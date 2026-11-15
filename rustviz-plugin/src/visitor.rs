@@ -1941,6 +1941,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     if !self.in_closure(try_expr) {
       self.note_try_loop_iterators(line);
+      // What it leaves in scope if it returns early, for the scope ends
+      // said to happen at a later `return` (#1044).
+      let vars = self.in_scope.iter().filter_map(|name| self.raps.get(name))
+        .filter(|rd| !rd.rap.is_fn() && !(rd.rap.is_temporary() && rd.scope < line))
+        .map(|rd| *rd.rap.hash()).collect();
+      self.fn_tries.push((line, vars));
     }
     let end = self.in_scope.len();
     let mut tuples: Vec<LiveTuple<'tcx>> = self.live_tuples.clone();
@@ -2168,13 +2174,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   ///   `exit_ids`, nor that of a later variable sharing the column, #589):
   ///   for a variable the loop body declared, its first, at the body's
   ///   end; one the code never reaches (`dead_ends`, #1041) is always
-  ///   dropped at one of them instead;
+  ///   dropped at one of them instead; and one that is always dropped
+  ///   at them names each `?` before them it is in scope at (`fn_tries`,
+  ///   #1044), which may return first;
+  /// - removes the `GoOutOfScope` of an owner the code never reaches
+  ///   that none of them comes before (#1043): its loop is left only at
+  ///   exits drawn with their own drops, or never;
   /// - the drop of a `for` loop's head temporary where the loop ends;
   /// - the drop of a `for` loop's iterator variable where its loop ends.
   pub fn mark_loop_returns(&mut self, exit_ids: &HashSet<usize>) {
     let returns = std::mem::take(&mut self.loop_returns);
     let dead = std::mem::take(&mut self.dead_ends);
-    if returns.is_empty() {
+    let tries = std::mem::take(&mut self.fn_tries);
+    if returns.is_empty() && dead.is_empty() {
       return;
     }
     // Each scope end of a variable: its line, and whether it is a later
@@ -2201,6 +2213,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       !always || ends.iter().filter(|(l, h)| h == ro.hash() && *l > r.line).map(|(l, _)| *l).min() == Some(line)
     };
+    // The scope ends the code never reaches that nothing else marks
+    // (#1043): removed below.
+    let mut unreached: HashSet<usize> = HashSet::new();
     let mut mark = |line: usize, ev: &mut ExternalEvent| match ev {
       ExternalEvent::GoOutOfScope { ro, early, id, .. } if !exit_ids.contains(id) => {
         let mut e = EarlyReturns::default();
@@ -2219,8 +2234,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           e.always.sort_unstable();
           e.always.dedup();
         }
+        // A `?` it is in scope at, before the last of those `return`s,
+        // may return first and drop it there instead (#1044).
+        if let Some(&last) = e.always.iter().max() {
+          e.tries = tries.iter().filter(|(l, vars)| *l < last && vars.contains(ro.hash())).map(|(l, _)| *l).collect();
+          e.tries.sort_unstable();
+          e.tries.dedup();
+        }
         if e != EarlyReturns::default() {
           *early = Some(e);
+        } else if dead.contains(&line) && !ro.never_drops() && !ro.is_ref() {
+          // Never reached, and no `return` directly in the loop: the
+          // loop is left only at exits drawn with their own drops (a
+          // `return` / panic in a branch, a `?`), or never. Like after
+          // a conditional whose every branch leaves (#515), no scope
+          // end drops it here (#1043).
+          unreached.insert(*id);
         }
       }
       // A `for` loop's head temporary, where the loop ends.
@@ -2245,6 +2274,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     };
     walk(self.preprocessed_events.as_mut_slice(), &mut mark);
     walk_map(&mut *self.event_line_map, &mut mark);
+    if !unreached.is_empty() {
+      drop_ids(&mut self.preprocessed_events, &mut *self.event_line_map, &unreached);
+    }
 
     // Every event, those in branches too (with each branch's line map).
     fn walk(events: &mut [(usize, ExternalEvent)], f: &mut impl FnMut(usize, &mut ExternalEvent)) {
@@ -2256,6 +2288,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       for (line, evs) in map.iter_mut() {
         for ev in evs.iter_mut() {
           walk_one(*line, ev, f);
+        }
+      }
+    }
+    // Removes the events `ids`, those in branches too.
+    fn drop_ids(events: &mut Vec<(usize, ExternalEvent)>, map: &mut BTreeMap<usize, Vec<ExternalEvent>>, ids: &HashSet<usize>) {
+      events.retain(|(_, e)| !ids.contains(&e.get_id()));
+      for evs in map.values_mut() {
+        evs.retain(|e| !ids.contains(&e.get_id()));
+      }
+      let branches = events.iter_mut().map(|(_, e)| e).chain(map.values_mut().flatten());
+      for ev in branches {
+        if let ExternalEvent::Branch { branches, .. } = ev {
+          for b in branches.iter_mut() {
+            drop_ids(&mut b.e_data, &mut b.line_map, ids);
+          }
         }
       }
     }

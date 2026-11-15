@@ -1422,6 +1422,10 @@ pub struct EarlyReturns {
     pub always: Vec<usize>,
     /// Lines of the `return`s where it is dropped if they run.
     pub maybe: Vec<usize>,
+    /// With `always`: lines of the `?`s it is in scope at before those
+    /// `return`s, any of which may return first and drop it there
+    /// instead (#1044).
+    pub tries: Vec<usize>,
 }
 
 /// Where a `for` loop's iterator is dropped (#482, #592).

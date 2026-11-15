@@ -4660,6 +4660,22 @@ fn whichever_return(lines: &[usize]) -> String {
     }
 }
 
+/// What a scope end said to happen at a `return` adds when a `?` before
+/// it may return first (#1044): " (or at the `?` on line 4, if that
+/// returns first)". Empty without any.
+fn or_at_tries(lines: &[usize]) -> String {
+    let on = match lines.split_last() {
+        None => return String::new(),
+        Some((last, [])) => format!("line {}", last),
+        Some((last, init)) => {
+            let init: Vec<String> = init.iter().map(|l| l.to_string()).collect();
+            format!("line {} or {}", init.join(", "), last)
+        }
+    };
+    let which = if lines.len() == 1 { "that returns" } else { "one of them returns" };
+    format!(" (or at the `?` on {on}, if {which} first)")
+}
+
 /// A scope end that `return`s directly in a loop body come before
 /// (#1020), whose drops aren't drawn on their own rows. `title` is what
 /// the dot says otherwise. A variable the loop body declared never gets
@@ -4668,17 +4684,18 @@ fn whichever_return(lines: &[usize]) -> String {
 /// says so; likewise any variable at a scope end after a `loop` that
 /// nothing breaks out of, which the code never reaches (#1041). One
 /// declared before the loop (`maybe`) is dropped at the `return` if that
-/// runs: said when this dot drops something (`drops`).
+/// runs: said when this dot drops something (`drops`). A `?` that may
+/// return before the `return` (`tries`) is named too (#1044).
 pub fn event_dot_scope_end_after_loop_return(title: &str, early: &EarlyReturns, drops: bool) -> String {
     let mut out = title.to_owned();
     if !early.always.is_empty() {
-        let at = format!("goes out of scope at {}", whichever_return(&early.always));
+        let at = format!("goes out of scope at {}{}", whichever_return(&early.always), or_at_tries(&early.tries));
         out = if out.contains("goes out of scope at the end of the block") {
             out.replacen("goes out of scope at the end of the block", &at, 1)
         } else if out.contains("goes out of scope") {
             out.replacen("goes out of scope", &at, 1)
         } else {
-            format!("{}. This happens at {}", out.trim_end_matches('.'), whichever_return(&early.always))
+            format!("{}. This happens at {}{}", out.trim_end_matches('.'), whichever_return(&early.always), or_at_tries(&early.tries))
         };
         out = out.replace(" here ", " there ");
     }
