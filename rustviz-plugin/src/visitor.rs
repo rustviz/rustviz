@@ -2079,6 +2079,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       return true;
     }
     match e.kind {
+      // An `if let` whose pattern always matches runs its body (#1013).
+      ExprKind::If(c, then, _) if self.always_matching_if_let(c) => self.expr_diverges(then),
       ExprKind::If(_, then, Some(els)) => self.expr_diverges(then) && self.expr_diverges(els),
       ExprKind::Match(_, arms, _) => !arms.is_empty() && arms.iter().all(|a| self.expr_diverges(a.body)),
       ExprKind::Block(b, _) => {
@@ -2183,6 +2185,102 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     true
   }
 
+  /// Whether the condition `c` of an `if` is a lone `let` whose pattern
+  /// always matches (#995): the body always runs.
+  fn always_matching_if_let(&self, c: &'tcx Expr<'tcx>) -> bool {
+    matches!(c.kind, ExprKind::Let(l) if self.let_always_matches(l.pat, l.init))
+  }
+
+  /// Whether `e`, a body drawn inline (see `keep_inline_exit_drops`),
+  /// sits directly in a branch of an `if` / `match` drawn as one: only
+  /// statements and blocks, or other bodies drawn inline, between them,
+  /// not a loop, a closure or a `let`'s value. An exit in it always
+  /// leaves that branch, whose columns its drops end (#1013).
+  fn inline_in_branch(&self, e: &'tcx Expr<'tcx>) -> bool {
+    use rustc_hir::Node;
+    let mut child = e.hir_id;
+    for (id, node) in self.tcx.hir_parent_iter(e.hir_id) {
+      let from = std::mem::replace(&mut child, id);
+      match node {
+        Node::Stmt(_) | Node::Block(_) => {}
+        Node::Expr(Expr { kind: ExprKind::Block(..), .. }) => {}
+        Node::Expr(x) if x.span.from_expansion() => return false,
+        Node::Expr(Expr { kind: ExprKind::If(c, ..), .. }) => {
+          if c.hir_id == from {
+            return false;
+          }
+          // (One drawn inline too: look further out.)
+          if !self.always_matching_if_let(c) {
+            return true;
+          }
+        }
+        Node::Arm(_) => {}
+        Node::Expr(Expr { kind: ExprKind::Match(_, arms, rustc_hir::MatchSource::Normal), .. }) => {
+          if arms.len() > 1 {
+            return true;
+          }
+        }
+        _ => return false,
+      }
+    }
+    false
+  }
+
+  /// Whether the `return` `ret`, directly in the function's body (not in
+  /// a branch, a loop or a closure), has something after it before the
+  /// body's closing brace: it sits in a block of its own (`{ let x = f;
+  /// return x.len(); }`), or statements follow it, which never run. Its
+  /// drops are then drawn on its line, as for a body drawn inline that
+  /// always returns (#1004, #1013); otherwise they are at the closing
+  /// brace, the line after.
+  fn returns_before_body_end(&self, ret: &'tcx Expr<'tcx>) -> bool {
+    use rustc_hir::Node;
+    if !self.exit_frames.is_empty() || self.in_closure(ret) || ret.span.from_expansion() || !self.at_fn_level(ret) {
+      return false;
+    }
+    let mut cur = ret.hir_id;
+    loop {
+      match self.tcx.parent_hir_node(cur) {
+        Node::Stmt(st) => cur = st.hir_id,
+        Node::Block(b) => {
+          let last = match b.expr {
+            Some(t) => t.hir_id == cur,
+            None => b.stmts.last().is_some_and(|st| st.hir_id == cur),
+          };
+          if !last {
+            return true;
+          }
+          // The function's own body block: its `}` comes right after.
+          return !matches!(self.tcx.parent_hir_node(self.tcx.parent_hir_id(b.hir_id)),
+            Node::Item(_) | Node::ImplItem(_) | Node::TraitItem(_));
+        }
+        _ => return false,
+      }
+    }
+  }
+
+  /// A `return` for which `returns_before_body_end`: it drops every
+  /// value the function still owns, on its line, and every path has left
+  /// the function (`all_paths_exit`): nothing after it is drawn.
+  fn drop_locals_at_fn_return(&mut self, ret: &'tcx Expr<'tcx>, value: Option<&'tcx Expr<'tcx>>) {
+    let lo = *self.unique_id;
+    self.exit_frames.push(ExitFrame::Branch { len: 0, hide: Vec::new(), binds: Vec::new(), binds_at: 0 });
+    self.drop_locals_on_exit(expr_to_line(ret, &self.tcx), value, None, false, "return");
+    self.exit_frames.pop();
+    self.keep_inline_exit_drops(lo..*self.unique_id);
+  }
+
+  /// Whether statement `st` never completes normally (its expression
+  /// diverges, `expr_diverges`): what comes after it in its block never
+  /// runs (#1013).
+  fn stmt_leaves(&self, st: &'tcx rustc_hir::Stmt<'tcx>) -> bool {
+    match st.kind {
+      StmtKind::Expr(x) | StmtKind::Semi(x) => self.expr_diverges(x),
+      StmtKind::Let(l) => l.init.is_some_and(|i| self.expr_diverges(i)),
+      StmtKind::Item(_) => false,
+    }
+  }
+
   /// Remove the drops of exits (`drop_locals_on_exit`) emitted while
   /// event ids `ids` were handed out (see `take_branch_events`) and
   /// still on the function's own column: they're in a branch that
@@ -2248,16 +2346,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// only by a conditional directly in the function's body, so only
   /// the rest of the body, and of blocks directly in it, is skipped.)
   fn visit_live_stmts(&mut self, b: &'tcx rustc_hir::Block<'tcx>) {
+    // Also after a statement that never completes, anywhere (#1013).
+    let mut left = false;
     for st in b.stmts {
-      if self.all_paths_exit {
+      if (self.all_paths_exit || left) && !matches!(st.kind, StmtKind::Item(_)) {
         self.dead_code.insert(st.hir_id);
       } else {
         self.visit_stmt(st);
+        left |= self.stmt_leaves(st);
       }
     }
     if let Some(e) = b.expr {
-      if self.all_paths_exit {
-        self.dead_tail = true;
+      if self.all_paths_exit || left {
+        self.dead_tail |= self.all_paths_exit;
         self.dead_code.insert(e.hir_id);
       } else {
         self.visit_expr(e);
@@ -2965,6 +3066,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ExprKind::Break(dest, _) => branch && dest.target_id.is_ok_and(|t|
         matches!(self.tcx.hir_node(t), Node::Expr(Expr { kind: ExprKind::Loop(..), .. }))),
       ExprKind::Call(..) => branch && self.panic_line(e).is_some(),
+      // A body drawn inline (an `if let` whose pattern always matches,
+      // a lone match arm) is where the code around it is: its exits'
+      // drops are drawn as they would be there (#1013).
+      ExprKind::If(c, then, _) if !e.span.from_expansion() && self.always_matching_if_let(c) =>
+        self.ends_at_exits(then, branch),
+      ExprKind::Match(_, [arm], rustc_hir::MatchSource::Normal) if !e.span.from_expansion() =>
+        self.ends_at_exits(arm.body, branch),
       ExprKind::If(_, then, Some(els)) if !e.span.from_expansion() =>
         self.ends_at_exits(then, true) && self.ends_at_exits(els, true),
       ExprKind::Match(_, arms, rustc_hir::MatchSource::Normal) if !e.span.from_expansion() =>
@@ -3660,7 +3768,11 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // (#363), except what `ret` moves to the caller (#410). Inside
         // a branch, those drops are drawn on the branch's columns, at
         // the `return`.
-        self.drop_locals_on_exit(expr_to_line(expr, &self.tcx), ret, None, false, "return");
+        if self.returns_before_body_end(expr) {
+          self.drop_locals_at_fn_return(expr, ret);
+        } else {
+          self.drop_locals_on_exit(expr_to_line(expr, &self.tcx), ret, None, false, "return");
+        }
         if !self.in_closure(expr) {
           self.drop_loop_iterators_on_return(expr_to_line(expr, &self.tcx));
         }
@@ -3685,11 +3797,15 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // construct ends them. They go out of scope at its `}` (#591).
         // (An `if` / `else` / loop body, a match arm, a closure body
         // is not a bare block: its construct ends its own locals.)
+        // Unless every path through it leaves the branch it is in at an
+        // exit that drops them: its `}` is never reached (#1013).
         if self.inside_branch
           && matches!(self.tcx.parent_hir_node(expr.hir_id), rustc_hir::Node::Stmt(_) | rustc_hir::Node::Block(_))
         {
+          let left = Self::left_at_exits(self.inline_in_branch(expr) && self.ends_at_exits(expr, true),
+            &get_decl_of_block(block, &self.tcx, &self.raps));
           let decls: HashSet<ResourceAccessPoint> = get_decl_of_block(block, &self.tcx, &self.raps)
-            .into_iter().filter(|v| needs_scope_end(v)).collect();
+            .into_iter().filter(|v| needs_scope_end(v) && !left.contains(v)).collect();
           self.emit_scope_end(decls, new_scope);
         }
         // A labeled block (`'a: { … break 'a; … }`) can also end by
@@ -5605,12 +5721,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // A body that always runs and always leaves the function
             // (#1004): its exit's drops are drawn, and nothing after.
             let leaves_fn = always_matches && self.at_fn_level(expr) && self.ends_at_exits(if_expr, true);
+            // Or, directly in a branch, always leaves that branch: its
+            // drops stay on the branch's columns, ended there (#1013).
+            let leaves_branch = always_matches && !leaves_fn && self.inline_in_branch(expr) && self.ends_at_exits(if_expr, true);
             if leaves_fn {
               self.keep_inline_exit_drops(if_ids.clone());
-            } else {
+            } else if !leaves_branch {
               self.discard_exit_drops(if_ids.clone());
             }
-            let left = Self::left_at_exits(leaves_fn, &if_decl);
+            let left = Self::left_at_exits(leaves_fn || leaves_branch, &if_decl);
             for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v) && !left.contains(v)) {
                 self.preprocessed_events.push((
                     if_end,
@@ -5961,6 +6080,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // A lone arm that always leaves the function (`x => return …`),
     // directly in its body (#1004): see `keep_inline_exit_drops`.
     let leaves_fn = inline && self.at_fn_level(expr) && self.ends_at_exits(arms[0].body, true);
+    // Or the branch it is directly in (#1013).
+    let leaves_branch = inline && !leaves_fn && self.inline_in_branch(expr) && self.ends_at_exits(arms[0].body, true);
     // Every arm starts from the same uninitialized `let x;`
     // locals (#234); see join_uninit_locals.
     let uninit_before = self.uninit_locals.clone();
@@ -6173,7 +6294,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // an exit that drops them (#630)
       // (A lone arm that always leaves the function drops them there
       // too, #1004.)
-      let arm_left = Self::left_at_exits((!inline || leaves_fn) && self.ends_at_exits(arm.body, true), &arm_decls);
+      let arm_left = Self::left_at_exits((!inline || leaves_fn || leaves_branch) && self.ends_at_exits(arm.body, true), &arm_decls);
       for r in in_decl_order(&arm_decls).into_iter().filter(|v| needs_scope_end(v) && !arm_scoped.contains(v) && !arm_left.contains(v)) {
         let id = *self.unique_id;
         *self.unique_id += 1;
@@ -6234,7 +6355,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // Unless it always leaves the function (#1004).
         if leaves_fn {
           self.keep_inline_exit_drops(match_lo..*self.unique_id);
-        } else {
+        } else if !leaves_branch {
           self.discard_exit_drops(match_lo..*self.unique_id);
         }
         return;

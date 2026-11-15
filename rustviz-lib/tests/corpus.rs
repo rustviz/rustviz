@@ -19238,6 +19238,47 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "r goes out of scope. No resource is dropped.",
         ],
     },
+    TooltipExpect {
+        // #1013: a body that always runs and always returns, drawn inline
+        // inside a branch (an `if let` whose pattern always matches, a
+        // one-arm `match`, a plain block), or a plain block that returns
+        // directly in the function's body, leaves the function there:
+        // what the `return` drops is dropped on its row, the branch counts
+        // as one that returns, and the code after it never runs. It used
+        // to draw `g.len()` etc. as running, x's and g's drops at the scope
+        // ends, f "maybe moved" at the join, and "b goes out of scope. No
+        // resource is dropped." at the `return` (b's String is dropped
+        // there). In a loop body, `println!` after the `if let` never runs
+        // either. (Known gap, #1020: in a loop body the `return`'s drops
+        // of t, the iterator and h are still drawn at their scope ends.)
+        name: "inline_exit_nested_1013",
+        must_contain: &[
+            "Move from f to x",
+            "x goes out of scope. Its resource is dropped.",
+            "g goes out of scope. Its resource is dropped.",
+            "f still owns its resource here: the branch that moved f returned before reaching this point",
+            "Move from p to y",
+            "y goes out of scope. Its resource is dropped.",
+            "q goes out of scope. Its resource is dropped.",
+            "Move from a to z",
+            "z goes out of scope. Its resource is dropped.",
+            "b goes out of scope. Its resource is dropped.",
+            "a still owns its resource here: the branch that moved a returned before reaching this point",
+            "Move from d to w",
+            "w goes out of scope. Its resource is dropped.",
+            "e goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "g's resource is immutably borrowed by len",
+            "q's resource is immutably borrowed by len",
+            "e's resource is immutably borrowed by len",
+            "h's resource is immutably borrowed by println!",
+            "f was moved in at least one branch above",
+            "f goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "b goes out of scope. No resource is dropped.",
+            "z goes out of scope. No resource is dropped.",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -22710,6 +22751,32 @@ fn reassign_from_branches_drops_old_value_in_each_arm() {
     let v_dots = dots_listing_tooltip(&timeline, "v acquires ownership of a new resource; its previous resource is dropped");
     assert_eq!(v_dots.iter().filter(|(_, dy)| *dy == y).count(), 2,
         "want a drop of v's old String in each branch; dots: {:?}", v_dots);
+}
+
+/// A body that always returns, drawn inline in a branch, and a plain block
+/// that returns (#1013): what the `return` drops is dropped on its row, not
+/// where the variables' scopes end.
+#[test]
+fn nested_inline_exit_drops_are_on_the_return_row() {
+    let name = "inline_exit_nested_1013";
+    let rv = run_with_local_backend(name);
+    let (code, timeline) = (rv.code_panel_string(), rv.timeline_panel_string());
+    for (drop, row) in [
+        ("x goes out of scope. Its resource is dropped.", "return x.len();"),
+        ("g goes out of scope. Its resource is dropped.", "return x.len();"),
+        ("y goes out of scope. Its resource is dropped.", "return y.len();"),
+        ("q goes out of scope. Its resource is dropped.", "return y.len();"),
+        ("z goes out of scope. Its resource is dropped.", "return z.len();"),
+        ("b goes out of scope. Its resource is dropped.", "return z.len();"),
+        ("w goes out of scope. Its resource is dropped.", "return w.len();"),
+        ("e goes out of scope. Its resource is dropped.", "return w.len();"),
+    ] {
+        let y = code_row_y(&code, row);
+        let ok = dots_where(&timeline, |lines| lines.iter().any(|l| l == drop));
+        assert!(ok.iter().any(|(_, dy)| *dy == y),
+            "{}: no dot on the {:?} row lists {:?}; dots listing it: {:?}",
+            name, row, drop, dots_listing_tooltip(&timeline, drop));
+    }
 }
 
 /// A reference made before an `if` / `match` and used after it: on the
