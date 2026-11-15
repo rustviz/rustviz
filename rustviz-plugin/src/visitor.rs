@@ -2198,6 +2198,108 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     step(&events, hash, &hide, Own::No) == Own::Yes
   }
 
+  /// At a `break` (`brk`) out of the loop `target`: the variables the
+  /// iteration moved on the way here and didn't give a new value since
+  /// are (maybe) moved where the loop ends, if they were declared
+  /// before it (`emit_loop_exit_moves`). The path is the events since
+  /// the body started, minus the other branches of the conditionals the
+  /// `break` is in, plus their match arms' pattern bindings (as
+  /// `owns_value_here`). The branch that breaks also records its own
+  /// moves (`branch_divergence`); this sees those made before it too
+  /// (`loop { drop(s); if c { break; } s = …; }`, #980), and a value
+  /// given back before the `break` (`drop(s); s = …; if c { break; }`).
+  fn note_break_path_moves(&mut self, target: HirId, brk: HirId) {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Own { Yes, No, Maybe }
+    fn step(events: &[(usize, ExternalEvent)], rap: &ResourceAccessPoint, hide: &[std::ops::Range<usize>], mut own: Own) -> Own {
+      let is = |r: &ResourceTy| matches!(r, ResourceTy::Value(v) if v == rap);
+      for (_, e) in events {
+        if hide.iter().any(|ids| ids.contains(&e.get_id())) {
+          continue;
+        }
+        own = match e {
+          ExternalEvent::Move { to, .. } | ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. }
+            if is(to) => Own::Yes,
+          ExternalEvent::Move { from, .. } if is(from) => Own::No,
+          ExternalEvent::OrAltMove { ro, tuple: None, .. } if ro == rap && own == Own::Yes => Own::Maybe,
+          // An inner loop's `break` after a move, or a let-chain's
+          // condition that moved it before failing.
+          ExternalEvent::LoopExitMove { ro, definite: true, .. } if ro == rap => Own::No,
+          ExternalEvent::LoopExitMove { ro, .. } if ro == rap && own == Own::Yes => Own::Maybe,
+          // A branch that diverges doesn't reach this point.
+          ExternalEvent::Branch { branches, .. } => {
+            let mut ends = branches.iter().filter(|b| !b.diverges).map(|b| step(&b.e_data, rap, &[], own));
+            match ends.next() {
+              None => own,
+              Some(first) => if ends.all(|o| o == first) { first } else { Own::Maybe },
+            }
+          }
+          _ => own,
+        };
+      }
+      own
+    }
+    fn moved_from(events: &[(usize, ExternalEvent)], out: &mut Vec<ResourceAccessPoint>) {
+      for (_, e) in events {
+        let rap = match e {
+          ExternalEvent::Move { from: ResourceTy::Value(r), .. } => r,
+          ExternalEvent::OrAltMove { ro, tuple: None, .. } | ExternalEvent::LoopExitMove { ro, .. } => ro,
+          ExternalEvent::Branch { branches, .. } => {
+            for b in branches {
+              moved_from(&b.e_data, out);
+            }
+            continue;
+          }
+          _ => continue,
+        };
+        if !rap.is_fn() && !out.contains(rap) {
+          out.push(rap.clone());
+        }
+      }
+    }
+    let Some(loop_at) = self.exit_frames.iter()
+      .rposition(|f| matches!(f, ExitFrame::Loop { id, .. } if *id == target)) else { return };
+    let ExitFrame::Loop { events_at, len, .. } = self.exit_frames[loop_at] else { return };
+    let events_at = events_at.min(self.preprocessed_events.len());
+    // Only what was in scope where the loop started: not a `for`
+    // loop's pattern bindings, which an inner `for row in row` may move.
+    let outer = &self.in_scope[..len.min(self.in_scope.len())];
+    let declared_before = |rap: &ResourceAccessPoint| {
+      let root = rap.name().trim_start_matches('*').split('.').next().unwrap_or("");
+      outer.iter().any(|n| n == root)
+    };
+    let hide: Vec<std::ops::Range<usize>> = self.exit_frames.iter().flat_map(|f| match f {
+      ExitFrame::Branch { hide, .. } => hide.clone(),
+      ExitFrame::Loop { .. } => Vec::new(),
+    }).collect();
+    // The events in the order they happened: each arm's bindings
+    // where its body starts.
+    let mut events: Vec<(usize, ExternalEvent)> = Vec::new();
+    let mut from = events_at;
+    for f in &self.exit_frames[loop_at + 1..] {
+      if let ExitFrame::Branch { binds, binds_at, .. } = f {
+        if binds.is_empty() {
+          continue;
+        }
+        let at = (*binds_at).clamp(from, self.preprocessed_events.len());
+        events.extend_from_slice(&self.preprocessed_events[from..at]);
+        events.extend_from_slice(binds);
+        from = at;
+      }
+    }
+    events.extend_from_slice(&self.preprocessed_events[from..]);
+    let mut candidates = Vec::new();
+    moved_from(&events, &mut candidates);
+    for rap in candidates.into_iter().filter(|r| declared_before(r)) {
+      let definite = match step(&events, &rap, &hide, Own::Yes) {
+        Own::Yes => continue,
+        Own::No => true,
+        Own::Maybe => false,
+      };
+      self.break_moves.push(BreakMove { target, brk, rap, definite, on_path: true });
+    }
+  }
+
   /// Whether every path through `e` leaves at an exit that drops what
   /// `e` declares, so its closing brace is never reached and states no
   /// drop (#630, #631): a `return`, a panic, or a `break` / `continue`
@@ -3018,7 +3120,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // ForLoopDesugar arm.
         let entry_len = self.in_scope.len();
         if !matches!(loop_ty, rustc_hir::LoopSource::ForLoop) {
-          self.exit_frames.push(ExitFrame::Loop { id: expr.hir_id, len: entry_len, head_from: entry_len });
+          let events_at = self.preprocessed_events.len();
+          self.exit_frames.push(ExitFrame::Loop { id: expr.hir_id, len: entry_len, head_from: entry_len, events_at });
         }
         match loop_ty {
           rustc_hir::LoopSource::While => {
@@ -3090,6 +3193,15 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 // whether or not the loop goes on.
                 walk.effects.retain(|e| matches!(e.kind, ChainEffectKind::Move { .. }));
                 let cond_moves = self.chain_fail_moves(&walk, cond_lo, false).moves;
+                // A `break` in the body comes after the condition held:
+                // its moves are the condition's own way out (above), so
+                // the path to a `break` starts here (#980).
+                let len = self.preprocessed_events.len();
+                if let Some(ExitFrame::Loop { id, events_at, .. }) = self.exit_frames.last_mut() {
+                  if *id == expr.hir_id {
+                    *events_at = len;
+                  }
+                }
                 let before = self.rap_names();
                 self.inside_branch = true;
                 // The body may run no times or many (#786).
@@ -3181,6 +3293,11 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       // what it declared (#410); a `break` in a labelled block
       // (no loop) drops nothing drawn here.
       ExprKind::Break(dest, value) => {
+        // What the iteration moved on the way to this `break`, before
+        // its value (which a `break s` hands to the loop's receiver).
+        if let Ok(target) = dest.target_id {
+          self.note_break_path_moves(target, expr.hir_id);
+        }
         intravisit::walk_expr(self, expr);
         // What `let x;` locals have no value where this `break` leaves
         // its loop (#786).
@@ -5507,7 +5624,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // target, and drops the loop variable too (#410).
         let entry_len = self.in_scope.len();
         if let Some(outer_arm) = arms.first() {
-          self.exit_frames.push(ExitFrame::Loop { id: outer_arm.body.hir_id, len: entry_len, head_from });
+          let events_at = self.preprocessed_events.len();
+          self.exit_frames.push(ExitFrame::Loop { id: outer_arm.body.hir_id, len: entry_len, head_from, events_at });
         }
         // The variable moved into the loop as its iterator, whose
         // drop is stated on its column (#482).
@@ -5692,6 +5810,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         if let Some(ro) = &iterator_head {
           if let Some(loop_expr) = arms.first().map(|a| a.body) {
             self.loop_iterators.push((loop_expr.hir_id, ro.clone()));
+          }
+        }
+        // The path to a `break` in the body starts here, after the head
+        // moved what it iterates over into the loop (#980).
+        let len = self.preprocessed_events.len();
+        if let (Some(loop_expr), Some(ExitFrame::Loop { id, events_at, .. })) = (arms.first().map(|a| a.body), self.exit_frames.last_mut()) {
+          if *id == loop_expr.hir_id {
+            *events_at = len;
           }
         }
         // The body may run no times or many (#786).
@@ -9671,6 +9797,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           brk: *brk,
           rap: rap.clone(),
           definite: *every_path && leaves.ends_in_its_only_break,
+          on_path: false,
         });
       }
     }
@@ -9863,9 +9990,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
       }
       let definite = !ends_otherwise && definite_breaks.len() == all_breaks;
+      // Only seen on the path to a `break`, not in the branch that
+      // breaks: the move may be in no branch (#980).
+      let nothing_above = mine.iter().all(|o| o.rap != m.rap || o.on_path);
       self.add_external_event(line, ExternalEvent::LoopExitMove {
         ro: m.rap.clone(), definite,
-        at: if block.is_some() { MaybeMovedAt::LabeledBlock } else { MaybeMovedAt::Loop },
+        at: if block.is_some() { MaybeMovedAt::LabeledBlock } else { MaybeMovedAt::Loop { nothing_above } },
         id: *self.unique_id,
       });
       *self.unique_id += 1;

@@ -17229,6 +17229,42 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "q acquires ownership of a new resource; its previous resource is dropped",
         ],
     },
+    TooltipExpect {
+        name: "loop_move_before_break_980",
+        // #980: a move in a loop body before a `break` that isn't in the
+        // branch that breaks. Only the moves made inside that branch were
+        // recorded, so a value given back after the `break` (for the next
+        // iteration) was taken to reach the end of the loop: s's, t's and
+        // w's scope ends said "Its resource is dropped." (s is always
+        // moved there; t and w only maybe), and y's reassignment after the
+        // loop said its previous resource is dropped (y may have been
+        // moved by the branch that breaks). u gets its new value before
+        // the `break`, so it is dropped at its scope end. Checked with
+        // rustc (using s, t, w or y after the loop is E0382; u is fine) and
+        // a `Drop`-printing type.
+        must_contain: &[
+            "s was moved before the loop ended: the only way out of the loop is a break that comes after s is moved, so s can't be used after the loop",
+            "s goes out of scope. No resource is dropped.",
+            "t may have been moved: the loop can end through a break that comes after t is moved, so t can't be used after the loop",
+            "t goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "u goes out of scope. Its resource is dropped.",
+            "w may have been moved: the loop can end through a break that comes after w is moved, so w can't be used after the loop",
+            "w goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "y may have been moved: the loop can end through a break that comes after y is moved, so y can't be used after the loop",
+            // The assignment after the loop. (The one inside it, after the
+            // `if` whose branch broke out, prints the same text, which is
+            // misleading there: y always holds a value at that point, #993.)
+            "y acquires ownership of a new resource. Its previous resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "=s goes out of scope. Its resource is dropped.",
+            "=t goes out of scope. Its resource is dropped.",
+            "=w goes out of scope. Its resource is dropped.",
+            "y acquires ownership of a new resource; its previous resource is dropped",
+            "u was moved before the loop ended",
+            "u may have been moved",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {

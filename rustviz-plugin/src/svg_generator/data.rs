@@ -1310,8 +1310,11 @@ pub struct TupleLeft {
 /// Where an `ExternalEvent::LoopExitMove` happens.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum MaybeMovedAt {
-    /// The end of a loop.
-    Loop,
+    /// The end of a loop. `nothing_above`: a move on the path to a
+    /// `break` that isn't in a branch which then breaks (`loop {
+    /// drop(s); if c { break; } s = … }`, #980), so a drop-flag text
+    /// says "nothing above" moved it, not "no branch above".
+    Loop { nothing_above: bool },
     /// The end of a labeled block (`'a: { … break 'a; … }`).
     LabeledBlock,
     /// The start of the `else` branch (`no_else`: the implicit empty
@@ -2914,7 +2917,7 @@ impl Event {
             Event::ManuallyDropByHand => {
                 hover_messages::event_dot_manually_drop_by_hand(my_name)
             }
-            Event::LoopExitMove { definite, at: MaybeMovedAt::Loop } => {
+            Event::LoopExitMove { definite, at: MaybeMovedAt::Loop { .. } } => {
                 hover_messages::event_dot_loop_exit_move(my_name, *definite, false)
             }
             Event::LoopExitMove { definite, at: MaybeMovedAt::LabeledBlock } => {

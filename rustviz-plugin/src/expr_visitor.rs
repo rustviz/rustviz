@@ -659,6 +659,10 @@ pub struct BreakMove {
   pub brk: rustc_hir::HirId,
   pub rap: ResourceAccessPoint,
   pub definite: bool,
+  /// Found on the path from the loop's start to `brk` (#980), not
+  /// only in the branch that breaks: the move may be outside any
+  /// branch, so a drop-flag text says "nothing above" moved it.
+  pub on_path: bool,
 }
 
 /// See `ExprVisitor::exit_frames`.
@@ -682,7 +686,10 @@ pub enum ExitFrame {
   // `head_from`: for a `for` loop, where in `in_scope` the temporaries
   // its head made begin (they're dropped where the loop is left, but
   // declared before `len`); `len` for any other loop.
-  Loop { id: rustc_hir::HirId, len: usize, head_from: usize },
+  // `events_at`: the length `preprocessed_events` had where the body
+  // (of a `while`, after its condition) starts, so the events since
+  // are those of the iteration on the path to a `break` (#980).
+  Loop { id: rustc_hir::HirId, len: usize, head_from: usize, events_at: usize },
 }
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
@@ -1909,7 +1916,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   pub fn moved_by_chain_condition(&self, name: &str) -> bool {
     fn any(events: &[(usize, ExternalEvent)], name: &str) -> bool {
       events.iter().any(|(_, ev)| match ev {
-        ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::ChainFail { .. } | MaybeMovedAt::WhileCondFail { .. }, .. } => ro.name() == name,
+        ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::ChainFail { .. } | MaybeMovedAt::WhileCondFail { .. }
+          | MaybeMovedAt::Loop { nothing_above: true }, .. } => ro.name() == name,
         ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| any(&b.e_data, name)),
         _ => false,
       })
@@ -8483,10 +8491,7 @@ fn ownership_after(events: &[(usize, ExternalEvent)], rap_name: &str, start: Opt
         return Some(Ownership::None);
       }
       // Moved before every `break` out of the loop: gone after it. If
-      // only some ways out moved it, it's maybe-moved, which (like a
-      // conditional that moved it on some paths) doesn't decide here:
-      // the `if` that moved it before the `break` is in the loop body's
-      // events above, and makes it `Maybe` (#335).
+      // only some ways out moved it, it's maybe-moved (below).
       ExternalEvent::LoopExitMove { ro, definite: true, .. } if ro.name() == rap_name => {
         return Some(Ownership::None);
       }
@@ -8499,7 +8504,11 @@ fn ownership_after(events: &[(usize, ExternalEvent)], rap_name: &str, start: Opt
       // The end of a `while` loop whose condition may have moved it
       // before it turned out false (#968): the body's events above may
       // have given it a new value, but the loop can end after the move.
-      ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::WhileCondFail { .. }, .. } if ro.name() == rap_name => {
+      // Likewise a loop some of whose `break`s come after a move (#980):
+      // `loop { drop(s); if c { break; } s = …; }` gives s a new value
+      // after the `break`, not on the way out.
+      ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::WhileCondFail { .. } | MaybeMovedAt::Loop { .. }
+        | MaybeMovedAt::LabeledBlock, .. } if ro.name() == rap_name => {
         return Some(Ownership::Maybe);
       }
       // Moved into a name an or-pattern binds, if its alternative
