@@ -104,6 +104,24 @@ fn same_loan(a: &RefData, b: &RefData) -> bool {
     && a.borrow_span == b.borrow_span && a.co_lenders == b.co_lenders
 }
 
+/// `let w = <rhs>;` (or `w = <rhs>;`) with rhs a call, a method call, an
+/// index or a deref (see `ExprVisitor::note_derived`).
+#[derive(Debug, Clone)]
+pub struct Derived {
+  /// The lines rhs spans: the event that gives w its value is on one.
+  pub lines: (usize, usize),
+  /// The places rhs reads (`v` in `v.iter().copied().collect()`, `&vd`
+  /// in `firsts(&vd)`, `h.v` in `h.v.iter()`), each with whether its
+  /// type's drop may use a borrow in it (a type with its own `Drop`).
+  pub srcs: Vec<(String, bool)>,
+  pub dest: String,
+  /// A clone of its one source (`v.clone()`, `Clone::clone(&v)`,
+  /// `v.to_vec()`, `v.to_owned()`, std's, with v's own type).
+  pub clone: bool,
+  /// w's type's drop may use a borrow in it.
+  pub dropped: bool,
+}
+
 /// A borrow a call may have stored behind one of its `&mut` arguments
 /// (see `ExprVisitor::stored_borrows`).
 #[derive(Debug, Clone)]
@@ -119,6 +137,8 @@ pub struct StoredBorrow {
   pub is_mut: bool,
   /// The id of the call's PassByStaticReference / PassByMutableReference.
   pub id: usize,
+  /// rustc's loans for the borrow (`mir_data::loans_issued_in`).
+  pub loans: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -370,12 +390,12 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// lender, and whether the borrow is mutable. `note_sharers_across_calls`
   /// treats each shared one as a sharer of its lender (#974).
   pub stored_borrows: Vec<StoredBorrow>,
-  /// `let w = v.clone();` (`Clone::clone(&v)`, `v.to_vec()`,
-  /// `v.to_owned()`): the line, the place cloned, the variable the
-  /// clone goes to, and whether their type's drop may use a borrow in
-  /// it (a type with its own `Drop`). The clone has v's own type, so a
-  /// borrow a call stored in v is in it too (#1003).
-  pub clones: Vec<(usize, String, String, bool)>,
+  /// Variables given a value computed from places (`let w =
+  /// v.clone();`, `let w: Vec<&String> = v.iter().copied().collect();`,
+  /// `let r = v[0];`, see `note_derived`). The holder walk of a stored
+  /// borrow follows one from a holder when rustc's borrow checker
+  /// puts the stored loan in the variable's type (#1003, #1015).
+  pub derived: Vec<Derived>,
   /// References a pattern copied (or moved) out of a value that holds
   /// a borrow (`Some(n)` on `it.next()`, #391): their borrow is part of
   /// that value's, and ends at their own last use (#575).
@@ -754,7 +774,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       ref_var_borrows: HashSet::new(),
       stored_ref_var_lends: HashSet::new(),
       stored_borrows: Vec::new(),
-      clones: Vec::new(),
+      derived: Vec::new(),
       pattern_copies: HashSet::new(),
       pointee_copies: HashMap::new(),
       deref_ref_pats: HashSet::new(),
@@ -3560,13 +3580,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       if let Some((place, end_line)) = self.stored_borrow(arg, &from_ro, line_num) {
         let mutable = arg_ty.ref_mutability() == Some(Mutability::Mut);
         let id = *self.unique_id;
+        let loans = self.loans_issued_in(arg.span);
         self.stored_borrows.push(StoredBorrow {
-          holder: place.name().to_owned(), at: line_num, until: end_line, lender: from_ro.real_name(), is_mut: mutable, id,
+          holder: place.name().to_owned(), at: line_num, until: end_line, lender: from_ro.real_name(), is_mut: mutable, id, loans,
         });
         if of_ref_var {
           self.stored_ref_var_lends.insert((place.name().to_owned(), from_ro.real_name()));
         }
-        let stored_in = StoredIn(Some(place.name().to_owned()), Vec::new(), Vec::new(), false, Vec::new(), false);
+        let stored_in = StoredIn(Some(place.name().to_owned()), Vec::new(), Vec::new(), false, Vec::new(), false, Vec::new());
         self.add_external_event(line_num, if mutable {
           ExternalEvent::PassByMutableReference {
             from: from_ro.clone(), to: to_ro, id, is_reborrow: false, result_has_lifetime: true,
@@ -6239,7 +6260,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     self.bind_from_anonymous(line_num, lhs);
     return;
   }
-  self.note_clone(&lhs, rhs);
+  self.note_derived(&lhs, rhs);
   match rhs.kind {
     ExprKind::Path(QPath::Resolved(_,p)) => self.match_rhs_path(lhs, rhs, evt, p),
     // `Type::item` (`let f = String::len;`, `let n = Self::N;`): an
@@ -6797,48 +6818,96 @@ pub fn match_rhs_path(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
   }
 }
 
-/// `let w = v.clone();`, `let w = Clone::clone(&v);`, `let w =
-/// v.to_vec();` / `v.to_owned();`, with w getting a value of v's own
-/// type: recorded in `clones`, on the line the call's result moves to w
-/// on. (std's methods only: their signatures give the result v's
-/// lifetimes, so rustc sees a borrow stored in v in w too, #1003.)
-fn note_clone(&mut self, lhs: &ResourceTy, rhs: &'tcx Expr<'tcx>) {
+/// `let w = <rhs>;` with rhs a call, a method call, an index or a
+/// deref that reads places (`v.iter().copied().collect()`,
+/// `firsts(&v)`, `v[0]`, `v.clone()`): recorded in `derived`. Whether
+/// w holds a borrow stored in one of them is left to rustc's borrow
+/// checker (`names_holding_loans`): w's type carries the loan when the
+/// signatures along the way tie it to the source's lifetimes (#1015).
+/// A clone (`v.clone()`, `Clone::clone(&v)`, `v.to_vec()`,
+/// `v.to_owned()`, std's, with w getting v's own type) is marked as one,
+/// for the text (#1003).
+fn note_derived(&mut self, lhs: &ResourceTy, rhs: &'tcx Expr<'tcx>) {
   use rustc_middle::ty;
   let ResourceTy::Value(dest) = lhs else { return };
   if dest.is_fn() {
     return;
   }
-  let typeck = self.tcx.typeck(rhs.hir_id.owner);
-  let (def_id, recv, line) = match rhs.kind {
-    ExprKind::MethodCall(_, recv, [], _) => (typeck.type_dependent_def_id(rhs.hir_id), recv, span_to_line(&recv.span, &self.tcx)),
-    ExprKind::Call(callee, [arg]) => match typeck.node_type_opt(callee.hir_id).map(|t| *t.kind()) {
-      Some(ty::FnDef(def_id, _)) => (Some(def_id), arg, span_to_line(&callee.span, &self.tcx)),
-      _ => return,
-    },
-    _ => return,
-  };
-  let Some(def_id) = def_id else { return };
-  if def_id.is_local() || !matches!(self.tcx.crate_name(def_id.krate).as_str(), "core" | "alloc" | "std")
-    || !matches!(self.tcx.item_name(def_id).as_str(), "clone" | "to_vec" | "to_owned")
-  {
+  if !matches!(rhs.kind, ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::Index(..) | ExprKind::Unary(UnOp::Deref, _)) {
     return;
   }
-  let place = match recv.kind {
-    ExprKind::AddrOf(_, _, inner) => inner,
-    _ => recv,
-  };
-  if !matches!(place.kind, ExprKind::Path(_) | ExprKind::Field(..)) {
+  let typeck = self.tcx.typeck(rhs.hir_id.owner);
+  let env = typing_env(self.tcx, rhs.hir_id.owner);
+  /// The places an expression reads, outside closures: a local, or a
+  /// field of one (`h.v`, not also `h`).
+  struct Places<'a, 'tcx> { tcx: &'a TyCtxt<'tcx>, out: Vec<&'tcx Expr<'tcx>> }
+  impl<'a, 'tcx> rustc_hir::intravisit::Visitor<'tcx> for Places<'a, 'tcx> {
+    fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+      match e.kind {
+        ExprKind::Closure(..) => {}
+        ExprKind::Path(QPath::Resolved(None, p)) if matches!(p.res, Res::Local(_)) => self.out.push(e),
+        ExprKind::Field(..) if expr_to_rap_name(e, self.tcx).is_some() && field_base_is_local(e) => self.out.push(e),
+        _ => rustc_hir::intravisit::walk_expr(self, e),
+      }
+    }
+  }
+  fn field_base_is_local(e: &Expr) -> bool {
+    match e.kind {
+      ExprKind::Field(inner, _) => field_base_is_local(inner),
+      ExprKind::Path(QPath::Resolved(None, p)) => matches!(p.res, Res::Local(_)),
+      _ => false,
+    }
+  }
+  let mut places = Places { tcx: &self.tcx, out: Vec::new() };
+  rustc_hir::intravisit::Visitor::visit_expr(&mut places, rhs);
+  let mut srcs: Vec<(String, bool)> = Vec::new();
+  for p in places.out {
+    let Some(name) = expr_to_rap_name(p, &self.tcx) else { continue };
+    if name == dest.name().as_str() || srcs.iter().any(|(n, _)| *n == name) {
+      continue;
+    }
+    srcs.push((name, typeck.expr_ty(p).has_significant_drop(self.tcx, env)));
+  }
+  if srcs.is_empty() {
     return;
   }
   let ty = typeck.expr_ty(rhs);
-  if typeck.expr_ty(place).peel_refs() != ty {
+  // A value with no lifetime in its type (`v.len()`) holds no borrow.
+  if !ty.walk().any(|g| matches!(g.kind(), rustc_middle::ty::GenericArgKind::Lifetime(_))) {
     return;
   }
-  let Some(src) = expr_to_rap_name(place, &self.tcx) else { return };
+  // A clone of v: std's `clone` / `to_vec` / `to_owned` of the place,
+  // giving w v's own type.
+  let clone_of = match rhs.kind {
+    ExprKind::MethodCall(_, recv, [], _) => typeck.type_dependent_def_id(rhs.hir_id).map(|d| (d, recv)),
+    ExprKind::Call(callee, [arg]) => match typeck.node_type_opt(callee.hir_id).map(|t| *t.kind()) {
+      Some(ty::FnDef(def_id, _)) => Some((def_id, arg)),
+      _ => None,
+    },
+    _ => None,
+  }.filter(|(def_id, _)| !def_id.is_local()
+    && matches!(self.tcx.crate_name(def_id.krate).as_str(), "core" | "alloc" | "std")
+    && matches!(self.tcx.item_name(*def_id).as_str(), "clone" | "to_vec" | "to_owned"))
+  .map(|(_, recv)| match recv.kind {
+    ExprKind::AddrOf(_, _, inner) => inner,
+    _ => recv,
+  })
+  .filter(|place| matches!(place.kind, ExprKind::Path(_) | ExprKind::Field(..)) && typeck.expr_ty(place).peel_refs() == ty);
+  let clone = clone_of.is_some() && srcs.len() == 1;
   // A value whose drop may use the borrow (a type with its own `Drop`)
-  // holds it until it is dropped, not until its last use.
-  let dropped = ty.has_significant_drop(self.tcx, typing_env(self.tcx, rhs.hir_id.owner));
-  self.clones.push((line, src, dest.name().to_owned(), dropped));
+  // holds it until it is dropped, not until its last use; so does a
+  // field of a struct literal of such a type (`D { v: … }`).
+  let mut dropped = ty.has_significant_drop(self.tcx, env);
+  let mut at = rhs.hir_id;
+  while let rustc_hir::Node::ExprField(f) = self.tcx.parent_hir_node(at) {
+    let rustc_hir::Node::Expr(lit) = self.tcx.parent_hir_node(f.hir_id) else { break };
+    dropped |= typeck.expr_ty(lit).has_significant_drop(self.tcx, env);
+    at = lit.hir_id;
+  }
+  self.derived.push(Derived {
+    lines: (span_to_line(&rhs.span, &self.tcx), span_end_line(&rhs.span, &self.tcx)),
+    srcs, dest: dest.name().to_owned(), clone, dropped,
+  });
 }
 
 /// The `ExprKind::Call` case of `match_rhs`: `let lhs = f(args);`.
@@ -7759,8 +7828,18 @@ pub fn print_out_of_scope(&mut self){
     for sb in self.stored_borrows.iter() {
       let Some(hash) = hash_of(&sb.holder) else { continue };
       let list = stored_call_list(self.preprocessed_events, sb.id).unwrap_or(self.preprocessed_events);
+      // The values made from others whose variable holds the call's
+      // loan, by rustc's borrow checker: their type carries the loan's
+      // region while they are live (#1015).
+      // (Without rustc's loan, as in a closure's body, only clones,
+      // which have the holder's own type.)
+      let holding = if self.derived.is_empty() || sb.loans.is_empty() { BTreeSet::new() } else { self.names_holding_loans(&sb.loans) };
+      // (A field `h.v` is held when its variable h is.)
+      let derived: Vec<&Derived> = self.derived.iter()
+        .filter(|d| holding.contains(d.dest.split('.').next().unwrap_or(&d.dest)) || (sb.loans.is_empty() && d.clone))
+        .collect();
       let mut walk = HolderWalk {
-        lender: sb.lender.clone(), hash_of: &hash_of, clones: &self.clones, seen: vec![sb.holder.clone()], holders: Vec::new(), hops: Vec::new(),
+        lender: sb.lender.clone(), hash_of: &hash_of, derived: &derived, seen: vec![sb.holder.clone()], holders: Vec::new(), hops: Vec::new(),
       };
       walk.follow(list, &sb.holder, hash, sb.at, sb.until, false);
       // The call's borrow end is the event after it (see
@@ -7770,24 +7849,29 @@ pub fn print_out_of_scope(&mut self){
         sharers.extend(walk.holders);
       }
       if !walk.hops.is_empty() {
-        let pick = |copy: bool, clone: bool| walk.hops.iter().filter(|h| h.1 == copy && h.3 == clone).map(|h| h.0.clone()).collect::<Vec<_>>();
-        let moved = pick(false, false);
+        let pick = |copy: bool, clone: bool, made: bool| walk.hops.iter()
+          .filter(|h| h.1 == copy && h.3 == clone && h.4 == made).map(|h| h.0.clone()).collect::<Vec<_>>();
+        let moved = pick(false, false, false);
         // Two moves of one holder's value are in different arms, so
         // only one of them happens (`match k { 0 => { let w = v; } 1 =>
         // { let x = v; } }`); otherwise they're one after the other.
         let alternatives = walk.hops.iter().enumerate()
           .any(|(i, h)| !h.1 && walk.hops[i + 1..].iter().any(|o| !o.1 && o.2 == h.2));
-        // A move of a clone's value (`let w = v.clone(); let x = w;`)
-        // comes after the clone: the text names the clone first.
+        // A move of a clone's value (`let w = v.clone(); let x = w;`),
+        // or of another value made from v's, comes after it: the text
+        // names the clone first.
         let mut cloned: Vec<&String> = Vec::new();
         let mut of_clone = false;
         for h in walk.hops.iter() {
-          if h.3 || cloned.contains(&&h.2) {
+          if h.3 || h.4 || cloned.contains(&&h.2) {
             of_clone |= !h.1;
             cloned.push(&h.0);
           }
         }
-        moved_on.push((sb.id, StoredIn(None, moved, pick(true, false), alternatives, pick(true, true), of_clone)));
+        // A value made from another is named with the holder it was
+        // made from (`x`, made from w, after `let w = v.clone();`).
+        let made = walk.hops.iter().filter(|h| h.4).map(|h| (h.0.clone(), h.2.clone())).collect();
+        moved_on.push((sb.id, StoredIn(None, moved, pick(true, false, false), alternatives, pick(true, true, false), of_clone, made)));
       }
     }
     for (die_id, holders) in ends.iter() {
@@ -8105,9 +8189,15 @@ struct Hop<'e> {
   /// A clone (`let w = v.clone();`, #1003), which is followed like a
   /// copy.
   clone: bool,
-  /// A clone of a value whose drop may use the borrow: it and the
-  /// original hold it until they are dropped, not until their last use.
+  /// Another value made from the holder's that rustc says holds the
+  /// borrow (`let w: Vec<&String> = v.iter().copied().collect();`,
+  /// #1015), also followed like a copy.
+  derived: bool,
+  /// `dest`'s drop may use the borrow: it holds it until it is
+  /// dropped, not until its last use.
   dropped: bool,
+  /// The same for the holder it is made from.
+  src_dropped: bool,
   /// The event list it is in: where `dest` goes on from.
   list: &'e [(usize, ExternalEvent)],
   /// The last line of the `if` / `match` arm it is in, when that arm
@@ -8121,36 +8211,63 @@ struct Hop<'e> {
 /// nested conditionals: `w` for `let w = v;`, `h.v` for `let h = H { v
 /// };`, `h2.v` for holder `h.v` and `let h2 = h;`, and for a move `let
 /// w = pass(v);` the variable the call's result goes to. A move in a
-/// loop body ends the hold there, without a destination. A clone of the
-/// value (`let w = v.clone();`, one of `clones`) is a copy of it here:
-/// its elements are copies of the references in v (#1003).
-fn holder_hops<'e>(list: &'e [(usize, ExternalEvent)], holder: &str, from: usize, hi: usize, arm_end: Option<usize>, clones: &[(usize, String, String, bool)], out: &mut Vec<Hop<'e>>) {
+/// loop body ends the hold there, without a destination. A value made
+/// from the holder's that holds the borrow (one of `derived`: `let w =
+/// v.clone();`, `let w: Vec<&String> = v.iter().copied().collect();`) is
+/// a copy of it here: it holds copies of the references in v (#1003,
+/// #1015).
+fn holder_hops<'e>(list: &'e [(usize, ExternalEvent)], holder: &str, from: usize, hi: usize, arm_end: Option<usize>, derived: &[&Derived], out: &mut Vec<Hop<'e>>) {
   for (line, ev) in list {
+    // The event that gives a value made from the holder's to its
+    // variable (the call's result moving to w, `let r = v[0];`'s copy).
+    if let ExternalEvent::Move { to: ResourceTy::Value(d), .. } | ExternalEvent::Copy { to: ResourceTy::Value(d), .. }
+      | ExternalEvent::Bind { to: ResourceTy::Value(d), .. } | ExternalEvent::StaticBorrow { to: ResourceTy::Value(d), .. }
+      | ExternalEvent::MutableBorrow { to: ResourceTy::Value(d), .. } = ev
+    {
+      let mut found = false;
+      for dv in derived.iter().filter(|dv| dv.dest == *d.name() && dv.lines.0 <= *line && *line <= dv.lines.1) {
+        if *line <= from || *line > hi || d.is_fn() {
+          continue;
+        }
+        for (src, src_dropped) in dv.srcs.iter() {
+          // v itself, a value v is part of (`h.clone()` for holder
+          // `h.v`: `h2.v`), or a part of v (`h.v.iter()` for holder h;
+          // `h.v.clone()` isn't a clone of h).
+          let (dest, clone) = match holder.strip_prefix(src.as_str()) {
+            Some(rest) if rest.is_empty() || rest.starts_with('.') =>
+              (format!("{}{}", d.name(), if dv.clone { rest } else { "" }), dv.clone),
+            _ if src.strip_prefix(holder).is_some_and(|r| r.starts_with('.')) => (d.name().to_owned(), false),
+            _ => continue,
+          };
+          found = true;
+          if !out.iter().any(|h| h.line == *line && h.dest.as_ref() == Some(&dest)) {
+            out.push(Hop {
+              line: *line, dest: Some(dest), copy: true, clone, derived: !clone,
+              dropped: dv.dropped, src_dropped: *src_dropped, list, arm_end,
+            });
+          }
+        }
+      }
+      if found {
+        continue;
+      }
+    }
     let (src, to, copy) = match ev {
       ExternalEvent::Branch { branches, branch_type, .. } => {
         for (a, b) in branches.iter().enumerate() {
           if matches!(branch_type, BranchType::Loop(..)) {
             let mut inner = Vec::new();
-            holder_hops(&b.e_data, holder, from, hi, None, clones, &mut inner);
+            holder_hops(&b.e_data, holder, from, hi, None, derived, &mut inner);
             out.extend(inner.into_iter().filter(|h| !h.copy).map(|h| Hop { dest: None, list, arm_end, ..h }));
           } else {
             let (_, end) = branch_type.get_start_end(a);
-            holder_hops(&b.e_data, holder, from, hi.min(end), Some(end), clones, out);
+            holder_hops(&b.e_data, holder, from, hi.min(end), Some(end), derived, out);
           }
         }
         continue;
       }
-      // The result of `v.clone()` moving to w.
-      ExternalEvent::Move { from: ResourceTy::Value(c), to: ResourceTy::Value(d), .. } if c.is_fn() && !d.is_fn() => {
-        if *line > from && *line <= hi {
-          for (_, src, _, dropped) in clones.iter().filter(|(l, _, to, _)| l == line && to == d.name()) {
-            if let Some(rest) = holder.strip_prefix(src.as_str()).filter(|r| r.is_empty() || r.starts_with('.')) {
-              out.push(Hop { line: *line, dest: Some(format!("{}{}", d.name(), rest)), copy: true, clone: true, dropped: *dropped, list, arm_end });
-            }
-          }
-        }
-        continue;
-      }
+      // A call's result moving to w, not made from the holder's value.
+      ExternalEvent::Move { from: ResourceTy::Value(c), to: ResourceTy::Value(d), .. } if c.is_fn() && !d.is_fn() => continue,
       ExternalEvent::Move { from, to, .. } => (from, to, false),
       // A copy of the whole value (`let w = v;`, `H { v }`), not of a
       // part of it or of what a reference in it points to.
@@ -8176,7 +8293,7 @@ fn holder_hops<'e>(list: &'e [(usize, ExternalEvent)], holder: &str, from: usize
       ResourceTy::Value(d) if !d.is_fn() => Some(format!("{}{}", d.name(), rest)),
       _ => None,
     };
-    out.push(Hop { line: *line, dest, copy, clone: false, dropped: false, list, arm_end });
+    out.push(Hop { line: *line, dest, copy, clone: false, derived: false, dropped: false, src_dropped: false, list, arm_end });
   }
 }
 
@@ -8213,15 +8330,16 @@ fn last_use(events: &[(usize, ExternalEvent)], holder: &str, from: usize, hi: us
 struct HolderWalk<'w> {
   lender: String,
   hash_of: &'w dyn Fn(&str) -> Option<u64>,
-  /// `ExprVisitor::clones`.
-  clones: &'w [(usize, String, String, bool)],
+  /// The values made from others (`ExprVisitor::derived`) whose
+  /// variable rustc says holds the borrow.
+  derived: &'w [&'w Derived],
   seen: Vec<String>,
   /// Each holder, as a sharer of the lender.
   holders: Vec<Sharer>,
   /// The variables the borrow went on to, in order, whether by a copy
-  /// (true) or a move, the holder it went on from, and whether the copy
-  /// is a clone.
-  hops: Vec<(String, bool, String, bool)>,
+  /// (true) or a move, the holder it went on from, whether the copy is
+  /// a clone, and whether it is another value made from the holder's.
+  hops: Vec<(String, bool, String, bool, bool)>,
 }
 
 impl HolderWalk<'_> {
@@ -8231,10 +8349,11 @@ impl HolderWalk<'_> {
   /// until its last use, not until the loan ends; so does a value that
   /// is copied or cloned (a Copy value has no drop to keep it in use,
   /// and a `Vec`'s drop doesn't use the references in it). A clone of a
-  /// value whose own `Drop` may use them isn't trimmed (#1003).
+  /// value whose own `Drop` may use them isn't trimmed (#1003), nor is
+  /// a value made from one (#1015).
   fn follow(&mut self, list: &[(usize, ExternalEvent)], holder: &str, hash: u64, from: usize, hi: usize, trim: bool) {
     let mut hops = Vec::new();
-    holder_hops(list, holder, from, hi, None, self.clones, &mut hops);
+    holder_hops(list, holder, from, hi, None, self.derived, &mut hops);
     hops.sort_by_key(|h| h.line);
     // A move in `list` itself ends its hold; one in an arm only for the
     // rest of that arm.
@@ -8243,7 +8362,7 @@ impl HolderWalk<'_> {
     hops.retain(|h| h.line <= end);
     // (It still holds the value on the move's line.)
     let mut gaps: Vec<(usize, usize)> = hops.iter().filter(|h| !h.copy).filter_map(|h| h.arm_end.map(|e| (h.line + 1, e))).collect();
-    let to = if trim || hops.iter().any(|h| h.copy && !h.dropped && h.dest.is_some()) {
+    let to = if trim || hops.iter().any(|h| h.copy && !h.src_dropped && h.dest.is_some()) {
       last_use(list, holder, from, end).unwrap_or(from)
     } else {
       hi
@@ -8258,7 +8377,7 @@ impl HolderWalk<'_> {
         continue;
       }
       self.seen.push(dest.clone());
-      self.hops.push((dest.clone(), h.copy, holder.to_owned(), h.clone));
+      self.hops.push((dest.clone(), h.copy, holder.to_owned(), h.clone, h.derived));
       let hash = (self.hash_of)(&dest).unwrap_or(hash);
       self.follow(h.list, &dest, hash, h.line, h.arm_end.map_or(hi, |e| e.min(hi)), trim || (h.copy && !h.dropped) || h.arm_end.is_some());
     }

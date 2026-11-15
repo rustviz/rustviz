@@ -4082,8 +4082,8 @@ pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, fro
         // (`point(&mut hold, &t)`, #513): the borrow lasts past
         // the call, until the borrow checker ends it.
         let stored_suffix: String = match external_event {
-            ExternalEvent::PassByStaticReference { stored_in: StoredIn(Some(place), moved_to, copied_to, alternatives, cloned_to, moves_of_clone), .. }
-            | ExternalEvent::PassByMutableReference { stored_in: StoredIn(Some(place), moved_to, copied_to, alternatives, cloned_to, moves_of_clone), .. } => {
+            ExternalEvent::PassByStaticReference { stored_in: StoredIn(Some(place), moved_to, copied_to, alternatives, cloned_to, moves_of_clone, made_to), .. }
+            | ExternalEvent::PassByMutableReference { stored_in: StoredIn(Some(place), moved_to, copied_to, alternatives, cloned_to, moves_of_clone, made_to), .. } => {
                 let styled_place = styled_name_html(place);
                 // The place's value moves on while the borrow is live
                 // (`let w = hold;`, `let w = pass(hold);`): the borrow
@@ -4112,20 +4112,36 @@ pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, fro
                 // `hold: Option<&String>`) holds the borrow too (#997),
                 // and so does a clone (`let w = hold.clone();`, #1003):
                 // its references are copies of hold's. (It is called a
-                // clone, not a copy: hold's type needn't be Copy.)
+                // clone, not a copy: hold's type needn't be Copy.) So
+                // does another value made from hold's whose type rustc
+                // ties to the borrow (`let w: Vec<&String> =
+                // hold.iter().copied().collect();`, #1015).
                 let also = |names: &[String], one: &str, many: &str| match names {
                     [] => String::new(),
-                    [n] => format!(", and while {}, {} of {}, is in use", styled_name_html(n), one, styled_place),
+                    [n] => format!(", and while {}, {} {}, is in use", styled_name_html(n), one, styled_place),
                     names => format!(
-                        ", and while {}, {} of {}, are in use",
+                        ", and while {}, {} {}, are in use",
                         join_names(&names.iter().map(|n| styled_name_html(n)).collect::<Vec<_>>()),
                         many, styled_place,
                     ),
                 };
-                let copied = also(copied_to, "a copy", "copies");
-                let cloned = also(cloned_to, "a clone", "clones");
+                let copied = also(copied_to, "a copy of", "copies of");
+                let cloned = also(cloned_to, "a clone of", "clones of");
+                // Each value made from another is named with its source
+                // (`x`, made from w, after `let w = hold.clone();`).
+                let mut made = String::new();
+                let mut rest: &[(String, String)] = made_to;
+                while let Some((_, src)) = rest.first() {
+                    let n = rest.iter().take_while(|(_, s)| s == src).count();
+                    let names: Vec<String> = rest[..n].iter().map(|(d, _)| styled_name_html(d)).collect();
+                    made.push_str(&format!(
+                        ", and while {}, made from {}, {} in use",
+                        join_names(&names), styled_name_html(src), if n == 1 { "is" } else { "are" },
+                    ));
+                    rest = &rest[n..];
+                }
                 // A move of a clone's value comes after the clone.
-                let later = if *moves_of_clone { [copied, cloned, moved_on] } else { [moved_on, copied, cloned] };
+                let later = if *moves_of_clone { [copied, cloned, made, moved_on] } else { [moved_on, copied, cloned, made] };
                 format!(
                     "; {}'s signature lets it store this reference in {}, so {} stays borrowed while {} is in use{}",
                     styled_fn_name, styled_place, styled_from_name, styled_place, later.concat(),

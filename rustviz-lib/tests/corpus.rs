@@ -17436,6 +17436,69 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "a copy of d,",
         ],
     },
+    // ─── a value made from a stored borrow's holder (#1015) ───
+    TooltipExpect {
+        name: "stored_borrow_derived_holder_1015",
+        // Main followed only moves, copies and clones of a holder: a
+        // value made from it whose type rustc ties to the stored
+        // reference (`let w: Vec<&String> = v.iter().copied().collect();`,
+        // `va.iter()`, `vb.first().copied()`, `vc[0]`, `firsts(&vd)`)
+        // wasn't, so look named the holder, which isn't used after it,
+        // and keepv's text left the value out. rustc rejects moving each
+        // lender right after its look (the borrow is later used by the
+        // value made from the holder; for dg, by its Drop at the end of
+        // into_drop). Rows are checked in
+        // `a_stored_borrow_is_held_by_values_made_from_its_holder`.
+        must_contain: &[
+            "keepv reads from s; keepv's signature lets it store this reference in v, so s stays borrowed while v is in use, and while w, made from v, is in use",
+            "s's resource is no longer borrowed by look, but is still immutably borrowed by w",
+            "keepv reads from a; keepv's signature lets it store this reference in va, so a stays borrowed while va is in use, and while it, made from va, is in use",
+            "a's resource is no longer borrowed by look, but is still immutably borrowed by it",
+            "keepv reads from b; keepv's signature lets it store this reference in vb, so b stays borrowed while vb is in use, and while fb, made from vb, is in use",
+            "b's resource is no longer borrowed by look, but is still immutably borrowed by fb",
+            "keepv reads from c; keepv's signature lets it store this reference in vc, so c stays borrowed while vc is in use, and while rc, made from vc, is in use",
+            "c's resource is no longer borrowed by look, but is still immutably borrowed by rc",
+            "keepv reads from d; keepv's signature lets it store this reference in vd, so d stays borrowed while vd is in use, and while wd, made from vd, is in use",
+            "d's resource is no longer borrowed by look, but is still immutably borrowed by wd",
+            "keepv reads from e; keepv's signature lets it store this reference in ve, so e stays borrowed while ve is in use, and while we, made from ve, is in use",
+            "e's resource is no longer borrowed by look, but is still immutably borrowed by ve and we",
+            "keepv reads from f; keepv's signature lets it store this reference in vf, so f stays borrowed while vf is in use, and while wf, a clone of vf, is in use, and while xf, made from wf, is in use",
+            "f's resource is no longer borrowed by look, but is still immutably borrowed by xf",
+            "keepv reads from g; keepv's signature lets it store this reference in vg, so g stays borrowed while vg is in use, and while dg.v, made from vg, is in use",
+            "g's resource is no longer borrowed by look, but is still immutably borrowed by dg.v",
+            // lens (a Vec<usize>) holds no reference.
+            "keepv reads from k; keepv's signature lets it store this reference in vk, so k stays borrowed while vk is in use",
+        ],
+        must_not_contain: &[
+            // The value made from the holder holds the borrow too.
+            "=keepv reads from s; keepv's signature lets it store this reference in v, so s stays borrowed while v is in use",
+            "=keepv reads from a; keepv's signature lets it store this reference in va, so a stays borrowed while va is in use",
+            "=keepv reads from b; keepv's signature lets it store this reference in vb, so b stays borrowed while vb is in use",
+            "=keepv reads from c; keepv's signature lets it store this reference in vc, so c stays borrowed while vc is in use",
+            "=keepv reads from d; keepv's signature lets it store this reference in vd, so d stays borrowed while vd is in use",
+            "=keepv reads from e; keepv's signature lets it store this reference in ve, so e stays borrowed while ve is in use",
+            "=keepv reads from f; keepv's signature lets it store this reference in vf, so f stays borrowed while vf is in use, and while wf, a clone of vf, is in use",
+            "=keepv reads from g; keepv's signature lets it store this reference in vg, so g stays borrowed while vg is in use",
+            // The holder isn't used after the value is made from it.
+            "=s's resource is no longer borrowed by look, but is still immutably borrowed by v",
+            "=a's resource is no longer borrowed by look, but is still immutably borrowed by va",
+            "=b's resource is no longer borrowed by look, but is still immutably borrowed by vb",
+            "=c's resource is no longer borrowed by look, but is still immutably borrowed by vc",
+            "=d's resource is no longer borrowed by look, but is still immutably borrowed by vd",
+            "=e's resource is no longer borrowed by look, but is still immutably borrowed by ve",
+            "=g's resource is no longer borrowed by look, but is still immutably borrowed by vg",
+            // xf is made from the clone wf, not from vf.
+            "xf, made from vf",
+            // Not a clone or a copy of the holder.
+            "w, a clone of v",
+            "w, a copy of v",
+            "rc, a copy of vc",
+            // lens holds no reference.
+            "lens, made from vk",
+            "still immutably borrowed by lens",
+            "still immutably borrowed by vk",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -23371,6 +23434,57 @@ fn a_stored_borrow_is_held_by_clones_of_its_holder() {
         if ys.len() != 1 || (ys[0] - row).abs() >= 1.0 {
             failures.push(format!("\"{text}\" should be on `{src}` only (y={row}), got {ys:?}"));
         }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// #1015: a value made from a stored borrow's holder whose type rustc
+/// ties to the stored reference (`let w: Vec<&String> =
+/// v.iter().copied().collect();`, an iterator over v, `v.first().copied()`,
+/// `v[0]`, `firsts(&v)`) holds it too, until its own last use (dg, whose
+/// type has its own Drop, until it is dropped at the end of the fn).
+/// rustc rejects moving the lender right after each look below; the
+/// borrow ends where the last holder is last used. Main named the
+/// holder (v, va, vb, vc, vd, ve, vg) at each look, and drew f free at
+/// its look.
+#[test]
+fn a_stored_borrow_is_held_by_values_made_from_its_holder() {
+    let name = "stored_borrow_derived_holder_1015";
+    let still = |l: &str, h: &str| format!("{l}'s resource is no longer borrowed by look, but is still immutably borrowed by {h}");
+    let ended = |l: &str| format!("{l}'s resource is no longer immutably borrowed");
+    let cases: Vec<(String, &str)> = vec![
+        (still("s", "w"), "let n = look(&s);"),
+        (ended("s"), "println!(\"{} {}\", w.len(), n);"),
+        (still("a", "it"), "let na = look(&a);"),
+        (ended("a"), "println!(\"{} {}\", it.count(), na);"),
+        (still("b", "fb"), "let nb = look(&b);"),
+        (ended("b"), "println!(\"{:?} {}\", fb, nb);"),
+        (still("c", "rc"), "let nc = look(&c);"),
+        (ended("c"), "println!(\"{} {}\", rc, nc);"),
+        (still("d", "wd"), "let nd = look(&d);"),
+        (ended("d"), "println!(\"{} {}\", wd.len(), nd);"),
+        (still("e", "ve and we"), "let ne = look(&e);"),
+        (ended("e"), "println!(\"{} {} {}\", ve.len(), we.len(), ne);"),
+        (still("f", "xf"), "let nf = look(&f);"),
+        (ended("f"), "println!(\"{} {}\", xf.len(), nf);"),
+        (still("g", "dg.v"), "let ng = look(&g);"),
+    ];
+    let rv = run_with_local_backend(name);
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let mut failures = Vec::new();
+    for (text, src) in &cases {
+        let row = code_rows_y(&code, src)[0];
+        let ys: Vec<f64> = dots_listing_tooltip(&timeline, text).iter().map(|d| d.1).collect();
+        if ys.len() != 1 || (ys[0] - row).abs() >= 1.0 {
+            failures.push(format!("\"{text}\" should be on `{src}` only (y={row}), got {ys:?}"));
+        }
+    }
+    // dg's drop at the end of into_drop may use the reference: g stays
+    // borrowed past dg's last use, until then.
+    let after = code_rows_y(&code, "println!(\"{}\", ng);")[0];
+    let ends: Vec<f64> = dots_listing_tooltip(&timeline, &ended("g")).iter().map(|d| d.1).collect();
+    if ends.len() != 1 || ends[0] <= after {
+        failures.push(format!("g's borrow should end after `println!(\"{{}}\", ng);` (y={after}), got {ends:?}"));
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
