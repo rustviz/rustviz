@@ -57,6 +57,10 @@ struct ArgFlow<'tcx> {
   /// result `&'a String`, or `x: &T` with `T = &String`): the result
   /// has that reference's lifetime (#1084).
   referent_is_ref: bool,
+  /// For content flow out of a struct or tuple (`&self` with `Self =
+  /// Shelf<'a>`): the fields whose types carry what the result does
+  /// (`items: Vec<&'a str>`). `None` for any other type.
+  fields: Option<Vec<String>>,
 }
 
 /// Which type a call's arguments may flow into.
@@ -95,6 +99,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let fty = typeck.node_type_opt(fn_expr.hir_id)?;
         match fty.kind() {
           ty::FnDef(def_id, gargs) => {
+            if let Some((sig, gargs, def_id)) = self.impl_view_sig(call, *def_id, gargs) {
+              return Some((sig, Some(gargs), args.iter().collect(), Some(def_id)));
+            }
             let sig = self.tcx.fn_sig(*def_id).instantiate_identity().skip_norm_wip();
             Some((self.tcx.liberate_late_bound_regions(*def_id, sig), Some(*gargs), args.iter().collect(), Some(*def_id)))
           }
@@ -108,13 +115,50 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       ExprKind::MethodCall(_, rcvr, args, _) => {
         let def_id = typeck.type_dependent_def_id(call.hir_id)?;
-        let sig = self.tcx.fn_sig(def_id).instantiate_identity().skip_norm_wip();
         let mut all = vec![rcvr];
         all.extend(args.iter());
+        if let Some((sig, gargs, def_id)) = typeck.node_args_opt(call.hir_id)
+          .and_then(|gargs| self.impl_view_sig(call, def_id, gargs)) {
+          return Some((sig, Some(gargs), all, Some(def_id)));
+        }
+        let sig = self.tcx.fn_sig(def_id).instantiate_identity().skip_norm_wip();
         Some((self.tcx.liberate_late_bound_regions(def_id, sig), typeck.node_args_opt(call.hir_id), all, Some(def_id)))
       }
       _ => None,
     }
+  }
+
+  /// A call of a trait method that resolves to one impl's method
+  /// (`names.top()` with `impl<'a> Top<'a> for Vec<&'a str>`): the
+  /// trait method's signature with the trait's `Self` and parameters
+  /// replaced by that impl's (`fn(&Vec<&'a str>) -> &'a str`), the
+  /// call's generic arguments for the impl method, and its `DefId`.
+  /// This is what the borrow checker sees at the call: the trait's
+  /// signature alone (`fn(&Self) -> &'a str`) doesn't say that the
+  /// result's `'a` is the lifetime of the references in the receiver
+  /// (#1089). `None` for any other call, or when the impl isn't known
+  /// at the call (a generic `T: Top<'a>`), or for a provided method the
+  /// impl doesn't override.
+  fn impl_view_sig(
+    &self,
+    call: &'tcx Expr<'tcx>,
+    def_id: DefId,
+    gargs: GenericArgsRef<'tcx>,
+  ) -> Option<(ty::FnSig<'tcx>, GenericArgsRef<'tcx>, DefId)> {
+    let tcx = self.tcx;
+    tcx.trait_of_assoc(def_id)?;
+    let env = typing_env(tcx, call.hir_id.owner);
+    let inst = ty::Instance::try_resolve(tcx, env, def_id, gargs).ok()??;
+    let ty::InstanceKind::Item(impl_m) = inst.def else { return None };
+    let impl_id = tcx.trait_impl_of_assoc(impl_m)?;
+    let trait_ref = tcx.impl_trait_ref(impl_id).instantiate_identity().skip_norm_wip();
+    // The trait method's own parameters follow the trait's; the impl
+    // method's follow the impl's.
+    let own = ty::GenericArgs::identity_for_item(tcx, impl_m);
+    let parent = tcx.generics_of(impl_id).count();
+    let args = tcx.mk_args_from_iter(trait_ref.args.iter().chain(own.iter().skip(parent)));
+    let sig = tcx.fn_sig(def_id).instantiate(tcx, args).skip_norm_wip();
+    Some((tcx.liberate_late_bound_regions(impl_m, sig), inst.args, impl_m))
   }
 
   /// For each argument of `call`, whether the call's result can borrow
@@ -227,7 +271,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           },
           _ => false,
         };
-        flows.push(ArgFlow { index, arg, place, content, place_mut: place && place_mut, by_value, referent_is_ref });
+        let fields = content.then(|| {
+          let held = match input.kind() { ty::Ref(_, inner, _) => *inner, _ => *input };
+          match held.kind() {
+            ty::Adt(def, fargs) if def.is_struct() => Some(def.all_fields()
+              .filter(|fd| shares(fd.ty(self.tcx, fargs)))
+              .map(|fd| fd.name.as_str().to_owned())
+              .collect()),
+            ty::Tuple(tys) => Some(tys.iter().enumerate()
+              .filter(|(_, t)| shares(*t))
+              .map(|(i, _)| i.to_string())
+              .collect()),
+            _ => None,
+          }
+        }).flatten();
+        flows.push(ArgFlow { index, arg, place, content, place_mut: place && place_mut, by_value, referent_is_ref, fields });
       }
     }
     Some(flows)
@@ -329,7 +387,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let mut out: Vec<ResourceTy> = Vec::new();
     let mut unnamed = false;
     for flow in flows {
-      let ls = self.arg_lenders(flow.arg, flow.place, flow.content, flow.by_value);
+      let ls = self.arg_lenders(&flow);
       // A closure passed by value (`.map(|p| p.len())`) holds only
       // what it captures by reference; one that captures nothing that
       // way holds no borrow at all.
@@ -390,7 +448,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     for flow in self.call_arg_flows_into(call, target).unwrap_or_default() {
       holds_all_literal = matches!(flow.arg.kind,
         ExprKind::Array(..) | ExprKind::Struct(..) | ExprKind::Tup(..) | ExprKind::Repeat(..));
-      let named = self.arg_lenders(flow.arg, flow.place, flow.content, flow.by_value).iter()
+      let named = self.arg_lenders(&flow).iter()
         .any(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)));
       tie.tied.push(flow.index);
       if flow.content && !flow.place && !flow.by_value {
@@ -415,8 +473,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// references a call's result can carry: `rows` for `&rows`, or for
   /// `rows` auto-referenced as a method receiver. With `is_ref`, that
   /// variable is itself the carried reference (`t` in `first(&t)`).
-  /// `None` when the argument reaches its data through another
-  /// reference (`r`, `&*r`) or isn't a plain variable or field.
+  /// When the argument reaches its data through a reference variable
+  /// (`rr`, `&*rr`, an auto-dereferenced `rr`), the one variable it
+  /// points to (`rows` for `rr = &rows`, #1089). `None` when that
+  /// isn't a single variable with a column, or the argument isn't a
+  /// plain variable or field.
   fn stored_in_name(&self, arg: &'tcx Expr<'tcx>, is_ref: bool) -> Option<String> {
     let typeck = self.tcx.typeck(arg.hir_id.owner);
     let adjs = typeck.expr_adjustments(arg);
@@ -426,7 +487,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         match a.kind {
           Adjust::Deref(DerefAdjustKind::Builtin) => match place.kind {
             ExprKind::AddrOf(_, _, inner) => place = inner,
-            _ => return None,
+            _ => return self.pointee_name(place, is_ref),
           },
           // An overloaded deref (`Vec<T>` → `[T]`) stays in the same value.
           _ => {}
@@ -436,9 +497,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     } else {
       match arg.kind {
         ExprKind::AddrOf(_, _, inner) => inner,
-        _ => return None,
+        _ => return self.pointee_name(arg, is_ref),
       }
     };
+    if let ExprKind::Unary(UnOp::Deref, inner) = place.kind {
+      if typeck.expr_ty(inner).is_ref() {
+        return self.pointee_name(inner, is_ref);
+      }
+    }
     fn plain<'t>(e: &'t Expr<'t>) -> bool {
       match e.kind {
         ExprKind::Path(QPath::Resolved(None, _)) => true,
@@ -450,6 +516,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       return None;
     }
     expr_to_rap_name(place, &self.tcx)
+  }
+
+  /// `stored_in_name` for an argument that is a reference `e`: the
+  /// variable `e` points to, when that is exactly one variable with a
+  /// column (and, with `is_ref`, itself a reference).
+  fn pointee_name(&self, e: &'tcx Expr<'tcx>, is_ref: bool) -> Option<String> {
+    if !matches!(e.kind, ExprKind::Path(QPath::Resolved(None, _)) | ExprKind::Field(..)) {
+      return None;
+    }
+    match self.value_lenders(e).as_slice() {
+      [ResourceTy::Value(rap)] if rap.is_ref() == is_ref && !rap.is_fn()
+        && expr_to_rap_name(e, &self.tcx).is_some_and(|n| n != *rap.name()) => Some(rap.name().to_owned()),
+      _ => None,
+    }
   }
 
   /// Whether the borrow `call`'s result keeps is a mutable one: some
@@ -611,11 +691,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
   /// Lenders reachable through one argument, after rustc's adjustments
   /// (auto-ref of a method receiver, auto-deref, deref coercion).
-  fn arg_lenders(&self, arg: &'tcx Expr<'tcx>, place: bool, content: bool, by_value: bool) -> Vec<ResourceTy> {
+  fn arg_lenders(&self, flow: &ArgFlow<'tcx>) -> Vec<ResourceTy> {
+    let ArgFlow { arg, place, content, by_value, .. } = *flow;
+    let fields = flow.fields.as_deref();
     if by_value {
       // Passed by value: whatever the value holds, including the
-      // borrow of a reference passed for a type parameter.
-      return if content { self.value_lenders(arg) } else { Vec::new() };
+      // borrow of a reference passed for a type parameter, or what
+      // the fields of a struct drawn as field columns hold.
+      return if content {
+        let ls = self.value_lenders(arg);
+        if ls.is_empty() { self.struct_content_lenders(arg, fields) } else { ls }
+      } else {
+        Vec::new()
+      };
     }
     let typeck = self.tcx.typeck(arg.hir_id.owner);
     let adjs = typeck.expr_adjustments(arg);
@@ -646,8 +734,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         });
       }
       if content {
-        if let Referent::Place(e) = referent {
-          res.extend(self.content_lenders(e));
+        match referent {
+          Referent::Place(e) => res.extend(self.content_lenders(e, fields)),
+          // `rr.top()` with `rr: &Vec<&str>`: what rr points to.
+          Referent::Through(e) => res.extend(self.pointee_content_lenders(e, fields)),
+          Referent::Unknown => {}
         }
       }
     } else if typeck.expr_ty_adjusted(arg).is_ref() {
@@ -656,8 +747,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         res.extend(self.value_lenders(arg));
       }
       if content {
-        if let ExprKind::AddrOf(_, _, inner) = arg.kind {
-          res.extend(self.content_lenders(inner));
+        match arg.kind {
+          ExprKind::AddrOf(_, _, inner) => res.extend(self.content_lenders(inner, fields)),
+          // A reference variable (`inner(rr)` with `rr = &rows`):
+          // the references stored in what it points to (#1089).
+          _ => res.extend(self.pointee_content_lenders(arg, fields)),
         }
       }
     } else if content {
@@ -802,19 +896,95 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   }
 
   /// What the references stored *inside* the value at place `p`
-  /// borrow from.
-  fn content_lenders(&self, p: &'tcx Expr<'tcx>) -> Vec<ResourceTy> {
+  /// borrow from. `fields`: see `ArgFlow::fields`.
+  fn content_lenders(&self, p: &'tcx Expr<'tcx>, fields: Option<&[String]>) -> Vec<ResourceTy> {
     let typeck = self.tcx.typeck(p.hir_id.owner);
     match p.kind {
       ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::Block(..) => self.value_lenders(p),
       _ if typeck.expr_ty(p).is_ref() => self.value_lenders(p),
+      // `&*rr`: what rr points to (#1089); `&*b` with b a `Box`: b's
+      // own data.
+      ExprKind::Unary(UnOp::Deref, inner) => {
+        if typeck.expr_ty(inner).is_ref() {
+          self.pointee_content_lenders(inner, fields)
+        } else {
+          self.content_lenders(inner, fields)
+        }
+      }
       // A local `Option<&T>` / iterator that holds a borrow we track
-      // (#336): `value_lenders` finds it in `borrow_map`.
-      ExprKind::Path(QPath::Resolved(..)) if expr_to_rap_name(p, &self.tcx)
+      // (#336), or a struct field drawn as such a holder
+      // (`shelf.items`, #1088): `value_lenders` finds it in
+      // `borrow_map`. A struct drawn as field columns holds what its
+      // fields hold (`shelf.top()`).
+      ExprKind::Path(QPath::Resolved(..)) | ExprKind::Field(..) => match expr_to_rap_name(p, &self.tcx)
         .and_then(|n| self.raps.get(&n))
-        .is_some_and(|rd| rd.rap.holds_borrow()) => self.value_lenders(p),
-      // Any other local `Option<&T>` / iterator / struct: not tracked.
+      {
+        Some(rd) => self.rap_content_lenders(&rd.rap, fields),
+        None => Vec::new(),
+      },
+      // Any other value: not tracked.
       _ => Vec::new(),
     }
+  }
+
+  /// `content_lenders` for `*e`, where `e` is a reference: the
+  /// references stored in the variables `e` points to (`rows`, for
+  /// `rr = &rows`). Empty when what `e` points to has no column.
+  fn pointee_content_lenders(&self, e: &'tcx Expr<'tcx>, fields: Option<&[String]>) -> Vec<ResourceTy> {
+    let mut out: Vec<ResourceTy> = Vec::new();
+    for l in self.value_lenders(e) {
+      let ResourceTy::Value(rap) = &l else { continue };
+      for c in self.rap_content_lenders(rap, fields) {
+        if !out.contains(&c) {
+          out.push(c);
+        }
+      }
+    }
+    out
+  }
+
+  /// `struct_content_lenders` for a struct value passed by value
+  /// (`take(shelf)`): what its field columns hold.
+  fn struct_content_lenders(&self, e: &'tcx Expr<'tcx>, fields: Option<&[String]>) -> Vec<ResourceTy> {
+    if !matches!(e.kind, ExprKind::Path(QPath::Resolved(..)) | ExprKind::Field(..)) {
+      return Vec::new();
+    }
+    match expr_to_rap_name(e, &self.tcx).and_then(|n| self.raps.get(&n)) {
+      Some(rd) if matches!(rd.rap, ResourceAccessPoint::Struct(_)) && !rd.rap.holds_borrow() => self.rap_content_lenders(&rd.rap, fields),
+      _ => Vec::new(),
+    }
+  }
+
+  /// What the references held by the value in column `rap` borrow
+  /// from: a holder's recorded borrow (`names`, `shelf.items`), or for
+  /// a struct drawn as field columns, what its reference and holder
+  /// fields borrow (only those named in `fields`, when given).
+  fn rap_content_lenders(&self, rap: &ResourceAccessPoint, fields: Option<&[String]>) -> Vec<ResourceTy> {
+    let lenders_of = |name: &str| -> Vec<ResourceTy> {
+      self.borrow_map.get(name).map(|rd| rd.all_lenders()).unwrap_or_default()
+    };
+    if rap.holds_borrow() {
+      return lenders_of(rap.name());
+    }
+    if !matches!(rap, ResourceAccessPoint::Struct(_)) {
+      return Vec::new();
+    }
+    let prefix = format!("{}.", rap.name());
+    let mut out: Vec<ResourceTy> = Vec::new();
+    for m in self.struct_members_deep(rap.name()) {
+      if !(m.is_ref() || m.holds_borrow()) {
+        continue;
+      }
+      let top = m.name()[prefix.len()..].split('.').next().unwrap_or_default();
+      if fields.is_some_and(|fs| !fs.iter().any(|f| f == top)) {
+        continue;
+      }
+      for l in lenders_of(m.name()) {
+        if matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)) && !out.contains(&l) {
+          out.push(l);
+        }
+      }
+    }
+    out
   }
 }

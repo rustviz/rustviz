@@ -359,6 +359,10 @@ pub struct Struct {
     /// moved. Whatever fields remain, and the box's own heap
     /// allocation, are still freed when it goes out of scope.
     pub is_box: bool,
+    /// Same as `Owner::holds_borrow`, for a member that isn't a
+    /// reference but whose value holds a borrow (`items: Vec<&'a str>`
+    /// initialised with `vec![w.as_str()]`, #1088).
+    pub holds_borrow: bool,
 }
 
 // a reference of type &mut T
@@ -863,10 +867,12 @@ impl ResourceAccessPoint {
         matches!(self, ResourceAccessPoint::Owner(Owner { is_static: true, .. }))
     }
 
-    /// True iff this RAP is a non-reference owner whose value holds a
-    /// borrow (see `Owner::holds_borrow`).
+    /// True iff this RAP is a non-reference owner, or a struct member
+    /// drawn as one column, whose value holds a borrow (see
+    /// `Owner::holds_borrow`, `Struct::holds_borrow`).
     pub fn holds_borrow(&self) -> bool {
-        matches!(self, ResourceAccessPoint::Owner(Owner { holds_borrow: true, .. }))
+        matches!(self, ResourceAccessPoint::Owner(Owner { holds_borrow: true, .. })
+            | ResourceAccessPoint::Struct(Struct { holds_borrow: true, .. }))
     }
 
     /// True iff this RAP is an owner of a Copy type (i32 etc.). The
