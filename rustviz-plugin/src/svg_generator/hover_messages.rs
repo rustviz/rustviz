@@ -1457,14 +1457,21 @@ pub fn event_dot_reacquire_deep(ref_name: &String, derefs: usize, borrower: &Str
 // borrow ends (`n` in `while let Some(n) = it.next()`, #575): n's part
 // of the borrow is given back, but `holders` (`it`) still hold it, so
 // the lender is still borrowed.
-pub fn event_dot_reacquire_still_borrowed(my_name: &String, from_name: &String, holders: &[String], mutable: bool, holds_value: bool) -> String {
+// `of_ref_var`: the lender is a reference variable x borrowed itself
+// (`look(&x)` while `let rr = &x;` is live, #974), as in
+// event_dot_static_lend_ref_var: "x is no longer borrowed by look, …".
+pub fn event_dot_reacquire_still_borrowed(my_name: &String, from_name: &String, holders: &[String], mutable: bool, holds_value: bool, of_ref_var: bool) -> String {
     let holders: Vec<String> = holders.iter()
         .map(|n| if n == LOOP_ITERATOR_HOLDER { n.clone() } else { styled_name_html(n) })
         .collect();
+    let subject = if of_ref_var {
+        styled_name_html(my_name)
+    } else {
+        format!("{}'s {}", styled_name_html(my_name), held(holds_value))
+    };
     format!(
-        "{0}'s {1} is no longer borrowed by {2}, but is still {3} borrowed by {4}",
-        styled_name_html(my_name),
-        held(holds_value),
+        "{0} is no longer borrowed by {1}, but is still {2} borrowed by {3}",
+        subject,
         styled_name_html(from_name),
         if mutable { "mutably" } else { "immutably" },
         holders.join(" and "),

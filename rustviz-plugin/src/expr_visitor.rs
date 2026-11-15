@@ -104,6 +104,21 @@ fn same_loan(a: &RefData, b: &RefData) -> bool {
     && a.borrow_span == b.borrow_span && a.co_lenders == b.co_lenders
 }
 
+/// A borrow a call may have stored behind one of its `&mut` arguments
+/// (see `ExprVisitor::stored_borrows`).
+#[derive(Debug, Clone)]
+pub struct StoredBorrow {
+  /// The variable or field that may hold it (`v` in `keep(&mut v, &s)`).
+  pub holder: String,
+  /// The line of the call.
+  pub at: usize,
+  /// The line the loan ends on.
+  pub until: usize,
+  /// The variable borrowed (`s`).
+  pub lender: String,
+  pub is_mut: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct RefData {
   pub lender: ResourceTy, // who this reference borrowed from
@@ -341,6 +356,18 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// (`RefData::borrow_span`) is one of them gives back r, a value,
   /// not what r points to.
   pub ref_var_borrows: HashSet<rustc_span::Span>,
+  /// (holder, reference variable r) for a borrow of r itself that a
+  /// call stored in the holder's value (`refs.push(&r)` with `refs:
+  /// Vec<&&String>`, #973): the holder gives back r, a value, not what
+  /// r points to. Holders keep `RefData::borrow_span` unset (their
+  /// loans are found by line), so `ref_var_borrows` can't say this.
+  pub stored_ref_var_lends: HashSet<(String, String)>,
+  /// Borrows a call may have stored behind one of its `&mut`
+  /// arguments (`keep(&mut v, &s)`, `stored_borrow`, #513): the
+  /// holder, the line of the call, the line the loan ends on, the
+  /// lender, and whether the borrow is mutable. `note_sharers_across_calls`
+  /// treats each shared one as a sharer of its lender (#974).
+  pub stored_borrows: Vec<StoredBorrow>,
   /// References a pattern copied (or moved) out of a value that holds
   /// a borrow (`Some(n)` on `it.next()`, #391): their borrow is part of
   /// that value's, and ends at their own last use (#575).
@@ -710,6 +737,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       unlent_refs: HashSet::new(),
       tuple_temp_refs: HashSet::new(),
       ref_var_borrows: HashSet::new(),
+      stored_ref_var_lends: HashSet::new(),
+      stored_borrows: Vec::new(),
       pattern_copies: HashSet::new(),
       pointee_copies: HashMap::new(),
       deref_ref_pats: HashSet::new(),
@@ -2188,8 +2217,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       ResourceTy::Anonymous => ref_data.static_lender.clone(),
       _ => None,
     };
-    let of_ref_var = to == ref_data.lender
-      && ref_data.borrow_span.is_some_and(|sp| self.ref_var_borrows.contains(&sp));
+    let of_ref_var = (to == ref_data.lender
+      && ref_data.borrow_span.is_some_and(|sp| self.ref_var_borrows.contains(&sp)))
+      || matches!((&from, &to), (ResourceTy::Value(h), ResourceTy::Value(l))
+        if self.stored_ref_var_lends.contains(&(h.name().to_owned(), l.name().to_owned())));
     let ev = if ref_data.mut_of(&to) {
       ExternalEvent::MutableDie { from, to, id, static_lender, still_borrowed_by, of_ref_var }
     } else {
@@ -3511,6 +3542,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // `&t` in `hold`: t stays borrowed past the call (#513).
       if let Some((place, end_line)) = self.stored_borrow(arg, &from_ro, line_num) {
         let mutable = arg_ty.ref_mutability() == Some(Mutability::Mut);
+        self.stored_borrows.push(StoredBorrow {
+          holder: place.name().to_owned(), at: line_num, until: end_line, lender: from_ro.real_name(), is_mut: mutable,
+        });
+        if of_ref_var {
+          self.stored_ref_var_lends.insert((place.name().to_owned(), from_ro.real_name()));
+        }
         let id = *self.unique_id;
         let stored_in = StoredIn(Some(place.name().to_owned()));
         self.add_external_event(line_num, if mutable {
@@ -4539,6 +4576,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       return;
     }
     let name = rcvr.name().to_owned();
+    // `refs.push(&x)` with x a reference variable and `refs:
+    // Vec<&&String>` stores a borrow of x itself, a value, not of what
+    // x points to (#973).
+    let ExprKind::MethodCall(_, _, args, _) = call.kind else { return };
+    let typeck = self.tcx.typeck(call.hir_id.owner);
+    let ref_var_args: Vec<String> = args.iter()
+      .filter(|a| ref_var_borrow(a, typeck))
+      .filter_map(|a| match a.kind {
+        ExprKind::AddrOf(_, _, inner) => expr_to_rap_name(inner, &self.tcx),
+        _ => None,
+      })
+      .collect();
+    let lends_ref_var = |l: &ResourceTy| matches!(l, ResourceTy::Value(r) if r.is_ref() && ref_var_args.iter().any(|n| n == r.name()));
+    for l in lenders.iter().filter(|l| lends_ref_var(l)) {
+      self.stored_ref_var_lends.insert((name.clone(), l.real_name()));
+    }
     match self.borrow_map.get_mut(&name) {
       Some(rd) => {
         for l in lenders.iter() {
@@ -4575,10 +4628,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     for lender in lenders.iter() {
       let id = *self.unique_id;
       *self.unique_id += 1;
+      let of_ref_var = lends_ref_var(lender);
       let ev = if is_mut {
-        ExternalEvent::MutableBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id, of_ref_var: false }
+        ExternalEvent::MutableBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id, of_ref_var }
       } else {
-        ExternalEvent::StaticBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id, of_ref_var: false }
+        ExternalEvent::StaticBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id, of_ref_var }
       };
       self.add_external_event(line, ev);
     }
@@ -7601,8 +7655,14 @@ pub fn print_out_of_scope(&mut self){
         // (A retired loan's key isn't its name, #903.)
         let rap = &self.raps.get(key)?.rap;
         let (name, hash) = (rap.name(), *rap.hash());
+        // A reference variable r is shared only by a borrow of r itself
+        // (`let rr = &r;`, `refs.push(&r)`; #925, #973), not by one of
+        // what r points to.
+        let of_ref_var = |l: &ResourceTy| (*l == rd.lender
+            && rd.borrow_span.is_some_and(|sp| self.ref_var_borrows.contains(&sp)))
+          || self.stored_ref_var_lends.contains(&(name.clone(), l.real_name()));
         let lenders: Vec<String> = rd.all_lenders().iter()
-          .filter(|l| matches!(l, ResourceTy::Value(r) if !r.is_ref()) && !rd.mut_of(l))
+          .filter(|l| matches!(l, ResourceTy::Value(r) if !r.is_ref() || of_ref_var(l)) && !rd.mut_of(l))
           .map(|l| l.real_name())
           .collect();
         if lenders.is_empty() {
@@ -7619,9 +7679,22 @@ pub fn print_out_of_scope(&mut self){
         first_and_moved(self.preprocessed_events, base, rd.assigned_at, &mut seen);
         let from = seen.0.unwrap_or(rd.assigned_at);
         let moved = seen.1;
-        Some(Sharer { name: name.clone(), hash, from, to: rd.lifetime, moved, lenders, from_kept_call: false })
+        Some(Sharer { name: name.clone(), hash, from, to: rd.lifetime, moved, lenders, from_kept_call: false, stored: false })
       })
       .collect();
+    // A borrow a call may have stored in `v` (`keep(&mut v, &s)`,
+    // #513) keeps s shared until the loan ends, as a live `let r = &s;`
+    // does (#974). Once `v` is moved on (`let w = v;`), the borrow is
+    // w's, not v's.
+    for sb in self.stored_borrows.iter().filter(|sb| !sb.is_mut) {
+      let Some(rd) = self.raps.get(&sb.holder) else { continue };
+      let base = sb.holder.split('.').next().unwrap_or(&sb.holder);
+      let mut seen = (None, None);
+      first_and_moved(self.preprocessed_events, base, sb.at, &mut seen);
+      sharers.push(Sharer {
+        name: sb.holder.clone(), hash: *rd.rap.hash(), from: sb.at, to: sb.until, moved: seen.1, lenders: vec![sb.lender.clone()], from_kept_call: false, stored: true,
+      });
+    }
     sharers.sort_by(|a, b| a.hash.cmp(&b.hash).then_with(|| a.name.cmp(&b.name)));
     // A `for` loop's iterator that borrows the lender with no loop
     // variable to name it (`for (i, a) in v.iter().enumerate() {
@@ -7636,9 +7709,21 @@ pub fn print_out_of_scope(&mut self){
         moved: None,
         lenders: vec![lender.clone()],
         from_kept_call: *head_call,
+        stored: false,
       });
     }
-    note_sharers_in(self.preprocessed_events, &sharers);
+    let mut noted: HashMap<usize, Vec<String>> = HashMap::new();
+    note_sharers_in(self.preprocessed_events, &sharers, &mut noted);
+    // A borrow end between two variables is listed by line too.
+    for evs in self.event_line_map.values_mut() {
+      for e in evs.iter_mut() {
+        if let ExternalEvent::StaticDie { id, still_borrowed_by, .. } = e {
+          if let Some(names) = noted.get(id) {
+            *still_borrowed_by = names.clone();
+          }
+        }
+      }
+    }
   }
 
   /// A reference declared before an `if` / `match` whose borrow ends
@@ -7839,6 +7924,9 @@ struct Sharer {
   /// keeps the loan has borrowed the lender there: `v.len()` in `for x
   /// in v.iter().take(v.len())` runs while `iter`'s result holds v.
   from_kept_call: bool,
+  /// A borrow a call may have stored in it (`keep(&mut v, &s)`, #974),
+  /// not a loan of its own in `borrow_map`.
+  stored: bool,
 }
 
 /// The first line from `start` on that an event of `events` (branches
@@ -7875,7 +7963,8 @@ fn first_and_moved(events: &[(usize, ExternalEvent)], base: &str, start: usize, 
 }
 
 /// `note_sharers_across_calls` over `events`, branches included.
-fn note_sharers_in(events: &mut [(usize, ExternalEvent)], sharers: &[Sharer]) {
+/// The borrow ends it notes are recorded in `noted`, by event id.
+fn note_sharers_in(events: &mut [(usize, ExternalEvent)], sharers: &[Sharer], noted: &mut HashMap<usize, Vec<String>>) {
   // The lenders a call whose result keeps the borrow has borrowed so
   // far, with its line.
   let mut kept: Vec<(usize, String)> = Vec::new();
@@ -7884,8 +7973,8 @@ fn note_sharers_in(events: &mut [(usize, ExternalEvent)], sharers: &[Sharer]) {
       kept.push((*line, lender.name().to_owned()));
     }
     match ev {
-      ExternalEvent::PassByStaticReference { from: ResourceTy::Value(lender), stored_in, result_keeps_borrow, still_borrowed_by, .. }
-        if stored_in.0.is_none() && !*result_keeps_borrow && !lender.is_ref() =>
+      ExternalEvent::PassByStaticReference { from: ResourceTy::Value(lender), stored_in, result_keeps_borrow, still_borrowed_by, of_ref_var, .. }
+        if stored_in.0.is_none() && !*result_keeps_borrow && (!lender.is_ref() || *of_ref_var) =>
       {
         // Each fn's visitor runs this over the events of the fns
         // visited before it too; its sharers are on its own lines, so
@@ -7899,7 +7988,8 @@ fn note_sharers_in(events: &mut [(usize, ExternalEvent)], sharers: &[Sharer]) {
           })
           .map(|s| s.name.clone())
           .fold(Vec::new(), |mut names, n| {
-            // (Nested loops over the lender: one mention.)
+            // (Nested loops over the lender, or a holder with two loans
+            // of it, `keep(&mut v, &s)` twice: one mention.)
             if !names.contains(&n) {
               names.push(n);
             }
@@ -7909,9 +7999,36 @@ fn note_sharers_in(events: &mut [(usize, ExternalEvent)], sharers: &[Sharer]) {
           *still_borrowed_by = names;
         }
       }
+      // The end of a shared loan while a borrow a call stored keeps
+      // the lender shared (#974): a reference's last use while v holds
+      // it (`keep(&mut v, &s); let r = &s; println!("{}", r); v.len()`),
+      // or the stored borrow's end while a reference still holds one
+      // (`keep(&mut v, &s); let r = &s; v.len(); println!("{}", r)`).
+      ExternalEvent::StaticDie { from, to: ResourceTy::Value(lender), still_borrowed_by, of_ref_var, id, .. }
+        if still_borrowed_by.is_empty() && (!lender.is_ref() || *of_ref_var) =>
+      {
+        let (holder, stored_end) = match from {
+          ResourceTy::Value(r) => (r.name().to_owned(), false),
+          ResourceTy::Index(_, place, PlaceWrite::Update) => (place.clone(), true),
+          _ => continue,
+        };
+        let mut names: Vec<String> = Vec::new();
+        for s in sharers.iter().filter(|s| (s.stored || stored_end) && s.name != holder
+            && s.from <= *line && s.to > *line && s.moved.is_none_or(|m| m > *line)
+            && s.lenders.iter().any(|l| l == lender.name()))
+        {
+          if !names.contains(&s.name) {
+            names.push(s.name.clone());
+          }
+        }
+        if !names.is_empty() {
+          noted.insert(*id, names.clone());
+          *still_borrowed_by = names;
+        }
+      }
       ExternalEvent::Branch { branches, .. } => {
         for b in branches.iter_mut() {
-          note_sharers_in(&mut b.e_data, sharers);
+          note_sharers_in(&mut b.e_data, sharers, noted);
         }
       }
       _ => {}
