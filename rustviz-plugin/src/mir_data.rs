@@ -935,13 +935,27 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
             (inside, other)
         };
         let names = self.mir_local_names(self.bwf);
-        let move_data = MoveData::gather_moves(body, self.tcx, |_| true);
-        let mut init = MaybeInitializedPlaces::new(self.tcx, body, &move_data)
-            .iterate_to_fixpoint(self.tcx, body, None)
-            .into_results_cursor(body);
-        let mut uninit = MaybeUninitializedPlaces::new(self.tcx, body, &move_data)
-            .iterate_to_fixpoint(self.tcx, body, None)
-            .into_results_cursor(body);
+        // What holds a value at run time, as drop elaboration sees it:
+        // the borrow checker's `FalseEdge`s (its imaginary way past an
+        // `if let` pattern that always matches, into a dead `else`;
+        // #981, #987, #995) are gone by then (`CleanupPostBorrowck`), so
+        // a value moved on every real path holds nothing at its `}`.
+        let mut real = body.clone();
+        for data in real.basic_blocks.as_mut().iter_mut() {
+            if let Some(t) = data.terminator.as_mut() {
+                if let TerminatorKind::FalseEdge { real_target, .. } = t.kind {
+                    t.kind = TerminatorKind::Goto { target: real_target };
+                }
+            }
+        }
+        let real = &real;
+        let move_data = MoveData::gather_moves(real, self.tcx, |_| true);
+        let mut init = MaybeInitializedPlaces::new(self.tcx, real, &move_data)
+            .iterate_to_fixpoint(self.tcx, real, None)
+            .into_results_cursor(real);
+        let mut uninit = MaybeUninitializedPlaces::new(self.tcx, real, &move_data)
+            .iterate_to_fixpoint(self.tcx, real, None)
+            .into_results_cursor(real);
         queries.iter().map(|(name, line)| {
             // The `Drop`s of a variable named `name` on that line.
             let drops: Vec<(BasicBlock, Local, Span)> = body.basic_blocks.iter_enumerated()
