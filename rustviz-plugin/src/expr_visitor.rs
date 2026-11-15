@@ -1695,7 +1695,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         *self.unique_id += 1;
         let to_anonymous = matches!(dest, ResourceTy::Anonymous);
         let ev = if is_copy {
-          ExternalEvent::Copy { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, break_alt: None, closure_value: false, into_ctor: None, pointee: None }
+          ExternalEvent::Copy { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, break_alt: None, closure_value: false, into_ctor: None, pointee: None, of_const: None }
         } else {
           ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: None, closure_value: false }
         };
@@ -1742,7 +1742,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       *self.unique_id += 1;
       let (from, to) = (ResourceTy::Value(child), ResourceTy::Value(dest));
       self.add_external_event(line_num, if is_copy {
-        ExternalEvent::Copy { from, to, id: ev_id, is_partial: false, into_closure: false, break_alt: None, closure_value: false, into_ctor: None, pointee: None }
+        ExternalEvent::Copy { from, to, id: ev_id, is_partial: false, into_closure: false, break_alt: None, closure_value: false, into_ctor: None, pointee: None, of_const: None }
       } else {
         ExternalEvent::Move { from, to, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: None, closure_value: false }
       });
@@ -2094,7 +2094,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           .filter(|(parent, _)| *parent == rhs)
           .map(|(_, part)| *part);
         let is_partial = is_partial && pointee.is_none();
-        ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial, into_closure: false, break_alt: None, closure_value: false, into_ctor: None, pointee }
+        ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial, into_closure: false, break_alt: None, closure_value: false, into_ctor: None, pointee, of_const: None }
       }
       Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: self.try_move, closure_value: false },
       Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None, of_ref_var: false },
@@ -3150,6 +3150,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       PlaceWrite::AssignOwned
     };
     Some(ResourceTy::Index(rap, place, write))
+  }
+
+  /// The column of the `static` whose field (or field of a field) the
+  /// projection `expr` reads (`ORIGIN.x`, `CFG.size.w`; #690), if the
+  /// field isn't a reference: a static has one column, not one per
+  /// field.
+  fn static_field_holder(&self, expr: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
+    if expr.span.from_expansion() || self.tcx.typeck(expr.hir_id.owner).node_type(expr.hir_id).is_ref() {
+      return None;
+    }
+    let mut base = expr;
+    while let ExprKind::Field(b, _) = base.kind {
+      base = b;
+    }
+    let ExprKind::Path(QPath::Resolved(_, p)) = base.kind else { return None };
+    static_of_path(p)?;
+    self.raps.get(&path_key(p, &self.tcx)).map(|rd| rd.rap.to_owned())
   }
 
   /// How an element place (`v[i]`) is named in tooltips: its source
@@ -6629,6 +6646,15 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
           self.update_rap(&r.clone(), line_num);
         }
         self.add_ev(line_num, evt, lhs, rty, false);
+      } else if let Some(rap) = self.static_field_holder(rhs) {
+        // `let x = ORIGIN.x;`: a copy of a part of a static, which has
+        // one column for all of it (#690). Drawn like a copy of an
+        // element (`v[0]`): out of `ORIGIN.x`, on ORIGIN's column.
+        // (Moving out of a static doesn't compile.)
+        let line_num = span_to_line(&inner.span, &self.tcx);
+        self.update_rap(&rap, line_num);
+        let place = self.place_label(rhs, rap.name());
+        self.add_ev(line_num, evt, lhs, ResourceTy::Index(rap, place, Default::default()), false);
       } else {
         // A field of a temporary (`let k = (u, 1).1;`): no column to copy
         // or move it from, but the variable still gets its value (#737).
@@ -6821,12 +6847,12 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
 
 /// The `ExprKind::Path` case of `match_rhs`: `let lhs = <path>;` (a variable, a const or static, a unit struct or variant).
 pub fn match_rhs_path(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Evt, p: &'tcx rustc_hir::Path<'tcx>) {
-  // const / static items aren't function-local RAPs — they're
-  // compile-time values (or `'static` references) baked into
-  // the binary. Treat reading one on the RHS of a let as if
-  // the RHS were a literal: the LHS gets a Bind from an
-  // Anonymous source. Same handling as the path-arm in
-  // visitor.rs's main expression walker.
+  // const items aren't function-local RAPs — they're compile-time
+  // values baked into the binary. Treat reading one on the RHS of a
+  // let as if the RHS were a literal: the LHS gets a Bind from an
+  // Anonymous source. Same handling as the path-arm in visitor.rs's
+  // main expression walker. (A `static` has a column, #690: reading
+  // it is a copy out of it, like reading a variable.)
   //
   // A function item (`let f = helper;`, `let d = std::mem::drop;`)
   // isn't a RAP either: the function itself has no column, and
@@ -6838,13 +6864,28 @@ pub fn match_rhs_path(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
     Res::Def(
       rustc_hir::def::DefKind::Const { .. }
         | rustc_hir::def::DefKind::AssocConst { .. }
-        | rustc_hir::def::DefKind::Static { .. }
         | rustc_hir::def::DefKind::Fn
         | rustc_hir::def::DefKind::AssocFn,
       _
     )
   ) {
     let line_num = span_to_line(&p.span, &self.tcx);
+    // A Copy constant: the variable gets a copy of its value, which the
+    // tooltip names (#690). (Not a reference variable: it is bound to
+    // what the constant points to, which its borrow's end names.)
+    if matches!(p.res, Res::Def(rustc_hir::def::DefKind::Const { .. } | rustc_hir::def::DefKind::AssocConst { .. }, _))
+      && matches!(lhs, ResourceTy::Value(ResourceAccessPoint::Owner(_)))
+      && self.ty_is_copy(self.tcx.typeck(rhs.hir_id.owner).node_type(rhs.hir_id), rhs.hir_id.owner)
+    {
+      let name = p.segments.iter().map(|s| s.ident.as_str()).collect::<Vec<_>>().join("::");
+      let id = *self.unique_id;
+      *self.unique_id += 1;
+      self.add_external_event(line_num, ExternalEvent::Copy {
+        from: ResourceTy::Anonymous, to: lhs, id, is_partial: false, into_closure: false, break_alt: None,
+        closure_value: false, into_ctor: None, pointee: None, of_const: Some(name),
+      });
+      return;
+    }
     self.bind_from_anonymous(line_num, lhs);
     return;
   }
@@ -6878,7 +6919,7 @@ pub fn match_rhs_path(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
   // the Match arm below now unwraps `?` to its operand before
   // we get this far. If this fires, some other desugaring is
   // leaking a synthetic local — worth a look, hence the warn.
-  let rhs_key = if matches!(p.res, Res::Local(_)) { rhs_name.clone() } else { fn_key(&rhs_name) };
+  let rhs_key = if matches!(p.res, Res::Local(_)) || static_of_path(p).is_some() { rhs_name.clone() } else { fn_key(&rhs_name) };
   match self.raps.get(&rhs_key) {
     Some(rd) => {
       let rhs_rap = rd.rap.to_owned();

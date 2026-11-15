@@ -322,6 +322,25 @@ pub fn event_dot_param_value_init(my_name: &String, fn_name: &String, whole: boo
     ).replace("  ", " ")
 }
 
+// `let m = MAX;` / `m = MAX;` with a Copy constant (#690): a constant
+// has no place in memory of its own; each use of it is a new copy of
+// its value.
+pub fn event_dot_copy_of_const(my_name: &String, constant: &String) -> String {
+    format!("{0} is initialized with a copy of the constant {1}", styled_name_html(my_name), styled_name_html(constant))
+}
+
+pub fn event_dot_assign_copy_of_const(my_name: &String, constant: &String) -> String {
+    format!("{0} is assigned a copy of the constant {1}", styled_name_html(my_name), styled_name_html(constant))
+}
+
+// A `static` item's column (#690), at the start and at the end of the
+// function that uses it: a static is one place in memory that exists
+// for the whole run of the program, so the function neither creates
+// nor drops it.
+pub fn event_dot_static(my_name: &String) -> String {
+    format!("{0} is a static: it lives for the whole program and is never dropped", styled_name_html(my_name))
+}
+
 // A reference function parameter receives a borrow from the caller.
 // Mirror message to `event_dot_owner_init_from_caller` for the ref
 // side: makes it clear that the lender lives outside this fn scope.

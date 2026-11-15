@@ -363,8 +363,41 @@ pub fn binding_name(tcx: &TyCtxt, hir_id: HirId) -> String {
 pub fn path_name(p: &Path, tcx: &TyCtxt) -> String {
   match p.res {
     Res::Local(hir_id) => binding_name(tcx, hir_id),
+    // A `static`'s column is named by its path (#690): `X`, or `a::X`
+    // for one in module `a`, so two statics called X in different
+    // modules get different columns.
+    Res::Def(rustc_hir::def::DefKind::Static { .. }, def_id) => tcx.def_path_str(def_id),
     _ => tcx.hir_name(p.segments[0].hir_id).as_str().to_owned(),
   }
+}
+
+/// The `static` item a path names, if it names one.
+pub fn static_of_path(p: &Path) -> Option<rustc_hir::def_id::DefId> {
+  match p.res {
+    Res::Def(rustc_hir::def::DefKind::Static { .. }, def_id) => Some(def_id),
+    _ => None,
+  }
+}
+
+/// The `static` items the code of `e` names (not inside a closure's
+/// body or a macro's own code), once each, in the order a depth-first
+/// walk meets them. Each gets a column in the function (#690).
+pub fn statics_in<'tcx>(e: &'tcx Expr<'tcx>) -> Vec<rustc_hir::def_id::DefId> {
+  use rustc_hir::intravisit::{self, Visitor};
+  struct Find(Vec<rustc_hir::def_id::DefId>);
+  impl<'tcx> Visitor<'tcx> for Find {
+    fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+      if let ExprKind::Path(QPath::Resolved(_, p)) = e.kind {
+        if let Some(id) = static_of_path(p).filter(|id| !e.span.from_expansion() && !self.0.contains(id)) {
+          self.0.push(id);
+        }
+      }
+      intravisit::walk_expr(self, e);
+    }
+  }
+  let mut f = Find(Vec::new());
+  f.visit_expr(e);
+  f.0
 }
 
 /// For a place reached through an index projection (`v[0]`,
@@ -428,7 +461,8 @@ pub fn fn_key(name: &str) -> String {
 pub fn path_key(p: &Path, tcx: &TyCtxt) -> String {
   match p.res {
     // A local's own name, `s₂` for a second `let s` (`binding_name`).
-    Res::Local(_) => path_name(p, tcx),
+    // A static's column is keyed like a variable (#690).
+    Res::Local(_) | Res::Def(rustc_hir::def::DefKind::Static { .. }, _) => path_name(p, tcx),
     _ => fn_key(&path_name(p, tcx)),
   }
 }
@@ -1741,19 +1775,28 @@ pub fn fetch_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> 
 pub fn find_lender(rhs: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>, borrow_map: &HashMap<String, RefData>) -> ResourceTy {
   match rhs.kind {
     ExprKind::Path(QPath::Resolved(_,p)) => {
-      // const / static items aren't registered as RAPs — they're
-      // compile-time values / `'static` references baked into the
-      // binary. Treating them as `Anonymous` (the "external"
-      // source we already use for literals and fn-return values)
-      // gives `let s = GREETING;` a clean shape: s borrows from
-      // an external source rather than from a function-local
-      // lender.
+      // A `static` has a column (#690): `&COUNT` borrows it. A static
+      // of reference type is treated like a reference variable whose
+      // lender has no column: `let s = GREETING;` (and `&GREETING`, as
+      // for a reference variable) borrows what it points to, which is
+      // data living for the whole program.
+      if let Some(def_id) = static_of_path(p) {
+        if tcx.type_of(def_id).instantiate_identity().skip_normalization().is_ref() {
+          return ResourceTy::Anonymous;
+        }
+        return raps.get(&path_key(p, tcx)).map_or(ResourceTy::Anonymous, |rd| ResourceTy::Value(rd.rap.to_owned()));
+      }
+      // const items aren't registered as RAPs — they're compile-time
+      // values baked into the binary. Treating them as `Anonymous`
+      // (the "external" source we already use for literals and
+      // fn-return values) gives `let s = NAME;` a clean shape: s
+      // borrows from an external source rather than from a
+      // function-local lender.
       if matches!(
         p.res,
         rustc_hir::def::Res::Def(
           rustc_hir::def::DefKind::Const { .. }
-            | rustc_hir::def::DefKind::AssocConst { .. }
-            | rustc_hir::def::DefKind::Static { .. },
+            | rustc_hir::def::DefKind::AssocConst { .. },
           _
         )
       ) {
@@ -1780,6 +1823,14 @@ pub fn find_lender(rhs: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>, bo
       ResourceTy::Anonymous
     }
     ExprKind::AddrOf(_, _, expr) => {
+      // `&GREETING` borrows the static itself, whatever its type.
+      if let ExprKind::Path(QPath::Resolved(_, p)) = expr.kind {
+        if static_of_path(p).is_some() {
+          if let Some(rd) = raps.get(&path_key(p, tcx)) {
+            return ResourceTy::Value(rd.rap.to_owned());
+          }
+        }
+      }
       find_lender(expr, tcx, raps, borrow_map)
     }
     // `&v[..]` / `&s[i..j]`: the lender is the receiver, the same way

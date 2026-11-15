@@ -1506,11 +1506,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "const_basic",
-        // `let x = N;` where N is a const i32 → Copy treated as a
-        // Bind from Anonymous (the const has no column). Then
-        // `let y = x` is a regular Copy from x to y.
+        // `let x = N;` where N is a const i32: x gets a copy of the
+        // constant's value, which has no column (#690). Then `let y = x`
+        // is a regular Copy from x to y.
         must_contain: &[
-            "x is bound to a copyable value",
+            "x is initialized with a copy of the constant N",
             "y is initialized with a copy of x",
             "Copy from x to y",
         ],
@@ -1527,19 +1527,23 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "static_basic",
-        // `let s = GREETING;` where GREETING is a `&'static str`.
-        // The static itself isn't a function-local RAP; `s` borrows
-        // from an Anonymous source (external memory). show(s) reads
-        // through s.
+        // `let s = GREETING;` where GREETING is a `&'static str`. The
+        // static has a column in main (#690), which exists before main
+        // runs and is never dropped; `s` gets a copy of the reference it
+        // holds. show(s) reads through s.
         must_contain: &[
+            "GREETING is a static: it lives for the whole program and is never dropped",
+            "Copy from GREETING to s",
+            "s is initialized with a copy of GREETING",
             "s holds a reference",
             "show reads from s",
         ],
         must_not_contain: &[
-            // GREETING shouldn't get a column.
+            // A static is never dropped, and isn't a parameter.
             "GREETING is the owner",
-            "GREETING holds",
             "GREETING goes out of scope",
+            "GREETING's value is dropped",
+            "from the caller",
         ],
     },
     TooltipExpect {
@@ -1561,17 +1565,24 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "static_mut_write",
         // `COUNTER += inc` and `LOG = v` write to `static mut`s. Both
-        // used to panic in resource_of_lhs. The statics get no column;
-        // `v` is moved into LOG, so it must not be shown as dropped at
-        // the end of main.
+        // used to panic in resource_of_lhs. Each static has a column in
+        // the function that writes it (#690): COUNTER is read and
+        // assigned; `v` is moved into LOG, whose old Vec is dropped, so
+        // `v` must not be shown as dropped at the end of main.
         must_contain: &[
+            "COUNTER is a static: it lives for the whole program and is never dropped",
+            "COUNTER's value is copied",
+            "COUNTER is assigned a new value",
+            "Move from v to LOG",
+            "LOG acquires ownership of a new resource; its previous resource (including every String it holds) is dropped",
+            "LOG is a static: it lives for the whole program and is never dropped",
             "v's resource is moved",
             "v goes out of scope. No resource is dropped.",
         ],
         must_not_contain: &[
             "v goes out of scope. Its resource is dropped.",
-            "COUNTER",
-            "LOG",
+            "COUNTER goes out of scope",
+            "LOG goes out of scope",
         ],
     },
     // ─── Unions (#131) ──────────────────────────────────────────────
@@ -2725,15 +2736,19 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "ref_static_lender",
-        // The lender has no column but is 'static data: a literal, the
-        // static COUNT (`&COUNT`), or what a static / const of reference
-        // type points to (`GREETING`, `NAME` are copied, not borrowed).
+        // The lender has no column but is 'static data: a literal, or
+        // what a static / const of reference type points to (`GREETING`,
+        // `NAME` are copied, not borrowed). The static COUNT has a column
+        // (#690), so `&COUNT` is a borrow of it, returned at g's end.
         // A call result (`w`) still gets the generic text.
         must_contain: &[
             "s's borrow of the string literal ends (string literals live for the whole program)",
             "t's borrow of the string literal ends (string literals live for the whole program)",
             "b's borrow of the byte string literal ends (byte string literals live for the whole program)",
-            "g's borrow of the static COUNT ends (statics live for the whole program)",
+            "Immutable borrow from COUNT to g",
+            "Return immutably borrowed value from g to COUNT",
+            "Copy from GREETING to h",
+            "h is initialized with a copy of GREETING",
             "h's borrow of what the static GREETING points to ends (it lives for the whole program)",
             "c's borrow of what the constant NAME points to ends (it lives for the whole program)",
             "w's immutable borrow ends (what it borrows from isn't shown)",
@@ -2752,8 +2767,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "ref_static_lender_mut",
+        // COUNTER has a column (#690): r borrows it and gives it back.
         must_contain: &[
-            "r's mutable borrow of the static COUNTER ends (statics live for the whole program)",
+            "Mutable borrow from COUNTER to r",
+            "Return mutably borrowed value from r to COUNTER",
+            "COUNTER's value is mutably borrowed by r; COUNTER can't be used while the borrow is live",
         ],
         must_not_contain: &[
             "r's mutable borrow ends (what it borrows from isn't shown)",
@@ -17690,6 +17708,71 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "names acquires ownership of a new resource",
             "names goes out of scope. Its resource is dropped",
             "the resource names points to is dropped",
+        ],
+    },
+    TooltipExpect {
+        name: "const_static_read",
+        // #690's example. A constant has no column: each use is a new
+        // copy of its value (`n`, `k`). A static has one in main, which
+        // exists before main runs and is never dropped; `g` copies the
+        // reference it holds. `v` gets a new Vec from EMPTY (not a copy:
+        // Vec isn't Copy).
+        must_contain: &[
+            "n is initialized with a copy of the constant LIMIT",
+            "k is assigned a copy of the constant LIMIT",
+            "GREETING is a static: it lives for the whole program and is never dropped",
+            "Copy from GREETING to g",
+            "GREETING's value is copied",
+            "g is initialized with a copy of GREETING",
+            "g's borrow of what the static GREETING points to ends (it lives for the whole program)",
+            "v acquires ownership of a resource",
+        ],
+        must_not_contain: &[
+            // A constant is not a variable: no column, and reading it
+            // moves nothing.
+            "=LIMIT, immutable",
+            "=EMPTY, immutable",
+            "Move from LIMIT",
+            "Move from EMPTY",
+            "LIMIT's value",
+            "v is initialized with a copy of the constant EMPTY",
+            // A static is never dropped, and isn't a parameter.
+            "GREETING goes out of scope",
+            "from the caller",
+        ],
+    },
+    TooltipExpect {
+        name: "static_column",
+        // Each static a function uses gets a column there (#690):
+        // created before the function runs, never dropped. Reading it
+        // copies out of it (all of COUNT, ORIGIN.x, PRIMES[1]), `&COUNT`
+        // borrows it, `fetch_add` borrows HITS, `TOTAL += 1` assigns
+        // TOTAL. `primes` returns a reference to PRIMES, so nothing is
+        // copied to the caller.
+        must_contain: &[
+            "COUNT is a static: it lives for the whole program and is never dropped",
+            "Copy from COUNT to n",
+            "n is initialized with a copy of COUNT",
+            "Immutable borrow from COUNT to r",
+            "Return immutably borrowed value from r to COUNT",
+            "Copy from ORIGIN.x to ox",
+            "ox is initialized with a copy of ORIGIN.x",
+            "ORIGIN.x is copied out of ORIGIN's value",
+            "Copy from PRIMES[1] to p",
+            "PRIMES[1] is copied out of PRIMES's value",
+            "HITS's value is immutably borrowed by fetch_add",
+            "TOTAL's value is copied",
+            "TOTAL is assigned a new value",
+            "PRIMES is a static: it lives for the whole program and is never dropped",
+        ],
+        must_not_contain: &[
+            "PRIMES's value is copied to the caller",
+            "=ox is initialized with a copy of ORIGIN",
+            "Copy from ORIGIN to ox",
+            "goes out of scope. Its",
+            "COUNT goes out of scope",
+            "TOTAL goes out of scope",
+            "from the caller",
         ],
     },
 ];

@@ -249,6 +249,9 @@ pub struct Owner {
     /// isn't the box's, but its heap allocation is still freed at scope
     /// end.
     pub box_contents_moved: bool,
+    /// True iff this column is a `static` item the function uses (#690):
+    /// it exists before the function runs and is never dropped.
+    pub is_static: bool,
 }
 
 /// What is moved out of an unbound temporary before Rust drops it and
@@ -827,7 +830,7 @@ impl ResourceAccessPoint {
     /// the same as "has a `Copy` type": see `is_copy_owner`.
     pub fn never_drops(&self) -> bool {
         match self {
-            ResourceAccessPoint::Owner(Owner{is_copy, ..}) => *is_copy,
+            ResourceAccessPoint::Owner(Owner{is_copy, is_static, ..}) => *is_copy || *is_static,
             ResourceAccessPoint::Struct(Struct{is_copy, ..}) => *is_copy,
             ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) => true,
             ResourceAccessPoint::Function(_) => true,
@@ -846,6 +849,11 @@ impl ResourceAccessPoint {
     /// events that flow into or out of a closure.
     pub fn is_closure(&self) -> bool {
         matches!(self, ResourceAccessPoint::Owner(Owner { is_closure: true, .. }))
+    }
+
+    /// True iff this RAP is a `static` item's column (`Owner::is_static`).
+    pub fn is_static(&self) -> bool {
+        matches!(self, ResourceAccessPoint::Owner(Owner { is_static: true, .. }))
     }
 
     /// True iff this RAP is a non-reference owner whose value holds a
@@ -1488,6 +1496,9 @@ pub enum ExternalEvent {
         pointee: Option<bool>,
         id: usize,
         break_alt: Option<BreakAlt>,
+        /// `from` is `Anonymous`: `to` gets a copy of this constant (`let
+        /// m = MAX;`, #690), which has no column.
+        of_const: Option<String>,
     },
     // `loop_head`: a `for` loop's head moved into the loop, whose
     // iterator has drop glue (#482). Only the for-loop arm of the
@@ -2017,6 +2028,9 @@ pub enum CopyOf {
     /// receiver got only a value inside it (`Some(&(a, b))`):
     /// ExternalEvent's `pointee`.
     Pointee { part: bool },
+    /// A copy of the constant named here (`let m = MAX;`, #690): the
+    /// ExternalEvent's `of_const`. Its `from` is `Anonymous`.
+    Const(String),
 }
 
 /// What the source of a copy says was copied out of it: a constructor's
@@ -2029,7 +2043,10 @@ fn source_copy_of(of: CopyOf) -> CopyOf {
 }
 
 impl CopyOf {
-    fn of(is_partial: bool, into_ctor: &Option<String>, pointee: Option<bool>) -> CopyOf {
+    fn of(is_partial: bool, into_ctor: &Option<String>, pointee: Option<bool>, of_const: &Option<String>) -> CopyOf {
+        if let Some(c) = of_const {
+            return CopyOf::Const(c.clone());
+        }
         match (into_ctor, pointee) {
             (Some(c), _) => CopyOf::IntoCtor(c.clone()),
             (None, Some(part)) => CopyOf::Pointee { part },
@@ -3014,6 +3031,11 @@ impl Event {
             Event::TemporaryDrop { ty: Some(ty), when, part: Some(part), .. } => {
                 hover_messages::event_dot_temporary_part_drop(ty, when, part)
             }
+            // A `static` the function uses (#690): it was there before
+            // the function ran.
+            Event::InitRefParam{ param, .. } if param.is_static() => {
+                hover_messages::event_dot_static(my_name)
+            }
             Event::InitRefParam{ param, .. } => {
                 // Owner/Struct params receive ownership from the
                 // caller — call that out so the dot hover matches
@@ -3403,6 +3425,10 @@ impl Event {
                     // is part of what r points to.
                     _ => hover_messages::event_dot_write_through_deref(r.name(), &deref, matches!(is, ResourceTy::Deref(_)) || r.points_to_copy()),
                 }
+            }
+            // `let m = MAX;`: a copy of the constant (#690).
+            Event::Copy{ from: ResourceTy::Anonymous, of: CopyOf::Const(c), ..} => {
+                hover_messages::event_dot_copy_of_const(&self.deref_name(my_name), c)
             }
             // A copy out of a value with no name of its own (`let n =
             // match o { Some(x) => x.len(), None => 0 };`): there is no
@@ -4396,8 +4422,8 @@ impl Visualizable for VisualizationData {
           if to_o { vec![(line_num,  Event::Acquire{from : from.to_owned(), is: to.clone(), via_try: None, id: *id, break_alt: break_alt.clone(), loop_head: LoopHead::No})] }
           else { vec![(line_num, Event::Duplicate{to : to.to_owned(), is: from.clone(), into_closure: false, of: CopyOf::Whole, id: *id, break_alt: break_alt.clone()})] }
         },
-        ExternalEvent::Copy{from: from_ro, to: to_ro, id, into_closure, break_alt, is_partial, into_ctor, pointee, ..} => {
-          let of = CopyOf::of(*is_partial, into_ctor, *pointee);
+        ExternalEvent::Copy{from: from_ro, to: to_ro, id, into_closure, break_alt, is_partial, into_ctor, pointee, of_const, ..} => {
+          let of = CopyOf::of(*is_partial, into_ctor, *pointee, of_const);
           if to_o { vec![(line_num,  Event::Copy{from : from_ro.to_owned(), is: to_ro.clone(), of, id: *id, break_alt: break_alt.clone()})] }
           else { vec![(line_num, Event::Duplicate{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: *into_closure, of: source_copy_of(of), id: *id, break_alt: break_alt.clone()})] }
         },
@@ -4703,8 +4729,8 @@ impl Visualizable for VisualizationData {
                 maybe_append_event(self, &from_ro.clone(), Event::Duplicate{to : to_ro.to_owned(), is: from_ro, into_closure: false, of: CopyOf::Whole, id: id, break_alt}, line_number);
             },
             // eg: let x : i64 = y as i64;
-            ExternalEvent::Copy{from: from_ro, to: to_ro, id, into_closure, break_alt, is_partial, into_ctor, pointee, ..} => {
-                let of = CopyOf::of(is_partial, &into_ctor, pointee);
+            ExternalEvent::Copy{from: from_ro, to: to_ro, id, into_closure, break_alt, is_partial, into_ctor, pointee, of_const, ..} => {
+                let of = CopyOf::of(is_partial, &into_ctor, pointee, &of_const);
                 let source_of = source_copy_of(of.clone());
                 maybe_append_event(self, &to_ro.clone(), Event::Copy{from : from_ro.to_owned(), is: to_ro.clone(), of, id: id, break_alt: break_alt.clone()}, line_number);
                 maybe_append_event(self, &from_ro.clone(), Event::Duplicate{to : to_ro.to_owned(), is: from_ro, into_closure, of: source_of, id: id, break_alt}, line_number);
