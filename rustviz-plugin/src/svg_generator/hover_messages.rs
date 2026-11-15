@@ -1265,6 +1265,12 @@ pub fn event_dot_tuple_temp_drop(tuple: &String, at: TupleDropAt, with: &[TupleL
         TupleDropAt::IfExit => ("", "when the if branch leaves early"),
         TupleDropAt::Else => ("The pattern didn't match, so ", "here, before the else branch runs"),
         TupleDropAt::NoElse => ("The pattern didn't match, so ", "here"),
+        // A pattern that can't fail on the literal (#981): the path
+        // this dot is on never runs, so nothing is dropped on it.
+        TupleDropAt::NeverElse => return format!(
+            "The pattern always matches {tuple}, so the else branch never runs and nothing is dropped here: the {noun} is dropped when the if branch ends"),
+        TupleDropAt::NeverSkipped => return format!(
+            "The pattern always matches {tuple}, so the body is never skipped and nothing is dropped here: the {noun} is dropped when the if branch ends"),
         TupleDropAt::MatchArm => ("", "after this arm, when the match ends"),
         TupleDropAt::MatchArmStmt => ("", "after this arm, at the end of the statement the match is in"),
         TupleDropAt::MatchArmExit => ("", "when this arm leaves the match early"),

@@ -4446,6 +4446,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         if_hash_lo = self.rap_hashes;
         HashSet::new()
       };
+    // A lone `if let` whose pattern matches every value its scrutinee
+    // can have: an irrefutable pattern, or one that takes apart a
+    // literal the way it was built (`(x, _)` on `(f, s)`, `Some(x)` on
+    // `Some(f)`, #981). Its body always runs.
+    let always_matches = iflet_tuple.is_some_and(|l| self.let_always_matches(l.pat, l.init));
     // Restored, not reset: this `if` may sit inside another branch
     // (#410).
     let prev_inside_branch = self.inside_branch;
@@ -4684,11 +4689,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let exit_branch = self.expr_diverges(if_expr)
           && body_ev.iter().any(|(_, e)| self.exit_drops.contains(&e.get_id()));
         // An `if let` whose pattern matches every value always runs
-        // its body: there's no implicit empty `else` path, so what
-        // the body does to outer variables is drawn inline, not as
-        // a branch.
-        let always_runs = matches!(guard_expr.kind, ExprKind::Let(l)
-          if pat_is_irrefutable(l.pat, self.tcx.typeck(l.pat.hir_id.owner)));
+        // its body (`always_matches`, also for a literal taken apart
+        // the way it was built, #981): there's no implicit empty
+        // `else` path, so what the body does to outer variables is
+        // drawn inline, not as a branch.
         // A body that assigns a `let x;` local is drawn as a branch
         // too when x may have no value on the implicit `else` path
         // (#244): the join says so.
@@ -4701,7 +4705,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           && assigned_in_if.iter().any(|id| self.uninit_locals.contains_key(id))
           && branch_leaves(self.tcx, BranchBody::Expr(if_expr)).exits.iter()
             .all(|x| matches!(x, BranchExit::Return | BranchExit::Panic | BranchExit::Other));
-        let drawn_as_branch = (events_move_out_of_outer(&body_ev, &if_scope) && !always_runs) || exit_branch
+        let drawn_as_branch = (events_move_out_of_outer(&body_ev, &if_scope) && !always_matches) || exit_branch
           || assigns_maybe_init || assigns_then_exits
           || (self.expr_diverges(if_expr) && {
             let sm = self.tcx.sess.source_map();
@@ -4709,8 +4713,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             self.borrow_may_end_at_exit(if_expr, split, if_end, &if_scope)
           });
         // A tuple scrutinee's variables are moved whether or not the
-        // body runs (#327), so that's a second path as well.
-        if scrutinee_moves.is_empty() && !drawn_as_branch && !chain_fail_ev {
+        // body runs (#327), so that's a second path as well, unless
+        // the pattern always matches (#981).
+        if (scrutinee_moves.is_empty() || always_matches) && !drawn_as_branch && !chain_fail_ev {
             self.preprocessed_events.retain(|(_, e)| !uses_ids.contains(&e.get_id()));
             for evs in self.event_line_map.values_mut() {
               evs.retain(|e| !uses_ids.contains(&e.get_id()));
@@ -4725,6 +4730,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                     ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id },
                 ));
                 *self.unique_id += 1;
+            }
+            // The tuple scrutinee of a pattern that always matches
+            // (#981) is dropped at the end of the body, as on the
+            // if branch below.
+            if !self.expr_diverges(if_expr) {
+              if let Some(let_expr) = iflet_tuple.filter(|_| !scrutinee_moves.is_empty()) {
+                let tuple_name = self.tuple_scrutinee_text(let_expr.init);
+                for e in self.tuple_drop_events(let_expr.init, &tuple_name, Some(let_expr.pat), TupleDropAt::IfEnd) {
+                  self.preprocessed_events.push((if_end, e));
+                }
+              }
             }
             return;
         }
@@ -4836,7 +4852,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         *self.unique_id += 1;
         liveness.insert(r.clone());
       }
-      let at = if else_expr.is_some() { TupleDropAt::Else } else { TupleDropAt::NoElse };
+      // A pattern that always matches (#981): this path never runs.
+      let at = match (always_matches, else_expr.is_some()) {
+        (true, true) => TupleDropAt::NeverElse,
+        (true, false) => TupleDropAt::NeverSkipped,
+        (false, true) => TupleDropAt::Else,
+        (false, false) => TupleDropAt::NoElse,
+      };
       front.extend(self.tuple_drop_events(let_expr.init, &tuple_name, None, at).into_iter().map(|e| (if_end, e)));
       else_ev.splice(0..0, front);
     }

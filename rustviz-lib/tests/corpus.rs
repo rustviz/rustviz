@@ -12714,10 +12714,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "The temporary tuple (s3, w) is dropped here, at the end of the match, and with it w.b's resource",
             "w.b goes out of scope. No resource is dropped.",
             "The temporary tuple (s4, m) is dropped here, at the end of the if branch, and with it m.1's resource",
-            "The pattern didn't match, so the temporary tuple (s4, m) is dropped here, and with it s4's and m's resources",
-            "m goes out of scope. No resource is dropped: m was moved or dropped in every branch above.",
-            "m.0 goes out of scope. No resource is dropped: m.0 was moved or dropped in every branch above.",
-            "m.1 goes out of scope. No resource is dropped: m.1 was moved or dropped in every branch above.",
+            // `(p4, (x4, _))` always matches `(s4, m)`: the body always
+            // runs, drawn inline with no else path (#981)
+            "s4 goes out of scope. No resource is dropped.",
+            "m goes out of scope. No resource is dropped.",
+            "m.0 goes out of scope. No resource is dropped.",
+            "m.1 goes out of scope. No resource is dropped.",
         ],
         must_not_contain: &[
             "=u goes out of scope. Its resource is dropped.",
@@ -12731,6 +12733,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "m.1 is dropped.",
             "=m.1 goes out of scope. Its resource is dropped.",
             "=m.0 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "The pattern didn't match, so the temporary tuple (s4, m)",
         ],
     },
     TooltipExpect {
@@ -13302,9 +13305,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from h to x",
             "f's resource is moved into the temporary value Some(f)",
             "The temporary value Some(f) is dropped after this arm, when the match ends, and with it f's resource",
-            "The pattern didn't match, so the temporary value Some(h) is dropped here, and with it h's resource",
+            // `Some(x)` always matches `Some(h)`: no else path (#981)
+            "h goes out of scope. No resource is dropped.",
         ],
         must_not_contain: &[
+            "The pattern didn't match, so the temporary value Some(h)",
             "Move from f to Some",
             "Move from g to Some",
             "Move from h to Some",
@@ -17565,7 +17570,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "The temporary value Some(f) is dropped after this arm, when the match ends, and with it f's resource",
             "f goes out of scope. No resource is dropped: f was moved or dropped in every branch above.",
             "Move from h to y",
-            "The pattern didn't match, so the temporary value Some(h) is dropped here, and with it h's resource",
+            // `Some(y)` always matches `Some(h)`: no else path (#981)
+            "h goes out of scope. No resource is dropped.",
             "m acquires ownership of a resource",
             "Move from String::from to c",
             "Move from g to k",
@@ -17582,6 +17588,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "The temporary tuple (Some(b), n) is dropped after this arm, when the match ends, and with it b's resource",
         ],
         must_not_contain: &[
+            "The pattern didn't match, so the temporary value Some(h)",
             "Move from f to Some",
             "Move from h to Some",
             "Move from g to Some",
@@ -17998,6 +18005,52 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // m is moved only when c holds
             "m goes out of scope. Its resource is dropped.",
             "m may have been moved (consumed in at least one branch above)",
+        ],
+    },
+    // #981: a lone `if let` whose pattern can't fail on the literal it
+    // takes apart (`(x, _)` on `(f, s)`, `Some(y)` on `Some(a)`) always
+    // runs its body. No "the pattern didn't match" path: drawn inline
+    // without an else, and an `else` block (dead code) says it never
+    // runs. Controls: `(Some(t), _)` on `(o, u)` and `Some(Some(n))` on
+    // `Some(e)` can fail, and keep their failed-match drop.
+    TooltipExpect {
+        name: "edition2024/irrefutable_iflet_literal_981",
+        must_contain: &[
+            "Move from f to x",
+            "f goes out of scope. No resource is dropped.",
+            "s's resource is moved into the temporary tuple (f, s)",
+            "The temporary tuple (f, s) is dropped here, at the end of the if branch, and with it s's resource",
+            "s goes out of scope. No resource is dropped.",
+            "Move from a to y",
+            "a goes out of scope. No resource is dropped.",
+            "Move from g to take",
+            "g goes out of scope. No resource is dropped.",
+            "The temporary tuple (b, c) is dropped here, at the end of the if branch, and with it c's resource",
+            "h's resource is moved into the temporary tuple (h, k)",
+            "The pattern always matches the temporary tuple (h, k), so the else branch never runs and nothing is dropped here: the tuple is dropped when the if branch ends",
+            "The temporary tuple (h, k) is dropped here, at the end of the if branch, and with it k's resource",
+            "m's resource is moved into the temporary value Some(m)",
+            "The pattern always matches the temporary value Some(m), so the else branch never runs and nothing is dropped here: the temporary is dropped when the if branch ends",
+            "The pattern always matches the temporary tuple (p, q), so the body is never skipped and nothing is dropped here: the tuple is dropped when the if branch ends",
+            "The temporary tuple (p, q) is dropped when the if branch leaves early, and with it q's resource",
+            // controls: these patterns can fail
+            "The pattern didn't match, so the temporary tuple (o, u) is dropped here, and with it o's and u's resources",
+            "The pattern didn't match, so the temporary value Some(e) is dropped here, and with it e's resource",
+        ],
+        must_not_contain: &[
+            "The pattern didn't match, so the temporary tuple (f, s)",
+            "The pattern didn't match, so the temporary value Some(a)",
+            "The pattern didn't match, so the temporary tuple (b, c)",
+            "The pattern didn't match, so the temporary tuple (h, k)",
+            "The pattern didn't match, so the temporary value Some(m)",
+            "The pattern didn't match, so the temporary tuple (p, q)",
+            // the body always runs and moves g: no drop flag
+            "g was moved in at least one branch above",
+            "Rust tracks this with a runtime drop flag",
+            // no else path at all without an `else` block
+            "f was moved or dropped in every branch above",
+            "a was moved or dropped in every branch above",
+            "b was moved or dropped in every branch above",
         ],
     },
 ];
