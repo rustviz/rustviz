@@ -1365,6 +1365,18 @@ pub enum MaybeMovedAt {
     /// `how`: as for `ChainFail`. Like `ChainFail`, its drop flag reads
     /// "nothing above" moved it, not "no branch above".
     WhileCondFail { to: Vec<String>, dropped: Vec<String>, how: ChainFailHow },
+    /// The start of a loop's body (#992), for a variable that holds its
+    /// value where the loop starts but that the body may leave moved
+    /// where the loop comes back round (a move further down, or before
+    /// a `continue`, with no new value after it): until the body gives
+    /// it a new value, it is maybe-moved (rustc: "value moved here, in
+    /// previous iteration of loop"). The loop body is drawn once (#853),
+    /// so this stands for the later times round.
+    LoopHead,
+    /// The end of a `while` / `for` loop with a `LoopHead` event for
+    /// the variable: the loop can end (its condition false, its
+    /// iterator done) after a time round that moved it (#992).
+    LoopRound,
 }
 
 /// How a let-chain's condition moves a variable (`MaybeMovedAt::ChainFail`).
@@ -1677,6 +1689,10 @@ pub enum ExternalEvent {
         // With `maybe_moved`: a let-chain's condition may have been
         // what moved it (#281), not only a branch.
         by_cond: bool,
+        // With `maybe_moved`: it is maybe-moved only because the loop
+        // whose body this is can come back round with it moved
+        // (`MaybeMovedAt::LoopHead`, #992).
+        loop_head: bool,
         // `ro` is a struct or tuple some of whose parts were moved out
         // before (#628): what of its previous value is dropped.
         parts: Option<ReassignParts>,
@@ -2242,8 +2258,8 @@ pub enum Event {
     // rhs lands on the same line and immediately re-establishes
     // FullPrivilege. `maybe_moved`: see ExternalEvent::OwnerDropAtReassign.
     // `maybe_init`: see ExternalEvent::OwnerDropAtReassign.
-    // `payload`: see ExternalEvent::OwnerDropAtReassign.
-    OwnerDropAtReassign { maybe_moved: bool, by_cond: bool, parts: Option<ReassignParts>, maybe_init: Option<InitBy>, payload: bool },
+    // `payload`, `loop_head`: see ExternalEvent::OwnerDropAtReassign.
+    OwnerDropAtReassign { maybe_moved: bool, by_cond: bool, loop_head: bool, parts: Option<ReassignParts>, maybe_init: Option<InitBy>, payload: bool },
     // `ManuallyDrop::drop(&mut md)`: the value inside is dropped by
     // hand. The owner is left in a moved-out-like state.
     ManuallyDropByHand,
@@ -2970,6 +2986,9 @@ impl Event {
             Event::OwnerDropAtReassign { maybe_moved: false, .. } => {
                 hover_messages::event_dot_owner_drop_at_reassign(my_name, "")
             }
+            Event::OwnerDropAtReassign { maybe_moved: true, loop_head: true, .. } => {
+                hover_messages::event_dot_owner_drop_at_reassign_loop_head(my_name, "")
+            }
             Event::OwnerDropAtReassign { maybe_moved: true, by_cond, .. } => {
                 hover_messages::event_dot_owner_drop_at_reassign_maybe_moved(my_name, "", *by_cond)
             }
@@ -2987,6 +3006,12 @@ impl Event {
             }
             Event::LoopExitMove { definite, at: MaybeMovedAt::WhileCondFail { to, dropped, how } } => {
                 hover_messages::event_dot_while_cond_move(my_name, *definite, to, dropped, how)
+            }
+            Event::LoopExitMove { at: MaybeMovedAt::LoopHead, .. } => {
+                hover_messages::event_dot_loop_head_maybe_moved(my_name)
+            }
+            Event::LoopExitMove { at: MaybeMovedAt::LoopRound, .. } => {
+                hover_messages::event_dot_loop_round_maybe_moved(my_name)
             }
             Event::ChainFailAssign { place, drops_old, rc, no_else } => {
                 hover_messages::event_dot_chain_fail_assign(place.as_ref().unwrap_or(my_name), *drops_old, *rc, *no_else)
@@ -4543,8 +4568,8 @@ impl Visualizable for VisualizationData {
             }
           }
         },
-        ExternalEvent::OwnerDropAtReassign{ maybe_moved, by_cond, parts, maybe_init, payload, .. } => {
-          vec![(line_num, Event::OwnerDropAtReassign { maybe_moved: *maybe_moved, by_cond: *by_cond, parts: parts.clone(), maybe_init: *maybe_init, payload: *payload })]
+        ExternalEvent::OwnerDropAtReassign{ maybe_moved, by_cond, loop_head, parts, maybe_init, payload, .. } => {
+          vec![(line_num, Event::OwnerDropAtReassign { maybe_moved: *maybe_moved, by_cond: *by_cond, loop_head: *loop_head, parts: parts.clone(), maybe_init: *maybe_init, payload: *payload })]
         },
         ExternalEvent::ManuallyDropByHand{..} => {
           vec![(line_num, Event::ManuallyDropByHand)]
@@ -4913,8 +4938,8 @@ impl Visualizable for VisualizationData {
                     }
                 }
             },
-            ExternalEvent::OwnerDropAtReassign{ro, maybe_moved, by_cond, parts, maybe_init, payload, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropAtReassign { maybe_moved, by_cond, parts, maybe_init, payload }, line_number);
+            ExternalEvent::OwnerDropAtReassign{ro, maybe_moved, by_cond, loop_head, parts, maybe_init, payload, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropAtReassign { maybe_moved, by_cond, loop_head, parts, maybe_init, payload }, line_number);
             },
             ExternalEvent::ManuallyDropByHand{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::ManuallyDropByHand, line_number);

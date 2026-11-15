@@ -577,6 +577,67 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         out
     }
 
+    /// The user variables, and fields of them (RAP names, sorted), that
+    /// hold their value on every way into the loop `loop_span` but may
+    /// not where the loop comes back round to its start (#992): a move
+    /// further down the body, or before a `continue`, that nothing
+    /// after gave a new value. rustc's maybe-uninitialized places at
+    /// the loop's head (its `FalseUnwind` block), split by the edges
+    /// into it: from before the loop (not dominated by the head), and
+    /// back from the body. Empty when the loop isn't in this body (a
+    /// closure's).
+    pub fn moved_round_loop(&self, loop_span: Span) -> Vec<String> {
+        use rustc_middle::mir::BasicBlock;
+        use rustc_mir_dataflow::impls::MaybeUninitializedPlaces;
+        use rustc_mir_dataflow::move_paths::MoveData;
+        let body = &self.bwf.body;
+        let Some(head) = body.basic_blocks.iter_enumerated().find_map(|(bb, data)| {
+            let t = data.terminator.as_ref()?;
+            (matches!(t.kind, TerminatorKind::FalseUnwind { .. }) && t.source_info.span == loop_span).then_some(bb)
+        }) else { return Vec::new() };
+        let doms = body.basic_blocks.dominators();
+        let (back, entry): (Vec<BasicBlock>, Vec<BasicBlock>) =
+            body.basic_blocks.predecessors()[head].iter().partition(|&&p| doms.dominates(head, p));
+        if back.is_empty() || entry.is_empty() {
+            return Vec::new();
+        }
+        let move_data = MoveData::gather_moves(body, self.tcx, |_| true);
+        let mut cursor = MaybeUninitializedPlaces::new(self.tcx, body, &move_data)
+            .iterate_to_fixpoint(self.tcx, body, None)
+            .into_results_cursor(body);
+        let names = self.mir_local_names(self.bwf);
+        let mut out: Vec<String> = Vec::new();
+        // A user variable, or a field of one (`p.name`, `t.0`), named
+        // as its column is.
+        for (mpi, path) in move_data.move_paths.iter_enumerated() {
+            let Some(mut name) = names.get(&path.place.local).cloned() else { continue };
+            let mut ty = body.local_decls[path.place.local].ty;
+            let mut is_field_path = true;
+            for elem in path.place.projection {
+                let ProjectionElem::Field(f, fty) = elem else { is_field_path = false; break };
+                match ty.kind() {
+                    TyKind::Adt(def, _) if def.is_struct() => name = format!("{}.{}", name, def.non_enum_variant().fields[f].name),
+                    TyKind::Tuple(_) => name = format!("{}.{}", name, f.index()),
+                    _ => { is_field_path = false; break }
+                }
+                ty = fty;
+            }
+            if !is_field_path {
+                continue;
+            }
+            let mut uninit_at_end = |bb: BasicBlock| {
+                cursor.seek_to_block_end(bb);
+                cursor.get().contains(mpi)
+            };
+            if !entry.iter().any(|&p| uninit_at_end(p)) && back.iter().any(|&p| uninit_at_end(p)) {
+                out.push(name);
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// The last line in `lines` (first, last) on which the variable
     /// `name` (its RAP name, see `mir_local_names`) is live, from
     /// Polonius' liveness: its last use, or the end of a loop it's used

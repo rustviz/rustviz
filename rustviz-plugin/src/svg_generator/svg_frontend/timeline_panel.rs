@@ -1726,6 +1726,10 @@ fn render_dot(
                     } else if let Event::OwnerDropAtReassign { maybe_init: Some(InitBy::EarlierIteration), .. } = event {
                         // Its first assignment, in a loop body (#786).
                         hover_messages::event_dot_init_drops_earlier_iteration(&name)
+                    } else if matches!(event, Event::OwnerDropAtReassign { maybe_moved: true, loop_head: true, parts: None, payload: false, .. }) {
+                        // Maybe-moved only because the loop can come
+                        // back round after a move further down (#992).
+                        hover_messages::event_dot_owner_drop_at_reassign_loop_head(&name, &note)
                     } else if matches!(event, Event::OwnerDropAtReassign { maybe_moved: true, by_cond: false, .. })
                         // (Before the new value's Acquire on this line.)
                         && maybe_moved_by_let(history[..i].iter().filter(|(l, _)| l < line_number)) {
@@ -2168,13 +2172,14 @@ fn all_moved_at_end(history: &[(usize, Event)]) -> Option<bool> {
 
 // True when a let-chain's condition may have moved this column's value
 // before failing (#281), or a `while` loop's (#968), or a loop body
-// before a `break` outside any branch that breaks (#980), so a
+// before a `break` outside any branch that breaks (#980), or before
+// the loop comes back round (#992), so a
 // drop-flag message says "nothing above" moved it rather than "no
 // branch above".
 fn moved_by_chain_condition(history: &[(usize, Event)]) -> bool {
     history.iter().any(|(_, e)| match e {
         Event::LoopExitMove { at: MaybeMovedAt::ChainFail { .. } | MaybeMovedAt::WhileCondFail { .. }
-            | MaybeMovedAt::Loop { nothing_above: true }, .. } => true,
+            | MaybeMovedAt::Loop { nothing_above: true } | MaybeMovedAt::LoopHead | MaybeMovedAt::LoopRound, .. } => true,
         Event::Branch { branch_history, .. } => branch_history.iter().any(|b| moved_by_chain_condition(&b.e_data)),
         _ => false,
     })

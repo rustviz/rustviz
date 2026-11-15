@@ -1979,12 +1979,46 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     fn any(events: &[(usize, ExternalEvent)], name: &str) -> bool {
       events.iter().any(|(_, ev)| match ev {
         ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::ChainFail { .. } | MaybeMovedAt::WhileCondFail { .. }
-          | MaybeMovedAt::Loop { nothing_above: true }, .. } => ro.name() == name,
+          | MaybeMovedAt::Loop { nothing_above: true } | MaybeMovedAt::LoopHead | MaybeMovedAt::LoopRound, .. } => ro.name() == name,
         ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| any(&b.e_data, name)),
         _ => false,
       })
     }
     any(self.preprocessed_events, name)
+  }
+
+  /// Whether what last changed `name`'s state, in the events so far, is
+  /// the start of a loop body that the loop can come back to with it
+  /// moved (`MaybeMovedAt::LoopHead`, #992): a reassignment then drops
+  /// the old value the first time round, and later only if the time
+  /// round before didn't leave it moved. A conditional in between
+  /// counts only if one of its branches that reach the join changes it
+  /// (not `if n >= k { break; }`).
+  pub fn maybe_moved_by_loop_head_now(&self, name: &str) -> bool {
+    fn changes(e: &ExternalEvent, name: &str) -> bool {
+      let is = |r: &ResourceTy| r.extract_rap().is_some_and(|r| r.name() == name);
+      match e {
+        ExternalEvent::Branch { branches, .. } =>
+          branches.iter().filter(|b| !b.diverges).any(|b| b.e_data.iter().any(|(_, e)| changes(e, name))),
+        ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::OrAltMove { ro, .. }
+        | ExternalEvent::ManuallyDropByHand { ro, .. } | ExternalEvent::OwnerDropAtReassign { ro, .. } => ro.name() == name,
+        ExternalEvent::InitRefParam { param, .. } => param.name() == name,
+        ExternalEvent::Move { from, to, .. } => is(from) || is(to),
+        ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. } => is(to),
+        _ => false,
+      }
+    }
+    for (_, e) in self.preprocessed_events.iter().rev() {
+      if let ExternalEvent::LoopExitMove { ro, at, .. } = e {
+        if ro.name() == name {
+          return *at == MaybeMovedAt::LoopHead;
+        }
+      }
+      if changes(e, name) {
+        return false;
+      }
+    }
+    false
   }
 
   /// What reassigning the struct or tuple `parent` drops of its
@@ -9354,8 +9388,11 @@ fn ownership_after(events: &[(usize, ExternalEvent)], rap_name: &str, start: Opt
       // Likewise a loop some of whose `break`s come after a move (#980):
       // `loop { drop(s); if c { break; } s = …; }` gives s a new value
       // after the `break`, not on the way out.
+      // The start of a loop body that the loop can come back to after
+      // a move further down (#992), and the end of a `while` / `for`
+      // loop that can stop after such a time round.
       ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::WhileCondFail { .. } | MaybeMovedAt::Loop { .. }
-        | MaybeMovedAt::LabeledBlock, .. } if ro.name() == rap_name => {
+        | MaybeMovedAt::LabeledBlock | MaybeMovedAt::LoopHead | MaybeMovedAt::LoopRound, .. } if ro.name() == rap_name => {
         return Some(Ownership::Maybe);
       }
       // Moved into a name an or-pattern binds, if its alternative
@@ -9383,8 +9420,17 @@ fn ownership_after(events: &[(usize, ExternalEvent)], rap_name: &str, start: Opt
       }
       ExternalEvent::Branch { branches, .. } if !branches.is_empty() => {
         let before = ownership_after(&events[..i], rap_name, start);
-        let ends: Vec<Option<Ownership>> =
-          branches.iter().map(|b| ownership_after(&b.e_data, rap_name, before)).collect();
+        // A branch that diverges (`return`, `break`, `continue`, a
+        // panic) doesn't reach this point (#993): `if c { drop(y);
+        // return; } y = …;` drops y's old value on every path that gets
+        // there. (A `break`'s moves are the loop's `LoopExitMove`s
+        // where it ends; a `continue`'s, the next time round's
+        // `MaybeMovedAt::LoopHead`.)
+        let ends: Vec<Option<Ownership>> = branches.iter().filter(|b| !b.diverges)
+          .map(|b| ownership_after(&b.e_data, rap_name, before)).collect();
+        if ends.is_empty() {
+          return before;
+        }
         let holds = |e: &Option<Ownership>| matches!(e, Some(Ownership::Held) | Some(Ownership::Maybe));
         let moved = |e: &Option<Ownership>| matches!(e, Some(Ownership::None) | Some(Ownership::Maybe));
         return if ends.iter().all(|e| *e == ends[0]) {

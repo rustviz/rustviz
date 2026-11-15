@@ -2306,6 +2306,58 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     step(&events, hash, &hide, Own::No) == Own::Yes
   }
 
+  /// At the start of the body of `loop_expr` (#992): the variables
+  /// declared before the loop (the first `len` of `in_scope`) that
+  /// hold their value here the first time round, but that the loop may
+  /// come back to with them moved (`moved_round_loop`: a move further
+  /// down the body, or before a `continue`, that nothing after gave a
+  /// new value). The body is drawn once (#853), so each gets a
+  /// `LoopExitMove { at: LoopHead }` on the loop's first line: what the
+  /// body does before giving it a new value (a reassignment, a
+  /// `break`) sees it maybe-moved. Returns them.
+  fn note_loop_head_moves(&mut self, loop_expr: &'tcx Expr<'tcx>, len: usize) -> Vec<ResourceAccessPoint> {
+    // A struct moved whole takes its field columns with it.
+    let mut names: Vec<String> = Vec::new();
+    for name in self.moved_round_loop(loop_expr.span) {
+      let members = self.struct_members_deep(&name);
+      names.push(name);
+      names.extend(members.iter().map(|m| m.name().clone()));
+    }
+    names.sort();
+    names.dedup();
+    let line = span_to_line(&loop_expr.span, &self.tcx);
+    let outer = &self.in_scope[..len.min(self.in_scope.len())];
+    names.retain(|n| outer.iter().any(|o| o == n.split('.').next().unwrap_or("")) && !self.skip_raps.contains(n));
+    let mut out = Vec::new();
+    for name in names {
+      let Some(rd) = self.raps.get(&name) else { continue };
+      let ro = rd.rap.clone();
+      if ro.is_ref() || ro.is_fn() || self.rap_ownership_now(&name) != Ownership::Held {
+        continue;
+      }
+      self.add_external_event(line, ExternalEvent::LoopExitMove {
+        ro: ro.clone(), definite: false, at: MaybeMovedAt::LoopHead, id: *self.unique_id,
+      });
+      *self.unique_id += 1;
+      out.push(ro);
+    }
+    out
+  }
+
+  /// At the end of a `while` / `for` loop (#992): the variables of
+  /// `note_loop_head_moves` are maybe-moved, as the loop can end after
+  /// a time round that moved them; not those a `break` already says
+  /// so for (`broke_moved`).
+  fn emit_loop_round_moves(&mut self, loop_expr: &'tcx Expr<'tcx>, head: Vec<ResourceAccessPoint>, broke_moved: &[ResourceAccessPoint]) {
+    let line = span_end_line(&loop_expr.span, &self.tcx);
+    for ro in head.into_iter().filter(|r| !broke_moved.contains(r)) {
+      self.add_external_event(line, ExternalEvent::LoopExitMove {
+        ro, definite: false, at: MaybeMovedAt::LoopRound, id: *self.unique_id,
+      });
+      *self.unique_id += 1;
+    }
+  }
+
   /// At a `break` (`brk`) out of the loop `target`: the variables the
   /// iteration moved on the way here and didn't give a new value since
   /// are (maybe) moved where the loop ends, if they were declared
@@ -3336,6 +3388,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     *events_at = len;
                   }
                 }
+                // What the loop may come back round to moved (#992).
+                let head_moved = self.note_loop_head_moves(expr, entry_len);
                 let before = self.rap_names();
                 self.inside_branch = true;
                 // The body may run no times or many (#786).
@@ -3353,6 +3407,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 self.emit_scope_end(decls, body_end);
                 // A `while` also ends when its condition is false.
                 let broke_moved = self.emit_loop_exit_moves(expr, None, &before, true);
+                self.emit_loop_round_moves(expr, head_moved, &broke_moved);
                 // After the condition moved something (#968). A variable
                 // a `break` also moved says so already.
                 let line = span_end_line(&expr.span, &self.tcx);
@@ -3386,6 +3441,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             // runs vs. may run", so use the same shape as while/for.)
             let prev = self.inside_branch;
             let before = self.rap_names();
+            // What the loop may come back round to moved (#992). A
+            // bare `loop` ends only through a `break`, which sees it.
+            self.note_loop_head_moves(expr, entry_len);
             self.inside_branch = true;
             // Left only by a `break` (#786).
             let inits = self.enter_loop_inits();
@@ -4257,6 +4315,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       .map(|rap| matches!(lhs_rty, ResourceTy::Value(_))
         && self.rap_ownership_now(rap.name()) == Ownership::Maybe)
       .collect();
+    // Of those, the ones maybe-moved only because the loop can come
+    // back round with them moved (#992).
+    let loop_head: Vec<bool> = drop_target.iter().chain(field_drop_targets.iter())
+      .zip(maybe_moved.iter())
+      .map(|(rap, maybe)| *maybe && self.maybe_moved_by_loop_head_now(rap.name()))
+      .collect();
     // A struct or tuple some of whose parts were moved out before
     // (on every path, or some only): only the parts still there are
     // dropped (#628).
@@ -4398,7 +4462,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
     let n_before_drops = self.preprocessed_events.len();
     let payload_target = drop_target.as_ref().map(|r| *r.hash());
-    for ((rap, maybe_moved), parts) in drop_target.into_iter().chain(field_drop_targets).zip(maybe_moved).zip(parts) {
+    for (((rap, maybe_moved), parts), loop_head) in drop_target.into_iter().chain(field_drop_targets).zip(maybe_moved).zip(parts).zip(loop_head) {
       let by_cond = maybe_moved && self.moved_by_chain_condition(rap.name());
       let payload = box_payload.as_ref().is_some_and(|b| b.hash() == rap.hash())
         || (payload_behind_ref && payload_target.is_some_and(|h| h == *rap.hash()));
@@ -4407,6 +4471,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         id: *self.unique_id,
         maybe_moved,
         by_cond,
+        loop_head,
         parts,
         maybe_init,
         payload,
@@ -6138,6 +6203,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             *events_at = len;
           }
         }
+        // What the loop may come back round to moved (#992).
+        let head_moved = match arms.first() {
+          Some(a) => self.note_loop_head_moves(a.body, entry_len),
+          None => Vec::new(),
+        };
         // The body may run no times or many (#786).
         let inits = self.enter_loop_inits();
         self.visit_expr(body_expr);
@@ -6242,7 +6312,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // (the outer arm's body), which also ends when the
         // iterator runs out.
         if let Some(loop_expr) = arms.first().map(|a| a.body) {
-          self.emit_loop_exit_moves(loop_expr, None, &before, true);
+          let broke_moved = self.emit_loop_exit_moves(loop_expr, None, &before, true);
+          self.emit_loop_round_moves(loop_expr, head_moved, &broke_moved);
         }
         if arms.first().is_some() {
           self.exit_frames.pop();
@@ -9692,6 +9763,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       id: *self.unique_id,
       maybe_moved: false,
       by_cond: false,
+      loop_head: false,
       parts: None,
       maybe_init: Some(InitBy::EarlierIteration),
       payload: false,

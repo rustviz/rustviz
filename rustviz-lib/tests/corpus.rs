@@ -17309,16 +17309,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "w may have been moved: the loop can end through a break that comes after w is moved, so w can't be used after the loop",
             "w goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
             "y may have been moved: the loop can end through a break that comes after y is moved, so y can't be used after the loop",
-            // The assignment after the loop. (The one inside it, after the
-            // `if` whose branch broke out, prints the same text, which is
-            // misleading there: y always holds a value at that point, #993.)
+            // The assignment after the loop.
             "y acquires ownership of a new resource. Its previous resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            // The one inside it, after the `if` whose branch broke out: y
+            // holds a value on every path that gets there (#993).
+            "y acquires ownership of a new resource; its previous resource is dropped",
         ],
         must_not_contain: &[
             "=s goes out of scope. Its resource is dropped.",
             "=t goes out of scope. Its resource is dropped.",
             "=w goes out of scope. Its resource is dropped.",
-            "y acquires ownership of a new resource; its previous resource is dropped",
             "u was moved before the loop ended",
             "u may have been moved",
         ],
@@ -18289,6 +18289,86 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "pr.0 goes out of scope. Its resource is dropped.",
             // m has no value yet when the None arm returns
             "m goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "loop_back_edge_move_992",
+        // #992: a move near the end of a loop body, or before a
+        // `continue`, that nothing after gives a new value to. The body
+        // was walked once from the state before the loop, so the
+        // reassignment at its top said the old value is always dropped
+        // (false from the second time round: the time round before moved
+        // it), and the scope end after a `loop` / `while` / `for` said
+        // nothing is dropped (false when the loop ends before any move:
+        // k = 0). The start of the body now says the loop can come back
+        // there with the variable moved; the reassignment's drop is a
+        // drop flag's; the loop's end says it may have been moved. v gets
+        // a new value before the loop comes back round, so nothing
+        // changes for it. Checked with rustc (a use before the
+        // reassignment is E0382 "value moved here, in previous iteration
+        // of loop") and a `Drop`-printing type.
+        must_contain: &[
+            "s may have been moved: the loop can come back here after s is moved further down, so s can't be used until it gets a new value",
+            "s acquires ownership of a new resource. Its previous resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag): it does the first time round the loop, but not if the previous time round left s moved.",
+            "s may have been moved: the loop can end through a break that comes after s is moved, so s can't be used after the loop",
+            "s goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "t may have been moved: the loop can come back here after t is moved further down, so t can't be used until it gets a new value",
+            "t acquires ownership of a new resource. Its previous resource is dropped here only if t still holds it (Rust tracks this with a runtime drop flag): it does the first time round the loop, but not if the previous time round left t moved.",
+            "t goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            // Both of r's assignments: in the branch that goes round
+            // again, and after it.
+            "r acquires ownership of a new resource. Its previous resource is dropped here only if r still holds it (Rust tracks this with a runtime drop flag): it does the first time round the loop, but not if the previous time round left r moved.",
+            "r may have been moved: the loop can end after a time round that left r moved, so r can't be used after the loop",
+            "w acquires ownership of a new resource. Its previous resource is dropped here only if w still holds it (Rust tracks this with a runtime drop flag): it does the first time round the loop, but not if the previous time round left w moved.",
+            "w may have been moved: the loop can end after a time round that left w moved, so w can't be used after the loop",
+            "w goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "u acquires ownership of a new resource. Its previous resource is dropped here only if u still holds it (Rust tracks this with a runtime drop flag): it does the first time round the loop, but not if the previous time round left u moved.",
+            "u may have been moved: the loop can end after a time round that left u moved, so u can't be used after the loop",
+            "u goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "p.name may have been moved: the loop can come back here after p.name is moved further down, so p.name can't be used until it gets a new value",
+            "p.name acquires ownership of a new resource. Its previous resource is dropped here only if p.name still holds it (Rust tracks this with a runtime drop flag): it does the first time round the loop, but not if the previous time round left p.name moved.",
+            "p goes out of scope. p.name may have been moved out above, so it's dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "v goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "s acquires ownership of a new resource; its previous resource is dropped",
+            "=s goes out of scope. No resource is dropped.",
+            "t acquires ownership of a new resource; its previous resource is dropped",
+            "=t goes out of scope. Its resource is dropped.",
+            "r acquires ownership of a new resource; its previous resource is dropped",
+            "=r goes out of scope. Its resource is dropped.",
+            "w acquires ownership of a new resource; its previous resource is dropped",
+            "=w goes out of scope. No resource is dropped.",
+            "u acquires ownership of a new resource; its previous resource is dropped",
+            "=u goes out of scope. No resource is dropped.",
+            "p.name acquires ownership of a new resource; its previous resource is dropped",
+            "=p goes out of scope. p.name was moved out earlier, so no resource is dropped.",
+            "=p.name goes out of scope. No resource is dropped.",
+            "v may have been moved",
+        ],
+    },
+    TooltipExpect {
+        name: "join_after_diverging_branch_993",
+        // #993: a reassignment after a conditional whose branch that
+        // moved the variable then left (`return`, `break`, a panic). The
+        // join joined the branch that left too, so the reassignment said
+        // the old value is dropped "only if no branch above moved it" (a
+        // drop flag), though every path that gets there still holds it.
+        // Checked with rustc and a `Drop`-printing type.
+        must_contain: &[
+            "y still owns its resource here: the branch that moved y returned before reaching this point",
+            "y acquires ownership of a new resource; its previous resource is dropped",
+            "z still owns its resource here: the branch that moved z broke out of the loop before reaching this point",
+            "z acquires ownership of a new resource; its previous resource is dropped",
+            // After the loop, the `break` that moved z counts.
+            "z may have been moved: the loop can end through a break that comes after z is moved, so z can't be used after the loop",
+            "m still owns its resource here: the branch that moved m panicked before reaching this point",
+            "m acquires ownership of a new resource; its previous resource is dropped",
+        ],
+        must_not_contain: &[
+            "y acquires ownership of a new resource. Its previous resource is dropped here only if",
+            "z acquires ownership of a new resource. Its previous resource is dropped here only if",
+            "m acquires ownership of a new resource. Its previous resource is dropped here only if",
         ],
     },
 ];

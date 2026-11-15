@@ -3539,6 +3539,44 @@ pub fn event_dot_loop_exit_move(my_name: &String, definite: bool, labeled_block:
     }
 }
 
+// At the start of a loop's body, for a variable that holds its value
+// where the loop starts but that the body may leave moved where it
+// comes back round (#992): `loop { if n >= k { break; } s = …;
+// drop(s); }`. The body is drawn once, for every time round (#853), so
+// the first time round s still holds its value here, a later one it
+// may not. rustc rejects a use before s gets a new value ("value moved
+// here, in previous iteration of loop").
+pub fn event_dot_loop_head_maybe_moved(my_name: &String) -> String {
+    format!(
+        "{0} may have been moved: the loop can come back here after {0} is moved further down, so {0} can't be used until it gets a new value",
+        styled_name_html(my_name)
+    )
+}
+
+// At the end of a `while` / `for` loop, for such a variable: the loop
+// can end (its condition false, its iterator done) after a time round
+// that left it moved (#992).
+pub fn event_dot_loop_round_maybe_moved(my_name: &String) -> String {
+    format!(
+        "{0} may have been moved: the loop can end after a time round that left {0} moved, so {0} can't be used after the loop",
+        styled_name_html(my_name)
+    )
+}
+
+// A reassignment in a loop body whose start has `s` maybe-moved
+// (`event_dot_loop_head_maybe_moved`) with nothing in between that
+// reaches it (#992): the first time round s holds its value; a later
+// time round it does unless the one before left it moved.
+pub fn event_dot_owner_drop_at_reassign_loop_head(my_name: &String, note: &str) -> String {
+    let (holds, rest) = split_drop_note(note);
+    format!(
+        "{0} acquires ownership of a new resource. Its previous resource{1} is dropped{2} here only if \
+         {0} still holds it (Rust tracks this with a runtime drop flag): it does the first time round \
+         the loop, but not if the previous time round left {0} moved.",
+        styled_name_html(my_name), holds, rest
+    )
+}
+
 // At the start of the `else` branch of an `if` whose let-chain
 // condition moves the variable in one part and can still be false in a
 // later one (`if let Some(a) = x && a.len() > 5`, #281): on that path
