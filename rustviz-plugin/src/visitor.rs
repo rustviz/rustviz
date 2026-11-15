@@ -141,6 +141,32 @@ struct ChainFail {
 }
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
+  /// Give each `static` the body names a column (#690), after the
+  /// parameters' ones. Like a parameter, it exists before the function
+  /// runs (its dot is on the signature's line); unlike one, it doesn't
+  /// come from the caller and isn't dropped at the end.
+  fn register_statics(&mut self, body: &rustc_hir::Body<'tcx>) {
+    let owner = body.value.hir_id.owner;
+    let line_num = self.current_fn_start;
+    for def_id in statics_in(body.value) {
+      let name = self.tcx.def_path_str(def_id);
+      if self.raps.contains_key(&name) {
+        continue;
+      }
+      let ty = self.tcx.type_of(def_id).instantiate_identity().skip_normalization();
+      let is_mut = matches!(self.tcx.def_kind(def_id), DefKind::Static { mutability: Mutability::Mut, .. });
+      self.add_owner(name.clone(), is_mut, self.ty_is_copy(ty, owner), self.ty_is_plain(ty, owner), self.ty_has_interior_mut(ty, owner), self.current_scope, true);
+      self.mark_owner_type(&name, ty);
+      let Some(rd) = self.raps.get_mut(&name) else { continue };
+      if let ResourceAccessPoint::Owner(o) = &mut rd.rap {
+        o.is_static = true;
+      }
+      let rap = rd.rap.clone();
+      self.add_external_event(line_num, ExternalEvent::InitRefParam { param: rap, id: *self.unique_id, own_param: None, in_pattern: None });
+      *self.unique_id += 1;
+    }
+  }
+
   /// `e` is the value the function returns (its tail expression, or
   /// the operand of a `return`): record it moving (or, for a Copy
   /// type or a shared reference, being copied) to the caller.
@@ -184,6 +210,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // rather than a copy.
       None => self.field_through_ref(e).unwrap_or(ResourceTy::Anonymous),
     }};
+    // `&PRIMES` / `&PRIMES[0]` returned: a reference to (part of) a
+    // static, not a copy of it (#690). Not drawn.
+    if lhs_ty.is_ref() && !matches!(e.kind, ExprKind::Path(..))
+      && matches!(&from_ro, ResourceTy::Value(r) if r.is_static()) {
+      return;
+    }
 
     let line_num = expr_to_line(e, &self.tcx);
     // A closure literal as the returned value: what it captures by
@@ -1357,7 +1389,8 @@ pub fn dbg_single_arg<'tcx>(expr: &'tcx Expr<'tcx>) -> Option<&'tcx Expr<'tcx>> 
 fn place_rap(expr: &Expr, tcx: &rustc_middle::ty::TyCtxt, raps: &std::collections::HashMap<String, RapData>) -> Option<ResourceTy> {
   fn is_place(e: &Expr) -> bool {
     match e.kind {
-      ExprKind::Path(QPath::Resolved(_, p)) => matches!(p.res, Res::Local(_)),
+      // (A static has a column too, #690.)
+      ExprKind::Path(QPath::Resolved(_, p)) => matches!(p.res, Res::Local(_)) || static_of_path(p).is_some(),
       ExprKind::Field(base, _) | ExprKind::Unary(UnOp::Deref, base)
       | ExprKind::Index(base, _, _) | ExprKind::AddrOf(_, _, base) => is_place(base),
       _ => false,
@@ -2378,6 +2411,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
     for (line, is_mut, r, lender) in std::mem::take(&mut self.pending_param_borrows) {
       self.add_borrow_ev(line, if is_mut { Evt::MBorrow } else { Evt::SBorrow }, r, lender, false);
     }
+    self.register_statics(body);
 
     // The tail of an `if` / `match` returned as the body's value: each
     // branch's value goes to the caller in its branch (#674).
@@ -2958,13 +2992,6 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             self.match_arg(operand, fn_name.clone());
           }
         }
-        // `COUNTER += 1` on a `static mut`: no column to write to (see
-        // the Path arm below).
-        if let ExprKind::Path(QPath::Resolved(_, p)) = lhs_expr.kind {
-          if matches!(p.res, Res::Def(DefKind::Static { .. }, _)) {
-            return;
-          }
-        }
         // The write: "acc is bound to a value", or through a
         // reference, "the resource r points to is modified through *r".
         // An element (`v[i] += 1`) has no column of its own: the write
@@ -3079,23 +3106,22 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             self.add_fn(name);
             return;
           }
-          // `const` and `static` items don't get RAP timelines —
-          // they're compile-time values (or `'static` references)
-          // that exist outside the function-local ownership story.
+          // `const` items don't get RAP timelines — they're
+          // compile-time values: each use is a new copy of the value.
           // Reading one in `let x = N;` makes `x` an owner of the
-          // resulting copy / static borrow; the const/static itself
-          // doesn't need a column. Skip the path-expression event so
-          // the lookup below doesn't trip on the missing RAP.
-          Res::Def(DefKind::Const { .. } | DefKind::AssocConst { .. } | DefKind::Static { .. }, _) => {
+          // resulting copy; the const itself doesn't need a column.
+          // Skip the path-expression event so the lookup below doesn't
+          // trip on the missing RAP. (A `static` has a column, #690.)
+          Res::Def(DefKind::Const { .. } | DefKind::AssocConst { .. }, _) => {
             return;
           }
           _ => ()
         }
-        // Only a local binding can be a variable RAP. Other paths (fn
-        // items, statics, consts) have nothing to update, and looking
-        // their name up among the variables would update a variable
-        // that merely shares the name (#232).
-        if !matches!(p.res, Res::Local(_)) {
+        // Only a local binding or a static (#690) can be a variable RAP.
+        // Other paths (fn items, consts) have nothing to update, and
+        // looking their name up among the variables would update a
+        // variable that merely shares the name (#232).
+        if !matches!(p.res, Res::Local(_)) && static_of_path(p).is_none() {
           return;
         }
         let name = path_name(p, &self.tcx);
@@ -3607,22 +3633,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.visit_expr(lhs_expr);
     if destructure_hid.is_none() {
       self.visit_expr(rhs_expr);
-    }
-
-    // Writing to a `static mut` (`COUNTER += inc`): the static has no
-    // column (see the Path arm below), so there's no LHS resource to
-    // attribute the write to. Events inside the RHS were emitted by
-    // the visit above; a non-Copy value assigned in (`LOG = v;`) is
-    // moved out of its owner, so record that move (to no column).
-    if let ExprKind::Path(QPath::Resolved(_, p)) = lhs_expr.kind {
-      if matches!(p.res, Res::Def(DefKind::Static { .. }, _)) {
-        let rhs_ty = self.tcx.typeck(rhs_expr.hir_id.owner).node_type(rhs_expr.hir_id);
-        let rhs_copy = self.ty_is_copy(rhs_ty, rhs_expr.hir_id.owner);
-        if !rhs_copy {
-          self.match_rhs(ResourceTy::Anonymous, rhs_expr, Evt::Move);
-        }
-        return;
-      }
     }
 
     // `x = rhs` where x came from `let x;` and is still

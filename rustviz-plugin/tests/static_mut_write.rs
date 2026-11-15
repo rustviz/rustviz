@@ -1,7 +1,8 @@
 // Writes to a `static mut` (Rust Book ch20, "Accessing or Modifying a
-// Mutable Static Variable"). The static has no column, like any static,
-// so the write itself draws nothing. Moving a non-Copy value into the
-// static must still show the value as moved, not dropped at scope end.
+// Mutable Static Variable"). Each static has a column in the function
+// that writes it (#690), where the write is drawn. Moving a non-Copy
+// value into the static must show the value as moved, not dropped at
+// scope end, and the static's old value as dropped.
 
 static mut COUNTER: u32 = 0;
 static mut LOG: Vec<String> = Vec::new();

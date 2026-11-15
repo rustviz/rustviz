@@ -5,7 +5,7 @@
 //! The logic is quite simple, visit each part of a function body and replace each RAP as it appears in the source string
 //! with a new string. (It's a little more complicated but this is the gist)
 
-use crate::{expr_visitor::ExprVisitor, expr_visitor_utils::{binding_name, builtin_binop_copied_operands, expr_to_rap_name, fn_key, hirid_to_var_name, operand_names_column, overloaded_by_value_binop, overloaded_comparison, path_name, span_to_line, unary_op_operand}};
+use crate::{expr_visitor::ExprVisitor, expr_visitor_utils::{binding_name, builtin_binop_copied_operands, expr_to_rap_name, fn_key, hirid_to_var_name, operand_names_column, overloaded_by_value_binop, overloaded_comparison, path_name, span_to_line, static_of_path, unary_op_operand}};
 use rustc_hir::{Expr, ExprKind, QPath, Stmt, StmtKind, LetStmt, Pat, PatKind};
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_span::{BytePos, Span};
@@ -193,7 +193,7 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
         }
         _ => (path_name(p, &self.tcx), false)
       };
-      let key = if matches!(p.res, rustc_hir::def::Res::Local(_)) { name.clone() } else { fn_key(&name) };
+      let key = if matches!(p.res, rustc_hir::def::Res::Local(_)) || static_of_path(p).is_some() { name.clone() } else { fn_key(&name) };
       match self.raps.get(&key) {
         Some(r) => {
           self.annotate_src(name.clone(), p.span, is_func, *r.rap.hash());

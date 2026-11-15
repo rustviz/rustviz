@@ -1378,8 +1378,9 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "m_18_const",
-        note: "renders since #155 (was a crash in the probe)",
-        must_contain: &["x is bound to a copyable value"],
+        note: "renders since #155 (was a crash in the probe); the copy names the constant since #690",
+        must_contain: &["x is initialized with a copy of the constant MAX_POINTS"],
+        must_not_contain: &["MAX_POINTS goes out of scope", "=MAX_POINTS, immutable"],
         ..E
     },
     // ─── Extras: crash minimizations and controls ─────────────────────
@@ -1468,16 +1469,19 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "x09_static_item",
-        status: Missing,
-        note: "was a crash at c2037dd. The static has no column (#690); only the borrow-end arrow names it",
+        note: "was a crash at c2037dd. The static has a column since #690",
         must_contain: &[
-            "g is bound to an immutable reference",
+            "L3 GREETING is a static: it lives for the whole program and is never dropped",
+            "L4 Copy from GREETING to g",
+            "L4 g is initialized with a copy of GREETING",
+            "L6 GREETING is a static: it lives for the whole program and is never dropped",
             "println! reads from g through an implicit reference, so g isn't moved",
             "L5 g's borrow of what the static GREETING points to ends (it lives for the whole program)",
         ],
         must_not_contain: &[
             "Return immutably borrowed resource from g to *g",
             "g's immutable borrow ends (what it borrows from isn't shown)",
+            "GREETING goes out of scope",
         ],
         ..E
     },

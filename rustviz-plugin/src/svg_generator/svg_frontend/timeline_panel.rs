@@ -1306,6 +1306,11 @@ fn render_scope_end_dot(
     dots: &mut DotLayer,
 ) -> bool {
         let ro = &visualization_data.timelines[hash].resource_access_point;
+        // A static outlives the function (#690).
+        if ro.is_static() {
+            data.title = hover_messages::event_dot_static(&name);
+            return false;
+        }
         let exit = exit_at(&visualization_data.timelines[hash].history, history, *line_number);
         let never_drops = ro.never_drops();
         // Not Copy but nothing to drop (#484): a value, so
@@ -1816,6 +1821,7 @@ fn render_dot(
                             CopyOf::IntoCtor(_) | CopyOf::Pointee { .. } => hover_messages::event_dot_copyable_assign(&name),
                             _ if from.extract_rap().is_some_and(|f| f.is_fn()) => hover_messages::event_dot_copyable_assign(&name),
                             CopyOf::Inside => hover_messages::event_dot_copyable_assign_copy_inside(&name, &from.name()),
+                            CopyOf::Const(c) => hover_messages::event_dot_assign_copy_of_const(&name, c),
                             CopyOf::Whole => hover_messages::event_dot_copyable_assign_copy(&name, &from.name()),
                         };
                     } else if let Some((func, true)) = match event {
@@ -3815,7 +3821,8 @@ fn render_init_param_arrow(line_number: &usize, param: &ResourceAccessPoint, id:
             param,
             ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_)
         );
-        if !is_owned {
+        // A static doesn't come from the caller (#690).
+        if !is_owned || param.is_static() {
             return;
         }
         let timeline = fetch_timeline(param.hash(), visualization_data, resource_owners_layout, *id);
