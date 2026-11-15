@@ -2016,7 +2016,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// { break; } }`: the loan v's iterator holds lasts to the loop's
   /// end on the paths that go round again, but ends at the `break`.
   fn borrow_may_end_at_exit(&self, if_expr: &'tcx Expr<'tcx>, split: usize, merge: usize, if_decl: &HashSet<ResourceAccessPoint>) -> bool {
-    let leaves = branch_leaves(self.tcx, if_expr);
+    let leaves = branch_leaves(self.tcx, BranchBody::Expr(if_expr));
     if !leaves.exits.iter().all(|x| matches!(x, BranchExit::Return | BranchExit::Break | BranchExit::Continue))
       || self.in_closure(if_expr)
     {
@@ -3227,7 +3227,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
     let local_line = self.tcx.sess.source_map().lookup_char_pos(local.span.lo()).line;
     let is_skipped = self.skip_lines.contains(&local_line);
     if let Some(init) = local.init {
-      self.process_let_binding(local.pat, init, is_skipped);
+      self.process_let_binding(local.pat, init, is_skipped, local.els);
     } else {
       // `let x;` (deferred initialization, #234): x owns nothing yet,
       // so register no RAP and emit no event here. Remember each
@@ -3239,7 +3239,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       });
     }
 
-    if let Some(els) = local.els {
+    if let (Some(els), None) = (local.els, local.init) {
       self.visit_block(els);
     }
   }
@@ -4548,9 +4548,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     };
     // A branch of type `!` (`return`, `panic!()`) never reaches
     // the merge (#296).
-    let (if_diverges, if_exits, if_carries) = self.branch_divergence(if_expr, &if_ev, &if_decl);
+    let (if_diverges, if_exits, if_carries) = self.branch_divergence(BranchBody::Expr(if_expr), &if_ev, &if_decl);
     let (else_diverges, else_exits, else_carries) = match else_expr {
-      Some(e) => self.branch_divergence(e, &else_ev, &else_decl),
+      Some(e) => self.branch_divergence(BranchBody::Expr(e), &else_ev, &else_decl),
       None => (false, Vec::new(), Vec::new()),
     };
     let (b_labels, b_slices, b_branches) = match else_expr {
@@ -4941,7 +4941,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let branch_line_map = create_line_map(&branch_e_data);
         // An arm of type `!` (`_ => unreachable!()`) never
         // reaches the merge (#296).
-        let (diverges, exits, break_carries) = self.branch_divergence(arm.body, &branch_e_data, &arm_decls);
+        let (diverges, exits, break_carries) = self.branch_divergence(BranchBody::Expr(arm.body), &branch_e_data, &arm_decls);
         branch_data.push(ExtBranchData { e_data: branch_e_data, line_map: branch_line_map, decl_vars: arm_decls, diverges, exits, break_carries });
       }
     }
@@ -7036,6 +7036,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     pat: &'tcx Pat<'tcx>,
     init: &'tcx Expr<'tcx>,
     is_skipped: bool,
+    // A let-else's `else` block, visited here (#906).
+    els: Option<&'tcx rustc_hir::Block<'tcx>>,
   ) {
     // `let y = dbg!(e);` binds y to e's value: dbg! takes e by value
     // and returns it. Treat it as `let y = e;` so the move / copy /
@@ -7060,6 +7062,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // `let r = &String::from("a");`: the String gets a column of its
     // own (#400).
     if !is_skipped && self.bind_extended_temporary(pat, init) {
+      if let Some(els) = els {
+        self.visit_block(els);
+      }
       return;
     }
     let init_is_branching = !is_skipped
@@ -7088,14 +7093,33 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       self.break_pats.retain(|(id, ..)| *id != init.hir_id);
       self.break_binds.retain(|(id, ..)| *id != init.hir_id);
+      if let Some(els) = els {
+        self.visit_block(els);
+      }
     } else {
       let mut nested_temps = Vec::new();
+      let init_len = self.in_scope.len();
       if !is_skipped {
         self.visit_expr(init);
         nested_temps = self.bind_nested_extended_temps(pat, init);
       }
+      // The `else` block runs when the pattern doesn't match, before
+      // anything is bound. Drawn as a branch, the bindings happen
+      // where it joins: on the path that skipped it.
+      let joined_at = match els {
+        Some(els) if !is_skipped => self.visit_let_else(pat, init, els, init_len),
+        Some(els) => {
+          self.visit_block(els);
+          None
+        }
+        None => None,
+      };
+      let saved_line = joined_at.map(|l| self.line_override.replace(l));
       let first_id = *self.unique_id;
       self.bind_pat(pat, init, is_skipped);
+      if let Some(l) = saved_line {
+        self.line_override = l;
+      }
       // The temporaries the initializer keeps alive are declared with
       // the pattern's bindings (#856).
       if !nested_temps.is_empty() {
@@ -7116,6 +7140,105 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
     }
     self.keep_literal_temp_with_refs(pat);
+  }
+
+  /// The `else` block of `let pat = init else { … };` (#906), visited
+  /// after `init` and before `pat` binds anything: it runs when the
+  /// pattern doesn't match, and can't finish (`return`, a panic, `break`
+  /// / `continue`), so what's in scope there is dropped at its exit
+  /// (`drop_locals_on_exit`), the scrutinee too: it still owns its value.
+  /// Drawn as the body of `if no_match { return; }` is (#429): a branch
+  /// whose column ends in those drops, beside the path on which the
+  /// pattern matched (named after the pattern).
+  /// With no drop there it's drawn inline, as before.
+  ///
+  /// `init_len`: the length `in_scope` had before `init` was visited.
+  /// The unbound temporaries `init` made are dropped before the `else`
+  /// block runs, so its exit doesn't drop them again. Returns the line
+  /// the branches join on, when they're drawn.
+  fn visit_let_else(&mut self, pat: &'tcx Pat<'tcx>, init: &'tcx Expr<'tcx>, els: &'tcx rustc_hir::Block<'tcx>, init_len: usize) -> Option<usize> {
+    let sm = self.tcx.sess.source_map();
+    let split = sm.lookup_char_pos(pat.span.lo()).line;
+    let merge = sm.lookup_char_pos(els.span.hi()).line;
+    let block_lo = sm.lookup_char_pos(els.span.lo()).line;
+    let saved_scope = self.in_scope.clone();
+    let mut idx = 0;
+    self.in_scope.retain(|n| {
+      idx += 1;
+      idx <= init_len || !self.raps.get(n).is_some_and(|rd| rd.rap.is_unbound_temporary())
+    });
+    let entry_len = self.in_scope.len();
+    let lo = *self.unique_id;
+    let hash_lo = self.rap_hashes;
+    // The `else` path never gets past the block: what it assigns to a
+    // `let x;` local (#234) doesn't count after the `let`.
+    let uninit_before = self.uninit_locals.clone();
+    let maybe_init_before = self.maybe_init_locals.clone();
+    let prev_inside_branch = std::mem::replace(&mut self.inside_branch, true);
+    self.exit_frames.push(ExitFrame::Branch { len: entry_len, hide: Vec::new(), binds: Vec::new(), binds_at: 0 });
+    let arm_borrows = self.arm_borrows_begin();
+    self.arm_frames.push((split, merge, block_lo, merge));
+    self.visit_block(els);
+    self.arm_frames.pop();
+    self.arm_borrows_end(arm_borrows);
+    let inner = self.raps_declared_since(hash_lo, &uninit_before);
+    self.exit_frames.pop();
+    self.in_scope = saved_scope;
+    self.inside_branch = prev_inside_branch;
+    self.uninit_locals = uninit_before;
+    self.maybe_init_locals = maybe_init_before;
+    let ids = lo..*self.unique_id;
+    if !self.preprocessed_events.iter().any(|(_, e)| ids.contains(&e.get_id()) && self.exit_drops.contains(&e.get_id())) {
+      return None;
+    }
+    let mut else_ev = self.take_branch_events(ids, None, &HashSet::new());
+    let in_branch: HashSet<usize> = else_ev.iter().map(|(_, e)| e.get_id()).collect();
+    for evs in self.event_line_map.values_mut() {
+      evs.retain(|e| !in_branch.contains(&e.get_id()));
+    }
+    let mut liveness: HashSet<ResourceAccessPoint> = HashSet::new();
+    collect_event_live_vars(&else_ev, &mut liveness);
+    liveness.extend(self.keep_exit_drops(&mut else_ev, true));
+    let scoped = scoped_in_events(&else_ev, &self.exit_drops);
+    let decl = get_decl_of_block(els, &self.tcx, &self.raps);
+    let mut decl_vars = &(&decl | &inner) | &scoped;
+    liveness = &liveness - &decl_vars;
+    let left = Self::left_at_exits(self.block_ends_at_exits(els, true), &decl);
+    for var in in_decl_order(&decl).into_iter().filter(|v| needs_scope_end(v) && !scoped.contains(v) && !left.contains(v)) {
+      else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id }));
+      *self.unique_id += 1;
+    }
+    decl_vars.extend(decl);
+    let (diverges, exits, break_carries) = self.branch_divergence(BranchBody::LetElse(els), &else_ev, &decl_vars);
+    let collapsed = branch_is_collapsed(split, merge);
+    let else_slice = if collapsed { (split, merge) } else { (split + 1, merge) };
+    let match_slice = if collapsed { (merge, merge) } else { (merge, merge.saturating_sub(1)) };
+    let else_map = create_line_map(&else_ev);
+    let matched = ExtBranchData {
+      e_data: Vec::new(), line_map: BTreeMap::new(), decl_vars: HashSet::new(),
+      diverges: false, exits: Vec::new(), break_carries: Vec::new(),
+    };
+    let branches = vec![
+      ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars, diverges, exits, break_carries },
+      matched,
+    ];
+    // The matched path is named by the pattern as written.
+    let pat_text = self.tcx.sess.source_map().span_to_snippet(pat.span).ok()
+      .filter(|t| !t.contains('\n') && !pat.span.from_expansion())
+      .unwrap_or_else(|| get_name_of_pat(pat, &self.tcx));
+    let labels = vec!["Else".to_owned(), pat_text];
+    self.note_exit_scope(init);
+    self.add_external_event(split, ExternalEvent::Branch {
+      live_vars: liveness,
+      branches,
+      branch_type: BranchType::If(labels, vec![else_slice, match_slice]),
+      split_point: split,
+      merge_point: merge,
+      maybe_init: HashSet::new(),
+      id: *self.unique_id,
+    });
+    *self.unique_id += 1;
+    Some(merge)
   }
 
   /// `let r = &String::from("a");` (also `&mut`, `&s.clone()`,
@@ -9255,7 +9378,16 @@ fn mentioned_locals<'tcx>(e: &'tcx Expr<'tcx>, out: &mut Vec<String>) {
   }
 }
 
-fn branch_leaves<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, body: &'tcx Expr<'tcx>) -> BranchLeaves {
+/// A branch's body: an expression (an if/else branch, a match arm), or
+/// the `else` block of a let-else (#906), which HIR keeps as a bare
+/// block.
+#[derive(Clone, Copy)]
+enum BranchBody<'tcx> {
+  Expr(&'tcx Expr<'tcx>),
+  LetElse(&'tcx rustc_hir::Block<'tcx>),
+}
+
+fn branch_leaves<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, body: BranchBody<'tcx>) -> BranchLeaves {
   struct Finder<'tcx> {
     tcx: rustc_middle::ty::TyCtxt<'tcx>,
     // Loops and labeled blocks inside the branch: a `break` /
@@ -9312,13 +9444,22 @@ fn branch_leaves<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, body: &'tcx Expr<'tc
   let mut f = Finder {
     tcx, inner: HashSet::new(), control: Vec::new(), loop_breaks: Vec::new(), break_carries: Vec::new(), panics: false,
   };
-  f.visit_expr(body);
-  let last = match body.kind {
-    ExprKind::Block(b, _) => b.expr.or_else(|| match b.stmts.last().map(|s| &s.kind) {
-      Some(StmtKind::Semi(e)) | Some(StmtKind::Expr(e)) => Some(*e),
-      _ => None,
-    }),
-    _ => Some(body),
+  let block_last = |b: &'tcx rustc_hir::Block<'tcx>| b.expr.or_else(|| match b.stmts.last().map(|s| &s.kind) {
+    Some(StmtKind::Semi(e)) | Some(StmtKind::Expr(e)) => Some(*e),
+    _ => None,
+  });
+  let last = match body {
+    BranchBody::Expr(body) => {
+      f.visit_expr(body);
+      match body.kind {
+        ExprKind::Block(b, _) => block_last(b),
+        _ => Some(body),
+      }
+    }
+    BranchBody::LetElse(b) => {
+      f.visit_block(b);
+      block_last(b)
+    }
   };
   let ends_in_its_only_break = f.control == [BranchExit::Break]
     && f.loop_breaks.len() == 1
@@ -9410,11 +9551,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// marks the moved variables as (maybe) moved where it ends (#344).
   fn branch_divergence(
     &mut self,
-    body: &'tcx Expr<'tcx>,
+    body: BranchBody<'tcx>,
     events: &[(usize, ExternalEvent)],
     decls: &HashSet<ResourceAccessPoint>,
   ) -> (bool, Vec<BranchExit>, Vec<String>) {
-    if !self.expr_diverges(body) {
+    // (A let-else's `else` block always diverges: rustc requires it.)
+    if matches!(body, BranchBody::Expr(e) if !self.expr_diverges(e)) {
       return (false, Vec::new(), Vec::new());
     }
     let leaves = branch_leaves(self.tcx, body);

@@ -1265,6 +1265,7 @@ fn render_scope_end_dot(
     dots: &mut DotLayer,
 ) -> bool {
         let ro = &visualization_data.timelines[hash].resource_access_point;
+        let exit = exit_at(&visualization_data.timelines[hash].history, history, *line_number);
         let never_drops = ro.never_drops();
         // Not Copy but nothing to drop (#484): a value, so
         // no drop triangle and no "resource" wording.
@@ -1325,7 +1326,7 @@ fn render_scope_end_dot(
         } else if is_plain {
             // Never a resource: going out of scope drops
             // nothing, whether or not it was moved earlier.
-            data.title = match struct_partial_move_split(visualization_data, *hash) {
+            data.title = match struct_partial_move_split(visualization_data, *hash, exit) {
                 Some(split) if resource_hold =>
                     hover_messages::event_dot_struct_partial_go_out_of_scope(&name, &split.moved, &split.maybe_moved, &[], true, split.by_cond, false),
                 _ => event.print_message_with_name(&mut name),
@@ -1433,7 +1434,7 @@ fn render_scope_end_dot(
                     None => data.title.push_str(&hover_messages::event_dot_no_resource_dropped_suffix()),
                 }
             }
-        } else if let Some(split) = struct_partial_move_split(visualization_data, *hash) {
+        } else if let Some(split) = struct_partial_move_split(visualization_data, *hash, exit) {
             // Partially moved struct (#207): only the
             // fields still holding a value are dropped,
             // and those moved on some paths only maybe
@@ -2867,9 +2868,12 @@ struct PartialMoveSplit {
 // or all (#395). A nested field counts under its ancestors:
 // `o.inner.x` moved out leaves `o.inner.y` and `o.z` to be dropped.
 // None when no field below `hash` was moved out.
+// `exit`: the scope end is an exit's drop in a branch (see `ExitAt`), not
+// the column's own end: what's moved is what was moved by then.
 fn struct_partial_move_split(
     visualization_data: &VisualizationData,
     hash: u64,
+    exit: Option<ExitAt>,
 ) -> Option<PartialMoveSplit> {
     let rap = &visualization_data.timelines.get(&hash)?.resource_access_point;
     let ResourceAccessPoint::Struct(Struct { owner, is_box, .. }) = rap else { return None };
@@ -2895,7 +2899,15 @@ fn struct_partial_move_split(
         }
         let child_prefix = format!("{}.", name);
         let is_leaf = !fields.iter().any(|(_, n, _)| n.starts_with(&child_prefix));
-        if !holds_resource_at_scope_end(timeline) {
+        // At an exit, a field that still owns its value is dropped there
+        // too, by a drop on its own column (`if c { return; } let a =
+        // p.a;`, a let-else's `else`, #906); one moved later isn't moved
+        // yet. (A Copy field has no drop to tell: it holds its value.)
+        let holds = match exit {
+            Some(at) if !is_copy => dropped_at_exit(&timeline.history, at),
+            _ => holds_resource_at_scope_end(timeline),
+        };
+        if !holds {
             // A Copy part of a Box's payload moved out with all of it
             // (`x => …` on `match *b`, #898): nothing of it is ever
             // dropped, so the Box's scope end has nothing to say of it.
@@ -2919,6 +2931,45 @@ fn struct_partial_move_split(
     } else {
         Some(PartialMoveSplit { moved, maybe_moved, dropped, by_cond })
     }
+}
+
+// Where an exit drops a column (#906): branch `branch` of the conditional
+// that splits at `split` and joins at `merge`, on `line`.
+#[derive(Clone, Copy)]
+struct ExitAt {
+    split: usize,
+    merge: usize,
+    branch: usize,
+    line: usize,
+}
+
+// `history`, the events of a branch of the column whose own history is
+// `top`, as an exit at `line` in it (`ExitAt`). None when `history` is
+// the column's own: a scope end there is its end, not an exit's drop.
+fn exit_at(top: &[(usize, Event)], history: &Vec<(usize, Event)>, line: usize) -> Option<ExitAt> {
+    top.iter().find_map(|(_, e)| match e {
+        Event::Branch { branch_history, split_point, merge_point, .. } => branch_history.iter().enumerate()
+            .find_map(|(k, b)| if std::ptr::eq(&b.e_data, history) {
+                Some(ExitAt { split: *split_point, merge: *merge_point, branch: k, line })
+            } else {
+                exit_at(&b.e_data, history, line)
+            }),
+        _ => None,
+    })
+}
+
+// Whether the column with this `history` is dropped at the exit `at`:
+// only what still owns a value there is (an exit draws no scope end for
+// what was moved before it).
+fn dropped_at_exit(history: &[(usize, Event)], at: ExitAt) -> bool {
+    history.iter().any(|(_, e)| match e {
+        Event::Branch { branch_history, split_point, merge_point, .. }
+            if (*split_point, *merge_point) == (at.split, at.merge) =>
+            branch_history.get(at.branch).is_some_and(|b| b.e_data.iter()
+                .any(|(l, e)| *l == at.line && matches!(e, Event::OwnerGoOutOfScope))),
+        Event::Branch { branch_history, .. } => branch_history.iter().any(|b| dropped_at_exit(&b.e_data, at)),
+        _ => false,
+    })
 }
 
 // Smallest id among the events that give a column its value (Acquire /
