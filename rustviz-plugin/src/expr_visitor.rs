@@ -5824,8 +5824,7 @@ fn tuple_scrutinee_vars(&self, scrutinee: &'tcx Expr<'tcx>) -> Vec<(ResourceAcce
         // `(x, y.name)`, #977), when the tuple is drawn as "the
         // temporary tuple" (`tuple_scrutinee_position`, and a variable
         // in it). Otherwise its literal has a `(temporary)` column,
-        // which already takes the field (`(y.name, y.tag)`, a let
-        // chain's `(x, y.name)`).
+        // which already takes the field (`(y.name, y.tag)`).
         if !out.is_empty() && self.tuple_scrutinee_position(scrutinee) {
             out.clear();
             self.tuple_literal_vars(scrutinee, &mut Vec::new(), typeck, true, &mut out);
@@ -5835,16 +5834,17 @@ fn tuple_scrutinee_vars(&self, scrutinee: &'tcx Expr<'tcx>) -> Vec<(ResourceAcce
 }
 
 /// Whether the tuple literal `expr` is directly the scrutinee of a
-/// `match`, or of an `if let` / `while let` that isn't part of a let
-/// chain: where its variables are drawn moving into "the temporary
+/// `match`, or of an `if let` (also a part of an `if`'s let chain,
+/// #971): where its variables are drawn moving into "the temporary
 /// tuple" rather than into a `(temporary)` column (#327).
 pub fn tuple_scrutinee_position(&self, expr: &'tcx Expr<'tcx>) -> bool {
     use rustc_hir::Node;
     match self.tcx.parent_hir_node(expr.hir_id) {
         Node::Expr(m) => match m.kind {
             ExprKind::Match(s, _, rustc_hir::MatchSource::Normal) => s.hir_id == expr.hir_id,
-            ExprKind::Let(l) if l.init.hir_id == expr.hir_id => matches!(self.tcx.parent_hir_node(m.hir_id),
-                Node::Expr(i) if matches!(i.kind, ExprKind::If(c, ..) if c.hir_id == m.hir_id)),
+            // Also a part of a let chain (`if let (x, _) = (f, s) && c`,
+            // #971).
+            ExprKind::Let(l) if l.init.hir_id == expr.hir_id => self.is_if_condition_let(m),
             _ => false,
         },
         _ => false,
