@@ -1242,8 +1242,11 @@ fn render_branch_dots(
                 .map(|(_, e)| e);
             let reassigned_next = matches!(next, Some(Event::OwnerDropAtReassign { maybe_moved: true, .. }));
             // This `if`'s let-chain condition, not only a branch body,
-            // may have moved it (#940, #953).
-            let by_cond = chain_condition_moved_here(branch_history);
+            // may have moved it (#940, #953), or a `match` arm's
+            // guard that failed (#247): the keyword of the conditional,
+            // for "can't be used after the if / match".
+            let by_cond = chain_condition_moved_here(branch_history)
+                .then_some(if matches!(ty, BranchType::Match(..)) { "match" } else { "if" });
             Some(if rap.box_contents_moved() && moves_only_box_contents(branch_history) {
                 // Only a Box's contents were moved (`let w = *e;`,
                 // #921): e keeps its heap allocation on every path.
@@ -2449,19 +2452,38 @@ fn all_moved_at_end(history: &[(usize, Event)]) -> Option<bool> {
     all
 }
 
-// True when a let-chain's condition may have moved this column's value
-// before failing (#281), or a `while` loop's (#968), or a loop body
-// before a `break` outside any branch that breaks (#980), or before
-// the loop comes back round (#992), so a
+// True when a let-chain's condition (or a match guard, #247) may have
+// moved this column's value before failing (#281), or a `while` loop's
+// (#968), or a loop body before a `break` outside any branch that
+// breaks (#980), or before the loop comes back round (#992), so a
 // drop-flag message says "nothing above" moved it rather than "no
-// branch above".
+// branch above". Not when the column got a new value after that on the
+// same path (`s = …` in the else branch): from there it holds one
+// whatever the condition did, and the drop flag is down to what comes
+// after.
 fn moved_by_chain_condition(history: &[(usize, Event)]) -> bool {
-    history.iter().any(|(_, e)| match e {
-        Event::LoopExitMove { at: MaybeMovedAt::ChainFail { .. } | MaybeMovedAt::WhileCondFail { .. }
-            | MaybeMovedAt::Loop { nothing_above: true, .. } | MaybeMovedAt::LoopHead | MaybeMovedAt::LoopRound { .. }, .. } => true,
-        Event::Branch { branch_history, .. } => branch_history.iter().any(|b| moved_by_chain_condition(&b.e_data)),
-        _ => false,
-    })
+    chain_move_lasts(false, history)
+}
+
+// `moved_by_chain_condition` along `events`, starting from `lasts`.
+fn chain_move_lasts(mut lasts: bool, events: &[(usize, Event)]) -> bool {
+    for (_, e) in events {
+        match e {
+            Event::LoopExitMove { at: MaybeMovedAt::ChainFail { .. } | MaybeMovedAt::WhileCondFail { .. }
+                | MaybeMovedAt::Loop { nothing_above: true, .. } | MaybeMovedAt::LoopHead | MaybeMovedAt::LoopRound { .. }, .. } => lasts = true,
+            e if gives_new_value(e) => lasts = false,
+            Event::Branch { branch_history, .. } => {
+                lasts = branch_history.iter().any(|b| chain_move_lasts(lasts, &b.e_data));
+            }
+            _ => {}
+        }
+    }
+    lasts
+}
+
+// An assignment that gives the column a new value (`s = …`, `*b = …`).
+fn gives_new_value(e: &Event) -> bool {
+    matches!(e, Event::OwnerDropAtReassign { .. } | Event::Acquire { .. })
 }
 
 // Whether this conditional's own let-chain condition may have moved the
@@ -2469,10 +2491,15 @@ fn moved_by_chain_condition(history: &[(usize, Event)]) -> bool {
 // implicit empty one) starts with the `MaybeMovedAt::ChainFail` event
 // (#940, #953). Not one nested in a branch: for an outer conditional's
 // join, a condition inside one of its branches is part of that branch,
-// so "if the branch that ran didn't move it" stays true.
+// so "if the branch that ran didn't move it" stays true. Nor one that
+// assigns it again after that (`s = …` in the else branch): that branch
+// then ends holding a value, like one that didn't move it.
 fn chain_condition_moved_here(branch_history: &[BranchData]) -> bool {
-    branch_history.iter().any(|b| b.e_data.iter().any(|(_, e)|
-        matches!(e, Event::LoopExitMove { at: MaybeMovedAt::ChainFail { .. }, .. })))
+    branch_history.iter().any(|b| {
+        let at = b.e_data.iter().rposition(|(_, e)|
+            matches!(e, Event::LoopExitMove { at: MaybeMovedAt::ChainFail { .. }, .. }));
+        at.is_some_and(|i| !b.e_data[i + 1..].iter().any(|(_, e)| gives_new_value(e)))
+    })
 }
 
 // Whether what makes this column maybe-moved at its end (as

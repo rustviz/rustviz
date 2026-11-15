@@ -2126,8 +2126,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     // ─── Match guards (#176) ─────────────────────────────────────────
     // A guard's events are drawn in its own arm's column: they run
     // after the pattern matched and before the body, so "if this arm
-    // is taken, this happened" holds. (Guards that move or assign an
-    // outer variable are refused; see `guard_that_moves_is_refused`.)
+    // is taken, this happened" holds. What a guard that then fails
+    // leaves behind starts every later arm (#247, #248; see
+    // `match_guard_moves_247`).
     TooltipExpect {
         name: "match_guard_borrow",
         // `Some(n) if check(&s) =>`: the guard lends `s` to `check`.
@@ -2137,6 +2138,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "n is initialized with a copy of a value inside opt",
             "s goes out of scope. Its resource is dropped.",
             "Partial copy from opt to n",
+            // #248: the later arms may run after the guard lent s and
+            // turned out false.
+            "s may have been immutably borrowed: when the guard on line 6 lends s to check and then turns out false, matching goes on with the later arms after that borrow has ended",
         ],
         must_not_contain: &[
             "s's resource is moved",
@@ -2188,6 +2192,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "w goes out of scope",
             "words goes out of scope. Its resource is dropped (including every String it holds).",
             "s goes out of scope. Its resource is dropped.",
+            // #248: the `_` arm may run after the guard lent both and
+            // turned out false.
+            "s may have been immutably borrowed: when the guard on line 7 lends s to check and then turns out false, matching goes on with the later arms after that borrow has ended",
+            "words may have been immutably borrowed: when the guard on line 7 lends words to last and w and then turns out false, w goes out of scope, so matching goes on with the later arms after those borrows have ended",
         ],
         must_not_contain: &[
             "words's resource is moved",
@@ -9192,16 +9200,24 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "edition2024/if_let_chain_else_reassign",
         // The old value is still in `x` only if the condition didn't move
-        // it, so its drop at the reassignment is decided by a drop flag.
+        // it, so its drop at the reassignment is decided by a drop flag:
+        // there the condition, not a branch, may have moved it
+        // (maintainer, #581). After the reassignment the else branch
+        // holds a value whatever the condition did, so at the scope end
+        // only the if branch (whose condition moved x into a) has x
+        // moved: "no branch above". "nothing above" was false on the
+        // path where the condition moved x and then failed: the new
+        // value is dropped there (checked with a `Drop`-printing type;
+        // see edition2024/chain_move_then_reassign_247).
         must_contain: &[
-            "x goes out of scope. Its resource (including the String it holds, if any) is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "x goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "x acquires ownership of a new resource. Its previous resource (including the String it holds, if any) is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             // The holds note goes before "is dropped" (#679).
             "Its previous resource is dropped here only if",
-            // The condition, not a branch, may have moved it (maintainer, #581).
-            "only if no branch above moved it",
+            "Its previous resource (including the String it holds, if any) is dropped here only if no branch above moved it",
+            "x goes out of scope. Its resource (including the String it holds, if any) is dropped here only if nothing above moved it",
             "x acquires ownership of a new resource; its previous resource is dropped",
         ],
     },
@@ -19550,6 +19566,130 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "(what it borrows from isn't shown)",
         ],
     },
+    TooltipExpect {
+        name: "match_guard_moves_247",
+        // #247: `Some(_) if consume(s) =>` moves s whenever the guard runs,
+        // also when it then turns out false and matching goes on with the
+        // later arms. rustc counts every later arm as reachable from the
+        // failed guard, whatever its pattern (`None => s.len()` there is
+        // E0382), so both later arms start with s maybe-moved; after the
+        // match a drop flag decides. main refused the program ("match
+        // guards that move or assign a variable declared outside the
+        // guard … aren't supported yet"); before #195 it drew no move and
+        // dropped s unconditionally. Checked with a `Drop`-printing type:
+        // with `Some(5)` s is dropped inside consume, not at scope end.
+        must_contain: &[
+            "s may have been moved: when the guard on line 6 moves s to consume and then turns out false, matching goes on with the later arms after that move, so s can't be used here (the borrow checker counts every later arm as one that may run after a failed guard)",
+            "s may have been moved above, so it can't be used after the match. If nothing above moved it, its resource is dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "can't be used after the if",
+            "If the branch that ran didn't move it",
+            "s isn't moved in any of the branches above",
+        ],
+    },
+    TooltipExpect {
+        name: "match_guard_assigns_247",
+        // #247: a guard that assigns an outer variable (`Some(n) if { z =
+        // n.to_string(); n > 3 } =>`): the assignment lasts when the guard
+        // then fails, so the later arm starts with z holding its old value
+        // or the new one, as a let-chain's else branch does (#579). main
+        // refused the program.
+        must_contain: &[
+            "z may have been assigned a new resource: when the guard on line 5 assigns to z and then turns out false, matching goes on with the later arms after that assignment, so here z holds either its previous resource or the new one. When the assignment runs, it drops z's previous resource.",
+            "z goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "z may have been moved",
+            "else branch",
+        ],
+    },
+    TooltipExpect {
+        name: "match_guard_fnonce_247",
+        // #247: a guard that calls an outer `FnOnce` closure moves it, also
+        // when the guard is then false (#579's wording for a let-chain).
+        // main refused the program.
+        must_contain: &[
+            "f may have been moved: when the guard on line 6 calls f (it can only be called once, so the call moves it) and then turns out false, matching goes on with the later arms after that call, so f can't be used here (the borrow checker counts every later arm as one that may run after a failed guard)",
+            "f may have been moved above, so it can't be used after the match. If nothing above moved it, its resource is dropped when f goes out of scope.",
+            "f goes out of scope. Its captured resources are dropped here only if nothing above moved or called it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "can't be used after the if",
+        ],
+    },
+    TooltipExpect {
+        name: "match_guard_move_then_reassign_247",
+        // #247: the guard moves s, and the later arm assigns s again. Its
+        // old value is dropped there only if the guard didn't run (a drop
+        // flag). From then on s holds a value on that path, so after the
+        // match only the arm whose guard moved s has it moved: the join and
+        // scope end say "no branch above", not "nothing above" (on the `_`
+        // path the guard did move s, yet the new value is dropped at the
+        // scope end). Checked with a `Drop`-printing type. main refused the
+        // program.
+        must_contain: &[
+            "s may have been moved: when the guard on line 6 moves s to consume and then turns out false, matching goes on with the later arms after that move, so s can't be used here (the borrow checker counts every later arm as one that may run after a failed guard)",
+            "s acquires ownership of a new resource. Its previous resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "s was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "s may have been moved above",
+            "s goes out of scope. Its resource is dropped here only if nothing above moved it",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/match_if_let_guard_moves_247",
+        // #247: `Some(_) if let Some(a) = x && a.len() > 3 =>` moves x's
+        // String into a before the `&&` part can fail; then a is dropped
+        // and matching goes on with x moved (a `Drop`-printing type prints
+        // the drop before the `_` arm runs). main refused the program.
+        must_contain: &[
+            "x may have been moved: when the guard on line 5 moves x to a and then turns out false, matching goes on with the later arms after that move, so x can't be used here (the borrow checker counts every later arm as one that may run after a failed guard). When the guard fails after that move, a goes out of scope and its resource is dropped.",
+            "x may have been moved above, so it can't be used after the match. If nothing above moved it, its resource (including the String it holds, if any) is dropped when x goes out of scope.",
+            "x goes out of scope. Its resource (including the String it holds, if any) is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "can't be used after the if",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/chain_move_then_reassign_247",
+        // The let-chain counterpart of match_guard_move_then_reassign_247:
+        // the condition moves s and fails, and the else branch assigns s
+        // again. The else branch then ends holding a value, so the scope
+        // end's drop flag is down to the if-branch, not the condition: it
+        // used to say "dropped here only if nothing above moved it", false
+        // on the else path (the condition moved the old s, and the new one
+        // is dropped there). Checked with a `Drop`-printing type.
+        must_contain: &[
+            "s may have been moved: when the condition moves s to consume and then turns out false, the else branch runs after that move, so s can't be used here",
+            "s acquires ownership of a new resource. Its previous resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "s was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "s may have been moved above",
+            "s goes out of scope. Its resource is dropped here only if nothing above moved it",
+        ],
+    },
+    TooltipExpect {
+        name: "match_guard_lends_mut_248",
+        // #248: a guard that lends v mutably (`v.push(n)`) and then turns
+        // out false: the later arm runs after that borrow has ended, and v
+        // may have been changed by it. A dot at the top of the later arm
+        // says so, as at a let-chain's else branch (#688). main drew the
+        // guard's events in its own arm only.
+        must_contain: &[
+            "v may have been borrowed: when the guard on line 5 lends v to push and len and then turns out false, matching goes on with the later arms after those borrows have ended. By then, v may have been changed by push.",
+            "v goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "v may have been moved",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -22687,27 +22827,28 @@ fn struct_without_field_columns_boxes_its_own_label() {
     );
 }
 
-/// A guard that moves an outer variable (`Some(_) if consume(s) =>`) moves
-/// it whenever the guard runs, even when the guard is false and a later
-/// arm is taken. Drawing the move in the guard's arm only would show the
-/// later arms still owning `s`, so the plugin refuses instead. (main used
-/// to render it with no move at all and `s` dropped at the end.)
+/// What a match guard that then fails leaves behind starts every later
+/// arm (#247), as for a let-chain's else branch. What that machinery
+/// can't draw yet is refused for guards too, with the guard's wording
+/// (#603): here a new reference assigned to an outer variable, after
+/// which r points to s or to t in the later arm.
 #[test]
-fn guard_that_moves_is_refused() {
+fn guard_that_assigns_a_reference_is_refused() {
     env::set_var("RV_RUNNER", "local");
-    let src = "fn consume(s: String) -> bool { s.len() > 3 }\n\
-               fn main() {\n\
-               \x20   let s = String::from(\"hello\");\n\
+    let src = "fn main() {\n\
+               \x20   let s = String::from(\"a\");\n\
+               \x20   let t = String::from(\"b\");\n\
+               \x20   let mut r = &t;\n\
                \x20   let opt = Some(5);\n\
                \x20   match opt {\n\
-               \x20       Some(_) if consume(s) => println!(\"yes\"),\n\
-               \x20       _ => println!(\"no\"),\n\
+               \x20       Some(_) if { r = &s; r.len() > 3 } => println!(\"{}\", r),\n\
+               \x20       _ => println!(\"{}\", r),\n\
                \x20   }\n\
                }\n";
-    let err = Rustviz::new(src).expect_err("a guard that moves must not render");
+    let err = Rustviz::new(src).expect_err("a guard that assigns a reference must not render");
     let msg = err.to_string();
-    assert!(msg.contains("match guards that move or assign a variable declared outside the guard (`s`"),
-        "expected the guard-move refusal, got:\n{}", msg);
+    assert!(msg.contains("match guards that assign a new reference to a variable declared outside the guard (`r`, line 7)"),
+        "expected the guard's reference-assignment refusal, got:\n{}", msg);
 }
 
 /// What an or-pattern arm that binds a name from different places
@@ -23184,14 +23325,10 @@ fn outer_borrow_ends_at_exit() {
     assert_eq!(count("w's resource is no longer immutably borrowed"), 1, "{:?}", tips);
 }
 
-/// The `if` counterpart of `guard_that_moves_is_refused` (#198, #281):
-/// `let Some(a) = x` moves out of `x` as soon as it matches, so when
-/// `a.len() > 5` is then false the `else` branch runs with `x` already
-/// partially moved (rustc rejects using `x` there). The chain's events
-/// are drawn in the if branch only, so the plugin refuses instead of
-/// showing the else branch still owning `x`. (main used to render it
-/// with no move at all and "x goes out of scope. Its resource is
-/// dropped.")
+/// The `if` counterpart of `guard_that_assigns_a_reference_is_refused`
+/// (#198, #281, #603): the lasting effects of a let-chain's condition
+/// that the else branch can't be drawn with yet are refused, rather
+/// than drawn in the if branch only.
 #[test]
 fn if_let_chain_lasting_effects_still_refused() {
     env::set_var("RV_RUNNER", "local");
