@@ -4101,8 +4101,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     // Everything declared in each branch, also inside an inline
     // construct nested in it (an `else if let`'s bindings, #501):
-    // see raps_declared_since.
-    let if_inner = self.raps_declared_since(if_hash_lo, &uninit_before);
+    // see raps_declared_since. A name an earlier, out-of-scope
+    // variable used shares its column, so only the branch's code
+    // shows it's declared there (#927).
+    let if_inner = &self.raps_declared_since(if_hash_lo, &uninit_before) | &bindings_within(if_expr, &self.tcx, &self.raps);
     let else_hash_lo = self.rap_hashes;
     let uninit_after_if = std::mem::replace(&mut self.uninit_locals, uninit_before.clone());
     let maybe_init_after_if = std::mem::replace(&mut self.maybe_init_locals, maybe_init_before.clone());
@@ -4182,7 +4184,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     };
     let mut else_inner = self.raps_declared_since(else_hash_lo, &uninit_before);
     if let Some(e) = else_expr {
-      else_inner = &else_inner | &else_if_let_bindings(e, &self.tcx, &self.raps);
+      else_inner = &else_inner | &bindings_within(e, &self.tcx, &self.raps);
     }
     self.arm_borrows_end(arm_borrows);
     let uninit_after_else = std::mem::take(&mut self.uninit_locals);
@@ -4783,8 +4785,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // Everything declared in the arm, also inside an inline
       // construct nested in it (`Some(x) => { if let Some(y) =
       // b { … } }`, #501), exists only in the arm (the nested
-      // construct ends what it declares itself).
-      let arm_inner = self.raps_declared_since(arm_hash_lo, &uninit_before);
+      // construct ends what it declares itself). A name an
+      // earlier, out-of-scope variable used shares its column
+      // (`{ let r = &a; … }` before `0 => { let r = &a; … }`), so
+      // only the arm's code shows it's declared there (#927).
+      let arm_inner = &self.raps_declared_since(arm_hash_lo, &uninit_before) | &bindings_within(arm.body, &self.tcx, &self.raps);
       all_pat_decls = &all_pat_decls | &arm_inner;
       // Variables declared inside a loop in this arm already go
       // out of scope there (see scoped_in_events).
