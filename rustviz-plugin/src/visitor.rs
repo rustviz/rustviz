@@ -2529,6 +2529,35 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       && path_own(&events, rap, &hide, PathOwn::No) == PathOwn::No).then_some(nested)
   }
 
+  /// Of `live`, the variables (and field columns) that a loop this is
+  /// inside, and that they were declared before, gives a new value
+  /// somewhere in its body (#1026): at a join here that leaves one
+  /// maybe-moved, the value the branches that didn't move it left is
+  /// dropped by that assignment when the loop comes back round, not at
+  /// the scope end.
+  fn loop_assigned_now(&self, live: &HashSet<ResourceAccessPoint>) -> HashSet<ResourceAccessPoint> {
+    let mut out = HashSet::new();
+    for f in &self.exit_frames {
+      let ExitFrame::Loop { id, len, .. } = f else { continue };
+      let rustc_hir::Node::Expr(loop_expr) = self.tcx.hir_node(*id) else { continue };
+      let assigned = assigned_names(&self.tcx, loop_expr);
+      if assigned.is_empty() {
+        continue;
+      }
+      let outer = &self.in_scope[..(*len).min(self.in_scope.len())];
+      #[expect(clippy::iter_over_hash_type, reason = "only collects into a set; order doesn't matter")]
+      for r in live {
+        let name = r.name();
+        let root = name.split('.').next().unwrap_or("");
+        if outer.iter().any(|o| o == root)
+          && assigned.iter().any(|a| a == name || name.starts_with(&format!("{}.", a))) {
+          out.insert(r.clone());
+        }
+      }
+    }
+    out
+  }
+
   /// Whether an assignment to `rap` here, which holds no value on the
   /// path from before the loop (moved before it), drops what an
   /// earlier time round a loop it's in gave it (#1001): `rap` is one
@@ -4716,7 +4745,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // Whether each old value is there on every path, decided
     // before match_rhs too (see above). `*p = x` writes through a
     // live `&mut`, so its lender holds a value.
-    let maybe_moved: Vec<bool> = drop_target.iter().chain(field_drop_targets.iter())
+    let mut maybe_moved: Vec<bool> = drop_target.iter().chain(field_drop_targets.iter())
       .map(|rap| matches!(lhs_rty, ResourceTy::Value(_))
         && self.rap_ownership_now(rap.name()) == Ownership::Maybe)
       .collect();
@@ -4775,6 +4804,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             InitBy::EarlierIteration
           });
         }
+      }
+      // `s = …` in a loop's body that the drawing reaches with s
+      // holding a value, where rustc says it only may (#1027): a loop
+      // above, inside this one, may have ended before giving s one
+      // after a branch above moved it, and on a later time round the
+      // value it holds may be one the time round before gave it. Only
+      // the drop flag knows. (A struct's field columns go with it.)
+      if drop_target.as_ref() == Some(rap) && maybe_init.is_none()
+        && maybe_moved.iter().all(|m| !*m) && parts.iter().all(|p| p.is_none())
+        && self.exit_frames.iter().any(|f| matches!(f, ExitFrame::Loop { .. }))
+        && drop_target.iter().chain(field_drop_targets.iter())
+          .all(|r| self.ownership_before_assign(r.name(), lhs_expr.span, expr.span) == Some(Ownership::Maybe)) {
+        maybe_init = Some(InitBy::DropFlag);
+        maybe_moved.iter_mut().for_each(|m| *m = true);
       }
     }
 
@@ -5622,6 +5665,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     let b_ty = BranchType::If(b_labels, b_slices);
     self.note_exit_scope(expr);
+    let loop_assigned = self.loop_assigned_now(&liveness);
     self.add_external_event(line_num,
       ExternalEvent::Branch {
         live_vars: liveness,
@@ -5630,6 +5674,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         split_point: split,
         merge_point: merge,
         maybe_init,
+        loop_assigned,
         id: *self.unique_id });
         *self.unique_id += 1;
     // Both branches leave the function: nothing after the `if` runs.
@@ -6325,6 +6370,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.all_paths_exit = true;
     }
     self.note_exit_scope(expr);
+    let loop_assigned = self.loop_assigned_now(&liveness);
     self.add_external_event(split, ExternalEvent::Branch {
       live_vars: liveness,
       branches: branch_data,
@@ -6332,6 +6378,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       split_point: split,
       merge_point: merge,
       maybe_init,
+      loop_assigned,
       id: *self.unique_id });
     *self.unique_id += 1;
   }
@@ -8476,6 +8523,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       .unwrap_or_else(|| get_name_of_pat(pat, &self.tcx));
     let labels = vec!["Else".to_owned(), pat_text];
     self.note_exit_scope(init);
+    let loop_assigned = self.loop_assigned_now(&liveness);
     self.add_external_event(split, ExternalEvent::Branch {
       live_vars: liveness,
       branches,
@@ -8483,6 +8531,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       split_point: split,
       merge_point: merge,
       maybe_init: HashSet::new(),
+      loop_assigned,
       id: *self.unique_id,
     });
     *self.unique_id += 1;
@@ -10943,6 +10992,40 @@ fn runs_straight(e: &Expr<'_>) -> bool {
   f.0
 }
 
+/// The columns (`s`, `p.name`) that an assignment in `e` (outside any
+/// closure) gives a new value: `s = …` gives `s` and its fields one,
+/// `p.name = …` gives `p.name` one (#1026).
+fn assigned_names<'tcx>(tcx: &rustc_middle::ty::TyCtxt<'tcx>, e: &'tcx Expr<'tcx>) -> Vec<String> {
+  struct Find<'a, 'tcx> { tcx: &'a rustc_middle::ty::TyCtxt<'tcx>, out: Vec<String> }
+  impl<'a, 'tcx> Visitor<'tcx> for Find<'a, 'tcx> {
+    fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+      match e.kind {
+        ExprKind::Closure(..) => return,
+        ExprKind::Assign(lhs, ..) => {
+          let mut fields: Vec<String> = Vec::new();
+          let mut place = lhs;
+          while let ExprKind::Field(base, ident) = place.kind {
+            fields.push(ident.as_str().to_owned());
+            place = base;
+          }
+          if let Some(l) = local_of_path(place) {
+            let mut name = binding_name(self.tcx, l);
+            for f in fields.iter().rev() {
+              name = format!("{}.{}", name, f);
+            }
+            self.out.push(name);
+          }
+        }
+        _ => {}
+      }
+      intravisit::walk_expr(self, e);
+    }
+  }
+  let mut f = Find { tcx, out: Vec::new() };
+  f.visit_expr(e);
+  f.out
+}
+
 /// Whether `e` (outside any closure) contains a `return`, or a `?`,
 /// which returns on its error path.
 fn body_returns(e: &Expr<'_>) -> bool {
@@ -11163,6 +11246,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let all_breaks = breaks_to(loop_expr).len();
     let line = span_end_line(&loop_expr.span, &self.tcx);
     let mut done: Vec<&ResourceAccessPoint> = Vec::new();
+    let mut rounds: Option<Vec<(String, Ownership, bool)>> = None;
     for m in &mine {
       if done.contains(&&m.rap) {
         continue;
@@ -11183,9 +11267,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // Only seen on the path to a `break`, not in the branch that
       // breaks: the move may be in no branch (#980).
       let nothing_above = mine.iter().all(|o| o.rap != m.rap || o.on_path);
+      // Other time rounds come back round with it holding a value
+      // (#1029): rustc says it only may hold one at the loop's back
+      // edges.
+      let kept = !definite && block.is_none() && {
+        let rounds = rounds.get_or_insert_with(|| self.round_states_loop(loop_expr.span));
+        rounds.iter().any(|(n, own, _)| n == m.rap.name() && *own == Ownership::Maybe)
+      };
       self.add_external_event(line, ExternalEvent::LoopExitMove {
         ro: m.rap.clone(), definite,
-        at: if block.is_some() { MaybeMovedAt::LabeledBlock } else { MaybeMovedAt::Loop { nothing_above } },
+        at: if block.is_some() { MaybeMovedAt::LabeledBlock } else { MaybeMovedAt::Loop { nothing_above, kept } },
         id: *self.unique_id,
       });
       *self.unique_id += 1;

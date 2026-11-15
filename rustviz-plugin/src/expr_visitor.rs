@@ -2040,7 +2040,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     fn any(events: &[(usize, ExternalEvent)], hash: u64) -> bool {
       events.iter().any(|(_, ev)| match ev {
         ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::ChainFail { .. } | MaybeMovedAt::WhileCondFail { .. }
-          | MaybeMovedAt::Loop { nothing_above: true } | MaybeMovedAt::LoopHead | MaybeMovedAt::LoopRound { .. }, .. } => *ro.hash() == hash,
+          | MaybeMovedAt::Loop { nothing_above: true, .. } | MaybeMovedAt::LoopHead | MaybeMovedAt::LoopRound { .. }, .. } => *ro.hash() == hash,
         ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| any(&b.e_data, hash)),
         _ => false,
       })

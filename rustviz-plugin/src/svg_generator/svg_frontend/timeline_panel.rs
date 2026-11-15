@@ -1237,12 +1237,19 @@ fn render_branch_dots(
                 // That assignment is in a loop's body (#1012), which
                 // may end before it runs: unless every `break` out of
                 // the loop comes after it (`LoopExitKept`).
-                let in_loop = matches!(next, Some(Event::OwnerDropAtReassign { maybe_init: Some(InitBy::EarlierIteration | InitBy::OuterLoop { .. }), .. }))
+                let in_loop = matches!(next, Some(Event::OwnerDropAtReassign { maybe_init: Some(InitBy::EarlierIteration | InitBy::OuterLoop { .. } | InitBy::DropFlag), .. }))
                     && !full.iter()
                         .filter(|(l, _)| *l > *merge_point)
                         .find(|(_, e)| matches!(e, Event::LoopExitKept { .. } | Event::LoopMaybeInit { .. } | Event::LoopExitMove { .. }))
                         .is_some_and(|(_, e)| matches!(e, Event::LoopExitKept { reassigned: true }));
                 hover_messages::event_dot_branch_merge_moved_then_reassigned(&is.real_name(), by_cond, in_loop)
+            } else if matches!(event, Event::Branch { loop_assigned: true, .. })
+                && !is.extract_rap().is_some_and(|r| r.holds_value() || r.is_ref()) {
+                // In a loop whose body gives it a new value (#1026):
+                // when the loop comes back round, that assignment
+                // drops it; if it doesn't, a later one or the scope
+                // end does.
+                hover_messages::event_dot_branch_merge_moved_then_reassigned(&is.real_name(), by_cond, true)
             } else {
                 // A `&mut` reference moved on some paths (`if b {
                 // x } else { y }` returned, #674) owns nothing to
@@ -1747,6 +1754,10 @@ fn render_dot(
                         // run of it may follow an earlier one.
                         hover_messages::event_dot_owner_drop_at_reassign_outer_loop(&name, &note, *by_cond
                             || maybe_moved_by_let(history[..i].iter().filter(|(l, _)| l < line_number)), *moves)
+                    } else if let Event::OwnerDropAtReassign { maybe_init: Some(InitBy::DropFlag), .. } = event {
+                        // rustc says it only may hold a value here,
+                        // though nothing drawn above says so (#1027).
+                        hover_messages::event_dot_owner_drop_at_reassign_maybe_kept(&name, &note)
                     } else if let Event::OwnerDropAtReassign { maybe_init: Some(InitBy::EarlierIteration), .. } = event {
                         // Its first assignment, in a loop body (#786).
                         hover_messages::event_dot_init_drops_earlier_iteration(&name)
@@ -2134,7 +2145,7 @@ fn maybe_moved_by_kept_round<'a>(history: impl Iterator<Item = &'a (usize, Event
     let mut kept = false;
     for (_, e) in history {
         match e {
-            Event::LoopExitMove { definite: false, at: MaybeMovedAt::LoopRound { kept: k } } => kept = *k,
+            Event::LoopExitMove { definite: false, at: MaybeMovedAt::LoopRound { kept: k } | MaybeMovedAt::Loop { kept: k, .. } } => kept = *k,
             Event::Branch { branch_history, maybe_init, .. }
                 if init_join(*maybe_init, reaching_end_states(branch_history)).is_some() => kept = false,
             Event::Branch { branch_history, ty, .. } => {
@@ -2178,7 +2189,7 @@ fn reassigns_maybe_init(e: &Event) -> bool {
 // before the loop (#786), also one in a branch.
 fn reassigns_in_loop(e: &Event) -> bool {
     match e {
-        Event::OwnerDropAtReassign { maybe_init, .. } => matches!(maybe_init, Some(InitBy::EarlierIteration | InitBy::OuterLoop { .. })),
+        Event::OwnerDropAtReassign { maybe_init, .. } => matches!(maybe_init, Some(InitBy::EarlierIteration | InitBy::OuterLoop { .. } | InitBy::DropFlag)),
         Event::Branch { branch_history, .. } =>
             branch_history.iter().any(|b| b.e_data.iter().any(|(_, e)| reassigns_in_loop(e))),
         _ => false,
@@ -2252,7 +2263,7 @@ fn all_moved_at_end(history: &[(usize, Event)]) -> Option<bool> {
 fn moved_by_chain_condition(history: &[(usize, Event)]) -> bool {
     history.iter().any(|(_, e)| match e {
         Event::LoopExitMove { at: MaybeMovedAt::ChainFail { .. } | MaybeMovedAt::WhileCondFail { .. }
-            | MaybeMovedAt::Loop { nothing_above: true } | MaybeMovedAt::LoopHead | MaybeMovedAt::LoopRound { .. }, .. } => true,
+            | MaybeMovedAt::Loop { nothing_above: true, .. } | MaybeMovedAt::LoopHead | MaybeMovedAt::LoopRound { .. }, .. } => true,
         Event::Branch { branch_history, .. } => branch_history.iter().any(|b| moved_by_chain_condition(&b.e_data)),
         _ => false,
     })
@@ -5773,6 +5784,7 @@ mod tests {
             split_point: 0,
             merge_point: 0,
             maybe_init: false,
+            loop_assigned: false,
             id: 0,
         })];
         compute_width(&mut events);
