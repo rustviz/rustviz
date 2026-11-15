@@ -998,8 +998,9 @@ fn render_branch_dots(
         // The split: the arms leave it in the state the column has
         // there (as `render_branches` draws them). None does while
         // the column is mutably borrowed (`r = &mut s` live across
-        // the conditional), so the arms start from nothing; each
-        // arm's first dot then says s is live in the conditional.
+        // the conditional): the arms start dotted, lent out (#722),
+        // with no split dot; each arm's first dot then says s is live
+        // in the conditional.
         let split_has_line = branch_history.first()
             .and_then(|b| b.entry_state.as_ref())
             .map_or(true, |entry| {
@@ -2676,6 +2677,9 @@ fn timeline_segment_title(
             return hover_messages::state_or_alt_lent(rap.name(), into.name(), mutable, rap.holds_value());
         }
     }
+    if let (State::RevokedPrivilege { .. }, Some(line)) = (state, line) {
+        return lent_out_title(rap, visualization_data, line, &[]);
+    }
     if let Some(title) = line.and_then(|l| loop_iterator_title(state, rap, visualization_data, l)) {
         return title;
     }
@@ -2755,6 +2759,94 @@ fn timeline_segment_title(
         return hover_messages::state_mut_ref_partial_privilege(rap.name(), rap.points_to_copy());
     }
     state.print_message_with_name(rap.name())
+}
+
+/// Every event of a column, those in its conditionals' arms included,
+/// with its line. Of a conditional on `path` (its split line, and an
+/// arm), only that arm's.
+fn flat_history<'a>(history: &'a [(usize, Event)], path: &[(usize, usize)], out: &mut Vec<(usize, &'a Event)>) {
+    for (l, e) in history {
+        out.push((*l, e));
+        if let Event::Branch { branch_history, split_point, .. } = e {
+            let on_path = path.iter().find(|(split, _)| split == split_point).map(|(_, arm)| *arm);
+            for (i, b) in branch_history.iter().enumerate() {
+                if on_path.is_none_or(|arm| arm == i) {
+                    flat_history(&b.e_data, path, out);
+                }
+            }
+        }
+    }
+}
+
+/// A conditional's arm's segment of a column while it is mutably lent
+/// out: as `timeline_segment_title`, on the arm `path`.
+fn revoked_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, row: usize, path: &[(usize, usize)]) -> String {
+    if !rap.is_ref() {
+        if let Some((into, mutable)) = or_alt_lend_at(visualization_data, rap, Some(row)) {
+            return hover_messages::state_or_alt_lent(rap.name(), into.name(), mutable, rap.holds_value());
+        }
+    }
+    lent_out_title(rap, visualization_data, row, path)
+}
+
+/// The text of a column's dotted segment from row `line` while it is
+/// mutably lent out (#722), naming who holds the borrow there: a `for`
+/// loop's iterator, or the one variable or closure whose `&mut` borrow
+/// of it is live on that row. A call that hands its borrow on to its
+/// result (`let w = first_mut(&mut v);`) isn't named; with several
+/// holders (`it` and the `y` taken out of it) none is.
+fn lent_out_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, line: usize, path: &[(usize, usize)]) -> String {
+    let through_ref = rap.is_mutref().then(|| rap.points_to_copy());
+    // `ref_itself`: a `&T` binding borrowed `&mut`, or a `&mut` reference
+    // borrowed itself (`&mut r`, not `&mut *r`; #914): r is what's lent.
+    let text = |to, of_ref_var: bool| {
+        let ref_itself = (rap.is_ref() && !rap.is_mutref()) || of_ref_var;
+        hover_messages::state_lent_out(rap.name(), to, through_ref, ref_itself, rap.holds_value())
+    };
+    if loop_iterator_holds(visualization_data, rap, line) {
+        return text(hover_messages::LentTo::LoopIterator, false);
+    }
+    let Some(timeline) = visualization_data.timelines.get(rap.hash()) else {
+        return text(hover_messages::LentTo::Unknown, false);
+    };
+    let mut history = Vec::new();
+    flat_history(&timeline.history, path, &mut history);
+    history.sort_by_key(|(l, _)| *l);
+    // Who holds a `&mut` borrow of it after the events up to `line`.
+    let key = |to: &ResourceTy| match to {
+        ResourceTy::Value(r) => Some((r.name().to_owned(), r.is_closure(), r.is_fn())),
+        ResourceTy::Deref(r) => Some((format!("*{}", r.name()), false, false)),
+        _ => None,
+    };
+    // Each live lend's holder, and whether it borrows the reference
+    // column itself (`&mut r`, #914).
+    let mut holders: Vec<(Option<(String, bool, bool)>, bool)> = Vec::new();
+    for (_, e) in history.iter().filter(|(l, _)| *l <= line) {
+        match e {
+            Event::MutableLend { to, of_ref_var, .. } => holders.push((key(to), *of_ref_var)),
+            Event::MutableReacquire { from, .. } => {
+                let k = key(from);
+                if let Some(i) = holders.iter().position(|h| h.0 == k) {
+                    holders.remove(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    let of_ref_var = !holders.is_empty() && holders.iter().all(|h| h.1);
+    // A call that handed its borrow on to its result isn't the holder.
+    let mut holders: Vec<(String, bool)> = holders.into_iter()
+        .map(|h| h.0)
+        .filter(|h| !h.as_ref().is_some_and(|h| h.2))
+        .map(|h| h.map_or((String::new(), false), |h| (h.0, h.1)))
+        .collect();
+    holders.sort();
+    holders.dedup();
+    match holders.as_slice() {
+        [(name, true)] if !name.is_empty() => text(hover_messages::LentTo::Closure(name), of_ref_var),
+        [(name, false)] if !name.is_empty() => text(hover_messages::LentTo::Var(name), of_ref_var),
+        _ => text(hover_messages::LentTo::Unknown, of_ref_var),
+    }
 }
 
 /// The dot of the borrow a `for` loop's head `&v` / `&mut v` makes when
@@ -4220,8 +4312,30 @@ fn determine_owner_line_styles(
         (State::FullPrivilege{..}, true) => OwnerLine::Solid,
         (State::FullPrivilege{..}, false) => OwnerLine::Hollow,
         (State::PartialPrivilege{..}, _) => OwnerLine::Hollow,
+        // Mutably lent out (#722): a faint dotted line, so the events
+        // during and at the end of the lend sit on the column.
+        (State::RevokedPrivilege{..}, _) => OwnerLine::Dotted,
         _ => OwnerLine::Empty,
     }
+}
+
+/// A column's faint dotted segment while it is mutably lent out
+/// (RevokedPrivilege, #722): it can't be used, but it's still there,
+/// and the events of the lend (another `&mut` taken through it, a
+/// sub-borrow ending, the borrow's end) sit on it. One thin line of
+/// round dots (`.lent`) under a transparent strip as wide as a hollow
+/// column, which takes the hover: the dots' gaps alone would be hard
+/// to hit. Hovering it underlines the rows from the segment's first up
+/// to the one it ends on, as a solid line's does (`data-underline-y`
+/// names rows; helpers.js).
+fn lent_line_string(data: &VerticalLineData) -> String {
+    let w = BRANCH_HALF_W;
+    format!(
+        "<g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\" data-underline-y=\"{y1} {last}\">\n            <line data-hash=\"{hash}\" class=\"lent\" x1=\"{x1}\" y1=\"{y1}\" x2=\"{x2}\" y2=\"{y2}\"/>\n            <polygon data-hash=\"{hash}\" points=\"{l1},{y1} {r1},{y1} {r2},{y2} {l2},{y2}\" style=\"fill:transparent; stroke:none; pointer-events:fill;\"/>\n        </g>\n",
+        title = data.title, hash = data.hash,
+        x1 = data.x1, y1 = data.y1, x2 = data.x2, y2 = data.y2, last = (data.y2 - 3).max(data.y1),
+        l1 = data.x1 - w, r1 = data.x1 + w, l2 = data.x2 - w, r2 = data.x2 + w,
+    )
 }
 
 fn compute_hollow_line_data(v_data: VerticalLineData, w: f64) -> HollowLineData{
@@ -4317,8 +4431,9 @@ fn create_owner_line_string(
             let new_hollow_line_data = compute_hollow_line_data(hollow_line_data, 3.5);
             registry.render("new_hollow_line_template", &new_hollow_line_data).unwrap()
         },
+        (State::RevokedPrivilege{..}, OwnerLine::Dotted) => lent_line_string(data),
         (State::OutOfScope, _) => "".to_owned(),
-        // do nothing when the case is (RevokedPrivilege, false), (OutofScope, _), (ResourceMoved, false)
+        // do nothing when the case is (OutofScope, _), (ResourceMoved, _)
         (_, _) => "".to_owned()
     }
 }
@@ -4360,7 +4475,10 @@ fn create_reference_line_string(
             data.line_class = String::from("extend");
             registry.render("vertical_line_template", &data).unwrap()
         }
-        // do nothing when the case is (RevokedPrivilege, _), (OutofScope, _), (ResourceMoved, false)
+        // Mutably reborrowed (`let r2 = &mut *r;`) or, for a `&T`
+        // binding, itself borrowed `&mut` (#722).
+        (State::RevokedPrivilege{ .. }, _) => lent_line_string(data),
+        // do nothing when the case is (OutofScope, _), (ResourceMoved, false)
         _ => "".to_owned(),
     }
 }
@@ -4461,8 +4579,20 @@ fn state_is_alive(state: &State) -> bool {
 
 /// Whether a conditional's arm draws a line for the column in `state`
 /// (`push_seg_if_renderable`): where it doesn't, it draws nothing.
+///
+/// Not the dotted line of a column that is mutably lent out
+/// (`seg_drawn`): a split or join dot there would say the column is
+/// live in the conditional, so it's left out and its text goes on the
+/// column's next dot (#702).
 fn line_drawn(rap: &ResourceAccessPoint, state: &State) -> bool {
     !matches!(determine_owner_line_styles(rap, state), OwnerLine::Empty | OwnerLine::Dotted)
+}
+
+/// Whether an arm draws a segment for the column in `state`: a line
+/// (`line_drawn`), or the dotted line of a column mutably lent out
+/// (#722).
+fn seg_drawn(rap: &ResourceAccessPoint, state: &State) -> bool {
+    !matches!(determine_owner_line_styles(rap, state), OwnerLine::Empty)
 }
 
 /// Half-width of a hollow strip — matches `compute_hollow_line_data`'s
@@ -4564,6 +4694,7 @@ fn render_branches(
     visualization_data: &VisualizationData,
     timeline_data: &TimelineColumnData,
     maybe_init: bool,
+    path: &[(usize, usize)],
 ) {
     if rap.is_fn() { return; }
     for (k, (_, ev)) in history.iter().enumerate() {
@@ -4631,6 +4762,9 @@ fn render_branches(
 
         for (i, branch) in branch_history.iter().enumerate() {
             let branch_x = branch.t_data.x_val as f64;
+            // The arms this one is nested in, and this one, by their
+            // conditional's split line (`lent_out_title`).
+            let arm_path = [path, &[(*split_point, i)]].concat();
             // Active arm: i == 0 with non-empty body. Other arms,
             // and any empty body, render passive (Gray-converted
             // leading so it's dashed).
@@ -4651,7 +4785,7 @@ fn render_branches(
             push_seg_if_renderable(
                 &mut segs, rap,
                 (parent_x, split_y), (branch_x, column_top_y),
-                leading_state.clone(), visualization_data, &arm_label, Leg::Split, *split_point,
+                leading_state.clone(), visualization_data, &arm_label, Leg::Split, *split_point, &arm_path,
             );
             // An arm that starts below the raised fork's row (the `else`)
             // runs down to its first row in the state it forked with.
@@ -4661,7 +4795,7 @@ fn render_branches(
                     push_seg_if_renderable(
                         &mut segs, rap,
                         (branch_x, column_top_y), (branch_x, get_y_axis_pos(first_row) as f64),
-                        leading_state, visualization_data, &arm_label, Leg::Column, *split_point,
+                        leading_state, visualization_data, &arm_label, Leg::Column, *split_point, &arm_path,
                     );
                 }
             }
@@ -4705,7 +4839,7 @@ fn render_branches(
                     &mut segs, rap,
                     (branch_x, y1 as f64),
                     (branch_x, y2 as f64),
-                    state.clone(), visualization_data, &arm_label, Leg::Column, *top,
+                    state.clone(), visualization_data, &arm_label, Leg::Column, *top, &arm_path,
                 );
                 if segs.len() > n { ended_title(&mut segs, bot); }
             }
@@ -4719,7 +4853,7 @@ fn render_branches(
                     push_seg_if_renderable(
                         &mut segs, rap,
                         (branch_x, column_bot_y), (parent_x, merge_y),
-                        end_state, visualization_data, &arm_label, Leg::Join, *merge_point,
+                        end_state, visualization_data, &arm_label, Leg::Join, *merge_point, &arm_path,
                     );
                     if segs.len() > n { ended_title(&mut segs, *merge_point); }
                 }
@@ -4775,7 +4909,7 @@ fn render_branches(
                 let n = segs.len();
                 push_seg_if_renderable(
                     &mut segs, rap, (branch_x, top), (branch_x, bot),
-                    parent_active.clone(), visualization_data, &arm_label, Leg::Column, own_first,
+                    parent_active.clone(), visualization_data, &arm_label, Leg::Column, own_first, &arm_path,
                 );
                 if segs.len() > n {
                     let mut solid = segs.pop().unwrap();
@@ -4844,7 +4978,7 @@ fn render_branches(
 
             render_branches(
                 hash, rap, &branch.e_data, &branch.states,
-                output, visualization_data, &branch.t_data, entry_maybe_init,
+                output, visualization_data, &branch.t_data, entry_maybe_init, &arm_path,
             );
         }
     }
@@ -4862,8 +4996,9 @@ fn push_seg_if_renderable(
     arm_label: &str,
     leg: Leg,
     row: usize,
+    path: &[(usize, usize)],
 ) {
-    if !line_drawn(rap, &state) {
+    if !seg_drawn(rap, &state) {
         return;
     }
     // A dashed arm column (`Gray`): another arm's code runs on these
@@ -4879,6 +5014,12 @@ fn push_seg_if_renderable(
         (true, Leg::Split) => hover_messages::state_arm_split(arm_label),
         (true, Leg::Join) => hover_messages::state_arm_join(arm_label),
         (true, Leg::Column) => hover_messages::state_inactive_arm(arm_label),
+        // Mutably lent out (#722): who holds the borrow on the row the
+        // segment starts on (a join's, the row above the join).
+        (false, _) if matches!(state, State::RevokedPrivilege { .. }) => {
+            let row = if leg == Leg::Join { row.saturating_sub(1) } else { row };
+            revoked_title(rap, visualization_data, row, path)
+        }
         // `row`: the first source row the segment covers, for a `for`
         // loop around the conditional (#871).
         (false, _) => loop_iterator_title(&state, rap, visualization_data, row)
@@ -5022,7 +5163,13 @@ fn render_branch_run(
                     ));
                 }
             }
-            OwnerLine::Empty | OwnerLine::Dotted => {} // unreachable: filtered before push
+            // Mutably lent out (#722); the segment's hover polygon below
+            // takes the hover.
+            OwnerLine::Dotted => svg.push_str(&format!(
+                "            <line data-hash=\"{}\" class=\"lent tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\"{}/>\n",
+                hash, seg.p1.0, seg.p1.1, seg.p2.0, seg.p2.1, seg.title, underline_attr(seg, own_y, split_row),
+            )),
+            OwnerLine::Empty => {} // unreachable: filtered before push
         }
     }
 
@@ -5176,7 +5323,7 @@ fn render_timeline(
     // ranges (clean_states leaves an OOS placeholder over the
     // branch's split..merge span, so those rows naturally render
     // as nothing).
-    render_branches(hash, rap, history, states, output, visualization_data, timeline_data, false);
+    render_branches(hash, rap, history, states, output, visualization_data, timeline_data, false, &[]);
 
     let apexes = CollapsedApexes::of(history);
     for (line_start, line_end, state) in states {

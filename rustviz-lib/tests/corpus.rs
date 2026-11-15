@@ -6101,10 +6101,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "outer_mut_ref_end_in_if_arm",
-        // While `r = &mut s` is live s's column draws no line at the
-        // split: "s is live in a conditional expression" is on each arm's
-        // first dot, not a split dot of its own (#702, geometry in
-        // `no_split_or_join_dot_floats_off_its_column`).
+        // While `r = &mut s` is live s's column is only dotted (lent
+        // out, #722) at the split: "s is live in a conditional
+        // expression" is on each arm's first dot, not a split dot of its
+        // own (#702, geometry in `no_split_or_join_dot_floats_off_its_column`).
         must_contain: &[
             "Return mutably borrowed resource from r to s",
             "s's resource is no longer mutably borrowed",
@@ -17588,6 +17588,76 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from a to q",
         ],
     },
+    // #722: a column that is mutably lent out can't be used, and draws a
+    // faint dotted line until the borrow ends (geometry in
+    // `a_column_lent_out_mutably_is_dotted_until_the_borrow_ends`). Its
+    // text says so, naming who holds the borrow when one variable or
+    // closure does. Main drew nothing there, so none of these texts was
+    // in the timeline.
+    TooltipExpect {
+        name: "deref_write_ends_borrow",
+        must_contain: &[
+            "v's resource is mutably borrowed by x; v can't be used until the borrow ends",
+            "v's resource is mutably borrowed by it; v can't be used until the borrow ends",
+            // While `it` and the `y` taken out of it both hold it.
+            "v's resource is mutably borrowed; v can't be used until the borrow ends",
+        ],
+        must_not_contain: &[
+            // iter_mut has returned; its borrow lives on in `it`.
+            "mutably borrowed by iter_mut; v can't be used until",
+            // The old (never drawn) text of a mutably borrowed state.
+            "so it cannot access the resource",
+        ],
+    },
+    TooltipExpect {
+        name: "reborrow_kinds",
+        must_contain: &[
+            "a's resource is mutably borrowed by ra; a can't be used until the borrow ends",
+            "the resource ra points to is mutably borrowed by ra2 through ra; ra can't be used until the borrow ends",
+            // rb2 = &mut rb borrows rb itself, not what rb points to (#914).
+            "rb is mutably borrowed by rb2; rb can't be used until the borrow ends",
+        ],
+        // A reference owns nothing.
+        must_not_contain: &[
+            "ra's resource is mutably borrowed",
+            "the resource rb points to is mutably borrowed by rb2 through rb; rb can't be used until",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_capture_through_ref",
+        must_contain: &[
+            "t's resource is mutably borrowed by closure h; t can't be used until the borrow ends",
+            // An i32 is a value, and p only points to it.
+            "n's value is mutably borrowed by p; n can't be used until the borrow ends",
+            "the value p points to is mutably borrowed by closure g through p; p can't be used until the borrow ends",
+        ],
+        must_not_contain: &[
+            "n's resource is mutably borrowed",
+            "p's value is mutably borrowed",
+            "so it cannot access the value",
+        ],
+    },
+    TooltipExpect {
+        name: "call_reborrow_kinds",
+        must_contain: &["s's resource is mutably borrowed by y; s can't be used until the borrow ends"],
+        // `let w = first(y);`: first has returned; w holds the reborrow.
+        must_not_contain: &["mutably borrowed by first; s can't be used until"],
+    },
+    TooltipExpect {
+        name: "advanced_deref",
+        // `let z = &mut y;` with y: &i32 borrows the reference y itself;
+        // through a `&` nothing can borrow the value y points to mutably.
+        must_contain: &["y is mutably borrowed by z; y can't be used until the borrow ends"],
+        must_not_contain: &["the value y points to is mutably borrowed"],
+    },
+    TooltipExpect {
+        name: "outer_mut_ref_end_in_if_arm",
+        // On s's column before the `if`, and on both arms' columns (the
+        // `else` arm's beside the `if` arm's rows too: r holds the borrow
+        // until the path reaches the `else`).
+        must_contain: &["s's resource is mutably borrowed by r; s can't be used until the borrow ends"],
+        must_not_contain: &["s's resource is mutably borrowed; s can't be used"],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -21487,7 +21557,9 @@ fn mutable_branch_bends_have_round_joints() {
     // if/else: 2 arms x (split + join); match: 2 bent arms x (split +
     // join) (the middle arm is straight).
     assert!(dots == 8, "expected a round joint at each bend, found {}", dots);
-    assert!(t.contains("stroke-linecap: round"));
+    // (On the joint lines themselves: the stylesheet's `.lent` dots
+    // are round-capped too, #722.)
+    assert!(start_tags(&t, "line").iter().any(|l| l.contains("stroke-linecap: round")));
     // The joints are decorative: a bend point can lie on another arm's
     // row, so they must not be hoverable arm elements.
     assert!(start_tags(&t, "line").into_iter()
@@ -21504,7 +21576,7 @@ fn mutable_branch_bends_have_round_joints() {
     assert!(plain_dots == 4, "expected 4 round joints, found {}", plain_dots);
     // Immutable (double-line) columns are untouched.
     let imm = run_with_local_backend("if_no_else").timeline_panel_string();
-    assert!(!imm.contains("stroke-linecap"));
+    assert!(!start_tags(&imm, "line").iter().any(|l| l.contains("stroke-linecap")));
 }
 
 /// #519: the dot of `t = (w, 2)` (and of `t.0 = s`) says the new resource
@@ -21902,49 +21974,144 @@ fn reference_column_reaches_its_last_use() {
         let timeline = run_with_local_backend(name).timeline_panel_string();
         assert_eq!(lone_dots(&timeline, |t| !skip(t)), Vec::new(), "{}: dots no line reaches", name);
     }
-    // These also have dots of a reference while it is itself mutably
-    // reborrowed (`m = n;` lends n to m): like any lender's column, it
-    // draws no line while `&mut`-borrowed (#722's first group), and the
-    // reborrow's end is its last use. Check the uses after a reassignment.
-    //
-    // advanced_deref's y is like that too, and its old borrow ends on the
-    // dot where z's `&mut` borrow of it ends (`println!("c value {}",
-    // **z);`): rustc ends z's loan of y and the loan of c that `*z = &c;`
-    // put in y both there (`c += 1;` right after compiles), and y is
-    // dead until `y = &x;` gives it a new reference (#745). That dot,
-    // "y is no longer mutably borrowed • y's immutable borrow ends",
-    // ends two different loans, and no line reaches it: none is drawn
-    // while z borrows y, and none after (#700 listed advanced_deref in
-    // the first list when its old borrow ended at `y = &x;`).
-    //
-    // `*z = &c;` re-points y while z still borrows it (#904): that dot,
-    // "y immutably borrows a value", is in the stretch where y draws no
-    // line, like the dot where z's borrow starts, so it is not checked.
-    for (name, uses, unchecked_row) in [
-        ("advanced_deref", &[
-            "y immutably borrows a value",
-            "println! no longer borrows the value y points to",
-        ][..], Some("*z = &c;")),
-        ("aliasing2", &["println! no longer borrows the value b points to"][..], None),
-        ("ref_reassign_wording", &[
-            "println! no longer borrows the value r points to",
-            "r is assigned a copy of s's reference",
-            "push no longer borrows the resource m points to",
-            "println! no longer borrows the resource m points to",
-            "println! no longer borrows the resource t points to",
-        ][..], None),
+    // advanced_deref, aliasing2 and ref_reassign_wording also have dots
+    // of a reference while it is itself mutably reborrowed (`m = n;`
+    // lends n to m); its column is dotted then (#722), and those dots
+    // are checked with the other lent-out columns in
+    // `no_dot_of_a_lent_out_column_floats`.
+}
+
+/// The faint dotted lines of columns that are mutably lent out
+/// (`class="lent"`, #722), as `(x1, y1, x2, y2)`.
+fn lent_lines(svg: &str) -> Vec<(f64, f64, f64, f64)> {
+    start_tags(svg, "line")
+        .into_iter()
+        .filter(|t| attr(t, "class").is_some_and(|c| c.split(' ').any(|c| c == "lent")))
+        .map(|t| (num_attr(t, "x1"), num_attr(t, "y1"), num_attr(t, "x2"), num_attr(t, "y2")))
+        .collect()
+}
+
+/// Where the dotted lent-out lines of a timeline panel start and stop:
+/// the ends of `lent_lines` that no other dotted line continues from.
+fn lent_line_ends(svg: &str) -> Vec<(f64, f64)> {
+    let lines = lent_lines(svg);
+    let ends: Vec<(f64, f64)> = lines.iter().flat_map(|&(x1, y1, x2, y2)| [(x1, y1), (x2, y2)]).collect();
+    let same = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).abs() < 0.01 && (a.1 - b.1).abs() < 0.01;
+    let mut out: Vec<(f64, f64)> = ends.iter()
+        .filter(|&&p| ends.iter().filter(|&&q| same(p, q)).count() == 1)
+        .copied()
+        .collect();
+    out.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    out
+}
+
+/// #722: while a column is mutably lent out (an owner `&mut`-borrowed, a
+/// `&mut` reference mutably reborrowed) it can't be used, and main drew
+/// no line for it: the events of the lend (a borrow through it, a
+/// sub-borrow ending, the end of the lend) floated off their column. It
+/// now draws a faint dotted line exactly over the lend, borrow-checker
+/// view: from the lender's dot where the borrow starts to the dot where
+/// it ends, in each arm of a conditional to that arm's end of it. Each
+/// case lists every end of the dotted lines in the snippet as the dot
+/// (one of its texts, and its source line, the nth time that line
+/// appears) it must sit on.
+#[test]
+fn a_column_lent_out_mutably_is_dotted_until_the_borrow_ends() {
+    for (name, ends) in [
+        ("deref_write_ends_borrow", &[
+            ("v's resource is mutably borrowed by x; v can't be used while the borrow is live", "let x = &mut v[0];", 0),
+            ("v's resource is no longer mutably borrowed", "*x += 1;", 0),
+            ("v's resource is mutably borrowed by it; v can't be used while the borrow is live", "let mut it = v.iter_mut();", 0),
+            // `while let` holds `it`'s borrow until the loop ends.
+            ("v's resource is no longer mutably borrowed", "}", 0),
+        ][..]),
+        ("reborrow_kinds", &[
+            ("a's resource is mutably borrowed by ra; a can't be used while the borrow is live", "let ra = &mut a;", 0),
+            ("a's resource is no longer mutably borrowed", "ra.push_str(\"?\");", 0),
+            ("the resource ra points to is mutably borrowed by ra2 through ra; ra can't be used while the borrow is live",
+             "let ra2 = &mut *ra; // mutable reborrow: ra unusable while ra2 is live", 0),
+            ("ra2 no longer borrows the resource ra points to", "ra2.push_str(\"!\");", 0),
+            ("b's resource is mutably borrowed by rb; b can't be used while the borrow is live", "let mut rb = &mut b;", 0),
+            ("b's resource is no longer mutably borrowed", "rb2.push_str(\"!\");", 0),
+            // rb2 = &mut rb borrows rb itself (#914).
+            ("rb is mutably borrowed by rb2; rb can't be used while the borrow is live",
+             "let rb2 = &mut rb; // fresh mutable borrow of rb: &mut &mut String", 0),
+            ("rb is no longer mutably borrowed", "rb2.push_str(\"!\");", 0),
+        ][..]),
+        ("closure_capture_through_ref", &[
+            ("s's resource is mutably borrowed by r; s can't be used while the borrow is live", "let r = &mut s;", 0),
+            ("s's resource is no longer mutably borrowed", "println!(\"{}\", len());", 0),
+            ("the resource r points to is captured by closure f (a mutable reborrow through r); r can't be used while the borrow is live",
+             "let mut f = || r.push('b');", 0),
+            ("f no longer borrows the resource r points to", "f();", 0),
+            ("n's value is mutably borrowed by p; n can't be used while the borrow is live", "let p = &mut n;", 0),
+            ("n's value is no longer mutably borrowed", "g();", 0),
+            ("the resource p points to is captured by closure g (a mutable reborrow through p); p can't be used while the borrow is live",
+             "let mut g = || *p += 1;", 0),
+            ("g no longer borrows the value p points to", "g();", 0),
+            ("t's resource is captured (mutably borrowed) by closure h", "let mut h = || t.push('x');", 0),
+            ("t's resource is no longer mutably borrowed", "h();", 0),
+        ][..]),
+        // In a conditional: each arm's dotted line ends where the borrow
+        // ends on that arm's path (at r's last use in the `if`, as the
+        // `else` starts on the other).
+        ("outer_mut_ref_end_in_if_arm", &[
+            ("s's resource is mutably borrowed by r; s can't be used while the borrow is live", "let r = &mut s;", 0),
+            ("s's resource is no longer mutably borrowed", "r.push('x');", 0),
+            ("s's resource is no longer mutably borrowed", "} else {", 0),
+        ][..]),
+        // A `&mut` parameter reborrowed by a `match` arm's binding.
+        ("match_mut_ref_param_reborrow", &[
+            ("the resource o points to is mutably borrowed by s through o; o can't be used while the borrow is live", "Some(s) => {", 0),
+            ("s no longer borrows the resource o points to", "s.push('!');", 0),
+        ][..]),
     ] {
         let rv = run_with_local_backend(name);
-        let timeline = rv.timeline_panel_string();
-        let skip_y = unchecked_row.map(|src| code_row_y(&rv.code_panel_string(), src));
-        for used in uses {
-            let lone: Vec<_> = lone_dots(&timeline, |t| t.iter().any(|l| l == used))
-                .into_iter()
-                .filter(|d| Some(d.1) != skip_y)
-                .collect();
-            assert_eq!(lone, Vec::new(), "{}: no line reaches the dot of {:?}", name, used);
-            assert!(!dots_listing_tooltip(&timeline, used).is_empty(), "{}: no dot lists {:?}", name, used);
-        }
+        let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+        let mut want: Vec<(f64, f64)> = ends.iter().map(|&(text, src, nth)| {
+            let row = code_rows_y(&code, src)[nth];
+            let dots: Vec<(f64, f64)> = dots_listing_tooltip(&tl, text).into_iter().filter(|d| d.1 == row).collect();
+            assert_eq!(dots.len(), 1, "{}: one dot {:?} on the row of `{}`", name, text, src);
+            dots[0]
+        }).collect();
+        want.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(lent_line_ends(&tl), want, "{}: where the dotted lent-out lines end", name);
+    }
+}
+
+/// #722: no dot of a column floats off it while the column is mutably
+/// lent out. Main drew no line then, and left these dots alone:
+/// - a lender's events during the lend (another `&mut` taken from the
+///   holder: "v's resource is mutably borrowed by y", "v's resource is
+///   no longer borrowed by y, but is still mutably borrowed by it");
+/// - a mutably reborrowed reference getting access back on the row its
+///   own borrow ends.
+#[test]
+fn no_dot_of_a_lent_out_column_floats() {
+    // A scope end stands alone after the column ended, as does a
+    // temporary's drop.
+    let skip = |tips: &[String]| tips.iter().any(|t| {
+        t.split_once(" goes out of scope").is_some_and(|(who, _)| !who.contains(' '))
+            || t.contains("temporary")
+    });
+    for name in [
+        "deref_write_ends_borrow",
+        "holder_ref_ends_first",
+        "holder_iter_mut",
+        "holder_ref_param_iter_mut",
+        "call_reborrow_kinds",
+        "ref_move_copy_wording",
+        "advanced_deref",
+        "ref_reassign_wording",
+        "field_mut_borrow_through_ref",
+        "aliasing2",
+        "reborrow_kinds",
+        "closure_capture_through_ref",
+        "match_mut_ref_param_reborrow",
+    ] {
+        let timeline = run_with_local_backend(name).timeline_panel_string();
+        assert!(!lent_lines(&timeline).is_empty(), "{}: no dotted lent-out line", name);
+        assert_eq!(lone_dots(&timeline, |t| !skip(t)), Vec::new(), "{}: dots no line reaches", name);
     }
 }
 
@@ -22750,8 +22917,9 @@ fn reassign_from_a_loop_drops_where_the_loop_ends() {
 ///   and no line runs from there to the outer one ("s was moved in at
 ///   least one branch above ...");
 /// - the split of a lender while `r = &mut s` is live across the
-///   conditional: its column draws no line there, and the arms start
-///   from nothing ("s is live in a conditional expression");
+///   conditional: its column draws no line there (only the dotted
+///   lent-out line since #722, which no split dot goes on), and the arms
+///   start from nothing ("s is live in a conditional expression");
 /// - the join in a loop body after arms that `break` / `return`, where
 ///   the reference's borrow ended in every arm ("v's borrow ended in
 ///   each branch above", and an empty join dot on x's column).

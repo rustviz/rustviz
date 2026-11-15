@@ -2491,7 +2491,8 @@ pub fn state_ref_moved(my_name: &String, is_mut: bool) -> String {
 }
 
 // temporarily no read or write access right to the resource, but eventually
-// the privilege will come back. Occurs when mutably borrowed. This is an invisible line in the timeline.
+// the privilege will come back. Occurs when mutably borrowed. The timeline
+// draws `state_lent_out` on that segment instead (#722).
 pub fn state_resource_revoked(my_name: &String) -> String {
     // update styling
     let my_name_fmt = styled_name_html(my_name);
@@ -2747,6 +2748,46 @@ pub fn event_dot_lend_to_loop_iterator(my_name: &String, is_mut: bool, holds_val
 /// borrow only a `for` loop's iterator holds (#900). Not a variable, so
 /// not styled as one.
 pub const LOOP_ITERATOR_HOLDER: &str = "the `for` loop's iterator";
+
+/// Who holds the `&mut` borrow a column is lent out to, for
+/// `state_lent_out`.
+pub enum LentTo<'a> {
+    /// A variable (or field) holding the reference.
+    Var(&'a str),
+    /// A closure that captured it mutably.
+    Closure(&'a str),
+    /// A `for` loop's iterator, which has no column.
+    LoopIterator,
+    /// Nothing RustViz can name (several holders, or a call's result
+    /// that isn't bound).
+    Unknown,
+}
+
+/// The faint dotted segment of a column while it is mutably lent out
+/// (RevokedPrivilege, #722): the column can't be used until the `&mut`
+/// borrow ends. Worded like the lender's dot (`event_dot_mut_lend`,
+/// `event_dot_lend_through_ref`, `event_dot_lend_to_loop_iterator`),
+/// with "until the borrow ends" for the stretch of rows.
+///
+/// `through_ref`: the column is a `&mut` reference, so what's borrowed is
+/// what it points to (Some(pointee_copy)); `ref_itself`: the column is a
+/// `&T` binding that was itself borrowed `&mut` (`&mut r`).
+pub fn state_lent_out(my_name: &String, to: LentTo, through_ref: Option<bool>, ref_itself: bool, holds_value: bool) -> String {
+    let me = styled_name_html(my_name);
+    let by = match &to {
+        LentTo::Var(v) => format!(" by {}", styled_name_html(v)),
+        LentTo::Closure(c) => format!(" by closure {}", styled_name_html(c)),
+        LentTo::LoopIterator => " by the `for` loop's iterator".to_owned(),
+        LentTo::Unknown => String::new(),
+    };
+    let until = if matches!(to, LentTo::LoopIterator) { "the loop ends" } else { "the borrow ends" };
+    let subject = match through_ref {
+        _ if ref_itself => format!("{} is mutably borrowed{}", me, by),
+        Some(pointee_copy) => format!("the {} {} points to is mutably borrowed{} through {}", held(pointee_copy), me, by, me),
+        None => format!("{}'s {} is mutably borrowed{}", me, held(holds_value), by),
+    };
+    format!("{}; {} can't be used until {}", subject, me, until)
+}
 
 // PartialPrivilege of a variable that only a `for` loop's iterator
 // borrows (`for c in s.chars()`, `for (i, a) in v.iter().enumerate()`;
