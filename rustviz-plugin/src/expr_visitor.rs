@@ -2467,7 +2467,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             self.update_rap(&x, line_num);
             Some(ResourceTy::Deref(x))
           }
-          None => Some(ResourceTy::Anonymous),
+          // `*v.get_mut(0).unwrap() += 1`: a write into v's resource
+          // (#861). Otherwise a deref of a temporary with no column.
+          None => Some(self.deref_of_mut_call(expr).unwrap_or(ResourceTy::Anonymous)),
         }
       }
       // `v[i] = …`, `grid[r][c] += …`, `r[i] = …` (r: `&mut Vec<_>`):
@@ -2697,6 +2699,75 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       PlaceWrite::AssignOwned
     };
     Some(ResourceTy::Index(rap, place, write))
+  }
+
+  /// `*v.get_mut(0).unwrap() += 1`, `*m.get_mut(&k).unwrap() = 5`,
+  /// `*map.entry(k).or_insert(0) += 1`: a write through the `&mut` a
+  /// method chain on a variable returns, into part of the resource the
+  /// variable owns (or points to). Drawn on the variable's column like
+  /// an element write `v[0] += 1` (#861): "v's resource is modified
+  /// through v.get_mut(0).unwrap()" for `op=`, and for `=` a plain
+  /// assignment to the place `*v.get_mut(0).unwrap()` (dropping the old
+  /// value, if it needs drop). Only when the chain's first call takes
+  /// the variable by `&mut`: one taking `&self` (`c.borrow_mut()` on a
+  /// RefCell, `m.lock()`) writes through interior mutability, not
+  /// through a mutable borrow of the variable.
+  fn deref_of_mut_call(&mut self, expr: &'tcx Expr<'tcx>) -> Option<ResourceTy> {
+    let mut inner = expr;
+    let mut derefs = 0;
+    while let ExprKind::Unary(UnOp::Deref, e) = inner.kind {
+      inner = e;
+      derefs += 1;
+    }
+    let ExprKind::MethodCall(..) = inner.kind else { return None };
+    let mut first_call = inner;
+    let mut cur = inner;
+    loop {
+      match cur.kind {
+        ExprKind::MethodCall(_, rcvr, _, _) => {
+          first_call = cur;
+          cur = rcvr;
+        }
+        ExprKind::Field(base, _) | ExprKind::Index(base, _, _) | ExprKind::Unary(UnOp::Deref, base) => cur = base,
+        _ => break,
+      }
+    }
+    let typeck = self.tcx.typeck(expr.hir_id.owner);
+    let def_id = typeck.type_dependent_def_id(first_call.hir_id)?;
+    let sig = self.tcx.fn_sig(def_id).instantiate_identity().skip_norm_wip();
+    let self_ty = *sig.skip_binder().inputs().first()?;
+    if self_ty.ref_mutability() != Some(Mutability::Mut) {
+      return None;
+    }
+    let ResourceTy::Index(rap, _, write) = self.place_without_column(expr)? else { return None };
+    let chain = self.call_chain_label(inner).unwrap_or_else(|| format!("{}.…", rap.name()));
+    let is_update = matches!(self.tcx.parent_hir_node(expr.hir_id),
+      rustc_hir::Node::Expr(Expr { kind: ExprKind::AssignOp(_, lhs, _), .. }) if lhs.hir_id == expr.hir_id);
+    // `op=` modifies the place in place: "modified through" the
+    // reference the chain returns. `=` assigns to the place itself.
+    let place = if is_update { chain } else { format!("{}{}", "*".repeat(derefs), chain) };
+    Some(ResourceTy::Index(rap, place, write))
+  }
+
+  /// A method chain as written (`v.get_mut(0).unwrap()`), for a tooltip.
+  /// An argument list that is long or has characters a label leaves
+  /// out (`m.get_mut(&k)`, `m.get_mut("k")`) is shortened to `(…)`.
+  fn call_chain_label(&self, e: &Expr) -> Option<String> {
+    if e.span.from_expansion() {
+      return None;
+    }
+    let text = self.tcx.sess.source_map().span_to_snippet(e.span).ok().filter(|t| t.chars().count() <= 32
+      && !t.contains(|c: char| matches!(c, '<' | '>' | '&' | '"' | '\'' | '\n' | '\r')));
+    if text.is_some() {
+      return text;
+    }
+    match e.kind {
+      ExprKind::MethodCall(seg, rcvr, args, _) => {
+        let rcvr = self.call_chain_label(rcvr)?;
+        Some(format!("{}.{}({})", rcvr, seg.ident, if args.is_empty() { "" } else { "…" }))
+      }
+      _ => None,
+    }
   }
 
   /// `place = &x` / `place = &mut x` where `place` has no column of its
@@ -2958,7 +3029,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   /// A place's source text if it's short and plain enough to put in a
   /// tooltip (see `place_label`).
-  fn plain_source_text(&self, expr: &Expr) -> Option<String> {
+  pub(crate) fn plain_source_text(&self, expr: &Expr) -> Option<String> {
     if expr.span.from_expansion() {
       return None;
     }

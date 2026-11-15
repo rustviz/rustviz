@@ -549,6 +549,38 @@ fn element_update_holds_value(r: &ResourceAccessPoint, place: &str, write: &Plac
     }
 }
 
+/// Appends `event` to a column's history. A write through a reference
+/// to part of v's resource, drawn on v's column (#861), goes before the
+/// end of that reference's borrow of v on the same line, which may be
+/// recorded first: the write is done through the reference. That is
+/// the call's result in `*v.get_mut(0).unwrap() += 1` and
+/// `v.last_mut().unwrap().n = 5` (the call's events end its borrow of v,
+/// "v's resource is no longer mutably borrowed", as one event), and x
+/// in `*x += 1` as x's last use.
+fn push_history_event(history: &mut Vec<(usize, Event)>, line: usize, event: Event) {
+    if let Event::Acquire { is: ResourceTy::Index(_, place, _), .. } = &event {
+        let ends_through = |e: &Event| match e {
+            Event::MutableReacquire { from: ResourceTy::Value(f), .. } if f.is_fn() =>
+                place.contains(&format!(".{}(", f.name())),
+            Event::MutableReacquire { from: ResourceTy::Value(r), .. } if r.is_mutref() =>
+                place.trim_start_matches('*') == r.name(),
+            _ => false,
+        };
+        // The borrow ends recorded last on this line (another borrow of
+        // v ending there too, `it` for `first` from `it.next()`, is
+        // drawn after the write as well).
+        let run = history.iter().rev()
+            .take_while(|(l, e)| *l == line && matches!(e, Event::MutableReacquire { .. }))
+            .count();
+        let start = history.len() - run;
+        if history[start..].iter().any(|(_, e)| ends_through(e)) {
+            history.insert(start, (line, event));
+            return;
+        }
+    }
+    history.push((line, event));
+}
+
 pub fn place_assign_copy_message(place: &String, from: &ResourceTy) -> String {
     match from.extract_rap().filter(|f| !f.is_fn()) {
         Some(_) => hover_messages::event_dot_copyable_assign_copy(place, &from.name()),
@@ -3778,6 +3810,11 @@ impl Visualizable for VisualizationData {
             | (State::RevokedPrivilege{ .. }, Event::Acquire{ .. })
             | (State::RevokedPrivilege{ .. }, Event::Copy{ .. }) if !self.is_ref(hash) =>
                 (*previous_state).clone(),
+            // A write to an element through the reborrow a call made
+            // (`*v.get_mut(0).unwrap() = 5` with v a `&mut Vec` parameter,
+            // #861) is drawn before the reborrow ends: v keeps its state.
+            (State::RevokedPrivilege{ .. }, Event::Acquire{ is: ResourceTy::Index(..), .. }) =>
+                (*previous_state).clone(),
 
             (State::FullPrivilege{..}, Event::StaticLend{ ..}) =>
                 State::PartialPrivilege { s: LineState::Full },
@@ -4270,9 +4307,7 @@ impl Visualizable for VisualizationData {
         // append the event to the end of the timeline of the corresponding hash
         match self.timelines.get_mut(hash) {
             Some(timeline) => {
-                timeline.history.push(
-                    (*line_number, event)
-                );
+                push_history_event(&mut timeline.history, *line_number, event);
             },
             _ => {
                 panic!("internal state: timeline #{} vanished right after it was created", hash);
@@ -4497,7 +4532,9 @@ impl Visualizable for VisualizationData {
                     b_history.extend(self.event_of_external_event(line_number, event, false));
                 }
                 else if *to == *is || through_rap(to) || to_elem {
-                    b_history.extend(self.event_of_external_event(line_number, event, true));
+                    for (l, e) in self.event_of_external_event(line_number, event, true) {
+                        push_history_event(b_history, l, e);
+                    }
                 }
                 else if let Some(r) = event.is_gos_ev() {
                     if *r.name() == is.real_name() {

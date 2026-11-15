@@ -15830,8 +15830,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // as the place written: main ended `a`'s loan at `*p = &t` (refs
         // still holds it), and said v and x now borrowed a string literal.
         // `*p = &t` keeps t borrowed until refs' last use, as
-        // `refs[0] = &t` does. (#861: a write through get_mut isn't drawn
-        // on words's column, as for `Vec<i32>`.)
+        // `refs[0] = &t` does. (A reference stored in an element isn't
+        // drawn on the collection's column, as for `words[1] = "x"`; a
+        // `Vec<i32>` element written through get_mut is, #861.)
         must_contain: &[
             "r is a mutable borrow from the caller",
             "*r is assigned a new value",
@@ -16832,6 +16833,41 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "w is live in a conditional expression",
             "w has no value yet",
             "w's borrow has ended on this path",
+        ],
+    },
+    TooltipExpect {
+        name: "get_mut_write_861",
+        // #861: a write through the `&mut` that `get_mut` returns wasn't
+        // drawn on the collection's column, while `v[0] += 1` is ("v's
+        // resource is modified through v[0]"). Main drew nothing on v for
+        // `*v.get_mut(0).unwrap() += 1` or m for `*m.get_mut("k").unwrap()
+        // = 5`, and on names, for `*n = String::from("d")` with
+        // `n = &mut names[1]`, it said names got a new resource and its
+        // whole Vec ("including every String it holds") was dropped: only
+        // the String in names[1] is; the same for a field column
+        // (`b.items`). The call's borrow of v ends after
+        // the write done through its result, so the write's line comes
+        // first in the dot. (The `get_mut` row test below pins which
+        // column each text is on.)
+        must_contain: &[
+            "v's resource is modified through v.get_mut(0).unwrap()",
+            "v's resource is modified through x",
+            "*y is assigned a new value",
+            "v's resource is modified through e",
+            "*m.get_mut(…).unwrap() is assigned a new value",
+            "*names.get_mut(0).unwrap() acquires ownership of a new resource; its previous resource is dropped",
+            "Move from String::from to *names.get_mut(0).unwrap()",
+            "*n acquires ownership of a new resource; its previous resource is dropped",
+            "*it acquires ownership of a new resource; its previous resource is dropped",
+            // x's own column keeps its texts.
+            "the value x points to is modified through *x",
+            "x's mutable borrow ends",
+            "v's resource is mutably borrowed by x; v can't be used while the borrow is live",
+        ],
+        must_not_contain: &[
+            "names acquires ownership of a new resource",
+            "b.items acquires ownership of a new resource",
+            "including every String it holds) is dropped",
         ],
     },
 ];
@@ -22376,6 +22412,39 @@ fn format_macro_arguments_are_coloured_in_the_code_panel() {
     // The macro name is plain text, not a highlighted function.
     assert!(!row_of("    print!(").contains(">print!</tspan>"));
     assert!(!row_of("= format!(").contains(">format!</tspan>"));
+}
+
+/// #861: a write through the `&mut` a `get_mut` call (or `&mut v[1]`,
+/// `v.iter_mut()`) gives is drawn on the collection's column, on the
+/// write's row, and before the end of the borrow it was done through.
+#[test]
+fn get_mut_writes_are_drawn_on_the_collection() {
+    let rv = run_with_local_backend("get_mut_write_861");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (column, line, write, then) in [
+        ("v", "*v.get_mut(0).unwrap() += 1;", "v's resource is modified through v.get_mut(0).unwrap()", Some("v's resource is no longer mutably borrowed")),
+        ("v", "*x += 10;", "v's resource is modified through x", Some("v's resource is no longer mutably borrowed")),
+        ("v", "*y = 7;", "*y is assigned a new value", Some("v's resource is no longer mutably borrowed")),
+        ("m", "*m.get_mut(\"k\").unwrap() = 5;", "*m.get_mut(…).unwrap() is assigned a new value", Some("m's resource is no longer mutably borrowed")),
+        ("names", "*names.get_mut(0).unwrap() = String::from(\"c\");",
+            "*names.get_mut(0).unwrap() acquires ownership of a new resource; its previous resource is dropped",
+            Some("names's resource is no longer mutably borrowed")),
+        ("names", "*n = String::from(\"d\");", "*n acquires ownership of a new resource; its previous resource is dropped",
+            Some("names's resource is no longer mutably borrowed")),
+        ("b.items", "*it = String::from(\"f\");", "*it acquires ownership of a new resource; its previous resource is dropped",
+            Some("b.items's resource is no longer mutably borrowed")),
+        ("v", "*e *= 2;", "v's resource is modified through e", None),
+    ] {
+        let at = (label_x(&tl, column), code_row_y(&code, line));
+        let dots = dots_where(&tl, |lines| {
+            let w = lines.iter().position(|l| l == write);
+            match then {
+                Some(t) => w.is_some_and(|w| lines.iter().position(|l| l == t).is_some_and(|e| w < e)),
+                None => w.is_some(),
+            }
+        });
+        assert!(dots.contains(&at), "`{}`: expected {:?} (then {:?}) on {}'s column at {:?}, found {:?}", line, write, then, column, at, dots);
+    }
 }
 
 /// #913: a reference copied into a variable that outlives it (`x = w;`,

@@ -608,7 +608,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
     /// The type of field `f` (a name, or a tuple index) of a struct or
     /// tuple type `ty`, with `ty`'s own lifetimes.
-    fn field_ty_named(&self, ty: Ty<'tcx>, f: &str) -> Option<Ty<'tcx>> {
+    pub(crate) fn field_ty_named(&self, ty: Ty<'tcx>, f: &str) -> Option<Ty<'tcx>> {
         match ty.kind() {
             TyKind::Adt(adt, args) if adt.is_struct() => adt.non_enum_variant().fields.iter()
                 .find(|fd| fd.name.as_str() == f)
