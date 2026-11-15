@@ -2517,7 +2517,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let line = span_end_line(&loop_expr.span, &self.tcx);
     // What a `break`'s value mentions (`break s`, `break f(s)`) may be
     // moved by it, after the variable's state at the `break` is taken.
-    #[expect(clippy::disallowed_methods, reason = "only tested for membership")]
     let in_values: HashSet<String> = breaks_to(loop_expr).into_iter()
       .filter_map(|(_, v)| v)
       .flat_map(|v| locals_in(v, ClosureLocals::Captures(self.tcx)))
