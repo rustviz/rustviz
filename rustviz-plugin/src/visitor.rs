@@ -3488,20 +3488,43 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// resource: an element (`v.get_mut(0).unwrap()`, `if let Some(x) =
   /// v.get_mut(0)`, `&mut v[0]`, `v.iter_mut()`), a map's value. Returns
   /// that variable, the owner x borrows from (a field column such as
-  /// `b.items` too). Told apart from a reference to the whole of it
-  /// (`&mut s`) by type: `*x` isn't of its type. None when the owner is
-  /// the caller's (x from `v.get_mut(0)` with `v: &mut Vec<_>` a
-  /// parameter), and for a reference-typed `*x` (a borrow stored in an
-  /// element isn't drawn on the collection, as for `v[0] = &u`).
+  /// `b.items` too). When that resource is the caller's (x from
+  /// `v.get_mut(0)` with `v: &mut Vec<_>` a parameter, #967), it is the
+  /// reference parameter v, whose column says "the resource v points to"
+  /// as for `v[0] += 1`. Told apart from a reference to the whole of it
+  /// (`&mut s`, `&mut *v`) by type: `*x` isn't of its (pointee's) type.
+  /// None for a reference-typed `*x` (a borrow stored in an element
+  /// isn't drawn on the collection, as for `v[0] = &u`).
   fn part_owner_behind_ref(&self, lhs_rty: &ResourceTy, lhs_expr: &'tcx Expr<'tcx>, lhs_ty: rustc_middle::ty::Ty<'tcx>) -> Option<ResourceAccessPoint> {
     let ResourceTy::Deref(r) = lhs_rty else { return None };
     if lhs_ty.is_ref() {
       return None;
     }
-    let owner = self.owner_behind_ref(r, "").filter(|o| !o.is_fn())?;
-    let erase = |ty: rustc_middle::ty::Ty<'tcx>| self.tcx.erase_and_anonymize_regions(ty);
+    let owner = self.owner_behind_ref(r, "").filter(|o| !o.is_fn())
+      .or_else(|| self.callers_ref_behind_ref(r, 0))?;
+    let erase = |ty: rustc_middle::ty::Ty<'tcx>| self.tcx.erase_and_anonymize_regions(ty.peel_refs());
     let tys: Vec<_> = self.column_tys(owner.name(), lhs_expr.hir_id.owner).into_iter().map(erase).collect();
     (!tys.is_empty() && !tys.contains(&erase(lhs_ty))).then_some(owner)
+  }
+
+  /// The reference r borrows through whose lender is the caller (a
+  /// reference parameter `v: &mut Vec<_>`, or a reference field of a
+  /// by-value parameter): x from `v.get_mut(0)`, `&mut v[0]`, or
+  /// through a local reborrow of v. None when r's lender chain ends
+  /// anywhere else.
+  fn callers_ref_behind_ref(&self, r: &ResourceAccessPoint, depth: usize) -> Option<ResourceAccessPoint> {
+    if depth > 16 {
+      return None;
+    }
+    match &self.borrow_map.get(r.name())?.lender {
+      ResourceTy::Value(q) | ResourceTy::Deref(q) if q.is_ref() && !q.is_fn() => {
+        match self.borrow_map.get(q.name())?.lender {
+          ResourceTy::Caller => Some(q.clone()),
+          _ => self.callers_ref_behind_ref(q, depth + 1),
+        }
+      }
+      _ => None,
+    }
   }
 
   /// The types the column `name` may have: of each binding so named, or
