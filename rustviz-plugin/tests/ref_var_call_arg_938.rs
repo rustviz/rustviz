@@ -2,9 +2,9 @@
 // parameter borrows x itself: the parameter points to x, not to what
 // x points to (that would be `show(&*x)` with a `&String` parameter).
 // The call-argument form of #925 (`let rr = &x;`), and of #914 for
-// `&mut m`. (Inside show / show_m / bump / show_self, `r.len()` reads
-// "the value r points to is immutably borrowed by len", which is wrong:
-// len borrows the String two references away, #952.)
+// `&mut m`. (Inside show / show_m / bump / show_self, `r.len()` borrows
+// the String two references away: "the resource *r points to is
+// immutably borrowed by len", #952.)
 fn show(r: &&String) -> usize {
     r.len()
 }

@@ -16757,6 +16757,50 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "y is no longer immutably borrowed",
         ],
     },
+    // ─── A method on a reference to a reference borrows `**r` (#952) ───
+    TooltipExpect {
+        name: "double_deref_receiver_952",
+        must_contain: &[
+            // show: r.len() with r: &&String borrows the String *r points to.
+            "the resource *r points to is immutably borrowed by len",
+            "len no longer borrows the resource *r points to",
+            // bump: r.push('!') with r: &mut &mut String.
+            "the resource *r points to is mutably borrowed by push through r; r can't be used while the borrow is live",
+            "push no longer borrows the resource *r points to",
+            // self.len() with self: &&String, (*q).len() with q: &&String.
+            "the resource *self points to is immutably borrowed by len",
+            "len no longer borrows the resource *self points to",
+            "the resource *q points to is immutably borrowed by len",
+            // c.len() with c: &&[i32]: a slice of Copy numbers is a value.
+            "the value *c points to is immutably borrowed by len",
+            "len no longer borrows the value *c points to",
+            // Local references: rr = &x, mm = &mut m.
+            "the resource *rr points to is immutably borrowed by len",
+            "the resource *mm points to is mutably borrowed by push through mm; mm can't be used while the borrow is live",
+            "push no longer borrows the resource *mm points to",
+            // One reference: unchanged.
+            "the resource p points to is immutably borrowed by len",
+            "len no longer borrows the resource p points to",
+            // Call arguments deref-coerced the same way: plain(d) with
+            // d: &&String is plain(&**d); add(e) with e: &mut &mut String.
+            "the resource *d points to is immutably borrowed by plain",
+            "plain no longer borrows the resource *d points to",
+            "the resource *e points to is mutably borrowed by add through e; e can't be used while the borrow is live",
+            "add no longer borrows the resource *e points to",
+        ],
+        must_not_contain: &[
+            "the value r points to",
+            "the value self points to",
+            "the value q points to",
+            "the value c points to",
+            "the value rr points to",
+            "the value mm points to",
+            "the resource r points to",
+            "the resource rr points to",
+            "the value d points to",
+            "the value e points to",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
