@@ -2316,6 +2316,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // place was moved into the tuple already.)
           ExternalEvent::OrAltMove { ro, tuple: None, .. } if *ro.hash() == hash && own == Own::Yes => Own::Maybe,
           ExternalEvent::InitRefParam { param, .. } if *param.hash() == hash => Own::Yes,
+          // After a loop: owns a value at every `break` (#1000), or
+          // may have ended before giving it one (#786, #1001).
+          ExternalEvent::LoopExitKept { ro, .. } if *ro.hash() == hash => Own::Yes,
+          ExternalEvent::LoopMaybeInit { ro, .. } if *ro.hash() == hash && own == Own::Yes => Own::Maybe,
           // A branch that diverges doesn't reach this point.
           ExternalEvent::Branch { branches, .. } => {
             let mut ends = branches.iter().filter(|b| !b.diverges).map(|b| step(&b.e_data, hash, &[], own));
@@ -2397,6 +2401,198 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     out
   }
 
+  /// At the start of the body of `loop_expr` (#1001), the mirror of
+  /// `note_loop_head_moves`: the variables declared before the loop
+  /// (the first `len` of `in_scope`) that hold no value here on the
+  /// path from before the loop (moved before it), but that the loop may
+  /// come back to with a value the body gave them (`given_round_loop`).
+  /// (In a loop inside another, the outer loop's earlier times round
+  /// may have given it one too; the outer loop sees to that.)
+  /// Pushed onto `loop_given`: an assignment that the body makes before
+  /// anything else touches one drops, a later time round, the value an
+  /// earlier one gave it (`given_by_loop_now`), and the loop's end
+  /// says whether it has one after the loop (`emit_loop_exit_states`).
+  /// Not a `let x;` local, which `enter_loop_inits` sees to (#786).
+  /// `before_cond`: for a `while` loop, the length `preprocessed_events`
+  /// had before its condition, which runs again each time round: one
+  /// that held a value there (the condition moved it, `while let
+  /// Some(x) = o`) has none when the body starts on any time round.
+  fn note_loop_head_given(&mut self, loop_expr: &'tcx Expr<'tcx>, len: usize, before_cond: Option<usize>) {
+    let mut names: Vec<String> = Vec::new();
+    for name in self.given_round_loop(loop_expr.span) {
+      let members = self.struct_members_deep(&name);
+      names.push(name);
+      names.extend(members.iter().map(|m| m.name().clone()));
+    }
+    names.sort();
+    names.dedup();
+    #[expect(clippy::disallowed_methods, reason = "only tested for membership")]
+    let deferred: HashSet<String> = self.uninit_locals.keys().chain(self.maybe_init_locals.iter())
+      .map(|id| binding_name(&self.tcx, *id)).collect();
+    let outer = &self.in_scope[..len.min(self.in_scope.len())];
+    names.retain(|n| {
+      let root = n.split('.').next().unwrap_or("");
+      outer.iter().any(|o| o == root) && !deferred.contains(root) && !self.skip_raps.contains(n)
+    });
+    let mut given = Vec::new();
+    for name in names {
+      let Some(rd) = self.raps.get(&name) else { continue };
+      let ro = rd.rap.clone();
+      if ro.is_ref() || ro.is_fn() || self.rap_ownership_now(&name) != Ownership::None
+        || before_cond.is_some_and(|at| self.rap_ownership_before(at, &name) != Ownership::None) {
+        continue;
+      }
+      given.push(ro);
+    }
+    self.loop_given.push((loop_expr.hir_id, given));
+  }
+
+  /// Whether an assignment to `rap` here, which holds no value on the
+  /// path from before the loop (moved before it), drops what an
+  /// earlier time round a loop it's in gave it (#1001): `rap` is one
+  /// of the loop's `loop_given`, and nothing since the start of the
+  /// loop's body moved it or gave it a value.
+  fn given_by_loop_now(&self, rap: &ResourceAccessPoint) -> bool {
+    self.loop_given.iter().rev().any(|(id, given)| {
+      given.contains(rap) && self.exit_frames.iter()
+        .rposition(|f| matches!(f, ExitFrame::Loop { id: l, .. } if l == id))
+        .is_some_and(|loop_at| {
+          let (events, hide) = self.loop_path_events(loop_at);
+          path_own(&events, rap, &hide, PathOwn::Maybe) == PathOwn::Maybe
+        })
+    })
+  }
+
+  /// Whether what last changed `rap`'s state, in the events so far, is
+  /// the end of a loop that may have ended before giving it a value
+  /// (`LoopMaybeInit`, #1001): its next assignment drops the old value
+  /// only if the loop gave it one (`InitBy::Loop`).
+  fn maybe_init_by_loop_now(&self, rap: &ResourceAccessPoint) -> bool {
+    let is = |r: &ResourceTy| r.extract_rap().is_some_and(|r| r.hash() == rap.hash());
+    for (_, e) in self.preprocessed_events.iter().rev() {
+      match e {
+        ExternalEvent::LoopMaybeInit { ro, .. } if ro.hash() == rap.hash() => return true,
+        ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::LoopExitKept { ro, .. }
+        | ExternalEvent::OrAltMove { ro, .. } | ExternalEvent::ManuallyDropByHand { ro, .. }
+        | ExternalEvent::OwnerDropAtReassign { ro, .. } if ro.hash() == rap.hash() => return false,
+        ExternalEvent::Move { from, to, .. } if is(from) || is(to) => return false,
+        ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. } if is(to) => return false,
+        ExternalEvent::Branch { branches, .. }
+          if branches.iter().filter(|b| !b.diverges).any(|b| path_own(&b.e_data, rap, &[], PathOwn::Yes) != PathOwn::Yes
+            || path_own(&b.e_data, rap, &[], PathOwn::No) != PathOwn::No) => return false,
+        _ => {}
+      }
+    }
+    false
+  }
+
+  /// At the end of `loop_expr` (#1000, #1001), what a variable declared
+  /// before it holds after it, where that isn't what the end of its
+  /// body (drawn once, #853) left: the code after the loop is reached
+  /// through a `break`, or for a `while` / `for` (`!bare`) also where
+  /// the loop starts (its condition false, its iterator done).
+  ///
+  /// - `entry`: the variables that owned a value (or maybe did) where
+  ///   the loop started. In a bare `loop`, one that owns a value at
+  ///   every `break` (Held where the loop started and moved on the way
+  ///   to none, `broke_moved`; or given a value on the way to each)
+  ///   owns it after the loop: a `LoopExitKept` event, if the body's
+  ///   end left it moved (`loop { s = …; if c { break; } drop(s); }`).
+  /// - The loop's `loop_given` (moved before the loop, given a value in
+  ///   it): with a `break` before that, or for a `while` / `for`, the
+  ///   loop can end without one: a `LoopMaybeInit` event, if the body's
+  ///   end left it owning one.
+  fn emit_loop_exit_states(&mut self, loop_expr: &'tcx Expr<'tcx>, entry: Vec<(ResourceAccessPoint, Ownership)>, broke_moved: &[ResourceAccessPoint], bare: bool) {
+    let given = match self.loop_given.last() {
+      Some((id, _)) if *id == loop_expr.hir_id => self.loop_given.pop().map(|(_, g)| g).unwrap_or_default(),
+      _ => Vec::new(),
+    };
+    let (mine, rest): (Vec<BreakState>, Vec<BreakState>) =
+      std::mem::take(&mut self.break_states).into_iter().partition(|b| b.target == loop_expr.hir_id);
+    self.break_states = rest;
+    // A bare `loop` with no `break`: nothing after it runs.
+    if bare && mine.is_empty() {
+      return;
+    }
+    let line = span_end_line(&loop_expr.span, &self.tcx);
+    // What a `break`'s value mentions (`break s`, `break f(s)`) may be
+    // moved by it, after the variable's state at the `break` is taken.
+    #[expect(clippy::disallowed_methods, reason = "only tested for membership")]
+    let in_values: HashSet<String> = breaks_to(loop_expr).into_iter()
+      .filter_map(|(_, v)| v)
+      .flat_map(|v| locals_in(v, ClosureLocals::Captures(self.tcx)))
+      .map(|m| binding_name(&self.tcx, m.id))
+      .collect();
+    // Still the same variable here (not shadowed by one the body
+    // declared), and not in a `break`'s value.
+    let current = |this: &Self, ro: &ResourceAccessPoint| {
+      this.raps.get(ro.name()).is_some_and(|rd| rd.rap == *ro)
+        && !this.skip_raps.contains(ro.name())
+        && !in_values.contains(ro.name().split('.').next().unwrap_or(""))
+    };
+    let mut kept: Vec<(ResourceAccessPoint, bool)> = Vec::new();
+    let mut maybe_init: Vec<ResourceAccessPoint> = Vec::new();
+    if bare {
+      for (ro, own) in entry {
+        if broke_moved.contains(&ro) || !current(self, &ro) {
+          continue;
+        }
+        let reassigned = mine.iter().all(|b| b.assigned.contains(&ro));
+        let held = match own {
+          Ownership::Held => true,
+          _ => reassigned,
+        };
+        if held && self.rap_ownership_now(ro.name()) != Ownership::Held {
+          kept.push((ro, reassigned));
+        }
+      }
+    }
+    for ro in given {
+      if broke_moved.contains(&ro) || !current(self, &ro) {
+        continue;
+      }
+      let at_breaks: Vec<Ownership> = mine.iter()
+        .filter_map(|b| b.given.iter().find(|(r, _)| *r == ro).map(|(_, o)| *o))
+        .collect();
+      let after = if !bare || at_breaks.is_empty() {
+        Ownership::Maybe
+      } else if at_breaks.iter().all(|o| *o == at_breaks[0]) {
+        at_breaks[0]
+      } else {
+        Ownership::Maybe
+      };
+      match (after, self.rap_ownership_now(ro.name())) {
+        (Ownership::Held, now) if now != Ownership::Held => kept.push((ro, true)),
+        (Ownership::Maybe, Ownership::Held) => maybe_init.push(ro),
+        _ => {}
+      }
+    }
+    for (ro, reassigned) in kept {
+      self.add_external_event(line, ExternalEvent::LoopExitKept { ro, reassigned, id: *self.unique_id });
+      *self.unique_id += 1;
+    }
+    for ro in maybe_init {
+      self.add_external_event(line, ExternalEvent::LoopMaybeInit { ro, id: *self.unique_id });
+      *self.unique_id += 1;
+    }
+  }
+
+  /// The variables in scope (and their field columns) that own a value,
+  /// on every path or some, as a loop starts: `emit_loop_exit_states`'s
+  /// `entry`.
+  fn loop_entry_owners(&self) -> Vec<(ResourceAccessPoint, Ownership)> {
+    #[expect(clippy::disallowed_methods, reason = "sorted by hash below")]
+    let mut out: Vec<(ResourceAccessPoint, Ownership)> = self.raps.values()
+      .map(|rd| rd.rap.clone())
+      .filter(|r| !r.is_ref() && !r.is_fn())
+      .filter(|r| self.in_scope.iter().any(|n| n == r.name().split('.').next().unwrap_or("")))
+      .map(|r| { let own = self.rap_ownership_now(r.name()); (r, own) })
+      .filter(|(_, own)| *own != Ownership::None)
+      .collect();
+    out.sort_by_key(|(r, _)| *r.hash());
+    out
+  }
+
   /// At the end of a `while` / `for` loop (#992): the variables of
   /// `note_loop_head_moves` are maybe-moved, as the loop can end after
   /// a time round that moved them; not those a `break` already says
@@ -2422,36 +2618,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// (`loop { drop(s); if c { break; } s = …; }`, #980), and a value
   /// given back before the `break` (`drop(s); s = …; if c { break; }`).
   fn note_break_path_moves(&mut self, target: HirId, brk: HirId) {
-    #[derive(Clone, Copy, PartialEq)]
-    enum Own { Yes, No, Maybe }
-    fn step(events: &[(usize, ExternalEvent)], rap: &ResourceAccessPoint, hide: &[std::ops::Range<usize>], mut own: Own) -> Own {
-      let is = |r: &ResourceTy| matches!(r, ResourceTy::Value(v) if v == rap);
-      for (_, e) in events {
-        if hide.iter().any(|ids| ids.contains(&e.get_id())) {
-          continue;
-        }
-        own = match e {
-          ExternalEvent::Move { to, .. } | ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. }
-            if is(to) => Own::Yes,
-          ExternalEvent::Move { from, .. } if is(from) => Own::No,
-          ExternalEvent::OrAltMove { ro, tuple: None, .. } if ro == rap && own == Own::Yes => Own::Maybe,
-          // An inner loop's `break` after a move, or a let-chain's
-          // condition that moved it before failing.
-          ExternalEvent::LoopExitMove { ro, definite: true, .. } if ro == rap => Own::No,
-          ExternalEvent::LoopExitMove { ro, .. } if ro == rap && own == Own::Yes => Own::Maybe,
-          // A branch that diverges doesn't reach this point.
-          ExternalEvent::Branch { branches, .. } => {
-            let mut ends = branches.iter().filter(|b| !b.diverges).map(|b| step(&b.e_data, rap, &[], own));
-            match ends.next() {
-              None => own,
-              Some(first) => if ends.all(|o| o == first) { first } else { Own::Maybe },
-            }
-          }
-          _ => own,
-        };
-      }
-      own
-    }
     fn moved_from(events: &[(usize, ExternalEvent)], out: &mut Vec<ResourceAccessPoint>) {
       for (_, e) in events {
         let rap = match e {
@@ -2472,8 +2638,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     let Some(loop_at) = self.exit_frames.iter()
       .rposition(|f| matches!(f, ExitFrame::Loop { id, .. } if *id == target)) else { return };
-    let ExitFrame::Loop { events_at, len, .. } = self.exit_frames[loop_at] else { return };
-    let events_at = events_at.min(self.preprocessed_events.len());
+    let ExitFrame::Loop { len, .. } = self.exit_frames[loop_at] else { return };
     // Only what was in scope where the loop started: not a `for`
     // loop's pattern bindings, which an inner `for row in row` may move.
     let outer = &self.in_scope[..len.min(self.in_scope.len())];
@@ -2481,12 +2646,54 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let root = rap.name().trim_start_matches('*').split('.').next().unwrap_or("");
       outer.iter().any(|n| n == root)
     };
+    let (events, hide) = self.loop_path_events(loop_at);
+    let mut candidates = Vec::new();
+    moved_from(&events, &mut candidates);
+    for rap in candidates.into_iter().filter(|r| declared_before(r)) {
+      let definite = match path_own(&events, &rap, &hide, PathOwn::Yes) {
+        PathOwn::Yes => continue,
+        PathOwn::No => true,
+        PathOwn::Maybe => false,
+      };
+      self.break_moves.push(BreakMove { target, brk, rap, definite, on_path: true });
+    }
+    // What the code after the loop gets from this `break` (#1000,
+    // #1001): the variables declared before the loop that the path
+    // gives a value to, and what the loop's `loop_given` ones hold
+    // here (one an earlier time round may have given a value: maybe).
+    #[expect(clippy::disallowed_methods, reason = "sorted by hash below")]
+    let mut assigned: Vec<ResourceAccessPoint> = self.raps.values()
+      .map(|rd| rd.rap.clone())
+      .filter(|r| !r.is_ref() && !r.is_fn() && declared_before(r))
+      .filter(|r| path_own(&events, r, &hide, PathOwn::No) == PathOwn::Yes)
+      .collect();
+    assigned.sort_by_key(|r| *r.hash());
+    let given = self.loop_given.iter().rev().find(|(id, _)| *id == target)
+      .map(|(_, g)| g.iter().map(|r| {
+        let own = match path_own(&events, r, &hide, PathOwn::Maybe) {
+          PathOwn::Yes => Ownership::Held,
+          PathOwn::No => Ownership::None,
+          PathOwn::Maybe => Ownership::Maybe,
+        };
+        (r.clone(), own)
+      }).collect())
+      .unwrap_or_default();
+    self.break_states.push(BreakState { target, assigned, given });
+  }
+
+  /// The events on the path from the start of the loop whose frame is
+  /// `exit_frames[loop_at]` (its body, after a `while`'s condition or
+  /// a `for`'s head) to here, in the order they happened (each match
+  /// arm's pattern bindings where its body starts), and the ranges of
+  /// event ids among them that aren't on the path (the other branches
+  /// of the conditionals this point is in). See `owns_value_here`.
+  fn loop_path_events(&self, loop_at: usize) -> (Vec<(usize, ExternalEvent)>, Vec<std::ops::Range<usize>>) {
+    let ExitFrame::Loop { events_at, .. } = self.exit_frames[loop_at] else { return (Vec::new(), Vec::new()) };
+    let events_at = events_at.min(self.preprocessed_events.len());
     let hide: Vec<std::ops::Range<usize>> = self.exit_frames.iter().flat_map(|f| match f {
       ExitFrame::Branch { hide, .. } => hide.clone(),
       ExitFrame::Loop { .. } => Vec::new(),
     }).collect();
-    // The events in the order they happened: each arm's bindings
-    // where its body starts.
     let mut events: Vec<(usize, ExternalEvent)> = Vec::new();
     let mut from = events_at;
     for f in &self.exit_frames[loop_at + 1..] {
@@ -2501,16 +2708,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
     }
     events.extend_from_slice(&self.preprocessed_events[from..]);
-    let mut candidates = Vec::new();
-    moved_from(&events, &mut candidates);
-    for rap in candidates.into_iter().filter(|r| declared_before(r)) {
-      let definite = match step(&events, &rap, &hide, Own::Yes) {
-        Own::Yes => continue,
-        Own::No => true,
-        Own::Maybe => false,
-      };
-      self.break_moves.push(BreakMove { target, brk, rap, definite, on_path: true });
-    }
+    (events, hide)
   }
 
   /// Whether every path through `e` leaves at an exit that drops what
@@ -3440,8 +3638,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                     *events_at = len;
                   }
                 }
-                // What the loop may come back round to moved (#992).
+                // What the loop may come back round to moved (#992), or
+                // given a value after a move before it (#1001).
                 let head_moved = self.note_loop_head_moves(expr, entry_len);
+                self.note_loop_head_given(expr, entry_len, Some(cond_lo));
                 let before = self.rap_names();
                 self.inside_branch = true;
                 // The body may run no times or many (#786).
@@ -3472,6 +3672,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   });
                   *self.unique_id += 1;
                 }
+                // What it gave a variable moved before it (#1001).
+                self.emit_loop_exit_states(expr, Vec::new(), &broke_moved, false);
               } else {
                 self.inside_branch = true;
                 self.visit_block(block);
@@ -3493,9 +3695,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             // runs vs. may run", so use the same shape as while/for.)
             let prev = self.inside_branch;
             let before = self.rap_names();
-            // What the loop may come back round to moved (#992). A
-            // bare `loop` ends only through a `break`, which sees it.
+            // What owns a value as it starts (#1000).
+            let entry = self.loop_entry_owners();
+            // What the loop may come back round to moved (#992), or
+            // given a value after a move before it (#1001). A bare
+            // `loop` ends only through a `break`, which sees it.
             self.note_loop_head_moves(expr, entry_len);
+            self.note_loop_head_given(expr, entry_len, None);
             self.inside_branch = true;
             // Left only by a `break` (#786).
             let inits = self.enter_loop_inits();
@@ -3511,7 +3717,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             let decls = &decls - &Self::left_at_exits(self.block_ends_at_exits(block, false), &decls);
             self.emit_scope_end(decls, body_end);
             // A bare `loop` ends only through a `break`.
-            self.emit_loop_exit_moves(expr, None, &before, false);
+            let broke_moved = self.emit_loop_exit_moves(expr, None, &before, false);
+            // What a variable holds at every `break`, where the body's
+            // end left something else (#1000, #1001).
+            self.emit_loop_exit_states(expr, entry, &broke_moved, true);
             self.pair_deferred_breaks(expr);
           }
           rustc_hir::LoopSource::ForLoop => {
@@ -3964,7 +4173,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         PlaceWrite::AssignDropsOld if box_deref => match self.rap_ownership_now(rap.name()) {
           Ownership::None => PlaceWrite::AssignOverMoved,
           Ownership::Maybe => PlaceWrite::AssignMaybeMoved {
-            by_cond: self.maybe_moved_by_let_now(rap.name()) || self.moved_by_chain_condition(rap.name()),
+            by_cond: self.maybe_moved_by_let_now(rap.name()) || self.moved_by_chain_condition(rap),
           },
           Ownership::Held => write,
         },
@@ -4282,8 +4491,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.part_owner_behind_ref(&lhs_rty, lhs_expr, lhs_ty)
     };
     let mut payload_behind_ref = false;
+    let drops_old = !lhs_ty.is_ref() && !is_copyable && !lhs_is_union_field && !union_without_drop && !lhs_is_manually_drop && self.needs_drop(lhs_ty, lhs_expr.hir_id.owner);
     let drop_target: Option<ResourceAccessPoint> =
-      if !lhs_ty.is_ref() && !is_copyable && !lhs_is_union_field && !union_without_drop && !lhs_is_manually_drop && self.needs_drop(lhs_ty, lhs_expr.hir_id.owner) {
+      if drops_old {
         match &lhs_rty {
           ResourceTy::Value(rap) => {
             // Plain reassign — only emit the drop if y currently
@@ -4383,6 +4593,27 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         _ => None,
       })
       .collect();
+
+    // `s = …` in a loop's body, where s holds nothing on the path from
+    // before the loop (moved before it) but a later time round may
+    // hold what an earlier one gave it (#1001): drawn as a drop on the
+    // assignment, as for a `let x;` local (#786). Its field columns
+    // likewise. And after a loop that may have ended before giving it
+    // a value, a drop flag decides (`InitBy::Loop`).
+    let mut earlier_iteration: Vec<ResourceAccessPoint> = Vec::new();
+    if let (ResourceTy::Value(rap), ExprKind::Assign(..)) = (&lhs_rty, expr.kind) {
+      if drops_old && drop_target.is_none() && maybe_init.is_none() && self.given_by_loop_now(rap) {
+        earlier_iteration.push(rap.clone());
+        for m in self.struct_members_deep(rap.name()) {
+          if !m.never_drops() && !m.is_plain_value() && !m.is_ref() && self.given_by_loop_now(&m) {
+            earlier_iteration.push(m);
+          }
+        }
+      }
+      if drop_target.is_some() && maybe_init.is_none() && self.maybe_init_by_loop_now(rap) {
+        maybe_init = Some(InitBy::Loop);
+      }
+    }
 
     // `it = b.iter();` where `it` holds a borrow (#336).
     if let ResourceTy::Value(rap) = &lhs_rty {
@@ -4515,7 +4746,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let n_before_drops = self.preprocessed_events.len();
     let payload_target = drop_target.as_ref().map(|r| *r.hash());
     for (((rap, maybe_moved), parts), loop_head) in drop_target.into_iter().chain(field_drop_targets).zip(maybe_moved).zip(parts).zip(loop_head) {
-      let by_cond = maybe_moved && self.moved_by_chain_condition(rap.name());
+      let by_cond = maybe_moved && self.moved_by_chain_condition(&rap);
       let payload = box_payload.as_ref().is_some_and(|b| b.hash() == rap.hash())
         || (payload_behind_ref && payload_target.is_some_and(|h| h == *rap.hash()));
       self.add_external_event(drop_line, ExternalEvent::OwnerDropAtReassign {
@@ -4527,6 +4758,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         parts,
         maybe_init,
         payload,
+      });
+      *self.unique_id += 1;
+    }
+    for ro in earlier_iteration {
+      self.add_external_event(drop_line, ExternalEvent::OwnerDropAtReassign {
+        ro,
+        id: *self.unique_id,
+        maybe_moved: false,
+        by_cond: false,
+        loop_head: false,
+        parts: None,
+        maybe_init: Some(InitBy::EarlierIteration),
+        payload: false,
       });
       *self.unique_id += 1;
     }
@@ -6273,9 +6517,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             *events_at = len;
           }
         }
-        // What the loop may come back round to moved (#992).
+        // What the loop may come back round to moved (#992), or
+        // given a value after a move before it (#1001).
         let head_moved = match arms.first() {
-          Some(a) => self.note_loop_head_moves(a.body, entry_len),
+          Some(a) => {
+            let moved = self.note_loop_head_moves(a.body, entry_len);
+            self.note_loop_head_given(a.body, entry_len, None);
+            moved
+          }
           None => Vec::new(),
         };
         // The body may run no times or many (#786).
@@ -6384,6 +6633,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         if let Some(loop_expr) = arms.first().map(|a| a.body) {
           let broke_moved = self.emit_loop_exit_moves(loop_expr, None, &before, true);
           self.emit_loop_round_moves(loop_expr, head_moved, &broke_moved);
+          self.emit_loop_exit_states(loop_expr, Vec::new(), &broke_moved, false);
         }
         if arms.first().is_some() {
           self.exit_frames.pop();
@@ -10780,6 +11030,46 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     emitted
   }
+}
+
+/// What a variable holds after a stretch of a path (see
+/// `ExprVisitor::loop_path_events`), from what it held before it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum PathOwn { Yes, No, Maybe }
+
+/// `PathOwn` of `rap` after `events` (minus the event ids in `hide`),
+/// starting from `own`.
+fn path_own(events: &[(usize, ExternalEvent)], rap: &ResourceAccessPoint, hide: &[std::ops::Range<usize>], mut own: PathOwn) -> PathOwn {
+  let is = |r: &ResourceTy| matches!(r, ResourceTy::Value(v) if v == rap);
+  for (_, e) in events {
+    if hide.iter().any(|ids| ids.contains(&e.get_id())) {
+      continue;
+    }
+    own = match e {
+      ExternalEvent::Move { to, .. } | ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. }
+        if is(to) => PathOwn::Yes,
+      ExternalEvent::Move { from, .. } if is(from) => PathOwn::No,
+      ExternalEvent::OrAltMove { ro, tuple: None, .. } if ro == rap && own == PathOwn::Yes => PathOwn::Maybe,
+      // An inner loop's `break` after a move, or a let-chain's
+      // condition that moved it before failing.
+      ExternalEvent::LoopExitMove { ro, definite: true, .. } if ro == rap => PathOwn::No,
+      ExternalEvent::LoopExitMove { ro, .. } if ro == rap && own == PathOwn::Yes => PathOwn::Maybe,
+      // An inner loop that owns it at every `break` (#1000), or that
+      // may have ended before giving it a value (#786, #1001).
+      ExternalEvent::LoopExitKept { ro, .. } if ro == rap => PathOwn::Yes,
+      ExternalEvent::LoopMaybeInit { ro, .. } if ro == rap && own == PathOwn::Yes => PathOwn::Maybe,
+      // A branch that diverges doesn't reach this point.
+      ExternalEvent::Branch { branches, .. } => {
+        let mut ends = branches.iter().filter(|b| !b.diverges).map(|b| path_own(&b.e_data, rap, &[], own));
+        match ends.next() {
+          None => own,
+          Some(first) => if ends.all(|o| o == first) { first } else { PathOwn::Maybe },
+        }
+      }
+      _ => own,
+    };
+  }
+  own
 }
 
 /// A constructor applied to literals only (`Some(5)`, `Ok(1)`,

@@ -3539,6 +3539,30 @@ pub fn event_dot_loop_exit_move(my_name: &String, definite: bool, labeled_block:
     }
 }
 
+// At the end of a bare `loop` (#1000), for a variable declared before
+// it that owns a value at every `break` out of it, although the body
+// may leave it moved where it goes round again: `loop { s = …; if c {
+// break; } drop(s); }`. Only a `break` reaches the code after the
+// loop. `reassigned`: every `break` comes after the body gives it a
+// new value. `value`: a value with nothing to drop is a "value", not
+// a "resource" (#484).
+pub fn event_dot_loop_exit_kept(my_name: &String, reassigned: bool, value: bool) -> String {
+    let name = styled_name_html(my_name);
+    let brk = styled_name_html(&"break".to_owned());
+    let what = if value { "value" } else { "resource" };
+    if reassigned {
+        format!(
+            "{0} owns a {2} here: the code after the loop is reached only through a {1}, and every {1} comes after {0} gets a new {2}",
+            name, brk, what
+        )
+    } else {
+        format!(
+            "{0} owns a {2} here: the code after the loop is reached only through a {1}, and {0} owns one at every {1}",
+            name, brk, what
+        )
+    }
+}
+
 // At the start of a loop's body, for a variable that holds its value
 // where the loop starts but that the body may leave moved where it
 // comes back round (#992): `loop { if n >= k { break; } s = …;
