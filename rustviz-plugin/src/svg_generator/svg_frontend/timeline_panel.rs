@@ -3165,52 +3165,81 @@ fn loop_head_lend_title(event: &Event, name: &String, rap: &ResourceAccessPoint,
 
 /// The dots of a `&mut` reference whose pointee a `for` loop's
 /// iterator reborrows (`for e in v.iter_mut()` with `v: &mut Vec<_>`;
-/// #1046): the head's call lends it there, but the loop's iterator holds
-/// the reborrow until the loop ends (`StaticLender::LoopIterator`).
+/// #1046, or `v.iter()`, shared; #1059), or a field of whose pointee it
+/// borrows (`self.items.iter_mut()`; #1060): the head's call lends it
+/// there, but the loop's iterator holds the reborrow until the loop
+/// ends (`StaticLender::LoopIterator`).
 fn loop_iterator_ref_title(event: &Event, line: usize, rap: &ResourceAccessPoint, visualization_data: &VisualizationData) -> Option<String> {
     if !rap.is_mutref() {
         return None;
     }
+    // What the loop's iterator borrows: all of what rap points to
+    // (None), or the field `place` of it.
+    fn lent_place(is: &ResourceTy) -> Option<Option<&String>> {
+        match is {
+            ResourceTy::Value(_) => Some(None),
+            ResourceTy::DerefField(_, place, _) => Some(Some(place)),
+            _ => None,
+        }
+    }
+    // The end, where the loop ends, of a borrow its iterator holds.
+    fn loop_end(ev: &ExternalEvent) -> Option<(usize, &ResourceTy, bool, &String)> {
+        match ev {
+            ExternalEvent::MutableDie { to, static_lender: Some(StaticLender::LoopIterator { call }), id, .. } => Some((*id, to, true, call)),
+            ExternalEvent::StaticDie { to, static_lender: Some(StaticLender::LoopIterator { call }), id, .. } => Some((*id, to, false, call)),
+            _ => None,
+        }
+    }
+    fn loop_ends<'a>(events: &'a [(usize, ExternalEvent)], out: &mut Vec<(usize, &'a ResourceTy, bool, &'a String)>) {
+        for (_, ev) in events {
+            if let Some(end) = loop_end(ev) {
+                out.push(end);
+            } else if let ExternalEvent::Branch { branches, .. } = ev {
+                for b in branches {
+                    loop_ends(&b.e_data, out);
+                }
+            }
+        }
+    }
+    let mut all_ends = Vec::new();
+    loop_ends(&visualization_data.external_events, &mut all_ends);
+    let same = |a: &ResourceTy, b: &ResourceTy| a.extract_rap().is_some_and(|r| r.hash() == rap.hash())
+        && b.extract_rap().is_some_and(|r| r.hash() == rap.hash())
+        && lent_place(a).is_some() && lent_place(a) == lent_place(b);
     match event {
         // The head's call (`iter_mut`), when the loop's end gives back
         // what it lent: no other lend to that call comes between.
-        Event::MutableLend { to: ResourceTy::Value(ResourceAccessPoint::Function(f)), .. } => {
-            fn loop_ends(events: &[(usize, ExternalEvent)], hash: u64, call: &str, out: &mut Vec<usize>) {
-                for (_, ev) in events {
-                    match ev {
-                        ExternalEvent::MutableDie { to: ResourceTy::Value(r), static_lender: Some(StaticLender::LoopIterator { call: c }), id, .. }
-                            if *r.hash() == hash && c == call => out.push(*id),
-                        ExternalEvent::Branch { branches, .. } => {
-                            for b in branches {
-                                loop_ends(&b.e_data, hash, call, out);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            let mut ids = Vec::new();
-            loop_ends(&visualization_data.external_events, *rap.hash(), &f.name, &mut ids);
+        Event::MutableLend { to: ResourceTy::Value(ResourceAccessPoint::Function(f)), is, .. }
+        | Event::StaticLend { to: ResourceTy::Value(ResourceAccessPoint::Function(f)), is, .. } => {
+            let is_mut = matches!(event, Event::MutableLend { .. });
+            let ids: Vec<usize> = all_ends.iter()
+                .filter(|(_, to, m, call)| *m == is_mut && **call == f.name && same(to, is))
+                .map(|(id, ..)| *id).collect();
             let history = &visualization_data.timelines.get(rap.hash())?.history;
             let ends: Vec<usize> = history.iter().filter_map(|(l, e)| match e {
-                Event::MutableReacquire { id, .. } if ids.contains(id) => Some(*l),
+                Event::MutableReacquire { id, .. } | Event::StaticReacquire { id, .. } if ids.contains(id) => Some(*l),
                 _ => None,
             }).collect();
             let lends_to_call = |lo: usize, hi: usize| history.iter().any(|(l, e)| *l > lo && *l <= hi && matches!(e,
-                Event::MutableLend { to: ResourceTy::Value(ResourceAccessPoint::Function(g)), .. } if g.name == f.name));
-            ends.iter().any(|&end| end >= line && !lends_to_call(line, end))
-                .then(|| hover_messages::event_dot_lend_through_ref_to_loop_iterator(rap.name(), rap.points_to_copy()))
-        }
-        Event::MutableReacquire { from: ResourceTy::Anonymous, id, still_borrowed_by, .. } if still_borrowed_by.is_empty() => {
-            fn is_loop_end(events: &[(usize, ExternalEvent)], id: usize) -> bool {
-                events.iter().any(|(_, ev)| match ev {
-                    ExternalEvent::MutableDie { id: i, static_lender: Some(StaticLender::LoopIterator { .. }), .. } => *i == id,
-                    ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| is_loop_end(&b.e_data, id)),
-                    _ => false,
-                })
+                Event::MutableLend { to: ResourceTy::Value(ResourceAccessPoint::Function(g)), is: i, .. }
+                | Event::StaticLend { to: ResourceTy::Value(ResourceAccessPoint::Function(g)), is: i, .. } if g.name == f.name && same(i, is)));
+            if !ends.iter().any(|&end| end >= line && !lends_to_call(line, end)) {
+                return None;
             }
-            is_loop_end(&visualization_data.external_events, *id)
-                .then(|| hover_messages::event_dot_loop_iterator_reacquire_through_ref(rap.name(), rap.points_to_copy()))
+            Some(match lent_place(is)? {
+                None => hover_messages::event_dot_lend_through_ref_to_loop_iterator(rap.name(), is_mut, rap.points_to_copy()),
+                Some(place) => hover_messages::event_dot_lend_field_through_ref_to_loop_iterator(place, is_mut),
+            })
+        }
+        Event::MutableReacquire { from: ResourceTy::Anonymous, id, still_borrowed_by, is }
+        | Event::StaticReacquire { from: ResourceTy::Anonymous, id, still_borrowed_by, is } if still_borrowed_by.is_empty() => {
+            if !all_ends.iter().any(|(i, ..)| i == id) {
+                return None;
+            }
+            Some(match lent_place(is)? {
+                None => hover_messages::event_dot_loop_iterator_reacquire_through_ref(rap.name(), rap.points_to_copy()),
+                Some(place) => hover_messages::event_dot_loop_iterator_reacquire_field_through_ref(place),
+            })
         }
         _ => None,
     }
@@ -3224,27 +3253,41 @@ fn loop_iterator_ref_title(event: &Event, line: usize, rap: &ResourceAccessPoint
 /// A segment of `rap` from row `line` that only a `for` loop's iterator
 /// borrows (#871): the iterator has no column, so "being shared by one
 /// or more variables" sent the reader looking for a variable that isn't
-/// there.
+/// there. Not for a `&mut` reference whose pointee the iterator
+/// reborrows (`v.iter()` with `v: &mut Vec<_>`; #1059): its own state
+/// text ("…currently shared through it, so v can only read it") says it.
+/// But when the iterator borrows only a field of what it points to
+/// (`self.items.iter()`; #1060), the rest is still writable through it.
 fn loop_iterator_title(state: &State, rap: &ResourceAccessPoint, visualization_data: &VisualizationData, line: usize) -> Option<String> {
     let State::PartialPrivilege { s } = state else { return None };
-    if matches!(s, LineState::Gray) || !loop_iterator_holds(visualization_data, rap, line) {
+    if matches!(s, LineState::Gray) {
         return None;
     }
-    Some(hover_messages::state_borrowed_by_loop_iterator(rap.name(), rap.is_copy_owner() || rap.is_plain_value()))
+    match (loop_iterator_holds(visualization_data, rap, line)?, rap.is_ref()) {
+        (None, false) => Some(hover_messages::state_borrowed_by_loop_iterator(rap.name(), rap.is_copy_owner() || rap.is_plain_value())),
+        (Some(place), true) => Some(hover_messages::state_mut_ref_field_borrowed_by_loop_iterator(rap.name(), &place)),
+        _ => None,
+    }
 }
 
 /// Whether `rap`'s segment from `line` lies where a `for` loop's
 /// iterator borrows it (#871): from the call that lent it (`chars` in
 /// `for c in s.chars()`) to the end the loop draws for that borrow
 /// (`StaticLender::LoopIterator`). The plugin draws that end only when
-/// no loop variable gives the borrow back itself.
-fn loop_iterator_holds(visualization_data: &VisualizationData, rap: &ResourceAccessPoint, line: usize) -> bool {
-    fn loop_ends(events: &[(usize, ExternalEvent)], hash: u64, out: &mut Vec<(usize, StaticLender)>) {
+/// no loop variable gives the borrow back itself. Some(place) when what
+/// it borrows is the field `place` reached through the reference rap
+/// (`self.items.iter()`; #1060), Some(None) when it is rap's resource
+/// (or all of what rap points to), None when it doesn't borrow it there.
+fn loop_iterator_holds(visualization_data: &VisualizationData, rap: &ResourceAccessPoint, line: usize) -> Option<Option<String>> {
+    fn loop_ends(events: &[(usize, ExternalEvent)], hash: u64, out: &mut Vec<(usize, StaticLender, Option<String>)>) {
         for (_, ev) in events {
             match ev {
                 ExternalEvent::StaticDie { to: ResourceTy::Value(r), static_lender: Some(l @ (StaticLender::LoopIterator { .. } | StaticLender::LoopHeadBorrow { .. })), id, .. }
                 | ExternalEvent::MutableDie { to: ResourceTy::Value(r), static_lender: Some(l @ (StaticLender::LoopIterator { .. } | StaticLender::LoopHeadBorrow { .. })), id, .. }
-                    if *r.hash() == hash => out.push((*id, l.clone())),
+                    if *r.hash() == hash => out.push((*id, l.clone(), None)),
+                ExternalEvent::StaticDie { to: ResourceTy::DerefField(r, place, _), static_lender: Some(l @ StaticLender::LoopIterator { .. }), id, .. }
+                | ExternalEvent::MutableDie { to: ResourceTy::DerefField(r, place, _), static_lender: Some(l @ StaticLender::LoopIterator { .. }), id, .. }
+                    if *r.hash() == hash => out.push((*id, l.clone(), Some(place.clone()))),
                 ExternalEvent::Branch { branches, .. } => {
                     for b in branches {
                         loop_ends(&b.e_data, hash, out);
@@ -3267,12 +3310,12 @@ fn loop_iterator_holds(visualization_data: &VisualizationData, rap: &ResourceAcc
     let mut ends = Vec::new();
     loop_ends(&visualization_data.external_events, *rap.hash(), &mut ends);
     if ends.is_empty() {
-        return false;
+        return None;
     }
-    let Some(timeline) = visualization_data.timelines.get(rap.hash()) else { return false };
+    let timeline = visualization_data.timelines.get(rap.hash())?;
     let mut history = Vec::new();
     flat(&timeline.history, &mut history);
-    ends.iter().any(|(id, lender)| {
+    ends.into_iter().find(|(id, lender, _)| {
         let Some(end) = history.iter().find_map(|(l, e)| match e {
             Event::StaticReacquire { id: i, .. } | Event::MutableReacquire { id: i, .. } if i == id => Some(*l),
             _ => None,
@@ -3288,7 +3331,7 @@ fn loop_iterator_holds(visualization_data: &VisualizationData, rap: &ResourceAcc
             _ => None,
         }).max();
         lent.is_some_and(|from| from <= line && line < end)
-    })
+    }).map(|(_, _, place)| place)
 }
 
 fn or_alt_lend_at<'a>(
