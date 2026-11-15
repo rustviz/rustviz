@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{is_param_value_line, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
+use crate::svg_generator::data::{is_param_value_line, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, Event, ExternalEvent, LineState, TupleDropAt, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
 use crate::svg_generator::hover_messages::{self, styled_name_html};
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
@@ -1699,6 +1699,11 @@ fn render_dot(
                     append_drop_dot(drop_data, timeline_data, dots);
                     continue;
                 },
+                // (A tuple that is never dropped on this path, #981, is
+                // a plain dot: nothing is dropped there, #987.)
+                Event::TupleTempDrop { at: TupleDropAt::NeverSkipped, .. } => {
+                    data.title = event.print_message_with_name(&mut name);
+                }
                 Event::OwnerDropAtReassign { .. } | Event::OwnerDropIfTryReturns | Event::OwnerDropUnlessReturned | Event::TemporaryDrop { .. } | Event::TupleTempDrop { .. } | Event::LoopIteratorDrop { .. } => {
                     let cx = timeline_data.x_val;
                     let cy = event_y;

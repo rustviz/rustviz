@@ -968,7 +968,8 @@ pub fn collect_event_live_vars(
             ExternalEvent::GoOutOfScope { .. }
             | ExternalEvent::InitRefParam { .. } => {}
             ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::TupleTempDrop { ro, .. } | ExternalEvent::OrAltMove { ro, .. }
-            | ExternalEvent::OrAltBorrow { ro, .. } | ExternalEvent::ChainFailAssign { ro, .. } | ExternalEvent::ChainFailUse { ro, .. } | ExternalEvent::TiedParamNote { ro, .. } => {
+            | ExternalEvent::OrAltBorrow { ro, .. } | ExternalEvent::ChainFailAssign { ro, .. } | ExternalEvent::ChainFailUse { ro, .. } | ExternalEvent::TiedParamNote { ro, .. }
+            | ExternalEvent::DeadElseNote { ro, .. } => {
                 out.insert(ro.clone());
             }
             // The drop of the iterator `ro` was moved into, at a
