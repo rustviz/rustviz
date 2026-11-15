@@ -6,7 +6,7 @@
 //! See tcx: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TyCtxt.html
 
 use log::{info, warn};
-use rustc_hir::{StmtKind, Stmt, Expr, ExprKind, PathSegment, UnOp, Param, QPath, Pat, PatKind, BindingMode, HirId, Mutability, LetStmt, def::*};
+use rustc_hir::{StmtKind, Stmt, Expr, ExprKind, PathSegment, UnOp, Param, QPath, Pat, PatKind, BindingMode, HirId, Mutability, LetStmt, Block, def::*};
 use rustc_hir::intravisit::{self, Visitor};
 use crate::expr_visitor::*;
 use crate::expr_visitor_utils::*;
@@ -202,8 +202,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // to (part of) a static goes to the caller (#1053).
     // Like a reborrow, a `&mut STATIC` returned is drawn as a copy of
     // the reference: the static isn't moved.
+    // `unsafe { &mut TOTAL }` / `unsafe { GRID[1][0] }`: the block only
+    // wraps the place (#1065).
+    let mut place_e = e;
+    while let ExprKind::Block(Block { stmts: [], expr: Some(inner), .. }, None) = place_e.kind {
+      if place_e.span.from_expansion() {
+        break;
+      }
+      place_e = inner;
+    }
     let part = if deref.is_none() && reborrow.is_none()
-      && (matches!(evt, Evt::Copy) || matches!(e.kind, ExprKind::AddrOf(..))) { self.returned_part(e) } else { None };
+      && (matches!(evt, Evt::Copy) || matches!(place_e.kind, ExprKind::AddrOf(..))) { self.returned_part(place_e) } else { None };
     let evt = if part.is_some() { Evt::Copy } else { evt };
     let from_ro = if let Some(rty) = deref.or(reborrow).or(part) { rty } else { match fetch_rap(e, &self.tcx, &self.raps) {
       // A unit struct / enum constructor (`Marker`) or a fn item
