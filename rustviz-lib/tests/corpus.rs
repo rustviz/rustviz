@@ -17203,6 +17203,32 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "If the branch that ran didn't move it, its resource is dropped when u goes out of scope.",
         ],
     },
+    TooltipExpect {
+        name: "edition2024/while_cond_move_968",
+        // #968: a `while` loop ends when its condition turns out false,
+        // which can be after the condition moved a variable declared before
+        // the loop; the body's new value doesn't help on that path. s's
+        // scope end said "Its resource is dropped." (false when the loop
+        // ended after the move), u's and q's reassignments said their
+        // previous resource is dropped (u was always moved; q only maybe),
+        // and v's scope end said its resource is dropped (v was always
+        // moved). Checked with rustc and a `Drop`-printing type.
+        must_contain: &[
+            "s may have been moved: when the condition moves s to w and then turns out false, the while loop ends after that move, so s can't be used after the loop",
+            "s goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "u was moved before the loop ended: the condition moves u to first before it can turn out false, so the while loop ends after that move, and u can't be used after the loop",
+            "v was moved before the loop ended: the condition moves v to z before it can turn out false, so the while loop ends after that move, and v can't be used after the loop",
+            "v goes out of scope. No resource is dropped.",
+            "q may have been moved: when the condition moves q to w and then turns out false, the while loop ends after that move, so q can't be used after the loop",
+            "q acquires ownership of a new resource. Its previous resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "=s goes out of scope. Its resource is dropped.",
+            "u acquires ownership of a new resource; its previous resource is dropped",
+            "=v goes out of scope. Its resource is dropped.",
+            "q acquires ownership of a new resource; its previous resource is dropped",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {

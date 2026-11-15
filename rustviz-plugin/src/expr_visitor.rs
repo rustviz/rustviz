@@ -1909,7 +1909,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   pub fn moved_by_chain_condition(&self, name: &str) -> bool {
     fn any(events: &[(usize, ExternalEvent)], name: &str) -> bool {
       events.iter().any(|(_, ev)| match ev {
-        ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::ChainFail { .. }, .. } => ro.name() == name,
+        ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::ChainFail { .. } | MaybeMovedAt::WhileCondFail { .. }, .. } => ro.name() == name,
         ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| any(&b.e_data, name)),
         _ => false,
       })
@@ -8494,6 +8494,12 @@ fn ownership_after(events: &[(usize, ExternalEvent)], rap_name: &str, start: Opt
       // have moved it before (#281). It held the value before the
       // condition, which moved it.
       ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::ChainFail { .. }, .. } if ro.name() == rap_name => {
+        return Some(Ownership::Maybe);
+      }
+      // The end of a `while` loop whose condition may have moved it
+      // before it turned out false (#968): the body's events above may
+      // have given it a new value, but the loop can end after the move.
+      ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::WhileCondFail { .. }, .. } if ro.name() == rap_name => {
         return Some(Ownership::Maybe);
       }
       // Moved into a name an or-pattern binds, if its alternative

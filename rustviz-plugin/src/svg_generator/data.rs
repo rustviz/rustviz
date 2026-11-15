@@ -1324,6 +1324,13 @@ pub enum MaybeMovedAt {
     /// are dropped when the condition fails (they hold what was moved
     /// and need drop). `how`: what the condition does to it (#579).
     ChainFail { to: Vec<String>, dropped: Vec<String>, no_else: bool, how: ChainFailHow },
+    /// The end of a `while` loop whose condition moves the variable
+    /// (`while let Some(x) = it.next() && { let w = s; … }`, `while
+    /// let Some(c) = first(s)`, #968): the loop ends when the condition
+    /// turns out false, which may be after that move. `to`, `dropped`,
+    /// `how`: as for `ChainFail`. Like `ChainFail`, its drop flag reads
+    /// "nothing above" moved it, not "no branch above".
+    WhileCondFail { to: Vec<String>, dropped: Vec<String>, how: ChainFailHow },
 }
 
 /// How a let-chain's condition moves a variable (`MaybeMovedAt::ChainFail`).
@@ -2915,6 +2922,9 @@ impl Event {
             }
             Event::LoopExitMove { definite, at: MaybeMovedAt::ChainFail { to, dropped, no_else, how } } => {
                 hover_messages::event_dot_chain_fail_move(my_name, *definite, to, dropped, *no_else, how)
+            }
+            Event::LoopExitMove { definite, at: MaybeMovedAt::WhileCondFail { to, dropped, how } } => {
+                hover_messages::event_dot_while_cond_move(my_name, *definite, to, dropped, how)
             }
             Event::ChainFailAssign { place, drops_old, rc, no_else } => {
                 hover_messages::event_dot_chain_fail_assign(place.as_ref().unwrap_or(my_name), *drops_old, *rc, *no_else)

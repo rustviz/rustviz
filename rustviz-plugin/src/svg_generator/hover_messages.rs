@@ -3392,26 +3392,7 @@ pub fn event_dot_chain_fail_move(
     no_else: bool,
     how: &ChainFailHow,
 ) -> String {
-    fn join(names: &[String]) -> String {
-        let fmt: Vec<String> = names.iter().map(|n| styled_name_html(n)).collect();
-        match fmt.len() {
-            0 | 1 => fmt.concat(),
-            n => format!("{} and {}", fmt[..n - 1].join(", "), fmt[n - 1]),
-        }
-    }
-    // What is moved: the variable, or for `take(*b)` the place `*b`
-    // (#579).
-    let name = match how {
-        ChainFailHow::Out(place) => styled_name_html(place),
-        _ => styled_name_html(my_name),
-    };
-    // A call of an FnOnce closure moves it into the call (#579).
-    let (moves, act) = match how {
-        ChainFailHow::Call => (format!(
-            "the condition calls {} (it can only be called once, so the call moves it)", name), "call"),
-        _ if to.is_empty() => (format!("the condition moves {}", name), "move"),
-        _ => (format!("the condition moves {} to {}", name, join(to)), "move"),
-    };
+    let (name, moves, act) = cond_move_parts(my_name, to, how);
     let if_kw = styled_name_html(&"if".to_owned());
     let mut out = match (definite, no_else) {
         (false, false) => format!(
@@ -3431,17 +3412,83 @@ pub fn event_dot_chain_fail_move(
              the body is skipped, and {0} can't be used after the {3}",
             name, moves, act, if_kw),
     };
-    if !dropped.is_empty() {
-        let plural = dropped.len() > 1;
-        out.push_str(&format!(
-            ". When the condition fails after that move, {} {} out of scope and {} {} dropped.",
-            join(dropped),
-            if plural { "go" } else { "goes" },
-            if plural { "their resources" } else { "its resource" },
-            if plural { "are" } else { "is" },
-        ));
-    }
+    out.push_str(&cond_fail_dropped(dropped));
     out
+}
+
+// Where a `while` loop ends, when its condition moves the variable
+// before it can turn out false (#968): the loop ends after that move.
+// `definite`: every way the condition can turn out false passes the
+// move. `to`, `dropped`, `how`: as for `event_dot_chain_fail_move`.
+pub fn event_dot_while_cond_move(
+    my_name: &String,
+    definite: bool,
+    to: &[String],
+    dropped: &[String],
+    how: &ChainFailHow,
+) -> String {
+    let (name, moves, act) = cond_move_parts(my_name, to, how);
+    let while_kw = styled_name_html(&"while".to_owned());
+    let mut out = if definite {
+        format!(
+            "{0} was moved before the loop ended: {1} before it can turn out false, so the {3} \
+             loop ends after that {2}, and {0} can't be used after the loop",
+            name, moves, act, while_kw)
+    } else {
+        format!(
+            "{0} may have been moved: when {1} and then turns out false, the {3} loop ends after \
+             that {2}, so {0} can't be used after the loop",
+            name, moves, act, while_kw)
+    };
+    out.push_str(&cond_fail_dropped(dropped));
+    out
+}
+
+// What a condition does to the variable (`event_dot_chain_fail_move`,
+// `event_dot_while_cond_move`): the name of what it moves (the
+// variable, or for `take(*b)` the place `*b`, #579), how it says so,
+// and what to call that act.
+fn cond_move_parts(my_name: &String, to: &[String], how: &ChainFailHow) -> (String, String, &'static str) {
+    fn join(names: &[String]) -> String {
+        let fmt: Vec<String> = names.iter().map(|n| styled_name_html(n)).collect();
+        match fmt.len() {
+            0 | 1 => fmt.concat(),
+            n => format!("{} and {}", fmt[..n - 1].join(", "), fmt[n - 1]),
+        }
+    }
+    let name = match how {
+        ChainFailHow::Out(place) => styled_name_html(place),
+        _ => styled_name_html(my_name),
+    };
+    // A call of an FnOnce closure moves it into the call (#579).
+    let (moves, act) = match how {
+        ChainFailHow::Call => (format!(
+            "the condition calls {} (it can only be called once, so the call moves it)", name), "call"),
+        _ if to.is_empty() => (format!("the condition moves {}", name), "move"),
+        _ => (format!("the condition moves {} to {}", name, join(to)), "move"),
+    };
+    (name, moves, act)
+}
+
+// The condition's bindings that took the moved value and are dropped
+// when it fails (#281).
+fn cond_fail_dropped(dropped: &[String]) -> String {
+    if dropped.is_empty() {
+        return String::new();
+    }
+    let plural = dropped.len() > 1;
+    let fmt: Vec<String> = dropped.iter().map(|n| styled_name_html(n)).collect();
+    let names = match fmt.len() {
+        1 => fmt.concat(),
+        n => format!("{} and {}", fmt[..n - 1].join(", "), fmt[n - 1]),
+    };
+    format!(
+        ". When the condition fails after that move, {} {} out of scope and {} {} dropped.",
+        names,
+        if plural { "go" } else { "goes" },
+        if plural { "their resources" } else { "its resource" },
+        if plural { "are" } else { "is" },
+    )
 }
 
 // "t.0 or t.1", "t.0, t.1 or t.2": the places an or-pattern binds a
