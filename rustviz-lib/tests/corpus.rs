@@ -16528,6 +16528,52 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return mutably borrowed resource from dv to *gv",
         ],
     },
+    TooltipExpect {
+        name: "else_if_let_name_reuse",
+        // #916: same-named references in different arms (`if let Some(x)
+        // = &a {..} else if let Some(x) = &b {..}`, `let r = &c;` /
+        // `let r = &d;` in an if/else, `let q` in two match arms) share a
+        // column, and each one's borrow end was put in the first arm that
+        // declares the name, so the later arm's lender read "being shared"
+        // past the join (across `b = None;`, `d.push('!')`). That text is
+        // right on the rows where the borrow is live and the ends' tooltips
+        // were the same, so the rows are checked in
+        // `a_borrow_end_lands_in_the_arm_that_declares_its_reference`; the
+        // old plugin printed nothing false that a tooltip check can forbid.
+        must_contain: &[
+            "Return immutably borrowed resource from x to a",
+            "Return immutably borrowed resource from x to b",
+            "b's resource is no longer immutably borrowed",
+            "Return immutably borrowed resource from r to d",
+            "Return immutably borrowed resource from q to d",
+            "d's resource is no longer immutably borrowed",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "ref_name_reuse_pointee_kind",
+        // #917: a `&i32` `x` and a later `&Vec<i32>` `x` (and a `&String`
+        // `w` and a later `&i32` `w`) shared a column, and the later
+        // reference took the first one's "value" / "resource". A Vec needs
+        // drop (a resource); an i32 doesn't (a value, #484). They now have
+        // a column each, whose header says they're different variables.
+        must_contain: &[
+            "x holds an immutable reference; it can read the borrowed resource",
+            "the resource x points to is immutably borrowed by len",
+            "len no longer borrows the resource x points to",
+            "w holds an immutable reference; it can read the borrowed value",
+            "the value w points to is immutably borrowed by to_string",
+            "to_string no longer borrows the value w points to",
+            "x, immutable. A different variable from the x declared on line 8 (separate scopes, so only one exists at a time)",
+            "x, immutable. A different variable from the x declared on line 12 (separate scopes, so only one exists at a time)",
+        ],
+        must_not_contain: &[
+            "the value x points to is immutably borrowed by len",
+            "len no longer borrows the value x points to",
+            "the resource w points to is immutably borrowed by to_string",
+            "to_string no longer borrows the resource w points to",
+        ],
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -17645,6 +17691,43 @@ fn a_reused_name_keeps_the_earlier_borrows_end() {
     let e_end = dots_listing_tooltip(&timeline, "q's resource is no longer borrowed by e, but is still immutably borrowed by it1");
     assert!(e_end.len() == 1 && (e_end[0].1 - e_row).abs() < 1.0,
         "e's borrow should end on its last use's row (y={e_row}): {e_end:?}");
+}
+
+/// #916: same-named references in different arms of a conditional share
+/// a column. Each one's borrow end used to go to the first arm declaring
+/// the name, so the later arm's lender had no end in its own arm and read
+/// "being shared" past the join, across `b = None;` / `d.push('!')`,
+/// which need it unborrowed (and compile). Now the end is in the arm that
+/// holds its line: on the arm's last use of the reference, on the lender's
+/// column there (the borrow dot's x), and nothing draws the lender shared
+/// from there to its next event.
+#[test]
+fn a_borrow_end_lands_in_the_arm_that_declares_its_reference() {
+    let rv = run_with_local_backend("else_if_let_name_reuse");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let mut failures = Vec::new();
+    for (lender, var, use_line, nth, next_line) in [
+        ("b", "x", "println!(\"{}\", x);", 1, "b = None;"),
+        ("d", "r", "println!(\"{}\", r);", 1, "d.push('!');"),
+        ("d", "q", "println!(\"{}\", q);", 1, "d.push('?');"),
+    ] {
+        let end_row = code_rows_y(&code, use_line)[nth];
+        let next_row = code_row_y(&code, next_line);
+        let borrow = dots_listing_tooltip(&timeline, &format!(
+            "{lender}'s resource is immutably borrowed by {var}; {lender} is read-only while the borrow is live"));
+        let borrow = borrow.iter().filter(|d| d.1 < end_row).max_by(|a, b| a.1.total_cmp(&b.1))
+            .unwrap_or_else(|| panic!("{lender}: no borrow by {var} above y={end_row}"));
+        let ends = dots_listing_tooltip(&timeline, &format!("{lender}'s resource is no longer immutably borrowed"));
+        if !ends.iter().any(|d| (d.1 - end_row).abs() < 1.0 && (d.0 - borrow.0).abs() < 1.0) {
+            failures.push(format!("{lender}: {var}'s borrow should end at ({}, {end_row}), on the column it was borrowed on: {ends:?}", borrow.0));
+        }
+        let shared = state_lines_with_tooltip(&timeline, &format!("{lender}'s resource is being shared by one or more variables"));
+        let stale: Vec<_> = shared.iter().filter(|(a, b)| b.min(next_row) - a.max(end_row) > 0.5).collect();
+        if !stale.is_empty() {
+            failures.push(format!("{lender}: drawn as shared at {stale:?}, after {var}'s borrow ends (y={end_row}) and before its next event (y={next_row})"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// The y ranges of the column lines whose tooltip is exactly `text`.
