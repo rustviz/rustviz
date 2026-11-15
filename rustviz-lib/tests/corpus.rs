@@ -18859,6 +18859,62 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x.name may have been moved out above, so it's dropped here only if nothing above moved it",
             "y.a and y.b may have been moved out above, so each is dropped here only if nothing above moved it",
         ],
+    },    TooltipExpect {
+        name: "maybe_held_if_1034",
+        // #1034: a variable a branch may have moved (moved_before: moved
+        // on every path), then given a new value in only some branches
+        // of a later conditional. Checked with rustc and a
+        // `Drop`-printing type (c, x = false / true; loops 0, 1, 2 times
+        // round; i = 0, 1):
+        //   one_armed(false,false): (assign a)(end)[drop a]
+        //   one_armed(false,true):  (assign a)(assign c)[drop a](end)[drop c]
+        //   one_armed(true,false):  (assign a)[drop a](end)
+        //   one_armed(true,true):   (assign a)[drop a](assign c)(end)[drop c]
+        // The `if c` join said "a" is dropped "when s is assigned again"
+        // (c = x = false: at the scope end), the scope end "Its resource
+        // is dropped" (c = true, x = false: nothing is), and the `if x`
+        // with no `else` was drawn inline, s's owner line running on past
+        // it (checked by
+        // `a_conditional_that_may_leave_a_variable_empty_draws_no_owner_line_after_it`).
+        // Now the `if x` is drawn as a branch whose join says s may
+        // have no value, and the scope end is the drop flag's. With an
+        // `else` (with_else), the join said t "was moved in at least one
+        // branch above" and the scope end "only if no branch above moved
+        // it" (c = x = true: "c" is dropped there). assigned_after:
+        // `u = …"d"` said "its previous resource is dropped" (c = true, x
+        // = false: nothing is). in_loop: v's owner line ran on past the
+        // `if x` to the loop's end. after_inner_loop: q's owner line ran on
+        // past the `if x` too; the `if x`'s arms, where q may have no
+        // value because the `while` may not have run, mustn't say it
+        // was "assigned in only some of the branches above".
+        must_contain: &[
+            "s was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when s is assigned again (or, if it isn't, when it goes out of scope).",
+            "s may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
+            "t was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when t is assigned again (or, if it isn't, when it goes out of scope).",
+            "t may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when t goes out of scope.",
+            "t goes out of scope. Its resource is dropped here only if t still holds it (Rust tracks this with a runtime drop flag).",
+            "u was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when u is assigned again.",
+            "u may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when u is assigned again.",
+            "u acquires ownership of a new resource. Its previous resource is dropped here only if u still holds it (Rust tracks this with a runtime drop flag).",
+            "u goes out of scope. Its resource is dropped.",
+            "v may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when v is assigned again (or, if it isn't, when it goes out of scope).",
+            "v may have no value after the loop: a branch above may have moved it, and the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it or no branch above moved it, its resource is dropped when v goes out of scope.",
+            "v goes out of scope. Its resource is dropped here only if the loop above assigned v or no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "w may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when w goes out of scope.",
+            "w goes out of scope. Its resource is dropped here only if w still holds it (Rust tracks this with a runtime drop flag).",
+            "q may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when q is assigned again (or, if it isn't, when it goes out of scope).",
+            "q may have no value here: a loop above may have ended before assigning it",
+        ],
+        must_not_contain: &[
+            "its resource is dropped when s is assigned again.",
+            "=s goes out of scope. Its resource is dropped.",
+            "If the branch that ran didn't move it, its resource is dropped when t goes out of scope.",
+            "t goes out of scope. Its resource is dropped here only if no branch above moved it",
+            "u acquires ownership of a new resource; its previous resource is dropped",
+            "=w goes out of scope. Its resource is dropped.",
+            "q may have no value here: it was assigned in only some of the branches above",
+        ],
     },
 ];
 
@@ -25095,4 +25151,49 @@ fn column_lines_with_tooltip(svg: &str, text: &str) -> Vec<(f64, f64)> {
         .filter_map(|l| Some((attr(l, "y1")?.parse::<f64>().ok()?, attr(l, "y2")?.parse::<f64>().ok()?)))
         .map(|(a, b)| (a.min(b), a.max(b)))
         .collect()
+}
+
+/// #1034: a conditional that gives a new value, in only some of its
+/// branches, to a variable that may hold none where it starts (`if c {
+/// drop(s); } if x { s = …; }`). An `if` with no `else` there was drawn
+/// inline, and the column kept its owner line ("s is the owner of the
+/// resource") past the `if`'s closing brace, where s may hold nothing.
+/// Now the `if` is drawn as a branch, its join on the closing brace's
+/// row has a dot saying s may have no value, and no owner line runs
+/// from there to the row that ends the check (the scope end, or the
+/// next assignment).
+#[test]
+fn a_conditional_that_may_leave_a_variable_empty_draws_no_owner_line_after_it() {
+    let rv = run_with_local_backend("maybe_held_if_1034");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (var, assign_src, until_src, when) in [
+        ("s", "s = String::from(\"c\");", "}", "goes out of scope"),
+        ("t", "t = String::from(\"c\");", "}", "goes out of scope"),
+        ("u", "u = String::from(\"c\");", "u = String::from(\"d\");", "is assigned again"),
+        ("v", "v = String::from(\"c\");", "}", "is assigned again (or, if it isn't, when it goes out of scope)"),
+        ("w", "w = String::from(\"c\");", "}", "goes out of scope"),
+        ("q", "q = String::from(\"c\");", "}", "is assigned again (or, if it isn't, when it goes out of scope)"),
+    ] {
+        let assign_row = code_rows_y(&code, assign_src)[0];
+        // (with_else's `} else {` row isn't a "}" one: its `if` ends at
+        // the `else` block's closing brace.)
+        let close_row = code_rows_y(&code, "}").into_iter().find(|y| *y > assign_row).expect("the conditional's closing brace");
+        let until_row = code_rows_y(&code, until_src).into_iter().find(|y| *y > close_row).expect("the row after it");
+        let text = format!(
+            "{var} may have no value after the branches: it may have had none where they start, and only some of \
+             them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its \
+             resource is dropped when {var} {when}."
+        );
+        let dots = dots_listing_tooltip(&timeline, &text);
+        assert!(
+            dots.len() == 1 && (dots[0].1 - close_row).abs() < 1.0,
+            "{var}: one maybe-no-value dot on the conditional's closing row (y={close_row}) expected: {dots:?}",
+        );
+        let owner = column_lines_with_tooltip(&timeline, &format!("{var} is the owner of the resource"));
+        let through: Vec<_> = owner.iter().filter(|(a, b)| b.min(until_row) - a.max(close_row) > 0.5).collect();
+        assert!(
+            through.is_empty(),
+            "{var} drawn as the owner at {through:?}, between the conditional's end (y={close_row}) and `{until_src}` (y={until_row})",
+        );
+    }
 }

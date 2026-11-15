@@ -2604,6 +2604,29 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     None
   }
 
+  /// Where in `preprocessed_events` the conditional is, if what last
+  /// changed `rap`'s state, in the events so far, is a conditional that
+  /// gives it a new value in only some of its branches where it may
+  /// have held none as it started (`maybe_held`, #1034).
+  fn maybe_held_branch_now(&self, rap: &ResourceAccessPoint) -> Option<usize> {
+    let is = |r: &ResourceTy| r.extract_rap().is_some_and(|r| r.hash() == rap.hash());
+    for (at, (_, e)) in self.preprocessed_events.iter().enumerate().rev() {
+      match e {
+        ExternalEvent::Branch { maybe_held, .. } if maybe_held.contains(rap) => return Some(at),
+        ExternalEvent::LoopMaybeInit { ro, .. } | ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::LoopExitKept { ro, .. }
+        | ExternalEvent::OrAltMove { ro, .. } | ExternalEvent::ManuallyDropByHand { ro, .. }
+        | ExternalEvent::OwnerDropAtReassign { ro, .. } if ro.hash() == rap.hash() => return None,
+        ExternalEvent::Move { from, to, .. } if is(from) || is(to) => return None,
+        ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. } if is(to) => return None,
+        ExternalEvent::Branch { branches, .. }
+          if branches.iter().filter(|b| !b.diverges).any(|b| path_own(&b.e_data, rap, &[], PathOwn::Yes) != PathOwn::Yes
+            || path_own(&b.e_data, rap, &[], PathOwn::No) != PathOwn::No) => return None,
+        _ => {}
+      }
+    }
+    None
+  }
+
   /// At the end of `loop_expr` (#1000, #1001), what a variable declared
   /// before it holds after it, where that isn't what the end of its
   /// body (drawn once, #853) left: the code after the loop is reached
@@ -2743,6 +2766,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // as if it held one, what this loop says goes.
         (Ownership::Held, Ownership::Maybe) if body_from.is_some_and(|from|
           self.loop_maybe_init_now(&ro).is_some_and(|(at, nested)| nested && at >= from)) =>
+          maybe_init.push((ro, Some(by_cond), false)),
+        // Or because the body gives it a value in only some branches
+        // of a conditional (#1034): the loop may still end before
+        // giving it one.
+        (Ownership::Held, Ownership::Maybe) if body_from.is_some_and(|from|
+          self.maybe_held_branch_now(&ro).is_some_and(|at| at >= from)) =>
           maybe_init.push((ro, Some(by_cond), false)),
         (Ownership::None, Ownership::None) => round_moved.push((ro, false)),
         (Ownership::Maybe, Ownership::Maybe | Ownership::Held) => round_moved.push((ro, true)),
@@ -5427,6 +5456,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           && assigned_in_if.iter().any(|id| self.uninit_locals.contains_key(id))
           && branch_leaves(self.tcx, BranchBody::Expr(if_expr)).exits.iter()
             .all(|x| matches!(x, BranchExit::Return | BranchExit::Panic | BranchExit::Other));
+        // So is a body that gives a new value to a variable that may
+        // hold none where the `if` starts (#1034): on the implicit
+        // `else` path it still may hold none after the `if`, so after
+        // it, it only may hold a value.
+        let assigns_maybe_held = !always_matches && !self.expr_diverges(if_expr) && {
+          let mut body_live = HashSet::new();
+          collect_event_live_vars(&body_ev, &mut body_live);
+          let body_live = &body_live - &if_scope;
+          let start = self.preprocessed_events.iter()
+            .position(|(_, e)| body_ev.iter().any(|(_, b)| b.get_id() == e.get_id()))
+            .unwrap_or(self.preprocessed_events.len());
+          !self.maybe_held_after(&body_live, &[&body_ev, &[]], &maybe_init,
+            |name| self.rap_ownership_before(start, name)).is_empty()
+        };
         //
         // An `if let` whose pattern matches every value always runs
         // its body (`always_matches`, also for a literal taken apart
@@ -5438,7 +5481,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // assigned it, and nothing is dropped with a drop flag.)
         let drawn_as_branch = !always_matches
           && (events_move_out_of_outer(&body_ev, &if_scope) || exit_branch
-            || assigns_maybe_init || assigns_then_exits
+            || assigns_maybe_init || assigns_then_exits || assigns_maybe_held
             || (self.expr_diverges(if_expr) && {
               let sm = self.tcx.sess.source_map();
               let (split, if_end) = (sm.lookup_char_pos(if_expr.span.lo()).line, sm.lookup_char_pos(if_expr.span.hi()).line);
@@ -5701,6 +5744,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let b_ty = BranchType::If(b_labels, b_slices);
     self.note_exit_scope(expr);
     let loop_assigned = self.loop_assigned_now(&liveness);
+    // (The arms' events are out of the global timeline by now: what
+    // it says is the state where the `if` starts.)
+    let reaching: Vec<&[(usize, ExternalEvent)]> = b_branches.iter()
+      .filter(|b| !b.diverges).map(|b| b.e_data.as_slice()).collect();
+    let maybe_held = self.maybe_held_after(&liveness, &reaching, &maybe_init, |name| self.rap_ownership_now(name));
     self.add_external_event(line_num,
       ExternalEvent::Branch {
         live_vars: liveness,
@@ -5710,6 +5758,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         merge_point: merge,
         maybe_init,
         loop_assigned,
+        maybe_held,
         id: *self.unique_id });
         *self.unique_id += 1;
     // Both branches leave the function: nothing after the `if` runs.
@@ -6406,6 +6455,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     self.note_exit_scope(expr);
     let loop_assigned = self.loop_assigned_now(&liveness);
+    let reaching: Vec<&[(usize, ExternalEvent)]> = branch_data.iter()
+      .filter(|b| !b.diverges).map(|b| b.e_data.as_slice()).collect();
+    let maybe_held = self.maybe_held_after(&liveness, &reaching, &maybe_init, |name| self.rap_ownership_now(name));
     self.add_external_event(split, ExternalEvent::Branch {
       live_vars: liveness,
       branches: branch_data,
@@ -6414,6 +6466,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       merge_point: merge,
       maybe_init,
       loop_assigned,
+      maybe_held,
       id: *self.unique_id });
     *self.unique_id += 1;
   }
@@ -8567,6 +8620,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       merge_point: merge,
       maybe_init: HashSet::new(),
       loop_assigned,
+      maybe_held: HashSet::new(),
       id: *self.unique_id,
     });
     *self.unique_id += 1;

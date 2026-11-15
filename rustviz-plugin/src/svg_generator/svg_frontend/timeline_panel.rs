@@ -1172,6 +1172,21 @@ fn render_branch_dots(
                     &is.extract_rap().map_or(String::new(), |r| r.drop_note()),
                 )
             })
+        } else if matches!(event, Event::Branch { maybe_held: true, .. }) {
+            // It may have held nothing as the conditional started,
+            // and only some branches assign it (#1034): it may hold
+            // the new value, the old one, or nothing.
+            let full = visualization_data.timelines.get(hash).map_or(history, |t| &t.history);
+            let reassigned = match reassigned_after(full, *merge_point) {
+                None if matches!(event, Event::Branch { loop_assigned: true, .. }) => Some(false),
+                r => r,
+            };
+            Some(hover_messages::event_dot_branch_merge_maybe_held(
+                &is.real_name(),
+                is.extract_rap().map_or(false, |r| r.holds_value() || r.is_ref()),
+                rap.is_mut(),
+                reassigned,
+            ))
         } else if partly_initialized {
             // No path that gets here gave s a value (#919): a branch
             // that did returned or panicked (`if c { s = …; return; }`,
@@ -1243,6 +1258,12 @@ fn render_branch_dots(
                         .find(|(_, e)| matches!(e, Event::LoopExitKept { .. } | Event::LoopMaybeInit { .. } | Event::LoopExitMove { .. }))
                         .is_some_and(|(_, e)| matches!(e, Event::LoopExitKept { reassigned: true }));
                 hover_messages::event_dot_branch_merge_moved_then_reassigned(&is.real_name(), by_cond, in_loop)
+            } else if let Some(Some(every_path)) = matches!(next, Some(e @ Event::Branch { .. }) if assigns_in_branch(e))
+                .then(|| reassigned_after(full, *merge_point)) {
+                // The next assignment is in a branch of a later
+                // conditional (#1034): unless another one follows on
+                // every path, the scope end drops it on the others.
+                hover_messages::event_dot_branch_merge_moved_then_reassigned(&is.real_name(), by_cond, !every_path)
             } else if matches!(event, Event::Branch { loop_assigned: true, .. })
                 && !is.extract_rap().is_some_and(|r| r.holds_value() || r.is_ref()) {
                 // In a loop whose body gives it a new value (#1026):
@@ -2108,6 +2129,9 @@ fn maybe_moved_at_end(history: &[(usize, Event)]) -> bool {
     let mut maybe = false;
     for (_, e) in history {
         match e {
+            // Maybe held nothing as it started, assigned in some
+            // branches only (#1034).
+            Event::Branch { maybe_held: true, .. } => maybe = true,
             // Assigned in some branches only, not moved (#244).
             Event::Branch { branch_history, maybe_init, .. }
                 if init_join(*maybe_init, reaching_end_states(branch_history)).is_some() => maybe = false,
@@ -2147,12 +2171,19 @@ fn maybe_moved_at_end(history: &[(usize, Event)]) -> bool {
 // Whether what last made the column maybe-moved (as
 // `maybe_moved_at_end` reads `history`) is the end of a loop that
 // moves it on some time rounds and not others (`MaybeMovedAt::LoopRound
-// { kept: true }`, #1019).
+// { kept: true }`, #1019), or a conditional that assigns it in some
+// branches only where it may have held nothing as it started (a
+// `maybe_held` join, #1034): either way, whether something above moved
+// it doesn't settle what's dropped, so "only if it still holds it".
 fn maybe_moved_by_kept_round<'a>(history: impl Iterator<Item = &'a (usize, Event)>) -> bool {
     let mut kept = false;
     for (_, e) in history {
         match e {
             Event::LoopExitMove { definite: false, at: MaybeMovedAt::LoopRound { kept: k } | MaybeMovedAt::Loop { kept: k, .. } } => kept = *k,
+            // A conditional that assigns it in some branches only,
+            // where it may have held nothing as it started (#1034):
+            // the old value, the new one or nothing.
+            Event::Branch { maybe_held: true, .. } => kept = true,
             Event::Branch { branch_history, maybe_init, .. }
                 if init_join(*maybe_init, reaching_end_states(branch_history)).is_some() => kept = false,
             Event::Branch { branch_history, ty, .. } => {
@@ -2171,6 +2202,46 @@ fn maybe_moved_by_kept_round<'a>(history: impl Iterator<Item = &'a (usize, Event
         }
     }
     kept
+}
+
+// A conditional that assigns the column in one of its branches, also
+// in a conditional nested in one (#1034).
+fn assigns_in_branch(e: &Event) -> bool {
+    match e {
+        Event::Branch { branch_history, .. } => branch_history.iter().any(|b| b.e_data.iter()
+            .any(|(_, e)| matches!(e, Event::OwnerDropAtReassign { .. }) || assigns_in_branch(e))),
+        _ => false,
+    }
+}
+
+// After a conditional's join at `merge_point` that may leave the
+// column holding a value (#1034), what drops that value, as for
+// `event_dot_loop_maybe_init`'s `reassigned`: the next assignment, on
+// every path (`Some(true)`); one that may not run, in a branch of a
+// later conditional or in a loop that may end before it
+// (`Some(false)`); or the scope end (`None`). Later conditionals that
+// assign it in some branches only are looked past, for an assignment
+// on every path after them. `history` is the column's whole history.
+fn reassigned_after(history: &[(usize, Event)], merge_point: usize) -> Option<bool> {
+    let after = || history.iter().filter(|(l, _)| *l > merge_point);
+    let mut in_branch = false;
+    for (_, e) in after() {
+        match e {
+            Event::OwnerDropAtReassign { maybe_init: Some(InitBy::EarlierIteration | InitBy::OuterLoop { .. } | InitBy::DropFlag), .. } => {
+                // In a loop's body, which may end before it runs, unless
+                // every `break` out of it comes after it.
+                let kept = after()
+                    .find(|(_, e)| matches!(e, Event::LoopExitKept { .. } | Event::LoopMaybeInit { .. } | Event::LoopExitMove { .. }))
+                    .is_some_and(|(_, e)| matches!(e, Event::LoopExitKept { reassigned: true }));
+                return Some(kept && !in_branch);
+            }
+            Event::OwnerDropAtReassign { .. } => return Some(true),
+            Event::Branch { .. } if assigns_in_branch(e) => in_branch = true,
+            Event::Branch { .. } => break,
+            _ => {}
+        }
+    }
+    in_branch.then_some(false)
 }
 
 // The `before_loop` of the last `LoopMaybeInit` in `history` (#1012).
@@ -4821,9 +4892,8 @@ fn render_branches(
         let Event::Branch { branch_history, split_point, merge_point, ty, .. } = ev else { continue };
         // Maybe-initialized as the conditional starts (#244): where an
         // arm hasn't assigned s yet, s may or may not hold a value.
-        let entry_maybe_init = matches!(
-            init_after(maybe_init.then_some(InitJoin::Maybe { moved: false }), &history[..k]),
-            Some(InitJoin::Maybe { .. } | InitJoin::Loop));
+        let entry_init = init_after(maybe_init.then_some(InitJoin::Maybe { moved: false }), &history[..k]);
+        let entry_maybe_init = matches!(entry_init, Some(InitJoin::Maybe { .. } | InitJoin::Loop));
 
         let parent_x = timeline_data.x_val as f64;
         // Branches that share lines (`let s = if c { a } else { b };`)
@@ -5044,7 +5114,13 @@ fn render_branches(
             if entry_maybe_init {
                 let no_value = hover_messages::state_uninitialized(rap.name());
                 for seg in segs.iter_mut().filter(|seg| seg.title == no_value) {
-                    seg.title = hover_messages::state_maybe_uninitialized(rap.name());
+                    // Not branches above: a loop above that may have
+                    // ended before assigning it (#1034).
+                    seg.title = if entry_init == Some(InitJoin::Loop) {
+                        hover_messages::state_maybe_uninitialized_after_loop(rap.name())
+                    } else {
+                        hover_messages::state_maybe_uninitialized(rap.name())
+                    };
                 }
             }
             let mut segs = trim_dashes_under_solid(segs);
@@ -5799,6 +5875,7 @@ mod tests {
             merge_point: 0,
             maybe_init: false,
             loop_assigned: false,
+            maybe_held: false,
             id: 0,
         })];
         compute_width(&mut events);
