@@ -19690,6 +19690,46 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "v may have been moved",
         ],
     },
+    TooltipExpect {
+        // #1057: after #1043 a variable declared before a `loop` that
+        // nothing breaks out of (left only at a `return` / panic in a
+        // branch or a `?`, or never) had no dot after its last use in the
+        // loop, so its column seemed to end there. It is still in scope
+        // (an owner still owns its resource) while the loop keeps running:
+        // its column runs on to the loop's `}` and ends in a plain dot that
+        // says so (where: `endless_loop_columns_end_at_the_loops_brace`).
+        // Checked with rustc and a Drop-printing type: with c false (x
+        // `Some`) nothing is dropped while the loop runs; `loop {}` never
+        // drops g; `return g` moves g to the caller; `process::exit` drops
+        // nothing; `n += 1` may panic on overflow, which drops g.
+        name: "loop_runs_on_1057",
+        must_contain: &[
+            "g is still alive while the loop keeps running; it's dropped only at the exits above",
+            "c is still in scope while the loop keeps running; it goes out of scope only at the exits above",
+            "w is still alive while the loop keeps running; it's dropped only at the exits above",
+            "x is still in scope while the loop keeps running; it goes out of scope only at the exits above",
+            "g is still alive while the loop keeps running; this loop never ends, so g is never dropped",
+            "n is still in scope while the loop keeps running; this loop never ends, so n never goes out of scope",
+            "g is still alive while the loop keeps running; it's moved or dropped only at the exits above",
+            "g is still alive while the loop keeps running",
+            "n is still in scope while the loop keeps running",
+            "h is still alive while the loop keeps running; it's dropped only at the exits above",
+            "s is still alive while the loop keeps running; it's dropped only at the exits above",
+            "u is still alive while the loop keeps running; it's dropped only at the exits above",
+            "c is still in scope while the loop keeps running",
+        ],
+        must_not_contain: &[
+            // The code never reaches the scope ends after the loop (#1043).
+            // (Each of these is reached only in `in_for`, where its `for`
+            // loop may end: k there.)
+            "=w goes out of scope. Its resource is dropped.",
+            "=c goes out of scope",
+            "=x goes out of scope",
+            "=n goes out of scope",
+            // Nor is anything left in g to say about after the move.
+            "g goes out of scope. No resource is dropped.",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -23216,6 +23256,72 @@ fn breakless_loop_branch_exits_drop_only_there() {
     }
     let w = dots_where(&timeline, |lines| lines.iter().any(|l| l.starts_with("w goes out of scope")));
     assert!(w.is_empty(), "{name}: w has a scope end after the loop: {w:?}");
+}
+
+/// A variable declared before a `loop` that nothing breaks out of (#1057):
+/// its column runs on to the loop's closing `}` (the last row the code
+/// reaches while the loop keeps running) and ends there in a plain dot,
+/// not a drop dot; nothing on its column is below it. One moved away
+/// before the loop (g in `moved_before`) gets no such dot.
+#[test]
+fn endless_loop_columns_end_at_the_loops_brace() {
+    let name = "loop_runs_on_1057";
+    let rv = run_with_local_backend(name);
+    let (code, timeline) = (rv.code_panel_string(), rv.timeline_panel_string());
+    // The row of source line `line` (1-based), a line holding only `}`.
+    let src = std::fs::read_to_string(corpus_dir().join(format!("{name}.rs"))).unwrap();
+    let braces: Vec<usize> = src.lines().enumerate().filter(|(_, l)| l.trim() == "}").map(|(i, _)| i + 1).collect();
+    let rows = code_rows_y(&code, "}");
+    assert_eq!(braces.len(), rows.len(), "{name}: rows holding only `}}`");
+    let brace_row = |line: usize| rows[braces.iter().position(|&l| l == line).expect("a `}` line")];
+    let owns = |v: &str, rest: &str| format!("{v} is still alive while the loop keeps running{rest}");
+    let in_scope = |v: &str, rest: &str| format!("{v} is still in scope while the loop keeps running{rest}");
+    let exits = "; it's dropped only at the exits above";
+    let ref_exits = "; it goes out of scope only at the exits above";
+    for (text, line, count) in [
+        // (c says the same in `onlybr`, `give`, `moved_before` and
+        // `nested`; x in `only_try` and `in_for`.)
+        (owns("g", exits), 15, 1),
+        (in_scope("c", ref_exits), 15, 4),
+        (owns("w", exits), 22, 1),
+        (in_scope("x", ref_exits), 22, 2),
+        (owns("g", "; this loop never ends, so g is never dropped"), 29, 1),
+        (in_scope("n", "; this loop never ends, so n never goes out of scope"), 29, 1),
+        (owns("g", "; it's moved or dropped only at the exits above"), 38, 1),
+        (owns("g", ""), 50, 1),
+        (in_scope("c", ""), 50, 1),
+        (in_scope("n", ""), 50, 1),
+        (owns("h", exits), 60, 1),
+        (in_scope("c", ref_exits), 60, 4),
+        (owns("s", exits), 75, 1),
+        (in_scope("c", ref_exits), 75, 4),
+        (owns("u", exits), 89, 1),
+        (in_scope("x", ref_exits), 89, 2),
+    ] {
+        let dots = dots_with_tooltip(&timeline, &text);
+        assert_eq!(dots.len(), count, "{name}: dots saying {text:?}: {dots:?}");
+        if count == 0 {
+            continue;
+        }
+        let y = brace_row(line);
+        let (x, _) = *dots.iter().find(|(_, dy)| *dy == y)
+            .unwrap_or_else(|| panic!("{name}: no dot saying {text:?} on line {line}'s `}}` (y={y}): {dots:?}"));
+        let circle = start_tags(&timeline, "circle").into_iter()
+            .find(|t| attr(t, "cx").and_then(|v| v.parse::<f64>().ok()) == Some(x) && attr(t, "cy").and_then(|v| v.parse::<f64>().ok()) == Some(y))
+            .expect("its circle");
+        // A plain dot: its own tooltip, not a drop dot's `<g>`.
+        assert!(circle.contains("data-tooltip-text="), "{name}: {text:?} isn't a plain dot (a drop dot's `<g>` holds the text)");
+        // The column's line reaches it and nothing of it is below.
+        let hash = attr(circle, "data-hash").expect("a dot has a data-hash");
+        let bars: Vec<(f64, f64)> = start_tags(&timeline, "line").into_iter()
+            .filter(|l| attr(l, "data-hash") == Some(hash))
+            .filter_map(|l| Some((attr(l, "y1")?.parse::<f64>().ok()?, attr(l, "y2")?.parse::<f64>().ok()?)))
+            .filter(|(a, b)| a.min(*b) <= y + 1.0 && a.max(*b) >= y - 1.0 && (a - b).abs() > 1.0)
+            .collect();
+        assert!(bars.iter().any(|(a, b)| a.max(*b) == y && a.min(*b) < y), "{name}: no line on {text:?}'s column reaches it (y={y}): {bars:?}");
+        let below: Vec<(f64, f64)> = dots_where(&timeline, |_| true).into_iter().filter(|(dx, dy)| *dx == x && *dy > y && *dy < y + 31.0).collect();
+        assert!(below.is_empty(), "{name}: a dot right below {text:?} on its column: {below:?}");
+    }
 }
 
 /// `w = match n { 0 => p, 1 => q, _ => String::new() };` with w owning a
