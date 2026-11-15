@@ -5526,18 +5526,45 @@ fn tuple_scrutinee_vars(&self, scrutinee: &'tcx Expr<'tcx>) -> Vec<(ResourceAcce
     let mut out = Vec::new();
     if matches!(scrutinee.kind, ExprKind::Tup(_)) && !scrutinee.span.from_expansion() {
         let typeck = self.tcx.typeck(scrutinee.hir_id.owner);
-        self.tuple_literal_vars(scrutinee, &mut Vec::new(), typeck, &mut out);
+        self.tuple_literal_vars(scrutinee, &mut Vec::new(), typeck, false, &mut out);
+        // A variable's field is moved into the tuple too (`y.name` in
+        // `(x, y.name)`, #977), when the tuple is drawn as "the
+        // temporary tuple" (`tuple_scrutinee_position`, and a variable
+        // in it). Otherwise its literal has a `(temporary)` column,
+        // which already takes the field (`(y.name, y.tag)`, a let
+        // chain's `(x, y.name)`).
+        if !out.is_empty() && self.tuple_scrutinee_position(scrutinee) {
+            out.clear();
+            self.tuple_literal_vars(scrutinee, &mut Vec::new(), typeck, true, &mut out);
+        }
     }
     out
 }
 
+/// Whether the tuple literal `expr` is directly the scrutinee of a
+/// `match`, or of an `if let` / `while let` that isn't part of a let
+/// chain: where its variables are drawn moving into "the temporary
+/// tuple" rather than into a `(temporary)` column (#327).
+pub fn tuple_scrutinee_position(&self, expr: &'tcx Expr<'tcx>) -> bool {
+    use rustc_hir::Node;
+    match self.tcx.parent_hir_node(expr.hir_id) {
+        Node::Expr(m) => match m.kind {
+            ExprKind::Match(s, _, rustc_hir::MatchSource::Normal) => s.hir_id == expr.hir_id,
+            ExprKind::Let(l) if l.init.hir_id == expr.hir_id => matches!(self.tcx.parent_hir_node(m.hir_id),
+                Node::Expr(i) if matches!(i.kind, ExprKind::If(c, ..) if c.hir_id == m.hir_id)),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 fn tuple_literal_vars(&self, e: &'tcx Expr<'tcx>, path: &mut Vec<String>,
-  typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>, out: &mut Vec<(ResourceAccessPoint, Vec<String>, Ty<'tcx>)>) {
+  typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>, fields: bool, out: &mut Vec<(ResourceAccessPoint, Vec<String>, Ty<'tcx>)>) {
     match e.kind {
         ExprKind::Tup(elems) if !e.span.from_expansion() => {
             for (i, el) in elems.iter().enumerate() {
                 path.push(i.to_string());
-                self.tuple_literal_vars(el, path, typeck, out);
+                self.tuple_literal_vars(el, path, typeck, fields, out);
                 path.pop();
             }
         }
@@ -5549,6 +5576,30 @@ fn tuple_literal_vars(&self, e: &'tcx Expr<'tcx>, path: &mut Vec<String>,
             match crate::expr_visitor_utils::get_rap(e, &self.tcx, &self.raps) {
                 ResourceTy::Value(rap @ (ResourceAccessPoint::Owner(_)
                     | ResourceAccessPoint::Struct(Struct { is_member: false, .. }))) => out.push((rap, path.clone(), ty)),
+                _ => {}
+            }
+        }
+        // A field of a variable (`y.name`, `p.0`, a Box's `b.name`)
+        // whose part has a column of its own: moved into the tuple like
+        // a variable, out of the variable, which keeps its other parts
+        // (#977). Only a chain of fields on the variable itself: `v[0].f`
+        // or `(*r).f` isn't a column (and doesn't compile for a non-Copy
+        // field behind a reference).
+        ExprKind::Field(..) if fields && !e.span.from_expansion() => {
+            let mut base = e;
+            while let ExprKind::Field(b, _) = base.kind {
+                base = b;
+            }
+            if !matches!(base.kind, ExprKind::Path(QPath::Resolved(_, p)) if matches!(p.res, Res::Local(_))) {
+                return;
+            }
+            let ty = typeck.node_type(e.hir_id);
+            if ty.is_ref() || self.ty_is_copy(ty, e.hir_id.owner) {
+                return;
+            }
+            let Some(name) = crate::expr_visitor_utils::expr_to_rap_name(e, &self.tcx) else { return };
+            match self.raps.get(&name).map(|rd| &rd.rap) {
+                Some(rap @ (ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_))) => out.push((rap.clone(), path.clone(), ty)),
                 _ => {}
             }
         }
