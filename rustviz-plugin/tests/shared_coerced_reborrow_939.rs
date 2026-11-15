@@ -47,9 +47,9 @@ fn call_coerced() {
 }
 
 // `&mut gv` unsized to a `&mut dyn Write` derefs only once: dv points
-// to gv itself, so this is no reborrow. (gv's dot still says "the
-// resource gv points to is mutably borrowed by dv through gv", which
-// is wrong: #947.)
+// to gv itself, so this is no reborrow: gv itself is borrowed, and
+// what dv borrows is the reference gv holds, a value (#947, as for
+// the shared `&gd` unsized to `&dyn Debug`).
 fn mut_unsized() {
     let mut w = Vec::<u8>::new();
     let mut gv = &mut w;

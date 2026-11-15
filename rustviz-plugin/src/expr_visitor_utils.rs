@@ -1065,15 +1065,18 @@ pub fn innermost_addr_of_operand<'tcx>(expr: &'tcx Expr<'tcx>) -> &'tcx Expr<'tc
 /// True iff `addr_of` is `&mut r` / `&r` with `r` a local reference
 /// variable that stays borrowed as itself: the result is a `&mut &mut T`
 /// / `&mut &T` / `&&T` / `&&mut T` pointing to r, not a reborrow of what
-/// r points to (#914, #925). Not when rustc coerces the result through r
-/// (`let s: &mut String = &mut m;` / `let s: &String = &x;` derefs twice
-/// and reborrows `*m` / `*x`): the adjusted type then no longer points
-/// to a reference.
+/// r points to (#914, #925). Also when the result is unsized to a trait
+/// object (`let d: &dyn Debug = &x;`): that derefs once and borrows x
+/// itself, the `dyn Debug` being x's `&T` (#947). Not when rustc coerces
+/// the result through r (`let s: &mut String = &mut m;` / `let s:
+/// &String = &x;` derefs twice and reborrows `*m` / `*x`, see
+/// `is_coerced_ref_var_reborrow`), so this looks at the adjustments, not
+/// at the adjusted type.
 pub fn ref_var_borrow(addr_of: &Expr, typeck: &TypeckResults) -> bool {
   let ExprKind::AddrOf(rustc_hir::BorrowKind::Ref, _, inner) = addr_of.kind else { return false };
   matches!(inner.kind, ExprKind::Path(QPath::Resolved(_, Path { res: Res::Local(_), .. })))
     && typeck.expr_ty(inner).is_ref()
-    && typeck.expr_ty_adjusted(addr_of).builtin_deref(true).is_some_and(|t| t.is_ref())
+    && typeck.expr_adjustments(addr_of).iter().filter(|a| matches!(a.kind, Adjust::Deref(_))).count() < 2
 }
 
 /// True iff `addr_of` is `&mut r` / `&r` with `r` a local reference
