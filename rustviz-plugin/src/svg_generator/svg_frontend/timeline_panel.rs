@@ -1702,7 +1702,7 @@ fn loop_runs_on_owns(hash: &u64, history: &[(usize, Event)], resource_hold: bool
     {
         return Some(false);
     }
-    let whole = resource_hold && !maybe_moved_at_end(history) && struct_partial_move_split(visualization_data, *hash).is_none();
+    let whole = resource_hold && !maybe_moved_at_end(history) && struct_partial_move_split(visualization_data, *hash, None).is_none();
     whole.then_some(true)
 }
 
