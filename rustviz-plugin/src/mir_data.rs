@@ -642,6 +642,72 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         out
     }
 
+    /// What each user variable (and field of one) holds where the loop
+    /// `loop_span` comes back round to its start (#1012): `Held` when
+    /// rustc's dataflow says it's initialized on every edge back to the
+    /// loop's head, `None` when on none, `Maybe` otherwise. With each,
+    /// whether the loop moves anything out of its variable (a `Drop`
+    /// before an assignment isn't a move). Empty when the loop isn't in
+    /// this body or never comes back round.
+    pub fn round_states_loop(&self, loop_span: Span) -> Vec<(String, Ownership, bool)> {
+        use rustc_mir_dataflow::impls::{MaybeInitializedPlaces, MaybeUninitializedPlaces};
+        use rustc_mir_dataflow::move_paths::MoveData;
+        let Some((_, back)) = self.loop_head_edges(loop_span) else { return Vec::new() };
+        let body = &self.bwf.body;
+        let move_data = MoveData::gather_moves(body, self.tcx, |_| true);
+        // The loop's blocks: its head, and those that lead back to it
+        // without passing it (the natural loop of its back edges).
+        let Some(head) = body.basic_blocks.iter_enumerated().find_map(|(bb, data)| {
+            let t = data.terminator.as_ref()?;
+            (matches!(t.kind, TerminatorKind::FalseUnwind { .. }) && t.source_info.span == loop_span).then_some(bb)
+        }) else { return Vec::new() };
+        let preds = body.basic_blocks.predecessors();
+        let mut in_loop: BTreeSet<rustc_middle::mir::BasicBlock> = back.iter().copied().collect();
+        in_loop.insert(head);
+        let mut work: Vec<rustc_middle::mir::BasicBlock> = back.clone();
+        while let Some(bb) = work.pop() {
+            for &p in &preds[bb] {
+                if in_loop.insert(p) {
+                    work.push(p);
+                }
+            }
+        }
+        // The variables (locals) the loop moves something out of: not a
+        // `Drop` before an assignment, nor a `StorageDead`.
+        let moved_locals: BTreeSet<Local> = move_data.moves.iter()
+            .filter(|m| in_loop.contains(&m.source.block))
+            .filter(|m| {
+                let data = &body.basic_blocks[m.source.block];
+                match data.statements.get(m.source.statement_index) {
+                    Some(st) => !matches!(st.kind, rustc_middle::mir::StatementKind::StorageDead(_)),
+                    None => !matches!(data.terminator().kind, TerminatorKind::Drop { .. }),
+                }
+            })
+            .map(|m| move_data.move_paths[m.path].place.local)
+            .collect();
+        let mut init = MaybeInitializedPlaces::new(self.tcx, body, &move_data)
+            .iterate_to_fixpoint(self.tcx, body, None)
+            .into_results_cursor(body);
+        let mut uninit = MaybeUninitializedPlaces::new(self.tcx, body, &move_data)
+            .iterate_to_fixpoint(self.tcx, body, None)
+            .into_results_cursor(body);
+        let mut out: Vec<(String, Ownership, bool)> = Vec::new();
+        for (mpi, name) in self.move_path_names(&move_data) {
+            let moved = moved_locals.contains(&move_data.move_paths[mpi].place.local);
+            let may_hold = back.iter().any(|&p| { init.seek_to_block_end(p); init.get().contains(mpi) });
+            let may_lack = back.iter().any(|&p| { uninit.seek_to_block_end(p); uninit.get().contains(mpi) });
+            let own = match (may_hold, may_lack) {
+                (true, false) => Ownership::Held,
+                (false, _) => Ownership::None,
+                (true, true) => Ownership::Maybe,
+            };
+            if !out.iter().any(|(n, ..)| *n == name) {
+                out.push((name, own, moved));
+            }
+        }
+        out
+    }
+
     /// The edges into the head of the loop `loop_span` (its
     /// `FalseUnwind` block): the blocks that enter it from before the
     /// loop (not dominated by the head), and those that come back to

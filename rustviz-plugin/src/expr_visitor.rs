@@ -569,6 +569,15 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // #1001): a later time round, an assignment to one drops what an
   // earlier time round gave it, if it still holds that.
   pub loop_given: Vec<(rustc_hir::HirId, Vec<ResourceAccessPoint>)>,
+  // The loops being visited and the variables declared before each
+  // that may hold a value where it starts, but only may (a branch
+  // above moved them on some paths), each with what it holds where the
+  // loop comes back round (`round_states_loop`, #1012). An assignment
+  // to one the first time round drops the old value only if no branch
+  // above moved it; a later time round, what the time round before
+  // left. With each, whether something other than a branch may have
+  // moved it (a drop flag's "nothing above", `moved_by_chain_condition`).
+  pub loop_maybe_entry: Vec<(rustc_hir::HirId, Vec<MaybeEntry>)>,
   // At each `break` (#1000, #1001): the loop it leaves, the variables
   // declared before the loop that the path from the loop's start to
   // the `break` gives a value to, and what each of the loop's
@@ -744,6 +753,18 @@ pub struct BreakState {
   pub target: rustc_hir::HirId,
   pub assigned: Vec<ResourceAccessPoint>,
   pub given: Vec<(ResourceAccessPoint, Ownership)>,
+  // The loop's `loop_maybe_entry` variables that nothing on the path
+  // from the start of its body to the `break` changes (#1012).
+  pub untouched: Vec<ResourceAccessPoint>,
+}
+
+/// See `ExprVisitor::loop_maybe_entry`.
+#[derive(Clone)]
+pub struct MaybeEntry {
+  pub ro: ResourceAccessPoint,
+  /// What it holds where the loop comes back round.
+  pub round: Ownership,
+  pub by_cond: bool,
 }
 
 /// See `ExprVisitor::exit_frames`.
@@ -862,6 +883,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       defer_old_ends: false,
       break_moves: Vec::new(),
       loop_given: Vec::new(),
+      loop_maybe_entry: Vec::new(),
       break_states: Vec::new(),
       all_paths_exit: false,
       dead_tail: false,
