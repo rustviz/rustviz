@@ -3271,6 +3271,40 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
+  /// The places a `for` loop's head borrows through method chains (each
+  /// `call_chain_root`): the head's own chain (`a.iter_mut()` in
+  /// `a.iter_mut().zip(b.iter())`), and the chains passed to its calls
+  /// whose value can hold a borrow (`b.iter()`, `self.b.iter()`; #1066),
+  /// not those that can't (`b.len()` in `.take(b.len())`).
+  pub(crate) fn loop_head_chain_roots(&self, head: &'tcx Expr<'tcx>) -> Vec<(ResourceTy, Mutability)> {
+    let typeck = self.tcx.typeck(head.hir_id.owner);
+    let holds = |e: &'tcx Expr<'tcx>| typeck.expr_ty(e).walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_)));
+    let mut out: Vec<(ResourceTy, Mutability)> = Vec::new();
+    let mut todo: Vec<&'tcx Expr<'tcx>> = vec![head];
+    while let Some(e) = todo.pop() {
+      if let Some(root) = self.call_chain_root(e) {
+        if !out.contains(&root) {
+          out.push(root);
+        }
+      }
+      let mut call = e;
+      loop {
+        match call.kind {
+          ExprKind::MethodCall(_, rcvr, args, _) => {
+            todo.extend(args.iter().filter(|a| holds(a)));
+            call = rcvr;
+          }
+          ExprKind::Call(_, args) => {
+            todo.extend(args.iter().filter(|a| holds(a)));
+            break;
+          }
+          _ => break,
+        }
+      }
+    }
+    out
+  }
+
   /// A method chain as written (`v.get_mut(0).unwrap()`), for a tooltip.
   /// An argument list that is long or has characters a label leaves
   /// out (`m.get_mut(&k)`, `m.get_mut("k")`) is shortened to `(…)`.
@@ -6261,7 +6295,9 @@ pub fn keep_loop_head_loans(&mut self, head: &'tcx Expr<'tcx>) -> Vec<(ResourceT
   // v is read-only until the loop ends. (A `&T` v is copied, not
   // reborrowed, and is read-only anyway.) A field reached through a
   // `&mut` (`self.items.iter_mut()`, #1060) is lent the same way.
-  if let Some((root, m)) = self.call_chain_root(head) {
+  // So is each chain passed to the head's calls (`b.iter()` in
+  // `a.iter_mut().zip(b.iter())`, #1066): the zipped iterator holds both.
+  for (root, m) in self.loop_head_chain_roots(head) {
     let through = match &root {
       ResourceTy::Value(r) if r.is_ref() => Some((r.clone(), None)),
       ResourceTy::DerefField(r, place, _) => Some((r.clone(), Some(place.clone()))),

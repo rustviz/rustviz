@@ -4640,6 +4640,40 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     (!tys.is_empty() && !tys.contains(&erase(lhs_ty))).then_some(owner)
   }
 
+  /// The `&mut` bindings of a `for` loop's tuple pattern and the
+  /// variable each points into (as `mut_call_chain_root`), following
+  /// the head's adapters: `enumerate` pairs an index with its
+  /// receiver's item, `zip` pairs its receiver's item with its
+  /// argument's, and `rev` / `skip` / `take` / ... hand out their
+  /// receiver's items (#1067).
+  fn loop_pat_write_roots(&self, pat: &'tcx Pat<'tcx>, head: &'tcx Expr<'tcx>, out: &mut Vec<(String, ResourceAccessPoint)>) {
+    const SAME_ITEMS: &[&str] = &["rev", "skip", "take", "step_by", "skip_while", "take_while", "filter", "peekable", "fuse", "inspect"];
+    let typeck = self.tcx.typeck(pat.hir_id.owner);
+    match (pat.kind, head.kind) {
+      (PatKind::Binding(BindingMode(rustc_hir::ByRef::No, _), hirid, _, None), _) => {
+        if typeck.pat_ty(pat).ref_mutability() == Some(Mutability::Mut) && typeck.pat_adjustments().get(pat.hir_id).is_none() {
+          if let Some(root) = self.mut_call_chain_root(head) {
+            out.push((binding_name(&self.tcx, hirid), root));
+          }
+        }
+      }
+      (PatKind::Tuple(ps, dd), ExprKind::MethodCall(seg, rcvr, args, _)) if ps.len() == 2 && dd.as_opt_usize().is_none()
+        && matches!(seg.ident.as_str(), "enumerate" | "zip") =>
+      {
+        if seg.ident.as_str() == "enumerate" {
+          self.loop_pat_write_roots(&ps[1], rcvr, out);
+        } else if let [arg] = args {
+          self.loop_pat_write_roots(&ps[0], rcvr, out);
+          self.loop_pat_write_roots(&ps[1], arg, out);
+        }
+      }
+      (_, ExprKind::MethodCall(seg, rcvr, _, _)) if SAME_ITEMS.contains(&seg.ident.as_str()) => {
+        self.loop_pat_write_roots(pat, rcvr, out);
+      }
+      _ => {}
+    }
+  }
+
   /// The variable whose resource (or, for a reference parameter, the
   /// caller's resource it points to) the reference r points into: r's
   /// lender's owner, or the reference parameter r borrows through. For
@@ -7218,7 +7252,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let mut head_loan: Option<(ResourceTy, bool, usize)> = None;
         // The loop variable's `loop_ref_into` entry, and the one it
         // shadows (a loop nested in another with the same variable).
-        let mut loop_ref_prev: Option<(String, Option<ResourceAccessPoint>)> = None;
+        let mut loop_ref_prev: Vec<(String, Option<ResourceAccessPoint>)> = Vec::new();
         if let PatKind::Binding(_, pat_hirid, pat_ident, None) = user_pat.kind {
           let pat_name = binding_name(&self.tcx, pat_hirid);
           let pat_ty = self.tcx.typeck(user_pat.hir_id.owner)
@@ -7278,7 +7312,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             if matches!(lender, ResourceTy::Anonymous) && pat_ty.ref_mutability() == Some(Mutability::Mut) {
               if let Some(root) = self.mut_call_chain_root(head_arg) {
                 let prev = self.loop_ref_into.insert(pat_name.clone(), root);
-                loop_ref_prev = Some((pat_name.clone(), prev));
+                loop_ref_prev.push((pat_name.clone(), prev));
               }
             }
             self.add_ref(
@@ -7380,6 +7414,37 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           }
           self.register_pattern_bindings_anon(user_pat, for_line);
           self.pattern_lender = None;
+          // `for (i, e) in v.iter().enumerate()`: as for `for e in
+          // v.iter().rev()`, e points into what the head's call
+          // borrowed (drawn on v, #868), so nothing is "returned" when
+          // e ends: it wasn't drawn as an arrow from e's column to
+          // nowhere ("what it borrows from isn't shown"; #1067).
+          if matches!(head_arg.kind, ExprKind::MethodCall(..) | ExprKind::Call(..)) {
+            let mut decls = HashSet::new();
+            collect_pat_bindings(user_pat, &self.tcx, &self.raps, &mut decls);
+            #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "each binding is inserted into a set on its own")]
+            for d in decls.iter() {
+              if self.borrow_map.get(d.name()).is_some_and(|rd| matches!(rd.lender, ResourceTy::Anonymous)) {
+                self.unlent_refs.insert(d.name().to_owned());
+              }
+            }
+          }
+          // `for (i, e) in v.iter_mut().enumerate()`, `for (x, y) in
+          // a.iter_mut().zip(b.iter_mut())` with v, a, b `&mut`
+          // references or fields through `&mut self`: as for `for e in
+          // v.iter_mut()`, a write through e goes into the resource v
+          // points to (#1067), and one through y into b's.
+          if !head_is_iterator {
+            let mut roots = Vec::new();
+            self.loop_pat_write_roots(user_pat, head_arg, &mut roots);
+            for (name, root) in roots {
+              let unlent = self.borrow_map.get(&name).is_some_and(|d| matches!(d.lender, ResourceTy::Anonymous));
+              if unlent {
+                let prev = self.loop_ref_into.insert(name.clone(), root);
+                loop_ref_prev.push((name, prev));
+              }
+            }
+          }
           // `for &y in &v`, `for &(a, b) in &pairs`, `for _ in &v`: no
           // loop variable borrows the head (each is a copy, or there is
           // none), but the loop's iterator still borrows `v` until the
@@ -7429,10 +7494,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // The body may run no times or many (#786).
         let inits = self.enter_loop_inits();
         self.visit_expr(body_expr);
-        match loop_ref_prev {
-          Some((name, Some(prev))) => { self.loop_ref_into.insert(name, prev); }
-          Some((name, None)) => { self.loop_ref_into.remove(&name); }
-          None => {}
+        for (name, prev) in loop_ref_prev.into_iter().rev() {
+          match prev {
+            Some(prev) => { self.loop_ref_into.insert(name, prev); }
+            None => { self.loop_ref_into.remove(&name); }
+          }
         }
         if let Some(loop_expr) = arms.first().map(|a| a.body) {
           self.leave_loop_inits(expr, loop_expr.hir_id, inits, true);
