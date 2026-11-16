@@ -18916,6 +18916,140 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "q may have no value here: it was assigned in only some of the branches above",
         ],
     },
+    TooltipExpect {
+        name: "deferred_init_maybe_held_1036",
+        // #1036: a `let mut s;` local a loop above (or an `if` above) may
+        // have assigned, then assigned in only some branches of a
+        // conditional. Checked with rustc and a `Drop`-printing type
+        // (loops run 0, 1, 2 times; each branch outcome):
+        //   n1(0,false): (else)(end)          n1(1,false): (assign w)(else)(end)[drop w]
+        //   n1(0,true):  (assign b)(end)[drop b]
+        //   n1(1,true):  (assign w)(assign b)[drop w](end)[drop b]
+        //   two_ifs(true,false): (assign a)(else)(end)[drop a]
+        //   assigned_after(1,false): (assign w)(assign z)[drop w]...
+        //   assigned_after(0,false): (assign z) drops nothing
+        //   both_arms(1,false): (assign w)(assign c)[drop w]...
+        // The scope ends said "only if s was assigned in the branch that
+        // ran" (n = 1, x = false: "w" is dropped there though the `else`
+        // ran), the joins "If the branch that ran assigned it" (and
+        // nothing of the earlier value), assigned_after's `w = …"z"`
+        // "only if w was assigned in the branch that ran", and both_arms'
+        // `else` arm "only if q was assigned in the branch that ran" (it
+        // drops "w" only if the loop assigned q).
+        must_contain: &[
+            "s may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
+            "t may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when t goes out of scope.",
+            "t goes out of scope. Its resource is dropped here only if t still holds it (Rust tracks this with a runtime drop flag).",
+            "u may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when u goes out of scope.",
+            "u goes out of scope. Its resource is dropped here only if u still holds it (Rust tracks this with a runtime drop flag).",
+            "v may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when v goes out of scope.",
+            "v goes out of scope. Its resource is dropped here only if v still holds it (Rust tracks this with a runtime drop flag).",
+            "w may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when w is assigned again.",
+            "w acquires ownership of a new resource. Its previous resource is dropped here only if w still holds it (Rust tracks this with a runtime drop flag).",
+            "q acquires ownership of a new resource. Its previous resource is dropped here only if the loop above assigned q (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "s goes out of scope. Its resource is dropped here only if s was assigned in the branch that ran",
+            "t goes out of scope. Its resource is dropped here only if t was assigned in the branch that ran",
+            "u goes out of scope. Its resource is dropped here only if u was assigned in the branch that ran",
+            "v goes out of scope. Its resource is dropped here only if v was assigned in the branch that ran",
+            "s was assigned a value in only some of the branches above",
+            "t was assigned a value in only some of the branches above",
+            "v was assigned a value in only some of the branches above",
+            "w was assigned a value in only some of the branches above",
+            "If the branch that ran assigned it, its resource is dropped when u goes out of scope.",
+            "w acquires ownership of a new resource. Its previous resource is dropped here only if w was assigned in the branch that ran",
+            "q acquires ownership of a new resource. Its previous resource is dropped here only if q was assigned in the branch that ran",
+        ],
+    },
+    TooltipExpect {
+        name: "maybe_moved_returned_1037",
+        // #1037: a variable a branch may have moved (or a `let mut w;` an
+        // `if` or a loop above may have assigned), given a new value only
+        // in a branch of a later conditional that returns or panics.
+        // Checked with rustc and a `Drop`-printing type:
+        //   ret(false,false): (assign a)(end)[drop a]
+        //   ret(true,false):  (assign a)[drop a](end)
+        //   ret(false,true):  (assign a)(assign c)[drop a](returned)[drop c]
+        //   panics(false,false): (assign a)(end)[drop a]
+        //   deferred(true,false): (assign a)(end)[drop a]
+        //   deferred(false,false): (end)
+        //   after_loop(1,false): (assign w)(end)[drop w]
+        //   after_loop(0,false): (end)
+        // The scope ends said "No resource is dropped: s was moved or
+        // dropped in every branch above that reaches this point" (s, t,
+        // u, v), "No resource is dropped." (w) and "Its resource is
+        // dropped." (q), and the joins of the returning `if`s "w (q)
+        // still has no value here: the branch that assigned w returned
+        // before reaching this point".
+        must_contain: &[
+            "s goes out of scope. Its resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
+            "t goes out of scope. Its resource is dropped here only if t still holds it (Rust tracks this with a runtime drop flag).",
+            "u goes out of scope. Its resource is dropped here only if u still holds it (Rust tracks this with a runtime drop flag).",
+            "v goes out of scope. Its resource is dropped here only if v still holds it (Rust tracks this with a runtime drop flag).",
+            "w goes out of scope. Its resource is dropped here only if w still holds it (Rust tracks this with a runtime drop flag).",
+            "q goes out of scope. Its resource is dropped here only if q still holds it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "s goes out of scope. No resource is dropped",
+            "t goes out of scope. No resource is dropped",
+            "u goes out of scope. No resource is dropped",
+            "v goes out of scope. No resource is dropped",
+            "w goes out of scope. No resource is dropped",
+            "=q goes out of scope. Its resource is dropped.",
+            "w still has no value here",
+            "q still has no value here",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_arg_move_captures",
+        // #1036, #1037 (rustc's move data at the scope end): `fn apply<F:
+        // FnOnce() -> usize>(f: F) -> usize { f() }` calls f, which moves
+        // it (a `Drop`-printing capture is dropped during the call), so
+        // nothing is dropped at apply's end. It said "Its resource is
+        // dropped."
+        must_contain: &[
+            "f goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "=f goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/if_let_chain_closure_move",
+        // As in closure_arg_move_captures: `run`'s `f()` moves f.
+        must_contain: &[
+            "f goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "=f goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "shadow_matrix_closures",
+        // As in closure_arg_move_captures: `apply`'s `f()` moves f.
+        must_contain: &[
+            "f goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "=f goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/box_contents_moved_by_chain_940",
+        // `{ let w = *e; drop(w); true }`: w's String is moved into drop,
+        // so nothing is dropped where w goes out of scope (rustc's move
+        // data at the scope end, #1036, #1037). It said "Its resource is
+        // dropped." (and, for g's, "only if no branch above moved it").
+        must_contain: &[
+            "w goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "=w goes out of scope. Its resource is dropped.",
+            "w goes out of scope. Its resource is dropped here only if no branch above moved it",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop

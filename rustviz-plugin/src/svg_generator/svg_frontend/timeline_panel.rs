@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{is_param_value_line, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
+use crate::svg_generator::data::{is_param_value_line, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
 use crate::svg_generator::hover_messages::{self, styled_name_html};
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
@@ -1143,7 +1143,7 @@ fn render_branch_dots(
             Some(hover_messages::event_dot_branch_merge_borrow_ended(&is.real_name()))
         } else if let Some(InitJoin::AllMoved) = init {
             Some(hover_messages::event_dot_branch_merge_init_all_moved(&is.real_name(), rap.is_mut()))
-        } else if let Some(InitJoin::Maybe { moved }) = init {
+        } else if let (Some(InitJoin::Maybe { moved }), false) = (init, matches!(event, Event::Branch { maybe_held: true, .. })) {
             // As for a maybe-moved variable below, the old value
             // is dropped by a drop flag at the next assignment
             // if there is one, or else at the scope end. That
@@ -1199,7 +1199,13 @@ fn render_branch_dots(
                     Some(State::OutOfScope) | Some(State::FullPrivilege { s: LineState::Uninit })
                 ) && !(rap.is_ref() && ends_borrow(&b.e_data))
             });
-            unassigned_everywhere.then(|| {
+            // Unless it may have had a value as the conditional
+            // started (a loop or a conditional above may have assigned
+            // it, #1037): the paths that get here leave it as it was,
+            // and the scope end or next assignment says what's dropped.
+            let entry_maybe_init = history.iter().position(|(_, e)| std::ptr::eq(e, event))
+                .is_some_and(|k| matches!(init_after(None, &history[..k]), Some(InitJoin::Maybe { .. } | InitJoin::Loop)));
+            (unassigned_everywhere && !entry_maybe_init).then(|| {
                 let mut leavers = Vec::new();
                 assigned_by_leavers(branch_history, &mut leavers);
                 hover_messages::event_dot_branch_merge_still_unassigned(&is.real_name(), &leavers)
@@ -1324,6 +1330,42 @@ fn render_branch_dots(
         return;
 }
 
+/// A plain owner's scope end where what the column's history says about
+/// what's dropped there (as the arms of `render_scope_end_dot` read it)
+/// isn't what rustc's move data says (the event's `holds`, #1036,
+/// #1037): the text rustc's answer gives, and whether the dot drops
+/// something (a value, or one only a drop flag knows of). `None` when
+/// the history agrees, or rustc doesn't say. A conditional whose arms
+/// that get to its join leave s as it was (`if x { s = …; return s; }`
+/// after a branch that may have moved s) or a loop that may not have
+/// assigned a `let s;` before a conditional that does in some arms
+/// could make the history say a value is dropped, or none, where only
+/// a drop flag knows.
+fn scope_end_by_rustc(event: &Event, ro: &ResourceAccessPoint, history: &[(usize, Event)], resource_hold: bool, name: &String) -> Option<(String, bool)> {
+    let Event::OwnerGoOutOfScope { holds: Some(holds) } = event else { return None };
+    if !matches!(ro, ResourceAccessPoint::Owner(_)) || ro.never_drops() || ro.is_plain_value() || ro.is_closure()
+        || ro.is_union() || ro.is_manually_drop() || ro.is_temporary() || ro.holds_borrow() || ro.box_contents_moved() {
+        return None;
+    }
+    // The history's drop flag (`init_at_end`, `maybe_moved_at_end`).
+    let flag = (!ro.holds_value() && matches!(init_at_end(history), Some(InitJoin::Loop | InitJoin::Maybe { .. })))
+        || (!resource_hold && maybe_moved_at_end(history));
+    let note = ro.drop_note();
+    match holds {
+        ScopeEndHolds::Maybe if !flag =>
+            Some((hover_messages::event_dot_go_out_of_scope_maybe_kept(name, &note), true)),
+        ScopeEndHolds::Nothing if resource_hold || flag => Some((
+            hover_messages::event_dot_owner_go_out_of_scope(name) + &hover_messages::event_dot_no_resource_dropped_suffix(),
+            false,
+        )),
+        ScopeEndHolds::Value if !resource_hold || flag => Some((
+            hover_messages::event_dot_owner_go_out_of_scope(name) + &hover_messages::event_dot_resource_dropped_suffix(&note),
+            true,
+        )),
+        _ => None,
+    }
+}
+
 /// The dot for `Event::OwnerGoOutOfScope`: a variable's scope end, with the
 /// drop triangle when its resource is dropped there. Sets `data.title` for
 /// the plain dot; returns true when it drew the dot itself (a drop triangle,
@@ -1430,6 +1472,26 @@ fn render_scope_end_dot(
             };
             append_drop_dot(drop_data, timeline_data, dots);
             return true;
+        } else if let Some((title, dropped)) = scope_end_by_rustc(event, ro, history, resource_hold, &name) {
+            // What's drawn above says something else about what's
+            // dropped here than rustc does (#1036, #1037).
+            if !dropped {
+                data.title = title;
+                return false;
+            }
+            let cx = timeline_data.x_val;
+            let cy = event_y;
+            let drop_data = DropDotData {
+                hash: *hash as u64,
+                dot_x: cx,
+                dot_y: cy,
+                title,
+                p1x: cx - 3, p1y: cy - 1,
+                p2x: cx + 3, p2y: cy - 1,
+                p3x: cx,     p3y: cy + 3,
+            };
+            append_drop_dot(drop_data, timeline_data, dots);
+            return true;
         // (`init_at_end` is `Some` only if nothing assigned
         // the column since: it holds no definite value,
         // whatever the merged states say.)
@@ -1455,13 +1517,20 @@ fn render_scope_end_dot(
         } else if let (false, Some(InitJoin::Maybe { moved })) = (ro.holds_value(), init_at_end(history)) {
             // Assigned in some branches of a conditional but
             // not others (#244): the drop flag decides here.
+            // Whether it holds a value isn't only up to the branch
+            // that ran when it may have held one as the conditional
+            // started (#1036).
             let cx = timeline_data.x_val;
             let cy = event_y;
             let drop_data = DropDotData {
                 hash: *hash as u64,
                 dot_x: cx,
                 dot_y: cy,
-                title: hover_messages::event_dot_go_out_of_scope_maybe_init(&name, &ro.drop_note(), moved),
+                title: if init_by_maybe_held(history) {
+                    hover_messages::event_dot_go_out_of_scope_maybe_kept(&name, &ro.drop_note())
+                } else {
+                    hover_messages::event_dot_go_out_of_scope_maybe_init(&name, &ro.drop_note(), moved)
+                },
                 p1x: cx - 3, p1y: cy - 1,
                 p2x: cx + 3, p2y: cy - 1,
                 p3x: cx,     p3y: cy + 3,
@@ -1626,7 +1695,7 @@ fn render_dot(
     // its resource there is whether it still holds a value just before
     // that event (a `drop(s)` in the first block is not undone by the
     // second block's own `s`), not the column's penultimate state.
-    let scope_ends = history.iter().filter(|(_, e)| matches!(e, Event::OwnerGoOutOfScope)).count();
+    let scope_ends = history.iter().filter(|(_, e)| matches!(e, Event::OwnerGoOutOfScope { .. })).count();
     let resource_hold_of_column = resource_hold;
     // Whether the column's value was moved away earlier in `history`
     // (and nothing was put back): a conditional after that finds it
@@ -1637,7 +1706,7 @@ fn render_dot(
     // over an earlier one. (line, whether it held a value before them)
     let mut before_breaks: Option<(usize, bool)> = None;
     for (i, (line_number, event)) in history.iter().enumerate() {
-        let resource_hold = if scope_ends > 1 && matches!(event, Event::OwnerGoOutOfScope) {
+        let resource_hold = if scope_ends > 1 && matches!(event, Event::OwnerGoOutOfScope { .. }) {
             held
         } else {
             resource_hold_of_column
@@ -1714,7 +1783,7 @@ fn render_dot(
         };
         if let Some(mut name) = visualization_data.get_name_from_hash(hash) {
             match event {
-                Event::OwnerGoOutOfScope => {
+                Event::OwnerGoOutOfScope { .. } => {
                 if render_scope_end_dot(hash, history, event, line_number, event_y, resource_hold, name, &mut data, timeline_data, visualization_data, dots) {
                     continue;
                 }
@@ -1755,7 +1824,14 @@ fn render_dot(
                         Event::OwnerDropAtReassign { payload: true, .. } => format!("*{}", name),
                         _ => name.clone(),
                     };
-                    let title = if let Event::OwnerDropAtReassign { maybe_init: Some(InitBy::Branch), maybe_moved, .. } = event {
+                    let title = if matches!(event, Event::OwnerDropAtReassign { maybe_init: Some(InitBy::Branch | InitBy::Loop), .. })
+                        // (Before the new value's Acquire on this line.)
+                        && init_by_maybe_held(history[..i].iter().filter(|(l, _)| l < line_number)) {
+                        // After a conditional that assigns a `let s;`
+                        // local in some branches only, where it may
+                        // have held a value as it started (#1036).
+                        hover_messages::event_dot_owner_drop_at_reassign_maybe_kept(&name, &note)
+                    } else if let Event::OwnerDropAtReassign { maybe_init: Some(InitBy::Branch), maybe_moved, .. } = event {
                         // A `let s;` local only some branches above
                         // assigned (#244), and maybe moved after that.
                         hover_messages::event_dot_owner_drop_at_reassign_maybe_init(&name, &note, *maybe_moved)
@@ -2286,6 +2362,24 @@ fn reaching_end_states(branch_history: &[BranchData]) -> impl Iterator<Item = &S
 // value only if there is one (a runtime drop flag).
 fn init_at_end(history: &[(usize, Event)]) -> Option<InitJoin> {
     init_after(None, history)
+}
+
+// Whether what last decided what a `let s;` local holds (as
+// `init_at_end` reads `history`) is a conditional that assigns it in
+// some branches only, where it may have held a value as it started
+// (a `maybe_held` join, #1036): the drop flag's "if it still holds it",
+// not "if the branch that ran assigned it".
+fn init_by_maybe_held<'a>(history: impl IntoIterator<Item = &'a (usize, Event)>) -> bool {
+    let mut held = false;
+    for (_, e) in history {
+        match e {
+            Event::Branch { maybe_held, .. } => held = *maybe_held,
+            Event::LoopMaybeInit { .. } => held = false,
+            e if holds_value_after(false, e) => held = false,
+            _ => {}
+        }
+    }
+    held
 }
 
 // `init_at_end` for events that follow a point where the column was in
@@ -3379,7 +3473,7 @@ fn dropped_at_exit(history: &[(usize, Event)], at: ExitAt) -> bool {
         Event::Branch { branch_history, split_point, merge_point, .. }
             if (*split_point, *merge_point) == (at.split, at.merge) =>
             branch_history.get(at.branch).is_some_and(|b| b.e_data.iter()
-                .any(|(l, e)| *l == at.line && matches!(e, Event::OwnerGoOutOfScope))),
+                .any(|(l, e)| *l == at.line && matches!(e, Event::OwnerGoOutOfScope { .. }))),
         Event::Branch { branch_history, .. } => branch_history.iter().any(|b| dropped_at_exit(&b.e_data, at)),
         _ => false,
     })
@@ -3456,7 +3550,7 @@ fn holds_value_after(held: bool, event: &Event) -> bool {
         // (`if let Some(z) = a {…} else if let Some(z) = b {…}`), the
         // next one's first event initializes a new variable; it isn't an
         // assignment to the one that ended.
-        Event::OwnerGoOutOfScope | Event::RefGoOutOfScope => false,
+        Event::OwnerGoOutOfScope { .. } | Event::RefGoOutOfScope => false,
         // May have no value after a loop (#786).
         Event::LoopMaybeInit { .. } => false,
         // (Not one that returns or panics after assigning a `let x;`
@@ -5055,7 +5149,7 @@ fn render_branches(
                     // one-line `0 => panic!()` arm, #410): the drop
                     // dot ends it.
                     let dropped_at_stop = branch.e_data.iter().any(|(l, e)| *l == stop
-                        && matches!(e, Event::OwnerGoOutOfScope | Event::RefGoOutOfScope | Event::TemporaryDrop { .. }));
+                        && matches!(e, Event::OwnerGoOutOfScope { .. } | Event::RefGoOutOfScope | Event::TemporaryDrop { .. }));
                     // The bar is a marker, not a line of code: hovering it
                     // underlines nothing (#369), like the dashed columns.
                     if let Some(stop_y) = stop_y.filter(|y| !dropped_at_stop && segs.last().is_some_and(|seg| seg.p2 == (branch_x, *y))) {

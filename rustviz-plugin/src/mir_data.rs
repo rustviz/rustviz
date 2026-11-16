@@ -8,6 +8,7 @@
 //! multiple MIR instructions.
 
 use crate::{expr_visitor::*, expr_visitor_utils::{binding_names, span_end_line, span_to_line, written_name}};
+use crate::svg_generator::data::{ExternalEvent, ResourceAccessPoint, ScopeEndHolds};
 use log::info;
 use rustc_middle::mir::{BorrowKind, Location, Local, Operand, ProjectionElem, TerminatorKind, VarDebugInfoContents};
 use rustc_middle::mir::visit::Visitor;
@@ -783,6 +784,224 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
             (false, _) => Ownership::None,
             (true, true) => Ownership::Maybe,
         })
+    }
+
+    /// Fill in, on the scope ends among `preprocessed_events[from..]`
+    /// (this body's events, also those in a conditional's arms), what
+    /// rustc's move data says the variable holds there
+    /// (`ownership_at_scope_ends`, #1036, #1037). Only a plain owner's:
+    /// not a struct's (its fields are drawn on their own), nor a
+    /// reference's.
+    pub fn fill_scope_end_holds(&mut self, from: usize) {
+        fn queries(events: &[(usize, ExternalEvent)], out: &mut Vec<(String, usize)>) {
+            for (line, e) in events {
+                match e {
+                    ExternalEvent::GoOutOfScope { ro: ro @ ResourceAccessPoint::Owner(_), .. } => {
+                        let q = (ro.name().clone(), *line);
+                        if !out.contains(&q) {
+                            out.push(q);
+                        }
+                    }
+                    ExternalEvent::Branch { branches, .. } => branches.iter().for_each(|b| queries(&b.e_data, out)),
+                    _ => {}
+                }
+            }
+        }
+        fn fill(events: &mut [(usize, ExternalEvent)], answers: &BTreeMap<(String, usize), ScopeEndHolds>) {
+            for (line, e) in events.iter_mut() {
+                match e {
+                    ExternalEvent::GoOutOfScope { ro: ro @ ResourceAccessPoint::Owner(_), holds, .. } => {
+                        *holds = answers.get(&(ro.name().clone(), *line)).copied();
+                    }
+                    ExternalEvent::Branch { branches, .. } => branches.iter_mut().for_each(|b| fill(&mut b.e_data, answers)),
+                    _ => {}
+                }
+            }
+        }
+        let mut qs = Vec::new();
+        queries(&self.preprocessed_events[from..], &mut qs);
+        let found = self.ownership_at_scope_ends(&qs);
+        let answers: BTreeMap<(String, usize), ScopeEndHolds> = qs.into_iter().zip(found)
+            .filter_map(|(q, own)| own.map(|o| (q, match o {
+                Ownership::Held => ScopeEndHolds::Value,
+                Ownership::Maybe => ScopeEndHolds::Maybe,
+                Ownership::None => ScopeEndHolds::Nothing,
+            })))
+            .collect();
+        fill(&mut self.preprocessed_events[from..], &answers);
+    }
+
+    /// What each variable of `queries` (its RAP name, and the line of
+    /// the `}` where it goes out of scope) holds there, on the paths
+    /// that get to that `}` through the code of the block it closes
+    /// (#1036, #1037): rustc's dataflow just before the `Drop`s of it
+    /// that MIR puts at that `}`. A `return` (or `?`), or a `break` or
+    /// `continue` that leaves its block, drops it on the way out with a
+    /// `Drop` MIR gives the same span, and so does a let-chain whose
+    /// condition fails after binding it (`if let Some(a) = x && … {`,
+    /// whose `}` it is): those are left out. `Held` when it holds a
+    /// value on every path left, `None` when on none, `Maybe` when a
+    /// runtime drop flag decides. No answer (`None`) when no such
+    /// `Drop` is found (its type needs no drop, it's a closure's
+    /// variable, or the `}` isn't a block's), more than one variable of
+    /// that name is dropped there, something was moved out of a part of
+    /// it (a field, a Box's contents), or a `Drop` there is reached both
+    /// ways.
+    pub fn ownership_at_scope_ends(&self, queries: &[(String, usize)]) -> Vec<Option<Ownership>> {
+        use rustc_middle::mir::{BasicBlock, RETURN_PLACE, StatementKind};
+        use rustc_mir_dataflow::impls::{MaybeInitializedPlaces, MaybeUninitializedPlaces};
+        use rustc_mir_dataflow::move_paths::MoveData;
+        if queries.is_empty() {
+            return Vec::new();
+        }
+        let body = &self.bwf.body;
+        // The body's blocks, and its `return`s, `break`s and
+        // `continue`s, each with the loop or labeled block a `break` or
+        // `continue` leaves (`None` for a `return`). Not those of a
+        // closure inside.
+        struct Hir<'tcx> { tcx: rustc_middle::ty::TyCtxt<'tcx>, blocks: Vec<Span>, exits: Vec<(Span, Option<Span>)> }
+        impl<'tcx> intravisit::Visitor<'tcx> for Hir<'tcx> {
+            fn visit_block(&mut self, b: &'tcx rustc_hir::Block<'tcx>) {
+                self.blocks.push(b.span);
+                intravisit::walk_block(self, b);
+            }
+            fn visit_expr(&mut self, e: &'tcx rustc_hir::Expr<'tcx>) {
+                match e.kind {
+                    rustc_hir::ExprKind::Ret(_) => self.exits.push((e.span, None)),
+                    rustc_hir::ExprKind::Break(dest, _) | rustc_hir::ExprKind::Continue(dest) => {
+                        if let Ok(id) = dest.target_id {
+                            self.exits.push((e.span, Some(self.tcx.hir_span(id))));
+                        }
+                    }
+                    _ => {}
+                }
+                intravisit::walk_expr(self, e);
+            }
+        }
+        let mut hir = Hir { tcx: self.tcx, blocks: Vec::new(), exits: Vec::new() };
+        intravisit::Visitor::visit_expr(&mut hir, self.hir_body.value);
+        let preds = body.basic_blocks.predecessors();
+        // Whether code at `sp` leaves the scope of a variable declared
+        // at `decl`.
+        let leaves = |sp: Span, decl: Span| hir.exits.iter().any(|(e, from)| e.contains(sp) && from.is_none_or(|f| f.contains(decl)));
+        // A `?`'s early return: the call that makes the return value
+        // from the error (its span is the whole `x?`, not the `?`'s).
+        let residual = |t: &rustc_middle::mir::Terminator<'tcx>| matches!(&t.kind,
+            TerminatorKind::Call { func, destination, .. } if destination.local == RETURN_PLACE
+                && func.const_fn_def().is_some_and(|(def, _)| self.tcx.item_name(def).as_str() == "from_residual"));
+        // How the `Drop` that ends block `bb` is reached, walking back
+        // from it past what MIR adds on the way out (other `Drop`s,
+        // `goto`s, `StorageDead`s) to the code before: (through the
+        // code of `closes`, the block whose `}` it is; by a way out of
+        // the scope of a variable declared at `decl`, or from code
+        // outside that block).
+        let reached = |bb: BasicBlock, decl: Span, closes: Span| -> (bool, bool) {
+            let (mut inside, mut other) = (false, false);
+            let mut seen: BTreeSet<BasicBlock> = BTreeSet::new();
+            let mut work = vec![(bb, true)];
+            while let Some((b, own)) = work.pop() {
+                if !seen.insert(b) {
+                    continue;
+                }
+                let data = &body.basic_blocks[b];
+                let t = data.terminator();
+                let code = if own {
+                    None
+                } else if residual(t) {
+                    other = true;
+                    continue;
+                } else {
+                    match t.kind {
+                        TerminatorKind::Drop { .. } => None,
+                        TerminatorKind::Goto { .. } => leaves(t.source_info.span, decl).then_some(t.source_info.span),
+                        _ => Some(t.source_info.span),
+                    }
+                };
+                let code = code.or_else(|| data.statements.iter().rev()
+                    .find(|st| !matches!(st.kind, StatementKind::StorageDead(_) | StatementKind::StorageLive(_) | StatementKind::Nop))
+                    .map(|st| st.source_info.span));
+                match code {
+                    Some(sp) if !leaves(sp, decl) && closes.contains(sp) => inside = true,
+                    Some(_) => other = true,
+                    None => {
+                        let from: Vec<BasicBlock> = preds[b].iter().copied().filter(|p| !body.basic_blocks[*p].is_cleanup).collect();
+                        if from.is_empty() {
+                            other = true;
+                        }
+                        work.extend(from.into_iter().map(|p| (p, false)));
+                    }
+                }
+            }
+            (inside, other)
+        };
+        let names = self.mir_local_names(self.bwf);
+        // What holds a value at run time, as drop elaboration sees it:
+        // the borrow checker's `FalseEdge`s (its imaginary way past an
+        // `if let` pattern that always matches, into a dead `else`;
+        // #981, #987, #995) are gone by then (`CleanupPostBorrowck`), so
+        // a value moved on every real path holds nothing at its `}`.
+        let mut real = body.clone();
+        for data in real.basic_blocks.as_mut().iter_mut() {
+            if let Some(t) = data.terminator.as_mut() {
+                if let TerminatorKind::FalseEdge { real_target, .. } = t.kind {
+                    t.kind = TerminatorKind::Goto { target: real_target };
+                }
+            }
+        }
+        let real = &real;
+        let move_data = MoveData::gather_moves(real, self.tcx, |_| true);
+        let mut init = MaybeInitializedPlaces::new(self.tcx, real, &move_data)
+            .iterate_to_fixpoint(self.tcx, real, None)
+            .into_results_cursor(real);
+        let mut uninit = MaybeUninitializedPlaces::new(self.tcx, real, &move_data)
+            .iterate_to_fixpoint(self.tcx, real, None)
+            .into_results_cursor(real);
+        queries.iter().map(|(name, line)| {
+            // The `Drop`s of a variable named `name` on that line.
+            let drops: Vec<(BasicBlock, Local, Span)> = body.basic_blocks.iter_enumerated()
+                .filter(|(_, data)| !data.is_cleanup)
+                .filter_map(|(bb, data)| {
+                    let t = data.terminator();
+                    match &t.kind {
+                        TerminatorKind::Drop { place, .. } if place.projection.is_empty()
+                            && names.get(&place.local).is_some_and(|n| n == name)
+                            && span_to_line(&t.source_info.span, &self.tcx) == *line => Some((bb, place.local, t.source_info.span)),
+                        _ => None,
+                    }
+                })
+                .collect();
+            let local = drops.first()?.1;
+            if drops.iter().any(|(_, l, _)| *l != local) {
+                return None;
+            }
+            let mut paths = move_data.move_paths.iter_enumerated().filter(|(_, p)| p.place.local == local);
+            let mpi = paths.next().filter(|(_, p)| p.place.projection.is_empty())?.0;
+            if paths.next().is_some() {
+                return None;
+            }
+            let decl = body.local_decls[local].source_info.span;
+            let (mut may_hold, mut may_lack, mut found) = (false, false, false);
+            for (bb, _, sp) in drops {
+                // The innermost block whose `}` this is.
+                let closes = hir.blocks.iter().filter(|b| b.hi() == sp.hi()).min_by_key(|b| b.hi() - b.lo())?;
+                match reached(bb, decl, *closes) {
+                    (true, true) => return None,
+                    (true, false) => {}
+                    (false, _) => continue,
+                }
+                let at = Location { block: bb, statement_index: body.basic_blocks[bb].statements.len() };
+                init.seek_before_primary_effect(at);
+                uninit.seek_before_primary_effect(at);
+                may_hold |= init.get().contains(mpi);
+                may_lack |= uninit.get().contains(mpi);
+                found = true;
+            }
+            found.then_some(match (may_hold, may_lack) {
+                (true, false) => Ownership::Held,
+                (false, _) => Ownership::None,
+                (true, true) => Ownership::Maybe,
+            })
+        }).collect()
     }
 
     /// The edges into the head of the loop `loop_span` (its
