@@ -2447,13 +2447,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // Those that only may hold a value where it starts (#1012), and
     // what each holds where the loop comes back round: `Held` also
     // when the loop never moves it (it keeps what it had, and may give
-    // it a value). A struct's field columns go with it. Not in a loop
-    // inside another that it was declared before: there the first time
-    // round this loop may follow an earlier run of it, not only the
-    // branch above.
-    let enclosing_len = self.exit_frames.iter().rev()
-      .filter_map(|f| match f { ExitFrame::Loop { id, len, .. } if *id != loop_expr.hir_id => Some(*len), _ => None })
-      .max();
+    // it a value). A struct's field columns go with it. In a loop
+    // inside another that it was declared before (#1019), a run of this
+    // loop may follow an earlier one, not only the branch above: what
+    // it holds where this loop is entered is rustc's, on every way in
+    // (an outer loop's later times round too), and `nested` says
+    // whether the outermost such loop ever moves it.
+    let enclosing: Vec<(rustc_hir::HirId, usize)> = self.exit_frames.iter()
+      .filter_map(|f| match f { ExitFrame::Loop { id, len, .. } if *id != loop_expr.hir_id => Some((*id, *len)), _ => None })
+      .collect();
+    let mut entry_states: Option<Vec<(String, Ownership)>> = None;
+    let mut outer_moves: Vec<(rustc_hir::HirId, Vec<(String, bool)>)> = Vec::new();
     let mut rounds: Vec<(String, Ownership)> = Vec::new();
     for (name, round, moved) in self.round_states_loop(loop_expr.span) {
       let round = if round == Ownership::Maybe && !moved { Ownership::Held } else { round };
@@ -2464,8 +2468,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let mut maybe_entry: Vec<MaybeEntry> = Vec::new();
     for (name, round) in rounds {
       let root = name.split('.').next().unwrap_or("");
-      if !outer.iter().any(|o| o == root) || deferred.contains(root) || self.skip_raps.contains(&name)
-        || enclosing_len.is_some_and(|l| self.in_scope[..l.min(self.in_scope.len())].iter().any(|o| o == root)) {
+      if !outer.iter().any(|o| o == root) || deferred.contains(root) || self.skip_raps.contains(&name) {
         continue;
       }
       let Some(rd) = self.raps.get(&name) else { continue };
@@ -2475,8 +2478,33 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         || before_cond.is_some_and(|at| self.rap_ownership_before(at, &name) != Ownership::Maybe) {
         continue;
       }
+      // The outermost enclosing loop it was declared before.
+      let outermost = enclosing.iter()
+        .find(|(_, l)| self.in_scope[..(*l).min(self.in_scope.len())].iter().any(|o| o == root))
+        .map(|(id, _)| *id);
+      let nested = match outermost {
+        None => None,
+        Some(id) => {
+          // (A field rustc has no move path for goes with its struct.)
+          let entry = entry_states.get_or_insert_with(|| self.entry_states_loop(loop_expr.span));
+          let own = entry.iter().find(|(n, _)| *n == name).or_else(|| entry.iter().find(|(n, _)| n == root));
+          if !own.is_some_and(|(_, o)| *o == Ownership::Maybe) {
+            continue;
+          }
+          if !outer_moves.iter().any(|(o, _)| *o == id) {
+            let span = self.tcx.hir_span(id);
+            let moves = self.round_states_loop(span).into_iter().map(|(n, _, m)| (n, m)).collect();
+            outer_moves.push((id, moves));
+          }
+          let moves = outer_moves.iter().find(|(o, _)| *o == id)
+            .and_then(|(_, ms)| ms.iter().find(|(n, _)| *n == root).map(|(_, m)| *m));
+          // (Unknown to rustc's move data: left as before.)
+          let Some(moves) = moves else { continue };
+          Some(moves)
+        }
+      };
       let by_cond = self.moved_by_chain_condition(&ro) || self.maybe_moved_by_let_now(&name);
-      maybe_entry.push(MaybeEntry { ro, round, by_cond });
+      maybe_entry.push(MaybeEntry { ro, round, by_cond, nested });
     }
     self.loop_given.push((loop_expr.hir_id, given));
     self.loop_maybe_entry.push((loop_expr.hir_id, maybe_entry));
@@ -2488,17 +2516,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// #1012): the first time round, the assignment drops the old value
   /// only if no branch above moved it; a later time round, only if the
   /// time round before left it holding one. Only the innermost loop
-  /// here: in an inner loop, "the first time round" would be each run
-  /// of it.
-  fn maybe_entry_untouched_now(&self, rap: &ResourceAccessPoint) -> bool {
-    let Some(loop_at) = self.exit_frames.iter().rposition(|f| matches!(f, ExitFrame::Loop { .. })) else { return false };
-    let ExitFrame::Loop { id: innermost, .. } = self.exit_frames[loop_at] else { return false };
-    if !self.loop_maybe_entry.iter().any(|(id, entry)| *id == innermost && entry.iter().any(|m| m.ro == *rap)) {
-      return false;
-    }
+  /// here. `Some(nested)` (`MaybeEntry::nested`) if so: in a loop inside
+  /// another that `rap` was declared before, "the first time round"
+  /// would be each run of the inner loop (#1019).
+  fn maybe_entry_untouched_now(&self, rap: &ResourceAccessPoint) -> Option<Option<bool>> {
+    let loop_at = self.exit_frames.iter().rposition(|f| matches!(f, ExitFrame::Loop { .. }))?;
+    let ExitFrame::Loop { id: innermost, .. } = self.exit_frames[loop_at] else { return None };
+    let nested = self.loop_maybe_entry.iter()
+      .find_map(|(id, entry)| if *id == innermost { entry.iter().find(|m| m.ro == *rap).map(|m| m.nested) } else { None })?;
     let (events, hide) = self.loop_path_events(loop_at);
-    path_own(&events, rap, &hide, PathOwn::Yes) == PathOwn::Yes
-      && path_own(&events, rap, &hide, PathOwn::No) == PathOwn::No
+    (path_own(&events, rap, &hide, PathOwn::Yes) == PathOwn::Yes
+      && path_own(&events, rap, &hide, PathOwn::No) == PathOwn::No).then_some(nested)
   }
 
   /// Whether an assignment to `rap` here, which holds no value on the
@@ -2631,14 +2659,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // before it. When every time round leaves it holding a value, it
     // has one after the loop if the loop assigned it or nothing moved
     // it before (`before_loop`); when every time round leaves it
-    // moved, it may have been moved (`LoopRound`). (One that every
-    // `break` comes after an assignment to is `kept` above; other
-    // mixes are left as the body's end draws them.)
+    // moved, it may have been moved (`LoopRound`); when some time
+    // rounds leave it moved and others don't, too, but then a drop
+    // flag's "nothing above moved it" can't tell the branch above from
+    // the loop's own moves (#1019): `kept`. (One that every `break`
+    // comes after an assignment to is `kept` above; other mixes are
+    // left as the body's end draws them. A loop inside another that it
+    // was declared before is the outer loop's to say, #1019.)
     let mut maybe_init: Vec<(ResourceAccessPoint, Option<bool>)> =
       maybe_init.into_iter().map(|ro| (ro, None)).collect();
-    let mut round_moved: Vec<ResourceAccessPoint> = Vec::new();
-    for MaybeEntry { ro, round, by_cond } in maybe_entry {
-      if broke_moved.contains(&ro) || !current(self, &ro) || kept.iter().any(|(k, _)| *k == ro) {
+    let mut round_moved: Vec<(ResourceAccessPoint, bool)> = Vec::new();
+    for MaybeEntry { ro, round, by_cond, nested } in maybe_entry {
+      if nested.is_some() || broke_moved.contains(&ro) || !current(self, &ro) || kept.iter().any(|(k, _)| *k == ro) {
         continue;
       }
       // The ways out of the loop: its `break`s, and for a `while` /
@@ -2655,7 +2687,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       match (round, self.rap_ownership_now(ro.name())) {
         (Ownership::Held, Ownership::Held) => maybe_init.push((ro, Some(by_cond))),
-        (Ownership::None, Ownership::None) => round_moved.push(ro),
+        (Ownership::None, Ownership::None) => round_moved.push((ro, false)),
+        (Ownership::Maybe, Ownership::Maybe | Ownership::Held) => round_moved.push((ro, true)),
         _ => {}
       }
     }
@@ -2667,9 +2700,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.add_external_event(line, ExternalEvent::LoopMaybeInit { ro, before_loop, id: *self.unique_id });
       *self.unique_id += 1;
     }
-    for ro in round_moved {
+    for (ro, kept) in round_moved {
       self.add_external_event(line, ExternalEvent::LoopExitMove {
-        ro, definite: false, at: MaybeMovedAt::LoopRound, id: *self.unique_id,
+        ro, definite: false, at: MaybeMovedAt::LoopRound { kept }, id: *self.unique_id,
       });
       *self.unique_id += 1;
     }
@@ -2694,12 +2727,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// At the end of a `while` / `for` loop (#992): the variables of
   /// `note_loop_head_moves` are maybe-moved, as the loop can end after
   /// a time round that moved them; not those a `break` already says
-  /// so for (`broke_moved`).
+  /// so for (`broke_moved`). `kept` when rustc says some time rounds
+  /// come back round with it holding a value (#1019): only some of
+  /// them move it.
   fn emit_loop_round_moves(&mut self, loop_expr: &'tcx Expr<'tcx>, head: Vec<ResourceAccessPoint>, broke_moved: &[ResourceAccessPoint]) {
     let line = span_end_line(&loop_expr.span, &self.tcx);
-    for ro in head.into_iter().filter(|r| !broke_moved.contains(r)) {
+    let head: Vec<ResourceAccessPoint> = head.into_iter().filter(|r| !broke_moved.contains(r)).collect();
+    let rounds = if head.is_empty() { Vec::new() } else { self.round_states_loop(loop_expr.span) };
+    for ro in head {
+      let kept = rounds.iter().any(|(n, own, _)| n == ro.name() && *own == Ownership::Maybe);
       self.add_external_event(line, ExternalEvent::LoopExitMove {
-        ro, definite: false, at: MaybeMovedAt::LoopRound, id: *self.unique_id,
+        ro, definite: false, at: MaybeMovedAt::LoopRound { kept }, id: *self.unique_id,
       });
       *self.unique_id += 1;
     }
@@ -4723,11 +4761,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // between: the first time round, the old value is dropped only
       // if no branch above moved it; a later time round, only if the
       // time round before left s holding one. Marked as an
-      // `EarlierIteration` drop that's also `maybe_moved`.
+      // `EarlierIteration` drop that's also `maybe_moved`. In a loop
+      // inside another that s was declared before, an earlier run of
+      // this loop may have given s a value too (#1019): `OuterLoop`.
       if drop_target.as_ref() == Some(rap) && maybe_init.is_none()
-        && maybe_moved.iter().all(|m| *m) && loop_head.iter().all(|l| !*l)
-        && drop_target.iter().chain(field_drop_targets.iter()).all(|r| self.maybe_entry_untouched_now(r)) {
-        maybe_init = Some(InitBy::EarlierIteration);
+        && maybe_moved.iter().all(|m| *m) && loop_head.iter().all(|l| !*l) {
+        let entries: Option<Vec<Option<bool>>> = drop_target.iter().chain(field_drop_targets.iter())
+          .map(|r| self.maybe_entry_untouched_now(r)).collect();
+        if let Some(entries) = entries {
+          maybe_init = Some(if entries.iter().any(|n| n.is_some()) {
+            InitBy::OuterLoop { moves: entries.iter().any(|n| *n != Some(false)) }
+          } else {
+            InitBy::EarlierIteration
+          });
+        }
       }
     }
 

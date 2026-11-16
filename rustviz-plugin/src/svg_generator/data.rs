@@ -1376,7 +1376,11 @@ pub enum MaybeMovedAt {
     /// The end of a `while` / `for` loop with a `LoopHead` event for
     /// the variable: the loop can end (its condition false, its
     /// iterator done) after a time round that moved it (#992).
-    LoopRound,
+    /// `kept`: other time rounds leave it holding a value (or a branch
+    /// above moved it before the loop, #1012), so whether it holds one
+    /// after the loop isn't down to whether "something above" moved it:
+    /// a drop flag's text says "only if it still holds one" (#1019).
+    LoopRound { kept: bool },
 }
 
 /// How a let-chain's condition moves a variable (`MaybeMovedAt::ChainFail`).
@@ -2598,6 +2602,15 @@ pub enum InitBy {
     /// it drops what an earlier iteration assigned, if x still holds it
     /// (#786).
     EarlierIteration,
+    /// The first thing the body of a loop inside another loop does to
+    /// a variable declared before the outer one, which only may hold a
+    /// value where the inner loop is entered (a branch above moved it
+    /// on some paths): as `EarlierIteration` with `maybe_moved` (#1012),
+    /// but a run of the inner loop may follow an earlier one, so its
+    /// first time round isn't only after the branch (#1019). `moves`:
+    /// the loops may also move it, so only "if it still holds one" is
+    /// sure.
+    OuterLoop { moves: bool },
 }
 
 /// What a conditional's join leaves in a `let x;` local that only some
@@ -3032,7 +3045,7 @@ impl Event {
             Event::LoopExitMove { at: MaybeMovedAt::LoopHead, .. } => {
                 hover_messages::event_dot_loop_head_maybe_moved(my_name)
             }
-            Event::LoopExitMove { at: MaybeMovedAt::LoopRound, .. } => {
+            Event::LoopExitMove { at: MaybeMovedAt::LoopRound { .. }, .. } => {
                 hover_messages::event_dot_loop_round_maybe_moved(my_name)
             }
             Event::ChainFailAssign { place, drops_old, rc, no_else } => {
