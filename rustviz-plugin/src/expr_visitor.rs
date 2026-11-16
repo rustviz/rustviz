@@ -4153,10 +4153,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         .filter(|r| r.is_ref() && !r.is_static() && !r.is_fn())?;
       return Some(ResourceTy::DerefField(rap, text()?, PlaceWrite::Update));
     }
+    let holds = self.field_holds(self.tcx.typeck(e.hir_id.owner).node_type(place.hir_id), e.hir_id.owner);
     // `&ps[1].y` / `&mut ps[0].x` with `ps` a reference: a field of an
     // element of what ps points to (#1065).
     if let Some(rap) = self.element_field_holder(place).filter(|r| r.is_ref()) {
-      return Some(ResourceTy::DerefField(rap, text()?, PlaceWrite::Update));
+      return Some(ResourceTy::DerefField(rap, text()?, PlaceWrite::Update, holds));
     }
     let mut p = place;
     while let ExprKind::Index(recv, _, _) = p.kind {
@@ -4178,6 +4179,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let rap = self.element_holder_ref(through, p)?;
       let through_text = self.plain_source_text(through)?;
       return Some(ResourceTy::DerefField(rap, crate::svg_generator::hover_messages::reborrow_place_through(&text()?, &through_text), PlaceWrite::Update));
+      let rap = self.element_holder_ref(place, p)?;
+      return Some(ResourceTy::DerefField(rap, text()?, PlaceWrite::Update, holds));
     }
     let ExprKind::Field(..) = p.kind else { return None };
     let ResourceTy::DerefField(rap, _, w, holds) = self.field_through_ref(p)? else { return None };

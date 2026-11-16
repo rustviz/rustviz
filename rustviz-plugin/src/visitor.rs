@@ -6222,7 +6222,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         ResourceTy::Deref(rap) if !lhs_ty.is_ref() => match self.multi_deref_place(lhs_expr, &rap) {
           Some(place) => {
             let write = rap.place_write();
-            ResourceTy::DerefField(rap, place, write)
+            ResourceTy::DerefField(rap, place, write, self.field_holds(lhs_ty, lhs_expr.hir_id.owner))
           }
           None => ResourceTy::Deref(rap),
         },
