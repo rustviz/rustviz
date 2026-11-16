@@ -1267,6 +1267,14 @@ fn render_branch_dots(
                 };
                 hover_messages::event_dot_branch_merge_box_contents_moved(
                     &is.real_name(), rap.is_mut(), rap.holds_phrase(), at, by_cond)
+            } else if let Some(kw) = by_cond.filter(|_| chain_condition_assigned_here(branch_history)) {
+                // It may have been given a new value when it held none
+                // (#603): no "if nothing above moved it".
+                hover_messages::event_dot_branch_merge_chain_new_value(
+                    &is.real_name(), kw,
+                    is.extract_rap().map_or(false, |r| r.holds_value()),
+                    rap.is_mut(), reassigned_next,
+                    &is.extract_rap().map_or(String::new(), |r| r.drop_note()))
             } else if reassigned_next {
                 // That assignment is in a loop's body (#1012), which
                 // may end before it runs: unless every `break` out of
@@ -1563,7 +1571,10 @@ fn render_scope_end_dot(
             // A Box whose contents need no drop (no drop note), moved
             // out in some branches only (#929): nothing but the heap
             // allocation is freed, on every path.
-            let title = if ro.box_contents_moved() && ro.drop_note().is_empty()
+            let title = if chain_new_value_lasts(history) {
+                // Given a new value by a condition (#603).
+                hover_messages::event_dot_go_out_of_scope_chain_new_value(&name, &ro.drop_note())
+            } else if ro.box_contents_moved() && ro.drop_note().is_empty()
                 && last_branch.is_some_and(|b| moves_only_box_contents(b)) {
                 hover_messages::event_dot_go_out_of_scope_box_plain_contents_maybe_moved(&name, by_cond)
             } else if !ro.box_contents_moved() && maybe_moved_by_kept_round(history.iter()) {
@@ -1920,6 +1931,10 @@ fn render_dot(
                         && maybe_moved_by_let(history[..i].iter().filter(|(l, _)| l < line_number)) {
                         // A `let` or-pattern, not a branch, may have moved it (#597).
                         hover_messages::event_dot_owner_drop_at_reassign_maybe_moved(&name, &note, true)
+                    } else if matches!(event, Event::OwnerDropAtReassign { maybe_moved: true, parts: None, payload: false, .. })
+                        && chain_new_value_lasts(history[..i].iter().filter(|(l, _)| l < line_number)) {
+                        // A condition may have given it a new value (#603).
+                        hover_messages::event_dot_owner_drop_at_reassign_chain_new_value(&name, &note)
                     } else if let Event::OwnerDropAtReassign { maybe_moved: true, by_cond, .. } = event {
                         // A Box whose contents only were moved out in
                         // some branches (#921): its old heap allocation
@@ -2509,6 +2524,37 @@ fn chain_move_lasts(mut lasts: bool, events: &[(usize, Event)]) -> bool {
     lasts
 }
 
+// True when a let-chain's condition (or a match guard) may have given
+// this column a new value when it held none, or after moving it (#603,
+// `ChainFailHow::may_hold_new`), and nothing gave it one since on that
+// path: its drop flag decides "only if it still holds it".
+fn chain_new_value_lasts<'a>(history: impl IntoIterator<Item = &'a (usize, Event)>) -> bool {
+    fn along<'a>(mut lasts: bool, events: impl IntoIterator<Item = &'a (usize, Event)>) -> bool {
+        for (_, e) in events {
+            match e {
+                Event::LoopExitMove { at: MaybeMovedAt::ChainFail { how, .. }, .. } => lasts = how.may_hold_new(),
+                e if gives_new_value(e) => lasts = false,
+                Event::Branch { branch_history, .. } => {
+                    lasts = branch_history.iter().any(|b| along(lasts, &b.e_data));
+                }
+                _ => {}
+            }
+        }
+        lasts
+    }
+    along(false, history)
+}
+
+// `chain_condition_moved_here` for a `chain_new_value_lasts` effect.
+fn chain_condition_assigned_here(branch_history: &[BranchData]) -> bool {
+    branch_history.iter().any(|b| {
+        let at = b.e_data.iter().rposition(|(_, e)|
+            matches!(e, Event::LoopExitMove { at: MaybeMovedAt::ChainFail { .. }, .. }));
+        at.is_some_and(|i| matches!(&b.e_data[i].1, Event::LoopExitMove { at: MaybeMovedAt::ChainFail { how, .. }, .. } if how.may_hold_new())
+            && !b.e_data[i + 1..].iter().any(|(_, e)| gives_new_value(e)))
+    })
+}
+
 // An assignment that gives the column a new value (`s = …`, `*b = …`).
 fn gives_new_value(e: &Event) -> bool {
     matches!(e, Event::OwnerDropAtReassign { .. } | Event::Acquire { .. })
@@ -3020,7 +3066,10 @@ fn timeline_segment_title(
     // only if its alternative matched, though the borrow checker treats
     // it as borrowed either way.
     if matches!(state, State::PartialPrivilege { .. } | State::RevokedPrivilege { .. }) && !rap.is_ref() {
-        if let Some((into, mutable)) = or_alt_lend_at(visualization_data, rap, line) {
+        if let Some((into, mutable, chain)) = or_alt_lend_at(visualization_data, rap, line) {
+            if let Some(sources) = chain {
+                return hover_messages::state_chain_ref_lent(rap.name(), into.name(), sources, mutable, rap.holds_value());
+            }
             return hover_messages::state_or_alt_lent(rap.name(), into.name(), mutable, rap.holds_value());
         }
     }
@@ -3129,7 +3178,10 @@ fn flat_history<'a>(history: &'a [(usize, Event)], path: &[(usize, usize)], out:
 /// out: as `timeline_segment_title`, on the arm `path`.
 fn revoked_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, row: usize, path: &[(usize, usize)]) -> String {
     if !rap.is_ref() {
-        if let Some((into, mutable)) = or_alt_lend_at(visualization_data, rap, Some(row)) {
+        if let Some((into, mutable, chain)) = or_alt_lend_at(visualization_data, rap, Some(row)) {
+            if let Some(sources) = chain {
+                return hover_messages::state_chain_ref_lent(rap.name(), into.name(), sources, mutable, rap.holds_value());
+            }
             return hover_messages::state_or_alt_lent(rap.name(), into.name(), mutable, rap.holds_value());
         }
     }
@@ -3393,7 +3445,7 @@ fn or_alt_lend_at<'a>(
     visualization_data: &'a VisualizationData,
     rap: &ResourceAccessPoint,
     line: Option<usize>,
-) -> Option<(&'a ResourceAccessPoint, bool)> {
+) -> Option<(&'a ResourceAccessPoint, bool, Option<&'a [String]>)> {
     fn lends<'a>(history: &'a [(usize, Event)], out: &mut Vec<(usize, &'a Event)>) {
         for (l, e) in history {
             match e {
@@ -3420,7 +3472,7 @@ fn or_alt_lend_at<'a>(
         None => None,
     };
     match found {
-        Some(Event::OrAltLend { into, mutable, .. }) => Some((into, *mutable)),
+        Some(Event::OrAltLend { into, mutable, chain, sources, .. }) => Some((into, *mutable, chain.map(|_| sources.as_slice()))),
         _ => None,
     }
 }

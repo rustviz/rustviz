@@ -5602,7 +5602,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "i is live in a conditional expression",
             "i was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
         ],
-    },    TooltipExpect {
+    },
+    TooltipExpect {
         name: "slice_ref_value",
         // `xs: &[i32]` and `s: &str` point to values (nothing to drop);
         // controls: `names: &[String]` and `st: &String` point to
@@ -15216,7 +15217,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from pop to s",
             "Copy from s to consume",
         ],
-    },    TooltipExpect {
+    },
+    TooltipExpect {
         name: "ctor_payload_copy_866",
         // #866: a constructor's value is a new value, not a copy of its
         // argument or of the constructor; a pattern binding copies a value inside
@@ -18880,7 +18882,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x.name may have been moved out above, so it's dropped here only if nothing above moved it",
             "y.a and y.b may have been moved out above, so each is dropped here only if nothing above moved it",
         ],
-    },    TooltipExpect {
+    },
+    TooltipExpect {
         name: "maybe_held_if_1034",
         // #1034: a variable a branch may have moved (moved_before: moved
         // on every path), then given a new value in only some branches
@@ -19688,6 +19691,238 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "v may have been moved",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/chain_assigns_ref_603",
+        // #603 (item 1): `r = &s` in a let-chain part before one that fails.
+        // On the else path r points to s (the length check failed) or to t (`y`
+        // was `None`); rustc treats both as borrowed while r is live there
+        // (`s.push(..)` / `t.push(..)` before the else's `println!` are E0502,
+        // after it they compile). On the if path t's loan ends at the write
+        // (`t.push(..)` in the body compiles) and s's at the body's `println!`.
+        // main refused the program ("`if let` chains that assign a new reference
+        // to a variable declared outside the condition … aren't supported yet").
+        // Each end's row is pinned by `chain_reference_borrows_end_on_each_path`.
+        must_contain: &[
+            "r may have been assigned a new reference: when the condition assigns &s to r and then turns out false, the else branch runs after that assignment, so here r points to s or to t",
+            "r points to s or to t here. If the condition assigned &s to r before turning out false, s's resource is immutably borrowed by r here. Which one r points to is decided at run time, so the borrow checker treats s as borrowed either way: s is read-only while r's borrow is live.",
+            "r points to s or to t here. If the condition turned out false before assigning &s to r, t's resource is still immutably borrowed by r here. Which one r points to is decided at run time, so the borrow checker treats t as borrowed either way: t is read-only while r's borrow is live.",
+            "r's borrow ends here, so s's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whether or not the condition had assigned &s to r)",
+            "r's borrow ends here, so t's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whether or not the condition had assigned &s to r)",
+            "t's resource is no longer immutably borrowed",
+            "s's resource is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            "s may have been immutably borrowed: when the condition lends s to r",
+            "the resource r points to may have been immutably borrowed",
+            "r's borrow ended in each branch above",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/chain_assigns_ref_after_603",
+        // #603 (item 1): as chain_assigns_ref_603, with r used only after the
+        // `if`: both arms reach the join with s and t borrowed (rustc: `s.push`
+        // or `t.push` between the `if` and the `println!` is E0502, in the else
+        // branch too), and both borrows end at that `println!`. On the if path
+        // t's loan still ends at the write (`t.push(..)` in the body compiles).
+        // main refused the program.
+        must_contain: &[
+            "r may have been assigned a new reference: when the condition assigns &s to r and then turns out false, the else branch runs after that assignment, so here r points to s or to t",
+            "r points to s or to t here. If the condition assigned &s to r before turning out false, s's resource is immutably borrowed by r here. Which one r points to is decided at run time, so the borrow checker treats s as borrowed either way: s is read-only while r's borrow is live.",
+            "r points to s or to t here. If the condition turned out false before assigning &s to r, t's resource is still immutably borrowed by r here. Which one r points to is decided at run time, so the borrow checker treats t as borrowed either way: t is read-only while r's borrow is live.",
+            "s's resource may be immutably borrowed by r (r points to s or to t); either way, s is read-only until r's borrow ends",
+            "t's resource may be immutably borrowed by r (r points to s or to t); either way, t is read-only until r's borrow ends",
+            "r's borrow ends here, so t's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whether or not the condition had assigned &s to r)",
+            "s's resource is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            "r's borrow ends here, so s's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whether or not the condition had assigned &s to r)",
+            "the else branch runs after that borrow has ended",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/chain_assigns_ref_no_else_603",
+        // #603 (item 1) without an `else`: on the path that skips the body r
+        // points to s or to t, and r is read after the `if`, so both stay
+        // borrowed to that read (`skipped`). In `unused_in_else` q isn't used
+        // again on the else path: a's borrow has ended there (as for a call the
+        // condition lends it to, #688) and b's ends where the else branch
+        // starts. main refused the program.
+        must_contain: &[
+            "r may have been assigned a new reference: when the condition assigns &s to r and then turns out false, the body is skipped but the assignment has happened, so after the if r points to s or to t",
+            "r points to s or to t here. If the condition assigned &s to r before turning out false, s's resource is immutably borrowed by r here. Which one r points to is decided at run time, so the borrow checker treats s as borrowed either way: s is read-only while r's borrow is live.",
+            "r points to s or to t here. If the condition turned out false before assigning &s to r, t's resource is still immutably borrowed by r here. Which one r points to is decided at run time, so the borrow checker treats t as borrowed either way: t is read-only while r's borrow is live.",
+            "s's resource may be immutably borrowed by r (r points to s or to t); either way, s is read-only until r's borrow ends",
+            "t's resource may be immutably borrowed by r (r points to s or to t); either way, t is read-only until r's borrow ends",
+            "r's borrow ends here, so t's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whether or not the condition had assigned &s to r)",
+            "a may have been immutably borrowed: when the condition lends a to q and then turns out false, the else branch runs after that borrow has ended",
+            "b's resource is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            "q may have been assigned a new reference",
+            "points to a or to b",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/chain_assigns_mut_ref_603",
+        // #603 (item 1) with `&mut`: in the else branch r points to s or to t,
+        // and the borrow checker treats both as mutably borrowed until r's last
+        // use there (`r.push('?')`): using s or t before it is E0499/E0502.
+        // main refused the program.
+        must_contain: &[
+            "r may have been assigned a new reference: when the condition assigns &mut s to r and then turns out false, the else branch runs after that assignment, so here r points to s or to t",
+            "r points to s or to t here. If the condition assigned &mut s to r before turning out false, s's resource is mutably borrowed by r here. Which one r points to is decided at run time, so the borrow checker treats s as borrowed either way: s can't be used while r's borrow is live.",
+            "r's borrow ends here, so s's resource is no longer mutably borrowed (the borrow checker counted it as borrowed whether or not the condition had assigned &mut s to r)",
+            "r's borrow ends here, so t's resource is no longer mutably borrowed (the borrow checker counted it as borrowed whether or not the condition had assigned &mut s to r)",
+        ],
+        must_not_contain: &[
+            "s is read-only while r's borrow is live",
+        ],
+    },
+    TooltipExpect {
+        name: "match_guard_assigns_ref_603",
+        // #603 (item 1) for a match guard (`Some(_) if { r = &s; … } =>`): every
+        // later arm starts with r pointing to s or to t (the guard ran and
+        // failed, or the arm's pattern didn't match), and rustc counts every
+        // later arm as one that may run after the failed guard, so s and t are
+        // borrowed in both until r's last use there (`s.push` / `t.push` before
+        // the arm's `println!` is E0502, after it compiles). In the guarded arm
+        // t's loan ends at the write. main refused the program ("match guards
+        // that assign a new reference … aren't supported yet").
+        must_contain: &[
+            "r may have been assigned a new reference: when the guard on line 7 assigns &s to r and then turns out false, matching goes on with the later arms after that assignment, so here r points to s or to t (the borrow checker counts every later arm as one that may run after a failed guard)",
+            "r points to s or to t here. If the guard on line 7 assigned &s to r before turning out false, s's resource is immutably borrowed by r here. Which one r points to is decided at run time, so the borrow checker treats s as borrowed either way: s is read-only while r's borrow is live.",
+            "r points to s or to t here. If the guard on line 7 turned out false before assigning &s to r, or didn't run (its arm's pattern didn't match), t's resource is still immutably borrowed by r here. Which one r points to is decided at run time, so the borrow checker treats t as borrowed either way: t is read-only while r's borrow is live.",
+            "r's borrow ends here, so s's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whether or not the guard on line 7 had assigned &s to r)",
+            "r's borrow ends here, so t's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whether or not the guard on line 7 had assigned &s to r)",
+        ],
+        must_not_contain: &[
+            "can't be used after the if",
+            "the else branch",
+        ],
+    },
+    TooltipExpect {
+        name: "match_guard_assigns_ref_after_603",
+        // #603 (item 1): as match_guard_assigns_ref_603, with r read only after
+        // the match: s and t stay borrowed through the later arm and after the
+        // match, to that read. main refused the program.
+        must_contain: &[
+            "r may have been assigned a new reference: when the guard on line 7 assigns &s to r and then turns out false, matching goes on with the later arms after that assignment, so here r points to s or to t (the borrow checker counts every later arm as one that may run after a failed guard)",
+            "r points to s or to t here. If the guard on line 7 assigned &s to r before turning out false, s's resource is immutably borrowed by r here. Which one r points to is decided at run time, so the borrow checker treats s as borrowed either way: s is read-only while r's borrow is live.",
+            "r points to s or to t here. If the guard on line 7 turned out false before assigning &s to r, or didn't run (its arm's pattern didn't match), t's resource is still immutably borrowed by r here. Which one r points to is decided at run time, so the borrow checker treats t as borrowed either way: t is read-only while r's borrow is live.",
+            "s's resource may be immutably borrowed by r (r points to s or to t); either way, s is read-only until r's borrow ends",
+            "t's resource may be immutably borrowed by r (r points to s or to t); either way, t is read-only until r's borrow ends",
+            "r's borrow ends here, so t's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whether or not the guard on line 7 had assigned &s to r)",
+            "s's resource is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            "r's borrow ends here, so s's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whether or not the guard on line 7 had assigned &s to r)",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/chain_assigns_moved_603",
+        // #603 (item 3): `drop(z); if let Some(a) = y && { z = a; … }`. z held
+        // no value before the condition, so on the else path (and, without an
+        // `else`, after the `if`) it holds the new value or nothing: a use there
+        // is E0382, and a drop flag decides what is dropped. `Drop`-printing
+        // check: `y = None` drops nothing at the end; a failed length check
+        // drops the new value at the end (or at `w = …`, which drops it there).
+        // main refused the program ("… that may hold no value before …").
+        must_contain: &[
+            "z may have been assigned a new value: z held no value before the condition (it was moved on line 4); when the condition assigns to z and then turns out false, the else branch runs after that assignment, so here z holds the new value or nothing, and can't be used until it's assigned again",
+            "z may have no value after the if, so it can't be used after the if (until it's assigned again). If it has one, its resource is dropped when z goes out of scope.",
+            "z goes out of scope. Its resource is dropped here only if z still holds it (Rust tracks this with a runtime drop flag).",
+            "w may have been assigned a new value: w held no value before the condition (it was moved on line 15); when the condition assigns to w and then turns out false, the body is skipped but the assignment has happened, so after the if w holds the new value or nothing, and can't be used until it's assigned again",
+            "w may have no value after the if, so it can't be used after the if (until it's assigned again). If it has one, its resource is dropped when w is assigned again.",
+            "w acquires ownership of a new resource. Its previous resource is dropped here only if w still holds it (Rust tracks this with a runtime drop flag).",
+            "w goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "holds either its previous",
+            "z may have been moved above",
+            "If nothing above moved it, its resource is dropped when z",
+            "z goes out of scope. Its resource is dropped here only if nothing above moved it",
+            "w acquires ownership of a new resource. Its previous resource is dropped here only if nothing above moved it",
+        ],
+    },
+    TooltipExpect {
+        name: "match_guard_assigns_moved_603",
+        // #603 (item 3) for a match guard: z held no value before the guard, so
+        // every later arm starts with z holding the new value or nothing (a use
+        // there is E0382, also in `None =>`). main refused the program.
+        must_contain: &[
+            "z may have been assigned a new value: z held no value before the guard on line 6 (it was moved on line 4); when the guard assigns to z and then turns out false, matching goes on with the later arms after that assignment, so here z holds the new value or nothing, and can't be used until it's assigned again (the borrow checker counts every later arm as one that may run after a failed guard)",
+            "z may have no value after the match, so it can't be used after the match (until it's assigned again). If it has one, its resource is dropped when z goes out of scope.",
+            "z goes out of scope. Its resource is dropped here only if z still holds it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "holds either its previous",
+            "z goes out of scope. Its resource is dropped here only if nothing above moved it",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/chain_assign_then_move_603",
+        // #603 (item 4): `{ z = a; true } && take(z)` assigns z (dropping the
+        // old String) and then moves it: the else branch has z holding its old
+        // value (`y` was `None`) or nothing (`take` returned false), the
+        // maybe-moved state, in one sentence for both. `Drop`-printing check:
+        // `y = None` drops the old value at the end; otherwise the old value is
+        // dropped at the assignment and the new one in `take`. main refused the
+        // program ("… that both move and assign …").
+        must_contain: &[
+            "z may have been moved: when the condition assigns z a new value (dropping its previous one), then moves z to take and turns out false, the else branch runs after that move, so z can't be used here",
+            "z goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "holds either its previous resource or the new one",
+            "z may have been assigned a new",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/chain_move_then_assign_603",
+        // #603 (item 4): `take(z) && … && { z = a; … }` moves z and then gives
+        // it a new value: on the else path z holds its previous value (`w` was
+        // `None`), nothing (`take` returned false, or `y` was `None`), or the new
+        // one (the length check failed). `Drop`-printing check: the new value is
+        // dropped at the scope end on that last path, so "only if nothing above
+        // moved it" would be false. main refused the program.
+        must_contain: &[
+            "z may have been assigned a new value: when the condition moves z to take, then assigns to z and turns out false, the else branch runs after that assignment, so here z holds its previous value, the new one, or nothing, and can't be used until it's assigned again",
+            "z may have no value after the if, so it can't be used after the if (until it's assigned again). If it has one, its resource is dropped when z goes out of scope.",
+            "z goes out of scope. Its resource is dropped here only if z still holds it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "z goes out of scope. Its resource is dropped here only if nothing above moved it",
+            "If nothing above moved it, its resource is dropped when z",
+        ],
+    },
+    TooltipExpect {
+        name: "match_guard_assign_then_move_603",
+        // #603 (item 4) for a match guard: the guard assigns z and then moves
+        // it into `take`; every later arm starts with z maybe-moved. main
+        // refused the program.
+        must_contain: &[
+            "z may have been moved: when the guard on line 9 assigns z a new value (dropping its previous one), then moves z to take and turns out false, matching goes on with the later arms after that move, so z can't be used here (the borrow checker counts every later arm as one that may run after a failed guard)",
+            "z may have been moved above, so it can't be used after the match (until it's assigned again). If nothing above moved it, its resource is dropped when z goes out of scope.",
+        ],
+        must_not_contain: &[
+            "holds either its previous resource or the new one",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/chain_write_then_move_603",
+        // #603 (item 4): a write through `*b`, then a move of b (`*b = a; let c
+        // = b;`): on the else path b holds its old Box (`y` was `None`) or
+        // nothing (the Box moved into c, which the block dropped). main refused
+        // the program; a drawn "holds either its previous resource or the new
+        // one" would be false.
+        must_contain: &[
+            "b may have been moved: when the condition assigns *b a new value (dropping its previous one), then moves b to c and turns out false, the else branch runs after that move, so b can't be used here",
+            "b goes out of scope. Its resource (including the String it holds) is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "holds either its previous resource or the new one",
         ],
     },
     TooltipExpect {
@@ -22868,24 +23103,25 @@ fn struct_without_field_columns_boxes_its_own_label() {
 }
 
 /// What a match guard that then fails leaves behind starts every later
-/// arm (#247), as for a let-chain's else branch. What that machinery
-/// can't draw yet is refused for guards too, with the guard's wording
-/// (#603): here a new reference assigned to an outer variable, after
-/// which r points to s or to t in the later arm.
+/// arm (#247), as for a let-chain's else branch, and a new reference it
+/// assigns is drawn too (#603). Inside a loop's body, where the loans
+/// can come back round to the guard, where they end isn't worked out:
+/// that is still refused, with the guard's wording.
 #[test]
-fn guard_that_assigns_a_reference_is_refused() {
+fn guard_that_assigns_a_reference_in_a_loop_is_refused() {
     env::set_var("RV_RUNNER", "local");
     let src = "fn main() {\n\
                \x20   let s = String::from(\"a\");\n\
                \x20   let t = String::from(\"b\");\n\
                \x20   let mut r = &t;\n\
-               \x20   let opt = Some(5);\n\
-               \x20   match opt {\n\
-               \x20       Some(_) if { r = &s; r.len() > 3 } => println!(\"{}\", r),\n\
-               \x20       _ => println!(\"{}\", r),\n\
+               \x20   for n in 0..2 {\n\
+               \x20       match Some(n) {\n\
+               \x20           Some(_) if { r = &s; r.len() > 3 } => println!(\"{}\", r),\n\
+               \x20           _ => println!(\"{}\", r),\n\
+               \x20       }\n\
                \x20   }\n\
                }\n";
-    let err = Rustviz::new(src).expect_err("a guard that assigns a reference must not render");
+    let err = Rustviz::new(src).expect_err("a guard in a loop that assigns a reference must not render");
     let msg = err.to_string();
     assert!(msg.contains("match guards that assign a new reference to a variable declared outside the guard (`r`, line 7)"),
         "expected the guard's reference-assignment refusal, got:\n{}", msg);
@@ -23068,26 +23304,6 @@ fn return_drops_what_the_branch_owns() {
     }
 }
 
-/// What a let-chain still can't draw (#579, #603): a part that assigns a
-/// new reference to, or a value to a moved-out, variable declared
-/// outside the condition, or both assigns and moves one, followed by a
-/// part that can be false. Each lasts on the path into the `else`, where
-/// RustViz can't show which borrow is live, or that the variable may
-/// hold no value.
-/// What a let-chain still can't draw (#579): a part that assigns a new
-/// reference to, writes through, or gives a first value to a variable
-/// declared outside the condition, followed by a part that can be false.
-/// Each lasts on the path into the `else`, where RustViz can't show
-/// which borrow is live, or that the variable may hold no value.
-/// What a let-chain still can't draw (#579): a part that assigns a new
-/// reference to, writes through, or gives a first value to a variable
-/// declared outside the condition, followed by a part that can be false.
-/// Each lasts on the path into the `else`, where RustViz can't show
-/// which borrow is live, or that the variable may hold no value.
-/// What a let-chain still can't draw (#281): a part that assigns to a
-/// variable declared outside the condition, followed by a part that can
-/// be false. The assignment lasts on the path into the `else`, which
-/// would need the variable's old and new values on one column.
 /// #630, #631: an exit (`return`, a panic, `break`, `continue`) drops
 /// what the branch or loop body it leaves declared (`if let` bindings
 /// too), on the exit's own row, and the closing brace that no path
@@ -23431,10 +23647,12 @@ fn outer_borrow_ends_at_exit() {
     assert_eq!(count("w's resource is no longer immutably borrowed"), 1, "{:?}", tips);
 }
 
-/// The `if` counterpart of `guard_that_assigns_a_reference_is_refused`
+/// The `if` counterpart of `guard_that_assigns_a_reference_in_a_loop_is_refused`
 /// (#198, #281, #603): the lasting effects of a let-chain's condition
-/// that the else branch can't be drawn with yet are refused, rather
-/// than drawn in the if branch only.
+/// that the else branch still can't be drawn with are refused, rather
+/// than drawn in the if branch only: a new reference that isn't `&x` of
+/// a variable (here another reference, `r = q`: which loans r holds on
+/// the else path isn't worked out), and `r = &s` in a loop's body.
 #[test]
 fn if_let_chain_lasting_effects_still_refused() {
     env::set_var("RV_RUNNER", "local");
@@ -23443,59 +23661,33 @@ fn if_let_chain_lasting_effects_still_refused() {
           \x20   let s = String::from(\"a\");\n\
           \x20   let t = String::from(\"b\");\n\
           \x20   let y = Some(1);\n\
+          \x20   let q = &s;\n\
           \x20   let mut r = &t;\n\
-          \x20   if let Some(_n) = y && { r = &s; r.len() > 3 } {\n\
+          \x20   if let Some(_n) = y && { r = q; r.len() > 3 } {\n\
           \x20       println!(\"{}\", r);\n\
           \x20   } else {\n\
           \x20       println!(\"{}\", r);\n\
+          \x20   }\n\
+          }\n",
+         "`if let` chains that assign a new reference to a variable declared outside the condition (`r`, line 7)"),
+        ("fn main() {\n\
+          \x20   let s = String::from(\"a\");\n\
+          \x20   let t = String::from(\"b\");\n\
+          \x20   let mut r = &t;\n\
+          \x20   for n in 0..2 {\n\
+          \x20       if let Some(_n) = Some(n) && { r = &s; r.len() > 3 } {\n\
+          \x20           println!(\"{}\", r);\n\
+          \x20       } else {\n\
+          \x20           println!(\"{}\", r);\n\
+          \x20       }\n\
           \x20   }\n\
           }\n",
          "`if let` chains that assign a new reference to a variable declared outside the condition (`r`, line 6)"),
-        ("fn main() {\n\
-          \x20   let y = Some(String::from(\"a\"));\n\
-          \x20   let mut z = String::from(\"z\");\n\
-          \x20   drop(z);\n\
-          \x20   if let Some(a) = y && { z = a; z.len() > 3 } {\n\
-          \x20       println!(\"{}\", z);\n\
-          \x20   }\n\
-          }\n",
-         "`if let` chains that assign to a variable declared outside the condition that may hold no value before (`z`, line 5)"),
-        ("fn take(s: String) -> bool { s.len() > 0 }\n\
-          fn main() {\n\
-          \x20   let y = Some(String::from(\"a\"));\n\
-          \x20   let mut z = String::from(\"z\");\n\
-          \x20   if let Some(a) = y && { z = a; true } && take(z) {\n\
-          \x20       println!(\"yes\");\n\
-          \x20   }\n\
-          }\n",
-         "`if let` chains that both move and assign a variable declared outside the condition (`z`)"),
-        // A write through a place, then a move of the variable it goes
-        // through: on the path that ran the write the Box / Vec moved
-        // on and was dropped, so `*b` / `v[0]` holds nothing in the
-        // else branch (a drawn "holds either ... or the new one" is
-        // false; see the `must_not_contain` below).
-        ("fn main() {\n\
-          \x20   let y = Some(String::from(\"a\"));\n\
-          \x20   let mut b = Box::new(String::from(\"o\"));\n\
-          \x20   if let Some(a) = y && { *b = a; let c = b; c.len() > 3 } {\n\
-          \x20   } else {\n\
-          \x20   }\n\
-          }\n",
-         "`if let` chains that both move and assign a variable declared outside the condition (`b`)"),
-        ("fn main() {\n\
-          \x20   let y = Some(String::from(\"a\"));\n\
-          \x20   let mut v = vec![String::from(\"o\")];\n\
-          \x20   if let Some(a) = y && { v[0] = a; let w = v; w.len() > 3 } {\n\
-          \x20   } else {\n\
-          \x20   }\n\
-          }\n",
-         "`if let` chains that both move and assign a variable declared outside the condition (`v`)"),
     ];
     for (src, want) in cases {
         let err = Rustviz::new(src).expect_err("a let-chain with this lasting effect must not render");
         let msg = err.to_string();
         assert!(msg.contains(want), "expected {:?}, got:\n{}", want, msg);
-        assert!(!msg.contains("holds either its previous resource or the new one"), "{}", msg);
     }
 }
 
@@ -26454,5 +26646,63 @@ fn adapter_loops_over_a_mut_ref_keep_it_borrowed_and_draw_writes() {
         let at = (label_x(&tl, column), code_row_y(&code, src));
         let ends_there = dots_where(&tl, |lines| lines.iter().any(|l| l == end));
         assert!(!ends_there.contains(&at), "{:?} still on the `for` line `{}`: {:?}", end, src, ends_there);
+    }
+}
+
+/// #603: `r = &s` in a let-chain part (or a match guard) before a part
+/// that fails. Each borrow ends where rustc ends it on each path, checked
+/// with conflicting uses (E0502 before the row, accepted after it):
+/// * the path into the body: t's loan ends at the write (the condition's
+///   row), s's at r's last use in the body;
+/// * the else branch / each later arm: r points to s or to t, so both
+///   are borrowed from where it starts to r's last use there;
+/// * r read after the conditional: both stay borrowed to that read.
+#[test]
+fn chain_reference_borrows_end_on_each_path() {
+    let on = |dots: &[(f64, f64)], row: f64| dots.iter().filter(|d| (d.1 - row).abs() < 1.0).count();
+    let s_end = "r's borrow ends here, so s's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whether or not the condition had assigned &s to r)";
+    let t_end = "r's borrow ends here, so t's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whether or not the condition had assigned &s to r)";
+
+    let rv = run_with_local_backend("edition2024/chain_assigns_ref_603");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let cond = code_row_y(&code, "if let Some(_n) = y && { r = &s; r.len() > 3 } {");
+    let body = code_row_y(&code, "println!(\"long {}\", r);");
+    let els = code_row_y(&code, "println!(\"short {}\", r);");
+    let t_back = dots_listing_tooltip(&timeline, "t's resource is no longer immutably borrowed");
+    let s_back = dots_listing_tooltip(&timeline, "s's resource is no longer immutably borrowed");
+    assert_eq!((t_back.len(), on(&t_back, cond)), (1, 1), "t's loan on the body's path ends at the write: {t_back:?} (row {cond})");
+    assert_eq!((s_back.len(), on(&s_back, body)), (1, 1), "s's loan on the body's path ends at its println!: {s_back:?} (row {body})");
+    for end in [s_end, t_end] {
+        let dots = dots_listing_tooltip(&timeline, end);
+        assert_eq!((dots.len(), on(&dots, els)), (1, 1), "{end}: {dots:?}, not on the else branch's println! row ({els})");
+    }
+
+    let rv = run_with_local_backend("edition2024/chain_assigns_ref_after_603");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let cond = code_row_y(&code, "if let Some(_n) = y && { r = &s; r.len() > 3 } {");
+    let read = code_row_y(&code, "println!(\"{}\", r);");
+    let t_back = dots_listing_tooltip(&timeline, "t's resource is no longer immutably borrowed");
+    assert_eq!((t_back.len(), on(&t_back, cond)), (1, 1), "t's loan on the body's path ends at the write: {t_back:?} (row {cond})");
+    let s_back = dots_listing_tooltip(&timeline, "s's resource is no longer immutably borrowed");
+    assert_eq!((s_back.len(), on(&s_back, read)), (1, 1), "s stays borrowed to the read after the if: {s_back:?} (row {read})");
+    let dots = dots_listing_tooltip(&timeline, t_end);
+    assert_eq!((dots.len(), on(&dots, read)), (1, 1), "t stays borrowed to the read after the if: {dots:?} (row {read})");
+
+    let rv = run_with_local_backend("match_guard_assigns_ref_603");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let guard = code_row_y(&code, "Some(_) if { r = &s; r.len() > 3 } => {");
+    let body = code_row_y(&code, "println!(\"long {}\", r);");
+    let later = [code_row_y(&code, "println!(\"short {}\", r);"), code_row_y(&code, "println!(\"none {}\", r);")];
+    let t_back = dots_listing_tooltip(&timeline, "t's resource is no longer immutably borrowed");
+    let s_back = dots_listing_tooltip(&timeline, "s's resource is no longer immutably borrowed");
+    assert_eq!((t_back.len(), on(&t_back, guard)), (1, 1), "t's loan in the guarded arm ends at the write: {t_back:?} (row {guard})");
+    assert_eq!((s_back.len(), on(&s_back, body)), (1, 1), "s's loan in the guarded arm ends at its println!: {s_back:?} (row {body})");
+    for who in ["s", "t"] {
+        let end = format!("r's borrow ends here, so {who}'s resource is no longer immutably borrowed (the borrow checker counted it as borrowed whether or not the guard on line 7 had assigned &s to r)");
+        let dots = dots_listing_tooltip(&timeline, &end);
+        assert_eq!(dots.len(), 2, "{end}: {dots:?}");
+        for row in later {
+            assert_eq!(on(&dots, row), 1, "{end}: {dots:?}, none on the later arm's println! row ({row})");
+        }
     }
 }

@@ -567,6 +567,12 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// `nest_borrow_ends_in_arms` moves each into the arm that declares
   /// the reference, as for its other borrow ends.
   pub or_ref_ends: Vec<(usize, ExternalEvent)>,
+  /// Where the loan made by the `&x` at a span ends on the path into the
+  /// body of the conditional whose condition (or guard) made it, when a
+  /// failed condition also leaves it to the else branch (or the later
+  /// arms), which ends it on its own (#603): `emit_borrow_ends` ends the
+  /// loan `borrow_map` holds there, not at its last line over all paths.
+  pub loan_end_overrides: Vec<(rustc_span::Span, usize)>,
   /// Loans a reference was given in an arm of an `if` / `match` that
   /// another arm's, or the conditional's end, replaced in `borrow_map`
   /// (`c = &y;` in one arm, `c = &z;` in the next, #806): the arms are
@@ -955,6 +961,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       taken_over_loans: HashSet::new(),
       late_old_ends: Vec::new(),
       or_ref_ends: Vec::new(),
+      loan_end_overrides: Vec::new(),
       arm_loans: Vec::new(),
       retired_loans: Vec::new(),
       retired_until: HashMap::new(),
@@ -8249,6 +8256,14 @@ pub fn print_out_of_scope(&mut self){
       };
       if let Some(kill) = chosen {
         data.lifetime = kill;
+      }
+    }
+    for (sp, line) in self.loan_end_overrides.iter() {
+      #[expect(clippy::disallowed_methods, reason = "each entry is set on its own")]
+      for data in self.borrow_map.values_mut().chain(self.arm_loans.iter_mut().map(|(_, d)| d)) {
+        if data.borrow_span == Some(*sp) {
+          data.lifetime = *line;
+        }
       }
     }
     // A struct binding's reference field that a pattern gave a lender

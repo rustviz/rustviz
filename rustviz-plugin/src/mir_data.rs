@@ -10,7 +10,7 @@
 use crate::{expr_visitor::*, expr_visitor_utils::{binding_names, span_end_line, span_to_line, written_name}};
 use crate::svg_generator::data::{ExternalEvent, ResourceAccessPoint, ScopeEndHolds};
 use log::info;
-use rustc_middle::mir::{BorrowKind, Location, Local, Operand, ProjectionElem, TerminatorKind, VarDebugInfoContents};
+use rustc_middle::mir::{BorrowKind, Location, Local, Operand, ProjectionElem, StatementKind, TerminatorKind, VarDebugInfoContents};
 use rustc_middle::mir::visit::Visitor;
 use rustc_middle::ty::{GenericArgKind, RegionVid, Ty, TyKind};
 use rustc_hir::intravisit;
@@ -291,6 +291,50 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
             .map(|(_, line)| line)
             .max()
             .filter(|&end| end < write_line)
+    }
+
+    /// Where rustc's borrow checker has the loan `borrow_idx` in scope
+    /// around a conditional `whole` (#603): for each of `parts` (spans
+    /// of its arms, or of a condition and its body), the last line of a
+    /// location inside it where the loan is in scope; and whether it is
+    /// in scope anywhere after `whole` (a location that starts past its
+    /// end), where the paths through the parts meet again.
+    pub fn loan_scope_in(&self, borrow_idx: usize, parts: &[Span], whole: Span) -> (Vec<Option<usize>>, bool) {
+        let body_with_facts = self.bwf;
+        let body = &body_with_facts.body;
+        let borrows = Borrows::new(self.tcx, body, &body_with_facts.region_inference_context, &body_with_facts.borrow_set);
+        let mut cursor = borrows.iterate_to_fixpoint(self.tcx, body, None).into_results_cursor(body);
+        let mut last: Vec<Option<usize>> = vec![None; parts.len()];
+        let mut past = false;
+        for (block, data) in body.basic_blocks.iter_enumerated() {
+            for statement_index in 0..=data.statements.len() {
+                let location = Location { block, statement_index };
+                cursor.seek_before_primary_effect(location);
+                if !cursor.get().iter().any(|b| b.index() == borrow_idx) {
+                    continue;
+                }
+                // Only where code runs: a temporary's `StorageDead` at the
+                // failing path's start has the span of the body's `}`.
+                let bookkeeping = match data.statements.get(location.statement_index) {
+                    Some(st) => matches!(st.kind, StatementKind::StorageLive(_) | StatementKind::StorageDead(_) | StatementKind::Nop),
+                    None => matches!(data.terminator().kind, TerminatorKind::Goto { .. } | TerminatorKind::FalseEdge { .. } | TerminatorKind::FalseUnwind { .. }),
+                };
+                if bookkeeping {
+                    continue;
+                }
+                let span = self.location_to_span(location, body_with_facts);
+                if span.lo() >= whole.hi() {
+                    past = true;
+                }
+                let line = self.location_to_line(location, body_with_facts);
+                for (i, part) in parts.iter().enumerate() {
+                    if part.contains(span) {
+                        last[i] = Some(last[i].map_or(line, |l: usize| l.max(line)));
+                    }
+                }
+            }
+        }
+        (last, past)
     }
 
     // To get this to really work we would need to do a dataflow analysis to establish which temporaries 

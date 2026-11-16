@@ -1428,6 +1428,44 @@ pub enum ChainFailHow {
     /// (`Some(o)`, `(a, 1)`), whose text this is, for a pattern that can
     /// fail to take apart (`if let Some(Some(x)) = Some(o) && ..`, #949).
     Literal(String),
+    /// Gives it a new value when it may hold none (#603): `drop(z); if
+    /// let Some(a) = y && { z = a; … }`. On the failing path it holds the
+    /// new value or nothing (or, with `before: NoValueBefore::Maybe`,
+    /// also its previous value): rustc rejects a use (E0382) and a drop
+    /// flag decides what's dropped. Like a move, it can't be used.
+    AssignNoValue { before: NoValueBefore },
+    /// Gives it a new value, then moves it (#603): `{ z = a; true } &&
+    /// take(z)`. On the failing path it holds its previous value or
+    /// nothing. `place`: the write is to the place reached through it
+    /// (`*b`), as written. `drops_old`: the write drops the old value.
+    AssignThenMove { place: Option<String>, drops_old: bool, to: Vec<String> },
+    /// Moves it, then gives it a new value (#603): `take(z) && { z = a;
+    /// true }`. On the failing path it holds the new value or nothing,
+    /// and with `old` (a part that can fail comes before the move) also
+    /// possibly its previous value.
+    MoveThenAssign { old: bool, to: Vec<String> },
+}
+
+/// Why a variable may hold no value where a condition gives it a new
+/// one (`ChainFailHow::AssignNoValue`).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum NoValueBefore {
+    /// It was moved before the condition (on this line, if known).
+    Moved(Option<usize>),
+    /// The condition's first part moved it (on this line, if known).
+    MovedByCondition(Option<usize>),
+    /// It was moved on some paths above only: it may still hold its
+    /// previous value.
+    Maybe,
+}
+
+impl ChainFailHow {
+    /// On the failing path it may hold a new value the condition gave it
+    /// (or nothing): its drop flag reads "only if it still holds it", not
+    /// "only if nothing above moved it".
+    pub fn may_hold_new(&self) -> bool {
+        matches!(self, ChainFailHow::AssignNoValue { .. } | ChainFailHow::MoveThenAssign { .. })
+    }
 }
 
 /// The `return`s directly in a loop body (not in an `if` / `match`
@@ -1957,6 +1995,12 @@ pub enum ExternalEvent {
     // borrow starts (the pattern), `end: true` where it ends. Drawn as a
     // dot on `ro`'s column, with no arrow; the event with `first` also
     // carries `into`'s own dot (its borrow starting / ending).
+    //
+    // `chain`: not an or-pattern but a let-chain condition (or a match
+    // guard) that assigned `into` a new reference before it failed
+    // (#603): on the failing path `into` points to the new place or to
+    // the one it pointed to before, and the borrow checker treats both
+    // as borrowed while it's live. `from` is then [new, old].
     OrAltBorrow {
         ro: ResourceAccessPoint,
         into: ResourceAccessPoint,
@@ -1964,6 +2008,7 @@ pub enum ExternalEvent {
         mutable: bool,
         end: bool,
         first: bool,
+        chain: Option<FailPath>,
         id: usize
     },
     // At the start of the `else` branch (or the implicit empty one) of
@@ -2104,14 +2149,14 @@ impl ExternalEvent {
     /// The column events of an `OrAltBorrow` (#565): the place's, and
     /// the reference's when the event carries it (`first`).
     pub fn or_alt_borrow_events(&self) -> (Event, Option<Event>) {
-        let ExternalEvent::OrAltBorrow { ro, into, from, mutable, end, first, .. } = self else {
+        let ExternalEvent::OrAltBorrow { ro, into, from, mutable, end, first, chain, .. } = self else {
             panic!("internal state: or_alt_borrow_events of another event");
         };
         let lend = Event::OrAltLend {
-            into: into.clone(), is: ResourceTy::Value(ro.clone()), sources: from.clone(), mutable: *mutable, end: *end,
+            into: into.clone(), is: ResourceTy::Value(ro.clone()), sources: from.clone(), mutable: *mutable, end: *end, chain: *chain,
         };
         let borrow = first.then(|| Event::OrAltBorrow {
-            is: ResourceTy::Value(into.clone()), sources: from.clone(), mutable: *mutable, end: *end,
+            is: ResourceTy::Value(into.clone()), sources: from.clone(), mutable: *mutable, end: *end, chain: *chain,
         });
         (lend, borrow)
     }
@@ -2429,11 +2474,12 @@ pub enum Event {
     // borrowed by `into` (`end: false`), or that borrow ends (`end:
     // true`). Changes the place's state like a StaticLend / MutableLend
     // and StaticReacquire / MutableReacquire would.
-    OrAltLend { into: ResourceAccessPoint, is: ResourceTy, sources: Vec<String>, mutable: bool, end: bool },
+    // `chain`: see ExternalEvent::OrAltBorrow (#603).
+    OrAltLend { into: ResourceAccessPoint, is: ResourceTy, sources: Vec<String>, mutable: bool, end: bool, chain: Option<FailPath> },
     // The reference's side of an ExternalEvent::OrAltBorrow: its borrow
     // of one of `sources` starts or ends. Changes its state like a
     // StaticBorrow / MutableBorrow and StaticDie / MutableDie would.
-    OrAltBorrow { is: ResourceTy, sources: Vec<String>, mutable: bool, end: bool },
+    OrAltBorrow { is: ResourceTy, sources: Vec<String>, mutable: bool, end: bool, chain: Option<FailPath> },
     // See ExternalEvent::ChainFailAssign. `rc`: the variable's
     // `rc_drop()`, for what dropping the old value does.
     ChainFailAssign { place: Option<String>, drops_old: bool, rc: Option<RcDrop>, path: FailPath },
@@ -3195,13 +3241,24 @@ impl Event {
             Event::OrAltMove { into, sources, tuple, part_of, value, .. } => {
                 hover_messages::event_dot_or_alt_move(my_name, into, sources, tuple.as_deref(), part_of.as_ref(), *value)
             }
-            Event::OrAltLend { into, is, sources, mutable, end } => {
+            Event::OrAltLend { into, is, sources, mutable, end, chain: Some(path) } => {
+                let holds_value = matches!(is, ResourceTy::Value(r) if r.holds_value());
+                if *end {
+                    hover_messages::event_dot_chain_ref_reacquire(my_name, into.name(), sources, *mutable, holds_value, *path)
+                } else {
+                    hover_messages::event_dot_chain_ref_lend(my_name, into.name(), sources, *mutable, holds_value, *path)
+                }
+            }
+            Event::OrAltLend { into, is, sources, mutable, end, chain: None } => {
                 let holds_value = matches!(is, ResourceTy::Value(r) if r.holds_value());
                 if *end {
                     hover_messages::event_dot_or_alt_reacquire(my_name, into.name(), *mutable, holds_value)
                 } else {
                     hover_messages::event_dot_or_alt_lend(my_name, into.name(), sources, *mutable, holds_value)
                 }
+            }
+            Event::OrAltBorrow { sources, mutable, end: false, chain: Some(path), .. } => {
+                hover_messages::event_dot_chain_ref_borrow(my_name, sources, *mutable, *path)
             }
             Event::OrAltBorrow { sources, mutable, end, .. } => {
                 match (*end, *mutable) {
