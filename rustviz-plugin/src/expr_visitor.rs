@@ -3234,11 +3234,25 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     Some(ResourceTy::Index(rap, place, write))
   }
 
-  /// `v.iter_mut()`, `v.iter_mut().rev()`: the variable a method chain
-  /// starts from, when the chain's first call takes it by `&mut` (so
-  /// what the chain hands out points into its resource, or into the
-  /// resource it points to).
+  /// `v.iter_mut()`, `v.iter_mut().rev()`, `self.items.iter_mut()`: the
+  /// variable a method chain starts from, when the chain's first call
+  /// takes it by `&mut` (so what the chain hands out points into its
+  /// resource, or into the resource it points to). For a field reached
+  /// through a reference (`self.items` with `self: &mut Self`), the
+  /// reference (#1060).
   pub(crate) fn mut_call_chain_root(&self, e: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
+    match self.call_chain_root(e)? {
+      (ResourceTy::Value(r) | ResourceTy::DerefField(r, _, _), Mutability::Mut) => Some(r),
+      _ => None,
+    }
+  }
+
+  /// The place a method chain starts from and how its first call takes
+  /// it (`&self` or `&mut self`): `Value(v)` for a variable v (`v.iter()`),
+  /// `DerefField(self, "self.items")` for a field reached through a
+  /// reference (`self.items.iter_mut()`; #1060). None when the first
+  /// call takes its receiver by value.
+  pub(crate) fn call_chain_root(&self, e: &'tcx Expr<'tcx>) -> Option<(ResourceTy, Mutability)> {
     let ExprKind::MethodCall(_, mut rcvr, _, _) = e.kind else { return None };
     let mut first_call = e;
     while let ExprKind::MethodCall(_, inner, _, _) = rcvr.kind {
@@ -3247,12 +3261,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
     let def_id = self.tcx.typeck(e.hir_id.owner).type_dependent_def_id(first_call.hir_id)?;
     let sig = self.tcx.fn_sig(def_id).instantiate_identity().skip_norm_wip();
-    if sig.skip_binder().inputs().first()?.ref_mutability() != Some(Mutability::Mut) {
-      return None;
-    }
+    let m = sig.skip_binder().inputs().first()?.ref_mutability()?;
     match get_rap(rcvr, &self.tcx, &self.raps) {
-      ResourceTy::Value(r) if !r.is_fn() => Some(r),
-      _ => None,
+      ResourceTy::Value(r) if !r.is_fn() => Some((ResourceTy::Value(r), m)),
+      _ => match self.field_access_through_ref(rcvr)? {
+        f @ ResourceTy::DerefField(..) => Some((f, m)),
+        _ => None,
+      },
     }
   }
 
@@ -6186,8 +6201,15 @@ fn mark_borrow_kept_by_result(&mut self, call: &'tcx Expr<'tcx>, lenders: &[Reso
 /// of `hashes` into one of the functions `fns` on lines `lo..=hi`, and
 /// return their ids.
 fn mark_kept_on_lines(&mut self, lo: usize, hi: usize, hashes: &[u64], fns: &[String]) -> Vec<usize> {
+  self.mark_kept_on_lines_at(lo, hi, hashes, None, fns)
+}
+
+/// `mark_kept_on_lines`, for the events from the field `place` reached
+/// through one of the references `hashes` (`self.items` in
+/// `self.items.iter_mut()`, a `DerefField`) when `place` is given.
+fn mark_kept_on_lines_at(&mut self, lo: usize, hi: usize, hashes: &[u64], place: Option<&str>, fns: &[String]) -> Vec<usize> {
   let mut ids: Vec<usize> = Vec::new();
-  mark_kept_in(&mut self.preprocessed_events, lo, hi, hashes, fns, &mut ids);
+  mark_kept_in(&mut self.preprocessed_events, lo, hi, hashes, place, fns, &mut ids);
   for line in lo..=hi {
     if let Some(evs) = self.event_line_map.get_mut(&line) {
       for ev in evs.iter_mut() {
@@ -6235,10 +6257,21 @@ pub fn keep_loop_head_loans(&mut self, head: &'tcx Expr<'tcx>) -> Vec<(ResourceT
       out.push((l, is_mut, call));
     }
   }
-  if let Some(root) = self.mut_call_chain_root(head).filter(|r| r.is_ref()) {
-    let ids = self.mark_kept_on_lines(lo, hi, &[*root.hash()], &fns);
-    if let Some((true, call)) = ids.iter().find_map(|id| pass_ref_kind(&self.preprocessed_events, *id)) {
-      out.push((ResourceTy::Value(root), true, call));
+  // `v.iter()` reborrows `*v` too, shared, when v is a `&mut` (#1059):
+  // v is read-only until the loop ends. (A `&T` v is copied, not
+  // reborrowed, and is read-only anyway.) A field reached through a
+  // `&mut` (`self.items.iter_mut()`, #1060) is lent the same way.
+  if let Some((root, m)) = self.call_chain_root(head) {
+    let through = match &root {
+      ResourceTy::Value(r) if r.is_ref() => Some((r.clone(), None)),
+      ResourceTy::DerefField(r, place, _) => Some((r.clone(), Some(place.clone()))),
+      _ => None,
+    };
+    if let Some((r, place)) = through.filter(|(r, _)| m == Mutability::Mut || r.is_mutref()) {
+      let ids = self.mark_kept_on_lines_at(lo, hi, &[*r.hash()], place.as_deref(), &fns);
+      if let Some((is_mut, call)) = ids.iter().find_map(|id| pass_ref_kind(&self.preprocessed_events, *id)) {
+        out.push((root, is_mut, call));
+      }
     }
   }
   out
@@ -10064,12 +10097,16 @@ fn set_kept(ev: &mut ExternalEvent) {
 /// Set `result_keeps_borrow` on the pass-by-reference events from one
 /// of `hashes` into a function on lines `lo..=hi`, including those
 /// already folded into a branch (recording their ids in `ids`).
-fn mark_kept_in(events: &mut Vec<(usize, ExternalEvent)>, lo: usize, hi: usize, hashes: &[u64], fns: &[String], ids: &mut Vec<usize>) {
+fn mark_kept_in(events: &mut Vec<(usize, ExternalEvent)>, lo: usize, hi: usize, hashes: &[u64], place: Option<&str>, fns: &[String], ids: &mut Vec<usize>) {
   for (line, ev) in events.iter_mut() {
     let pass_from_lender = match &*ev {
       ExternalEvent::PassByStaticReference { from, to: ResourceTy::Value(ResourceAccessPoint::Function(f)), .. }
       | ExternalEvent::PassByMutableReference { from, to: ResourceTy::Value(ResourceAccessPoint::Function(f)), .. } =>
-        fns.contains(&f.name) && matches!(from, ResourceTy::Value(r) if hashes.contains(r.hash())),
+        fns.contains(&f.name) && match (from, place) {
+          (ResourceTy::Value(r), None) => hashes.contains(r.hash()),
+          (ResourceTy::DerefField(r, p, _), Some(want)) => hashes.contains(r.hash()) && p == want,
+          _ => false,
+        },
       _ => false,
     };
     if pass_from_lender {
@@ -10083,7 +10120,7 @@ fn mark_kept_in(events: &mut Vec<(usize, ExternalEvent)>, lo: usize, hi: usize, 
       ExternalEvent::Branch { branches, .. } => {
         for b in branches.iter_mut() {
           let mut inner: Vec<usize> = Vec::new();
-          mark_kept_in(&mut b.e_data, lo, hi, hashes, fns, &mut inner);
+          mark_kept_in(&mut b.e_data, lo, hi, hashes, place, fns, &mut inner);
           for evs in b.line_map.values_mut() {
             for e in evs.iter_mut() {
               if inner.contains(&e.get_id()) {

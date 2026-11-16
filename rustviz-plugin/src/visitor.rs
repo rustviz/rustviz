@@ -7521,9 +7521,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             self.for_loop_iter_loans.push((lender.real_name(), for_line, body_end, head_call));
           }
           // A reference the iterator reborrows through (`v.iter_mut()`
-          // with `v: &mut Vec<_>`) stays live until the loop ends too:
-          // its own borrow ends after the iterator's (#1046).
-          if let ResourceTy::Value(r) = &lender {
+          // with `v: &mut Vec<_>`, `self.items.iter_mut()`) stays live
+          // until the loop ends too: its own borrow ends after the
+          // iterator's (#1046, #1060).
+          if let ResourceTy::Value(r) | ResourceTy::DerefField(r, _, _) = &lender {
             if r.is_ref() && self.borrow_map.contains_key(r.name()) {
               let floor = self.borrow_floor.entry(r.name().to_owned()).or_insert(body_end);
               *floor = (*floor).max(body_end);

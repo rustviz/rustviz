@@ -19470,6 +19470,46 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "on line 123 (or at the `?`",
         ],
     },
+    TooltipExpect {
+        name: "iter_on_mut_ref_1059",
+        // #1059: `for x in v.iter()` with v a `&mut Vec` (a parameter, or
+        // a local `let r = &mut s;`) said "iter no longer borrows the
+        // resource v points to" on the `for` line, but the loop's iterator
+        // holds that shared reborrow of `*v` until the loop ends: `v.push(1)`
+        // in the body is E0502, `v.len()` there compiles. #1060: `for e in
+        // self.items.iter_mut()` / `self.items.iter()` in a `&mut self`
+        // method said "self.items's resource is no longer mutably /
+        // immutably borrowed" on the `for` line (`self.items.len()` /
+        // `self.items.push(1)` in the body is E0502), and `*e += 1` wasn't
+        // drawn on self. Only the field is lent: `self.n += 1` in the body
+        // compiles, so the texts name self.items, not self. The rows are
+        // pinned by the row test below. (`self.items's resource is no
+        // longer mutably borrowed` is still right on the `push` line.)
+        must_contain: &[
+            "the resource v points to is immutably borrowed by the `for` loop's iterator through v; v is read-only until the loop ends",
+            "the `for` loop's iterator no longer borrows the resource v points to",
+            "v holds a mutable reference, but the resource it points to is currently shared through it, so v can only read it",
+            "the resource r points to is immutably borrowed by the `for` loop's iterator through r; r is read-only until the loop ends",
+            "the `for` loop's iterator no longer borrows the resource r points to",
+            "self.items is mutably borrowed by the `for` loop's iterator; self.items can't be used until the loop ends",
+            "the resource self points to is modified through e",
+            "the `for` loop's iterator no longer borrows self.items",
+            "self.items is immutably borrowed by the `for` loop's iterator; self.items is read-only until the loop ends",
+            "self holds a mutable reference, but self.items is immutably borrowed by the `for` loop's iterator, so self.items is read-only until the loop ends",
+            "the value e points to is modified through *e",
+        ],
+        must_not_contain: &[
+            "iter no longer borrows the resource v points to",
+            "iter no longer borrows the resource r points to",
+            "v is read-only while the borrow is live",
+            "r is read-only while the borrow is live",
+            "self.items's resource is no longer immutably borrowed",
+            "self.items is read-only while the borrow is live",
+            "v's resource is immutably borrowed by the `for` loop's iterator",
+            "r's resource is immutably borrowed by the `for` loop's iterator",
+            "e no longer borrows",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -26035,5 +26075,50 @@ fn a_conditional_that_may_leave_a_variable_empty_draws_no_owner_line_after_it() 
             through.is_empty(),
             "{var} drawn as the owner at {through:?}, between the conditional's end (y={close_row}) and `{until_src}` (y={until_row})",
         );
+    }
+}
+
+/// #1059 / #1060 (`iter_on_mut_ref_1059`): where each text sits. A `for`
+/// loop over `v.iter()` with v a `&mut Vec`, or over `self.items.iter_mut()`
+/// / `self.items.iter()` with `self: &mut Self`, keeps the borrow until the
+/// loop's `}`, not just the `for` line; `*e += 1` is drawn on self's row.
+#[test]
+fn loop_over_a_mut_ref_keeps_it_borrowed_until_the_loop_ends() {
+    let rv = run_with_local_backend("iter_on_mut_ref_1059");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let closes = code_rows_y(&code, "}");
+    // Fixture order: bump's loop `}` is the second `}` (after the struct's),
+    // total's the fourth, read_only's the seventh, through_local_ref's the
+    // ninth.
+    let rows = [
+        ("self", code_row_y(&code, "for e in self.items.iter_mut() {"),
+            "self.items is mutably borrowed by the `for` loop's iterator; self.items can't be used until the loop ends"),
+        ("self", code_row_y(&code, "*e += 1;"), "the resource self points to is modified through e"),
+        ("self", closes[1], "the `for` loop's iterator no longer borrows self.items"),
+        ("self", code_row_y(&code, "for x in self.items.iter() {"),
+            "self.items is immutably borrowed by the `for` loop's iterator; self.items is read-only until the loop ends"),
+        ("self", closes[3], "the `for` loop's iterator no longer borrows self.items"),
+        ("v", code_row_y(&code, "for x in v.iter() {"),
+            "the resource v points to is immutably borrowed by the `for` loop's iterator through v; v is read-only until the loop ends"),
+        ("v", closes[6], "the `for` loop's iterator no longer borrows the resource v points to"),
+        ("r", code_row_y(&code, "for x in r.iter() {"),
+            "the resource r points to is immutably borrowed by the `for` loop's iterator through r; r is read-only until the loop ends"),
+        ("r", closes[8], "the `for` loop's iterator no longer borrows the resource r points to"),
+    ];
+    for (column, y, text) in rows {
+        let at = (label_x(&tl, column), y);
+        let dots = dots_where(&tl, |lines| lines.iter().any(|l| l == text));
+        assert!(dots.contains(&at), "expected {:?} on {}'s column at {:?}, found {:?}", text, column, at, dots);
+    }
+    // The `for` lines no longer end the borrow.
+    for (column, src, end) in [
+        ("self", "for e in self.items.iter_mut() {", "self.items's resource is no longer mutably borrowed"),
+        ("self", "for x in self.items.iter() {", "self.items's resource is no longer immutably borrowed"),
+        ("v", "for x in v.iter() {", "iter no longer borrows the resource v points to"),
+        ("r", "for x in r.iter() {", "iter no longer borrows the resource r points to"),
+    ] {
+        let at = (label_x(&tl, column), code_row_y(&code, src));
+        let ends_there = dots_where(&tl, |lines| lines.iter().any(|l| l == end));
+        assert!(!ends_there.contains(&at), "{:?} still on the `for` line `{}`: {:?}", end, src, ends_there);
     }
 }

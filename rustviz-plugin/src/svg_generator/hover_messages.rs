@@ -2898,15 +2898,22 @@ pub fn state_lent_out(my_name: &String, to: LentTo, through_ref: Option<bool>, r
 }
 
 // The dots of a `&mut` reference whose pointee a `for` loop's iterator
-// reborrows (`for e in v.iter_mut()` with `v: &mut Vec<_>`; #1046):
-// where the head's call lends it, and where the loop ends. The iterator
-// holds the reborrow until then, so v can't be used meanwhile, even
-// after the last use of e.
-pub fn event_dot_lend_through_ref_to_loop_iterator(ref_name: &String, pointee_copy: bool) -> String {
-    format!(
-        "the {1} {0} points to is mutably borrowed by the `for` loop's iterator through {0}; {0} can't be used until the loop ends",
-        styled_name_html(ref_name), held(pointee_copy)
-    )
+// reborrows (`for e in v.iter_mut()` with `v: &mut Vec<_>`; #1046, or
+// `v.iter()`, shared; #1059): where the head's call lends it, and where
+// the loop ends. The iterator holds the reborrow until then, so v can't
+// be used (or is read-only) meanwhile, even after the last use of e.
+pub fn event_dot_lend_through_ref_to_loop_iterator(ref_name: &String, is_mut: bool, pointee_copy: bool) -> String {
+    if is_mut {
+        format!(
+            "the {1} {0} points to is mutably borrowed by the `for` loop's iterator through {0}; {0} can't be used until the loop ends",
+            styled_name_html(ref_name), held(pointee_copy)
+        )
+    } else {
+        format!(
+            "the {1} {0} points to is immutably borrowed by the `for` loop's iterator through {0}; {0} is read-only until the loop ends",
+            styled_name_html(ref_name), held(pointee_copy)
+        )
+    }
 }
 
 pub fn event_dot_loop_iterator_reacquire_through_ref(ref_name: &String, pointee_copy: bool) -> String {
@@ -2914,6 +2921,28 @@ pub fn event_dot_loop_iterator_reacquire_through_ref(ref_name: &String, pointee_
         "the `for` loop's iterator no longer borrows the {1} {0} points to",
         styled_name_html(ref_name), held(pointee_copy)
     )
+}
+
+// The same for a field reached through a `&mut` reference
+// (`for e in self.items.iter_mut()` with `self: &mut Self`; #1060),
+// drawn on the reference's column. Only that field is lent: `self.n
+// += 1` in the body compiles, `self.items.len()` doesn't.
+pub fn event_dot_lend_field_through_ref_to_loop_iterator(place: &String, is_mut: bool) -> String {
+    if is_mut {
+        format!(
+            "{0} is mutably borrowed by the `for` loop's iterator; {0} can't be used until the loop ends",
+            styled_name_html(place)
+        )
+    } else {
+        format!(
+            "{0} is immutably borrowed by the `for` loop's iterator; {0} is read-only until the loop ends",
+            styled_name_html(place)
+        )
+    }
+}
+
+pub fn event_dot_loop_iterator_reacquire_field_through_ref(place: &String) -> String {
+    format!("the `for` loop's iterator no longer borrows {0}", styled_name_html(place))
 }
 
 // PartialPrivilege of a variable that only a `for` loop's iterator
@@ -2935,6 +2964,16 @@ pub fn state_mut_ref_partial_privilege(my_name: &String, pointee_copy: bool) -> 
     format!(
         "{0} holds a mutable reference, but the {1} it points to is currently shared through it, so {0} can only read it",
         styled_name_html(my_name), held(pointee_copy)
+    )
+}
+
+// The same while a `for` loop's iterator borrows only a field of what
+// r points to (`for e in self.items.iter()` with `self: &mut Self`;
+// #1060): the other fields can still be written through r.
+pub fn state_mut_ref_field_borrowed_by_loop_iterator(my_name: &String, place: &String) -> String {
+    format!(
+        "{0} holds a mutable reference, but {1} is immutably borrowed by the `for` loop's iterator, so {1} is read-only until the loop ends",
+        styled_name_html(my_name), styled_name_html(place)
     )
 }
 
