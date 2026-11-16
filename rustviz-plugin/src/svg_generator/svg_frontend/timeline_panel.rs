@@ -3095,7 +3095,7 @@ fn lent_out_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
         let ref_itself = (rap.is_ref() && !rap.is_mutref()) || of_ref_var;
         hover_messages::state_lent_out(rap.name(), to, through_ref, ref_itself, rap.holds_value())
     };
-    if loop_iterator_holds(visualization_data, rap, line) {
+    if loop_iterator_holds(visualization_data, rap, line).is_some() {
         return text(hover_messages::LentTo::LoopIterator, false);
     }
     let Some(timeline) = visualization_data.timelines.get(rap.hash()) else {
@@ -3231,8 +3231,8 @@ fn loop_iterator_ref_title(event: &Event, line: usize, rap: &ResourceAccessPoint
                 Some(place) => hover_messages::event_dot_lend_field_through_ref_to_loop_iterator(place, is_mut),
             })
         }
-        Event::MutableReacquire { from: ResourceTy::Anonymous, id, still_borrowed_by, is }
-        | Event::StaticReacquire { from: ResourceTy::Anonymous, id, still_borrowed_by, is } if still_borrowed_by.is_empty() => {
+        Event::MutableReacquire { from: ResourceTy::Anonymous, id, still_borrowed_by, is, .. }
+        | Event::StaticReacquire { from: ResourceTy::Anonymous, id, still_borrowed_by, is, .. } if still_borrowed_by.is_empty() => {
             if !all_ends.iter().any(|(i, ..)| i == id) {
                 return None;
             }
