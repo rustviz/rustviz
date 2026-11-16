@@ -2160,6 +2160,18 @@ pub enum ExternalEvent {
         ro: ResourceAccessPoint,
         id: usize
     },
+    // A write to `ro` (or the variable `lender` it is part of) on a path
+    // where `borrower`'s loan of `lender` is already dead, though the
+    // borrow checker keeps it in scope on another path past the write
+    // (#796): why rustc accepts the write inside the drawn borrow. A
+    // note on the write's dot; the state is unchanged.
+    DeadLoanNote {
+        ro: ResourceAccessPoint,
+        lender: String,
+        borrower: String,
+        repoint: Option<(usize, bool)>,
+        id: usize
+    },
     // only use this event to initialize fn parameters
     InitRefParam {
         param: ResourceAccessPoint,
@@ -2292,6 +2304,7 @@ impl ExternalEvent {
             &ExternalEvent::ChainFailUse { id, .. } |
             &ExternalEvent::TiedParamNote { id, .. } |
             &ExternalEvent::DeadElseNote { id, .. } |
+            &ExternalEvent::DeadLoanNote { id, .. } |
             &ExternalEvent::RefDie { id, .. } | &ExternalEvent::Bind { id, .. } |
             &ExternalEvent::PassByStaticReference { id, .. } | &ExternalEvent::PassByMutableReference {id, .. } |
             &ExternalEvent::InitRefParam { id, .. } | &ExternalEvent::ClosureCall { id, .. } => id
@@ -2592,6 +2605,10 @@ pub enum Event {
     TiedParamNote { lifetime: String },
     // See ExternalEvent::DeadElseNote.
     DeadElseNote,
+    // See ExternalEvent::DeadLoanNote. `shown`: the column is drawn
+    // borrowed at the write (set while computing its states); a note
+    // on a column that isn't is dropped then.
+    DeadLoanNote { lender: String, borrower: String, repoint: Option<(usize, bool)>, shown: bool },
     // SPECIAL CASE: use only to initialize a fn's paramter
     // Requires param to be Owner, StaticRef, or MutRef (cannot be Function)
     // (`own_param`, `in_pattern`: see ExternalEvent::InitRefParam)
@@ -3180,6 +3197,9 @@ impl Display for Event {
             Event::DeadElseNote => {
                 write!(f, "This else branch never runs")
             },
+            Event::DeadLoanNote { .. } => {
+                write!(f, "Written where the borrow is already over on this path")
+            },
             Event::RefDie { from, .. } => {
               write!(f, "{} reference dies", from.name())
             }
@@ -3381,6 +3401,9 @@ impl Event {
             }
             Event::TiedParamNote { lifetime, .. } => {
                 hover_messages::event_dot_tied_param_note(my_name, lifetime)
+            }
+            Event::DeadLoanNote { lender, borrower, repoint, .. } => {
+                hover_messages::event_dot_dead_loan_note(lender, borrower, *repoint)
             }
             Event::InitRefParam{ param, own_param: Some(own), .. } => {
                 hover_messages::event_dot_ref_init_own_param(my_name, &own.fn_name, own.whole, matches!(param, ResourceAccessPoint::MutRef(_)), own.drops)
@@ -3996,6 +4019,18 @@ pub struct VisualizationData {
     pub arrow_tracks: HashMap<usize, usize>,
 }
 
+impl VisualizationData {
+    /// Whether a DeadLoanNote on column `hash` is shown: the column is
+    /// drawn borrowed at the write (`state`, its state there). A struct
+    /// field's column doesn't draw its parent's borrows, so the note on
+    /// a field write is always shown.
+    fn dead_loan_note_shown(&self, state: &State, hash: &u64) -> bool {
+        matches!(state, State::PartialPrivilege { .. } | State::RevokedPrivilege { .. })
+            || matches!(self.timelines.get(hash).map(|t| &t.resource_access_point),
+                Some(ResourceAccessPoint::Struct(Struct { is_member: true, .. })))
+    }
+}
+
 /// About a numbered column (`s₂`): a variable of the same name as an
 /// earlier one in its fn.
 #[derive(Debug, Clone)]
@@ -4486,6 +4521,7 @@ impl Visualizable for VisualizationData {
             (_, Event::ChainFailUse { .. }) => (*previous_state).clone(),
             (_, Event::TiedParamNote { .. }) => (*previous_state).clone(),
             (_, Event::DeadElseNote) => (*previous_state).clone(),
+            (_, Event::DeadLoanNote { .. }) => (*previous_state).clone(),
 
 
             (_, _) => State::Invalid,
@@ -4661,6 +4697,9 @@ impl Visualizable for VisualizationData {
                     previous_line = *merge_point;
                 }
                 _ => {
+                    if let Event::DeadLoanNote { shown, .. } = e {
+                        *shown = self.dead_loan_note_shown(&previous_state, hash);
+                    }
                     // An end that leaves the reference column holding a
                     // reference (`ends_kept_alive`) doesn't end its line.
                     if !(kept[i] && holds_reference(&previous_state)) {
@@ -4670,6 +4709,7 @@ impl Visualizable for VisualizationData {
                 }
             }
         }
+        history.retain(|(_, e)| !matches!(e, Event::DeadLoanNote { shown: false, .. }));
         // `max`: an event below the branch's active range (possible
         // when branches share lines) mustn't make the range run upwards.
         let end = end.max(previous_line);
@@ -4776,6 +4816,9 @@ impl Visualizable for VisualizationData {
 
                 }
                 _ => {
+                    if let Event::DeadLoanNote { shown, .. } = e {
+                        *shown = self.dead_loan_note_shown(&previous_state, hash);
+                    }
                     // An end that leaves the reference column holding a
                     // reference (`ends_kept_alive`) doesn't end its line.
                     if !(kept[i] && holds_reference(&previous_state)) {
@@ -4785,6 +4828,7 @@ impl Visualizable for VisualizationData {
                 }
             }
         }
+        history.retain(|(_, e)| !matches!(e, Event::DeadLoanNote { shown: false, .. }));
         states.push((previous_line, previous_line, previous_state));
         *states = clean_states(&states);
     }
@@ -4977,6 +5021,9 @@ impl Visualizable for VisualizationData {
         ExternalEvent::TiedParamNote{ lifetime, .. } => {
           vec![(line_num, Event::TiedParamNote { lifetime: lifetime.clone() })]
         },
+        ExternalEvent::DeadLoanNote{ lender, borrower, repoint, .. } => {
+          vec![(line_num, Event::DeadLoanNote { lender: lender.clone(), borrower: borrower.clone(), repoint: *repoint, shown: false })]
+        },
         ExternalEvent::ChainFailUse{ro, uses, definite, path, ..} => {
           vec![(line_num, Event::ChainFailUse { uses: uses.clone(), definite: *definite, path: *path, is_ref: ro.is_ref() })]
         },
@@ -5027,7 +5074,7 @@ impl Visualizable for VisualizationData {
             ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::TupleTempDrop { ro, .. } | ExternalEvent::OrAltMove { ro, .. } | ExternalEvent::LoopIteratorDrop { ro, .. }
             | ExternalEvent::LoopMaybeInit { ro, .. } | ExternalEvent::LoopExitKept { ro, .. }
             | ExternalEvent::ChainFailAssign { ro, .. } | ExternalEvent::ChainFailUse { ro, .. } | ExternalEvent::TiedParamNote { ro, .. }
-            | ExternalEvent::DeadElseNote { ro, .. } => {
+            | ExternalEvent::DeadElseNote { ro, .. } | ExternalEvent::DeadLoanNote { ro, .. } => {
                 if ro == rap {
                     b_history.extend(self.event_of_external_event(line_number, event, true));
                 }
@@ -5361,6 +5408,9 @@ impl Visualizable for VisualizationData {
             },
             ExternalEvent::DeadElseNote{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::DeadElseNote, line_number);
+            },
+            ExternalEvent::DeadLoanNote{ro, lender, borrower, repoint, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::DeadLoanNote { lender, borrower, repoint, shown: false }, line_number);
             },
             ExternalEvent::ChainFailUse{ro, uses, definite, path, ..} => {
                 let is_ref = ro.is_ref();

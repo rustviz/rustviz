@@ -609,6 +609,8 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// borrows `emit_holder_literal_borrows` draws: drawn after the old
   /// value's borrow ends and drop, which come first on the dot (#1097).
   pub deferred_holder_borrows: Option<Vec<(String, &'tcx Expr<'tcx>)>>,
+  /// (column, line) pairs `note_dead_loan_write` has looked at (#796).
+  pub dead_loan_checked: HashSet<(String, usize)>,
 
 
   // Variables moved in a branch that then `break`s out of a loop
@@ -981,6 +983,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       arm_frames: Vec::new(),
       defer_old_ends: false,
       deferred_holder_borrows: None,
+      dead_loan_checked: HashSet::new(),
       break_moves: Vec::new(),
       loop_given: Vec::new(),
       loop_maybe_entry: Vec::new(),
@@ -1637,6 +1640,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       | ExternalEvent::ChainFailUse { ro, .. }
       | ExternalEvent::TiedParamNote { ro, .. }
       | ExternalEvent::DeadElseNote { ro, .. }
+      | ExternalEvent::DeadLoanNote { ro, .. }
       | ExternalEvent::OwnerDropAtReassign { ro, .. }
       | ExternalEvent::OwnerDropIfTryReturns { ro, .. }
       | ExternalEvent::OwnerDropUnlessReturned { ro, .. }
@@ -1739,6 +1743,33 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       _ => ()
     }
     self.propagate_struct_transfer(line_num, &event);
+    self.note_dead_loan_write(line_num, &event);
+  }
+
+  /// `event` writes to a variable's column (an assignment, or a `&mut`
+  /// borrow): if a loan of the variable is drawn live across the write
+  /// though it is dead on the write's path (#796), add the note that
+  /// says why rustc accepts the write.
+  fn note_dead_loan_write(&mut self, line: usize, event: &ExternalEvent) {
+    let written = match event {
+      ExternalEvent::Bind { to, .. } | ExternalEvent::Copy { to, .. } | ExternalEvent::Move { to, .. } => to,
+      ExternalEvent::MutableBorrow { from, .. } | ExternalEvent::PassByMutableReference { from, .. } => from,
+      _ => return,
+    };
+    let (ResourceTy::Value(r) | ResourceTy::Index(r, ..)) = written else { return };
+    if r.is_fn() || r.is_ref() || self.bwf.borrow_set.location_map().is_empty() {
+      return;
+    }
+    if !self.dead_loan_checked.insert((r.name().to_owned(), line)) {
+      return;
+    }
+    let lender = r.name().split('.').next().unwrap_or(r.name()).to_owned();
+    let Some(dead) = self.dead_loan_at_write(&lender, line) else { return };
+    let id = *self.unique_id;
+    *self.unique_id += 1;
+    self.add_external_event(line, ExternalEvent::DeadLoanNote {
+      ro: r.clone(), lender, borrower: dead.borrower, repoint: dead.repoint, id,
+    });
   }
 
   /// Registered member-field RAPs directly under `parent` (`parent.f`,
@@ -8879,6 +8910,11 @@ pub fn print_out_of_scope(&mut self){
         Some(Sharer { name: name.clone(), hash, from, to: rd.lifetime, moved, lenders, from_kept_call: false, stored: false, gaps: Vec::new() })
       })
       .collect();
+    // An arm whose path ends the reference's loan (it returns, or the
+    // last use is in another arm) doesn't hold it after that end (#796).
+    for s in sharers.iter_mut() {
+      ended_arm_gaps(self.preprocessed_events, &s.name, &s.lenders, s.from, s.to, &mut s.gaps);
+    }
     // A borrow a call may have stored in `v` (`keep(&mut v, &s)`,
     // #513) keeps s shared until the loan ends, as a live `let r = &s;`
     // does (#974). Once `v` is moved on (`let w = v;`, `let h = H { v
@@ -9468,6 +9504,37 @@ fn dead_arm_gaps(list: &[(usize, ExternalEvent)], holder: &str, from: usize, to:
         dead_arm_gaps(&b.e_data, holder, from, to, out);
       } else if end > from {
         let first = last_use(&b.e_data, holder, from, end).map_or(start.max(from + 1), |u| u + 1);
+        if first <= end {
+          out.push((first, end));
+        }
+      }
+    }
+  }
+}
+
+/// The lines of the arms of an `if` / `match` in `list` that come after
+/// the end of `holder`'s loan of one of `lenders` drawn in that arm
+/// (#796): `let u = &h; if c { println!("{}", h); return; }
+/// println!("{}", u);` ends u's borrow at the arm's start, so the arm's
+/// `println!` leaves h unborrowed, not "still borrowed by u". The end's
+/// own line counts too unless the arm uses `holder` there.
+fn ended_arm_gaps(list: &[(usize, ExternalEvent)], holder: &str, lenders: &[String], from: usize, to: usize, out: &mut Vec<(usize, usize)>) {
+  for (_, ev) in list {
+    let ExternalEvent::Branch { branches, branch_type, .. } = ev else { continue };
+    for (i, b) in branches.iter().enumerate() {
+      ended_arm_gaps(&b.e_data, holder, lenders, from, to, out);
+      if matches!(branch_type, BranchType::Loop(..)) {
+        continue;
+      }
+      let (_, end) = branch_type.get_start_end(i);
+      let ended = b.e_data.iter().filter_map(|(line, e)| match e {
+        ExternalEvent::StaticDie { from: ResourceTy::Value(r), to: ResourceTy::Value(l), .. }
+        | ExternalEvent::MutableDie { from: ResourceTy::Value(r), to: ResourceTy::Value(l), .. }
+          if r.name() == holder && lenders.iter().any(|n| n == l.name()) && from <= *line && *line <= to.min(end) => Some(*line),
+        _ => None,
+      }).min();
+      if let Some(l) = ended {
+        let first = if last_use(&b.e_data, holder, l - 1, l) == Some(l) { l + 1 } else { l };
         if first <= end {
           out.push((first, end));
         }

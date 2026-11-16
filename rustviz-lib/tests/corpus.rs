@@ -13013,13 +13013,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // keeps x borrowed until the `println!`: the borrow checker's end
         // is the latest over the paths, and that is where x's borrow is
         // drawn to (#778; #770 drew it ending at the `if`). The write sits
-        // inside the drawn span, so the scope end reads "No resource is
-        // dropped" like any written lender's. The reassignment's own dot
-        // only starts the new borrow (#770).
+        // inside the drawn span, and its dot says why rustc accepts it
+        // there (#796). The reassignment's own dot only starts the new
+        // borrow (#770).
         must_contain: &[
             "x's value is no longer immutably borrowed",
             "c's immutable borrow ends",
             "c immutably borrows a value",
+            // A bullet of the `x += 1;` dot (after "x's value is copied" and
+            // "x is assigned a new value").
+            "On this path c is given a new reference on line 11 before it is used again, so c's borrow of x is already over here; x stays borrowed only on paths that skip line 11",
         ],
         must_not_contain: &[
             "c's immutable borrow ends• c immutably borrows a value",
@@ -20397,6 +20400,71 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "reborrowed through names",
         ],
     },
+    // #796: each write is drawn inside its lender's borrowed span (the
+    // borrow checker's end is the latest over the paths, #778), and rustc
+    // accepts it only because the loan is dead on the write's path: the
+    // reference is given a new one before its next use. The write's dot
+    // says so; main showed only the write ("x is assigned a new value"),
+    // which reads as a write to a borrowed variable. In `returns`, u
+    // isn't used again on the path that returns, and the diagram already
+    // ends u's borrow at `h = 2;` on that path (#663), so the write isn't
+    // drawn borrowed and needs no note ("h's value is no longer immutably
+    // borrowed", then "h is assigned a new value"). The arm's
+    // `println!("{}", h)` then gives h back unborrowed: main said "h's
+    // value is no longer borrowed by println!, but is still immutably
+    // borrowed by u", false on that path (the row test
+    // `a_returning_arm_doesnt_keep_a_dead_reference_sharing` pins it).
+    TooltipExpect {
+        name: "dead_loan_write_796",
+        must_contain: &[
+            "x is assigned a new value. On this path c is given a new reference on line 19 before it is used again, so c's borrow of x is already over here; x stays borrowed only on paths that skip line 19",
+            // Bullets of their dots, after "a is assigned a new value" /
+            // "m is assigned a new value".
+            "On this path r was given a new reference on line 30, so r's borrow of a is already over here; a stays borrowed only on paths that skip line 30",
+            "d is assigned a new value. On this path q is given a new reference on line 45 before it is used again, so q's borrow of d is already over here; d stays borrowed only on paths that skip line 45",
+            "On this path p is given a new reference on line 59 before it is used again, so p's borrow of m is already over here; m stays borrowed only on paths that skip line 59",
+            "s.n is assigned a new value. On this path f is given a new reference on line 75 before it is used again, so f's borrow of s is already over here; s stays borrowed only on paths that skip line 75",
+            "v[0] is assigned a new value. On this path g is given a new reference on line 77 before it is used again, so g's borrow of v is already over here; v stays borrowed only on paths that skip line 77",
+            // The single span is kept (borrow-checker view, #778).
+            "x's value is no longer immutably borrowed",
+            "s's value is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            "=x is assigned a new value",
+            "=d is assigned a new value",
+            "=s.n is assigned a new value",
+            "=v[0] is assigned a new value",
+            "but is still immutably borrowed by u",
+        ],
+    },
+    // #796: `x += 8;` follows `c = &y;` on its path, so c's loan of x
+    // ended there (line 8), not at the later `c = &z;` / `c = &s;`: the
+    // note names the earlier line, and x is borrowed only on the path that
+    // skips the outer `if`.
+    TooltipExpect {
+        name: "basic_if12",
+        must_contain: &[
+            "On this path c was given a new reference on line 8, so c's borrow of x is already over here; x stays borrowed only on paths that skip line 8",
+        ],
+        must_not_contain: &[
+            "skip line 11",
+            "skip line 15",
+        ],
+    },
+    // #796 near misses: the lender isn't drawn borrowed at the write (its
+    // arm's column shows the borrow ended, or the write follows the last
+    // use), so the write gets no note.
+    TooltipExpect {
+        name: "dead_loan_write_near_796",
+        must_contain: &[
+            "x is assigned a new value",
+            "a is assigned a new value",
+        ],
+        must_not_contain: &[
+            "On this path",
+            "is already over here",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -21624,6 +21692,29 @@ fn a_call_on_a_shared_variable_leaves_it_shared() {
         let free: Vec<_> = owner.iter().filter(|(a, b)| b.min(end_row) - a.max(call_row) > 0.5).collect();
         assert!(free.is_empty(), "{by}: v drawn as its unborrowed owner at {free:?}, between the call (y={call_row}) and the borrow's end (y={end_row})");
     }
+}
+
+/// #796 (`returns` in dead_loan_write_796): `let u = &h; if z > 5 { h =
+/// 2; println!("{}", h); return; } println!("{}", u);`. On the path that
+/// returns, u isn't used again, so its borrow ends at `h = 2;` (rustc
+/// accepts `&mut h` anywhere after it in the arm). The `println!`'s dot
+/// said h was "still immutably borrowed by u", and h's line was drawn
+/// shared from there to the `return`. Now the dot gives h back
+/// unborrowed, and h isn't drawn shared below the write in that arm.
+#[test]
+fn a_returning_arm_doesnt_keep_a_dead_reference_sharing() {
+    let rv = run_with_local_backend("dead_loan_write_796");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let write = code_row_y(&code, "h = 2;");
+    let print = code_row_y(&code, "println!(\"{}\", h);");
+    let ret = code_row_y(&code, "return;");
+    let back = dots_listing_tooltip(&timeline, "h's value is no longer immutably borrowed");
+    for (what, row) in [("h = 2;", write), ("println!", print)] {
+        assert!(back.iter().any(|d| (d.1 - row).abs() < 1.0), "h isn't unborrowed on the {what} row (y={row}): {back:?}");
+    }
+    let shared = state_lines_with_tooltip(&timeline, "h's value is being shared by one or more variables");
+    let in_arm: Vec<_> = shared.iter().filter(|(a, b)| b.min(ret) - a.max(write) > 0.5).collect();
+    assert!(in_arm.is_empty(), "h drawn shared at {in_arm:?}, between the write (y={write}) and the return (y={ret})");
 }
 
 /// #903: variables of one name that are never in scope together share a

@@ -3793,6 +3793,30 @@ pub fn event_dot_dead_else_note(my_name: &String) -> String {
     )
 }
 
+/// A write to `lender` drawn inside its borrow by `borrower`, on a path
+/// where that loan is already dead (#796): `let mut c = &x; if cond { x
+/// = 2; c = &y; } println!("{}", c);`. The diagram gives a loan one end,
+/// the latest over the paths, as the borrow checker does; on the write's
+/// path `borrower` gets a new reference (`repoint`: its line, and whether
+/// that is before the write) before it is used again, or isn't used
+/// again (None). Starts with DEAD_LOAN_NOTE_START (see merged_dot_title).
+pub fn event_dot_dead_loan_note(lender: &String, borrower: &String, repoint: Option<(usize, bool)>) -> String {
+    let (x, c) = (styled_name_html(lender), styled_name_html(borrower));
+    match repoint {
+        Some((n, true)) => format!(
+            "{DEAD_LOAN_NOTE_START} {c} was given a new reference on line {n}, so {c}'s borrow of {x} is already over here; {x} stays borrowed only on paths that skip line {n}"
+        ),
+        Some((n, false)) => format!(
+            "{DEAD_LOAN_NOTE_START} {c} is given a new reference on line {n} before it is used again, so {c}'s borrow of {x} is already over here; {x} stays borrowed only on paths that skip line {n}"
+        ),
+        None => format!(
+            "{DEAD_LOAN_NOTE_START} {c} isn't used again, so {c}'s borrow of {x} is already over here; {x} stays borrowed only on the other paths"
+        ),
+    }
+}
+
+pub const DEAD_LOAN_NOTE_START: &str = "On this path";
+
 // Merge dot for a variable that no branch above moved (#179; this used
 // to be an empty tooltip).
 pub fn event_dot_branch_merge_unchanged(my_name: &String) -> String {
