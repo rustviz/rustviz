@@ -2897,6 +2897,25 @@ pub fn state_lent_out(my_name: &String, to: LentTo, through_ref: Option<bool>, r
     format!("{}; {} can't be used until {}", subject, me, until)
 }
 
+// The dots of a `&mut` reference whose pointee a `for` loop's iterator
+// reborrows (`for e in v.iter_mut()` with `v: &mut Vec<_>`; #1046):
+// where the head's call lends it, and where the loop ends. The iterator
+// holds the reborrow until then, so v can't be used meanwhile, even
+// after the last use of e.
+pub fn event_dot_lend_through_ref_to_loop_iterator(ref_name: &String, pointee_copy: bool) -> String {
+    format!(
+        "the {1} {0} points to is mutably borrowed by the `for` loop's iterator through {0}; {0} can't be used until the loop ends",
+        styled_name_html(ref_name), held(pointee_copy)
+    )
+}
+
+pub fn event_dot_loop_iterator_reacquire_through_ref(ref_name: &String, pointee_copy: bool) -> String {
+    format!(
+        "the `for` loop's iterator no longer borrows the {1} {0} points to",
+        styled_name_html(ref_name), held(pointee_copy)
+    )
+}
+
 // PartialPrivilege of a variable that only a `for` loop's iterator
 // borrows (`for c in s.chars()`, `for (i, a) in v.iter().enumerate()`;
 // #871): the iterator has no column, so "being shared by one or more

@@ -1,6 +1,6 @@
 extern crate handlebars;
 
-use crate::svg_generator::data::{branch_is_collapsed, is_param_value_line, returned_closure, ExtBranchData, ExternalEvent, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, Visualizable, VisualizationData, LINE_SPACE};
+use crate::svg_generator::data::{branch_is_collapsed, is_param_value_line, returned_closure, ExtBranchData, ExternalEvent, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, StaticLender, Visualizable, VisualizationData, LINE_SPACE};
 use crate::svg_generator::svg_frontend::{code_panel, timeline_panel};
 use handlebars::Handlebars;
 use serde::Serialize;
@@ -111,6 +111,12 @@ fn ended_ref(e: &ExternalEvent) -> Option<u64> {
         return None;
     }
     ResourceAccessPoint_extract(e).0.extract_rap().map(|r| *r.hash())
+}
+
+/// Whether `e` ends a borrow of the reference `r` (its hash): a
+/// reborrow through r giving its borrow back.
+fn returns_to(e: &ExternalEvent, r: u64) -> bool {
+    ended_ref(e).is_some() && ResourceAccessPoint_extract(e).1.extract_rap().is_some_and(|t| *t.hash() == r)
 }
 
 fn uses_rap(e: &ExternalEvent, r: u64) -> bool {
@@ -727,10 +733,14 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
         // scope end on that line, which doesn't use it).
         if !deferred_ends.is_empty() {
             let pending = &visualization_data.preprocess_external_events[i..];
-            let (still, ready): (Vec<_>, Vec<_>) = std::mem::take(&mut deferred_ends).into_iter().partition(|(src, e, _)| {
+            // Nor while another held-back end on its row gives a borrow
+            // back to it (`y`'s end of its reborrow through the parameter
+            // `t`, before `t`'s own; #1047).
+            let held = std::mem::take(&mut deferred_ends);
+            let (still, ready): (Vec<_>, Vec<_>) = held.iter().cloned().partition(|(src, e, row)| {
                 ended_ref(e).is_some_and(|r| pending.iter().any(|(l, o)| {
                     l == src && !skippable_ev.contains(&o.get_id()) && uses_rap(o, r)
-                }))
+                }) || held.iter().any(|(l, o, w)| l == src && w == row && o.get_id() != e.get_id() && returns_to(o, r)))
             });
             deferred_ends = still;
             for (_, e, row) in ready {
@@ -840,11 +850,35 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                 // the closure's arrival from the call on g's column.
                 let kept_by_returned_closure = matches!(&event,
                     ExternalEvent::StaticBorrow { via, .. } | ExternalEvent::MutableBorrow { via, .. } if returned_closure(via));
+                // The end, where a `for` loop ends, of the borrow its
+                // iterator holds (#868) is no arrow either. It used to be
+                // lost when its line had an arrow: `let r = &mut s; for e
+                // in r.iter_mut() { .. }` ends r's own borrow of s there
+                // too (#1046).
+                let loop_iterator_end = matches!(&event,
+                    ExternalEvent::StaticDie { static_lender: Some(StaticLender::LoopIterator { .. } | StaticLender::LoopHeadBorrow { .. }), .. }
+                    | ExternalEvent::MutableDie { static_lender: Some(StaticLender::LoopIterator { .. } | StaticLender::LoopHeadBorrow { .. }), .. });
+                // A reference parameter's end on a line where a reborrow
+                // through it gives its borrow back (`*y = 7;` as the last
+                // use of `y = t.get_mut(0).unwrap()`) comes after that
+                // end, as for a local's (#1047): it is held back until
+                // the line's arrows are appended, on the row of the one
+                // that gives the borrow back.
+                if let (true, Some(line_ev)) = (ref_param_ends, line_ev) {
+                    if let Some(r) = ended_ref(&event).filter(|r| line_ev.iter().any(|o| !skippable_ev.contains(&o.get_id()) && returns_to(o, *r))) {
+                        let (front, back) = split_same_line_borrow_ends(line_ev);
+                        let row = if back.iter().any(|o| returns_to(o, r)) { final_line_num + front.len() } else { final_line_num };
+                        deferred_ends.push((line_num, event.clone(), row));
+                        i += 1;
+                        continue;
+                    }
+                }
                 if (is_transfer && (from_fn || into_fn || matches!(to, ResourceTy::Caller) || into_unmodelled_place))
                     || borrow_of_temporary
                     || kept_by_returned_closure
                     || ref_param_ends
-                    || place_borrow {
+                    || place_borrow
+                    || loop_iterator_end {
                     visualization_data.append_processed_external_event(event.clone(), final_line_num);
                 }
                 i += 1;

@@ -19050,6 +19050,49 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "w goes out of scope. Its resource is dropped here only if no branch above moved it",
         ],
     },
+    TooltipExpect {
+        name: "param_writes_1046",
+        // #1046: `for e in v.iter_mut()` with v a `&mut Vec` (a parameter,
+        // or a local `let r = &mut s;`) ended v's borrow on the `for` line
+        // ("iter_mut no longer borrows ...", "v's mutable borrow ends"),
+        // but the loop's iterator holds that reborrow of `*v` until the
+        // loop ends (`v.len()` in the body is E0502), and the write `*e
+        // += 1` went into the caller's Vec without being drawn on v. e's
+        // own texts are unchanged, and e gets no "e no longer borrows ..."
+        // (it has no lender drawn). #1047: the order of the two ends in
+        // one dot is pinned by the row test below. #1048: a write to all
+        // of what u / n point to through a reborrow (`let q = &mut *u;
+        // *q = vec![9];`) wasn't drawn on u / n; it now reads as `*u =
+        // vec![9]` / `*n += 1` written on the parameter would.
+        must_contain: &[
+            "the resource v points to is mutably borrowed by the `for` loop's iterator through v; v can't be used until the loop ends",
+            "the resource v points to is modified through e",
+            "the `for` loop's iterator no longer borrows the resource v points to",
+            "v's mutable borrow ends",
+            "the resource w points to is modified through e",
+            "the `for` loop's iterator no longer borrows the resource w points to",
+            "the resource r points to is mutably borrowed by the `for` loop's iterator through r; r can't be used until the loop ends",
+            "the `for` loop's iterator no longer borrows the resource r points to",
+            "s's resource is modified through e",
+            "s's resource is no longer mutably borrowed",
+            "the value e points to is modified through *e",
+            "e's mutable borrow ends",
+            "y no longer borrows the resource t points to",
+            "t's mutable borrow ends",
+            "*u acquires ownership of a new resource; its previous resource is dropped",
+            "*q acquires ownership of a new resource; its previous resource is dropped",
+            "the value n points to is modified through x",
+            "x no longer borrows the value n points to",
+        ],
+        must_not_contain: &[
+            "iter_mut no longer borrows the resource v points to",
+            "iter_mut no longer borrows the resource w points to",
+            "iter_mut no longer borrows the resource r points to",
+            "e no longer borrows",
+            "is no longer borrowed through",
+            "the resource u points to is dropped",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -25223,6 +25266,45 @@ fn a_stored_borrow_is_held_by_values_made_from_its_holder() {
         failures.push(format!("g's borrow should end after `println!(\"{{}}\", ng);` (y={after}), got {ends:?}"));
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// #1046 / #1047 / #1048 (`param_writes_1046`): where each text sits.
+/// `for e in v.iter_mut()` with v a `&mut Vec` keeps v borrowed until
+/// the loop's `}`, not just the `for` line, and draws `*e += 1` on v's
+/// row; one dot lists a reborrow's end before the parameter's own; a
+/// write to all of what u / n point to through a reborrow is on u's / n's
+/// column on the write's row.
+#[test]
+fn param_writes_are_drawn_on_the_parameter() {
+    let rv = run_with_local_backend("param_writes_1046");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let closes = code_rows_y(&code, "}");
+    // Fixture order: bump_all's loop `}` is the first `}`, double_then_push's
+    // the third, through_local_ref's the fifth.
+    let rows = [
+        ("v", code_rows_y(&code, "*e += 1;")[0], "the resource v points to is modified through e", None),
+        ("v", closes[0], "the `for` loop's iterator no longer borrows the resource v points to", Some("v's mutable borrow ends")),
+        ("w", code_row_y(&code, "*e *= 2;"), "the resource w points to is modified through e", None),
+        ("w", closes[2], "the `for` loop's iterator no longer borrows the resource w points to", None),
+        ("r", closes[4], "the `for` loop's iterator no longer borrows the resource r points to", Some("r's mutable borrow ends")),
+        ("s", closes[4], "s's resource is no longer mutably borrowed", None),
+        ("t", code_row_y(&code, "*y = 7;"), "y no longer borrows the resource t points to", Some("t's mutable borrow ends")),
+        ("u", code_row_y(&code, "*q = vec![9];"), "*u acquires ownership of a new resource; its previous resource is dropped",
+            Some("q no longer borrows the resource u points to")),
+        ("n", code_row_y(&code, "*x += 1;"), "the value n points to is modified through x", Some("x no longer borrows the value n points to")),
+    ];
+    for (column, y, text, then) in rows {
+        let at = (label_x(&tl, column), y);
+        let dots = dots_where(&tl, |lines| {
+            let w = lines.iter().position(|l| l == text);
+            w.is_some_and(|w| then.is_none_or(|t| lines.iter().position(|l| l == t).is_some_and(|e| w < e)))
+        });
+        assert!(dots.contains(&at), "expected {:?} (then {:?}) on {}'s column at {:?}, found {:?}", text, then, column, at, dots);
+    }
+    // The `for` line no longer ends v's borrow.
+    let for_line = (label_x(&tl, "v"), code_row_y(&code, "for e in v.iter_mut() {"));
+    let ends_there = dots_where(&tl, |lines| lines.iter().any(|l| l == "v's mutable borrow ends"));
+    assert!(!ends_there.contains(&for_line), "v's borrow still ends on the `for` line: {:?}", ends_there);
 }
 
 /// #1032: a loop inside another, after a branch that may have moved s,
