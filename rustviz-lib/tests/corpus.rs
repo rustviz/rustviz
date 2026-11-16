@@ -19386,6 +19386,43 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "is dropped when the `for` loop ends: nothing bound it",
         ],
     },
+    TooltipExpect {
+        // #1041: a `return` directly in a `loop` nothing breaks out of,
+        // which sits directly in the function's body. The loop body always
+        // runs and the `return` is the only way out, so the drops are on
+        // its row (`breakless_loop_drops_are_on_the_return_row`) with the
+        // plain texts, and the function's end draws nothing. With an inner
+        // `for` loop's `return` before it, its dots say "If the `return`
+        // on line 21 runs first". The loops that can end (a `break`, the
+        // `else` path around it, a `break 'outer`) keep #1020's wording; a
+        // `loop` in a `for` body says the `for` body's variables are
+        // dropped at the `return` (that body's `}` is never reached).
+        name: "breakless_loop_return_1041",
+        must_contain: &[
+            "g goes out of scope. Its resource is dropped.",
+            "t goes out of scope. Its resource is dropped.",
+            "v goes out of scope. Its resource is dropped (including every String it holds). If the `return` on line 21 runs first, this happens there instead.",
+            "g goes out of scope. Its resource is dropped. If the `return` on line 21 runs first, this happens there instead.",
+            "a goes out of scope. Its resource is dropped.",
+            "(temporary) goes out of scope here, where `return` leaves early: a let borrowed it, so it lived past its statement. Its resource is dropped.",
+            "u goes out of scope at the `return` on line 80. Its resource is dropped.",
+            // Controls: the code after these loops can run.
+            "b goes out of scope. Its resource is dropped. If the `return` on line 46 runs first, this happens there instead.",
+            "h goes out of scope. Its resource is dropped. If the `return` on line 55 runs first, this happens there instead.",
+            "e goes out of scope. Its resource is dropped. If the `return` on line 68 runs first, this happens there instead.",
+            "f goes out of scope. Its resource is dropped. If the `return` on line 80 runs first, this happens there instead.",
+        ],
+        must_not_contain: &[
+            "If the `return` on line 12 runs first",
+            "If the `return` on line 21 or 23 runs first",
+            "If the `return` on line 35 runs first",
+            "t goes out of scope at the `return` on line 12",
+            "goes out of scope at the end of the block: a let borrowed it",
+            "=t goes out of scope. No resource is dropped.",
+            "=a goes out of scope. No resource is dropped.",
+            "=u goes out of scope. Its resource is dropped. If the `return` on line 80 runs first, this happens there instead.",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -22837,6 +22874,47 @@ fn inline_exit_drops_are_on_the_return_row() {
             "{}: no dot on the {:?} row lists {:?}; dots listing it: {:?}",
             name, row, drop, dots_listing_tooltip(&timeline, drop));
     }
+}
+
+/// A `return` directly in a `loop` nothing breaks out of, directly in the
+/// function's body (#1041): the loop body always runs and the `return` is
+/// the only way out, so what the function owns is dropped on the
+/// `return`'s row, as for a body drawn inline that always returns (#1004),
+/// and nowhere below it. (A crowded row gets extra rows under it before
+/// the next line's: its band runs up to that line's row.)
+#[test]
+fn breakless_loop_drops_are_on_the_return_row() {
+    let name = "breakless_loop_return_1041";
+    let rv = run_with_local_backend(name);
+    let (code, timeline) = (rv.code_panel_string(), rv.timeline_panel_string());
+    // (Each of these `return`s is followed by a line holding only `}`.)
+    let next_after = |src: &str| -> f64 {
+        let y = code_row_y(&code, src);
+        code_rows_y(&code, "}").into_iter().filter(|r| *r > y).fold(f64::MAX, f64::min)
+    };
+    let on_row = |dy: f64, src: &str| dy >= code_row_y(&code, src) && dy < next_after(src);
+    let lp = "return t.len() + g.len();";
+    let two = "return g.len();";
+    let nest = "return a.len() + g.len() + r.len() + k;";
+    let if_inner = " If the `return` on line 21 runs first, this happens there instead.";
+    for (drop, row) in [
+        ("g goes out of scope. Its resource is dropped.".to_owned(), lp),
+        ("t goes out of scope. Its resource is dropped.".to_owned(), lp),
+        (format!("g goes out of scope. Its resource is dropped.{if_inner}"), two),
+        (format!("v goes out of scope. Its resource is dropped (including every String it holds).{if_inner}"), two),
+        ("a goes out of scope. Its resource is dropped.".to_owned(), nest),
+        ("g goes out of scope. Its resource is dropped.".to_owned(), nest),
+        ("(temporary) goes out of scope here, where `return` leaves early: a let borrowed it, so it lived past its statement. Its resource is dropped.".to_owned(), nest),
+    ] {
+        let ok = dots_where(&timeline, |lines| lines.iter().any(|l| *l == drop));
+        assert!(ok.iter().any(|(_, dy)| on_row(*dy, row)),
+            "{}: no dot on the {:?} row (y={}) lists {:?}; dots listing it: {:?}",
+            name, row, code_row_y(&code, row), drop, dots_listing_tooltip(&timeline, &drop));
+    }
+    // g's plain drop is on those two rows only, not at a scope end below.
+    let g = dots_listing_tooltip(&timeline, "g goes out of scope. Its resource is dropped.");
+    assert!(g.iter().all(|(_, dy)| on_row(*dy, lp) || on_row(*dy, nest)),
+        "{name}: g dropped off its `return` rows: {g:?}");
 }
 
 /// `w = match n { 0 => p, 1 => q, _ => String::new() };` with w owning a

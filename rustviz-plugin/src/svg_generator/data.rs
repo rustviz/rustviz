@@ -1411,12 +1411,15 @@ pub enum ChainFailHow {
 /// body is drawn inline, and it may not run. So the scope end, where the
 /// drop is drawn, says it happens at the `return` instead: `always`, on
 /// every path that gets that far (a variable of the loop body, whose
-/// closing brace the body never reaches), or `maybe`, if that `return`
-/// runs (a variable declared before the loop, the loop's iterator).
+/// closing brace the body never reaches; or a scope end after a `loop`
+/// that nothing breaks out of, which the code never reaches, #1041), or
+/// `maybe`, if that `return` runs (a variable declared before the loop,
+/// the loop's iterator).
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct EarlyReturns {
-    /// Line of the `return` where it is always dropped instead.
-    pub always: Option<usize>,
+    /// Lines of the `return`s where it is always dropped instead: at
+    /// whichever of them runs.
+    pub always: Vec<usize>,
     /// Lines of the `return`s where it is dropped if they run.
     pub maybe: Vec<usize>,
 }
