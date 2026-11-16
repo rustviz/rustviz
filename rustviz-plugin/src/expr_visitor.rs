@@ -2479,11 +2479,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       .map_or_else(|| span_end_line(&value.span, &self.tcx), |(l, _)| *l);
     let maybe_moved = held == Ownership::Maybe;
     let by_cond = maybe_moved && self.moved_by_chain_condition(&old);
+    // Same rule as a plain `v = f;` (see visitor.rs): maybe-moved only
+    // because the loop can come back round with it moved (#992).
+    let loop_head = maybe_moved && self.maybe_moved_by_loop_head_now(old.name());
     self.add_external_event(line, ExternalEvent::OwnerDropAtReassign {
       ro: old,
       id: *self.unique_id,
       maybe_moved,
       by_cond,
+      loop_head,
       parts: None,
       maybe_init: None,
       payload: false,
