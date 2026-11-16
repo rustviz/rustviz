@@ -1551,7 +1551,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       is_copy,
       is_plain_value,
       interior_mut,
-      is_manually_drop: false, rc: None, rc_fields: None, rc_inside: None, holds: None, is_box: false }),
+      is_manually_drop: false, rc: None, rc_fields: None, rc_inside: None, holds: None, is_box: false, holds_borrow: false }),
       scope, is_global);
   }
 
@@ -4948,18 +4948,40 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       return;
     }
     let Some(adt) = ty.ty_adt_def() else { return };
+    let TyKind::Adt(_, args) = ty.kind() else { return };
     for field in adt.all_fields() {
       let fname = format!("{}.{}", name, field.name.as_str());
-      if !self.borrow_map.contains_key(&fname) {
+      // A field drawn as one column that holds a borrow (`items:
+      // Vec<&'a str>`) becomes a holder, as in a struct literal (#1088).
+      let field_ty = field.ty(self.tcx, args);
+      let holder = !field_ty.is_ref() && !self.has_member_columns(field_ty)
+        && field_ty.walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_)))
+        && matches!(self.raps.get(&fname).map(|rd| &rd.rap), Some(ResourceAccessPoint::Struct(Struct { is_member: true, .. })));
+      if !holder && !self.borrow_map.contains_key(&fname) {
         continue;
       }
-      let (mut lenders, _, _) = self.call_field_lenders(init, field.name.as_str());
+      let (mut lenders, _, is_mut) = self.call_field_lenders(init, field.name.as_str());
       if lenders.is_empty() {
         continue;
       }
       let lender = lenders.remove(0);
       let aliasing = get_aliasing_data(&lender, &self.borrow_map);
-      if let Some(rd) = self.borrow_map.get_mut(&fname) {
+      if holder {
+        self.mark_holder(&fname);
+        let line = expr_to_line(&init, &self.tcx);
+        self.borrow_map.insert(fname, RefData {
+          lender,
+          assigned_at: line,
+          lifetime: line,
+          ref_mutability: is_mut,
+          aliasing,
+          static_lender: None,
+          borrow_span: None,
+          loan_line: None,
+          co_lenders: lenders,
+          lender_muts: Vec::new(),
+        });
+      } else if let Some(rd) = self.borrow_map.get_mut(&fname) {
         rd.lender = lender;
         rd.co_lenders = lenders;
         rd.aliasing = aliasing;
@@ -5023,7 +5045,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let mir_b_data = self.gather_borrow_data(self.bwf);
     let mut ends = Vec::new();
     for member in self.struct_members_deep(st.name()) {
-      if !member.is_ref() {
+      // A reference field, or a field holding one (`items: Vec<&'a
+      // str>`, #1088).
+      if !member.is_ref() && !member.holds_borrow() {
         continue;
       }
       let Some(old) = self.borrow_map.get(member.name()) else { continue };
@@ -5172,20 +5196,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // fills with borrows (#392): a holder from the start, with no
       // borrow yet; `record_receiver_store` adds each one.
       if self.filled_with_borrows_later(init, ty) {
-        if let Some(rd) = self.raps.get_mut(name) {
-          if let ResourceAccessPoint::Owner(o) = &mut rd.rap {
-            o.holds_borrow = true;
-          }
-        }
+        self.mark_holder(name);
       }
       return;
     }
-    if let Some(rd) = self.raps.get_mut(name) {
-      if let ResourceAccessPoint::Owner(o) = &mut rd.rap {
-        o.holds_borrow = true;
-      } else {
-        return;
-      }
+    if !self.mark_holder(name) {
+      return;
     }
     // `let it2 = it;` moves the value, and the borrow with it: `it`
     // no longer holds it (a Copy holder like an `Option<&T>` is
@@ -5212,6 +5228,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       co_lenders: lenders,
       lender_muts,
     });
+  }
+
+  /// Marks `name`'s column as a borrow holder: an owner, or a struct
+  /// member drawn as one column (`shelf.items` with `items: Vec<&'a
+  /// str>`, #1088). False for any other column.
+  fn mark_holder(&mut self, name: &str) -> bool {
+    let Some(rd) = self.raps.get_mut(name) else { return true };
+    match &mut rd.rap {
+      ResourceAccessPoint::Owner(o) => o.holds_borrow = true,
+      ResourceAccessPoint::Struct(s) if s.is_member => s.holds_borrow = true,
+      _ => return false,
+    }
+    true
   }
 
   /// `let g = keep(|| s.len());`: `g` holds the closure `keep`
@@ -6297,9 +6326,10 @@ pub fn emit_struct_field_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'
     let lenders: Vec<ResourceTy> = rd.all_lenders().into_iter()
       .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)))
       .collect();
-    if lenders.is_empty() || !frap.is_ref() {
+    if lenders.is_empty() || !(frap.is_ref() || frap.holds_borrow()) {
       continue;
     }
+    let is_mut = if frap.is_ref() { frap.is_mutref() } else { rd.ref_mutability };
     let via = BorrowVia {
       func: func.clone(),
       lenders: lenders.iter().map(|l| l.name()).collect(),
@@ -6310,7 +6340,7 @@ pub fn emit_struct_field_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'
     let to = ResourceTy::Value(frap.clone());
     for lender in lenders.iter() {
       let id = *self.unique_id;
-      let ev = if frap.is_mutref() {
+      let ev = if is_mut {
         ExternalEvent::MutableBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id, of_ref_var: false }
       } else {
         ExternalEvent::StaticBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id, of_ref_var: false }
@@ -7935,11 +7965,18 @@ pub fn match_rhs_struct(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, _qpat
       // `r.a` but doesn't recurse to add `r.a.b`, so the inner
       // struct's expansion lands here without an entry. Better
       // to lose the per-field event than crash the whole render.
-      let field_rap = match self.raps.get(&new_lhs_name) {
-        Some(rd) => rd.rap.to_owned(),
-        None => continue,
-      };
+      if !self.raps.contains_key(&new_lhs_name) {
+        continue;
+      }
       let field_ty = self.tcx.typeck(field.expr.hir_id.owner).node_type(field.expr.hir_id);
+      // A field drawn as one column whose value holds a borrow
+      // (`items: vec![w.as_str()]`, `it: v.iter()`) holds it like
+      // `let items = vec![w.as_str()];` would (#1088).
+      if !field_ty.is_ref() && !self.has_member_columns(field_ty)
+        && matches!(self.raps.get(&new_lhs_name).map(|rd| &rd.rap), Some(ResourceAccessPoint::Struct(_))) {
+        self.register_holder(&new_lhs_name, field.expr, field_ty);
+      }
+      let field_rap = self.raps.get(&new_lhs_name).unwrap().rap.to_owned();
       let is_copyable = self.ty_is_copy(field_ty, field.expr.hir_id.owner);
       let e = if field_ty.is_ref() {
         match field_ty.ref_mutability().unwrap() {
@@ -7975,6 +8012,7 @@ pub fn match_rhs_struct(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, _qpat
         self.register_struct_field_lenders(&new_lhs_name, field.expr, field_ty);
       }
       self.match_rhs(ResourceTy::Value(field_rap), field.expr, e);
+      self.emit_holder_literal_borrows(&new_lhs_name, field.expr);
   }
   // Struct update syntax `S { a: e, ..base }`: every field not
   // written explicitly comes from `base`, moved if its type isn't

@@ -11957,8 +11957,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "m is bound to a copyable value",
             "A temporary holds the value that adder returns. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
             "t goes out of scope. No resource is dropped.",
+            // The closure in w.f holds its borrow of s until `(w.f)()`
+            // (#1088; rustc rejects `drop(s)` before it).
+            "Immutable borrow from s to w.f: wrap's signature gives the struct it returns the same lifetime as its argument",
+            "s's resource is immutably borrowed by w.f; s is read-only while the borrow is live",
         ],
-        must_not_contain: &[],
+        must_not_contain: &[
+            "=w.f holds a copyable value",
+        ],
     },
     // #704: `let h = g;` copies (g captures only `&s`, so it's Copy) or
     // moves the closure value; nothing is captured. The borrow g's
@@ -12968,6 +12974,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "y is bound to a copyable value",
             "s's resource is immutably borrowed by b; s is read-only while the borrow is live",
             "s's resource is immutably borrowed by d; s is read-only while the borrow is live",
+            // `Some(w)` holds w's `&s` (#1088's struct field lenders).
+            "s's resource is immutably borrowed by c; s is read-only while the borrow is live",
             "s's resource is immutably borrowed by take; s is read-only while the borrow is live",
             // A variable moved into a constructor goes to whoever takes
             // the value: the variable it is bound to, or the call.
@@ -20137,6 +20145,63 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "zip no longer borrows the resource b points to",
             "chain no longer borrows the resource b points to",
+        ],
+    },
+    TooltipExpect {
+        // #1088: a struct field that holds references without being one
+        // (`items: Vec<&'a str>`) borrows what it holds, so w stays
+        // borrowed while shelf.items, `first` or `b` is in use (rustc
+        // rejects `drop(w)` before `println!("{}", b)`). The same for a
+        // struct a call returns (`Shelf::new`). `Pair::first` returns
+        // only the `'a` field's reference: f borrows a, not z
+        // (`drop(z)` compiles).
+        name: "struct_field_holder_1088",
+        must_contain: &[
+            "Immutable borrow from w to shelf.items",
+            "shelf.items holds a value that immutably borrows w's resource (shelf.items isn't a reference itself)",
+            "w's resource is being shared by one or more variables",
+            "w's resource is no longer borrowed by println!, but is still immutably borrowed by shelf.items",
+            "Immutable borrow from w to first: first is a reference copied out of shelf.items",
+            "Immutable borrow from w to b: top's signature gives the reference it returns the same lifetime as the references stored in shelf",
+            "Immutable borrow from v to other.items: Shelf::new's signature gives the struct it returns the same lifetime as its argument",
+            "Immutable borrow from v to c: c is a reference copied out of other.items",
+            "Immutable borrow from a to f: first's signature gives the reference it returns the same lifetime as the references stored in p",
+        ],
+        must_not_contain: &[
+            "first's immutable borrow ends (what it borrows from isn't shown)",
+            "b's immutable borrow ends (what it borrows from isn't shown)",
+            "c's immutable borrow ends (what it borrows from isn't shown)",
+            "f's immutable borrow ends (what it borrows from isn't shown)",
+            // shelf.items holds w's borrow: it isn't a plain owner.
+            "=shelf.items is the owner of the resource",
+            "=other.items is the owner of the resource",
+            // f doesn't borrow z.
+            "Immutable borrow from z to f",
+        ],
+    },
+    TooltipExpect {
+        // #1089: `names.top()` through `impl<'a> Top<'a> for Vec<&'a
+        // str>` borrows s, which names' references point to; `inner(&*rr)`
+        // and `inner(rr)` with `rr = &rows` borrow row, as `inner(&rows)`
+        // does (rustc rejects `drop(s)` / `drop(row)` while t / h, k are
+        // in use, and accepts `drop(rows)` after the calls).
+        name: "lender_via_trait_or_ref_1089",
+        must_contain: &[
+            "Immutable borrow from s to t: top's signature gives the reference it returns the same lifetime as the references stored in names",
+            "s's resource is immutably borrowed by t; s is read-only while the borrow is live",
+            "Immutable borrow from row to h: inner's signature gives the reference it returns the same lifetime as the references stored in rows",
+            "Immutable borrow from row to k: inner's signature gives the reference it returns the same lifetime as the references stored in rows",
+        ],
+        must_not_contain: &[
+            "t's immutable borrow ends (what it borrows from isn't shown)",
+            "h's immutable borrow ends (what it borrows from isn't shown)",
+            "k's immutable borrow ends (what it borrows from isn't shown)",
+            // names / rows / rr aren't kept borrowed by the results.
+            "Immutable borrow from names to t",
+            "Immutable borrow from rows to h",
+            "Immutable borrow from rows to k",
+            "Immutable borrow from rr to h",
+            "Immutable borrow from rr to k",
         ],
     },
 ];
