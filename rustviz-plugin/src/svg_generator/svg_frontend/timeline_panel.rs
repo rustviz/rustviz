@@ -3179,8 +3179,8 @@ fn flat_history<'a>(history: &'a [(usize, Event)], path: &[(usize, usize)], out:
 fn revoked_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, row: usize, path: &[(usize, usize)]) -> String {
     if !rap.is_ref() {
         if let Some((into, mutable, chain)) = or_alt_lend_at(visualization_data, rap, Some(row)) {
-            if let Some(sources) = chain {
-                return hover_messages::state_chain_ref_lent(rap.name(), into.name(), sources, mutable, rap.holds_value());
+            if let Some((sources, chain)) = chain {
+                return hover_messages::state_chain_ref_lent(rap.name(), into.name(), sources, chain, mutable, rap.holds_value());
             }
             return hover_messages::state_or_alt_lent(rap.name(), into.name(), mutable, rap.holds_value());
         }
