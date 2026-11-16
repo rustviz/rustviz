@@ -20647,7 +20647,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "self holds a mutable reference, but self.items is immutably borrowed by f, so self.items is read-only while the borrow is live",
             "self.items's resource is immutably borrowed by f; self.items is read-only while the borrow is live",
             "f holds a value that immutably borrows self.items (f isn't a reference itself)",
-            "Immutable borrow from self.items to f: find's signature gives the value it returns the same lifetime as the value it was called on; f isn't a reference, but its value holds one",
+            "Immutable borrow from self.items to f: find's signature gives the value it returns the same lifetime as the references stored in the value it was called on; f isn't a reference, but its value holds one",
             "Return immutably borrowed resource from f to self.items",
             "self.items's resource is no longer immutably borrowed",
             "the resource self points to is modified through self.n",
@@ -20662,6 +20662,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the resource it points to is currently shared through it",
             "the resource self points to is immutably borrowed by f through self",
             "the resource self points to is mutably borrowed by f through self",
+            // The iterator is a temporary; the lifetime comes from the
+            // references it stores, not from the iterator itself (#1090).
+            "same lifetime as the value it was called on",
             "borrows the data self points to",
             "f no longer borrows the resource self points to",
             "Immutable borrow from self to f",
