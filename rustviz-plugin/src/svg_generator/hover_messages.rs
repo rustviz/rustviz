@@ -1955,16 +1955,53 @@ pub fn event_dot_write_through_deref(ref_name: &String, deref_name: &String, poi
 // place reached through the reference `r`. `place` is the expression as
 // written, with its `&` / `&mut`. The data isn't copied, and `r`'s
 // borrow goes on with the reference.
+// `place` can also be one of the forms below (#1078).
 pub fn event_dot_reborrow_to_caller(ref_name: &String, place: &String) -> String {
     let (what, target) = match place.strip_prefix("&mut ") {
         Some(t) => ("a mutable reference", t),
         None => ("a reference", place.strip_prefix('&').unwrap_or(place)),
     };
+    let tail = "is returned to the caller; the data it points to is not copied";
+    if let Some(call) = target.strip_prefix(REBORROW_VIA_CALL) {
+        let (method, into) = call.split_once(REBORROW_THROUGH).unwrap_or((call, ref_name));
+        return format!(
+            "{what} into {0} (from {1}), reborrowed through {2}, {tail}",
+            styled_name_html(&into.to_owned()),
+            styled_name_html(&method.to_owned()),
+            styled_name_html(ref_name)
+        );
+    }
+    let (target, through) = match target.split_once(REBORROW_THROUGH) {
+        Some((t, through)) => (t, through.to_owned()),
+        None => (target, ref_name.to_owned()),
+    };
     format!(
-        "{what} to {0}, reborrowed through {1}, is returned to the caller; the data it points to is not copied",
+        "{what} to {0}, reborrowed through {1}, {tail}",
         styled_name_html(&target.trim().to_owned()),
-        styled_name_html(ref_name)
+        styled_name_html(&through)
     )
+}
+
+/// Marks, in the place of a returned reborrow (`DerefField`), a
+/// reference a call returned rather than a place written out.
+const REBORROW_VIA_CALL: char = '\u{1e}';
+/// Separates, in the place of a returned reborrow, the place from the
+/// reference it is reborrowed through when that isn't the column's own.
+const REBORROW_THROUGH: char = '\u{1f}';
+
+/// `v.get_mut(0).unwrap()` returned with `v` a reference: the place
+/// `event_dot_reborrow_to_caller` reads as "a mutable reference into
+/// v (from get_mut), reborrowed through v" (#1078). `into` is the
+/// place the call borrows (`v`, `self.items`).
+pub fn reborrow_place_via_call(is_mut: bool, method: &str, into: &str) -> String {
+    format!("{}{REBORROW_VIA_CALL}{method}{REBORROW_THROUGH}{into}", if is_mut { "&mut " } else { "&" })
+}
+
+/// `&v[0][1]` returned with `v[0]` a reference stored in what `v`
+/// points to: `place` (`&v[0][1]`, with its `&`) is reborrowed through
+/// `through` (`v[0]`), not through the column's own reference (#1078).
+pub fn reborrow_place_through(place: &str, through: &str) -> String {
+    format!("{place}{REBORROW_THROUGH}{through}")
 }
 
 pub fn event_dot_copy_deref_to_caller(ref_name: &String, place: &String) -> String {

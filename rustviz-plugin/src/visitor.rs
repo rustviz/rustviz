@@ -264,6 +264,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // copy of the reference for `&mut` too: `self` isn't moved, it is
     // reborrowed.
     let reborrow = if lhs_ty.is_ref() { self.reborrow_through_ref(e) } else { None };
+    // `v.get_mut(0).unwrap()`: the borrow the call takes through `v`
+    // goes on in the returned reference, so `get_mut` doesn't give it
+    // back here (#1078).
+    if reborrow.is_some() {
+      if let Some(r) = self.call_reborrows_through(e) {
+        self.mark_borrow_kept_by_result(e, &[ResourceTy::Value(r.through)]);
+      }
+    }
     let evt = if reborrow.is_some() { Evt::Copy } else { evt };
     // `v[0]` / `ORIGIN.x` returned: a copy of one element or field, on
     // the holder's column (#1052). `&PRIMES` / `&PRIMES[0]`: a reference

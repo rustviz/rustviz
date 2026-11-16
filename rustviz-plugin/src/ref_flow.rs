@@ -38,6 +38,16 @@ use crate::expr_visitor::*;
 use crate::expr_visitor_utils::*;
 use crate::svg_generator::data::*;
 
+/// A reference a call returns into what the reference variable
+/// `through` points to (see `call_reborrows_through`; #1078).
+pub struct CallReborrow {
+  pub through: ResourceAccessPoint,
+  /// The place the reference points into, as written: `v`, `self.items`.
+  pub target: String,
+  /// The call that borrows it (`get_mut` in `v.get_mut(0).unwrap()`).
+  pub method: String,
+}
+
 /// How an argument reaches a call's result (see the module docs).
 struct ArgFlow<'tcx> {
   index: usize,
@@ -532,6 +542,137 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
+  /// `v.get_mut(0).unwrap()` / `v.first().unwrap()` /
+  /// `v.iter().next().unwrap()` / `self.items.first().unwrap()` with
+  /// `v` / `self` a reference variable: the reference `call` returns
+  /// points into what `v` points to, reborrowed through `v` (#1078).
+  ///
+  /// Decided from the callees' signatures: one call in the chain ties
+  /// its result's lifetime to the borrow of `*v` (a place flow from
+  /// `v`), and each call after it passes that borrow on in a type
+  /// parameter that isn't behind a reference in the argument
+  /// (`unwrap(self: Option<T>) -> T`, `next(&mut self) ->
+  /// Option<Self::Item>`). `v.first().copied()` gives back the `T`
+  /// behind `&T`, a reference stored in the Vec rather than one into
+  /// it, so it isn't this. If `v` is a parameter, the function's own
+  /// signature must tie the result to it.
+  pub fn call_reborrows_through(&self, call: &'tcx Expr<'tcx>) -> Option<CallReborrow> {
+    let typeck = self.tcx.typeck(call.hir_id.owner);
+    if call.span.from_expansion() || !typeck.node_type(call.hir_id).is_ref() {
+      return None;
+    }
+    let found = self.call_reborrow_source(call)?;
+    self.param_tied_to_result(call, found.through.name()).then_some(found)
+  }
+
+  fn call_reborrow_source(&self, call: &'tcx Expr<'tcx>) -> Option<CallReborrow> {
+    if call.span.from_expansion() {
+      return None;
+    }
+    let method = match call.kind {
+      ExprKind::MethodCall(seg, ..) => seg.ident.as_str().to_owned(),
+      ExprKind::Call(fn_expr, _) => hirid_to_var_name(fn_expr.hir_id, &self.tcx)?,
+      _ => return None,
+    };
+    let (sig, _, _, _) = self.callee_sig(call)?;
+    let out_params: Vec<u32> = sig.output().walk()
+      .filter_map(|g| match g.kind() {
+        GenericArgKind::Type(t) => match t.kind() { ty::Param(p) => Some(p.index), _ => None },
+        _ => None,
+      })
+      .collect();
+    let mut found: Option<CallReborrow> = None;
+    for flow in self.call_arg_flows(call)? {
+      let this = if flow.place {
+        self.reborrowed_ref_arg(flow.arg, method.clone())
+      } else {
+        let input = *sig.inputs().get(flow.index)?;
+        let value_ty = match input.kind() {
+          ty::Ref(_, inner, _) if !flow.by_value => *inner,
+          _ => input,
+        };
+        let mut inner = flow.arg;
+        while let ExprKind::DropTemps(i) = inner.kind {
+          inner = i;
+        }
+        if param_outside_refs(value_ty, &out_params) {
+          self.call_reborrow_source(inner)
+        } else {
+          None
+        }
+      };
+      let this = this?;
+      match &found {
+        Some(f) if f.through != this.through || f.target != this.target => return None,
+        Some(_) => {}
+        None => found = Some(this),
+      }
+    }
+    found
+  }
+
+  /// `arg` is used where the callee borrows the place it denotes: a
+  /// reference variable with a column, auto-dereferenced or passed as
+  /// is (`v` in `v.get_mut(0)`), or a field reached through one
+  /// (`self.items` in `self.items.first()`).
+  fn reborrowed_ref_arg(&self, arg: &'tcx Expr<'tcx>, method: String) -> Option<CallReborrow> {
+    if arg.span.from_expansion() {
+      return None;
+    }
+    let typeck = self.tcx.typeck(arg.hir_id.owner);
+    let adjs = typeck.expr_adjustments(arg);
+    let (through, target) = match arg.kind {
+      ExprKind::Path(QPath::Resolved(None, _)) => {
+        // An auto-ref of the reference itself (`&v`) would borrow `v`,
+        // not what it points to.
+        if !typeck.node_type(arg.hir_id).is_ref() || adjs.first().is_some_and(|a| !matches!(a.kind, Adjust::Deref(_))) {
+          return None;
+        }
+        let r = expr_to_rap_name(arg, &self.tcx).and_then(|n| self.raps.get(&n)).map(|rd| rd.rap.to_owned())?;
+        let target = r.name().to_owned();
+        (r, target)
+      }
+      // `self.items` auto-referenced: a place inside what `self`
+      // points to.
+      ExprKind::Field(..) if adjs.iter().any(|a| matches!(a.kind, Adjust::Borrow(_))) => {
+        let ResourceTy::DerefField(r, place, _) = self.field_through_ref(arg)? else { return None };
+        (r, place)
+      }
+      _ => return None,
+    };
+    if !through.is_ref() || through.is_static() || through.is_fn() {
+      return None;
+    }
+    Some(CallReborrow { through, target, method })
+  }
+
+  /// If `name` is a reference parameter of the function `e` is in,
+  /// whether the function's signature gives its result that
+  /// parameter's lifetime (`fn g(v: &mut Vec<i32>) -> &mut i32`, by
+  /// elision). True for anything else.
+  fn param_tied_to_result(&self, e: &'tcx Expr<'tcx>, name: &str) -> bool {
+    let owner = e.hir_id.owner.def_id;
+    if self.tcx.hir_enclosing_body_owner(e.hir_id) != owner || !self.tcx.def_kind(owner).is_fn_like() {
+      return true;
+    }
+    let sig = self.tcx.liberate_late_bound_regions(owner.to_def_id(), self.tcx.fn_sig(owner).instantiate_identity().skip_norm_wip());
+    let out: Vec<ty::Region<'tcx>> = sig.output().walk()
+      .filter_map(|g| match g.kind() { GenericArgKind::Lifetime(r) => Some(r), _ => None })
+      .collect();
+    let body = self.tcx.hir_body_owned_by(owner);
+    for (param, input) in body.params.iter().zip(sig.inputs().iter()) {
+      let rustc_hir::PatKind::Binding(_, _, ident, None) = param.pat.kind else { continue };
+      if ident.name.as_str() != name {
+        continue;
+      }
+      return match input.kind() {
+        ty::Ref(r, _, _) => out.contains(r),
+        _ => true,
+      };
+    }
+    true
+  }
+
   /// Whether the borrow `call`'s result keeps is a mutable one: some
   /// argument tied to the result is passed as `&mut` (`v.iter_mut()`),
   /// or the result carries a mutable borrow an argument already held
@@ -987,4 +1128,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     out
   }
+}
+
+/// Whether one of the type parameters `params` occurs in `t` other than
+/// behind a reference: `T` in `Option<T>` or `Self`, not in
+/// `Option<&T>` (see `call_reborrows_through`).
+fn param_outside_refs<'tcx>(t: Ty<'tcx>, params: &[u32]) -> bool {
+  let mut walk = t.walk();
+  while let Some(g) = walk.next() {
+    let GenericArgKind::Type(t) = g.kind() else { continue };
+    match t.kind() {
+      ty::Ref(..) => walk.skip_current_subtree(),
+      ty::Param(p) if params.contains(&p.index) => return true,
+      _ => {}
+    }
+  }
+  false
 }
