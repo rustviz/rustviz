@@ -3482,6 +3482,36 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     self.raps.get(&path_key(p, &self.tcx)).map(|rd| rd.rap.to_owned())
   }
 
+  /// The column of the variable or static that a field of an element
+  /// (`pts[0].x`, `PTS[1].y`, `ws[0].inner.n`) is read out of (#1065):
+  /// the collection indexed first. None if there's no index, if the
+  /// field is a reference, or if the place goes through a reference
+  /// (or a smart pointer other than `Box`) after the index: then the
+  /// data belongs to whatever that points to, not to the collection.
+  fn element_field_holder(&self, expr: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
+    let typeck = self.tcx.typeck(expr.hir_id.owner);
+    if expr.span.from_expansion() || !matches!(expr.kind, ExprKind::Field(..)) || typeck.node_type(expr.hir_id).is_ref() {
+      return None;
+    }
+    let base = index_base(expr)?;
+    let mut cur = expr;
+    while let ExprKind::Field(recv, _) | ExprKind::Index(recv, _, _) = cur.kind {
+      if recv.hir_id == base.hir_id {
+        break;
+      }
+      let through_ptr = typeck.expr_adjustments(recv).iter().any(|a| matches!(a.kind, adjustment::Adjust::Deref(_)))
+        && !typeck.node_type(recv.hir_id).is_box();
+      if through_ptr || typeck.node_type(recv.hir_id).is_any_ptr() {
+        return None;
+      }
+      cur = recv;
+    }
+    expr_to_rap_name(base, &self.tcx)
+      .and_then(|n| self.raps.get(&n))
+      .map(|rd| rd.rap.to_owned())
+      .filter(|r| !r.is_fn())
+  }
+
   /// How an element place (`v[i]`) is named in tooltips: its source
   /// text when that's short and plain, else `v[…]`. Tooltip text goes
   /// into an HTML attribute, so text with markup characters, quotes
@@ -3533,10 +3563,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     Some(ResourceTy::DerefField(rap, place, PlaceWrite::Update))
   }
 
-  /// `&self.s` / `&mut p.items[0]`: a reference to a place reached
-  /// through the reference variable `self` / `p`, a reborrow of what it
-  /// points to (#784). `DerefField(self, "&self.s")`, drawn on the
-  /// reference's column. `&*x` and `&v[0]` (a place `x` / `v` itself)
+  /// `&self.s` / `&mut p.items[0]` / `&ps[1].y`: a reference to a place
+  /// reached through the reference variable `self` / `p` / `ps`, a
+  /// reborrow of what it points to (#784, #1065).
+  /// `DerefField(self, "&self.s")`, drawn on the reference's column. `&*x` and `&v[0]` (a place `x` / `v` itself)
   /// are not this: they resolve to the variable. None when the place is
   /// itself a reference (`&self.r` with `r: &T`).
   pub fn reborrow_through_ref(&self, e: &'tcx Expr<'tcx>) -> Option<ResourceTy> {
@@ -3544,20 +3574,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       return None;
     }
     let ExprKind::AddrOf(_, _, place) = e.kind else { return None };
+    let text = || self.tcx.sess.source_map().span_to_snippet(e.span).ok().filter(|s| !s.contains('\n'));
+    // `&ps[1].y` / `&mut ps[0].x` with `ps` a reference: a field of an
+    // element of what ps points to (#1065).
+    if let Some(rap) = self.element_field_holder(place).filter(|r| r.is_ref()) {
+      return Some(ResourceTy::DerefField(rap, text()?, PlaceWrite::Update));
+    }
     let mut p = place;
     while let ExprKind::Index(recv, _, _) = p.kind {
       p = recv;
     }
     let ExprKind::Field(..) = p.kind else { return None };
     let ResourceTy::DerefField(rap, _, w) = self.field_through_ref(p)? else { return None };
-    let text = self.tcx.sess.source_map().span_to_snippet(e.span).ok().filter(|s| !s.contains('\n'))?;
-    Some(ResourceTy::DerefField(rap, text, w))
+    Some(ResourceTy::DerefField(rap, text()?, w))
   }
 
   /// The returned value `e` is part of a variable or static that has a
   /// column, not all of it: `v[0]` / `g[1][0]` / `ORIGIN.x` (a Copy
   /// element or field copied out, #1052), or `&PRIMES` / `&PRIMES[0]`
-  /// (a reference to (part of) a static, #1053). Returns
+  /// (a reference to (part of) a static, #1053), or a field of an
+  /// element (`pts[0].x`, #1065). Returns
   /// `Index(<holder>, <place>)`, drawn on the holder's column; for a
   /// reference the place starts with `&` / `&mut `.
   pub fn returned_part(&mut self, e: &'tcx Expr<'tcx>) -> Option<ResourceTy> {
@@ -3588,7 +3624,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         .and_then(|n| self.raps.get(&n))
         .map(|rd| rd.rap.to_owned())
         .filter(|r| !r.is_fn())?,
-      ExprKind::Field(..) => self.static_field_holder(e)?,
+      // `pts[0].x` / `PTS[1].y`: a field of an element (#1065).
+      ExprKind::Field(..) => self.element_field_holder(e).or_else(|| self.static_field_holder(e))?,
       _ => return None,
     };
     self.update_rap(&rap, line_num);
@@ -7017,6 +7054,16 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
           self.update_rap(&r.clone(), line_num);
         }
         self.add_ev(line_num, evt, lhs, rty, false);
+      } else if let Some(rap) = self.element_field_holder(rhs)
+        .filter(|_| matches!(evt, Evt::Copy) && matches!(lhs, ResourceTy::Value(_))) {
+        // `let a = pts[0].x;`: a copy of a field of an element, drawn
+        // on the collection's column like `let a = v[0];` (#1065).
+        // (Moving out of an element doesn't compile, E0507 / E0508.)
+        // Only into a variable, as for `v[0]` above.
+        let line_num = span_to_line(&inner.span, &self.tcx);
+        self.update_rap(&rap, line_num);
+        let place = self.place_label(rhs, rap.name());
+        self.add_ev(line_num, evt, lhs, ResourceTy::Index(rap, place, Default::default()), false);
       } else if let Some(rap) = self.static_field_holder(rhs) {
         // `let x = ORIGIN.x;`: a copy of a part of a static, which has
         // one column for all of it (#690). Drawn like a copy of an

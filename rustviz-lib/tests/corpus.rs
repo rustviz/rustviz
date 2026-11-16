@@ -19093,6 +19093,41 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the resource u points to is dropped",
         ],
     },
+    TooltipExpect {
+        name: "return_nested_place",
+        // #1065: a field of an element returned (`pts[0].x`, `PTS[1].y`)
+        // is copied out of the collection, which keeps all of it;
+        // `unsafe { &mut TOTAL }` returns a mutable reference to the
+        // static; `&mut ps[0].x` / `&rows[1].y` reborrow through the
+        // reference parameter, whose borrow goes on with the result.
+        must_contain: &[
+            "pts[0].x is copied out of pts's value and returned to the caller",
+            "qs[0].x is copied out of qs's value",
+            "a is initialized with a copy of qs[0].x",
+            "ws[0].n is copied out of ws's resource and returned to the caller",
+            "os[0].inner.n is copied out of os's value and returned to the caller",
+            "ps[0].y is copied out of the value ps points to and returned to the caller",
+            "PTS[1].y is copied out of PTS's value and returned to the caller",
+            "a mutable reference to TOTAL is returned to the caller; the data it points to is not copied. TOTAL is a static, so the borrow can last for the whole program",
+            "a mutable reference to GRID[1][0] is returned to the caller; the data it points to is not copied. GRID is a static, so the borrow can last for the whole program",
+            "GRID[1][0] is copied out of GRID's value and returned to the caller",
+            "a mutable reference to ps[0].x, reborrowed through ps, is returned to the caller; the data it points to is not copied",
+            "a reference to rows[1].y, reborrowed through rows, is returned to the caller; the data it points to is not copied",
+            "ws goes out of scope. Its resource is dropped (including every W it holds).",
+        ],
+        must_not_contain: &[
+            // `unsafe { GRID[1][0] }` copies one u8, not the whole static.
+            "GRID's value is copied to the caller",
+            // The returned reference keeps the parameter's borrow going.
+            "ps's mutable borrow ends",
+            "rows's immutable borrow ends",
+            // rs[0] is a reference: rs[0].x lives in what it points to.
+            "rs[0].x is copied out of",
+            "a is bound to a copyable value",
+            "TOTAL's value is moved",
+            "GRID's value is moved",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
