@@ -41,9 +41,12 @@ rustviz init                # installs nightly-2026-05-01 + the plugin
 `rustviz init` runs `rustup toolchain install nightly-2026-05-01` (with
 the `rust-src`, `rustc-dev` and `llvm-tools-preview` components) and
 then `cargo install`s `rustviz-plugin` from this repository's git, at
-the default branch unless you pass `--plugin-rev`. Pass `--dry-run` to
-see exactly what it would run, `--plugin-git` to install from a fork,
-or `--skip-toolchain` / `--skip-plugin` to run one step only. See
+the tag matching the CLI's own version (e.g. `v2.1.0`), so the plugin
+matches the CLI. Pass `--dry-run` to see exactly what it would run,
+`--plugin-rev` to install a different branch / tag / commit,
+`--plugin-git` to install from a fork (its default branch, unless you
+also pass `--plugin-rev`), or `--skip-toolchain` / `--skip-plugin` to
+run one step only. See
 `rustviz init --help` for the full flag list.
 
 ### Building from source

@@ -18,7 +18,7 @@ rustviz html foo.rs                # writes foo.html (both SVGs + tooltip JS inl
 |---|---|
 | `rustviz svg <file>`  | Two SVGs side-by-side (`<stem>.code.svg`, `<stem>.timeline.svg`) for embedding into your own HTML/Markdown workflow. Written next to the input unless you pass `-o <DIR>`. |
 | `rustviz html <file>` | One self-contained HTML page with both SVGs + the tooltip JS embedded. Opens in any browser; no server, no external assets. `-o <FILE>` sets the output path (default `<stem>.html` next to the input), `--title` the page title. |
-| `rustviz init`        | Installs the pinned nightly toolchain + the rustc plugin (`rustviz-plugin`). Run once after `cargo install rustviz`. Pass `--dry-run` to preview, `--plugin-git` / `--plugin-rev` to install from a fork or a given branch / tag / commit, or `--skip-toolchain` / `--skip-plugin` to run one step only. |
+| `rustviz init`        | Installs the pinned nightly toolchain + the rustc plugin (`rustviz-plugin`). Run once after `cargo install rustviz`. The plugin comes from the git tag matching this CLI's version (e.g. `v2.1.0`). Pass `--dry-run` to preview, `--plugin-rev` to install a different branch / tag / commit, `--plugin-git` to install from a fork (its default branch unless you also pass `--plugin-rev`), or `--skip-toolchain` / `--skip-plugin` to run one step only. |
 
 ## Library use
 
@@ -42,8 +42,9 @@ toolchain it was developed against. `rustviz init` does that bootstrap
 in one go: `rustup toolchain install nightly-2026-05-01 --profile minimal
 --component rust-src,rustc-dev,llvm-tools-preview` followed by `cargo
 +nightly-2026-05-01 install --git https://github.com/rustviz/rustviz
---locked rustviz-plugin` (the repository's default branch, unless you
-pass `--plugin-rev`). After that the `rustviz` binary uses the matching
+--tag v<version> --locked rustviz-plugin`, where `v<version>` is this
+CLI's own release tag (e.g. `v2.1.0`), so the plugin matches the CLI;
+`--plugin-rev` overrides it. After that the `rustviz` binary uses the matching
 nightly automatically.
 
 Working on RustViz itself? See [Building from
