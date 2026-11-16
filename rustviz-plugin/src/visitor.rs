@@ -4246,6 +4246,17 @@ fn pat_refutable(pat: &Pat) -> bool {
   }
 }
 
+/// Whether `a` and `b` name the same place: the same local, or the same
+/// field of the same place (`v` and `v`, `p.f` and `p.f`).
+fn same_place(a: &Expr, b: &Expr) -> bool {
+  match (a.kind, b.kind) {
+    (ExprKind::Path(QPath::Resolved(None, pa)), ExprKind::Path(QPath::Resolved(None, pb))) =>
+      matches!((pa.res, pb.res), (Res::Local(x), Res::Local(y)) if x == y),
+    (ExprKind::Field(ra, fa), ExprKind::Field(rb, fb)) => fa.name == fb.name && same_place(ra, rb),
+    _ => false,
+  }
+}
+
 /// `x`, `p.f`, `v[i]`, `*r`: an expression that names a place.
 fn is_place_expr(e: &Expr) -> bool {
   match e.kind {
@@ -4490,6 +4501,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       Some(h) => self.destructure_srcs[&h],
       None => rhs_expr,
     };
+    // `v = v;` / `p.f = p.f;` (rustc warns: useless assignment, #1021):
+    // the value is moved out of the place and straight back in. Nothing
+    // is dropped and the place owns the same value after, so nothing is
+    // drawn, as for a branch giving v its own value back in `v = if c
+    // { v } else { g };` (#1010). (A Copy value is drawn as the copy it
+    // is; a reference reassigned to itself keeps its reborrow drawing.)
+    if destructure_hid.is_none() && matches!(expr.kind, ExprKind::Assign(..))
+      && !expr.span.from_expansion() && same_place(lhs_expr, rhs_expr) {
+      let owner = lhs_expr.hir_id.owner;
+      let ty = self.tcx.typeck(owner).node_type(lhs_expr.hir_id);
+      if !ty.is_ref() && !self.ty_is_copy(ty, owner) {
+        self.visit_expr(lhs_expr);
+        return;
+      }
+    }
     self.visit_expr(lhs_expr);
     if destructure_hid.is_none() && self.init_from_branches(expr, lhs_expr, rhs_expr) {
       return;
