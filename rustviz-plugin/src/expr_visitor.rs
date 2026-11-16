@@ -3378,6 +3378,44 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     out
   }
 
+  /// The reference variables a `for` loop's head passes as they are to
+  /// its calls (`b` in `a.iter_mut().zip(b)` with `b: &Vec<_>` or `b:
+  /// &mut Vec<_>`, also in a chain passed to one: `.zip(c.iter().chain(b))`;
+  /// #1076). The loop's iterator holds a copy of a `&T` (or the moved
+  /// `&mut T`) and reads or writes through it until the loop ends.
+  /// Only the arguments of calls whose value can hold a borrow: not
+  /// `make(b)` returning a `Vec<i32>`.
+  pub(crate) fn loop_head_ref_args(&self, head: &'tcx Expr<'tcx>) -> Vec<ResourceAccessPoint> {
+    let typeck = self.tcx.typeck(head.hir_id.owner);
+    let holds = |e: &'tcx Expr<'tcx>| typeck.expr_ty(e).walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_)));
+    let mut out: Vec<ResourceAccessPoint> = Vec::new();
+    let mut todo: Vec<&'tcx Expr<'tcx>> = vec![head];
+    while let Some(e) = todo.pop() {
+      let args = match e.kind {
+        ExprKind::MethodCall(_, rcvr, args, _) if holds(e) => {
+          todo.push(rcvr);
+          args
+        }
+        ExprKind::Call(_, args) if holds(e) => args,
+        _ => continue,
+      };
+      for a in args.iter() {
+        match a.kind {
+          ExprKind::Path(_) if typeck.expr_ty(a).is_ref() && typeck.expr_adjustments(a).is_empty() => {
+            if let ResourceTy::Value(r) = get_rap(a, &self.tcx, &self.raps) {
+              if r.is_ref() && !out.contains(&r) {
+                out.push(r);
+              }
+            }
+          }
+          ExprKind::MethodCall(..) | ExprKind::Call(..) => todo.push(a),
+          _ => {}
+        }
+      }
+    }
+    out
+  }
+
   /// A method chain as written (`v.get_mut(0).unwrap()`), for a tooltip.
   /// An argument list that is long or has characters a label leaves
   /// out (`m.get_mut(&k)`, `m.get_mut("k")`) is shortened to `(…)`.
@@ -6381,6 +6419,18 @@ pub fn keep_loop_head_loans(&mut self, head: &'tcx Expr<'tcx>) -> Vec<(ResourceT
       if let Some((is_mut, call)) = ids.iter().find_map(|id| pass_ref_kind(&self.preprocessed_events, *id)) {
         out.push((root, is_mut, call));
       }
+    }
+  }
+  // A `&T` passed as it is to the head's calls (`.zip(b)`, #1076) is
+  // copied into the loop's iterator, which reads through the copy
+  // until the loop ends. (A `&mut` is moved in: see the `for` lowering.)
+  for r in self.loop_head_ref_args(head) {
+    if r.is_mutref() || out.iter().any(|(o, _, _)| matches!(o, ResourceTy::Value(x) if *x == r)) {
+      continue;
+    }
+    let ids = self.mark_kept_on_lines_at(lo, hi, &[*r.hash()], None, &fns);
+    if let Some((is_mut, call)) = ids.iter().find_map(|id| pass_ref_kind(&self.preprocessed_events, *id)) {
+      out.push((ResourceTy::Value(r), is_mut, call));
     }
   }
   out

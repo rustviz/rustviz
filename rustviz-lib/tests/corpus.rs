@@ -20115,6 +20115,30 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[],
     },
+    TooltipExpect {
+        name: "ref_into_adapter_1076",
+        // #1076: a reference passed as it is to an adapter in a `for`
+        // head. `a.iter_mut().zip(b)` with `b: &Vec<_>` copies b into the
+        // zipped iterator, which reads through the copy on every
+        // iteration, but the `for` line said "zip no longer borrows the
+        // resource b points to" (also "chain no longer borrows .." for
+        // `a.iter().chain(b)`). With `b: &mut Vec<_>`, zip moves b in
+        // (`b.len()` after the loop is E0382) and `*y += *x` writes into
+        // the resource b points to, but nothing was drawn for it, and b's
+        // borrow ended on the `for` line. The rows are pinned by the row
+        // test below.
+        must_contain: &[
+            "the resource b points to is immutably borrowed by the `for` loop's iterator, through a copy of b, until the loop ends",
+            "the `for` loop's iterator no longer borrows the resource b points to",
+            "b's mutable reference is moved (not the resource it points to)",
+            "the resource b points to is modified through y",
+            "q's resource is modified through y",
+        ],
+        must_not_contain: &[
+            "zip no longer borrows the resource b points to",
+            "chain no longer borrows the resource b points to",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -26856,6 +26880,56 @@ fn chain_reference_borrows_end_on_each_path() {
         for row in later {
             assert_eq!(on(&dots, row), 1, "{end}: {dots:?}, none on the later arm's println! row ({row})");
         }
+    }
+}
+
+/// #1076 (`ref_into_adapter_1076`): where each text sits. A reference
+/// passed as it is to an adapter in a `for` head (`.zip(b)`, `.chain(b)`)
+/// stays borrowed by the loop's iterator until the loop's `}`: a `&T` is
+/// copied in, a `&mut` moved in, and writes through y are drawn on the
+/// column of what it writes into.
+#[test]
+fn ref_passed_into_an_adapter_stays_borrowed_until_the_loop_ends() {
+    let rv = run_with_local_backend("ref_into_adapter_1076");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let closes = code_rows_y(&code, "}");
+    let zips = code_rows_y(&code, "for (x, y) in a.iter_mut().zip(b) {");
+    let writes = code_rows_y(&code, "*y += *x;");
+    let chain = code_row_y(&code, "for x in a.iter().chain(b) {");
+    let main_for = code_row_y(&code, "for (x, y) in p.iter().zip(r) {");
+    // Fixture order: each function's loop `}` comes just before its own:
+    // shared's is the first, moved's the third, chained's the fifth,
+    // main's the seventh.
+    let kept = "the resource b points to is immutably borrowed by the `for` loop's iterator, through a copy of b, until the loop ends";
+    let rows = [
+        ("b", zips[0], kept),
+        ("b", closes[0], "the `for` loop's iterator no longer borrows the resource b points to"),
+        ("b", zips[1], "b's mutable reference is moved (not the resource it points to)"),
+        ("b", writes[0], "the resource b points to is modified through y"),
+        ("b", closes[2], "b's mutable borrow ends"),
+        ("b", chain, kept),
+        ("b", closes[4], "the `for` loop's iterator no longer borrows the resource b points to"),
+        ("q", writes[1], "q's resource is modified through y"),
+        ("q", closes[6], "q's resource is no longer mutably borrowed"),
+        ("r", closes[6], "r's mutable borrow ends"),
+    ];
+    for (column, y, text) in rows {
+        let at = (label_x(&tl, column), y);
+        let dots = dots_where(&tl, |lines| lines.iter().any(|l| l == text));
+        assert!(dots.contains(&at), "expected {:?} on {}'s column at {:?}, found {:?}", text, column, at, dots);
+    }
+    // The `for` lines no longer end the borrow.
+    for (column, y, end) in [
+        ("b", zips[0], "zip no longer borrows the resource b points to"),
+        ("b", zips[0], "b's immutable borrow ends"),
+        ("b", zips[1], "b's mutable borrow ends"),
+        ("b", chain, "chain no longer borrows the resource b points to"),
+        ("r", main_for, "r's mutable borrow ends"),
+        ("q", main_for, "q's resource is no longer mutably borrowed"),
+    ] {
+        let at = (label_x(&tl, column), y);
+        let ends_there = dots_where(&tl, |lines| lines.iter().any(|l| l == end));
+        assert!(!ends_there.contains(&at), "{:?} still on {}'s `for` line: {:?}", end, column, ends_there);
     }
 }
 
