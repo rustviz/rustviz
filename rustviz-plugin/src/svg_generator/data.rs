@@ -167,6 +167,22 @@ impl PartialEq for PlaceWrite { fn eq(&self, _: &Self) -> bool { true } }
 impl Eq for PlaceWrite {}
 impl Hash for PlaceWrite { fn hash<H: Hasher>(&self, _: &mut H) {} }
 
+/// What a place without a column of its own (`ResourceTy::DerefField`:
+/// `self.n`, `p.x` reached through a reference) holds: a "value" (a Copy
+/// type, or one with nothing to drop) or a "resource" (#484). Tooltips
+/// about borrowing the place use it: `let r = &self.n;` with `n: usize`
+/// reads "self.n's value is immutably borrowed by r" (#1100). Like
+/// `PlaceWrite`, it is fixed by the place's type and not part of its
+/// identity: it compares equal and hashes to nothing.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct FieldHolds {
+    pub value: bool,
+}
+
+impl PartialEq for FieldHolds { fn eq(&self, _: &Self) -> bool { true } }
+impl Eq for FieldHolds {}
+impl Hash for FieldHolds { fn hash<H: Hasher>(&self, _: &mut H) {} }
+
 /// Whether a type can be mutated through a shared reference: it
 /// contains an `UnsafeCell` (`Cell`, `RefCell`, `Mutex`, atomics, ...)
 /// inline or behind a pointer it owns or borrows. `Unknown` when part
@@ -438,7 +454,9 @@ pub enum ResourceTy {
     // The PlaceWrite says whether the write is an assignment (and, if the
     // field's type needs drop, that the old value is dropped: the field
     // has no column to draw that on, so the write's tooltip says so).
-    DerefField(ResourceAccessPoint, String, PlaceWrite),
+    // The FieldHolds says whether the place holds a value (a Copy type,
+    // or one with nothing to drop) rather than a resource (#1100).
+    DerefField(ResourceAccessPoint, String, PlaceWrite, FieldHolds),
     Caller, // For expressing relationship between return expr and fn
     Value(ResourceAccessPoint),
     // A write to an element of the RAP's resource: the LHS of
@@ -473,7 +491,7 @@ impl ResourceTy {
             ResourceTy::Value(r) => r.name().to_owned(),
             ResourceTy::Deref(r) => format!("*{}", r.name()),
             ResourceTy::Index(_, place, _) => place.clone(),
-            ResourceTy::DerefField(_, place, _) => place.clone(),
+            ResourceTy::DerefField(_, place, _, _) => place.clone(),
             ResourceTy::Caller => "Caller".to_owned()
         }
     }
@@ -481,7 +499,7 @@ impl ResourceTy {
     pub fn real_name(&self) -> String {
         match self {
             ResourceTy::Anonymous | ResourceTy::Temporary { .. } => "Anonymous resource".to_owned(),
-            ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _, _) | ResourceTy::DerefField(r, _, _) => r.name().to_owned(),
+            ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _, _) | ResourceTy::DerefField(r, _, _, _) => r.name().to_owned(),
             ResourceTy::Caller => "Caller".to_owned()
         }
     }
@@ -489,27 +507,27 @@ impl ResourceTy {
     pub fn hash(&self) -> &u64 {
         match self {
             ResourceTy::Caller | ResourceTy::Anonymous | ResourceTy::Temporary { .. } => &std::u64::MAX,
-            ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _, _) | ResourceTy::DerefField(r, _, _) => r.hash(),
+            ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _, _) | ResourceTy::DerefField(r, _, _, _) => r.hash(),
         }
     }
 
     pub fn is_ref(&self) -> bool {
       match self {
-        ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _, _) | ResourceTy::DerefField(r, _, _) => r.is_ref(),
+        ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _, _) | ResourceTy::DerefField(r, _, _, _) => r.is_ref(),
         _ => false
       }
     }
 
     pub fn is_mutref(&self) -> bool {
         match self {
-            ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _, _) | ResourceTy::DerefField(r, _, _) => r.is_mutref(),
+            ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _, _) | ResourceTy::DerefField(r, _, _, _) => r.is_mutref(),
             _ => false
           }
     }
 
     pub fn is_closure(&self) -> bool {
         match self {
-            ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _, _) | ResourceTy::DerefField(r, _, _) => r.is_closure(),
+            ResourceTy::Value(r) | ResourceTy::Deref(r) | ResourceTy::Index(r, _, _) | ResourceTy::DerefField(r, _, _, _) => r.is_closure(),
             _ => false
         }
     }
@@ -523,14 +541,14 @@ impl ResourceTy {
     pub fn extract_rap(&self) -> Option<&ResourceAccessPoint> {
         match self {
             ResourceTy::Anonymous | ResourceTy::Caller | ResourceTy::Temporary { .. } => None,
-            ResourceTy::Deref(r) | ResourceTy::Value(r) | ResourceTy::Index(r, _, _) | ResourceTy::DerefField(r, _, _) => Some(r)
+            ResourceTy::Deref(r) | ResourceTy::Value(r) | ResourceTy::Index(r, _, _) | ResourceTy::DerefField(r, _, _, _) => Some(r)
         }
     }
 
     /// The reference RAP a write through `*r` / `r.f` goes through.
     pub fn deref_rap(&self) -> Option<&ResourceAccessPoint> {
         match self {
-            ResourceTy::Deref(r) | ResourceTy::DerefField(r, _, _) => Some(r),
+            ResourceTy::Deref(r) | ResourceTy::DerefField(r, _, _, _) => Some(r),
             _ => None,
         }
     }
@@ -2733,10 +2751,18 @@ pub(crate) fn holder_lender_kind(rty: &ResourceTy) -> hover_messages::HolderLend
 // "resource" (#274, #484). A `*r`
 // place isn't: what it holds belongs to r's lender.
 pub(crate) fn holds_copy_value(rty: &ResourceTy) -> bool {
-    matches!(rty, ResourceTy::Value(r) if r.holds_value())
+    lender_holds_value(rty)
         // A borrow from / returned to a reference r (or `*r`) is of
         // what r points to (#313), a value if that's Copy (#312).
         || matches!(rty, ResourceTy::Value(r) | ResourceTy::Deref(r) if r.points_to_copy())
+}
+
+// Whether the lender `rty` of a borrow holds a "value" (#274, #484): an
+// owner of a Copy type or one with nothing to drop, or such a field
+// reached through a reference (`&self.n` with `n: usize`, #1100).
+pub(crate) fn lender_holds_value(rty: &ResourceTy) -> bool {
+    matches!(rty, ResourceTy::Value(r) if r.holds_value())
+        || matches!(rty, ResourceTy::DerefField(_, _, _, FieldHolds { value: true }))
 }
 
 // Whether a borrow's referent is a "value" in the dot's tooltip. A
@@ -3282,7 +3308,7 @@ impl Event {
                         name.insert(0, '*');
                         name
                     },
-                    ResourceTy::DerefField(_, place, _) => {
+                    ResourceTy::DerefField(_, place, _, _) => {
                         *name = place.clone();
                         name
                     },
@@ -3375,7 +3401,7 @@ impl Event {
                 hover_messages::event_dot_or_alt_move(my_name, into, sources, tuple.as_deref(), part_of.as_ref(), *value)
             }
             Event::OrAltLend { into, is, sources, mutable, end, chain: Some(chain) } => {
-                let holds_value = matches!(is, ResourceTy::Value(r) if r.holds_value());
+                let holds_value = lender_holds_value(is);
                 if *end {
                     hover_messages::event_dot_chain_ref_reacquire(my_name, into.name(), *mutable, holds_value, chain)
                 } else {
@@ -3383,7 +3409,7 @@ impl Event {
                 }
             }
             Event::OrAltLend { into, is, sources, mutable, end, chain: None } => {
-                let holds_value = matches!(is, ResourceTy::Value(r) if r.holds_value());
+                let holds_value = lender_holds_value(is);
                 if *end {
                     hover_messages::event_dot_or_alt_reacquire(my_name, into.name(), *mutable, holds_value)
                 } else {
@@ -3531,14 +3557,14 @@ impl Event {
                 hover_messages::event_dot_copy_out_of_element(r.name(), place, r.is_ref(), if r.is_ref() { r.points_to_copy() } else { r.holds_value() })
             }
             // `&self.s` returned: a reborrow through `self` (#784).
-            Event::Duplicate{ to: ResourceTy::Caller, is: ResourceTy::DerefField(r, place, _), ..} if place.starts_with('&') => {
+            Event::Duplicate{ to: ResourceTy::Caller, is: ResourceTy::DerefField(r, place, _, _), ..} if place.starts_with('&') => {
                 hover_messages::event_dot_reborrow_to_caller(r.name(), place)
             }
             // `*r` returned with r a reference (#670).
-            Event::Duplicate{ to: ResourceTy::Caller, is: ResourceTy::DerefField(r, place, _), ..} if place.starts_with('*') => {
+            Event::Duplicate{ to: ResourceTy::Caller, is: ResourceTy::DerefField(r, place, _, _), ..} if place.starts_with('*') => {
                 hover_messages::event_dot_copy_deref_to_caller(r.name(), place)
             }
-            Event::Duplicate{ to, is: ResourceTy::DerefField(r, place, _), ..} => {
+            Event::Duplicate{ to, is: ResourceTy::DerefField(r, place, _, _), ..} => {
                 // `let a = p.x;` with p a reference: the field is
                 // copied out of the resource p points to (#266).
                 let target = match to {
@@ -3629,7 +3655,7 @@ impl Event {
                 // Only an owner's own Copy value here: a reference
                 // lender is handled by event_dot_static_lend_ref_var
                 // (`&r`, #925) or event_dot_lend_through_ref.
-                let holds_value = matches!(is, ResourceTy::Value(r) if r.holds_value());
+                let holds_value = lender_holds_value(is);
                 if to.is_closure() {
                     let target_name = target_name(to);
                     hover_messages::event_dot_capture_static_lend_to_closure(&self.deref_name(my_name), &target_name, holds_value)
@@ -3651,7 +3677,7 @@ impl Event {
                 }
             }
             Event::MutableLend{ to, is, of_ref_var, ..} => {
-                let holds_value = matches!(is, ResourceTy::Value(r) if r.holds_value());
+                let holds_value = lender_holds_value(is);
                 let target_name = target_name(to);
                 if to.is_closure() {
                     hover_messages::event_dot_capture_mut_lend_to_closure(&self.deref_name(my_name), &target_name, holds_value)
@@ -3745,7 +3771,7 @@ impl Event {
                     // and the drop sentence of the old value is the
                     // one plain assignment uses.
                     let write = match is {
-                        ResourceTy::DerefField(_, _, w) => *w,
+                        ResourceTy::DerefField(_, _, w, _) => *w,
                         _ => r.place_write(),
                     };
                     match write {
@@ -3846,12 +3872,12 @@ impl Event {
                 };
                 with_alternatives(msg, r, place, write, alts)
             }
-            Event::Copy{ from, is: is @ (ResourceTy::Deref(r) | ResourceTy::DerefField(r, _, _)), of, ..} => {
+            Event::Copy{ from, is: is @ (ResourceTy::Deref(r) | ResourceTy::DerefField(r, _, _, _)), of, ..} => {
                 // `*r = y;` / `r.f = y;` with y: Copy assigns a new value
                 // to the place `*r` / `r.f`; it isn't an initialization.
                 let deref = self.deref_name(my_name).clone();
                 let write = match is {
-                    ResourceTy::DerefField(_, _, w) => *w,
+                    ResourceTy::DerefField(_, _, w, _) => *w,
                     _ => r.place_write(),
                 };
                 match write {
@@ -4168,7 +4194,7 @@ impl Visualizable for VisualizationData {
         // state, as an owner `s` does while `s.items` is lent. The
         // texts name the field.
         let field_of_this_ref = |is: &ResourceTy| self.is_ref(hash)
-            && matches!(is, ResourceTy::DerefField(r, _, _) if r.hash() == hash);
+            && matches!(is, ResourceTy::DerefField(r, _, _, _) if r.hash() == hash);
         match event {
             Event::MutableLend { is, .. } | Event::StaticLend { is, .. }
             | Event::MutableReacquire { is, .. } | Event::StaticReacquire { is, .. }
@@ -4218,7 +4244,7 @@ impl Visualizable for VisualizationData {
             (State::OutOfScope, Event::Copy{ from: ro, is: is_ro, ..}) => {
                 match ro {
                     ResourceTy::Anonymous => State::FullPrivilege {s: LineState::Full},
-                    ResourceTy::Deref(r) | ResourceTy::Value(r) | ResourceTy::DerefField(r, _, _) | ResourceTy::Index(r, _, _) => {
+                    ResourceTy::Deref(r) | ResourceTy::Value(r) | ResourceTy::DerefField(r, _, _, _) | ResourceTy::Index(r, _, _) => {
                         // if we are copying a reference - then the State must be PartialPrivilege
                         // ex: 
                         // let a = &b; (ImmutableBorrow(b -> a))
@@ -5218,7 +5244,7 @@ impl Visualizable for VisualizationData {
         fn maybe_append_event (vd: & mut VisualizationData, resource_ty: &ResourceTy, event: Event, line_number: usize){
           match resource_ty {
             ResourceTy::Anonymous | ResourceTy::Caller | ResourceTy::Temporary { .. } => {}
-            ResourceTy::Deref(r) | ResourceTy::Value(r) | ResourceTy::Index(r, _, _) | ResourceTy::DerefField(r, _, _) => {
+            ResourceTy::Deref(r) | ResourceTy::Value(r) | ResourceTy::Index(r, _, _) | ResourceTy::DerefField(r, _, _, _) => {
                 vd._append_event(&r, event, &line_number);
             }
           }

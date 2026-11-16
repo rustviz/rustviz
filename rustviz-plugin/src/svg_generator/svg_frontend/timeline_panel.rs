@@ -2923,7 +2923,7 @@ fn kept_closure_lend_title(event: &Event, name: &String, visualization_data: &Vi
         _ => None,
     })?;
     let r = is.extract_rap()?;
-    let holds_value = matches!(is, ResourceTy::Value(r) if r.holds_value());
+    let holds_value = crate::svg_generator::data::lender_holds_value(is);
     if reborrow {
         return Some(hover_messages::event_dot_lend_through_ref(r.name(), &to.name(), mutable, r.is_mutref(), r.points_to_copy()));
     }
@@ -3298,7 +3298,7 @@ fn loop_iterator_ref_title(event: &Event, line: usize, rap: &ResourceAccessPoint
     fn lent_place(is: &ResourceTy) -> Option<Option<&String>> {
         match is {
             ResourceTy::Value(_) => Some(None),
-            ResourceTy::DerefField(_, place, _) => Some(Some(place)),
+            ResourceTy::DerefField(_, place, _, _) => Some(Some(place)),
             _ => None,
         }
     }
@@ -3418,7 +3418,7 @@ fn field_lent_through_ref_title(state: &State, rap: &ResourceAccessPoint, visual
     let mut history = Vec::new();
     flat(&timeline.history, &mut history);
     let field = |is: &ResourceTy| match is {
-        ResourceTy::DerefField(r, place, _) if r.hash() == rap.hash() => Some(place.clone()),
+        ResourceTy::DerefField(r, place, _, _) if r.hash() == rap.hash() => Some(place.clone()),
         _ => None,
     };
     // The field borrows live at `line`.
@@ -3532,8 +3532,8 @@ fn loop_iterator_holds_all(visualization_data: &VisualizationData, rap: &Resourc
                 ExternalEvent::StaticDie { to: ResourceTy::Value(r), static_lender: Some(l @ (StaticLender::LoopIterator { .. } | StaticLender::LoopHeadBorrow { .. })), id, .. }
                 | ExternalEvent::MutableDie { to: ResourceTy::Value(r), static_lender: Some(l @ (StaticLender::LoopIterator { .. } | StaticLender::LoopHeadBorrow { .. })), id, .. }
                     if *r.hash() == hash => out.push((*id, l.clone(), None)),
-                ExternalEvent::StaticDie { to: ResourceTy::DerefField(r, place, _), static_lender: Some(l @ StaticLender::LoopIterator { .. }), id, .. }
-                | ExternalEvent::MutableDie { to: ResourceTy::DerefField(r, place, _), static_lender: Some(l @ StaticLender::LoopIterator { .. }), id, .. }
+                ExternalEvent::StaticDie { to: ResourceTy::DerefField(r, place, _, _), static_lender: Some(l @ StaticLender::LoopIterator { .. }), id, .. }
+                | ExternalEvent::MutableDie { to: ResourceTy::DerefField(r, place, _, _), static_lender: Some(l @ StaticLender::LoopIterator { .. }), id, .. }
                     if *r.hash() == hash => out.push((*id, l.clone(), Some(place.clone()))),
                 ExternalEvent::Branch { branches, .. } => {
                     for b in branches {
@@ -4627,15 +4627,15 @@ fn render_return_to_caller_arrow(line_number: &usize, external_event: &ExternalE
         };
         let title = match external_event {
             // `&self.s` returned: a reborrow through `self` (#784).
-            ExternalEvent::Copy { from: ResourceTy::DerefField(r, place, _), .. } if place.starts_with('&') =>
+            ExternalEvent::Copy { from: ResourceTy::DerefField(r, place, _, _), .. } if place.starts_with('&') =>
                 hover_messages::event_dot_reborrow_to_caller(r.name(), place),
             // `*r` returned with r a reference: a copy of the value
             // r points to (#670).
-            ExternalEvent::Copy { from: ResourceTy::DerefField(r, place, _), .. } if place.starts_with('*') =>
+            ExternalEvent::Copy { from: ResourceTy::DerefField(r, place, _, _), .. } if place.starts_with('*') =>
                 hover_messages::event_dot_copy_deref_to_caller(r.name(), place),
             // `p.x` returned from behind a reference p: the field
             // is copied, not p's resource (#266).
-            ExternalEvent::Copy { from: ResourceTy::DerefField(r, place, _), .. } =>
+            ExternalEvent::Copy { from: ResourceTy::DerefField(r, place, _, _), .. } =>
                 hover_messages::event_dot_copy_through_deref_field(
                     r.name(), place, &"the caller".to_string(), r.points_to_copy()),
             // `&PRIMES` / `v[0]` returned (#1053, #1052).

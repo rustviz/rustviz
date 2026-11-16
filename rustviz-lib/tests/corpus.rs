@@ -2921,9 +2921,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "borrow_mut borrows cell immutably (a shared borrow); exclusive access to its contents is checked at runtime (a second borrow_mut while this one is live would panic)",
             "borrow_mut borrows counter immutably (a shared borrow); counter has interior mutability, so its contents can change even through a shared borrow",
+            // #1100: a `Cell<i32>` has nothing to drop, so the field
+            // holds a value, as a `Cell` local does.
+            "self.hits's value is immutably borrowed by get",
+            "self.hits's value is no longer immutably borrowed",
         ],
         must_not_contain: &[
             "borrow_mut borrows counter immutably (a shared borrow); exclusive access to its contents is checked at runtime",
+            "self.hits's resource",
         ],
     },
     TooltipExpect {
@@ -20591,8 +20596,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Mutable borrow from self.n to it: map's signature gives the value it returns the same lifetime as the value it was called on and its argument, so it may borrow from either, and both stay borrowed while it is in use; it isn't a reference, but its value holds one",
             "Return immutably borrowed resource from it to self.items",
             "the resource self points to is modified through self.n",
+            // #1100: self.n is a usize, a value.
+            "self.n's value is immutably borrowed by it; self.n is read-only while the borrow is live",
+            "self.n's value is no longer immutably borrowed",
         ],
         must_not_contain: &[
+            "self.n's resource",
             "self holds a mutable reference, but the resource it points to is currently shared through it",
             "the resource self points to is immutably borrowed by it through self",
             "the resource self points to is mutably borrowed by it through self",
@@ -20601,6 +20610,67 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from self to",
             "Mutable borrow from self to",
             "=self holds a mutable reference, but self.items is immutably borrowed by the `for` loop's iterator, so self.items is read-only until the loop ends",
+        ],
+    },
+    TooltipExpect {
+        name: "field_value_borrow_find_closure_1100",
+        // #1100: a borrow of a Copy field reached through a reference
+        // (`let r = &self.n;`, `&mut self.n`, `&p.n` with `n: usize`) called
+        // the field's value a "resource" ("self.n's resource is immutably
+        // borrowed by r", "Return immutably borrowed resource from r to
+        // self.n", "r immutably borrows a resource"). A usize needs no drop:
+        // it holds a value, as a Copy local does (`let n = 0; let r = &n;`
+        // reads "n's value is immutably borrowed by r"). `self.s: String`
+        // stays a resource.
+        // #1101: `find` is passed a closure capturing `self.n` but doesn't
+        // keep it, yet self was lent whole to f ("self holds a mutable
+        // reference, but the resource it points to is currently shared
+        // through it, so self can only read it"; "the resource self points
+        // to is immutably borrowed by f through self"). Checked with rustc:
+        // while f is live `self.n += 1` compiles (the closure's borrow of
+        // self.n ended with the call) and `self.items.push(0)` is E0502; f
+        // holds only the borrow of self.items.
+        must_contain: &[
+            "self.n's value is immutably borrowed by r; self.n is read-only while the borrow is live",
+            "self.n's value is no longer immutably borrowed",
+            "Return immutably borrowed value from r to self.n",
+            "r immutably borrows a value",
+            "self.n's value is mutably borrowed by m; self.n can't be used while the borrow is live",
+            "self.n's value is no longer mutably borrowed",
+            "Return mutably borrowed value from m to self.n",
+            "m mutably borrows a value",
+            "self.s's resource is immutably borrowed by q; self.s is read-only while the borrow is live",
+            "Return immutably borrowed resource from q to self.s",
+            "p.n's value is immutably borrowed by r",
+            "p.n's value is no longer immutably borrowed",
+            "Return immutably borrowed value from r to p.n",
+            "self holds a mutable reference, but self.items is immutably borrowed by f, so self.items is read-only while the borrow is live",
+            "self.items's resource is immutably borrowed by f; self.items is read-only while the borrow is live",
+            "f holds a value that immutably borrows self.items (f isn't a reference itself)",
+            "Immutable borrow from self.items to f: find's signature gives the value it returns the same lifetime as the references stored in the value it was called on; f isn't a reference, but its value holds one",
+            "Return immutably borrowed resource from f to self.items",
+            "self.items's resource is no longer immutably borrowed",
+            "the resource self points to is modified through self.n",
+        ],
+        must_not_contain: &[
+            "self.n's resource",
+            "p.n's resource",
+            "borrowed resource from r to",
+            "borrowed resource from m to",
+            "r immutably borrows a resource",
+            "m mutably borrows a resource",
+            "the resource it points to is currently shared through it",
+            "the resource self points to is immutably borrowed by f through self",
+            "the resource self points to is mutably borrowed by f through self",
+            // The iterator is a temporary; the lifetime comes from the
+            // references it stores, not from the iterator itself (#1090).
+            "same lifetime as the value it was called on",
+            "borrows the data self points to",
+            "f no longer borrows the resource self points to",
+            "Immutable borrow from self to f",
+            "Mutable borrow from self to f",
+            "Return immutably borrowed resource from f to self<",
+            "=Return immutably borrowed resource from f to self",
         ],
     },
 ];
@@ -27892,18 +27962,61 @@ fn a_closure_capturing_a_field_through_a_reference_keeps_its_line() {
     };
     let next_row = |at: f64, next: &str| code_rows_y(&code, next).into_iter().find(|&y| y > at).unwrap_or_else(|| panic!("no {:?} after y={}", next, at));
     // The captured field is given back where the borrow ends, not where
-    // it starts. (Matched without the noun: "self.n's resource is no
-    // longer …" should say "value", #1100.)
+    // it starts. self.n is a usize: its value is borrowed (#1100).
     for (x, src, end, back) in [
-        (selfs[0], read, counts[0], " is no longer immutably borrowed"),
-        (selfs[1], bump, counts[1], " is no longer mutably borrowed"),
-        (selfs[3], count, row("it.sum()"), " is no longer immutably borrowed"),
+        (selfs[0], read, counts[0], "self.n's value is no longer immutably borrowed"),
+        (selfs[1], bump, counts[1], "self.n's value is no longer mutably borrowed"),
+        (selfs[3], count, row("it.sum()"), "self.n's value is no longer immutably borrowed"),
     ] {
-        let want = |l: &str| l.starts_with("self.n's ") && l.ends_with(back);
+        let want = |l: &str| l == back;
         assert!(!given_back(x, row(src), next_row(row(src), "self.other.push(0);"), &want), "self.n given back on `{}`", src);
         assert!(given_back(x, end, next_row(end, "}"), &want), "self.n isn't given back on the row of `{}`'s last use", src);
     }
     let back = |l: &str| l == "the `for` loop's iterator no longer borrows self.n";
     assert!(!given_back(selfs[2], row(looped), loop_end, &back), "self.n given back before the loop ends");
     assert!(given_back(selfs[2], loop_end, next_row(loop_end, "self.n += 1;"), &back), "self.n isn't given back where the loop ends");
+}
+
+/// #1101 (`field_value_borrow_find_closure_1100`): `find` is passed a
+/// closure capturing `self.n` but doesn't keep it, so while `f` is live
+/// only self.items is borrowed (`self.n += 1` compiles there). self's
+/// column keeps the style it had just before the `let f` line, with the
+/// text naming self.items, until f's last use; #1102's plugin lent all of
+/// self there ("…currently shared through it, so self can only read it").
+#[test]
+fn a_closure_find_does_not_keep_borrows_only_the_receiver_field() {
+    let rv = run_with_local_backend("field_value_borrow_find_closure_1100");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let label_xs = |label: &str| -> Vec<f64> {
+        tl.split("<text ").skip(1).filter_map(|t| {
+            let (tag, rest) = t.split_once('>')?;
+            (tag.contains("class=\"label") && rest.split('<').next() == Some(label)).then(|| num_attr(tag, "x"))
+        }).collect()
+    };
+    let selfs = label_xs("self");
+    assert_eq!(selfs.len(), 4, "self columns: {:?}", selfs);
+    let column = |x: f64| -> Vec<(f64, f64, String)> {
+        start_tags(&tl, "line").into_iter()
+            .filter(|t| attr(t, "class").is_some_and(|c| c.starts_with("hollow") || c.starts_with("solid")))
+            .filter(|t| (num_attr(t, "x1") - x).abs() <= 2.0 && num_attr(t, "x1") == num_attr(t, "x2"))
+            .map(|t| {
+                let (a, b) = (num_attr(t, "y1"), num_attr(t, "y2"));
+                (a.min(b), a.max(b), attr(t, "class").unwrap_or_default().to_string())
+            })
+            .collect()
+    };
+    let lets = [code_row_y(&code, "let f = self.items.iter().find(|x| **x as usize == self.n);"), code_row_y(&code, "let f = self.items.iter().find(|x| {")];
+    let ends = code_rows_y(&code, "*f.unwrap_or(&0)");
+    assert_eq!(ends.len(), 2, "rows: {:?}", ends);
+    let text = "self holds a mutable reference, but self.items is immutably borrowed by f, so self.items is read-only while the borrow is live";
+    for (x, from, to) in [(selfs[2], lets[0], ends[0]), (selfs[3], lets[1], ends[1])] {
+        let lines = column(x);
+        let before = lines.iter().find(|(a, b, _)| *a < from && *b >= from)
+            .unwrap_or_else(|| panic!("no line above row {} on column x={}: {:?}", from, x, lines)).2.clone();
+        for (a, _, class) in lines.iter().filter(|(a, b, _)| *b > from && *a < to) {
+            assert_eq!(*class, before, "column x={} changes style from {:?} to {:?} at y={} while only self.items is borrowed", x, before, class, a);
+        }
+        let texts = state_lines_with_tooltip(&tl, text);
+        assert!(texts.iter().any(|&(a, b)| a <= from && b >= to), "no line {:?} from y={} to y={}: {:?}", text, from, to, texts);
+    }
 }

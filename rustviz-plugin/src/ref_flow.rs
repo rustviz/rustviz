@@ -635,7 +635,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // `self.items` auto-referenced: a place inside what `self`
       // points to.
       ExprKind::Field(..) if adjs.iter().any(|a| matches!(a.kind, Adjust::Borrow(_))) => {
-        let ResourceTy::DerefField(r, place, _) = self.field_through_ref(arg)? else { return None };
+        let ResourceTy::DerefField(r, place, _, _) = self.field_through_ref(arg)? else { return None };
         (r, place)
       }
       _ => return None,
