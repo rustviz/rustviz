@@ -1,6 +1,7 @@
 extern crate handlebars;
 
-use crate::svg_generator::data::{branch_is_collapsed, is_param_value_line, returned_closure, ExtBranchData, ExternalEvent, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, StaticLender, Visualizable, VisualizationData, FIRST_ROW_Y, OLD_FIRST_ROW_Y, LINE_SPACE};use crate::svg_generator::svg_frontend::{code_panel, timeline_panel};
+use crate::svg_generator::data::{branch_is_collapsed, is_param_value_line, returned_closure, ExtBranchData, ExternalEvent, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, StaticLender, Visualizable, VisualizationData, FIRST_ROW_Y, OLD_FIRST_ROW_Y, LINE_SPACE};
+use crate::svg_generator::svg_frontend::{code_panel, timeline_panel};
 use handlebars::Handlebars;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
