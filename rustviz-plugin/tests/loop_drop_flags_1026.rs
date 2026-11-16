@@ -4,9 +4,9 @@
 // #1027: s is assigned in a loop inside another, then again in the outer
 // loop's body. With c = true and i = 0, the outer loop's first time round
 // reaches `s = …"c"` with s holding nothing (nothing is dropped there); a
-// later time round, it holds what the time round before gave it. (Known
-// wrong, not pinned: s's column is drawn as "the owner" from the inner
-// loop to `s = …"c"`, #1032.)
+// later time round, it holds what the time round before gave it. The
+// inner loop's end leaves s with no owner line down to `s = …"c"`
+// (#1032).
 fn nested_after(c: bool, o: usize, i: usize) {
     let mut s = String::from("a");
     if c {
@@ -57,9 +57,8 @@ fn for_join(flags: Vec<bool>) {
 }
 
 // The same for a field column: x.name's value is dropped when x.name is
-// assigned again, or with x at its scope end. (Known wrong, not pinned:
-// x's scope end says x.name is dropped "only if nothing above moved it",
-// #1031.)
+// assigned again, or with x at its scope end, which says so "only if
+// x.name still holds it" (#1031).
 fn field_join(k: usize) {
     let mut x = P { name: String::from("a") };
     let mut n = 0;

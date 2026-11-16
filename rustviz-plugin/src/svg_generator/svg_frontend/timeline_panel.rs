@@ -1389,7 +1389,7 @@ fn render_scope_end_dot(
             // nothing, whether or not it was moved earlier.
             data.title = match struct_partial_move_split(visualization_data, *hash, exit) {
                 Some(split) if resource_hold =>
-                    hover_messages::event_dot_struct_partial_go_out_of_scope(&name, &split.moved, &split.maybe_moved, &[], true, split.by_cond, false),
+                    hover_messages::event_dot_struct_partial_go_out_of_scope(&name, &split.moved, &split.maybe_moved, &[], true, split.by_cond, split.kept, false),
                 _ => event.print_message_with_name(&mut name),
             };
         } else if history.iter().any(|(l, e)| l == line_number && matches!(e, Event::Move { break_out: true, .. })) {
@@ -1519,7 +1519,7 @@ fn render_scope_end_dot(
             // and those moved on some paths only maybe
             // (#395).
             let title = hover_messages::event_dot_struct_partial_go_out_of_scope(
-                &name, &split.moved, &split.maybe_moved, &split.dropped, false, split.by_cond, is_box);
+                &name, &split.moved, &split.maybe_moved, &split.dropped, false, split.by_cond, split.kept, is_box);
             // A Box's allocation is freed whatever is left in it.
             if split.dropped.is_empty() && split.maybe_moved.is_empty() && !is_box {
                 data.title = title;
@@ -1812,7 +1812,14 @@ fn render_dot(
                     append_drop_dot(drop_data, timeline_data, dots);
                     continue;
                 },
-                Event::LoopMaybeInit { before_loop } => {
+                Event::LoopMaybeInit { nested: true, .. } => {
+                    // A loop inside another, every run of which may
+                    // start with it holding nothing (#1032).
+                    let rap = &visualization_data.timelines[hash].resource_access_point;
+                    data.title = hover_messages::event_dot_loop_maybe_init_nested(
+                        &name, rap.holds_value() || rap.is_ref(), rap.is_mut());
+                }
+                Event::LoopMaybeInit { before_loop, .. } => {
                     // A loop above may have ended before assigning it
                     // (#786): like a conditional's maybe-initialized
                     // join, say when its value, if any, is dropped.
@@ -2169,7 +2176,7 @@ fn maybe_moved_by_kept_round<'a>(history: impl Iterator<Item = &'a (usize, Event
 // The `before_loop` of the last `LoopMaybeInit` in `history` (#1012).
 fn loop_maybe_init_before(history: &[(usize, Event)]) -> Option<bool> {
     history.iter().rev().find_map(|(_, e)| match e {
-        Event::LoopMaybeInit { before_loop } => Some(*before_loop),
+        Event::LoopMaybeInit { before_loop, .. } => Some(*before_loop),
         _ => None,
     }).flatten()
 }
@@ -3189,6 +3196,11 @@ struct PartialMoveSplit {
     // `maybe_moved_by_let`), not only a branch, may have moved one of
     // `maybe_moved`.
     by_cond: bool,
+    // One of `maybe_moved` is maybe-moved by a loop that moves it on
+    // some time rounds only (`maybe_moved_by_kept_round`, #1031): "only
+    // if nothing above moved it" would read as if the move above
+    // settled it.
+    kept: bool,
 }
 
 // For a struct column (or a struct-typed field column such as
@@ -3220,6 +3232,7 @@ fn struct_partial_move_split(
     let mut maybe_moved: Vec<String> = Vec::new();
     let mut dropped = Vec::new();
     let mut by_cond = false;
+    let mut kept = false;
     for (timeline, name, is_copy) in &fields {
         // Fields of an already-listed moved-out field went with it.
         if moved.iter().chain(maybe_moved.iter()).any(|m| name.starts_with(&format!("{}.", m))) {
@@ -3246,6 +3259,7 @@ fn struct_partial_move_split(
             // branch of an `if`, and not in the others (#395).
             if maybe_moved_at_end(&timeline.history) {
                 by_cond |= moved_by_chain_condition(&timeline.history) || maybe_moved_by_let(&timeline.history);
+                kept |= maybe_moved_by_kept_round(timeline.history.iter());
                 maybe_moved.push((*name).clone());
             } else {
                 moved.push((*name).clone());
@@ -3257,7 +3271,7 @@ fn struct_partial_move_split(
     if moved.is_empty() && maybe_moved.is_empty() {
         None
     } else {
-        Some(PartialMoveSplit { moved, maybe_moved, dropped, by_cond })
+        Some(PartialMoveSplit { moved, maybe_moved, dropped, by_cond, kept })
     }
 }
 

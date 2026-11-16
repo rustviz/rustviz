@@ -2577,24 +2577,31 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// Whether what last changed `rap`'s state, in the events so far, is
   /// the end of a loop that may have ended before giving it a value
   /// (`LoopMaybeInit`, #1001): its next assignment drops the old value
-  /// only if the loop gave it one (`InitBy::Loop`).
-  fn maybe_init_by_loop_now(&self, rap: &ResourceAccessPoint) -> bool {
+  /// only if the loop gave it one (`InitBy::Loop`). `Some(nested)`, the
+  /// event's `nested` (#1032), if so.
+  fn maybe_init_by_loop_now(&self, rap: &ResourceAccessPoint) -> Option<bool> {
+    self.loop_maybe_init_now(rap).map(|(_, nested)| nested)
+  }
+
+  /// `maybe_init_by_loop_now`, with where in `preprocessed_events` that
+  /// `LoopMaybeInit` is.
+  fn loop_maybe_init_now(&self, rap: &ResourceAccessPoint) -> Option<(usize, bool)> {
     let is = |r: &ResourceTy| r.extract_rap().is_some_and(|r| r.hash() == rap.hash());
-    for (_, e) in self.preprocessed_events.iter().rev() {
+    for (at, (_, e)) in self.preprocessed_events.iter().enumerate().rev() {
       match e {
-        ExternalEvent::LoopMaybeInit { ro, .. } if ro.hash() == rap.hash() => return true,
+        ExternalEvent::LoopMaybeInit { ro, nested, .. } if ro.hash() == rap.hash() => return Some((at, *nested)),
         ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::LoopExitKept { ro, .. }
         | ExternalEvent::OrAltMove { ro, .. } | ExternalEvent::ManuallyDropByHand { ro, .. }
-        | ExternalEvent::OwnerDropAtReassign { ro, .. } if ro.hash() == rap.hash() => return false,
-        ExternalEvent::Move { from, to, .. } if is(from) || is(to) => return false,
-        ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. } if is(to) => return false,
+        | ExternalEvent::OwnerDropAtReassign { ro, .. } if ro.hash() == rap.hash() => return None,
+        ExternalEvent::Move { from, to, .. } if is(from) || is(to) => return None,
+        ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. } if is(to) => return None,
         ExternalEvent::Branch { branches, .. }
           if branches.iter().filter(|b| !b.diverges).any(|b| path_own(&b.e_data, rap, &[], PathOwn::Yes) != PathOwn::Yes
-            || path_own(&b.e_data, rap, &[], PathOwn::No) != PathOwn::No) => return false,
+            || path_own(&b.e_data, rap, &[], PathOwn::No) != PathOwn::No) => return None,
         _ => {}
       }
     }
-    false
+    None
   }
 
   /// At the end of `loop_expr` (#1000, #1001), what a variable declared
@@ -2693,13 +2700,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // flag's "nothing above moved it" can't tell the branch above from
     // the loop's own moves (#1019): `kept`. (One that every `break`
     // comes after an assignment to is `kept` above; other mixes are
-    // left as the body's end draws them. A loop inside another that it
-    // was declared before is the outer loop's to say, #1019.)
-    let mut maybe_init: Vec<(ResourceAccessPoint, Option<bool>)> =
-      maybe_init.into_iter().map(|ro| (ro, None)).collect();
+    // left as the body's end draws them.) In a loop inside another
+    // that it was declared before (#1019), each run of this loop may
+    // start with it holding nothing (the outer loop's first time
+    // round, after the branch above) or a value (from the outer loop's
+    // time round before): when every time round leaves it holding a
+    // value, it only may hold one after the loop, a `LoopMaybeInit`
+    // with `nested` (#1032); the rest is the outer loop's to say.
+    let mut maybe_init: Vec<(ResourceAccessPoint, Option<bool>, bool)> =
+      maybe_init.into_iter().map(|ro| (ro, None, false)).collect();
     let mut round_moved: Vec<(ResourceAccessPoint, bool)> = Vec::new();
+    // Where this loop's body starts in `preprocessed_events`.
+    let body_from = self.exit_frames.iter().rev().find_map(|f| match f {
+      ExitFrame::Loop { events_at, .. } => Some(*events_at),
+      ExitFrame::Branch { .. } => None,
+    });
     for MaybeEntry { ro, round, by_cond, nested } in maybe_entry {
-      if nested.is_some() || broke_moved.contains(&ro) || !current(self, &ro) || kept.iter().any(|(k, _)| *k == ro) {
+      if broke_moved.contains(&ro) || !current(self, &ro) || kept.iter().any(|(k, _)| *k == ro) {
         continue;
       }
       // The ways out of the loop: its `break`s, and for a `while` /
@@ -2714,8 +2731,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if !ok {
         continue;
       }
+      if nested.is_some() {
+        if round == Ownership::Held && self.rap_ownership_now(ro.name()) == Ownership::Held {
+          maybe_init.push((ro, Some(by_cond), true));
+        }
+        continue;
+      }
       match (round, self.rap_ownership_now(ro.name())) {
-        (Ownership::Held, Ownership::Held) => maybe_init.push((ro, Some(by_cond))),
+        (Ownership::Held, Ownership::Held) => maybe_init.push((ro, Some(by_cond), false)),
+        // Only may hold one because of a loop inside this one (#1032):
+        // as if it held one, what this loop says goes.
+        (Ownership::Held, Ownership::Maybe) if body_from.is_some_and(|from|
+          self.loop_maybe_init_now(&ro).is_some_and(|(at, nested)| nested && at >= from)) =>
+          maybe_init.push((ro, Some(by_cond), false)),
         (Ownership::None, Ownership::None) => round_moved.push((ro, false)),
         (Ownership::Maybe, Ownership::Maybe | Ownership::Held) => round_moved.push((ro, true)),
         _ => {}
@@ -2725,8 +2753,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.add_external_event(line, ExternalEvent::LoopExitKept { ro, reassigned, id: *self.unique_id });
       *self.unique_id += 1;
     }
-    for (ro, before_loop) in maybe_init {
-      self.add_external_event(line, ExternalEvent::LoopMaybeInit { ro, before_loop, id: *self.unique_id });
+    for (ro, before_loop, nested) in maybe_init {
+      self.add_external_event(line, ExternalEvent::LoopMaybeInit { ro, before_loop, nested, id: *self.unique_id });
       *self.unique_id += 1;
     }
     for (ro, kept) in round_moved {
@@ -4782,8 +4810,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           }
         }
       }
-      if drop_target.is_some() && maybe_init.is_none() && self.maybe_init_by_loop_now(rap) {
-        maybe_init = Some(InitBy::Loop);
+      if drop_target.is_some() && maybe_init.is_none() {
+        // After a loop inside another, every run of which may start
+        // with s holding nothing or a value (#1032), only the drop
+        // flag knows (as #1027's `DropFlag`).
+        maybe_init = match self.maybe_init_by_loop_now(rap) {
+          Some(false) => Some(InitBy::Loop),
+          Some(true) => Some(InitBy::DropFlag),
+          None => None,
+        };
       }
       // `s = …` in a loop's body where s only may hold a value as the
       // loop starts (a branch above moved it, #1012), with nothing in
@@ -10265,7 +10300,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if self.skip_raps.contains(ro.name()) || ro.is_ref() {
         continue;
       }
-      self.add_external_event(line, ExternalEvent::LoopMaybeInit { ro, before_loop: None, id: *self.unique_id });
+      self.add_external_event(line, ExternalEvent::LoopMaybeInit { ro, before_loop: None, nested: false, id: *self.unique_id });
       *self.unique_id += 1;
     }
   }
