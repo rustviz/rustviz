@@ -3276,8 +3276,9 @@ fn loop_head_lend_title(event: &Event, name: &String, rap: &ResourceAccessPoint,
 /// borrows (`self.items.iter_mut()`; #1060): the head's call lends it
 /// there, but the loop's iterator holds the reborrow until the loop
 /// ends (`StaticLender::LoopIterator`). Also a `&T` passed as it is to
-/// the head's adapter (`a.iter_mut().zip(b)`; #1076), whose copy the
-/// iterator holds.
+/// the head's adapter (`a.iter_mut().zip(b)`; #1076), or whose pointee
+/// the head's call reads (`v.iter()` with `v: &Vec<_>`; #1081): the
+/// iterator holds a copy of it.
 fn loop_iterator_ref_title(event: &Event, line: usize, rap: &ResourceAccessPoint, visualization_data: &VisualizationData) -> Option<String> {
     if !rap.is_ref() {
         return None;
@@ -3337,7 +3338,7 @@ fn loop_iterator_ref_title(event: &Event, line: usize, rap: &ResourceAccessPoint
             }
             Some(match lent_place(is)? {
                 None => hover_messages::event_dot_lend_through_ref_to_loop_iterator(rap.name(), is_mut, rap.is_mutref(), rap.points_to_copy()),
-                Some(place) => hover_messages::event_dot_lend_field_through_ref_to_loop_iterator(place, is_mut),
+                Some(place) => hover_messages::event_dot_lend_field_through_ref_to_loop_iterator(place, is_mut, rap.is_mutref()),
             })
         }
         Event::MutableReacquire { from: ResourceTy::Anonymous, id, still_borrowed_by, is, .. }

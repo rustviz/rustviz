@@ -20254,6 +20254,63 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=shelf.items is the owner of the resource",
         ],
     },
+    TooltipExpect {
+        name: "shared_iter_loop_1081",
+        // #1081: `for e in v.iter()` with `v: &Vec<_>` (also `list: &[T]`,
+        // `a.iter().zip(w.iter())`, a local `let r = &p;`, and
+        // `self.items.iter()` through `&self`). The loop's iterator reads
+        // through what `iter()` returned until the loop's `}` (`p.push(..)`
+        // in the body of `for n in r.iter()` is E0502), but the `for` line
+        // said "iter no longer borrows the resource v points to • v's
+        // immutable borrow ends". And `q.iter().map(..).collect::<Vec<i32>>()`
+        // keeps no borrow at all (`q.push(k)` in the body compiles), but
+        // said "q is read-only until the loop ends". The rows are pinned
+        // by the row test below.
+        must_contain: &[
+            "the resource v points to is immutably borrowed by the `for` loop's iterator, through a copy of v, until the loop ends",
+            "the `for` loop's iterator no longer borrows the resource v points to",
+            "the resource w points to is immutably borrowed by the `for` loop's iterator, through a copy of w, until the loop ends",
+            "the value list points to is immutably borrowed by the `for` loop's iterator, through a copy of list, until the loop ends",
+            "the resource r points to is immutably borrowed by the `for` loop's iterator, through a copy of r, until the loop ends",
+            "self.items is immutably borrowed by the `for` loop's iterator until the loop ends",
+            "the `for` loop's iterator no longer borrows self.items",
+        ],
+        must_not_contain: &[
+            "iter no longer borrows the resource v points to",
+            "iter no longer borrows the resource a points to",
+            "iter no longer borrows the resource w points to",
+            "iter no longer borrows the value list points to",
+            "iter no longer borrows the resource r points to",
+            "self.items's resource is no longer immutably borrowed",
+            "q is read-only until the loop ends",
+            "the `for` loop's iterator no longer borrows the resource q points to",
+        ],
+    },
+    TooltipExpect {
+        name: "chain_writes_1082",
+        // #1082: `for x in a.iter_mut().chain(b.iter_mut())` hands out a's
+        // elements, then b's, but `*x += 1` was drawn on a only, as "the
+        // resource a points to is modified through x". It is drawn on both
+        // columns now, each saying when it lands there. Also for
+        // `.chain(f)` with `f: &mut Vec<_>` moved in, and for local owners
+        // (`p.iter_mut().chain(q.iter_mut()).rev()`). With
+        // `std::iter::zip(c.iter_mut(), d.iter_mut())`, `*y += *x` wasn't
+        // drawn on d at all (the method form was, since #1067).
+        must_contain: &[
+            "the resource a points to is modified through x when x points into it (x points into the resource a or b points to)",
+            "the resource b points to is modified through x when x points into it (x points into the resource a or b points to)",
+            "the resource d points to is modified through y",
+            "*x acquires ownership of a new resource; its previous resource is dropped, when x points into the resource e points to (x points into the resource e or f points to)",
+            "*x acquires ownership of a new resource; its previous resource is dropped, when x points into the resource f points to (x points into the resource e or f points to)",
+            "p's resource is modified through x when x points into it (x points into p's resource or q's value)",
+            "q's value is modified through x when x points into it (x points into p's resource or q's value)",
+        ],
+        must_not_contain: &[
+            "=the resource a points to is modified through x",
+            "=p's resource is modified through x",
+            "the resource c points to is modified through",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -27076,6 +27133,102 @@ fn ref_passed_into_an_adapter_stays_borrowed_until_the_loop_ends() {
         let at = (label_x(&tl, column), y);
         let ends_there = dots_where(&tl, |lines| lines.iter().any(|l| l == end));
         assert!(!ends_there.contains(&at), "{:?} still on {}'s `for` line: {:?}", end, column, ends_there);
+    }
+}
+
+/// #1081 (`shared_iter_loop_1081`): where each text sits. A `for` loop
+/// over `v.iter()` with `v: &Vec<_>` (also `list: &[T]`, `.zip(w.iter())`,
+/// `let r = &p;`, `self.items.iter()` through `&self`) keeps reading
+/// through what `iter()` returned until the loop's `}`.
+#[test]
+fn shared_ref_iter_loop_keeps_its_borrow_until_the_loop_ends() {
+    let rv = run_with_local_backend("shared_iter_loop_1081");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let closes = code_rows_y(&code, "}");
+    let kept = |n: &str, what: &str| format!("the {what} {n} points to is immutably borrowed by the `for` loop's iterator, through a copy of {n}, until the loop ends");
+    let ends = |n: &str, what: &str| format!("the `for` loop's iterator no longer borrows the {what} {n} points to");
+    let show_for = code_row_y(&code, "for it in self.items.iter() {");
+    let total_for = code_row_y(&code, "for e in v.iter() {");
+    let pairs_for = code_row_y(&code, "for (x, y) in a.iter().zip(w.iter()) {");
+    let largest_for = code_row_y(&code, "for &item in list.iter() {");
+    let main_for = code_row_y(&code, "for n in r.iter() {");
+    let collect_for = code_row_y(&code, "for k in q.iter().map(|k| k * 2).collect::<Vec<i32>>() {");
+    // Each loop's `}` (the struct's is the first): show's is the second,
+    // total's the fifth, pairs' the seventh, largest's the tenth, main's
+    // the twelfth.
+    let rows = [
+        ("self", show_for, "self.items is immutably borrowed by the `for` loop's iterator until the loop ends".to_owned()),
+        ("self", closes[1], "the `for` loop's iterator no longer borrows self.items".to_owned()),
+        ("v", total_for, kept("v", "resource")),
+        ("v", closes[4], ends("v", "resource")),
+        ("a", pairs_for, kept("a", "resource")),
+        ("a", closes[6], ends("a", "resource")),
+        ("w", pairs_for, kept("w", "resource")),
+        ("w", closes[6], ends("w", "resource")),
+        ("list", largest_for, kept("list", "value")),
+        ("list", closes[9], ends("list", "value")),
+        ("r", main_for, kept("r", "resource")),
+        ("r", closes[11], ends("r", "resource")),
+        ("p", closes[11], "p's resource is no longer immutably borrowed".to_owned()),
+    ];
+    for (column, y, text) in rows {
+        let at = (label_x(&tl, column), y);
+        let dots = dots_where(&tl, |lines| lines.iter().any(|l| *l == text));
+        assert!(dots.contains(&at), "expected {:?} on {}'s column at {:?}, found {:?}", text, column, at, dots);
+    }
+    // The `for` lines no longer end the borrow; a head that collects
+    // into a new Vec keeps none.
+    for (column, y, end) in [
+        ("v", total_for, "iter no longer borrows the resource v points to"),
+        ("v", total_for, "v's immutable borrow ends"),
+        ("w", pairs_for, "iter no longer borrows the resource w points to"),
+        ("list", largest_for, "list's immutable borrow ends"),
+        ("r", main_for, "iter no longer borrows the resource r points to"),
+        ("p", main_for, "p's resource is no longer immutably borrowed"),
+        ("q", collect_for, "the resource q points to is immutably borrowed by the `for` loop's iterator through q; q is read-only until the loop ends"),
+    ] {
+        let at = (label_x(&tl, column), y);
+        let there = dots_where(&tl, |lines| lines.iter().any(|l| l == end));
+        assert!(!there.contains(&at), "{:?} still on {}'s `for` line: {:?}", end, column, there);
+    }
+}
+
+/// #1082 (`chain_writes_1082`): a write through x from a `chain` is drawn
+/// on each column x may point into, on the write's line; with
+/// `std::iter::zip(c.iter_mut(), d.iter_mut())` one through y on d's.
+#[test]
+fn chain_writes_are_drawn_on_each_column_x_may_point_into() {
+    let rv = run_with_local_backend("chain_writes_1082");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let incr = code_row_y(&code, "*x += 1;");
+    let zipped = code_row_y(&code, "*y += *x;");
+    let assign = code_row_y(&code, "*x = String::new();");
+    let double = code_row_y(&code, "*x *= 2;");
+    let either = |n: &str| format!("the resource {n} points to is modified through x when x points into it (x points into the resource a or b points to)");
+    let assigned = |n: &str| format!("*x acquires ownership of a new resource; its previous resource is dropped, when x points into the resource {n} points to (x points into the resource e or f points to)");
+    let rows = [
+        ("a", incr, either("a")),
+        ("b", incr, either("b")),
+        ("d", zipped, "the resource d points to is modified through y".to_owned()),
+        ("e", assign, assigned("e")),
+        ("f", assign, assigned("f")),
+        ("p", double, "p's resource is modified through x when x points into it (x points into p's resource or q's value)".to_owned()),
+        ("q", double, "q's value is modified through x when x points into it (x points into p's resource or q's value)".to_owned()),
+    ];
+    for (column, y, text) in rows {
+        let at = (label_x(&tl, column), y);
+        let dots = dots_where(&tl, |lines| lines.iter().any(|l| *l == text));
+        assert!(dots.contains(&at), "expected {:?} on {}'s column at {:?}, found {:?}", text, column, at, dots);
+    }
+    // Nothing claims x always points into a, and `*y += *x` writes nothing
+    // through x.
+    for (column, y, wrong) in [
+        ("a", incr, "the resource a points to is modified through x"),
+        ("c", zipped, "the resource c points to is modified through x"),
+    ] {
+        let at = (label_x(&tl, column), y);
+        let there = dots_where(&tl, |lines| lines.iter().any(|l| l == wrong));
+        assert!(!there.contains(&at), "{:?} on {}'s column: {:?}", wrong, column, there);
     }
 }
 

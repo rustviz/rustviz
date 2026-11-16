@@ -157,7 +157,11 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "s is an immutable borrow from the caller",
             "L2 Immutable borrow from s to bytes: as_bytes's signature gives the reference it returns the same lifetime as the value it was called on",
-            "L3 Return immutably borrowed resource from bytes to s",
+            // The loop's iterator reads through bytes until the loop's
+            // `}` (#1081).
+            "L3 the value bytes points to is immutably borrowed by the `for` loop's iterator, through a copy of bytes, until the loop ends",
+            "L7 the `for` loop's iterator no longer borrows the value bytes points to",
+            "L7 Return immutably borrowed resource from bytes to s",
             "Copy of the value first_word() returns to word",
             // `==` on u8 copies item; it isn't an actor (#908).
             "L4 item's value is copied",
@@ -170,6 +174,9 @@ const BOOK: &[Snippet] = &[
             "L2 s's resource is no longer immutably borrowed",
             "L2 as_bytes no longer borrows the resource s points to",
             "the resource bytes points to",
+            "L3 iter no longer borrows the value bytes points to",
+            "L3 Return immutably borrowed resource from bytes to s",
+            "L3 bytes's immutable borrow ends",
         ],
         ..E
     },
@@ -196,6 +203,11 @@ const BOOK: &[Snippet] = &[
             "my_string goes out of scope. Its resource is dropped.",
             // `==` on u8 copies item; it isn't an actor (#908).
             "L4 item's value is copied",
+            // The loop's iterator reads through bytes until the loop's
+            // `}` (#1081).
+            "L3 the value bytes points to is immutably borrowed by the `for` loop's iterator, through a copy of bytes, until the loop ends",
+            "L7 the `for` loop's iterator no longer borrows the value bytes points to",
+            "L7 Return immutably borrowed value from bytes to s",
         ],
         must_not_contain: &[
             "Copy from item to ==",
@@ -210,6 +222,9 @@ const BOOK: &[Snippet] = &[
             // `&s[0..i]` is a reference to part of the str s points to,
             // reborrowed through s, not s's reference (#1071).
             "a reference from s is returned to the caller",
+            "L3 iter no longer borrows the value bytes points to",
+            "L3 Return immutably borrowed value from bytes to s",
+            "L3 bytes's immutable borrow ends",
         ],
         ..E
     },
@@ -740,7 +755,11 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "text is bound to an immutable reference",
             "split_whitespace reads from text",
-            "L6 text's borrow of the string literal ends (string literals live for the whole program)",
+            // The loop's iterator reads through text until the loop's
+            // `}` (#1081).
+            "L6 the value text points to is immutably borrowed by the `for` loop's iterator, through a copy of text, until the loop ends",
+            "L9 the `for` loop's iterator no longer borrows the value text points to",
+            "L9 text's borrow of the string literal ends (string literals live for the whole program)",
             "L7 Mutable borrow from map to count: or_insert's signature gives the reference it returns the same lifetime as the value it was called on",
             "the value count points to is modified through *count",
             "Return mutably borrowed resource from count to map",
@@ -755,6 +774,8 @@ const BOOK: &[Snippet] = &[
             "text's immutable borrow ends (what it borrows from isn't shown)",
             // split_whitespace is a method, not a lender (#868).
             "Return immutably borrowed resource from word to split_whitespace",
+            "L6 split_whitespace no longer borrows the value text points to",
+            "L6 text's borrow of the string literal ends (string literals live for the whole program)",
         ],
         ..E
     },

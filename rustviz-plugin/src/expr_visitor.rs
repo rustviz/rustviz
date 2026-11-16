@@ -419,7 +419,9 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// local reference, `for e in v.iter_mut().rev()`): the receiver the
   /// head's method chain takes by `&mut`. A write `*e += 1` is drawn on
   /// its column, or on the column of what it points into (#1046).
-  pub loop_ref_into: HashMap<String, ResourceAccessPoint>,
+  /// Several when e may point into any of them: `for x in
+  /// a.iter_mut().chain(b.iter_mut())` (#1082).
+  pub loop_ref_into: HashMap<String, Vec<ResourceAccessPoint>>,
   /// `ref` / `ref mut` bindings out of a tuple-literal scrutinee's
   /// element (#580): they borrow the temporary tuple, which has no
   /// column, so their borrow's end is drawn as a plain end dot with no
@@ -6517,18 +6519,25 @@ pub fn keep_loop_head_loans(&mut self, head: &'tcx Expr<'tcx>) -> Vec<(ResourceT
     }
   }
   // `v.iter()` reborrows `*v` too, shared, when v is a `&mut` (#1059):
-  // v is read-only until the loop ends. (A `&T` v is copied, not
-  // reborrowed, and is read-only anyway.) A field reached through a
+  // v is read-only until the loop ends. A field reached through a
   // `&mut` (`self.items.iter_mut()`, #1060) is lent the same way.
   // So is each chain passed to the head's calls (`b.iter()` in
   // `a.iter_mut().zip(b.iter())`, #1066): the zipped iterator holds both.
-  for (root, m) in self.loop_head_chain_roots(head) {
+  // With a `&T` v (`v: &Vec<_>`, `list: &[T]`; #1081) the iterator reads
+  // through a copy of v until the loop ends, and v stays usable.
+  // Nothing is kept when the head's value can't hold a borrow
+  // (`v.iter().map(..).collect::<Vec<i32>>()`): the loop iterates
+  // over a new Vec, and `v.push(..)` in the body compiles.
+  if !typeck.expr_ty(head).walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_))) {
+    return out;
+  }
+  for (root, _) in self.loop_head_chain_roots(head) {
     let through = match &root {
       ResourceTy::Value(r) if r.is_ref() => Some((r.clone(), None)),
       ResourceTy::DerefField(r, place, _) => Some((r.clone(), Some(place.clone()))),
       _ => None,
     };
-    if let Some((r, place)) = through.filter(|(r, _)| m == Mutability::Mut || r.is_mutref()) {
+    if let Some((r, place)) = through {
       let ids = self.mark_kept_on_lines_at(lo, hi, &[*r.hash()], place.as_deref(), &fns);
       if let Some((is_mut, call)) = ids.iter().find_map(|id| pass_ref_kind(&self.preprocessed_events, *id)) {
         out.push((root, is_mut, call));
