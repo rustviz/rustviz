@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{is_param_value_line, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
+use crate::svg_generator::data::{is_param_value_line, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
 use crate::svg_generator::hover_messages::{self, styled_name_html};
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use handlebars::Handlebars;
@@ -1689,6 +1689,23 @@ fn render_scope_end_dot(
     false
 }
 
+/// At the `}` of a `loop` nothing breaks out of (#1057): whether the
+/// column holds a resource that is dropped where it leaves the loop
+/// (`Some(true)`), or is a reference or a value with nothing to drop
+/// (`Some(false)`). `None` when an owner may not hold its resource there
+/// (moved before the loop, on some paths, or in part): nothing is drawn,
+/// as after a conditional whose every branch leaves (#515, #1043).
+fn loop_runs_on_owns(hash: &u64, history: &[(usize, Event)], resource_hold: bool, visualization_data: &VisualizationData) -> Option<bool> {
+    let ro = &visualization_data.timelines[hash].resource_access_point;
+    if ro.is_ref() || ro.never_drops() || ro.is_plain_value() || ro.is_union() || ro.is_manually_drop()
+        || (ro.is_closure() && closure_move_capture_count(visualization_data, *hash) == 0)
+    {
+        return Some(false);
+    }
+    let whole = resource_hold && !maybe_moved_at_end(history) && struct_partial_move_split(visualization_data, *hash, None).is_none();
+    whole.then_some(true)
+}
+
 fn render_dot(
     hash: &u64,
     history: &Vec<(usize, Event)>,
@@ -1796,6 +1813,17 @@ fn render_dot(
         };
         if let Some(mut name) = visualization_data.get_name_from_hash(hash) {
             match event {
+                Event::OwnerGoOutOfScope { early: Some(EarlyReturns { runs_on: Some(on), .. }), .. }
+                | Event::RefGoOutOfScope { early: Some(EarlyReturns { runs_on: Some(on), .. }), .. } => {
+                    // At the `}` of a `loop` nothing breaks out of: still
+                    // alive while the loop keeps running (#1057). A plain
+                    // dot: nothing is dropped here.
+                    if let Some(owns) = loop_runs_on_owns(hash, history, resource_hold, visualization_data) {
+                        data.title = hover_messages::event_dot_loop_runs_on(&name, owns, on.exits, on.moved);
+                        append_dot(data, timeline_data, dots, None);
+                    }
+                    continue;
+                }
                 Event::OwnerGoOutOfScope { early, .. } => {
                 if render_scope_end_dot(hash, history, event, line_number, event_y, resource_hold, name, &mut data, timeline_data, visualization_data, dots) {
                     // A drop: `return`s in a loop body may drop it

@@ -2144,22 +2144,127 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// and those braces draw nothing; elsewhere (in a `for` body, say), a
   /// variable in scope at a `return` in it whose scope ends at one of them
   /// is always dropped at a `return`, which its scope end says (#1041).
+  ///
+  /// Each brace remembers the innermost such loop that keeps the code
+  /// from reaching it (a loop nested in the one recorded comes later;
+  /// one after it never runs): while it keeps running, its own `}` is
+  /// the last row the code reaches, where the variables still in scope
+  /// are drawn as alive (#1057).
   fn note_breakless_loop(&mut self, l: &'tcx Expr<'tcx>) {
     use rustc_hir::Node;
     if self.in_closure(l) || !self.loop_never_ends(l) {
       return;
     }
+    let this = EndlessLoop {
+      span: l.span,
+      first: span_to_line(&l.span, &self.tcx),
+      last: span_end_line(&l.span, &self.tcx),
+      exits: self.loop_exits(l),
+      runs: self.loop_repeats(l),
+    };
     let mut child = l.hir_id;
     for (id, node) in self.tcx.hir_parent_iter(l.hir_id) {
       let from = std::mem::replace(&mut child, id);
       match node {
         Node::Stmt(_) => {}
         Node::LetStmt(LetStmt { init: Some(init), .. }) if init.hir_id == from => {}
-        Node::Block(b) => { self.dead_ends.insert(span_end_line(&b.span, &self.tcx)); }
+        Node::Block(b) => {
+          let at = self.dead_ends.entry(span_end_line(&b.span, &self.tcx)).or_insert(this);
+          if at.span.contains(this.span) {
+            *at = this;
+          }
+        }
         Node::Expr(Expr { kind: ExprKind::Block(_, None) | ExprKind::DropTemps(_), .. }) => {}
         Node::Expr(m) if self.loop_never_ends(m) => {}
         _ => break,
       }
+    }
+  }
+
+  /// Whether the `loop` `l` can start its body again: the body can reach
+  /// its end (no statement in it, nor its tail, has type `!`: a `return`,
+  /// a panic, a loop that never ends), or a `continue` goes back to it
+  /// (#1057). One whose body always returns (#1041) never repeats.
+  fn loop_repeats(&self, l: &'tcx Expr<'tcx>) -> bool {
+    let ExprKind::Loop(body, ..) = l.kind else { return true };
+    let typeck = self.tcx.typeck(l.hir_id.owner);
+    let never = |e: &Expr<'tcx>| typeck.expr_ty_opt(e).is_some_and(|t| t.is_never());
+    let diverges = body.stmts.iter().any(|st| match st.kind {
+      StmtKind::Expr(e) | StmtKind::Semi(e) => never(e),
+      StmtKind::Let(LetStmt { init: Some(e), .. }) => never(e),
+      _ => false,
+    }) || body.expr.is_some_and(never);
+    if !diverges {
+      return true;
+    }
+    struct Continues { l: HirId, found: bool }
+    impl<'tcx> Visitor<'tcx> for Continues {
+      fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+        if let ExprKind::Continue(dest) = e.kind {
+          self.found |= dest.target_id == Ok(self.l);
+        }
+        intravisit::walk_expr(self, e);
+      }
+    }
+    let mut v = Continues { l: l.hir_id, found: false };
+    intravisit::walk_expr(&mut v, l);
+    v.found
+  }
+
+  /// What can leave the `loop` `l` that nothing breaks out of (#1057):
+  /// a `return` or a `?` (not in a closure), or a call that never
+  /// returns (a panic) drop what is in scope; `std::process::exit` /
+  /// `abort` drop nothing. With none of those, the loop never ends
+  /// (`LoopExits::None`) only if nothing in it may panic either (a call,
+  /// arithmetic that may overflow, indexing); otherwise what leaves it
+  /// isn't drawn (`LoopExits::Other`).
+  fn loop_exits(&self, l: &'tcx Expr<'tcx>) -> LoopExits {
+    struct Exits<'a, 'tcx> {
+      tcx: rustc_middle::ty::TyCtxt<'tcx>,
+      typeck: &'a rustc_middle::ty::TypeckResults<'tcx>,
+      dropping: bool,
+      other: bool,
+    }
+    impl<'a, 'tcx> Visitor<'tcx> for Exits<'a, 'tcx> {
+      fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+        use rustc_hir::BinOpKind::*;
+        match e.kind {
+          // A `return` or `?` in a closure leaves the closure.
+          ExprKind::Closure(..) => return,
+          ExprKind::Ret(_) => self.dropping = true,
+          ExprKind::Call(f, _) => {
+            let never = self.typeck.expr_ty_opt(e).is_some_and(|t| t.is_never());
+            let callee = match f.kind {
+              ExprKind::Path(ref qp) => self.typeck.qpath_res(qp, f.hir_id).opt_def_id(),
+              _ => None,
+            };
+            let quits = callee.is_some_and(|d| matches!(self.tcx.def_path_str(d).as_str(), "std::process::exit" | "std::process::abort"));
+            if never && !quits {
+              self.dropping = true;
+            } else {
+              self.other = true;
+            }
+          }
+          ExprKind::MethodCall(..) | ExprKind::Index(..) | ExprKind::Unary(rustc_hir::UnOp::Neg, _) => {
+            self.dropping |= self.typeck.expr_ty_opt(e).is_some_and(|t| t.is_never());
+            self.other = true;
+          }
+          ExprKind::Binary(op, ..) if matches!(op.node, Add | Sub | Mul | Div | Rem | Shl | Shr) => self.other = true,
+          ExprKind::AssignOp(op, ..) if matches!(rustc_hir::BinOpKind::from(op.node), Add | Sub | Mul | Div | Rem | Shl | Shr) => self.other = true,
+          _ => {}
+        }
+        intravisit::walk_expr(self, e);
+      }
+    }
+    let typeck = self.tcx.typeck(l.hir_id.owner);
+    let mut v = Exits { tcx: self.tcx, typeck, dropping: false, other: false };
+    intravisit::walk_expr(&mut v, l);
+    if v.dropping {
+      LoopExits::Dropping
+    } else if v.other {
+      LoopExits::Other
+    } else {
+      LoopExits::None
     }
   }
 
@@ -2173,9 +2278,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   ///   dropped at one of them instead; and one that is always dropped
   ///   at them names each `?` before them it is in scope at (`fn_tries`,
   ///   #1044), which may return first;
-  /// - removes the `GoOutOfScope` of an owner the code never reaches
-  ///   that none of them comes before (#1043): its loop is left only at
-  ///   exits drawn with their own drops, or never;
+  /// - moves the `GoOutOfScope` of a variable the code never reaches
+  ///   that none of them comes before (#1043) to the closing `}` of the
+  ///   loop that keeps the code from reaching it, the last row the code
+  ///   reaches while the loop keeps running (`runs_on`, #1057): the loop
+  ///   is left only at exits drawn with their own drops, or never;
   /// - the drop of a `for` loop's head temporary where the loop ends;
   /// - the drop of a `for` loop's iterator variable where its loop ends.
   pub fn mark_loop_returns(&mut self, exit_ids: &HashSet<usize>) {
@@ -2209,9 +2316,25 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       !always || ends.iter().filter(|(l, h)| h == ro.hash() && *l > r.line).map(|(l, _)| *l).min() == Some(line)
     };
+    // Whether the variable `h` is moved on the lines `first..=last` (at
+    // an exit of the loop there, #1057).
+    let mut moves: Vec<(usize, u64)> = Vec::new();
+    {
+      let mut collect = |line: usize, ev: &mut ExternalEvent| {
+        if let ExternalEvent::Move { from: ResourceTy::Value(from), .. } = ev {
+          moves.push((line, *from.hash()));
+        }
+      };
+      walk(self.preprocessed_events.as_mut_slice(), &mut collect);
+      walk_map(&mut *self.event_line_map, &mut collect);
+    }
+    let moved_in = |h: &u64, first: usize, last: usize| moves.iter().any(|(l, m)| m == h && (first..=last).contains(l));
     // The scope ends the code never reaches that nothing else marks
-    // (#1043): removed below.
-    let mut unreached: HashSet<usize> = HashSet::new();
+    // (#1043), by id: moved below to the line of the closing `}` of the
+    // loop that keeps the code from reaching them (#1057).
+    let mut unreached: HashMap<usize, usize> = HashMap::new();
+    // Those of an owner after a loop that never repeats: removed.
+    let mut removed: HashSet<usize> = HashSet::new();
     let mut mark = |line: usize, ev: &mut ExternalEvent| match ev {
       ExternalEvent::GoOutOfScope { ro, early, id, .. } if !exit_ids.contains(id) => {
         let mut e = EarlyReturns::default();
@@ -2225,7 +2348,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // Never reached (after a `loop` nothing breaks out of): every
         // path that leaves through the loop does so at one of the
         // `return`s (#1041).
-        if dead.contains(&line) && !e.maybe.is_empty() {
+        if dead.contains_key(&line) && !e.maybe.is_empty() {
           e.always.append(&mut e.maybe);
           e.always.sort_unstable();
           e.always.dedup();
@@ -2239,13 +2362,25 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
         if e != EarlyReturns::default() {
           *early = Some(e);
-        } else if dead.contains(&line) && !ro.never_drops() && !ro.is_ref() {
+        } else if dead.get(&line).is_some_and(|lp| !lp.runs) {
+          // Its loop never starts its body again (it always returns,
+          // #1041): an owner is dropped at those exits, and a reference
+          // or Copy value keeps its plain scope end, as after a
+          // conditional whose every branch leaves (#515).
+          if !ro.never_drops() && !ro.is_ref() {
+            removed.insert(*id);
+          }
+        } else if let Some(lp) = dead.get(&line) {
           // Never reached, and no `return` directly in the loop: the
           // loop is left only at exits drawn with their own drops (a
           // `return` / panic in a branch, a `?`), or never. Like after
           // a conditional whose every branch leaves (#515), no scope
-          // end drops it here (#1043).
-          unreached.insert(*id);
+          // end drops it here (#1043). It is still in scope while the
+          // loop keeps running: its column runs on to the loop's `}`
+          // (#1057).
+          let moved = moved_in(ro.hash(), lp.first, lp.last);
+          *early = Some(EarlyReturns { runs_on: Some(LoopRunsOn { exits: lp.exits, moved }), ..EarlyReturns::default() });
+          unreached.insert(*id, lp.last);
         }
       }
       // A `for` loop's head temporary, where the loop ends.
@@ -2271,7 +2406,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     walk(self.preprocessed_events.as_mut_slice(), &mut mark);
     walk_map(&mut *self.event_line_map, &mut mark);
     if !unreached.is_empty() {
-      drop_ids(&mut self.preprocessed_events, &mut *self.event_line_map, &unreached);
+      move_ids(&mut self.preprocessed_events, &mut *self.event_line_map, &unreached);
+    }
+    if !removed.is_empty() {
+      drop_ids(&mut self.preprocessed_events, &mut *self.event_line_map, &removed);
     }
 
     // Every event, those in branches too (with each branch's line map).
@@ -2298,6 +2436,32 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         if let ExternalEvent::Branch { branches, .. } = ev {
           for b in branches.iter_mut() {
             drop_ids(&mut b.e_data, &mut b.line_map, ids);
+          }
+        }
+      }
+    }
+    // Moves each event of `to` (by id) to its line there, in branches
+    // too.
+    fn move_ids(events: &mut [(usize, ExternalEvent)], map: &mut BTreeMap<usize, Vec<ExternalEvent>>, to: &HashMap<usize, usize>) {
+      for (line, e) in events.iter_mut() {
+        if let Some(&l) = to.get(&e.get_id()) {
+          *line = l;
+        }
+      }
+      let mut moved: Vec<(usize, ExternalEvent)> = Vec::new();
+      for evs in map.values_mut() {
+        let (go, stay): (Vec<_>, Vec<_>) = std::mem::take(evs).into_iter().partition(|e| to.contains_key(&e.get_id()));
+        *evs = stay;
+        moved.extend(go.into_iter().map(|e| (to[&e.get_id()], e)));
+      }
+      for (l, e) in moved {
+        map.entry(l).or_default().push(e);
+      }
+      let branches = events.iter_mut().map(|(_, e)| e).chain(map.values_mut().flatten());
+      for ev in branches {
+        if let ExternalEvent::Branch { branches, .. } = ev {
+          for b in branches.iter_mut() {
+            move_ids(&mut b.e_data, &mut b.line_map, to);
           }
         }
       }

@@ -487,8 +487,9 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // The `return`s directly in a loop body (#1020): see `LoopReturn`.
   pub loop_returns: Vec<LoopReturn>,
   // The lines of the closing braces that a `loop` nothing breaks out of
-  // keeps the code from reaching (#1041): see `note_breakless_loop`.
-  pub dead_ends: HashSet<usize>,
+  // keeps the code from reaching (#1041), and that loop (the innermost
+  // one, #1057): see `note_breakless_loop`.
+  pub dead_ends: HashMap<usize, EndlessLoop>,
   // Each `?` in the function (not in a closure): its line, and the
   // variables in scope there, which it drops if it returns early
   // (#1044): see `mark_loop_returns`.
@@ -821,6 +822,23 @@ pub struct LoopReturn {
   pub iters: Vec<ResourceAccessPoint>,
 }
 
+/// A `loop` that nothing breaks out of (`loop_never_ends`), which keeps
+/// the code from reaching the closing braces after it (#1041). While it
+/// keeps running, its own `}` is the last row the code reaches (#1057).
+#[derive(Clone, Copy)]
+pub struct EndlessLoop {
+  /// The loop's span, to tell a loop nested in it.
+  pub span: rustc_span::Span,
+  /// The lines of its `loop` keyword and its closing `}`.
+  pub first: usize,
+  pub last: usize,
+  /// What can leave it.
+  pub exits: LoopExits,
+  /// Whether it can start its body again (`loop_repeats`): only then
+  /// does it keep running.
+  pub runs: bool,
+}
+
 /// See `ExprVisitor::exit_frames`.
 #[derive(Clone)]
 pub enum ExitFrame {
@@ -921,7 +939,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       unbranched_temps: HashSet::new(),
       loop_iterators: Vec::new(),
       loop_returns: Vec::new(),
-      dead_ends: HashSet::new(),
+      dead_ends: HashMap::new(),
       fn_tries: Vec::new(),
       temp_cols: HashMap::new(),
       nested_ext_temps: HashMap::new(),

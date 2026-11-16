@@ -1444,6 +1444,36 @@ pub struct EarlyReturns {
     /// `return`s, any of which may return first and drop it there
     /// instead (#1044).
     pub tries: Vec<usize>,
+    /// A scope end after a `loop` that nothing breaks out of and no
+    /// `return` directly in it leaves (#1043), which the code never
+    /// reaches: drawn instead at the loop's closing `}`, the last row
+    /// the code reaches while the loop keeps running, where it ends the
+    /// column without dropping anything (#1057).
+    pub runs_on: Option<LoopRunsOn>,
+}
+
+/// A variable still in scope while a `loop` that nothing breaks out of
+/// keeps running, at the loop's closing `}` (#1057).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LoopRunsOn {
+    /// What can leave the loop.
+    pub exits: LoopExits,
+    /// Whether the loop moves the variable (at one of its exits:
+    /// `return g`), so it isn't always dropped there.
+    pub moved: bool,
+}
+
+/// What can leave a `loop` that nothing breaks out of (#1057).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LoopExits {
+    /// A `return`, a `?` or a panic, which drop what is in scope.
+    Dropping,
+    /// None that drop anything: only `std::process::exit` / `abort`
+    /// (which drop nothing), or a panic in a call or arithmetic, which
+    /// isn't drawn.
+    Other,
+    /// Nothing: the loop never ends (`loop {}`).
+    None,
 }
 
 /// Where a `for` loop's iterator is dropped (#482, #592).

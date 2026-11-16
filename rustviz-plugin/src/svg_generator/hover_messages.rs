@@ -1,4 +1,4 @@
-use crate::svg_generator::data::{BranchExit, EarlyReturns, LoopLeft, ResourceAccessPoint, TempPart, IF_LET_ARM};
+use crate::svg_generator::data::{BranchExit, EarlyReturns, LoopExits, LoopLeft, ResourceAccessPoint, TempPart, IF_LET_ARM};
 
 
 /* Event Dot messages: shows up when someone hovers over a dot */
@@ -4777,6 +4777,30 @@ pub fn event_dot_scope_end_after_loop_return(title: &str, early: &EarlyReturns, 
         out.push_str(&format!(" If {} runs first, this happens there instead.", returns_on_lines(&early.maybe)));
     }
     out
+}
+
+/// The end of a column at the closing `}` of a `loop` that nothing
+/// breaks out of (#1057): the code never gets past it, but the variable
+/// isn't dropped here. It is still in scope (and an owner still owns its
+/// resource) on every path that keeps looping, and leaves only where the
+/// loop is left: at the exits drawn above it (`return`, `?`, a panic),
+/// or never. `owns`: it holds a resource that would be dropped; `moved`:
+/// the loop moves it, at one of those exits.
+pub fn event_dot_loop_runs_on(my_name: &str, owns: bool, exits: LoopExits, moved: bool) -> String {
+    let n = styled_name_html(my_name);
+    let head = if owns {
+        format!("{n} is still alive while the loop keeps running")
+    } else {
+        format!("{n} is still in scope while the loop keeps running")
+    };
+    match (exits, owns) {
+        (LoopExits::Dropping, true) if moved => format!("{head}; it's moved or dropped only at the exits above"),
+        (LoopExits::Dropping, true) => format!("{head}; it's dropped only at the exits above"),
+        (LoopExits::Dropping, false) => format!("{head}; it goes out of scope only at the exits above"),
+        (LoopExits::None, true) => format!("{head}; this loop never ends, so {n} is never dropped"),
+        (LoopExits::None, false) => format!("{head}; this loop never ends, so {n} never goes out of scope"),
+        (LoopExits::Other, _) => head,
+    }
 }
 
 /// A scope end after the resource was moved out on every path that
