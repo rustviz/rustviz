@@ -19423,6 +19423,53 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=u goes out of scope. Its resource is dropped. If the `return` on line 80 runs first, this happens there instead.",
         ],
     },
+    TooltipExpect {
+        // #1043: a `loop` with no `break` whose only ways out are a
+        // `return` / panic in a branch or a `?`. The code after the loop
+        // never runs, so no scope end there drops anything: each exit's
+        // own dot says what it drops (with c false the loop runs forever
+        // and nothing is dropped). #1044: a `?` before a `return`
+        // directly in a loop body may return first, so the scope ends
+        // said to happen at the `return` name it too; a variable declared
+        // after the `?` (y, b), a `?` after the loop and a `?` in a
+        // closure aren't named.
+        name: "loop_exit_texts_1043",
+        must_contain: &[
+            // (Each exit's drops: where they are is checked by
+            // `breakless_loop_branch_exits_drop_only_there`.)
+            "g goes out of scope. Its resource is dropped.",
+            "q goes out of scope. Its resource is dropped.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and w's resource is dropped. If the `?` succeeds, nothing happens to w here.",
+            "s goes out of scope at the `return` on line 68 (or at the `?` on line 67, if that returns first). Its resource is dropped.",
+            "t goes out of scope at the `return` on line 68 (or at the `?` on line 67, if that returns first). Its resource is dropped.",
+            "y goes out of scope at the `return` on line 68",
+            "s goes out of scope at the `return` on line 79 (or at the `?` on line 76 or 78, if one of them returns first). Its resource is dropped.",
+            "a goes out of scope at the `return` on line 79 (or at the `?` on line 78, if that returns first)",
+            "t goes out of scope at the `return` on line 79 (or at the `?` on line 78, if that returns first). Its resource is dropped.",
+            "b goes out of scope at the `return` on line 79",
+            "t goes out of scope at the `return` on line 90 (or at the `?` on line 88, if that returns first). Its resource is dropped.",
+            "u goes out of scope at the `return` on line 102 (or at the `?` on line 101, if that returns first). Its resource is dropped.",
+            "e goes out of scope at the `return` on line 102 (or at the `?` on line 101, if that returns first)",
+            // Controls.
+            "s goes out of scope at the `return` on line 113. Its resource is dropped.",
+            "t goes out of scope at the `return` on line 123. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "=w goes out of scope. Its resource is dropped.",
+            "=s goes out of scope at the `return` on line 68. Its resource is dropped.",
+            "=t goes out of scope at the `return` on line 68. Its resource is dropped.",
+            "=s goes out of scope at the `return` on line 79. Its resource is dropped.",
+            "=t goes out of scope at the `return` on line 79. Its resource is dropped.",
+            "=a goes out of scope at the `return` on line 79",
+            "=t goes out of scope at the `return` on line 90. Its resource is dropped.",
+            "=u goes out of scope at the `return` on line 102. Its resource is dropped.",
+            "=e goes out of scope at the `return` on line 102",
+            "y goes out of scope at the `return` on line 68 (or",
+            "b goes out of scope at the `return` on line 79 (or",
+            "on line 113 (or at the `?`",
+            "on line 123 (or at the `?`",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -22915,6 +22962,39 @@ fn breakless_loop_drops_are_on_the_return_row() {
     let g = dots_listing_tooltip(&timeline, "g goes out of scope. Its resource is dropped.");
     assert!(g.iter().all(|(_, dy)| on_row(*dy, lp) || on_row(*dy, nest)),
         "{name}: g dropped off its `return` rows: {g:?}");
+}
+
+/// A `loop` with no `break` whose only ways out are a `return` / panic in
+/// a branch or a `?` (#1043): the code after it never runs, so each
+/// variable's drop is on its exit's row only, not at a scope end after the
+/// loop (with the loop running forever, nothing is dropped); with only a
+/// `?`, only its conditional dot says w is dropped.
+#[test]
+fn breakless_loop_branch_exits_drop_only_there() {
+    let name = "loop_exit_texts_1043";
+    let rv = run_with_local_backend(name);
+    let (code, timeline) = (rv.code_panel_string(), rv.timeline_panel_string());
+    // (Each of these exits is followed by a line holding only `}`.)
+    let next_after = |src: &str| -> f64 {
+        let y = code_row_y(&code, src);
+        code_rows_y(&code, "}").into_iter().filter(|r| *r > y).fold(f64::MAX, f64::min)
+    };
+    let on_row = |dy: f64, src: &str| dy >= code_row_y(&code, src) && dy < next_after(src);
+    for (var, row) in [
+        ("g", "return g.len();"),
+        ("p", "return p.len() + h.len();"),
+        ("h", "return p.len() + h.len();"),
+        ("u", "return u.len() + x as usize;"),
+        ("q", "panic!(\"stop {}\", q.len());"),
+    ] {
+        let drop = format!("{var} goes out of scope. Its resource is dropped.");
+        let dots = dots_listing_tooltip(&timeline, &drop);
+        assert!(!dots.is_empty() && dots.iter().all(|(_, dy)| on_row(*dy, row)),
+            "{name}: {var} should be dropped on the {row:?} row (y={}) only; dots listing {drop:?}: {dots:?}",
+            code_row_y(&code, row));
+    }
+    let w = dots_where(&timeline, |lines| lines.iter().any(|l| l.starts_with("w goes out of scope")));
+    assert!(w.is_empty(), "{name}: w has a scope end after the loop: {w:?}");
 }
 
 /// `w = match n { 0 => p, 1 => q, _ => String::new() };` with w owning a

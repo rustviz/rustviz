@@ -489,6 +489,10 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // The lines of the closing braces that a `loop` nothing breaks out of
   // keeps the code from reaching (#1041): see `note_breakless_loop`.
   pub dead_ends: HashSet<usize>,
+  // Each `?` in the function (not in a closure): its line, and the
+  // variables in scope there, which it drops if it returns early
+  // (#1044): see `mark_loop_returns`.
+  pub fn_tries: Vec<(usize, HashSet<u64>)>,
   // The `(temporary N)` column of each unbound temporary that a field
   // is moved out of (`make_q().a`), by the expression that makes it
   // (#469).
@@ -918,6 +922,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       loop_iterators: Vec::new(),
       loop_returns: Vec::new(),
       dead_ends: HashSet::new(),
+      fn_tries: Vec::new(),
       temp_cols: HashMap::new(),
       nested_ext_temps: HashMap::new(),
       let_else_literal_temps: HashMap::new(),
