@@ -2901,9 +2901,12 @@ pub fn event_dot_closure_value_acquire(my_name: &String, from_name: &String, is_
     }
 }
 
-// Scope end of a holder that still holds its (non-Copy) value.
+// Scope end of a holder that still holds its value and needs drop (a
+// `Vec<&T>`, a `Box<dyn Fn() + '_>`): its resource is dropped (#484). A
+// holder with nothing to drop (an `Iter`) never gets this suffix: its
+// scope end claims no drop.
 pub fn event_dot_holder_drop_suffix() -> String {
-    ". Its value is dropped, but not the data it borrowed.".to_owned()
+    ". Its resource is dropped, but not the data it borrowed.".to_owned()
 }
 
 pub fn state_closure_full_privilege_no_resource(my_name: &String) -> String {

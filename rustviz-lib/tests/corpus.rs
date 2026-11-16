@@ -7125,6 +7125,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "it goes out of scope. Its value is dropped, but not the data it borrowed.",
+            "it goes out of scope. Its resource is dropped, but not the data it borrowed.",
             ", through the value iter returned",
             "Move from iter to it",
             "it is the owner of the resource",
@@ -7388,9 +7389,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "refs holds a value that immutably borrows s's resource (refs isn't a reference itself)",
             "refs owns a value that can hold references (refs isn't a reference itself)",
             "Return immutably borrowed resource from refs to s",
-            "refs goes out of scope. Its value is dropped, but not the data it borrowed.",
+            // A `Vec` needs drop: its resource (the buffer) is dropped (#484).
+            "refs goes out of scope. Its resource is dropped, but not the data it borrowed.",
         ],
         must_not_contain: &[
+            "refs goes out of scope. Its value is dropped, but not the data it borrowed.",
             ", through the value collect returned",
             "Move from collect to words",
             "words is the owner of the resource",
@@ -20309,6 +20312,44 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=the resource a points to is modified through x",
             "=p's resource is modified through x",
             "the resource c points to is modified through",
+        ],
+    },
+    // ─── A holder's scope end follows the resource rule (#484) ───────
+    TooltipExpect {
+        name: "holder_drop_resource",
+        // `refs` (a `Vec<&String>`) and `f` (a `Box<dyn Fn() -> usize +
+        // '_>` borrowing `b`) are not references but need drop: their
+        // buffer / box is freed at scope end, so it is a resource that is
+        // dropped (never the Strings they point to). `it` (a slice
+        // `Iter`) has nothing to drop: no drop is claimed, and certainly
+        // not a "resource".
+        must_contain: &[
+            "refs goes out of scope. Its resource is dropped, but not the data it borrowed.",
+            "f goes out of scope. Its resource is dropped, but not the data it borrowed.",
+            "it goes out of scope",
+            "a goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "refs goes out of scope. Its value is dropped, but not the data it borrowed.",
+            "f goes out of scope. Its value is dropped, but not the data it borrowed.",
+            "it goes out of scope. Its value is dropped",
+            "it goes out of scope. Its resource is dropped",
+        ],
+    },
+    TooltipExpect {
+        name: "holder_drop_call",
+        // `drop(refs)` moves a `Vec<&String>` into `drop`: its resource.
+        // `drop(it)` moves an `Iter`, which has nothing to drop: its
+        // value. Neither holder is dropped again at scope end.
+        must_contain: &[
+            "refs's resource is moved into drop, which drops it",
+            "it's value is moved",
+        ],
+        must_not_contain: &[
+            "it's resource is moved",
+            "refs's value is moved",
+            "refs goes out of scope. Its value is dropped",
+            "it goes out of scope. Its resource is dropped",
         ],
     },
 ];
