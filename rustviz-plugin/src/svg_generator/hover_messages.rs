@@ -2634,6 +2634,16 @@ pub fn state_maybe_uninitialized(my_name: &String) -> String {
     )
 }
 
+// `state_maybe_uninitialized` where what may have left s with no value
+// is a loop above that may have ended before assigning it (#786), not
+// a conditional above (#1034).
+pub fn state_maybe_uninitialized_after_loop(my_name: &String) -> String {
+    format!(
+        "{0} may have no value here: a loop above may have ended before assigning it",
+        styled_name_html(my_name)
+    )
+}
+
 /// How the tooltips name an arm: "if" / "else" / "if let" for an `if`,
 /// the pattern for a `match` arm. `label` is the arm's label (see
 /// `BranchType`).
@@ -3209,6 +3219,36 @@ pub fn event_dot_branch_merge_moved_then_reassigned(my_name: &String, by_cond: b
         branch_merge_moved(&name, by_cond), branch_merge_unless(by_cond), name,
         if in_loop { " (or, if it isn't, when it goes out of scope)" } else { "" }
     )
+}
+
+// The join of a conditional that gives a new value, in only some of its
+// branches, to a variable that may have held none where it started
+// (#1034): `if c { drop(s); } if x { s = String::from("b"); }`. After
+// it, s holds the new value, the old one (if nothing moved it), or
+// nothing: rustc rejects a read of s there (E0382), and a drop flag
+// decides what is dropped. `value`, `mutable`: as for
+// `event_dot_branch_merge_maybe_init`. `reassigned`: as for
+// `event_dot_loop_maybe_init`.
+pub fn event_dot_branch_merge_maybe_held(my_name: &String, value: bool, mutable: bool, reassigned: Option<bool>) -> String {
+    let my_name_fmt = styled_name_html(my_name);
+    let mut out = format!(
+        "{0} may have no value after the branches: it may have had none where they start, and only some \
+         of them assign it, so it can't be used after the branches{1}.",
+        my_name_fmt,
+        if mutable { " (until it's assigned again)" } else { "" },
+    );
+    if !value {
+        out.push_str(&format!(
+            " If it has one, its resource is dropped when {0} {1}.",
+            my_name_fmt,
+            match reassigned {
+                Some(true) => "is assigned again",
+                Some(false) => "is assigned again (or, if it isn't, when it goes out of scope)",
+                None => "goes out of scope",
+            },
+        ));
+    }
+    out
 }
 
 // ── Maybe-initialized `let x;` locals (#244) ──────────────────────

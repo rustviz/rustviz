@@ -1968,6 +1968,13 @@ pub enum ExternalEvent {
       // inside, and that they were declared before, gives a new value
       // somewhere in its body (#1026).
       loop_assigned: HashSet<ResourceAccessPoint>,
+      // Variables (and field columns) declared before the conditional
+      // that may hold no value where it starts (something above moved
+      // them, on some paths or on all) and that only some of the branches reaching the
+      // merge give a new value, the others leaving them as they were
+      // (#1034): after the merge they may hold a value or not, and only
+      // a drop flag knows which.
+      maybe_held: HashSet<ResourceAccessPoint>,
       id: usize
     }
 }
@@ -2222,6 +2229,8 @@ pub enum Event {
       // (#1026): when the loop comes back round, that assignment drops
       // what the join leaves it holding.
       loop_assigned: bool,
+      // This column is one of the ExternalEvent's `maybe_held` (#1034).
+      maybe_held: bool,
       id: usize
     },
 
@@ -4298,7 +4307,7 @@ impl Visualizable for VisualizationData {
             };
             states.push((previous_line, *l, pre_event_state));
             match e {
-                Event::Branch { branch_history, ty, split_point, merge_point, maybe_init, .. } => {
+                Event::Branch { branch_history, ty, split_point, merge_point, maybe_init, maybe_held, .. } => {
                     // Timeline is empty in the middle during a branch
                     states.push((*split_point, *merge_point, State::OutOfScope));
                     // State of each branch that reaches the merge; a
@@ -4334,6 +4343,10 @@ impl Visualizable for VisualizationData {
                     // maybe-moved one), and it doesn't surely own
                     // anything.
                     let unassigned_on_some_path = matches!(init_join(*maybe_init, reaching_states.iter()), Some(InitJoin::Maybe { .. }));
+                    // So has one that may have held nothing where the
+                    // conditional started and that only some branches
+                    // assign (#1034).
+                    let unassigned_on_some_path = unassigned_on_some_path || *maybe_held;
                     // If every recorded branch diverges, only a path
                     // the user didn't write can get past the
                     // conditional (the implicit empty `else` of an
@@ -4408,7 +4421,7 @@ impl Visualizable for VisualizationData {
         for (i, (l, e)) in history.iter_mut().enumerate() {
             states.push((previous_line, *l, previous_state.clone()));
             match e {
-                Event::Branch { branch_history, ty, split_point, merge_point, maybe_init, .. } => {
+                Event::Branch { branch_history, ty, split_point, merge_point, maybe_init, maybe_held, .. } => {
                     // Timeline is empty in the middle during a branch
                     states.push((*split_point, *merge_point, State::OutOfScope));
                     // State of each branch that reaches the merge; a
@@ -4444,6 +4457,10 @@ impl Visualizable for VisualizationData {
                     // maybe-moved one), and it doesn't surely own
                     // anything.
                     let unassigned_on_some_path = matches!(init_join(*maybe_init, reaching_states.iter()), Some(InitJoin::Maybe { .. }));
+                    // So has one that may have held nothing where the
+                    // conditional started and that only some branches
+                    // assign (#1034).
+                    let unassigned_on_some_path = unassigned_on_some_path || *maybe_held;
                     // If every recorded branch diverges, only a path
                     // the user didn't write can get past the
                     // conditional (the implicit empty `else` of an
@@ -4700,7 +4717,7 @@ impl Visualizable for VisualizationData {
     fn append_branch_event(&self, event: &ExternalEvent, line_number: usize, is: &ResourceTy, b_history: &mut Vec<(usize, Event)>) {
         let rap = is.extract_rap().unwrap();
         match event {
-            ExternalEvent::Branch { live_vars, branches, branch_type, split_point, merge_point, maybe_init, loop_assigned, id } => {
+            ExternalEvent::Branch { live_vars, branches, branch_type, split_point, merge_point, maybe_init, loop_assigned, maybe_held, id } => {
                 if live_vars.contains(rap) {
                     let mut new_branches: Vec<BranchData> = Vec::new();
                     for b in branches.iter() {
@@ -4727,6 +4744,7 @@ impl Visualizable for VisualizationData {
                                         merge_point: *merge_point,
                                         maybe_init: maybe_init.contains(rap),
                                         loop_assigned: loop_assigned.contains(rap),
+                                        maybe_held: maybe_held.contains(rap),
                                         id: *id}));
                 }
             }
@@ -4872,7 +4890,7 @@ impl Visualizable for VisualizationData {
                 maybe_append_event(self, &to_ro.clone(), Event::Copy{from : from_ro.to_owned(), is: to_ro.clone(), of, id: id, break_alt: break_alt.clone()}, line_number);
                 maybe_append_event(self, &from_ro.clone(), Event::Duplicate{to : to_ro.to_owned(), is: from_ro, into_closure, of: source_of, id: id, break_alt}, line_number);
             },
-            ExternalEvent::Branch { live_vars, branches, branch_type, split_point, merge_point, maybe_init, loop_assigned, id } => {
+            ExternalEvent::Branch { live_vars, branches, branch_type, split_point, merge_point, maybe_init, loop_assigned, maybe_held, id } => {
                 // need to add events with more granularity for Branches
                 for var in in_decl_order(&live_vars) { // for all the live variables in the branch (declaration order, #211)
                     let is = ResourceTy::Value(var.clone());
@@ -4901,6 +4919,7 @@ impl Visualizable for VisualizationData {
                                         merge_point: merge_point, 
                                         maybe_init: maybe_init.contains(var),
                                         loop_assigned: loop_assigned.contains(var),
+                                        maybe_held: maybe_held.contains(var),
                                         id: id}, line_number);
                 }
 

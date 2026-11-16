@@ -2029,6 +2029,50 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     ownership_after(&self.preprocessed_events[..end], rap_name, None).unwrap_or(Ownership::None)
   }
 
+  /// Of `live`, the variables that may hold no value where a
+  /// conditional starts and that only some of its arms that reach the
+  /// join give a new value, the others leaving them as they were
+  /// (#1034): `if c { drop(s); } if x { s = …; }`, or `drop(s); if x {
+  /// s = …; }`. After the join they
+  /// may hold a value (the new one, or the old one if nothing moved
+  /// it) or not, and only a drop flag knows. `arms`: the events of the
+  /// arms that reach the join, with an empty one for an `if` without
+  /// an `else`. `before`: what each holds where the conditional
+  /// starts. That it may hold nothing there is also told by an arm
+  /// whose assignment to it is a drop flag's (rustc's move data says
+  /// so where the drawing doesn't, #1027). Not a `let x;` local
+  /// (`maybe_init`, #244), a reference, or a value with nothing to
+  /// drop.
+  pub fn maybe_held_after(
+    &self,
+    live: &HashSet<ResourceAccessPoint>,
+    arms: &[&[(usize, ExternalEvent)]],
+    maybe_init: &HashSet<ResourceAccessPoint>,
+    before: impl Fn(&str) -> Ownership,
+  ) -> HashSet<ResourceAccessPoint> {
+    let mut out = HashSet::new();
+    #[expect(clippy::iter_over_hash_type, reason = "only collects into a set; order doesn't matter")]
+    for r in live {
+      if maybe_init.contains(r) || r.is_ref() || r.holds_value() {
+        continue;
+      }
+      let name = r.name();
+      let ends: Vec<Option<Ownership>> = arms.iter().map(|a| ownership_after(a, name, None)).collect();
+      let assigned = ends.iter().filter(|e| **e == Some(Ownership::Held)).count();
+      let untouched = ends.iter().filter(|e| e.is_none()).count();
+      if assigned == 0 || untouched == 0 || assigned + untouched != ends.len() {
+        continue;
+      }
+      let drop_flag_assign = arms.iter().any(|a| a.iter().any(|(_, e)| matches!(e,
+        ExternalEvent::OwnerDropAtReassign { ro, maybe_moved, maybe_init, .. }
+          if ro.name() == name && (*maybe_moved || maybe_init.is_some()))));
+      if before(name) != Ownership::Held || drop_flag_assign {
+        out.insert(r.clone());
+      }
+    }
+    out
+  }
+
   /// True when a let-chain's condition may have moved `rap` before it
   /// failed (#281): a `MaybeMovedAt::ChainFail` event for it, also
   /// inside a finished conditional. A drop-flag message then says
