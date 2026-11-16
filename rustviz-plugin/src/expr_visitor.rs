@@ -3455,29 +3455,93 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     out
   }
 
-  /// The field a call's result borrows when `lenders` (from
-  /// `call_lenders`) is just the reference r and the call is a method
-  /// chain that starts from a field reached through r and mentions r
-  /// nowhere else (`self.items.first_mut().unwrap()` with `self: &mut
-  /// Self`): `DerefField(r, "r.items")`. rustc then restricts only that
-  /// field while the result is live (`self.n += 1` compiles, #1073).
-  pub(crate) fn field_only_call_lender(&self, call: &'tcx Expr<'tcx>, lenders: &[ResourceTy]) -> Option<ResourceTy> {
+  /// The fields a call's result borrows when `lenders` (from
+  /// `call_lenders`) is just the reference r and the call mentions r
+  /// only through fields of what it points to, each with whether it is
+  /// borrowed mutably: `self.items` for `self.items.first_mut().unwrap()`
+  /// (#1073); `self.items` and `self.other` for
+  /// `self.items.iter().chain(self.other.iter())` or `pick(&self.items,
+  /// &self.other)` (#1080). rustc then restricts only those fields while
+  /// the result is live (`self.n += 1` compiles). A field borrowed only
+  /// for the call (`self.other` in `take(self.other.len())`) or read by
+  /// copy (`skip(self.n)`) isn't one of them. None when r is mentioned
+  /// any other way (by itself, or captured by a closure).
+  pub(crate) fn field_call_lenders(&self, call: &'tcx Expr<'tcx>, lenders: &[ResourceTy]) -> Option<Vec<(ResourceTy, bool)>> {
+    use rustc_middle::ty::adjustment::{Adjust, AutoBorrow, DerefAdjustKind};
     let [ResourceTy::Value(r)] = lenders else { return None };
-    if !r.is_ref() {
+    if !r.is_ref() || !matches!(call.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) {
       return None;
     }
-    let (root, _) = self.call_chain_root(call)?;
-    if !matches!(&root, ResourceTy::DerefField(fr, _, _) if fr.hash() == r.hash()) {
-      return None;
+    let typeck = self.tcx.typeck(call.hir_id.owner);
+    let has_lifetime = |t: Ty<'tcx>| t.walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_)));
+    let parent_expr = |e: &'tcx Expr<'tcx>| match self.tcx.parent_hir_node(e.hir_id) {
+      rustc_hir::Node::Expr(p) => Some(p),
+      _ => None,
+    };
+    let mut out: Vec<(ResourceTy, bool)> = Vec::new();
+    for m in locals_in(call, ClosureLocals::Captures(self.tcx)) {
+      if binding_name(&self.tcx, m.id) != *r.name() {
+        continue;
+      }
+      // Captured by a closure: which part, isn't worked out here.
+      let path = m.expr?;
+      // The whole field place: `self.items` (or `self.a.b`) from `self`.
+      let mut place = path;
+      while let Some(p @ Expr { kind: ExprKind::Field(base, _), .. }) = parent_expr(place) {
+        if base.hir_id != place.hir_id {
+          break;
+        }
+        place = p;
+      }
+      if place.hir_id == path.hir_id {
+        return None;
+      }
+      let Some(ResourceTy::DerefField(fr, fname, w)) = self.field_through_ref(place) else { return None };
+      if fr.hash() != r.hash() {
+        return None;
+      }
+      // How the field is used: borrowed (`&self.other`, or auto-ref'd
+      // as a method's receiver), or its value read.
+      let is_mut = match parent_expr(place) {
+        Some(Expr { kind: ExprKind::AddrOf(_, mt, _), .. }) => Some(mt.is_mut()),
+        _ => typeck.expr_adjustments(place).iter().find_map(|a| match a.kind {
+          Adjust::Borrow(AutoBorrow::Ref(am)) => Some(Mutability::from(am).is_mut()),
+          Adjust::Deref(DerefAdjustKind::Overloaded(od)) => Some(od.mutbl.is_mut()),
+          _ => None,
+        }),
+      };
+      let Some(is_mut) = is_mut else {
+        // A copy of a plain value (`self.n` in `skip(self.n)`) holds
+        // no borrow.
+        let ty = typeck.expr_ty(place);
+        if self.ty_is_copy(ty, call.hir_id.owner) && !has_lifetime(ty) {
+          continue;
+        }
+        return None;
+      };
+      // The borrow reaches the result only if every value from the
+      // borrow up to the call's result can hold it (`self.other.len()`
+      // returns a `usize`: an instant borrow).
+      let mut kept = true;
+      let mut cur = place;
+      while cur.hir_id != call.hir_id {
+        let p = parent_expr(cur)?;
+        if !has_lifetime(typeck.expr_ty_adjusted(p)) {
+          kept = false;
+          break;
+        }
+        cur = p;
+      }
+      if !kept {
+        continue;
+      }
+      let l = ResourceTy::DerefField(fr, fname, w);
+      match out.iter_mut().find(|(x, _)| *x == l) {
+        Some(entry) => entry.1 |= is_mut,
+        None => out.push((l, is_mut)),
+      }
     }
-    let ExprKind::MethodCall(_, mut rcvr, _, _) = call.kind else { return None };
-    while let ExprKind::MethodCall(_, inner, _, _) = rcvr.kind {
-      rcvr = inner;
-    }
-    let in_rcvr = locals_in(rcvr, ClosureLocals::Skip);
-    let [m] = &in_rcvr[..] else { return None };
-    let mentions = locals_in(call, ClosureLocals::Captures(self.tcx)).iter().filter(|x| x.id == m.id).count();
-    (mentions == 1).then_some(root)
+    (!out.is_empty()).then_some(out)
   }
 
   /// A method chain as written (`v.get_mut(0).unwrap()`), for a tooltip.
@@ -4589,8 +4653,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // signature (`ref_flow.rs`, #171), not by its receiver.
     if matches!(expr.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) {
       let mut lenders = self.call_lenders(expr);
-      if let Some(field) = self.field_only_call_lender(expr, &lenders) {
-        lenders = vec![field];
+      // Only the fields reached through a reference (#1073, #1080).
+      if let Some(fields) = self.field_call_lenders(expr, &lenders) {
+        lenders = fields.into_iter().map(|(l, _)| l).collect();
       }
       if lenders.is_empty() {
         // Nothing with a column. Keep a non-variable lender the old
@@ -6384,9 +6449,10 @@ fn pattern_ref_borrows(
   if lenders.is_empty() {
     return Vec::new();
   }
-  // `if let Some(x) = self.items.first_mut()`: only the field (#1073).
-  if let Some(field) = self.field_only_call_lender(scrutinee, &lenders) {
-    lenders = vec![field];
+  // `if let Some(x) = self.items.first_mut()`: only the field (#1073),
+  // or fields (#1080).
+  if let Some(fields) = self.field_call_lenders(scrutinee, &lenders) {
+    lenders = fields.into_iter().map(|(l, _)| l).collect();
   }
   let (func, from_call) = match scrutinee.kind {
     ExprKind::MethodCall(seg, ..) => (seg.ident.as_str().to_owned(), true),
@@ -6459,9 +6525,10 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
     _ => self.call_lenders(call),
   };
   let muts: Vec<(ResourceTy, bool)> = self.borrow_map.get(lhs_rap.name()).map(|rd| rd.lender_muts.clone()).unwrap_or_default();
-  // `self.items.first_mut().unwrap()`: only the field (#1073).
-  let own: Vec<ResourceTy> = match self.field_only_call_lender(call, &own) {
-    Some(field) => vec![field],
+  // `self.items.first_mut().unwrap()`: only the field (#1073), or
+  // fields (#1080).
+  let own: Vec<ResourceTy> = match self.field_call_lenders(call, &own) {
+    Some(fields) => fields.into_iter().map(|(l, _)| l).collect(),
     None => own,
   };
   let (lenders, is_mut): (Vec<ResourceTy>, bool) = match self.borrow_map.get(lhs_rap.name()) {
@@ -6628,6 +6695,23 @@ pub fn keep_loop_head_loans(&mut self, head: &'tcx Expr<'tcx>) -> Vec<(ResourceT
     if let Some((is_mut, call)) = ids.iter().find_map(|id| pass_ref_kind(&self.preprocessed_events, *id)) {
       out.push((l, is_mut, call));
     }
+  }
+  // Several fields reached through a `&mut` (`self.items.iter()
+  // .zip(self.other.iter_mut())`, #1080): each is lent until the loop
+  // ends, as one is below.
+  let lenders = self.call_lenders(head);
+  if let Some(fields) = self.field_call_lenders(head, &lenders).filter(|f| f.len() > 1) {
+    for (field, _) in fields {
+      let ResourceTy::DerefField(r, place, _) = &field else { continue };
+      if !r.is_mutref() {
+        continue;
+      }
+      let ids = self.mark_kept_on_lines_at(lo, hi, &[*r.hash()], Some(place.as_str()), &fns);
+      if let Some((is_mut, call)) = ids.iter().find_map(|id| pass_ref_kind(&self.preprocessed_events, *id)) {
+        out.push((field, is_mut, call));
+      }
+    }
+    return out;
   }
   // `v.iter()` reborrows `*v` too, shared, when v is a `&mut` (#1059):
   // v is read-only until the loop ends. A field reached through a
@@ -8819,11 +8903,15 @@ pub fn print_out_of_scope(&mut self){
         _ => r_ty.clone()
       };
       // A reference that borrows from several variables gives each of
-      // them back at its last use (#171).
-      for co in co_lenders.iter().filter(|c| matches!(c, ResourceTy::Value(_) | ResourceTy::Deref(_))) {
+      // them back at its last use (#171), and one that borrows several
+      // fields through a reference each field (#1080).
+      // (A holder moved into a `for` loop: the loop gives them back, as
+      // below.)
+      let co_from = if self.for_moved_holders.contains(k) { ResourceTy::Anonymous } else { ResourceTy::Value(from_ro.clone()) };
+      for co in co_lenders.iter().filter(|c| matches!(c, ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..))) {
         if ultimate_refs.contains(&(k.to_owned(), co.real_name())) {
           let evt = if ref_data.mut_of(co) { Evt::MDie } else { Evt::SDie };
-          self.add_ev(*lifetime, evt, co.clone(), ResourceTy::Value(from_ro.clone()), false);
+          self.add_ev(*lifetime, evt, co.clone(), co_from.clone(), false);
         }
       }
       // if ref is not an ultimate ref then it dies without returning a resource
@@ -8876,7 +8964,7 @@ pub fn print_out_of_scope(&mut self){
         ResourceTy::Anonymous => ResourceTy::Deref(from_ro.clone()),
         l => l.clone(),
       };
-      for co in rd.co_lenders.iter().filter(|c| matches!(c, ResourceTy::Value(_) | ResourceTy::Deref(_))) {
+      for co in rd.co_lenders.iter().filter(|c| matches!(c, ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..))) {
         let evt = if rd.mut_of(co) { Evt::MDie } else { Evt::SDie };
         self.add_ev(rd.lifetime, evt, co.clone(), ResourceTy::Value(from_ro.clone()), false);
       }

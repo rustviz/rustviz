@@ -20511,6 +20511,58 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "self holds a mutable reference, but the resource it points to is currently shared through it",
         ],
     },
+    TooltipExpect {
+        name: "two_field_borrow_through_ref_1080",
+        // #1080: a value or reference that borrows several fields of what a
+        // `&mut` reference points to (`self.items.iter().chain(self.other
+        // .iter())`, `pick(&self.items, &self.other)`, `first_of(&mut
+        // self.items, &mut self.other)`, `r.other.iter_mut().zip(r.items
+        // .iter())`, a `for` over `self.items.iter().zip(self.other
+        // .iter_mut())`) lent all of self: "self holds a mutable reference,
+        // but the resource it points to is currently shared through it, so
+        // self can only read it" (false: `self.n += 1` compiles there), and
+        // the line was gone after that write. A single field held by a
+        // value (`let it = self.items.iter();`) wasn't a borrow at all ("it
+        // holds a value"). rustc restricts only the borrowed fields (using
+        // `self.items` / `self.other` there is E0502 / E0499; checked for
+        // each). `self.other` in `skip(self.n).take(self.other.len())` is
+        // borrowed only for the call, so only `self.items` is named.
+        must_contain: &[
+            "self holds a mutable reference, but self.items and self.other are immutably borrowed by it, so they are read-only while the borrow is live",
+            "self holds a mutable reference, but self.items is immutably borrowed by it, so self.items is read-only while the borrow is live",
+            "self holds a mutable reference, but self.items and self.other are immutably borrowed by l, so they are read-only while the borrow is live",
+            "self holds a mutable reference, but self.items and self.other are mutably borrowed by x, so they can't be used while the borrow is live",
+            "self holds a mutable reference, but self.other is mutably borrowed and self.items immutably borrowed by the `for` loop's iterator, so self.other can't be used and self.items is read-only until the loop ends",
+            "r holds a mutable reference, but r.other is mutably borrowed and r.items immutably borrowed by pairs, so r.other can't be used and r.items is read-only while the borrow is live",
+            "r holds a mutable reference, but r.other is mutably borrowed and r.items immutably borrowed by the `for` loop's iterator, so r.other can't be used and r.items is read-only until the loop ends",
+            "it holds a value that immutably borrows self.items (it isn't a reference itself)",
+            "it holds a value that immutably borrows self.other (it isn't a reference itself)",
+            "pairs holds a value that mutably borrows r.other (pairs isn't a reference itself)",
+            "pairs holds a value that immutably borrows r.items (pairs isn't a reference itself)",
+            "self.items's resource is immutably borrowed by it; self.items is read-only while the borrow is live",
+            "self.other's resource is immutably borrowed by it; self.other is read-only while the borrow is live",
+            "self.other is mutably borrowed by the `for` loop's iterator; self.other can't be used until the loop ends",
+            "the `for` loop's iterator no longer borrows self.other",
+            "Immutable borrow from self.other to l: pick's signature gives the reference it returns the same lifetime as both arguments, so it may point into either, and both stay borrowed while l is in use",
+            "Mutable borrow from r.other to pairs: zip's signature gives the value it returns the same lifetime as the value it was called on and its argument, so it may borrow from either, and both stay borrowed while pairs is in use; pairs isn't a reference, but its value holds one",
+            "r.other's resource is no longer mutably borrowed",
+            "the resource self points to is modified through self.n",
+            "the resource r points to is modified through r.n",
+        ],
+        must_not_contain: &[
+            "self holds a mutable reference, but the resource it points to is currently shared through it",
+            "the resource self points to is immutably borrowed by it through self",
+            "the resource self points to is immutably borrowed by l through self",
+            "the resource self points to is mutably borrowed by x through self",
+            "the resource r points to is mutably borrowed by pairs through r",
+            "borrows the data self points to",
+            "borrows the data r points to",
+            "Immutable borrow from self to",
+            "Mutable borrow from self to",
+            "Mutable borrow from r to pairs",
+            "=it holds a value",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -27619,4 +27671,112 @@ fn a_field_borrow_through_a_reference_keeps_its_line() {
     let owner = column(label_x(&tl, "s"));
     let (from, to) = (code_row_y(&code, "for e in s.items.iter_mut() {"), closes[12]);
     assert!(owner.iter().any(|(a, b, c)| *a <= from && *b >= to && c.starts_with("solid")), "s's line doesn't span its loop: {:?}", owner);
+}
+
+/// #1080 (`two_field_borrow_through_ref_1080`): while a value or reference
+/// borrows several fields of what a `&mut` reference points to (or a value
+/// holds one field: `let it = self.items.iter();`), the reference keeps its
+/// line, in the style it had just before, with the text naming the fields;
+/// main lent all of self ("…currently shared through it, so self can only
+/// read it") and the line was gone after `self.n += 1`, which compiles
+/// (using `self.items` / `self.other` while the borrow is live doesn't).
+/// The call lines don't give the fields back.
+#[test]
+fn a_borrow_of_several_fields_through_a_reference_keeps_its_line() {
+    let rv = run_with_local_backend("two_field_borrow_through_ref_1080");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let closes = code_rows_y(&code, "}");
+    // The `}` closing the block that `row` is the last line of.
+    let close_after = |row: f64| *closes.iter().find(|&&y| y > row).unwrap_or_else(|| panic!("no `}}` after y={}", row));
+    let label_xs = |label: &str| -> Vec<f64> {
+        tl.split("<text ").skip(1).filter_map(|t| {
+            let (tag, rest) = t.split_once('>')?;
+            (tag.contains("class=\"label") && rest.split('<').next() == Some(label)).then(|| num_attr(tag, "x"))
+        }).collect()
+    };
+    let selfs = label_xs("self");
+    assert_eq!(selfs.len(), 6, "self columns: {:?}", selfs);
+    let r = label_x(&tl, "r");
+    let column = |x: f64| -> Vec<(f64, f64, String)> {
+        start_tags(&tl, "line").into_iter()
+            .filter(|t| attr(t, "class").is_some_and(|c| c.starts_with("hollow") || c.starts_with("solid")))
+            .filter(|t| (num_attr(t, "x1") - x).abs() <= 2.0 && num_attr(t, "x1") == num_attr(t, "x2"))
+            .map(|t| {
+                let (a, b) = (num_attr(t, "y1"), num_attr(t, "y2"));
+                (a.min(b), a.max(b), attr(t, "class").unwrap_or_default().to_string())
+            })
+            .collect()
+    };
+    let counts = code_rows_y(&code, "it.count()");
+    let row = |src: &str| code_row_y(&code, src);
+    let both = "let it = self.items.iter().chain(self.other.iter());";
+    let longer = "let l = pick(&self.items, &self.other);";
+    let skip = "let it = self.items.iter().skip(self.n).take(self.other.len());";
+    let looped = "for (a, b) in self.items.iter().zip(self.other.iter_mut()) {";
+    let peek = "if let Some(x) = first_of(&mut self.items, &mut self.other) {";
+    let pairs = "let pairs = r.other.iter_mut().zip(r.items.iter());";
+    let spans = [
+        (selfs[0], row(both), counts[0],
+            "self holds a mutable reference, but self.items and self.other are immutably borrowed by it, so they are read-only while the borrow is live"),
+        (selfs[1], row("let it = self.items.iter();"), counts[1],
+            "self holds a mutable reference, but self.items is immutably borrowed by it, so self.items is read-only while the borrow is live"),
+        (selfs[2], row(longer), row("l.len()"),
+            "self holds a mutable reference, but self.items and self.other are immutably borrowed by l, so they are read-only while the borrow is live"),
+        (selfs[3], row(skip), row("it.sum()"),
+            "self holds a mutable reference, but self.items is immutably borrowed by it, so self.items is read-only while the borrow is live"),
+        (selfs[4], row(looped), close_after(row("*b += *a;")),
+            "self holds a mutable reference, but self.other is mutably borrowed and self.items immutably borrowed by the `for` loop's iterator, so self.other can't be used and self.items is read-only until the loop ends"),
+        (selfs[5], row(peek), row("*x += 1;"),
+            "self holds a mutable reference, but self.items and self.other are mutably borrowed by x, so they can't be used while the borrow is live"),
+        (r, row(pairs), row("for (o, i) in pairs {"),
+            "r holds a mutable reference, but r.other is mutably borrowed and r.items immutably borrowed by pairs, so r.other can't be used and r.items is read-only while the borrow is live"),
+        (r, row("for (o, i) in pairs {"), close_after(row("*o += *i;")),
+            "r holds a mutable reference, but r.other is mutably borrowed and r.items immutably borrowed by the `for` loop's iterator, so r.other can't be used and r.items is read-only until the loop ends"),
+    ];
+    for (x, from, to, text) in spans {
+        let lines = column(x);
+        let before = lines.iter().find(|(a, b, _)| *a < from && *b >= from)
+            .unwrap_or_else(|| panic!("no line above row {} on column x={}: {:?}", from, x, lines)).2.clone();
+        let mut reached = from;
+        let mut parts: Vec<&(f64, f64, String)> = lines.iter().filter(|(a, b, _)| *b > from && *a < to).collect();
+        parts.sort_by(|p, q| p.0.partial_cmp(&q.0).unwrap());
+        for (a, b, class) in parts {
+            assert_eq!(*class, before, "column x={} changes style from {:?} to {:?} at y={} while only fields are borrowed", x, before, class, a);
+            if *a <= reached {
+                reached = reached.max(*b);
+            }
+        }
+        assert!(reached >= to, "column x={} isn't drawn from y={} to y={} (reaches {}): {:?}", x, from, to, reached, lines);
+        let texts = state_lines_with_tooltip(&tl, text);
+        assert!(texts.iter().any(|&(a, b)| a <= from && b >= to), "no line {:?} from y={} to y={}: {:?}", text, from, to, texts);
+    }
+    // The line that makes the borrow doesn't give the fields back (main
+    // said it did, though the result keeps them). A line's events can
+    // take several rows: up to the next statement's.
+    let rows_of = |src: &str, next: &str| -> (f64, f64) {
+        let at = row(src);
+        let to = code_rows_y(&code, next).into_iter().find(|&y| y > at).unwrap_or_else(|| panic!("no {:?} after {:?}", next, src));
+        (at, to)
+    };
+    let given_back = |x: f64, (at, to): (f64, f64), text: &str| -> bool {
+        dots_where(&tl, |lines| lines.iter().any(|l| l == text)).iter().any(|&(dx, dy)| (dx - x).abs() < 1.0 && dy >= at && dy < to)
+    };
+    for (x, src, next, back_text) in [
+        (selfs[0], both, "self.n += 1;", "self.items's resource is no longer immutably borrowed"),
+        (selfs[0], both, "self.n += 1;", "self.other's resource is no longer immutably borrowed"),
+        (selfs[1], "let it = self.items.iter();", "self.n += 1;", "self.items's resource is no longer immutably borrowed"),
+        (selfs[2], longer, "self.n += 1;", "self.items's resource is no longer immutably borrowed"),
+        (selfs[2], longer, "self.n += 1;", "self.other's resource is no longer immutably borrowed"),
+        (selfs[3], skip, "self.n += 1;", "self.items's resource is no longer immutably borrowed"),
+        (selfs[4], looped, "*b += *a;", "self.other's resource is no longer mutably borrowed"),
+        (selfs[5], peek, "self.n += 1;", "self.items's resource is no longer mutably borrowed"),
+        (selfs[5], peek, "self.n += 1;", "self.other's resource is no longer mutably borrowed"),
+        (r, pairs, "r.n += 1;", "r.other's resource is no longer mutably borrowed"),
+        (r, pairs, "r.n += 1;", "r.items's resource is no longer immutably borrowed"),
+    ] {
+        assert!(!given_back(x, rows_of(src, next), back_text), "{:?} on `{}`", back_text, src);
+    }
+    // `self.other.len()` in `skip_n` borrows it only for the call.
+    assert!(given_back(selfs[3], rows_of(skip, "self.n += 1;"), "self.other's resource is no longer immutably borrowed"),
+        "self.other isn't given back on `{}`", skip);
 }
