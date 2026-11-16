@@ -6834,11 +6834,13 @@ pub fn keep_loop_head_loans(&mut self, head: &'tcx Expr<'tcx>) -> Vec<(ResourceT
           ExternalEvent::PassByMutableReference {
             from, to, id, is_reborrow: false, result_has_lifetime: true, implicit: ImplicitRef::No,
             result_keeps_borrow: true, stored_in: StoredIn::default(), break_alt: None,
+            of_ref_var: false, deep: None,
           }
         } else {
           ExternalEvent::PassByStaticReference {
             from, to, id, implicit: ImplicitRef::No, refcell_borrow_mut: false,
             result_keeps_borrow: true, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new(),
+            of_ref_var: false, deep: None,
           }
         };
         self.update_rap(r, lo);
