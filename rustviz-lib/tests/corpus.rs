@@ -149,15 +149,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "return_shared_ref",
         // Returning a `&T` copies the reference (references are Copy),
         // never the String behind it. A returned String is still moved.
-        // In the caller, `w` and `p` borrow `owned` (#171).
+        // In the caller, `w` and `p` borrow `owned` (#171). `&s[..1]` is
+        // a reference to part of the String s points to, reborrowed
+        // through s, not s's own reference (#1071).
         must_contain: &[
-            "a reference from s is returned to the caller; the data it points to is not copied",
+            "a reference to s[..1], reborrowed through s, is returned to the caller; the data it points to is not copied",
             "a reference from r is returned to the caller; the data it points to is not copied",
             "t's resource is moved to the caller",
             "Immutable borrow from owned to w: first_word's signature gives the reference it returns the same lifetime as its argument",
             "Immutable borrow from owned to p: pick's signature gives the reference it returns the same lifetime as its argument",
         ],
         must_not_contain: &[
+            "a reference from s is returned to the caller",
             ", through the reference first_word returned",
             ", through the reference pick returned",
             "s's resource is copied to the caller",
@@ -19126,6 +19129,35 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "a is bound to a copyable value",
             "TOTAL's value is moved",
             "GRID's value is moved",
+        ],
+    },
+    TooltipExpect {
+        name: "return_elem_reborrow",
+        // #1071: `&mut v[0]` / `&v[0]` / `&xs[i]` / `&mut g[i][j]` with a
+        // reference parameter is a reborrow of one element through it:
+        // the parameter isn't moved to the caller, and the caller gets a
+        // reference to the element, not the parameter's reference. The
+        // caller's Vec stays borrowed while the result is used.
+        must_contain: &[
+            "a mutable reference to v[0], reborrowed through v, is returned to the caller; the data it points to is not copied",
+            "a reference to v[0], reborrowed through v, is returned to the caller; the data it points to is not copied",
+            "a reference to xs[i], reborrowed through xs, is returned to the caller; the data it points to is not copied",
+            "a mutable reference to g[i][j], reborrowed through g, is returned to the caller; the data it points to is not copied",
+            "a mutable reference to w[n], reborrowed through w, is returned to the caller; the data it points to is not copied",
+            "Return mutably borrowed resource from a to v",
+            "v's resource is no longer mutably borrowed",
+        ],
+        must_not_contain: &[
+            // Before #1071: as if the parameter itself went to the caller.
+            "mutable reference is moved to the caller",
+            "a reference from v is returned to the caller",
+            "a reference from xs is returned to the caller",
+            // The returned reference keeps the parameter's borrow going.
+            "v's mutable borrow ends",
+            "v's immutable borrow ends",
+            "xs's immutable borrow ends",
+            "g's mutable borrow ends",
+            "w's mutable borrow ends",
         ],
     },
 ];

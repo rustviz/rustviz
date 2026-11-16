@@ -3494,6 +3494,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       return None;
     }
     let base = index_base(expr)?;
+    if !self.held_by_base(expr, base) {
+      return None;
+    }
+    expr_to_rap_name(base, &self.tcx)
+      .and_then(|n| self.raps.get(&n))
+      .map(|rd| rd.rap.to_owned())
+      .filter(|r| !r.is_fn())
+  }
+
+  /// The place `expr` (fields and indexes applied to `base`) is part of
+  /// what `base` holds, or of what it points to if `base` is itself a
+  /// reference: no step after `base` goes through a reference or a smart
+  /// pointer other than `Box` (`rs[0].x` with `rs: Vec<&Pt>` is not).
+  fn held_by_base(&self, expr: &'tcx Expr<'tcx>, base: &'tcx Expr<'tcx>) -> bool {
+    let typeck = self.tcx.typeck(expr.hir_id.owner);
     let mut cur = expr;
     while let ExprKind::Field(recv, _) | ExprKind::Index(recv, _, _) = cur.kind {
       if recv.hir_id == base.hir_id {
@@ -3502,14 +3517,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let through_ptr = typeck.expr_adjustments(recv).iter().any(|a| matches!(a.kind, adjustment::Adjust::Deref(_)))
         && !typeck.node_type(recv.hir_id).is_box();
       if through_ptr || typeck.node_type(recv.hir_id).is_any_ptr() {
-        return None;
+        return false;
       }
       cur = recv;
     }
-    expr_to_rap_name(base, &self.tcx)
-      .and_then(|n| self.raps.get(&n))
-      .map(|rd| rd.rap.to_owned())
-      .filter(|r| !r.is_fn())
+    true
   }
 
   /// How an element place (`v[i]`) is named in tooltips: its source
@@ -3563,11 +3575,28 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     Some(ResourceTy::DerefField(rap, place, PlaceWrite::Update))
   }
 
-  /// `&self.s` / `&mut p.items[0]` / `&ps[1].y`: a reference to a place
-  /// reached through the reference variable `self` / `p` / `ps`, a
-  /// reborrow of what it points to (#784, #1065).
-  /// `DerefField(self, "&self.s")`, drawn on the reference's column. `&*x` and `&v[0]` (a place `x` / `v` itself)
-  /// are not this: they resolve to the variable. None when the place is
+  /// The reference variable `base` that the element place `elem`
+  /// (`v[0]`, `g[i][j]`, with `base` the collection indexed first) is
+  /// reached through (#1071). None if `base` isn't a reference column,
+  /// or if the place goes through another reference after it
+  /// (`v[0][1]` with `v: &Vec<&Vec<i32>>`): then the element belongs to
+  /// what that reference points to, and isn't reborrowed through `base`.
+  fn element_holder_ref(&self, elem: &'tcx Expr<'tcx>, base: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
+    if !self.held_by_base(elem, base) {
+      return None;
+    }
+    expr_to_rap_name(base, &self.tcx)
+      .and_then(|n| self.raps.get(&n))
+      .map(|rd| rd.rap.to_owned())
+      .filter(|r| r.is_ref() && !r.is_static() && !r.is_fn())
+  }
+
+  /// `&self.s` / `&mut p.items[0]` / `&ps[1].y` / `&mut v[0]`: a
+  /// reference to a place reached through the reference variable
+  /// `self` / `p` / `ps` / `v`, a reborrow of what it points to (#784,
+  /// #1065, #1071). `DerefField(self, "&self.s")`, drawn on the
+  /// reference's column. `&*x` (the place `x` points to as a whole) is
+  /// not this: it resolves to the variable. None when the place is
   /// itself a reference (`&self.r` with `r: &T`).
   pub fn reborrow_through_ref(&self, e: &'tcx Expr<'tcx>) -> Option<ResourceTy> {
     if e.span.from_expansion() {
@@ -3583,6 +3612,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let mut p = place;
     while let ExprKind::Index(recv, _, _) = p.kind {
       p = recv;
+    }
+    // `&mut v[0]` / `&xs[i]` / `&mut g[i][j]` with `v` / `xs` / `g` a
+    // reference: an element of what it points to (#1071).
+    if !std::ptr::eq(p, place) && matches!(p.kind, ExprKind::Path(_)) {
+      let rap = self.element_holder_ref(place, p)?;
+      return Some(ResourceTy::DerefField(rap, text()?, PlaceWrite::Update));
     }
     let ExprKind::Field(..) = p.kind else { return None };
     let ResourceTy::DerefField(rap, _, w) = self.field_through_ref(p)? else { return None };
