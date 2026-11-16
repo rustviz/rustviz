@@ -2415,32 +2415,59 @@ fn signature_tie(func_fmt: &str, what: &str, point: &str, to_name: &String, name
         const NAMES: [&str; 10] = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"];
         NAMES.get(n).map(|s| s.to_string()).unwrap_or_else(|| n.to_string())
     }
-    // Which arguments the result's lifetime is the same as.
+    // Which arguments the result's lifetime is the same as. A position
+    // in `tie.stored_in` is tied only through the references stored in
+    // that argument, not the argument itself (#1084).
     let first_arg = usize::from(tie.receiver);
     let n_args = tie.total.saturating_sub(first_arg);
-    let recv_tied = tie.receiver && tie.tied.contains(&0);
-    let args: Vec<usize> = tie.tied.iter().filter(|&&i| i >= first_arg).map(|i| i - first_arg).collect();
-    let arg_part = if args.is_empty() {
-        None
-    } else if args.len() == n_args && n_args == 1 {
-        Some("its argument".to_owned())
-    } else if args.len() == n_args && !recv_tied {
-        Some(match n_args {
-            2 => "both arguments".to_owned(),
-            n => format!("all {} arguments", count_word(n)),
-        })
-    } else if args.len() == 1 {
-        Some(format!("its {} argument", ordinal(args[0])))
-    } else {
-        let ords: Vec<String> = args.iter().map(|&i| ordinal(i)).collect();
-        Some(format!("its {} arguments", join(&ords)))
+    let positions = |set: &[usize]| -> Option<String> {
+        let recv_tied = tie.receiver && set.contains(&0);
+        let args: Vec<usize> = set.iter().filter(|&&i| i >= first_arg).map(|i| i - first_arg).collect();
+        let arg_part = if args.is_empty() {
+            None
+        } else if args.len() == n_args && n_args == 1 {
+            Some("its argument".to_owned())
+        } else if args.len() == n_args && !recv_tied {
+            Some(match n_args {
+                2 => "both arguments".to_owned(),
+                n => format!("all {} arguments", count_word(n)),
+            })
+        } else if args.len() == 1 {
+            Some(format!("its {} argument", ordinal(args[0])))
+        } else {
+            let ords: Vec<String> = args.iter().map(|&i| ordinal(i)).collect();
+            Some(format!("its {} arguments", join(&ords)))
+        };
+        match (recv_tied, arg_part) {
+            (true, Some(a)) => Some(format!("the value it was called on and {}", a)),
+            (true, None) => Some("the value it was called on".to_owned()),
+            (false, a) => a,
+        }
     };
-    let mut tied = match (recv_tied, arg_part) {
-        (true, Some(a)) => format!("the value it was called on and {}", a),
-        (true, None) => "the value it was called on".to_owned(),
-        (false, Some(a)) => a,
-        (false, None) => "its arguments".to_owned(),
-    };
+    let direct: Vec<usize> = tie.tied.iter().copied().filter(|i| !tie.stored_in.iter().any(|st| st.index == *i)).collect();
+    // `the references stored in rows` (`&rows`; `... in a and b` for
+    // several), `t` (`&t` with `t` a reference), or the argument's
+    // position when it isn't a variable.
+    let mut parts: Vec<String> = positions(&direct).into_iter().collect();
+    let holders: Vec<String> = tie.stored_in.iter()
+        .filter(|st| !st.referent_is_ref)
+        .filter_map(|st| st.name.as_deref().map(styled_name_html))
+        .collect();
+    let mut holders_said = false;
+    for st in &tie.stored_in {
+        let pos = || positions(&[st.index]).unwrap_or_else(|| "its argument".to_owned());
+        parts.push(match (&st.name, st.referent_is_ref) {
+            (Some(n), true) => styled_name_html(n),
+            (Some(_), false) if holders_said => continue,
+            (Some(_), false) => {
+                holders_said = true;
+                format!("the references stored in {}", join(&holders))
+            }
+            (None, true) => format!("the reference {} points to", pos()),
+            (None, false) => format!("the references stored in {}", pos()),
+        });
+    }
+    let mut tied = if parts.is_empty() { "its arguments".to_owned() } else { join(&parts) };
     let tied_count = tie.tied.len().max(1);
     if tie.unnamed > 0 && tied_count >= 2 {
         tied.push_str(&match (tie.unnamed, tied_count) {

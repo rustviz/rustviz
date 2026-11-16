@@ -52,6 +52,11 @@ struct ArgFlow<'tcx> {
   /// (`id(&s)`, `Some(&s)`, `refs.push(&s)` with `T = &String`), the
   /// result carries that reference's borrow (#424).
   by_value: bool,
+  /// Content flow only, and what the parameter points to is itself a
+  /// reference carried whole into the result (`r: &&'a String` with
+  /// result `&'a String`, or `x: &T` with `T = &String`): the result
+  /// has that reference's lifetime (#1084).
+  referent_is_ref: bool,
 }
 
 /// Which type a call's arguments may flow into.
@@ -213,7 +218,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       };
       if place || content {
         let by_value = !matches!(input.kind(), ty::Ref(..));
-        flows.push(ArgFlow { index, arg, place, content, place_mut: place && place_mut, by_value });
+        let referent_is_ref = !place && match input.kind() {
+          ty::Ref(_, inner, _) => match inner.kind() {
+            ty::Ref(r, ..) => regions.contains(r),
+            ty::Param(p) => params.contains(&p.index)
+              && gargs.and_then(|g| g.get(p.index as usize)).and_then(|a| a.as_type()).is_some_and(|t| t.is_ref()),
+            _ => false,
+          },
+          _ => false,
+        };
+        flows.push(ArgFlow { index, arg, place, content, place_mut: place && place_mut, by_value, referent_is_ref });
       }
     }
     Some(flows)
@@ -379,6 +393,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let named = self.arg_lenders(flow.arg, flow.place, flow.content, flow.by_value).iter()
         .any(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)));
       tie.tied.push(flow.index);
+      if flow.content && !flow.place && !flow.by_value {
+        tie.stored_in.push(StoredTie {
+          index: flow.index,
+          name: self.stored_in_name(flow.arg, flow.referent_is_ref),
+          referent_is_ref: flow.referent_is_ref,
+        });
+      }
       // A closure that captures nothing by reference holds no borrow:
       // it isn't "data with no column" (see `lenders_of_flows`).
       if !named && !matches!(flow.arg.kind, ExprKind::Closure(..)) {
@@ -388,6 +409,47 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // A single aggregate argument holds all its borrows, not one of them.
     tie.holds_all = tie.tied.len() == 1 && holds_all_literal;
     tie
+  }
+
+  /// The variable a reference argument points to, whose stored
+  /// references a call's result can carry: `rows` for `&rows`, or for
+  /// `rows` auto-referenced as a method receiver. With `is_ref`, that
+  /// variable is itself the carried reference (`t` in `first(&t)`).
+  /// `None` when the argument reaches its data through another
+  /// reference (`r`, `&*r`) or isn't a plain variable or field.
+  fn stored_in_name(&self, arg: &'tcx Expr<'tcx>, is_ref: bool) -> Option<String> {
+    let typeck = self.tcx.typeck(arg.hir_id.owner);
+    let adjs = typeck.expr_adjustments(arg);
+    let place = if let Some(bpos) = adjs.iter().position(|a| matches!(a.kind, Adjust::Borrow(_))) {
+      let mut place = arg;
+      for a in &adjs[..bpos] {
+        match a.kind {
+          Adjust::Deref(DerefAdjustKind::Builtin) => match place.kind {
+            ExprKind::AddrOf(_, _, inner) => place = inner,
+            _ => return None,
+          },
+          // An overloaded deref (`Vec<T>` → `[T]`) stays in the same value.
+          _ => {}
+        }
+      }
+      place
+    } else {
+      match arg.kind {
+        ExprKind::AddrOf(_, _, inner) => inner,
+        _ => return None,
+      }
+    };
+    fn plain<'t>(e: &'t Expr<'t>) -> bool {
+      match e.kind {
+        ExprKind::Path(QPath::Resolved(None, _)) => true,
+        ExprKind::Field(base, _) => plain(base),
+        _ => false,
+      }
+    }
+    if !plain(place) || typeck.expr_ty(place).is_ref() != is_ref {
+      return None;
+    }
+    expr_to_rap_name(place, &self.tcx)
   }
 
   /// Whether the borrow `call`'s result keeps is a mutable one: some

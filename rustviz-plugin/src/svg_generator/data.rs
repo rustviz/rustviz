@@ -1251,6 +1251,26 @@ pub struct ArgTie {
     /// `[&s, &t]`): its value holds each of its borrows at once, so the
     /// result holds all of them; nothing is chosen between them.
     pub holds_all: bool,
+    /// Tied positions whose parameter is a reference that the result's
+    /// lifetime appears only *inside* (`rows: &Vec<&'a Vec<i32>>` with
+    /// result `&'a i32`): the result has the lifetime of the references
+    /// stored in that argument, not the argument's own, so the caller's
+    /// variable isn't kept borrowed (#1084).
+    pub stored_in: Vec<StoredTie>,
+}
+
+/// An argument a call's result is tied to only through the references
+/// stored in what it points to (see `ArgTie::stored_in`).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct StoredTie {
+    /// Its position, counting the receiver.
+    pub index: usize,
+    /// The caller's variable it points to, when the argument is `&rows`
+    /// or an auto-referenced `rows`.
+    pub name: Option<String>,
+    /// What it points to is itself the reference the result copies
+    /// (`first(&t)` with `t: &String`, parameter `&&'a String`).
+    pub referent_is_ref: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
