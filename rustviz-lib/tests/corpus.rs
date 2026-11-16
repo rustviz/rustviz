@@ -20563,6 +20563,46 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=it holds a value",
         ],
     },
+    TooltipExpect {
+        name: "closure_field_capture_through_ref_1093",
+        // #1093: a value holding a closure that captures a field of what a
+        // `&mut` reference points to (`self.items.iter().map(|x| *x as
+        // usize + self.n)`; edition 2021 captures just `self.n`) lent all of
+        // self: "self holds a mutable reference, but the resource it points
+        // to is currently shared through it, so self can only read it"
+        // (false: `self.other.push(0)` compiles there), and "it holds a
+        // value that immutably borrows the data self points to". rustc
+        // restricts only the captured fields and the receiver's field (all
+        // checked: `self.items.push(0)` E0502, `self.n += 1` E0506, reading
+        // `self.n` while `bump`'s closure holds it mutably E0503). The `for`
+        // over such a head named only self.items; self.n's capture was not
+        // drawn (`self.n += 1` in the body is E0506).
+        must_contain: &[
+            "self holds a mutable reference, but self.items and self.n are immutably borrowed by it, so they are read-only while the borrow is live",
+            "self holds a mutable reference, but self.n is mutably borrowed and self.items immutably borrowed by it, so self.n can't be used and self.items is read-only while the borrow is live",
+            "self holds a mutable reference, but self.items and self.n are immutably borrowed by the `for` loop's iterator, so they are read-only until the loop ends",
+            "self holds a mutable reference, but self.n is immutably borrowed by it, so self.n is read-only while the borrow is live",
+            "it holds a value that immutably borrows self.items (it isn't a reference itself)",
+            "it holds a value that immutably borrows self.n (it isn't a reference itself)",
+            "it holds a value that mutably borrows self.n (it isn't a reference itself)",
+            "self.n is immutably borrowed by the `for` loop's iterator; self.n is read-only until the loop ends",
+            "the closure passed to map reads from self.n",
+            "the `for` loop's iterator no longer borrows self.n",
+            "Mutable borrow from self.n to it: map's signature gives the value it returns the same lifetime as the value it was called on and its argument, so it may borrow from either, and both stay borrowed while it is in use; it isn't a reference, but its value holds one",
+            "Return immutably borrowed resource from it to self.items",
+            "the resource self points to is modified through self.n",
+        ],
+        must_not_contain: &[
+            "self holds a mutable reference, but the resource it points to is currently shared through it",
+            "the resource self points to is immutably borrowed by it through self",
+            "the resource self points to is mutably borrowed by it through self",
+            "borrows the data self points to",
+            "it no longer borrows the resource self points to",
+            "Immutable borrow from self to",
+            "Mutable borrow from self to",
+            "=self holds a mutable reference, but self.items is immutably borrowed by the `for` loop's iterator, so self.items is read-only until the loop ends",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -27779,4 +27819,91 @@ fn a_borrow_of_several_fields_through_a_reference_keeps_its_line() {
     // `self.other.len()` in `skip_n` borrows it only for the call.
     assert!(given_back(selfs[3], rows_of(skip, "self.n += 1;"), "self.other's resource is no longer immutably borrowed"),
         "self.other isn't given back on `{}`", skip);
+}
+
+/// #1093 (`closure_field_capture_through_ref_1093`): while a value (or a
+/// `for` loop's iterator) holds a closure that captures fields of what a
+/// `&mut` reference points to, the reference keeps its line, in the style
+/// it had just before, with the text naming the captured fields; #1080's
+/// plugin lent all of self ("…currently shared through it, so self can
+/// only read it"), though `self.other.push(0)` compiles there. The `let`
+/// / `for` lines don't give the captured field back; the loop's end does.
+#[test]
+fn a_closure_capturing_a_field_through_a_reference_keeps_its_line() {
+    let rv = run_with_local_backend("closure_field_capture_through_ref_1093");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let closes = code_rows_y(&code, "}");
+    let close_after = |row: f64| *closes.iter().find(|&&y| y > row).unwrap_or_else(|| panic!("no `}}` after y={}", row));
+    let label_xs = |label: &str| -> Vec<f64> {
+        tl.split("<text ").skip(1).filter_map(|t| {
+            let (tag, rest) = t.split_once('>')?;
+            (tag.contains("class=\"label") && rest.split('<').next() == Some(label)).then(|| num_attr(tag, "x"))
+        }).collect()
+    };
+    let selfs = label_xs("self");
+    assert_eq!(selfs.len(), 4, "self columns: {:?}", selfs);
+    let column = |x: f64| -> Vec<(f64, f64, String)> {
+        start_tags(&tl, "line").into_iter()
+            .filter(|t| attr(t, "class").is_some_and(|c| c.starts_with("hollow") || c.starts_with("solid")))
+            .filter(|t| (num_attr(t, "x1") - x).abs() <= 2.0 && num_attr(t, "x1") == num_attr(t, "x2"))
+            .map(|t| {
+                let (a, b) = (num_attr(t, "y1"), num_attr(t, "y2"));
+                (a.min(b), a.max(b), attr(t, "class").unwrap_or_default().to_string())
+            })
+            .collect()
+    };
+    let counts = code_rows_y(&code, "it.count()");
+    let row = |src: &str| code_row_y(&code, src);
+    let read = "let it = self.items.iter().map(|x| *x as usize + self.n);";
+    let bump = "let it = self.items.iter().map(|x| {";
+    let looped = "for x in self.items.iter().map(|x| *x as usize + self.n) {";
+    let count = "let it = (0..3).map(|i| i + self.n);";
+    let loop_end = close_after(row("self.other.push(x as i32);"));
+    let spans = [
+        (selfs[0], row(read), counts[0],
+            "self holds a mutable reference, but self.items and self.n are immutably borrowed by it, so they are read-only while the borrow is live"),
+        (selfs[1], row(bump), counts[1],
+            "self holds a mutable reference, but self.n is mutably borrowed and self.items immutably borrowed by it, so self.n can't be used and self.items is read-only while the borrow is live"),
+        (selfs[2], row(looped), loop_end,
+            "self holds a mutable reference, but self.items and self.n are immutably borrowed by the `for` loop's iterator, so they are read-only until the loop ends"),
+        (selfs[3], row(count), row("it.sum()"),
+            "self holds a mutable reference, but self.n is immutably borrowed by it, so self.n is read-only while the borrow is live"),
+    ];
+    for (x, from, to, text) in spans {
+        let lines = column(x);
+        let before = lines.iter().find(|(a, b, _)| *a < from && *b >= from)
+            .unwrap_or_else(|| panic!("no line above row {} on column x={}: {:?}", from, x, lines)).2.clone();
+        let mut reached = from;
+        let mut parts: Vec<&(f64, f64, String)> = lines.iter().filter(|(a, b, _)| *b > from && *a < to).collect();
+        parts.sort_by(|p, q| p.0.partial_cmp(&q.0).unwrap());
+        for (a, b, class) in parts {
+            assert_eq!(*class, before, "column x={} changes style from {:?} to {:?} at y={} while only fields are borrowed", x, before, class, a);
+            if *a <= reached {
+                reached = reached.max(*b);
+            }
+        }
+        assert!(reached >= to, "column x={} isn't drawn from y={} to y={} (reaches {}): {:?}", x, from, to, reached, lines);
+        let texts = state_lines_with_tooltip(&tl, text);
+        assert!(texts.iter().any(|&(a, b)| a <= from && b >= to), "no line {:?} from y={} to y={}: {:?}", text, from, to, texts);
+    }
+    // A dot on column x in rows at..to with a bullet `want` accepts.
+    let given_back = |x: f64, at: f64, to: f64, want: &dyn Fn(&str) -> bool| -> bool {
+        dots_where(&tl, |lines| lines.iter().any(|l| want(l))).iter().any(|&(dx, dy)| (dx - x).abs() < 1.0 && dy >= at && dy < to)
+    };
+    let next_row = |at: f64, next: &str| code_rows_y(&code, next).into_iter().find(|&y| y > at).unwrap_or_else(|| panic!("no {:?} after y={}", next, at));
+    // The captured field is given back where the borrow ends, not where
+    // it starts. (Matched without the noun: "self.n's resource is no
+    // longer …" should say "value", #1100.)
+    for (x, src, end, back) in [
+        (selfs[0], read, counts[0], " is no longer immutably borrowed"),
+        (selfs[1], bump, counts[1], " is no longer mutably borrowed"),
+        (selfs[3], count, row("it.sum()"), " is no longer immutably borrowed"),
+    ] {
+        let want = |l: &str| l.starts_with("self.n's ") && l.ends_with(back);
+        assert!(!given_back(x, row(src), next_row(row(src), "self.other.push(0);"), &want), "self.n given back on `{}`", src);
+        assert!(given_back(x, end, next_row(end, "}"), &want), "self.n isn't given back on the row of `{}`'s last use", src);
+    }
+    let back = |l: &str| l == "the `for` loop's iterator no longer borrows self.n";
+    assert!(!given_back(selfs[2], row(looped), loop_end, &back), "self.n given back before the loop ends");
+    assert!(given_back(selfs[2], loop_end, next_row(loop_end, "self.n += 1;"), &back), "self.n isn't given back where the loop ends");
 }

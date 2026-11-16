@@ -3464,8 +3464,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// &self.other)` (#1080). rustc then restricts only those fields while
   /// the result is live (`self.n += 1` compiles). A field borrowed only
   /// for the call (`self.other` in `take(self.other.len())`) or read by
-  /// copy (`skip(self.n)`) isn't one of them. None when r is mentioned
-  /// any other way (by itself, or captured by a closure).
+  /// copy (`skip(self.n)`) isn't one of them. A closure in the call
+  /// that the result holds (`map(|x| *x as usize + self.n)`) borrows
+  /// the fields it captures, each the way it captures it (#1093). None
+  /// when r is mentioned any other way (by itself, or a closure
+  /// capturing all of what it points to).
   pub(crate) fn field_call_lenders(&self, call: &'tcx Expr<'tcx>, lenders: &[ResourceTy]) -> Option<Vec<(ResourceTy, bool)>> {
     use rustc_middle::ty::adjustment::{Adjust, AutoBorrow, DerefAdjustKind};
     let [ResourceTy::Value(r)] = lenders else { return None };
@@ -3479,12 +3482,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       _ => None,
     };
     let mut out: Vec<(ResourceTy, bool)> = Vec::new();
+    let mut add = |l: ResourceTy, is_mut: bool| match out.iter_mut().find(|(x, _)| *x == l) {
+      Some(entry) => entry.1 |= is_mut,
+      None => out.push((l, is_mut)),
+    };
     for m in locals_in(call, ClosureLocals::Captures(self.tcx)) {
       if binding_name(&self.tcx, m.id) != *r.name() {
         continue;
       }
-      // Captured by a closure: which part, isn't worked out here.
-      let path = m.expr?;
+      let Some(path) = m.expr else {
+        for (l, is_mut) in self.closure_field_captures(call, m.closure?, m.id, r)? {
+          add(l, is_mut);
+        }
+        continue;
+      };
       // The whole field place: `self.items` (or `self.a.b`) from `self`.
       let mut place = path;
       while let Some(p @ Expr { kind: ExprKind::Field(base, _), .. }) = parent_expr(place) {
@@ -3535,13 +3546,110 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       if !kept {
         continue;
       }
-      let l = ResourceTy::DerefField(fr, fname, w);
-      match out.iter_mut().find(|(x, _)| *x == l) {
-        Some(entry) => entry.1 |= is_mut,
-        None => out.push((l, is_mut)),
-      }
+      add(ResourceTy::DerefField(fr, fname, w), is_mut);
     }
     (!out.is_empty()).then_some(out)
+  }
+
+  /// The call a closure in `call` that captures the field `place` of
+  /// what the reference r points to is passed to (`map` for
+  /// `self.items.iter().map(|x| x + self.n)` and `self.n`), and
+  /// whether the capture is mutable.
+  fn closure_capturing_field(&self, call: &'tcx Expr<'tcx>, r: &ResourceAccessPoint, place: &str) -> Option<(String, bool)> {
+    locals_in(call, ClosureLocals::Captures(self.tcx)).into_iter().find_map(|m| {
+      let closure = m.closure?;
+      if binding_name(&self.tcx, m.id) != *r.name() {
+        return None;
+      }
+      let is_mut = self.closure_field_captures(call, closure, m.id, r)?.into_iter()
+        .find_map(|(l, is_mut)| matches!(&l, ResourceTy::DerefField(_, p, _) if p == place).then_some(is_mut))?;
+      let rustc_hir::Node::Expr(callee) = self.tcx.parent_hir_node(closure.hir_id) else { return None };
+      let name = match callee.kind {
+        ExprKind::MethodCall(seg, ..) => seg.ident.as_str().to_owned(),
+        ExprKind::Call(f, _) => hirid_to_var_name(f.hir_id, &self.tcx)?,
+        _ => return None,
+      };
+      Some((name, is_mut))
+    })
+  }
+
+  /// For `field_call_lenders`: the fields of what the reference r
+  /// (binding `r_id`) points to that `closure`, a closure literal in
+  /// `call`, holds borrows of once `call` returns, each with whether
+  /// it is borrowed mutably. Edition 2021 closures capture just the
+  /// places their body uses: `|x| *x as usize + self.n` captures
+  /// `(*self).n` by shared reference, `|x| { self.n += 1; … }` by
+  /// mutable reference (#1093). A by-value capture of a Copy field
+  /// copies it (no borrow). Empty when the closure's borrows end with
+  /// the call; None when the closure captures r some other way (all of
+  /// `*self`, for `self.len()`, or `self` itself, as a `move` closure
+  /// does), or the call's result may hold its borrows without holding
+  /// the closure.
+  fn closure_field_captures(&self, call: &'tcx Expr<'tcx>, closure: &'tcx Expr<'tcx>, r_id: rustc_hir::HirId, r: &ResourceAccessPoint) -> Option<Vec<(ResourceTy, bool)>> {
+    use rustc_middle::hir::place::{PlaceBase, ProjectionKind};
+    let ExprKind::Closure(c) = closure.kind else { return None };
+    let typeck = self.tcx.typeck(call.hir_id.owner);
+    let has_lifetime = |t: Ty<'tcx>| t.walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_)));
+    let holds_closure = |t: Ty<'tcx>| t.walk().any(|g| matches!(g.kind(),
+      GenericArgKind::Type(t) if matches!(t.kind(), TyKind::Closure(d, _) if *d == c.def_id.to_def_id())));
+    // The closure's borrows reach the result if every value from the
+    // closure up to the call's result holds the closure (`map(|x| …)`
+    // returns a `Map` that holds it), and end with the call if one of
+    // them can't hold a borrow at all.
+    let mut kept = true;
+    let mut cur = closure;
+    while cur.hir_id != call.hir_id {
+      let rustc_hir::Node::Expr(p) = self.tcx.parent_hir_node(cur.hir_id) else { return None };
+      let t = typeck.expr_ty_adjusted(p);
+      if !has_lifetime(t) {
+        kept = false;
+        break;
+      }
+      if !holds_closure(t) {
+        return None;
+      }
+      cur = p;
+    }
+    let mut out = Vec::new();
+    for cap in self.tcx.typeck(c.def_id).closure_min_captures_flattened(c.def_id) {
+      let PlaceBase::Upvar(u) = cap.place.base else { return None };
+      if u.var_path.hir_id != r_id {
+        continue;
+      }
+      // `(*self).n` / `(*self).a.b`: fields of what r points to.
+      let projs = &cap.place.projections;
+      if projs.len() < 2 || projs[0].kind != ProjectionKind::Deref {
+        return None;
+      }
+      let mut name = r.name().to_owned();
+      for (i, proj) in projs.iter().enumerate().skip(1) {
+        let ProjectionKind::Field(idx, variant) = proj.kind else { return None };
+        let ty = cap.place.ty_before_projection(i);
+        if matches!(ty.kind(), TyKind::Tuple(_)) {
+          name = format!("{}.{}", name, idx.as_usize());
+        } else {
+          let adt = ty.ty_adt_def().filter(|a| a.is_struct())?;
+          name = format!("{}.{}", name, adt.variant(variant).fields[idx].name.as_str());
+        }
+      }
+      let ty = cap.place.ty();
+      if ty.is_ref() {
+        return None;
+      }
+      let is_mut = match cap.info.capture_kind {
+        UpvarCapture::ByRef(kind) => !matches!(kind, BorrowKind::Immutable),
+        UpvarCapture::ByValue | UpvarCapture::ByUse => {
+          if self.ty_is_copy(ty, call.hir_id.owner) && !has_lifetime(ty) {
+            continue;
+          }
+          return None;
+        }
+      };
+      if kept {
+        out.push((ResourceTy::DerefField(r.to_owned(), name, PlaceWrite::Update), is_mut));
+      }
+    }
+    Some(out)
   }
 
   /// A method chain as written (`v.get_mut(0).unwrap()`), for a tooltip.
@@ -6709,6 +6817,35 @@ pub fn keep_loop_head_loans(&mut self, head: &'tcx Expr<'tcx>) -> Vec<(ResourceT
       let ids = self.mark_kept_on_lines_at(lo, hi, &[*r.hash()], Some(place.as_str()), &fns);
       if let Some((is_mut, call)) = ids.iter().find_map(|id| pass_ref_kind(&self.preprocessed_events, *id)) {
         out.push((field, is_mut, call));
+      } else if let Some((call, is_mut)) = self.closure_capturing_field(head, r, place) {
+        // Captured by a closure the loop's iterator holds (`map(|x| x +
+        // self.n)`, #1093): no call was passed the field, so its borrow
+        // starts here, lent to the closure, which the iterator keeps
+        // (the loop's end matches it by that name).
+        let target_name = format!("the closure passed to {}", call);
+        if !self.raps.contains_key(&fn_key(&target_name)) {
+          self.add_fn(target_name.clone());
+        }
+        let target = ResourceTy::Value(self.raps.get(&fn_key(&target_name)).unwrap().rap.to_owned());
+        let id = *self.unique_id;
+        *self.unique_id += 1;
+        let (from, to) = (field.clone(), target);
+        let ev = if is_mut {
+          ExternalEvent::PassByMutableReference {
+            from, to, id, is_reborrow: false, result_has_lifetime: true, implicit: ImplicitRef::No,
+            result_keeps_borrow: true, stored_in: StoredIn::default(), break_alt: None,
+            of_ref_var: false, deep: None,
+          }
+        } else {
+          ExternalEvent::PassByStaticReference {
+            from, to, id, implicit: ImplicitRef::No, refcell_borrow_mut: false,
+            result_keeps_borrow: true, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new(),
+            of_ref_var: false, deep: None,
+          }
+        };
+        self.update_rap(r, lo);
+        self.add_external_event(lo, ev);
+        out.push((field, is_mut, target_name));
       }
     }
     return out;
