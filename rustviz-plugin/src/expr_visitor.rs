@@ -4137,12 +4137,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let r = self.call_reborrows_through(e)?;
       let is_mut = typeck.node_type(e.hir_id).ref_mutability().is_some_and(|m| m.is_mut());
       let place = crate::svg_generator::hover_messages::reborrow_place_via_call(is_mut, &r.method, &r.target);
-      return Some(ResourceTy::DerefField(r.through, place, PlaceWrite::Update));
+      let pointee = typeck.node_type(e.hir_id).builtin_deref(true).unwrap_or(typeck.node_type(e.hir_id));
+      return Some(ResourceTy::DerefField(r.through, place, PlaceWrite::Update, self.field_holds(pointee, e.hir_id.owner)));
     }
     let ExprKind::AddrOf(_, _, place) = e.kind else { return None };
     let text = || self.tcx.sess.source_map().span_to_snippet(e.span).ok().filter(|s| !s.contains('\n'));
     // `&mut *v` / `&*v` with `v` a reference: an explicit reborrow of
     // all of what v points to (#1078).
+    let holds = self.field_holds(typeck.node_type(place.hir_id), e.hir_id.owner);
     if let ExprKind::Unary(UnOp::Deref, inner) = place.kind {
       if !matches!(inner.kind, ExprKind::Path(QPath::Resolved(None, _))) || !typeck.node_type(inner.hir_id).is_ref() {
         return None;
@@ -4151,9 +4153,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         .and_then(|n| self.raps.get(&n))
         .map(|rd| rd.rap.to_owned())
         .filter(|r| r.is_ref() && !r.is_static() && !r.is_fn())?;
-      return Some(ResourceTy::DerefField(rap, text()?, PlaceWrite::Update));
+      return Some(ResourceTy::DerefField(rap, text()?, PlaceWrite::Update, holds));
     }
-    let holds = self.field_holds(self.tcx.typeck(e.hir_id.owner).node_type(place.hir_id), e.hir_id.owner);
     // `&ps[1].y` / `&mut ps[0].x` with `ps` a reference: a field of an
     // element of what ps points to (#1065).
     if let Some(rap) = self.element_field_holder(place).filter(|r| r.is_ref()) {
@@ -4167,7 +4168,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // reference: an element of what it points to (#1071).
     if !std::ptr::eq(p, place) && matches!(p.kind, ExprKind::Path(_)) {
       if let Some(rap) = self.element_holder_ref(place, p) {
-        return Some(ResourceTy::DerefField(rap, text()?, PlaceWrite::Update));
+        return Some(ResourceTy::DerefField(rap, text()?, PlaceWrite::Update, holds));
       }
       // `&v[0][1]` with `v: &Vec<&Vec<i32>>`: the element is in what
       // the reference `v[0]` points to, so it is reborrowed through
@@ -4178,9 +4179,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       }
       let rap = self.element_holder_ref(through, p)?;
       let through_text = self.plain_source_text(through)?;
-      return Some(ResourceTy::DerefField(rap, crate::svg_generator::hover_messages::reborrow_place_through(&text()?, &through_text), PlaceWrite::Update));
-      let rap = self.element_holder_ref(place, p)?;
-      return Some(ResourceTy::DerefField(rap, text()?, PlaceWrite::Update, holds));
+      return Some(ResourceTy::DerefField(rap, crate::svg_generator::hover_messages::reborrow_place_through(&text()?, &through_text), PlaceWrite::Update, holds));
     }
     let ExprKind::Field(..) = p.kind else { return None };
     let ResourceTy::DerefField(rap, _, w, holds) = self.field_through_ref(p)? else { return None };
@@ -10796,8 +10795,8 @@ fn mark_kept_in(events: &mut Vec<(usize, ExternalEvent)>, lo: usize, hi: usize, 
         fns.contains(&f.name) && match (from, place) {
           // `self.items.first()` with the whole reference as lender: the
           // place passed is inside what it points to (#1078).
-          (ResourceTy::Value(r) | ResourceTy::DerefField(r, _, _), None) => hashes.contains(r.hash()),
-          (ResourceTy::DerefField(r, p, _), Some(want)) => hashes.contains(r.hash()) && p == want,
+          (ResourceTy::Value(r) | ResourceTy::DerefField(r, _, _, _), None) => hashes.contains(r.hash()),
+          (ResourceTy::DerefField(r, p, _, _), Some(want)) => hashes.contains(r.hash()) && p == want,
           (ResourceTy::Value(r), None) => hashes.contains(r.hash()),
           (ResourceTy::DerefField(r, p, _, _), Some(want)) => hashes.contains(r.hash()) && p == want,
           _ => false,
