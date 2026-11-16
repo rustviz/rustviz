@@ -4,8 +4,8 @@
 // borrows (only `self.n` through `&mut self`). A `Box<dyn Fn>` has drop
 // glue: the borrow lasts until g is dropped, at the end of the scope or
 // at `drop(g)`. A closure that reads through a shared reference
-// (`|x| r.len() …`) reborrows `*r`; m holds that borrow at least until
-// its last call.
+// (`|x| r.len() …`) reborrows `*r`; m holds that borrow until it is
+// dropped too (#1107).
 fn boxed<'a>(f: impl Fn(&i32) -> bool + 'a) -> Box<dyn Fn(&i32) -> bool + 'a> {
     Box::new(f)
 }
