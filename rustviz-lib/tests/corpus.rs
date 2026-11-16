@@ -19160,6 +19160,84 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "w's mutable borrow ends",
         ],
     },
+    TooltipExpect {
+        // #1010: `v = if c { f } else { g };` with v owning a String is
+        // drawn like `if c { v = f; } else { v = g; }`: only the branch that
+        // ran moves its String into v, v's old String is dropped there, and
+        // the other branch's String is dropped at its scope end with a
+        // runtime drop flag. It used to draw both moves as unconditional,
+        // and f's and g's scope ends said nothing was dropped (one of them
+        // still owns its String).
+        name: "reassign_branch_value_1010",
+        must_contain: &[
+            "v acquires ownership of a new resource; its previous resource is dropped",
+            "v acquired ownership of a resource (in all branches above)",
+            "f goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "g goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "w acquires ownership of a new resource; its previous resource is dropped",
+            "w acquired ownership of a resource (in all branches above)",
+            "p goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "q goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            // the branch that moved u's old String away first drops nothing
+            "u's resource is moved into drop, which drops it",
+            "u acquires ownership of a resource",
+            "u acquires ownership of a new resource; its previous resource is dropped",
+            "u acquired ownership of a resource (in all branches above)",
+            // the branch that returns drops x's old String there, with h
+            "x acquires ownership of a new resource; its previous resource is dropped",
+            "x goes out of scope. Its resource is dropped.",
+            "h goes out of scope. Its resource is dropped.",
+            "x acquired ownership of a resource in every branch that reaches this point (the else branch returned)",
+            // `y = if c { y } else { m }`: y keeps its String on one path
+            "y acquires ownership of a new resource; its previous resource is dropped",
+            "m goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "f goes out of scope. No resource is dropped.",
+            "g goes out of scope. No resource is dropped.",
+            "p goes out of scope. No resource is dropped.",
+            "q goes out of scope. No resource is dropped.",
+            "h goes out of scope. No resource is dropped.",
+            "m goes out of scope. No resource is dropped.",
+            // w's last String goes to the caller
+            "w goes out of scope. Its resource is dropped.",
+            // u's old String was dropped by `drop(u)` on that path
+            "u acquires ownership of a new resource. Its previous resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "u was moved in at least one branch above",
+        ],
+    },
+    TooltipExpect {
+        // #1011: `let (a, _) = if c { (f, g) } else { (h, k) };` moves the
+        // part `_` leaves into the branch's tuple, a temporary Rust drops
+        // at the end of the `let` statement, as for `let (a, _) = (f, g);`
+        // (#439). It used to draw "g's resource is moved" into nothing and
+        // never state that drop; spread over several lines (`wild_match`)
+        // the plugin crashed (no layout column) on the #1007 fix.
+        name: "let_tuple_wild_branch_1011",
+        must_contain: &[
+            "Move from f to a",
+            "Move from h to a",
+            "Move from g to (temporary)",
+            "Move from k to (temporary 2)",
+            "The temporary that the literal on the right of this let builds takes the value of g. No `ref` binding borrows from it, so Rust drops it at the end of this statement",
+            "The temporary that the literal on the right of this let builds takes the value of k. No `ref` binding borrows from it, so Rust drops it at the end of this statement",
+            "This temporary (String, String), built by the literal on the right of the let, is dropped at the end of this statement. What the pattern didn't bind by value stays in it and is dropped with it. Its resource is dropped",
+            "g goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "k goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "Move from q to b",
+            "Move from s to b",
+            "Move from p to (temporary)",
+            "Move from r to (temporary 2)",
+            "The temporary that the literal on the right of this let builds takes the value of p. No `ref` binding borrows from it, so Rust drops it at the end of this statement",
+            "The temporary that the literal on the right of this let builds takes the value of r. No `ref` binding borrows from it, so Rust drops it at the end of this statement",
+        ],
+        must_not_contain: &[
+            "g goes out of scope. No resource is dropped.",
+            "k goes out of scope. No resource is dropped.",
+            "p goes out of scope. No resource is dropped.",
+            "r goes out of scope. No resource is dropped.",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -22611,6 +22689,27 @@ fn inline_exit_drops_are_on_the_return_row() {
             "{}: no dot on the {:?} row lists {:?}; dots listing it: {:?}",
             name, row, drop, dots_listing_tooltip(&timeline, drop));
     }
+}
+
+/// `w = match n { 0 => p, 1 => q, _ => String::new() };` with w owning a
+/// String (#1010): w's old String is dropped in each arm, on the arm's row,
+/// where its value arrives, not once for all of them after the `match`.
+#[test]
+fn reassign_from_branches_drops_old_value_in_each_arm() {
+    let rv = run_with_local_backend("reassign_branch_value_1010");
+    let (code, timeline) = (rv.code_panel_string(), rv.timeline_panel_string());
+    let drop = "w acquires ownership of a new resource; its previous resource is dropped";
+    let dots = dots_listing_tooltip(&timeline, drop);
+    for row in ["0 => p,", "1 => q,", "_ => String::new(),"] {
+        let y = code_row_y(&code, row);
+        assert!(dots.iter().any(|(_, dy)| *dy == y),
+            "no dot on the {:?} row lists {:?}; dots listing it: {:?}", row, drop, dots);
+    }
+    // In each branch of the one-line `v = if c { f } else { g };`.
+    let y = code_row_y(&code, "v = if c { f } else { g };");
+    let v_dots = dots_listing_tooltip(&timeline, "v acquires ownership of a new resource; its previous resource is dropped");
+    assert_eq!(v_dots.iter().filter(|(_, dy)| *dy == y).count(), 2,
+        "want a drop of v's old String in each branch; dots: {:?}", v_dots);
 }
 
 /// A reference made before an `if` / `match` and used after it: on the

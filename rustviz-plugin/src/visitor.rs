@@ -4315,7 +4315,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if !branching {
       return false;
     }
-    let Some(decl) = self.uninit_locals.remove(&hirid) else { return false };
+    let Some(decl) = self.uninit_locals.remove(&hirid) else {
+      return self.reassign_from_branches(hirid, lhs_expr, rhs_expr);
+    };
     let prev = self.defer_arm_binds.replace(rhs_expr.span);
     self.init_deferred_local(hirid, decl, rhs_expr);
     self.defer_arm_binds = prev;
@@ -4327,6 +4329,38 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if matches!(decl.annotation.1, Mutability::Mut) {
       self.drop_earlier_iteration(hirid, lhs_expr);
     }
+    true
+  }
+
+  /// `v = if c { f } else { g };` (or a `match`) where v may hold a
+  /// value already (#1010): drawn like `if c { v = f; } else { v = g;
+  /// }`. Each branch's value is paired with v once the branch has been
+  /// visited (`ArmBind::Reassign`): only the branch that ran moved f (or
+  /// g), and v's old value, if the branch left it there, is dropped where
+  /// the new one arrives, after the branch's value is computed. Only for
+  /// a local owning a value of a type that isn't Copy, a reference, a
+  /// union or a `ManuallyDrop`, or drawn with columns for its fields or
+  /// as holding a borrow; returns false, having done nothing, for others.
+  fn reassign_from_branches(&mut self, hirid: HirId, lhs_expr: &'tcx Expr<'tcx>, rhs_expr: &'tcx Expr<'tcx>) -> bool {
+    if self.maybe_init_locals.contains(&hirid) || self.destructure_srcs.contains_key(&hirid) {
+      return false;
+    }
+    let owner = lhs_expr.hir_id.owner;
+    let lhs_ty = self.tcx.typeck(owner).node_type(lhs_expr.hir_id);
+    if lhs_ty.is_ref() || lhs_ty.is_union() || self.ty_is_copy(lhs_ty, owner)
+      || lhs_ty.ty_adt_def().is_some_and(|d| d.is_manually_drop()) {
+      return false;
+    }
+    let Some(ResourceTy::Value(rap @ ResourceAccessPoint::Owner(_))) = self.resource_of_lhs(lhs_expr) else { return false };
+    if rap.holds_borrow() || rap.is_union() || !self.struct_children(rap.name()).is_empty() {
+      return false;
+    }
+    let drops = self.needs_drop(lhs_ty, owner);
+    let prev = self.reassign_arms.replace((rap.clone(), drops));
+    self.match_rhs(ResourceTy::Value(rap.clone()), rhs_expr, Evt::Move);
+    self.reassign_arms = prev;
+    self.visit_expr(rhs_expr);
+    self.bind_left_arms(rhs_expr);
     true
   }
 
@@ -10630,21 +10664,37 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// element the pattern leaves is a fresh value): made here, and
   /// holding the literal's value from this line (#483).
   fn start_literal_temp(&mut self, e: &'tcx Expr<'tcx>, is_skipped: bool) {
-    use rustc_hir::Node;
     if is_skipped || e.span.from_expansion() {
       return;
     }
-    let Some(let_stmt) = self.tcx.hir_parent_iter(e.hir_id).find_map(|(_, n)| match n {
-      Node::LetStmt(l) => Some(l),
-      _ => None,
-    }) else { return };
-    if self.literal_temps.contains_key(&let_stmt.hir_id) {
+    let Some((key, _)) = self.literal_temp_key(e) else { return };
+    if self.literal_temps.contains_key(&key) {
       return;
     }
     if let Some(tmp) = self.literal_temp(e) {
       let line = expr_to_line(e, &self.tcx);
       self.add_ev(line, Evt::Bind, ResourceTy::Value(tmp), ResourceTy::Anonymous, false);
     }
+  }
+
+  /// The `let` statement whose pattern takes apart the literal that `e`
+  /// is an element of, and the key of the literal's temporary in
+  /// `literal_temps`: the `let`'s, or, for a literal that is the value
+  /// of a branch of the `let`'s `if` / `match` (#1011), the literal's.
+  fn literal_temp_key(&self, e: &'tcx Expr<'tcx>) -> Option<(HirId, &'tcx rustc_hir::LetStmt<'tcx>)> {
+    use rustc_hir::Node;
+    let let_stmt = self.tcx.hir_parent_iter(e.hir_id).find_map(|(_, n)| match n {
+      Node::LetStmt(l) => Some(l),
+      _ => None,
+    })?;
+    if self.bind_existing && self.branch_value_owner.is_some() {
+      if let Node::Expr(literal) = self.tcx.parent_hir_node(e.hir_id) {
+        if !matches!(self.tcx.parent_hir_node(literal.hir_id), Node::LetStmt(_)) {
+          return Some((literal.hir_id, let_stmt));
+        }
+      }
+    }
+    Some((let_stmt.hir_id, let_stmt))
   }
 
   /// `let ref t = String::from("tmp");`, `let P { ref name, .. } =
@@ -10704,17 +10754,40 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// one-line `if` / `match` (the limit `note_temporary_drop` has).
   fn literal_temp(&mut self, e: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
     use rustc_hir::Node;
-    let let_stmt = self.tcx.hir_parent_iter(e.hir_id).find_map(|(_, n)| match n {
-      Node::LetStmt(l) => Some(l),
-      _ => None,
-    })?;
-    if let Some(t) = self.literal_temps.get(&let_stmt.hir_id) {
+    let (key, let_stmt) = self.literal_temp_key(e)?;
+    if let Some(t) = self.literal_temps.get(&key) {
       return Some(t.clone());
     }
     let literal = self.tcx.hir_parent_iter(e.hir_id).find_map(|(_, n)| match n {
       Node::Expr(p) => Some(p),
       _ => None,
     })?;
+    // The value of a branch of the `let`'s `if` / `match` (`let (a, _)
+    // = if c { (f, g) } else { .. };`, #1011): each branch's literal
+    // has a temporary of its own, declared in that branch (whose
+    // pairing comes after its visit, `pat_leaves_parts`). Rust drops
+    // it at the end of the `let`; on the branch's path nothing else
+    // happens before then, so its drop is drawn where the literal is.
+    if key != let_stmt.hir_id {
+      let ty = self.tcx.typeck(e.hir_id.owner).expr_ty(literal);
+      if !self.needs_drop(ty, e.hir_id.owner) {
+        return None;
+      }
+      self.temp_count += 1;
+      let tmp_name = temporary_label(self.temp_count);
+      let end_line = span_end_line(&literal.span, &self.tcx);
+      self.add_owner(tmp_name.clone(), false, false, false, InteriorMut::No, end_line, false);
+      if let Some(ResourceAccessPoint::Owner(o)) = self.raps.get_mut(&tmp_name).map(|rd| &mut rd.rap) {
+        o.unbound_temp = true;
+        o.let_literal_temp = true;
+      }
+      self.raps.get_mut(&tmp_name).unwrap().temp_owner = self.branch_value_owner;
+      let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();
+      // (Its drop is drawn after what goes into it: `pair_pat_with_value`.)
+      self.branch_temp_drops.push((end_line, tmp.clone(), strip_module_paths(&ty.to_string())));
+      self.literal_temps.insert(key, tmp.clone());
+      return Some(tmp);
+    }
     let typeck = self.tcx.typeck(e.hir_id.owner);
     let ty = typeck.expr_ty(literal);
     if !self.needs_drop(ty, e.hir_id.owner) || self.inside_one_line_branch(e) {
