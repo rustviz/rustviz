@@ -159,8 +159,12 @@ const BOOK: &[Snippet] = &[
             "L2 Immutable borrow from s to bytes: as_bytes's signature gives the reference it returns the same lifetime as the value it was called on",
             "L3 Return immutably borrowed resource from bytes to s",
             "Copy of the value first_word() returns to word",
+            // `==` on u8 copies item; it isn't an actor (#908).
+            "L4 item's value is copied",
         ],
         must_not_contain: &[
+            "Copy from item to ==",
+            "===",
             "bytes is the owner of the resource",
             "Copy from as_bytes to bytes",
             "L2 s's resource is no longer immutably borrowed",
@@ -189,8 +193,12 @@ const BOOK: &[Snippet] = &[
             "L13 Immutable borrow from my_string to word: first_word's signature gives the reference it returns the same lifetime as its argument",
             "L14 Return immutably borrowed resource from word to my_string",
             "my_string goes out of scope. Its resource is dropped.",
+            // `==` on u8 copies item; it isn't an actor (#908).
+            "L4 item's value is copied",
         ],
         must_not_contain: &[
+            "Copy from item to ==",
+            "===",
             "bytes is the owner of the resource",
             "word is the owner of the resource",
             "s's resource is moved to the caller",

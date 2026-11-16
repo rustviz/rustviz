@@ -828,6 +828,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
+  /// An operand of a built-in operator on primitives (`item == b' '`,
+  /// `x + y`, `-x`, `acc += x`) that names a column: its value is
+  /// copied, and that is drawn on its column ("item's value is
+  /// copied"). The operator is not an actor, like a constructor
+  /// (#768, #873): it gets no column and no arrow (#908).
+  fn read_copied_operand(&mut self, operand: &'tcx Expr<'tcx>) {
+    let line_num = expr_to_line(operand, &self.tcx);
+    let from = get_rap(operand, &self.tcx, &self.raps);
+    let (ResourceTy::Value(rap) | ResourceTy::Deref(rap)) = &from else { return };
+    self.update_rap(rap, line_num);
+    self.add_ev(line_num, Evt::Copy, ResourceTy::Anonymous, from, false);
+  }
+
   /// What a method call does to its receiver (`self`): a borrow
   /// (`&self` / `&mut self`), or a move / copy (`self` by value).
   /// Emitted only when the receiver is a place with a column.
@@ -3063,17 +3076,16 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           self.add_fn(fn_name.clone());
           self.match_arg(expra, fn_name.clone());
           self.match_arg(exprb, fn_name);
-        } else if let Some((op_name, operands)) = builtin_binop_copied_operands(expr, &self.tcx, &self.raps) {
+        } else if let Some((_, operands)) = builtin_binop_copied_operands(expr, &self.tcx, &self.raps) {
           // A built-in arithmetic / bitwise operator on primitives
-          // (`x + y` on i32) reads its operands the same way: each
-          // one that names a column is copied into the operator
-          // (#241), and so is each operand of a built-in comparison
-          // (#497). A comparison that calls a trait method reads through a
-          // reference: see below.
-          let fn_name = op_name.to_owned();
-          self.add_fn(fn_name.clone());
+          // (`x + y` on i32) reads its operands: each one that names a
+          // column is copied (#241), and so is each operand of a
+          // built-in comparison (#497, `item == b' '`). The operator
+          // is not an actor: no column, no arrow (#908). A comparison
+          // that calls a trait method reads through a reference: see
+          // below.
           for operand in operands {
-            self.match_arg(operand, fn_name.clone());
+            self.read_copied_operand(operand);
           }
         } else if let Some((op_name, operands)) = overloaded_comparison(expr, &self.tcx) {
           // A comparison on non-primitive operands (`a == b` on
@@ -3119,11 +3131,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       // - On primitives (`acc += x` with i32s) it's built in: `acc` is
       //   read, combined with `x`, and the result written back. Like
       //   `acc + x` (#241), each operand that names a column (`acc`
-      //   and `x`) is copied into the operator, and `acc` then gets a
-      //   new value. Nothing is
-      //   dropped, and nothing is borrowed (a shared borrow of `acc`
-      //   that's still live makes it E0506 "cannot assign", not a
-      //   borrow conflict).
+      //   and `x`) is copied (the operator is not an actor, #908), and
+      //   `acc` then gets a new value. Nothing is dropped, and nothing
+      //   is borrowed (a shared borrow of `acc` that's still live
+      //   makes it E0506 "cannot assign", not a borrow conflict).
       // - Otherwise it calls the trait method:
       //   `s += &t` is `AddAssign::add_assign(&mut s, &t)`. `s` is
       //   mutably borrowed for the call and modified in place (it
@@ -3162,15 +3173,11 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           return;
         }
         // Both operands are read, as in `acc = acc + x`: the old value
-        // of `acc` is copied into the operator too ("Copy from acc to
-        // +="), then `x`.
-        let operands: Vec<_> = [lhs_expr, rhs_expr].into_iter()
-          .filter(|e| operand_names_column(e, &self.tcx, &self.raps))
-          .collect();
-        if !operands.is_empty() {
-          self.add_fn(fn_name.clone());
-          for operand in operands {
-            self.match_arg(operand, fn_name.clone());
+        // of `acc` is copied ("acc's value is copied"), then `x`. As
+        // for `acc + x`, the operator is not an actor (#908).
+        for operand in [lhs_expr, rhs_expr] {
+          if operand_names_column(operand, &self.tcx, &self.raps) {
+            self.read_copied_operand(operand);
           }
         }
         // The write: "acc is bound to a value", or through a
@@ -3257,15 +3264,19 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       }
 
       // `-x` / `!b` take their operand by value, like `x + y` (#262):
-      // a built-in one on a primitive copies a named operand into
-      // the operator; an overloaded one is a call to `Neg::neg` /
-      // `Not::not` with the operand as its argument.
+      // a built-in one on a primitive copies a named operand (the
+      // operator is not an actor, #908); an overloaded one is a call
+      // to `Neg::neg` / `Not::not` with the operand as its argument.
       ExprKind::Unary(UnOp::Neg | UnOp::Not, operand) => {
         self.visit_expr(operand);
         if let Some((op_name, operand)) = unary_op_operand(expr, &self.tcx, &self.raps) {
-          let fn_name = op_name.to_owned();
-          self.add_fn(fn_name.clone());
-          self.match_arg(operand, fn_name);
+          if self.tcx.typeck(expr.hir_id.owner).is_method_call(expr) {
+            let fn_name = op_name.to_owned();
+            self.add_fn(fn_name.clone());
+            self.match_arg(operand, fn_name);
+          } else {
+            self.read_copied_operand(operand);
+          }
         }
       }
 
