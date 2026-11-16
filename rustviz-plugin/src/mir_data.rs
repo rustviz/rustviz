@@ -742,6 +742,49 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         out
     }
 
+    /// What the user variable (or field of one) `name` holds where the
+    /// assignment `assign` (its span; `lhs`, its left-hand side's)
+    /// overwrites it (#1027): rustc's dataflow just before the `Drop` of
+    /// the old value that the assignment starts with (MIR gives it the
+    /// left-hand side's span), or, failing that, the write itself.
+    /// `None` when no such place in the MIR is found.
+    pub fn ownership_before_assign(&self, name: &str, lhs: Span, assign: Span) -> Option<Ownership> {
+        use rustc_middle::mir::StatementKind;
+        use rustc_mir_dataflow::impls::{MaybeInitializedPlaces, MaybeUninitializedPlaces};
+        use rustc_mir_dataflow::move_paths::MoveData;
+        let body = &self.bwf.body;
+        let move_data = MoveData::gather_moves(body, self.tcx, |_| true);
+        let paths = self.move_path_names(&move_data);
+        let root = name.split('.').next().unwrap_or(name);
+        let mpi = paths.iter().find(|(_, n)| n == name).or_else(|| paths.iter().find(|(_, n)| n == root))?.0;
+        let local = move_data.move_paths[mpi].place.local;
+        let blocks = || body.basic_blocks.iter_enumerated();
+        let dropped = blocks().find_map(|(bb, data)| {
+            let t = data.terminator.as_ref()?;
+            matches!(&t.kind, TerminatorKind::Drop { place, .. } if place.local == local && t.source_info.span == lhs)
+                .then(|| Location { block: bb, statement_index: data.statements.len() })
+        });
+        let at = dropped.or_else(|| blocks().find_map(|(bb, data)| {
+            data.statements.iter().position(|st| matches!(&st.kind,
+                StatementKind::Assign(b) if b.0.local == local && st.source_info.span == assign))
+                .map(|i| Location { block: bb, statement_index: i })
+        }));
+        let at = at?;
+        let mut init = MaybeInitializedPlaces::new(self.tcx, body, &move_data)
+            .iterate_to_fixpoint(self.tcx, body, None)
+            .into_results_cursor(body);
+        let mut uninit = MaybeUninitializedPlaces::new(self.tcx, body, &move_data)
+            .iterate_to_fixpoint(self.tcx, body, None)
+            .into_results_cursor(body);
+        init.seek_before_primary_effect(at);
+        uninit.seek_before_primary_effect(at);
+        Some(match (init.get().contains(mpi), uninit.get().contains(mpi)) {
+            (true, false) => Ownership::Held,
+            (false, _) => Ownership::None,
+            (true, true) => Ownership::Maybe,
+        })
+    }
+
     /// The edges into the head of the loop `loop_span` (its
     /// `FalseUnwind` block): the blocks that enter it from before the
     /// loop (not dominated by the head), and those that come back to

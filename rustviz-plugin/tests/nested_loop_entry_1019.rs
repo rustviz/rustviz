@@ -6,9 +6,8 @@
 // the outer loop's second time round it drops what the first left.
 // And a loop that moves it on some time rounds only: after it, whether
 // it holds a value isn't settled by whether "no branch above" moved it.
-// (Known wrong, not pinned: the join after each `if n == 0 { drop(..); }`
-// says the value is dropped when the variable goes out of scope; when
-// the loop comes back round, the assignment at the top drops it, #1026.)
+// The join after each `if n == 0 { drop(..); }`: when the loop comes back
+// round, the assignment at the top drops the value (#1026).
 
 // The issue's program: the loops never move s.
 fn nested(c: bool, k: usize) {

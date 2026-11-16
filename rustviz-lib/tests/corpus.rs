@@ -18387,7 +18387,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
             "t may have been moved: the loop can come back here after t is moved further down, so t can't be used until it gets a new value",
             "t acquires ownership of a new resource. Its previous resource is dropped here only if t still holds it (Rust tracks this with a runtime drop flag): it does the first time round the loop, but not if the previous time round left t moved.",
-            "t goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            // cont's t: the `loop` moves it on odd time rounds only, so
+            // "nothing above moved it" read as if the `drop(t)` above
+            // settled it (k = 2: the second "x" is dropped here, #1029).
+            "t goes out of scope. Its resource is dropped here only if t still holds it (Rust tracks this with a runtime drop flag).",
             // Both of r's assignments: in the branch that goes round
             // again, and after it.
             "r acquires ownership of a new resource. Its previous resource is dropped here only if r still holds it (Rust tracks this with a runtime drop flag): it does the first time round the loop, but not if the previous time round left r moved.",
@@ -18408,6 +18411,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "=r goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "=t goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
             "s acquires ownership of a new resource; its previous resource is dropped",
             "=s goes out of scope. No resource is dropped.",
             "t acquires ownership of a new resource; its previous resource is dropped",
@@ -18721,11 +18725,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // second time round's "b" is dropped. Checked with rustc and a
         // `Drop`-printing type: c = false / true, outer and inner loop
         // 0, 1, 2 times round (k = 0..3 for the single loops).
-        // (Not pinned: the join inside the loop after `if n == 0 {
-        // drop(t); }` still says the value "is dropped when t goes out
-        // of scope", wrong when the loop comes back round and the
-        // assignment drops it: #1026.)
+        // The join inside the loop after `if n == 0 { drop(t); }` said
+        // the value "is dropped when t goes out of scope": when the
+        // loop comes back round, the assignment at the top of its body
+        // drops it (k = 3: the second "b" is dropped where the third is
+        // assigned, #1026).
         must_contain: &[
+            "t was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when t is assigned again (or, if it isn't, when it goes out of scope).",
+            "u was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when u is assigned again (or, if it isn't, when it goes out of scope).",
             "s was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when s is assigned again (or, if it isn't, when it goes out of scope).",
             "v was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when v is assigned again (or, if it isn't, when it goes out of scope).",
             "p was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when p is assigned again (or, if it isn't, when it goes out of scope).",
@@ -18765,6 +18772,47 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s acquires ownership of a new resource. Its previous resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag): the first time round",
             "v acquires ownership of a new resource. Its previous resource is dropped here only if v still holds it (Rust tracks this with a runtime drop flag): the first time round",
             "p acquires ownership of a new resource. Its previous resource is dropped here only if p still holds it (Rust tracks this with a runtime drop flag): the first time round",
+            "=s was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped when s goes out of scope.",
+            "=t was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped when t goes out of scope.",
+            "=u was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped when u goes out of scope.",
+        ],
+    },
+    TooltipExpect {
+        name: "loop_drop_flags_1026",
+        // #1027: `s = …"c"` in an outer loop's body, after an inner loop
+        // that may not have run, said "its previous resource is
+        // dropped": with c = true and i = 0, the outer loop's first time
+        // round drops nothing there. A drop flag decides (p, p.name:
+        // the same with a struct). #1026: a join inside a loop's body
+        // that gives the variable a new value at its top said the value
+        // "is dropped when q goes out of scope": when the loop comes
+        // back round, that assignment drops it (q in a `for` loop,
+        // x.name a field column). #1029: after a bare `loop` left by a
+        // `break` before a move made on some time rounds only, the next
+        // assignment said "only if nothing above moved it" (k = 2: the
+        // `drop(t)` above moved the first "x", the second is dropped
+        // at `t = …"z"`). Checked with rustc and a `Drop`-printing type:
+        // c = false / true, loops 0, 1, 2 times round.
+        // (Known wrong, not pinned: x's scope end in field_join still
+        // says x.name is dropped "only if nothing above moved it",
+        // ambiguous in the same way as #1029's: #1031. And s's column
+        // is drawn as "the owner" from the inner loop to `s = …"c"`:
+        // #1032.)
+        must_contain: &[
+            "s acquires ownership of a new resource. Its previous resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
+            "p acquires ownership of a new resource. Its previous resource is dropped here only if p still holds it (Rust tracks this with a runtime drop flag).",
+            "p.name acquires ownership of a new resource. Its previous resource is dropped here only if p.name still holds it (Rust tracks this with a runtime drop flag).",
+            "q was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when q is assigned again (or, if it isn't, when it goes out of scope).",
+            "x.name was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when x.name is assigned again (or, if it isn't, when it goes out of scope).",
+            "t acquires ownership of a new resource. Its previous resource is dropped here only if t still holds it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "s acquires ownership of a new resource; its previous resource is dropped",
+            "p acquires ownership of a new resource; its previous resource is dropped",
+            "p.name acquires ownership of a new resource; its previous resource is dropped",
+            "If the branch that ran didn't move it, its resource is dropped when q goes out of scope.",
+            "If the branch that ran didn't move it, its resource is dropped when x.name goes out of scope.",
+            "t acquires ownership of a new resource. Its previous resource is dropped here only if nothing above moved it",
         ],
     },
 ];

@@ -1344,8 +1344,14 @@ pub enum MaybeMovedAt {
     /// The end of a loop. `nothing_above`: a move on the path to a
     /// `break` that isn't in a branch which then breaks (`loop {
     /// drop(s); if c { break; } s = … }`, #980), so a drop-flag text
-    /// says "nothing above" moved it, not "no branch above".
-    Loop { nothing_above: bool },
+    /// says "nothing above" moved it, not "no branch above". `kept`:
+    /// other time rounds come back round with it holding a value (a
+    /// bare `loop` whose body moves it on some time rounds only, left
+    /// by a `break` before the move), so whether it holds one after the
+    /// loop isn't down to whether something above moved it: as
+    /// `LoopRound { kept: true }`, a drop flag's text says "only if it
+    /// still holds it" (#1029).
+    Loop { nothing_above: bool, kept: bool },
     /// The end of a labeled block (`'a: { … break 'a; … }`).
     LabeledBlock,
     /// The start of the `else` branch (`no_else`: the implicit empty
@@ -1951,6 +1957,10 @@ pub enum ExternalEvent {
       // flag decides whether their scope end or next assignment drops
       // anything).
       maybe_init: HashSet<ResourceAccessPoint>,
+      // Variables (and field columns) that a loop the conditional is
+      // inside, and that they were declared before, gives a new value
+      // somewhere in its body (#1026).
+      loop_assigned: HashSet<ResourceAccessPoint>,
       id: usize
     }
 }
@@ -2200,6 +2210,11 @@ pub enum Event {
       // This column is a `let x;` local initialized in only some of the
       // branches that reach the merge (#244).
       maybe_init: bool,
+      // A loop this conditional is inside, and that this column was
+      // declared before, gives it a new value somewhere in its body
+      // (#1026): when the loop comes back round, that assignment drops
+      // what the join leaves it holding.
+      loop_assigned: bool,
       id: usize
     },
 
@@ -2611,6 +2626,12 @@ pub enum InitBy {
     /// the loops may also move it, so only "if it still holds one" is
     /// sure.
     OuterLoop { moves: bool },
+    /// An assignment in a loop's body to a variable that rustc says
+    /// only may hold a value here, though nothing drawn above says so
+    /// (#1027): a loop above, inside this one, may have ended before
+    /// giving it a value (`if c { drop(s); } for … { while … { s = …; }
+    /// s = …; }`). Only a drop flag knows.
+    DropFlag,
 }
 
 /// What a conditional's join leaves in a `let x;` local that only some
@@ -4669,7 +4690,7 @@ impl Visualizable for VisualizationData {
     fn append_branch_event(&self, event: &ExternalEvent, line_number: usize, is: &ResourceTy, b_history: &mut Vec<(usize, Event)>) {
         let rap = is.extract_rap().unwrap();
         match event {
-            ExternalEvent::Branch { live_vars, branches, branch_type, split_point, merge_point, maybe_init, id } => {
+            ExternalEvent::Branch { live_vars, branches, branch_type, split_point, merge_point, maybe_init, loop_assigned, id } => {
                 if live_vars.contains(rap) {
                     let mut new_branches: Vec<BranchData> = Vec::new();
                     for b in branches.iter() {
@@ -4695,6 +4716,7 @@ impl Visualizable for VisualizationData {
                                         split_point: *split_point, 
                                         merge_point: *merge_point,
                                         maybe_init: maybe_init.contains(rap),
+                                        loop_assigned: loop_assigned.contains(rap),
                                         id: *id}));
                 }
             }
@@ -4840,7 +4862,7 @@ impl Visualizable for VisualizationData {
                 maybe_append_event(self, &to_ro.clone(), Event::Copy{from : from_ro.to_owned(), is: to_ro.clone(), of, id: id, break_alt: break_alt.clone()}, line_number);
                 maybe_append_event(self, &from_ro.clone(), Event::Duplicate{to : to_ro.to_owned(), is: from_ro, into_closure, of: source_of, id: id, break_alt}, line_number);
             },
-            ExternalEvent::Branch { live_vars, branches, branch_type, split_point, merge_point, maybe_init, id } => {
+            ExternalEvent::Branch { live_vars, branches, branch_type, split_point, merge_point, maybe_init, loop_assigned, id } => {
                 // need to add events with more granularity for Branches
                 for var in in_decl_order(&live_vars) { // for all the live variables in the branch (declaration order, #211)
                     let is = ResourceTy::Value(var.clone());
@@ -4868,6 +4890,7 @@ impl Visualizable for VisualizationData {
                                         split_point: split_point, 
                                         merge_point: merge_point, 
                                         maybe_init: maybe_init.contains(var),
+                                        loop_assigned: loop_assigned.contains(var),
                                         id: id}, line_number);
                 }
 
