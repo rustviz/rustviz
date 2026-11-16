@@ -1,6 +1,6 @@
 extern crate handlebars;
 
-use crate::svg_generator::data::{branch_is_collapsed, is_param_value_line, returned_closure, ExtBranchData, ExternalEvent, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, StaticLender, Visualizable, VisualizationData, LINE_SPACE};
+use crate::svg_generator::data::{branch_is_collapsed, is_param_value_line, returned_closure, ExtBranchData, ExternalEvent, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, StaticLender, Visualizable, VisualizationData, FIRST_ROW_Y, OLD_FIRST_ROW_Y, LINE_SPACE};
 use crate::svg_generator::svg_frontend::{code_panel, timeline_panel};
 use handlebars::Handlebars;
 use serde::Serialize;
@@ -1164,7 +1164,8 @@ pub fn render_svg(
         // drop dot's radius, or a glyph's descender), so a fixed margin
         // below it leaves an even gap about as tall as the one above
         // the first line. It used to be a fixed 100px band (#844).
-        height: (num_lines + 1) * LINE_SPACE as i32 + BOTTOM_MARGIN,
+        height: (num_lines + 1) * LINE_SPACE as i32 + BOTTOM_MARGIN
+            - (OLD_FIRST_ROW_Y - FIRST_ROW_Y) as i32,
     };
 
     let final_code_svg_content = handlebars.render("code_svg_template", &svg_data).unwrap();
