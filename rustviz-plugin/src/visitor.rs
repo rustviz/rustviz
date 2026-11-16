@@ -105,6 +105,7 @@ struct ChainWalk {
 /// A variable that the condition of an `if` let-chain moves before a
 /// part of it that can still fail (#281): on the path into the `else`
 /// it may have been moved. See `MaybeMovedAt::ChainFail`.
+#[derive(Clone)]
 struct ChainFailMove {
   rap: ResourceAccessPoint,
   definite: bool,
@@ -117,6 +118,7 @@ struct ChainFailMove {
 /// value before a part of it that can still fail (#579): on the path
 /// into the `else` it holds the old value or the new one. See
 /// `ExternalEvent::ChainFailAssign`.
+#[derive(Clone)]
 struct ChainFailAssign {
   rap: ResourceAccessPoint,
   place: Option<String>,
@@ -126,6 +128,7 @@ struct ChainFailAssign {
 /// A variable that the condition of an `if` let-chain lends before a
 /// part of it that can still fail (#688): the else branch starts with
 /// that said. See `ExternalEvent::ChainFailUse`.
+#[derive(Clone)]
 struct ChainFailUse {
   rap: ResourceAccessPoint,
   uses: Vec<ChainUse>,
@@ -133,7 +136,7 @@ struct ChainFailUse {
 }
 
 /// What `chain_fail_moves` finds: see there.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct ChainFail {
   moves: Vec<ChainFailMove>,
   assigns: Vec<ChainFailAssign>,
@@ -384,53 +387,37 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     true
   }
 
-  /// Visit a match-arm guard. `if let` parts register their bindings
-  /// into `guard_decls` (the caller scopes them to the arm); `&&`
-  /// chains are walked part by part; anything else is visited as an
-  /// ordinary expression.
+  /// Visit a match-arm guard (`pat if cond =>`), walked like an `if`
+  /// let-chain (`visit_if_let_chain`): `if let` parts register their
+  /// bindings into `guard_decls` (the caller scopes them to the arm),
+  /// and what each part does that lasts to the variables in `outer` is
+  /// recorded.
   ///
-  /// Every event a guard produces is drawn in its arm's column, which
-  /// is only accurate for effects that end inside the guard: when the
-  /// guard is false, matching continues with later arms in the state
-  /// the guard left behind. So a guard that moves out of, or assigns
-  /// to, a variable that outlives it (`x if consume(s) =>`) is
-  /// refused instead of drawn. The one exception is the bindings of a
-  /// guard that is a lone `if let`: those happen only when the whole
-  /// guard succeeds, i.e. exactly when the arm is taken.
+  /// Every event a guard produces is drawn in its arm's column: if that
+  /// arm is taken, its guard ran first. But when the guard is false,
+  /// matching goes on with the later arms in the state the guard left
+  /// behind, and the borrow checker counts every later arm as one that
+  /// may run after it, whatever its pattern (`Some(_) if consume(s) =>
+  /// …, None => s.len()` is E0382). So what a later arm starts with
+  /// (`chain_fail_moves`) is returned, for the caller to put at the top
+  /// of each later arm (#247, #248).
   ///
   /// `arm_end`: the arm's last line, where the guard's bindings go out
   /// of scope.
   fn visit_match_guard(
     &mut self,
-    expr: &'tcx Expr<'tcx>,
-    whole_guard: bool,
+    guard: &'tcx Expr<'tcx>,
     outer: &HashSet<ResourceAccessPoint>,
     guard_decls: &mut HashSet<ResourceAccessPoint>,
     arm_end: usize,
-  ) {
-    match expr.kind {
-      ExprKind::DropTemps(inner) => self.visit_match_guard(inner, whole_guard, outer, guard_decls, arm_end),
-      ExprKind::Binary(op, lhs, rhs) if op.node == rustc_hir::BinOpKind::And => {
-        self.visit_match_guard(lhs, false, outer, guard_decls, arm_end);
-        self.visit_match_guard(rhs, false, outer, guard_decls, arm_end);
-      }
-      ExprKind::Let(let_expr) => {
-        let mark = self.preprocessed_events.len();
-        self.visit_expr(let_expr.init);
-        self.refuse_lasting_guard_effects(mark, outer, expr);
-        let mark = self.preprocessed_events.len();
-        let (bound, _) = self.register_iflet_let_bindings(let_expr, None, arm_end);
-        if !whole_guard {
-          self.refuse_lasting_guard_effects(mark, outer, expr);
-        }
-        guard_decls.extend(bound);
-      }
-      _ => {
-        let mark = self.preprocessed_events.len();
-        self.visit_expr(expr);
-        self.refuse_lasting_guard_effects(mark, outer, expr);
-      }
-    }
+  ) -> (ChainFail, FailPath) {
+    let chain_lo = self.preprocessed_events.len();
+    // Nothing of a guard is drawn before the arms split, so every
+    // part's effects count, the first one's too.
+    let mut walk = ChainWalk { first_lo: Some(*self.unique_id), body_end: arm_end, ..ChainWalk::default() };
+    self.visit_if_let_chain(guard, outer, guard_decls, &mut walk);
+    let path = FailPath::Guard(expr_to_line(guard, &self.tcx));
+    (self.chain_fail_moves(&walk, chain_lo, path), path)
   }
 
   /// Visit an `if` condition that is a let-chain (`if let A = x && let
@@ -451,7 +438,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// in `walk.effects`, and `chain_fail_moves` turns them into what the
   /// else branch starts with (#281). The `while let` caller keeps only
   /// the moves, which it draws where the loop ends (#968); it sets
-  /// `walk.first_lo` first, so the first part's are recorded too.
+  /// `walk.first_lo` first, so the first part's are recorded too. A
+  /// match guard is walked the same way, with `first_lo` set
+  /// beforehand: see `visit_match_guard`.
   fn visit_if_let_chain(
     &mut self,
     expr: &'tcx Expr<'tcx>,
@@ -649,23 +638,34 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// binding of the chain) also happened on the path into the else
   /// branch, which starts with that said (#688), unless the variable
   /// is moved or assigned there too (that dot is the one that matters).
-  fn chain_fail_moves(&self, walk: &ChainWalk, chain_lo: usize, has_else: bool) -> ChainFail {
+  ///
+  /// A match guard is walked the same way (#247): `path` is then
+  /// `FailPath::Guard`, and what this finds is what every later arm
+  /// starts with. Nothing is drawn before a guard's split, so all of
+  /// its parts count; and none of it is definite, since a later arm is
+  /// also reached when the guarded arm's pattern doesn't match.
+  fn chain_fail_moves(&self, walk: &ChainWalk, chain_lo: usize, path: FailPath) -> ChainFail {
     let mut out: Vec<ChainFailMove> = Vec::new();
     let mut assigns: Vec<ChainFailAssign> = Vec::new();
     let mut uses: Vec<ChainFailUse> = Vec::new();
-    let later = if has_else { "the condition is false and the else branch runs" }
-      else { "the condition is false and the body is skipped" };
+    let guard = matches!(path, FailPath::Guard(_));
+    let later = match path {
+      FailPath::Else => "the condition is false and the else branch runs",
+      FailPath::NoElse => "the condition is false and the body is skipped",
+      FailPath::Guard(_) => "the guard is false and a later arm runs",
+    };
+    let (what_kind, outside) = if guard { ("match guards", "the guard") } else { ("`if let` chains", "the condition") };
     for eff in walk.effects.iter().filter(|e| e.checks_before < walk.checks) {
       match &eff.kind {
         ChainEffectKind::Other { name, what, lasts } => {
-          panic!("`if let` chains that {} (`{}`, line {}) aren't supported yet: {} even when {}",
-            what, name, eff.line, lasts, later);
+          panic!("{} that {} (`{}`, line {}) aren't supported yet: {} even when {}",
+            what_kind, what.replace("the condition", outside), name, eff.line, lasts, later);
         }
         ChainEffectKind::Assign { rap, place, drops_old, held } => {
           if !held {
-            panic!("`if let` chains that assign to a variable declared outside the condition that \
-                    may hold no value before (`{}`, line {}) aren't supported yet: after the \
-                    assignment it holds one even when {}", rap.name(), eff.line, later);
+            panic!("{} that assign to a variable declared outside {} that may hold no value \
+                    before (`{}`, line {}) aren't supported yet: after the assignment it holds \
+                    one even when {}", what_kind, outside, rap.name(), eff.line, later);
           }
           match assigns.iter_mut().find(|a| a.rap == *rap && a.place == *place) {
             Some(a) => a.drops_old |= drops_old,
@@ -678,7 +678,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // an expression may sit inside a conditional of its own
           // (`a || take(s)`), so it's only "may have been", unless its
           // part has none (#968).
-          let definite = (*binding || eff.straight) && eff.checks_before == 0;
+          let definite = (*binding || eff.straight) && eff.checks_before == 0 && !guard;
           let i = match out.iter().position(|m| m.rap == *rap) {
             Some(i) => i,
             None => {
@@ -716,7 +716,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             _ => false,
           });
           let use_ = ChainUse { to: to_name, mutable: *mutable, binding: *binding, changes };
-          let definite = *binding && eff.checks_before == 0;
+          let definite = *binding && eff.checks_before == 0 && !guard;
           match uses.iter_mut().find(|u| u.rap == *rap) {
             Some(u) => {
               u.definite |= definite;
@@ -735,10 +735,37 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // place (`*b = a`, `v[0] = a`) counts too when the variable it goes
     // through is moved: the new value went with it.
     if let Some(a) = assigns.iter().find(|a| out.iter().any(|m| m.rap == a.rap)) {
-      panic!("`if let` chains that both move and assign a variable declared outside the condition \
-              (`{}`) aren't supported yet: both last even when {}", a.rap.name(), later);
+      panic!("{} that both move and assign a variable declared outside {} (`{}`) aren't \
+              supported yet: both last even when {}", what_kind, outside, a.rap.name(), later);
     }
     ChainFail { moves: out, assigns, uses }
+  }
+
+  /// The events that say what `fail` (see `chain_fail_moves`) leaves
+  /// behind on `path`, in order: assignments, moves, then borrows that
+  /// have ended (#688). They take fresh ids.
+  fn chain_fail_events(&mut self, fail: ChainFail, path: FailPath) -> Vec<ExternalEvent> {
+    let mut evs = Vec::new();
+    let mut next_id = || {
+      let id = *self.unique_id;
+      *self.unique_id += 1;
+      id
+    };
+    for a in fail.assigns {
+      evs.push(ExternalEvent::ChainFailAssign { ro: a.rap, place: a.place, drops_old: a.drops_old, path, id: next_id() });
+    }
+    for m in fail.moves {
+      evs.push(ExternalEvent::LoopExitMove {
+        ro: m.rap,
+        definite: m.definite,
+        at: MaybeMovedAt::ChainFail { to: m.to, dropped: m.dropped, path, how: m.how },
+        id: next_id(),
+      });
+    }
+    for u in fail.uses {
+      evs.push(ExternalEvent::ChainFailUse { ro: u.rap, uses: u.uses, definite: u.definite, path, id: next_id() });
+    }
+    evs
   }
 
   /// True if an event of the let-chain from `preprocessed_events[chain_lo..]`
@@ -803,37 +830,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       pairs
     } else {
       Vec::new()
-    }
-  }
-
-  /// Panic (reported as "can't visualize this yet") if any event from
-  /// `preprocessed_events[mark..]` moves out of, or assigns to, a
-  /// variable in `outer`. See `visit_match_guard`.
-  fn refuse_lasting_guard_effects(
-    &self,
-    mark: usize,
-    outer: &HashSet<ResourceAccessPoint>,
-    guard_part: &'tcx Expr<'tcx>,
-  ) {
-    let is_outer = |r: &ResourceTy| r.extract_rap().is_some_and(|rap| outer.contains(rap));
-    for (_, ev) in &self.preprocessed_events[mark..] {
-      let culprit = match ev {
-        ExternalEvent::Move { from, .. } if is_outer(from) => from,
-        ExternalEvent::ClosureCall { closure, .. } if is_outer(closure) => closure,
-        ExternalEvent::Bind { to, .. }
-        | ExternalEvent::Copy { to, .. }
-        | ExternalEvent::Move { to, .. }
-        | ExternalEvent::StaticBorrow { to, .. }
-        | ExternalEvent::MutableBorrow { to, .. } if is_outer(to) => to,
-        ExternalEvent::OwnerDropAtReassign { ro, .. } if outer.contains(ro) => {
-          panic!("match guards that assign to an outer variable (`{}`, line {}) aren't supported yet",
-            ro.name(), expr_to_line(guard_part, &self.tcx));
-        }
-        _ => continue,
-      };
-      panic!("match guards that move or assign a variable declared outside the guard (`{}`, line {}) \
-              aren't supported yet: the effect lasts even when the guard is false and a later arm runs",
-        culprit.real_name(), expr_to_line(guard_part, &self.tcx));
     }
   }
 
@@ -4318,7 +4314,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 // is drawn where it happens and lasts the same way
                 // whether or not the loop goes on.
                 walk.effects.retain(|e| matches!(e.kind, ChainEffectKind::Move { .. }));
-                let cond_moves = self.chain_fail_moves(&walk, cond_lo, false).moves;
+                let cond_moves = self.chain_fail_moves(&walk, cond_lo, FailPath::NoElse).moves;
                 // A `break` in the body comes after the condition held:
                 // its moves are the condition's own way out (above), so
                 // the path to a `break` starts here (#980).
@@ -5402,6 +5398,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       .zip(maybe_moved.iter())
       .map(|(rap, maybe)| *maybe && self.maybe_moved_by_loop_head_now(rap.name()))
       .collect();
+    // And whether a let-chain's condition or a match guard may have
+    // moved it (#281, #247): also before match_rhs, whose new value
+    // for it ends that.
+    let by_conds: Vec<bool> = drop_target.iter().chain(field_drop_targets.iter())
+      .zip(maybe_moved.iter())
+      .map(|(rap, maybe)| *maybe && self.moved_by_chain_condition(rap))
+      .collect();
     // A struct or tuple some of whose parts were moved out before
     // (on every path, or some only): only the parts still there are
     // dropped (#628).
@@ -5615,8 +5618,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
     let n_before_drops = self.preprocessed_events.len();
     let payload_target = drop_target.as_ref().map(|r| *r.hash());
-    for (((rap, maybe_moved), parts), loop_head) in drop_target.into_iter().chain(field_drop_targets).zip(maybe_moved).zip(parts).zip(loop_head) {
-      let by_cond = maybe_moved && self.moved_by_chain_condition(&rap);
+    for ((((rap, maybe_moved), parts), loop_head), by_cond) in drop_target.into_iter().chain(field_drop_targets).zip(maybe_moved).zip(parts).zip(loop_head).zip(by_conds) {
       let payload = box_payload.as_ref().is_some_and(|b| b.hash() == rap.hash())
         || (payload_behind_ref && payload_target.is_some_and(|h| h == *rap.hash()));
       self.add_external_event(drop_line, ExternalEvent::OwnerDropAtReassign {
@@ -5730,7 +5732,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.visit_if_let_chain(guard_expr, &outer, &mut decls, &mut walk);
         chain_tuples = self.chain_tuple_lets(guard_expr);
         if_lo = walk.first_lo.unwrap_or(start);
-        chain_fail = self.chain_fail_moves(&walk, chain_lo, else_expr.is_some());
+        let path = if else_expr.is_some() { FailPath::Else } else { FailPath::NoElse };
+        chain_fail = self.chain_fail_moves(&walk, chain_lo, path);
         let binds = self.chain_binding_events(&(if_lo..*self.unique_id), &decls);
         // Copying a value out of a variable declared before the `if`
         // changes nothing about that variable, so, as for a lone `if
@@ -5854,38 +5857,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       Some(_) => self.tcx.sess.source_map().lookup_char_pos(if_expr.span.hi()).line,
       None => self.tcx.sess.source_map().lookup_char_pos(if_expr.span.lo()).line,
     };
-    for a in std::mem::take(&mut chain_fail.assigns) {
-      self.add_external_event(fail_line, ExternalEvent::ChainFailAssign {
-        ro: a.rap,
-        place: a.place,
-        drops_old: a.drops_old,
-        no_else: else_expr.is_none(),
-        id: *self.unique_id,
-      });
-      *self.unique_id += 1;
-    }
-    for m in std::mem::take(&mut chain_fail.moves) {
-      self.add_external_event(fail_line, ExternalEvent::LoopExitMove {
-        ro: m.rap,
-        definite: m.definite,
-        at: MaybeMovedAt::ChainFail { to: m.to, dropped: m.dropped, no_else: else_expr.is_none(), how: m.how },
-        id: *self.unique_id,
-      });
-      *self.unique_id += 1;
-    }
-    // Borrows it made that have ended by then (#688).
-    let uses_lo = *self.unique_id;
-    for u in std::mem::take(&mut chain_fail.uses) {
-      self.add_external_event(fail_line, ExternalEvent::ChainFailUse {
-        ro: u.rap,
-        uses: u.uses,
-        definite: u.definite,
-        no_else: else_expr.is_none(),
-        id: *self.unique_id,
-      });
-      *self.unique_id += 1;
-    }
+    let path = if else_expr.is_some() { FailPath::Else } else { FailPath::NoElse };
+    // Borrows it made that have ended by then (#688) come last.
+    let fail_events = self.chain_fail_events(std::mem::take(&mut chain_fail), path);
+    let uses_lo = fail_events.iter()
+      .find(|ev| matches!(ev, ExternalEvent::ChainFailUse { .. }))
+      .map_or(*self.unique_id, |ev| ev.get_id());
     let uses_ids = uses_lo..*self.unique_id;
+    for ev in fail_events {
+      self.add_external_event(fail_line, ev);
+    }
     // The if-body's events, when there's an `else` (see below).
     let mut if_ev_early: Option<Vec<(usize, ExternalEvent)>> = None;
     let else_decl = match else_expr {
@@ -6508,6 +6489,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // match, usually the match's own last line.
     let past_match = self.temporary_scope_end(guard_expr).is_some_and(|(_, l, _)| l > merge);
     let mut arm_borrows = self.arm_borrows_begin();
+    // What each earlier arm's guard leaves behind when it fails (#247).
+    let mut failed_guards: Vec<(ChainFail, FailPath)> = Vec::new();
     for (arm_idx, arm) in arms.iter().enumerate() {
       if arm_idx > 0 {
         self.arm_borrows_next(&mut arm_borrows);
@@ -6528,6 +6511,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       b_ty_names.push(get_name_of_pat(arm.pat, &self.tcx));
 
       
+      // The arm starts with what the failed guards of earlier arms
+      // left behind (#247, #248), before its pattern's events: drawn
+      // on its pattern's line. They're also on the global list while
+      // its pattern, guard and body are visited, so that, say, a
+      // reassignment there sees the drop flag (they're taken off with
+      // the pattern's events, by id, after the body).
+      let mut fail_evs: Vec<(usize, ExternalEvent)> = Vec::new();
+      for (fail, path) in failed_guards.clone() {
+        for ev in self.chain_fail_events(fail, path) {
+          self.preprocessed_events.push((pat_line, ev.clone()));
+          fail_evs.push((pat_line, ev));
+        }
+      }
       // Events the pattern adds to the global list (a struct
       // binding's reference fields, its fields' binds) belong
       // to this arm; see the drain below.
@@ -6546,7 +6542,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let (arm_pat, or_conflicts) = self.or_arm_stand_in(arm.pat, parents, &parents_ty, Some(guard_expr), pat_line, typeck_res, &scrutinee_moves);
       // add/fetch raps that are initialized in arm expr
       // need to also get their types, in order to figure out if we are moving, copying or borrowing something into the block
-      let mut pat_out = MatchArmPat::default();
+      let mut pat_out = MatchArmPat { branch_e_data: fail_evs, ..MatchArmPat::default() };
       let cx = MatchArmCtx { guard_expr, typeck_res, parents, parents_ty: &parents_ty, scrutinee_moves: &scrutinee_moves, tuple_name: &tuple_name, or_conflicts: &or_conflicts, arm_pat, pat_line, end, inline };
       match arm_pat.kind {
         PatKind::TupleStruct(_, pat_list, _) | PatKind::Tuple(pat_list, _) => self.match_arm_tuple_pat(cx, pat_list, &mut pat_out),
@@ -6599,7 +6595,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         branch_e_data.extend(self.preprocessed_events.drain(first_pat_ev..));
       }
 
-      self.match_arm_guard(arm, inline, &mut pat_decls, &mut branch_e_data);
+      failed_guards.extend(self.match_arm_guard(arm, inline, &mut pat_decls, &mut branch_e_data));
       // While the body is visited, the pattern's and the guard's
       // events are on the global list too, so that an exit in it
       // sees the bindings own their values and drops them
@@ -6964,22 +6960,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   }
 
   /// A `match` arm's guard (`pat if cond =>`): its events join the arm's
-  /// column, and its bindings are declared in the arm.
-  fn match_arm_guard(&mut self, arm: &'tcx rustc_hir::Arm<'tcx>, inline: bool, pat_decls: &mut HashSet<ResourceAccessPoint>, branch_e_data: &mut Vec<(usize, ExternalEvent)>) {
+  /// column, and its bindings are declared in the arm. Returns what the
+  /// later arms start with when it fails (see `visit_match_guard`).
+  fn match_arm_guard(&mut self, arm: &'tcx rustc_hir::Arm<'tcx>, inline: bool, pat_decls: &mut HashSet<ResourceAccessPoint>, branch_e_data: &mut Vec<(usize, ExternalEvent)>) -> Option<(ChainFail, FailPath)> {
     // Match guard: `pat if cond =>` / `pat if let p = e =>`.
     // The guard runs after the pattern matched and before
     // the body, and only then; if it's false, matching goes
     // on with the later arms. We show its events in this
     // arm's own column, next to the pattern's bindings:
     // "when this arm is taken, this happened" is always true.
-    // What that leaves out is that the guard also ran when
-    // the pattern matched but the guard failed and a later
-    // arm was taken. For borrows and reads that's harmless
-    // (they end inside the guard, so later arms start from
-    // the same state), but a move or an assignment would
-    // still be in effect in those later arms, so
-    // `visit_match_guard` refuses those rather than draw a
-    // later arm with a value it no longer has.
+    // The guard also runs when the pattern matched but the
+    // guard fails and a later arm is taken: what it did that
+    // lasts, or lent and got back, is returned for the later
+    // arms to start with (#247, #248).
     //
     // Bindings introduced by an `if let` guard are registered
     // like `if let` condition bindings and live until the
@@ -6992,12 +6985,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         .collect();
       let first_guard_ev = self.preprocessed_events.len();
       let mut guard_decls: HashSet<ResourceAccessPoint> = HashSet::new();
-      self.visit_match_guard(guard, true, &outer, &mut guard_decls, span_end_line(&arm.span, &self.tcx));
+      let failed = self.visit_match_guard(guard, &outer, &mut guard_decls, span_end_line(&arm.span, &self.tcx));
       if !inline {
         branch_e_data.extend(self.preprocessed_events.drain(first_guard_ev..));
       }
       pat_decls.extend(guard_decls);
+      return Some(failed);
     }
+    None
   }
 
   /// The end of the borrows an arm's pattern takes: an or-pattern's

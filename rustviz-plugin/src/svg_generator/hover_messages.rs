@@ -3,7 +3,7 @@ use crate::svg_generator::data::{BranchExit, EarlyReturns, LoopLeft, ResourceAcc
 
 /* Event Dot messages: shows up when someone hovers over a dot */
 
-use crate::svg_generator::data::{ArgTie, ChainFailHow, ChainUse, RcCall, RcDrop, StaticLender, TryMove, TupleDropAt, TupleLeft, ViaCarrier};
+use crate::svg_generator::data::{ArgTie, ChainFailHow, ChainUse, FailPath, RcCall, RcDrop, StaticLender, TryMove, TupleDropAt, TupleLeft, ViaCarrier};
 /// Escape a name (`s`, `p.x`, or an operator such as `<` or `&`) for a
 /// tooltip. A tooltip is HTML stored in an SVG attribute that is written
 /// without escaping (the span markup around names is already in its
@@ -3164,7 +3164,7 @@ fn exits_verb(exits: &[BranchExit], plural: bool) -> String {
 // assignment to an immutable one is E0384). `by_cond`: a let-chain's
 // condition, not only a branch, may have moved it (`if let … && { let
 // w = s; … }`, #953); see `branch_merge_moved`.
-pub fn event_dot_branch_merge_moved_with_drop(my_name: &String, value: bool, mutable: bool, note: &str, by_cond: bool) -> String {
+pub fn event_dot_branch_merge_moved_with_drop(my_name: &String, value: bool, mutable: bool, note: &str, by_cond: Option<&str>) -> String {
     let my_name_fmt = styled_name_html(my_name);
     let again = if mutable { " (until it's assigned again)" } else { "" };
     let moved = branch_merge_moved(&my_name_fmt, by_cond);
@@ -3174,7 +3174,7 @@ pub fn event_dot_branch_merge_moved_with_drop(my_name: &String, value: bool, mut
     let (holds, rest) = split_drop_note(note);
     format!(
         "{0}{3}. {4}, its resource{1} is dropped{2} when {5} goes out of scope.",
-        moved, holds, rest, again, branch_merge_unless(by_cond), my_name_fmt
+        moved, holds, rest, again, branch_merge_unless(by_cond.is_some()), my_name_fmt
     )
 }
 
@@ -3185,12 +3185,14 @@ pub fn event_dot_branch_merge_moved_with_drop(my_name: &String, value: bool, mut
 // condition moves s and a later part fails, the branch that runs (the
 // else, or the skipped body) doesn't move s, yet s is gone. So it says
 // "s may have been moved above, so it can't be used after the if", the
-// wording of a Box's contents moved there (#940).
-fn branch_merge_moved(name: &str, by_cond: bool) -> String {
-    if by_cond {
+// wording of a Box's contents moved there (#940). A `match` arm's guard
+// that moves s and then fails is the same (#247): `by_cond` is the
+// conditional's keyword, "if" or "match".
+fn branch_merge_moved(name: &str, by_cond: Option<&str>) -> String {
+    if let Some(kw) = by_cond {
         format!(
             "{0} may have been moved above, so it can't be used after the {1}",
-            name, styled_name_html(&"if".to_owned())
+            name, styled_name_html(&kw.to_owned())
         )
     } else {
         format!("{} was moved in at least one branch above, so it can't be used after the branches", name)
@@ -3224,7 +3226,7 @@ pub enum ContentsDropAt {
 // when the contents need no drop. `by_cond`: a let-chain's condition,
 // not only a branch, may have moved them (`if let … && { let w = *e;
 // … }`, #940): see `moved_above`.
-pub fn event_dot_branch_merge_box_contents_moved(my_name: &String, mutable: bool, holds: Option<&str>, at: ContentsDropAt, by_cond: bool) -> String {
+pub fn event_dot_branch_merge_box_contents_moved(my_name: &String, mutable: bool, holds: Option<&str>, at: ContentsDropAt, by_cond: Option<&str>) -> String {
     let name = styled_name_html(my_name);
     let deref = styled_name_html(&format!("*{}", my_name));
     let until = match at {
@@ -3233,10 +3235,10 @@ pub fn event_dot_branch_merge_box_contents_moved(my_name: &String, mutable: bool
         ContentsDropAt::ScopeEnd if mutable => format!(" (until {} or {} is assigned again)", deref, name),
         ContentsDropAt::ScopeEnd => String::new(),
     };
-    let mut out = if by_cond {
+    let mut out = if let Some(kw) = by_cond {
         format!(
             "{0}'s contents may have been moved out above, so {0} can't be used after the {1}{2}.",
-            name, styled_name_html(&"if".to_owned()), until
+            name, styled_name_html(&kw.to_owned()), until
         )
     } else {
         format!(
@@ -3255,7 +3257,7 @@ pub fn event_dot_branch_merge_box_contents_moved(my_name: &String, mutable: bool
             || format!("{}'s contents", name),
             escape_tooltip_name,
         );
-        let unless = if by_cond { "If nothing above moved them" } else { "If the branch that ran didn't move them" };
+        let unless = if by_cond.is_some() { "If nothing above moved them" } else { "If the branch that ran didn't move them" };
         out.push_str(&format!(" {}, {} is dropped {}.", unless, what, when));
         if at != ContentsDropAt::PayloadWrite {
             out.push_str(" The Box's heap allocation is freed then either way.");
@@ -3270,11 +3272,11 @@ pub fn event_dot_branch_merge_box_contents_moved(my_name: &String, mutable: bool
 // again before it goes out of scope: the old value, if it's still there,
 // is dropped at that assignment instead (#335). `in_loop`: that
 // assignment is in a loop's body, which may end before it runs (#1012).
-pub fn event_dot_branch_merge_moved_then_reassigned(my_name: &String, by_cond: bool, in_loop: bool) -> String {
+pub fn event_dot_branch_merge_moved_then_reassigned(my_name: &String, by_cond: Option<&str>, in_loop: bool) -> String {
     let name = styled_name_html(my_name);
     format!(
         "{} until it's assigned again. {}, its resource is dropped when {} is assigned again{}.",
-        branch_merge_moved(&name, by_cond), branch_merge_unless(by_cond), name,
+        branch_merge_moved(&name, by_cond), branch_merge_unless(by_cond.is_some()), name,
         if in_loop { " (or, if it isn't, when it goes out of scope)" } else { "" }
     )
 }
@@ -3830,13 +3832,23 @@ pub fn event_dot_owner_drop_at_reassign_loop_head(my_name: &String, note: &str) 
     )
 }
 
+// What failed: "the condition" of an `if`, or "the guard on line N"
+// of a `match` arm (#247).
+fn fail_subject(path: FailPath) -> String {
+    match path {
+        FailPath::Guard(line) => format!("the guard on line {}", line),
+        FailPath::Else | FailPath::NoElse => "the condition".to_owned(),
+    }
+}
+
 // At the start of the `else` branch of an `if` whose let-chain
 // condition moves the variable in one part and can still be false in a
 // later one (`if let Some(a) = x && a.len() > 5`, #281): on that path
 // the else branch runs after the move (rustc: "borrow of partially
 // moved value"). `definite`: every way into the else branch passes the
-// move (the parts before it can't fail). `no_else`: there's no `else`,
-// so it's the path where the body is skipped. `to`: where the condition
+// move (the parts before it can't fail). `path`: the else branch, the
+// path where the body is skipped (no `else`), or a later arm of a
+// `match` whose guard moved it (#247). `to`: where the condition
 // moves it; `dropped`: those of them (the chain's own bindings) that
 // are dropped when the condition fails, with what they hold.
 pub fn event_dot_chain_fail_move(
@@ -3844,36 +3856,44 @@ pub fn event_dot_chain_fail_move(
     definite: bool,
     to: &[String],
     dropped: &[String],
-    no_else: bool,
+    path: FailPath,
     how: &ChainFailHow,
 ) -> String {
-    let (name, moves, act) = cond_move_parts(my_name, to, how);
+    let (name, moves, act) = cond_move_parts(my_name, to, how, &fail_subject(path));
     let if_kw = styled_name_html(&"if".to_owned());
-    let mut out = match (definite, no_else) {
-        (false, false) => format!(
+    let mut out = match (definite, path) {
+        // A guard (#247): never definite, since a later arm can also be
+        // reached when this arm's pattern doesn't match.
+        (_, FailPath::Guard(_)) => format!(
+            "{0} may have been moved: when {1} and then turns out false, matching goes on with the \
+             later arms after that {2}, so {0} can't be used here (the borrow checker counts every \
+             later arm as one that may run after a failed guard)",
+            name, moves, act),
+        (false, FailPath::Else) => format!(
             "{0} may have been moved: when {1} and then turns out false, the else branch runs \
              after that {2}, so {0} can't be used here",
             name, moves, act),
-        (true, false) => format!(
+        (true, FailPath::Else) => format!(
             "{0} was moved: {1} before it can turn out false, so the else branch runs after that \
              {2}, and {0} can't be used here",
             name, moves, act),
-        (false, true) => format!(
+        (false, FailPath::NoElse) => format!(
             "{0} may have been moved: when {1} and then turns out false, the body is skipped but \
              the {2} has happened, so {0} can't be used after the {3}",
             name, moves, act, if_kw),
-        (true, true) => format!(
+        (true, FailPath::NoElse) => format!(
             "{0} was moved: {1} before it can turn out false, so the {2} has happened even when \
              the body is skipped, and {0} can't be used after the {3}",
             name, moves, act, if_kw),
     };
+    let what = if matches!(path, FailPath::Guard(_)) { "guard" } else { "condition" };
     // That temporary is dropped when the condition fails, with what the
     // pattern didn't take out of it: all of it if the pattern didn't
     // match (#949).
     if let ChainFailHow::Literal(tuple) = how {
         let tmp = temporary_tuple(tuple);
         if to.is_empty() {
-            return format!("{out}. When the condition fails, {tmp} is dropped, and with it {name}'s resource.");
+            return format!("{out}. When the {what} fails, {tmp} is dropped, and with it {name}'s resource.");
         }
         out.push_str(&format!(". If the pattern doesn't match, {tmp} is dropped, and with it {name}'s resource"));
         if dropped.is_empty() {
@@ -3887,7 +3907,8 @@ pub fn event_dot_chain_fail_move(
             n => format!("{} and {}", fmt[..n - 1].join(", "), fmt[n - 1]),
         };
         out.push_str(&format!(
-            "; if it matches and the condition fails after that, {} {} out of scope and {} {} dropped.",
+            "; if it matches and the {} fails after that, {} {} out of scope and {} {} dropped.",
+            what,
             names,
             if plural { "go" } else { "goes" },
             if plural { "their resources" } else { "its resource" },
@@ -3895,7 +3916,7 @@ pub fn event_dot_chain_fail_move(
         ));
         return out;
     }
-    out.push_str(&cond_fail_dropped(dropped));
+    out.push_str(&cond_fail_dropped(dropped, what));
     out
 }
 
@@ -3910,7 +3931,7 @@ pub fn event_dot_while_cond_move(
     dropped: &[String],
     how: &ChainFailHow,
 ) -> String {
-    let (name, moves, act) = cond_move_parts(my_name, to, how);
+    let (name, moves, act) = cond_move_parts(my_name, to, how, "the condition");
     let while_kw = styled_name_html(&"while".to_owned());
     let mut out = if definite {
         format!(
@@ -3923,15 +3944,16 @@ pub fn event_dot_while_cond_move(
              that {2}, so {0} can't be used after the loop",
             name, moves, act, while_kw)
     };
-    out.push_str(&cond_fail_dropped(dropped));
+    out.push_str(&cond_fail_dropped(dropped, "condition"));
     out
 }
 
 // What a condition does to the variable (`event_dot_chain_fail_move`,
 // `event_dot_while_cond_move`): the name of what it moves (the
 // variable, or for `take(*b)` the place `*b`, #579), how it says so,
-// and what to call that act.
-fn cond_move_parts(my_name: &String, to: &[String], how: &ChainFailHow) -> (String, String, &'static str) {
+// and what to call that act. `cond`: what moves it, "the condition" or
+// "the guard on line N" (`fail_subject`, #247).
+fn cond_move_parts(my_name: &String, to: &[String], how: &ChainFailHow, cond: &str) -> (String, String, &'static str) {
     fn join(names: &[String]) -> String {
         let fmt: Vec<String> = names.iter().map(|n| styled_name_html(n)).collect();
         match fmt.len() {
@@ -3946,19 +3968,19 @@ fn cond_move_parts(my_name: &String, to: &[String], how: &ChainFailHow) -> (Stri
     // A call of an FnOnce closure moves it into the call (#579).
     let (moves, act) = match how {
         ChainFailHow::Call => (format!(
-            "the condition calls {} (it can only be called once, so the call moves it)", name), "call"),
+            "{} calls {} (it can only be called once, so the call moves it)", cond, name), "call"),
         // Into the temporary of a literal scrutinee that the pattern
         // may not match (#949).
-        ChainFailHow::Literal(tuple) => (format!("the condition moves {} into {}", name, temporary_tuple(tuple)), "move"),
-        _ if to.is_empty() => (format!("the condition moves {}", name), "move"),
-        _ => (format!("the condition moves {} to {}", name, join(to)), "move"),
+        ChainFailHow::Literal(tuple) => (format!("{} moves {} into {}", cond, name, temporary_tuple(tuple)), "move"),
+        _ if to.is_empty() => (format!("{} moves {}", cond, name), "move"),
+        _ => (format!("{} moves {} to {}", cond, name, join(to)), "move"),
     };
     (name, moves, act)
 }
 
 // The condition's bindings that took the moved value and are dropped
-// when it fails (#281).
-fn cond_fail_dropped(dropped: &[String]) -> String {
+// when it fails (#281). `what`: "condition", or "guard" (#247).
+fn cond_fail_dropped(dropped: &[String], what: &str) -> String {
     if dropped.is_empty() {
         return String::new();
     }
@@ -3969,7 +3991,8 @@ fn cond_fail_dropped(dropped: &[String]) -> String {
         n => format!("{} and {}", fmt[..n - 1].join(", "), fmt[n - 1]),
     };
     format!(
-        ". When the condition fails after that move, {} {} out of scope and {} {} dropped.",
+        ". When the {} fails after that move, {} {} out of scope and {} {} dropped.",
+        what,
         names,
         if plural { "go" } else { "goes" },
         if plural { "their resources" } else { "its resource" },
@@ -4087,8 +4110,9 @@ pub fn state_or_alt_lent(my_name: &String, into: &String, mutable: bool, holds_v
     }
 }
 
-// At the start of the `else` branch (`no_else`: the path that skips the
-// body) of an `if` whose let-chain condition lends the variable in a part
+// At the start of the `else` branch (`path`: or the path that skips the
+// body, or a later arm after a failed guard, #248) of an `if` whose
+// let-chain condition lends the variable in a part
 // before one that can still be false (#688): `if let Some(a) = &x && let
 // Some(b) = y.take()` lends `y` to `take`, and `x` to `a`. The borrows
 // have ended by the time the else branch runs: a call's when it returns,
@@ -4099,7 +4123,7 @@ pub fn event_dot_chain_fail_use(
     my_name: &String,
     uses: &[ChainUse],
     definite: bool,
-    no_else: bool,
+    path: FailPath,
     is_ref: bool,
 ) -> String {
     fn join(names: &[String]) -> String {
@@ -4123,10 +4147,11 @@ pub fn event_dot_chain_fail_use(
         ""
     };
     let named: Vec<String> = uses.iter().filter(|u| !u.to.is_empty()).map(|u| u.to.clone()).collect();
+    let cond = fail_subject(path);
     let lends = if named.is_empty() {
-        format!("the condition borrows {}", obj)
+        format!("{} borrows {}", cond, obj)
     } else {
-        format!("the condition lends {} to {}", obj, join(&named))
+        format!("{} lends {} to {}", cond, obj, join(&named))
     };
     let bound: Vec<String> = uses.iter().filter(|u| u.binding && !u.to.is_empty()).map(|u| u.to.clone()).collect();
     let gos = match bound.len() {
@@ -4135,10 +4160,10 @@ pub fn event_dot_chain_fail_use(
         _ => format!("{} go out of scope, so ", join(&bound)),
     };
     let ended = if uses.len() > 1 { "those borrows have ended" } else { "that borrow has ended" };
-    let then = if no_else {
-        format!("the body is skipped after {}", ended)
-    } else {
-        format!("the else branch runs after {}", ended)
+    let then = match path {
+        FailPath::NoElse => format!("the body is skipped after {}", ended),
+        FailPath::Else => format!("the else branch runs after {}", ended),
+        FailPath::Guard(_) => format!("matching goes on with the later arms after {}", ended),
     };
     let mut out = if definite {
         format!("{} was {}borrowed: {} before it can turn out false; when it does, {}{}",
@@ -4165,17 +4190,24 @@ pub fn event_dot_chain_fail_use(
 // #579): the assignment lasts, so on that path the variable holds its
 // new value, and on the paths where the condition failed before the
 // assignment its old one. `drops_old`: the assignment drops the old
-// value (`rc`: what that drop does for an Rc). `no_else`: there's no
-// `else`, so it's the path where the body is skipped.
+// value (`rc`: what that drop does for an Rc). `path`: the else branch,
+// the path where the body is skipped (no `else`), or a later arm of a
+// `match` whose guard assigned it (#247).
 pub fn event_dot_chain_fail_assign(
     my_name: &String,
     drops_old: bool,
     rc: Option<RcDrop>,
-    no_else: bool,
+    path: FailPath,
 ) -> String {
     let name = styled_name_html(my_name);
     let what = if drops_old { "resource" } else { "value" };
-    let mut out = if no_else {
+    let mut out = if let FailPath::Guard(line) = path {
+        format!(
+            "{0} may have been assigned a new {1}: when the guard on line {2} assigns to {0} and \
+             then turns out false, matching goes on with the later arms after that assignment, so \
+             here {0} holds either its previous {1} or the new one.",
+            name, what, line)
+    } else if path == FailPath::NoElse {
         format!(
             "{0} may have been assigned a new {1}: when the condition assigns to {0} and then \
              turns out false, the body is skipped but the assignment has happened, so after the \

@@ -18,14 +18,15 @@ use rustviz_lib::{error_kind, ErrorKind, Rustviz, DOES_NOT_COMPILE_INTRO, UNSUPP
 /// skipped. If they all start working, add a new one here.
 ///
 /// The first is a deliberate refusal, not a bug: a match guard that
-/// moves a variable declared outside it can't be drawn truthfully with
-/// one column per arm (#247, #248), so it stays refused until that
-/// design work is done. The second is an ordinary crash (#210).
+/// assigns a new reference to a variable declared outside it leaves it
+/// pointing to one of two values in the later arms, which RustViz can't
+/// draw yet (#603). The second is an ordinary crash (#210).
 const KNOWN_PANICKING: &[(&str, &str)] = &[
-    // A match guard that moves an outer variable (#247).
+    // A match guard that assigns a new reference to an outer variable
+    // (#603). (A guard that moves one, #247, renders now.)
     (
-        "guard_moves_outer",
-        "fn consume(s: String) -> bool {\n    s.len() > 3\n}\nfn main() {\n    let s = String::from(\"hello\");\n    let opt = Some(5);\n    match opt {\n        Some(_) if consume(s) => println!(\"long\"),\n        _ => println!(\"other\"),\n    }\n}\n",
+        "guard_assigns_reference",
+        "fn main() {\n    let s = String::from(\"a\");\n    let t = String::from(\"b\");\n    let mut r = &t;\n    let opt = Some(5);\n    match opt {\n        Some(_) if { r = &s; r.len() > 3 } => println!(\"{}\", r),\n        _ => println!(\"{}\", r),\n    }\n}\n",
     ),
     // Calling a closure with a `&mut` argument (#210).
     (
@@ -144,12 +145,13 @@ fn plugin_panic_prints_one_clean_unsupported_line() {
 /// so in words). As with `KNOWN_PANICKING`, a snippet that starts working
 /// is skipped, but at least one must still trip a guard.
 const GUARD_REASONS: &[(&str, &str, &str)] = &[
-    // A match guard that moves an outer variable (#247). (Shadowing a
-    // moved variable (#253) used to be the example here; it renders now.)
+    // A match guard that assigns a new reference to an outer variable
+    // (#603). (Shadowing a moved variable (#253), then a guard that moves
+    // one (#247), used to be the example here; both render now.)
     (
-        "guard_moves_outer",
-        "fn consume(s: String) -> bool { s.len() > 3 }\nfn main() {\n    let s = String::from(\"hello\");\n    let opt = Some(5);\n    match opt {\n        Some(_) if consume(s) => println!(\"yes\"),\n        _ => println!(\"no\"),\n    }\n}\n",
-        "match guards that move or assign a variable declared outside the guard",
+        "guard_assigns_reference",
+        "fn main() {\n    let s = String::from(\"a\");\n    let t = String::from(\"b\");\n    let mut r = &t;\n    let opt = Some(5);\n    match opt {\n        Some(_) if { r = &s; r.len() > 3 } => println!(\"{}\", r),\n        _ => println!(\"{}\", r),\n    }\n}\n",
+        "match guards that assign a new reference to a variable declared outside the guard",
     ),
     // A write through `*r` in both arms of an if/else (#264): the layout
     // has no column for the event's timeline.

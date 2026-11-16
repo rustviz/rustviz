@@ -2133,23 +2133,33 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     out
   }
 
-  /// True when a let-chain's condition may have moved `rap` before it
-  /// failed (#281): a `MaybeMovedAt::ChainFail` event for it, also
-  /// inside a finished conditional. A drop-flag message then says
-  /// "nothing above" moved it rather than "no branch above". The
-  /// events are the whole crate's, so this matches the variable, not
-  /// its name: a same-named one in another function doesn't count
-  /// (#1002).
+  /// True when a let-chain's condition (or a match guard, #247) may
+  /// have moved `rap` before it failed (#281): a `MaybeMovedAt::ChainFail`
+  /// event for it, also inside a finished conditional, with no new value
+  /// for it after that on the same path (`s = …` in the else branch). A
+  /// drop-flag message then says "nothing above" moved it rather than
+  /// "no branch above". The events are the whole crate's, so this matches
+  /// the variable, not its name: a same-named one in another function
+  /// doesn't count (#1002).
   pub fn moved_by_chain_condition(&self, rap: &ResourceAccessPoint) -> bool {
-    fn any(events: &[(usize, ExternalEvent)], hash: u64) -> bool {
-      events.iter().any(|(_, ev)| match ev {
-        ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::ChainFail { .. } | MaybeMovedAt::WhileCondFail { .. }
-          | MaybeMovedAt::Loop { nothing_above: true, .. } | MaybeMovedAt::LoopHead | MaybeMovedAt::LoopRound { .. }, .. } => *ro.hash() == hash,
-        ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| any(&b.e_data, hash)),
-        _ => false,
-      })
+    fn lasts_along(mut lasts: bool, events: &[(usize, ExternalEvent)], hash: u64) -> bool {
+      for (_, ev) in events {
+        match ev {
+          ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::ChainFail { .. } | MaybeMovedAt::WhileCondFail { .. }
+            | MaybeMovedAt::Loop { nothing_above: true, .. } | MaybeMovedAt::LoopHead | MaybeMovedAt::LoopRound { .. }, .. }
+            if *ro.hash() == hash => lasts = true,
+          ExternalEvent::Move { to: ResourceTy::Value(r), .. }
+          | ExternalEvent::Copy { to: ResourceTy::Value(r), .. }
+          | ExternalEvent::Bind { to: ResourceTy::Value(r), .. } if *r.hash() == hash => lasts = false,
+          ExternalEvent::Branch { branches, .. } => {
+            lasts = branches.iter().any(|b| lasts_along(lasts, &b.e_data, hash));
+          }
+          _ => {}
+        }
+      }
+      lasts
     }
-    any(self.preprocessed_events, *rap.hash())
+    lasts_along(false, self.preprocessed_events, *rap.hash())
   }
 
   /// Whether what last changed `name`'s state, in the events so far, is

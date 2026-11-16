@@ -1354,16 +1354,17 @@ pub enum MaybeMovedAt {
     Loop { nothing_above: bool, kept: bool },
     /// The end of a labeled block (`'a: { … break 'a; … }`).
     LabeledBlock,
-    /// The start of the `else` branch (`no_else`: the implicit empty
+    /// The start of the `else` branch (`path`: or the implicit empty
     /// one) of an `if` whose let-chain condition moves the variable in
     /// a part that a part which can be false comes after
-    /// (`if let Some(a) = x && a.len() > 5`, #281). On that path the
+    /// (`if let Some(a) = x && a.len() > 5`, #281), or of a later arm
+    /// of a `match` whose guard moved it and then failed (#247). On that path the
     /// move has happened by the time the condition fails. `to`: where
     /// the condition moves it (variable or function names; empty when
     /// it has no name). `dropped`: the chain's bindings among `to` that
     /// are dropped when the condition fails (they hold what was moved
     /// and need drop). `how`: what the condition does to it (#579).
-    ChainFail { to: Vec<String>, dropped: Vec<String>, no_else: bool, how: ChainFailHow },
+    ChainFail { to: Vec<String>, dropped: Vec<String>, path: FailPath, how: ChainFailHow },
     /// The end of a `while` loop whose condition moves the variable
     /// (`while let Some(x) = it.next() && { let w = s; … }`, `while
     /// let Some(c) = first(s)`, #968): the loop ends when the condition
@@ -1387,6 +1388,23 @@ pub enum MaybeMovedAt {
     /// after the loop isn't down to whether "something above" moved it:
     /// a drop flag's text says "only if it still holds one" (#1019).
     LoopRound { kept: bool },
+}
+
+/// Where a condition leads when it turns out false after an effect that
+/// lasts (`MaybeMovedAt::ChainFail`, `ExternalEvent::ChainFailAssign`,
+/// `ExternalEvent::ChainFailUse`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FailPath {
+    /// The `else` branch of an `if` whose let-chain condition failed
+    /// (#281).
+    Else,
+    /// No `else`: the path that skips the `if`'s body.
+    NoElse,
+    /// The later arms of a `match`, after the guard on this line failed
+    /// (#247, #248): matching goes on with them. The borrow checker
+    /// counts every later arm as one that may run after it, whatever
+    /// its pattern.
+    Guard(usize),
 }
 
 /// How a let-chain's condition moves a variable (`MaybeMovedAt::ChainFail`).
@@ -1923,7 +1941,7 @@ pub enum ExternalEvent {
         ro: ResourceAccessPoint,
         place: Option<String>,
         drops_old: bool,
-        no_else: bool,
+        path: FailPath,
         id: usize
     },
     // At the start of the `else` branch (or the implicit empty one) of
@@ -1937,7 +1955,7 @@ pub enum ExternalEvent {
         ro: ResourceAccessPoint,
         uses: Vec<ChainUse>,
         definite: bool,
-        no_else: bool,
+        path: FailPath,
         id: usize
     },
     // A reference parameter a returned `if` / `match` doesn't return on
@@ -2381,10 +2399,10 @@ pub enum Event {
     OrAltBorrow { is: ResourceTy, sources: Vec<String>, mutable: bool, end: bool },
     // See ExternalEvent::ChainFailAssign. `rc`: the variable's
     // `rc_drop()`, for what dropping the old value does.
-    ChainFailAssign { place: Option<String>, drops_old: bool, rc: Option<RcDrop>, no_else: bool },
+    ChainFailAssign { place: Option<String>, drops_old: bool, rc: Option<RcDrop>, path: FailPath },
     // See ExternalEvent::ChainFailUse. `is_ref`: the column is a
     // reference, so what was lent is the resource it points to.
-    ChainFailUse { uses: Vec<ChainUse>, definite: bool, no_else: bool, is_ref: bool },
+    ChainFailUse { uses: Vec<ChainUse>, definite: bool, path: FailPath, is_ref: bool },
     // See ExternalEvent::TiedParamNote.
     TiedParamNote { lifetime: String },
     // See ExternalEvent::DeadElseNote.
@@ -3122,8 +3140,8 @@ impl Event {
             Event::LoopExitMove { definite, at: MaybeMovedAt::LabeledBlock } => {
                 hover_messages::event_dot_loop_exit_move(my_name, *definite, true)
             }
-            Event::LoopExitMove { definite, at: MaybeMovedAt::ChainFail { to, dropped, no_else, how } } => {
-                hover_messages::event_dot_chain_fail_move(my_name, *definite, to, dropped, *no_else, how)
+            Event::LoopExitMove { definite, at: MaybeMovedAt::ChainFail { to, dropped, path, how } } => {
+                hover_messages::event_dot_chain_fail_move(my_name, *definite, to, dropped, *path, how)
             }
             Event::LoopExitMove { definite, at: MaybeMovedAt::WhileCondFail { to, dropped, how } } => {
                 hover_messages::event_dot_while_cond_move(my_name, *definite, to, dropped, how)
@@ -3134,8 +3152,8 @@ impl Event {
             Event::LoopExitMove { at: MaybeMovedAt::LoopRound { .. }, .. } => {
                 hover_messages::event_dot_loop_round_maybe_moved(my_name)
             }
-            Event::ChainFailAssign { place, drops_old, rc, no_else } => {
-                hover_messages::event_dot_chain_fail_assign(place.as_ref().unwrap_or(my_name), *drops_old, *rc, *no_else)
+            Event::ChainFailAssign { place, drops_old, rc, path } => {
+                hover_messages::event_dot_chain_fail_assign(place.as_ref().unwrap_or(my_name), *drops_old, *rc, *path)
             }
             Event::OrAltMove { into, sources, tuple, part_of, value, .. } => {
                 hover_messages::event_dot_or_alt_move(my_name, into, sources, tuple.as_deref(), part_of.as_ref(), *value)
@@ -3159,8 +3177,8 @@ impl Event {
             Event::InitRefParam{ param: ResourceAccessPoint::Owner(_), own_param: Some(own), .. } => {
                 hover_messages::event_dot_param_value_init(my_name, &own.fn_name, own.whole)
             }
-            Event::ChainFailUse { uses, definite, no_else, is_ref } => {
-                hover_messages::event_dot_chain_fail_use(my_name, uses, *definite, *no_else, *is_ref)
+            Event::ChainFailUse { uses, definite, path, is_ref } => {
+                hover_messages::event_dot_chain_fail_use(my_name, uses, *definite, *path, *is_ref)
             }
             Event::DeadElseNote => {
                 hover_messages::event_dot_dead_else_note(my_name)
@@ -4740,9 +4758,9 @@ impl Visualizable for VisualizationData {
         ExternalEvent::OrAltMove{ro, into, from, tuple, part_of, in_let, ..} => {
           vec![(line_num, Event::OrAltMove { into: into.clone(), sources: from.clone(), tuple: tuple.clone(), part_of: part_of.clone(), value: ro.holds_value(), in_let: *in_let })]
         },
-        ExternalEvent::ChainFailAssign{ro, place, drops_old, no_else, ..} => {
+        ExternalEvent::ChainFailAssign{ro, place, drops_old, path, ..} => {
           let rc = if place.is_some() { None } else { ro.rc_drop() };
-          vec![(line_num, Event::ChainFailAssign { place: place.clone(), drops_old: *drops_old, rc, no_else: *no_else })]
+          vec![(line_num, Event::ChainFailAssign { place: place.clone(), drops_old: *drops_old, rc, path: *path })]
         },
         ExternalEvent::DeadElseNote{ .. } => {
           vec![(line_num, Event::DeadElseNote)]
@@ -4750,8 +4768,8 @@ impl Visualizable for VisualizationData {
         ExternalEvent::TiedParamNote{ lifetime, .. } => {
           vec![(line_num, Event::TiedParamNote { lifetime: lifetime.clone() })]
         },
-        ExternalEvent::ChainFailUse{ro, uses, definite, no_else, ..} => {
-          vec![(line_num, Event::ChainFailUse { uses: uses.clone(), definite: *definite, no_else: *no_else, is_ref: ro.is_ref() })]
+        ExternalEvent::ChainFailUse{ro, uses, definite, path, ..} => {
+          vec![(line_num, Event::ChainFailUse { uses: uses.clone(), definite: *definite, path: *path, is_ref: ro.is_ref() })]
         },
 
         _ => panic!("internal state: a branch event reached the per-variable event expansion")
@@ -5125,9 +5143,9 @@ impl Visualizable for VisualizationData {
                     maybe_append_event(self, &ResourceTy::Value(into.clone()), b, line_number);
                 }
             },
-            ExternalEvent::ChainFailAssign{ro, place, drops_old, no_else, ..} => {
+            ExternalEvent::ChainFailAssign{ro, place, drops_old, path, ..} => {
                 let rc = if place.is_some() { None } else { ro.rc_drop() };
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::ChainFailAssign { place, drops_old, rc, no_else }, line_number);
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::ChainFailAssign { place, drops_old, rc, path }, line_number);
             },
             ExternalEvent::TiedParamNote{ro, lifetime, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::TiedParamNote { lifetime }, line_number);
@@ -5135,9 +5153,9 @@ impl Visualizable for VisualizationData {
             ExternalEvent::DeadElseNote{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::DeadElseNote, line_number);
             },
-            ExternalEvent::ChainFailUse{ro, uses, definite, no_else, ..} => {
+            ExternalEvent::ChainFailUse{ro, uses, definite, path, ..} => {
                 let is_ref = ro.is_ref();
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::ChainFailUse { uses, definite, no_else, is_ref }, line_number);
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::ChainFailUse { uses, definite, path, is_ref }, line_number);
             },
         }
     }
