@@ -3,7 +3,7 @@ use crate::svg_generator::data::{BranchExit, EarlyReturns, LoopExits, LoopLeft, 
 
 /* Event Dot messages: shows up when someone hovers over a dot */
 
-use crate::svg_generator::data::{ArgTie, ChainFailHow, ChainUse, FailPath, NoValueBefore, RcCall, RcDrop, StaticLender, TryMove, TupleDropAt, TupleLeft, ViaCarrier};
+use crate::svg_generator::data::{ArgTie, ChainFailHow, ChainRef, ChainUse, FailPath, NoValueBefore, RcCall, RcDrop, StaticLender, TryMove, TupleDropAt, TupleLeft, ViaCarrier};
 /// Escape a name (`s`, `p.x`, or an operator such as `<` or `&`) for a
 /// tooltip. A tooltip is HTML stored in an SVG attribute that is written
 /// without escaping (the span markup around names is already in its
@@ -4295,51 +4295,73 @@ pub fn state_or_alt_lent(my_name: &String, into: &String, mutable: bool, holds_v
 // live there (an `ExternalEvent::OrAltBorrow` with `chain`). `sources`
 // is [s, t]: the new lender, then the old one.
 
-// `&s` / `&mut s`, styled.
-fn chain_ref_expr(new: &str, mutable: bool) -> String {
-    styled_name_html(&format!("{}{}", if mutable { "&mut " } else { "&" }, new))
+// Where `r` may point on the failing path: "to s or to t", "into v or
+// to t" (a lender reached through a call's result, which points into
+// it, #1068), "to s, into a or into b". `sources`: the new reference's
+// lenders, then the old one's (see `ChainRef`).
+fn chain_ref_alts(sources: &[String], chain: &ChainRef) -> String {
+    let mut items: Vec<String> = sources.iter().enumerate().map(|(i, n)| {
+        let into = if i < chain.new { chain.new_via_call } else { chain.old_via_call };
+        format!("{} {}", if into { "into" } else { "to" }, styled_name_html(n))
+    }).collect();
+    // The old reference's data with no column (#1068).
+    let what = match &chain.old_static {
+        Some(StaticLender::Literal { noun }) => Some(format!("a {}", noun)),
+        Some(StaticLender::Static(n)) => Some(format!("the static {}", styled_name_html(n))),
+        Some(StaticLender::PointeeOfStatic(n)) => Some(format!("what the static {} points to", styled_name_html(n))),
+        Some(StaticLender::PointeeOfConst(n)) => Some(format!("what the constant {} points to", styled_name_html(n))),
+        Some(StaticLender::PromotedConst(n)) => Some(format!("the constant {}", styled_name_html(n))),
+        _ => None,
+    };
+    items.extend(what.map(|w| format!("to {}", w)));
+    match items.as_slice() {
+        [] => String::new(),
+        [one] => one.clone(),
+        [init @ .., last] => format!("{} or {}", init.join(", "), last),
+    }
 }
 
 // The reference's dot where that starts.
-pub fn event_dot_chain_ref_borrow(my_name: &String, sources: &[String], mutable: bool, path: FailPath) -> String {
+pub fn event_dot_chain_ref_borrow(my_name: &String, sources: &[String], chain: &ChainRef) -> String {
     let r = styled_name_html(my_name);
-    let (new, old) = (styled_name_html(&sources[0]), styled_name_html(&sources[1]));
-    let assigns = format!("{} assigns {} to {}", fail_subject(path), chain_ref_expr(&sources[0], mutable), r);
-    match path {
+    let alts = chain_ref_alts(sources, chain);
+    let assigns = format!("{} assigns {} to {}", fail_subject(chain.path), styled_name_html(&chain.rhs), r);
+    match chain.path {
         FailPath::Guard(_) => format!(
             "{0} may have been assigned a new reference: when {1} and then turns out false, matching goes on \
-             with the later arms after that assignment, so here {0} points to {2} or to {3} (the borrow \
+             with the later arms after that assignment, so here {0} points {2} (the borrow \
              checker counts every later arm as one that may run after a failed guard)",
-            r, assigns, new, old),
+            r, assigns, alts),
         FailPath::Else => format!(
             "{0} may have been assigned a new reference: when {1} and then turns out false, the else branch \
-             runs after that assignment, so here {0} points to {2} or to {3}",
-            r, assigns, new, old),
+             runs after that assignment, so here {0} points {2}",
+            r, assigns, alts),
         FailPath::NoElse => format!(
             "{0} may have been assigned a new reference: when {1} and then turns out false, the body is \
-             skipped but the assignment has happened, so after the {4} {0} points to {2} or to {3}",
-            r, assigns, new, old, styled_name_html(&"if".to_owned())),
+             skipped but the assignment has happened, so after the {3} {0} points {2}",
+            r, assigns, alts, styled_name_html(&"if".to_owned())),
     }
 }
 
 // The dot of `s` or `t` (`my_name`) where that starts, adapted from
 // `event_dot_or_alt_lend`.
-pub fn event_dot_chain_ref_lend(my_name: &String, into: &String, sources: &[String], mutable: bool, holds_value: bool, path: FailPath) -> String {
+pub fn event_dot_chain_ref_lend(my_name: &String, into: &String, sources: &[String], mutable: bool, holds_value: bool, chain: &ChainRef) -> String {
     let me = styled_name_html(my_name);
     let r = styled_name_html(into);
-    let (new, old) = (styled_name_html(&sources[0]), styled_name_html(&sources[1]));
-    let borrow = chain_ref_expr(&sources[0], mutable);
-    let cond = fail_subject(path);
+    let alts = chain_ref_alts(sources, chain);
+    let rhs = styled_name_html(&chain.rhs);
+    let cond = fail_subject(chain.path);
     let how = if mutable { "mutably" } else { "immutably" };
-    let when = if *my_name == sources[0] {
+    let is_new = sources.iter().position(|n| n == my_name).is_some_and(|i| i < chain.new);
+    let when = if is_new {
         format!("If {} assigned {} to {} before turning out false, {}'s {} is {} borrowed by {} here.",
-            cond, borrow, r, me, held(holds_value), how, r)
-    } else if matches!(path, FailPath::Guard(_)) {
+            cond, rhs, r, me, held(holds_value), how, r)
+    } else if matches!(chain.path, FailPath::Guard(_)) {
         format!("If {} turned out false before assigning {} to {}, or didn't run (its arm's pattern didn't match), \
-                 {}'s {} is still {} borrowed by {} here.", cond, borrow, r, me, held(holds_value), how, r)
+                 {}'s {} is still {} borrowed by {} here.", cond, rhs, r, me, held(holds_value), how, r)
     } else {
         format!("If {} turned out false before assigning {} to {}, {}'s {} is still {} borrowed by {} here.",
-            cond, borrow, r, me, held(holds_value), how, r)
+            cond, rhs, r, me, held(holds_value), how, r)
     };
     let while_live = if mutable {
         format!("{} can't be used while {}'s borrow is live", me, r)
@@ -4347,28 +4369,28 @@ pub fn event_dot_chain_ref_lend(my_name: &String, into: &String, sources: &[Stri
         format!("{} is read-only while {}'s borrow is live", me, r)
     };
     format!(
-        "{0} points to {1} or to {2} here. {3} Which one {0} points to is decided at run time, so the borrow \
-         checker treats {4} as borrowed either way: {5}.",
-        r, new, old, when, me, while_live)
+        "{0} points {1} here. {2} Which one {0} points to is decided at run time, so the borrow \
+         checker treats {3} as borrowed either way: {4}.",
+        r, alts, when, me, while_live)
 }
 
 // The end of that borrow, on `s`'s or `t`'s column.
-pub fn event_dot_chain_ref_reacquire(my_name: &String, into: &String, sources: &[String], mutable: bool, holds_value: bool, path: FailPath) -> String {
+pub fn event_dot_chain_ref_reacquire(my_name: &String, into: &String, mutable: bool, holds_value: bool, chain: &ChainRef) -> String {
     format!(
         "{1}'s borrow ends here, so {0}'s {2} is no longer {3} borrowed (the borrow checker counted it as \
          borrowed whether or not {4} had assigned {5} to {1})",
         styled_name_html(my_name), styled_name_html(into), held(holds_value),
-        if mutable { "mutably" } else { "immutably" }, fail_subject(path), chain_ref_expr(&sources[0], mutable))
+        if mutable { "mutably" } else { "immutably" }, fail_subject(chain.path), styled_name_html(&chain.rhs))
 }
 
 // A segment of `s` or `t` while that borrow is live.
-pub fn state_chain_ref_lent(my_name: &String, into: &String, sources: &[String], mutable: bool, holds_value: bool) -> String {
+pub fn state_chain_ref_lent(my_name: &String, into: &String, sources: &[String], chain: &ChainRef, mutable: bool, holds_value: bool) -> String {
     let me = styled_name_html(my_name);
     let r = styled_name_html(into);
     format!(
-        "{0}'s {1} may be {2} borrowed by {3} ({3} points to {4} or to {5}); either way, {0} {6} until {3}'s borrow ends",
+        "{0}'s {1} may be {2} borrowed by {3} ({3} points {4}); either way, {0} {5} until {3}'s borrow ends",
         me, held(holds_value), if mutable { "mutably" } else { "immutably" }, r,
-        styled_name_html(&sources[0]), styled_name_html(&sources[1]),
+        chain_ref_alts(sources, chain),
         if mutable { "can't be used" } else { "is read-only" })
 }
 

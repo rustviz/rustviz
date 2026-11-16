@@ -1434,6 +1434,26 @@ pub enum FailPath {
     Guard(usize),
 }
 
+/// A new reference a let-chain condition (or a match guard) assigned
+/// before it failed (#603, #1068): see `ExternalEvent::OrAltBorrow`.
+/// `rhs`: the assigned expression as written (`&s`, `first(&v)`,
+/// `longest(&a, &b)`). `new`: how many of the event's `from` names are
+/// lenders of that new reference; the rest are the lenders of the one
+/// it held before.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ChainRef {
+    pub path: FailPath,
+    pub rhs: String,
+    pub new: usize,
+    /// The new / old reference came from a call's result (`first(&v)`):
+    /// it points into its lenders, not at them.
+    pub new_via_call: bool,
+    pub old_via_call: bool,
+    /// What the old reference pointed to when that has no column (`let
+    /// mut r: &str = "lit";`): not among `from`.
+    pub old_static: Option<StaticLender>,
+}
+
 /// How a let-chain's condition moves a variable (`MaybeMovedAt::ChainFail`).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ChainFailHow {
@@ -2020,7 +2040,9 @@ pub enum ExternalEvent {
     // guard) that assigned `into` a new reference before it failed
     // (#603): on the failing path `into` points to the new place or to
     // the one it pointed to before, and the borrow checker treats both
-    // as borrowed while it's live. `from` is then [new, old].
+    // as borrowed while it's live. `from` is then the new reference's
+    // lenders, then the old one's (`ChainRef::new` says where they
+    // split; several for a call tied to several arguments, #1068).
     OrAltBorrow {
         ro: ResourceAccessPoint,
         into: ResourceAccessPoint,
@@ -2028,7 +2050,7 @@ pub enum ExternalEvent {
         mutable: bool,
         end: bool,
         first: bool,
-        chain: Option<FailPath>,
+        chain: Option<ChainRef>,
         id: usize
     },
     // At the start of the `else` branch (or the implicit empty one) of
@@ -2173,10 +2195,10 @@ impl ExternalEvent {
             panic!("internal state: or_alt_borrow_events of another event");
         };
         let lend = Event::OrAltLend {
-            into: into.clone(), is: ResourceTy::Value(ro.clone()), sources: from.clone(), mutable: *mutable, end: *end, chain: *chain,
+            into: into.clone(), is: ResourceTy::Value(ro.clone()), sources: from.clone(), mutable: *mutable, end: *end, chain: chain.clone(),
         };
         let borrow = first.then(|| Event::OrAltBorrow {
-            is: ResourceTy::Value(into.clone()), sources: from.clone(), mutable: *mutable, end: *end, chain: *chain,
+            is: ResourceTy::Value(into.clone()), sources: from.clone(), mutable: *mutable, end: *end, chain: chain.clone(),
         });
         (lend, borrow)
     }
@@ -2495,11 +2517,11 @@ pub enum Event {
     // true`). Changes the place's state like a StaticLend / MutableLend
     // and StaticReacquire / MutableReacquire would.
     // `chain`: see ExternalEvent::OrAltBorrow (#603).
-    OrAltLend { into: ResourceAccessPoint, is: ResourceTy, sources: Vec<String>, mutable: bool, end: bool, chain: Option<FailPath> },
+    OrAltLend { into: ResourceAccessPoint, is: ResourceTy, sources: Vec<String>, mutable: bool, end: bool, chain: Option<ChainRef> },
     // The reference's side of an ExternalEvent::OrAltBorrow: its borrow
     // of one of `sources` starts or ends. Changes its state like a
     // StaticBorrow / MutableBorrow and StaticDie / MutableDie would.
-    OrAltBorrow { is: ResourceTy, sources: Vec<String>, mutable: bool, end: bool, chain: Option<FailPath> },
+    OrAltBorrow { is: ResourceTy, sources: Vec<String>, mutable: bool, end: bool, chain: Option<ChainRef> },
     // See ExternalEvent::ChainFailAssign. `rc`: the variable's
     // `rc_drop()`, for what dropping the old value does.
     ChainFailAssign { place: Option<String>, drops_old: bool, rc: Option<RcDrop>, path: FailPath },
@@ -3261,12 +3283,12 @@ impl Event {
             Event::OrAltMove { into, sources, tuple, part_of, value, .. } => {
                 hover_messages::event_dot_or_alt_move(my_name, into, sources, tuple.as_deref(), part_of.as_ref(), *value)
             }
-            Event::OrAltLend { into, is, sources, mutable, end, chain: Some(path) } => {
+            Event::OrAltLend { into, is, sources, mutable, end, chain: Some(chain) } => {
                 let holds_value = matches!(is, ResourceTy::Value(r) if r.holds_value());
                 if *end {
-                    hover_messages::event_dot_chain_ref_reacquire(my_name, into.name(), sources, *mutable, holds_value, *path)
+                    hover_messages::event_dot_chain_ref_reacquire(my_name, into.name(), *mutable, holds_value, chain)
                 } else {
-                    hover_messages::event_dot_chain_ref_lend(my_name, into.name(), sources, *mutable, holds_value, *path)
+                    hover_messages::event_dot_chain_ref_lend(my_name, into.name(), sources, *mutable, holds_value, chain)
                 }
             }
             Event::OrAltLend { into, is, sources, mutable, end, chain: None } => {
@@ -3277,8 +3299,8 @@ impl Event {
                     hover_messages::event_dot_or_alt_lend(my_name, into.name(), sources, *mutable, holds_value)
                 }
             }
-            Event::OrAltBorrow { sources, mutable, end: false, chain: Some(path), .. } => {
-                hover_messages::event_dot_chain_ref_borrow(my_name, sources, *mutable, *path)
+            Event::OrAltBorrow { sources, end: false, chain: Some(chain), .. } => {
+                hover_messages::event_dot_chain_ref_borrow(my_name, sources, chain)
             }
             Event::OrAltBorrow { sources, mutable, end, .. } => {
                 match (*end, *mutable) {
