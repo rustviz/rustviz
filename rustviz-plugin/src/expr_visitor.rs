@@ -563,6 +563,17 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // (#344), recorded when the branch is built; the loop turns them
   // into `LoopExitMove` events at its end.
   pub break_moves: Vec<BreakMove>,
+  // The loops being visited (by the HirId their `break`s name) and
+  // the variables declared before each that hold no value where it
+  // starts but may where it comes back round (`given_round_loop`,
+  // #1001): a later time round, an assignment to one drops what an
+  // earlier time round gave it, if it still holds that.
+  pub loop_given: Vec<(rustc_hir::HirId, Vec<ResourceAccessPoint>)>,
+  // At each `break` (#1000, #1001): the loop it leaves, the variables
+  // declared before the loop that the path from the loop's start to
+  // the `break` gives a value to, and what each of the loop's
+  // `loop_given` variables holds there (`Ownership`).
+  pub break_states: Vec<BreakState>,
   // Set when a conditional directly in the function's body has every
   // branch leaving the function (`return`, panic): the closing brace
   // is unreachable, so it drops nothing (#515).
@@ -727,6 +738,14 @@ pub struct BreakMove {
   pub on_path: bool,
 }
 
+/// See `ExprVisitor::break_states`.
+#[derive(Clone)]
+pub struct BreakState {
+  pub target: rustc_hir::HirId,
+  pub assigned: Vec<ResourceAccessPoint>,
+  pub given: Vec<(ResourceAccessPoint, Ownership)>,
+}
+
 /// See `ExprVisitor::exit_frames`.
 #[derive(Clone)]
 pub enum ExitFrame {
@@ -842,6 +861,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       arm_frames: Vec::new(),
       defer_old_ends: false,
       break_moves: Vec::new(),
+      loop_given: Vec::new(),
+      break_states: Vec::new(),
       all_paths_exit: false,
       dead_tail: false,
       dead_code: HashSet::new(),
@@ -1497,7 +1518,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       | ExternalEvent::OwnerDropUnlessReturned { ro, .. }
       | ExternalEvent::TemporaryDrop { ro, .. }
       | ExternalEvent::LoopIteratorDrop { ro, .. }
-      | ExternalEvent::LoopMaybeInit { ro, .. } => {
+      | ExternalEvent::LoopMaybeInit { ro, .. }
+      | ExternalEvent::LoopExitKept { ro, .. } => {
         self.skip_raps.contains(ro.name())
       }
       ExternalEvent::InitRefParam { param, .. } => {
@@ -1979,20 +2001,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     ownership_after(&self.preprocessed_events[..end], rap_name, None).unwrap_or(Ownership::None)
   }
 
-  /// True when a let-chain's condition may have moved `name` before it
+  /// True when a let-chain's condition may have moved `rap` before it
   /// failed (#281): a `MaybeMovedAt::ChainFail` event for it, also
   /// inside a finished conditional. A drop-flag message then says
-  /// "nothing above" moved it rather than "no branch above".
-  pub fn moved_by_chain_condition(&self, name: &str) -> bool {
-    fn any(events: &[(usize, ExternalEvent)], name: &str) -> bool {
+  /// "nothing above" moved it rather than "no branch above". The
+  /// events are the whole crate's, so this matches the variable, not
+  /// its name: a same-named one in another function doesn't count
+  /// (#1002).
+  pub fn moved_by_chain_condition(&self, rap: &ResourceAccessPoint) -> bool {
+    fn any(events: &[(usize, ExternalEvent)], hash: u64) -> bool {
       events.iter().any(|(_, ev)| match ev {
         ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::ChainFail { .. } | MaybeMovedAt::WhileCondFail { .. }
-          | MaybeMovedAt::Loop { nothing_above: true } | MaybeMovedAt::LoopHead | MaybeMovedAt::LoopRound, .. } => ro.name() == name,
-        ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| any(&b.e_data, name)),
+          | MaybeMovedAt::Loop { nothing_above: true } | MaybeMovedAt::LoopHead | MaybeMovedAt::LoopRound, .. } => *ro.hash() == hash,
+        ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| any(&b.e_data, hash)),
         _ => false,
       })
     }
-    any(self.preprocessed_events, name)
+    any(self.preprocessed_events, *rap.hash())
   }
 
   /// Whether what last changed `name`'s state, in the events so far, is
@@ -2009,6 +2034,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         ExternalEvent::Branch { branches, .. } =>
           branches.iter().filter(|b| !b.diverges).any(|b| b.e_data.iter().any(|(_, e)| changes(e, name))),
         ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::OrAltMove { ro, .. }
+        | ExternalEvent::LoopExitKept { ro, .. } | ExternalEvent::LoopMaybeInit { ro, .. }
         | ExternalEvent::ManuallyDropByHand { ro, .. } | ExternalEvent::OwnerDropAtReassign { ro, .. } => ro.name() == name,
         ExternalEvent::InitRefParam { param, .. } => param.name() == name,
         ExternalEvent::Move { from, to, .. } => is(from) || is(to),
@@ -2047,7 +2073,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       match self.rap_ownership_now(&name) {
         Ownership::None => out.moved.push(name),
         Ownership::Maybe => {
-          out.by_cond |= self.maybe_moved_by_let_now(&name) || self.moved_by_chain_condition(&name);
+          out.by_cond |= self.maybe_moved_by_let_now(&name) || self.moved_by_chain_condition(&c);
           out.maybe_moved.push(name);
         }
         Ownership::Held => {
@@ -2070,7 +2096,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     for (_, ev) in self.preprocessed_events.iter().rev() {
       match ev {
         ExternalEvent::OrAltMove { ro, tuple: None, in_let, .. } if ro.name() == name => return *in_let,
-        ExternalEvent::LoopExitMove { ro, .. } if ro.name() == name => return false,
+        ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::LoopExitKept { ro, .. } if ro.name() == name => return false,
         ExternalEvent::Move { from, to, .. } if is(from) || is(to) => return false,
         ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. } if is(to) => return false,
         ExternalEvent::Branch { branches, .. }
@@ -9383,6 +9409,11 @@ fn ownership_after(events: &[(usize, ExternalEvent)], rap_name: &str, start: Opt
       // only some ways out moved it, it's maybe-moved (below).
       ExternalEvent::LoopExitMove { ro, definite: true, .. } if ro.name() == rap_name => {
         return Some(Ownership::None);
+      }
+      // Owns a value at every `break` out of the loop that just ended,
+      // whatever the end of its body left (#1000).
+      ExternalEvent::LoopExitKept { ro, .. } if ro.name() == rap_name => {
+        return Some(Ownership::Held);
       }
       // The start of an `else` branch that a let-chain condition may
       // have moved it before (#281). It held the value before the

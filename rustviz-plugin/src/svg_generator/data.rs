@@ -1755,6 +1755,17 @@ pub enum ExternalEvent {
         ro: ResourceAccessPoint,
         id: usize
     },
+    // At the end of a bare `loop` (#1000): `ro`, declared before the
+    // loop, owns a value at every `break` out of it, although the body
+    // may leave it moved where it goes round again (`loop { s = …; if
+    // c { break; } drop(s); }`). After the loop it owns that value.
+    // `reassigned`: every `break` comes after the body gives it a new
+    // value.
+    LoopExitKept {
+        ro: ResourceAccessPoint,
+        reassigned: bool,
+        id: usize
+    },
     // At the end of a loop: `ro` (declared outside the loop) was moved
     // in a branch that then `break`s out of the loop, so after the
     // loop it may have been moved (`definite`: it has been, because
@@ -2001,6 +2012,7 @@ impl ExternalEvent {
             &ExternalEvent::TemporaryDrop { id, .. } |
             &ExternalEvent::LoopIteratorDrop { id, .. } |
             &ExternalEvent::LoopMaybeInit { id, .. } |
+            &ExternalEvent::LoopExitKept { id, .. } |
             &ExternalEvent::LoopExitMove { id, .. } |
             &ExternalEvent::OwnerDropIfTryReturns { id, .. } |
             &ExternalEvent::OwnerDropUnlessReturned { id, .. } |
@@ -2269,6 +2281,8 @@ pub enum Event {
     LoopIteratorDrop { left: LoopLeft },
     // See ExternalEvent::LoopMaybeInit.
     LoopMaybeInit,
+    // See ExternalEvent::LoopExitKept.
+    LoopExitKept { reassigned: bool },
     // See ExternalEvent::LoopExitMove.
     LoopExitMove { definite: bool, at: MaybeMovedAt },
     // The owner's resource is dropped here only if the `?` returns
@@ -2821,6 +2835,9 @@ impl Display for Event {
             Event::LoopMaybeInit => {
                 write!(f, "May have no value when the loop ends")
             },
+            Event::LoopExitKept { .. } => {
+                write!(f, "Owns a value when the loop ends")
+            },
             Event::LoopExitMove { .. } => {
                 write!(f, "May have been moved when the loop ends")
             },
@@ -3070,6 +3087,10 @@ impl Event {
             }
             Event::LoopIteratorDrop { left } => {
                 hover_messages::event_dot_loop_iterator_drop(my_name, *left)
+            }
+            // (The timeline panel says "value" for a value.)
+            Event::LoopExitKept { reassigned } => {
+                hover_messages::event_dot_loop_exit_kept(my_name, *reassigned, false)
             }
             // (The timeline panel words it with what follows.)
             Event::LoopMaybeInit => {
@@ -4100,6 +4121,9 @@ impl Visualizable for VisualizationData {
             // May have no value after the loop (#786): no line until
             // it's assigned again, like a maybe-moved one.
             (_, Event::LoopMaybeInit) => State::OutOfScope,
+            // Owns a value at every `break` (#1000): what the body did
+            // after the last one led back round, not out of the loop.
+            (_, Event::LoopExitKept { .. }) => State::FullPrivilege { s: LineState::Full },
 
             // `ManuallyDrop::drop(&mut md)`: no resource left, and md
             // must not be used again.
@@ -4583,6 +4607,9 @@ impl Visualizable for VisualizationData {
         ExternalEvent::LoopMaybeInit{ .. } => {
           vec![(line_num, Event::LoopMaybeInit)]
         },
+        ExternalEvent::LoopExitKept{ reassigned, .. } => {
+          vec![(line_num, Event::LoopExitKept { reassigned: *reassigned })]
+        },
         ExternalEvent::LoopExitMove{definite, at, ..} => {
           vec![(line_num, Event::LoopExitMove { definite: *definite, at: at.clone() })]
         },
@@ -4654,7 +4681,7 @@ impl Visualizable for VisualizationData {
                 }
             }
             ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::TupleTempDrop { ro, .. } | ExternalEvent::OrAltMove { ro, .. } | ExternalEvent::LoopIteratorDrop { ro, .. }
-            | ExternalEvent::LoopMaybeInit { ro, .. }
+            | ExternalEvent::LoopMaybeInit { ro, .. } | ExternalEvent::LoopExitKept { ro, .. }
             | ExternalEvent::ChainFailAssign { ro, .. } | ExternalEvent::ChainFailUse { ro, .. } | ExternalEvent::TiedParamNote { ro, .. }
             | ExternalEvent::DeadElseNote { ro, .. } => {
                 if ro == rap {
@@ -4952,6 +4979,9 @@ impl Visualizable for VisualizationData {
             },
             ExternalEvent::LoopMaybeInit{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopMaybeInit, line_number);
+            },
+            ExternalEvent::LoopExitKept{ro, reassigned, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopExitKept { reassigned }, line_number);
             },
             ExternalEvent::LoopExitMove{ro, definite, at, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopExitMove { definite, at }, line_number);

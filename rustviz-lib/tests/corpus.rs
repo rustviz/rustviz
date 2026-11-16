@@ -18514,6 +18514,106 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=+=",
         ],
     },
+    TooltipExpect {
+        name: "loop_exit_kept_1000",
+        // #1000: a bare `loop` ends only at a `break`, but after it the
+        // timeline showed what the end of the body left (which goes back
+        // round to the start): s, moved by `drop(s)` at the end, was drawn
+        // as moved after the loop and its scope end said "No resource is
+        // dropped", though every `break` comes after `s = …` and the end of
+        // `main` drops that value. The loop's end now says s owns a
+        // resource again, and so the scope end drops it. The same for r
+        // (moved only on a path that returns), a struct moved whole (its
+        // field columns too, p.n's "value"), and not for w, which a
+        // `break` after the move leaves maybe-moved (#980). Checked with
+        // rustc and a `Drop`-printing type.
+        must_contain: &[
+            "s owns a resource here: the code after the loop is reached only through a break, and every break comes after s gets a new resource",
+            "s goes out of scope. Its resource is dropped.",
+            "r owns a resource here: the code after the loop is reached only through a break, and r owns one at every break",
+            "r goes out of scope. Its resource is dropped.",
+            "p owns a resource here: the code after the loop is reached only through a break, and every break comes after p gets a new resource",
+            "p.name owns a resource here: the code after the loop is reached only through a break, and every break comes after p.name gets a new resource",
+            "p.n owns a value here: the code after the loop is reached only through a break, and every break comes after p.n gets a new value",
+            "p goes out of scope. Its resource is dropped.",
+            "p.name goes out of scope. Its resource is dropped.",
+            "w may have been moved: the loop can end through a break that comes after w is moved, so w can't be used after the loop",
+            "w goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "=s goes out of scope. No resource is dropped.",
+            "=r goes out of scope. No resource is dropped.",
+            "=p goes out of scope. No resource is dropped.",
+            "=p.name goes out of scope. No resource is dropped.",
+            "p.n was moved out earlier",
+            "w owns a",
+        ],
+    },
+    TooltipExpect {
+        name: "loop_given_round_1001",
+        // #1001, the mirror of #992: a variable moved before a loop and
+        // given a value in its body. The assignment said only "s acquires
+        // ownership of a resource", but a later time round it drops what
+        // the time round before gave s (a drop flag); and the scope end
+        // said "Its resource is dropped", though with k = 0 the loop ends
+        // before giving s anything. Now the assignment says so (#786's
+        // text for a `let x;` local), the loop's end says s may have no
+        // value, and the scope end's drop is a drop flag's: in a bare
+        // `loop` whose `break` comes first (s), a `while` (t), a `for`
+        // (u), an inner loop (q) and a struct (p, p.name). w's `break`
+        // comes after its assignment, so it always has a value after the
+        // loop. r's assignment after the loop drops the loop's value only
+        // if there is one. Checked with a `Drop`-printing type, k = 0, 1
+        // and 2.
+        must_contain: &[
+            "On a later iteration of the loop, the resource an earlier iteration gave s is dropped here first, if s still holds it (Rust tracks this with a runtime drop flag).",
+            "s may have no value after the loop: the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it, its resource is dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if the loop above assigned s (Rust tracks this with a runtime drop flag).",
+            "On a later iteration of the loop, the resource an earlier iteration gave t is dropped here first, if t still holds it (Rust tracks this with a runtime drop flag).",
+            "t may have no value after the loop: the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it, its resource is dropped when t goes out of scope.",
+            "t goes out of scope. Its resource is dropped here only if the loop above assigned t (Rust tracks this with a runtime drop flag).",
+            "On a later iteration of the loop, the resource an earlier iteration gave u is dropped here first, if u still holds it (Rust tracks this with a runtime drop flag).",
+            "u goes out of scope. Its resource is dropped here only if the loop above assigned u (Rust tracks this with a runtime drop flag).",
+            "On a later iteration of the loop, the resource an earlier iteration gave w is dropped here first, if w still holds it (Rust tracks this with a runtime drop flag).",
+            "w goes out of scope. Its resource is dropped.",
+            "On a later iteration of the loop, the resource an earlier iteration gave r is dropped here first, if r still holds it (Rust tracks this with a runtime drop flag).",
+            "r may have no value after the loop: the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it, its resource is dropped when r is assigned again.",
+            "r acquires ownership of a new resource. Its previous resource is dropped here only if the loop above assigned r (Rust tracks this with a runtime drop flag).",
+            "On a later iteration of the loop, the resource an earlier iteration gave q is dropped here first, if q still holds it (Rust tracks this with a runtime drop flag).",
+            "q goes out of scope. Its resource is dropped here only if the loop above assigned q (Rust tracks this with a runtime drop flag).",
+            "On a later iteration of the loop, the resource an earlier iteration gave p is dropped here first, if p still holds it (Rust tracks this with a runtime drop flag).",
+            "On a later iteration of the loop, the resource an earlier iteration gave p.name is dropped here first, if p.name still holds it (Rust tracks this with a runtime drop flag).",
+            "p goes out of scope. Its resource is dropped here only if the loop above assigned p (Rust tracks this with a runtime drop flag).",
+            "p.name goes out of scope. Its resource is dropped here only if the loop above assigned p.name (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "=s goes out of scope. Its resource is dropped.",
+            "=t goes out of scope. Its resource is dropped.",
+            "=u goes out of scope. Its resource is dropped.",
+            "=q goes out of scope. Its resource is dropped.",
+            "=p goes out of scope. Its resource is dropped.",
+            "=p.name goes out of scope. Its resource is dropped.",
+            "r acquires ownership of a new resource; its previous resource is dropped",
+            "w may have no value",
+        ],
+    },
+    TooltipExpect {
+        name: "chain_wording_other_fn_1002",
+        // #1002: the "nothing above" / "no branch above" choice in a
+        // drop-flag text matched events by the variable's name across the
+        // whole file, so `st`'s loop (which moves its p outside any
+        // branch on the way to a `break`) made `st2`'s p, moved only in a
+        // branch, say "only if nothing above moved it". It now matches
+        // the variable itself.
+        must_contain: &[
+            "p acquires ownership of a new resource. Its previous resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "p.name acquires ownership of a new resource. Its previous resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "p acquires ownership of a new resource. Its previous resource is dropped here only if nothing above moved it",
+            "p.name acquires ownership of a new resource. Its previous resource is dropped here only if nothing above moved it",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop

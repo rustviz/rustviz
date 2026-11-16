@@ -587,28 +587,85 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     /// back from the body. Empty when the loop isn't in this body (a
     /// closure's).
     pub fn moved_round_loop(&self, loop_span: Span) -> Vec<String> {
-        use rustc_middle::mir::BasicBlock;
         use rustc_mir_dataflow::impls::MaybeUninitializedPlaces;
         use rustc_mir_dataflow::move_paths::MoveData;
+        let Some((entry, back)) = self.loop_head_edges(loop_span) else { return Vec::new() };
         let body = &self.bwf.body;
-        let Some(head) = body.basic_blocks.iter_enumerated().find_map(|(bb, data)| {
-            let t = data.terminator.as_ref()?;
-            (matches!(t.kind, TerminatorKind::FalseUnwind { .. }) && t.source_info.span == loop_span).then_some(bb)
-        }) else { return Vec::new() };
-        let doms = body.basic_blocks.dominators();
-        let (back, entry): (Vec<BasicBlock>, Vec<BasicBlock>) =
-            body.basic_blocks.predecessors()[head].iter().partition(|&&p| doms.dominates(head, p));
-        if back.is_empty() || entry.is_empty() {
-            return Vec::new();
-        }
         let move_data = MoveData::gather_moves(body, self.tcx, |_| true);
         let mut cursor = MaybeUninitializedPlaces::new(self.tcx, body, &move_data)
             .iterate_to_fixpoint(self.tcx, body, None)
             .into_results_cursor(body);
-        let names = self.mir_local_names(self.bwf);
         let mut out: Vec<String> = Vec::new();
-        // A user variable, or a field of one (`p.name`, `t.0`), named
-        // as its column is.
+        for (mpi, name) in self.move_path_names(&move_data) {
+            let mut uninit_at_end = |bb: rustc_middle::mir::BasicBlock| {
+                cursor.seek_to_block_end(bb);
+                cursor.get().contains(mpi)
+            };
+            if !entry.iter().any(|&p| uninit_at_end(p)) && back.iter().any(|&p| uninit_at_end(p)) {
+                out.push(name);
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// The mirror of `moved_round_loop` (#1001): the user variables,
+    /// and fields of them, that may hold a value where the loop
+    /// `loop_span` comes back round to its start: the body gave them a
+    /// value that nothing after moved on every path. rustc's
+    /// maybe-initialized places at the ends of the edges back to the
+    /// loop's head. (The caller keeps those that hold none where the
+    /// loop starts: moved before it. One on a way into the loop may
+    /// hold one there too, from an outer loop's earlier time round.)
+    pub fn given_round_loop(&self, loop_span: Span) -> Vec<String> {
+        use rustc_mir_dataflow::impls::MaybeInitializedPlaces;
+        use rustc_mir_dataflow::move_paths::MoveData;
+        let Some((_, back)) = self.loop_head_edges(loop_span) else { return Vec::new() };
+        let body = &self.bwf.body;
+        let move_data = MoveData::gather_moves(body, self.tcx, |_| true);
+        let mut cursor = MaybeInitializedPlaces::new(self.tcx, body, &move_data)
+            .iterate_to_fixpoint(self.tcx, body, None)
+            .into_results_cursor(body);
+        let mut out: Vec<String> = Vec::new();
+        for (mpi, name) in self.move_path_names(&move_data) {
+            let mut init_at_end = |bb: rustc_middle::mir::BasicBlock| {
+                cursor.seek_to_block_end(bb);
+                cursor.get().contains(mpi)
+            };
+            if back.iter().any(|&p| init_at_end(p)) {
+                out.push(name);
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// The edges into the head of the loop `loop_span` (its
+    /// `FalseUnwind` block): the blocks that enter it from before the
+    /// loop (not dominated by the head), and those that come back to
+    /// it from the body. `None` when the loop isn't in this body (a
+    /// closure's) or either set is empty.
+    fn loop_head_edges(&self, loop_span: Span) -> Option<(Vec<rustc_middle::mir::BasicBlock>, Vec<rustc_middle::mir::BasicBlock>)> {
+        use rustc_middle::mir::BasicBlock;
+        let body = &self.bwf.body;
+        let head = body.basic_blocks.iter_enumerated().find_map(|(bb, data)| {
+            let t = data.terminator.as_ref()?;
+            (matches!(t.kind, TerminatorKind::FalseUnwind { .. }) && t.source_info.span == loop_span).then_some(bb)
+        })?;
+        let doms = body.basic_blocks.dominators();
+        let (back, entry): (Vec<BasicBlock>, Vec<BasicBlock>) =
+            body.basic_blocks.predecessors()[head].iter().partition(|&&p| doms.dominates(head, p));
+        (!back.is_empty() && !entry.is_empty()).then_some((entry, back))
+    }
+
+    /// The move paths of `move_data` that are a user variable, or a
+    /// field of one (`p.name`, `t.0`), each with the name of its column.
+    fn move_path_names(&self, move_data: &rustc_mir_dataflow::move_paths::MoveData<'tcx>) -> Vec<(rustc_mir_dataflow::move_paths::MovePathIndex, String)> {
+        let body = &self.bwf.body;
+        let names = self.mir_local_names(self.bwf);
+        let mut out = Vec::new();
         for (mpi, path) in move_data.move_paths.iter_enumerated() {
             let Some(mut name) = names.get(&path.place.local).cloned() else { continue };
             let mut ty = body.local_decls[path.place.local].ty;
@@ -622,19 +679,10 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 }
                 ty = fty;
             }
-            if !is_field_path {
-                continue;
-            }
-            let mut uninit_at_end = |bb: BasicBlock| {
-                cursor.seek_to_block_end(bb);
-                cursor.get().contains(mpi)
-            };
-            if !entry.iter().any(|&p| uninit_at_end(p)) && back.iter().any(|&p| uninit_at_end(p)) {
-                out.push(name);
+            if is_field_path {
+                out.push((mpi, name));
             }
         }
-        out.sort();
-        out.dedup();
         out
     }
 

@@ -1788,6 +1788,10 @@ fn render_dot(
                     data.title = hover_messages::event_dot_loop_maybe_init(
                         &name, rap.holds_value() || rap.is_ref(), rap.is_mut(), reassigned);
                 }
+                Event::LoopExitKept { reassigned } => {
+                    let rap = &visualization_data.timelines[hash].resource_access_point;
+                    data.title = hover_messages::event_dot_loop_exit_kept(&name, *reassigned, rap.holds_value());
+                }
                 _ => {
                     // Closure Bind-Acquire: aggregate every capture
                     // event landing at the same line into a single
@@ -1953,7 +1957,7 @@ fn analyze_branch_for_join(events: &[(usize, Event)]) -> (bool, bool) {
             Event::Move { .. } | Event::LoopExitMove { .. } | Event::OrAltMove { tuple: None, .. } | Event::ClosureCall { .. } => { moved = true; acquired = false; }
             // (A copy in, `Ok(num) => num` with num an i32, gives it
             // its value too, #994.)
-            Event::Acquire { .. } | Event::Copy { .. } => { moved = false; acquired = true; }
+            Event::Acquire { .. } | Event::Copy { .. } | Event::LoopExitKept { .. } => { moved = false; acquired = true; }
             Event::Branch { branch_history, ty, .. } => {
                 let mut nested_any_moved = false;
                 let mut nested_all_acquired = branch_history.iter().any(|nb| !nb.diverges);
@@ -2083,6 +2087,8 @@ fn maybe_moved_at_end(history: &[(usize, Event)]) -> bool {
             Event::Move { break_alt: Some(alt), .. } => maybe = !alt.in_loop,
             Event::Acquire { is: ResourceTy::Value(_), .. }
             | Event::Copy { is: ResourceTy::Value(_), .. }
+            // Owns a value at every `break` of the loop above (#1000).
+            | Event::LoopExitKept { .. }
             | Event::Move { .. } | Event::ClosureCall { .. } => maybe = false,
             _ => {}
         }
@@ -2160,7 +2166,7 @@ fn all_moved_at_end(history: &[(usize, Event)]) -> Option<bool> {
                 }
             }
             e if e.is_box_payload_move() => {}
-            Event::LoopExitMove { .. }
+            Event::LoopExitMove { .. } | Event::LoopExitKept { .. }
             | Event::Acquire { .. } | Event::Copy { .. }
             | Event::Move { .. } | Event::ClosureCall { .. }
             | Event::OwnerDropAtReassign { .. } => all = None,
@@ -2211,7 +2217,7 @@ fn maybe_moved_by_let<'a>(history: impl IntoIterator<Item = &'a (usize, Event)>)
                 }
             }
             Event::OrAltMove { in_let, .. } => by_let = *in_let,
-            Event::LoopExitMove { .. }
+            Event::LoopExitMove { .. } | Event::LoopExitKept { .. }
             | Event::Acquire { is: ResourceTy::Value(_), .. }
             | Event::Copy { is: ResourceTy::Value(_), .. }
             | Event::Move { .. } | Event::ClosureCall { .. } => by_let = false,
@@ -3277,6 +3283,8 @@ fn holds_value_after(held: bool, event: &Event) -> bool {
         | Event::StaticBorrow { is: ResourceTy::Value(_), .. }
         | Event::MutableBorrow { is: ResourceTy::Value(_), .. }
         | Event::OrAltBorrow { end: false, .. }
+        // Owns a value at every `break` of the loop above (#1000).
+        | Event::LoopExitKept { .. }
         | Event::InitRefParam { .. } => true,
         e if e.is_box_payload_move() => held,
         Event::Move { .. } | Event::LoopExitMove { definite: true, .. } | Event::ClosureCall { .. } => false,
