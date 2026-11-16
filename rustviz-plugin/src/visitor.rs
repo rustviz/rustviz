@@ -4458,6 +4458,21 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               self.visit_expr(&arg);
               self.match_arg(&arg, fn_name.clone());
             }
+            // `g()` with `g` a `Box<dyn Fn() + '_>` holding a borrow:
+            // calling it uses it, so it holds the borrow at least until
+            // here (#1104). A borrow rustc's facts don't give an end for
+            // (`|| r.len()` reborrows through the shared reference r)
+            // would otherwise end where g was made. (A reference `f: &F`
+            // called as `f()` keeps the end it has.)
+            if let ExprKind::Path(QPath::Resolved(None, p)) = fn_expr.kind {
+              let line = expr_to_line(expr, &self.tcx);
+              let holder = self.raps.get(&fn_name).map(|rd| rd.rap.to_owned())
+                .filter(|r| matches!(p.res, Res::Local(_)) && !r.is_ref() && r.holds_borrow())
+                .filter(|r| self.borrow_map.get(r.name()).is_some_and(|d| d.lifetime < line));
+              if let Some(rap) = holder {
+                self.update_rap(&rap, line);
+              }
+            }
             // `f(..)` with `f` a local `FnOnce` closure: the call moves
             // it, after the arguments are evaluated (#271).
             self.closure_call_events(fn_expr, expr_to_line(expr, &self.tcx));
