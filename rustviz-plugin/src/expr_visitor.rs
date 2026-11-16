@@ -68,6 +68,11 @@ pub struct MemberSite {
 /// arms to start from (see `ExprVisitor::arm_borrows_next`).
 pub struct ArmBorrows {
   before: HashMap<String, RefData>,
+  /// Variables declared before the conditional that held no loan when
+  /// it began (`let r;`, #1069): an arm that gives one its first loan
+  /// (`r = &t;`) doesn't give it to the next arm, which starts with r
+  /// holding none, as for `before`'s.
+  unlent: HashSet<String>,
   /// The loans earlier arms gave a reference, in arm order.
   done: Vec<(String, RefData)>,
   /// The last use of a loan held from before in an arm that used it,
@@ -1580,7 +1585,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   pub fn update_rap(&mut self, r: &ResourceAccessPoint, line_num: usize) {
     // A value holding a borrow keeps it until its last use, like a
     // reference (#336).
-    if r.is_ref() || (r.holds_borrow() && self.borrow_map.contains_key(r.name())) {
+    // (A `let r;` reference holds no loan at the start of an arm after
+    // one that assigned it, #1069.)
+    if (r.is_ref() || r.holds_borrow()) && self.borrow_map.contains_key(r.name()) {
       self.update_lifetime(r.name(), line_num);
     }
   }
@@ -2620,7 +2627,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   /// Called when an `if` / `match` begins: the loans its arms start from.
   pub fn arm_borrows_begin(&self) -> ArmBorrows {
-    ArmBorrows { before: self.borrow_map.clone(), done: Vec::new(), last_use: std::collections::BTreeMap::new() }
+    // A `let r;` local may be registered when it's first assigned:
+    // name it from `uninit_locals` / `maybe_init_locals` too.
+    #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
+    let unlent: HashSet<String> = self.raps.iter()
+      .filter(|(_, rd)| (*rd.rap.hash() as usize) < self.rap_hashes)
+      .map(|(n, _)| n.clone())
+      .chain(self.uninit_locals.keys().chain(self.maybe_init_locals.iter()).map(|h| self.tcx.hir_name(*h).to_string()))
+      .filter(|n| !self.borrow_map.contains_key(n))
+      .collect();
+    ArmBorrows { before: self.borrow_map.clone(), unlent, done: Vec::new(), last_use: std::collections::BTreeMap::new() }
   }
 
   /// Called before each arm but the first is visited. The arms are
@@ -2647,6 +2663,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       }
       self.borrow_map.insert(k.clone(), old.clone());
     }
+    // One that held no loan before starts the next arm holding none.
+    #[expect(clippy::disallowed_methods, reason = "sorted below")]
+    let mut unlent: Vec<&String> = ab.unlent.iter().collect();
+    unlent.sort();
+    for k in unlent {
+      if let Some(cur) = self.borrow_map.remove(k) {
+        ab.done.push((k.clone(), cur));
+      }
+    }
   }
 
   /// Called after the last arm. A reference that only an earlier arm
@@ -2671,6 +2696,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         if let Some(cur) = self.borrow_map.get_mut(k).filter(|c| c.lifetime == old.lifetime) {
           cur.lifetime = l;
         }
+      }
+    }
+    // One that held no loan before and that the last arm left without
+    // one keeps the latest earlier arm's (#1069).
+    #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "`keep` is sorted before use; the inserts are independent")]
+    for k in ab.unlent.iter() {
+      if self.borrow_map.contains_key(k) {
+        continue;
+      }
+      if let Some(i) = done.iter().rposition(|(n, _)| n == k) {
+        keep.push(i);
+        self.borrow_map.insert(k.clone(), done[i].1.clone());
       }
     }
     keep.sort_unstable();

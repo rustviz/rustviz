@@ -20003,6 +20003,34 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from vb to z",
         ],
     },
+    TooltipExpect {
+        name: "let_ref_arms_1069",
+        // #1069: a `let r;` given `&t` in one arm and `&s` in the other, read
+        // after the conditional. rustc keeps both borrowed to that read
+        // (`t.push('x')` or `s.push('x')` between the `if` and the `println!`
+        // is E0502, after it both compile), so t's borrow ends there too. On
+        // main the else arm's loan replaced the if arm's: t (and in `three`, x
+        // and y) were never given back, and in `mutable` b's column read "No
+        // resource is dropped" at its scope end, false for a String. In `inner`,
+        // where each arm reads r, p's borrow (the if arm's) wasn't ended at all,
+        // and r was drawn holding a reference after the `if`. Rows are
+        // pinned by `let_reference_assigned_in_arms_gives_back_every_lender`.
+        must_contain: &[
+            "t's resource is no longer immutably borrowed",
+            "s's resource is no longer immutably borrowed",
+            "b's resource is no longer mutably borrowed",
+            "a's resource is no longer mutably borrowed",
+            "b goes out of scope. Its resource is dropped.",
+            "x's resource is no longer immutably borrowed",
+            "y's resource is no longer immutably borrowed",
+            "z's resource is no longer immutably borrowed",
+            "p's resource is no longer immutably borrowed",
+            "q's resource is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            "b goes out of scope. No resource is dropped.",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -26742,5 +26770,43 @@ fn chain_reference_borrows_end_on_each_path() {
         for row in later {
             assert_eq!(on(&dots, row), 1, "{end}: {dots:?}, none on the later arm's println! row ({row})");
         }
+    }
+}
+
+/// #1069: a `let r;` reference given a loan in each arm of an `if` /
+/// `match` and read after it. Each arm's lender stays borrowed to that
+/// read (rustc: a conflicting use of any of them between the conditional
+/// and the read is E0502 / E0499, after it compiles), so each one's borrow
+/// ends on the read's row, not just the last arm's.
+#[test]
+fn let_reference_assigned_in_arms_gives_back_every_lender() {
+    let on = |dots: &[(f64, f64)], row: f64| dots.iter().filter(|d| (d.1 - row).abs() < 1.0).count();
+    let rv = run_with_local_backend("let_ref_arms_1069");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let reads = code_rows_y(&code, "println!(\"{}\", r);");
+    assert_eq!(reads.len(), 4, "{reads:?}");
+    let (read, last) = (reads[0], reads[1]);
+    let push = code_row_y(&code, "m.push('x');");
+    for (end, row) in [
+        ("t's resource is no longer immutably borrowed", read),
+        ("b's resource is no longer mutably borrowed", push),
+        ("a's resource is no longer mutably borrowed", push),
+    ] {
+        let dots = dots_listing_tooltip(&timeline, end);
+        assert_eq!((dots.len(), on(&dots, row)), (1, 1), "{end}: {dots:?}, not on row {row}");
+    }
+    // (s's text is also a bullet of each `s.len()` row.)
+    let dots = dots_listing_tooltip(&timeline, "s's resource is no longer immutably borrowed");
+    assert_eq!(on(&dots, read), 1, "s: {dots:?}, not on row {read}");
+    for who in ["x", "y", "z"] {
+        let end = format!("{who}'s resource is no longer immutably borrowed");
+        let dots = dots_listing_tooltip(&timeline, &end);
+        assert_eq!((dots.len(), on(&dots, last)), (1, 1), "{end}: {dots:?}, not on the match's read row ({last})");
+    }
+    // Read in each arm and not after: each borrow ends in its own arm.
+    for (who, row) in [("p", reads[2]), ("q", reads[3])] {
+        let end = format!("{who}'s resource is no longer immutably borrowed");
+        let dots = dots_listing_tooltip(&timeline, &end);
+        assert_eq!((dots.len(), on(&dots, row)), (1, 1), "{end}: {dots:?}, not on its arm's read row ({row})");
     }
 }
