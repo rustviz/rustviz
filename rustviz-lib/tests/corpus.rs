@@ -18552,6 +18552,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "w goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
+            // #1020 x #1000: `drop(r); return;` drops nothing at the `return`.
+            "If the `return` on line 38 runs first",
             "=s goes out of scope. No resource is dropped.",
             "=r goes out of scope. No resource is dropped.",
             "=p goes out of scope. No resource is dropped.",
@@ -19249,8 +19251,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // ends, f "maybe moved" at the join, and "b goes out of scope. No
         // resource is dropped." at the `return` (b's String is dropped
         // there). In a loop body, `println!` after the `if let` never runs
-        // either. (Known gap, #1020: in a loop body the `return`'s drops
-        // of t, the iterator and h are still drawn at their scope ends.)
+        // either. (In a loop body the `return`'s drops of t, the iterator
+        // and h are still drawn at their scope ends, which say so: #1020.)
         name: "inline_exit_nested_1013",
         must_contain: &[
             "Move from f to x",
@@ -19317,6 +19319,71 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p.name acquires ownership of a new resource",
             "p.name goes out of scope. No resource is dropped.",
             "p.name was moved out earlier",
+        ],
+    },
+    TooltipExpect {
+        // #1020: a `return` directly in a loop body (no branch around it,
+        // or in an `if let` whose pattern always matches, drawn inline)
+        // leaves the function, but its drops are drawn at the scope ends
+        // after it: the loop body is drawn inline and may not run, so its
+        // row can't end the columns. Those scope ends used to state each
+        // drop as happening there, which is false on the path through the
+        // `return`. Now a variable the loop body declared, whose `}` the
+        // body never reaches, goes out of scope "at the `return` on line
+        // N"; a variable declared before the loop, the loop's iterator and
+        // its head's temporary are dropped at the `return` if it runs
+        // first (checked with a Drop-printing type, 0/1/2 elements).
+        name: "return_in_loop_1020",
+        must_contain: &[
+            "s goes out of scope at the `return` on line 12. Its resource is dropped.",
+            "This temporary IntoIter<String> is dropped when the `for` loop ends (or at the `return` on line 12, if that runs first): nothing bound it to a variable or moved it on. Its resource is dropped",
+            "g goes out of scope. Its resource is dropped. If the `return` on line 12 runs first, this happens there instead.",
+            "it's former resource, the `for` loop's iterator, is dropped when the `for` loop ends (or at the `return` on line 23, if that runs first), along with whatever it still owns (such as elements it hasn't handed out yet)",
+            "s goes out of scope at the `return` on line 23. No resource is dropped.",
+            "t goes out of scope at the `return` on line 23. Its resource is dropped.",
+            "u goes out of scope at the `return` on line 23. Its resource is dropped.",
+            "g goes out of scope. Its resource is dropped. If the `return` on line 23 runs first, this happens there instead.",
+            "s goes out of scope at the `return` on line 36. Its resource is dropped.",
+            "t goes out of scope at the `return` on line 36. Its resource is dropped.",
+            "g goes out of scope. Its resource is dropped. If the `return` on line 36 runs first, this happens there instead.",
+            "a goes out of scope at the `return` on line 49. Its resource is dropped. If the `return` on line 47 runs first, this happens there instead.",
+            "row goes out of scope at the `return` on line 49. No resource is dropped.",
+            "This temporary IntoIter<Vec<String>> is dropped when the `for` loop ends (or at the `return` on line 47 or 49, if one of them runs first): nothing bound it to a variable or moved it on. Its resource is dropped",
+            "s goes out of scope at the `return` on line 47. Its resource is dropped.",
+            "g goes out of scope. Its resource is dropped. If the `return` on line 47 or 49 runs first, this happens there instead.",
+            "s goes out of scope at the `return` on line 57. Its resource is dropped.",
+            "stack goes out of scope. Its resource is dropped (including every String it holds). If the `return` on line 57 runs first, this happens there instead.",
+            "g goes out of scope. Its resource is dropped. If the `return` on line 57 runs first, this happens there instead.",
+            // The `continue` branch still drops s and t itself.
+            "s goes out of scope. Its resource is dropped.",
+            "t goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "=g goes out of scope. Its resource is dropped.",
+            "=stack goes out of scope. Its resource is dropped (including every String it holds).",
+            "=a goes out of scope. Its resource is dropped.",
+            "=u goes out of scope. Its resource is dropped.",
+            "=s goes out of scope. No resource is dropped.",
+            "=row goes out of scope. No resource is dropped.",
+            "is dropped when the `for` loop ends: nothing bound it",
+            "is dropped when the `for` loop ends, along with",
+        ],
+    },
+    TooltipExpect {
+        // #1020: the loop-body case of #1013's fixture. t, the if-let's
+        // binding, is always dropped at the `return`; h and the iterator
+        // only if it runs.
+        name: "inline_exit_nested_1013",
+        must_contain: &[
+            "t goes out of scope at the `return` on line 64. Its resource is dropped.",
+            "s goes out of scope at the `return` on line 64. No resource is dropped.",
+            "h goes out of scope. Its resource is dropped. If the `return` on line 64 runs first, this happens there instead.",
+            "This temporary IntoIter<String> is dropped when the `for` loop ends (or at the `return` on line 64, if that runs first): nothing bound it to a variable or moved it on. Its resource is dropped",
+        ],
+        must_not_contain: &[
+            "=t goes out of scope. Its resource is dropped.",
+            "=h goes out of scope. Its resource is dropped.",
+            "is dropped when the `for` loop ends: nothing bound it",
         ],
     },
 ];

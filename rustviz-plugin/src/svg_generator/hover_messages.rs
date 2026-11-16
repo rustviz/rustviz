@@ -1,4 +1,4 @@
-use crate::svg_generator::data::{BranchExit, LoopLeft, ResourceAccessPoint, TempPart, IF_LET_ARM};
+use crate::svg_generator::data::{BranchExit, EarlyReturns, LoopLeft, ResourceAccessPoint, TempPart, IF_LET_ARM};
 
 
 /* Event Dot messages: shows up when someone hovers over a dot */
@@ -1124,7 +1124,7 @@ pub fn event_dot_move_iterator_into_loop(my_name: &String) -> String {
 // `break` leaves it), or at a `return` from inside the loop (`early`)
 // (#482). What the iterator still owns goes with it: the elements it
 // hasn't handed out, a `vec::IntoIter`'s buffer.
-pub fn event_dot_loop_iterator_drop(my_name: &String, left: LoopLeft) -> String {
+pub fn event_dot_loop_iterator_drop(my_name: &String, left: LoopLeft, early: &[usize]) -> String {
     match left {
         LoopLeft::Return => format!(
             "{0}'s former resource, the `for` loop's iterator, is dropped here: the function returns from inside the loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
@@ -1147,8 +1147,8 @@ pub fn event_dot_loop_iterator_drop(my_name: &String, left: LoopLeft) -> String 
             styled_name_html(my_name)
         ),
         LoopLeft::End => format!(
-            "{0}'s former resource, the `for` loop's iterator, is dropped when the `for` loop ends, along with whatever it still owns (such as elements it hasn't handed out yet)",
-            styled_name_html(my_name)
+            "{0}'s former resource, the `for` loop's iterator, is dropped when the `for` loop ends{1}, along with whatever it still owns (such as elements it hasn't handed out yet)",
+            styled_name_html(my_name), or_at_returns(early)
         ),
     }
 }
@@ -4621,6 +4621,60 @@ pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, fro
 /// dot's own text normally replaces).
 pub fn event_dot_unknown_owner() -> String {
     "Unknown Resource Owner Value".to_owned()
+}
+
+/// The `return` on each of `lines`, as one phrase: "the `return` on
+/// line 3", "the `return` on line 3 or 7".
+fn returns_on_lines(lines: &[usize]) -> String {
+    match lines.split_last() {
+        None => String::new(),
+        Some((last, [])) => format!("the `return` on line {}", last),
+        Some((last, init)) => {
+            let init: Vec<String> = init.iter().map(|l| l.to_string()).collect();
+            format!("the `return` on line {} or {}", init.join(", "), last)
+        }
+    }
+}
+
+/// What a drop at the end of a loop (or after it) adds when `return`s
+/// directly in the loop body (#1020) may leave the function first and
+/// drop it there instead: " (or at the `return` on line 3, if that runs
+/// first)". Empty without any.
+pub fn or_at_returns(lines: &[usize]) -> String {
+    match lines {
+        [] => String::new(),
+        [_] => format!(" (or at {}, if that runs first)", returns_on_lines(lines)),
+        _ => format!(" (or at {}, if one of them runs first)", returns_on_lines(lines)),
+    }
+}
+
+/// A scope end that `return`s directly in a loop body come before
+/// (#1020), whose drops aren't drawn on their own rows. `title` is what
+/// the dot says otherwise. A variable the loop body declared never gets
+/// here on a path through the body (`always`): it goes out of scope at
+/// the `return` (or at an exit drawn with its own drops), so the text
+/// says so. One declared before the loop (`maybe`) is dropped at the
+/// `return` if that runs: said when this dot drops something (`drops`).
+pub fn event_dot_scope_end_after_loop_return(title: &str, early: &EarlyReturns, drops: bool) -> String {
+    let mut out = title.to_owned();
+    if let Some(line) = early.always {
+        let at = format!("goes out of scope at {}", returns_on_lines(&[line]));
+        out = if out.contains("goes out of scope at the end of the block") {
+            out.replacen("goes out of scope at the end of the block", &at, 1)
+        } else if out.contains("goes out of scope") {
+            out.replacen("goes out of scope", &at, 1)
+        } else {
+            format!("{}. This happens at {}", out.trim_end_matches('.'), returns_on_lines(&[line]))
+        };
+        out = out.replace(" here ", " there ");
+    }
+    if drops && !early.maybe.is_empty() {
+        if !out.ends_with('.') {
+            out.push('.');
+        }
+        out.push_str(&format!(" If {} runs first, this happens there instead.", returns_on_lines(&early.maybe)));
+    }
+    out
 }
 
 /// A scope end after the resource was moved out on every path that

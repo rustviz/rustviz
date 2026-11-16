@@ -1405,6 +1405,22 @@ pub enum ChainFailHow {
     Literal(String),
 }
 
+/// The `return`s directly in a loop body (not in an `if` / `match`
+/// drawn as a branch) that can leave the function before a scope end is
+/// reached (#1020). Their drops aren't drawn on their own rows: the loop
+/// body is drawn inline, and it may not run. So the scope end, where the
+/// drop is drawn, says it happens at the `return` instead: `always`, on
+/// every path that gets that far (a variable of the loop body, whose
+/// closing brace the body never reaches), or `maybe`, if that `return`
+/// runs (a variable declared before the loop, the loop's iterator).
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct EarlyReturns {
+    /// Line of the `return` where it is always dropped instead.
+    pub always: Option<usize>,
+    /// Lines of the `return`s where it is dropped if they run.
+    pub maybe: Vec<usize>,
+}
+
 /// Where a `for` loop's iterator is dropped (#482, #592).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LoopLeft {
@@ -1680,6 +1696,8 @@ pub enum ExternalEvent {
         deep: Option<DeepPlace>,
         id: usize
     },
+    // `early`: `return`s in a loop body that drop `ro` instead, before
+    // this scope end (#1020).
     GoOutOfScope {
         ro: ResourceAccessPoint,
         // What rustc's move data says the variable holds at this `}`,
@@ -1687,7 +1705,8 @@ pub enum ExternalEvent {
         // (`ownership_at_scope_ends`, #1036, #1037); `None` when it
         // doesn't say. Set once the body has been visited.
         holds: Option<ScopeEndHolds>,
-        id: usize
+        id: usize,
+        early: Option<EarlyReturns>,
     },
     // The previously-held resource of an owner is dropped when that
     // owner is overwritten by a new value (`y = x` where `y: String`,
@@ -1754,11 +1773,14 @@ pub enum ExternalEvent {
     // `ro` was moved into a `for` loop as its iterator (`for s in it`,
     // `LoopHead::Iterator`), and the loop drops that iterator: where
     // the loop ends, or (`left`) at a `return` or an outer `break` (#482, #592). `ro`
-    // doesn't own it any more, so its state doesn't change.
+    // doesn't own it any more, so its state doesn't change. `early`
+    // (with `LoopLeft::End`): lines of `return`s directly in the loop
+    // body, where it is dropped instead if they run (#1020).
     LoopIteratorDrop {
         ro: ResourceAccessPoint,
         left: LoopLeft,
-        id: usize
+        id: usize,
+        early: Vec<usize>,
     },
     // At the end of a loop: `ro`, a `let x;` local declared before the
     // loop, is assigned in the loop's body, but the loop may end before
@@ -2305,11 +2327,11 @@ pub enum Event {
     },
     // this happens when a owner is returned this line,
     // or if this owner's scope ends at this line. The data must be dropped.
-    // `holds`: the ExternalEvent's.
-    OwnerGoOutOfScope { holds: Option<ScopeEndHolds> },
+    // `holds`, `early`: the ExternalEvent's.
+    OwnerGoOutOfScope { holds: Option<ScopeEndHolds>, early: Option<EarlyReturns> },
     // this happens when a vairable that is not an owner goes out of scope.
     // The data is not dropped in this case
-    RefGoOutOfScope,
+    RefGoOutOfScope { early: Option<EarlyReturns> },
     // The previously-held resource is dropped at a reassignment
     // (`y = x` or `*p = x`). The owner stays alive — its state is
     // unchanged across this event because the matching Acquire from
@@ -2324,7 +2346,7 @@ pub enum Event {
     // An unbound temporary is dropped (see ExternalEvent).
     TemporaryDrop { ty: Option<String>, when: String, literal: bool, early: bool, part: Option<TempPart> },
     // See ExternalEvent::LoopIteratorDrop.
-    LoopIteratorDrop { left: LoopLeft },
+    LoopIteratorDrop { left: LoopLeft, early: Vec<usize> },
     // See ExternalEvent::LoopMaybeInit.
     LoopMaybeInit { before_loop: Option<bool>, nested: bool },
     // See ExternalEvent::LoopExitKept.
@@ -2892,7 +2914,7 @@ impl Display for Event {
             Event::ClosureCall{ is, .. } => { write!(f, "{} is moved into the call", is.name()) },
             Event::OwnerGoOutOfScope { .. } => {
                 write!(f, "Goes out of Scope as an owner of resource" ) }
-            Event::RefGoOutOfScope => {
+            Event::RefGoOutOfScope { .. } => {
                 write!(f, "Goes out of Scope as a reference to resource")
             },
             Event::OwnerDropAtReassign { .. } => {
@@ -3069,7 +3091,7 @@ impl Event {
             Event::OwnerGoOutOfScope { .. } => {
                 hover_messages::event_dot_owner_go_out_of_scope(my_name)
             }
-            Event::RefGoOutOfScope => {
+            Event::RefGoOutOfScope { .. } => {
                 hover_messages::event_dot_ref_go_out_of_scope(my_name)
             }
             Event::OwnerDropAtReassign { parts: Some(p), .. } => {
@@ -3160,8 +3182,8 @@ impl Event {
             Event::TupleTempDrop { tuple, at, with } => {
                 hover_messages::event_dot_tuple_temp_drop(tuple, *at, with)
             }
-            Event::LoopIteratorDrop { left } => {
-                hover_messages::event_dot_loop_iterator_drop(my_name, *left)
+            Event::LoopIteratorDrop { left, early } => {
+                hover_messages::event_dot_loop_iterator_drop(my_name, *left, early)
             }
             // (The timeline panel says "value" for a value.)
             Event::LoopExitKept { reassigned } => {
@@ -4049,7 +4071,7 @@ impl Visualizable for VisualizationData {
             (State::FullPrivilege{..}, Event::OwnerGoOutOfScope { .. }) =>
                 State::OutOfScope,
 
-            (State::FullPrivilege{..}, Event::RefGoOutOfScope) =>
+            (State::FullPrivilege{..}, Event::RefGoOutOfScope { .. }) =>
                 State::OutOfScope,
 
             // A write to a lender inside the span drawn for its loan (#778):
@@ -4130,7 +4152,7 @@ impl Visualizable for VisualizationData {
             (State::PartialPrivilege{ .. }, Event::OwnerGoOutOfScope { .. }) =>
                 State::OutOfScope,
 
-            (State::PartialPrivilege{ .. }, Event::RefGoOutOfScope) =>
+            (State::PartialPrivilege{ .. }, Event::RefGoOutOfScope { .. }) =>
                 State::OutOfScope,
 
             (State::RevokedPrivilege{ prev_state: p,.. }, Event::MutableReacquire{ .. }) => {
@@ -4173,7 +4195,7 @@ impl Visualizable for VisualizationData {
             (_, Event::Branch { .. }) => { // technically not necessary - this is handled inside the compute_states function
                 State::OutOfScope
             }
-            (_, Event::OwnerGoOutOfScope { .. }) | (_, Event::RefGoOutOfScope) => State::OutOfScope,
+            (_, Event::OwnerGoOutOfScope { .. }) | (_, Event::RefGoOutOfScope { .. }) => State::OutOfScope,
 
             // OwnerDropAtReassign is paired with an Acquire/Move on
             // the same line that immediately re-establishes ownership,
@@ -4662,13 +4684,13 @@ impl Visualizable for VisualizationData {
         ExternalEvent::InitRefParam{param: ro, id, own_param, in_pattern} => {
           vec![(line_num, Event::InitRefParam{param : ro.to_owned(), id: *id, own_param: own_param.clone(), in_pattern: in_pattern.clone()})]
         },
-        ExternalEvent::GoOutOfScope{ro, holds, ..} => {
+        ExternalEvent::GoOutOfScope{ro, holds, early, ..} => {
           match ro {
             ResourceAccessPoint::Owner(..) | ResourceAccessPoint::Struct(..) => {
-              vec![(line_num, Event::OwnerGoOutOfScope { holds: *holds })]
+              vec![(line_num, Event::OwnerGoOutOfScope { holds: *holds, early: early.clone() })]
             },
             ResourceAccessPoint::MutRef(..) | ResourceAccessPoint::StaticRef(..)=> {
-              vec![(line_num, Event::RefGoOutOfScope)]
+              vec![(line_num, Event::RefGoOutOfScope { early: early.clone() })]
             },
             ResourceAccessPoint::Function(func) => {
               panic!(
@@ -4687,8 +4709,8 @@ impl Visualizable for VisualizationData {
         ExternalEvent::TemporaryDrop{ ty, when, literal, early, part, .. } => {
           vec![(line_num, Event::TemporaryDrop { ty: ty.clone(), when: when.clone(), literal: *literal, early: *early, part: part.clone() })]
         },
-        ExternalEvent::LoopIteratorDrop{ left, .. } => {
-          vec![(line_num, Event::LoopIteratorDrop { left: *left })]
+        ExternalEvent::LoopIteratorDrop{ left, early, .. } => {
+          vec![(line_num, Event::LoopIteratorDrop { left: *left, early: early.clone() })]
         },
         ExternalEvent::LoopMaybeInit{ before_loop, nested, .. } => {
           vec![(line_num, Event::LoopMaybeInit { before_loop: *before_loop, nested: *nested })]
@@ -5039,13 +5061,13 @@ impl Visualizable for VisualizationData {
             ExternalEvent::InitRefParam{param: ro, id, own_param, in_pattern} => {
                 maybe_append_event(self, &ResourceTy::Value(ro.clone()), Event::InitRefParam{param : ro.to_owned(), id: id, own_param, in_pattern}, line_number);
             },
-            ExternalEvent::GoOutOfScope{ro, holds, ..} => {
+            ExternalEvent::GoOutOfScope{ro, holds, early, ..} => {
                 match ro {
                     ResourceAccessPoint::Owner(..) | ResourceAccessPoint::Struct(..) => {
-                        maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerGoOutOfScope { holds }, line_number);
+                        maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerGoOutOfScope { holds, early }, line_number);
                     },
                     ResourceAccessPoint::MutRef(..) | ResourceAccessPoint::StaticRef(..)=> {
-                        maybe_append_event(self, &ResourceTy::Value(ro), Event::RefGoOutOfScope, line_number);
+                        maybe_append_event(self, &ResourceTy::Value(ro), Event::RefGoOutOfScope { early }, line_number);
                     },
                     ResourceAccessPoint::Function(func) => {
                         panic!(
@@ -5064,8 +5086,8 @@ impl Visualizable for VisualizationData {
             ExternalEvent::TemporaryDrop{ro, ty, when, literal, early, part, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::TemporaryDrop { ty, when, literal, early, part }, line_number);
             },
-            ExternalEvent::LoopIteratorDrop{ro, left, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopIteratorDrop { left }, line_number);
+            ExternalEvent::LoopIteratorDrop{ro, left, early, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopIteratorDrop { left, early }, line_number);
             },
             ExternalEvent::LoopMaybeInit{ro, before_loop, nested, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopMaybeInit { before_loop, nested }, line_number);

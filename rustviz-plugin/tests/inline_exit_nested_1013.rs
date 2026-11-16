@@ -55,9 +55,9 @@ fn block(d: String, e: String) -> usize {
     e.len()
 }
 
-// In a loop body: `println!` after the `if let` never runs. (Known gap,
-// #1020: in a loop body the `return`'s drops of t, the iterator and h are
-// drawn at their scope ends.)
+// In a loop body: `println!` after the `if let` never runs. The `return`'s
+// drops of t, the iterator and h stay at their scope ends, which say they
+// happen at the `return` (always for t, if it runs for the others; #1020).
 fn in_loop(v: Vec<String>, h: String) -> usize {
     for s in v {
         if let t = s {

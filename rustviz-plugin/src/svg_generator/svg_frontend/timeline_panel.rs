@@ -85,6 +85,16 @@ impl DotLayer {
         dot.lines.push((lend_id, title));
     }
 
+    /// Rewrites the text the event dot of column `hash` at (`x`, `y`)
+    /// got last.
+    fn edit_last_line(&mut self, hash: u64, x: i64, y: i64, f: impl FnOnce(&str) -> String) {
+        if let Some(&i) = self.at.get(&(hash, x, y)) {
+            if let Some((_, text)) = self.dots[i].lines.last_mut() {
+                *text = f(text);
+            }
+        }
+    }
+
     /// Text waiting for the next event dot of column `hash` (see
     /// `carry`), taken off it.
     fn take_carry(&mut self, hash: u64) -> Vec<String> {
@@ -1342,7 +1352,7 @@ fn render_branch_dots(
 /// could make the history say a value is dropped, or none, where only
 /// a drop flag knows.
 fn scope_end_by_rustc(event: &Event, ro: &ResourceAccessPoint, history: &[(usize, Event)], resource_hold: bool, name: &String) -> Option<(String, bool)> {
-    let Event::OwnerGoOutOfScope { holds: Some(holds) } = event else { return None };
+    let Event::OwnerGoOutOfScope { holds: Some(holds), .. } = event else { return None };
     if !matches!(ro, ResourceAccessPoint::Owner(_)) || ro.never_drops() || ro.is_plain_value() || ro.is_closure()
         || ro.is_union() || ro.is_manually_drop() || ro.is_temporary() || ro.holds_borrow() || ro.box_contents_moved() {
         return None;
@@ -1783,8 +1793,14 @@ fn render_dot(
         };
         if let Some(mut name) = visualization_data.get_name_from_hash(hash) {
             match event {
-                Event::OwnerGoOutOfScope { .. } => {
+                Event::OwnerGoOutOfScope { early, .. } => {
                 if render_scope_end_dot(hash, history, event, line_number, event_y, resource_hold, name, &mut data, timeline_data, visualization_data, dots) {
+                    // A drop: `return`s in a loop body may drop it
+                    // first (#1020).
+                    if let Some(e) = early {
+                        dots.edit_last_line(*hash, timeline_data.x_val, event_y,
+                            |t| hover_messages::event_dot_scope_end_after_loop_return(t, e, true));
+                    }
                     continue;
                 }
                 },
@@ -2047,6 +2063,11 @@ fn render_dot(
                     }
                 }
             }
+        }
+        // A scope end that drops nothing, which `return`s in a loop body
+        // may come before (#1020).
+        if let Event::OwnerGoOutOfScope { early: Some(e), .. } | Event::RefGoOutOfScope { early: Some(e) } = event {
+            data.title = hover_messages::event_dot_scope_end_after_loop_return(&data.title, e, false);
         }
         // push to individual timelines
         let lend_id = match event {
@@ -3605,7 +3626,7 @@ fn holds_value_after(held: bool, event: &Event) -> bool {
         // (`if let Some(z) = a {…} else if let Some(z) = b {…}`), the
         // next one's first event initializes a new variable; it isn't an
         // assignment to the one that ended.
-        Event::OwnerGoOutOfScope { .. } | Event::RefGoOutOfScope => false,
+        Event::OwnerGoOutOfScope { .. } | Event::RefGoOutOfScope { .. } => false,
         // May have no value after a loop (#786).
         Event::LoopMaybeInit { .. } => false,
         // (Not one that returns or panics after assigning a `let x;`
@@ -5204,7 +5225,7 @@ fn render_branches(
                     // one-line `0 => panic!()` arm, #410): the drop
                     // dot ends it.
                     let dropped_at_stop = branch.e_data.iter().any(|(l, e)| *l == stop
-                        && matches!(e, Event::OwnerGoOutOfScope { .. } | Event::RefGoOutOfScope | Event::TemporaryDrop { .. }));
+                        && matches!(e, Event::OwnerGoOutOfScope { .. } | Event::RefGoOutOfScope { .. } | Event::TemporaryDrop { .. }));
                     // The bar is a marker, not a line of code: hovering it
                     // underlines nothing (#369), like the dashed columns.
                     if let Some(stop_y) = stop_y.filter(|y| !dropped_at_stop && segs.last().is_some_and(|seg| seg.p2 == (branch_x, *y))) {
