@@ -16,12 +16,12 @@ checker's view of the program rather than a hand-curated approximation.
 > branch and tag in this repo, with a matching
 > [GitHub Release](https://github.com/rustviz/rustviz/releases/tag/rv1-final).
 
-RustViz is a project of the [Future of Programming Lab](https://fplab.mplse.org/)
+RustViz is a project of the [Future of Programming Lab](http://fplab.mplse.org/)
 at the University of Michigan.
 
 > **Try it live:** <https://rustviz.github.io/>
 
-![screenshot placeholder](rustviz-plugin/src/svg_generator/rv2_example.png)
+![A RustViz visualization: the code panel on the left, the ownership and borrow timeline on the right](rustviz-plugin/src/svg_generator/rv2_example.png)
 
 ---
 
@@ -30,33 +30,98 @@ at the University of Michigan.
 The CLI, mdbook preprocessor, and library all share a runtime
 dependency on the rustc plugin built from this workspace, which links
 against `rustc_private` and so requires a specific nightly toolchain.
-The fastest way to get a working install is:
+You need [`rustup`](https://rustup.rs/). The fastest way to get a
+working install is:
 
 ```sh
 cargo install rustviz       # the `rustviz` CLI binary
 rustviz init                # installs nightly-2026-05-01 + the plugin
 ```
 
-`rustviz init` runs the underlying `rustup toolchain install` + `cargo
-install` against the canonical RustViz repo; pass `--dry-run` to see
-exactly what it would do, or `--plugin-git` / `--plugin-rev` to install
-from a fork. See `rustviz init --help` for the full flag list.
+`rustviz init` runs `rustup toolchain install nightly-2026-05-01` (with
+the `rust-src`, `rustc-dev` and `llvm-tools-preview` components) and
+then `cargo install`s `rustviz-plugin` from this repository's git, at
+the default branch unless you pass `--plugin-rev`. Pass `--dry-run` to
+see exactly what it would run, `--plugin-git` to install from a fork,
+or `--skip-toolchain` / `--skip-plugin` to run one step only. See
+`rustviz init --help` for the full flag list.
 
-**Building from this checkout instead** (e.g. you're contributing):
+### Building from source
+
+For working *on* RustViz. Besides `rustup` you need `node` 20+ (for
+the playground frontend) and, optionally, Docker (for the playground's
+sandboxed runner image).
 
 ```sh
 git clone https://github.com/rustviz/rustviz
 cd rustviz
-cargo xtask setup          # toolchain + plugin install + frontend build + runner image
+cargo xtask setup
 ```
 
-`cargo xtask setup` is the canonical bootstrap for working *on* RustViz;
-it sets up everything you need to run any of the four entry points below
-plus the playground's React frontend. To undo it, run `cargo xtask
-uninstall` (see `--help` for what it touches and what it leaves alone —
-by default it spares the rustup toolchain and the cargo `target/`
-tree). The xtask driver is pure Rust, so it works the same on Linux,
-macOS, and Windows.
+`cargo xtask setup` is the canonical bootstrap. From the workspace
+root it:
+
+1. runs `rustup show active-toolchain`, which installs the nightly
+   pinned in [`rust-toolchain.toml`](rust-toolchain.toml)
+   (nightly-2026-05-01) if it's missing;
+2. `cargo install --path rustviz-plugin --locked`: the plugin
+   (`cargo rv-plugin`, `rv-plugin-driver`);
+3. `cargo install --path rustviz-cli --locked`: the `rustviz` CLI;
+4. `npm install` + `npm run build` in `playground/frontend/` (the build
+   pre-renders the playground's examples through the `rustviz` CLI just
+   installed);
+5. `cargo build --workspace --release`;
+6. gets the `rustviz/rustviz-runner:latest` Docker image if it isn't
+   already present (pulled from
+   `ghcr.io/rustviz/rustviz-runner:latest`, or built from
+   `playground/runner/Dockerfile` if the pull fails or you pass
+   `--build-runner`). Skipped when Docker isn't running.
+
+It does **not** install the mdBook preprocessor. To undo it, run `cargo
+xtask uninstall` (see `--help` for what it touches and what it leaves
+alone; by default it spares the rustup toolchain and the cargo
+`target/` tree). The xtask driver is pure Rust, so it works the same
+on Linux, macOS, and Windows.
+
+The minimal manual alternative (no npm, no Docker), run from the
+checkout so the pinned nightly is used:
+
+```sh
+rustup toolchain install nightly-2026-05-01 --profile minimal \
+    --component rust-src,rustc-dev,llvm-tools-preview
+cargo install --locked --path rustviz-plugin   # required by everything else
+cargo install --locked --path rustviz-cli      # optional: the `rustviz` CLI
+cargo install --locked --path mdbook-rustviz   # optional: the mdBook preprocessor
+```
+
+**Running the tests:**
+
+```sh
+cargo build --workspace --locked
+cargo test --workspace --locked
+```
+
+The corpus tests in `rustviz-lib/tests/` (`corpus.rs`, `book.rs`, ...)
+run the **installed** plugin (`cargo rv-plugin` on your `PATH`), not
+the source tree. After changing the plugin, reinstall it with `cargo
+install --locked --path rustviz-plugin` before running them, or they
+silently test a stale build. On Windows, run `build` and `test` as
+`--workspace --exclude rustviz` and then `-p rustviz` separately:
+`rustviz` and `rustviz-cli` both produce a `rustviz` bin, and linking
+both in one invocation fails with LNK1104 (CI does the same).
+
+**Running the playground locally:** `cd playground && cargo run
+--release`, then open <http://127.0.0.1:8080/>. Without Docker, set
+`RV_RUNNER=local` (fine on your own machine, never on a public
+deployment). See [`playground/README.md`](playground/README.md).
+
+**Using your build in an mdBook** (for example a clone of the
+[tutorial](https://github.com/rustviz/tutorial)): install the
+preprocessor and plugin from the checkout as above, then run `mdbook
+build` or `mdbook serve` in the book. The preprocessor renders through
+whichever `cargo rv-plugin` is installed, as a local subprocess (the
+default `RV_RUNNER=local` backend), so reinstall the plugin to see
+your changes.
 
 ### Working from multiple checkouts in parallel
 
@@ -104,7 +169,7 @@ and the operational notes for the production deploy.
 Embed RustViz visualizations directly in an [mdBook](https://rust-lang.github.io/mdBook/)
 by tagging code blocks with ` ```rv ` instead of ` ```rust `. The
 preprocessor compiles each snippet through the plugin at build time and
-inlines the resulting SVGs into the rendered HTML, with tooltip glue for
+embeds the resulting SVGs in the rendered HTML, with tooltip glue for
 hover-driven exploration.
 
 ```toml
@@ -161,10 +226,12 @@ fs::write("timeline.svg", rv.timeline_panel_string())?;
 
 A runnable example lives at
 [`rustviz-lib/examples/render_to_files.rs`](rustviz-lib/examples/render_to_files.rs).
-The crate's [API docs](rustviz-lib/src/lib.rs) cover the backend split
-(local subprocess vs. sandboxed Docker — `local` is the default for
-library use; the playground binary opts into `docker` for untrusted
-input).
+The crate's [API docs](rustviz-lib/src/lib.rs) cover the backends,
+chosen with the `RV_RUNNER` env var: `local` (a subprocess on the host,
+the default for library, CLI and mdBook use), `docker` (the sandboxed
+`rustviz/rustviz-runner` image; the playground binary opts into it for
+untrusted input) and `sandbox` (Cloud Run's per-request sandbox, used in
+production).
 
 ---
 
@@ -175,14 +242,15 @@ top-level directory:
 
 | Path                  | Contents |
 |-----------------------|----------|
-| **`rustviz-plugin/`** | The rustc plugin — the heart of the project. Walks HIR/MIR for one source file of a crate (the crate root, `src/lib.rs` or `src/main.rs`, or another file chosen with `--file`; see [`rustviz-plugin/README.md`](rustviz-plugin/README.md#usage)) and emits a code-panel + timeline-panel SVG on stdout. Built on Will Crichton's `rustc_plugin` / `rustc_utils` crates (same family as Flowistry / Aquascope). Produces the `cargo-rv-plugin` and `rv-plugin-driver` binaries. Pinned to nightly-2026-05-01 via `rust-toolchain.toml`. Published to crates.io as **`rustviz-plugin`**. |
+| **`rustviz-plugin/`** | The rustc plugin — the heart of the project. Walks HIR/MIR for one source file of a crate (the crate root, `src/lib.rs` or `src/main.rs`, or another file chosen with `--file`; see [`rustviz-plugin/README.md`](rustviz-plugin/README.md#usage)) and prints the code-panel and timeline-panel SVGs on stdout, as one JSON object (`code_panel`, `timeline_panel`, `height`). Built on Will Crichton's `rustc_plugin` / `rustc_utils` crates (same family as Flowistry / Aquascope). Produces the `cargo-rv-plugin` and `rv-plugin-driver` binaries. Pinned to nightly-2026-05-01 via `rust-toolchain.toml`. Published to crates.io as **`rustviz-plugin`**. |
 | **`rustviz-lib/`**    | User-facing Rust library. Exposes `Rustviz::new(code)` which shells out to the plugin and returns the two SVGs. The shared tooltip JS for hover behavior also lives here, exported as `rustviz_lib::HELPERS_JS`. Published to crates.io as **`rustviz-lib`**. |
 | **`rustviz/`**        | The namesake crate: `cargo install rustviz` installs the `rustviz` CLI, and `rustviz = "2"` as a dependency re-exports `rustviz-lib`. A few lines of glue over `rustviz-cli` and `rustviz-lib`. Published to crates.io as **`rustviz`**. |
 | **`rustviz-cli/`**    | The implementation of the `rustviz` command-line interface — `rustviz svg`, `rustviz html`, `rustviz init`. Wraps `rustviz-lib` with file I/O + self-contained-HTML output, plus a one-shot toolchain/plugin bootstrap (`init`). Exposes `rustviz_cli::run()`; its own binary is the same `rustviz` (so `cargo install rustviz-cli` still works). Published to crates.io as **`rustviz-cli`**. |
 | **`mdbook-rustviz/`** | An [mdBook](https://rust-lang.github.io/mdBook/) preprocessor. Replaces ` ```rv ` fenced code blocks with embedded RustViz SVGs at build time. Includes a `test-book/` worked example. The full hands-on tutorial that uses it is in a [separate repo](https://github.com/rustviz/tutorial). Published to crates.io as **`mdbook-rustviz`**. |
 | **`playground/`**     | The web playground: Actix-web backend + a Vite/React/CodeMirror frontend. Hosted at <https://rustviz.github.io/> with the compile API at <https://rustviz-api-816769776225.us-central1.run.app/>. The same binary works as an all-in-one server for local dev. The per-request Docker sandbox image, deploy artifacts, and security threat model all live alongside it under `playground/`. Not published to crates.io. |
 | **`xtask/`**          | Cross-platform driver for `cargo xtask setup` / `cargo xtask uninstall`. Installs the plugin + CLI, builds the frontend, pulls/builds the docker runner image; the uninstall subcommand reverses each step (with optional `--toolchain` / `--target` / `--everything` flags). Replaces the legacy bash scripts so the workspace boots the same way on Linux, macOS, and Windows. Not published. |
-| `scripts/bump-version.sh` | Synchronizes the version field across all five published crates' Cargo.toml files (and refreshes Cargo.lock). Run before tagging a release; see "Releasing" below. |
+| `scripts/`            | `bump-version.sh` synchronizes the version field across all five published crates' Cargo.toml files (and refreshes Cargo.lock); run before tagging a release, see "Releasing" below. `bump-nightly.sh` moves every pin of the nightly toolchain (see [`CLAUDE.md`](CLAUDE.md#bumping-the-toolchain)). `probe-diff.sh` diffs two plugin builds' tooltips over every fixture. |
+| `.github/workflows/`  | CI (`build.yml`, which also deploys the compile API), the playground's GitHub Pages deploy (`pages.yml`) and the crates.io release (`publish.yml`). |
 
 ---
 
@@ -206,9 +274,6 @@ crashes](https://github.com/rustviz/rustviz/issues?q=is%3Aissue+is%3Aopen+label%
 visualize, please [open an issue](https://github.com/rustviz/rustviz/issues/new)
 with the snippet.
 
-The plugin has its own per-feature TODO checklist in
-[`rustviz-plugin/README.md`](rustviz-plugin/README.md).
-
 ---
 
 ## Security
@@ -225,12 +290,8 @@ checklist are in [`playground/SECURITY.md`](playground/SECURITY.md). Report find
 
 ## Contributing
 
-Issues and PRs welcome. Keep each PR focused on a single concern; for
-local-dev setup run `cargo xtask setup` then `cargo build --workspace --locked`.
-(On Windows, use `--workspace --exclude rustviz` and then `-p rustviz` as a
-separate command, for `build` and `test` alike: `rustviz` and `rustviz-cli`
-both produce a `rustviz` bin, and linking both in one invocation fails with
-LNK1104; CI does the same.)
+Issues and PRs welcome. Keep each PR focused on a single concern; see
+[Building from source](#building-from-source) for setup and tests.
 [`CLAUDE.md`](CLAUDE.md) has the project's ground rules (for human and AI
 contributors alike): tooltips must be semantically correct, tests must pin
 correct behaviour, and known gaps are tracked as issues labelled

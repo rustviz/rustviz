@@ -25,7 +25,12 @@ the `rustviz-cli` crate (still published; same binary). The pieces are
 [`rustviz-cli`](https://crates.io/crates/rustviz-cli),
 [`rustviz-plugin`](https://crates.io/crates/rustviz-plugin) and
 [`mdbook-rustviz`](https://crates.io/crates/mdbook-rustviz). See the
-[repository](https://github.com/rustviz/rustviz) for documentation,
-limitations and the web playground.
+[repository](https://github.com/rustviz/rustviz) for documentation and
+known limitations, or try it without installing anything in the
+[web playground](https://rustviz.github.io/).
+
+Working on RustViz itself? See [Building from
+source](https://github.com/rustviz/rustviz#building-from-source) in the
+main README.
 
 MIT licensed.

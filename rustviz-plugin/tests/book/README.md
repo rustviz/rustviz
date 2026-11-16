@@ -17,7 +17,7 @@ breaks those references. Add a new file instead.
 | `Correct` | Renders, and every tooltip reviewed is true. |
 | `Wrong`   | Renders, but some tooltip is false. The false strings are in `known_wrong`. |
 | `Missing` | Renders and nothing shown is false, but an event is missing or drawn off-canvas (`off_canvas: true`). `note` says which. |
-| `Crash`   | The plugin panics today. `note` gives the panic site. (None on main 4c8f552.) |
+| `Crash`   | The plugin panics today. `note` gives the panic site. |
 
 Each entry also has
 
@@ -46,8 +46,7 @@ It **passes but prints a note** (on stderr, visible without
 - an `off_canvas` snippet is now fully on canvas.
 
 Every run ends with a summary like
-`book corpus: 127 render (74 correct, 39 known-wrong, 14 missing), 0 known crashes; 0 failure(s), 0 note(s)`
-(the counts on main 4c8f552).
+`book corpus: 127 render (C correct, W known-wrong, M missing), 0 known crashes; 0 failure(s), 0 note(s)`.
 
 ## When a fix lands
 
@@ -72,4 +71,5 @@ replacement is still false, put the new false text in `known_wrong`.
 
 The test runs the installed plugin (`cargo rv-plugin` on PATH), so
 reinstall after plugin changes: `cargo install --locked --path rustviz-plugin`.
-`RV_BOOK_JOBS` sets the number of parallel runs (default 4).
+`RV_BOOK_ONLY=c4_,m_1` runs only the snippets whose id starts with one of
+those prefixes; `RV_BOOK_JOBS` sets the number of parallel runs (default 4).
