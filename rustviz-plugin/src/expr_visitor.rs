@@ -3455,6 +3455,31 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     out
   }
 
+  /// The field a call's result borrows when `lenders` (from
+  /// `call_lenders`) is just the reference r and the call is a method
+  /// chain that starts from a field reached through r and mentions r
+  /// nowhere else (`self.items.first_mut().unwrap()` with `self: &mut
+  /// Self`): `DerefField(r, "r.items")`. rustc then restricts only that
+  /// field while the result is live (`self.n += 1` compiles, #1073).
+  pub(crate) fn field_only_call_lender(&self, call: &'tcx Expr<'tcx>, lenders: &[ResourceTy]) -> Option<ResourceTy> {
+    let [ResourceTy::Value(r)] = lenders else { return None };
+    if !r.is_ref() {
+      return None;
+    }
+    let (root, _) = self.call_chain_root(call)?;
+    if !matches!(&root, ResourceTy::DerefField(fr, _, _) if fr.hash() == r.hash()) {
+      return None;
+    }
+    let ExprKind::MethodCall(_, mut rcvr, _, _) = call.kind else { return None };
+    while let ExprKind::MethodCall(_, inner, _, _) = rcvr.kind {
+      rcvr = inner;
+    }
+    let in_rcvr = locals_in(rcvr, ClosureLocals::Skip);
+    let [m] = &in_rcvr[..] else { return None };
+    let mentions = locals_in(call, ClosureLocals::Captures(self.tcx)).iter().filter(|x| x.id == m.id).count();
+    (mentions == 1).then_some(root)
+  }
+
   /// A method chain as written (`v.get_mut(0).unwrap()`), for a tooltip.
   /// An argument list that is long or has characters a label leaves
   /// out (`m.get_mut(&k)`, `m.get_mut("k")`) is shortened to `(…)`.
@@ -4564,6 +4589,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // signature (`ref_flow.rs`, #171), not by its receiver.
     if matches!(expr.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) {
       let mut lenders = self.call_lenders(expr);
+      if let Some(field) = self.field_only_call_lender(expr, &lenders) {
+        lenders = vec![field];
+      }
       if lenders.is_empty() {
         // Nothing with a column. Keep a non-variable lender the old
         // way found (a `&self` method on a reference parameter yields
@@ -6356,6 +6384,10 @@ fn pattern_ref_borrows(
   if lenders.is_empty() {
     return Vec::new();
   }
+  // `if let Some(x) = self.items.first_mut()`: only the field (#1073).
+  if let Some(field) = self.field_only_call_lender(scrutinee, &lenders) {
+    lenders = vec![field];
+  }
   let (func, from_call) = match scrutinee.kind {
     ExprKind::MethodCall(seg, ..) => (seg.ident.as_str().to_owned(), true),
     ExprKind::Call(fn_expr, _) => match hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
@@ -6427,9 +6459,14 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
     _ => self.call_lenders(call),
   };
   let muts: Vec<(ResourceTy, bool)> = self.borrow_map.get(lhs_rap.name()).map(|rd| rd.lender_muts.clone()).unwrap_or_default();
+  // `self.items.first_mut().unwrap()`: only the field (#1073).
+  let own: Vec<ResourceTy> = match self.field_only_call_lender(call, &own) {
+    Some(field) => vec![field],
+    None => own,
+  };
   let (lenders, is_mut): (Vec<ResourceTy>, bool) = match self.borrow_map.get(lhs_rap.name()) {
     Some(rd) => (rd.all_lenders().into_iter()
-      .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)) && own.contains(l))
+      .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..)) && own.contains(l))
       .collect(),
       if lhs_rap.is_ref() { lhs_rap.is_mutref() } else { rd.ref_mutability }),
     None => return false,
@@ -6514,13 +6551,22 @@ pub fn emit_struct_field_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'
 pub fn mark_borrow_kept_by_result(&mut self, call: &'tcx Expr<'tcx>, lenders: &[ResourceTy]) {
   let lo = span_to_line(&call.span, &self.tcx);
   let hi = span_end_line(&call.span, &self.tcx);
-  let hashes: Vec<u64> = lenders.iter().filter_map(|l| l.extract_rap().map(|r| *r.hash())).collect();
+  let hashes: Vec<u64> = lenders.iter()
+    .filter(|l| !matches!(l, ResourceTy::DerefField(..)))
+    .filter_map(|l| l.extract_rap().map(|r| *r.hash())).collect();
   // Only the calls inside `call` (`first` and `unwrap` in
   // `v.first().unwrap()`), not another call on the same line
   // (`t.len()` in `if t.len() > 1 { first_word(&t) } ..`; #337).
   let mut fns: Vec<String> = Vec::new();
   self.call_names(call, &mut fns);
   self.mark_kept_on_lines(lo, hi, &hashes, &fns);
+  // A field reached through a reference (`self.items` in
+  // `self.items.first_mut().unwrap()`; #1073).
+  for l in lenders {
+    if let ResourceTy::DerefField(r, place, _) = l {
+      self.mark_kept_on_lines_at(lo, hi, &[*r.hash()], Some(place.as_str()), &fns);
+    }
+  }
 }
 
 /// Set `result_keeps_borrow` on the pass-by-reference events from one

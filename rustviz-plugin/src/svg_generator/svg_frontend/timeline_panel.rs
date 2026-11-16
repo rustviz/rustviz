@@ -3376,18 +3376,95 @@ fn loop_iterator_ref_title(event: &Event, line: usize, rap: &ResourceAccessPoint
 /// there. Not for a `&mut` reference whose pointee the iterator
 /// reborrows (`v.iter()` with `v: &mut Vec<_>`; #1059): its own state
 /// text ("…currently shared through it, so v can only read it") says it.
-/// But when the iterator borrows only a field of what it points to
-/// (`self.items.iter()`; #1060), the rest is still writable through it.
+/// (When the iterator borrows only a field of what a reference points
+/// to, `self.items.iter()`, see `field_lent_through_ref_title`.)
 fn loop_iterator_title(state: &State, rap: &ResourceAccessPoint, visualization_data: &VisualizationData, line: usize) -> Option<String> {
+    if let Some(title) = field_lent_through_ref_title(state, rap, visualization_data, line) {
+        return Some(title);
+    }
     let State::PartialPrivilege { s } = state else { return None };
     if matches!(s, LineState::Gray) {
         return None;
     }
     match (loop_iterator_holds(visualization_data, rap, line)?, rap.is_ref()) {
         (None, false) => Some(hover_messages::state_borrowed_by_loop_iterator(rap.name(), rap.is_copy_owner() || rap.is_plain_value())),
-        (Some(place), true) => Some(hover_messages::state_mut_ref_field_borrowed_by_loop_iterator(rap.name(), &place)),
         _ => None,
     }
+}
+
+/// A segment of the `&mut` reference `rap` from row `line` while only
+/// a field of what it points to is borrowed (#1073): by a `for` loop's
+/// iterator (`for e in self.items.iter_mut()`; #1060), or by a
+/// reference variable (`let r = &mut self.items;`, `let first =
+/// self.items.first_mut().unwrap();`). rustc restricts only that field
+/// (`self.n += 1` compiles, `self.items.len()` doesn't), so rap keeps
+/// its state and line style (see `calc_state`); the text names the
+/// field. None when no field borrow is live there.
+fn field_lent_through_ref_title(state: &State, rap: &ResourceAccessPoint, visualization_data: &VisualizationData, line: usize) -> Option<String> {
+    if !rap.is_mutref() || !matches!(state, State::FullPrivilege { s: LineState::Full } | State::PartialPrivilege { s: LineState::Full }) {
+        return None;
+    }
+    fn flat<'a>(history: &'a [(usize, Event)], out: &mut Vec<(usize, &'a Event)>) {
+        for (l, e) in history {
+            out.push((*l, e));
+            if let Event::Branch { branch_history, .. } = e {
+                for b in branch_history {
+                    flat(&b.e_data, out);
+                }
+            }
+        }
+    }
+    let timeline = visualization_data.timelines.get(rap.hash())?;
+    let mut history = Vec::new();
+    flat(&timeline.history, &mut history);
+    let field = |is: &ResourceTy| match is {
+        ResourceTy::DerefField(r, place, _) if r.hash() == rap.hash() => Some(place.clone()),
+        _ => None,
+    };
+    // The latest field borrow live at `line`.
+    let mut live: Option<(usize, String, bool, Option<String>)> = None;
+    for &(l, e) in &history {
+        if l > line {
+            continue;
+        }
+        let (to, is, is_mut) = match e {
+            Event::MutableLend { to, is, .. } => (to, is, true),
+            Event::StaticLend { to, is, .. } => (to, is, false),
+            _ => continue,
+        };
+        let Some(place) = field(is) else { continue };
+        let borrower = match to {
+            // A reference variable: live until it gives the field back.
+            ResourceTy::Value(b) if !b.is_fn() => {
+                let back = history.iter().any(|&(l2, e2)| l2 >= l && l2 <= line && matches!(e2,
+                    Event::MutableReacquire { from: ResourceTy::Value(f), is: i, .. }
+                    | Event::StaticReacquire { from: ResourceTy::Value(f), is: i, .. }
+                        if f.hash() == b.hash() && field(i).as_ref() == Some(&place)));
+                if back {
+                    continue;
+                }
+                Some(b.name().to_owned())
+            }
+            // A call: a `for` loop's iterator keeps it until the loop
+            // ends; any other call gives it back on its own line, or
+            // its result's borrow is the variable's above.
+            ResourceTy::Value(_) => {
+                if loop_iterator_holds(visualization_data, rap, line).flatten().as_ref() != Some(&place) {
+                    continue;
+                }
+                None
+            }
+            _ => continue,
+        };
+        if live.as_ref().is_none_or(|(l0, ..)| l >= *l0) {
+            live = Some((l, place, is_mut, borrower));
+        }
+    }
+    let (_, place, is_mut, borrower) = live?;
+    Some(match borrower {
+        None => hover_messages::state_mut_ref_field_borrowed_by_loop_iterator(rap.name(), &place, is_mut),
+        Some(b) => hover_messages::state_mut_ref_field_borrowed_by(rap.name(), &place, &b, is_mut),
+    })
 }
 
 /// Whether `rap`'s segment from `line` lies where a `for` loop's
@@ -5855,22 +5932,61 @@ fn render_timeline(
     render_branches(hash, rap, history, states, output, visualization_data, timeline_data, false, &[]);
 
     let apexes = CollapsedApexes::of(history);
-    for (line_start, line_end, state) in states {
+    let cuts = field_borrow_rows(rap, history);
+    for (seg_start, seg_end, state) in states {
         // println!("{} -> start: {}, end: {}, state: {}", visualization_data.get_name_from_hash(hash).unwrap(), line_start, line_end, state); // DEBUG PURPOSES
-        let Some((y1, y2)) = apexes.segment_ys(*line_start, *line_end) else { continue };
-        let mut data = VerticalLineData {
-                line_class: String::new(),
-                hash: *hash,
-                x1: timeline_data.x_val as f64,
-                y1,
-                x2: timeline_data.x_val as f64,
-                y2,
-                title: timeline_segment_title(state, rap, visualization_data, Some(*line_start)),
-                opacity: 1.0,
-                dasharray: "none".to_owned(),
-        };
-        append_line(state, & mut data, rap, timeline_data, output, registry);
+        // A field borrow through a `&mut` reference doesn't change its
+        // state (#1073), so the segment is cut where one starts or ends:
+        // its text names the field while the borrow is live.
+        let mut bounds = vec![*seg_start];
+        if matches!(state, State::FullPrivilege { .. } | State::PartialPrivilege { .. }) {
+            bounds.extend(cuts.iter().copied().filter(|l| l > seg_start && l < seg_end));
+        }
+        bounds.push(*seg_end);
+        // (Pieces with the same text are drawn as one.)
+        let mut pieces: Vec<(usize, usize, String)> = Vec::new();
+        for w in bounds.windows(2) {
+            let title = timeline_segment_title(state, rap, visualization_data, Some(w[0]));
+            match pieces.last_mut() {
+                Some(last) if last.2 == title => last.1 = w[1],
+                _ => pieces.push((w[0], w[1], title)),
+            }
+        }
+        for (line_start, line_end, title) in pieces {
+            let Some((y1, y2)) = apexes.segment_ys(line_start, line_end) else { continue };
+            let mut data = VerticalLineData {
+                    line_class: String::new(),
+                    hash: *hash,
+                    x1: timeline_data.x_val as f64,
+                    y1,
+                    x2: timeline_data.x_val as f64,
+                    y2,
+                    title,
+                    opacity: 1.0,
+                    dasharray: "none".to_owned(),
+            };
+            append_line(state, & mut data, rap, timeline_data, output, registry);
+        }
     }
+}
+
+/// The rows where a borrow of a field of what the `&mut` reference
+/// `rap` points to starts or ends (`self.items` in `for e in
+/// self.items.iter_mut()`; #1073), sorted. Empty for anything else.
+fn field_borrow_rows(rap: &ResourceAccessPoint, history: &[(usize, Event)]) -> Vec<usize> {
+    if !rap.is_mutref() {
+        return Vec::new();
+    }
+    let mut rows: Vec<usize> = history.iter().filter_map(|(l, e)| match e {
+        Event::MutableLend { is: ResourceTy::DerefField(r, ..), .. }
+        | Event::StaticLend { is: ResourceTy::DerefField(r, ..), .. }
+        | Event::MutableReacquire { is: ResourceTy::DerefField(r, ..), .. }
+        | Event::StaticReacquire { is: ResourceTy::DerefField(r, ..), .. } if r.hash() == rap.hash() => Some(*l),
+        _ => None,
+    }).collect();
+    rows.sort_unstable();
+    rows.dedup();
+    rows
 }
 
 /// How far above its first row / below its last row the split and the

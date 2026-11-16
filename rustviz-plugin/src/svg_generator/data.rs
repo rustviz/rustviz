@@ -4149,6 +4149,24 @@ impl Visualizable for VisualizationData {
         let holder = self.timelines.get(hash)
             .is_some_and(|t| t.resource_access_point.holds_borrow());
 
+        // A borrow of one field of what a reference points to
+        // (`&mut self.items`, `self.items.iter_mut()` in a `for` head,
+        // `self.items.first_mut()` kept by its result), and the end of
+        // that borrow: rustc restricts only that field (`self.n += 1`
+        // still compiles; #1073), so the reference itself keeps its
+        // state, as an owner `s` does while `s.items` is lent. The
+        // texts name the field.
+        let field_of_this_ref = |is: &ResourceTy| self.is_ref(hash)
+            && matches!(is, ResourceTy::DerefField(r, _, _) if r.hash() == hash);
+        match event {
+            Event::MutableLend { is, .. } | Event::StaticLend { is, .. }
+            | Event::MutableReacquire { is, .. } | Event::StaticReacquire { is, .. }
+                if field_of_this_ref(is)
+                    && matches!(previous_state, State::FullPrivilege { .. } | State::PartialPrivilege { .. }) =>
+                return previous_state.clone(),
+            _ => {}
+        }
+
         match (previous_state, event) {
             // propogate invalid states
             (State::Invalid, _) => State::Invalid,
