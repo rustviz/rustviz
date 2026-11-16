@@ -2061,6 +2061,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if rd.rap.is_fn() || self.skip_raps.contains(name) || (rd.rap.is_temporary() && rd.scope < line) {
         continue;
       }
+      // An owner declared before the loop that holds nothing where the
+      // `return` is (`drop(r); return;`) drops nothing there, so its
+      // scope end after the loop (reached by a `break`, where it still
+      // held a value, #1000) isn't one the `return` could come before.
+      if idx < len && matches!(rd.rap, ResourceAccessPoint::Owner(_)) && !rd.rap.is_temporary()
+        && self.rap_ownership_now(name) == Ownership::None {
+        continue;
+      }
       vars.push((rd.rap.clone(), idx >= len));
     }
     let iters = self.loop_iterators.iter().map(|(_, ro)| ro.clone()).collect();

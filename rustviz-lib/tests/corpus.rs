@@ -18552,6 +18552,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "w goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
+            // #1020 x #1000: `drop(r); return;` drops nothing at the `return`.
+            "If the `return` on line 38 runs first",
             "=s goes out of scope. No resource is dropped.",
             "=r goes out of scope. No resource is dropped.",
             "=p goes out of scope. No resource is dropped.",
