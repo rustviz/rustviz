@@ -20720,6 +20720,39 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "currently shared through it",
         ],
     },
+    TooltipExpect {
+        name: "boxed_closure_drop_1107",
+        // #1107: `let m = boxed(|x| r.len() …)` (and `let n: Box<dyn Fn() ->
+        // usize + '_> = Box::new(|| q.len())`) reborrows `*r` through the
+        // shared reference r, which rustc records as no loan, so m's borrow
+        // ended on the `m(&1)` row ("m's immutable borrow ends", "m no
+        // longer borrows the resource r points to"). Checked with rustc:
+        // `v.push('x')` right after `m(&1)` is E0502 ("immutable borrow
+        // might be used here, when `m` is dropped and runs the destructor
+        // for type `Box<dyn for<'a> Fn(&'a i32) -> bool>`"), the same for
+        // n; after `drop(d)`, `w.push('g')` compiles. The false texts are
+        // the same words on an earlier row, so where they sit is pinned by
+        // `a_boxed_closure_borrowing_through_a_reference_keeps_it_until_dropped`.
+        must_contain: &[
+            "m holds a value that immutably borrows the data r points to (m isn't a reference itself)",
+            "Immutable borrow from r to m: boxed's signature gives the value it returns the same lifetime as its argument; m isn't a reference, but its value holds one",
+            "m's immutable borrow ends",
+            "m no longer borrows the resource r points to",
+            "Return immutably borrowed resource from m to r",
+            "n holds a value that immutably borrows the data q points to (n isn't a reference itself)",
+            "n's immutable borrow ends",
+            "n no longer borrows the resource q points to",
+            "d's immutable borrow ends",
+            "d no longer borrows the resource p points to",
+            "w's resource is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            // m / n / d drawn as plain owners, with no borrow.
+            "=Move from boxed to m",
+            "=Move from Box::new to n",
+            "=Move from boxed to d",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -28093,10 +28126,34 @@ fn a_boxed_closure_keeps_its_borrows_until_dropped() {
     // dropped: t is given back on the `drop(h);` row, before `t.push('c');`.
     assert_eq!(ys("t's resource is no longer immutably borrowed"), vec![row("drop(h);")]);
     assert_eq!(ys("h's immutable borrow ends"), vec![row("drop(h);")]);
-    // through_ref: m's borrow of what r points to lasts at least until m
-    // is called (rustc keeps it until m is dropped; r's own borrow of v,
-    // drawn to the closing brace, shows that).
-    let m_end = ys("m's immutable borrow ends");
-    assert_eq!(m_end.len(), 1, "{:?}", m_end);
-    assert!(m_end[0] >= row("let hit = m(&1);"), "m's borrow ends before m is called: {:?}", m_end);
+    // through_ref: m's borrow of what r points to lasts until m is
+    // dropped at the closing brace (#1107).
+    let m_end = next_row(row("let hit = m(&1);"), "}");
+    assert_eq!(ys("m's immutable borrow ends"), vec![m_end], "m's borrow must last until m is dropped");
+}
+
+/// #1107 (`boxed_closure_drop_1107`): a boxed closure that reads through a
+/// shared reference (`boxed(|x| r.len() …)`, `Box::new(|| q.len())`) holds
+/// a reborrow of `*r`, which rustc records as no loan. A `Box<dyn Fn +
+/// '_>` has drop glue that may use it, so rustc keeps the borrow until the
+/// box is dropped. #1106's plugin ended it on the row of the last call.
+#[test]
+fn a_boxed_closure_borrowing_through_a_reference_keeps_it_until_dropped() {
+    let rv = run_with_local_backend("boxed_closure_drop_1107");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let row = |src: &str| code_row_y(&code, src);
+    let next_row = |at: f64, next: &str| code_rows_y(&code, next).into_iter().find(|&y| y > at).unwrap_or_else(|| panic!("no {:?} after y={}", next, at));
+    let ys = |text: &str| -> Vec<f64> { dots_listing_tooltip(&tl, text).into_iter().map(|(_, y)| y).collect() };
+    // through_ref: m is dropped at the closing brace, after `hit`.
+    let m_end = next_row(row("let hit = m(&1);"), "}");
+    assert_eq!(ys("m's immutable borrow ends"), vec![m_end], "m's borrow must last until m is dropped");
+    assert_eq!(ys("m no longer borrows the resource r points to"), vec![m_end]);
+    // through_ref_plain: the same for `Box::new(|| q.len())`.
+    let n_end = next_row(row("let len = n();"), "}");
+    assert_eq!(ys("n's immutable borrow ends"), vec![n_end], "n's borrow must last until n is dropped");
+    assert_eq!(ys("n no longer borrows the resource q points to"), vec![n_end]);
+    // through_ref_dropped: `drop(d)` gives it back, before `w.push('g')`.
+    assert_eq!(ys("d's immutable borrow ends"), vec![row("drop(d);")]);
+    assert_eq!(ys("d no longer borrows the resource p points to"), vec![row("drop(d);")]);
+    assert_eq!(ys("w's resource is no longer immutably borrowed"), vec![row("drop(d);")]);
 }

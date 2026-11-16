@@ -8863,6 +8863,28 @@ pub fn print_out_of_scope(&mut self){
         rd.lifetime = rd.lifetime.max(last);
       }
     }
+    // A holder whose drop may use the borrow it holds (`let m =
+    // boxed(|x| r.len() …)`, a `Box<dyn Fn + '_>`) keeps it until it's
+    // dropped: at the end of its scope, or at `drop(m)`. For a loan,
+    // rustc's loan end above already says so; reading through the
+    // shared reference r is no loan, and m's borrow ended at its last
+    // call (#1107).
+    let mut drop_ends: Vec<(String, usize)> = Vec::new();
+    #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "collected into a Vec, each entry raised on its own")]
+    for (name, rd) in self.borrow_map.iter() {
+      let holder = self.raps.get(name).is_some_and(|r| !r.rap.is_ref() && r.rap.holds_borrow());
+      if !holder {
+        continue;
+      }
+      if let Some(line) = self.last_drop_use_line(name).filter(|l| *l > rd.lifetime) {
+        drop_ends.push((name.clone(), line));
+      }
+    }
+    for (name, line) in drop_ends {
+      if let Some(rd) = self.borrow_map.get_mut(&name) {
+        rd.lifetime = line;
+      }
+    }
     // A reference that a pattern binding reborrows through stays
     // borrowed as long as that binding does: `s` in `match o {
     // Some(s) => … }` (`o: &Option<String>`) points into `*o`, so the
