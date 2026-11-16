@@ -602,6 +602,11 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   pub arm_frames: Vec<(usize, usize, usize, usize)>,
   /// While true, `add_external_event` queues events in `late_old_ends`.
   pub defer_old_ends: bool,
+  /// While a whole value is overwritten (`s2 = Shelf { items:
+  /// vec![w.as_str()] };`), the struct literal's holder fields whose
+  /// borrows `emit_holder_literal_borrows` draws: drawn after the old
+  /// value's borrow ends and drop, which come first on the dot (#1097).
+  pub deferred_holder_borrows: Option<Vec<(String, &'tcx Expr<'tcx>)>>,
 
 
   // Variables moved in a branch that then `break`s out of a loop
@@ -973,6 +978,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       retired_until: HashMap::new(),
       arm_frames: Vec::new(),
       defer_old_ends: false,
+      deferred_holder_borrows: None,
       break_moves: Vec::new(),
       loop_given: Vec::new(),
       loop_maybe_entry: Vec::new(),
@@ -4961,6 +4967,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         continue;
       }
       let (mut lenders, _, is_mut) = self.call_field_lenders(init, field.name.as_str());
+      if holder && self.narrow_holder_lenders(&fname, init, &mut lenders, &mut Vec::new()) && lenders.is_empty() {
+        self.mark_holder(&fname);
+        continue;
+      }
       if lenders.is_empty() {
         continue;
       }
@@ -5014,7 +5024,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       self.borrow_map.remove(&name);
     }
     let (mut lenders, is_mut) = self.holder_lenders(rhs, ty);
-    let lender_muts = self.holder_lender_muts(rhs);
+    let mut lender_muts = self.holder_lender_muts(rhs);
+    self.narrow_holder_lenders(&name, rhs, &mut lenders, &mut lender_muts);
     if lenders.is_empty() {
       return;
     }
@@ -5190,7 +5201,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   fn register_holder(&mut self, name: &String, init: &'tcx Expr<'tcx>, ty: Ty<'tcx>) {
     self.retire_loan(name, expr_to_line(&init, &self.tcx));
     let (mut lenders, is_mut) = self.holder_lenders(init, ty);
-    let lender_muts = self.holder_lender_muts(init);
+    let mut lender_muts = self.holder_lender_muts(init);
+    // `let w: Vec<&String> = v.iter().copied().collect();` holds the
+    // references stored in v, not a borrow of v (#1094): a holder of
+    // borrows whose own lenders all went is still one.
+    if self.narrow_holder_lenders(name, init, &mut lenders, &mut lender_muts) && lenders.is_empty() {
+      self.mark_holder(name);
+      return;
+    }
     if lenders.is_empty() {
       // `let mut refs = Vec::new();` that a later `refs.push(&s)`
       // fills with borrows (#392): a holder from the start, with no
@@ -5228,6 +5246,43 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       co_lenders: lenders,
       lender_muts,
     });
+  }
+
+  /// The lenders `holder_lenders` found for the value a call returns
+  /// follow the call's arguments as a whole: `v.iter().copied()
+  /// .collect()` gets v, which `iter` borrows, though the result holds
+  /// only the references stored in v (`copied` and `collect` keep the
+  /// items, `&'a String`, not the iterator's borrow of v). Keep only
+  /// those whose loans rustc's borrow checker puts in the lifetimes of
+  /// `name`'s type (`loans_held_by`), as for a reference result
+  /// (`narrow_call_result_lenders`, #756). A lender with no loan in
+  /// this body (a reference, a place behind one, a variable of another
+  /// body) stays. Returns whether a lender was dropped (#1094).
+  fn narrow_holder_lenders(
+    &self,
+    name: &str,
+    init: &'tcx Expr<'tcx>,
+    lenders: &mut Vec<ResourceTy>,
+    lender_muts: &mut Vec<(ResourceTy, bool)>,
+  ) -> bool {
+    if lenders.is_empty() || !matches!(init.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) {
+      return false;
+    }
+    let mut parts = name.split('.');
+    let base = parts.next().unwrap_or_default();
+    let fields: Vec<&str> = parts.collect();
+    let Some(held) = self.loans_held_by(base, &fields) else { return false };
+    let kept = |l: &ResourceTy| match l {
+      ResourceTy::Value(r) if !r.is_ref() => {
+        let lb = r.name().split('.').next().unwrap_or_default();
+        held.contains_key(lb) || !self.is_body_local(lb)
+      }
+      _ => true,
+    };
+    let before = lenders.len();
+    lenders.retain(|l| kept(l));
+    lender_muts.retain(|(l, _)| kept(l));
+    lenders.len() != before
   }
 
   /// Marks `name`'s column as a borrow holder: an owner, or a struct
@@ -5323,21 +5378,50 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// `call_stores_into_receiver`, #392), or is later assigned a whole
   /// new value (`let mut q: Option<&String> = None; q = Some(r);`,
   /// #875): `reassign_holder` then records the new value's borrow.
+  ///
+  /// A field of a struct literal bound by a `let` (`let mut shelf =
+  /// Shelf { items: Vec::new() };`) is filled the same way through its
+  /// place (`shelf.items.push(w.as_str())`, #1096).
   fn filled_with_borrows_later(&self, init: &'tcx Expr<'tcx>, ty: Ty<'tcx>) -> bool {
     if ty.is_ref() || !ty.walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_))) {
       return false;
     }
-    let rustc_hir::Node::LetStmt(local) = self.tcx.parent_hir_node(init.hir_id) else { return false };
+    // The field names from the `let`'s variable down to `init`,
+    // outermost first (`["items"]`).
+    let mut path: Vec<rustc_span::Symbol> = Vec::new();
+    let mut e = init;
+    let local = loop {
+      match self.tcx.parent_hir_node(e.hir_id) {
+        rustc_hir::Node::LetStmt(local) => break local,
+        rustc_hir::Node::ExprField(f) => {
+          let rustc_hir::Node::Expr(lit) = self.tcx.parent_hir_node(f.hir_id) else { return false };
+          if !matches!(lit.kind, ExprKind::Struct(..)) {
+            return false;
+          }
+          path.insert(0, f.ident.name);
+          e = lit;
+        }
+        _ => return false,
+      }
+    };
     let PatKind::Binding(_, hir_id, _, None) = local.pat.kind else { return false };
     struct StoreFinder<'v, 'a, 'tcx> {
       ev: &'v ExprVisitor<'a, 'tcx>,
       local: rustc_hir::HirId,
+      path: Vec<rustc_span::Symbol>,
       found: bool,
     }
     impl<'v, 'a, 'tcx> rustc_hir::intravisit::Visitor<'tcx> for StoreFinder<'v, 'a, 'tcx> {
       fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
-        let is_local = |x: &Expr<'_>| matches!(x.kind,
-          ExprKind::Path(QPath::Resolved(None, path)) if path.res == Res::Local(self.local));
+        // `x` itself, or the place `x.f.g` for `path` `[f, g]`.
+        fn is_place(x: &Expr<'_>, local: rustc_hir::HirId, path: &[rustc_span::Symbol]) -> bool {
+          match (x.kind, path.split_last()) {
+            (ExprKind::Path(QPath::Resolved(None, p)), None) => p.res == Res::Local(local),
+            (ExprKind::Field(base, ident), Some((last, rest))) => ident.name == *last && is_place(base, local, rest),
+            _ => false,
+          }
+        }
+        let is_local = |x: &Expr<'_>| is_place(x, self.local, &self.path);
         match e.kind {
           ExprKind::MethodCall(_, rcvr, _, _) if is_local(rcvr) && self.ev.call_stores_into_receiver(e) => {
             self.found = true;
@@ -5348,7 +5432,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         rustc_hir::intravisit::walk_expr(self, e);
       }
     }
-    let mut finder = StoreFinder { ev: self, local: hir_id, found: false };
+    let mut finder = StoreFinder { ev: self, local: hir_id, path, found: false };
     rustc_hir::intravisit::Visitor::visit_expr(&mut finder, self.hir_body.value);
     finder.found
   }
@@ -8012,7 +8096,10 @@ pub fn match_rhs_struct(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, _qpat
         self.register_struct_field_lenders(&new_lhs_name, field.expr, field_ty);
       }
       self.match_rhs(ResourceTy::Value(field_rap), field.expr, e);
-      self.emit_holder_literal_borrows(&new_lhs_name, field.expr);
+      match &mut self.deferred_holder_borrows {
+        Some(later) => later.push((new_lhs_name.clone(), field.expr)),
+        None => self.emit_holder_literal_borrows(&new_lhs_name, field.expr),
+      }
   }
   // Struct update syntax `S { a: e, ..base }`: every field not
   // written explicitly comes from `base`, moved if its type isn't

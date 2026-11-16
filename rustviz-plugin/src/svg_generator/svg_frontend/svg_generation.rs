@@ -89,9 +89,33 @@ fn split_same_line_borrow_ends(group: &[ExternalEvent]) -> (Vec<ExternalEvent>, 
 /// through it, and returns x's borrow, in that order. Appended first,
 /// the end came before the write in x's history, and the write then
 /// showed x holding a live `&mut` again down to its scope end (#587).
+///
+/// A borrow into the same holder recorded after the end (`s2 = Shelf {
+/// items: vec![w.as_str()] };` ends s2.items's borrow of v, then gives
+/// it w's) is its new borrow, not a use of the one that ends: the end
+/// stays first (#1097).
 fn ends_after_line_uses(e: &ExternalEvent, group: &[ExternalEvent], rest: &[ExternalEvent]) -> bool {
     let Some(r) = ended_ref(e) else { return false };
-    group.iter().chain(rest).filter(|o| o.get_id() != e.get_id()).any(|o| uses_rap(o, r))
+    group.iter().chain(rest)
+        .filter(|o| o.get_id() != e.get_id() && !new_borrow_into(o, r, e.get_id()))
+        .any(|o| uses_rap(o, r))
+}
+
+/// Whether `o` is a borrow into the column `r` recorded after the event
+/// with id `after`.
+fn new_borrow_into(o: &ExternalEvent, r: u64, after: usize) -> bool {
+    matches!(o, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. })
+        && o.get_id() > after
+        && ResourceAccessPoint_extract(o).1.extract_rap().is_some_and(|t| *t.hash() == r)
+}
+
+/// Whether `drop` is the drop of `holder`'s old value at a reassignment
+/// (`o = vec![&w];`), recorded before `borrow`, the borrow the new value
+/// gives `holder`: the drop comes first on the dot, as it does in the
+/// source of the events (#1097).
+fn drop_before_new_borrow(drop: &ExternalEvent, borrow: &ExternalEvent) -> bool {
+    let ExternalEvent::OwnerDropAtReassign { ro, id, .. } = drop else { return false };
+    new_borrow_into(borrow, *ro.hash(), *id)
 }
 
 /// Whether `die` is the end (`RefDie`) of the borrow of the reference
@@ -922,7 +946,10 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                         // new value, on the arrow's row. Left in the
                         // line's sequence it was appended after the rows
                         // inserted for the stack, below the swap.
-                        for d in rest_of_line.iter().filter(|d| ref_die_before_arrow(d, e)) {
+                        for d in rest_of_line.iter().filter(|d| ref_die_before_arrow(d, e) || drop_before_new_borrow(d, e)) {
+                            if skippable_ev.contains(&d.get_id()) {
+                                continue;
+                            }
                             visualization_data.append_processed_external_event(d.clone(), row);
                             skippable_ev.insert(d.get_id());
                         }

@@ -17655,6 +17655,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "lens, made from vk",
             "still immutably borrowed by lens",
             "still immutably borrowed by vk",
+            // #1094: what is made from the holder holds the references
+            // stored in it (they point to s, b, e, f, g), not a borrow
+            // of the holder: `drop(v)` right after the collect compiles.
+            "Immutable borrow from v to w",
+            "Immutable borrow from vb to fb",
+            "Immutable borrow from ve to we",
+            "Immutable borrow from wf to xf",
+            "Immutable borrow from vg to dg.v",
+            "w holds a value that immutably borrows v's resource",
+            "fb holds a value that immutably borrows vb's resource",
+            "dg.v holds a value that immutably borrows vg's resource",
+            "vg's resource is immutably borrowed by dg.v",
         ],
     },
     // #807: a constructor scrutinee whose pattern binds the payload by
@@ -20202,6 +20214,44 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from rows to k",
             "Immutable borrow from rr to h",
             "Immutable borrow from rr to k",
+        ],
+    },
+    TooltipExpect {
+        // #1094-#1097: holders of stored references (rustc rejects
+        // `drop(s)` / `drop(a)` / `drop(c)` / `drop(e)` / `drop(g)` while
+        // w / o / arr / first / s2.items are in use, and accepts `drop(v)`
+        // after the collect, `drop(b)` / `drop(d)` / `drop(h)` after the
+        // reassignments). The dot order at the overwrites is checked in
+        // `a_holder_overwrite_ends_the_old_borrow_before_the_new_one`.
+        name: "holder_borrows_1094",
+        must_contain: &[
+            // #1094: s's borrow is still held by w, made from v.
+            "keepv reads from s; keepv's signature lets it store this reference in v, so s stays borrowed while v is in use, and while w, made from v, is in use",
+            "v's resource is moved into drop, which drops it",
+            // #1095
+            "Immutable borrow from a to o",
+            "a's resource is immutably borrowed by o; a is read-only while the borrow is live",
+            "o holds a value that immutably borrows a's resource (o isn't a reference itself)",
+            "Immutable borrow from c to arr",
+            "c's resource is immutably borrowed by arr; c is read-only while the borrow is live",
+            "arr holds a value that immutably borrows c's resource (arr isn't a reference itself)",
+            // #1096
+            "Immutable borrow from e to shelf.items, stored in shelf.items by push; shelf.items isn't a reference, but its value now holds one",
+            "shelf.items holds a value that immutably borrows e's resource (shelf.items isn't a reference itself)",
+            "Immutable borrow from e to first: first is a reference copied out of shelf.items",
+            "e's resource is immutably borrowed by first; e is read-only while the borrow is live",
+            // #1097
+            "s2.items holds a value that immutably borrows g's resource (s2.items isn't a reference itself)",
+        ],
+        must_not_contain: &[
+            // #1094: w holds copies of the references stored in v, not
+            // a borrow of v.
+            "Immutable borrow from v to w",
+            "v's resource is immutably borrowed by w",
+            "w holds a value that immutably borrows v's resource",
+            // #1096
+            "first's immutable borrow ends (what it borrows from isn't shown)",
+            "=shelf.items is the owner of the resource",
         ],
     },
 ];
@@ -26946,6 +26996,37 @@ fn chain_reference_borrows_end_on_each_path() {
             assert_eq!(on(&dots, row), 1, "{end}: {dots:?}, none on the later arm's println! row ({row})");
         }
     }
+}
+
+/// #1097 / #1095: when a holder gets a new value whose borrow it now
+/// holds, its dot says the old borrow ends and the old value is
+/// dropped before the new borrow. #1098 listed s2.items's new borrow
+/// of g first, so "s2.items's immutable borrow ends" read as the end of
+/// that borrow; o and arr drew no new borrow at all.
+#[test]
+fn a_holder_overwrite_ends_the_old_borrow_before_the_new_one() {
+    let rv = run_with_local_backend("holder_borrows_1094");
+    let dots = tooltip_lines(&rv.timeline_panel_string());
+    let cases: [&[&str]; 3] = [
+        &[
+            "s2.items's immutable borrow ends",
+            "s2.items acquires ownership of a new resource; its previous resource is dropped",
+            "s2.items holds a value that immutably borrows g's resource (s2.items isn't a reference itself)",
+        ],
+        &[
+            "o acquires ownership of a new resource; its previous resource is dropped",
+            "o holds a value that immutably borrows a's resource (o isn't a reference itself)",
+        ],
+        &[
+            "arr is assigned a new value",
+            "arr holds a value that immutably borrows c's resource (arr isn't a reference itself)",
+        ],
+    ];
+    let failures: Vec<String> = cases.iter()
+        .filter(|want| !dots.iter().any(|d| d.iter().map(String::as_str).eq(want.iter().copied())))
+        .map(|want| format!("no dot lists exactly {want:?}"))
+        .collect();
+    assert!(failures.is_empty(), "{}\ndots: {dots:#?}", failures.join("\n"));
 }
 
 /// #1076 (`ref_into_adapter_1076`): where each text sits. A reference

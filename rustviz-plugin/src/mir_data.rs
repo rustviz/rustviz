@@ -1167,6 +1167,15 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         Some(out)
     }
 
+    /// Whether this body has a MIR local for the variable `name` (its
+    /// RAP name, see `mir_local_names`): a borrow of it is one of
+    /// rustc's loans here.
+    pub fn is_body_local(&self, name: &str) -> bool {
+        #[expect(clippy::disallowed_methods, reason = "only asks whether any local has the name")]
+        let found = self.mir_local_names(self.bwf).values().any(|n| n == name);
+        found
+    }
+
     /// The type of field `f` (a name, or a tuple index) of a struct or
     /// tuple type `ty`, with `ty`'s own lifetimes.
     pub(crate) fn field_ty_named(&self, ty: Ty<'tcx>, f: &str) -> Option<Ty<'tcx>> {

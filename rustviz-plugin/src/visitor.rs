@@ -6096,6 +6096,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     };
     let mut drop_line = line_num;
     let mut drop_at: Option<usize> = None;
+    let mut late_holder_borrows: Vec<(String, &'tcx Expr<'tcx>)> = Vec::new();
     if let (ResourceTy::Index(..), ExprKind::AssignOp(..)) = (&lhs_rty, expr.kind) {
       // `v[i] += k`: k is an operand, not the element's new
       // value, so don't draw it as copied into v[i].
@@ -6120,7 +6121,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       };
       let n_events = self.preprocessed_events.len();
       let first_id = *self.unique_id;
+      // A whole new value: the borrows its holder fields take are
+      // drawn after the old value's ends and drop (#1097).
+      let overwrite = matches!(lhs_rty, ResourceTy::Value(_)) && matches!(expr.kind, ExprKind::Assign(..));
+      let outer = if overwrite { self.deferred_holder_borrows.replace(Vec::new()) } else { None };
       self.match_rhs(lhs_rty.clone(), rhs_expr, e);
+      if overwrite {
+        late_holder_borrows = std::mem::replace(&mut self.deferred_holder_borrows, outer).unwrap_or_default();
+      }
       if let Some(b) = &box_payload {
         self.retarget_into_payload(b, first_id);
       }
@@ -6223,6 +6231,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if let Some(i) = drop_at {
       let n_drops = self.preprocessed_events.len() - n_before_drops;
       self.preprocessed_events[i..].rotate_right(n_drops);
+    }
+    // `o = vec![&w];` / `o = [&w];` where o holds a borrow: o now
+    // borrows w, drawn as for `let o = vec![&w];` (#1095), after the
+    // old borrow's end and the old value's drop. The same for a struct
+    // literal's holder fields (`s2 = Shelf { items: vec![w.as_str()] }`).
+    if let (ResourceTy::Value(rap), ExprKind::Assign(..)) = (&lhs_rty, expr.kind) {
+      if rap.holds_borrow() && !lhs_is_union_field {
+        let name = rap.name().to_owned();
+        self.emit_holder_literal_borrows(&name, rhs_expr);
+      }
+    }
+    for (name, e) in late_holder_borrows {
+      self.emit_holder_literal_borrows(&name, e);
     }
 }
 
