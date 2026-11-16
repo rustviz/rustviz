@@ -27,7 +27,7 @@
 
 mod common;
 
-use common::svg::attr;
+use common::svg::{attr, is_arrow_shaft};
 use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fs;
@@ -19265,6 +19265,14 @@ fn assert_well_formed(name: &str, rv: &Rustviz) {
             panel,
             uncoloured
         );
+        let palette = palette_problems(svg);
+        assert!(
+            palette.is_empty(),
+            "{}: {} panel colours aren't all themed: {:?}",
+            name,
+            panel,
+            palette
+        );
         let off = off_canvas_ys(svg);
         assert!(
             off.is_empty(),
@@ -19576,6 +19584,124 @@ fn hashes_without_colour(svg: &str) -> Vec<u64> {
         .collect()
 }
 
+/// The mdBook themes every panel carries a palette for.
+const THEMES: [&str; 5] = ["light", "rust", "coal", "navy", "ayu"];
+
+/// Colours in a panel that a theme can't change, and gaps in its
+/// palettes. Every colour must be a `--rv-*` custom property, declared
+/// once per theme (`[data-rv-theme="coal"] { --rv-bg: ...; ... }`, plus
+/// the default on `:root` and the system-dark fallback), so a theme
+/// recolours the whole panel. Literal colours may appear only in those
+/// declarations; elsewhere, in the stylesheet's rules or in an
+/// element's `fill`/`stroke`/`color` attribute or inline style, only
+/// `var(--rv-*)`, `none`, `transparent`, `inherit` and `currentColor`
+/// are allowed. Returns one line per problem.
+fn palette_problems(svg: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let (Some(open), Some(close)) = (svg.find("<![CDATA["), svg.find("]]>")) else {
+        return vec!["no stylesheet".into()];
+    };
+    // Comments cite issues as `#626`; they aren't colours.
+    let mut style = String::new();
+    let mut rest = &svg[open + 9..close];
+    while let Some(i) = rest.find("/*") {
+        style.push_str(&rest[..i]);
+        rest = rest[i..].find("*/").map_or("", |j| &rest[i + j + 2..]);
+    }
+    style.push_str(rest);
+    let body = &svg[close..];
+
+    // Palette blocks: selector -> declared property names.
+    let block = |sel: &str| -> Option<Vec<String>> {
+        let i = style.find(sel)? + sel.len();
+        let b = &style[i..i + style[i..].find('}')?];
+        Some(b.split(';').filter_map(|d| {
+            let (k, _) = d.split_once(':')?;
+            let k = k.trim();
+            k.starts_with("--rv-").then(|| k.to_string())
+        }).collect())
+    };
+    // The default palette is light's, on `:root` too.
+    let Some(default) = block(":root,\n    [data-rv-theme=\"light\"] {") else {
+        return vec!["no default palette on :root".into()];
+    };
+    if default.len() < 20 {
+        out.push(format!("default palette declares only {:?}", default));
+    }
+    let mut blocks = vec![(
+        "system-dark fallback".to_string(),
+        block("@media (prefers-color-scheme: dark) {\n        :root:not([data-rv-theme]) {"),
+    )];
+    for t in THEMES {
+        blocks.push((t.to_string(), block(&format!("[data-rv-theme=\"{t}\"] {{"))));
+    }
+    for (name, props) in blocks {
+        match props {
+            None => out.push(format!("no palette for {name}")),
+            Some(p) if p != default => out.push(format!("{name} declares {:?}, not {:?}", p, default)),
+            _ => {}
+        }
+    }
+    // Every property read is declared (in the stylesheet or an inline
+    // style; code text may well say `var(`).
+    let inline: Vec<&str> = body
+        .split('<')
+        .skip(1)
+        .filter_map(|t| attr(&t[..t.find('>').unwrap_or(t.len())], "style"))
+        .collect();
+    for text in std::iter::once(style.as_str()).chain(inline) {
+        for used in text.split("var(").skip(1) {
+            let name = used.split(|c| c == ')' || c == ',').next().unwrap_or("");
+            if !default.iter().any(|d| d == name) {
+                out.push(format!("var({name}) is not in the palette"));
+            }
+        }
+    }
+
+    let allowed = |v: &str| {
+        let v = v.trim().trim_end_matches("!important").trim();
+        v.starts_with("var(--rv-") || ["none", "transparent", "inherit", "currentColor"].contains(&v)
+    };
+    // Stylesheet rules: drop the palette declarations, then every
+    // colour property must read the palette.
+    for decl in style.split(|c| c == ';' || c == '{' || c == '}') {
+        let Some((k, v)) = decl.split_once(':') else { continue };
+        let k = k.trim().rsplit('\n').next().unwrap_or("").trim();
+        if k.starts_with("--rv-") {
+            continue;
+        }
+        if ["fill", "stroke", "color", "background", "background-color", "stop-color", "flood-color"]
+            .contains(&k)
+            && !allowed(v)
+        {
+            out.push(format!("stylesheet: {k}:{v}"));
+        }
+    }
+    // Elements: colour attributes and inline styles.
+    for tag in body.split('<').skip(1) {
+        let tag = &tag[..tag.find('>').unwrap_or(tag.len())];
+        for k in ["fill", "stroke", "color", "stop-color", "flood-color"] {
+            if let Some(v) = attr(tag, k) {
+                if !allowed(v) {
+                    out.push(format!("<{}: {k}=\"{v}\"", tag.split(' ').next().unwrap_or("")));
+                }
+            }
+        }
+        if let Some(st) = attr(tag, "style") {
+            for d in st.split(';') {
+                let Some((k, v)) = d.split_once(':') else { continue };
+                let k = k.trim();
+                if ["fill", "stroke", "color", "background", "background-color"].contains(&k) && !allowed(v) {
+                    out.push(format!("<{}: style {k}:{v}", tag.split(' ').next().unwrap_or("")));
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Every y coordinate (`y`, `y1`, `y2`, `cy`, and the y half of each
 /// `points` pair) that lies outside `0..=height` of the panel's root
 /// `<svg height="..">`. Elements out there are never visible: a
@@ -19649,7 +19775,7 @@ fn arrows_crossing_dots(svg: &str) -> Vec<String> {
     let dots = dot_centres(svg);
     let mut out = Vec::new();
     for t in start_tags(svg, "polyline") {
-        if attr(t, "stroke") != Some("gray") {
+        if !is_arrow_shaft(t) {
             continue;
         }
         let pts: Vec<f64> = attr(t, "points")
@@ -19675,11 +19801,11 @@ fn arrows_crossing_dots(svg: &str) -> Vec<String> {
 fn arrow_tails(svg: &str) -> Vec<(f64, f64)> {
     let polylines = start_tags(svg, "polyline")
         .into_iter()
-        .filter(|t| attr(t, "stroke") == Some("gray"))
+        .filter(|t| is_arrow_shaft(t))
         .filter_map(|t| attr(t, "points"));
     let paths = start_tags(svg, "path")
         .into_iter()
-        .filter(|t| attr(t, "stroke") == Some("gray"))
+        .filter(|t| is_arrow_shaft(t))
         .filter_map(|t| attr(t, "d"))
         .map(|d| d.trim_start_matches('M'));
     polylines
@@ -19780,7 +19906,7 @@ fn arrows_hop_over_dots_they_cross() {
     let dots = dot_centres(&timeline);
     let hop_paths: Vec<&str> = start_tags(&timeline, "path")
         .into_iter()
-        .filter(|t| attr(t, "stroke") == Some("gray"))
+        .filter(|t| is_arrow_shaft(t))
         .filter_map(|t| attr(t, "d"))
         .filter(|d| d.contains(" A "))
         .collect();
@@ -20790,7 +20916,7 @@ fn assert_arm_starts_on_split_line(name: &str, var: &str, line: &str, bind_text:
     assert_eq!(arrows_crossing_dots(&timeline), Vec::<String>::new(), "{}", name);
     let hops: Vec<&str> = start_tags(&timeline, "path")
         .into_iter()
-        .filter(|t| attr(t, "stroke") == Some("gray") && attr(t, "d").is_some_and(|d| d.contains(" A ")))
+        .filter(|t| is_arrow_shaft(t) && attr(t, "d").is_some_and(|d| d.contains(" A ")))
         .collect();
     assert_eq!(hops, Vec::<&str>::new(), "{} {}: an arrow hops over a dot", name, var);
 }
@@ -21021,7 +21147,7 @@ fn two_bindings_on_one_let_chain_line_are_drawn_side_by_side() {
         assert_eq!(arrows_crossing_dots(&timeline), Vec::<String>::new(), "{}", name);
         let hops: Vec<&str> = start_tags(&timeline, "path")
             .into_iter()
-            .filter(|t| attr(t, "stroke") == Some("gray") && attr(t, "d").is_some_and(|d| d.contains(" A ")))
+            .filter(|t| is_arrow_shaft(t) && attr(t, "d").is_some_and(|d| d.contains(" A ")))
             .collect();
         assert_eq!(hops, Vec::<&str>::new(), "{}: an arrow hops over a dot", name);
         // No row added below the line: the body stays on the rows of its code.
@@ -21066,7 +21192,7 @@ fn copying_out_of_a_let_chain_scrutinee_doesnt_branch_it() {
         assert_eq!(arrows_crossing_dots(&timeline), Vec::<String>::new(), "{}", name);
         let hops: Vec<&str> = start_tags(&timeline, "path")
             .into_iter()
-            .filter(|t| attr(t, "stroke") == Some("gray") && attr(t, "d").is_some_and(|d| d.contains(" A ")))
+            .filter(|t| is_arrow_shaft(t) && attr(t, "d").is_some_and(|d| d.contains(" A ")))
             .collect();
         assert_eq!(hops, Vec::<&str>::new(), "{}: an arrow hops over a dot", name);
     }
@@ -21108,7 +21234,7 @@ fn a_let_chains_bindings_are_drawn_beside_their_sources_inline() {
         assert_eq!(arrows_crossing_dots(&timeline), Vec::<String>::new(), "{}", name);
         let hops: Vec<&str> = start_tags(&timeline, "path")
             .into_iter()
-            .filter(|t| attr(t, "stroke") == Some("gray") && attr(t, "d").is_some_and(|d| d.contains(" A ")))
+            .filter(|t| is_arrow_shaft(t) && attr(t, "d").is_some_and(|d| d.contains(" A ")))
             .collect();
         assert_eq!(hops, Vec::<&str>::new(), "{}: an arrow hops over a dot", name);
         assert_eq!(code_row_y(&code, next), row + 30.0, "{}: a row is added below the line", name);
@@ -21122,7 +21248,7 @@ fn unnumbered_code_rows(code: &str) -> usize {
     let mut n = 0;
     let mut rest = code;
     let open = r##"<text class="code" "##;
-    let gutter = r##"<tspan fill="#AAA">"##;
+    let gutter = r##"<tspan class="line-number">"##;
     while let Some(i) = rest.find(open) {
         rest = &rest[i + open.len()..];
         let Some(g) = rest.find(gutter) else { break };
@@ -23192,7 +23318,7 @@ fn ref_mut_out_of_temporary_tuple_ends_without_arrow() {
     let mut arrows = Vec::new();
     for (i, _) in timeline.match_indices("<g class=\"tooltip-trigger\" data-tooltip-text=\"") {
         let group = &timeline[i..i + timeline[i..].find("</g>").unwrap_or(timeline.len() - i)];
-        if group.contains("stroke=\"gray\"") {
+        if group.contains("class=\"arrow-shaft\"") {
             arrows.extend(timeline_tooltips(&group[..group.find('>').unwrap_or(group.len()) + 1]));
         }
     }
@@ -23259,7 +23385,7 @@ fn arrowhead_stops_before_a_call_icon_on_its_dot() {
 fn level_arrows(svg: &str) -> Vec<(f64, f64, f64)> {
     let mut out = Vec::new();
     for t in start_tags(svg, "polyline") {
-        if attr(t, "stroke") != Some("gray") {
+        if !is_arrow_shaft(t) {
             continue;
         }
         let pts: Vec<f64> = attr(t, "points")

@@ -26,12 +26,15 @@ use std::path::{Path, PathBuf};
 use std::fs;
 use rustviz_lib::Rustviz;
 
+/// Keeps the embedded panels on the book's theme (see the file).
+const THEME_JS: &str = include_str!("theme.js");
+
 /// `<script>…</script>` block carrying the tooltip + cross-panel
-/// highlighting glue. The JS itself lives in
+/// highlighting glue and the theme sync. The helpers JS lives in
 /// `rustviz-lib/src/helpers.js` and is shared with the `rustviz` CLI's
 /// `--html` mode — keep the SVG schema in sync with both consumers.
 fn helpers_script() -> String {
-    format!("<script>\n{}\n</script>", rustviz_lib::HELPERS_JS)
+    format!("<script>\n{}\n{}\n</script>", rustviz_lib::HELPERS_JS, THEME_JS)
 }
 
 pub struct RustvizPlugin {
@@ -336,6 +339,19 @@ mod tests {
 	#[test]
 	fn empty_url_disables_link() {
 		assert_eq!(playground_link("", "fn main() {}"), "");
+	}
+
+	#[test]
+	fn pages_carry_the_theme_sync() {
+		let s = helpers_script();
+		assert!(s.contains("function helpers("));
+		// every mdBook theme is passed on to the panels
+		for t in ["'light'", "'rust'", "'coal'", "'navy'", "'ayu'"] {
+			assert!(s.contains(t), "{}", t);
+		}
+		assert!(s.contains("setAttribute('data-rv-theme', theme)"));
+		assert!(!s.contains("</script>\n</script>"));
+		assert!(!THEME_JS.contains("</script"));
 	}
 
 	#[test]

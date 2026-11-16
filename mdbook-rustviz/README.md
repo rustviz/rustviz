@@ -62,6 +62,17 @@ playground-url = "https://rustviz.github.io/"   # default; "" disables the links
 
 The link has class `rv-playground-link`, so a book's `additional-css` can restyle it.
 
+### Themes
+
+Figures follow the book's theme. Each SVG carries a palette for each of
+mdBook's five themes (Light, Rust, Coal, Navy, Ayu), and a small script
+the preprocessor adds to every chapter sets the reader's current theme
+on each figure, again whenever they switch. A book opened from `file://`
+can't reach into its figures, so they stay light (navy if the system
+prefers dark). The colours are CSS custom properties (`--rv-*`), selected
+by `data-rv-theme` on the SVG's root; see
+`rustviz-plugin/src/svg_generator/svg_frontend/themes.rs`.
+
 ### Keeping boilerplate out of the diagram
 
 Two comment markers, written at the end of the line an item starts on, work

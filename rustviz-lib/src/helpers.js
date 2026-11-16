@@ -160,6 +160,7 @@ function displayTooltip(tooltip, classname) {
         // can go without leaving the viewport.
         let text = e.currentTarget.getAttributeNS(null, "data-tooltip-text");
         tooltip.innerHTML = text;
+        themeTooltip(tooltip, tl_svg);
         tooltip.style.display = "block";
 
         let pos = placeTooltip(tooltip, mousePos(e, tl_obj));
@@ -285,6 +286,21 @@ function displayTooltip(tooltip, classname) {
     }
 }
 
+
+// The tooltip lives in the host page, outside the panels' stylesheet, so
+// take its colours from the timeline panel's theme (the plugin's
+// themes.rs: --rv-tooltip-bg/-fg/-border). Panels from before themes
+// don't set them and keep the original translucent grey box.
+function themeTooltip(tooltip, svg) {
+    let view = svg.ownerDocument && svg.ownerDocument.defaultView;
+    if (!view) return;
+    let cs = view.getComputedStyle(svg);
+    let v = (name, fallback) => cs.getPropertyValue(name).trim() || fallback;
+    tooltip.style.background = v('--rv-tooltip-bg', 'rgb(70, 70, 70, 0.6)');
+    tooltip.style.color = v('--rv-tooltip-fg', 'white');
+    // an outline that takes no layout space (transparent in light)
+    tooltip.style.boxShadow = '0 0 0 1px ' + v('--rv-tooltip-border', 'transparent');
+}
 
 // Where the pointer is, in viewport coordinates. With <object> embedding
 // (mdbook-rustviz), evt.clientX/Y are local to the SVG document, so the

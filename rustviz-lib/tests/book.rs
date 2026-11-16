@@ -1651,7 +1651,7 @@ fn code_rows(code_svg: &str) -> Vec<(f64, String)> {
     for chunk in code_svg.split(OPEN).skip(1) {
         let Some(after_x) = chunk.find("\" y=\"").map(|i| &chunk[i + 5..]) else { continue };
         let Some((y, rest)) = leading_number(after_x) else { continue };
-        let Some(rest) = rest.strip_prefix("\"> <tspan fill=\"#AAA\">") else { continue };
+        let Some(rest) = rest.strip_prefix("\"> <tspan class=\"line-number\">") else { continue };
         let digits: String = rest.trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
         last = if digits.is_empty() {
             format!("{}+", last.trim_end_matches('+'))

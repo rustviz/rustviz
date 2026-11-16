@@ -484,7 +484,7 @@ fn prepare_registry(registry: &mut Handlebars) {
     // regular dot so existing UI behavior (highlighting on hash
     // hover, tooltip text) is unchanged.
     let drop_dot_template =
-        "        <g data-hash=\"{{hash}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\">\n            <circle cx=\"{{dot_x}}\" cy=\"{{dot_y}}\" r=\"5\"/>\n            <polygon points=\"{{p1x}},{{p1y}} {{p2x}},{{p2y}} {{p3x}},{{p3y}}\" style=\"fill: white; stroke: none; pointer-events: none;\"/>\n        </g>\n";
+        "        <g data-hash=\"{{hash}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\">\n            <circle cx=\"{{dot_x}}\" cy=\"{{dot_y}}\" r=\"5\"/>\n            <polygon points=\"{{p1x}},{{p1y}} {{p2x}},{{p2y}} {{p3x}},{{p3y}}\" style=\"fill: var(--rv-drop-notch); stroke: none; pointer-events: none;\"/>\n        </g>\n";
     let function_dot_template =    
         "        <use xlink:href=\"#functionDot\" data-hash=\"{{hash}}\" x=\"{{x}}\" y=\"{{y}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n";
     let function_logo_template =
@@ -502,7 +502,7 @@ fn prepare_registry(registry: &mut Handlebars) {
     // markers live in <defs> scope and don't receive hover events
     // from the polylines that reference them.
     let arrow_template =
-        "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\">\n            <polyline stroke-width=\"5px\" stroke=\"gray\" points=\"{{coordinates_hbs}}\" style=\"fill: none;\"/>\n            <polygon points=\"{{head_points}}\" fill=\"gray\"/>\n        </g>\n";
+        "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\">\n            <polyline class=\"arrow-shaft\" stroke-width=\"5px\" points=\"{{coordinates_hbs}}\" style=\"fill: none;\"/>\n            <polygon points=\"{{head_points}}\" class=\"arrow-head\"/>\n        </g>\n";
     let vertical_line_template =
         "        <line data-hash=\"{{hash}}\" class=\"{{line_class}} tooltip-trigger\" x1=\"{{x1}}\" x2=\"{{x2}}\" y1=\"{{y1}}\" y2=\"{{y2}}\" data-tooltip-text=\"{{title}}\" style=\"opacity: {{opacity}}; stroke-dasharray: {{dasharray}};\"/>\n";
     let hollow_line_template =
@@ -534,7 +534,7 @@ fn prepare_registry(registry: &mut Handlebars) {
     let hollow_ref_line_template =
         "        <path data-hash=\"{{hash}}\" class=\"staticref tooltip-trigger\" style=\"fill: transparent; pointer-events: all;\" stroke-width=\"2px\" stroke-dasharray=\"3\" d=\"M {{x1}} {{y1}} l {{dx}} {{dy}} v {{v}} l -{{dx}} {{dy}}\" data-tooltip-text=\"{{title}}\"/>\n";
     let box_template =
-        "        <rect id=\"{{name}}\" x=\"{{x}}\" y=\"{{y}}\" rx=\"20\" ry=\"20\" width=\"{{w}}\" height=\"{{h}}\" style=\"fill:white;stroke:black;stroke-width:3;opacity:0.1\" pointer-events=\"none\" />\n";
+        "        <rect id=\"{{name}}\" x=\"{{x}}\" y=\"{{y}}\" rx=\"20\" ry=\"20\" width=\"{{w}}\" height=\"{{h}}\" style=\"fill:var(--rv-struct-fill);stroke:var(--rv-struct-stroke);stroke-width:3;opacity:0.1\" pointer-events=\"none\" />\n";
 
     assert!(
         registry.register_template_string("new_hollow_line_template", new_hollow_line_template).is_ok()
@@ -3815,8 +3815,8 @@ fn render_hopping_arrow(
 
     Some(format!(
         "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\">\n\
-            \x20           <path stroke-width=\"5px\" stroke=\"gray\" d=\"{d}\" style=\"fill: none;\"/>\n\
-            \x20           <polygon points=\"{},{} {},{} {},{}\" fill=\"gray\"/>\n\
+            \x20           <path class=\"arrow-shaft\" stroke-width=\"5px\" d=\"{d}\" style=\"fill: none;\"/>\n\
+            \x20           <polygon points=\"{},{} {},{} {},{}\" class=\"arrow-head\"/>\n\
             \x20       </g>\n",
         v1.0, v1.1, v2.0, v2.1, v3.0, v3.1,
         title = title, d = d,
@@ -4209,8 +4209,8 @@ fn render_init_param_arrow(line_number: &usize, param: &ResourceAccessPoint, id:
         // is overkill for one site.
         let rendered = format!(
             "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\">\n\
-                \x20           <polyline stroke-width=\"5px\" stroke=\"gray\" points=\"{polyline_pts}\" style=\"fill: none;\"/>\n\
-                \x20           <polygon points=\"{},{} {},{} {},{}\" fill=\"gray\"/>\n\
+                \x20           <polyline class=\"arrow-shaft\" stroke-width=\"5px\" points=\"{polyline_pts}\" style=\"fill: none;\"/>\n\
+                \x20           <polygon points=\"{},{} {},{} {},{}\" class=\"arrow-head\"/>\n\
                 \x20       </g>\n",
             bot_v1.0, bot_v1.1, bot_v2.0, bot_v2.1, bot_v3.0, bot_v3.1,
             title = title,
@@ -4244,8 +4244,8 @@ fn render_function_result_arrow(line_number: &usize, external_event: &ExternalEv
         let title = hover_messages::arrow_fn_return_title(matches!(external_event, ExternalEvent::Copy { .. }), named_call, &styled_fn);
         let rendered = format!(
             "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\">\n\
-                \x20           <polyline stroke-width=\"5px\" stroke=\"gray\" points=\"{source_x} {y} {bend_x} {y} {bend_x} {head_end_y}\" style=\"fill: none;\"/>\n\
-                \x20           <polygon points=\"{},{} {},{} {},{}\" fill=\"gray\"/>\n\
+                \x20           <polyline class=\"arrow-shaft\" stroke-width=\"5px\" points=\"{source_x} {y} {bend_x} {y} {bend_x} {head_end_y}\" style=\"fill: none;\"/>\n\
+                \x20           <polygon points=\"{},{} {},{} {},{}\" class=\"arrow-head\"/>\n\
                 \x20       </g>\n",
             bend_x - 6.0, head_end_y, bend_x, head_end_y - tip, bend_x + 6.0, head_end_y,
         );
@@ -4338,8 +4338,8 @@ fn render_return_to_caller_arrow(line_number: &usize, external_event: &ExternalE
 
         let rendered = format!(
             "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\">\n\
-                \x20           <polyline stroke-width=\"5px\" stroke=\"gray\" points=\"{polyline_pts}\" style=\"fill: none;\"/>\n\
-                \x20           <polygon points=\"{},{} {},{} {},{}\" fill=\"gray\"/>\n\
+                \x20           <polyline class=\"arrow-shaft\" stroke-width=\"5px\" points=\"{polyline_pts}\" style=\"fill: none;\"/>\n\
+                \x20           <polygon points=\"{},{} {},{} {},{}\" class=\"arrow-head\"/>\n\
                 \x20       </g>\n",
             head_v1.0, head_v1.1, head_v2.0, head_v2.1, head_v3.0, head_v3.1,
             title = title,

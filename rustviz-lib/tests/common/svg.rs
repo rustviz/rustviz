@@ -30,3 +30,10 @@ pub fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     }
     None
 }
+
+/// Whether the start tag `tag` is a move/copy/call arrow's shaft (a
+/// `<polyline>`, or a hop arrow's `<path>`).
+#[allow(dead_code)]
+pub fn is_arrow_shaft(tag: &str) -> bool {
+    attr(tag, "class").is_some_and(|c| c.split(' ').any(|c| c == "arrow-shaft"))
+}

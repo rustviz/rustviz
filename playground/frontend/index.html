@@ -5,6 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>RustViz Playground</title>
     <link rel="icon" href="data:;base64,=" />
+    <script>
+      // Apply the saved colour theme before first paint (src/theme.ts has
+      // the same key, list and default; keep them in sync).
+      (function () {
+        var t = 'navy';
+        try {
+          var s = localStorage.getItem('rustviz.theme');
+          if (['light', 'rust', 'coal', 'navy', 'ayu'].indexOf(s) >= 0) t = s;
+        } catch (e) {}
+        document.documentElement.setAttribute('data-rv-theme', t);
+        document.documentElement.style.colorScheme = t === 'light' || t === 'rust' ? 'light' : 'dark';
+      })();
+    </script>
     <script src="ex-assets/helpers.js"></script>
   </head>
   <body>
