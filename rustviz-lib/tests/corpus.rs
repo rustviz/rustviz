@@ -24896,6 +24896,26 @@ fn helpers_js_has_no_google_analytics() {
     }
 }
 
+/// The playground serves its own copy of the telemetry client; it must be
+/// the one mdbook-rustviz embeds (`rustviz_lib::TELEMETRY_JS`). Neither
+/// helpers.js nor the CLI's HTML may load it: telemetry is off unless a
+/// page is configured with an endpoint.
+#[test]
+fn telemetry_client_copies_match_and_are_opt_in() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let pg = fs::read_to_string(root.join("playground/frontend/public/ex-assets/rv-telemetry.js")).unwrap();
+    assert!(
+        pg == rustviz_lib::TELEMETRY_JS,
+        "playground/frontend/public/ex-assets/rv-telemetry.js differs from rustviz-lib/src/rv-telemetry.js; copy it over"
+    );
+    // without an endpoint the script returns before defining anything
+    assert!(pg.contains("if (!userCfg || typeof userCfg.endpoint !== 'string' || !userCfg.endpoint) return;"));
+    assert!(!rustviz_lib::HELPERS_JS.contains("RV_TELEMETRY_CONFIG"));
+    for bad in ["gtag", "googletagmanager", "document.cookie"] {
+        assert!(!pg.contains(bad), "rv-telemetry.js mentions {}", bad);
+    }
+}
+
 /// A reference bound by an `if` only exists once the branches have joined,
 /// so its dotted "holds a reference" bracket must start below the branch
 /// diamond, not between its arms (#489). On main the bracket started at the

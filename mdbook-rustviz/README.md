@@ -84,6 +84,29 @@ prefers dark). The colours are CSS custom properties (`--rv-*`), selected
 by `data-rv-theme` on the SVG's root; see
 [`themes.rs`](https://github.com/rustviz/rustviz/blob/main/rustviz-plugin/src/svg_generator/svg_frontend/themes.rs).
 
+### Usage logging (off by default)
+
+The preprocessor adds no analytics or logging of any kind unless you ask for
+it. To log how readers use your figures to a collector you run (the RustViz
+collector is `playground/events/` in the repository):
+
+```toml
+[preprocessor.rustviz]
+telemetry-endpoint = "https://events.example.org"   # unset (default): off
+telemetry-consent = "opt-in"     # default; or "notice": a banner, recording starts without a click
+telemetry-privacy-url = "https://example.org/privacy/"   # linked from the banner
+telemetry-surface = "book:example.org"   # default book:<host name>
+telemetry-study-text = "…"   # optional: who runs the study, a contact; shown in the banner
+```
+
+With an endpoint set, every chapter loads `rv-telemetry.js`: a consent
+banner, a "Your data" button (shows the reader's random ID; turns logging
+off), and events such as figure views, tooltip hovers and pointer paths
+over a figure. Do Not Track and Global Privacy Control turn it off
+entirely. Figures get a `data-rv-figure-id`, and `src/examples/rv-figures.json`
+maps each figure id to its snippet, so the snippets themselves are never
+logged. Without `telemetry-endpoint` none of this is in the output.
+
 ### Keeping boilerplate out of the diagram
 
 Two comment markers, written at the end of the line an item starts on, work

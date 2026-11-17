@@ -17,6 +17,38 @@ pub struct Cfg {
 	#[serde(alias = "playground-url")]
 	#[serde(default = "Cfg::default_playground_url")]
 	pub playground_url: String,
+
+	/// Usage logging (off by default). With a collector origin here, every
+	/// chapter loads rv-telemetry.js, which posts to `<endpoint>/v1/events`
+	/// under the consent rules below. Empty (the default): no telemetry
+	/// script, no ids, nothing sent, and the book's output is unchanged.
+	#[serde(alias = "telemetry-endpoint")]
+	#[serde(default)]
+	pub telemetry_endpoint: String,
+
+	/// `"opt-in"` (default): nothing is recorded until the reader agrees.
+	/// `"notice"`: a banner says what is recorded and recording starts
+	/// without a click; the reader can turn it off.
+	#[serde(alias = "telemetry-consent")]
+	#[serde(default = "Cfg::default_telemetry_consent")]
+	pub telemetry_consent: String,
+
+	/// Privacy page linked from the banner and the "Your data" panel.
+	#[serde(alias = "telemetry-privacy-url")]
+	#[serde(default)]
+	pub telemetry_privacy_url: String,
+
+	/// The `surface` events carry: `"tutorial"` for the RustViz tutorial,
+	/// default `book:<host name>`.
+	#[serde(alias = "telemetry-surface")]
+	#[serde(default)]
+	pub telemetry_surface: String,
+
+	/// A sentence about the research study (who runs it, a contact) shown
+	/// in the banner and the "Your data" panel. Empty: none shown.
+	#[serde(alias = "telemetry-study-text")]
+	#[serde(default)]
+	pub telemetry_study_text: String,
 }
 
 
@@ -26,6 +58,8 @@ impl Cfg {
 	fn default_code_block() -> String { DEFAULT_CODE_BLOCK.into() }
 	#[inline]
 	fn default_playground_url() -> String { DEFAULT_PLAYGROUND_URL.into() }
+	#[inline]
+	fn default_telemetry_consent() -> String { "opt-in".into() }
 }
 
 impl Default for Cfg {

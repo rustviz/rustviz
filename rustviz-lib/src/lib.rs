@@ -134,6 +134,14 @@ const DEFAULT_RUNNER_IMAGE: &str = "rustviz/rustviz-runner:latest";
 /// to update if the SVG schema shifts.
 pub const HELPERS_JS: &str = include_str!("helpers.js");
 
+/// The usage-logging client, `rv-telemetry.js`, as a raw JS string. It does
+/// nothing unless the page sets `window.RV_TELEMETRY_CONFIG.endpoint`
+/// first, and nothing in this crate or the CLI includes it: only
+/// mdbook-rustviz, and only when a book sets `telemetry-endpoint`. The
+/// playground ships a byte-identical copy in
+/// `playground/frontend/public/ex-assets/` (a corpus test checks it).
+pub const TELEMETRY_JS: &str = include_str!("rv-telemetry.js");
+
 /// Hard wall-clock cap on a single visualization request, in seconds.
 /// Compilation of legitimate examples completes well under a second; this is
 /// a safety net against malicious input that wedges rustc.

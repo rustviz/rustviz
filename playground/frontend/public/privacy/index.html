@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RustViz usage logging and privacy</title>
+<!--
+  Static page, linked from the playground's notice banner and "Your data"
+  panel, and (via telemetry-privacy-url) from the tutorial. Usage logging
+  is off unless a build sets a telemetry endpoint; this page describes what
+  happens when it is on.
+
+  MAINTAINER: everything in a .todo box is a placeholder to replace (study
+  wording, contacts, retention, IRB). Keep the "What is recorded" list in
+  sync with rv-telemetry.js (whatList) and the event schema.
+-->
+<style>
+  :root { --bg: #ffffff; --fg: #1d1d1f; --muted: #555; --link: #0b57d0; --todo-bg: #fff6d6; --todo-border: #c9a227; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161923; --fg: #e6e6e6; --muted: #a8a8b3; --link: #79b8ff; --todo-bg: #3a3215; --todo-border: #c9a227; }
+  }
+  body { background: var(--bg); color: var(--fg); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0; }
+  main { max-width: 46rem; margin: 0 auto; padding: 2rem 1rem 4rem; }
+  h1 { font-size: 1.6rem; line-height: 1.3; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; }
+  a { color: var(--link); }
+  .muted { color: var(--muted); }
+  .todo { background: var(--todo-bg); border-left: 4px solid var(--todo-border); padding: .5rem .8rem; margin: 1rem 0; }
+  code { font-size: .9em; }
+  button { font: inherit; padding: .3rem .9rem; }
+</style>
+</head>
+<body>
+<main>
+<h1>RustViz usage logging and privacy</h1>
+<p class="muted">Applies to the RustViz playground and the RustViz tutorial when usage logging is turned on. Last updated: <span class="todo">[date]</span>.</p>
+
+<div class="todo">[Placeholder for the research-study paragraph: the study's name, who runs it (principal investigator), the purpose, the IRB determination and number if any, and a contact address. To be written by the maintainer / IRB.]</div>
+
+<h2>Why we record</h2>
+<p>RustViz is a research project at the University of Michigan. We record how people use the tutorial and the playground to learn how people come to understand Rust's ownership and borrowing, and to find out what RustViz explains badly or cannot draw.</p>
+
+<h2>What is recorded</h2>
+<ul>
+  <li>Which pages you open, how long they are in front of you (and in use), and how far you scroll.</li>
+  <li>Which RustViz diagrams you look at, which parts of a diagram you point at (for example the arrow showing that <code>s</code> is moved) and for how long, and the path of your pointer over a diagram, sampled ten times a second.</li>
+  <li>In the playground: which examples you pick, how much you edit, and each run's result, for example the rustc error codes (such as E0382) or that RustViz could not draw the program. The text of the programs you run in the playground, and of what you are editing (at most once every ten seconds), is recorded too: each distinct program once.</li>
+  <li>Your screen size (rounded to 100 pixels), your browser's language setting and your time zone offset, and the website you came from (its host name only).</li>
+  <li>Three random IDs: one for this page view, one for this visit (it changes after 30 minutes without activity), and one kept in your browser's local storage so that visits from the same browser can be linked. They are random numbers, not derived from anything about you.</li>
+</ul>
+
+<h2>What is not recorded</h2>
+<ul>
+  <li>No name, e-mail address or account. We never ask who you are.</li>
+  <li>No IP address: our event collector does not record it, and its request logs are excluded from storage. <span class="todo">[Maintainer: confirm once deployed. Google Cloud, which hosts the collector and the playground's compile service, processes your IP address to deliver requests; the compile service's own request logs are kept by Google Cloud Logging for <em>N</em> days. State that here, or exclude those logs too.]</span></li>
+  <li>No cookies and no third-party analytics or advertising scripts.</li>
+  <li>Nothing you type outside the playground's editor. The tutorial's own example programs are not sent: a diagram is identified by a fingerprint of its program.</li>
+</ul>
+
+<h2>Turning it off</h2>
+<ul>
+  <li>Use <strong>Your data</strong> (in the playground's info pane, or the button in the corner of a tutorial page) and choose <strong>Turn off</strong>. Recording stops, and the random ID is deleted from your browser. <strong>Turn off and delete my data</strong> also asks us to delete what was recorded with that ID.</li>
+  <li>If your browser sends <a href="https://globalprivacycontrol.org/">Global Privacy Control</a> or Do Not Track, nothing is recorded at all.</li>
+  <li>Clearing this site's data in your browser also removes the ID.</li>
+</ul>
+
+<h2>Your random ID</h2>
+<p id="your-id">Your browser has no RustViz ID stored.</p>
+<p>Quote it if you write to us about your data.</p>
+
+<h2>How the data is kept and used</h2>
+<div class="todo">[Placeholder: where the data is stored (Google BigQuery, project <code>rustviz-playground</code>), who can access it (named researchers), how long it is kept, how deletion requests are handled and how fast, and what is published (aggregate results and de-identified excerpts only). To be written by the maintainer / IRB.]</div>
+
+<h2>Contact</h2>
+<div class="todo">[Placeholder: contact name and e-mail address for questions and deletion requests.]</div>
+</main>
+<script>
+  // Show the ID rv-telemetry.js keeps (key rv.telemetry.anon_id), if any.
+  try {
+    var id = localStorage.getItem('rv.telemetry.anon_id');
+    if (id && /^[0-9a-f-]{36}$/.test(id)) {
+      var p = document.getElementById('your-id');
+      p.textContent = 'Your browser’s RustViz ID: ';
+      var c = document.createElement('code');
+      c.textContent = id;
+      p.appendChild(c);
+    }
+  } catch (e) { /* storage blocked: keep the default text */ }
+</script>
+</body>
+</html>

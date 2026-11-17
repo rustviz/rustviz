@@ -29,6 +29,7 @@ env_logger = "0.9"
 semver = "1.0"
 
 serde_json = "1.0"
+sha2 = "0.10"
 # Pin to whatever mdbook-markdown re-exports — pulldown-cmark is
 # explicitly part of mdbook's public API and any drift here means
 # we'd be parsing markdown with a different version than the rest
