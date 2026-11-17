@@ -747,6 +747,43 @@ async fn max_program_fits_in_a_batch() {
     assert_eq!(resp["rejected"][0]["reason"], "invalid:source");
 }
 
+/// A source over the program cap is never sent; the run/edit that names
+/// its hash says so with `program_omitted`.
+#[actix_rt::test]
+async fn program_omitted_flag() {
+    let env = Env::new();
+    let app = app!(env.config.clone());
+    let pid = sha("x".repeat(70 * 1024).as_str());
+    let run = ev(
+        "run",
+        0,
+        1,
+        json!({"run_id": uuid(1), "program_id": pid, "line_count": 1, "program_omitted": "too_large"}),
+    );
+    let edit = ev(
+        "edit",
+        1,
+        1,
+        json!({"chars_changed": 70_000, "program_id": pid, "program_omitted": "too_large"}),
+    );
+    let bad = ev(
+        "run",
+        2,
+        1,
+        json!({"run_id": uuid(2), "program_id": pid, "line_count": 1, "program_omitted": "truncated"}),
+    );
+    let resp: Value =
+        test::call_and_read_body_json(&app, post(&batch(vec![run, edit, bad])).to_request()).await;
+    assert_eq!(
+        resp,
+        json!({"accepted": 2, "rejected": [{"index": 2, "reason": "invalid:program_omitted"}]})
+    );
+    let out = env.events();
+    assert_eq!(out[0]["props"]["program_omitted"], "too_large");
+    assert_eq!(out[1]["props"]["program_omitted"], "too_large");
+    assert!(out.iter().all(|r| r.get("dropped_fields").is_none()));
+}
+
 #[actix_rt::test]
 async fn rate_limit() {
     let env = Env::new();

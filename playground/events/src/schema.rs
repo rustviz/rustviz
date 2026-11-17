@@ -252,6 +252,7 @@ fn props_spec(event: &str) -> Option<&'static [Field]> {
             opt("ms_since_last_run", Ty::Dur),
             req("chars_changed", Ty::Int(0, 1_000_000)),
             opt("program_id", Ty::ProgramId),
+            opt("program_omitted", Ty::Enum(&["too_large"])),
         ],
         "run" => spec![
             req("run_id", Ty::Uuid),
@@ -260,6 +261,7 @@ fn props_spec(event: &str) -> Option<&'static [Field]> {
             req("line_count", Ty::Int(0, 100_000)),
             opt("example", Ty::Str(64, Charset::Text)),
             opt("source_figure_id", Ty::FigureId),
+            opt("program_omitted", Ty::Enum(&["too_large"])),
         ],
         "run_result" => spec![
             req("run_id", Ty::Uuid),
