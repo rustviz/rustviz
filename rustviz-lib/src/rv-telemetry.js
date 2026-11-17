@@ -14,30 +14,35 @@
 // Config, read once from window.RV_TELEMETRY_CONFIG before this script runs:
 //   endpoint        collector origin, events go to `${endpoint}/v1/events`
 //   consent         'opt-in' (default: nothing is sent before the visitor
-//                   says yes) | 'notice' (a banner says what is recorded;
-//                   recording starts without a click; "Turn off" stops it)
+//                   says yes; a bar asks) | 'notice' (no banner: the page's
+//                   own text and its "Your data" link say what is recorded;
+//                   recording starts without a click; "Turn off" in the
+//                   "Your data" panel stops it)
 //   collectCode     false (default) | true: send the text of programs run in
 //                   the playground, once per distinct program (`program`)
 //   surface         'tutorial' | 'playground' | 'book:<host>' (default
 //                   'book:' + location.hostname)
 //   rvVersion       RustViz version that rendered the figures
-//   privacyUrl      link shown in the banner and the "Your data" panel
+//   privacyUrl      link shown in the opt-in bar and the "Your data" panel
 //   consentVersion  version string of the notice text (default below)
 //   study           false (default) | true: the opt-in asks for 18+ and
 //                   marks events tier 2 (research participant), which also
 //                   sends the `?cohort=` tag
-//   studyText       a sentence about the research study, shown in the banner
+//   studyText       a sentence about the research study, shown in the opt-in bar
 //                   and the panel (always shown with `study`; the default
 //                   is an obvious placeholder for the maintainer / IRB)
-//   panelLink       'inline' (default: a small "Your data" link at the end of
-//                   the page's <main>) | 'none' (the page links to the panel
+//   panelLink       'inline' (default; opt-in mode only: a small "Your data"
+//                   link at the end of the page's <main>. Notice mode adds
+//                   nothing: the page's own text links the panel with
+//                   data-rv-your-data or href="#rv-your-data") | 'none' (the page links to the panel
 //                   itself, e.g. the playground's info pane, via
 //                   rvTelemetry.openPanel())
-//   bannerSlot      CSS selector of an element to put the consent bar in
-//                   (default: the top of <main>, else of <body>). The bar is
-//                   in the page's flow, never on top of the content.
+//   bannerSlot      opt-in mode only: CSS selector of an element to put the
+//                   consent bar in (default: the top of <main>, else of
+//                   <body>). The bar is in the page's flow, never on top of
+//                   the content. Notice mode shows no bar at all.
 //
-// Do Not Track or Global Privacy Control turns everything off: no banner,
+// Do Not Track or Global Privacy Control turns everything off: no bar,
 // no ids, no events, whatever the config says.
 (function () {
     'use strict';
@@ -207,7 +212,8 @@
         if (blocked) return false;
         if (!choice) return cfg.consent === 'notice';
         if (choice.state !== 'on') return false;
-        // A notice-mode "on" isn't an opt-in: an opt-in site asks again.
+        // A notice-mode "on" (including the older 'notice_shown' /
+        // 'notice') isn't an opt-in: an opt-in site asks again.
         return cfg.consent === 'notice' || choice.how === 'opt_in';
     }
 
@@ -782,7 +788,7 @@
     }
 
     // ------------------------------------------------------------------
-    // Consent UI: banner and "Your data" panel
+    // Consent UI: opt-in bar and "Your data" panel
     // ------------------------------------------------------------------
 
     // Colours follow the host page's theme: the playground's and mdBook's
@@ -797,7 +803,7 @@
         '@media (prefers-color-scheme: dark){.rv-tlm{--rvt-bg:#1f2328;--rvt-fg:#e6e6e6;--rvt-border:#6e7681;--rvt-link:#79b8ff}}' +
         '.rv-tlm *{box-sizing:border-box}' +
         '.rv-tlm a,.rv-tlm-link{color:var(--link,var(--links,var(--rvt-link,#0b57d0)))}' +
-        // the notice: a slim bar in the page's flow (it takes its own space,
+        // the opt-in prompt: a slim bar in the page's flow (it takes its own space,
         // so it never covers a diagram)
         '.rv-tlm-bar{display:block;width:100%;padding:6px 12px;border-width:0 0 1px 0;font-size:13px;margin:0}' +
         '.rv-tlm-bar .rv-tlm-line{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px}' +
@@ -842,7 +848,7 @@
         (document.head || document.documentElement).appendChild(s);
     }
 
-    // What is recorded, in plain words. Used by the banner and the panel.
+    // What is recorded, in plain words. Used by the opt-in bar and the panel.
     function whatList() {
         var items = [
             'which pages you open, how long they are in front of you and how far you scroll;',
@@ -887,15 +893,10 @@
             return;
         }
         ensureCss();
-        var notice = cfg.consent === 'notice';
         var code = cfg.surface === 'playground' && cfg.collectCode ? ', the programs you run' : '';
-        var summary = notice
-            ? 'This site records how you use it, for research on learning Rust: pages you view, ' +
-              'which parts of diagrams you point at and your pointer’s path' + code +
-              ', with a random ID kept in this browser. No name, IP address or cookies.'
-            : 'May this site record how you use it, for research on learning Rust? Pages you view, ' +
-              'which parts of diagrams you point at and your pointer’s path' + code +
-              ', with a random ID kept in this browser. Nothing is recorded unless you say yes.';
+        var summary = 'May this site record how you use it, for research on learning Rust? Pages you view, ' +
+            'which parts of diagrams you point at and your pointer’s path' + code +
+            ', with a random ID kept in this browser. Nothing is recorded unless you say yes.';
         var details = el('div', { id: 'rv-tlm-details', hidden: 'hidden' }, [
             whatList(),
             showStudy ? el('p', { 'class': 'rv-tlm-study', text: cfg.studyText }) : null
@@ -909,18 +910,13 @@
         });
         var age = null;
         var actions = [more, privacyLink('Privacy')];
-        if (!notice && cfg.study) {
+        if (cfg.study) {
             age = el('input', { type: 'checkbox', id: 'rv-tlm-age' });
             actions.push(el('span', {}, [age, ' ', el('label', { 'for': 'rv-tlm-age', text: 'I am 18+ and agree to take part' })]));
         }
-        if (notice) {
-            actions.push(el('button', { type: 'button', text: 'OK', onclick: function () { dismissNotice(); } }),
-                         el('button', { type: 'button', text: 'Turn off', onclick: function () { withdraw(true); } }));
-        } else {
-            actions.push(el('button', { type: 'button', text: 'Yes, record', onclick: function () {
-                             optIn(age ? age.checked : false); } }),
-                         el('button', { type: 'button', text: 'No, thanks', onclick: function () { decline(); } }));
-        }
+        actions.push(el('button', { type: 'button', text: 'Yes, record', onclick: function () {
+                         optIn(age ? age.checked : false); } }),
+                     el('button', { type: 'button', text: 'No, thanks', onclick: function () { decline(); } }));
         var host = bannerHost();
         banner = el('section', { 'class': 'rv-tlm rv-tlm-bar' + (host.boxed ? ' rv-tlm-boxed' : ''),
                                  role: 'region', 'aria-label': 'Usage logging' }, [
@@ -937,7 +933,9 @@
     // panel stays reachable after the bar is gone (pages that link it
     // themselves set panelLink: 'none').
     function showFoot() {
-        if (cfg.panelLink !== 'inline' || foot || !document.body) return;
+        // Notice mode injects nothing: the page's own text is the notice
+        // and links to the panel with data-rv-your-data (see below).
+        if (cfg.consent === 'notice' || cfg.panelLink !== 'inline' || foot || !document.body) return;
         ensureCss();
         var main = document.querySelector('main') || document.body;
         foot = el('p', { 'class': 'rv-tlm-foot' }, [
@@ -1039,18 +1037,10 @@
         closeBanner();
         showFoot();
     }
-    function dismissNotice() {
-        choice = { state: 'on', how: 'notice', version: cfg.consentVersion };
-        saveChoice(choice);
-        closeBanner();
-        emit('consent', { consent_version: cfg.consentVersion, choice: 'notice_dismissed' });
-        showFoot();
-    }
     function turnOnNotice() {
         choice = { state: 'on', how: 'notice', version: cfg.consentVersion };
         saveChoice(choice);
         active = true;
-        emit('consent', { consent_version: cfg.consentVersion, choice: 'notice_dismissed' });
         start();
         flush(false);
     }
@@ -1107,25 +1097,32 @@
     if (window.__RV_TELEMETRY_TEST__) {
         window.rvTelemetry._test = {
             queue: queue, sha256: sha256, batches: batches, cfg: cfg, optIn: optIn, decline: decline,
-            dismissNotice: dismissNotice, withdraw: withdraw, pageHide: pageHide, flush: flush
+            turnOnNotice: turnOnNotice, withdraw: withdraw, pageHide: pageHide, flush: flush
         };
     }
 
-    if (blocked) return;   // GPC / DNT: no banner, no listeners, nothing sent
+    // Authors can link the panel from their own text: any element with
+    // `data-rv-your-data`, or an <a href="#rv-your-data">, opens it. This
+    // works even when a privacy signal blocks logging (the panel then says
+    // nothing is recorded).
+    document.addEventListener('click', function (e) {
+        var t = e.target && e.target.closest ? e.target.closest('[data-rv-your-data],a[href="#rv-your-data"]') : null;
+        if (!t) return;
+        e.preventDefault();
+        openPanel();
+    });
+
+    if (blocked) return;   // GPC / DNT: no bar, no listeners, nothing sent
 
     function boot() {
         var notice = cfg.consent === 'notice';
         if (active) {
-            if (notice && !choice) {
-                // First page load under the notice: say so before anything else.
-                saveChoice(choice = { state: 'on', how: 'notice_shown', version: cfg.consentVersion });
-                emit('consent', { consent_version: cfg.consentVersion, choice: 'notice_shown' });
-            }
             start();
         }
-        if (notice && choice && choice.how === 'notice_shown') showBanner();
-        else if (!notice && (!choice || (choice.how !== 'opt_in' && choice.how !== 'declined' &&
-                                         choice.how !== 'withdrawn'))) showBanner();
+        // Notice mode draws no bar: the page's own text and the "Your data"
+        // line say what is recorded. Only opt-in has to ask.
+        if (!notice && (!choice || (choice.how !== 'opt_in' && choice.how !== 'declined' &&
+                                    choice.how !== 'withdrawn'))) showBanner();
         showFoot();
     }
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

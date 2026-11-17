@@ -41,6 +41,7 @@ import {
   setSourceCode,
   submitHeaders,
   TELEMETRY_ENABLED,
+  TELEMETRY_OPT_IN,
   uiEvent,
 } from './telemetry';
 
@@ -506,6 +507,14 @@ const Description: React.FC = () => (
             Your data
           </button>{' '}
           shows your random ID and lets you turn recording off.
+        </p>
+        {/* MAINTAINER placeholder: replace with the study's wording (name,
+            PI, contact) once the IRB has decided; keep it in sync with
+            public/privacy/index.html. */}
+        <p className="privacy-footer">
+          [Placeholder for the research-study sentence: study name, who runs
+          it (PI) and a contact address. To be written by the maintainer /
+          IRB.]
         </p>
       </>
     )}
@@ -1010,9 +1019,11 @@ const App: React.FC = () => {
   return (
     <div className="app-shell">
       <TitleBar theme={theme} onThemeChange={handleThemeChange} />
-      {/* The usage-logging notice bar goes here (telemetry builds only), in
-          the layout's flow so it shrinks the panels instead of covering them. */}
-      {TELEMETRY_ENABLED && <div id="rv-telemetry-slot" />}
+      {/* Opt-in builds only: the consent prompt goes here, in the layout's
+          flow so it shrinks the panels instead of covering them. The default
+          (notice) build draws nothing here; the info panel's Privacy
+          paragraph is its notice. */}
+      {TELEMETRY_ENABLED && TELEMETRY_OPT_IN && <div id="rv-telemetry-slot" />}
       <PanelGroup direction="vertical" className="main-split" autoSaveId="rustviz-vertical">
         {/* Top row: prose on the left, code editor on the right.
             minSize=0 with no `collapsible` means the handle drags

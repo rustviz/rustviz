@@ -52,7 +52,12 @@ class FakeEl {
   focus() {}
   closest(sel: string): FakeEl | null {
     let e: FakeEl | null = this;
-    while (e) { if (sel === '.vis_block' && e.classList.contains('vis_block')) return e; e = e.parentElement; }
+    while (e) {
+      if (sel === '.vis_block' && e.classList.contains('vis_block')) return e;
+      if (sel.includes('data-rv-your-data') &&
+          (e.hasAttribute('data-rv-your-data') || e.attrs.href === '#rv-your-data')) return e;
+      e = e.parentElement;
+    }
     return null;
   }
   querySelector(sel: string): FakeEl | null {
@@ -74,6 +79,7 @@ type Env = {
   local: Map<string, string>;
   body: FakeEl;
   figures: FakeEl[];
+  docListeners: Record<string, Listener[]>;
 };
 
 function storage(m: Map<string, string>) {
@@ -94,6 +100,7 @@ function boot(config: Record<string, unknown> | undefined, opts: {
   const body = new FakeEl('body');
   const head = new FakeEl('head');
   const figures = opts.figures ?? [];
+  const docListeners: Record<string, Listener[]> = {};
   const document = {
     readyState: 'complete',
     visibilityState: 'visible',
@@ -106,7 +113,7 @@ function boot(config: Record<string, unknown> | undefined, opts: {
     getElementById: () => null,
     querySelector: (sel: string) => (opts.slots ?? {})[sel] ?? null,
     querySelectorAll: (sel: string) => (sel === '.tl_panel' ? figures : []),
-    addEventListener: () => {},
+    addEventListener: (t: string, fn: Listener) => { (docListeners[t] ||= []).push(fn); },
   };
   const win: Record<string, any> = {
     RV_TELEMETRY_CONFIG: config,
@@ -133,7 +140,7 @@ function boot(config: Record<string, unknown> | undefined, opts: {
   win.window = win;
   vm.createContext(win);
   vm.runInContext(SRC, win);
-  return { win, beacons, fetches, local, body, figures };
+  return { win, beacons, fetches, local, body, figures, docListeners };
 }
 
 const t = (env: Env) => env.win.rvTelemetry;
@@ -218,7 +225,7 @@ for (const cfg of [undefined, {}, { endpoint: '' }, { endpoint: 42 }]) {
 //     layout row), never over the content; panelLink 'none' adds no link
 {
   const slot = new FakeEl('div');
-  const env = boot({ ...CFG, consent: 'notice', bannerSlot: '#slot', panelLink: 'none' }, { slots: { '#slot': slot } });
+  const env = boot({ ...CFG, consent: 'opt-in', bannerSlot: '#slot', panelLink: 'none' }, { slots: { '#slot': slot } });
   assert.equal(slot.children.length, 1);
   assert.match(slot.children[0].attrs.class, /rv-tlm-bar/);
   assert.doesNotMatch(slot.children[0].attrs.class, /boxed/);
@@ -226,7 +233,7 @@ for (const cfg of [undefined, {}, { endpoint: '' }, { endpoint: 42 }]) {
   // in mdBook it is the first thing in <main>
   const main = new FakeEl('main');
   main.appendChild(new FakeEl('h1'));
-  const book = boot({ ...CFG, consent: 'notice' }, { slots: { main } });
+  const book = boot({ ...CFG, consent: 'opt-in' }, { slots: { main } });
   assert.match(main.children[0].attrs.class, /rv-tlm-bar rv-tlm-boxed/);
   assert.match(main.children[main.children.length - 1].text(), /Your data/);
 }
@@ -242,22 +249,73 @@ for (const cfg of [undefined, {}, { endpoint: '' }, { endpoint: 42 }]) {
   assert.ok(!again.body.children.some(c => /May this site/.test(c.text())), 'no banner after declining');
 }
 
-// --- notice mode: events flow, the first one says the notice was shown
+// --- notice mode: no banner anywhere; events flow without a click
 {
   const env = boot({ ...CFG, consent: 'notice' });
   assert.equal(t(env).isActive(), true);
-  assert.deepEqual(names(env), ['consent', 'page_view']);
-  assert.equal(q(env)[0].props.choice, 'notice_shown');
+  assert.deepEqual(names(env), ['page_view']);
   assert.equal(q(env)[0].consent_mode, 'notice');
   q(env).forEach(checkEnvelope);
-  assert.match(env.body.children[0].text(), /This site records how you use it/);
-  t(env)._test.dismissNotice();
-  assert.equal(q(env)[2].props.choice, 'notice_dismissed');
+  assert.equal(env.body.children.length, 0, 'notice mode renders no banner');
+  assert.equal(env.local.get('rv.telemetry.choice'), undefined, 'nothing stored just for viewing');
   const again = boot({ ...CFG, consent: 'notice' }, { local: env.local });
-  assert.deepEqual(names(again), ['page_view'], 'notice_shown is sent once');
-  // a site that switches to opt-in asks again
+  assert.deepEqual(names(again), ['page_view']);
+  // a visitor whose browser stored the older 'notice_shown' choice is on
+  const old = boot({ ...CFG, consent: 'notice' }, { local: new Map([
+    ['rv.telemetry.choice', JSON.stringify({ state: 'on', how: 'notice_shown', version: '2026-11' })]]) });
+  assert.equal(t(old).isActive(), true);
+  assert.equal(old.body.children.length, 0);
+  assert.ok(!names(old).includes('consent'));
+  // a site that switches to opt-in asks again (and shows its prompt)
   const optin = boot(CFG, { local: env.local });
   assert.equal(t(optin).isActive(), false);
+  assert.match(optin.body.children[0].text(), /May this site record/);
+}
+
+// --- opt-in mode: its prompt is shown and nothing is sent before a yes
+{
+  const env = boot({ ...CFG, consent: 'opt-in' });
+  assert.match(env.body.children[0].text(), /May this site record/);
+  assert.equal(env.fetches.length + env.beacons.length, 0);
+  assert.deepEqual(names(env), []);
+}
+
+// --- the book's own text can open the Your-data panel (no injected UI)
+{
+  const env = boot({ ...CFG, consent: 'notice' });
+  const link = new FakeEl('a');
+  link.setAttribute('href', '#rv-your-data');
+  let prevented = false;
+  env.docListeners.click.forEach(fn => fn({ target: link, preventDefault: () => { prevented = true; } }));
+  assert.ok(prevented);
+  assert.match(env.body.children[0].text(), /Recording is on/);
+  const btn = new FakeEl('button');
+  btn.setAttribute('data-rv-your-data', '');
+  env.body.children[0].remove();
+  env.docListeners.click.forEach(fn => fn({ target: btn, preventDefault: () => {} }));
+  assert.match(env.body.children[0].text(), /Recording is on/);
+}
+
+// --- turning off in Your data stops events; turning back on works
+{
+  const env = boot({ ...CFG, consent: 'notice' });
+  t(env)._test.withdraw(false);
+  assert.equal(t(env).isActive(), false);
+  t(env).openPanel();
+  const panel = env.body.children[0];
+  assert.match(panel.text(), /Recording is off/);
+  const findBtn = (e: FakeEl, label: string): FakeEl | null =>
+    (e.tagName === 'BUTTON' && e.textContent === label) ? e :
+      e.children.reduce<FakeEl | null>((r, c) => r || findBtn(c, label), null);
+  findBtn(panel, 'Turn on')!.listeners.click[0]({});
+  assert.equal(t(env).isActive(), true);
+  const sent = [...env.beacons, ...env.fetches].flatMap(x => JSON.parse(x).events as any[]);
+  const after = sent.slice(sent.findIndex(e => e.event === 'withdraw') + 1);
+  assert.ok(after.some(e => e.event === 'page_view'), 'events flow again');
+  assert.ok(!sent.some(e => e.event === 'consent'));
+  after.forEach(checkEnvelope);
+  assert.match(env.local.get('rv.telemetry.anon_id')!, UUID);
+  assert.equal(env.body.children.length, 0, 'panel closed, still no banner');
 }
 
 // --- withdraw: one last event with the ids, then nothing and no ids
@@ -315,8 +373,10 @@ for (const sig of [{ dnt: true }, { gpc: true }]) {
   const id = t(off).program('fn main() {}');
   assert.equal(id, createHash('sha256').update('fn main() {}').digest('hex'));
   assert.ok(!names(off).includes('program'));
+  t(off).openPanel();
   assert.doesNotMatch(off.body.children[0].text(), /including the text/);
   const on = boot({ ...CFG, consent: 'notice', surface: 'playground', collectCode: true });
+  t(on).openPanel();
   assert.match(on.body.children[0].text(), /including the text of the programs you run/);
   t(on).program('fn main() {}', { source_figure_id: 'fd7e25f9ee13a174' });
   t(on).program('fn main() {}');

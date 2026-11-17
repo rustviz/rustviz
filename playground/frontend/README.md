@@ -32,7 +32,8 @@ and CSS) and the `README.md` of the deployed
 **Usage logging is off** in every build unless `VITE_RV_TELEMETRY_ENDPOINT`
 is set (see `src/telemetry.ts` for it and the other `VITE_RV_TELEMETRY_*`
 knobs). Then the page loads `ex-assets/rv-telemetry.js` (a copy of
-`rustviz-lib/src/rv-telemetry.js`; keep them identical), shows a notice
-banner and links `/privacy/` (`public/privacy/index.html`) and a "Your data"
+`rustviz-lib/src/rv-telemetry.js`; keep them identical), shows no
+banner (the info pane's Privacy paragraph is the notice; only an
+opt-in build shows a prompt) and links `/privacy/` (`public/privacy/index.html`) and a "Your data"
 panel from the Privacy section of the info pane. Without it, none of that is
 loaded or linked.

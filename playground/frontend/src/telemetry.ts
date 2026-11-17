@@ -38,6 +38,12 @@ declare global {
 const env: Record<string, string | undefined> = import.meta.env ?? {};
 const ENDPOINT: string = env.VITE_RV_TELEMETRY_ENDPOINT ?? '';
 
+/** True when this build asks before recording (VITE_RV_TELEMETRY_CONSENT=
+ *  opt-in). The default, notice mode, draws no banner at all: the Privacy
+ *  paragraph in the info panel is the notice. Only opt-in needs a prompt,
+ *  so only then does the page reserve a slot for it. */
+export const TELEMETRY_OPT_IN = env.VITE_RV_TELEMETRY_CONSENT === 'opt-in';
+
 /** True when this build was configured with a telemetry endpoint. */
 export const TELEMETRY_ENABLED = ENDPOINT !== '';
 
@@ -52,17 +58,13 @@ export function loadTelemetry(): Promise<void> {
   if (!TELEMETRY_ENABLED || window.RV_TELEMETRY_CONFIG) return Promise.resolve();
   window.RV_TELEMETRY_CONFIG = {
     endpoint: ENDPOINT,
-    consent: env.VITE_RV_TELEMETRY_CONSENT === 'opt-in' ? 'opt-in' : 'notice',
+    consent: TELEMETRY_OPT_IN ? 'opt-in' : 'notice',
     collectCode: env.VITE_RV_TELEMETRY_COLLECT_CODE !== 'false',
     surface: 'playground',
     rvVersion: __PLUGIN_VERSION__,
     privacyUrl: env.VITE_RV_TELEMETRY_PRIVACY_URL ?? '/privacy/',
     panelLink: 'none',
-    bannerSlot: '#rv-telemetry-slot',
-    // MAINTAINER: replace with the study's wording (name, PI, contact) once
-    // the IRB has decided; keep it in sync with public/privacy/index.html.
-    studyText: '[Placeholder for the research-study sentence: study name, who runs it (PI) ' +
-      'and a contact address. To be written by the maintainer / IRB.]',
+    ...(TELEMETRY_OPT_IN ? { bannerSlot: '#rv-telemetry-slot' } : {}),
   };
   return new Promise(resolve => {
     const s = document.createElement('script');
