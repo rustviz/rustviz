@@ -129,7 +129,8 @@ async fn schema_md_samples_are_accepted() {
     let mut cfg = env.config.clone();
     cfg.policy.accept_programs = true;
     let app = app!(cfg);
-    let md = include_str!("../SCHEMA.md");
+    // A Windows checkout may have CRLF line endings.
+    let md = include_str!("../SCHEMA.md").replace("\r\n", "\n");
     let samples: Vec<&str> = md
         .split("```json\n")
         .skip(1)
