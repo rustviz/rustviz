@@ -90,7 +90,7 @@ browser (rv-telemetry.js) ── POST /v1/events {"events":[…]} ──▶ rust
   chars) is set; the page asks for the token once and keeps it in the
   browser's localStorage.
 
-What this service does *not* decide: the consent model and banner, Do Not
+What this service does *not* decide: the consent model, Do Not
 Track / GPC, and which ids exist are the client's job (`rv-telemetry.js`);
 see `SCHEMA.md` "Consent rules". Google's front end necessarily sees client
 addresses; the privacy page should say so.

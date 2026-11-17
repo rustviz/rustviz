@@ -289,10 +289,7 @@ fn props_spec(event: &str) -> Option<&'static [Field]> {
         ],
         "consent" => spec![
             req("consent_version", Ty::Str(32, Charset::Version)),
-            req(
-                "choice",
-                Ty::Enum(&["opt_in", "notice_shown", "notice_dismissed"])
-            ),
+            req("choice", Ty::Enum(&["opt_in"])),
             opt("age_18_plus", Ty::Bool),
         ],
         "withdraw" => spec![

@@ -308,6 +308,16 @@ async fn invalid_fields_reject_the_event() {
             "invalid:consent_mode",
         ),
         (
+            // The client no longer sends banner choices (notice mode has no UI).
+            ev(
+                "consent",
+                0,
+                1,
+                json!({"consent_version": "2026-11", "choice": "notice_shown"}),
+            ),
+            "invalid:choice",
+        ),
+        (
             {
                 let mut e = ev("page_view", 0, 1, json!({}));
                 e["surface"] = json!("book:Evil Host");

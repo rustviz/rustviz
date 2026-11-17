@@ -74,7 +74,7 @@ Origin: https://rustviz.github.io      (must be on the collector's allow-list)
 | `page_load_id` | string | yes | UUID, fresh per page load (not stored) |
 | `session_id` | string | yes | UUID; rotates after 30 min idle (localStorage) |
 | `anon_id` | string | yes | UUID, persistent pseudonymous id (localStorage); cleared on `withdraw` |
-| `consent_mode` | string | yes | how this visitor was asked: `notice` (banner, events flow without a click; the public tutorial and playground) or `opt_in` (nothing sent before an explicit opt-in; the client's default when no mode is configured) |
+| `consent_mode` | string | yes | how this visitor was asked: `notice` (no client UI: the host page's own text is the notice, and events flow from first load; the public tutorial and playground) or `opt_in` (nothing sent before an explicit opt-in; the client's default when no mode is configured) |
 | `tier` | integer | yes | `1` (standard: everything below except the tier-2-only fields) or `2` (research participant who explicitly joined a study: allows `cohort`, `survey`, and code text when the server flag is on) |
 | `rv_version` | string | yes | RustViz version that rendered the page, ≤ 32 of `[0-9A-Za-z.+-]` |
 | `client_version` | string | yes | rv-telemetry.js version, same charset, ≤ 32 |
@@ -142,7 +142,7 @@ Common property types:
 | `edit` | `ms_since_last_run?`, `chars_changed` (0-1000000), `program_id?`, `program_omitted?`: `too_large` | an edit snapshot: at most one per 10 s; when `collectCode` is on, a `program` record for the snapshot precedes it (same dedupe) |
 | `run` | `run_id` (UUID), `program_id`, `figure_id?` (of the figure this run renders), `line_count` (0-100000), `example?` (≤ 64 chars, dropdown id it started from), `source_figure_id?`, `program_omitted?`: `too_large` | `program_id` is sent even when `collectCode` is off (the hash alone, no text). `program_omitted: "too_large"` (on `run` or `edit`) marks a `program_id` whose source exceeds the 64 KiB `source` cap, so no `program` record was sent (truncating would break the hash) |
 | `run_result` | `run_id`, `program_id?`, `figure_id?`, `outcome`: `ok`\|`compile_error`\|`refused`\|`crash`\|`timeout`\|`rate_limited`\|`network_error`\|`server_error`, `error_codes?` (≤ 32 strings matching `^E[0-9]{4}$`), `error_kind?` (value of `X-RustViz-Error-Kind`, ≤ 64 of `[a-z0-9-]`), `crash_at?` (≤ 64 of `[A-Za-z0-9_.:-]`, plugin source location such as `expr_visitor.rs:862`, only with `outcome: "crash"`), `latency_ms`, `cached?` bool, `http_status?` (100-599) | client-side view; the compile service may later write an authoritative server-side copy joined by `page_load_id` |
-| `consent` | `consent_version` (≤ 32 of `[0-9A-Za-z.-]`), `choice`: `opt_in` (explicit opt-in, `opt_in` mode or joining a study) \| `notice_shown` (banner first displayed in `notice` mode) \| `notice_dismissed`, `age_18_plus?` bool | see consent rules below |
+| `consent` | `consent_version` (≤ 32 of `[0-9A-Za-z.-]`), `choice`: `opt_in` (explicit opt-in, `opt_in` mode or joining a study), `age_18_plus?` bool | see consent rules below |
 | `withdraw` | `consent_version`, `delete_requested` bool | the visitor turned logging off. Last event this browser sends until it turns logging back on; analysis deletes all rows with this `anon_id` when `delete_requested`. The dashboard's "turned logging off" share = distinct `anon_id` with a `withdraw` / distinct `anon_id` |
 | `survey` | `survey_version` (≤ 32), `answers`: object of ≤ 20 entries, keys 1-32 of `[a-z0-9_]`, values strings ≤ 200 | tier 2 only (tier 1 → rejected `tier`) |
 
@@ -154,11 +154,12 @@ playground figure use that run's `figure_id` and may add `program_id?`.
 - `consent_mode` is a client config value. The client's default when nothing
   is configured is `opt_in` (safest): **no event at all** before the visitor
   opts in, then `consent` (`choice: "opt_in"`) followed by `page_view`.
-- The public tutorial and playground configure `notice`: a dismissible banner
-  says what is collected and links to the privacy page; events flow without a
-  click. The first event of a visitor's first page load is `consent`
-  (`choice: "notice_shown"`); dismissing the banner may send
-  `notice_dismissed`. "Turn off" in the Your-data panel sends `withdraw`.
+- The public tutorial and playground configure `notice`: the client shows no
+  UI. The host page's own text is the notice (the playground info panel's
+  Privacy section; a paragraph at the bottom of the tutorial's front page).
+  Events flow from first load unless GPC/DNT is set or the visitor turned
+  logging off in the Your-data panel, which sends `withdraw`. No `consent`
+  event is sent in `notice` mode.
 - There is no decline event: declining in `opt_in` mode sends nothing.
 - `withdraw` stops all logging on this device and clears `anon_id` and
   `session_id`.
