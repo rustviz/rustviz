@@ -98,6 +98,14 @@ fn error_response(kind: ErrorKind, msg: String) -> HttpResponse {
         .body(msg)
 }
 
+/// Access-log line for each request: request line, status, response size
+/// and time taken. Deliberately *not* actix's default format, which also
+/// prints the client IP (`%a`), the Referer and the User-Agent: the service
+/// never writes a visitor's IP or browser string anywhere (see SECURITY.md,
+/// "No IP addresses in logs"). The rate limiter still keys on the IP in
+/// memory only.
+const ACCESS_LOG_FORMAT: &str = "\"%r\" %s %b %Dms";
+
 /// Request header in which the playground frontend sends its telemetry
 /// page-load id (a random UUID, only while the visitor's usage logging is
 /// on), so a `run_result` line below can be joined with the client's events.
@@ -308,7 +316,7 @@ async fn main() -> std::io::Result<()> {
             .max_age(3600);
 
         App::new()
-            .wrap(Logger::default())
+            .wrap(Logger::new(ACCESS_LOG_FORMAT))
             .wrap(cors)
             .app_data(web::JsonConfig::default().limit(MAX_BODY_BYTES))
             .service(
@@ -386,6 +394,16 @@ mod tests {
         assert_eq!(v["rv"]["outcome"], "timeout");
         let v = line(Err((ErrorKind::SandboxUnavailable, "x")), None);
         assert_eq!(v["rv"]["outcome"], "server_error");
+    }
+
+    /// The access log must never carry the client's address or browser:
+    /// none of actix's IP / header placeholders may appear in the format.
+    #[test]
+    fn access_log_has_no_ip_or_user_agent() {
+        for bad in ["%a", "%{r}a", "%{User-Agent}i", "%{X-Forwarded-For}i", "%{Referer}i", "%{Forwarded}i"] {
+            assert!(!ACCESS_LOG_FORMAT.contains(bad), "{}", bad);
+        }
+        assert!(!ACCESS_LOG_FORMAT.contains("}i"), "no request headers at all");
     }
 
     #[test]

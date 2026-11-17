@@ -29,9 +29,13 @@
 //   studyText       a sentence about the research study, shown in the banner
 //                   and the panel (always shown with `study`; the default
 //                   is an obvious placeholder for the maintainer / IRB)
-//   panelLink       'floating' (default: a small "Your data" button in the
-//                   corner) | 'none' (the page links to the panel itself,
-//                   e.g. the playground's footer, via rvTelemetry.openPanel())
+//   panelLink       'inline' (default: a small "Your data" link at the end of
+//                   the page's <main>) | 'none' (the page links to the panel
+//                   itself, e.g. the playground's info pane, via
+//                   rvTelemetry.openPanel())
+//   bannerSlot      CSS selector of an element to put the consent bar in
+//                   (default: the top of <main>, else of <body>). The bar is
+//                   in the page's flow, never on top of the content.
 //
 // Do Not Track or Global Privacy Control turns everything off: no banner,
 // no ids, no events, whatever the config says.
@@ -51,9 +55,15 @@
     var MAX_TAPS = 100;
     var MAX_QUEUE = 1000;                // events waiting to be sent
     var MAX_BATCH_EVENTS = 100;
-    var MAX_BATCH_BYTES = 60000;         // collector limit is 64 KiB
-    var MAX_EVENT_BYTES = 24000;         // collector limit is 24 KiB ...
-    var MAX_PROGRAM_BYTES = 80000;       // ... and 80 KiB for a `program`
+    // Sizes are UTF-8 bytes. The collector accepts request bodies up to
+    // 192 KiB, but a beacon / keepalive request is capped by the browser at
+    // 64 KiB in flight, so ordinary batches stay under 60 000 bytes and a
+    // `program` record always travels alone in a plain fetch.
+    var MAX_BATCH_BYTES = 60000;
+    var MAX_EVENT_BYTES = 24 * 1024;     // collector: larger events are rejected ...
+    var MAX_PROGRAM_BYTES = 80 * 1024;   // ... except a `program`, up to 80 KiB
+    var MAX_SOURCE_BYTES = 64 * 1024;    // collector's cap on `program.source`
+    var MAX_BODY_BYTES = 192 * 1024;     // collector's cap on a request body
     var KEY = 'rv.telemetry.';           // localStorage / sessionStorage prefix
 
     var cfg = {
@@ -68,7 +78,8 @@
         studyText: typeof userCfg.studyText === 'string' ? userCfg.studyText
             : '[Placeholder for the research-study sentence: study name, who runs it ' +
               '(PI) and a contact address. To be written by the maintainer / IRB.]',
-        panelLink: userCfg.panelLink === 'none' ? 'none' : 'floating',
+        panelLink: userCfg.panelLink === 'none' ? 'none' : 'inline',
+        bannerSlot: typeof userCfg.bannerSlot === 'string' ? userCfg.bannerSlot : '',
     };
     var showStudy = cfg.study || typeof userCfg.studyText === 'string';
 
@@ -289,23 +300,36 @@
         return ev;
     }
 
+    function utf8Bytes(s) { return new TextEncoder().encode(s).length; }
+
+    // Request bodies for `events`: {body, program}. Each `program` record
+    // is a body of its own; the rest are packed into bodies of at most 100
+    // events and MAX_BATCH_BYTES. An event the collector would reject for
+    // its size is dropped here.
     function batches(events) {
         var out = [], cur = [], size = 12;
+        function wrap(list) { return '{"events":[' + list.join(',') + ']}'; }
         for (var i = 0; i < events.length; i++) {
             var s = JSON.stringify(events[i]);
-            if (s.length > (events[i].event === 'program' ? MAX_PROGRAM_BYTES : MAX_EVENT_BYTES)) {
-                continue;  // the collector would reject it
+            var n = utf8Bytes(s);
+            if (events[i].event === 'program') {
+                if (n <= MAX_PROGRAM_BYTES && n + 12 <= MAX_BODY_BYTES) out.push({ body: wrap([s]), program: true });
+                continue;
             }
-            if (cur.length && (cur.length >= MAX_BATCH_EVENTS || size + s.length + 1 > MAX_BATCH_BYTES)) {
-                out.push(cur); cur = []; size = 12;
+            if (n > MAX_EVENT_BYTES) continue;
+            if (cur.length && (cur.length >= MAX_BATCH_EVENTS || size + n + 1 > MAX_BATCH_BYTES)) {
+                out.push({ body: wrap(cur), program: false }); cur = []; size = 12;
             }
-            cur.push(s); size += s.length + 1;
+            cur.push(s); size += n + 1;
         }
-        if (cur.length) out.push(cur);
-        return out.map(function (b) { return '{"events":[' + b.join(',') + ']}'; });
+        if (cur.length) out.push({ body: wrap(cur), program: false });
+        return out;
     }
 
-    function send(body, useBeacon, isRetry) {
+    // `useBeacon` only for bodies under the 64 KiB beacon/keepalive cap
+    // (every ordinary batch); a program record goes in a plain fetch.
+    function send(batch, useBeacon, isRetry) {
+        var body = batch.body;
         var url = cfg.endpoint + '/v1/events';
         if (useBeacon && navigator.sendBeacon) {
             try {
@@ -317,12 +341,12 @@
         try {
             fetch(url, {
                 // keepalive requests are capped at 64 KiB in flight
-                method: 'POST', body: body, keepalive: body.length < 60000, credentials: 'omit', mode: 'cors',
+                method: 'POST', body: body, keepalive: useBeacon, credentials: 'omit', mode: 'cors',
                 headers: { 'Content-Type': 'text/plain;charset=UTF-8' }
             }).then(function (r) {
-                if ((r.status >= 500 || r.status === 429) && !isRetry) retryOnce.push(body);
+                if ((r.status >= 500 || r.status === 429) && !isRetry) retryOnce.push(batch);
             }, function () {
-                if (!isRetry) retryOnce.push(body);
+                if (!isRetry) retryOnce.push(batch);
             });
         } catch (e) { /* dropped */ }
     }
@@ -333,10 +357,10 @@
         }
         var retries = retryOnce.splice(0, 2);
         retryOnce.length = 0;   // at most two retried batches per flush; older ones dropped
-        for (i = 0; i < retries.length; i++) send(retries[i], useBeacon, true);
+        for (i = 0; i < retries.length; i++) send(retries[i], useBeacon && !retries[i].program, true);
         if (!queue.length) return;
         var bodies = batches(queue.splice(0, queue.length));
-        for (i = 0; i < bodies.length; i++) send(bodies[i], useBeacon, false);
+        for (i = 0; i < bodies.length; i++) send(bodies[i], useBeacon && !bodies[i].program, false);
     }
 
     // ------------------------------------------------------------------
@@ -661,8 +685,9 @@
     // tooltip_dwell: called by helpers.js when the pointer leaves a
     // tooltip trigger (helpers.js knows when the tooltip was shown).
     function elementKind(el) {
-        var k = el.getAttribute('data-rv-element');
-        if (k && /^(dot|arrow|bracket|line|header|code_line|other)$/.test(k)) return k;
+        // the plugin's data-rv-kind (element-ids.md), else guessed from the tag
+        var k = el.getAttribute('data-rv-kind');
+        if (k && /^(header|dot|call|fn|arrow|line|branch_line|stop_bar|bracket|code_line|other)$/.test(k)) return k;
         var tag = (el.tagName || '').toLowerCase();
         var cls = el.classList || { contains: function () { return false; } };
         if (tag === 'circle' || tag === 'use') return 'dot';
@@ -697,12 +722,18 @@
             figure_id: f.id, element_id: id, element_kind: elementKind(el),
             enter_ts: start, leave_ts: end, dwell_ms: Math.min(end - start, 86400000)
         };
-        var kind = el.getAttribute('data-rv-kind') || el.getAttribute('data-rv-event');
+        // event_kind: the first of the events drawn there (data-rv-event)
+        var kind = (el.getAttribute('data-rv-event') || '').split(' ')[0];
         if (kind && /^[a-z0-9_]{1,32}$/.test(kind)) props.event_kind = kind;
         var v = el.getAttribute('data-rv-var');
         if (v) props['var'] = v.slice(0, 64);
         var line = parseInt(el.getAttribute('data-rv-line'), 10);
         if (line >= 1 && line <= 100000) props.line = line;
+        var lineEnd = parseInt(el.getAttribute('data-rv-line-end'), 10);
+        if (lineEnd >= 1 && lineEnd <= 100000) props.line_end = lineEnd;
+        var state = el.getAttribute('data-rv-state');
+        if (state && /^[a-z0-9_]{1,32}$/.test(state)) props.state = state;
+        if (el.getAttribute('data-rv-drop') === 'true') props.drop = true;
         emit('tooltip_dwell', props);
     }
 
@@ -725,11 +756,18 @@
     // Programs (playground): each distinct source once per page load
     // ------------------------------------------------------------------
 
-    var sentPrograms = {};
+    var sentPrograms = {}, omittedPrograms = {};
+    // Send `source` as a `program` record (once per page load, only with
+    // collectCode) and return its program_id. A source over the collector's
+    // 64 KiB cap is not sent (truncating it would break program_id =
+    // SHA-256(source)); programOmitted(id) then says so, and the playground
+    // marks its run/edit `program_omitted: "too_large"`.
     function program(source, meta) {
         if (typeof source !== 'string') return null;
         var id = programId(source);
-        if (active && cfg.collectCode && !sentPrograms[id] && source.length <= 16384) {
+        if (active && cfg.collectCode && !sentPrograms[id] && utf8Bytes(source) > MAX_SOURCE_BYTES) {
+            omittedPrograms[id] = true;
+        } else if (active && cfg.collectCode && !sentPrograms[id]) {
             sentPrograms[id] = true;
             var props = { program_id: id, source: source };
             if (meta && /^[0-9a-f]{16,64}$/.test(meta.source_figure_id || '')) {
@@ -747,33 +785,45 @@
     // Consent UI: banner and "Your data" panel
     // ------------------------------------------------------------------
 
+    // Colours follow the host page's theme: the playground's and mdBook's
+    // own CSS variables (--bg, --fg, --bg-panel / --quote-bg, --border /
+    // --quote-border, --link / --links), so a theme switch restyles the bar
+    // and panel too. Elsewhere, light or dark by prefers-color-scheme.
     var CSS =
-        '.rv-tlm{font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;color:#1d1d1f;' +
-        'background:#fff;border:1px solid #8a8a8a;border-radius:8px;box-shadow:0 4px 18px rgba(0,0,0,.25);' +
-        'z-index:2147483000;box-sizing:border-box}' +
+        '.rv-tlm{--rvt-bg:#fff;--rvt-fg:#1d1d1f;--rvt-border:#8a8a8a;--rvt-link:#0b57d0;' +
+        'font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;box-sizing:border-box;' +
+        'color:var(--fg,var(--rvt-fg));background:var(--bg-panel,var(--quote-bg,var(--rvt-bg)));' +
+        'border:1px solid var(--border,var(--quote-border,var(--rvt-border)))}' +
+        '@media (prefers-color-scheme: dark){.rv-tlm{--rvt-bg:#1f2328;--rvt-fg:#e6e6e6;--rvt-border:#6e7681;--rvt-link:#79b8ff}}' +
         '.rv-tlm *{box-sizing:border-box}' +
-        '.rv-tlm-banner{position:fixed;left:50%;bottom:12px;transform:translateX(-50%);' +
-        'width:min(640px,calc(100vw - 24px));padding:14px 16px}' +
-        '.rv-tlm-panel{position:fixed;right:12px;bottom:12px;width:min(420px,calc(100vw - 24px));' +
-        'max-height:calc(100vh - 24px);overflow:auto;padding:16px}' +
+        '.rv-tlm a,.rv-tlm-link{color:var(--link,var(--links,var(--rvt-link,#0b57d0)))}' +
+        // the notice: a slim bar in the page's flow (it takes its own space,
+        // so it never covers a diagram)
+        '.rv-tlm-bar{display:block;width:100%;padding:6px 12px;border-width:0 0 1px 0;font-size:13px;margin:0}' +
+        '.rv-tlm-bar .rv-tlm-line{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px}' +
+        '.rv-tlm-bar .rv-tlm-text{flex:1 1 320px;min-width:0}' +
+        '.rv-tlm-bar .rv-tlm-actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center}' +
+        '.rv-tlm-bar ul{margin:6px 0 2px;padding-left:20px}' +
+        '.rv-tlm-bar.rv-tlm-boxed{border-width:1px;border-radius:6px;margin:0 0 1em}' +
+        '.rv-tlm-panel{position:fixed;right:12px;bottom:12px;z-index:2147483000;width:min(420px,calc(100vw - 24px));' +
+        'max-height:calc(100vh - 24px);overflow:auto;padding:16px;border-radius:8px;box-shadow:0 4px 18px rgba(0,0,0,.3)}' +
         '.rv-tlm h2{font-size:16px;margin:0 0 8px}' +
-        '.rv-tlm p,.rv-tlm ul{margin:0 0 8px}.rv-tlm ul{padding-left:20px}' +
-        '.rv-tlm a{color:#0b57d0}' +
+        '.rv-tlm p,.rv-tlm-panel ul{margin:0 0 8px}.rv-tlm-panel ul{padding-left:20px}' +
         '.rv-tlm code{font-size:12px;word-break:break-all}' +
         '.rv-tlm-row{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;align-items:center}' +
-        '.rv-tlm button{font:inherit;padding:6px 14px;border-radius:6px;border:1px solid #555;' +
-        'background:#f3f3f3;color:#1d1d1f;cursor:pointer;min-width:7em}' +
-        '.rv-tlm button:hover{background:#e4e4e4}' +
-        '.rv-tlm button:focus-visible,.rv-tlm-fab:focus-visible{outline:3px solid #0b57d0;outline-offset:2px}' +
+        '.rv-tlm button{font:inherit;padding:3px 12px;border-radius:5px;cursor:pointer;' +
+        'border:1px solid var(--border-strong,var(--fg,var(--rvt-border)));' +
+        'background:var(--bg,var(--rvt-bg));color:var(--fg,var(--rvt-fg))}' +
+        '.rv-tlm-panel button{padding:6px 14px;min-width:7em}' +
+        '.rv-tlm button:hover{filter:brightness(.93)}' +
+        // link-styled buttons look like the page's own links
+        '.rv-tlm button.rv-tlm-plain,.rv-tlm-link{background:none;border:none;padding:0;min-width:0;' +
+        'font:inherit;color:var(--link,var(--links,var(--rvt-link,#0b57d0)));text-decoration:inherit;cursor:pointer}' +
+        '.rv-tlm button.rv-tlm-plain:hover,.rv-tlm-link:hover{text-decoration:underline;filter:none}' +
+        '.rv-tlm button:focus-visible,.rv-tlm-link:focus-visible{outline:2px solid currentColor;outline-offset:2px}' +
         '.rv-tlm-close{float:right;min-width:0!important;padding:2px 8px!important}' +
-        '.rv-tlm-fab{position:fixed;right:10px;bottom:10px;z-index:2147482999;font:12px system-ui,sans-serif;' +
-        'padding:4px 10px;border-radius:12px;border:1px solid #8a8a8a;background:#fff;color:#1d1d1f;' +
-        'opacity:.8;cursor:pointer}' +
-        '.rv-tlm-fab:hover{opacity:1}' +
         '.rv-tlm-study{font-style:italic}' +
-        '@media (prefers-color-scheme: dark){.rv-tlm,.rv-tlm-fab{background:#1f2328;color:#e6e6e6;border-color:#6e7681}' +
-        '.rv-tlm button{background:#2d333b;color:#e6e6e6;border-color:#8b949e}.rv-tlm button:hover{background:#373e47}' +
-        '.rv-tlm a{color:#79b8ff}}';
+        '.rv-tlm-foot{font-size:.85em;opacity:.8;margin-top:2em}';
 
     function el(tag, attrs, children) {
         var e = document.createElement(tag);
@@ -812,48 +862,92 @@
         return cfg.privacyUrl ? el('a', { href: cfg.privacyUrl, target: '_blank', rel: 'noopener', text: text }) : null;
     }
 
-    var banner = null, panel = null, fab = null, panelOpener = null;
+    var banner = null, panel = null, foot = null, panelOpener = null;
 
     function closeBanner() { if (banner) { banner.remove(); banner = null; } }
 
-    function showBanner() {
-        if (banner || blocked || !document.body) return;
-        ensureCss();
-        var notice = cfg.consent === 'notice';
-        var title = notice ? 'This site records how it is used' : 'May this site record how you use it?';
-        var age = null;
-        var kids = [
-            el('h2', { id: 'rv-tlm-banner-title', text: title }),
-            el('p', { text: (notice ? 'To study how people learn Rust and to improve RustViz, this site records:'
-                                    : 'To study how people learn Rust and to improve RustViz, we would like to record:') }),
-            whatList(),
-            showStudy ? el('p', { 'class': 'rv-tlm-study', text: cfg.studyText }) : null,
-            el('p', {}, [notice ? 'You can turn this off now or later under “Your data”. '
-                                : 'Nothing is recorded unless you say yes. You can change your mind under “Your data”. ',
-                         privacyLink('How the data is used and kept')])
-        ];
-        if (!notice && cfg.study) {
-            age = el('input', { type: 'checkbox', id: 'rv-tlm-age' });
-            kids.push(el('p', {}, [age, ' ', el('label', { 'for': 'rv-tlm-age', text: 'I am 18 or older and agree to take part in the study.' })]));
-        }
-        var row = notice
-            ? [el('button', { type: 'button', text: 'OK', onclick: function () { dismissNotice(); } }),
-               el('button', { type: 'button', text: 'Turn off', onclick: function () { withdraw(true); } })]
-            : [el('button', { type: 'button', text: 'Yes, record', onclick: function () {
-                    optIn(age ? age.checked : false); } }),
-               el('button', { type: 'button', text: 'No, thanks', onclick: function () { decline(); } })];
-        kids.push(el('div', { 'class': 'rv-tlm-row' }, row));
-        banner = el('section', { 'class': 'rv-tlm rv-tlm-banner', role: 'region',
-                                 'aria-labelledby': 'rv-tlm-banner-title' }, kids);
-        document.body.appendChild(banner);
+    // Where the bar goes: the page's slot (`bannerSlot`, e.g. a row the
+    // playground reserves in its layout), else the top of mdBook's <main>
+    // (it scrolls away with the chapter), else the top of <body>.
+    function bannerHost() {
+        var slot = cfg.bannerSlot ? document.querySelector(cfg.bannerSlot) : null;
+        if (slot) return { parent: slot, before: slot.firstChild, boxed: false };
+        var main = document.querySelector('main');
+        if (main) return { parent: main, before: main.firstChild, boxed: true };
+        return { parent: document.body, before: document.body.firstChild, boxed: false };
     }
 
-    function showFab() {
-        if (cfg.panelLink !== 'floating' || fab || !document.body) return;
+    var slotTries = 0;
+    function showBanner() {
+        if (banner || blocked || !document.body) return;
+        // The page's slot may not exist yet (the playground renders after
+        // this script runs): wait for it for up to 5 s, then use the default.
+        if (cfg.bannerSlot && !document.querySelector(cfg.bannerSlot) && slotTries++ < 50) {
+            setTimeout(showBanner, 100);
+            return;
+        }
         ensureCss();
-        fab = el('button', { type: 'button', 'class': 'rv-tlm-fab', 'aria-haspopup': 'dialog',
-                             text: 'Your data', onclick: function () { openPanel(); } });
-        document.body.appendChild(fab);
+        var notice = cfg.consent === 'notice';
+        var code = cfg.surface === 'playground' && cfg.collectCode ? ', the programs you run' : '';
+        var summary = notice
+            ? 'This site records how you use it, for research on learning Rust: pages you view, ' +
+              'which parts of diagrams you point at and your pointer’s path' + code +
+              ', with a random ID kept in this browser. No name, IP address or cookies.'
+            : 'May this site record how you use it, for research on learning Rust? Pages you view, ' +
+              'which parts of diagrams you point at and your pointer’s path' + code +
+              ', with a random ID kept in this browser. Nothing is recorded unless you say yes.';
+        var details = el('div', { id: 'rv-tlm-details', hidden: 'hidden' }, [
+            whatList(),
+            showStudy ? el('p', { 'class': 'rv-tlm-study', text: cfg.studyText }) : null
+        ]);
+        var more = el('button', { type: 'button', 'class': 'rv-tlm-plain', 'aria-expanded': 'false',
+                                  'aria-controls': 'rv-tlm-details', text: 'What’s recorded' });
+        more.addEventListener('click', function () {
+            var open = details.hasAttribute('hidden');
+            if (open) details.removeAttribute('hidden'); else details.setAttribute('hidden', 'hidden');
+            more.setAttribute('aria-expanded', open ? 'true' : 'false');
+        });
+        var age = null;
+        var actions = [more, privacyLink('Privacy')];
+        if (!notice && cfg.study) {
+            age = el('input', { type: 'checkbox', id: 'rv-tlm-age' });
+            actions.push(el('span', {}, [age, ' ', el('label', { 'for': 'rv-tlm-age', text: 'I am 18+ and agree to take part' })]));
+        }
+        if (notice) {
+            actions.push(el('button', { type: 'button', text: 'OK', onclick: function () { dismissNotice(); } }),
+                         el('button', { type: 'button', text: 'Turn off', onclick: function () { withdraw(true); } }));
+        } else {
+            actions.push(el('button', { type: 'button', text: 'Yes, record', onclick: function () {
+                             optIn(age ? age.checked : false); } }),
+                         el('button', { type: 'button', text: 'No, thanks', onclick: function () { decline(); } }));
+        }
+        var host = bannerHost();
+        banner = el('section', { 'class': 'rv-tlm rv-tlm-bar' + (host.boxed ? ' rv-tlm-boxed' : ''),
+                                 role: 'region', 'aria-label': 'Usage logging' }, [
+            el('div', { 'class': 'rv-tlm-line' }, [
+                el('span', { 'class': 'rv-tlm-text', text: summary }),
+                el('span', { 'class': 'rv-tlm-actions' }, actions)
+            ]),
+            details
+        ]);
+        host.parent.insertBefore(banner, host.before);
+    }
+
+    // A small "Your data" link at the end of the page's content, so the
+    // panel stays reachable after the bar is gone (pages that link it
+    // themselves set panelLink: 'none').
+    function showFoot() {
+        if (cfg.panelLink !== 'inline' || foot || !document.body) return;
+        ensureCss();
+        var main = document.querySelector('main') || document.body;
+        foot = el('p', { 'class': 'rv-tlm-foot' }, [
+            'This site records usage for research. ',
+            el('button', { type: 'button', 'class': 'rv-tlm-link', 'aria-haspopup': 'dialog',
+                           text: 'Your data', onclick: function () { openPanel(); } }),
+            cfg.privacyUrl ? ' · ' : null,
+            privacyLink('Privacy')
+        ]);
+        main.appendChild(foot);
     }
 
     function closePanel() {
@@ -936,21 +1030,21 @@
         if (cfg.study) props.age_18_plus = !!age18;
         emit('consent', props);
         start();
-        showFab();
+        showFoot();
         flush(false);
     }
     function decline() {
         choice = { state: 'off', how: 'declined', version: cfg.consentVersion };
         saveChoice(choice);
         closeBanner();
-        showFab();
+        showFoot();
     }
     function dismissNotice() {
         choice = { state: 'on', how: 'notice', version: cfg.consentVersion };
         saveChoice(choice);
         closeBanner();
         emit('consent', { consent_version: cfg.consentVersion, choice: 'notice_dismissed' });
-        showFab();
+        showFoot();
     }
     function turnOnNotice() {
         choice = { state: 'on', how: 'notice', version: cfg.consentVersion };
@@ -980,7 +1074,7 @@
         choice = { state: 'off', how: 'withdrawn', version: cfg.consentVersion };
         saveChoice(choice);
         closeBanner();
-        showFab();
+        showFoot();
     }
 
     // ------------------------------------------------------------------
@@ -1002,6 +1096,7 @@
         tooltipHover: tooltipHover,
         program: program,
         programId: programId,
+        programOmitted: function (id) { return omittedPrograms[id] === true; },
         figureId: figureId,
         scan: function () { if (active) scan(); },
         flush: function () { flush(false); },
@@ -1031,7 +1126,7 @@
         if (notice && choice && choice.how === 'notice_shown') showBanner();
         else if (!notice && (!choice || (choice.how !== 'opt_in' && choice.how !== 'declined' &&
                                          choice.how !== 'withdrawn'))) showBanner();
-        else showFab();
+        showFoot();
     }
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
     else boot();

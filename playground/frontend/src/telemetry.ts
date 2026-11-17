@@ -20,6 +20,7 @@ type RvTelemetry = {
   ui(action: string, value?: string, sourceFigureId?: string): unknown;
   program(source: string, meta?: { source_figure_id?: string }): string | null;
   programId(source: string): string;
+  programOmitted(programId: string): boolean;
   figureId(source: string): string;
   scan(): void;
   flush(): void;
@@ -57,6 +58,7 @@ export function loadTelemetry(): Promise<void> {
     rvVersion: __PLUGIN_VERSION__,
     privacyUrl: env.VITE_RV_TELEMETRY_PRIVACY_URL ?? '/privacy/',
     panelLink: 'none',
+    bannerSlot: '#rv-telemetry-slot',
     // MAINTAINER: replace with the study's wording (name, PI, contact) once
     // the IRB has decided; keep it in sync with public/privacy/index.html.
     studyText: '[Placeholder for the research-study sentence: study name, who runs it (PI) ' +
@@ -129,7 +131,10 @@ function sendEdit(): void {
   // With code collection on, the text at this moment as a program record
   // (sent once per distinct text) that the edit names.
   const pid = t.program(latestCode, { source_figure_id: sourceFigure() });
-  if (pid && collectsCode()) props.program_id = pid;
+  if (pid && collectsCode()) {
+    props.program_id = pid;
+    if (t.programOmitted(pid)) props.program_omitted = 'too_large';
+  }
   t.emit('edit', props);
   pendingChars = 0;
   lastEditEvent = Date.now();
@@ -176,6 +181,8 @@ export function runStarted(code: string, example: string | undefined): RunHandle
     figure_id: figureId,
     line_count: Math.min(code.split('\n').length, 100_000),
   };
+  // over the collector's 64 KiB source cap: the text wasn't sent
+  if (t.programOmitted(programId)) props.program_omitted = 'too_large';
   if (example) props.example = example.slice(0, 64);
   // the figure it was edited from (an unedited example is its own figure)
   const src = sourceFigure();

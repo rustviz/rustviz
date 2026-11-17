@@ -1010,6 +1010,9 @@ const App: React.FC = () => {
   return (
     <div className="app-shell">
       <TitleBar theme={theme} onThemeChange={handleThemeChange} />
+      {/* The usage-logging notice bar goes here (telemetry builds only), in
+          the layout's flow so it shrinks the panels instead of covering them. */}
+      {TELEMETRY_ENABLED && <div id="rv-telemetry-slot" />}
       <PanelGroup direction="vertical" className="main-split" autoSaveId="rustviz-vertical">
         {/* Top row: prose on the left, code editor on the right.
             minSize=0 with no `collapsible` means the handle drags

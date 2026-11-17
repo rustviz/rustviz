@@ -34,6 +34,15 @@ class FakeEl {
   getAttribute(k: string) { return k in this.attrs ? this.attrs[k] : null; }
   getAttributeNS(_: unknown, k: string) { return this.getAttribute(k); }
   appendChild(c: FakeEl) { c.parentElement = this; this.children.push(c); return c; }
+  insertBefore(c: FakeEl, before: FakeEl | null) {
+    c.parentElement = this;
+    const i = before ? this.children.indexOf(before) : -1;
+    if (i < 0) this.children.push(c); else this.children.splice(i, 0, c);
+    return c;
+  }
+  get firstChild() { return this.children[0] ?? null; }
+  hasAttribute(k: string) { return k in this.attrs; }
+  removeAttribute(k: string) { delete this.attrs[k]; }
   remove() {
     const p = this.parentElement;
     if (p) p.children = p.children.filter(c => c !== this);
@@ -77,6 +86,7 @@ function storage(m: Map<string, string>) {
 
 function boot(config: Record<string, unknown> | undefined, opts: {
   dnt?: boolean; gpc?: boolean; search?: string; local?: Map<string, string>; figures?: FakeEl[];
+  slots?: Record<string, FakeEl>;
 } = {}): Env {
   const beacons: string[] = [];
   const fetches: string[] = [];
@@ -94,10 +104,7 @@ function boot(config: Record<string, unknown> | undefined, opts: {
     createElement: (t: string) => new FakeEl(t),
     createTextNode: (t: string) => { const e = new FakeEl('#text'); e.textContent = t; return e; },
     getElementById: () => null,
-    querySelector: (sel: string) => {
-      const m = /^\.([\w-]+)\.code_panel$/.exec(sel);
-      return m ? null : null;
-    },
+    querySelector: (sel: string) => (opts.slots ?? {})[sel] ?? null,
     querySelectorAll: (sel: string) => (sel === '.tl_panel' ? figures : []),
     addEventListener: () => {},
   };
@@ -182,7 +189,10 @@ for (const cfg of [undefined, {}, { endpoint: '' }, { endpoint: 42 }]) {
   assert.deepEqual(names(env), []);
   assert.equal(t(env).emit('ui', { action: 'other' }), null);
   assert.equal(env.local.get('rv.telemetry.anon_id'), undefined, 'no id before consent');
-  assert.equal(env.body.children.length, 1, 'banner shown');
+  // the bar goes first in the page's flow; the "Your data" link last
+  assert.equal(env.body.children.length, 2, 'bar and footer link');
+  assert.match(env.body.children[0].attrs.class, /rv-tlm-bar/);
+  assert.match(env.body.children[1].text(), /Your data/);
   assert.match(env.body.children[0].text(), /May this site record/);
   assert.match(env.body.children[0].text(), /No name, e-mail, IP address or cookies/);
   t(env)._test.optIn(false);
@@ -204,6 +214,23 @@ for (const cfg of [undefined, {}, { endpoint: '' }, { endpoint: 42 }]) {
   assert.equal(q(again)[0].anon_id, env.local.get('rv.telemetry.anon_id'));
 }
 
+// --- the bar goes in the page's slot when it has one (the playground's
+//     layout row), never over the content; panelLink 'none' adds no link
+{
+  const slot = new FakeEl('div');
+  const env = boot({ ...CFG, consent: 'notice', bannerSlot: '#slot', panelLink: 'none' }, { slots: { '#slot': slot } });
+  assert.equal(slot.children.length, 1);
+  assert.match(slot.children[0].attrs.class, /rv-tlm-bar/);
+  assert.doesNotMatch(slot.children[0].attrs.class, /boxed/);
+  assert.equal(env.body.children.length, 0);
+  // in mdBook it is the first thing in <main>
+  const main = new FakeEl('main');
+  main.appendChild(new FakeEl('h1'));
+  const book = boot({ ...CFG, consent: 'notice' }, { slots: { main } });
+  assert.match(main.children[0].attrs.class, /rv-tlm-bar rv-tlm-boxed/);
+  assert.match(main.children[main.children.length - 1].text(), /Your data/);
+}
+
 // --- declining stores no id and is never asked again
 {
   const env = boot(CFG);
@@ -223,7 +250,7 @@ for (const cfg of [undefined, {}, { endpoint: '' }, { endpoint: 42 }]) {
   assert.equal(q(env)[0].props.choice, 'notice_shown');
   assert.equal(q(env)[0].consent_mode, 'notice');
   q(env).forEach(checkEnvelope);
-  assert.match(env.body.children[0].text(), /This site records how it is used/);
+  assert.match(env.body.children[0].text(), /This site records how you use it/);
   t(env)._test.dismissNotice();
   assert.equal(q(env)[2].props.choice, 'notice_dismissed');
   const again = boot({ ...CFG, consent: 'notice' }, { local: env.local });
@@ -302,23 +329,46 @@ for (const sig of [{ dnt: true }, { gpc: true }]) {
   assert.equal(progs[0].props.source_figure_id, 'fd7e25f9ee13a174');
 }
 
-// --- batching: <= 100 events and < 64 KiB per request
+// --- batching: <= 100 events and < 60 000 UTF-8 bytes per ordinary request
+//     (the browser's 64 KiB beacon cap); a program record always alone
 {
   const env = boot({ ...CFG, consent: 'notice' });
-  const batches: string[] = t(env)._test.batches(
-    Array.from({ length: 250 }, (_, i) => ({ event: 'ui', i, pad: 'x'.repeat(i % 7 === 0 ? 2000 : 10) })));
-  assert.ok(batches.length >= 3);
+  const mk = (i: number) => ({ event: 'ui', i, pad: (i % 7 === 0 ? 'é'.repeat(2000) : 'x'.repeat(10)) });
+  const events: any[] = Array.from({ length: 250 }, (_, i) => mk(i));
+  events.splice(5, 0, { event: 'program', props: { source: 'ü'.repeat(30000) } });
+  const out: { body: string; program: boolean }[] = JSON.parse(JSON.stringify(t(env)._test.batches(events)));
   let n = 0;
-  for (const b of batches) {
-    const parsed = JSON.parse(b);
+  for (const b of out) {
+    const parsed = JSON.parse(b.body);
     assert.deepEqual(Object.keys(parsed), ['events']);
     assert.ok(parsed.events.length <= 100);
-    assert.ok(b.length < 64 * 1024);
+    const bytes = Buffer.byteLength(b.body, 'utf8');
+    if (b.program) {
+      assert.equal(parsed.events.length, 1);
+      assert.equal(parsed.events[0].event, 'program');
+      assert.ok(bytes <= 192 * 1024);
+    } else {
+      assert.ok(bytes < 60000, String(bytes));
+      assert.ok(parsed.events.every((e: any) => e.event !== 'program'));
+    }
     n += parsed.events.length;
   }
-  assert.equal(n, 250);
-  // an oversized event is dropped, not sent
+  assert.equal(n, 251);
+  // oversized events are dropped, not sent (24 KiB; 80 KiB for a program)
   assert.equal(t(env)._test.batches([{ big: 'x'.repeat(30000) }]).length, 0);
+  assert.equal(t(env)._test.batches([{ event: 'program', s: 'x'.repeat(90 * 1024) }]).length, 0);
+}
+
+// --- a program over the 64 KiB source cap is not sent, and is flagged
+{
+  const env = boot({ ...CFG, consent: 'notice', surface: 'playground', collectCode: true });
+  const big = '// ' + 'é'.repeat(33 * 1024) + '\nfn main() {}';   // < 64 Ki chars but > 64 KiB of UTF-8
+  const id = t(env).program(big);
+  assert.equal(id, createHash('sha256').update(big).digest('hex'));
+  assert.equal(t(env).programOmitted(id), true);
+  assert.equal(t(env).programOmitted(t(env).program('fn main() {}')), false);
+  const sent = env.fetches.flatMap(b => JSON.parse(b).events).filter((e: any) => e.event === 'program');
+  assert.deepEqual(sent.map((e: any) => e.props.source), ['fn main() {}']);
 }
 
 // --- tooltip_dwell from the helpers.js hook, with the plugin's attributes
@@ -329,19 +379,31 @@ for (const sig of [{ dnt: true }, { gpc: true }]) {
   const env = boot({ ...CFG, consent: 'notice', surface: 'playground' }, { figures: [tl] });
   const dot = new FakeEl('g', ['tooltip-trigger']);
   dot.appendChild(new FakeEl('circle'));
-  Object.assign(dot.attrs, { 'data-rv-id': 's:L5:move-out', 'data-rv-kind': 'move', 'data-rv-var': 's', 'data-rv-line': '5' });
+  // the plugin's attributes (element-ids.md)
+  Object.assign(dot.attrs, { 'data-rv-id': 's@L5:dot:move', 'data-rv-kind': 'dot', 'data-rv-event': 'move static_die',
+                             'data-rv-var': 's', 'data-rv-line': '5', 'data-rv-drop': 'true' });
   t(env).tooltipHover('ex2', dot, 1763370002700, 1763370003500);
   const ev = q(env).find((e: any) => e.event === 'tooltip_dwell');
   checkEnvelope(ev);
   assert.deepEqual(ev.props, {
-    figure_id: '0123456789abcdef', element_id: 's:L5:move-out', element_kind: 'dot',
+    figure_id: '0123456789abcdef', element_id: 's@L5:dot:move', element_kind: 'dot',
     enter_ts: 1763370002700, leave_ts: 1763370003500, dwell_ms: 800,
-    event_kind: 'move', var: 's', line: 5,
+    event_kind: 'move', var: 's', line: 5, drop: true,
   });
+  // a bracket segment: kind from the plugin, state and line range
+  const seg = new FakeEl('path', ['staticref', 'tooltip-trigger']);
+  Object.assign(seg.attrs, { 'data-rv-id': 'r@L3-7:bracket', 'data-rv-kind': 'bracket', 'data-rv-state': 'full_privilege',
+                             'data-rv-var': 'r', 'data-rv-line': '3', 'data-rv-line-end': '7' });
+  t(env).tooltipHover('ex2', seg, 1763370005000, 1763370005100);
+  const evb = q(env).filter((e: any) => e.event === 'tooltip_dwell').pop();
+  assert.equal(evb.props.element_kind, 'bracket');
+  assert.equal(evb.props.state, 'full_privilege');
+  assert.equal(evb.props.line_end, 7);
+  assert.equal(evb.props.event_kind, undefined);
   // a hover that never moved (no start time) is still logged, as 0 ms
   const arrow = new FakeEl('polyline', ['tooltip-trigger']);
   t(env).tooltipHover('ex2', arrow, null, 1763370004000);
-  const ev2 = q(env).filter((e: any) => e.event === 'tooltip_dwell')[1];
+  const ev2 = q(env).filter((e: any) => e.event === 'tooltip_dwell').pop();
   assert.equal(ev2.props.element_kind, 'arrow');
   assert.equal(ev2.props.dwell_ms, 0);
   assert.match(ev2.props.element_id, /^\S{1,128}$/);
