@@ -21,6 +21,7 @@ class FakeEl {
   attrs: Record<string, string> = {};
   listeners: Record<string, Listener[]> = {};
   textContent = '';
+  hidden = false;
   style: Record<string, string> = {};
   parentElement: FakeEl | null = null;
   classList: { contains: (c: string) => boolean; [i: number]: string; length: number };
@@ -54,8 +55,6 @@ class FakeEl {
     let e: FakeEl | null = this;
     while (e) {
       if (sel === '.vis_block' && e.classList.contains('vis_block')) return e;
-      if (sel.includes('data-rv-your-data') &&
-          (e.hasAttribute('data-rv-your-data') || e.attrs.href === '#rv-your-data')) return e;
       e = e.parentElement;
     }
     return null;
@@ -80,6 +79,8 @@ type Env = {
   body: FakeEl;
   figures: FakeEl[];
   docListeners: Record<string, Listener[]>;
+  winListeners: Record<string, Listener[]>;
+  els: Record<string, FakeEl>;
 };
 
 function storage(m: Map<string, string>) {
@@ -93,6 +94,9 @@ function storage(m: Map<string, string>) {
 function boot(config: Record<string, unknown> | undefined, opts: {
   dnt?: boolean; gpc?: boolean; search?: string; local?: Map<string, string>; figures?: FakeEl[];
   slots?: Record<string, FakeEl>;
+  // the privacy page: its inline script, and what telemetry-config.json holds
+  // (null: no such file in this build)
+  page?: string; configJson?: Record<string, unknown> | null;
 } = {}): Env {
   const beacons: string[] = [];
   const fetches: string[] = [];
@@ -101,6 +105,9 @@ function boot(config: Record<string, unknown> | undefined, opts: {
   const head = new FakeEl('head');
   const figures = opts.figures ?? [];
   const docListeners: Record<string, Listener[]> = {};
+  const winListeners: Record<string, Listener[]> = {};
+  const els: Record<string, FakeEl> = {};
+  for (const id of ['yd-status', 'yd-id', 'yd-button']) els[id] = new FakeEl(id === 'yd-button' ? 'button' : 'p');
   const document = {
     readyState: 'complete',
     visibilityState: 'visible',
@@ -110,7 +117,7 @@ function boot(config: Record<string, unknown> | undefined, opts: {
     hasFocus: () => true,
     createElement: (t: string) => new FakeEl(t),
     createTextNode: (t: string) => { const e = new FakeEl('#text'); e.textContent = t; return e; },
-    getElementById: () => null,
+    getElementById: (id: string) => els[id] ?? null,
     querySelector: (sel: string) => (opts.slots ?? {})[sel] ?? null,
     querySelectorAll: (sel: string) => (sel === '.tl_panel' ? figures : []),
     addEventListener: (t: string, fn: Listener) => { (docListeners[t] ||= []).push(fn); },
@@ -131,16 +138,34 @@ function boot(config: Record<string, unknown> | undefined, opts: {
     crypto: webcrypto,
     TextEncoder, URL, JSON, Math, Date, Object, Array, Uint8Array, DataView, parseInt, parseFloat, isFinite,
     performance: { getEntriesByType: () => [{ type: 'navigate' }] },
-    fetch: (_url: string, init: { body: string }) => { fetches.push(init.body); return Promise.resolve({ status: 200 }); },
+    fetch: (url: string, init: { body: string }) => {
+      if (/telemetry-config\.json$/.test(url)) {
+        const c = opts.configJson ?? null;
+        return Promise.resolve({ ok: c !== null, status: c ? 200 : 404, json: () => Promise.resolve(c) });
+      }
+      fetches.push(init.body);
+      return Promise.resolve({ status: 200 });
+    },
     setInterval: () => 0,
     setTimeout: () => 0,
-    addEventListener: () => {},
+    addEventListener: (t: string, fn: Listener) => { (winListeners[t] ||= []).push(fn); },
     innerWidth: 1234, innerHeight: 777, scrollY: 0,
   };
   win.window = win;
   vm.createContext(win);
-  vm.runInContext(SRC, win);
-  return { win, beacons, fetches, local, body, figures, docListeners };
+  if (opts.page !== undefined) {
+    // the privacy page: its script adds rv-telemetry.js with a <script>
+    head.appendChild = (c: FakeEl) => {
+      FakeEl.prototype.appendChild.call(head, c);
+      if (c.tagName === 'SCRIPT') {
+        vm.runInContext(SRC, win);
+        (c as any).onload?.({});
+      }
+      return c;
+    };
+    vm.runInContext(opts.page, win);
+  } else vm.runInContext(SRC, win);
+  return { win, beacons, fetches, local, body, figures, docListeners, winListeners, els };
 }
 
 const t = (env: Env) => env.win.rvTelemetry;
@@ -169,7 +194,8 @@ function checkEnvelope(ev: any) {
   if (ev.tier === 1) assert.equal(ev.cohort, undefined);
 }
 
-const CFG = { endpoint: 'http://127.0.0.1:8090/', rvVersion: '2.1.0', surface: 'tutorial' };
+const CFG = { endpoint: 'http://127.0.0.1:8090/', rvVersion: '2.1.0', surface: 'tutorial',
+              privacyUrl: 'https://rustviz.github.io/privacy/' };
 
 // --- no endpoint: nothing at all
 for (const cfg of [undefined, {}, { endpoint: '' }, { endpoint: 42 }]) {
@@ -200,6 +226,10 @@ for (const cfg of [undefined, {}, { endpoint: '' }, { endpoint: 42 }]) {
   assert.equal(env.body.children.length, 2, 'bar and footer link');
   assert.match(env.body.children[0].attrs.class, /rv-tlm-bar/);
   assert.match(env.body.children[1].text(), /Your data/);
+  const yd = (function find(e: FakeEl): FakeEl | null {
+    return (e.tagName === 'A' && e.textContent === 'Your data') ? e : e.children.reduce<FakeEl | null>((r, c) => r || find(c), null);
+  })(env.body.children[1]);
+  assert.equal(yd!.attrs.href, 'https://rustviz.github.io/privacy/#your-data', 'a plain link to the privacy page section');
   assert.match(env.body.children[0].text(), /May this site record/);
   assert.match(env.body.children[0].text(), /No name, e-mail, IP address or cookies/);
   t(env)._test.optIn(false);
@@ -222,10 +252,10 @@ for (const cfg of [undefined, {}, { endpoint: '' }, { endpoint: 42 }]) {
 }
 
 // --- the bar goes in the page's slot when it has one (the playground's
-//     layout row), never over the content; panelLink 'none' adds no link
+//     layout row), never over the content; footLink 'none' adds no link
 {
   const slot = new FakeEl('div');
-  const env = boot({ ...CFG, consent: 'opt-in', bannerSlot: '#slot', panelLink: 'none' }, { slots: { '#slot': slot } });
+  const env = boot({ ...CFG, consent: 'opt-in', bannerSlot: '#slot', footLink: 'none' }, { slots: { '#slot': slot } });
   assert.equal(slot.children.length, 1);
   assert.match(slot.children[0].attrs.class, /rv-tlm-bar/);
   assert.doesNotMatch(slot.children[0].attrs.class, /boxed/);
@@ -280,55 +310,36 @@ for (const cfg of [undefined, {}, { endpoint: '' }, { endpoint: 42 }]) {
   assert.deepEqual(names(env), []);
 }
 
-// --- the book's own text can open the Your-data panel (no injected UI)
+// --- no pop-up in either mode: no dialog, no panel API, no click hook
 {
-  const env = boot({ ...CFG, consent: 'notice' });
-  const link = new FakeEl('a');
-  link.setAttribute('href', '#rv-your-data');
-  let prevented = false;
-  env.docListeners.click.forEach(fn => fn({ target: link, preventDefault: () => { prevented = true; } }));
-  assert.ok(prevented);
-  assert.match(env.body.children[0].text(), /Recording is on/);
-  const btn = new FakeEl('button');
-  btn.setAttribute('data-rv-your-data', '');
-  env.body.children[0].remove();
-  env.docListeners.click.forEach(fn => fn({ target: btn, preventDefault: () => {} }));
-  assert.match(env.body.children[0].text(), /Recording is on/);
+  const hasPopup = (e: FakeEl): boolean =>
+    e.attrs.role === 'dialog' || /rv-tlm-panel/.test(e.attrs.class ?? '') || e.children.some(hasPopup);
+  for (const consent of ['notice', 'opt-in']) {
+    const env = boot({ ...CFG, consent });
+    assert.equal(t(env).openPanel, undefined, consent);
+    assert.equal(env.docListeners.click.length, 1, 'only the figure click listener, no #rv-your-data hook');
+    // the hook the book's own text used to use does nothing now
+    const link = new FakeEl('a');
+    link.setAttribute('href', '#rv-your-data');
+    env.docListeners.click.forEach(fn => fn({ target: link, preventDefault: () => { throw new Error('hooked'); } }));
+    assert.ok(!hasPopup(env.body));
+    t(env)._test.withdraw();
+    t(env)._test.turnOn();
+    assert.ok(!hasPopup(env.body), 'not after turning off and on either');
+  }
 }
 
-// --- turning off in Your data stops events; turning back on works
-{
-  const env = boot({ ...CFG, consent: 'notice' });
-  t(env)._test.withdraw(false);
-  assert.equal(t(env).isActive(), false);
-  t(env).openPanel();
-  const panel = env.body.children[0];
-  assert.match(panel.text(), /Recording is off/);
-  const findBtn = (e: FakeEl, label: string): FakeEl | null =>
-    (e.tagName === 'BUTTON' && e.textContent === label) ? e :
-      e.children.reduce<FakeEl | null>((r, c) => r || findBtn(c, label), null);
-  findBtn(panel, 'Turn on')!.listeners.click[0]({});
-  assert.equal(t(env).isActive(), true);
-  const sent = [...env.beacons, ...env.fetches].flatMap(x => JSON.parse(x).events as any[]);
-  const after = sent.slice(sent.findIndex(e => e.event === 'withdraw') + 1);
-  assert.ok(after.some(e => e.event === 'page_view'), 'events flow again');
-  assert.ok(!sent.some(e => e.event === 'consent'));
-  after.forEach(checkEnvelope);
-  assert.match(env.local.get('rv.telemetry.anon_id')!, UUID);
-  assert.equal(env.body.children.length, 0, 'panel closed, still no banner');
-}
-
-// --- withdraw: one last event with the ids, then nothing and no ids
+// --- withdraw: one last event with the old id, then nothing and no ids
 {
   const env = boot({ ...CFG, consent: 'notice' });
   const anon = env.local.get('rv.telemetry.anon_id');
   assert.match(anon!, UUID);
-  t(env)._test.withdraw(true);
+  t(env)._test.withdraw();
   const sent = env.beacons.flatMap(b => JSON.parse(b).events);
   const w = sent[sent.length - 1];
   assert.equal(w.event, 'withdraw');
   assert.equal(w.anon_id, anon);
-  assert.equal(w.props.delete_requested, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(w.props)), { consent_version: '2026-11' });
   assert.equal(env.local.get('rv.telemetry.anon_id'), undefined);
   assert.equal(env.local.get('rv.telemetry.session'), undefined);
   assert.equal(t(env).isActive(), false);
@@ -336,6 +347,128 @@ for (const cfg of [undefined, {}, { endpoint: '' }, { endpoint: 42 }]) {
   const again = boot({ ...CFG, consent: 'notice' }, { local: env.local });
   assert.equal(t(again).isActive(), false, 'stays off on later visits');
   assert.deepEqual(names(again), []);
+}
+
+// --- the privacy page's "Your data": control-only client + the page's script
+const PAGE = (() => {
+  const html = readFileSync(new URL('../public/privacy/index.html', import.meta.url), 'utf8');
+  return /<script>([\s\S]*?)<\/script>/.exec(html)![1];
+})();
+const settle = async () => { for (let i = 0; i < 8; i++) await new Promise(r => setImmediate(r)); };
+const PCFG = { endpoint: 'http://127.0.0.1:8090', consent: 'notice', rvVersion: '2.1.0' };
+const allEvents = (e: Env) => [...e.beacons, ...e.fetches].flatMap(x => JSON.parse(x).events as any[]);
+const click = (el: FakeEl) => el.listeners.click.forEach(fn => fn({}));
+{
+  // a tutorial page is open and recording; the visitor then opens the privacy page
+  const local = new Map<string, string>();
+  const tut = boot({ ...CFG, consent: 'notice' }, { local });
+  const oldId = local.get('rv.telemetry.anon_id')!;
+  assert.match(oldId, UUID);
+  const pg = boot(undefined, { local, page: PAGE, configJson: PCFG });
+  await settle();
+  const { els } = pg;
+  assert.equal(els['yd-status'].textContent, 'Recording is on.');
+  assert.match(els['yd-id'].text(), new RegExp(oldId));
+  assert.equal(els['yd-button'].textContent, 'Turn off');
+  assert.equal(els['yd-button'].hidden, false);
+  assert.equal(pg.body.children.length, 0, 'no popup, no banner on the privacy page');
+  assert.equal(allEvents(pg).length, 0, 'the privacy page records nothing by being opened');
+  assert.deepEqual(q(pg), []);
+
+  click(els['yd-button']);   // Turn off
+  const evs = allEvents(pg);
+  assert.equal(evs.length, 1, 'exactly one event');
+  assert.equal(evs[0].event, 'withdraw');
+  assert.equal(evs[0].anon_id, oldId, 'carries the id being deleted');
+  assert.equal(evs[0].surface, 'playground');
+  assert.equal(evs[0].page, '/tutorial/ch04-01.html'); // (the fake location is shared)
+  checkEnvelope(evs[0]);
+  assert.equal(local.get('rv.telemetry.anon_id'), undefined);
+  assert.equal(local.get('rv.telemetry.session'), undefined);
+  assert.equal(JSON.parse(local.get('rv.telemetry.choice')!).state, 'off');
+  assert.equal(els['yd-status'].textContent, 'Recording is off. Nothing is recorded.');
+  assert.match(els['yd-id'].text(), /none stored/);
+  assert.equal(els['yd-button'].textContent, 'Turn on');
+  assert.equal(pg.fetches.length + pg.beacons.length, 1, 'nothing more after that');
+
+  // the already-open tutorial page hears about it (storage event) and stops
+  const before = tut.beacons.length + tut.fetches.length;
+  tut.winListeners.storage.forEach(fn => fn({ key: 'rv.telemetry.choice' }));
+  assert.equal(t(tut).isActive(), false);
+  assert.equal(t(tut).emit('ui', { action: 'other' }), null);
+  t(tut)._test.pageHide('hidden');
+  t(tut)._test.flush(false);
+  assert.equal(tut.beacons.length + tut.fetches.length, before, 'the open page sends nothing afterwards');
+  assert.equal(local.get('rv.telemetry.anon_id'), undefined, 'and made no new id');
+  // a page loaded later is off too
+  assert.equal(t(boot({ ...CFG, consent: 'notice' }, { local })).isActive(), false);
+  // another storage key does not matter
+  tut.winListeners.storage.forEach(fn => fn({ key: 'something.else' }));
+  assert.equal(t(tut).isActive(), false);
+
+  // Turn off again (nothing to withdraw): no second event
+  const pg2 = boot(undefined, { local, page: PAGE, configJson: PCFG });
+  await settle();
+  assert.equal(pg2.els['yd-button'].textContent, 'Turn on');
+
+  // Turn on: recording restarts with a new ID
+  click(pg2.els['yd-button']);
+  assert.equal(pg2.els['yd-status'].textContent, 'Recording is on.');
+  assert.match(pg2.els['yd-id'].text(), /none yet/);
+  assert.equal(pg2.els['yd-button'].textContent, 'Turn off');
+  assert.equal(allEvents(pg2).length, 0, 'turning on sends nothing from the privacy page');
+  tut.winListeners.storage.forEach(fn => fn({ key: 'rv.telemetry.choice' }));
+  assert.equal(t(tut).isActive(), true, 'the open page resumes');
+  assert.ok(names(tut).includes('page_view'));
+  const next = boot({ ...CFG, consent: 'notice' }, { local });
+  assert.equal(t(next).isActive(), true);
+  const newId = local.get('rv.telemetry.anon_id')!;
+  assert.match(newId, UUID);
+  assert.notEqual(newId, oldId, 'a new ID');
+  assert.equal(q(next)[0].anon_id, newId);
+  // turning off with a recording page elsewhere sends one withdraw with the new id
+  const pg3 = boot(undefined, { local, page: PAGE, configJson: PCFG });
+  await settle();
+  click(pg3.els['yd-button']);
+  assert.deepEqual(allEvents(pg3).map(e => [e.event, e.anon_id]), [['withdraw', newId]]);
+}
+
+// --- privacy page, GPC / DNT: nothing recorded, no button, nothing sent
+for (const sig of [{ gpc: true }, { dnt: true }]) {
+  const pg = boot(undefined, { ...sig, page: PAGE, configJson: PCFG });
+  await settle();
+  assert.match(pg.els['yd-status'].textContent, /nothing is recorded and no ID is stored/);
+  assert.equal(pg.els['yd-button'].hidden, true);
+  assert.equal(pg.els['yd-id'].hidden, true);
+  assert.equal(pg.fetches.length + pg.beacons.length, 0);
+  assert.equal(pg.local.size, 0);
+  // even calling the control API directly does nothing
+  pg.win.rvTelemetry.control.turnOn();
+  pg.win.rvTelemetry.control.turnOff();
+  assert.equal(pg.fetches.length + pg.beacons.length, 0);
+}
+
+// --- privacy page in a build without an endpoint: says so, no button
+for (const configJson of [null, { endpoint: '' }]) {
+  const pg = boot(undefined, { page: PAGE, configJson });
+  await settle();
+  assert.match(pg.els['yd-status'].textContent, /not enabled/);
+  assert.equal(pg.els['yd-button'].hidden, true);
+  assert.equal(pg.els['yd-id'].hidden, true);
+  assert.equal(pg.win.rvTelemetry, undefined, 'the client is not even loaded');
+  assert.equal(pg.fetches.length + pg.beacons.length, 0);
+}
+
+// --- privacy page, opt-in build: Turn on is an opt-in; other pages then record
+{
+  const local = new Map<string, string>();
+  const pg = boot(undefined, { local, page: PAGE, configJson: { ...PCFG, consent: 'opt-in' } });
+  await settle();
+  assert.equal(pg.els['yd-status'].textContent, 'Recording is off. Nothing is recorded.');
+  click(pg.els['yd-button']);
+  assert.equal(pg.els['yd-status'].textContent, 'Recording is on.');
+  const tut = boot({ ...CFG, consent: 'opt-in' }, { local });
+  assert.equal(t(tut).isActive(), true);
 }
 
 // --- Do Not Track / Global Privacy Control: nothing, in every mode
@@ -346,8 +479,6 @@ for (const sig of [{ dnt: true }, { gpc: true }]) {
     assert.deepEqual(names(env), []);
     assert.equal(env.body.children.length, 0, 'no banner');
     assert.equal(env.local.size, 0, 'nothing stored');
-    t(env).openPanel();
-    assert.match(env.body.children[0].text(), /records nothing and stores no ID/);
     assert.equal(env.fetches.length + env.beacons.length, 0);
   }
 }
@@ -373,11 +504,7 @@ for (const sig of [{ dnt: true }, { gpc: true }]) {
   const id = t(off).program('fn main() {}');
   assert.equal(id, createHash('sha256').update('fn main() {}').digest('hex'));
   assert.ok(!names(off).includes('program'));
-  t(off).openPanel();
-  assert.doesNotMatch(off.body.children[0].text(), /including the text/);
   const on = boot({ ...CFG, consent: 'notice', surface: 'playground', collectCode: true });
-  t(on).openPanel();
-  assert.match(on.body.children[0].text(), /including the text of the programs you run/);
   t(on).program('fn main() {}', { source_figure_id: 'fd7e25f9ee13a174' });
   t(on).program('fn main() {}');
   t(on).program('fn main() { }');
@@ -387,6 +514,14 @@ for (const sig of [{ dnt: true }, { gpc: true }]) {
   assert.equal(on.beacons.length, 0);
   assert.equal(progs[0].props.source, 'fn main() {}');
   assert.equal(progs[0].props.source_figure_id, 'fd7e25f9ee13a174');
+}
+
+// --- the opt-in bar's "what's recorded" names program text only with collectCode
+{
+  const off = boot({ ...CFG, consent: 'opt-in', surface: 'playground' });
+  assert.doesNotMatch(off.body.children[0].text(), /including the text/);
+  const on = boot({ ...CFG, consent: 'opt-in', surface: 'playground', collectCode: true });
+  assert.match(on.body.children[0].text(), /including the text of the programs you run/);
 }
 
 // --- batching: <= 100 events and < 60 000 UTF-8 bytes per ordinary request

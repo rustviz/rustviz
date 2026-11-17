@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite';
+import { defineConfig, loadEnv, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -41,9 +41,34 @@ const pluginVersion = pluginVersionMatch ? pluginVersionMatch[1] : 'unknown';
 //
 // `npm run dev` proxies API + asset paths to a locally-running
 // playground at :8080 so you can iterate without CORS plumbing.
+// The static privacy page (public/privacy/index.html) is not processed by
+// Vite, so it learns the collector from a small file written at build time
+// and only when the build has VITE_RV_TELEMETRY_ENDPOINT: without it the
+// file is absent and the page says logging is not enabled.
+function telemetryConfigFile(mode: string): Plugin {
+  const env = loadEnv(mode, __dirname, 'VITE_');
+  const endpoint = env.VITE_RV_TELEMETRY_ENDPOINT ?? '';
+  return {
+    name: 'rv-telemetry-config',
+    apply: 'build',
+    generateBundle() {
+      if (!endpoint) return;
+      this.emitFile({
+        type: 'asset',
+        fileName: 'privacy/telemetry-config.json',
+        source: JSON.stringify({
+          endpoint,
+          consent: env.VITE_RV_TELEMETRY_CONSENT === 'opt-in' ? 'opt-in' : 'notice',
+          rvVersion: pluginVersion,
+        }) + '\n',
+      });
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => ({
   base: '/',
-  plugins: [react()],
+  plugins: [react(), telemetryConfigFile(mode)],
   define: {
     __RUST_VERSION__: JSON.stringify(rustVersion),
     __PLUGIN_VERSION__: JSON.stringify(pluginVersion),

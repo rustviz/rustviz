@@ -94,33 +94,34 @@ collector is `playground/events/` in the repository):
 [preprocessor.rustviz]
 telemetry-endpoint = "https://events.example.org"   # unset (default): off
 telemetry-consent = "opt-in"     # default; or "notice": no banner, recording starts without a click
-telemetry-privacy-url = "https://example.org/privacy/"   # linked from the opt-in prompt and the "Your data" panel
+telemetry-privacy-url = "https://example.org/privacy/"   # linked from the opt-in prompt
 telemetry-surface = "book:example.org"   # default book:<host name>
-telemetry-study-text = "…"   # optional: who runs the study, a contact; shown in the opt-in prompt and the panel
+telemetry-study-text = "…"   # optional: who runs the study, a contact; shown in the opt-in prompt
 ```
 
-With an endpoint set, every chapter loads `rv-telemetry.js`: a "Your data"
-panel (shows the reader's random ID; turns logging off), and events such as figure views, tooltip hovers and pointer paths
-over a figure. Do Not Track and Global Privacy Control turn it off
+With an endpoint set, every chapter loads `rv-telemetry.js`, which records
+events such as figure views, tooltip hovers and pointer paths over a figure. Do Not Track and Global Privacy Control turn it off
 entirely. Figures get a `data-rv-figure-id`, and `src/examples/rv-figures.json`
 maps each figure id to its snippet, so the snippets themselves are never
 logged. Without `telemetry-endpoint` none of this is in the output.
 
 **Consent modes.** With `opt-in`, a slim prompt at the top of each chapter
-asks first, nothing is recorded before a yes, and a "Your data" line ends
-each page. With `notice` there is **no banner and nothing injected into the
+asks first, nothing is recorded before a yes, and a "Your data" link (to
+`<privacy-url>#your-data`) ends each page. With `notice` there is **no banner and nothing injected into the
 pages**: the book's own text is the notice. Put a paragraph in a page the
 reader sees first (the front page, say) that says the site records how it is
-used for research, links your privacy page, and links the panel with a
-`data-rv-your-data` attribute (or an `<a href="#rv-your-data">`), which opens
-"Your data" when clicked. Paste-able:
+used for research, links your privacy page, and links `<privacy-url>#your-data`. The off switch and the reader's random ID
+live there, in the "Your data" section of the privacy page (the RustViz
+playground's `/privacy/` page works for any site on the same origin as the
+playground, since they share browser storage; a book on another origin needs
+a privacy page of its own that turns recording off the same way). Paste-able:
 
 ```markdown
 This site records how it is used, for research on learning Rust: pages
 viewed, which parts of the diagrams you point at, and a random ID kept in
 your browser (no name, IP address or cookies). See
 [what is recorded and why](https://example.org/privacy/), or
-<a href="#rv-your-data">Your data</a> to see your ID and turn recording off.
+[Your data](https://example.org/privacy/#your-data) to see your ID and turn recording off.
 ```
 
 ### Keeping boilerplate out of the diagram

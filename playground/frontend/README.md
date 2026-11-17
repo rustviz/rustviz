@@ -34,6 +34,13 @@ is set (see `src/telemetry.ts` for it and the other `VITE_RV_TELEMETRY_*`
 knobs). Then the page loads `ex-assets/rv-telemetry.js` (a copy of
 `rustviz-lib/src/rv-telemetry.js`; keep them identical), shows no
 banner (the info pane's Privacy paragraph is the notice; only an
-opt-in build shows a prompt) and links `/privacy/` (`public/privacy/index.html`) and a "Your data"
-panel from the Privacy section of the info pane. Without it, none of that is
-loaded or linked.
+opt-in build shows a prompt) and links `/privacy/` (`public/privacy/index.html`)
+and its `#your-data` section from the Privacy section of the info pane. That
+section is the visitor's off switch (and shows their random ID): the page loads
+the client in control-only mode, which records nothing, using the endpoint in
+`privacy/telemetry-config.json`, which the build writes only when
+`VITE_RV_TELEMETRY_ENDPOINT` is set (no file: the page says logging is not
+enabled and shows no button). Turning off sends one `withdraw` event, clears the
+IDs and stops recording on every page of rustviz.github.io (the tutorial shares
+the origin and its storage; open pages hear it via the `storage` event). Without
+an endpoint, none of that is loaded or linked.

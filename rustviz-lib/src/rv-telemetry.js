@@ -15,32 +15,37 @@
 //   endpoint        collector origin, events go to `${endpoint}/v1/events`
 //   consent         'opt-in' (default: nothing is sent before the visitor
 //                   says yes; a bar asks) | 'notice' (no banner: the page's
-//                   own text and its "Your data" link say what is recorded;
-//                   recording starts without a click; "Turn off" in the
-//                   "Your data" panel stops it)
+//                   own text says what is recorded and links the privacy
+//                   page's "Your data" section; recording starts without a
+//                   click)
 //   collectCode     false (default) | true: send the text of programs run in
 //                   the playground, once per distinct program (`program`)
 //   surface         'tutorial' | 'playground' | 'book:<host>' (default
 //                   'book:' + location.hostname)
 //   rvVersion       RustViz version that rendered the figures
-//   privacyUrl      link shown in the opt-in bar and the "Your data" panel
+//   privacyUrl      the privacy page, linked from the opt-in bar; its "Your data"
+//                   section (privacyUrl + '#your-data') is where a visitor sees their
+//                   ID and turns recording off
 //   consentVersion  version string of the notice text (default below)
 //   study           false (default) | true: the opt-in asks for 18+ and
 //                   marks events tier 2 (research participant), which also
 //                   sends the `?cohort=` tag
 //   studyText       a sentence about the research study, shown in the opt-in bar
-//                   and the panel (always shown with `study`; the default
+//                   (always shown with `study`; the default
 //                   is an obvious placeholder for the maintainer / IRB)
-//   panelLink       'inline' (default; opt-in mode only: a small "Your data"
-//                   link at the end of the page's <main>. Notice mode adds
-//                   nothing: the page's own text links the panel with
-//                   data-rv-your-data or href="#rv-your-data") | 'none' (the page links to the panel
-//                   itself, e.g. the playground's info pane, via
-//                   rvTelemetry.openPanel())
+//   footLink        'inline' (default; opt-in mode only: a small "Your data" link
+//                   at the end of the page's <main>, to privacyUrl#your-data;
+//                   notice mode adds nothing) | 'none' (the page links it itself)
+//   controlOnly     false (default) | true: records nothing and draws nothing;
+//                   only rvTelemetry.control works. The privacy page uses it to
+//                   show the status and ID and to turn recording off or on.
 //   bannerSlot      opt-in mode only: CSS selector of an element to put the
 //                   consent bar in (default: the top of <main>, else of
 //                   <body>). The bar is in the page's flow, never on top of
 //                   the content. Notice mode shows no bar at all.
+//
+// A choice made on another page of the same site (the privacy page's Turn
+// off / Turn on) reaches open pages through the `storage` event.
 //
 // Do Not Track or Global Privacy Control turns everything off: no bar,
 // no ids, no events, whatever the config says.
@@ -83,7 +88,8 @@
         studyText: typeof userCfg.studyText === 'string' ? userCfg.studyText
             : '[Placeholder for the research-study sentence: study name, who runs it ' +
               '(PI) and a contact address. To be written by the maintainer / IRB.]',
-        panelLink: userCfg.panelLink === 'none' ? 'none' : 'inline',
+        footLink: userCfg.footLink === 'none' ? 'none' : 'inline',
+        controlOnly: userCfg.controlOnly === true,
         bannerSlot: typeof userCfg.bannerSlot === 'string' ? userCfg.bannerSlot : '',
     };
     var showStudy = cfg.study || typeof userCfg.studyText === 'string';
@@ -788,13 +794,13 @@
     }
 
     // ------------------------------------------------------------------
-    // Consent UI: opt-in bar and "Your data" panel
+    // Consent UI: opt-in bar and "Your data" link
     // ------------------------------------------------------------------
 
     // Colours follow the host page's theme: the playground's and mdBook's
     // own CSS variables (--bg, --fg, --bg-panel / --quote-bg, --border /
     // --quote-border, --link / --links), so a theme switch restyles the bar
-    // and panel too. Elsewhere, light or dark by prefers-color-scheme.
+    // too. Elsewhere, light or dark by prefers-color-scheme.
     var CSS =
         '.rv-tlm{--rvt-bg:#fff;--rvt-fg:#1d1d1f;--rvt-border:#8a8a8a;--rvt-link:#0b57d0;' +
         'font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;box-sizing:border-box;' +
@@ -811,23 +817,17 @@
         '.rv-tlm-bar .rv-tlm-actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center}' +
         '.rv-tlm-bar ul{margin:6px 0 2px;padding-left:20px}' +
         '.rv-tlm-bar.rv-tlm-boxed{border-width:1px;border-radius:6px;margin:0 0 1em}' +
-        '.rv-tlm-panel{position:fixed;right:12px;bottom:12px;z-index:2147483000;width:min(420px,calc(100vw - 24px));' +
-        'max-height:calc(100vh - 24px);overflow:auto;padding:16px;border-radius:8px;box-shadow:0 4px 18px rgba(0,0,0,.3)}' +
-        '.rv-tlm h2{font-size:16px;margin:0 0 8px}' +
-        '.rv-tlm p,.rv-tlm-panel ul{margin:0 0 8px}.rv-tlm-panel ul{padding-left:20px}' +
+                '.rv-tlm p{margin:0 0 8px}' +
         '.rv-tlm code{font-size:12px;word-break:break-all}' +
-        '.rv-tlm-row{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;align-items:center}' +
         '.rv-tlm button{font:inherit;padding:3px 12px;border-radius:5px;cursor:pointer;' +
         'border:1px solid var(--border-strong,var(--fg,var(--rvt-border)));' +
         'background:var(--bg,var(--rvt-bg));color:var(--fg,var(--rvt-fg))}' +
-        '.rv-tlm-panel button{padding:6px 14px;min-width:7em}' +
         '.rv-tlm button:hover{filter:brightness(.93)}' +
         // link-styled buttons look like the page's own links
         '.rv-tlm button.rv-tlm-plain,.rv-tlm-link{background:none;border:none;padding:0;min-width:0;' +
         'font:inherit;color:var(--link,var(--links,var(--rvt-link,#0b57d0)));text-decoration:inherit;cursor:pointer}' +
         '.rv-tlm button.rv-tlm-plain:hover,.rv-tlm-link:hover{text-decoration:underline;filter:none}' +
         '.rv-tlm button:focus-visible,.rv-tlm-link:focus-visible{outline:2px solid currentColor;outline-offset:2px}' +
-        '.rv-tlm-close{float:right;min-width:0!important;padding:2px 8px!important}' +
         '.rv-tlm-study{font-style:italic}' +
         '.rv-tlm-foot{font-size:.85em;opacity:.8;margin-top:2em}';
 
@@ -848,7 +848,7 @@
         (document.head || document.documentElement).appendChild(s);
     }
 
-    // What is recorded, in plain words. Used by the opt-in bar and the panel.
+    // What is recorded, in plain words. Used by the opt-in bar.
     function whatList() {
         var items = [
             'which pages you open, how long they are in front of you and how far you scroll;',
@@ -864,11 +864,12 @@
             'kept in this browser so visits can be linked. No name, e-mail, IP address or cookies.');
         return el('ul', {}, items.map(function (t) { return el('li', { text: t }); }));
     }
+    function yourDataUrl() { return cfg.privacyUrl.replace(/#.*$/, '') + '#your-data'; }
     function privacyLink(text) {
         return cfg.privacyUrl ? el('a', { href: cfg.privacyUrl, target: '_blank', rel: 'noopener', text: text }) : null;
     }
 
-    var banner = null, panel = null, foot = null, panelOpener = null;
+    var banner = null, foot = null;
 
     function closeBanner() { if (banner) { banner.remove(); banner = null; } }
 
@@ -929,78 +930,22 @@
         host.parent.insertBefore(banner, host.before);
     }
 
-    // A small "Your data" link at the end of the page's content, so the
-    // panel stays reachable after the bar is gone (pages that link it
-    // themselves set panelLink: 'none').
+    // A small "Your data" link at the end of the page's content (opt-in
+    // mode), so the privacy page's off switch stays reachable after the bar
+    // is gone. Pages that link it themselves set footLink: 'none'.
     function showFoot() {
         // Notice mode injects nothing: the page's own text is the notice
-        // and links to the panel with data-rv-your-data (see below).
-        if (cfg.consent === 'notice' || cfg.panelLink !== 'inline' || foot || !document.body) return;
+        // and links to privacyUrl#your-data.
+        if (cfg.consent === 'notice' || cfg.footLink !== 'inline' || foot || !document.body || !cfg.privacyUrl) return;
         ensureCss();
         var main = document.querySelector('main') || document.body;
         foot = el('p', { 'class': 'rv-tlm-foot' }, [
             'This site records usage for research. ',
-            el('button', { type: 'button', 'class': 'rv-tlm-link', 'aria-haspopup': 'dialog',
-                           text: 'Your data', onclick: function () { openPanel(); } }),
-            cfg.privacyUrl ? ' · ' : null,
+            el('a', { href: yourDataUrl(), target: '_blank', rel: 'noopener', text: 'Your data' }),
+            ' · ',
             privacyLink('Privacy')
         ]);
         main.appendChild(foot);
-    }
-
-    function closePanel() {
-        if (!panel) return;
-        panel.remove();
-        panel = null;
-        if (panelOpener && panelOpener.focus) panelOpener.focus();
-        panelOpener = null;
-    }
-    function openPanel() {
-        if (!document.body) return;
-        ensureCss();
-        var opener = document.activeElement;
-        closePanel();
-        panelOpener = opener;
-        emit('ui', { action: 'privacy_panel' });
-        var id = anonId(false);
-        var status;
-        if (blocked) status = 'Your browser asks sites not to track you (Global Privacy Control or Do Not Track), ' +
-            'so this site records nothing and stores no ID.';
-        else if (active) status = 'Recording is on.';
-        else status = 'Recording is off. Nothing is being recorded.';
-        var kids = [
-            el('button', { type: 'button', 'class': 'rv-tlm-close', 'aria-label': 'Close', text: '×',
-                           onclick: closePanel }),
-            el('h2', { id: 'rv-tlm-panel-title', text: 'Your data' }),
-            el('p', { text: status })
-        ];
-        if (!blocked) {
-            kids.push(el('p', { text: 'What is recorded while it is on:' }), whatList());
-            if (showStudy) kids.push(el('p', { 'class': 'rv-tlm-study', text: cfg.studyText }));
-            kids.push(el('p', {}, ['Your random ID: ', id ? el('code', { text: id }) : 'none (nothing stored)',
-                                   id ? '. Quote it if you ask us about your data.' : '']));
-        }
-        var link = privacyLink('Privacy details');
-        if (link) kids.push(el('p', {}, [link]));
-        var row = [];
-        if (!blocked && active) {
-            row.push(el('button', { type: 'button', text: 'Turn off', onclick: function () { withdraw(false); closePanel(); } }));
-            row.push(el('button', { type: 'button', text: 'Turn off and delete my data',
-                                    onclick: function () { withdraw(true); closePanel(); } }));
-        } else if (!blocked) {
-            row.push(el('button', { type: 'button', text: 'Turn on', onclick: function () {
-                closePanel();
-                if (cfg.consent === 'opt_in') { removeItem('localStorage', 'choice'); choice = null; showBanner(); }
-                else turnOnNotice();
-            } }));
-        }
-        row.push(el('button', { type: 'button', text: 'Close', onclick: closePanel }));
-        kids.push(el('div', { 'class': 'rv-tlm-row' }, row));
-        panel = el('div', { 'class': 'rv-tlm rv-tlm-panel', role: 'dialog', 'aria-modal': 'false',
-                            'aria-labelledby': 'rv-tlm-panel-title', tabindex: '-1' }, kids);
-        panel.addEventListener('keydown', function (e) { if (e.key === 'Escape') closePanel(); });
-        document.body.appendChild(panel);
-        panel.focus();
     }
 
     // ------------------------------------------------------------------
@@ -1044,27 +989,49 @@
         start();
         flush(false);
     }
-    // Turn logging off: one last `withdraw` event (it carries the ids so the
-    // data can be found and deleted), then forget the ids and stop.
-    function withdraw(deleteRequested) {
-        if (active) {
-            closeAllFigures(now());
-            emit('withdraw', { consent_version: cfg.consentVersion, delete_requested: !!deleteRequested });
-            flush(true);
-        }
+    // Stop recording in this page, quietly: drop what is queued, send nothing.
+    function stopLocal() {
         active = false;
         started = false;
         pageViewSent = false;
         queue.length = 0;
         retryOnce.length = 0;
+        closeBanner();
+    }
+    // Turn logging off (from the privacy page's "Your data" section): one
+    // last `withdraw` event (it carries the ids, so the data can be found
+    // and deleted), then forget the ids and stop.
+    function withdraw() {
+        // the control-only page records nothing itself: it sends this event
+        // when the stored choice says recording was on and an ID exists
+        if (cfg.controlOnly) active = initiallyOn(loadChoice());
+        if (active && anonId(false)) {
+            closeAllFigures(now());
+            emit('withdraw', { consent_version: cfg.consentVersion });
+            flush(true);
+        }
+        stopLocal();
+        active = false;
         removeItem('localStorage', 'anon_id');
         removeItem('localStorage', 'session');
         removeItem('sessionStorage', 'cohort');
         cohort = null;
         choice = { state: 'off', how: 'withdrawn', version: cfg.consentVersion };
         saveChoice(choice);
-        closeBanner();
-        showFoot();
+    }
+    // Turn logging on again (new ID, made when the next page records).
+    function turnOn() {
+        if (blocked) return;
+        if (cfg.controlOnly) {
+            choice = { state: 'on', how: cfg.consent === 'notice' ? 'notice' : 'opt_in',
+                       version: cfg.consentVersion };
+            saveChoice(choice);
+        } else if (cfg.consent === 'opt_in') {
+            optIn(false);
+        } else turnOnNotice();
+    }
+    function status() {
+        return blocked ? 'blocked' : (initiallyOn(loadChoice()) ? 'on' : 'off');
     }
 
     // ------------------------------------------------------------------
@@ -1090,29 +1057,31 @@
         figureId: figureId,
         scan: function () { if (active) scan(); },
         flush: function () { flush(false); },
-        openPanel: openPanel,
+        control: { status: status, id: function () { return blocked ? null : anonId(false); },
+                   turnOff: withdraw, turnOn: turnOn },
         pageLoadId: function () { return active ? pageLoadId : null; },
         collectsCode: function () { return active && cfg.collectCode; }
     };
     if (window.__RV_TELEMETRY_TEST__) {
         window.rvTelemetry._test = {
             queue: queue, sha256: sha256, batches: batches, cfg: cfg, optIn: optIn, decline: decline,
-            turnOnNotice: turnOnNotice, withdraw: withdraw, pageHide: pageHide, flush: flush
+            turnOnNotice: turnOnNotice, withdraw: withdraw, turnOn: turnOn, pageHide: pageHide, flush: flush
         };
     }
 
-    // Authors can link the panel from their own text: any element with
-    // `data-rv-your-data`, or an <a href="#rv-your-data">, opens it. This
-    // works even when a privacy signal blocks logging (the panel then says
-    // nothing is recorded).
-    document.addEventListener('click', function (e) {
-        var t = e.target && e.target.closest ? e.target.closest('[data-rv-your-data],a[href="#rv-your-data"]') : null;
-        if (!t) return;
-        e.preventDefault();
-        openPanel();
-    });
+    // GPC / DNT: no bar, no listeners, nothing sent. Control-only (the
+    // privacy page): the control API above is all there is.
+    if (blocked || cfg.controlOnly) return;
 
-    if (blocked) return;   // GPC / DNT: no bar, no listeners, nothing sent
+    // A choice made on another page of this site (the privacy page's Turn
+    // off / Turn on) applies here at once.
+    window.addEventListener('storage', function (e) {
+        if (e.key !== null && e.key !== KEY + 'choice') return;
+        choice = loadChoice();
+        var on = initiallyOn(choice);
+        if (active && !on) stopLocal();
+        else if (!active && on) { closeBanner(); active = true; start(); }
+    });
 
     function boot() {
         var notice = cfg.consent === 'notice';

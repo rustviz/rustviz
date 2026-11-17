@@ -5,13 +5,17 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RustViz usage logging and privacy</title>
 <!--
-  Static page, linked from the playground's info panel and "Your data"
-  panel, and (via telemetry-privacy-url) from the tutorial. Usage logging
-  is off unless a build sets a telemetry endpoint; this page describes what
-  happens when it is on.
+  Static page, linked from the playground's info panel and (via
+  telemetry-privacy-url) from the tutorial, which share this origin
+  (https://rustviz.github.io), so they share the browser storage this page's
+  "Your data" section reads and changes. Usage logging is off unless a build
+  sets a telemetry endpoint; this page describes what happens when it is on.
+  The build writes telemetry-config.json next to this file (endpoint and
+  consent mode) only when it has an endpoint; without it, "Your data" says
+  logging is not enabled and shows no button.
 
   MAINTAINER: everything in a .todo box is a placeholder to replace (study
-  wording, contacts, retention, IRB). Keep the "What is recorded" list in
+  wording, retention, IRB). Keep the "What is recorded" list in
   sync with rv-telemetry.js (whatList) and the event schema.
 -->
 <style>
@@ -59,33 +63,82 @@
 
 <h2>Turning it off</h2>
 <ul>
-  <li>Use <strong>Your data</strong> (in the playground's info pane, or the <strong>Your data</strong> link in the tutorial's front-page text) and choose <strong>Turn off</strong>. Recording stops, and the random ID is deleted from your browser. <strong>Turn off and delete my data</strong> also asks us to delete what was recorded with that ID.</li>
+  <li>Use the <strong>Turn off</strong> button in <a href="#your-data">Your data</a> below. It applies to the whole site (the playground and the tutorial), in this browser. Recording stops, the random ID is deleted from your browser, and we receive one last message saying that logging was turned off (with the ID that is being deleted). Pages you already have open stop recording too. <strong>Turn on</strong> starts it again, with a new ID.</li>
   <li>If your browser sends <a href="https://globalprivacycontrol.org/">Global Privacy Control</a> or Do Not Track, nothing is recorded at all.</li>
   <li>Clearing this site's data in your browser also removes the ID.</li>
 </ul>
 
-<h2>Your random ID</h2>
-<p id="your-id">Your browser has no RustViz ID stored.</p>
-<p>Quote it if you write to us about your data.</p>
+<h2 id="your-data">Your data</h2>
+<p id="yd-status">This section needs JavaScript to show whether recording is on.</p>
+<p id="yd-id" hidden></p>
+<p><button type="button" id="yd-button" hidden></button></p>
+<p>To have what was recorded with your ID deleted, e-mail your ID to <a href="mailto:comar@umich.edu">comar@umich.edu</a>. We cannot find your data without it, and we cannot tell who you are from it.</p>
 
 <h2>How the data is kept and used</h2>
 <div class="todo">[Placeholder: where the data is stored (Google BigQuery, project <code>rustviz-playground</code>), who can access it (named researchers), how long it is kept, how deletion requests are handled and how fast, and what is published (aggregate results and de-identified excerpts only). To be written by the maintainer / IRB.]</div>
 
-<h2>Contact</h2>
-<div class="todo">[Placeholder: contact name and e-mail address for questions and deletion requests.]</div>
+<h2 id="contact">Contact</h2>
+<p>Questions, and requests to delete data: <a href="mailto:comar@umich.edu">comar@umich.edu</a>.</p>
 </main>
 <script>
-  // Show the ID rv-telemetry.js keeps (key rv.telemetry.anon_id), if any.
-  try {
-    var id = localStorage.getItem('rv.telemetry.anon_id');
-    if (id && /^[0-9a-f-]{36}$/.test(id)) {
-      var p = document.getElementById('your-id');
-      p.textContent = 'Your browser’s RustViz ID: ';
-      var c = document.createElement('code');
-      c.textContent = id;
-      p.appendChild(c);
+  // "Your data": status, random ID and the off/on switch. It loads
+  // rv-telemetry.js in control-only mode (records nothing, not even a page
+  // view of this page; the one event it can send is `withdraw` when you
+  // turn recording off). The endpoint comes from telemetry-config.json,
+  // which the playground build writes only when it has an endpoint.
+  (function () {
+    var statusEl = document.getElementById('yd-status');
+    var idEl = document.getElementById('yd-id');
+    var btn = document.getElementById('yd-button');
+    function plain(text) {
+      statusEl.textContent = text;
+      idEl.hidden = true;
+      btn.hidden = true;
     }
-  } catch (e) { /* storage blocked: keep the default text */ }
+    function render() {
+      var c = window.rvTelemetry && window.rvTelemetry.control;
+      if (!c) { plain('Usage logging is not enabled on this site, so nothing is recorded.'); return; }
+      var st = c.status();
+      if (st === 'blocked') {
+        plain('Your browser sends Global Privacy Control or Do Not Track, so nothing is recorded and no ID is stored.');
+        return;
+      }
+      var id = c.id();
+      statusEl.textContent = st === 'on' ? 'Recording is on.' : 'Recording is off. Nothing is recorded.';
+      idEl.textContent = 'Your browser’s RustViz ID: ';
+      if (id) {
+        var code = document.createElement('code');
+        code.textContent = id;
+        idEl.appendChild(code);
+      } else {
+        idEl.appendChild(document.createTextNode(st === 'on'
+          ? 'none yet (a random one is made when you next open a page).' : 'none stored.'));
+      }
+      idEl.hidden = false;
+      btn.textContent = st === 'on' ? 'Turn off' : 'Turn on';
+      btn.hidden = false;
+    }
+    btn.addEventListener('click', function () {
+      var c = window.rvTelemetry && window.rvTelemetry.control;
+      if (!c) return;
+      if (c.status() === 'on') c.turnOff(); else c.turnOn();
+      render();
+    });
+    fetch('telemetry-config.json', { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .catch(function () { return null; })
+      .then(function (cfg) {
+        if (!cfg || typeof cfg.endpoint !== 'string' || !cfg.endpoint) { render(); return; }
+        window.RV_TELEMETRY_CONFIG = {
+          endpoint: cfg.endpoint, consent: cfg.consent, surface: 'playground',
+          rvVersion: cfg.rvVersion, controlOnly: true
+        };
+        var s = document.createElement('script');
+        s.src = '/ex-assets/rv-telemetry.js';
+        s.onload = s.onerror = render;
+        document.head.appendChild(s);
+      });
+  })();
 </script>
 </body>
 </html>

@@ -738,15 +738,3 @@ a.titlebar-overflow-item:hover {
   .resize-handle-horizontal { height: 12px; }
   .resize-handle-vertical { width: 12px; }
 }
-
-/* "Your data" in the Privacy section (only in builds with usage logging):
-   a button that looks like the links around it. */
-.link-button {
-  background: none;
-  border: none;
-  padding: 0;
-  font: inherit;
-  color: var(--link);
-  cursor: pointer;
-}
-.link-button:hover { text-decoration: underline; }

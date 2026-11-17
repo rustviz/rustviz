@@ -10,6 +10,9 @@
 //   VITE_RV_TELEMETRY_CONSENT       'notice' (default here) | 'opt-in'
 //   VITE_RV_TELEMETRY_COLLECT_CODE  'true' (default here) | 'false'
 //   VITE_RV_TELEMETRY_PRIVACY_URL   default '/privacy/'
+// The same build also writes privacy/telemetry-config.json (endpoint and
+// consent mode; see vite.config.ts), which the privacy page's "Your data"
+// section reads to turn recording off or on.
 // The defaults are the maintainer's choice for the public playground
 // (2026-11-17); rv-telemetry.js's own defaults are the safest ones
 // (opt-in, no code text).
@@ -24,7 +27,6 @@ type RvTelemetry = {
   figureId(source: string): string;
   scan(): void;
   flush(): void;
-  openPanel(): void;
   pageLoadId(): string | null;
 };
 
@@ -63,7 +65,7 @@ export function loadTelemetry(): Promise<void> {
     surface: 'playground',
     rvVersion: __PLUGIN_VERSION__,
     privacyUrl: env.VITE_RV_TELEMETRY_PRIVACY_URL ?? '/privacy/',
-    panelLink: 'none',
+    footLink: 'none',
     ...(TELEMETRY_OPT_IN ? { bannerSlot: '#rv-telemetry-slot' } : {}),
   };
   return new Promise(resolve => {
@@ -79,10 +81,6 @@ export function loadTelemetry(): Promise<void> {
 function tlm(): RvTelemetry | null {
   const t = TELEMETRY_ENABLED ? window.rvTelemetry : undefined;
   return t && t.isActive() ? t : null;
-}
-
-export function openDataPanel(): void {
-  window.rvTelemetry?.openPanel();
 }
 
 /** figure_id of a program as rendered by this playground build. */

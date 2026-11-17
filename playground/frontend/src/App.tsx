@@ -35,7 +35,6 @@ import {
   figureIdFor,
   figuresChanged,
   noteEdit,
-  openDataPanel,
   runFinished,
   runStarted,
   setSourceCode,
@@ -503,10 +502,8 @@ const Description: React.FC = () => (
         <p className="privacy-footer">
           This playground records how it is used, for research on learning
           Rust; see <a href="/privacy/">what is recorded and why</a>.{' '}
-          <button type="button" className="link-button" onClick={openDataPanel}>
-            Your data
-          </button>{' '}
-          shows your random ID and lets you turn recording off.
+          <a href="/privacy/#your-data">Your data</a> shows your random ID
+          and lets you turn recording off.
         </p>
         {/* MAINTAINER placeholder: replace with the study's wording (name,
             PI, contact) once the IRB has decided; keep it in sync with

@@ -28,13 +28,14 @@ pub struct Cfg {
 
 	/// `"opt-in"` (default): nothing is recorded until the reader agrees.
 	/// `"notice"`: no banner; the book's own text says what is recorded
-	/// (link "Your data" with `data-rv-your-data`), and recording starts
-	/// without a click; the reader can turn it off there.
+	/// (link `<privacy-url>#your-data`), and recording starts without a click;
+	/// the reader can turn it off in the privacy page's "Your data" section.
 	#[serde(alias = "telemetry-consent")]
 	#[serde(default = "Cfg::default_telemetry_consent")]
 	pub telemetry_consent: String,
 
-	/// Privacy page linked from the opt-in prompt and the "Your data" panel.
+	/// Privacy page, linked from the opt-in prompt. Its "Your data" section
+	/// (`<privacy-url>#your-data`) shows the reader's ID and turns logging off.
 	#[serde(alias = "telemetry-privacy-url")]
 	#[serde(default)]
 	pub telemetry_privacy_url: String,
@@ -46,7 +47,7 @@ pub struct Cfg {
 	pub telemetry_surface: String,
 
 	/// A sentence about the research study (who runs it, a contact) shown
-	/// in the opt-in prompt and the "Your data" panel. Empty: none shown.
+	/// in the opt-in prompt. Empty: none shown.
 	#[serde(alias = "telemetry-study-text")]
 	#[serde(default)]
 	pub telemetry_study_text: String,
