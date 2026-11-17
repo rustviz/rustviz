@@ -2,6 +2,7 @@ extern crate handlebars;
 use crate::svg_generator::data::{is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
 use crate::svg_generator::hover_messages::{self, styled_name_html};
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
+use crate::svg_generator::svg_frontend::rv_attrs::{self, Rv};
 use handlebars::Handlebars;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use serde::Serialize;
@@ -34,6 +35,11 @@ struct PendingDot {
     event: bool,
     /// A function-call icon (`f`) is drawn here.
     call: bool,
+    /// The column's name, the row the dot is on and the events drawn on
+    /// it, for its `data-rv-*` attributes (`rv_attrs`).
+    var: String,
+    row: usize,
+    events: Vec<&'static str>,
 }
 
 /// Collects the dots of every column, merging events that share a
@@ -51,11 +57,11 @@ struct DotLayer {
     /// Text of a split or join dot that isn't drawn because no line of
     /// its column reaches it (#702), per column: it goes on the next
     /// event dot drawn on that column, before that dot's own text.
-    carry: HashMap<u64, Vec<String>>,
+    carry: HashMap<u64, Vec<(String, &'static str)>>,
 }
 
 impl DotLayer {
-    fn entry(&mut self, hash: u64, x: i64, y: i64, column: &TimelineColumnData) -> &mut PendingDot {
+    fn entry(&mut self, hash: u64, x: i64, y: i64, row: usize, column: &TimelineColumnData) -> &mut PendingDot {
         let (owner_key, is_member) = if column.is_struct_group {
             (column.owner as i64, column.is_member)
         } else {
@@ -66,23 +72,27 @@ impl DotLayer {
             dots.push(PendingDot {
                 hash, x, y, owner_key, is_member,
                 lines: Vec::new(), drop: false, event: false, call: false,
+                var: column.name.clone(), row, events: Vec::new(),
             });
             dots.len() - 1
         });
         &mut self.dots[i]
     }
 
-    /// An event dot (`drop`: one with the drop triangle).
+    /// An event dot (`drop`: one with the drop triangle) for the event
+    /// `ev` (`rv_attrs::event_name`) on row `row`.
     fn add_event(&mut self, hash: u64, x: i64, y: i64, column: &TimelineColumnData,
-                 title: String, drop: bool, lend_id: Option<usize>) {
+                 title: String, drop: bool, lend_id: Option<usize>, ev: &'static str, row: usize) {
         self.positions.insert((x, y));
         let carried = self.carry.remove(&hash).unwrap_or_default();
-        let dot = self.entry(hash, x, y, column);
+        let dot = self.entry(hash, x, y, row, column);
         dot.event = true;
         dot.drop |= drop;
         // Carried text happened before anything recorded on this dot.
-        dot.lines.splice(0..0, carried.into_iter().map(|t| (None, t)));
+        dot.events.splice(0..0, carried.iter().map(|(_, e)| *e));
+        dot.lines.splice(0..0, carried.into_iter().map(|(t, _)| (None, t)));
         dot.lines.push((lend_id, title));
+        dot.events.push(ev);
     }
 
     /// Rewrites the text the event dot of column `hash` at (`x`, `y`)
@@ -97,13 +107,13 @@ impl DotLayer {
 
     /// Text waiting for the next event dot of column `hash` (see
     /// `carry`), taken off it.
-    fn take_carry(&mut self, hash: u64) -> Vec<String> {
+    fn take_carry(&mut self, hash: u64) -> Vec<(String, &'static str)> {
         self.carry.remove(&hash).unwrap_or_default()
     }
 
     /// Makes `texts` the text waiting for the next event dot of column
     /// `hash`, replacing what was waiting.
-    fn set_carry(&mut self, hash: u64, texts: Vec<String>) {
+    fn set_carry(&mut self, hash: u64, texts: Vec<(String, &'static str)>) {
         if texts.is_empty() {
             self.carry.remove(&hash);
         } else {
@@ -116,9 +126,10 @@ impl DotLayer {
     /// event recorded, if that is drawn here: borrowed by f, f reads
     /// from s, no longer borrowed.
     fn add_call(&mut self, hash: u64, x: i64, y: i64, column: &TimelineColumnData,
-                title: String, id: usize) {
-        let dot = self.entry(hash, x, y, column);
+                title: String, id: usize, ev: &'static str, row: usize) {
+        let dot = self.entry(hash, x, y, row, column);
         dot.call = true;
+        dot.events.push(ev);
         let at = dot.lines.iter()
             .position(|(lend, _)| *lend == Some(id))
             .map_or(dot.lines.len(), |i| i + 1);
@@ -193,12 +204,22 @@ fn merged_dot_title(lines: &[(Option<usize>, String)]) -> String {
         .join("&lt;br&gt;")
 }
 
+/// Template data plus the `data-rv-*` attributes (`{{rv}}`).
+#[derive(Serialize)]
+struct WithRv<'a, T: Serialize> {
+    #[serde(flatten)]
+    data: &'a T,
+    rv: String,
+}
+
 fn render_pending_dot(dot: &PendingDot, registry: &Handlebars) -> String {
     let title = merged_dot_title(&dot.lines);
     let (cx, cy) = (dot.x, dot.y);
+    let kind = if dot.event { rv_attrs::DOT } else { rv_attrs::CALL };
+    let rv = Rv::new(kind).events(&dot.events).var(&dot.var).row(dot.row).drop(dot.drop).attrs();
     if !dot.event {
         let data = FunctionDotData { hash: dot.hash, x: cx, y: cy, title };
-        return registry.render("function_dot_template", &data).unwrap();
+        return registry.render("function_dot_template", &WithRv { data: &data, rv }).unwrap();
     }
     if !dot.call {
         if dot.drop {
@@ -208,10 +229,10 @@ fn render_pending_dot(dot: &PendingDot, registry: &Handlebars) -> String {
                 p2x: cx + 3, p2y: cy - 1,
                 p3x: cx,     p3y: cy + 3,
             };
-            return registry.render("drop_dot_template", &data).unwrap();
+            return registry.render("drop_dot_template", &WithRv { data: &data, rv }).unwrap();
         }
         let data = EventDotData { hash: dot.hash, dot_x: cx, dot_y: cy, title };
-        return registry.render("dot_template", &data).unwrap();
+        return registry.render("dot_template", &WithRv { data: &data, rv }).unwrap();
     }
     // An event dot with a call icon on it: one hover target for both.
     // The `f` glyph covers the dot, so a drop on this dot can't use the
@@ -227,12 +248,12 @@ fn render_pending_dot(dot: &PendingDot, registry: &Handlebars) -> String {
         String::new()
     };
     format!(
-        "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\">\n\
+        "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\"{rv}>\n\
          \x20           <circle cx=\"{cx}\" cy=\"{cy}\" r=\"5\" data-hash=\"{hash}\"/>\n\
          {triangle}\
          \x20           <use xlink:href=\"#functionDot\" data-hash=\"{hash}\" x=\"{cx}\" y=\"{cy}\"/>\n\
          \x20       </g>\n",
-        title = title, cx = cx, cy = cy, hash = dot.hash, triangle = triangle,
+        title = title, cx = cx, cy = cy, hash = dot.hash, triangle = triangle, rv = rv,
     )
 }
 
@@ -263,7 +284,8 @@ struct ResourceAccessPointLabelData {
     y_val: i64,
     hash: String,
     name: String,
-    title: String
+    title: String,
+    rv: String,
 }
 
 #[derive(Serialize)]
@@ -310,7 +332,8 @@ struct ArrowData {
     // marker-end approach (markers live in a separate <defs> scope
     // and don't inherit hover events from the referencing element).
     head_points: String,
-    title: String
+    title: String,
+    rv: String,
 }
 
 #[derive(Serialize)]
@@ -318,7 +341,8 @@ struct FunctionLogoData {
     hash: u64,
     x: i64,
     y: i64,
-    title: String
+    title: String,
+    rv: String,
 }
 
 #[derive(Serialize)]
@@ -347,6 +371,7 @@ struct VerticalLineData {
     /// similar to dash an inactive (Gray-state) branch column so
     /// readers can tell which lines a given branch is "passive" on.
     dasharray: String,
+    rv: String,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -367,6 +392,7 @@ struct HollowLineData {
     /// `compute_hollow_line_data` so a Gray-state hollow segment
     /// renders dashed.
     dasharray: String,
+    rv: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -380,7 +406,8 @@ struct RefLineData {
     dx: i64,
     dy: i64,
     v: i64,
-    title: String
+    title: String,
+    rv: String,
 }
 
 #[derive(Serialize)]
@@ -492,9 +519,9 @@ fn prepare_registry(registry: &mut Handlebars) {
              \t</g>\n    ";
     
     let label_template =
-        "        <text x=\"{{x_val}}\" y=\"{{y_val}}\" style=\"text-anchor:middle\" data-hash=\"{{hash}}\" class=\"label tooltip-trigger\" data-tooltip-text=\"{{title}}\">{{name}}</text>\n";
+        "        <text x=\"{{x_val}}\" y=\"{{y_val}}\" style=\"text-anchor:middle\" data-hash=\"{{hash}}\" class=\"label tooltip-trigger\" data-tooltip-text=\"{{title}}\"{{rv}}>{{name}}</text>\n";
     let dot_template =
-        "        <circle cx=\"{{dot_x}}\" cy=\"{{dot_y}}\" r=\"5\" data-hash=\"{{hash}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n";
+        "        <circle cx=\"{{dot_x}}\" cy=\"{{dot_y}}\" r=\"5\" data-hash=\"{{hash}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"{{rv}}/>\n";
     // Used for Owner end-of-scope dots when the owner is still
     // holding the resource at that point — i.e. the resource is
     // dropped here. The visual is a normal dot with a small white
@@ -504,11 +531,11 @@ fn prepare_registry(registry: &mut Handlebars) {
     // regular dot so existing UI behavior (highlighting on hash
     // hover, tooltip text) is unchanged.
     let drop_dot_template =
-        "        <g data-hash=\"{{hash}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\">\n            <circle cx=\"{{dot_x}}\" cy=\"{{dot_y}}\" r=\"5\"/>\n            <polygon points=\"{{p1x}},{{p1y}} {{p2x}},{{p2y}} {{p3x}},{{p3y}}\" style=\"fill: var(--rv-drop-notch); stroke: none; pointer-events: none;\"/>\n        </g>\n";
+        "        <g data-hash=\"{{hash}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"{{rv}}>\n            <circle cx=\"{{dot_x}}\" cy=\"{{dot_y}}\" r=\"5\"/>\n            <polygon points=\"{{p1x}},{{p1y}} {{p2x}},{{p2y}} {{p3x}},{{p3y}}\" style=\"fill: var(--rv-drop-notch); stroke: none; pointer-events: none;\"/>\n        </g>\n";
     let function_dot_template =    
-        "        <use xlink:href=\"#functionDot\" data-hash=\"{{hash}}\" x=\"{{x}}\" y=\"{{y}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"/>\n";
+        "        <use xlink:href=\"#functionDot\" data-hash=\"{{hash}}\" x=\"{{x}}\" y=\"{{y}}\" class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"{{rv}}/>\n";
     let function_logo_template =
-        "        <text x=\"{{x}}\" y=\"{{y}}\" data-hash=\"{{hash}}\" class=\"functionLogo tooltip-trigger fn-trigger\" data-tooltip-text=\"{{title}}\">f</text>\n";
+        "        <text x=\"{{x}}\" y=\"{{y}}\" data-hash=\"{{hash}}\" class=\"functionLogo tooltip-trigger fn-trigger\" data-tooltip-text=\"{{title}}\"{{rv}}>f</text>\n";
     // Arrow = shaft (polyline) + head (polygon) wrapped in a single
     // <g class="tooltip-trigger"> so the pair is treated as one
     // hover target: hovering either child triggers `:hover` on the
@@ -522,9 +549,9 @@ fn prepare_registry(registry: &mut Handlebars) {
     // markers live in <defs> scope and don't receive hover events
     // from the polylines that reference them.
     let arrow_template =
-        "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\">\n            <polyline class=\"arrow-shaft\" stroke-width=\"5px\" points=\"{{coordinates_hbs}}\" style=\"fill: none;\"/>\n            <polygon points=\"{{head_points}}\" class=\"arrow-head\"/>\n        </g>\n";
+        "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"{{rv}}>\n            <polyline class=\"arrow-shaft\" stroke-width=\"5px\" points=\"{{coordinates_hbs}}\" style=\"fill: none;\"/>\n            <polygon points=\"{{head_points}}\" class=\"arrow-head\"/>\n        </g>\n";
     let vertical_line_template =
-        "        <line data-hash=\"{{hash}}\" class=\"{{line_class}} tooltip-trigger\" x1=\"{{x1}}\" x2=\"{{x2}}\" y1=\"{{y1}}\" y2=\"{{y2}}\" data-tooltip-text=\"{{title}}\" style=\"opacity: {{opacity}}; stroke-dasharray: {{dasharray}};\"/>\n";
+        "        <line data-hash=\"{{hash}}\" class=\"{{line_class}} tooltip-trigger\" x1=\"{{x1}}\" x2=\"{{x2}}\" y1=\"{{y1}}\" y2=\"{{y2}}\" data-tooltip-text=\"{{title}}\"{{rv}} style=\"opacity: {{opacity}}; stroke-dasharray: {{dasharray}};\"/>\n";
     let hollow_line_template =
         "        <path data-hash=\"{{hash}}\" class=\"hollow tooltip-trigger\" style=\"fill:transparent;\" d=\"M {{x1}},{{y1}} V {{y2}} h 3.5 V {{y1}} h -3.5\" data-tooltip-text=\"{{title}}\"/>\n";
     // Hollow column rendering: two parallel `<line>` elements,
@@ -544,15 +571,15 @@ fn prepare_registry(registry: &mut Handlebars) {
     // wrapping `<g>`'s tooltip + glow. Without it, the cursor had
     // to land on one of the 1.5px line strokes to highlight.
     // (Same hover-capture pattern as branch strips in render_branch_run.)
-    let new_hollow_line_template = "<g class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\">\n            <line data-hash=\"{{hash}}\" class=\"hollow\" x1=\"{{x1}}\" y1=\"{{y1}}\" x2=\"{{x2}}\" y2=\"{{y2}}\" style=\"stroke-opacity: {{opacity}}; stroke-dasharray: {{dasharray}};\"/>\n            <line data-hash=\"{{hash}}\" class=\"hollow\" x1=\"{{x4}}\" y1=\"{{y4}}\" x2=\"{{x3}}\" y2=\"{{y3}}\" style=\"stroke-opacity: {{opacity}}; stroke-dasharray: {{dasharray}};\"/>\n            <polygon data-hash=\"{{hash}}\" points=\"{{x1}},{{y1}} {{x2}},{{y2}} {{x3}},{{y3}} {{x4}},{{y4}}\" style=\"fill:transparent; stroke:none; pointer-events:fill;\"/>\n        </g>\n";
+    let new_hollow_line_template = "<g class=\"tooltip-trigger\" data-tooltip-text=\"{{title}}\"{{rv}}>\n            <line data-hash=\"{{hash}}\" class=\"hollow\" x1=\"{{x1}}\" y1=\"{{y1}}\" x2=\"{{x2}}\" y2=\"{{y2}}\" style=\"stroke-opacity: {{opacity}}; stroke-dasharray: {{dasharray}};\"/>\n            <line data-hash=\"{{hash}}\" class=\"hollow\" x1=\"{{x4}}\" y1=\"{{y4}}\" x2=\"{{x3}}\" y2=\"{{y3}}\" style=\"stroke-opacity: {{opacity}}; stroke-dasharray: {{dasharray}};\"/>\n            <polygon data-hash=\"{{hash}}\" points=\"{{x1}},{{y1}} {{x2}},{{y2}} {{x3}},{{y3}} {{x4}},{{y4}}\" style=\"fill:transparent; stroke:none; pointer-events:fill;\"/>\n        </g>\n";
     // Borrow-region trapezoids — visible as outlines (fill is
     // transparent), but `pointer-events:all` makes the fill area
     // hit-test too so hovering anywhere inside the trapezoid fires
     // the tooltip + glow, not just on the 2px outline strokes.
     let solid_ref_line_template =
-        "        <path data-hash=\"{{hash}}\" class=\"mutref {{line_class}} tooltip-trigger\" style=\"fill:transparent; stroke-width: 2px !important; pointer-events: all;\" d=\"M {{x1}} {{y1}} l {{dx}} {{dy}} v {{v}} l -{{dx}} {{dy}}\" data-tooltip-text=\"{{title}}\"/>\n";
+        "        <path data-hash=\"{{hash}}\" class=\"mutref {{line_class}} tooltip-trigger\" style=\"fill:transparent; stroke-width: 2px !important; pointer-events: all;\" d=\"M {{x1}} {{y1}} l {{dx}} {{dy}} v {{v}} l -{{dx}} {{dy}}\" data-tooltip-text=\"{{title}}\"{{rv}}/>\n";
     let hollow_ref_line_template =
-        "        <path data-hash=\"{{hash}}\" class=\"staticref tooltip-trigger\" style=\"fill: transparent; pointer-events: all;\" stroke-width=\"2px\" stroke-dasharray=\"3\" d=\"M {{x1}} {{y1}} l {{dx}} {{dy}} v {{v}} l -{{dx}} {{dy}}\" data-tooltip-text=\"{{title}}\"/>\n";
+        "        <path data-hash=\"{{hash}}\" class=\"staticref tooltip-trigger\" style=\"fill: transparent; pointer-events: all;\" stroke-width=\"2px\" stroke-dasharray=\"3\" d=\"M {{x1}} {{y1}} l {{dx}} {{dy}} v {{v}} l -{{dx}} {{dy}}\" data-tooltip-text=\"{{title}}\"{{rv}}/>\n";
     let box_template =
         "        <rect id=\"{{name}}\" x=\"{{x}}\" y=\"{{y}}\" rx=\"20\" ry=\"20\" width=\"{{w}}\" height=\"{{h}}\" style=\"fill:var(--rv-struct-fill);stroke:var(--rv-struct-stroke);stroke-width:3;opacity:0.1\" pointer-events=\"none\" />\n";
 
@@ -954,6 +981,7 @@ fn render_labels_string(
             hash: hash.to_string(),
             name: column_data.name.clone(),
             title: column_data.title.clone(),
+            rv: Rv::new(rv_attrs::HEADER).var(&column_data.name).attrs(),
         };
 
         if column_data.is_ref {
@@ -981,8 +1009,10 @@ fn append_dot(
     timeline_data: &TimelineColumnData,
     dots: &mut DotLayer,
     lend_id: Option<usize>,
+    ev: &'static str,
+    row: usize,
 ) {
-    dots.add_event(dot_data.hash, dot_data.dot_x, dot_data.dot_y, timeline_data, dot_data.title, false, lend_id);
+    dots.add_event(dot_data.hash, dot_data.dot_x, dot_data.dot_y, timeline_data, dot_data.title, false, lend_id, ev, row);
 }
 
 /// The split dot, the arm lines and the join dot a conditional draws on one
@@ -1043,7 +1073,7 @@ fn render_branch_dots(
         if !split_drawn {
             arm_carry = dots.take_carry(*hash);
             if !moved_at_event {
-                arm_carry.push(event.print_message_with_name(& mut is.real_name()).trim_end().to_owned());
+                arm_carry.push((event.print_message_with_name(& mut is.real_name()).trim_end().to_owned(), rv_attrs::event_name(event)));
             }
         }
         if split_drawn {
@@ -1059,7 +1089,7 @@ fn render_branch_dots(
                 },
                 title: event.print_message_with_name(& mut is.real_name())
             };
-            append_dot(b_data, timeline_data, dots, None);
+            append_dot(b_data, timeline_data, dots, None, rv_attrs::event_name(event), *line_number);
         }
 
         // Each branch column gets its real events rendered.
@@ -1075,7 +1105,7 @@ fn render_branch_dots(
         // Text an arm that reaches the join leaves waiting goes on
         // the join dot or past it; one an arm that returns or
         // panics leaves can't (that arm never gets there).
-        let mut leftover: Vec<String> = Vec::new();
+        let mut leftover: Vec<(String, &'static str)> = Vec::new();
         for branch in branch_history.iter() {
             dots.set_carry(*hash, arm_carry.clone());
             // Whether the value is still owned when it goes out
@@ -1090,7 +1120,7 @@ fn render_branch_dots(
                 ));
                                 render_dot(hash, &branch.e_data, &branch.t_data, visualization_data, hold, dots, held_at_event);
             for text in dots.take_carry(*hash) {
-                if !branch.diverges && !leftover.contains(&text) {
+                if !branch.diverges && !leftover.iter().any(|(t, _)| *t == text.0) {
                     leftover.push(text);
                 }
             }
@@ -1349,11 +1379,11 @@ fn render_branch_dots(
                     dot_y: cy,
                     title,
                 };
-                append_dot(m_data, timeline_data, dots, None);
+                append_dot(m_data, timeline_data, dots, None, rv_attrs::BRANCH_JOIN, *merge_point);
             }
             Some(title) if !title.is_empty() => {
                 let mut waiting = dots.take_carry(*hash);
-                waiting.push(title);
+                waiting.push((title, rv_attrs::BRANCH_JOIN));
                 dots.set_carry(*hash, waiting);
             }
             _ => {}
@@ -1465,7 +1495,7 @@ fn render_scope_end_dot(
                     p2x: cx + 3, p2y: cy - 1,
                     p3x: cx,     p3y: cy + 3,
                 };
-                append_drop_dot(drop_data, timeline_data, dots);
+                append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
                 return true;
             }
             data.title = event.print_message_with_name(&mut name);
@@ -1501,7 +1531,7 @@ fn render_scope_end_dot(
                 p2x: cx + 3, p2y: cy - 1,
                 p3x: cx,     p3y: cy + 3,
             };
-            append_drop_dot(drop_data, timeline_data, dots);
+            append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
             return true;
         } else if let Some((title, dropped)) = scope_end_by_rustc(event, ro, history, resource_hold, &name) {
             // What's drawn above says something else about what's
@@ -1521,7 +1551,7 @@ fn render_scope_end_dot(
                 p2x: cx + 3, p2y: cy - 1,
                 p3x: cx,     p3y: cy + 3,
             };
-            append_drop_dot(drop_data, timeline_data, dots);
+            append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
             return true;
         // (`init_at_end` is `Some` only if nothing assigned
         // the column since: it holds no definite value,
@@ -1543,7 +1573,7 @@ fn render_scope_end_dot(
                 p2x: cx + 3, p2y: cy - 1,
                 p3x: cx,     p3y: cy + 3,
             };
-            append_drop_dot(drop_data, timeline_data, dots);
+            append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
             return true;
         } else if let (false, Some(InitJoin::Maybe { moved })) = (ro.holds_value(), init_at_end(history)) {
             // Assigned in some branches of a conditional but
@@ -1566,7 +1596,7 @@ fn render_scope_end_dot(
                 p2x: cx + 3, p2y: cy - 1,
                 p3x: cx,     p3y: cy + 3,
             };
-            append_drop_dot(drop_data, timeline_data, dots);
+            append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
             return true;
         } else if !resource_hold && maybe_moved_at_end(history) {
             // Moved in some branches of a conditional but
@@ -1603,7 +1633,7 @@ fn render_scope_end_dot(
                 p2x: cx + 3, p2y: cy - 1,
                 p3x: cx,     p3y: cy + 3,
             };
-            append_drop_dot(drop_data, timeline_data, dots);
+            append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
             return true;
         } else if !resource_hold && ro.box_contents_moved() {
             // `take(*b)`: the contents are gone but the Box's
@@ -1619,7 +1649,7 @@ fn render_scope_end_dot(
                 p2x: cx + 3, p2y: cy - 1,
                 p3x: cx,     p3y: cy + 3,
             };
-            append_drop_dot(drop_data, timeline_data, dots);
+            append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
             return true;
         } else if !resource_hold {
             // Resource was already moved out: note there's
@@ -1659,7 +1689,7 @@ fn render_scope_end_dot(
                     p2x: cx + 3, p2y: cy - 1,
                     p3x: cx,     p3y: cy + 3,
                 };
-                append_drop_dot(drop_data, timeline_data, dots);
+                append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
                 return true;
             }
         } else if ro.is_union() && !never_drops {
@@ -1704,7 +1734,7 @@ fn render_scope_end_dot(
                 p2x: cx + 3, p2y: cy - 1,
                 p3x: cx,     p3y: cy + 3,
             };
-            append_drop_dot(drop_data, timeline_data, dots);
+            append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
             return true;
         }
     false
@@ -1841,7 +1871,7 @@ fn render_dot(
                     // dot: nothing is dropped here.
                     if let Some(owns) = loop_runs_on_owns(hash, history, resource_hold, visualization_data) {
                         data.title = hover_messages::event_dot_loop_runs_on(&name, owns, on.exits, on.moved);
-                        append_dot(data, timeline_data, dots, None);
+                        append_dot(data, timeline_data, dots, None, rv_attrs::event_name(event), *line_number);
                     }
                     continue;
                 }
@@ -1873,7 +1903,7 @@ fn render_dot(
                         p2x: cx + 3, p2y: cy - 1,
                         p3x: cx,     p3y: cy + 3,
                     };
-                    append_drop_dot(drop_data, timeline_data, dots);
+                    append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
                     continue;
                 },
                 Event::OwnerDropAtReassign { .. } | Event::OwnerDropIfTryReturns | Event::OwnerDropUnlessReturned | Event::TemporaryDrop { .. } | Event::TupleTempDrop { .. } | Event::LoopIteratorDrop { .. } => {
@@ -1978,7 +2008,7 @@ fn render_dot(
                         p2x: cx + 3, p2y: cy - 1,
                         p3x: cx,     p3y: cy + 3,
                     };
-                    append_drop_dot(drop_data, timeline_data, dots);
+                    append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
                     continue;
                 },
                 Event::LoopMaybeInit { nested: true, .. } => {
@@ -2130,7 +2160,7 @@ fn render_dot(
             Event::StaticLend { id, .. } | Event::MutableLend { id, .. } => Some(*id),
             _ => None,
         };
-        append_dot(data, timeline_data, dots, lend_id);
+        append_dot(data, timeline_data, dots, lend_id, rv_attrs::event_name(event), *line_number);
     }
 }
 
@@ -3653,8 +3683,10 @@ fn append_drop_dot(
     drop_data: DropDotData,
     timeline_data: &TimelineColumnData,
     dots: &mut DotLayer,
+    ev: &'static str,
+    row: usize,
 ) {
-    dots.add_event(drop_data.hash, drop_data.dot_x, drop_data.dot_y, timeline_data, drop_data.title, true, None);
+    dots.add_event(drop_data.hash, drop_data.dot_x, drop_data.dot_y, timeline_data, drop_data.title, true, None, ev, row);
 }
 
 /// Collects every event dot. The arrow pass routes arrows around
@@ -4047,6 +4079,7 @@ fn tail_off_dot(tail: (f64, f64), next: (f64, f64), dots: &DotPositions) -> (f64
 fn render_hopping_arrow(
     x1: i64, y: i64, x2: i64,
     title: &str,
+    rv: &str,
     dot_positions: &DotPositions,
     head_offset: f64,
 ) -> Option<String> {
@@ -4125,12 +4158,12 @@ fn render_hopping_arrow(
     let v3 = (end_x_pulled, y_f + 6.0);
 
     Some(format!(
-        "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\">\n\
+        "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\"{rv}>\n\
             \x20           <path class=\"arrow-shaft\" stroke-width=\"5px\" d=\"{d}\" style=\"fill: none;\"/>\n\
             \x20           <polygon points=\"{},{} {},{} {},{}\" class=\"arrow-head\"/>\n\
             \x20       </g>\n",
         v1.0, v1.1, v2.0, v2.1, v3.0, v3.1,
-        title = title, d = d,
+        title = title, d = d, rv = rv,
     ))
 }
 
@@ -4317,7 +4350,9 @@ fn render_generic_arrow(
         coordinates: Vec::new(),
         coordinates_hbs: String::new(),
         head_points: String::new(),
-        title: title
+        title: title,
+        rv: Rv::new(rv_attrs::ARROW).event(rv_attrs::external_event_name(external_event))
+            .var(&rv_attrs::party_name(from)).to(&rv_attrs::party_name(to)).row(*line_number).attrs(),
     };
 
     let arrow_length = 20;
@@ -4374,6 +4409,8 @@ fn render_generic_arrow(
                 y: y2 + 5,
                 hash: from_function.hash.to_owned() as u64,
                 title: styled_name_html(&from_function.name),
+                rv: Rv::new(rv_attrs::FN).event(rv_attrs::external_event_name(external_event))
+                    .var(&from_function.name).to(&rv_attrs::party_name(to_variable)).row(*line_number).attrs(),
             };
     
             if to_timeline.is_struct_group {
@@ -4405,6 +4442,8 @@ fn render_generic_arrow(
                 from_timeline,
                 title,
                 external_event.get_id(),
+                rv_attrs::external_event_name(external_event),
+                *line_number,
             );
         }
         (from_variable, ResourceTy::Value(ResourceAccessPoint::Function(to_function)), _e) => { // (Some(variable), Some(function), _)
@@ -4428,6 +4467,8 @@ fn render_generic_arrow(
                 y: y1 + 5,
                 hash: to_function.hash.to_owned() as u64,
                 title: styled_fn_name,
+                rv: Rv::new(rv_attrs::FN).event(rv_attrs::external_event_name(external_event))
+                    .var(&rv_attrs::party_name(from_variable)).to(&to_function.name).row(*line_number).attrs(),
             };
     
             if from_timeline.is_struct_group {
@@ -4518,13 +4559,16 @@ fn render_init_param_arrow(line_number: &usize, param: &ResourceAccessPoint, id:
         // for the head) but emitted inline because we already
         // have ArrowData populated and assembling the template
         // is overkill for one site.
+        let rv = Rv::new(rv_attrs::ARROW).event("init_ref_param")
+            .var("caller").to(param.name()).row(*line_number).attrs();
         let rendered = format!(
-            "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\">\n\
+            "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\"{rv}>\n\
                 \x20           <polyline class=\"arrow-shaft\" stroke-width=\"5px\" points=\"{polyline_pts}\" style=\"fill: none;\"/>\n\
                 \x20           <polygon points=\"{},{} {},{} {},{}\" class=\"arrow-head\"/>\n\
                 \x20       </g>\n",
             bot_v1.0, bot_v1.1, bot_v2.0, bot_v2.1, bot_v3.0, bot_v3.1,
             title = title,
+            rv = rv,
             polyline_pts = polyline_pts,
         );
 
@@ -4553,8 +4597,10 @@ fn render_function_result_arrow(line_number: &usize, external_event: &ExternalEv
         let last = f.name.rsplit("::").next().unwrap_or(&f.name);
         let named_call = !last.starts_with(|c: char| c.is_uppercase()) && !f.name.ends_with('!');
         let title = hover_messages::arrow_fn_return_title(matches!(external_event, ExternalEvent::Copy { .. }), named_call, &styled_fn);
+        let ev = rv_attrs::external_event_name(external_event);
+        let rv = Rv::new(rv_attrs::ARROW).event(ev).var(&f.name).to("caller").row(*line_number).attrs();
         let rendered = format!(
-            "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\">\n\
+            "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\"{rv}>\n\
                 \x20           <polyline class=\"arrow-shaft\" stroke-width=\"5px\" points=\"{source_x} {y} {bend_x} {y} {bend_x} {head_end_y}\" style=\"fill: none;\"/>\n\
                 \x20           <polygon points=\"{},{} {},{} {},{}\" class=\"arrow-head\"/>\n\
                 \x20       </g>\n",
@@ -4565,6 +4611,7 @@ fn render_function_result_arrow(line_number: &usize, external_event: &ExternalEv
             y: y as i64 + 5,
             hash: f.hash as u64,
             title: styled_fn,
+            rv: Rv::new(rv_attrs::FN).event(ev).var(&f.name).to("caller").row(*line_number).attrs(),
         };
         let out = &mut output.get_mut(&-1).unwrap().0;
         out.arrows.push_str(&rendered);
@@ -4647,13 +4694,16 @@ fn render_return_to_caller_arrow(line_number: &usize, external_event: &ExternalE
             _ => message(&rap.name().to_string()),
         };
 
+        let rv = Rv::new(rv_attrs::ARROW).event(rv_attrs::external_event_name(external_event))
+            .var(rap.name()).to("caller").row(*line_number).attrs();
         let rendered = format!(
-            "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\">\n\
+            "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\"{rv}>\n\
                 \x20           <polyline class=\"arrow-shaft\" stroke-width=\"5px\" points=\"{polyline_pts}\" style=\"fill: none;\"/>\n\
                 \x20           <polygon points=\"{},{} {},{} {},{}\" class=\"arrow-head\"/>\n\
                 \x20       </g>\n",
             head_v1.0, head_v1.1, head_v2.0, head_v2.1, head_v3.0, head_v3.1,
             title = title,
+            rv = rv,
             polyline_pts = polyline_pts,
         );
 
@@ -4754,6 +4804,7 @@ fn plan_variable_arrow(line_number: &usize, external_event: &ExternalEvent, from
             if let Some(rendered) = (y1 == y2).then(|| render_hopping_arrow(
                 x1, y1, x2,
                 &data.title,
+                &data.rv,
                 &dots.positions,
                 if x2 > x1 && head_lands_on_call_icon(&(x1 as f64, y1 as f64), dots) { head_offset + CALL_ICON_CLEARANCE } else { head_offset },
             )).flatten() {
@@ -4982,8 +5033,8 @@ fn determine_owner_line_styles(
 fn lent_line_string(data: &VerticalLineData) -> String {
     let w = BRANCH_HALF_W;
     format!(
-        "<g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\" data-underline-y=\"{y1} {last}\">\n            <line data-hash=\"{hash}\" class=\"lent\" x1=\"{x1}\" y1=\"{y1}\" x2=\"{x2}\" y2=\"{y2}\"/>\n            <polygon data-hash=\"{hash}\" points=\"{l1},{y1} {r1},{y1} {r2},{y2} {l2},{y2}\" style=\"fill:transparent; stroke:none; pointer-events:fill;\"/>\n        </g>\n",
-        title = data.title, hash = data.hash,
+        "<g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\"{rv} data-underline-y=\"{y1} {last}\">\n            <line data-hash=\"{hash}\" class=\"lent\" x1=\"{x1}\" y1=\"{y1}\" x2=\"{x2}\" y2=\"{y2}\"/>\n            <polygon data-hash=\"{hash}\" points=\"{l1},{y1} {r1},{y1} {r2},{y2} {l2},{y2}\" style=\"fill:transparent; stroke:none; pointer-events:fill;\"/>\n        </g>\n",
+        title = data.title, hash = data.hash, rv = data.rv,
         x1 = data.x1, y1 = data.y1, x2 = data.x2, y2 = data.y2, last = (data.y2 - 3).max(data.y1),
         l1 = data.x1 - w, r1 = data.x1 + w, l2 = data.x2 - w, r2 = data.x2 + w,
     )
@@ -5038,6 +5089,7 @@ fn compute_hollow_line_data(v_data: VerticalLineData, w: f64) -> HollowLineData{
         title: v_data.title,
         opacity: v_data.opacity,
         dasharray: v_data.dasharray,
+        rv: v_data.rv,
     }
 }
 
@@ -5265,6 +5317,9 @@ struct BranchSeg {
     /// The solid stretch around a one-row arm's own row (#845); hovering
     /// it underlines that row.
     own_row: bool,
+    /// The first and last row the segment stands for, for its
+    /// `data-rv-*` attributes (a diagonal: the split's or join's row).
+    rows: (usize, usize),
 }
 
 /// Which part of an arm's strip a segment is.
@@ -5312,7 +5367,7 @@ fn trim_dashes_under_solid(segs: Vec<BranchSeg>) -> Vec<BranchSeg> {
         if !down { pieces.reverse(); }
         for (a, b) in pieces {
             let (p1y, p2y) = if down { (a, b) } else { (b, a) };
-            out.push(BranchSeg { p1: (seg.p1.0, p1y), p2: (seg.p2.0, p2y), state: seg.state.clone(), title: seg.title.clone(), inactive_arm: seg.inactive_arm.clone(), own_row: seg.own_row });
+            out.push(BranchSeg { p1: (seg.p1.0, p1y), p2: (seg.p2.0, p2y), state: seg.state.clone(), title: seg.title.clone(), inactive_arm: seg.inactive_arm.clone(), own_row: seg.own_row, rows: seg.rows });
         }
     }
     out
@@ -5435,7 +5490,7 @@ fn render_branches(
             push_seg_if_renderable(
                 &mut segs, rap,
                 (parent_x, split_y), (branch_x, column_top_y),
-                leading_state.clone(), visualization_data, &arm_label, Leg::Split, *split_point, &arm_path,
+                leading_state.clone(), visualization_data, &arm_label, Leg::Split, *split_point, *split_point, &arm_path,
             );
             // An arm that starts below the raised fork's row (the `else`)
             // runs down to its first row in the state it forked with.
@@ -5445,7 +5500,7 @@ fn render_branches(
                     push_seg_if_renderable(
                         &mut segs, rap,
                         (branch_x, column_top_y), (branch_x, get_y_axis_pos(first_row) as f64),
-                        leading_state, visualization_data, &arm_label, Leg::Column, *split_point, &arm_path,
+                        leading_state, visualization_data, &arm_label, Leg::Column, *split_point, first_row, &arm_path,
                     );
                 }
             }
@@ -5489,7 +5544,7 @@ fn render_branches(
                     &mut segs, rap,
                     (branch_x, y1 as f64),
                     (branch_x, y2 as f64),
-                    state.clone(), visualization_data, &arm_label, Leg::Column, *top, &arm_path,
+                    state.clone(), visualization_data, &arm_label, Leg::Column, *top, bot, &arm_path,
                 );
                 if segs.len() > n { ended_title(&mut segs, bot); }
             }
@@ -5503,7 +5558,7 @@ fn render_branches(
                     push_seg_if_renderable(
                         &mut segs, rap,
                         (branch_x, column_bot_y), (parent_x, merge_y),
-                        end_state, visualization_data, &arm_label, Leg::Join, *merge_point, &arm_path,
+                        end_state, visualization_data, &arm_label, Leg::Join, *merge_point, *merge_point, &arm_path,
                     );
                     if segs.len() > n { ended_title(&mut segs, *merge_point); }
                 }
@@ -5521,19 +5576,21 @@ fn render_branches(
                     if let Some(stop_y) = stop_y.filter(|y| !dropped_at_stop && segs.last().is_some_and(|seg| seg.p2 == (branch_x, *y))) {
                         stop_at = Some((branch_x, stop_y));
                         let title = hover_messages::branch_never_reaches_merge();
+                        let rv = Rv::new(rv_attrs::STOP_BAR).var(rap.name()).row(stop)
+                            .at(format!("stop {} {}", branch_x, stop_y));
                         stop_bar = format!(
-                            "            <line data-hash=\"{}\" class=\"tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\" data-underline=\"none\" style=\"stroke-width: 3px; stroke-linecap: round;\"/>\n",
-                            hash, branch_x - 6.0, stop_y, branch_x + 6.0, stop_y, title,
+                            "            <line data-hash=\"{}\" class=\"tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\"{} data-underline=\"none\" style=\"stroke-width: 3px; stroke-linecap: round;\"/>\n",
+                            hash, branch_x - 6.0, stop_y, branch_x + 6.0, stop_y, title, rv.attrs(),
                         );
                         // The bar's own hover polygon (it's a segment of
                         // the column too): the bar plus its stroke, drawn
                         // after the column's polygons so it's on top.
                         stop_bar.push_str(&format!(
-                            "            <polygon data-hash=\"{}\" class=\"tooltip-trigger\" points=\"{},{} {},{} {},{} {},{}\" data-tooltip-text=\"{}\" data-underline=\"none\" style=\"fill:transparent; stroke:none; pointer-events:fill;\"/>\n",
+                            "            <polygon data-hash=\"{}\" class=\"tooltip-trigger\" points=\"{},{} {},{} {},{} {},{}\" data-tooltip-text=\"{}\"{} data-underline=\"none\" style=\"fill:transparent; stroke:none; pointer-events:fill;\"/>\n",
                             hash,
                             branch_x - 6.0, stop_y - STOP_BAR_HOVER_HALF_H, branch_x + 6.0, stop_y - STOP_BAR_HOVER_HALF_H,
                             branch_x + 6.0, stop_y + STOP_BAR_HOVER_HALF_H, branch_x - 6.0, stop_y + STOP_BAR_HOVER_HALF_H,
-                            title,
+                            title, rv.part("hit").attrs(),
                         ));
                     }
                 }
@@ -5559,7 +5616,7 @@ fn render_branches(
                 let n = segs.len();
                 push_seg_if_renderable(
                     &mut segs, rap, (branch_x, top), (branch_x, bot),
-                    parent_active.clone(), visualization_data, &arm_label, Leg::Column, own_first, &arm_path,
+                    parent_active.clone(), visualization_data, &arm_label, Leg::Column, own_first, own_first, &arm_path,
                 );
                 if segs.len() > n {
                     let mut solid = segs.pop().unwrap();
@@ -5652,6 +5709,7 @@ fn push_seg_if_renderable(
     arm_label: &str,
     leg: Leg,
     row: usize,
+    end_row: usize,
     path: &[(usize, usize)],
 ) {
     if !seg_drawn(rap, &state) {
@@ -5682,7 +5740,7 @@ fn push_seg_if_renderable(
             .unwrap_or_else(|| timeline_segment_title(&state, rap, visualization_data, None)),
     };
     let inactive_arm = (inactive && leg == Leg::Column).then(|| arm_label.to_owned());
-    segs.push(BranchSeg { p1, p2, state, title, inactive_arm, own_row: false });
+    segs.push(BranchSeg { p1, p2, state, title, inactive_arm, own_row: false, rows: (row, end_row) });
 }
 
 /// The y-range of code to underline while hovering a segment. A solid
@@ -5799,31 +5857,37 @@ fn render_branch_run(
     let mut lines: Vec<String> = vec![String::new(); n_chunks];
     let mut polys: Vec<String> = vec![String::new(); n_chunks];
 
+    // The `data-rv-*` attributes of a segment's nodes: its hover
+    // polygon is the element, its lines are parts of it.
+    let seg_rv = |seg: &BranchSeg| Rv::new(rv_attrs::BRANCH_LINE).state(&seg.state).var(rap.name())
+        .rows(seg.rows.0, seg.rows.1)
+        .at(format!("{} {} {} {}", seg.p1.0, seg.p1.1, seg.p2.0, seg.p2.1));
+
     // Visible lines per segment.
     for (i, (style, dashed, seg)) in classified.iter().enumerate() {
         let svg = &mut lines[chunk_of[i]];
         let dasharray = if *dashed { "4 4" } else { "none" };
         match style {
             OwnerLine::Solid => svg.push_str(&format!(
-                "            <line data-hash=\"{}\" class=\"solid tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\"{} style=\"stroke-dasharray: {};\"/>\n",
-                hash, seg.p1.0, seg.p1.1, seg.p2.0, seg.p2.1, seg.title, underline_attr(seg, own_y, split_row), dasharray,
+                "            <line data-hash=\"{}\" class=\"solid tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\"{}{} style=\"stroke-dasharray: {};\"/>\n",
+                hash, seg.p1.0, seg.p1.1, seg.p2.0, seg.p2.1, seg.title, seg_rv(seg).part("line").attrs(), underline_attr(seg, own_y, split_row), dasharray,
             )),
             OwnerLine::Hollow => {
                 let perp = perp_unit(seg.p1, seg.p2);
-                for sign in [1.0_f64, -1.0] {
+                for (sign, part) in [(1.0_f64, "side1"), (-1.0, "side2")] {
                     let ox = perp.0 * sign * BRANCH_HALF_W;
                     let oy = perp.1 * sign * BRANCH_HALF_W;
                     svg.push_str(&format!(
-                        "            <line data-hash=\"{}\" class=\"hollow tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\"{} style=\"stroke-dasharray: {};\"/>\n",
-                        hash, seg.p1.0 + ox, seg.p1.1 + oy, seg.p2.0 + ox, seg.p2.1 + oy, seg.title, underline_attr(seg, own_y, split_row), dasharray,
+                        "            <line data-hash=\"{}\" class=\"hollow tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\"{}{} style=\"stroke-dasharray: {};\"/>\n",
+                        hash, seg.p1.0 + ox, seg.p1.1 + oy, seg.p2.0 + ox, seg.p2.1 + oy, seg.title, seg_rv(seg).part(part).attrs(), underline_attr(seg, own_y, split_row), dasharray,
                     ));
                 }
             }
             // Mutably lent out (#722); the segment's hover polygon below
             // takes the hover.
             OwnerLine::Dotted => svg.push_str(&format!(
-                "            <line data-hash=\"{}\" class=\"lent tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\"{}/>\n",
-                hash, seg.p1.0, seg.p1.1, seg.p2.0, seg.p2.1, seg.title, underline_attr(seg, own_y, split_row),
+                "            <line data-hash=\"{}\" class=\"lent tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\"{}{}/>\n",
+                hash, seg.p1.0, seg.p1.1, seg.p2.0, seg.p2.1, seg.title, seg_rv(seg).part("line").attrs(), underline_attr(seg, own_y, split_row),
             )),
             OwnerLine::Empty => {} // unreachable: filtered before push
         }
@@ -5873,7 +5937,7 @@ fn render_branch_run(
         let prev_perp = perp_unit(prev_seg.p1, prev_seg.p2);
         let curr_perp = perp_unit(curr_seg.p1, curr_seg.p2);
         let dasharray = if *prev_dashed { "4 4" } else { "none" };
-        for sign in [1.0_f64, -1.0] {
+        for (sign, part) in [(1.0_f64, "bevel1"), (-1.0, "bevel2")] {
             let prev_off = (
                 prev_seg.p2.0 + prev_perp.0 * sign * BRANCH_HALF_W,
                 prev_seg.p2.1 + prev_perp.1 * sign * BRANCH_HALF_W,
@@ -5889,8 +5953,8 @@ fn render_branch_run(
                 let bevel_title = prev_seg.inactive_arm.as_deref()
                     .map_or_else(|| prev_seg.title.clone(), hover_messages::state_inactive_arm_unlit);
                 svg.push_str(&format!(
-                    "            <line data-hash=\"{}\" class=\"hollow tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\" data-underline=\"none\" style=\"stroke-dasharray: {};\"/>\n",
-                    hash, prev_off.0, prev_off.1, curr_off.0, curr_off.1, bevel_title, dasharray,
+                    "            <line data-hash=\"{}\" class=\"hollow tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\"{} data-underline=\"none\" style=\"stroke-dasharray: {};\"/>\n",
+                    hash, prev_off.0, prev_off.1, curr_off.0, curr_off.1, bevel_title, seg_rv(prev_seg).part(part).attrs(), dasharray,
                 ));
             }
         }
@@ -5926,8 +5990,8 @@ fn render_branch_run(
             .join(" ");
         let underline = underline_attr(seg, own_y, split_row);
         svg.push_str(&format!(
-            "            <polygon data-hash=\"{}\" class=\"tooltip-trigger\" points=\"{}\" data-tooltip-text=\"{}\"{} style=\"fill:transparent; stroke:none; pointer-events:fill;\"/>\n",
-            hash, pts_str, seg.title, underline,
+            "            <polygon data-hash=\"{}\" class=\"tooltip-trigger\" points=\"{}\" data-tooltip-text=\"{}\"{}{} style=\"fill:transparent; stroke:none; pointer-events:fill;\"/>\n",
+            hash, pts_str, seg.title, seg_rv(seg).attrs(), underline,
         ));
     }
 
@@ -6014,6 +6078,8 @@ fn render_timeline(
                     title,
                     opacity: 1.0,
                     dasharray: "none".to_owned(),
+                    rv: Rv::new(rv_attrs::LINE).state(state).var(&timeline_data.name)
+                        .rows(line_start, line_end).attrs(),
             };
             append_line(state, & mut data, rap, timeline_data, output, registry);
         }
@@ -6250,7 +6316,10 @@ fn render_ref_line(
                     dx: 15,
                     dy: 0,
                     title: String::new(),
+                    rv: String::new(),
                 };
+                let mut bracket = Rv::new(rv_attrs::BRACKET);
+                let mut bracket_start = 0;
                 for (line_start, _line_end, state) in states.iter() {
                     match state { 
                         State::OutOfScope | State::ResourceMoved{ .. } => {
@@ -6261,6 +6330,7 @@ fn render_ref_line(
                                 let dv = get_y_axis_pos(*line_start)-data.y1;
                                 data.v = dv - 2*dv/5;
                                 data.dy = dv/5;
+                                data.rv = bracket.clone().rows(bracket_start, *line_start).attrs();
 
                                 match ro {
                                     ResourceAccessPoint::MutRef(_) => {
@@ -6281,6 +6351,8 @@ fn render_ref_line(
                                 data.hash = *hash;
                                 data.x1 = resource_owners_layout[hash].x_val;
                                 data.y1 = start_y(*line_start);
+                                bracket_start = *line_start;
+                                bracket = Rv::new(rv_attrs::BRACKET).state(state).var(&resource_owners_layout[hash].name);
 
                                 let styled = styled_name_html(&visualization_data.get_name_from_hash(hash).unwrap());
                                 data.title = hover_messages::ref_line_holds_reference(&styled, matches!(ro, ResourceAccessPoint::MutRef(_)));
@@ -6294,6 +6366,8 @@ fn render_ref_line(
                                 data.hash = *hash;
                                 data.x1 = resource_owners_layout[hash].x_val;
                                 data.y1 = start_y(*line_start);
+                                bracket_start = *line_start;
+                                bracket = Rv::new(rv_attrs::BRACKET).state(state).var(&resource_owners_layout[hash].name);
 
                                 let styled = styled_name_html(&visualization_data.get_name_from_hash(hash).unwrap());
                                 data.title = hover_messages::ref_line_holds_immutable_reference(&styled);

@@ -21,7 +21,10 @@
 # changed) and exits 1; prints "identical" and exits 0 otherwise.
 #
 # Env: JOBS (parallel runs, default 4), KEEP=1 (keep the work dir and print
-# its path; it holds the per-snippet records under old/ and new/).
+# its path; it holds the per-snippet records under old/ and new/), STRIP (a
+# Python regex removed from both panels of both builds before comparing:
+# `STRIP=' data-rv-[a-z-]+="[^"]*"'` checks that a change adds only the
+# `data-rv-*` attributes).
 
 set -euo pipefail
 
@@ -51,6 +54,8 @@ tests = os.path.join(repo, "rustviz-plugin", "tests")
 snippets = sorted(glob.glob(tests + "/*.rs") + glob.glob(tests + "/*/*.rs"))
 toolchain = open(os.path.join(repo, "rust-toolchain.toml")).read()
 TT = re.compile(r'data-tooltip-text="([^"]*)"')
+STRIP = re.compile(os.environ["STRIP"]) if os.environ.get("STRIP") else None
+strip = (lambda s: STRIP.sub("", s)) if STRIP else (lambda s: s)
 
 # cargo looks for `cargo-rv-plugin` in $CARGO_HOME/bin before PATH, so give
 # each build a private CARGO_HOME whose bin is the build under test.
@@ -81,9 +86,9 @@ def run(tag, path):
     else:
         try:
             out = json.loads(p.stdout)
-            tl = out["timeline_panel"]
+            tl = strip(out["timeline_panel"])
             rec = {"tooltips": sorted(TT.findall(tl)),
-                   "timeline": h(TT.sub("", tl)), "code": h(out["code_panel"])}
+                   "timeline": h(TT.sub("", tl)), "code": h(strip(out["code_panel"]))}
         except Exception as e:
             rec = {"fail": "unparseable output: %s" % e, "tooltips": []}
     return rel, rec

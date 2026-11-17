@@ -62,6 +62,16 @@ The file must be one the crate compiles, e.g. `src/shapes.rs` declared with
 shows that file. Otherwise the plugin exits 1 with
 `src/foo.rs isn't compiled as part of this crate (check its `mod` declaration)`.
 
+## Element ids
+
+Every hoverable element of the timeline, and every numbered code line,
+carries `data-rv-*` attributes (`data-rv-id="s@L9:dot:move"`,
+`data-rv-kind`, `data-rv-event`, `data-rv-var`, `data-rv-line`, …), so a
+client can tell which element was hovered without parsing tooltip text.
+They change nothing that is drawn. See
+[docs/element-ids.md](https://github.com/rustviz/rustviz/blob/main/rustviz-plugin/docs/element-ids.md)
+for the id grammar and the kind, event and state vocabularies.
+
 ## When the plugin crashes
 
 A panic inside the visitor is reported as a single rustc error line,

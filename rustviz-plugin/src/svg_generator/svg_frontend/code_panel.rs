@@ -1,7 +1,7 @@
 extern crate handlebars;
 
 use crate::svg_generator::data::{ExternalEvent, FIRST_ROW_Y, LINE_SPACE};
-use crate::svg_generator::svg_frontend::syntax;
+use crate::svg_generator::svg_frontend::{rv_attrs, syntax};
 use handlebars::Handlebars;
 use std::{cmp::max, collections::{BTreeMap, HashMap, HashSet}};
 
@@ -17,13 +17,13 @@ pub fn render_code_panel(
     // sit. Rendered with a blank gutter and no source-line increment
     // — same treatment arrow-stack inserts get below.
     synthetic_blank_rows: &HashSet<usize>,
-) -> (String, i32) {
+) -> (String, i32, Vec<Option<usize>>) {
     /* Template creation */
     let mut handlebars = Handlebars::new();
     // We want to preserve the inputs `as is`, and want to make no changes based on html escape.
     handlebars.register_escape_fn(handlebars::no_escape);
     let line_template =
-        "        <text class=\"code\" x=\"{{X_VAL}}\" y=\"{{Y_VAL}}\"> {{LINE}} </text>\n";
+        "        <text class=\"code\" x=\"{{X_VAL}}\" y=\"{{Y_VAL}}\"{{RV}}> {{LINE}} </text>\n";
     // register the template. The template string will be verified and compiled.
     assert!(handlebars
         .register_template_string("code_line_template", line_template)
@@ -68,6 +68,9 @@ pub fn render_code_panel(
     let mut iter_idx: usize = 1;
     let mut source_line: usize = 1;
     let mut visual_row: usize = 1;
+    // The line number shown on each visual row (index 0 unused), `None`
+    // on the rows added here or before (`rv_attrs::finalize`).
+    let mut row_lines: Vec<Option<usize>> = vec![None];
     // Threaded through per-line `highlight()` calls so a `/* … */`
     // that doesn't close on its opening line keeps subsequent lines
     // styled as a comment until we see the matching `*/`.
@@ -93,6 +96,10 @@ pub fn render_code_panel(
             )
         };
         data.insert("LINE".to_string(), fmt_line);
+        if !is_synthetic_blank {
+            data.insert("RV".to_string(), rv_attrs::code_line_attrs(source_line));
+        }
+        row_lines.push((!is_synthetic_blank).then_some(source_line));
         output.push_str(&handlebars.render("code_line_template", &data).unwrap());
         y = y + LINE_SPACE;
         let mut extra_line_num = match l_map.get(&visual_row) {
@@ -114,6 +121,7 @@ pub fn render_code_panel(
                 "", width = num_width,
             );
             data.insert("LINE".to_string(), empty_line);
+            row_lines.push(None);
             output.push_str(&handlebars.render("code_line_template", &data).unwrap());
             y = y + LINE_SPACE;
             visual_row += 1;
@@ -134,5 +142,5 @@ pub fn render_code_panel(
     // Returned value used to be the next line number; preserve that
     // shape (callers want a row count for height etc.) by returning
     // the visual row count.
-    (output, visual_row as i32)
+    (output, visual_row as i32, row_lines)
 }
