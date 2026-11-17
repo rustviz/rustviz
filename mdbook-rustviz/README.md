@@ -2,12 +2,15 @@
 
 An [mdBook](https://rust-lang.github.io/mdBook/) preprocessor that turns
 ` ```rv ` fenced code blocks into embedded RustViz visualizations.
-Compiles each snippet through the rustc plugin at build time and inlines
-the resulting SVGs (plus the tooltip JS) into the rendered HTML.
+Compiles each snippet through the rustc plugin at build time, writes the
+resulting SVGs into the book's `src/examples/example-<n>/`
+(`vis_code.svg`, `vis_timeline.svg`), embeds them in the chapter, and
+adds the tooltip JS to the page.
 
 The [RustViz tutorial](https://github.com/rustviz/tutorial) is a
-full-scale book built this way; `test-book/` here is a small
-worked example.
+full-scale book built this way;
+[`test-book/`](https://github.com/rustviz/rustviz/tree/main/mdbook-rustviz/test-book)
+in the repository is a small worked example.
 
 ## Setup
 
@@ -27,6 +30,13 @@ install. Then install the preprocessor itself:
 cargo install mdbook-rustviz
 ```
 
+It is built against mdBook 0.5.
+
+Working on RustViz itself? See [Building from
+source](https://github.com/rustviz/rustviz#building-from-source) in the
+main README; it covers using a local build of the plugin and
+preprocessor with a book.
+
 ## Usage
 
 Enable the preprocessor in your book's `book.toml`:
@@ -36,7 +46,8 @@ Enable the preprocessor in your book's `book.toml`:
 ```
 
 Then tag code blocks you'd like visualized with ` ```rv ` instead of
-` ```rust `:
+` ```rust ` (set `code-block = "..."` under `[preprocessor.rustviz]` to
+use another tag):
 
 ````markdown
 ```rv
@@ -71,7 +82,7 @@ on each figure, again whenever they switch. A book opened from `file://`
 can't reach into its figures, so they stay light (navy if the system
 prefers dark). The colours are CSS custom properties (`--rv-*`), selected
 by `data-rv-theme` on the SVG's root; see
-`rustviz-plugin/src/svg_generator/svg_frontend/themes.rs`.
+[`themes.rs`](https://github.com/rustviz/rustviz/blob/main/rustviz-plugin/src/svg_generator/svg_frontend/themes.rs).
 
 ### Keeping boilerplate out of the diagram
 
@@ -93,7 +104,21 @@ in ` ```rv ` blocks (the marker is stripped from the displayed code):
 Run `mdbook build` (or `mdbook serve`) as usual. For verbose logs, set
 `RUST_LOG=info`.
 
-By default the preprocessor invokes the plugin via Docker. Set
-`RV_RUNNER=local` to run it as a subprocess on the host instead — much
-faster for local iteration; **don't** use `local` against untrusted
-input (proc-macro expansion is arbitrary code execution).
+By default the preprocessor runs the plugin as a subprocess on the host
+(`cargo rv-plugin`, the `local` backend of
+[`rustviz-lib`](https://crates.io/crates/rustviz-lib)), which is why the
+plugin must be installed. That is fine for your own book, but
+**don't** build a book from untrusted sources this way: compiling a
+snippet can run arbitrary code (proc-macro expansion). To compile the
+snippets in a sandbox instead, set `RV_RUNNER=docker`. That needs Docker
+and the `rustviz/rustviz-runner:latest` image (which carries its own
+toolchain and plugin, built from the repository's `main`):
+
+```sh
+docker pull ghcr.io/rustviz/rustviz-runner:latest
+docker tag ghcr.io/rustviz/rustviz-runner:latest rustviz/rustviz-runner:latest
+RV_RUNNER=docker mdbook build
+```
+
+`RV_RUNNER_IMAGE` names a different image. The docker backend is much
+slower (one container per figure).

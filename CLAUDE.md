@@ -84,7 +84,8 @@ nightly>` afterwards. They are: `rust-toolchain.toml` (workspace root,
 `playground/cloudrun/Dockerfile`, the heredoc in
 `playground/runner/rv-runner.sh`, the `rustc_utils` / `rustc_plugin`
 versions in `rustviz-plugin/Cargo.toml`, and prose in `README.md`,
-`rustviz-plugin/README.md` and a doc comment in `rustviz-lib/src/lib.rs`.
+`rustviz-plugin/README.md`, `rustviz-cli/README.md` and a doc comment in
+`rustviz-lib/src/lib.rs`.
 (`scripts/bump-version.sh` is for RustViz's own release version and does
 not touch the nightly.)
 

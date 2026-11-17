@@ -38,6 +38,9 @@ where the payload is the UTF-8 source in unpadded base64url (`-`/`_` alphabet). 
 in the editor, rendered once, and the fragment is then removed. `mdbook-rustviz` emits
 these links under each figure; the helpers are in `frontend/src/linkCode.ts`.
 
+More on the frontend's own scripts (dev server, builds, the build-time
+pre-render of the examples) is in [`frontend/README.md`](frontend/README.md).
+
 If you don't have Docker installed and just want to poke at the server,
 set `RV_RUNNER=local`. **Never** do this on a public deployment — see
 [`SECURITY.md`](SECURITY.md).
@@ -106,8 +109,9 @@ gh secret set PAGES_DEPLOY_KEY --repo rustviz/rustviz < /tmp/playground_deploy_k
 rm /tmp/playground_deploy_key /tmp/playground_deploy_key.pub
 ```
 
-After that, every push to `main` (when the change touches
-`playground/frontend/**`) triggers `.github/workflows/pages.yml`, which
+After that, every push to `main` that touches the frontend, the plugin,
+the CLI, `rustviz-lib`, the toolchain or `Cargo.lock` (see the workflow's
+`paths:`) triggers `.github/workflows/pages.yml`, which
 builds the SPA in `pages` mode and pushes the `dist/` tree to
 `rustviz/rustviz.github.io` for serving at
 <https://rustviz.github.io/>.

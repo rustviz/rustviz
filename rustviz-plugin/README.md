@@ -1,8 +1,9 @@
 # rustviz-plugin
 
 The compiler-integrated heart of [RustViz](https://github.com/rustviz/rustviz).
-A `rustc_private` plugin that walks HIR/MIR for a single-file crate and
-emits a code panel + timeline panel as SVGs on stdout. Built on Will
+A `rustc_private` plugin that walks HIR/MIR for one source file of a crate
+and prints a code panel + timeline panel SVG on stdout, as one JSON object
+that [`rustviz-lib`](https://crates.io/crates/rustviz-lib) parses. Built on Will
 Crichton's [`rustc_plugin`](https://crates.io/crates/rustc_plugin) /
 [`rustc_utils`](https://crates.io/crates/rustc_utils) crates (same
 family as Flowistry / Aquascope).
@@ -11,13 +12,13 @@ End users typically don't touch this crate directly — they use one of:
 
 - the **`rustviz` CLI** in [`rustviz`](https://crates.io/crates/rustviz) (`rustviz svg foo.rs`, `rustviz html foo.rs`),
 - the **`mdbook-rustviz` preprocessor** in [`mdbook-rustviz`](https://crates.io/crates/mdbook-rustviz) (` ```rv ` fenced blocks),
-- the **playground** in [`../playground/`](../playground/), or
+- the **playground** at <https://rustviz.github.io/> (source in [`playground/`](https://github.com/rustviz/rustviz/tree/main/playground)), or
 - the **`rustviz-lib` Rust library** in [`rustviz-lib`](https://crates.io/crates/rustviz-lib).
 
 Each of those routes calls into the binaries this crate produces
 (`cargo-rv-plugin`, `rv-plugin-driver`).
 
-![](./src/svg_generator/rv2_example.png)
+![A RustViz visualization: the code panel on the left, the ownership and borrow timeline on the right](https://raw.githubusercontent.com/rustviz/rustviz/main/rustviz-plugin/src/svg_generator/rv2_example.png)
 
 ## Installing
 
@@ -29,7 +30,8 @@ cargo install rustviz
 rustviz init
 ```
 
-To install from source against a local checkout:
+To install from source, from this directory of a
+[checkout](https://github.com/rustviz/rustviz):
 
 ```sh
 rustup toolchain install nightly-2026-05-01 \
@@ -37,6 +39,10 @@ rustup toolchain install nightly-2026-05-01 \
     --component rust-src,rustc-dev,llvm-tools-preview
 cargo install --path . --locked
 ```
+
+Working on RustViz itself? See [Building from
+source](https://github.com/rustviz/rustviz#building-from-source) in the
+main README.
 
 ## Usage
 
@@ -75,26 +81,3 @@ What RustViz can't draw correctly yet is tracked as [issues labelled
 `limitation`](https://github.com/rustviz/rustviz/issues?q=is%3Aissue+is%3Aopen+label%3Alimitation);
 known crashes are [issues labelled
 `crash`](https://github.com/rustviz/rustviz/issues?q=is%3Aissue+is%3Aopen+label%3Acrash).
-The checklist below is the plugin's implementation-level TODO list.
-
-### To fix / implement
-
-- [x] Handle owners that are declared inside conditional blocks
-- [x] Typecheck function ctxt to determine what type of return annotation to make
-- [x] Implement new state calculation system
-- [ ] Remove struct members that are not utilized from the timeline
-- [ ] Implement hoverable anonymous owner interactions in code panel
-- [ ] Weird phantom annotated src bug that seems to appear when there are `\t` characters
-- [ ] Add highlighting for passbyref events
-- [x] Implement for-loops, while, while-let, loop, if-let — all loop / pattern-binding constructs
-- [x] last (black) data-hash doesn't render properly
-- [x] Fix resource dropping (breaks with conditionals)
-- [x] Reference aliasing
-- [x] Fix annotated source gen to handle `<` `/` `>` characters
-- [ ] Let-if / match expressions (new conditional move event)
-- [x] Conditional lifetime logic and visualization
-- [x] Bad stuff happens when you don't put a semi-colon at the end of a void stmt at the end of a block
-- [ ] Chained method calls (goes hand in hand with anonymous owner interactions, e.g. `.get().get_mut()`)
-- [ ] Lifetimes that are 'captured' by conditional statements (use MIR)
-- [ ] Struct box kind of buggy
-- [ ] JSONify the output
