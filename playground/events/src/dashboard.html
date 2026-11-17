@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>RustViz usage</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10);
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300;
+  --critical: #d03b3b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 48px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 16px; }
+h1 { font-size: 20px; margin: 0; font-weight: 600; }
+h2 { font-size: 15px; margin: 0 0 10px; font-weight: 600; }
+.sub { color: var(--ink-2); font-size: 13px; }
+.spacer { flex: 1; }
+button, input { font: inherit; color: inherit; }
+.seg button { border: 1px solid var(--ring); background: var(--surface); padding: 4px 10px; cursor: pointer; }
+.seg button:first-child { border-radius: 6px 0 0 6px; }
+.seg button:last-child { border-radius: 0 6px 6px 0; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
+.link { background: none; border: 0; color: var(--ink-2); text-decoration: underline; cursor: pointer; padding: 0; }
+.card { background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 14px 16px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.tile .v { font-size: 26px; font-weight: 600; margin-top: 2px; }
+.tile .k { color: var(--ink-2); font-size: 12.5px; }
+.tile .n { color: var(--muted); font-size: 12px; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 480px), 1fr)); gap: 14px; margin-bottom: 14px; }
+.full { margin-bottom: 14px; }
+svg { display: block; width: 100%; height: auto; overflow: visible; }
+svg text { fill: var(--muted); font-size: 11px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12.5px; color: var(--ink-2); margin: 0 0 8px; padding: 0; list-style: none; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; font-weight: 500; color: var(--ink-2); border-bottom: 1px solid var(--axis); padding: 4px 6px; }
+td { border-bottom: 1px solid var(--grid); padding: 4px 6px; vertical-align: middle; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.page { word-break: break-all; }
+.bar { height: 8px; border-radius: 0 4px 4px 0; background: var(--s1); min-width: 2px; }
+.barcell { width: 32%; }
+.scroll { overflow-x: auto; }
+.tall { max-height: 420px; overflow-y: auto; }
+a { color: inherit; }
+.empty { color: var(--muted); padding: 8px 0; }
+#tip { position: fixed; pointer-events: none; background: var(--ink); color: var(--surface); padding: 5px 8px;
+  border-radius: 6px; font-size: 12px; white-space: pre; display: none; z-index: 10; }
+#login { max-width: 420px; margin: 12vh auto; }
+#login form { display: flex; gap: 8px; margin-top: 10px; }
+#login input { flex: 1; padding: 6px 8px; border: 1px solid var(--axis); border-radius: 6px; background: var(--page); }
+#login button { padding: 6px 12px; border-radius: 6px; border: 0; background: var(--ink); color: var(--surface); cursor: pointer; }
+.err { color: var(--critical); margin-top: 8px; }
+.note { color: var(--muted); font-size: 12px; margin-top: 18px; }
+</style>
+</head>
+<body>
+<main>
+  <section id="login" class="card" hidden>
+    <h1>RustViz usage</h1>
+    <p class="sub">Enter the dashboard token (Secret Manager: <code>rv-events-dashboard-token</code>). It is kept in this browser's localStorage.</p>
+    <form id="login-form"><input id="token" type="password" autocomplete="off" placeholder="token" aria-label="dashboard token"><button>Open</button></form>
+    <div id="login-err" class="err" role="alert"></div>
+  </section>
+
+  <div id="app" hidden>
+    <header>
+      <h1>RustViz usage</h1>
+      <span class="sub" id="range"></span>
+      <span class="spacer"></span>
+      <div class="seg" role="group" aria-label="time range">
+        <button data-days="7">7 days</button><button data-days="28">28 days</button><button data-days="90">90 days</button>
+      </div>
+      <button class="link" id="logout">forget token</button>
+    </header>
+    <div id="load-err" class="err" role="alert"></div>
+
+    <div class="tiles" id="tiles"></div>
+
+    <div class="grid2">
+      <section class="card"><h2>Visitors per day</h2><div id="ch-visitors"></div></section>
+      <section class="card"><h2>Playground runs per day, by outcome</h2><ul class="legend" id="lg-runs"></ul><div id="ch-runs"></div></section>
+    </div>
+
+    <div class="grid2">
+      <section class="card"><h2>Run outcomes</h2><div id="tb-outcomes"></div></section>
+      <section class="card"><h2>Top rustc error codes</h2><div id="tb-codes"></div></section>
+    </div>
+
+    <section class="card full"><h2>Tutorial chapters</h2><div class="scroll" id="tb-chapters"></div></section>
+    <section class="card full"><h2>Figures (most viewed)</h2><div class="scroll" id="tb-figures"></div></section>
+
+    <div class="grid2">
+      <section class="card"><h2>Per day</h2><div class="scroll tall" id="tb-daily"></div></section>
+      <section class="card"><h2>Per week (Monday start)</h2><div class="scroll" id="tb-weekly"></div></section>
+    </div>
+
+    <p class="note">Aggregates only. Visitors are distinct pseudonymous browser ids; days are UTC.
+      "Turned logging off" counts visitors who sent a withdraw event in the window. Source: <span id="source"></span>, generated <span id="generated"></span>.</p>
+  </div>
+</main>
+<div id="tip" role="tooltip"></div>
+<script>
+(() => {
+  const KEY = "rv-events-dashboard-token";
+  const DAYS_KEY = "rv-events-dashboard-days";
+  const store = {
+    get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+    del(k) { try { localStorage.removeItem(k); } catch {} },
+  };
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const fmt = (n) => n == null ? "–" : Number(n).toLocaleString("en-US");
+  const dur = (ms) => {
+    if (ms == null) return "–";
+    const s = Math.round(ms / 1000);
+    return s < 60 ? s + " s" : Math.floor(s / 60) + " min " + String(s % 60).padStart(2, "0") + " s";
+  };
+  const pct = (x) => x == null ? "–" : (x * 100).toFixed(x < 0.1 ? 1 : 0) + "%";
+
+  // Fixed outcome -> slot order (color follows the outcome, never its rank).
+  const OUTCOMES = [
+    ["ok", "ok", "var(--s1)"],
+    ["compile_error", "compile error", "var(--s2)"],
+    ["refused", "refused", "var(--s3)"],
+    ["crash", "crash", "var(--s4)"],
+    ["timeout", "timeout", "var(--s5)"],
+    ["other", "other (rate limited, network, server)", "var(--s6)"],
+  ];
+  const outcomeKey = (o) => OUTCOMES.some(([k]) => k === o) ? o : "other";
+
+  let days = Number(store.get(DAYS_KEY)) || 28;
+  let memToken = null; // used when localStorage is blocked
+
+  const tip = $("tip");
+  function showTip(e, text) {
+    tip.textContent = text;
+    tip.style.display = "block";
+    const x = Math.min(e.clientX + 12, window.innerWidth - tip.offsetWidth - 8);
+    tip.style.left = x + "px";
+    tip.style.top = (e.clientY + 14) + "px";
+  }
+  function hideTip() { tip.style.display = "none"; }
+  function bindTips(root) {
+    root.querySelectorAll("[data-tip]").forEach((el) => {
+      el.addEventListener("pointermove", (e) => showTip(e, el.dataset.tip));
+      el.addEventListener("pointerleave", hideTip);
+    });
+  }
+
+  function niceMax(v) {
+    if (v <= 0) return 1;
+    const p = Math.pow(10, Math.floor(Math.log10(v)));
+    for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p;
+    return 10 * p;
+  }
+
+  // Bar chart over every day of the window (missing days are zero).
+  // series: [{key, color, label}]; rows: {day -> {key -> n}}.
+  function barChart(el, allDays, rows, series, labelFor) {
+    const W = 520, H = 190, L = 34, R = 6, T = 8, B = 22;
+    const totals = allDays.map((d) => series.reduce((s, x) => s + ((rows[d] || {})[x.key] || 0), 0));
+    const max = niceMax(Math.max(0, ...totals));
+    const bw = (W - L - R) / allDays.length;
+    const gap = Math.min(2, bw * 0.25);
+    const y = (v) => T + (H - T - B) * (1 - v / max);
+    let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="bar chart">`;
+    for (const f of [0, 0.5, 1]) {
+      const v = max * f;
+      svg += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="${f === 0 ? "var(--axis)" : "var(--grid)"}" stroke-width="1"/>`;
+      svg += `<text x="${L - 6}" y="${y(v) + 4}" text-anchor="end">${fmt(v)}</text>`;
+    }
+    const every = Math.ceil(allDays.length / 7);
+    allDays.forEach((d, i) => {
+      const x = L + i * bw;
+      let acc = 0;
+      const parts = [];
+      series.forEach((s, si) => {
+        const n = (rows[d] || {})[s.key] || 0;
+        if (!n) return;
+        const y0 = y(acc), y1 = y(acc + n);
+        acc += n;
+        const top = series.slice(si + 1).every((t) => !((rows[d] || {})[t.key]));
+        const h = Math.max(0, y0 - y1 - (top ? 0 : 2));
+        const w = Math.max(1, bw - gap);
+        const r = top ? Math.min(4, w / 2, h) : 0;
+        // Rounded data-end only on the top segment; anchored square at the baseline.
+        svg += r > 0
+          ? `<path d="M${x},${y0} V${y1 + r} Q${x},${y1} ${x + r},${y1} H${x + w - r} Q${x + w},${y1} ${x + w},${y1 + r} V${y0} Z" fill="${s.color}"/>`
+          : `<rect x="${x}" y="${y1}" width="${w}" height="${h}" fill="${s.color}"/>`;
+        parts.push(`${s.label}: ${fmt(n)}`);
+      });
+      const label = labelFor(d, totals[i], parts);
+      svg += `<rect x="${x}" y="${T}" width="${bw}" height="${H - T - B}" fill="transparent" data-tip="${esc(label)}"/>`;
+      if (i % every === 0) svg += `<text x="${x + bw / 2}" y="${H - 6}" text-anchor="middle">${d.slice(5)}</text>`;
+    });
+    svg += "</svg>";
+    el.innerHTML = svg;
+    bindTips(el);
+  }
+
+  function table(el, cols, rows, empty) {
+    if (!rows.length) { el.innerHTML = `<div class="empty">${empty || "No data in this window."}</div>`; return; }
+    let h = "<table><thead><tr>" + cols.map((c) => `<th class="${c.cls || ""}">${esc(c.label)}</th>`).join("") + "</tr></thead><tbody>";
+    for (const r of rows) h += "<tr>" + cols.map((c) => `<td class="${c.cls || ""}">${c.html ? c.html(r) : esc(c.get(r))}</td>`).join("") + "</tr>";
+    el.innerHTML = h + "</tbody></table>";
+  }
+  const barCol = (get, max) => ({ label: "", cls: "barcell", html: (r) => `<div class="bar" style="width:${max ? (100 * get(r) / max).toFixed(1) : 0}%"></div>` });
+
+  function windowDays(from, to) {
+    const out = [];
+    for (let d = new Date(from + "T00:00:00Z"); d <= new Date(to + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + 1)) out.push(d.toISOString().slice(0, 10));
+    return out;
+  }
+
+  function render(d) {
+    $("range").textContent = `${d.from_day} to ${d.to_day} (UTC), last ${d.window_days} days`;
+    $("source").textContent = d.source;
+    $("generated").textContent = d.generated_at;
+    const t = d.totals;
+    const tiles = [
+      ["Visitors", fmt(t.visitors), "distinct browsers"],
+      ["Sessions", fmt(t.sessions), ""],
+      ["Page views", fmt(t.page_views), fmt(t.page_loads) + " page loads"],
+      ["Playground runs", fmt(t.runs), fmt(t.distinct_programs) + " distinct programs"],
+      ["Figure views", fmt(t.figure_views), ""],
+      ["Tooltip hovers", fmt(t.tooltip_hovers), ""],
+      ["Turned logging off", pct(t.turned_off_share), fmt(t.turned_off) + " of " + fmt(t.visitors) + " visitors"],
+    ];
+    $("tiles").innerHTML = tiles.map(([k, v, n]) => `<div class="card tile"><div class="k">${esc(k)}</div><div class="v">${v}</div><div class="n">${esc(n)}</div></div>`).join("");
+
+    const all = windowDays(d.from_day, d.to_day);
+    const vrows = {};
+    d.daily.forEach((r) => { vrows[r.day] = { visitors: r.visitors }; });
+    barChart($("ch-visitors"), all, vrows, [{ key: "visitors", color: "var(--s1)", label: "visitors" }],
+      (day, tot) => `${day}\n${fmt(tot)} visitors`);
+
+    const rrows = {};
+    d.runs_daily.forEach((r) => {
+      const o = {};
+      for (const [k, n] of Object.entries(r.outcomes)) o[outcomeKey(k)] = (o[outcomeKey(k)] || 0) + n;
+      rrows[r.day] = o;
+    });
+    const present = new Set(d.outcomes.map((o) => outcomeKey(o.key)));
+    const series = OUTCOMES.filter(([k]) => present.has(k)).map(([key, label, color]) => ({ key, label, color }));
+    $("lg-runs").innerHTML = series.length > 1 ? series.map((s) => `<li><i style="background:${s.color}"></i>${esc(s.label)}</li>`).join("") : "";
+    if (series.length) {
+      barChart($("ch-runs"), all, rrows, series, (day, tot, parts) => `${day}\n${fmt(tot)} runs\n${parts.join("\n")}`);
+    } else {
+      $("ch-runs").innerHTML = '<div class="empty">No runs in this window.</div>';
+    }
+
+    const totalRuns = d.outcomes.reduce((s, o) => s + o.n, 0);
+    const maxOut = Math.max(0, ...d.outcomes.map((o) => o.n));
+    table($("tb-outcomes"), [
+      { label: "outcome", get: (r) => r.key.replace(/_/g, " ") },
+      { label: "runs", cls: "num", get: (r) => fmt(r.n) },
+      { label: "share", cls: "num", get: (r) => pct(totalRuns ? r.n / totalRuns : null) },
+      barCol((r) => r.n, maxOut),
+    ], d.outcomes);
+
+    const maxCode = Math.max(0, ...d.error_codes.map((c) => c.n));
+    table($("tb-codes"), [
+      { label: "code", html: (r) => `<a href="https://doc.rust-lang.org/error_codes/${esc(r.key)}.html" rel="noreferrer" target="_blank">${esc(r.key)}</a>` },
+      { label: "runs", cls: "num", get: (r) => fmt(r.n) },
+      barCol((r) => r.n, maxCode),
+    ], d.error_codes, "No compile errors in this window.");
+
+    const maxCh = Math.max(0, ...d.chapters.map((c) => c.page_views));
+    table($("tb-chapters"), [
+      { label: "page", cls: "page", get: (r) => r.page },
+      { label: "views", cls: "num", get: (r) => fmt(r.page_views) },
+      { label: "visitors", cls: "num", get: (r) => fmt(r.visitors) },
+      { label: "median active time", cls: "num", get: (r) => dur(r.median_active_ms) },
+      barCol((r) => r.page_views, maxCh),
+    ], d.chapters);
+
+    const maxFig = Math.max(0, ...d.figures.map((f) => f.views));
+    table($("tb-figures"), [
+      { label: "figure", get: (r) => r.figure_id.slice(0, 12) },
+      { label: "page", cls: "page", get: (r) => r.page },
+      { label: "views", cls: "num", get: (r) => fmt(r.views) },
+      { label: "tooltip hovers", cls: "num", get: (r) => fmt(r.hovers) },
+      { label: "hovers / view", cls: "num", get: (r) => r.views ? (r.hovers / r.views).toFixed(1) : "–" },
+      barCol((r) => r.views, maxFig),
+    ], d.figures);
+
+    table($("tb-daily"), [
+      { label: "day", get: (r) => r.day },
+      { label: "visitors", cls: "num", get: (r) => fmt(r.visitors) },
+      { label: "sessions", cls: "num", get: (r) => fmt(r.sessions) },
+      { label: "page views", cls: "num", get: (r) => fmt(r.page_views) },
+      { label: "runs", cls: "num", get: (r) => fmt(r.runs) },
+    ], d.daily.slice().reverse());
+    table($("tb-weekly"), [
+      { label: "week of", get: (r) => r.week },
+      { label: "visitors", cls: "num", get: (r) => fmt(r.visitors) },
+      { label: "sessions", cls: "num", get: (r) => fmt(r.sessions) },
+    ], d.weekly.slice().reverse());
+  }
+
+  function showLogin(msg) {
+    $("app").hidden = true;
+    $("login").hidden = false;
+    $("login-err").textContent = msg || "";
+    $("token").focus();
+  }
+
+  async function load() {
+    const token = store.get(KEY) || memToken;
+    if (!token) return showLogin();
+    document.querySelectorAll(".seg button").forEach((b) => b.setAttribute("aria-pressed", String(Number(b.dataset.days) === days)));
+    $("load-err").textContent = "";
+    let resp;
+    try {
+      resp = await fetch(`/dashboard/data?days=${days}`, { headers: { Authorization: "Bearer " + token }, cache: "no-store" });
+    } catch (e) {
+      $("load-err").textContent = "Could not reach the server.";
+      return;
+    }
+    if (resp.status === 401) { store.del(KEY); memToken = null; return showLogin("That token was not accepted."); }
+    if (!resp.ok) {
+      $("login").hidden = true; $("app").hidden = false;
+      $("load-err").textContent = `Error ${resp.status}: ${(await resp.text()).slice(0, 300)}`;
+      return;
+    }
+    const data = await resp.json();
+    $("login").hidden = true;
+    $("app").hidden = false;
+    render(data);
+  }
+
+  $("login-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const v = $("token").value.trim();
+    if (!v) return;
+    store.set(KEY, v);
+    memToken = v;
+    $("token").value = "";
+    load();
+  });
+  $("logout").addEventListener("click", () => { store.del(KEY); memToken = null; showLogin(); });
+  document.querySelectorAll(".seg button").forEach((b) => b.addEventListener("click", () => {
+    days = Number(b.dataset.days);
+    store.set(DAYS_KEY, String(days));
+    load();
+  }));
+  load();
+})();
+</script>
+</body>
+</html>
