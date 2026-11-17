@@ -24775,6 +24775,32 @@ fn tooltip_wrapping_is_css_not_word_splitting() {
     }
 }
 
+/// RustViz 1 reported every tooltip hover to Google Analytics
+/// (`gtag('event', 'tooltip_hover', …)`). No copy of helpers.js may call
+/// gtag or load Google's tag; hovers go only to the `rvTelemetry` hook,
+/// which no page defines unless a telemetry endpoint is configured.
+#[test]
+fn helpers_js_has_no_google_analytics() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    for rel in [
+        "rustviz-lib/src/helpers.js",
+        "playground/frontend/public/ex-assets/helpers.js",
+        "mdbook-rustviz/test-book/mdbook_plugin/helpers.js",
+        "mdbook-rustviz/test-book/mdbook_plugin/book.js",
+    ] {
+        let js = fs::read_to_string(root.join(rel)).unwrap();
+        for bad in ["gtag", "googletagmanager", "dataLayer"] {
+            assert!(!js.contains(bad), "{} still mentions {}", rel, bad);
+        }
+        if rel.ends_with("helpers.js") {
+            assert!(
+                js.contains("window.rvTelemetry && typeof window.rvTelemetry.tooltipHover === 'function'"),
+                "{} lacks the guarded rvTelemetry hook", rel
+            );
+        }
+    }
+}
+
 /// A reference bound by an `if` only exists once the branches have joined,
 /// so its dotted "holds a reference" bracket must start below the branch
 /// diamond, not between its arms (#489). On main the bracket started at the
