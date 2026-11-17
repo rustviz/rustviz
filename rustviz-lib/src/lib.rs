@@ -23,7 +23,7 @@
 //!
 //! # Execution backends
 //!
-//! There are two backends, selected by the `RV_RUNNER` env var:
+//! There are three backends, selected by the `RV_RUNNER` env var:
 //!
 //! - `RV_RUNNER=local` (default) shells out to `cargo rv-plugin` against
 //!   a generated tempdir crate. Fast, no Docker dependency. **Not safe for
@@ -41,9 +41,7 @@
 //!   playground server explicitly opts into it. See
 //!   `playground/SECURITY.md` for the full sandboxing contract.
 //!
-//! The default flipped from `docker` to `local` in PR C of the reorg —
-//! library use is the common case, and the previous default forced every
-//! caller to either install Docker or set the env var.
+//! The default is `local`, since library use is the common case.
 
 use std::{
     env,
@@ -58,7 +56,7 @@ use tempfile::tempdir;
 
 /// Verbatim contents of `rust-toolchain.toml`, embedded at compile
 /// time. The single source of truth for which nightly + components
-/// RustViz needs — `setup.sh` (defers to rustup auto-install via the
+/// RustViz needs — rustup's auto-install (via the
 /// workspace-root copy), the local-runner backend below (writes it
 /// into the per-request temp crate), and `rustviz init` (parses it
 /// for the rustup install command) all derive from this one constant.

@@ -31,6 +31,12 @@ use rustviz_lib::{HELPERS_JS, Rustviz, toolchain_channel, toolchain_components};
 /// fork or a different branch.
 const DEFAULT_PLUGIN_GIT: &str = "https://github.com/rustviz/rustviz";
 
+/// Git tag matching this CLI's own release (e.g. `v2.1.0`). With the
+/// default `--plugin-git` and no `--plugin-rev`, the plugin is installed
+/// from this tag so it matches the `rustviz-lib` output format and the
+/// nightly this CLI installs, instead of drifting with `main`.
+const RELEASE_TAG: &str = concat!("v", env!("CARGO_PKG_VERSION"));
+
 #[derive(Parser)]
 #[command(
     name = "rustviz",
@@ -77,7 +83,8 @@ enum Commands {
         #[arg(long, default_value = DEFAULT_PLUGIN_GIT, value_name = "URL")]
         plugin_git: String,
         /// Git branch / tag / commit to install the plugin from.
-        /// Defaults to whatever the repo's default branch is.
+        /// Defaults to this release's tag (e.g. v2.1.0) when --plugin-git
+        /// is the canonical repo, otherwise to the repo's default branch.
         #[arg(long, value_name = "REF")]
         plugin_rev: Option<String>,
         /// Skip the rustup step. Use if the toolchain is already
@@ -275,20 +282,7 @@ fn init(
         // plugin compiles against the same nightly the renderer
         // expects, regardless of the user's `rustup default`.
         let toolchain_arg = format!("+{}", channel);
-        let mut args: Vec<&str> = vec![
-            &toolchain_arg,
-            "install",
-            "--git",
-            plugin_git,
-        ];
-        if let Some(r) = plugin_rev {
-            args.push("--rev");
-            args.push(r);
-        }
-        // The plugin crate name doesn't match the repo name, so name
-        // it explicitly. `--locked` keeps us on the lockfile the
-        // upstream repo committed.
-        args.extend_from_slice(&["--locked", "rustviz-plugin"]);
+        let args = plugin_install_args(&toolchain_arg, plugin_git, plugin_rev);
         run_cmd("cargo", &args, dry_run)
             .context("cargo install rustviz-plugin failed")?;
     }
@@ -300,6 +294,55 @@ fn init(
         eprintln!("✓ rustviz init complete. Try: rustviz svg some_file.rs");
     }
     Ok(())
+}
+
+/// Arguments for the `cargo install` of the plugin. An explicit `rev`
+/// wins; otherwise the canonical repo is installed from this release's
+/// tag, and any other git URL from its default branch.
+fn plugin_install_args<'a>(
+    toolchain_arg: &'a str,
+    plugin_git: &'a str,
+    plugin_rev: Option<&'a str>,
+) -> Vec<&'a str> {
+    let mut args: Vec<&str> = vec![toolchain_arg, "install", "--git", plugin_git];
+    if let Some(r) = plugin_rev {
+        args.push("--rev");
+        args.push(r);
+    } else if plugin_git == DEFAULT_PLUGIN_GIT {
+        args.push("--tag");
+        args.push(RELEASE_TAG);
+    }
+    // The plugin crate name doesn't match the repo name, so name
+    // it explicitly. `--locked` keeps us on the lockfile the
+    // upstream repo committed.
+    args.extend_from_slice(&["--locked", "rustviz-plugin"]);
+    args
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_git_installs_from_release_tag() {
+        let a = plugin_install_args("+nightly", DEFAULT_PLUGIN_GIT, None);
+        let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+        assert!(a.windows(2).any(|w| w == ["--tag", tag.as_str()]), "{a:?}");
+        assert!(!a.contains(&"--rev"));
+    }
+
+    #[test]
+    fn explicit_rev_overrides_tag() {
+        let a = plugin_install_args("+nightly", DEFAULT_PLUGIN_GIT, Some("abc123"));
+        assert!(a.windows(2).any(|w| w == ["--rev", "abc123"]), "{a:?}");
+        assert!(!a.contains(&"--tag"));
+    }
+
+    #[test]
+    fn custom_git_keeps_default_branch() {
+        let a = plugin_install_args("+nightly", "https://example.com/fork", None);
+        assert!(!a.contains(&"--tag") && !a.contains(&"--rev"), "{a:?}");
+    }
 }
 
 /// Run a child process inheriting stdio, mirroring its exit code.
