@@ -914,7 +914,7 @@ async fn dashboard_aggregates_file() {
                 "withdraw",
                 4,
                 2,
-                json!({"consent_version": "2026-11", "delete_requested": false}),
+                json!({"consent_version": "2026-11"}),
             ),
             ch1,
         ),
@@ -1012,4 +1012,16 @@ async fn dashboard_aggregates_file() {
         }
     }
     assert!(!text.contains("event_id") && !text.contains("anon_id"));
+}
+
+/// `withdraw` carries only `consent_version`; the old `delete_requested`
+/// flag is gone (deletion is by e-mailed ID), so it is dropped if sent.
+#[actix_web::test]
+async fn withdraw_with_only_consent_version_is_accepted() {
+    let env = Env::new();
+    let app = app!(env.config.clone());
+    let b = batch(vec![ev("withdraw", 0, 1, json!({"consent_version": "2026-11"}))]);
+    let resp: Value = test::call_and_read_body_json(&app, post(&b).to_request()).await;
+    assert_eq!(resp, json!({"accepted": 1, "rejected": []}));
+    assert_eq!(env.events()[0]["props"], json!({"consent_version": "2026-11"}));
 }

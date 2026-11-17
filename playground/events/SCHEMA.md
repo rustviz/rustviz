@@ -143,7 +143,7 @@ Common property types:
 | `run` | `run_id` (UUID), `program_id`, `figure_id?` (of the figure this run renders), `line_count` (0-100000), `example?` (≤ 64 chars, dropdown id it started from), `source_figure_id?`, `program_omitted?`: `too_large` | `program_id` is sent even when `collectCode` is off (the hash alone, no text). `program_omitted: "too_large"` (on `run` or `edit`) marks a `program_id` whose source exceeds the 64 KiB `source` cap, so no `program` record was sent (truncating would break the hash) |
 | `run_result` | `run_id`, `program_id?`, `figure_id?`, `outcome`: `ok`\|`compile_error`\|`refused`\|`crash`\|`timeout`\|`rate_limited`\|`network_error`\|`server_error`, `error_codes?` (≤ 32 strings matching `^E[0-9]{4}$`), `error_kind?` (value of `X-RustViz-Error-Kind`, ≤ 64 of `[a-z0-9-]`), `crash_at?` (≤ 64 of `[A-Za-z0-9_.:-]`, plugin source location such as `expr_visitor.rs:862`, only with `outcome: "crash"`), `latency_ms`, `cached?` bool, `http_status?` (100-599) | client-side view; the compile service may later write an authoritative server-side copy joined by `page_load_id` |
 | `consent` | `consent_version` (≤ 32 of `[0-9A-Za-z.-]`), `choice`: `opt_in` (explicit opt-in, `opt_in` mode or joining a study), `age_18_plus?` bool | see consent rules below |
-| `withdraw` | `consent_version`, `delete_requested` bool | the visitor turned logging off. Last event this browser sends until it turns logging back on; analysis deletes all rows with this `anon_id` when `delete_requested`. The dashboard's "turned logging off" share = distinct `anon_id` with a `withdraw` / distinct `anon_id` |
+| `withdraw` | `consent_version` | the visitor turned logging off. Last event this browser sends until it turns logging back on; it carries the ids, so a visitor who e-mails their ID (shown in the privacy page's Your data section) can have their rows found and deleted. The dashboard's "turned logging off" share = distinct `anon_id` with a `withdraw` / distinct `anon_id` |
 | `survey` | `survey_version` (≤ 32), `answers`: object of ≤ 20 entries, keys 1-32 of `[a-z0-9_]`, values strings ≤ 200 | tier 2 only (tier 1 → rejected `tier`) |
 
 `figure_view`, `tooltip_dwell`, `code_line_hover` and `pointer_trace` on a
@@ -158,7 +158,7 @@ playground figure use that run's `figure_id` and may add `program_id?`.
   UI. The host page's own text is the notice (the playground info panel's
   Privacy section; a paragraph at the bottom of the tutorial's front page).
   Events flow from first load unless GPC/DNT is set or the visitor turned
-  logging off in the Your-data panel, which sends `withdraw`. No `consent`
+  logging off in the privacy page's Your data section, which sends `withdraw`. No `consent`
   event is sent in `notice` mode.
 - There is no decline event: declining in `opt_in` mode sends nothing.
 - `withdraw` stops all logging on this device and clears `anon_id` and

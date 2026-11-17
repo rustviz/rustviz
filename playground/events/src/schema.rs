@@ -294,7 +294,6 @@ fn props_spec(event: &str) -> Option<&'static [Field]> {
         ],
         "withdraw" => spec![
             req("consent_version", Ty::Str(32, Charset::Version)),
-            req("delete_requested", Ty::Bool),
         ],
         "survey" => spec![
             req("survey_version", Ty::Str(32, Charset::Version)),
