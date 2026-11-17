@@ -28,23 +28,6 @@ function panelOwnerDocument(panel) {
     return document;
 }
 
-const SVG = {
-    'text': {
-        'label': 'label',
-        'functionLogo': 'label'
-    },
-    'path': {
-        'hollow': 'timeline_mut',
-        'staticref': 'static_ref_line',
-        'mutref': 'mut_ref_line'
-    },
-    'polyline': 'arrow',
-    'circle': 'event',
-    'line': 'timeline_mut',
-    'use': 'function_event',
-    'rect': 'structBox'
-};
-
 function helpers(classname) {
     // mdbook 0.4 wrapped the chapter in `<div id="page-wrapper">`;
     // 0.5 renamed it to `#mdbook-page-wrapper`. Try the 0.5 id
@@ -173,11 +156,14 @@ function displayTooltip(tooltip, classname) {
         tooltip.style.display = 'none';
         tooltip.innerHTML = '';
 
-        let tgt = e.currentTarget;
-        let e_label = (tgt.tagName === 'text') ? SVG['text'][tgt.classList[0]]
-            : ((tgt.tagName === 'path') ? SVG['path'][tgt.classList[0]]
-            : SVG[tgt.tagName]);
-
+        // Telemetry hook, a no-op by default. RustViz 1 sent every hover
+        // to Google Analytics here; that is gone. Only a page that loads
+        // rv-telemetry.js (it is loaded only when a telemetry endpoint is
+        // configured) defines window.rvTelemetry; it gets the hovered
+        // element and when the hover started and ended.
+        if (window.rvTelemetry && typeof window.rvTelemetry.tooltipHover === 'function') {
+            window.rvTelemetry.tooltipHover(classname, e.currentTarget, time_start, Date.now());
+        }
         time_start = null;
 
         removeUnderline(e, classname);

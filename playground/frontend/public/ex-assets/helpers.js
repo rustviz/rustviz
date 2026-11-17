@@ -12,28 +12,6 @@
 //     otherwise shift the layout box and put it ~50px off the cursor.
 // See memory: project_rv_serve_helpers_quirks.md.
 
-const SVG = {
-    'text': {
-        'label': 'label',
-        'functionLogo': 'label'
-    },
-    'path': {
-        'hollow': 'timeline_mut',
-        'staticref': 'static_ref_line',
-        'mutref': 'mut_ref_line'
-    },
-    // Arrows are <g> wrappers around <polyline> + <polygon> so the
-    // shaft and head share a single hover region. (Older standalone
-    // <polyline> arrows kept here for any pre-RV2 SVGs that still
-    // use them.)
-    'g': 'arrow',
-    'polyline': 'arrow',
-    'circle': 'event',
-    'line': 'timeline_mut',
-    'use': 'function_event',
-    'rect': 'structBox'
-};
-
 // The playground embeds SVGs inline (<div class="ex2 code_panel"><svg>...</svg></div>)
 // while mdbook embeds them via <object data="vis_*.svg">. These helpers paper
 // over the difference so the same file works in both contexts.
@@ -181,15 +159,13 @@ function displayTooltip(tooltip, classname) {
         tooltip.style.display = 'none';
         tooltip.innerHTML = '';
 
-        let tgt = e.currentTarget;
-        let e_label = (tgt.tagName === 'text') ? SVG['text'][tgt.classList[0]]
-            : ((tgt.tagName === 'path') ? SVG['path'][tgt.classList[0]]
-            : SVG[tgt.tagName]);
-
-        // only track hovering after mouse leaves element (gtag may be a no-op shim)
-        if (typeof gtag === 'function') {
-            gtag('event', 'tooltip_hover', { 'event_label': e_label });
-            gtag('event', e_label, { 'hover_time': (Date.now() - time_start) });
+        // Telemetry hook, a no-op by default. RustViz 1 sent every hover
+        // to Google Analytics here; that is gone. Only a page that loads
+        // rv-telemetry.js (it is loaded only when a telemetry endpoint is
+        // configured) defines window.rvTelemetry; it gets the hovered
+        // element and when the hover started and ended.
+        if (window.rvTelemetry && typeof window.rvTelemetry.tooltipHover === 'function') {
+            window.rvTelemetry.tooltipHover(classname, e.currentTarget, time_start, Date.now());
         }
         time_start = null; // reset
 
