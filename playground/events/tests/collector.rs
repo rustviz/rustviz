@@ -426,8 +426,8 @@ async fn size_caps() {
     let r = test::call_service(&app, post(&batch(many)).to_request()).await;
     assert_eq!(r.status(), 413);
 
-    // Body over 192 KiB.
-    let body = json!({"events": [{"pad": "y".repeat(200 * 1024)}]});
+    // Body over 256 KiB.
+    let body = json!({"events": [{"pad": "y".repeat(257 * 1024)}]});
     let r = test::call_service(&app, post(&body).to_request()).await;
     assert_eq!(r.status(), 413);
 
@@ -691,6 +691,60 @@ async fn program_records() {
     assert!(!std::fs::read_to_string(&env.config.events_file)
         .unwrap()
         .contains("String::from"));
+}
+
+/// The largest program the schema allows (64 KiB of source, escaping to
+/// 128 KiB of JSON) fits in one request together with ordinary events.
+#[actix_rt::test]
+async fn max_program_fits_in_a_batch() {
+    let env = Env::new();
+    let mut cfg = env.config.clone();
+    cfg.policy.accept_programs = true;
+    let app = app!(cfg);
+    // Worst common case for escaping: every byte is a quote or newline.
+    let src: String = "\"\n".repeat(rustviz_events::schema::MAX_SOURCE_BYTES / 2);
+    assert_eq!(src.len(), rustviz_events::schema::MAX_SOURCE_BYTES);
+    let mut events = vec![ev(
+        "program",
+        0,
+        1,
+        json!({"program_id": sha(&src), "source": src}),
+    )];
+    events.extend((1..60).map(|i| {
+        ev(
+            "tooltip_dwell",
+            i,
+            1,
+            dwell("3fa2c1d0b9e87a65", "s:L1:bind"),
+        )
+    }));
+    let body = batch(events);
+    let len = body.to_string().len();
+    assert!(
+        len > 128 * 1024 && len < rustviz_events::schema::MAX_BODY_BYTES,
+        "{len}"
+    );
+    let resp: Value = test::call_and_read_body_json(&app, post(&body).to_request()).await;
+    assert_eq!(resp, json!({"accepted": 60, "rejected": []}));
+    assert_eq!(
+        env.programs()[0]["source"].as_str().unwrap().len(),
+        64 * 1024
+    );
+
+    // One byte more source is rejected (the event, not the request).
+    let src2 = format!("{src}x");
+    let resp: Value = test::call_and_read_body_json(
+        &app,
+        post(&batch(vec![ev(
+            "program",
+            99,
+            1,
+            json!({"program_id": sha(&src2), "source": src2}),
+        )]))
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp["rejected"][0]["reason"], "invalid:source");
 }
 
 #[actix_rt::test]

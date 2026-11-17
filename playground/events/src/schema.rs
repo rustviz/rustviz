@@ -9,14 +9,21 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 pub const SCHEMA_VERSION: i64 = 1;
-/// Whole request body. Larger bodies get 413 before parsing.
-pub const MAX_BODY_BYTES: usize = 192 * 1024;
+/// Whole request body. Larger bodies get 413 before parsing. Always
+/// leaves room for one largest-possible `program` event plus ordinary
+/// events (checked at compile time below, and by a test).
+pub const MAX_BODY_BYTES: usize = 256 * 1024;
 pub const MAX_EVENTS_PER_BATCH: usize = 100;
-/// One serialized event (as received).
+/// One serialized event (as received, after JSON escaping).
 pub const MAX_EVENT_BYTES: usize = 24 * 1024;
-/// One serialized `program` event: its source plus the envelope.
-pub const MAX_PROGRAM_EVENT_BYTES: usize = 80 * 1024;
+/// Program source text, in UTF-8 bytes (before JSON escaping).
 pub const MAX_SOURCE_BYTES: usize = 64 * 1024;
+/// One serialized `program` event: the envelope plus the source, which
+/// JSON escaping can double (quotes, backslashes, newlines).
+pub const MAX_PROGRAM_EVENT_BYTES: usize = 2 * MAX_SOURCE_BYTES + MAX_EVENT_BYTES;
+// A maximal program event always fits in one request, with room for a few
+// ordinary events beside it (checked at compile time).
+const _: () = assert!(MAX_PROGRAM_EVENT_BYTES + 4 * MAX_EVENT_BYTES <= MAX_BODY_BYTES);
 
 const MAX_DURATION_MS: i64 = 86_400_000;
 

@@ -58,10 +58,25 @@ browser (rv-telemetry.js) ── POST /v1/events {"events":[…]} ──▶ rust
   if that exclusion is missing. Tests send `X-Forwarded-For`, `Forwarded`,
   `X-Real-IP`, `User-Agent`, `Referer` and `Cookie` and check none of them
   reaches the output.
+- **The compile API's request logs are excluded too.** With
+  `RV_LOG_RUN_RESULTS=1` the compile API (`rustviz-api`) logs one
+  `rv_run_result` line per compile carrying the visitor's `page_load_id`;
+  its Cloud Run request logs carry the client IP, so keeping both would make
+  the pseudonymous events linkable to IPs. `infra/setup.sh` therefore also
+  excludes `rustviz-api`'s `run.googleapis.com/requests` logs from storage
+  and routes its `rv_run_results` lines to `rv_research`
+  (view `server_run_results`).
+  *Operational visibility lost:* no per-request entries (URL, HTTP status,
+  latency, user agent, client IP) for the compile API in Logs Explorer, so
+  no "which client is hammering us" by IP. *Still there:* Cloud Run's
+  built-in metrics (request count by response class, latency percentiles,
+  instance count, CPU/memory), the service's own stderr lines (plugin
+  crashes, runner failures), and per-compile outcome/error kind/latency in
+  the `rv_run_result` lines. The in-memory per-IP rate limit is unaffected.
 - **Only the schema's fields are kept.** Unknown fields are dropped (and
   counted in `dropped_fields`); malformed events are rejected; sizes are
   capped (64 KiB program source, 24 KiB other events, 100 events and
-  192 KiB per request).
+  256 KiB per request; a maximal program always fits in one request).
 - **Code text is opt-in on the server** (`RV_EVENTS_ACCEPT_PROGRAMS=1`,
   default off; `deploy.sh` turns it on per the maintainer's decision) and
   goes to its own dataset that the dashboard cannot read.

@@ -18,10 +18,19 @@
 #      third for the compile service's server-side run results
 #      (rustviz-api, rv_stream=rv_run_results; only logged when that service
 #      runs with RV_LOG_RUN_RESULTS=1) into rv_research.
-#   4. Exclusions on the _Default log bucket so the collector's request
-#      logs (which contain client IPs) and its event/program lines are not
-#      stored in Cloud Logging at all. The BigQuery sinks still receive the
-#      event lines: exclusions only apply to the bucket they're set on.
+#   4. Exclusions on the _Default log bucket so that Cloud Run request logs
+#      (which contain client IPs) of BOTH the collector and the compile API
+#      ($API_SERVICE) are never stored, and the collector's event/program
+#      lines aren't duplicated into Cloud Logging. The compile API's run_result
+#      lines carry page_load_id, so its request logs would let pseudonymous
+#      events be linked to IP addresses. The BigQuery sinks still receive
+#      their lines: exclusions only apply to the bucket they're set on.
+#      Operational cost for the compile API: no per-request log entries
+#      (URL, status, latency, user agent) in Logs Explorer. Still available:
+#      Cloud Run metrics (request counts by status class, latency
+#      percentiles, instances), the service's own stderr lines, and, with
+#      RV_LOG_RUN_RESULTS=1, one rv_run_result line per compile (outcome,
+#      error kind, latency).
 #   5. Secret rv-events-dashboard-token (random, 32 bytes base64).
 #   6. The SQL views (infra/bigquery/views.sql). BigQuery only creates the
 #      sink tables when the first matching line arrives, so run
@@ -35,6 +44,8 @@ set -euo pipefail
 PROJECT="${RV_GCP_PROJECT:-rustviz-playground}"
 LOCATION="${RV_BQ_LOCATION:-US}"
 SERVICE="${RV_EVENTS_SERVICE:-rustviz-events}"
+# The compile API (playground/cloudrun/deploy.sh's default service name).
+API_SERVICE="${RV_API_SERVICE:-rustviz-api}"
 SA="rv-events@${PROJECT}.iam.gserviceaccount.com"
 SECRET="rv-events-dashboard-token"
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -112,7 +123,7 @@ run gcloud logging sinks create rv-programs-to-bq \
 run gcloud logging sinks create rv-run-results-to-bq \
     "bigquery.googleapis.com/projects/${PROJECT}/datasets/rv_research" \
     --project "$PROJECT" --use-partitioned-tables \
-    --log-filter "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"rustviz-api\" AND labels.rv_stream=\"rv_run_results\""
+    --log-filter "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${API_SERVICE}\" AND log_id(\"run.googleapis.com/stdout\") AND labels.rv_stream=\"rv_run_results\""
 # Each sink writes as its own service identity; let it write its dataset.
 for pair in rv-events-to-bq:rv_research rv-programs-to-bq:rv_programs rv-run-results-to-bq:rv_research; do
     sink="${pair%%:*}" ds="${pair##*:}"
@@ -127,6 +138,8 @@ done
 echo "# 4. Keep IPs (request logs) and event payloads out of Cloud Logging storage"
 run gcloud logging sinks update _Default --project "$PROJECT" \
     --add-exclusion "name=rv-events-request-logs,description=rustviz-events request logs contain client IPs; never stored,filter=${SERVICE_LOGS} AND log_id(\"run.googleapis.com/requests\")"
+run gcloud logging sinks update _Default --project "$PROJECT" \
+    --add-exclusion "name=rv-api-request-logs,description=compile API request logs contain client IPs and would make run_result lines linkable to them; never stored,filter=resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${API_SERVICE}\" AND log_id(\"run.googleapis.com/requests\")"
 run gcloud logging sinks update _Default --project "$PROJECT" \
     --add-exclusion "name=rv-events-payloads,description=telemetry lines live only in BigQuery,filter=${SERVICE_LOGS} AND labels.rv_stream:*"
 

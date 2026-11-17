@@ -36,7 +36,7 @@ Origin: https://rustviz.github.io      (must be on the collector's allow-list)
 - No cookies, no credentials (`credentials: "omit"`). The collector never sets
   a cookie and never sends `Access-Control-Allow-Credentials`.
 - **Limits (whole request rejected, nothing recorded):**
-  - body > 192 KiB → 413 (but see the beacon note below)
+  - body > 256 KiB → 413 (but see the beacon note below)
   - more than 100 events in `events` → 413
   - malformed JSON / wrong top-level shape → 400
   - per-IP rate limit exceeded → 429 (in-memory token bucket; the IP is a
@@ -50,8 +50,11 @@ Origin: https://rustviz.github.io      (must be on the collector's allow-list)
   The client should not retry rejected events (they will be rejected again).
   It may retry a whole batch on network error / 5xx / 429 (dedupe is by
   `event_id`, so retries are safe).
-- An event serialized larger than 24 KiB is rejected (`too_large`); a
-  `program` event may be up to 80 KiB (its `source` is capped at 64 KiB).
+- An event serialized larger than 24 KiB is rejected (`too_large`). A
+  `program` event's `source` is capped at 64 KiB of UTF-8 (`invalid:source`)
+  and the whole serialized event at 152 KiB (2 × 64 KiB for worst-case JSON
+  escaping + 24 KiB), so a maximal program always fits in one 256 KiB
+  request alongside other events (the collector tests this).
 - **Beacon note:** browsers cap `sendBeacon` / `fetch(…, {keepalive: true})`
   at 64 KiB in flight. Send ordinary batches by beacon on page hide, but send
   a `program` record with a plain `fetch` at run time (it is rarely > 16 KiB:
