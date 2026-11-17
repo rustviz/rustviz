@@ -26,6 +26,9 @@ COPY rustviz/ ./rustviz/
 COPY mdbook-rustviz/ ./mdbook-rustviz/
 COPY playground/Cargo.toml ./playground/Cargo.toml
 COPY playground/src/ ./playground/src/
+# Workspace member; only its manifest and sources are needed for cargo to
+# load the workspace (the compile API image doesn't build or ship it).
+COPY playground/events/ ./playground/events/
 COPY xtask/ ./xtask/
 RUN cargo install --locked --path rustviz-plugin --root /out \
  && cargo build --release --locked -p rustviz-playground \

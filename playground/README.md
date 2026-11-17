@@ -122,3 +122,11 @@ If you ever stand up the SPA at another URL (custom domain, mirror), add
 that origin to the CORS allowlist in `playground/src/main.rs` and redeploy
 the API. The allowlist is the gate — without it the new origin's browsers
 will refuse to call `/submit-code`.
+
+## Telemetry collector (not deployed)
+
+[`events/`](events/README.md) holds `rustviz-events`, a separate Cloud Run
+service that would receive usage events from the tutorial and playground and
+serve an aggregate usage dashboard. It is not deployed and nothing sends to
+it; telemetry is off unless an endpoint is configured. The event contract is
+[`events/SCHEMA.md`](events/SCHEMA.md).

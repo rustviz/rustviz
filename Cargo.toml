@@ -8,5 +8,6 @@ members = [
   "rustviz",
   "mdbook-rustviz",
   "playground",
+  "playground/events",
   "xtask",
 ]
