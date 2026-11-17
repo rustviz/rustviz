@@ -1,7 +1,7 @@
 extern crate handlebars;
 
 use crate::svg_generator::data::{branch_is_collapsed, is_param_value_line, returned_closure, ExtBranchData, ExternalEvent, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, StaticLender, Visualizable, VisualizationData, FIRST_ROW_Y, OLD_FIRST_ROW_Y, LINE_SPACE};
-use crate::svg_generator::svg_frontend::{code_panel, timeline_panel};
+use crate::svg_generator::svg_frontend::{code_panel, rv_attrs, timeline_panel};
 use handlebars::Handlebars;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -1159,13 +1159,15 @@ pub fn render_svg(
 
     // data for code panel
     let mut max_x_space: i64 = 0;
-    let (output, line_of_code) =
+    let (output, line_of_code, row_lines) =
             code_panel::render_code_panel(a_lines, s_lines, &mut max_x_space, &visualization_data.event_line_map, &line_insertion_map, &synthetic_blank_rows);
     let code_panel_string = output;
     let num_lines = line_of_code;
 
     // data for tl panel
     let (timeline_panel_string, max_width) = timeline_panel::render_timeline_panel(visualization_data);
+    // Each element's `data-rv-id`, and its rows as code-panel lines.
+    let timeline_panel_string = rv_attrs::finalize(&timeline_panel_string, &row_lines);
     
     // Code-panel width: scale with the longest source line so long
     // function signatures (e.g. `fn compare_strings(_a: &String,

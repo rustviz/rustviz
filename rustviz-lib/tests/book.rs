@@ -1680,7 +1680,9 @@ fn code_rows(code_svg: &str) -> Vec<(f64, String)> {
     for chunk in code_svg.split(OPEN).skip(1) {
         let Some(after_x) = chunk.find("\" y=\"").map(|i| &chunk[i + 5..]) else { continue };
         let Some((y, rest)) = leading_number(after_x) else { continue };
-        let Some(rest) = rest.strip_prefix("\"> <tspan class=\"line-number\">") else { continue };
+        // (Past the tag's other attributes: `data-rv-*`, docs/element-ids.md.)
+        let Some(rest) = rest.find('>').map(|i| &rest[i + 1..]) else { continue };
+        let Some(rest) = rest.strip_prefix(" <tspan class=\"line-number\">") else { continue };
         let digits: String = rest.trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
         last = if digits.is_empty() {
             format!("{}+", last.trim_end_matches('+'))
@@ -1911,6 +1913,15 @@ fn check(s: &Snippet, outcome: &Outcome, failures: &mut Vec<String>, notes: &mut
     for (panel, svg) in [("code", code), ("timeline", timeline)] {
         if let Some(e) = common::svg::xml_error(svg) {
             failures.push(format!("{}: {} panel is not well-formed XML (#1049): {}", s.id, panel, e));
+            return;
+        }
+    }
+    // Every hover target has a unique, structured `data-rv-id`
+    // (docs/element-ids.md in rustviz-plugin).
+    for (panel, svg) in [("code", code), ("timeline", timeline)] {
+        let problems = common::svg::rv_problems(svg);
+        if !problems.is_empty() {
+            failures.push(format!("{}: {} panel's data-rv-* attributes: {:?}", s.id, panel, problems));
             return;
         }
     }

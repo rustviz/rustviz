@@ -20887,6 +20887,12 @@ fn assert_well_formed(name: &str, rv: &Rustviz) {
             panic!("{}: {} panel is not well-formed XML (#1049): {}", name, panel, e);
         }
     }
+    // Every hover target has a unique, structured `data-rv-id` (the ids
+    // telemetry names hovered elements by; docs/element-ids.md).
+    for (panel, svg) in [("code", &code), ("timeline", &timeline)] {
+        let problems = common::svg::rv_problems(svg);
+        assert!(problems.is_empty(), "{}: {} panel's data-rv-* attributes: {:#?}", name, panel, problems);
+    }
     let crossed = arrows_crossing_dots(&timeline);
     assert!(
         crossed.is_empty(),
@@ -23408,6 +23414,95 @@ fn plugin_output_is_deterministic() {
         "plugin output changed between identical runs:\n  {}",
         failures.join("\n  ")
     );
+}
+
+/// The `data-rv-id`s of a figure (the ids telemetry names hovered
+/// elements by, rustviz-plugin/docs/element-ids.md) are the same on
+/// every render of the same program: an analysis joins hovers from
+/// different learners on them. `assert_well_formed` checks they are
+/// unique in every fixture; these cover conditionals (arms, stop bars),
+/// structs, closures, references and functions.
+#[test]
+fn rv_ids_are_stable_across_runs() {
+    let cases = [
+        "rv_element_ids", "basic_if12", "basic_match2", "basic_struct",
+        "closure_move_multi", "basic_mutref3", "struct_after_fn_hashes",
+    ];
+    let mut failures = Vec::new();
+    for name in cases {
+        let ids = |rv: &Rustviz| {
+            let mut v = common::svg::rv_elements(&rv.code_panel_string());
+            v.extend(common::svg::rv_elements(&rv.timeline_panel_string()));
+            v
+        };
+        let first = ids(&render_uncached(name).unwrap_or_else(|e| panic!("{}", e)));
+        let again = ids(&render_uncached(name).unwrap_or_else(|e| panic!("{}", e)));
+        assert!(first.len() > 5, "{}: only {} elements with a data-rv-id", name, first.len());
+        if first != again {
+            failures.push(name);
+        }
+    }
+    assert!(failures.is_empty(), "data-rv-id / data-rv-* changed between two renders of {:?}", failures);
+}
+
+/// Pins the `data-rv-*` attributes of a small program (fixture
+/// `rv_element_ids`): the vocabulary a telemetry client relies on.
+/// Changing them changes what recorded hover events mean; update
+/// docs/element-ids.md (and tell whoever analyses the data) with them.
+#[test]
+fn rv_ids_pin_a_simple_program() {
+    use common::svg::RvElement;
+    let rv = run_with_local_backend("rv_element_ids");
+    let timeline = common::svg::rv_elements(&rv.timeline_panel_string());
+    let code = common::svg::rv_elements(&rv.code_panel_string());
+    let el = |id: &str| -> RvElement {
+        timeline.iter().chain(&code).find(|e| e.id == id).cloned()
+            .unwrap_or_else(|| panic!("no element with data-rv-id {:?}; ids: {:#?}", id,
+                timeline.iter().map(|e| &e.id).collect::<Vec<_>>()))
+    };
+    let o = |s: &str| Some(s.to_owned());
+    // 6: let s = String::from("hi");
+    assert_eq!(el("s@L6:dot:acquire"), RvElement {
+        id: "s@L6:dot:acquire".into(), kind: "dot".into(), event: o("acquire"), state: None,
+        var: o("s"), to: None, line: o("6"), line_end: None, part: None, drop: None,
+    });
+    assert_eq!(el("String::from>s@L6:arrow:move").kind, "arrow");
+    assert_eq!(el("String::from>s@L6:fn:move").kind, "fn");
+    // 7: let r = &s;  (the borrow, and r's bracket while it holds it)
+    let borrow = el("s>r@L7:arrow:static_borrow");
+    assert_eq!((borrow.event, borrow.var, borrow.to, borrow.line),
+        (o("static_borrow"), o("s"), o("r"), o("7")));
+    assert_eq!(el("s@L7:dot:static_lend").event, o("static_lend"));
+    assert_eq!(el("r@L7:dot:static_borrow").var, o("r"));
+    let bracket = el("r@L7-8:bracket:partial_privilege");
+    assert_eq!((bracket.kind.as_str(), bracket.line, bracket.line_end), ("bracket", o("7"), o("8")));
+    // 8: println!("{}", r);  r's last use: one dot for every event on it
+    assert_eq!(el("r@L8:dot:static_lend+static_reacquire+static_die+pass_by_static_reference").event,
+        o("static_lend static_reacquire static_die pass_by_static_reference"));
+    assert_eq!(el("r>s@L8:arrow:static_die").to, o("s"));
+    // 9: let t = s;  a move, not a copy
+    assert_eq!(el("s>t@L9:arrow:move").event, o("move"));
+    assert_eq!(el("s@L9:dot:move").event, o("move"));
+    // 10: let n = takes(t);  t moves into the call; n gets a copy of the usize
+    assert_eq!(el("t>takes@L10:arrow:move").to, o("takes"));
+    assert_eq!(el("takes>n@L10:arrow:copy").event, o("copy"));
+    // 3: takes' `s` is dropped at its `}` (the dot with the drop mark),
+    // main's `s` was moved and `t` was moved: only scope ends, no drops.
+    assert_eq!(el("s@L3:dot:owner_go_out_of_scope").drop, o("true"));
+    assert_eq!(el("s@L12:dot:owner_go_out_of_scope").drop, None);
+    assert_eq!(el("t@L12:dot:owner_go_out_of_scope").drop, None);
+    // Column segments, headers (two columns named s: takes' and main's)
+    // and code lines.
+    let seg = el("s@L7-8:line:partial_privilege");
+    assert_eq!((seg.kind.as_str(), seg.state, seg.line, seg.line_end),
+        ("line", o("partial_privilege"), o("7"), o("8")));
+    assert_eq!(el("hdr:s").kind, "header");
+    assert_eq!(el("hdr:s#2").var, o("s"));
+    assert_eq!(el("code:L9"), RvElement {
+        id: "code:L9".into(), kind: "code_line".into(), event: None, state: None,
+        var: None, to: None, line: o("9"), line_end: None, part: None, drop: None,
+    });
+    assert_eq!(code.len(), 12, "one code_line per source line");
 }
 
 /// Return arrows that end on the same line are drawn in source order:

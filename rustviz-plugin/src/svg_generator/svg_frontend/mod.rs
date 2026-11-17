@@ -6,3 +6,4 @@ pub mod line_styles;
 pub mod templates;
 pub mod themes;
 pub mod syntax;
+pub mod rv_attrs;
