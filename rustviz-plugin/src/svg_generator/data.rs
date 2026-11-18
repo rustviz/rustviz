@@ -2857,13 +2857,21 @@ impl Ord for State {
     fn cmp(&self, other: &Self) -> Ordering {
         use State::*;
         
+        // The join of a conditional takes the lowest-ranked state of
+        // the branches that reach it. A value moved in one branch and
+        // mutably lent in another is maybe-moved: it can't be used again
+        // until it is assigned, even once the borrow ends, so a move
+        // outranks a mutable lend (#1132). With the two tied, the first
+        // branch won, and a mutable lend in it gave the value back as
+        // "the owner" when the borrow ended.
         fn rank(s: &State) -> u8 {
             match s {
-                FullPrivilege { s: LineState::Uninit } => 3,
-                ResourceMoved { .. } | RevokedPrivilege { .. } => 0,
-                PartialPrivilege { .. } => 1,
-                FullPrivilege {..} => 2,
-                Invalid | OutOfScope => 3,
+                FullPrivilege { s: LineState::Uninit } => 4,
+                ResourceMoved { .. } => 0,
+                RevokedPrivilege { .. } => 1,
+                PartialPrivilege { .. } => 2,
+                FullPrivilege {..} => 3,
+                Invalid | OutOfScope => 4,
             }
         }
 
@@ -4482,6 +4490,14 @@ impl Visualizable for VisualizationData {
             (State::RevokedPrivilege{ prev_state: p,.. }, Event::MutableReacquire{ .. }) => {
               *p.clone()
             }
+            // Maybe-moved after a conditional (one branch moved it,
+            // another lent it out): the end of that borrow doesn't
+            // give it back. It stays unusable until it is assigned
+            // again (#1132); without this arm the state became Invalid
+            // and the assignment drew no line either.
+            (State::ResourceMoved{ .. }, Event::MutableReacquire{ .. })
+            | (State::ResourceMoved{ .. }, Event::StaticReacquire{ .. }) =>
+              (*previous_state).clone(),
 
             (State::FullPrivilege{..}, Event::StaticDie { .. }) |
             (State::FullPrivilege{..}, Event::StaticBorrow { .. }) => {
