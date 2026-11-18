@@ -21179,6 +21179,29 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=p.f acquires ownership of a new resource; its previous resource is dropped",
         ],
     },
+    TooltipExpect {
+        name: "let_else_move_1133",
+        // #1133: a `let … else` whose `else` block moves a variable but
+        // drops nothing at its exit was drawn inline: the move read as
+        // happening on the matched path too, which then borrowed and
+        // dropped a moved variable. The block runs only when the pattern
+        // fails, and leaves the function there, so after the `let` the
+        // variable still owns its value. (in_loop's else drops the loop's
+        // temporary at its exit, so it was already drawn as a branch.)
+        must_contain: &[
+            "a still owns its resource here: the branch that moved a returned before reaching this point",
+            "b still owns its resource here: the branch that moved b panicked before reaching this point",
+            "d still owns its resource here: the branch that moved d returned before reaching this point",
+            "e still owns its resource here: the branch that moved e returned before reaching this point",
+            "f still owns its resource here: the branch that moved f returned before reaching this point",
+            "a's resource is moved into drop, which drops it",
+        ],
+        must_not_contain: &[
+            // The `if c` around in_if's let-else, which looked like it
+            // moved e on its path.
+            "e may have been moved",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
