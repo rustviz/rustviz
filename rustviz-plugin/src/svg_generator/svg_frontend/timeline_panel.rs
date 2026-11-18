@@ -185,6 +185,19 @@ fn merged_dot_title(lines: &[(Option<usize>, String)]) -> String {
         texts[i] = merged;
         texts.remove(j);
     }
+    // `s = f()?;` (#1151): the assignment runs only if the `?` succeeds.
+    if let Some((i, j, merged)) = (0..texts.len()).find_map(|i| (0..texts.len())
+        .filter(|&j| j != i)
+        .find_map(|j| hover_messages::try_drop_then_reassign(&texts[i], &texts[j]).map(|m| (i, j, m)))) {
+        texts[i] = merged;
+        texts.remove(j);
+    } else if texts.len() > 1 {
+        for t in texts.iter_mut() {
+            if let Some(r) = hover_messages::try_drop_with_other_events(t) {
+                *t = r;
+            }
+        }
+    }
     // The note on a write drawn inside a borrow that is over on its
     // path (#796) goes last: after the write's own text as a second
     // sentence, or as the last bullet.
@@ -1992,6 +2005,10 @@ fn render_dot(
                     } else if matches!(event, Event::OwnerDropUnlessReturned) {
                         let value = visualization_data.timelines[hash].resource_access_point.holds_value();
                         hover_messages::event_dot_owner_drop_unless_returned(&name, value, &note)
+                    } else if let Some(part) = matches!(event, Event::OwnerDropIfTryReturns).then(|| try_assigned_part(visualization_data, *hash as u64, *line_number)).flatten() {
+                        // `p.f = f()?;` (#1151): on success the assignment
+                        // gives a part of p, on its own column, a new value.
+                        hover_messages::event_dot_owner_drop_if_try_returns_part(&name, &note, &part)
                     } else if note.is_empty() {
                         event.print_message_with_name(&mut name)
                     } else if matches!(event, Event::OwnerDropIfTryReturns) {
@@ -6425,6 +6442,17 @@ fn get_y_axis_pos(line_number : usize) -> i64 {
     FIRST_ROW_Y - 5 - LINE_SPACE + LINE_SPACE * line_number as i64
 }
 
+/// The part of `owner` (a member column, `p.f` of `p`) that is given a
+/// new value on `line`, where a `?` may return early first (#1151).
+fn try_assigned_part(visualization_data: &VisualizationData, owner: u64, line: usize) -> Option<String> {
+    visualization_data.timelines.values().find(|t| {
+        let rap = &t.resource_access_point;
+        rap.is_member() && rap.get_owner() == owner
+            && t.history.iter().any(|(l, e)| *l == line
+                && matches!(e, Event::Acquire { .. } | Event::Copy { .. } | Event::OwnerDropAtReassign { .. }))
+    }).map(|t| t.resource_access_point.name().clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6513,3 +6541,4 @@ mod tests {
         assert!(!msg.contains("moved"), "{msg}");
     }
 }
+
