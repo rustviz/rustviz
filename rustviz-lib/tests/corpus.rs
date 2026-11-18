@@ -20776,6 +20776,31 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "e may have been moved",
         ],
     },
+||||||| parent of 6f0ed62a9 (plugin: an exit after a nested conditional that re-initializes drops the new value (#1135))
+    TooltipExpect {
+        name: "exit_after_nested_reinit_1135",
+        // #1135: a move, then a nested `if` / `match` / `if let` that
+        // gives the variable a new String on every path, then an exit
+        // (`return`, `panic!`, `continue`). The exit said "No resource is
+        // dropped": the branch's state before its first gap (the nested
+        // conditional's) was the moved one. The variable owns the new
+        // String at the exit, which drops it.
+        must_contain: &[
+            "a goes out of scope. Its resource is dropped.",
+            "b goes out of scope. Its resource is dropped.",
+            "d goes out of scope. Its resource is dropped.",
+            "e goes out of scope. Its resource is dropped.",
+            "f goes out of scope. Its resource is dropped.",
+            "a acquired ownership of a resource (in all branches above)",
+        ],
+        must_not_contain: &[
+            "a goes out of scope. No resource is dropped.",
+            "b goes out of scope. No resource is dropped.",
+            "d goes out of scope. No resource is dropped.",
+            "e goes out of scope. No resource is dropped.",
+            "f goes out of scope. No resource is dropped.",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
