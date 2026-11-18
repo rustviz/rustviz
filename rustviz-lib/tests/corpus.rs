@@ -20972,6 +20972,42 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "NAME's resource",
         ],
     },
+    TooltipExpect {
+        name: "try_no_drop_glue_1137",
+        // #1137: a `?` that returns early drops only what needs drop. md
+        // (a ManuallyDrop never drops what it holds), nd / pair / maybe
+        // (Copy values inside), f / g / k (closures capturing nothing, a
+        // Copy value by `move`, a reference) and mixed.n / mixed.m have no
+        // drop glue (`needs_drop` is false): main gave each a dot saying
+        // "...md's resource is dropped". b, mixed.s (and mixed, which holds
+        // it) still get theirs. The `?`s are in a `let`, an `if`, a loop
+        // body and a call argument.
+        // pick: the `return if d { x } else { y }` dot said "If that value
+        // isn't x's, x's resource is dropped here". (Its other bullet, the
+        // branch join's "its resource is dropped when x goes out of
+        // scope", is #1147.)
+        must_contain: &[
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and b's resource is dropped. If the `?` succeeds, nothing happens to b here.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and mixed.s's resource is dropped. If the `?` succeeds, nothing happens to mixed.s here.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and mixed's resource is dropped. If the `?` succeeds, nothing happens to mixed here.",
+            "The `return` here hands the caller one of the values its `if` / `match` chooses between. If that value isn't x's, x goes out of scope here as the function returns (it has nothing to drop). If it is x's, x's value goes to the caller.",
+            "The `return` here hands the caller one of the values its `if` / `match` chooses between. If that value isn't y's, y goes out of scope here as the function returns (it has nothing to drop). If it is y's, y's value goes to the caller.",
+        ],
+        must_not_contain: &[
+            "the function returns and md's resource is dropped",
+            "the function returns and nd's resource is dropped",
+            "the function returns and pair's resource is dropped",
+            "the function returns and pair.0's resource is dropped",
+            "the function returns and maybe's resource is dropped",
+            "the function returns and f's resource is dropped",
+            "the function returns and g's resource is dropped",
+            "the function returns and k's resource is dropped",
+            "the function returns and mixed.n's resource is dropped",
+            "the function returns and mixed.m's resource is dropped",
+            "If that value isn't x's, x's resource is dropped here",
+            "If that value isn't y's, y's resource is dropped here",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop

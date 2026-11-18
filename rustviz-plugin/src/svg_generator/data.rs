@@ -920,6 +920,15 @@ impl ResourceAccessPoint {
         }
     }
 
+    /// True iff nothing is ever dropped when this binding's value is:
+    /// `never_drops`, a non-Copy value with no drop glue (#484: a plain
+    /// struct, a closure that captures no resource), or a `ManuallyDrop`
+    /// (#283). A drop dot that says "only if ..., its resource is
+    /// dropped" has nothing to say for it (#1137).
+    pub fn drops_nothing(&self) -> bool {
+        self.never_drops() || self.is_plain_value() || self.is_manually_drop()
+    }
+
     pub fn is_mutref(&self) -> bool {
         match self {
             ResourceAccessPoint::MutRef(_) => true,
