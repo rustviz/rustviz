@@ -21373,6 +21373,31 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "j acquires ownership of a new resource. Its previous resource (including the String it holds) is dropped here only if j still holds it",
         ],
     },
+    TooltipExpect {
+        name: "branch_mut_lend_move_1132",
+        // #1132: s mutably lent to r in one branch and moved in the other
+        // is maybe-moved after the join (rustc: E0382 on any use until it
+        // is assigned). Main ranked the lend and the move equally, kept
+        // the first branch's lend, and when r's borrow ended drew s as
+        // "the owner" to the end of the function. Where s's column stops
+        // is pinned by `a_value_lent_in_one_branch_and_moved_in_another_stays_moved`.
+        must_contain: &[
+            "s was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+            "t goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+            "w acquires ownership of a new resource. Its previous resource is dropped here only if \
+             no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            // The scope-end wording main used after drawing s as the owner again.
+            "s goes out of scope. Its resource is dropped here only if s still holds it",
+            "t goes out of scope. Its resource is dropped here only if t still holds it",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -28917,6 +28942,30 @@ fn a_boxed_closure_borrowing_through_a_reference_keeps_it_until_dropped() {
     assert_eq!(ys("d's immutable borrow ends"), vec![row("drop(d);")]);
     assert_eq!(ys("d no longer borrows the resource p points to"), vec![row("drop(d);")]);
     assert_eq!(ys("w's resource is no longer immutably borrowed"), vec![row("drop(d);")]);
+}
+
+/// #1132 (`branch_mut_lend_move_1132`): a value mutably lent in one branch
+/// and moved in another has no column after the join, also once the
+/// borrow ends (main drew it as "the owner" again when the lending branch
+/// came first). When it is assigned again (`w = String::from("new")`, the
+/// branches the other way round) its column comes back from that row on;
+/// main drew nothing after the assignment.
+#[test]
+fn a_value_lent_in_one_branch_and_moved_in_another_stays_moved() {
+    let rv = run_with_local_backend("branch_mut_lend_move_1132");
+    let els = common::svg::rv_elements(&rv.timeline_panel_string());
+    let line_from = |var: &str, row: usize| els.iter()
+        .filter(|e| e.kind == "line" && e.var.as_deref() == Some(var))
+        .filter(|e| e.line.as_deref().and_then(|l| l.parse::<usize>().ok()).is_some_and(|l| l >= row))
+        .map(|e| e.id.clone())
+        .collect::<Vec<_>>();
+    // s: `if` lends it (L9), `else` moves it (L11), join on L13.
+    assert_eq!(line_from("s", 12), Vec::<String>::new(), "s has a column after the join");
+    // t: `match` arm 0 lends it, arm 1 moves it, join on L23.
+    assert_eq!(line_from("t", 22), Vec::<String>::new(), "t has a column after the join");
+    // w: maybe-moved after L35, assigned again on L36.
+    assert_eq!(line_from("w", 31), vec!["w@L36-37:line:full_privilege".to_string(),
+        "w@L37-38:line:full_privilege".to_string()]);
 }
 
 
