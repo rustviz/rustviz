@@ -1990,7 +1990,8 @@ fn render_dot(
                             hover_messages::event_dot_owner_drop_at_reassign_maybe_moved(&name, &note, *by_cond)
                         }
                     } else if matches!(event, Event::OwnerDropUnlessReturned) {
-                        let value = visualization_data.timelines[hash].resource_access_point.holds_value();
+                        // A ManuallyDrop has nothing to drop either (#1137).
+                        let value = visualization_data.timelines[hash].resource_access_point.drops_nothing();
                         hover_messages::event_dot_owner_drop_unless_returned(&name, value, &note)
                     } else if note.is_empty() {
                         event.print_message_with_name(&mut name)

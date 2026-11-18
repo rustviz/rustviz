@@ -2359,6 +2359,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if moved.as_ref().is_some_and(|(r, _, _)| r.hash() == rap.hash()) {
         continue;
       }
+      // Nothing to drop if it returns early: no dot (#1137). (An exit's
+      // scope end still ends such a column; a `?` ends none.)
+      if rap.drops_nothing() {
+        continue;
+      }
       let dup = self.preprocessed_events.iter().any(|(l, e)| *l == line
         && matches!(e, ExternalEvent::OwnerDropIfTryReturns { ro, .. } if *ro == rap));
       if dup {
