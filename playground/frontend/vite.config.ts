@@ -60,6 +60,7 @@ function telemetryConfigFile(mode: string): Plugin {
           endpoint,
           consent: env.VITE_RV_TELEMETRY_CONSENT === 'opt-in' ? 'opt-in' : 'notice',
           rvVersion: pluginVersion,
+          respectPrivacySignals: false,
         }) + '\n',
       });
     },

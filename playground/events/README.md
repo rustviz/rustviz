@@ -91,7 +91,7 @@ browser (rv-telemetry.js) ── POST /v1/events {"events":[…]} ──▶ rust
   browser's localStorage.
 
 What this service does *not* decide: the consent model, Do Not
-Track / GPC, and which ids exist are the client's job (`rv-telemetry.js`);
+Track / GPC handling, and which ids exist are the client's job (`rv-telemetry.js`);
 see `SCHEMA.md` "Consent rules". Google's front end necessarily sees client
 addresses; the privacy page should say so.
 

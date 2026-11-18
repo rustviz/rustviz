@@ -39,6 +39,12 @@
 //   controlOnly     false (default) | true: records nothing and draws nothing;
 //                   only rvTelemetry.control works. The privacy page uses it to
 //                   show the status and ID and to turn recording off or on.
+//   respectPrivacySignals
+//                   default true: a browser that sends Global Privacy Control
+//                   or Do Not Track gets no bar, no ids and no events. Sites
+//                   that never sell or share the data and say so on their
+//                   privacy page (the RustViz sites) set false; logging then
+//                   stops only when the visitor turns it off.
 //   bannerSlot      opt-in mode only: CSS selector of an element to put the
 //                   consent bar in (default: the top of <main>, else of
 //                   <body>). The bar is in the page's flow, never on top of
@@ -47,8 +53,9 @@
 // A choice made on another page of the same site (the privacy page's Turn
 // off / Turn on) reaches open pages through the `storage` event.
 //
-// Do Not Track or Global Privacy Control turns everything off: no bar,
-// no ids, no events, whatever the config says.
+// Unless `respectPrivacySignals` is false, Do Not Track or Global Privacy
+// Control turns everything off: no bar, no ids, no events, whatever else the
+// config says.
 (function () {
     'use strict';
     if (typeof window === 'undefined' || window.rvTelemetry) return;
@@ -90,6 +97,7 @@
               '(PI) and a contact address. To be written by the maintainer / IRB.]',
         footLink: userCfg.footLink === 'none' ? 'none' : 'inline',
         controlOnly: userCfg.controlOnly === true,
+        respectPrivacySignals: userCfg.respectPrivacySignals !== false,
         bannerSlot: typeof userCfg.bannerSlot === 'string' ? userCfg.bannerSlot : '',
     };
     var showStudy = cfg.study || typeof userCfg.studyText === 'string';
@@ -205,7 +213,7 @@
             n.doNotTrack === '1' || n.doNotTrack === 'yes' ||
             window.doNotTrack === '1' || n.msDoNotTrack === '1';
     }
-    var blocked = privacySignal();
+    var blocked = cfg.respectPrivacySignals && privacySignal();
 
     // Stored choice: {state: 'on' | 'off', how: 'opt_in' | 'notice' |
     // 'declined' | 'withdrawn', version, age18?}. No identifier in it.
@@ -1069,7 +1077,7 @@
         };
     }
 
-    // GPC / DNT: no bar, no listeners, nothing sent. Control-only (the
+    // GPC / DNT (when respected): no bar, no listeners, nothing sent. Control-only (the
     // privacy page): the control API above is all there is.
     if (blocked || cfg.controlOnly) return;
 

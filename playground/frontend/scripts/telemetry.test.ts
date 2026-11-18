@@ -483,6 +483,40 @@ for (const sig of [{ dnt: true }, { gpc: true }]) {
   }
 }
 
+// --- respectPrivacySignals: false (the RustViz sites): GPC / DNT do not stop logging
+for (const sig of [{ dnt: true }, { gpc: true }]) {
+  const cfg = { ...CFG, consent: 'notice', respectPrivacySignals: false };
+  const env = boot(cfg, sig);
+  assert.equal(t(env).isActive(), true, 'recording despite the signal');
+  assert.ok(names(env).includes('page_view'), 'events flow');
+  assert.match(env.local.get('rv.telemetry.anon_id')!, UUID);
+  // Turn off still stops it, and stays off on the next visit
+  t(env)._test.withdraw();
+  assert.equal(t(env).isActive(), false);
+  assert.equal(env.local.get('rv.telemetry.anon_id'), undefined);
+  const again = boot(cfg, { ...sig, local: env.local });
+  assert.equal(t(again).isActive(), false, 'stays off');
+  assert.deepEqual(names(again), []);
+}
+// an explicit true is the default
+{
+  const env = boot({ ...CFG, consent: 'notice', respectPrivacySignals: true }, { gpc: true });
+  assert.equal(t(env).isActive(), false);
+  assert.equal(env.fetches.length + env.beacons.length, 0);
+}
+
+// --- privacy page, our config (respectPrivacySignals false) + GPC / DNT: recording is on, button works
+for (const sig of [{ gpc: true }, { dnt: true }]) {
+  const local = new Map<string, string>();
+  const pg = boot(undefined, { ...sig, local, page: PAGE, configJson: { ...PCFG, respectPrivacySignals: false } });
+  await settle();
+  assert.equal(pg.els['yd-status'].textContent, 'Recording is on.');
+  assert.equal(pg.els['yd-button'].hidden, false);
+  assert.equal(pg.els['yd-button'].textContent, 'Turn off');
+  click(pg.els['yd-button']);
+  assert.equal(pg.els['yd-status'].textContent, 'Recording is off. Nothing is recorded.');
+}
+
 // --- tier 2 and cohorts: only for study participants who opted in
 {
   const env = boot({ ...CFG, study: true }, { search: '?cohort=eecs490-w27' });

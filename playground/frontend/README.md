@@ -40,7 +40,8 @@ section is the visitor's off switch (and shows their random ID): the page loads
 the client in control-only mode, which records nothing, using the endpoint in
 `privacy/telemetry-config.json`, which the build writes only when
 `VITE_RV_TELEMETRY_ENDPOINT` is set (no file: the page says logging is not
-enabled and shows no button). Turning off sends one `withdraw` event, clears the
+enabled and shows no button). The playground sets `respectPrivacySignals: false`: GPC and Do Not Track
+do not stop logging (RustViz never sells or shares the data); only Turn off does. Turning off sends one `withdraw` event, clears the
 IDs and stops recording on every page of rustviz.github.io (the tutorial shares
 the origin and its storage; open pages hear it via the `storage` event). Without
 an endpoint, none of that is loaded or linked.

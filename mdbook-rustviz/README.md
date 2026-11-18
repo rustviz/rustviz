@@ -96,12 +96,15 @@ telemetry-endpoint = "https://events.example.org"   # unset (default): off
 telemetry-consent = "opt-in"     # default; or "notice": no banner, recording starts without a click
 telemetry-privacy-url = "https://example.org/privacy/"   # linked from the opt-in prompt
 telemetry-surface = "book:example.org"   # default book:<host name>
+telemetry-respect-privacy-signals = true   # default; false: ignore GPC / Do Not Track (see below)
 telemetry-study-text = "…"   # optional: who runs the study, a contact; shown in the opt-in prompt
 ```
 
 With an endpoint set, every chapter loads `rv-telemetry.js`, which records
-events such as figure views, tooltip hovers and pointer paths over a figure. Do Not Track and Global Privacy Control turn it off
-entirely. Figures get a `data-rv-figure-id`, and `src/examples/rv-figures.json`
+events such as figure views, tooltip hovers and pointer paths over a figure. By default Do Not Track and Global Privacy Control turn it off
+entirely; a book that never sells or shares the data and says so on its
+privacy page can set `telemetry-respect-privacy-signals = false`, and then
+logging stops only when the reader turns it off (the RustViz tutorial does). Figures get a `data-rv-figure-id`, and `src/examples/rv-figures.json`
 maps each figure id to its snippet, so the snippets themselves are never
 logged. Without `telemetry-endpoint` none of this is in the output.
 

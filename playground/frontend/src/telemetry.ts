@@ -66,6 +66,8 @@ export function loadTelemetry(): Promise<void> {
     rvVersion: __PLUGIN_VERSION__,
     privacyUrl: env.VITE_RV_TELEMETRY_PRIVACY_URL ?? '/privacy/',
     footLink: 'none',
+    // RustViz never sells or shares the data: only Turn off stops logging.
+    respectPrivacySignals: false,
     ...(TELEMETRY_OPT_IN ? { bannerSlot: '#rv-telemetry-slot' } : {}),
   };
   return new Promise(resolve => {

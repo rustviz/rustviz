@@ -46,6 +46,14 @@ pub struct Cfg {
 	#[serde(default)]
 	pub telemetry_surface: String,
 
+	/// `true` (default): a browser that sends Global Privacy Control or Do Not
+	/// Track gets no logging at all. `false`: those signals are ignored and
+	/// logging stops only when the reader turns it off in the privacy page.
+	/// Set `false` only if the book never sells or shares the data and says so.
+	#[serde(alias = "telemetry-respect-privacy-signals")]
+	#[serde(default = "Cfg::default_true")]
+	pub telemetry_respect_privacy_signals: bool,
+
 	/// A sentence about the research study (who runs it, a contact) shown
 	/// in the opt-in prompt. Empty: none shown.
 	#[serde(alias = "telemetry-study-text")]
@@ -60,6 +68,8 @@ impl Cfg {
 	fn default_code_block() -> String { DEFAULT_CODE_BLOCK.into() }
 	#[inline]
 	fn default_playground_url() -> String { DEFAULT_PLAYGROUND_URL.into() }
+	#[inline]
+	fn default_true() -> bool { true }
 	#[inline]
 	fn default_telemetry_consent() -> String { "opt-in".into() }
 }

@@ -64,7 +64,7 @@
 <h2>Turning it off</h2>
 <ul>
   <li>Use the <strong>Turn off</strong> button in <a href="#your-data">Your data</a> below. It applies to the whole site (the playground and the tutorial), in this browser. Recording stops, the random ID is deleted from your browser, and we receive one last message saying that logging was turned off (with the ID that is being deleted). Pages you already have open stop recording too. <strong>Turn on</strong> starts it again, with a new ID.</li>
-  <li>If your browser sends <a href="https://globalprivacycontrol.org/">Global Privacy Control</a> or Do Not Track, nothing is recorded at all.</li>
+  <li>We do not treat the browser signals <a href="https://globalprivacycontrol.org/">Global Privacy Control</a> and Do Not Track as a request to stop, because RustViz never sells or shares this data. <strong>Turn off</strong> above is how to stop it.</li>
   <li>Clearing this site's data in your browser also removes the ID.</li>
 </ul>
 
@@ -131,7 +131,8 @@
         if (!cfg || typeof cfg.endpoint !== 'string' || !cfg.endpoint) { render(); return; }
         window.RV_TELEMETRY_CONFIG = {
           endpoint: cfg.endpoint, consent: cfg.consent, surface: 'playground',
-          rvVersion: cfg.rvVersion, controlOnly: true
+          rvVersion: cfg.rvVersion, controlOnly: true,
+          respectPrivacySignals: cfg.respectPrivacySignals !== false
         };
         var s = document.createElement('script');
         s.src = '/ex-assets/rv-telemetry.js';

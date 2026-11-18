@@ -157,13 +157,16 @@ playground figure use that run's `figure_id` and may add `program_id?`.
 - The public tutorial and playground configure `notice`: the client shows no
   UI. The host page's own text is the notice (the playground info panel's
   Privacy section; a paragraph at the bottom of the tutorial's front page).
-  Events flow from first load unless GPC/DNT is set or the visitor turned
+  Events flow from first load unless the visitor turned
   logging off in the privacy page's Your data section, which sends `withdraw`. No `consent`
   event is sent in `notice` mode.
 - There is no decline event: declining in `opt_in` mode sends nothing.
 - `withdraw` stops all logging on this device and clears `anon_id` and
   `session_id`.
-- Do Not Track / Global Privacy Control set → send nothing, in every mode.
+- Do Not Track / Global Privacy Control set → send nothing, in every mode,
+  **only when the site keeps the client's default** `respectPrivacySignals:
+  true`. The RustViz sites (playground, tutorial) set it to false: they never
+  sell or share the data, so only Turn off stops logging there.
 
 ## 4. What the collector writes
 

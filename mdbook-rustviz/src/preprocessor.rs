@@ -57,6 +57,9 @@ impl Telemetry {
 			"consent": consent,
 			"rvVersion": RV_VERSION,
 		});
+		if !cfg.telemetry_respect_privacy_signals {
+			config["respectPrivacySignals"] = false.into();
+		}
 		if !cfg.telemetry_privacy_url.is_empty() {
 			config["privacyUrl"] = cfg.telemetry_privacy_url.clone().into();
 		}
@@ -438,6 +441,7 @@ mod tests {
 		let cfg = Cfg::default();
 		assert_eq!(cfg.telemetry_endpoint, "");
 		assert_eq!(cfg.telemetry_consent, "opt-in");
+		assert!(cfg.telemetry_respect_privacy_signals);
 		assert!(Telemetry::from_cfg(&cfg).is_none());
 		// the default page carries no trace of it
 		assert!(!helpers_script().contains("rvTelemetry ="));
@@ -466,6 +470,19 @@ mod tests {
 			"telemetry-endpoint = \"https://e.example\"\ntelemetry-consent = \"yes\"").unwrap();
 		let s = Telemetry::from_cfg(&Cfg::try_from(t).unwrap()).unwrap().script;
 		assert!(s.contains("\"consent\":\"opt-in\""));
+	}
+
+	#[test]
+	fn telemetry_privacy_signals_are_respected_unless_turned_off() {
+		let t: toml::value::Table = toml::from_str("telemetry-endpoint = \"https://e.example\"").unwrap();
+		let s = Telemetry::from_cfg(&Cfg::try_from(t).unwrap()).unwrap().script;
+		assert!(!s.contains("respectPrivacySignals\""), "default: the client's own default (respect) applies");
+		let t: toml::value::Table = toml::from_str(
+			"telemetry-endpoint = \"https://e.example\"\ntelemetry-respect-privacy-signals = false").unwrap();
+		let cfg = Cfg::try_from(t).unwrap();
+		assert!(!cfg.telemetry_respect_privacy_signals);
+		let s = Telemetry::from_cfg(&cfg).unwrap().script;
+		assert!(s.contains("\"respectPrivacySignals\":false"), "{}", s);
 	}
 
 	#[test]
