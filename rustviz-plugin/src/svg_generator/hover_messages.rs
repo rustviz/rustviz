@@ -985,6 +985,28 @@ pub fn event_dot_owner_drop_if_try_returns(my_name: &String, note: &str) -> Stri
     )
 }
 
+// `p.f = f()?;` (#1151): p's own dot. If the `?` succeeds, the assignment
+// gives the part `part` (drawn on its own column) a new value.
+pub fn event_dot_owner_drop_if_try_returns_part(my_name: &String, note: &str, part: &str) -> String {
+    let my_name_fmt = styled_name_html(my_name);
+    let (holds, rest) = split_drop_note(note);
+    format!(
+        "Only if the `?` here returns early (on an `Err` or `None`): the function returns and {0}'s \
+         resource{1} is dropped{2}. If the `?` succeeds, the assignment to {3} runs.",
+        my_name_fmt, holds, rest, styled_name_html(&part.to_string())
+    )
+}
+
+// A dot that says more than the drop at a `?` (#1151): "If the `?`
+// succeeds, nothing happens to s here" would contradict the dot's other
+// lines (s is borrowed by `s.push_str(&f()?)`, moved by `(s, f()?)`).
+// What is true either way is that the `?` itself doesn't drop it.
+pub fn try_drop_with_other_events(drop_text: &str) -> Option<String> {
+    let (head, owner) = drop_text.split_once(". If the `?` succeeds, nothing happens to ")?;
+    let owner = owner.strip_suffix(" here.")?;
+    Some(format!("{head}. If the `?` succeeds, {owner}'s resource isn't dropped here."))
+}
+
 // `let n = a? + b?;`: b's dot holds both a's `?` (b is dropped if it
 // returns early) and b's own `?` (moves b). "If the `?` succeeds, nothing
 // happens to b here" is about a's `?` only, but read next to the move it
@@ -998,6 +1020,23 @@ pub fn try_drop_before_own_try(drop_text: &str) -> Option<String> {
     Some(format!(
         "Only if an earlier `?` on this line returns early{head}. If it succeeds, {owner} is not dropped there; {owner}'s own `?` below moves it"
     ))
+}
+
+// `s = f()?;` (#1151): the `?` is part of the right-hand side, which runs
+// before the assignment. If it returns early, the assignment never
+// happens and s's current resource is dropped by the return; if it
+// succeeds, the assignment gives s its new resource. The dot holds the
+// drop text (event_dot_owner_drop_if_try_returns) and the reassignment's
+// own text; this says the reassignment happens only on success, in place
+// of "nothing happens to s here".
+pub fn try_drop_then_reassign(drop_text: &str, reassign: &str) -> Option<String> {
+    let (head, owner) = drop_text.split_once(". If the `?` succeeds, nothing happens to ")?;
+    owner.strip_suffix(" here.")?;
+    if !reassign.contains(" acquires ownership of a new resource") {
+        return None;
+    }
+    let reassign = reassign.strip_suffix('.').unwrap_or(reassign);
+    Some(format!("{head}. If the `?` succeeds, the assignment runs: {reassign}."))
 }
 
 // `return if b { p } else { q };` in a branch (#697): the value the
