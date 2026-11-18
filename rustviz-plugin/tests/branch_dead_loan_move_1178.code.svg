@@ -1,0 +1,395 @@
+<svg width="697px" height="1025px" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+
+    <desc>vis</desc>
+
+    <defs>
+        <style type="text/css">
+        <![CDATA[
+        /* colour themes: every colour below is one of these properties.
+       Pick a theme with data-rv-theme="light|rust|coal|navy|ayu" on
+       the root <svg> or, for an inline <svg>, on any ancestor. */
+    :root,
+    [data-rv-theme="light"] {
+        --rv-bg: #f1f1f1;
+        --rv-code: #6e6b5e;
+        --rv-comment: #8a8a8a;
+        --rv-string: #3a6bb5;
+        --rv-line-number: #aaaaaa;
+        --rv-caption: #000000;
+        --rv-arrow: #808080;
+        --rv-drop-notch: #ffffff;
+        --rv-struct-fill: #ffffff;
+        --rv-struct-stroke: #000000;
+        --rv-underline: currentColor;
+        --rv-tooltip-bg: rgba(70, 70, 70, 0.6);
+        --rv-tooltip-fg: #ffffff;
+        --rv-tooltip-border: transparent;
+        --rv-c1: #1893ff;
+        --rv-c2: #ff7f50;
+        --rv-c3: #8635ff;
+        --rv-c4: #dc143c;
+        --rv-c5: #0a810a;
+        --rv-c6: #008080;
+        --rv-c7: #ff6cce;
+        --rv-c8: #00d6fc;
+        --rv-c9: #b99f35;
+        --rv-c10: #15a710;
+        --rv-c11: #000000;
+        --rv-c12: #463ae9;
+    }
+    @media (prefers-color-scheme: dark) {
+        :root:not([data-rv-theme]) {
+            --rv-bg: #191f26;
+            --rv-code: #c5c8c6;
+            --rv-comment: #969896;
+            --rv-string: #81a2be;
+            --rv-line-number: #868a8e;
+            --rv-caption: #bcbdd0;
+            --rv-arrow: #8e9399;
+            --rv-drop-notch: #191f26;
+            --rv-struct-fill: #000000;
+            --rv-struct-stroke: #ffffff;
+            --rv-underline: #c5c8c6;
+            --rv-tooltip-bg: #161923;
+            --rv-tooltip-fg: #bcbdd0;
+            --rv-tooltip-border: #737480;
+            --rv-c1: #4aa8ff;
+            --rv-c2: #ff8c61;
+            --rv-c3: #c084fc;
+            --rv-c4: #f0475e;
+            --rv-c5: #4cc35a;
+            --rv-c6: #2ec4b6;
+            --rv-c7: #ff7ad9;
+            --rv-c8: #3fdcff;
+            --rv-c9: #d4b94a;
+            --rv-c10: #a6e22e;
+            --rv-c11: #e8e8e8;
+            --rv-c12: #8c8cff;
+        }
+    }
+    [data-rv-theme="rust"] {
+        --rv-bg: #f6f7f6;
+        --rv-code: #6e6b5e;
+        --rv-comment: #6b6b66;
+        --rv-string: #2f5f9e;
+        --rv-line-number: #6f6f68;
+        --rv-caption: #262625;
+        --rv-arrow: #767676;
+        --rv-drop-notch: #ffffff;
+        --rv-struct-fill: #ffffff;
+        --rv-struct-stroke: #000000;
+        --rv-underline: #262625;
+        --rv-tooltip-bg: #e1e1db;
+        --rv-tooltip-fg: #262625;
+        --rv-tooltip-border: #b38f6b;
+        --rv-c1: #1a6fd6;
+        --rv-c2: #d4551f;
+        --rv-c3: #8635ff;
+        --rv-c4: #c8102e;
+        --rv-c5: #0a7d0a;
+        --rv-c6: #007f7f;
+        --rv-c7: #c93a9f;
+        --rv-c8: #0090b0;
+        --rv-c9: #a06f00;
+        --rv-c10: #5c8f00;
+        --rv-c11: #000000;
+        --rv-c12: #463ae9;
+    }
+    [data-rv-theme="coal"] {
+        --rv-bg: #1d1f21;
+        --rv-code: #c5c8c6;
+        --rv-comment: #969896;
+        --rv-string: #81a2be;
+        --rv-line-number: #868a8e;
+        --rv-caption: #98a3ad;
+        --rv-arrow: #8e9399;
+        --rv-drop-notch: #1d1f21;
+        --rv-struct-fill: #000000;
+        --rv-struct-stroke: #ffffff;
+        --rv-underline: #c5c8c6;
+        --rv-tooltip-bg: #141617;
+        --rv-tooltip-fg: #98a3ad;
+        --rv-tooltip-border: #43484d;
+        --rv-c1: #4aa8ff;
+        --rv-c2: #ff8c61;
+        --rv-c3: #c084fc;
+        --rv-c4: #f0475e;
+        --rv-c5: #4cc35a;
+        --rv-c6: #2ec4b6;
+        --rv-c7: #ff7ad9;
+        --rv-c8: #3fdcff;
+        --rv-c9: #d4b94a;
+        --rv-c10: #a6e22e;
+        --rv-c11: #e8e8e8;
+        --rv-c12: #8c8cff;
+    }
+    [data-rv-theme="navy"] {
+        --rv-bg: #191f26;
+        --rv-code: #c5c8c6;
+        --rv-comment: #969896;
+        --rv-string: #81a2be;
+        --rv-line-number: #868a8e;
+        --rv-caption: #bcbdd0;
+        --rv-arrow: #8e9399;
+        --rv-drop-notch: #191f26;
+        --rv-struct-fill: #000000;
+        --rv-struct-stroke: #ffffff;
+        --rv-underline: #c5c8c6;
+        --rv-tooltip-bg: #161923;
+        --rv-tooltip-fg: #bcbdd0;
+        --rv-tooltip-border: #737480;
+        --rv-c1: #4aa8ff;
+        --rv-c2: #ff8c61;
+        --rv-c3: #c084fc;
+        --rv-c4: #f0475e;
+        --rv-c5: #4cc35a;
+        --rv-c6: #2ec4b6;
+        --rv-c7: #ff7ad9;
+        --rv-c8: #3fdcff;
+        --rv-c9: #d4b94a;
+        --rv-c10: #a6e22e;
+        --rv-c11: #e8e8e8;
+        --rv-c12: #8c8cff;
+    }
+    [data-rv-theme="ayu"] {
+        --rv-bg: #191f26;
+        --rv-code: #e6e1cf;
+        --rv-comment: #8a96a3;
+        --rv-string: #81a2be;
+        --rv-line-number: #818c98;
+        --rv-caption: #c5c5c5;
+        --rv-arrow: #8e959e;
+        --rv-drop-notch: #191f26;
+        --rv-struct-fill: #000000;
+        --rv-struct-stroke: #ffffff;
+        --rv-underline: #e6e1cf;
+        --rv-tooltip-bg: #14191f;
+        --rv-tooltip-fg: #c5c5c5;
+        --rv-tooltip-border: #5c6773;
+        --rv-c1: #4aa8ff;
+        --rv-c2: #ff8c61;
+        --rv-c3: #c084fc;
+        --rv-c4: #f0475e;
+        --rv-c5: #4cc35a;
+        --rv-c6: #2ec4b6;
+        --rv-c7: #ff7ad9;
+        --rv-c8: #3fdcff;
+        --rv-c9: #d4b94a;
+        --rv-c10: #a6e22e;
+        --rv-c11: #e8e8e8;
+        --rv-c12: #8c8cff;
+    }
+/* general setup */
+    svg {
+        background-color: var(--rv-bg);
+    }
+    
+    text {
+        vertical-align: baseline;
+        text-anchor: start;
+    }
+    
+    #heading {
+        font-size: 24px;
+        font-weight: bold;
+    }
+    
+    #caption {
+        fill: var(--rv-caption);
+        font-size: 0.875em;
+        font-family: "Open Sans", sans-serif;
+        font-style: italic;
+    }
+    
+    /* code related styling */
+    text.code {
+        fill: var(--rv-code);
+        white-space: pre;
+        font-family: "Source Code Pro", Consolas, "Ubuntu Mono", Menlo, "DejaVu Sans Mono", monospace, monospace !important;
+        font-size: 0.875em;
+    }
+
+    text.code .kw {
+        font-weight: bold;
+    }
+
+    text.code .comment {
+        fill: var(--rv-comment);
+        font-style: italic;
+    }
+
+    text.code .string {
+        fill: var(--rv-string);
+    }
+
+    text.code .line-number {
+        fill: var(--rv-line-number);
+    }
+
+    /* the line under the code a hovered element refers to (helpers.js) */
+    .emph {
+        stroke: var(--rv-underline);
+    }
+
+    text.label {
+        font-family: "Source Code Pro", Consolas, "Ubuntu Mono", Menlo, "DejaVu Sans Mono", monospace, monospace !important;
+        font-size: 0.875em;
+    }
+    
+    /* timeline/event interaction styling */
+    .solid {
+        stroke-width: 5px;
+    }
+    
+    .hollow {
+        stroke-width: 1.5;
+    }
+    
+    .dotted {
+        stroke-width: 5px;
+        stroke-dasharray: "2 1";
+    }
+    
+    .extend {
+        stroke-width: 1px;
+        stroke-dasharray: "2 1";
+    }
+
+    /* a column while it is mutably lent out (#722): it can't be used
+       until the borrow ends. A faint row of round dots, unlike the
+       4px dashes of a branch arm that isn't running. */
+    .lent {
+        stroke-width: 2.5px;
+        stroke-dasharray: 0 6;
+        stroke-linecap: round;
+        stroke-opacity: 0.6;
+    }
+    
+    .functionIcon {
+        paint-order: stroke;
+        stroke-width: 3px;
+        fill: var(--rv-bg);
+        font-size: 20px;
+        font-family: times;
+        font-weight: lighter;
+        dominant-baseline: central;
+        text-anchor: start;
+        font-style: italic;
+    }
+    
+    .functionLogo {
+        font-size: 20px;
+        font-style: italic;
+        paint-order: stroke;
+        stroke-width: 3px;
+        fill: var(--rv-bg) !important;
+    }
+    
+    /* move, copy and call arrows */
+    .arrow-shaft {
+        stroke: var(--rv-arrow);
+    }
+
+    .arrow-head {
+        fill: var(--rv-arrow);
+    }
+
+    /* flex related styling */
+    .flex-container {
+        display: flex;
+        flex-direction: row;
+        justify-content: flex-start;
+        flex-wrap: nowrap;
+        flex-shrink: 0;
+    }
+    
+    object.tl_panel {
+        flex-grow: 1;
+    }
+    
+    object.code_panel {
+        flex-grow: 0;
+    }
+    
+    .tooltip-trigger {
+        cursor: default;
+    }
+    
+    .tooltip-trigger:hover{
+        filter: url(#glow);
+    }
+
+    /* When the cursor is anywhere inside a branch column,
+       glow every element grouped under .branch-group: one dashed or
+       solid stretch of the arm, not the whole arm (#626).
+       Single-element hover otherwise only highlighted one of
+       the two parallel sides at a time, with no feedback on
+       the transparent gap between them. */
+    .branch-group:hover .tooltip-trigger {
+        filter: url(#glow);
+    }
+
+    /* hash based styling */
+    [data-hash="0"] { fill: var(--rv-code); }
+    [data-hash="1"] { fill: var(--rv-c1); stroke: var(--rv-c1); }
+    [data-hash="2"] { fill: var(--rv-c2); stroke: var(--rv-c2); }
+    [data-hash="3"] { fill: var(--rv-c3); stroke: var(--rv-c3); }
+    [data-hash="4"] { fill: var(--rv-c4); stroke: var(--rv-c4); }
+    [data-hash="5"] { fill: var(--rv-c5); stroke: var(--rv-c5); }
+    [data-hash="6"] { fill: var(--rv-c6); stroke: var(--rv-c6); }
+    [data-hash="7"] { fill: var(--rv-c7); stroke: var(--rv-c7); }
+    [data-hash="8"] { fill: var(--rv-c8); stroke: var(--rv-c8); }
+    [data-hash="9"] { fill: var(--rv-c9); stroke: var(--rv-c9); }
+    [data-hash="10"] { fill: var(--rv-c10); stroke: var(--rv-c10); }
+    [data-hash="11"] { fill: var(--rv-c11); stroke: var(--rv-c11); }
+    [data-hash="12"] { fill: var(--rv-c12); stroke: var(--rv-c12); }
+    [data-hash="13"] { fill: var(--rv-c1); stroke: var(--rv-c1); }
+    [data-hash="14"] { fill: var(--rv-c2); stroke: var(--rv-c2); }
+    [data-hash="15"] { fill: var(--rv-c3); stroke: var(--rv-c3); }
+    [data-hash="16"] { fill: var(--rv-c4); stroke: var(--rv-c4); }
+
+        ]]>
+        </style>
+    </defs>
+
+    <g>
+        <text id="caption" x="30" y="35">Hover over the visualization for more information.</text>
+    </g>
+
+        <g id="code">
+        <text class="code" x="20" y="70" data-rv-id="code:L1" data-rv-kind="code_line" data-rv-line="1"> <tspan class="line-number"> 1  </tspan><tspan class="comment">// #1178: s is lent to r before the `if`; the `if` points r elsewhere and</tspan> </text>
+        <text class="code" x="20" y="100" data-rv-id="code:L2" data-rv-kind="code_line" data-rv-line="2"> <tspan class="line-number"> 2  </tspan><tspan class="comment">// then moves s (allowed: the loan of s is dead on that path). After the</tspan> </text>
+        <text class="code" x="20" y="130" data-rv-id="code:L3" data-rv-kind="code_line" data-rv-line="3"> <tspan class="line-number"> 3  </tspan><tspan class="comment">// join s may have been moved, so it has no column, also once r's borrow</tspan> </text>
+        <text class="code" x="20" y="160" data-rv-id="code:L4" data-rv-kind="code_line" data-rv-line="4"> <tspan class="line-number"> 4  </tspan><tspan class="comment">// ends.</tspan> </text>
+        <text class="code" x="20" y="190" data-rv-id="code:L5" data-rv-kind="code_line" data-rv-line="5"> <tspan class="line-number"> 5  </tspan><tspan class="kw">fn</tspan> <tspan class="fn" data-hash="0" hash="15">shared</tspan>(<tspan data-hash="1">c</tspan>: bool) { </text>
+        <text class="code" x="20" y="220" data-rv-id="code:L6" data-rv-kind="code_line" data-rv-line="6"> <tspan class="line-number"> 6  </tspan>    <tspan class="kw">let</tspan> <tspan data-hash="3">s</tspan> = <tspan class="fn" data-hash="0" hash="2">String::from</tspan>(<tspan class="string">"a"</tspan>); </text>
+        <text class="code" x="20" y="250" data-rv-id="code:L7" data-rv-kind="code_line" data-rv-line="7"> <tspan class="line-number"> 7  </tspan>    <tspan class="kw">let</tspan> <tspan data-hash="4">t</tspan> = <tspan class="fn" data-hash="0" hash="2">String::from</tspan>(<tspan class="string">"b"</tspan>); </text>
+        <text class="code" x="20" y="280" data-rv-id="code:L8" data-rv-kind="code_line" data-rv-line="8"> <tspan class="line-number"> 8  </tspan>    <tspan class="kw">let</tspan> <tspan class="kw">mut</tspan> <tspan data-hash="5">r</tspan> = &amp;<tspan data-hash="3">s</tspan>; </text>
+        <text class="code" x="20" y="310" data-rv-id="code:L9" data-rv-kind="code_line" data-rv-line="9"> <tspan class="line-number"> 9  </tspan>    <tspan class="kw">if</tspan> <tspan data-hash="1">c</tspan> { </text>
+        <text class="code" x="20" y="340" data-rv-id="code:L10" data-rv-kind="code_line" data-rv-line="10"> <tspan class="line-number">10  </tspan>        <tspan data-hash="5">r</tspan> = &amp;<tspan data-hash="4">t</tspan>; </text>
+        <text class="code" x="20" y="370" data-rv-id="code:L11" data-rv-kind="code_line" data-rv-line="11"> <tspan class="line-number">11  </tspan>        <tspan class="kw">let</tspan> <tspan data-hash="6">m</tspan> = <tspan data-hash="3">s</tspan>; </text>
+        <text class="code" x="20" y="400" data-rv-id="code:L12" data-rv-kind="code_line" data-rv-line="12"> <tspan class="line-number">12  </tspan>        println!(<tspan class="string">"{}"</tspan>, <tspan data-hash="6">m</tspan>); </text>
+        <text class="code" x="20" y="430" data-rv-id="code:L13" data-rv-kind="code_line" data-rv-line="13"> <tspan class="line-number">13  </tspan>    } </text>
+        <text class="code" x="20" y="460" data-rv-id="code:L14" data-rv-kind="code_line" data-rv-line="14"> <tspan class="line-number">14  </tspan>    println!(<tspan class="string">"{}"</tspan>, <tspan data-hash="5">r</tspan>); </text>
+        <text class="code" x="20" y="490"> <tspan class="line-number">    </tspan> </text>
+        <text class="code" x="20" y="520" data-rv-id="code:L15" data-rv-kind="code_line" data-rv-line="15"> <tspan class="line-number">15  </tspan>} </text>
+        <text class="code" x="20" y="550"> <tspan class="line-number">    </tspan> </text>
+        <text class="code" x="20" y="580" data-rv-id="code:L16" data-rv-kind="code_line" data-rv-line="16"> <tspan class="line-number">16  </tspan><tspan class="kw">fn</tspan> <tspan class="fn" data-hash="0" hash="16">mutable</tspan>(<tspan data-hash="8">c</tspan>: bool) { </text>
+        <text class="code" x="20" y="610" data-rv-id="code:L17" data-rv-kind="code_line" data-rv-line="17"> <tspan class="line-number">17  </tspan>    <tspan class="kw">let</tspan> <tspan class="kw">mut</tspan> <tspan data-hash="10">u</tspan> = <tspan class="fn" data-hash="0" hash="9">String::from</tspan>(<tspan class="string">"a"</tspan>); </text>
+        <text class="code" x="20" y="640" data-rv-id="code:L18" data-rv-kind="code_line" data-rv-line="18"> <tspan class="line-number">18  </tspan>    <tspan class="kw">let</tspan> <tspan class="kw">mut</tspan> <tspan data-hash="11">w</tspan> = <tspan class="fn" data-hash="0" hash="9">String::from</tspan>(<tspan class="string">"b"</tspan>); </text>
+        <text class="code" x="20" y="670" data-rv-id="code:L19" data-rv-kind="code_line" data-rv-line="19"> <tspan class="line-number">19  </tspan>    <tspan class="kw">let</tspan> <tspan class="kw">mut</tspan> <tspan data-hash="12">q</tspan> = &amp;<tspan class="kw">mut</tspan> <tspan data-hash="10">u</tspan>; </text>
+        <text class="code" x="20" y="700" data-rv-id="code:L20" data-rv-kind="code_line" data-rv-line="20"> <tspan class="line-number">20  </tspan>    <tspan class="kw">if</tspan> <tspan data-hash="8">c</tspan> { </text>
+        <text class="code" x="20" y="730" data-rv-id="code:L21" data-rv-kind="code_line" data-rv-line="21"> <tspan class="line-number">21  </tspan>        <tspan data-hash="12">q</tspan> = &amp;<tspan class="kw">mut</tspan> <tspan data-hash="11">w</tspan>; </text>
+        <text class="code" x="20" y="760" data-rv-id="code:L22" data-rv-kind="code_line" data-rv-line="22"> <tspan class="line-number">22  </tspan>        <tspan class="fn" data-hash="0" hash="13">drop</tspan>(<tspan data-hash="10">u</tspan>); </text>
+        <text class="code" x="20" y="790" data-rv-id="code:L23" data-rv-kind="code_line" data-rv-line="23"> <tspan class="line-number">23  </tspan>    } </text>
+        <text class="code" x="20" y="820" data-rv-id="code:L24" data-rv-kind="code_line" data-rv-line="24"> <tspan class="line-number">24  </tspan>    <tspan data-hash="12">q</tspan>.<tspan class="fn" data-hash="0" hash="14">push</tspan>('x'); </text>
+        <text class="code" x="20" y="850"> <tspan class="line-number">    </tspan> </text>
+        <text class="code" x="20" y="880" data-rv-id="code:L25" data-rv-kind="code_line" data-rv-line="25"> <tspan class="line-number">25  </tspan>} </text>
+        <text class="code" x="20" y="910" data-rv-id="code:L26" data-rv-kind="code_line" data-rv-line="26"> <tspan class="line-number">26  </tspan><tspan class="kw">fn</tspan> main() { </text>
+        <text class="code" x="20" y="940" data-rv-id="code:L27" data-rv-kind="code_line" data-rv-line="27"> <tspan class="line-number">27  </tspan>    <tspan class="fn" data-hash="0" hash="15">shared</tspan>(<tspan class="kw">true</tspan>); </text>
+        <text class="code" x="20" y="970" data-rv-id="code:L28" data-rv-kind="code_line" data-rv-line="28"> <tspan class="line-number">28  </tspan>    <tspan class="fn" data-hash="0" hash="16">mutable</tspan>(<tspan class="kw">true</tspan>); </text>
+        <text class="code" x="20" y="1000" data-rv-id="code:L29" data-rv-kind="code_line" data-rv-line="29"> <tspan class="line-number">29  </tspan>} </text>
+    </g>
+
+
+</svg>

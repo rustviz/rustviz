@@ -21398,6 +21398,29 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t goes out of scope. Its resource is dropped here only if t still holds it",
         ],
     },
+    TooltipExpect {
+        name: "branch_dead_loan_move_1178",
+        // #1178: s is lent to r before the `if`; the `if` points r at t
+        // and then moves s, which rustc allows because the loan of s is
+        // dead on that path. The move fell through `calc_state` to
+        // Invalid, the join ignored that branch, and when r's borrow
+        // ended s was drawn as "the owner" again. Where the columns stop
+        // is pinned by `a_value_lent_in_one_branch_and_moved_in_another_stays_moved`.
+        must_contain: &[
+            "s was moved in at least one branch above, so it can't be used after the branches. \
+             If the branch that ran didn't move it, its resource is dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+            "u goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            // The join and scope-end wording main used for the dropped branch.
+            "s may have been moved (consumed in at least one branch above)",
+            "u may have been moved (consumed in at least one branch above)",
+            "s goes out of scope. Its resource is dropped here only if s still holds it",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -28949,7 +28972,8 @@ fn a_boxed_closure_borrowing_through_a_reference_keeps_it_until_dropped() {
 /// borrow ends (main drew it as "the owner" again when the lending branch
 /// came first). When it is assigned again (`w = String::from("new")`, the
 /// branches the other way round) its column comes back from that row on;
-/// main drew nothing after the assignment.
+/// main drew nothing after the assignment. Also #1178: a value lent before
+/// the conditional and moved in a branch where that loan is dead.
 #[test]
 fn a_value_lent_in_one_branch_and_moved_in_another_stays_moved() {
     let rv = run_with_local_backend("branch_mut_lend_move_1132");
@@ -28966,6 +28990,17 @@ fn a_value_lent_in_one_branch_and_moved_in_another_stays_moved() {
     // w: maybe-moved after L35, assigned again on L36.
     assert_eq!(line_from("w", 31), vec!["w@L36-37:line:full_privilege".to_string(),
         "w@L37-38:line:full_privilege".to_string()]);
+    // #1178 (`branch_dead_loan_move_1178`): moved in the `if` after the
+    // loan of it died there; joins on L13 (s) and L24 (u).
+    let rv = run_with_local_backend("branch_dead_loan_move_1178");
+    let els = common::svg::rv_elements(&rv.timeline_panel_string());
+    let line_from = |var: &str, row: usize| els.iter()
+        .filter(|e| e.kind == "line" && e.var.as_deref() == Some(var))
+        .filter(|e| e.line.as_deref().and_then(|l| l.parse::<usize>().ok()).is_some_and(|l| l >= row))
+        .map(|e| e.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(line_from("s", 10), Vec::<String>::new(), "s has a column after the join");
+    assert_eq!(line_from("u", 21), Vec::<String>::new(), "u has a column after the join");
 }
 
 
