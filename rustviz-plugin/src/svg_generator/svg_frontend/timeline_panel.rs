@@ -1124,8 +1124,17 @@ fn render_branch_dots(
             // Whether the value is still owned when it goes out
             // of scope inside the branch: only at a `return`
             // (#363), where it's dropped if so.
+            // The state just before the scope end, not before the
+            // first gap: a conditional nested in the branch leaves an
+            // OutOfScope gap in the branch's own states, and a move
+            // before it would read as "nothing to drop" although the
+            // nested branches all gave the variable a new value
+            // (#1135).
+            let ends_at = branch.e_data.iter()
+                .find(|(_, e)| matches!(e, Event::OwnerGoOutOfScope { .. }))
+                .map(|(l, _)| *l);
             let hold = branch.states.iter()
-                .position(|s| matches!(s.2, State::OutOfScope))
+                .position(|s| matches!(s.2, State::OutOfScope) && ends_at.is_none_or(|l| s.0 >= l))
                 .and_then(|i| i.checked_sub(1))
                 .map_or(false, |i| matches!(
                     branch.states[i].2,
