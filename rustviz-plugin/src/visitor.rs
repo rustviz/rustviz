@@ -10009,7 +10009,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.uninit_locals = uninit_before;
     self.maybe_init_locals = maybe_init_before;
     let ids = lo..*self.unique_id;
-    if !self.preprocessed_events.iter().any(|(_, e)| ids.contains(&e.get_id()) && self.exit_drops.contains(&e.get_id())) {
+    // Drawn inline when the block changes nothing the matched path
+    // sees: no drop at its exit, and no move out of a variable declared
+    // before it (`else { drop(s); return; }`, #1133: drawn inline, s
+    // read as moved on the matched path too).
+    let moves_outer = |e: &ExternalEvent| matches!(e, ExternalEvent::Move { from: ResourceTy::Value(r), .. }
+      if !r.is_fn() && !r.is_temporary() && *r.hash() < hash_lo as u64);
+    if !self.preprocessed_events.iter().any(|(_, e)| ids.contains(&e.get_id())
+      && (self.exit_drops.contains(&e.get_id()) || moves_outer(e))) {
       return None;
     }
     let mut else_ev = self.take_branch_events(ids, None, &HashSet::new());
