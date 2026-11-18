@@ -639,6 +639,65 @@ for (const sig of [{ gpc: true }, { dnt: true }]) {
   assert.equal(ev2.props.event_kind, undefined);
 }
 
+// --- code_line_hover: hovers under 100 ms are not sent; tooltip_dwell has no floor
+{
+  const tl = new FakeEl('div', ['ex3', 'tl_panel']);
+  tl.setAttribute('data-rv-figure-id', '0123456789abcdef');
+  tl.appendChild(new FakeEl('svg'));
+  // a code panel: rows 30 units tall, line numbers 9 and 10, baselines at y=20+30k
+  const code = new FakeEl('svg');
+  const g = new FakeEl('g');
+  const rows = [9, 10].map((n, k) => {
+    const row = new FakeEl('text');
+    row.setAttribute('y', String(200 + 30 * k));
+    const num = new FakeEl('tspan', ['line-number']);
+    num.textContent = String(n);
+    row.querySelector = (sel: string) => (sel === '.line-number' ? num : null);
+    return row;
+  });
+  g.querySelectorAll = () => rows;
+  code.querySelector = (sel: string) => (sel === '#code' ? g : null);
+  (code as any).getScreenCTM = () => ({ inverse: () => ({}) });
+  (code as any).createSVGPoint = () => {
+    const p: any = { x: 0, y: 0 };
+    p.matrixTransform = () => ({ x: p.x, y: p.y });
+    return p;
+  };
+  const env = boot({ ...CFG, consent: 'notice', surface: 'playground' },
+                   { figures: [tl], slots: { '.ex3.code_panel': code } });
+  let clock = 1763370000000;
+  env.win.Date = Object.assign(function () { return new Date(clock); }, { now: () => clock });
+  const move = (y: number) => code.listeners.pointermove.forEach(fn => fn({ clientX: 5, clientY: y }));
+  const leave = () => code.listeners.pointerleave.forEach(fn => fn({}));
+  const lines = () => q(env).filter((e: any) => e.event === 'code_line_hover');
+  const LINE9 = 195, LINE10 = 225;
+  // 30 ms on line 9, then 300 ms on line 10: only line 10 is logged, with its own enter/leave
+  move(LINE9); clock += 30; move(LINE10); clock += 300; leave();
+  assert.equal(lines().length, 1);
+  assert.equal(lines()[0].props.line, 10);
+  assert.equal(lines()[0].props.enter_ts, 1763370000030);
+  assert.equal(lines()[0].props.leave_ts, 1763370000330);
+  assert.equal(lines()[0].props.dwell_ms, 300);
+  // a 99 ms pass sends nothing; exactly 100 ms is sent (the floor is inclusive)
+  clock += 1000; move(LINE9); clock += 99; leave();
+  assert.equal(lines().length, 1, '99 ms is under the floor');
+  clock += 1000; move(LINE9); clock += 100; leave();
+  assert.equal(lines().length, 2, '100 ms is sent');
+  assert.equal(lines()[1].props.dwell_ms, 100);
+  // a 150 ms hover sends one event with the right dwell
+  clock += 1000; move(LINE10); clock += 150; leave();
+  assert.equal(lines().length, 3);
+  assert.equal(lines()[2].props.line, 10);
+  assert.equal(lines()[2].props.dwell_ms, 150);
+  // a tooltip hover of 8 ms is still sent
+  const dot = new FakeEl('g', ['tooltip-trigger']);
+  dot.appendChild(new FakeEl('circle'));
+  t(env).tooltipHover('ex3', dot, clock, clock + 8);
+  const dw = q(env).filter((e: any) => e.event === 'tooltip_dwell');
+  assert.equal(dw.length, 1);
+  assert.equal(dw[0].props.dwell_ms, 8);
+}
+
 // --- playground helpers
 assert.equal(TELEMETRY_ENABLED, false, 'off unless VITE_RV_TELEMETRY_ENDPOINT is set');
 assert.deepEqual(errorCodes('error[E0382]: a\nerror[E0499]: b\nerror[E0382]: c\nerror: no code'), ['E0382', 'E0499']);

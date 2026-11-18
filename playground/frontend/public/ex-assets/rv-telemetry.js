@@ -663,6 +663,13 @@
     }
 
     // code_line_hover: which source line of the code panel the pointer is on.
+    // A pass shorter than MIN_LINE_HOVER_MS sends nothing: sweeping the pointer
+    // across the code panel crosses many lines for 8-70 ms each, which is noise
+    // (pointer_trace already records the path). The line being tracked is still
+    // replaced as the pointer moves, so entering line 9 for 30 ms and then line
+    // 10 for 300 ms logs only line 10, with line 10's own enter/leave.
+    // tooltip_dwell has no such floor: every tooltip hover is logged.
+    var MIN_LINE_HOVER_MS = 100;
     function attachCode(f, svg) {
         if (svg.__rvTlm) return;
         svg.__rvTlm = true;
@@ -696,6 +703,7 @@
         var l = f.line;
         f.line = null;
         if (!l || !f.id) return;
+        if (t - l.enter < MIN_LINE_HOVER_MS) return;
         emit('code_line_hover', {
             figure_id: f.id, line: l.line, enter_ts: l.enter, leave_ts: Math.max(t, l.enter),
             dwell_ms: Math.min(Math.max(t - l.enter, 0), 86400000)
