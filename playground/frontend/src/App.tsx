@@ -31,6 +31,18 @@ import {
   type UserExample,
 } from './userExamples';
 import { applyTheme, isDark, loadTheme, saveTheme, THEMES, type ThemeId } from './theme';
+import {
+  figureIdFor,
+  figuresChanged,
+  noteEdit,
+  runFinished,
+  runStarted,
+  setSourceCode,
+  submitHeaders,
+  TELEMETRY_ENABLED,
+  TELEMETRY_OPT_IN,
+  uiEvent,
+} from './telemetry';
 
 // API origin. Empty (relative URL) when the playground binary serves the
 // SPA itself (local dev); set via .env.pages for the GitHub Pages build so
@@ -108,13 +120,18 @@ class Editor {
   public constructor(
     editorContainer: HTMLElement,
     code: string,
-    onUserChange: (code: string) => void,
+    onUserChange: (code: string, charsChanged: number) => void,
     theme: ThemeId,
   ) {
     const updateListener = EditorView.updateListener.of(update => {
       if (!update.docChanged) return;
       if (this.programmatic) return;
-      onUserChange(update.state.doc.toString());
+      // characters deleted + inserted (for the usage log's edit summary)
+      let chars = 0;
+      update.changes.iterChanges((fromA, toA, fromB, toB) => {
+        chars += (toA - fromA) + (toB - fromB);
+      });
+      onUserChange(update.state.doc.toString(), chars);
     });
     const initial_state = EditorState.create({
       doc: code,
@@ -478,6 +495,26 @@ const Description: React.FC = () => (
       </a>
       .
     </p>
+    {/* Only in builds with usage logging (VITE_RV_TELEMETRY_ENDPOINT). */}
+    {TELEMETRY_ENABLED && (
+      <>
+        <h3>Privacy</h3>
+        <p className="privacy-footer">
+          This playground records how it is used, for research on learning
+          Rust; see <a href="/privacy/">what is recorded and why</a>.{' '}
+          <a href="/privacy/#your-data">Your data</a> shows your random ID
+          and lets you turn recording off.
+        </p>
+        {/* MAINTAINER placeholder: replace with the study's wording (name,
+            PI, contact) once the IRB has decided; keep it in sync with
+            public/privacy/index.html. */}
+        <p className="privacy-footer">
+          [Placeholder for the research-study sentence: study name, who runs
+          it (PI) and a contact address. To be written by the maintainer /
+          IRB.]
+        </p>
+      </>
+    )}
   </div>
 );
 
@@ -548,6 +585,19 @@ function selectionMatchingCode(code: string): Selection {
   return DEFAULT_SELECTION;
 }
 
+// Short label of a dropdown selection for the usage log: the example's
+// name, or "user" for the visitor's own examples (their names are free text).
+function exampleLabel(sel: Selection): string {
+  return sel.kind === 'preloaded'
+    ? exampleGroups[sel.chapter]?.examples[sel.index]?.name ?? 'unknown'
+    : 'user';
+}
+
+// A resize handle was let go (usage log only).
+function onResizeDrag(dragging: boolean): void {
+  if (!dragging) uiEvent('panel_resize');
+}
+
 const App: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [isErr, setErr] = useState(false);
@@ -570,9 +620,13 @@ const App: React.FC = () => {
   const handleThemeChange = (t: ThemeId) => {
     setTheme(t);
     saveTheme(t);
+    uiEvent('theme_change', t);
   };
   const [code_svg, setCodeSvg] = useState<string | null>(null);
   const [timeline_svg, setTimelineSvg] = useState<string | null>(null);
+  // The program the shown panels were rendered from (names the figure in
+  // the usage log; unused when telemetry is off).
+  const [renderedCode, setRenderedCode] = useState<string | null>(null);
 
   // Persisted user examples + the current selection. Both hydrated
   // from localStorage on first render (useState initializer runs once)
@@ -626,7 +680,18 @@ const App: React.FC = () => {
   //     the just-edited code, and switch the selection to it. The
   //     user's edit cursor stays where it is — we don't touch the
   //     editor view itself.
-  const handleEditorChange = (code: string) => {
+  // The dropdown example a run is of, for the usage log: its name while
+  // the editor holds it unchanged, "user" for the visitor's own examples
+  // (and edited copies), nothing for a linked program that matches none.
+  const runExample = (code: string): string | undefined => {
+    const sel = selectionRef.current;
+    if (sel.kind === 'user') return 'user';
+    const shown = normalizeCode(codeForSelection(sel, userExamplesRef.current));
+    return shown === code ? exampleLabel(sel) : undefined;
+  };
+
+  const handleEditorChange = (code: string, charsChanged: number) => {
+    noteEdit(code, charsChanged);
     const sel = selectionRef.current;
     const examples = userExamplesRef.current;
     if (sel.kind === 'user') {
@@ -657,6 +722,7 @@ const App: React.FC = () => {
     // editor on every example switch and lose history. The change
     // listener below uses refs to read the live values instead.
     const initialCode = LINK_CODE ?? codeForSelection(selection, userExamples);
+    setSourceCode(LINK_CODE ?? (selection.kind === 'preloaded' ? initialCode : null));
     // Consumed: drop the fragment so later edits don't leave a stale URL.
     if (LINK_CODE !== null && window.location.hash) {
       window.history.replaceState(
@@ -701,6 +767,7 @@ const App: React.FC = () => {
     // they've already Generated once) — show it instantly with no
     // /submit-code round-trip and no "compile server is waking up"
     // message.
+    const run = runStarted(code, runExample(code));
     const cached = await cacheGet(code);
     if (cached) {
       // A newer request might have started between the await above
@@ -708,8 +775,10 @@ const App: React.FC = () => {
       if (inflightRef.current !== controller) return;
       setCodeSvg(cached.code_panel);
       setTimelineSvg(cached.timeline_panel);
+      setRenderedCode(code);
       setErr(false);
       setIsLoading(false);
+      runFinished(run, { cached: true });
       return;
     }
 
@@ -718,14 +787,17 @@ const App: React.FC = () => {
     try {
       const response = await axios.post(`${API_BASE}/submit-code`, { code }, {
         signal: controller.signal,
+        headers: submitHeaders(),
       });
       // A newer request was started while we were waiting; whoever
       // started it owns the UI now. Drop this response on the floor.
       if (inflightRef.current !== controller) return;
 
+      runFinished(run, { status: response.status });
       if (response.status === 200) {
         setCodeSvg(response.data.code_panel);
         setTimelineSvg(response.data.timeline_panel);
+        setRenderedCode(code);
         setErr(false);
         // Memoize so a re-run of the same snippet is instant. Fire-
         // and-forget — a localStorage write failure here doesn't
@@ -749,12 +821,19 @@ const App: React.FC = () => {
 
       if (axios.isAxiosError(error) && error.response) {
         const data = error.response.data;
-        setError(typeof data === 'string' ? data : JSON.stringify(data));
+        const message = typeof data === 'string' ? data : JSON.stringify(data);
+        setError(message);
         const kind = error.response.headers?.['x-rustviz-error-kind'];
         setErrorKind(typeof kind === 'string' ? kind : null);
+        runFinished(run, {
+          status: error.response.status,
+          errorKind: typeof kind === 'string' ? kind : null,
+          message,
+        });
       } else {
         setError('An unexpected error occurred');
         setErrorKind(null);
+        runFinished(run, { network: true });
       }
       setErrorCode(code);
       console.error('An error occurred:', error);
@@ -785,15 +864,24 @@ const App: React.FC = () => {
   // .listener class to skip already-bound nodes.
   useEffect(() => {
     helpers('ex2');
+    figuresChanged();
   }, [code_svg, timeline_svg]);
+  // The error card replaces the figure (usage log only).
+  useEffect(() => {
+    figuresChanged();
+  }, [isErr]);
 
   // Switch to a different example (preloaded or user-created).
   // Setting selection + pushing the new code into the editor are both
   // programmatic — neither should trigger the implicit-fork path.
   const handleExampleSelect = (sel: Selection) => {
     setSelection(sel);
+    selectionRef.current = sel;
+    const selected = codeForSelection(sel, userExamples);
+    uiEvent('example_select', exampleLabel(sel));
+    setSourceCode(sel.kind === 'preloaded' ? selected : null);
     if (!editor) return;
-    editor.setCurrentCode(codeForSelection(sel, userExamples));
+    editor.setCurrentCode(selected);
     // Auto-fire the visualization. CodeMirror's dispatch is
     // synchronous so getCurrentCode() inside handleClick() will see
     // the just-set code on the next line.
@@ -810,6 +898,9 @@ const App: React.FC = () => {
     };
     setUserExamples([...userExamples, created]);
     setSelection({ kind: 'user', id: created.id });
+    selectionRef.current = { kind: 'user', id: created.id };
+    uiEvent('example_select', 'new');
+    setSourceCode(null);
     if (!editor) return;
     editor.setCurrentCode(NEW_EXAMPLE_TEMPLATE);
     handleClick();
@@ -854,6 +945,8 @@ const App: React.FC = () => {
     }
     setUserExamples(next);
     setSelection(fallback);
+    selectionRef.current = fallback;
+    setSourceCode(null);
     if (!editor) return;
     editor.setCurrentCode(codeForSelection(fallback, next));
     handleClick();
@@ -871,6 +964,7 @@ const App: React.FC = () => {
       selection.kind === 'user'
         ? userExamples.find(e => e.id === selection.id)?.name ?? 'example'
         : exampleGroups[selection.chapter].examples[selection.index].name;
+    uiEvent('export');
     const blob = new Blob([code], { type: 'text/x-rust' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -908,6 +1002,9 @@ const App: React.FC = () => {
     };
     setUserExamples([...userExamples, created]);
     setSelection({ kind: 'user', id: created.id });
+    selectionRef.current = { kind: 'user', id: created.id };
+    uiEvent('import');
+    setSourceCode(null);
     if (!editor) return;
     editor.setCurrentCode(code);
     handleClick();
@@ -919,6 +1016,11 @@ const App: React.FC = () => {
   return (
     <div className="app-shell">
       <TitleBar theme={theme} onThemeChange={handleThemeChange} />
+      {/* Opt-in builds only: the consent prompt goes here, in the layout's
+          flow so it shrinks the panels instead of covering them. The default
+          (notice) build draws nothing here; the info panel's Privacy
+          paragraph is its notice. */}
+      {TELEMETRY_ENABLED && TELEMETRY_OPT_IN && <div id="rv-telemetry-slot" />}
       <PanelGroup direction="vertical" className="main-split" autoSaveId="rustviz-vertical">
         {/* Top row: prose on the left, code editor on the right.
             minSize=0 with no `collapsible` means the handle drags
@@ -948,7 +1050,7 @@ const App: React.FC = () => {
             >
               <Description />
             </Panel>
-            <PanelResizeHandle className="resize-handle resize-handle-vertical" />
+            <PanelResizeHandle className="resize-handle resize-handle-vertical" onDragging={onResizeDrag} />
             <Panel defaultSize={65} minSize={25} className="panel editor-panel">
               <div className="editor-toolbar">
                 <ExamplePicker
@@ -1074,7 +1176,7 @@ const App: React.FC = () => {
           </PanelGroup>
         </Panel>
 
-        <PanelResizeHandle className="resize-handle resize-handle-horizontal" />
+        <PanelResizeHandle className="resize-handle resize-handle-horizontal" onDragging={onResizeDrag} />
 
         {/* Bottom row: visualization (or error). Stretches to fill
             whatever vertical space is left. */}
@@ -1106,6 +1208,9 @@ const App: React.FC = () => {
                 />
                 <div
                   className="ex2 tl_panel"
+                  data-rv-figure-id={
+                    TELEMETRY_ENABLED && renderedCode !== null ? figureIdFor(renderedCode) : undefined
+                  }
                   style={{ width: 'auto' }}
                   dangerouslySetInnerHTML={{ __html: timeline_svg ?? '' }}
                 />

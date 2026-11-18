@@ -91,7 +91,7 @@ browser (rv-telemetry.js) ── POST /v1/events {"events":[…]} ──▶ rust
   browser's localStorage.
 
 What this service does *not* decide: the consent model, Do Not
-Track / GPC, and which ids exist are the client's job (`rv-telemetry.js`);
+Track / GPC handling, and which ids exist are the client's job (`rv-telemetry.js`);
 see `SCHEMA.md` "Consent rules". Google's front end necessarily sees client
 addresses; the privacy page should say so.
 
@@ -166,5 +166,5 @@ until telemetry is turned on. To turn it off: `gcloud run services delete
 rustviz-events` (clients drop events silently when the endpoint fails).
 
 Retention, access to `rv_research` / `rv_programs` (named researchers), and
-deletion requests (`withdraw` with `delete_requested`, by `anon_id`) are
+deletion requests (a visitor e-mails the ID shown in the privacy page's Your data section; `anon_id`) are
 still open decisions; `infra/setup.sh` sets no expiration.

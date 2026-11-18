@@ -1372,6 +1372,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sha2",
  "toml 0.5.11",
 ]
 
@@ -1931,6 +1932,7 @@ dependencies = [
  "rustviz-lib",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

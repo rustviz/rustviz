@@ -29,6 +29,67 @@ use rustviz_lib::Rustviz;
 /// Keeps the embedded panels on the book's theme (see the file).
 const THEME_JS: &str = include_str!("theme.js");
 
+/// RustViz version stamped on figure ids and telemetry events.
+const RV_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Book-wide telemetry settings, `None` unless `telemetry-endpoint` is set.
+pub struct Telemetry {
+	/// `<script>` tags (config + rv-telemetry.js) added to every chapter.
+	script: String,
+}
+
+impl Telemetry {
+	pub fn from_cfg(cfg: &Cfg) -> Option<Telemetry> {
+		let endpoint = cfg.telemetry_endpoint.trim();
+		if endpoint.is_empty() {
+			return None;
+		}
+		let consent = match cfg.telemetry_consent.as_str() {
+			"notice" => "notice",
+			"opt-in" => "opt-in",
+			other => {
+				warn!("telemetry-consent = {:?} is not \"opt-in\" or \"notice\"; using \"opt-in\"", other);
+				"opt-in"
+			}
+		};
+		let mut config = serde_json::json!({
+			"endpoint": endpoint,
+			"consent": consent,
+			"rvVersion": RV_VERSION,
+		});
+		if !cfg.telemetry_respect_privacy_signals {
+			config["respectPrivacySignals"] = false.into();
+		}
+		if !cfg.telemetry_privacy_url.is_empty() {
+			config["privacyUrl"] = cfg.telemetry_privacy_url.clone().into();
+		}
+		if !cfg.telemetry_surface.is_empty() {
+			config["surface"] = cfg.telemetry_surface.clone().into();
+		}
+		if !cfg.telemetry_study_text.is_empty() {
+			config["studyText"] = cfg.telemetry_study_text.clone().into();
+		}
+		// `</` can't appear inside a <script> element's text.
+		let config = config.to_string().replace("</", "<\\/");
+		Some(Telemetry {
+			script: format!(
+				"<script>window.RV_TELEMETRY_CONFIG = {};</script>\n<script>\n{}\n</script>\n",
+				config,
+				rustviz_lib::TELEMETRY_JS
+			),
+		})
+	}
+}
+
+/// figure_id of a snippet: the first 16 hex digits of
+/// SHA-256(snippet + "\n" + RustViz version). rv-telemetry.js computes the
+/// same for playground programs; keep the two in sync.
+pub fn figure_id(code: &str) -> String {
+	use sha2::{Digest, Sha256};
+	let digest = Sha256::digest(format!("{}\n{}", code, RV_VERSION).as_bytes());
+	digest.iter().take(8).map(|b| format!("{:02x}", b)).collect()
+}
+
 /// `<script>…</script>` block carrying the tooltip + cross-panel
 /// highlighting glue and the theme sync. The helpers JS lives in
 /// `rustviz-lib/src/helpers.js` and is shared with the `rustviz` CLI's
@@ -114,9 +175,14 @@ impl Preprocessor for RustvizPlugin {
 			}
 		};
 
+		let telemetry = Telemetry::from_cfg(&cfg);
+		// figure_id -> snippet, written for the analysis (re-rendering a
+		// figure from its id) only when telemetry is on.
+		let mut manifest = serde_json::Map::new();
+
 		book.for_each_mut(|item| {
 			    if let BookItem::Chapter(chapter) = item {
-				    let _ = process_code_blocks(chapter, &cfg, &assets_dir, &mut ex_counter).map(|s| {
+				    let _ = process_code_blocks(chapter, &cfg, telemetry.as_ref(), &mut manifest, &assets_dir, &mut ex_counter).map(|s| {
 					                                              chapter.content = s;
 					                                              trace!("chapter '{}' processed", &chapter.name);
 				                                              })
@@ -125,6 +191,13 @@ impl Preprocessor for RustvizPlugin {
 				                                              });
 			    }
 		    });
+
+		if telemetry.is_some() {
+			let json = serde_json::json!({ "rv_version": RV_VERSION, "figures": manifest });
+			if let Err(e) = fs::write(assets_dir.join("rv-figures.json"), format!("{:#}\n", json)) {
+				warn!("error writing the figure manifest: {}", e);
+			}
+		}
 
 		// could add some callbacks here to delete the examples directory - not necessary though
 		Ok(book)
@@ -176,7 +249,7 @@ fn html_attr_escape(s: &str) -> String {
 	html_escape(s).replace('"', "&quot;")
 }
 
-fn rustviz_handler(code_string: &str, a_dir: &PathBuf,  ex_counter: u32, playground_url: &str) -> String{
+fn rustviz_handler(code_string: &str, a_dir: &PathBuf,  ex_counter: u32, playground_url: &str, figure_id: Option<&str>) -> String{
 	// create new example directory: src/assets/example-x/
 	let example_dir_str = format!("example-{}", ex_counter);
 	let example_dir = a_dir.join(example_dir_str.clone());
@@ -199,13 +272,15 @@ fn rustviz_handler(code_string: &str, a_dir: &PathBuf,  ex_counter: u32, playgro
       }
 
       info!("successfully created visualization for example {}", ex_counter);
-      let visualization_div = format!("<div class=\"flex-container vis_block\" 
+      // Only with telemetry on: names the figure in usage events.
+      let id_attr = figure_id.map(|id| format!(" data-rv-figure-id=\"{}\"", id)).unwrap_or_default();
+      let visualization_div = format!("<div class=\"flex-container vis_block\"{} 
       style=\"position:relative; margin-left:-75px; margin-right:-75px; display: flex; flex-direction: row; justify-content: flex-start; flex-wrap: nowrap; flex-shrink: 0; height: {}px\">
       <div style=\"flex: 1 1 auto; min-width: 0; overflow-x: auto; overflow-y: hidden\">
       <object type=\"image/svg+xml\" class=\"{} code_panel\" data=\"examples/{}/vis_code.svg\" style=\"display: block; min-width: 100%\"></object>
       </div>
       <object type=\"image/svg+xml\" class=\"{} tl_panel\" data=\"examples/{}/vis_timeline.svg\" style=\"width: auto; flex-grow: 0; flex-shrink: 0\" onmouseenter=\"helpers('{}')\"></object>
-      </div>", rv.height(),example_dir_str, example_dir_str, example_dir_str, example_dir_str, example_dir_str);
+      </div>", id_attr, rv.height(),example_dir_str, example_dir_str, example_dir_str, example_dir_str, example_dir_str);
     
       format!("{}{}", visualization_div, playground_link(playground_url, code_string))
     }
@@ -225,6 +300,8 @@ fn rustviz_handler(code_string: &str, a_dir: &PathBuf,  ex_counter: u32, playgro
 fn process_code_blocks(
 chapter: &Chapter,
 cfg: &Cfg,
+telemetry: Option<&Telemetry>,
+manifest: &mut serde_json::Map<String, serde_json::Value>,
 assets_dir: &PathBuf,
 // pulldown-cmark-to-cmark 11+ widened its error type from
 // `std::fmt::Error` to its own enum (so it can surface things like
@@ -251,9 +328,10 @@ ex_counter: &mut u32) -> Result<String, pulldown_cmark_to_cmark::Error> {
 	// On narrow screens the -75px side margins would push the link past the
 	// viewport edge, so keep it inside the text column there.
 	let mut buf = format!(
-		"<style>@media (max-width: 640px) {{ .rv-playground-row {{ margin-left: 0 !important; margin-right: 0 !important; }} }}</style>\n{}\n",
-		helpers_script()
-	); // inject the helpers script directly into the page
+		"<style>@media (max-width: 640px) {{ .rv-playground-row {{ margin-left: 0 !important; margin-right: 0 !important; }} }}</style>\n{}\n{}",
+		helpers_script(),
+		telemetry.map_or("", |t| t.script.as_str())
+	); // inject the helpers script (and, if configured, telemetry) directly into the page
 	// The curly_quotes setting is left at false so that people can
 	// set it in book.toml (mdBook will apply the setting when it
 	// parses our output). It is important to use new_cmark_parser so
@@ -289,7 +367,11 @@ ex_counter: &mut u32) -> Result<String, pulldown_cmark_to_cmark::Error> {
 
 		                   (Event::Text(Borrowed(text)), Open) => {
                           state = Closing;
-                          let res = rustviz_handler(text, &assets_dir, *ex_counter, &cfg.playground_url);
+                          let fid = telemetry.map(|_| figure_id(text));
+                          if let Some(id) = &fid {
+                              manifest.insert(id.clone(), text.to_string().into());
+                          }
+                          let res = rustviz_handler(text, &assets_dir, *ex_counter, &cfg.playground_url, fid.as_deref());
                           *ex_counter += 1;
                           Some(Event::Html(res.into()))
 		                   },
@@ -352,6 +434,67 @@ mod tests {
 		assert!(s.contains("setAttribute('data-rv-theme', theme)"));
 		assert!(!s.contains("</script>\n</script>"));
 		assert!(!THEME_JS.contains("</script"));
+	}
+
+	#[test]
+	fn telemetry_is_off_by_default() {
+		let cfg = Cfg::default();
+		assert_eq!(cfg.telemetry_endpoint, "");
+		assert_eq!(cfg.telemetry_consent, "opt-in");
+		assert!(cfg.telemetry_respect_privacy_signals);
+		assert!(Telemetry::from_cfg(&cfg).is_none());
+		// the default page carries no trace of it
+		assert!(!helpers_script().contains("rvTelemetry ="));
+		assert!(!helpers_script().contains("RV_TELEMETRY_CONFIG"));
+	}
+
+	#[test]
+	fn telemetry_config_is_injected_when_set() {
+		let t: toml::value::Table = toml::from_str(
+			"telemetry-endpoint = \"https://events.example.org\"\n\
+			 telemetry-consent = \"notice\"\n\
+			 telemetry-privacy-url = \"https://example.org/privacy/</script>\"\n\
+			 telemetry-surface = \"tutorial\"",
+		).unwrap();
+		let cfg = Cfg::try_from(t).unwrap();
+		let s = Telemetry::from_cfg(&cfg).unwrap().script;
+		assert!(s.contains("\"endpoint\":\"https://events.example.org\""), "{}", s);
+		assert!(s.contains("\"consent\":\"notice\""));
+		assert!(s.contains("\"surface\":\"tutorial\""));
+		assert!(s.contains(&format!("\"rvVersion\":\"{}\"", RV_VERSION)));
+		assert!(s.contains("window.rvTelemetry = {"));
+		// the URL's `</script>` can't close the config's script element
+		assert_eq!(s.matches("</script>").count(), 2, "{}", s);
+		// an unknown consent mode falls back to opt-in
+		let t: toml::value::Table = toml::from_str(
+			"telemetry-endpoint = \"https://e.example\"\ntelemetry-consent = \"yes\"").unwrap();
+		let s = Telemetry::from_cfg(&Cfg::try_from(t).unwrap()).unwrap().script;
+		assert!(s.contains("\"consent\":\"opt-in\""));
+	}
+
+	#[test]
+	fn telemetry_privacy_signals_are_respected_unless_turned_off() {
+		let t: toml::value::Table = toml::from_str("telemetry-endpoint = \"https://e.example\"").unwrap();
+		let s = Telemetry::from_cfg(&Cfg::try_from(t).unwrap()).unwrap().script;
+		assert!(!s.contains("respectPrivacySignals\""), "default: the client's own default (respect) applies");
+		let t: toml::value::Table = toml::from_str(
+			"telemetry-endpoint = \"https://e.example\"\ntelemetry-respect-privacy-signals = false").unwrap();
+		let cfg = Cfg::try_from(t).unwrap();
+		assert!(!cfg.telemetry_respect_privacy_signals);
+		let s = Telemetry::from_cfg(&cfg).unwrap().script;
+		assert!(s.contains("\"respectPrivacySignals\":false"), "{}", s);
+	}
+
+	#[test]
+	fn figure_ids_follow_the_shared_formula() {
+		let id = figure_id("fn main() {}\n");
+		assert_eq!(id.len(), 16);
+		assert!(id.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+		assert_ne!(id, figure_id("fn main() { }\n"));
+		// `printf 'abc\n2.1.0' | shasum -a 256` = fd7e25f9ee13a174…
+		if RV_VERSION == "2.1.0" {
+			assert_eq!(figure_id("abc"), "fd7e25f9ee13a174");
+		}
 	}
 
 	#[test]

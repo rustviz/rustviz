@@ -108,7 +108,8 @@ entrypoint. There is no shell access surface in the playground HTTP path.
 - `submit_code` re-checks `payload.code.len() <= 16 KiB` for clarity.
 - `actix-governor` rate-limits `/submit-code` per peer IP (5-token bucket,
   refilled at one token per 2 seconds by default; tunable via
-  `RV_RATE_SECONDS_PER_REQUEST` / `RV_RATE_BURST`).
+  `RV_RATE_SECONDS_PER_REQUEST` / `RV_RATE_BURST`). The IP is a key in an
+  in-memory map only; it is never logged (see 5).
 
 ### 3. CORS allowlist on the API
 
@@ -120,6 +121,10 @@ sites can drive the API from a browser:
 
 - `https://rustviz.github.io` — the Pages origin.
 - `http://localhost:3000` / `http://127.0.0.1:3000` — Vite dev server.
+
+Besides `Content-Type`, the only request header allowed cross-origin is
+`X-RV-Page-Load`: a random per-page-load id that builds with usage logging
+send while the visitor's logging is on (see 5).
 
 Other origins fail the preflight OPTIONS and the browser refuses to send
 the request. If a new origin is added (mirror, custom domain), add it
@@ -142,6 +147,26 @@ overrides that default to `docker` at startup if the env var is unset, so
 you'd have to actively pass `RV_RUNNER=local` to the playground process to
 hit the unsafe path. The production image sets `RV_RUNNER=sandbox`
 (`playground/cloudrun/Dockerfile`).
+
+### 5. No IP addresses in logs
+
+The service never writes a visitor's IP address or browser string:
+
+- The access log (`ACCESS_LOG_FORMAT` in `playground/src/main.rs`) prints
+  only the request line, status, size and time, not actix's default
+  client address, Referer or User-Agent. A unit test pins this.
+- The rate limiter keeps IPs in memory only (actix-governor's logging is
+  compiled out).
+- With `RV_LOG_RUN_RESULTS=1` (off by default) the service also prints one
+  structured `rv_run_result` line per compile: outcome, rustc error codes,
+  crash location, latency, the program's size and SHA-256, and the
+  `X-RV-Page-Load` id if the request had one. No program text, no IP.
+- Cloud Run's own request log (`run.googleapis.com/requests`) records the
+  client IP for every request regardless; it must be excluded from storage
+  by a log exclusion on the compile service (`rustviz-api`), the same as for
+  the telemetry collector. That exclusion is created by
+  `playground/events/infra/setup.sh` (the collector's setup, #1118), not by
+  `deploy.sh`.
 
 ## Operator checklist
 

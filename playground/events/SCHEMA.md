@@ -134,8 +134,8 @@ Common property types:
 | `page_view` | `nav_type?`: `navigate`\|`reload`\|`back_forward`\|`prerender` | first event of a page load after consent |
 | `page_hide` | `active_ms`, `total_ms`, `max_scroll_pct` (0-100 int), `reason`: `hidden`\|`unload` | sent on every `visibilitychange→hidden`; `active_ms`/`total_ms` are cumulative since load, so take the max per page load. active = visible and focused with input in the last 30 s |
 | `figure_view` | `figure_id`, `figure_index` (0-based position on page, ≤ 999), `enter_ts`, `leave_ts`, `visible_ms` | one per visible interval (≥ 50 % in viewport) |
-| `tooltip_dwell` | `figure_id`, `element_id`, `element_kind` (`data-rv-kind`): `header`\|`dot`\|`call`\|`fn`\|`arrow`\|`line`\|`branch_line`\|`stop_bar`\|`bracket`\|`code_line`\|`other`, `event_kind?` token (first token of `data-rv-event`: the plugin's event names, `acquire`, `move`, `copy`, `static_borrow`, `mutable_borrow`, `owner_go_out_of_scope`, …), `var?` (≤ 64 chars, `data-rv-var`), `line?` (1-100000, `data-rv-line`), `line_end?` (1-100000, `data-rv-line-end`), `state?` token (`data-rv-state`), `drop?` bool (`data-rv-drop`), `enter_ts`, `leave_ts`, `dwell_ms` | every hover, no minimum dwell. Element vocabulary: `rustviz-plugin/docs/element-ids.md` |
-| `code_line_hover` | `figure_id`, `line`, `enter_ts`, `leave_ts`, `dwell_ms` | |
+| `tooltip_dwell` | `figure_id`, `element_id`, `element_kind` (`data-rv-kind`): `header`\|`dot`\|`call`\|`fn`\|`arrow`\|`line`\|`branch_line`\|`stop_bar`\|`bracket`\|`code_line`\|`other`, `event_kind?` token (first token of `data-rv-event`: the plugin's event names, `acquire`, `move`, `copy`, `static_borrow`, `mutable_borrow`, `owner_go_out_of_scope`, …), `var?` (≤ 64 chars, `data-rv-var`), `line?` (1-100000, `data-rv-line`), `line_end?` (1-100000, `data-rv-line-end`), `state?` token (`data-rv-state`), `drop?` bool (`data-rv-drop`), `enter_ts`, `leave_ts`, `dwell_ms` | every tooltip hover is sent, with no minimum dwell (unlike `code_line_hover`). Element vocabulary: `rustviz-plugin/docs/element-ids.md` |
+| `code_line_hover` | `figure_id`, `line`, `enter_ts`, `leave_ts`, `dwell_ms` | only hovers of at least 100 ms are sent (`MIN_LINE_HOVER_MS`; a 100 ms hover is sent, a 99 ms one is not): shorter passes while sweeping the pointer over the code panel are noise, and `pointer_trace` already records the path |
 | `pointer_trace` | `figure_id`, `chunk` (0-based per figure per page load), `t0` (ts of first sample), `input`: `mouse`\|`touch`\|`pen`, `samples`: array of `[dt_ms, x, y]` (≤ 600 per chunk), `taps?`: array of `[dt_ms, x, y]` (≤ 100) | `dt_ms` int 0..=600000 relative to `t0`; `x`,`y` finite numbers in the figure SVG's user coordinates (viewBox units), rounded to 1 decimal, abs ≤ 100000. 10 Hz while the pointer is inside the figure; flush a chunk when it reaches 600 samples or with the batch |
 | `ui` | `action`: `theme_change`\|`panel_resize`\|`open_in_playground`\|`example_select`\|`import`\|`export`\|`share`\|`privacy_panel`\|`other`, `value?` (≤ 64 chars), `source_figure_id?` | `value` is a short enum-like string (theme name, example id), never free text |
 | `program` | `program_id`, `source` (string, ≤ 64 KiB UTF-8), `source_figure_id?` (figure_id of the example/tutorial figure it was edited from) | the only event that carries code text. Sent only when the client is configured with `collectCode: true` (playground: true; library default: false), the first time this page load sees a `program_id`, before the `run`/`edit` that references it. The collector rejects it unless SHA-256(`source`) == `program_id` (`invalid:program_id`), and unless it runs with `RV_EVENTS_ACCEPT_PROGRAMS=1` (`programs_disabled`; default off, the Cloud Run deploy turns it on). Stored once per `program_id` in its own stream/table (section 4); `first_seen` = earliest `server_ts`. |
@@ -143,7 +143,7 @@ Common property types:
 | `run` | `run_id` (UUID), `program_id`, `figure_id?` (of the figure this run renders), `line_count` (0-100000), `example?` (≤ 64 chars, dropdown id it started from), `source_figure_id?`, `program_omitted?`: `too_large` | `program_id` is sent even when `collectCode` is off (the hash alone, no text). `program_omitted: "too_large"` (on `run` or `edit`) marks a `program_id` whose source exceeds the 64 KiB `source` cap, so no `program` record was sent (truncating would break the hash) |
 | `run_result` | `run_id`, `program_id?`, `figure_id?`, `outcome`: `ok`\|`compile_error`\|`refused`\|`crash`\|`timeout`\|`rate_limited`\|`network_error`\|`server_error`, `error_codes?` (≤ 32 strings matching `^E[0-9]{4}$`), `error_kind?` (value of `X-RustViz-Error-Kind`, ≤ 64 of `[a-z0-9-]`), `crash_at?` (≤ 64 of `[A-Za-z0-9_.:-]`, plugin source location such as `expr_visitor.rs:862`, only with `outcome: "crash"`), `latency_ms`, `cached?` bool, `http_status?` (100-599) | client-side view; the compile service may later write an authoritative server-side copy joined by `page_load_id` |
 | `consent` | `consent_version` (≤ 32 of `[0-9A-Za-z.-]`), `choice`: `opt_in` (explicit opt-in, `opt_in` mode or joining a study), `age_18_plus?` bool | see consent rules below |
-| `withdraw` | `consent_version`, `delete_requested` bool | the visitor turned logging off. Last event this browser sends until it turns logging back on; analysis deletes all rows with this `anon_id` when `delete_requested`. The dashboard's "turned logging off" share = distinct `anon_id` with a `withdraw` / distinct `anon_id` |
+| `withdraw` | `consent_version` | the visitor turned logging off. Last event this browser sends until it turns logging back on; it carries the ids, so a visitor who e-mails their ID (shown in the privacy page's Your data section) can have their rows found and deleted. The dashboard's "turned logging off" share = distinct `anon_id` with a `withdraw` / distinct `anon_id` |
 | `survey` | `survey_version` (≤ 32), `answers`: object of ≤ 20 entries, keys 1-32 of `[a-z0-9_]`, values strings ≤ 200 | tier 2 only (tier 1 → rejected `tier`) |
 
 `figure_view`, `tooltip_dwell`, `code_line_hover` and `pointer_trace` on a
@@ -157,13 +157,16 @@ playground figure use that run's `figure_id` and may add `program_id?`.
 - The public tutorial and playground configure `notice`: the client shows no
   UI. The host page's own text is the notice (the playground info panel's
   Privacy section; a paragraph at the bottom of the tutorial's front page).
-  Events flow from first load unless GPC/DNT is set or the visitor turned
-  logging off in the Your-data panel, which sends `withdraw`. No `consent`
+  Events flow from first load unless the visitor turned
+  logging off in the privacy page's Your data section, which sends `withdraw`. No `consent`
   event is sent in `notice` mode.
 - There is no decline event: declining in `opt_in` mode sends nothing.
 - `withdraw` stops all logging on this device and clears `anon_id` and
   `session_id`.
-- Do Not Track / Global Privacy Control set → send nothing, in every mode.
+- Do Not Track / Global Privacy Control set → send nothing, in every mode,
+  **only when the site keeps the client's default** `respectPrivacySignals:
+  true`. The RustViz sites (playground, tutorial) set it to false: they never
+  sell or share the data, so only Turn off stops logging there.
 
 ## 4. What the collector writes
 

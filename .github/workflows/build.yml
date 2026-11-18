@@ -105,6 +105,14 @@ jobs:
           RV_RUNNER: local
         run: cargo test -p rustviz --locked
 
+      - name: Frontend unit tests (link codec, telemetry client)
+        # `cargo xtask setup` ran `npm install`, so tsx is available.
+        if: runner.os == 'Linux'
+        working-directory: playground/frontend
+        run: |
+          npx tsx scripts/linkCode.test.ts
+          npx tsx scripts/telemetry.test.ts
+
       - name: Lint plugin for unordered HashMap/HashSet iteration (clippy)
         # Their iteration order is random per process, and when it reached
         # the output, diagrams differed between runs (#211). Only the two
