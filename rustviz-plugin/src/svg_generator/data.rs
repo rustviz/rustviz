@@ -4346,6 +4346,13 @@ impl Visualizable for VisualizationData {
             // other;` moves other.r): the field has no reference left.
             (State::PartialPrivilege{..}, Event::Move{to: to_ro,..}) if self.is_ref(hash) && !self.is_mutref(hash) =>
                 State::ResourceMoved{ move_to: to_ro.to_owned(), move_at_line: event_line, dropped_by_hand: false },
+            // An owner drawn as lent is moved: rustc allows it only where
+            // the loan is already dead (`r = &t; let m = s;` after `r =
+            // &s`, #1178). It is moved; this used to fall through to
+            // Invalid, which the join of a conditional then ignored.
+            (State::PartialPrivilege{..}, Event::Move{to: to_ro,..})
+            | (State::RevokedPrivilege{..}, Event::Move{to: to_ro,..}) if !self.is_ref(hash) =>
+                State::ResourceMoved{ move_to: to_ro.to_owned(), move_at_line: event_line, dropped_by_hand: false },
             // A reference whose reference was moved out (`let q2 = q;`)
             // is given a new one (`q = &mut s;`, #722): it holds that,
             // as when it was first initialized with a borrow.
