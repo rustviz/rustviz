@@ -3934,6 +3934,37 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     Some((ResourceTy::Index(place, label, PlaceWrite::Update), end_line))
   }
 
+  /// `arg` is a call returning a reference (`b.as_str()`) passed to a
+  /// call whose signature lets it store that reference behind another
+  /// argument (`store(&mut r, b.as_str())`, #1124): each variable with
+  /// a column the returned reference borrows, the place it may be
+  /// stored in, and the line the loan ends on. The inner call's own
+  /// borrow is marked as kept by its result.
+  fn stored_call_result_borrows(&mut self, arg: &'tcx Expr<'tcx>, line: usize) -> Vec<(ResourceTy, ResourceTy, usize)> {
+    let is_call = match arg.kind {
+      ExprKind::MethodCall(..) => true,
+      ExprKind::Call(callee, _) => !crate::visitor::is_ctor_path(callee, self.tcx.typeck(arg.hir_id.owner)),
+      _ => false,
+    };
+    if !is_call || arg.span.from_expansion() {
+      return Vec::new();
+    }
+    let rustc_hir::Node::Expr(call) = self.tcx.parent_hir_node(arg.hir_id) else { return Vec::new() };
+    let Some(place) = self.arg_storable_behind(call, arg).and_then(|t| self.mut_arg_place(t)) else { return Vec::new() };
+    let mut out = Vec::new();
+    for lender in self.call_lenders(arg) {
+      let ResourceTy::Value(l) = &lender else { continue };
+      if l.is_ref() || l.is_fn() {
+        continue;
+      }
+      let Some(end_line) = self.loan_end_line(line, l.name()).filter(|&end| end > line) else { continue };
+      self.mark_borrow_kept_by_result(arg, std::slice::from_ref(&lender));
+      let label = place.name().to_owned();
+      out.push((lender.clone(), ResourceTy::Index(place.clone(), label, PlaceWrite::Update), end_line));
+    }
+    out
+  }
+
   /// The argument of `call` that its signature lets it store the
   /// reference `arg` behind: a `&mut` parameter whose pointee's type
   /// mentions a lifetime of `arg`'s reference type
@@ -3959,10 +3990,28 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       return None;
     }
     let i = args.iter().position(|a| a.hir_id == arg.hir_id)?;
-    let ty::Ref(region, _, _) = inputs[i].kind() else { return None };
+    // `&'a String` for a parameter `&'a String`; or a type parameter
+    // the call fills with the reference (`std::mem::replace(&mut r,
+    // &b)`, `fn replace<T>(dest: &mut T, src: T) -> T`, #1124).
+    let stored = |g: ty::GenericArg<'tcx>| match inputs[i].kind() {
+      ty::Ref(region, _, _) => g.as_region() == Some(*region),
+      ty::Param(p) => g.as_type().is_some_and(|t| matches!(t.kind(), ty::Param(q) if q.index == p.index)),
+      _ => false,
+    };
+    if !matches!(inputs[i].kind(), ty::Ref(..) | ty::Param(_)) {
+      return None;
+    }
+    // A method's receiver (`refs.push(x)`, `push(&mut self, value: T)`)
+    // that may store the argument is drawn by `record_receiver_store`
+    // (#392); a type parameter is only followed into another argument.
+    let is_method = matches!(call.kind, ExprKind::MethodCall(..));
+    let by_param = matches!(inputs[i].kind(), ty::Param(_));
     inputs.iter().zip(&args).enumerate().find_map(|(j, (input, other))| {
       let ty::Ref(_, pointee, Mutability::Mut) = input.kind() else { return None };
-      (j != i && pointee.walk().any(|g| g.as_region() == Some(*region))).then_some(*other)
+      if by_param && is_method && j == 0 {
+        return None;
+      }
+      (j != i && pointee.walk().any(stored)).then_some(*other)
     })
   }
 
@@ -3986,13 +4035,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if !rap.is_ref() {
       return Some(rap);
     }
+    // `&mut r` with r a reference variable (`store(&mut r, &b)`,
+    // `std::mem::replace(&mut r, &b)`): the reference stored there is
+    // r's new value, so r is the place (#1124).
+    if !std::ptr::eq(place, target) {
+      return Some(rap);
+    }
     // A reference variable passed as is (`point(rh, &t)`): the place
     // is what it borrows.
-    if !std::ptr::eq(place, target) {
-      return None;
-    }
     match &self.borrow_map.get(&name)?.lender {
       ResourceTy::Value(lender) if !lender.is_ref() && !lender.is_fn() => Some(lender.to_owned()),
+      // `rr = &mut r` with r a reference variable: what's stored
+      // through rr is r's new value (#1124).
+      ResourceTy::Value(lender) if lender.is_ref() && rap.is_mutref() => Some(lender.to_owned()),
       _ => None,
     }
   }
@@ -4884,7 +4939,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let of_ref_var = ref_var_borrow(arg, tycheck_results);
       // `point(&mut hold, &t)` where point's signature lets it store
       // `&t` in `hold`: t stays borrowed past the call (#513).
-      if let Some((place, end_line)) = self.stored_borrow(arg, &from_ro, line_num) {
+      // `store(&mut r, b.as_str())`: the reference a call returns,
+      // into b, may be stored in r; b stays borrowed while r is (#1124).
+      let stored = match self.stored_borrow(arg, &from_ro, line_num) {
+        Some((place, end_line)) => vec![(from_ro.clone(), place, end_line)],
+        None => self.stored_call_result_borrows(arg, line_num),
+      };
+      for (from_ro, place, end_line) in stored.iter().cloned() {
         let mutable = arg_ty.ref_mutability() == Some(Mutability::Mut);
         let id = *self.unique_id;
         let loans = self.loans_issued_in(arg.span);
@@ -4897,12 +4958,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         let stored_in = StoredIn(Some(place.name().to_owned()), Vec::new(), Vec::new(), false, Vec::new(), false, Vec::new());
         self.add_external_event(line_num, if mutable {
           ExternalEvent::PassByMutableReference {
-            from: from_ro.clone(), to: to_ro, id, is_reborrow: false, result_has_lifetime: true,
+            from: from_ro.clone(), to: to_ro.clone(), id, is_reborrow: false, result_has_lifetime: true,
             implicit: ImplicitRef::No, result_keeps_borrow: false, stored_in, break_alt: None, of_ref_var, deep: None,
           }
         } else {
           ExternalEvent::PassByStaticReference {
-            from: from_ro.clone(), to: to_ro, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in, break_alt: None, still_borrowed_by: Vec::new(), of_ref_var, deep: None,
+            from: from_ro.clone(), to: to_ro.clone(), id, implicit: ImplicitRef::No, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in, break_alt: None, still_borrowed_by: Vec::new(), of_ref_var, deep: None,
           }
         });
         *self.unique_id += 1;
@@ -4914,6 +4975,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         }
         self.add_external_event(end_line, die);
         *self.unique_id += 1;
+      }
+      if !stored.is_empty() {
         return;
       }
       // `show_str(r)` with `r: &&String` and `show_str(s: &String)`
@@ -7042,10 +7105,15 @@ fn pattern_ref_borrows(
     let id = *self.unique_id;
     *self.unique_id += 1;
     let via = Some(via.clone());
+    // Through a local `&mut r` (`r.get_mut(0)`): a reborrow of r (#1152).
+    let (lender, is_reborrow) = match lender {
+      ResourceTy::Deref(r) if r.is_mutref() => (ResourceTy::Value(r), true),
+      l => (l, false),
+    };
     out.push(if is_mut {
-      ExternalEvent::MutableBorrow { from: lender, to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via, id, of_ref_var: false }
+      ExternalEvent::MutableBorrow { from: lender, to: to.clone(), is_partial: false, is_reborrow, break_alt: None, via, id, of_ref_var: false }
     } else {
-      ExternalEvent::StaticBorrow { from: lender, to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via, id, of_ref_var: false }
+      ExternalEvent::StaticBorrow { from: lender, to: to.clone(), is_partial: false, is_reborrow, break_alt: None, via, id, of_ref_var: false }
     });
   }
   out
@@ -7133,10 +7201,16 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
   for lender in lenders.iter() {
     let id = *self.unique_id;
     let is_mut = muts.iter().find(|(l, _)| l == lender).map_or(is_mut, |(_, m)| *m);
+    // `r.first_mut()` with r a local `&mut`: a reborrow through r, drawn
+    // like `&mut *r` (#1152).
+    let (from, is_reborrow) = match lender {
+      ResourceTy::Deref(r) if r.is_mutref() => (ResourceTy::Value(r.clone()), true),
+      l => (l.clone(), false),
+    };
     let ev = if is_mut {
-      ExternalEvent::MutableBorrow { from: lender.clone(), to: lhs.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id, of_ref_var: false }
+      ExternalEvent::MutableBorrow { from, to: lhs.clone(), is_partial: false, is_reborrow, break_alt: None, via: Some(via.clone()), id, of_ref_var: false }
     } else {
-      ExternalEvent::StaticBorrow { from: lender.clone(), to: lhs.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id, of_ref_var: false }
+      ExternalEvent::StaticBorrow { from, to: lhs.clone(), is_partial: false, is_reborrow, break_alt: None, via: Some(via.clone()), id, of_ref_var: false }
     };
     self.add_external_event(line_num, ev);
     *self.unique_id += 1;

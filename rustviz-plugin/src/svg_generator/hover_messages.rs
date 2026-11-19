@@ -2779,6 +2779,11 @@ fn signature_tie(func_fmt: &str, what: &str, point: &str, to_name: &String, name
     } else {
         String::new()
     };
+    if tie.via_outlives {
+        // `fn shorten<'a, 'b>(x: &'a str, _y: &'b str) -> &'b str where
+        // 'a: 'b`: x's lifetime isn't the result's, but outlives it (#1125).
+        return format!("{0}'s signature lets {1} point into {2} (a lifetime bound like `'a: 'b` lets a longer-lived reference stand in for a shorter one){3}", func_fmt, what, tied, tail);
+    }
     format!("{0}'s signature gives {1} the same lifetime as {2}{3}", func_fmt, what, tied, tail)
 }
 

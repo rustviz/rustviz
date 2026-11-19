@@ -1397,6 +1397,9 @@ pub struct ArgTie {
     /// stored in that argument, not the argument's own, so the caller's
     /// variable isn't kept borrowed (#1084).
     pub stored_in: Vec<StoredTie>,
+    /// Some tied argument has a lifetime that only outlives the
+    /// result's (`'a: 'b`, #1125): "the same lifetime" isn't true of it.
+    pub via_outlives: bool,
 }
 
 /// An argument a call's result is tied to only through the references
@@ -5171,7 +5174,7 @@ impl Visualizable for VisualizationData {
         ExternalEvent::RefDie { from: from_ro, to: to_ro, id ,..} => {
           match from_ro.clone() {
               ResourceTy::Deref(ro_is) | ResourceTy::Value(ro_is) => {
-                  if ro_is.is_mutref() && !to_o {
+                  if (ro_is.is_mutref() || holds_mut_borrow(self, &ro_is)) && !to_o {
                     vec![(line_num, Event::MutableDie {to: ResourceTy::Anonymous, is: from_ro.clone(), id: *id})]
                   }
                   else {
@@ -5551,7 +5554,7 @@ impl Visualizable for VisualizationData {
             ExternalEvent::RefDie { from: from_ro, to: _, id, ..} => { // need Ref Event to avoid drawing redundant arrows when rendering timelines
                 match from_ro.clone() {
                     ResourceTy::Deref(ro_is) | ResourceTy::Value(ro_is) => {
-                        if ro_is.is_mutref() {
+                        if ro_is.is_mutref() || holds_mut_borrow(self, &ro_is) {
                             maybe_append_event(self, &from_ro.clone(), Event::MutableDie { to: ResourceTy::Anonymous, is: from_ro.clone(), id: id }, line_number);
                             //maybe_append_event(self, &to_ro.clone(), Event::MutableReacquire { from: from_ro, is: to_ro }, &line_number);
                         }
@@ -5669,4 +5672,11 @@ impl Visualizable for VisualizationData {
             },
         }
     }
+}
+/// A value that holds a borrow without being a reference (`let it =
+/// r.iter_mut();`) whose borrow is a mutable one: its column drew a
+/// mutable borrow. Its end then says "mutable" too (#1152).
+fn holds_mut_borrow(vd: &VisualizationData, ro: &ResourceAccessPoint) -> bool {
+    !ro.is_ref() && ro.holds_borrow() && vd.timelines.get(ro.hash())
+        .is_some_and(|t| t.history.iter().any(|(_, e)| matches!(e, Event::MutableBorrow { .. })))
 }
