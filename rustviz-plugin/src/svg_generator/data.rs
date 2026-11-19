@@ -4495,6 +4495,23 @@ impl Visualizable for VisualizationData {
             | (State::PartialPrivilege { .. }, Event::RefDie { .. }) if holder =>
                 (*previous_state).clone(),
 
+            // A `&mut` moved into a call (`take(x)`) has its borrow's
+            // end drawn on it, on the same dot (#200): it stays moved.
+            (State::ResourceMoved { .. }, Event::StaticDie { .. })
+            | (State::ResourceMoved { .. }, Event::MutableDie { .. })
+            | (State::ResourceMoved { .. }, Event::RefDie { .. }) if self.is_ref(hash) =>
+                (*previous_state).clone(),
+            // Borrows of fields of what a reference points to that end
+            // on the row its own borrow ends (`&mut r.a` and `&r.b`
+            // last used where r is, #1080): it holds nothing either way.
+            (State::OutOfScope, Event::StaticReacquire { .. })
+            | (State::OutOfScope, Event::MutableReacquire { .. }) if self.is_ref(hash) =>
+                State::OutOfScope,
+            // `break k` out of a loop whose body declares `k` (#431): the
+            // move is drawn on the row where `k` goes out of scope on the
+            // other iterations, after that.
+            (State::OutOfScope, Event::Move { break_out: true, .. }) => State::OutOfScope,
+
             // A reference copied out of `it` ended its part of the
             // borrow `it` still holds: the lender stays borrowed (#575).
             (_, Event::StaticReacquire { still_borrowed_by, .. })
@@ -4691,6 +4708,12 @@ impl Visualizable for VisualizationData {
 
             // happends when a mutable reference returns, invalid otherwise
             (State::FullPrivilege{..}, Event::MutableDie{ .. }) =>
+                State::OutOfScope,
+            // A `&mut` whose own borrow ends while a shared reborrow
+            // through it is still live (`let first = &*r; r = &mut b;`
+            // with `first` used later, #1182): r holds no reference
+            // until it is given its next one.
+            (State::PartialPrivilege{..}, Event::MutableDie{ .. }) if self.is_mutref(hash) =>
                 State::OutOfScope,
 
             (State::FullPrivilege{..}, Event::Acquire{ from: _ ,..}) | (State::FullPrivilege{..}, Event::Copy{ from: _ ,..}) => {

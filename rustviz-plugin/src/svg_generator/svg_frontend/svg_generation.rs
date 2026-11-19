@@ -118,6 +118,22 @@ fn drop_before_new_borrow(drop: &ExternalEvent, borrow: &ExternalEvent) -> bool 
     new_borrow_into(borrow, *ro.hash(), *id)
 }
 
+/// Whether `drop` is the drop of the old value of `lender` (or of one of
+/// its fields) at a write through the reference whose borrow of `lender`
+/// `die` ends on the same line (`*r = t;` with `r = &mut p`): the drop
+/// goes on the end's row, so `p` gets one dot for both. Left in the
+/// line's sequence, it was appended on the row the line's later arrow
+/// (the move of `t`) added, as a second dot (#1192).
+fn drop_with_lender_return(drop: &ExternalEvent, die: &ExternalEvent) -> bool {
+    let ExternalEvent::OwnerDropAtReassign { ro, .. } = drop else { return false };
+    if !matches!(die, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. }) {
+        return false;
+    }
+    let (from, to) = ResourceAccessPoint_extract(die);
+    let (Some(r), Some(lender)) = (from.extract_rap(), to.extract_rap()) else { return false };
+    r.is_ref() && (ro.hash() == lender.hash() || ro.name().starts_with(&format!("{}.", lender.name())))
+}
+
 /// Whether `die` is the end (`RefDie`) of the borrow of the reference
 /// that the arrow `arrow` copies or moves a new value into.
 fn ref_die_before_arrow(die: &ExternalEvent, arrow: &ExternalEvent) -> bool {
@@ -946,7 +962,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                         // new value, on the arrow's row. Left in the
                         // line's sequence it was appended after the rows
                         // inserted for the stack, below the swap.
-                        for d in rest_of_line.iter().filter(|d| ref_die_before_arrow(d, e) || drop_before_new_borrow(d, e)) {
+                        for d in rest_of_line.iter().filter(|d| ref_die_before_arrow(d, e) || drop_before_new_borrow(d, e) || drop_with_lender_return(d, e)) {
                             if skippable_ev.contains(&d.get_id()) {
                                 continue;
                             }

@@ -22884,6 +22884,99 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=s's resource is mutably borrowed by x; s can't be used while the borrow is live",
         ],
     },
+    TooltipExpect {
+        name: "reborrow_outlives_repoint_1182",
+        // #1182: a reborrow through r (`&*r`, `&q[..1]`, `&t.name`) that is
+        // used after r is given a new reference keeps what r pointed to
+        // borrowed until its last use, and gives it back there (where, is
+        // pinned by `a_reborrow_keeps_its_lender_past_a_repoint`). Main
+        // ended it at the reassignment and returned it to `*r`, which by
+        // then pointed elsewhere.
+        must_contain: &[
+            "Return mutably borrowed resource from first to a",
+            "Return immutably borrowed resource from part to c",
+            "Return immutably borrowed resource from n to p",
+            "Return immutably borrowed resource from one to e",
+            "Return mutably borrowed resource from kept to g",
+            // first's own borrow is immutable; its use is what keeps a
+            // mutably borrowed.
+            "first's immutable borrow ends. first was made through r's mutable borrow of a, which lasts as long as first is used, so a is mutably borrowed until here",
+            "kept's immutable borrow ends. kept was made through w's mutable borrow of g, which lasts as long as kept is used, so g is mutably borrowed until here",
+            // Control: a reborrow dead before the write.
+            "Return mutably borrowed resource from x to g2",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from first to *r",
+            "Return mutably borrowed resource from r to a",
+            "first no longer borrows the resource r points to",
+            "=first's immutable borrow ends",
+            "first's mutable borrow ends",
+            "kept's mutable borrow ends",
+            "Return immutably borrowed resource from q to c",
+            "Return immutably borrowed resource from part to q",
+            "Return immutably borrowed resource from t to p",
+            "Return immutably borrowed resource from n to t.name",
+            "Return immutably borrowed resource from one to *u",
+            "Return mutably borrowed resource from w to g",
+            "Return immutably borrowed resource from kept to *w",
+        ],
+    },
+    TooltipExpect {
+        name: "oneline_if_repoint_1188",
+        // #1188: a reference re-pointed in a one-line conditional keeps its
+        // old lender borrowed on the path that skips the write, until the
+        // read after the conditional (rows pinned by
+        // `a_one_line_conditional_repoint_keeps_the_old_lender`). Main
+        // ended the old borrow at the `if` (r's dot said its borrow ended
+        // there), or, for a bare-expression match arm, drew d still shared
+        // after the join with no end.
+        must_contain: &[
+            "Return immutably borrowed resource from r to a",
+            "Return immutably borrowed resource from q to d",
+            "Return mutably borrowed resource from m to f",
+            "Return immutably borrowed resource from t to h",
+            "Return immutably borrowed resource from u to k",
+        ],
+        must_not_contain: &[
+            "d is live in a conditional expression",
+        ],
+    },
+    TooltipExpect {
+        name: "dead_loan_note_sibling_branch_1153",
+        // #1153: no "already over here" note on a borrow (or a field write)
+        // in the branch that didn't take the other branch's loan: on that
+        // path the reference never held it. The note stays where it is
+        // true (`still_noted`, #796).
+        must_contain: &[
+            "s's resource is mutably borrowed by r; s can't be used while the borrow is live",
+            "p.n is assigned a new value",
+            "t's resource is mutably borrowed by w; t can't be used while the borrow is live",
+            "x is assigned a new value. On this path z is given a new reference on line 55 before it is used again, so z's borrow of x is already over here; x stays borrowed only on paths that skip line 55",
+        ],
+        must_not_contain: &[
+            "r's borrow of s is already over here",
+            "q's borrow of p is already over here",
+            "w's borrow of t is already over here",
+        ],
+    },
+    TooltipExpect {
+        name: "mem_swap_ref_vars_1230",
+        // #1230: after `std::mem::swap(&mut r1, &mut r2)` r1 points to b and
+        // r2 to a: each gives back the borrow the other made. Main's
+        // arrows named each variable's old lender.
+        must_contain: &[
+            "Return immutably borrowed resource from r1 to b",
+            "Return immutably borrowed resource from r2 to a",
+            "Return mutably borrowed resource from m1 to d",
+            "Return mutably borrowed resource from m2 to c",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from r1 to a",
+            "Return immutably borrowed resource from r2 to b",
+            "Return mutably borrowed resource from m1 to c",
+            "Return mutably borrowed resource from m2 to d",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -30527,6 +30620,61 @@ fn a_boxed_closure_borrowing_through_a_reference_keeps_it_until_dropped() {
     assert_eq!(ys("d's immutable borrow ends"), vec![row("drop(d);")]);
     assert_eq!(ys("d no longer borrows the resource p points to"), vec![row("drop(d);")]);
     assert_eq!(ys("w's resource is no longer immutably borrowed"), vec![row("drop(d);")]);
+}
+
+
+/// #1182 (`reborrow_outlives_repoint_1182`): a reborrow made through a
+/// reference keeps what the reference pointed to borrowed until the
+/// reborrow's last use, even after the reference is given another one.
+#[test]
+fn a_reborrow_keeps_its_lender_past_a_repoint() {
+    let rv = run_with_local_backend("reborrow_outlives_repoint_1182");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let row = |src: &str| code_row_y(&code, src);
+    let ys = |text: &str| -> Vec<f64> { dots_listing_tooltip(&tl, text).into_iter().map(|(_, y)| y).collect() };
+    assert_eq!(ys("a's resource is no longer mutably borrowed"), vec![row(r#"println!("{} {}", first, r);"#)]);
+    assert_eq!(ys("c's resource is no longer immutably borrowed"), vec![row(r#"println!("{} {}", part, q);"#)]);
+    assert_eq!(ys("p's resource is no longer immutably borrowed"), vec![row(r#"println!("{} {}", n, t.name);"#)]);
+    assert_eq!(ys("e's resource is no longer immutably borrowed"), vec![row(r#"println!("{} {}", one, u);"#)]);
+    assert_eq!(ys("other's immutable borrow ends"), vec![row(r#"println!("{}", other);"#)]);
+    assert_eq!(ys("g's resource is no longer mutably borrowed"), vec![row(r#"println!("{} {}", kept, w);"#)]);
+    // Control: the reborrow is dead before the write: g2's loan ends at
+    // its last use, as before.
+    assert_eq!(ys("g2's resource is no longer mutably borrowed"), vec![row(r#"println!("{}", early);"#)]);
+}
+
+/// #1188 (`oneline_if_repoint_1188`): a reference re-pointed in a
+/// conditional written on one line keeps its old lender borrowed until the
+/// read after it, as the same conditional over several lines does.
+#[test]
+fn a_one_line_conditional_repoint_keeps_the_old_lender() {
+    let rv = run_with_local_backend("oneline_if_repoint_1188");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let row = |src: &str| code_row_y(&code, src);
+    let ys = |text: &str| -> Vec<f64> { dots_listing_tooltip(&tl, text).into_iter().map(|(_, y)| y).collect() };
+    assert_eq!(ys("a's resource is no longer immutably borrowed"), vec![row(r#"println!("{}", r);"#)]);
+    assert_eq!(ys("d's resource is no longer immutably borrowed"), vec![row(r#"println!("{}", q);"#)]);
+    assert_eq!(ys("f's resource is no longer mutably borrowed"), vec![row("m.push('!');")]);
+    assert_eq!(ys("h's resource is no longer immutably borrowed"), vec![row(r#"println!("{}", t);"#)]);
+    assert_eq!(ys("k's resource is no longer immutably borrowed"), vec![row(r#"println!("{}", u);"#)]);
+}
+
+/// #1192 (`move_into_deref_one_dot_1192`): `*r = t;` draws one dot on p's
+/// column, on the write's row, for the end of r's borrow and the drop of
+/// p's old value (and the drop of p.name's on that row too).
+#[test]
+fn a_move_into_deref_gives_the_lender_one_dot() {
+    let rv = run_with_local_backend("move_into_deref_one_dot_1192");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let row = |src: &str| code_row_y(&code, src);
+    let ys = |text: &str| -> Vec<f64> { dots_listing_tooltip(&tl, text).into_iter().map(|(_, y)| y).collect() };
+    let write = row("*r = t;");
+    assert_eq!(ys("p's resource is no longer mutably borrowed"), vec![write]);
+    assert_eq!(ys("p acquires ownership of a new resource; its previous resource is dropped"), vec![write]);
+    assert_eq!(ys("p.name acquires ownership of a new resource; its previous resource is dropped"), vec![write]);
+    let write = row("*q = u;");
+    assert_eq!(ys("s's resource is no longer mutably borrowed"), vec![write]);
+    assert_eq!(ys("s acquires ownership of a new resource; its previous resource is dropped"), vec![write]);
 }
 
 /// #1215: `match &mut t { (a, b) => { a.push('!'); b.push('?'); } }`
