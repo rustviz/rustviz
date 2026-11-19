@@ -6353,19 +6353,19 @@ pub fn register_iflet_let_bindings(
     // (#327), also of a tuple literal nested in it (#627). Otherwise
     // the whole pattern matches the scrutinee.
     // `if let Some(x) = Some(h)`: `x` takes `h`'s value (#807).
-    let pairs: Vec<(&'tcx Pat<'tcx>, ResourceTy, Ty<'tcx>)> = match (pat.kind, self.literal_elems(scrutinee)) {
-        (PatKind::Tuple(..) | PatKind::TupleStruct(..), Some(_)) => {
-            self.literal_pat_parents(pat, scrutinee).into_iter().map(|(sp, parent, ty, _)| (sp, parent, ty)).collect()
-        }
-        _ => vec![(pat, parent.clone(), scrutinee_ty)],
+    let pairs: Vec<(&'tcx Pat<'tcx>, ResourceTy, Ty<'tcx>, &'tcx Expr<'tcx>)> = match (pat.kind, self.literal_elems(scrutinee)) {
+        (PatKind::Tuple(..) | PatKind::TupleStruct(..), Some(_)) => self.literal_pat_parents(pat, scrutinee),
+        _ => vec![(pat, parent.clone(), scrutinee_ty, scrutinee)],
     };
     let mut decls = Vec::new();
-    for (sp, sp_parent, sp_parent_ty) in pairs {
+    for (sp, sp_parent, sp_parent_ty, sp_expr) in pairs {
         let mut sub = Vec::new();
         self.get_dec_of_pat_parts(sp, typeck_res, &sp_parent, sp_parent_ty, scope, &mut sub);
         let sp_ty = typeck_res.node_type(sp.hir_id);
         for (r, e, from, partial) in sub {
             let from = self.retarget_tuple_borrow(scrutinee, &r, &e, from);
+            // `if let s = &t`: s borrows t (#1235).
+            let e = self.addr_of_scrutinee_borrow(sp_expr, sp, &r, &e, &from).unwrap_or(e);
             decls.push((r, e, from, Some(partial.unwrap_or(sp_parent_ty != sp_ty))));
         }
     }
@@ -7171,6 +7171,34 @@ pub fn tuple_elem_lender(&self, scrutinee: &'tcx Expr<'tcx>, evt: &Evt, from: Re
   from
 }
 
+/// `match &t { s => … }` / `if let s = &mut t`: the pattern `pat` is a
+/// plain binding, so `s` is bound to the reference `&t` itself and
+/// borrows t, exactly as in `let s = &t;` (#1235). The scrutinee
+/// resolves to t's column (`from`), so without this the binding reads as
+/// a copy of t. Returns the borrow event and points the binding's loan
+/// (registered with no lender by `collect_pat_binding_events`) at t.
+pub fn addr_of_scrutinee_borrow(&mut self, scrutinee: &'tcx Expr<'tcx>, pat: &'tcx Pat<'tcx>, binding: &ResourceAccessPoint, evt: &Evt, from: &ResourceTy) -> Option<Evt> {
+  if !matches!(evt, Evt::Copy | Evt::Move) || !binding.is_ref() || from.is_ref() {
+    return None;
+  }
+  if !matches!(pat.kind, PatKind::Binding(ann, _, _, None) if matches!(ann.0, rustc_hir::ByRef::No)) {
+    return None;
+  }
+  let mut e = scrutinee;
+  while let ExprKind::DropTemps(inner) = e.kind {
+    e = inner;
+  }
+  let ExprKind::AddrOf(rustc_hir::BorrowKind::Ref, mutbl, _) = e.kind else { return None };
+  if !matches!(from, ResourceTy::Value(r) if !r.is_fn()) {
+    return None;
+  }
+  let aliasing = get_aliasing_data(from, &self.borrow_map);
+  let rd = self.borrow_map.get_mut(binding.name())?;
+  rd.lender = from.clone();
+  rd.aliasing = aliasing;
+  Some(if mutbl == Mutability::Mut { Evt::MBorrow } else { Evt::SBorrow })
+}
+
 /// `tuple_elem_lender` for the binding `binding`, also pointing the
 /// borrow its `ref` registered (add_ref) at the tuple, so the borrow's
 /// end isn't drawn as giving x its value back (#580).
@@ -7619,6 +7647,14 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       self.bind_from_anonymous(line_num, lhs);
     }
     // ex : &<expr> or &mut <expr>
+    // `let p: *mut i32 = &mut x;` (and `p = &x;`, `S { p: &mut x }`): the
+    // reference is coerced to a raw pointer on the spot. A raw pointer
+    // carries no lifetime, so the borrow ends right there and `p` is a
+    // plain value, as for the explicit cast `&mut x as *mut i32` (#1251).
+    ExprKind::AddrOf(..) if self.tcx.typeck(rhs.hir_id.owner).expr_ty_adjusted_opt(rhs).is_some_and(|t| t.is_raw_ptr()) => {
+      let line_num = span_to_line(&rhs.span, &self.tcx);
+      self.bind_from_anonymous(line_num, lhs);
+    }
     ExprKind::AddrOf(_, _,expr) => {
       let line_num = expr_to_line(&expr, &self.tcx);
       match fetch_rap(&expr, &self.tcx, &self.raps) {
