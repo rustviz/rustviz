@@ -5421,6 +5421,24 @@ fn same_place(a: &Expr, b: &Expr) -> bool {
   }
 }
 
+/// The temporary an extending `&` borrows (part of): `operand` itself
+/// when it's a value expression (`&String::from("a")`), or the value
+/// expression a field or index projection is applied to
+/// (`&make_user().name`, `&String::from("a")[1..]`, `&mk()[0].name`),
+/// which Rust's temporary lifetime extension reaches too (#1165). None
+/// when the `&` borrows a place (`&x`, `&v[0]`, `&p.f`, `&*r`) or
+/// another borrow (`&&x`).
+fn extended_temp_operand<'a, 'tcx>(operand: &'a Expr<'tcx>) -> Option<&'a Expr<'tcx>> {
+  let mut base = operand;
+  while let ExprKind::Field(b, _) | ExprKind::Index(b, _, _) = base.kind {
+    base = b;
+  }
+  match base.kind {
+    ExprKind::Path(_) | ExprKind::Unary(UnOp::Deref, _) | ExprKind::AddrOf(..) => None,
+    _ => Some(base),
+  }
+}
+
 /// `x`, `p.f`, `v[i]`, `*r`: an expression that names a place.
 fn is_place_expr(e: &Expr) -> bool {
   match e.kind {
@@ -10674,11 +10692,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     let ExprKind::AddrOf(rustc_hir::BorrowKind::Ref, borrow_mut, operand) = init.kind else { return false };
     // `&x`, `&v[0]`, `&p.f`, `&*r` borrow a place, not a temporary.
-    if matches!(operand.kind,
-      ExprKind::Path(_) | ExprKind::Field(..) | ExprKind::Index(..) | ExprKind::Unary(UnOp::Deref, _)
-      | ExprKind::AddrOf(..)) {
-      return false;
-    }
+    // `&make_user().name` / `&String::from("a")[1..]` borrow part of
+    // the temporary `make_user()` / `String::from("a")`, which is
+    // extended the same way (#1165).
+    let place = operand;
+    let Some(operand) = extended_temp_operand(operand) else { return false };
     let typeck = self.tcx.typeck(hirid.owner);
     let lhs_ty = typeck.node_type(hirid);
     let tmp_ty = typeck.expr_ty(operand);
@@ -10694,6 +10712,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let line_num = expr_to_line(init, &self.tcx);
     let tmp = self.extended_temp_column(operand, borrow_mut, tmp_ty, line_num);
     let tmp_name = tmp.name().to_owned();
+    // `&make_user().name`: the borrow is of the temporary's field
+    // column, when it has one.
+    let tmp = self.temp_field_column(&tmp, place, operand).unwrap_or(tmp);
 
     let name = binding_name(&self.tcx, hirid);
     self.add_ref(name.clone(), bool_of_mut(lhs_ty.ref_mutability().unwrap()), bool_of_mut(annotation.1),
@@ -10709,6 +10730,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     };
     self.add_borrow_ev(line_num, evt, ResourceTy::Value(r), ResourceTy::Value(tmp), false);
     true
+  }
+
+  /// The column of the field `place` (`make_user().name`) of the
+  /// temporary `base` (`make_user()`) whose column is `tmp`, if it has
+  /// one: `(temporary).name`. None through an index.
+  fn temp_field_column(&self, tmp: &ResourceAccessPoint, place: &'tcx Expr<'tcx>, base: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
+    let mut fields = Vec::new();
+    let mut e = place;
+    while e.hir_id != base.hir_id {
+      let ExprKind::Field(b, ident) = e.kind else { return None };
+      fields.push(ident.as_str().to_owned());
+      e = b;
+    }
+    if fields.is_empty() {
+      return None;
+    }
+    fields.reverse();
+    self.raps.get(&format!("{}.{}", tmp.name(), fields.join("."))).map(|rd| rd.rap.to_owned())
   }
 
   /// The `(temporary N)` column of a temporary that a `let` extends:
@@ -10759,10 +10798,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let typeck = self.tcx.typeck(e.hir_id.owner);
     match e.kind {
       ExprKind::AddrOf(rustc_hir::BorrowKind::Ref, borrow_mut, operand) => {
-        // `&x`, `&v[0]`, `&p.f`, `&*r` borrow a place, not a temporary.
-        if matches!(operand.kind, ExprKind::Path(_) | ExprKind::Field(..) | ExprKind::Index(..) | ExprKind::Unary(UnOp::Deref, _)) {
-          return;
-        }
+        // `&x`, `&v[0]`, `&p.f`, `&*r` borrow a place, not a temporary;
+        // `&make().name` borrows part of the temporary `make()` (#1165).
+        let operand = match extended_temp_operand(operand) {
+          Some(o) => o,
+          None if matches!(operand.kind, ExprKind::AddrOf(..)) => operand,
+          None => return,
+        };
         // Temporaries borrowed inside the operand are extended too, and
         // are made first: the operand's value borrows from them.
         self.walk_extending(operand, out);

@@ -22415,6 +22415,64 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[],
     },
+    TooltipExpect {
+        name: "borrow_call_result_no_drop_1155",
+        // #1155: `let r = &compute();` borrows a temporary holding the
+        // value compute returned (extended to the end of the block). With
+        // nothing to drop it has no `(temporary)` column (#400), so the
+        // borrow's end says its lender isn't shown. Main said it was
+        // "returned to compute" (a function lends nothing), or drew no end
+        // at all. `&mut v.iter()` likewise no longer returns a borrow to
+        // `iter` (#1209; that v stays borrowed until it's last use is
+        // still not drawn).
+        must_contain: &[
+            "r's immutable borrow ends (what it borrows from isn't shown)",
+            "m's mutable borrow ends (what it borrows from isn't shown)",
+            "p's immutable borrow ends (what it borrows from isn't shown)",
+            "x's immutable borrow ends (what it borrows from isn't shown)",
+            "h.r's immutable borrow ends (what it borrows from isn't shown)",
+            "t.0's immutable borrow ends (what it borrows from isn't shown)",
+            "it's mutable borrow ends (what it borrows from isn't shown)",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from r to compute",
+            "Return mutably borrowed resource from m to compute",
+            "Return immutably borrowed resource from p to make",
+            "Return immutably borrowed resource from t.0 to compute",
+            "Return mutably borrowed resource from it to iter",
+        ],
+    },
+    TooltipExpect {
+        name: "extended_temp_projection_1165",
+        // #1165: a `let` that borrows a field or an index of a temporary
+        // (`&String::from("hello")[1..]`, `&make_user().name`, `&mk()[0]`)
+        // extends that temporary to the end of the block, as for
+        // `&String::from("a")` (#400): it gets a `(temporary)` column, is
+        // borrowed (a field through its own column), and its drop at the
+        // block's end is stated. Checked with rustc: all compile and use the
+        // reference after the `let`. Main gave the temporary no column, never
+        // stated its drop, and "returned" the borrow to String::from.
+        must_contain: &[
+            "Move from String::from to (temporary)",
+            "Immutable borrow from (temporary) to s",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+            "Move from make_user to (temporary 2)",
+            "Immutable borrow from (temporary 2).name to name",
+            "(temporary 2).name goes out of scope. Its resource is dropped.",
+            "Mutable borrow from (temporary 3).age to age",
+            "Immutable borrow from (temporary 4) to e",
+            "Immutable borrow from (temporary 5) to h.r",
+            "Immutable borrow from (temporary 6) to inner",
+            "(temporary 6) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from s to String::from",
+            "Return immutably borrowed resource from inner to String::from",
+            "name's immutable borrow ends (what it borrows from isn't shown)",
+            "age's mutable borrow ends (what it borrows from isn't shown)",
+            "h.r's immutable borrow ends (what it borrows from isn't shown)",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
