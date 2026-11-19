@@ -1883,9 +1883,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if let Some(from_name) = from_struct.filter(|_| !from_children.is_empty()) {
       let pass_through = match to {
         ResourceTy::Caller => true,
-        ResourceTy::Value(r) => r.is_fn() || r.is_closure(),
+        // `let (a, _) = (1, q);`, `let _ = (q, 5);`: q's fields go into
+        // the temporary the literal builds, and are dropped with it (#1154).
+        ResourceTy::Value(r) => r.is_fn() || r.is_closure() || r.is_temporary(),
+        // `(a, _) = (1, q);`: the same for a destructuring assignment's.
+        // (A `match (s, q)` scrutinee's tuple moves q's fields itself.)
+        ResourceTy::Temporary { tuple: None, .. } => true,
         // `v[i] = p`: p's fields go into the element with it.
         ResourceTy::Index(..) => true,
+        // `*slot = s` (#1168): s's fields go into the place slot points to.
+        ResourceTy::Deref(_) | ResourceTy::DerefField(..) => true,
         _ => false,
       };
       if to_struct.is_none() && !pass_through {

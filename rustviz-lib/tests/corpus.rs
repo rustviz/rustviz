@@ -20863,6 +20863,72 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "sl immutably borrows a resource",
         ],
     },
+    TooltipExpect {
+        name: "struct_parts_follow_moves_1154_1168",
+        // #1154 / #1168: a struct moved into the temporary a `let`'s
+        // literal builds (`let (a, _) = (1, q2);`, `let _ = (q3, 5);`, an
+        // array literal, the tuple a destructuring assignment builds) or
+        // into the place a reference points to (`*slot = s`, `o.inner =
+        // s3`, `**pp = s4`) takes its fields with it: the String is dropped
+        // with the temporary, or is now b.name. Its field columns used to
+        // stay owners to the end and claim a second drop there.
+        must_contain: &[
+            "q2.s's resource is moved",
+            "q2.s goes out of scope. No resource is dropped.",
+            "q3.s's resource is moved",
+            "q3.s goes out of scope. No resource is dropped.",
+            "q4.s's resource is moved",
+            "q4.s goes out of scope. No resource is dropped.",
+            "q5.s's resource is moved",
+            "q5.s goes out of scope. No resource is dropped.",
+            "q6.s's resource is moved",
+            "q7.s's resource is moved",
+            "q7.s goes out of scope. No resource is dropped.",
+            "s.name's resource is moved",
+            "s.name goes out of scope. No resource is dropped.",
+            "s2.name's resource is moved",
+            "s2.name goes out of scope. No resource is dropped.",
+            "s3.name's resource is moved",
+            "s3.name goes out of scope. No resource is dropped.",
+            "s4.name's resource is moved",
+            "s4.name goes out of scope. No resource is dropped.",
+            "s5.name's resource is moved",
+        ],
+        must_not_contain: &[
+            "q2.s goes out of scope. Its resource is dropped.",
+            "q3.s goes out of scope. Its resource is dropped.",
+            "q4.s goes out of scope. Its resource is dropped.",
+            "q5.s goes out of scope. Its resource is dropped.",
+            "=q6.s goes out of scope. Its resource is dropped.",
+            "q7.s goes out of scope. Its resource is dropped.",
+            "s.name goes out of scope. Its resource is dropped.",
+            "s2.name goes out of scope. Its resource is dropped.",
+            "s3.name goes out of scope. Its resource is dropped.",
+            "s4.name goes out of scope. Its resource is dropped.",
+            "=s5.name goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_parts_moved_out_1157",
+        // #1157: once a field is moved out of a struct or tuple, it can't
+        // be used as a whole (E0382, "use of partially moved value"), and
+        // its line no longer says it owns "the resource". Once every field
+        // is, its line stops (see
+        // `a_struct_whose_fields_are_all_moved_out_has_no_line_after`).
+        // A Copy field (`u.1`) stays, so u stays partially moved; refilling
+        // the field (`r.a = ra`) makes r whole again.
+        must_contain: &[
+            "p is partially moved: p.a was moved out, so p can't be used as a whole; its other fields still can",
+            "u is partially moved: u.0 was moved out, so u can't be used as a whole; its other fields still can",
+            "o is partially moved: o.inner.x was moved out, so o can't be used as a whole; its other fields still can",
+            "o is partially moved: o.inner was moved out, so o can't be used as a whole; its other fields still can",
+            "o.inner is partially moved: o.inner.x was moved out, so o.inner can't be used as a whole; its other fields still can",
+            "q is partially moved: q.a may have been moved out, so q can't be used as a whole; its other fields still can",
+            "r is partially moved: r.a was moved out, so r can't be used as a whole; its other fields still can",
+            "r is the owner of the resource",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -28407,4 +28473,28 @@ fn a_boxed_closure_borrowing_through_a_reference_keeps_it_until_dropped() {
     assert_eq!(ys("d's immutable borrow ends"), vec![row("drop(d);")]);
     assert_eq!(ys("d no longer borrows the resource p points to"), vec![row("drop(d);")]);
     assert_eq!(ys("w's resource is no longer immutably borrowed"), vec![row("drop(d);")]);
+}
+
+/// #1157: a tuple / struct every field of which was moved out holds
+/// nothing: its line stops where the last one is moved out, like a
+/// moved variable's. It used to run on to the scope end as "t is the
+/// owner of the resource".
+#[test]
+fn a_struct_whose_fields_are_all_moved_out_has_no_line_after() {
+    let name = "struct_parts_moved_out_1157";
+    let rv = run_with_local_backend(name);
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (var, last_move) in [
+        ("t", "let (x, y) = t;"),
+        ("p", "let pb = p.b;"),
+        ("o.inner", "let oy = o.inner.y;"),
+    ] {
+        let row = code_row_y(&code, last_move);
+        let mut lines = state_lines_with_tooltip(&timeline, &format!("{var} is the owner of the resource"));
+        lines.extend(state_lines_with_tooltip(&timeline, &format!("{var} is partially moved: {var}.a was moved out, so {var} can't be used as a whole; its other fields still can")));
+        lines.extend(state_lines_with_tooltip(&timeline, &format!("{var} is partially moved: {var}.x was moved out, so {var} can't be used as a whole; its other fields still can")));
+        assert!(!lines.is_empty(), "{name}: no line for {var}");
+        let below: Vec<&(f64, f64)> = lines.iter().filter(|(_, y2)| *y2 > row + 1.0).collect();
+        assert!(below.is_empty(), "{name}: {var}'s line goes on below `{last_move}` (y={row}): {below:?}");
+    }
 }
