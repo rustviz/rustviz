@@ -4382,6 +4382,15 @@ impl Visualizable for VisualizationData {
                 State::FullPrivilege { s: LineState::Full },
             (State::FullPrivilege { .. }, Event::StaticDie { .. }) if self.is_mutref(hash) =>
                 State::OutOfScope,
+            // A shared reference bound to (or given) a value that borrows
+            // no variable here (`let mut r: &str = "hello";`, `r =
+            // "world";`, `q = name();` with `name() -> &'static str`), or
+            // a copy of another reference
+            // can only read, like one made by `&a`: its line is drawn the
+            // same way throughout, not solid until its first read (#1150).
+            (State::OutOfScope | State::FullPrivilege { .. } | State::PartialPrivilege { .. }, Event::Acquire { .. } | Event::Copy { .. })
+                if self.is_ref(hash) && !self.is_mutref(hash) =>
+                State::PartialPrivilege { s: LineState::Full },
 
             // A variable is initialized through a Move
             (State::OutOfScope, Event::Acquire{ .. }) => State::FullPrivilege {s: LineState::Full},
