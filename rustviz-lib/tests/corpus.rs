@@ -11483,7 +11483,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "a's resource is no longer mutably borrowed",
             "a goes out of scope. Its resource is dropped.",
             "Return immutably borrowed resource from rb to b",
-            "b's resource is no longer immutably borrowed",
             "Return mutably borrowed resource from r to c",
             "c goes out of scope. Its resource is dropped.",
             "Return mutably borrowed resource from r to d",
@@ -20753,6 +20752,98 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Move from boxed to d",
         ],
     },
+    TooltipExpect {
+        name: "shared_ref_holding_mut_loan_1122",
+        // #1122: a shared reference made from a mutable borrow (`let r =
+        // downgrade(&mut s)` with `fn(&mut String) -> &str`, `let r:
+        // &String = &mut s`, `c.bump()` returning `&i32` from `&mut self`)
+        // holds a *mutable* loan: rustc rejects even a read of the lender
+        // while r is live (E0502). Main drew it as a shared borrow ("a is
+        // read-only"), ended it as one, and on the coercion the lender's
+        // line vanished (State::Invalid). Same through an assignment, an
+        // `if let` binding (where main showed no lender at all and gave v
+        // back on the borrow's own row), a struct field, a call returning
+        // a struct, a copy of r, and `v.last_mut().unwrap()` coerced.
+        must_contain: &[
+            "Mutable borrow from a to ra: downgrade's signature gives the reference it returns the same lifetime as its argument",
+            "a's resource is mutably borrowed by ra; a can't be used while the borrow is live",
+            "a's resource is mutably borrowed by ra; a can't be used until the borrow ends",
+            "Return mutably borrowed resource from ra to a",
+            "ra is a shared reference made from a mutable borrow of a resource: ra can only read it, but the borrow stays mutable while ra is live",
+            "ra holds an immutable reference; it can read the borrowed value",
+            "b's resource is mutably borrowed by rb; b can't be used until the borrow ends",
+            "Return mutably borrowed resource from rb to b",
+            "b's resource is no longer mutably borrowed",
+            "rb holds an immutable reference; it can read the borrowed resource",
+            "Mutable borrow from c to rc: bump's signature gives the reference it returns the same lifetime as the value it was called on",
+            "c's value is mutably borrowed by rc; c can't be used until the borrow ends",
+            "Return mutably borrowed value from rc to c",
+            "Mutable borrow from d to rd: downgrade's signature gives the reference it returns the same lifetime as its argument",
+            "Return mutably borrowed resource from rd to d",
+            "Mutable borrow from v to x: x is a reference copied out of the value first returned",
+            "v's resource is mutably borrowed by x; v can't be used while the borrow is live",
+            "Return mutably borrowed resource from x to v",
+            "x holds an immutable reference; it can read the borrowed value",
+            "Mutable borrow from e to he.r: downgrade's signature gives the reference it returns the same lifetime as its argument",
+            "Return mutably borrowed resource from he.r to e",
+            "Mutable borrow from f to hf.r: mk's signature gives the struct it returns the same lifetime as its argument",
+            "Return mutably borrowed resource from hf.r to f",
+            "Return mutably borrowed resource from rg2 to g",
+            "Mutable borrow from w to xw: unwrap's signature gives the reference it returns the same lifetime as the value it was called on",
+            "Return mutably borrowed resource from xw to w",
+        ],
+        must_not_contain: &[
+            "is immutably borrowed by ra",
+            "Immutable borrow from a to ra",
+            "Return immutably borrowed resource from ra to a",
+            "Return immutably borrowed resource from rb to b",
+            "Immutable borrow from c to rc",
+            "Return immutably borrowed value from rc to c",
+            "Immutable borrow from d to rd",
+            "x's immutable borrow ends (what it borrows from isn't shown)",
+            "Immutable borrow from e to he.r",
+            "Immutable borrow from f to hf.r",
+            "Return immutably borrowed resource from rg2 to g",
+            "Immutable borrow from w to xw",
+            // r's dot called a `&String` a mutable borrower without saying
+            // it can only read.
+            "=rb mutably borrows a resource",
+            // The bracket of a shared reference said "holds a reference"
+            // (full privilege, drawn solid for a `let mut` one).
+            "=rb holds a reference",
+        ],
+    },
+    TooltipExpect {
+        name: "mut_ref_to_shared_temp_1131",
+        // #1131: `let r = &mut &x;` borrows x *shared*, into a temporary
+        // `&String` that r borrows mutably. Main started it as a shared
+        // borrow but ended it as a mutable one ("x's resource is no longer
+        // mutably borrowed", for an immutable x), said r "can only read",
+        // although `*r = &y` writes through it, and lost x's line after
+        // the borrow (State::Invalid). Same for a struct field `H { r:
+        // &mut &z }`.
+        must_contain: &[
+            "Immutable borrow from x to r",
+            "Return immutably borrowed resource from r to x",
+            "x's resource is no longer immutably borrowed",
+            "r mutably borrows a temporary that immutably borrows a resource",
+            "r holds a mutable reference; it can read and write the borrowed value",
+            "r's borrow ends",
+            "Return immutably borrowed resource from h.r to z",
+            "z's resource is no longer immutably borrowed",
+            "h.r mutably borrows a temporary that immutably borrows a resource",
+        ],
+        must_not_contain: &[
+            "Return mutably borrowed resource from r to x",
+            "x's resource is no longer mutably borrowed",
+            "Return mutably borrowed resource from h.r to z",
+            "z's resource is no longer mutably borrowed",
+            "r holds a mutable reference, but the value it points to is currently shared through it",
+            "h.r holds a mutable reference, but the value it points to is currently shared through it",
+            "=r immutably borrows a resource",
+            "=r holds an immutable reference",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -21741,6 +21832,54 @@ fn branches_that_diverge_stop_short() {
                     );
                 }
             }
+        }
+    }
+}
+
+/// The `data-rv-id`s of the line segments and brackets drawn for `var`
+/// in a timeline panel, with the state each names
+/// (`r@L5-7:line:partial_privilege` gives `("line", "partial_privilege")`).
+fn ref_line_states(svg: &str, var: &str) -> Vec<(String, String)> {
+    let prefix = format!("data-rv-id=\"{}@L", var);
+    let mut out = Vec::new();
+    for (i, _) in svg.match_indices(&prefix) {
+        let rest = &svg[i + prefix.len()..];
+        let id = &rest[..rest.find('"').unwrap_or(0)];
+        let mut parts = id.split(':');
+        let (_rows, kind, state) = (parts.next(), parts.next(), parts.next());
+        if let (Some(kind), Some(state)) = (kind, state) {
+            if matches!(kind, "line" | "branch_line" | "bracket") {
+                let state = state.split(['/', '#']).next().unwrap_or(state).trim_end_matches("_gray");
+                // (Before its first assignment, in an arm: no value yet.)
+                if !state.ends_with("_uninit") {
+                    out.push((kind.to_owned(), state.to_owned()));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A reference's line shows what it can do through itself, which its type
+/// decides: a shared reference is hollow ("partial privilege") all along,
+/// a `&mut` solid ("full privilege"), whatever loan it holds. Main drew a
+/// shared reference holding a mutable loan (`let rb: &String = &mut b`)
+/// as full privilege (#1122), and `let r = &mut &x` as read-only (#1131).
+#[test]
+fn reference_lines_follow_the_reference_type() {
+    let cases: &[(&str, &[&str], &str)] = &[
+        ("shared_ref_holding_mut_loan_1122", &["ra", "rb", "rc", "rd", "he.r", "hf.r", "rg", "rg2", "xw"], "partial_privilege"),
+        ("mut_ref_to_shared_temp_1131", &["r", "h.r"], "full_privilege"),
+    ];
+    prerender(cases.iter().map(|c| c.0));
+    for (name, vars, want) in cases {
+        let rv = run_with_local_backend(name);
+        let svg = rv.timeline_panel_string();
+        for var in vars.iter() {
+            let states = ref_line_states(&svg, var);
+            assert!(states.iter().any(|(k, _)| k == "line"), "{}: no line drawn for {}", name, var);
+            let wrong: Vec<_> = states.iter().filter(|(_, s)| s != want).collect();
+            assert!(wrong.is_empty(), "{}: {}'s line should be {} throughout, got {:?}", name, var, want, wrong);
         }
     }
 }

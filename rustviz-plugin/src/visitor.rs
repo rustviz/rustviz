@@ -5877,6 +5877,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           r.borrow_span = borrow_span_of(rhs_expr);
           r.loan_line = call_loan_line(rhs_expr, line_num);
           r.co_lenders = new_co_lenders;
+          self.note_loan_kinds(lhs_rap.name(), rhs_expr);
           if taken_over_now {
             self.note_ref_carrier(lhs_rap.name(), None);
             if let Some((_, sp)) = src_loan {
@@ -5943,6 +5944,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           r.borrow_span = borrow_span_of(rhs_expr);
           r.loan_line = call_loan_line(rhs_expr, line_num);
           r.co_lenders = new_co_lenders;
+          self.note_loan_kinds(&modified_ref_name, rhs_expr);
           self.note_ref_carrier(&modified_ref_name, src_loan);
 
           let old_aliasing_data = self.borrow_map.get(&lhs_rty.real_name()).unwrap().aliasing.clone();
