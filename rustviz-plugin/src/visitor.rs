@@ -2359,6 +2359,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if moved.as_ref().is_some_and(|(r, _, _)| r.hash() == rap.hash()) {
         continue;
       }
+      // Nothing to drop if it returns early: no dot (#1137). (An exit's
+      // scope end still ends such a column; a `?` ends none.)
+      if rap.drops_nothing() {
+        continue;
+      }
       let dup = self.preprocessed_events.iter().any(|(l, e)| *l == line
         && matches!(e, ExternalEvent::OwnerDropIfTryReturns { ro, .. } if *ro == rap));
       if dup {
@@ -3306,6 +3311,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           ExternalEvent::Move { to, .. } | ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. }
             if is(to) => Own::Yes,
           ExternalEvent::Move { from, .. } if is(from) => Own::No,
+          // An `FnOnce` closure's call moves it into the call (#271):
+          // it holds nothing after (#1136).
+          ExternalEvent::ClosureCall { closure, .. } if is(closure) => Own::No,
           // Moved into an or-pattern's binding only if its alternative
           // matched (#533). (Out of a tuple scrutinee, `tuple`, the
           // place was moved into the tuple already.)
@@ -4210,6 +4218,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 let interior_mut = self.ty_has_interior_mut(ty, param.hir_id.owner);
                 if ty.is_union() {
                   self.add_union_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, self.ty_is_plain(ty, param.hir_id.owner), interior_mut, self.current_scope, !self.inside_branch);
+                  self.mark_owner_type(&name, ty);
                 } else {
                   self.add_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, self.ty_is_plain(ty, param.hir_id.owner), interior_mut, self.current_scope, !self.inside_branch);
                   self.mark_owner_type(&name, ty);

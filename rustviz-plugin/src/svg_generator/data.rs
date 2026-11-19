@@ -228,6 +228,13 @@ pub struct Owner {
     /// True iff this owner's type is `ManuallyDrop<T>`: it never drops
     /// the `T` inside it, at scope end or when overwritten (#283).
     pub is_manually_drop: bool,
+    /// True iff this owner is a union (`is_union`) whose type has its
+    /// own `Drop` impl: dropping or overwriting the whole union runs it,
+    /// though its fields are still never dropped (#1146).
+    pub union_drop: bool,
+    /// True iff this owner's type is `MaybeUninit<T>`: like a
+    /// `ManuallyDrop<T>`, it never drops the `T` inside it (#1146).
+    pub is_maybe_uninit: bool,
     /// True iff this owner is an unbound temporary (see
     /// `ResourceAccessPoint::is_unbound_temporary`).
     pub unbound_temp: bool,
@@ -359,6 +366,12 @@ pub struct Struct {
     pub interior_mut: InteriorMut,
     /// Same as Owner::is_manually_drop, for a `ManuallyDrop<T>` field.
     pub is_manually_drop: bool,
+    /// Same as Owner::is_union, for a union-typed field (#1146).
+    pub is_union: bool,
+    /// Same as Owner::union_drop.
+    pub union_drop: bool,
+    /// Same as Owner::is_maybe_uninit, for a `MaybeUninit<T>` field.
+    pub is_maybe_uninit: bool,
     /// `Some` iff this member's own type is `Rc<T>`, `Arc<T>` or one of
     /// their `Weak<T>`s (same role as `Owner::rc`).
     pub rc: Option<RcKind>,
@@ -920,6 +933,19 @@ impl ResourceAccessPoint {
         }
     }
 
+    /// True iff nothing is ever dropped when this binding's value is:
+    /// `never_drops`, a non-Copy value with no drop glue (#484: a plain
+    /// struct, a closure that captures no resource), or a `ManuallyDrop`
+    /// (#283). A drop dot that says "only if ..., its resource is
+    /// dropped" has nothing to say for it (#1137).
+    ///
+    /// Also a `MaybeUninit` and a union without a `Drop` impl of its own
+    /// (#1146): neither ever drops what it holds.
+    pub fn drops_nothing(&self) -> bool {
+        self.never_drops() || self.is_plain_value() || self.is_manually_drop()
+            || self.is_maybe_uninit() || (self.is_union() && !self.union_drop())
+    }
+
     pub fn is_mutref(&self) -> bool {
         match self {
             ResourceAccessPoint::MutRef(_) => true,
@@ -970,7 +996,20 @@ impl ResourceAccessPoint {
     }
 
     pub fn is_union(&self) -> bool {
-        matches!(self, ResourceAccessPoint::Owner(Owner { is_union: true, .. }))
+        matches!(self, ResourceAccessPoint::Owner(Owner { is_union: true, .. })
+                     | ResourceAccessPoint::Struct(Struct { is_union: true, .. }))
+    }
+
+    /// True iff this is a union whose type implements `Drop` (#1146).
+    pub fn union_drop(&self) -> bool {
+        matches!(self, ResourceAccessPoint::Owner(Owner { union_drop: true, .. })
+                     | ResourceAccessPoint::Struct(Struct { union_drop: true, .. }))
+    }
+
+    /// True iff this owner's (or field's) type is `MaybeUninit<T>` (#1146).
+    pub fn is_maybe_uninit(&self) -> bool {
+        matches!(self, ResourceAccessPoint::Owner(Owner { is_maybe_uninit: true, .. })
+                     | ResourceAccessPoint::Struct(Struct { is_maybe_uninit: true, .. }))
     }
 
     pub fn is_manually_drop(&self) -> bool {

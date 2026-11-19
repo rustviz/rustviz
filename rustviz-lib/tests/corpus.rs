@@ -20753,6 +20753,173 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Move from boxed to d",
         ],
     },
+    TooltipExpect {
+        name: "try_no_drop_glue_1137",
+        // #1137: a `?` that returns early drops only what needs drop. md
+        // (a ManuallyDrop never drops what it holds), nd / pair / maybe
+        // (Copy values inside), f / g / k (closures capturing nothing, a
+        // Copy value by `move`, a reference) and mixed.n / mixed.m have no
+        // drop glue (`needs_drop` is false): main gave each a dot saying
+        // "...md's resource is dropped". b, mixed.s (and mixed, which holds
+        // it) still get theirs. The `?`s are in a `let`, an `if`, a loop
+        // body and a call argument.
+        // pick: the `return if d { x } else { y }` dot said "If that value
+        // isn't x's, x's resource is dropped here". (Its other bullet, the
+        // branch join's "its resource is dropped when x goes out of
+        // scope", is #1147.)
+        must_contain: &[
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and b's resource is dropped. If the `?` succeeds, nothing happens to b here.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and mixed.s's resource is dropped. If the `?` succeeds, nothing happens to mixed.s here.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and mixed's resource is dropped. If the `?` succeeds, nothing happens to mixed here.",
+            "The `return` here hands the caller one of the values its `if` / `match` chooses between. If that value isn't x's, x goes out of scope here as the function returns (it has nothing to drop). If it is x's, x's value goes to the caller.",
+            "The `return` here hands the caller one of the values its `if` / `match` chooses between. If that value isn't y's, y goes out of scope here as the function returns (it has nothing to drop). If it is y's, y's value goes to the caller.",
+        ],
+        must_not_contain: &[
+            "the function returns and md's resource is dropped",
+            "the function returns and nd's resource is dropped",
+            "the function returns and pair's resource is dropped",
+            "the function returns and pair.0's resource is dropped",
+            "the function returns and maybe's resource is dropped",
+            "the function returns and f's resource is dropped",
+            "the function returns and g's resource is dropped",
+            "the function returns and k's resource is dropped",
+            "the function returns and mixed.n's resource is dropped",
+            "the function returns and mixed.m's resource is dropped",
+            "If that value isn't x's, x's resource is dropped here",
+            "If that value isn't y's, y's resource is dropped here",
+        ],
+    },
+    TooltipExpect {
+        name: "manually_drop_maybe_moved_1147",
+        // #1147: a ManuallyDrop has no drop glue, so no drop flag: moved
+        // (or assigned) on some paths only, it still drops nothing at its
+        // scope end, and its join says nothing about a drop. Main said
+        // "Its resource is dropped here only if no branch above moved it
+        // (Rust tracks this with a runtime drop flag)" (if, match arm,
+        // break in a loop, `let x;` assigned in an
+        // if / a loop) and "If the branch that ran didn't move it, its
+        // resource is dropped when md goes out of scope" at the joins.
+        // Structs: s (s.a moved) drops nothing more ("only s.m is
+        // dropped"); t (t.a maybe moved) drops nothing else ("t.m is
+        // dropped"); u (u.m maybe moved) and v (v.n, nothing to drop,
+        // maybe moved) need no drop flag for that field: u / v drop u.a
+        // / v.a (still owned) as usual.
+        must_contain: &[
+            "md goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
+            "ma goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
+            "ml goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
+            "mi goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
+            "mo goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
+            "u.m goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
+            "md was moved in at least one branch above, so it can't be used after the branches.",
+            "ma was moved in at least one branch above, so it can't be used after the branches.",
+            "mi was assigned a value in only some of the branches above, so it can't be used after the branches.",
+            "u.m was moved in at least one branch above, so it can't be used after the branches.",
+            "s goes out of scope. s.a was moved out earlier, so no resource is dropped.",
+            "t goes out of scope. t.a was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "u goes out of scope. Its resource is dropped.",
+            "v goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "md goes out of scope. Its resource is dropped here only if",
+            "ma goes out of scope. Its resource is dropped here only if",
+            "ml goes out of scope. Its resource is dropped here only if",
+            "mi goes out of scope. Its resource is dropped here only if",
+            "mo goes out of scope. Its resource is dropped here only if",
+            "u.m goes out of scope. Its resource is dropped here only if",
+            "its resource is dropped when md goes out of scope",
+            "its resource is dropped when ma goes out of scope",
+            "its resource is dropped when mi goes out of scope",
+            "its resource is dropped when u.m goes out of scope",
+            "only s.m is dropped",
+            "t.m is dropped",
+            "u.m was moved out in at least one branch above",
+            "v.n was moved out in at least one branch above",
+        ],
+    },
+    TooltipExpect {
+        name: "try_after_fnonce_call_1136",
+        // #1136: calling an FnOnce closure moves it into the call, so a
+        // `?` after the call has nothing of it to drop. Main drew "the
+        // function returns and f's resource is dropped" for f (call
+        // before the `?`), g (`g()?`: the call consumes g before the `?`),
+        // h (call and `?` in the same `if`) and m (called in an `if`
+        // above: maybe-called, which the dot can't say either way). k is
+        // an Fn closure (it only reads q), so its dot stays.
+        must_contain: &[
+            "f is moved into the call (an FnOnce closure can only be called once). s, which f captured, is dropped during the call",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and k's resource is dropped. If the `?` succeeds, nothing happens to k here.",
+            "h goes out of scope. Its captured resources are dropped here only if no branch above called it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "the function returns and f's resource is dropped",
+            "the function returns and g's resource is dropped",
+            "the function returns and h's resource is dropped",
+            "the function returns and m's resource is dropped",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/manually_drop_chain_1147",
+        // #1147, a let-chain condition that moves the ManuallyDrop mc and
+        // then fails: main said "If nothing above moved it, its resource
+        // is dropped when mc goes out of scope" / "Its resource is dropped
+        // here only if nothing above moved it (… runtime drop flag)".
+        must_contain: &[
+            "mc may have been moved above, so it can't be used after the if.",
+            "mc goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
+        ],
+        must_not_contain: &[
+            "its resource is dropped when mc goes out of scope",
+            "mc goes out of scope. Its resource is dropped here only if",
+        ],
+    },
+    TooltipExpect {
+        name: "union_maybe_uninit_drops_1146",
+        // #1146: MaybeUninit<String> (m, m2 from a call, mu maybe moved)
+        // never drops its String: main said "Its resource is dropped" and
+        // the drop-flag text. A union without a Drop impl drops nothing,
+        // also as a struct field (w.u, main: "Its resource is dropped") and
+        // when moved on some paths (uu). A union whose type implements
+        // Drop (d, wd.d) runs it at scope end (main hid it: "A union's
+        // fields are never dropped automatically." / "Its resource is
+        // dropped.") and when the whole union is overwritten (`d = D {..}`,
+        // where main's other bullet said "writing to a union never drops
+        // its old contents"); a field write `d.a = 3` drops nothing. At
+        // the `?`, only d (a Drop union) and the structs holding a String
+        // or a Drop union keep their dots.
+        must_contain: &[
+            "m goes out of scope. Nothing is dropped: a MaybeUninit never drops the value inside it automatically.",
+            "m2 goes out of scope. Nothing is dropped: a MaybeUninit never drops the value inside it automatically.",
+            "mu goes out of scope. Nothing is dropped: a MaybeUninit never drops the value inside it automatically.",
+            "u goes out of scope. A union's fields are never dropped automatically.",
+            "uu goes out of scope. A union's fields are never dropped automatically.",
+            "w.u goes out of scope. A union's fields are never dropped automatically.",
+            "d goes out of scope. Its type implements Drop, so Drop::drop runs on it here, but a union's fields are never dropped automatically.",
+            "wd.d goes out of scope. Its type implements Drop, so Drop::drop runs on it here, but a union's fields are never dropped automatically.",
+            "d acquires ownership of a new resource; its previous resource is dropped",
+            "d is assigned a new value; writing to a union never drops its old contents",
+            "mu was moved in at least one branch above, so it can't be used after the branches.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and d's resource is dropped. If the `?` succeeds, nothing happens to d here.",
+        ],
+        must_not_contain: &[
+            "the function returns and m's resource is dropped",
+            "the function returns and m2's resource is dropped",
+            "the function returns and u's resource is dropped",
+            "the function returns and mu's resource is dropped",
+            "the function returns and uu's resource is dropped",
+            "the function returns and w.u's resource is dropped",
+            "m goes out of scope. Its resource is dropped",
+            "m2 goes out of scope. Its resource is dropped",
+            "w.u goes out of scope. Its resource is dropped",
+            "mu goes out of scope. Its resource is dropped here only if",
+            "uu goes out of scope. Its resource is dropped here only if",
+            "its resource is dropped when mu goes out of scope",
+            "its resource is dropped when uu goes out of scope",
+            "=d goes out of scope. A union's fields are never dropped automatically.",
+            "=wd.d goes out of scope. Its resource is dropped.",
+            "d acquires ownership of a resource; writing to a union never drops its old contents",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
