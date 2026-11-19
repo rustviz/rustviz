@@ -3786,6 +3786,10 @@ impl Event {
             Event::Move{ is: ResourceTy::Index(_, place, write), ..} if place.starts_with('*') => {
                 hover_messages::event_dot_move_through_element(place, !matches!(write, PlaceWrite::AssignDropsOld))
             }
+            // `return loop { … break k; }` (#1171): to the caller.
+            Event::Move{ to: ResourceTy::Caller, is, break_out: true, ..} => {
+                hover_messages::event_dot_break_out_move_to_caller(&self.deref_name(my_name), is_plain(is))
+            }
             Event::Move{ to, is, break_out: true, ..} => {
                 hover_messages::event_dot_break_out_move(&self.deref_name(my_name), &to.name(), is_plain(is))
             }
