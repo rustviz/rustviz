@@ -3869,6 +3869,18 @@ pub fn event_dot_break_out_go_out_of_scope(my_name: &String) -> String {
     )
 }
 
+// `slice = &mut slice[1..];` / `s = &s[1..];` (#1123): the reference now
+// points to part of what it pointed to. The new reference is a reborrow
+// through the old one, so the loan of `lender` goes on until the
+// reference's last use; nothing is given back here.
+pub fn event_dot_resliced_in_place(my_name: &String, lender: &String, mutable: bool) -> String {
+    format!(
+        "{0} now points to part of the data it pointed to (a reborrow through {0} itself). \
+         It still borrows from {1}, so {1} stays {2} borrowed while {0} is in use",
+        styled_name_html(my_name), styled_name_html(lender), if mutable { "mutably" } else { "immutably" }
+    )
+}
+
 /// A reference parameter a returned `if` / `match` doesn't return on
 /// this path, tied to the result by the signature's lifetime (#775).
 pub fn event_dot_tied_param_note(my_name: &String, lifetime: &str) -> String {
