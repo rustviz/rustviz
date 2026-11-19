@@ -3311,6 +3311,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           ExternalEvent::Move { to, .. } | ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. }
             if is(to) => Own::Yes,
           ExternalEvent::Move { from, .. } if is(from) => Own::No,
+          // An `FnOnce` closure's call moves it into the call (#271):
+          // it holds nothing after (#1136).
+          ExternalEvent::ClosureCall { closure, .. } if is(closure) => Own::No,
           // Moved into an or-pattern's binding only if its alternative
           // matched (#533). (Out of a tuple scrutinee, `tuple`, the
           // place was moved into the tuple already.)

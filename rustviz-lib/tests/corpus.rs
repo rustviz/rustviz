@@ -21060,6 +21060,27 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "v.n was moved out in at least one branch above",
         ],
     },
+    TooltipExpect {
+        name: "try_after_fnonce_call_1136",
+        // #1136: calling an FnOnce closure moves it into the call, so a
+        // `?` after the call has nothing of it to drop. Main drew "the
+        // function returns and f's resource is dropped" for f (call
+        // before the `?`), g (`g()?`: the call consumes g before the `?`),
+        // h (call and `?` in the same `if`) and m (called in an `if`
+        // above: maybe-called, which the dot can't say either way). k is
+        // an Fn closure (it only reads q), so its dot stays.
+        must_contain: &[
+            "f is moved into the call (an FnOnce closure can only be called once). s, which f captured, is dropped during the call",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and k's resource is dropped. If the `?` succeeds, nothing happens to k here.",
+            "h goes out of scope. Its captured resources are dropped here only if no branch above called it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "the function returns and f's resource is dropped",
+            "the function returns and g's resource is dropped",
+            "the function returns and h's resource is dropped",
+            "the function returns and m's resource is dropped",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
