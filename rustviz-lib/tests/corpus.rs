@@ -20753,6 +20753,64 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Move from boxed to d",
         ],
     },
+    TooltipExpect {
+        name: "early_return_field_1141",
+        // #1141: `return p.name;` (in an `if`, a match arm, `Some(..)`, a
+        // `break` out of a loop, nested `o.inner.first`, through a Box)
+        // dropped nothing on its path: p.bio, which the function still
+        // owns, was never stated as dropped there. Main counted the whole
+        // of p as moved to the caller. With `if d { e.name } else { e.bio
+        // }` returned, each field is dropped unless it is the one returned.
+        must_contain: &[
+            "p goes out of scope. p.name was moved out earlier, so only p.bio is dropped.",
+            "p.bio goes out of scope. Its resource is dropped.",
+            "q.bio goes out of scope. Its resource is dropped.",
+            "t goes out of scope. t.0 was moved out earlier, so only t.1 is dropped.",
+            "t.1 goes out of scope. Its resource is dropped.",
+            "o goes out of scope. o.inner.first was moved out earlier, so only o.inner.tag and o.note are dropped.",
+            "o.inner.tag goes out of scope. Its resource is dropped.",
+            "o.note goes out of scope. Its resource is dropped.",
+            "w.bio goes out of scope. Its resource is dropped.",
+            "The `return` here hands the caller one of the values its `if` / `match` chooses between. If that value isn't e.name's, e.name's resource is dropped here as the function returns. If it is e.name's, its resource goes to the caller instead and isn't dropped.",
+            "The `return` here hands the caller one of the values its `if` / `match` chooses between. If that value isn't e.bio's, e.bio's resource is dropped here as the function returns. If it is e.bio's, its resource goes to the caller instead and isn't dropped.",
+            "b.bio goes out of scope. Its resource is dropped.",
+            "l.bio goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            // The struct itself isn't one of the values `either` chooses.
+            "If that value isn't e's",
+        ],
+    },
+    TooltipExpect {
+        name: "tuple_self_swap_1138",
+        // #1138: `t = (t.1, t.0);` evaluates the tuple first, moving both
+        // fields out, so the assignment drops nothing (main drew three
+        // "its previous resource is dropped" triangles) and both fields
+        // own their new values to the end (main: "t.0 goes out of scope.
+        // No resource is dropped."). The same for `p = P { a: p.b, b: p.a
+        // }` and in a loop; `u = (u.1, String::from("c"))` drops only the
+        // old u.0. `w = (x, y)` after both fields were moved out drops
+        // nothing and now draws no drop triangle either.
+        must_contain: &[
+            "t acquires ownership of a resource",
+            "t.0 goes out of scope. Its resource is dropped.",
+            "t.1 goes out of scope. Its resource is dropped.",
+            "u acquires ownership of a new resource. Its previous u.1 was moved out earlier, so only its previous u.0 is dropped.",
+            "p.a goes out of scope. Its resource is dropped.",
+            "v.0 goes out of scope. Its resource is dropped.",
+            "w acquires ownership of a new resource. Its previous w.0 and w.1 were moved out earlier, so nothing of it is dropped.",
+        ],
+        must_not_contain: &[
+            "=t acquires ownership of a new resource; its previous resource is dropped",
+            "=t.0 acquires ownership of a new resource; its previous resource is dropped",
+            "=t.1 acquires ownership of a new resource; its previous resource is dropped",
+            "=t.0 goes out of scope. No resource is dropped.",
+            "=u.1 acquires ownership of a new resource; its previous resource is dropped",
+            "=p acquires ownership of a new resource; its previous resource is dropped",
+            "=p.a goes out of scope. No resource is dropped.",
+            "=v.0 goes out of scope. No resource is dropped.",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -28297,4 +28355,19 @@ fn a_boxed_closure_borrowing_through_a_reference_keeps_it_until_dropped() {
     assert_eq!(ys("d's immutable borrow ends"), vec![row("drop(d);")]);
     assert_eq!(ys("d no longer borrows the resource p points to"), vec![row("drop(d);")]);
     assert_eq!(ys("w's resource is no longer immutably borrowed"), vec![row("drop(d);")]);
+}
+
+
+/// #1138 (`tuple_self_swap_1138`): a reassignment that drops nothing
+/// (`w = (x, y)` after both of w's fields were moved out) draws no drop
+/// triangle, only a dot whose tooltip says nothing is dropped.
+#[test]
+fn a_reassignment_that_drops_nothing_has_no_drop_triangle() {
+    let rv = run_with_local_backend("tuple_self_swap_1138");
+    let tl = rv.timeline_panel_string();
+    // The drop dot is a <g> holding a circle and the triangle polygon; a
+    // plain dot is a lone <circle>.
+    let at = tl.find("nothing of it is dropped").expect("w's reassignment dot");
+    let start = tl[..at].rfind('<').unwrap();
+    assert!(tl[start..].starts_with("<circle"), "drop dot drawn for a reassignment that drops nothing: {}", &tl[start..start + 200.min(tl.len() - start)]);
 }
