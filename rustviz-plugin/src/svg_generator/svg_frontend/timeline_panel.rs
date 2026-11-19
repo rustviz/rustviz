@@ -1999,17 +1999,26 @@ fn render_dot(
                     } else {
                         hover_messages::event_dot_owner_drop_at_reassign(&name, &note)
                     };
-                    let drop_data = DropDotData {
-                        hash: *hash as u64,
-                        dot_x: cx,
-                        dot_y: cy,
-                        title,
-                        p1x: cx - 3, p1y: cy - 1,
-                        p2x: cx + 3, p2y: cy - 1,
-                        p3x: cx,     p3y: cy + 3,
-                    };
-                    append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
-                    continue;
+                    // A struct whose parts were all moved out before it
+                    // is overwritten drops nothing: a plain dot that says
+                    // so, no drop triangle (#1138).
+                    let drops_nothing = matches!(event, Event::OwnerDropAtReassign { parts: Some(p), .. }
+                        if p.dropped.is_empty() && p.maybe_moved.is_empty());
+                    if drops_nothing {
+                        data.title = title;
+                    } else {
+                        let drop_data = DropDotData {
+                            hash: *hash as u64,
+                            dot_x: cx,
+                            dot_y: cy,
+                            title,
+                            p1x: cx - 3, p1y: cy - 1,
+                            p2x: cx + 3, p2y: cy - 1,
+                            p3x: cx,     p3y: cy + 3,
+                        };
+                        append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
+                        continue;
+                    }
                 },
                 Event::LoopMaybeInit { nested: true, .. } => {
                     // A loop inside another, every run of which may
