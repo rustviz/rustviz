@@ -126,11 +126,14 @@ pub fn highlight(line: &str, in_block_comment: &mut bool) -> String {
         // raw / byte / C string literal (`r"…"`, `b"…"`, `br"…"`,
         // `r#"…"#`, …). Check the closed prefix set first so we color
         // the prefix character as part of the string.
-        if is_ident_start(bytes[i]) {
-            let mut j = i + 1;
-            while j < bytes.len() && is_ident_continue(bytes[j]) {
-                j += 1;
-            }
+        if line[i..].chars().next().is_some_and(is_ident_start) {
+            // Char-wise: an identifier can contain non-ASCII letters
+            // (`größe`), and a keyword's letters inside one (`fürfn`)
+            // aren't a keyword (#1160).
+            let j = line[i..]
+                .char_indices()
+                .find(|&(_, c)| !is_ident_continue(c))
+                .map_or(line.len(), |(k, _)| i + k);
             let word = &line[i..j];
 
             if matches!(word, "r" | "b" | "c" | "br" | "rb" | "cr")
@@ -240,12 +243,12 @@ fn find_close_tspan(s: &str) -> Option<usize> {
     Some(open_end + 1 + close + "</tspan>".len())
 }
 
-fn is_ident_start(b: u8) -> bool {
-    b.is_ascii_alphabetic() || b == b'_'
+fn is_ident_start(c: char) -> bool {
+    c.is_alphabetic() || c == '_'
 }
 
-fn is_ident_continue(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
+fn is_ident_continue(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
 
 #[cfg(test)]
@@ -260,6 +263,14 @@ mod tests {
     fn keywords_get_classed_spans() {
         let h = hl("let x = 5;");
         assert!(h.contains("<tspan class=\"kw\">let</tspan>"), "got: {}", h);
+    }
+
+    #[test]
+    fn keyword_letters_inside_a_non_ascii_identifier_are_not_a_keyword() {
+        // `ü` used to end the ASCII-only identifier scan, so the `fn`
+        // after it was classed as a keyword (#1160).
+        assert_eq!(hl("let fürfn = 1;"), "<tspan class=\"kw\">let</tspan> fürfn = 1;");
+        assert_eq!(hl("let größe = 2;"), "<tspan class=\"kw\">let</tspan> größe = 2;");
     }
 
     #[test]

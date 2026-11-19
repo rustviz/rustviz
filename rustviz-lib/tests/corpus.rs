@@ -20929,6 +20929,26 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[],
     },
+    TooltipExpect {
+        name: "non_ascii_names_1160",
+        // #1160: a non-ASCII identifier (`café`, a field `größe`, a fn
+        // `länge`, a variant `Grün`, `名前`) panicked in the code panel's
+        // annotation ("end of range should be a character boundary"), so
+        // nothing rendered. The timeline is the same as for ASCII names;
+        // the code panel is pinned by
+        // `code_panel_shows_tabs_and_non_ascii_text_as_written`.
+        must_contain: &[
+            "Move from café to t",
+            "café goes out of scope. No resource is dropped.",
+            "Move from t to länge",
+            "Copy of the value länge() returns to n",
+            "p.größe holds a copyable value",
+            "Immutable borrow from 名前 to r",
+            "名前 goes out of scope. Its resource is dropped.",
+            "f is initialized with a Grün value",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -28473,6 +28493,101 @@ fn a_boxed_closure_borrowing_through_a_reference_keeps_it_until_dropped() {
     assert_eq!(ys("d's immutable borrow ends"), vec![row("drop(d);")]);
     assert_eq!(ys("d no longer borrows the resource p points to"), vec![row("drop(d);")]);
     assert_eq!(ys("w's resource is no longer immutably borrowed"), vec![row("drop(d);")]);
+}
+
+/// Each source row of a code panel as (line number, the text it shows,
+/// the names wrapped in a hover-highlight span): gutter and markup
+/// removed, entities decoded.
+fn code_panel_rows(code_svg: &str) -> Vec<(usize, String, Vec<String>)> {
+    let decode = |t: &str| t.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&");
+    start_tags(code_svg, "text")
+        .into_iter()
+        .filter_map(|tag| {
+            let line: usize = attr(tag, "data-rv-line")?.parse().ok()?;
+            let at = code_svg.find(tag)?;
+            let body = &code_svg[at + tag.len() + 1..];
+            let body = &body[..body.find("</text>")?];
+            // The gutter (`<tspan class="line-number">12  </tspan>`) and
+            // the space the template puts after the line.
+            let body = &body[body.find("</tspan>")? + "</tspan>".len()..];
+            let body = body.strip_suffix(' ')?;
+            let mut text = String::new();
+            let mut in_tag = false;
+            for ch in body.chars() {
+                match ch {
+                    '<' => in_tag = true,
+                    '>' => in_tag = false,
+                    _ if !in_tag => text.push(ch),
+                    _ => {}
+                }
+            }
+            let names = body.match_indices("data-hash=\"")
+                .filter_map(|(i, _)| {
+                    let rest = &body[i..];
+                    let inner = &rest[rest.find('>')? + 1..];
+                    Some(decode(&inner[..inner.find("</tspan>")?]))
+                })
+                .collect();
+            Some((line, decode(&text), names))
+        })
+        .collect()
+}
+
+/// #1160: rustc's display columns (a tab counts 4, `é` 1, `名` 2) were
+/// used as byte offsets into the line: a tab-indented line came out
+/// garbled (`let s = String::from("hi");String::fromi");`) with its names
+/// highlighted on the wrong characters, and a non-ASCII identifier
+/// panicked. Every row must show the source as written (a tab as spaces
+/// up to the next 4-column stop: SVG text draws a tab as one space), and
+/// each name must be the exact text of its highlight span.
+#[test]
+fn code_panel_shows_tabs_and_non_ascii_text_as_written() {
+    fn expand_tabs(line: &str) -> String {
+        let mut out = String::new();
+        let mut col = 0;
+        for c in line.chars() {
+            if c == '\t' {
+                let n = 4 - col % 4;
+                out.push_str(&" ".repeat(n));
+                col += n;
+            } else {
+                out.push(c);
+                // The fixtures' wide characters (`名前`, `日本語`, `🦀`) come
+                // after their lines' last tab, so this needn't count them.
+                col += 1;
+            }
+        }
+        out
+    }
+    let cases: &[(&str, &[(usize, &[&str])])] = &[
+        ("code_panel_tabs_1160", &[
+            (4, &["s", "String::from"]),
+            (5, &["t", "s"]),
+            (7, &["u", "t"]),
+            (8, &["u"]),
+        ]),
+        ("non_ascii_names_1160", &[
+            (4, &["größe"]),
+            (5, &["Grün", "Blau"]),
+            (6, &["länge", "s", "s", "len"]),
+            (8, &["café", "String::from", "t", "café"]),
+            (10, &["t", "p", "größe"]),
+            (11, &["n", "länge", "t"]),
+            (12, &["名前", "String::from", "r", "名前"]),
+        ]),
+    ];
+    for &(name, names) in cases {
+        let rv = run_with_local_backend(name);
+        let rows = code_panel_rows(&rv.code_panel_string());
+        let src = read_corpus(name);
+        let want: Vec<String> = src.lines().map(expand_tabs).collect();
+        let shown: Vec<String> = rows.iter().map(|(_, t, _)| t.clone()).collect();
+        assert_eq!(shown, want, "{name}: the code panel must show the source as written");
+        for &(line, expect) in names {
+            let (_, _, got) = rows.iter().find(|(l, _, _)| *l == line).unwrap_or_else(|| panic!("{name}: no row {line}"));
+            assert_eq!(got, expect, "{name}: highlighted names on line {line}");
+        }
+    }
 }
 
 /// #1157: a tuple / struct every field of which was moved out holds
