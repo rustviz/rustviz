@@ -4919,6 +4919,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let aliasing = get_aliasing_data(&lender, &self.borrow_map);
       return (lender, aliasing, lenders);
     }
+    // `let it = &mut v.iter();` (#1209): the reference borrows a
+    // temporary (the `Iter`), which rustc keeps alive to the end of the
+    // block; the temporary borrows what the call's result borrows, so
+    // that stays borrowed while `it` is in use. (Not the function: the
+    // old lender was `iter`.)
+    if let ExprKind::AddrOf(rustc_hir::BorrowKind::Ref, _, inner) = expr.kind {
+      if matches!(inner.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) && !inner.span.from_expansion() {
+        let (lender, aliasing, co) = self.get_ref_data_co(inner);
+        if matches!(lender, ResourceTy::Value(_) | ResourceTy::Deref(_)) {
+          return (lender, aliasing, co);
+        }
+      }
+    }
     // `if c { first_word(&t) } else { "none" }` / a `match`: the
     // reference may come from any branch, so (as rustc sees it) it
     // borrows from every branch's lender until its last use (#337).
@@ -5815,6 +5828,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         also_unnamed: false,
         tie: ArgTie::default(),
         carrier: ViaCarrier::ReturnedClosure { mutable: k.is_mut, through_ref: k.through_ref },
+        passed_on: Vec::new(),
       };
       let id = *self.unique_id;
       *self.unique_id += 1;
@@ -5958,6 +5972,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       also_unnamed: false,
       tie: ArgTie::default(),
       carrier: ViaCarrier::StoredBy,
+      passed_on: Vec::new(),
     };
     let to = ResourceTy::Value(rcvr.clone());
     for lender in lenders.iter() {
@@ -6820,6 +6835,7 @@ fn pattern_ref_borrows(
     also_unnamed: one_lifetime && self.call_lenders_full(scrutinee).1,
     tie: if one_lifetime { self.call_arg_tie(scrutinee, None) } else { ArgTie::default() },
     carrier: ViaCarrier::PatternBinding { from_call, moved, field_of: in_field },
+    passed_on: Vec::new(),
   };
   let to = ResourceTy::Value(reference.clone());
   let mut out = Vec::new();
@@ -6834,6 +6850,30 @@ fn pattern_ref_borrows(
     });
   }
   out
+}
+
+/// The call in the method chain `call` that the borrow its result holds
+/// comes from, and the names of the calls chained on it that only pass
+/// that borrow on, innermost first: `(w.last_mut(), ["unwrap"])` for
+/// `w.last_mut().unwrap()` (#1266). A call is passed through when its
+/// signature ties its result to the value it was called on alone and
+/// that value is another method call's result. `(call, [])` otherwise.
+pub fn borrowing_call(&self, call: &'tcx Expr<'tcx>) -> (&'tcx Expr<'tcx>, Vec<String>) {
+  let mut c = call;
+  let mut passed: Vec<String> = Vec::new();
+  while let ExprKind::MethodCall(seg, recv, ..) = c.kind {
+    if c.span.from_expansion() || recv.span.from_expansion() || !matches!(recv.kind, ExprKind::MethodCall(..)) {
+      break;
+    }
+    let tie = self.call_arg_tie(c, None);
+    if !(tie.receiver && tie.tied == [0] && tie.stored_in.is_empty() && tie.unnamed == 0) {
+      break;
+    }
+    passed.push(seg.ident.to_string());
+    c = recv;
+  }
+  passed.reverse();
+  (c, passed)
 }
 
 /// `lhs` is a reference being bound to `call`'s result, and
@@ -6876,12 +6916,20 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
   if lenders.is_empty() {
     return false;
   }
+  // `w.last_mut().unwrap()` (#1266): the borrow comes from `last_mut`;
+  // `unwrap` only passes it on.
+  let (borrower, passed_on) = self.borrowing_call(call);
+  let func = match borrower.kind {
+    ExprKind::MethodCall(seg, ..) if !passed_on.is_empty() => seg.ident.to_string(),
+    _ => func,
+  };
   let via = BorrowVia {
     func,
     lenders: lenders.iter().map(|l| l.name()).collect(),
     also_unnamed: self.call_lenders_full(call).1,
-    tie: self.call_arg_tie(call, None),
+    tie: self.call_arg_tie(borrower, None),
     carrier: if lhs_rap.is_ref() { ViaCarrier::Reference } else { ViaCarrier::Value },
+    passed_on,
   };
   for lender in lenders.iter() {
     let id = *self.unique_id;
@@ -6927,6 +6975,7 @@ pub fn emit_struct_field_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'
       also_unnamed: self.call_field_lenders(call, field.name.as_str()).1,
       tie: self.call_arg_tie(call, Some(field.name.as_str())),
       carrier: ViaCarrier::StructField,
+      passed_on: Vec::new(),
     };
     let to = ResourceTy::Value(frap.clone());
     for (lender, is_mut) in lenders.iter().zip(kinds) {
@@ -7957,6 +8006,25 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       if of_ref_var {
         self.ref_var_borrows.insert(rhs.span);
       }
+      // `let it = &mut v.iter();` (#1209): `it` borrows a temporary
+      // (the `Iter`) that borrows v as the call's signature says; rustc
+      // keeps the temporary until the end of the block, so v stays
+      // borrowed (with the call's loan, here shared) while `it` is in use.
+      if let (ResourceTy::Anonymous, ResourceTy::Value(lhs_rap), ExprKind::Call(..) | ExprKind::MethodCall(..)) = (&res, &lhs, expr.kind) {
+        let lenders: Vec<ResourceTy> = self.call_lenders(expr).into_iter()
+          .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)))
+          .collect();
+        if lhs_rap.is_ref() && !expr.span.from_expansion() && !lenders.is_empty() {
+          let muts: Vec<(ResourceTy, bool)> = self.borrow_map.get(lhs_rap.name()).map(|rd| rd.lender_muts.clone()).unwrap_or_default();
+          for lender in &lenders {
+            let is_mut = muts.iter().find(|(l, _)| l == lender).map_or(lhs_rap.is_mutref(), |(_, m)| *m);
+            let evt = if is_mut { Evt::MBorrow } else { Evt::SBorrow };
+            self.add_borrow_ev_of_ref_var(line_num, evt, lhs.clone(), lender.clone(), false, false);
+          }
+          self.mark_borrow_kept_by_result(expr, &lenders);
+          return;
+        }
+      }
       match fetch_mutability(&rhs) { // fetch last ref mutability in the chain -> &&&mut x
         Some(Mutability::Not) => self.add_borrow_ev_of_ref_var(line_num, Evt::SBorrow, lhs, res, is_reborrow, of_ref_var),
         Some(Mutability::Mut) => self.add_borrow_ev_of_ref_var(line_num, Evt::MBorrow, lhs, res, is_reborrow, of_ref_var),
@@ -8370,6 +8438,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
         also_unnamed: false,
         tie: ArgTie::default(),
         carrier: ViaCarrier::Element,
+        passed_on: Vec::new(),
       };
       for lender in lenders {
         let id = *self.unique_id;

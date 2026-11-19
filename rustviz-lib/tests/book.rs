@@ -760,7 +760,9 @@ const BOOK: &[Snippet] = &[
             "L6 the value text points to is immutably borrowed by the `for` loop's iterator, through a copy of text, until the loop ends",
             "L9 the `for` loop's iterator no longer borrows the value text points to",
             "L9 text's borrow of the string literal ends (string literals live for the whole program)",
-            "L7 Mutable borrow from map to count: or_insert's signature gives the reference it returns the same lifetime as the value it was called on",
+            // #1266: the borrow of map comes from `entry`; `or_insert`
+            // passes it on (it named `or_insert` before).
+            "L7 Mutable borrow from map to count: entry's signature gives the value it returns the same lifetime as the value it was called on and its argument (the other is a value with no column here), so map stays borrowed while count is in use; or_insert passes the borrow on",
             "the value count points to is modified through *count",
             "Return mutably borrowed resource from count to map",
             "map goes out of scope. Its resource is dropped.",
