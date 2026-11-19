@@ -4294,6 +4294,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       && !self.tcx.typeck(e.hir_id.owner).node_type(e.hir_id).is_unit()
   }
 
+  /// `*b` with `b` a `Box` variable (`Box<String>`; not a reference):
+  /// `Deref(b)`, drawn as `*b` on b's column, as `let s = *b;` is.
+  pub fn box_contents_of(&self, e: &'tcx Expr<'tcx>) -> Option<ResourceTy> {
+    let ExprKind::Unary(UnOp::Deref, inner) = e.kind else { return None };
+    if e.span.from_expansion() || !self.tcx.typeck(inner.hir_id.owner).node_type(inner.hir_id).is_box() {
+      return None;
+    }
+    match fetch_rap(inner, &self.tcx, &self.raps) {
+      Some(b) if !b.is_ref() && !b.is_fn() => Some(ResourceTy::Deref(b)),
+      _ => None,
+    }
+  }
+
   pub fn match_array_elems(&mut self, lhs: ResourceTy, elems: &'tcx [Expr<'tcx>], line_num: usize) {
     let mut drew_source = false;
     for elem in elems {
@@ -4301,7 +4314,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         ExprKind::Path(_) | ExprKind::Field(..) if !elem.span.from_expansion() => {
           expr_to_rap_name(elem, &self.tcx).filter(|n| self.raps.contains_key(n))
         }
-        _ => None,
+        // `[*b]`: the Box's contents move into the array (#1191).
+        _ => self.box_contents_of(elem).and_then(|b| b.extract_rap().map(|r| r.name().to_owned())),
       };
       let ty = self.tcx.typeck(elem.hir_id.owner).node_type(elem.hir_id);
       if name.is_none() && matches!(lhs, ResourceTy::Caller) && self.is_returned_call_result(elem) {
@@ -4319,7 +4333,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       self.match_rhs(lhs.clone(), elem, e);
       drew_source = true;
       // A struct moved into the array takes its fields with it.
-      if !is_copy {
+      if !is_copy && self.box_contents_of(elem).is_none() {
         let mut stack = self.struct_children(&name);
         while let Some(child) = stack.pop() {
           stack.extend(self.struct_children(child.name()));
@@ -6070,7 +6084,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                 self.collect_pat_binding_events(field.pat, ty_results, parent, parent_ty, scope, res);
             }
         }
-        PatKind::Binding(mode, id, ident, _) => {
+        PatKind::Binding(mode, id, ident, sub_pat) => {
             // add raps that appear in binding
             let muta = bool_of_mut(mode.1); // You need to define this function
             let line_num = span_to_line(&ident.span, &self.tcx); // Assuming self.span_to_line exists
@@ -6161,7 +6175,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                             for r in ref_fields {
                               let id = *self.unique_id;
                               *self.unique_id += 1;
-                              self.add_external_event(line_num, ExternalEvent::InitRefParam { param: r, id, own_param: None, in_pattern: Some(name.clone()) });
+                              self.add_external_event(line_num, ExternalEvent::InitRefParam { param: r, id, own_param: None, in_pattern: Some(name.clone()), rest: None });
                             }
                         }
                     },
@@ -6219,6 +6233,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                 self.pointee_copies.insert(*rap.hash(), (parent.clone(), part));
             }
             res.push((rap, evt, ty));
+            // `whole @ Some(n)`: the names bound inside the sub-pattern
+            // are bound from the same matched value (copies, or `ref`
+            // borrows; #1177).
+            if let Some(sp) = sub_pat {
+                self.collect_pat_binding_events(sp, ty_results, parent, parent_ty, scope, res);
+            }
         }
         // `Some(&y)` on an `Option<&i32>`: y copies the value the
         // reference inside the matched value points to (#874). A `&`
@@ -7171,6 +7191,33 @@ pub fn tuple_elem_lender(&self, scrutinee: &'tcx Expr<'tcx>, evt: &Evt, from: Re
   from
 }
 
+/// A binding by reference into what a call's returned reference points
+/// to (`Some(x) => …` on `match get(&o)`, `[first, ..]` on `match
+/// v.as_slice()`): a function lends nothing, so it borrows what that
+/// reference borrows, the one variable the call's signature ties its
+/// result to (#1222). With several, none is named; with none (the call
+/// borrows nothing we track), `from` stays.
+fn call_result_lender(&self, scrutinee: &'tcx Expr<'tcx>, evt: &Evt, from: ResourceTy) -> ResourceTy {
+  if !matches!(evt, Evt::SBorrow | Evt::MBorrow) || !from.extract_rap().is_some_and(|r| r.is_fn()) {
+    return from;
+  }
+  let mut call = scrutinee;
+  while let ExprKind::DropTemps(inner) = call.kind {
+    call = inner;
+  }
+  if !matches!(call.kind, ExprKind::Call(..) | ExprKind::MethodCall(..))
+    || !self.tcx.typeck(call.hir_id.owner).expr_ty(call).is_ref() {
+    return from;
+  }
+  match self.call_lenders(call).as_slice() {
+    [one] => one.clone(),
+    // `pick(&a, &b)`: it may point into either; no arrow, rather than
+    // one from the function.
+    [_, _, ..] => ResourceTy::Anonymous,
+    [] => from,
+  }
+}
+
 /// `tuple_elem_lender` for the binding `binding`, also pointing the
 /// borrow its `ref` registered (add_ref) at the tuple, so the borrow's
 /// end isn't drawn as giving x its value back (#580).
@@ -7178,6 +7225,15 @@ pub fn retarget_tuple_borrow(&mut self, scrutinee: &'tcx Expr<'tcx>, binding: &R
   let lender = self.tuple_elem_lender(scrutinee, evt, from.clone());
   if lender != from {
     self.tuple_temp_refs.insert(binding.name().to_string());
+    if let Some(rd) = self.borrow_map.get_mut(binding.name()) {
+      if rd.lender == from {
+        rd.lender = lender.clone();
+      }
+    }
+    return lender;
+  }
+  let lender = self.call_result_lender(scrutinee, evt, from.clone());
+  if lender != from {
     if let Some(rd) = self.borrow_map.get_mut(binding.name()) {
       if rd.lender == from {
         rd.lender = lender.clone();
@@ -7790,7 +7846,8 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
               self.match_rhs(ResourceTy::Caller, elem, e);
               continue;
             }
-            let is_place = matches!(elem.kind, ExprKind::Path(_) | ExprKind::Field(..));
+            // `(*b, 1)`: the Box's contents (#1191).
+            let is_place = matches!(elem.kind, ExprKind::Path(_) | ExprKind::Field(..)) || self.box_contents_of(elem).is_some();
             if is_place && matches!(e, Evt::Move) && !elem.span.from_expansion()
               && !typeck.node_type(elem.hir_id).is_ref()
             {

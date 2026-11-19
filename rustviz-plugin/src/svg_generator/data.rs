@@ -2204,6 +2204,11 @@ pub enum ExternalEvent {
         // isn't tracked there, so it isn't "from the caller" (#352).
         // Never set together with `own_param`.
         in_pattern: Option<String>,
+        // `Some`: `param` is the first binding of a parameter pattern
+        // that leaves parts of the argument unbound (`P { name, .. }:
+        // P`, `(a, _): (String, String)`): those are dropped when the
+        // function returns, with no column to show it (#1181).
+        rest: Option<ParamRest>,
     },
     
     // A call `f()` of a local closure that rustc inferred to be
@@ -2635,6 +2640,7 @@ pub enum Event {
         id: usize,
         own_param: Option<OwnParam>,
         in_pattern: Option<String>,
+        rest: Option<ParamRest>,
     },
     // `f()` of an `FnOnce` closure `is`: `is` is moved into the call
     // (ExternalEvent::ClosureCall).
@@ -2643,6 +2649,18 @@ pub enum Event {
         fates: Vec<CapturedFate>,
         id: usize
     },
+}
+
+/// What a fn parameter's pattern leaves of the argument (#1181).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ParamRest {
+    /// The function the parameter belongs to.
+    pub fn_name: String,
+    /// The parts of the argument the pattern leaves unbound that need
+    /// drop, as field paths (`bio`, `1`, `inner.tag`). Empty: the
+    /// pattern binds no name at all (`_: String`), and the whole
+    /// argument is in a `(parameter)` column of its own (#1243).
+    pub parts: Vec<String>,
 }
 
 /// A `ref` / `ref mut` binding in a by-value fn parameter's pattern
@@ -3424,6 +3442,19 @@ impl Event {
                     (false, _) => hover_messages::event_dot_or_alt_borrow(my_name, sources, *mutable),
                     (true, false) => hover_messages::event_dot_static_return(my_name),
                     (true, true) => hover_messages::event_dot_mut_return(my_name),
+                }
+            }
+            // What the parameter's pattern leaves unbound is dropped when
+            // the function returns (#1181).
+            Event::InitRefParam{ rest: Some(rest), .. } => {
+                let mut whole = self.clone();
+                if let Event::InitRefParam { rest, .. } = &mut whole {
+                    *rest = None;
+                }
+                if rest.parts.is_empty() {
+                    hover_messages::event_dot_unbound_param_init(my_name, &rest.fn_name)
+                } else {
+                    format!("{}. {}", whole.print_message_with_name(my_name), hover_messages::param_rest_dropped(&rest.fn_name, &rest.parts))
                 }
             }
             // The column of the value a `ref` binding borrows (#691).
@@ -5014,8 +5045,8 @@ impl Visualizable for VisualizationData {
             (line_num,  Event::MutableReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: *id, still_borrowed_by: Vec::new(), of_ref_var: *of_ref_var})]
           }
         },
-        ExternalEvent::InitRefParam{param: ro, id, own_param, in_pattern} => {
-          vec![(line_num, Event::InitRefParam{param : ro.to_owned(), id: *id, own_param: own_param.clone(), in_pattern: in_pattern.clone()})]
+        ExternalEvent::InitRefParam{param: ro, id, own_param, in_pattern, rest} => {
+          vec![(line_num, Event::InitRefParam{param : ro.to_owned(), id: *id, own_param: own_param.clone(), in_pattern: in_pattern.clone(), rest: rest.clone()})]
         },
         ExternalEvent::GoOutOfScope{ro, holds, early, ..} => {
           match ro {
@@ -5394,8 +5425,8 @@ impl Visualizable for VisualizationData {
             ExternalEvent::ClosureCall { closure, fates, id } => {
                 maybe_append_event(self, &closure, Event::ClosureCall { is: closure.clone(), fates, id }, line_number);
             },
-            ExternalEvent::InitRefParam{param: ro, id, own_param, in_pattern} => {
-                maybe_append_event(self, &ResourceTy::Value(ro.clone()), Event::InitRefParam{param : ro.to_owned(), id: id, own_param, in_pattern}, line_number);
+            ExternalEvent::InitRefParam{param: ro, id, own_param, in_pattern, rest} => {
+                maybe_append_event(self, &ResourceTy::Value(ro.clone()), Event::InitRefParam{param : ro.to_owned(), id: id, own_param, in_pattern, rest}, line_number);
             },
             ExternalEvent::GoOutOfScope{ro, holds, early, ..} => {
                 match ro {
