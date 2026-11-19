@@ -2178,8 +2178,32 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // first assigned inside it, isn't one of its locals (#786).
     let declared_outside = |rap: &ResourceAccessPoint| loop_id.is_some()
       && self.deferred_decl_at.get(rap.name().split('.').next().unwrap_or("")).is_some_and(|at| *at < frame_floor);
-    let droppable: Vec<(usize, ResourceAccessPoint)> = self.droppable_locals_at(from, end, &moved, true, line, false)
+    // (What the value moves on some paths only gets its own dot below.)
+    let handed_on: BTreeSet<String> = moved.union(&moved_some).cloned().collect();
+    let droppable: Vec<(usize, ResourceAccessPoint)> = self.droppable_locals_at(from, end, &handed_on, true, line, false)
       .into_iter().filter(|(_, rap)| !declared_outside(rap)).collect();
+    // `process::exit` ends the process: nothing is dropped, and each
+    // local's column ends here with a dot that says so (#1172). (A
+    // temporary or a tuple scrutinee isn't dropped either; they have
+    // no column to end.)
+    let process_exit = match how {
+      "process::exit" => Some("process::exit"),
+      "process::abort" => Some("process::abort"),
+      _ => None,
+    };
+    if process_exit.is_some() {
+      for (_, rap) in droppable {
+        if rap.is_temporary() {
+          continue;
+        }
+        let id = *self.unique_id;
+        *self.unique_id += 1;
+        self.exit_drops.insert(id);
+        let early = Some(EarlyReturns { process_exit, ..EarlyReturns::default() });
+        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, holds: None, id, early });
+      }
+      return;
+    }
     for (idx, rap) in droppable {
       // A tuple is dropped after what its arm declared, before the
       // locals declared before its match.
@@ -2289,7 +2313,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if rd.rap.is_temporary() && rd.scope < line {
         continue;
       }
-      if !self.owns_value_here(*rd.rap.hash(), binds) {
+      // One its drop flag decides about (moved, or given a value, on
+      // some paths only) is included too: the exit drops it if it
+      // still holds a value (#1194).
+      if self.ownership_here(*rd.rap.hash(), binds) == OwnHere::No {
         continue;
       }
       out.push((idx, rd.rap.clone()));
@@ -2736,7 +2763,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // Those of an owner after a loop that never repeats: removed.
     let mut removed: HashSet<usize> = HashSet::new();
     let mut mark = |line: usize, ev: &mut ExternalEvent| match ev {
-      ExternalEvent::GoOutOfScope { ro, early, id, .. } if !exit_ids.contains(id) => {
+      ExternalEvent::GoOutOfScope { ro, early, id, .. } if !exit_ids.contains(id)
+        && !early.as_ref().is_some_and(|e| e.process_exit.is_some()) => {
         let mut e = EarlyReturns::default();
         for r in &returns {
           match r.vars.iter().find(|(v, _)| v.hash() == ro.hash()) {
@@ -2952,6 +2980,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       || def_path == "::panic::panic_any"
       || def_path == "::panic::resume_unwind";
     unwinds.then(|| span_to_line(&call.span.source_callsite(), &self.tcx))
+  }
+
+  /// If `call` is a call to `std::process::exit` or `abort`, which end
+  /// the process without running any destructor (#1172), the line of
+  /// the call and how to name it.
+  fn process_exit_line(&self, call: &'tcx Expr<'tcx>) -> Option<(usize, &'static str)> {
+    let ExprKind::Call(callee, _) = call.kind else { return None };
+    let ExprKind::Path(QPath::Resolved(_, path)) = callee.kind else { return None };
+    let Res::Def(DefKind::Fn, def_id) = path.res else { return None };
+    if self.tcx.crate_name(def_id.krate).as_str() != "std" {
+      return None;
+    }
+    let name = match self.tcx.def_path(def_id).to_string_no_crate_verbose().as_str() {
+      "::process::exit" => "process::exit",
+      "::process::abort" => "process::abort",
+      _ => return None,
+    };
+    Some((span_to_line(&call.span.source_callsite(), &self.tcx), name))
   }
 
   /// Whether `e` never completes normally: its type is `!` (`return`,
@@ -3268,8 +3314,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.all_paths_exit = true;
   }
 
-  /// `drop_locals_on_exit` for a panic call inside a branch.
+  /// `drop_locals_on_exit` for a panic call inside a branch. A call to
+  /// `process::exit` (`process_exit_line`) ends what is in scope there
+  /// without dropping it, in a branch or directly in the function's
+  /// body (#1172).
   fn note_panic(&mut self, call: &'tcx Expr<'tcx>) {
+    if let Some((line, name)) = self.process_exit_line(call) {
+      if self.in_closure(call) {
+        return;
+      }
+      if self.exit_frames.is_empty() && self.at_fn_level(call) {
+        let lo = *self.unique_id;
+        self.exit_frames.push(ExitFrame::Branch { len: 0, hide: Vec::new(), binds: Vec::new(), binds_at: 0 });
+        self.drop_locals_on_exit(line, None, None, false, name);
+        self.exit_frames.pop();
+        self.keep_inline_exit_drops(lo..*self.unique_id);
+      } else {
+        self.drop_locals_on_exit(line, None, None, false, name);
+      }
+      return;
+    }
     if let Some(line) = self.panic_line(call) {
       self.drop_locals_on_exit(line, None, None, false, "panic");
       if !self.in_closure(call) && self.exit_frames.iter().any(|f| matches!(f, ExitFrame::Branch { .. })) {
@@ -3294,8 +3358,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// scrutinee, whose dot says from the column's state that nothing is
   /// dropped.)
   fn owns_value_here(&self, hash: u64, binds: bool) -> bool {
-    #[derive(Clone, Copy, PartialEq)]
-    enum Own { Yes, No, Maybe }
+    self.ownership_here(hash, binds) == OwnHere::Yes
+  }
+
+  /// `owns_value_here`, telling a variable that holds no value on any
+  /// path (`No`) from one that holds one on some paths only (`Maybe`:
+  /// its drop flag decides whether an exit here drops it, #1194).
+  fn ownership_here(&self, hash: u64, binds: bool) -> OwnHere {
+    use OwnHere as Own;
     fn step(events: &[(usize, ExternalEvent)], hash: u64, hide: &[std::ops::Range<usize>], mut own: Own) -> Own {
       let is = |r: &ResourceTy| *r.hash() == hash;
       for (_, e) in events {
@@ -3342,7 +3412,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       Vec::new()
     };
     if frame_binds.is_empty() {
-      return step(self.preprocessed_events, hash, &hide, Own::No) == Own::Yes;
+      return step(self.preprocessed_events, hash, &hide, Own::No);
     }
     // The events in the order they happened: each arm's bindings
     // where its body starts.
@@ -3355,7 +3425,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       from = at;
     }
     events.extend_from_slice(&self.preprocessed_events[from..]);
-    step(&events, hash, &hide, Own::No) == Own::Yes
+    step(&events, hash, &hide, Own::No)
   }
 
   /// At the start of the body of `loop_expr` (#992): the variables
@@ -3955,7 +4025,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // A `break` out of a labelled block drops nothing drawn.
       ExprKind::Break(dest, _) => branch && dest.target_id.is_ok_and(|t|
         matches!(self.tcx.hir_node(t), Node::Expr(Expr { kind: ExprKind::Loop(..), .. }))),
-      ExprKind::Call(..) => branch && self.panic_line(e).is_some(),
+      ExprKind::Call(..) => branch && (self.panic_line(e).is_some() || self.process_exit_line(e).is_some()),
       // A body drawn inline (an `if let` whose pattern always matches,
       // a lone match arm) is where the code around it is: its exits'
       // drops are drawn as they would be there (#1013).
@@ -12378,6 +12448,11 @@ struct BranchLeaves {
   /// mention, sorted: what the break carries out of the loop.
   break_carries: Vec<String>,
 }
+
+/// Whether a variable holds a value at some point, on the paths that
+/// reach it (`ExprVisitor::ownership_here`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum OwnHere { Yes, No, Maybe }
 
 /// The local variables `e` mentions, pushed onto `out`.
 fn mentioned_locals<'tcx>(e: &'tcx Expr<'tcx>, out: &mut Vec<String>) {
