@@ -20753,6 +20753,94 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Move from boxed to d",
         ],
     },
+    TooltipExpect {
+        // #1125: an outlives bound (`where 'a: 'b`, `<'a, 'b: 'a>`) lets a
+        // `&'a str` stand in for the `&'b str` a fn returns, so the
+        // result may point into either argument: both stay borrowed while
+        // it is in use (with `s1.push('x')` before `println!("{}", r1)`,
+        // rustc says E0502). Main tied the result to only the argument
+        // whose lifetime is spelled in the return type, and freed the
+        // other one at the call. Also for an assignment (`r3 = ..`) and a
+        // struct result (`p4.text`).
+        name: "outlives_bound_1125",
+        must_contain: &[
+            "Immutable borrow from s1 to r1: shorten's signature lets the reference it returns point into both arguments (a lifetime bound like `'a: 'b` lets a longer-lived reference stand in for a shorter one), so it may point into either, and both stay borrowed while r1 is in use",
+            "Return immutably borrowed resource from r1 to s1",
+            "Return immutably borrowed resource from r1 to t1",
+            "Immutable borrow from t2 to r2: pick's signature lets the reference it returns point into both arguments (a lifetime bound like `'a: 'b` lets a longer-lived reference stand in for a shorter one), so it may point into either, and both stay borrowed while r2 is in use",
+            "Return immutably borrowed resource from r2 to t2",
+            "Return immutably borrowed resource from r3 to s3",
+            "Return immutably borrowed resource from p4.text to s4",
+        ],
+        must_not_contain: &[
+            "shorten's signature gives the reference it returns the same lifetime as its second argument",
+            "pick's signature gives the reference it returns the same lifetime as its first argument",
+            "part's signature gives the struct it returns the same lifetime as its second argument",
+        ],
+    },
+    TooltipExpect {
+        // #1124: a call whose signature lets it store a reference in a
+        // reference variable passed as `&mut r` (`store(&mut r, src)` with
+        // `dst: &mut &'a str, src: &'a str`, `std::mem::replace(&mut r,
+        // &b)`) makes r point into b, so b stays borrowed while r is in
+        // use. Main ended b's borrow at the call ("b's resource is no
+        // longer immutably borrowed" on the same line) and drew b as its
+        // owner's while `println!("{}", r)` read it. Also when the stored
+        // reference is a call's result (`b2.as_str()`), when the `&mut` is
+        // a local (`rr = &mut r5`), and in a branch. Storing into a
+        // container (`keep(&mut v, &b)`) was already right (#513).
+        name: "store_through_mut_ref_1124",
+        must_contain: &[
+            "store_s reads from b1; store_s's signature lets it store this reference in r1, so b1 stays borrowed while r1 is in use",
+            "store reads from b2; store's signature lets it store this reference in r2, so b2 stays borrowed while r2 is in use",
+            "store reads from b3; store's signature lets it store this reference in r3, so b3 stays borrowed while r3 is in use",
+            "std::mem::replace reads from b4; std::mem::replace's signature lets it store this reference in r4, so b4 stays borrowed while r4 is in use",
+            "store_s reads from b5; store_s's signature lets it store this reference in r5, so b5 stays borrowed while r5 is in use",
+            "std::mem::replace reads from b6; std::mem::replace's signature lets it store this reference in r6, so b6 stays borrowed while r6 is in use",
+            "b6's resource is no longer borrowed by _old, but is still immutably borrowed by r6",
+        ],
+        must_not_contain: &[
+            // The stored-in suffix was missing; the borrow ended at the call.
+            "=store_s reads from b1",
+            "=store reads from b3",
+            "=std::mem::replace reads from b4",
+            "=store_s reads from b5",
+            "=std::mem::replace reads from b6",
+        ],
+    },
+    TooltipExpect {
+        // #1152: a call through a local `&mut` r whose result keeps the
+        // borrow (`r1.iter_mut()`, `r2.first_mut().unwrap()`,
+        // `r3.get_mut(0)`, in a loop `r4.last_mut()`) reborrows through
+        // r, like `&mut *r`: r can't be used until the result is done
+        // (`r1.push(4)` between `r1.iter_mut()` and `it.next()` is
+        // E0499). Main drew the result borrowing v directly, left r "can
+        // read and write" throughout ("iter_mut no longer borrows the
+        // resource r1 points to" on the call's line), and ended the
+        // holders' mutable borrows as "immutable".
+        name: "reborrow_through_local_mut_ref_1152",
+        must_contain: &[
+            "Mutable reborrow from r1 to it: iter_mut's signature gives the value it returns the same lifetime as the value it was called on; it isn't a reference, but its value holds one",
+            "the resource r1 points to is mutably borrowed by it through r1; r1 can't be used until the borrow ends",
+            "it's mutable borrow ends",
+            "_x's mutable borrow ends",
+            "Mutable reborrow from r2 to x: unwrap's signature gives the reference it returns the same lifetime as the value it was called on",
+            "x no longer borrows the resource r2 points to",
+            "Mutable reborrow from r3 to o: get_mut's signature gives the value it returns the same lifetime as the value it was called on; o isn't a reference, but its value holds one",
+            "Mutable reborrow from r4 to y: unwrap's signature gives the reference it returns the same lifetime as the value it was called on",
+        ],
+        must_not_contain: &[
+            "Mutable borrow from v to it",
+            "Mutable borrow from v to x",
+            "Mutable borrow from v to o",
+            "Mutable borrow from v to y",
+            "iter_mut no longer borrows the resource r1 points to",
+            "first_mut no longer borrows the resource r2 points to",
+            "it's immutable borrow ends",
+            "_x's immutable borrow ends",
+            "o's immutable borrow ends",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
