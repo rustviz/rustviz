@@ -22772,6 +22772,24 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x acquires ownership of a resource (from whichever break ended the loop)",
         ],
     },
+    // #1226: a destructuring `let` of a labeled block took only the
+    // block's last expression, unconditionally (t moved, s never).
+    TooltipExpect {
+        name: "labeled_block_pattern_1226",
+        must_contain: &[
+            "Move from s to x, if the block ended with break 'blk (s, 1)",
+            "Move from t to x, if the block ended with its last expression, (t, 2)",
+            "x acquires ownership of a resource (from whichever break or last expression ended the block)",
+            "Move from u to a, if the block ended with break 'blk P { a: u, b: 1 }",
+            "Move from v to a, if the block ended with its last expression, P { a: v, b: 2 }",
+        ],
+        must_not_contain: &[
+            "=t's resource is moved",
+            "=v's resource is moved",
+            "=x acquires ownership of a resource",
+            "=a acquires ownership of a resource",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop

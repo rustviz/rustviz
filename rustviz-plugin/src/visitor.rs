@@ -10550,7 +10550,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       };
       let saved_line = joined_at.map(|l| self.line_override.replace(l));
       let first_id = *self.unique_id;
-      self.bind_pat(pat, init, is_skipped);
+      // `let (x, n) = 'blk: { if c { break 'blk (s, 1); } (t, 2) };`
+      // (#1226): the pattern takes apart whichever value ended the
+      // block, a `break`'s or its last expression, each drawn as one of
+      // them where the block ends (as a plain binding is, #1134).
+      let block_values = (!is_skipped && els.is_none() && !matches!(pat.kind, PatKind::Binding(..))
+        && matches!(init.kind, ExprKind::Block(_, Some(_))))
+        .then(|| self.labeled_block_values(init)).filter(|v| v.len() > 1);
+      if let Some(values) = block_values {
+        self.pair_break_alternatives(init, values, |this, v| this.bind_pat(pat, v, false));
+      } else {
+        self.bind_pat(pat, init, is_skipped);
+      }
       if let Some(l) = saved_line {
         self.line_override = l;
       }
