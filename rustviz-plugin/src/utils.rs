@@ -40,6 +40,27 @@ fn line_skip_marker(line: &str) -> Option<(usize, SkipKind)> {
 }
 
 // toplevel annotation helpers
+
+/// The byte range, within the text of its line, that `span` covers:
+/// what `replace_range` on that line needs. rustc's `col_display` is a
+/// *display* column (a tab counts 4, a wide character 2, `é` 1), not a
+/// byte offset, so using it to index the line put the markup in the
+/// wrong place after a tab or any non-ASCII text, and panicked inside a
+/// multi-byte character (#1160). `col` counts characters, which this
+/// maps to bytes through the line's own text. `None` if the span isn't
+/// on one line or runs past the text.
+pub fn span_line_bytes(sm: &rustc_span::source_map::SourceMap, span: rustc_span::Span, line_text: &str) -> Option<(usize, usize)> {
+  let lo = sm.lookup_char_pos(span.lo());
+  let hi = sm.lookup_char_pos(span.hi());
+  if lo.line != hi.line || lo.col > hi.col {
+    return None;
+  }
+  let byte_at = |col: usize| {
+    line_text.char_indices().map(|(b, _)| b).chain(std::iter::once(line_text.len())).nth(col)
+  };
+  Some((byte_at(lo.col.0)?, byte_at(hi.col.0)?))
+}
+
 pub fn annotate_struct_field (
   line_str: &str,
   hash_map: & mut HashMap<String, usize>,
@@ -69,8 +90,7 @@ pub fn annotate_struct_field (
   // with just the field name eats the colon + type and the rendered
   // struct definition shows `x,` instead of `x: i32,`.
   let line: usize = m.sess.source_map().lookup_char_pos(field.ident.span.lo()).line;
-  let left: usize = m.sess.source_map().lookup_char_pos(field.ident.span.lo()).col_display;
-  let right: usize = m.sess.source_map().lookup_char_pos(field.ident.span.hi()).col_display;
+  let Some((left, right)) = span_line_bytes(m.sess.source_map(), field.ident.span, line_str) else { return };
 
   let mut line_contents = line_str.to_string();
   let replace_with = tspan_markup(&name, hash, false);
@@ -92,8 +112,7 @@ pub fn annotate_toplevel_fn (
   let func_name = func_ident.as_str().to_owned();
   
   let line: usize = m.sess.source_map().lookup_char_pos(func_ident.span.lo()).line;
-  let left: usize = m.sess.source_map().lookup_char_pos(func_ident.span.lo()).col_display;
-  let right: usize = m.sess.source_map().lookup_char_pos(func_ident.span.hi()).col_display;
+  let Some((left, right)) = span_line_bytes(m.sess.source_map(), func_ident.span, line_str) else { return };
   let hash = match raps.get(&crate::expr_visitor_utils::fn_key(&func_name)) {
     Some(r) => { *r.rap.hash() }
     None => {
@@ -129,9 +148,8 @@ pub fn annotate_enum_variant(
     let span = variant.ident.span;
     let hash = rap_map.get(&rap_name).unwrap().rap.hash();
     let line: usize = m.sess.source_map().lookup_char_pos(span.lo()).line;
-    let left: usize = m.sess.source_map().lookup_char_pos(span.lo()).col_display;
     let line_str = &a_map[&line][0];
-    let right = m.sess.source_map().lookup_char_pos(span.hi()).col_display;
+    let Some((left, right)) = span_line_bytes(m.sess.source_map(), span, line_str) else { return };
 
     let mut line_contents = line_str.to_string();
     let replace_with = tspan_markup(&ctor_name, hash, true);
@@ -188,6 +206,10 @@ impl RV1Helper {
         let mut res_str = String::with_capacity(contents.len());
         let mut skip_lines: HashSet<usize> = HashSet::new();
         let mut hide_lines: HashSet<usize> = HashSet::new();
+        // rustc drops a leading byte-order mark before it numbers columns
+        // (`span_line_bytes` maps its columns through this text), and the
+        // code panel shouldn't show one either.
+        let contents = contents.strip_prefix('\u{feff}').unwrap_or(&contents);
         for (i, line) in contents.lines().enumerate() {
           if let Some((idx, kind)) = line_skip_marker(line) {
             let line_num = i + 1;

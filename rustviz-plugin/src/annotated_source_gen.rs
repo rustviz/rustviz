@@ -87,11 +87,8 @@ impl<'tcx> Visitor<'tcx> for UserArgs<'tcx> {
 
 impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
-// TODO: need to account for /t
 pub fn annotate_src(&mut self, name: String, s: Span, is_func: bool, hash: u64) {
   let line: usize = span_to_line(&s, &self.tcx);
-  let left:usize = self.tcx.sess.source_map().lookup_char_pos(s.lo()).col_display;
-  let right: usize = self.tcx.sess.source_map().lookup_char_pos(s.hi()).col_display;
 
   // The tspan markup is written with MARK_OPEN/MARK_CLOSE instead of `<`/`>`
   // because the whole line is HTML-escaped later; generate_annotated_src
@@ -102,9 +99,15 @@ pub fn annotate_src(&mut self, name: String, s: Span, is_func: bool, hash: u64) 
     Some(c) => c.clone(),
     None => return,
   };
-  if right > line_contents.len() || left > right {
+  // Byte offsets within the line, not display columns (#1160). A span
+  // that starts on another line than the one its call site maps to
+  // (some desugarings) would index the wrong line's text: skip it.
+  if self.tcx.sess.source_map().lookup_char_pos(s.lo()).line != line {
     return;
   }
+  let Some((left, right)) = crate::utils::span_line_bytes(self.tcx.sess.source_map(), s, &line_contents) else {
+    return;
+  };
   // A variable is shown as written: its RAP name can differ from the
   // source text (`s₂` for a second `let s`, see `binding_name`), but
   // the code panel shows the code.

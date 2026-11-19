@@ -5667,6 +5667,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // stored in a place, like `*r = 5` through `r: &mut i32` (#897).
     let repoints_ref_var = match &lhs_rty {
       ResourceTy::Deref(_) if lhs_ty.is_ref() => self.deref_is_ref_var(&lhs_rty.real_name(), lhs_expr, lhs_ty),
+      // A reference-typed `static mut` (`NAME = "b"` with
+      // `NAME: &str`) has a column but no loan to end or re-point:
+      // it can only hold a `&'static`, so it is drawn like a Copy
+      // value (#690), and the write is a plain assignment (#1162).
+      ResourceTy::Value(rap) if rap.is_static() => false,
       _ => true,
     };
     let assign_kind = || if is_copyable {
