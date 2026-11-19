@@ -1341,16 +1341,17 @@ pub fn event_dot_move_to_caller(my_name: &String, holds_value: bool) -> String {
     format!("{0}'s {1} is moved to the caller", styled_name_html(my_name), held(holds_value))
 }
 
-/// `let n = *slots[0];`: `place` is `*slots[0]`; the resource copied is
+/// `let n = *slots[0];`: `place` is `*slots[0]`; the value copied is
 /// the one the reference stored in `slots[0]` points to, not slots's own.
+/// What is copied is Copy, so a value, never a resource (#1163).
 pub fn event_dot_copy_through_element(place: &String) -> String {
     let elem = place.strip_prefix('*').unwrap_or(place).trim_start();
-    format!("the resource {0} points to is copied", styled_name_html(&elem.to_owned()))
+    format!("the value {0} points to is copied", styled_name_html(&elem.to_owned()))
 }
 
-pub fn event_dot_move_through_element(place: &String) -> String {
+pub fn event_dot_move_through_element(place: &String, holds_value: bool) -> String {
     let elem = place.strip_prefix('*').unwrap_or(place).trim_start();
-    format!("the resource {0} points to is moved", styled_name_html(&elem.to_owned()))
+    format!("the {1} {0} points to is moved", styled_name_html(&elem.to_owned()), held(holds_value))
 }
 
 pub fn event_dot_copy_to_caller(my_name: &String) -> String {
@@ -2237,12 +2238,15 @@ pub fn event_dot_capture_mut_lend_to_closure(my_name: &String, target_name: &Str
 // points to. r owns nothing, so "r's resource is captured" was wrong.
 // A `&mut` r can't be used while a mutable reborrow is live and is
 // read-only during a shared one; a `&T` r was read-only already.
-pub fn event_dot_capture_reborrow_through_ref(ref_name: &String, closure_name: &String, mutable: bool, ref_is_mut: bool) -> String {
+// `pointee_value`: what r points to is a value (Copy, or nothing to
+// drop; #1163).
+pub fn event_dot_capture_reborrow_through_ref(ref_name: &String, closure_name: &String, mutable: bool, ref_is_mut: bool, pointee_value: bool) -> String {
     let base = format!(
-        "the resource {0} points to is captured by closure {1} ({2} reborrow through {0})",
+        "the {3} {0} points to is captured by closure {1} ({2} reborrow through {0})",
         styled_name_html(ref_name),
         styled_name_html(closure_name),
-        if mutable { "a mutable" } else { "an immutable" }
+        if mutable { "a mutable" } else { "an immutable" },
+        held(pointee_value)
     );
     if mutable {
         format!("{0}; {1} can't be used while the borrow is live", base, styled_name_html(ref_name))
@@ -4636,13 +4640,15 @@ pub fn state_chain_ref_lent(my_name: &String, into: &String, sources: &[String],
 // have ended by the time the else branch runs: a call's when it returns,
 // a binding's when the failed condition ends its scope. `definite`: as
 // for event_dot_chain_fail_move. `is_ref`: the variable is a reference,
-// and it's the resource it points to that is lent.
+// and it's the resource it points to that is lent (a value when
+// `pointee_value`, #1163).
 pub fn event_dot_chain_fail_use(
     my_name: &String,
     uses: &[ChainUse],
     definite: bool,
     path: FailPath,
     is_ref: bool,
+    pointee_value: bool,
 ) -> String {
     fn join(names: &[String]) -> String {
         let fmt: Vec<String> = names.iter().map(|n| styled_name_html(n)).collect();
@@ -4653,7 +4659,7 @@ pub fn event_dot_chain_fail_use(
     }
     let name = styled_name_html(my_name);
     let (what, obj) = if is_ref {
-        (format!("the resource {} points to", name), "it".to_owned())
+        (format!("the {} {} points to", held(pointee_value), name), "it".to_owned())
     } else {
         (name.clone(), name.clone())
     };

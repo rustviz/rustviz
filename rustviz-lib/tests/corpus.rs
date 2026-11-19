@@ -20753,6 +20753,35 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Move from boxed to d",
         ],
     },
+    TooltipExpect {
+        name: "value_not_resource_1163",
+        // #1163: a value with nothing to drop is a "value". The temporary of
+        // `let (x, _) = (s, p);` holds only `p: P { a: i32 }` once x took s,
+        // which has no drop glue: nothing is dropped at the end of the let,
+        // so no temporary column and no drop triangle (in a tuple, a struct
+        // literal, a constructor, a branch's literal, a nested literal, and
+        // next to a fresh value). With a String left over it is still drawn.
+        must_contain: &[
+            "This temporary (String, String), built by the literal on the right of the let, is dropped at the end of this statement. What the pattern didn't bind by value stays in it and is dropped with it. Its resource is dropped",
+            "the value slots[0] points to is copied",
+            "the value r points to is captured by closure f (a mutable reborrow through r); r can't be used while the borrow is live",
+            "the value r points to may have been mutably borrowed: when the condition lends it to bump and then turns out false, the else branch runs after that borrow has ended. By then, the value r points to may have been changed by bump.",
+        ],
+        must_not_contain: &[
+            "This temporary (String, P), built by the literal",
+            "This temporary Q, built by the literal",
+            "This temporary W, built by the literal",
+            "This temporary ((String, P), P), built by the literal",
+            "=Move from p to (temporary)",
+            "=Move from q to (temporary)",
+            "=Move from p to (temporary 2)",
+            "=Move from q to (temporary 2)",
+            "takes the value of p",
+            "takes the value of q",
+            "the resource slots[0] points to",
+            "the resource r points to",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
