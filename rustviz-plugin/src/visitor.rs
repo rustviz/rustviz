@@ -7601,7 +7601,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let is_partial = partial.unwrap_or(!(parent_ty == typeck_res.node_type(p.hir_id)));
         let id = *self.unique_id;
         *self.unique_id += 1;
-        let ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), from.clone(), id, is_partial);
+        let mut ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), from.clone(), id, is_partial);
+        self.arm_part_borrow(guard_expr, arm_pat, to_ro, from, &mut ext_ev);
         // A reference copied out of a value that holds a
         // borrow also borrows what that value borrows (#391).
         pending_borrows.extend(self.pattern_ref_copy_borrow(to_ro, e, scrutinee));
@@ -7660,7 +7661,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
         let id = *self.unique_id;
         *self.unique_id += 1;
-        let ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), from.clone(), id, partial.unwrap_or(false));
+        let mut ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), from.clone(), id, partial.unwrap_or(false));
+        self.arm_part_borrow(guard_expr, arm_pat, to_ro, from, &mut ext_ev);
         let scrutinee = match self.literal_elems(guard_expr) {
           Some(fields) if fields.len() == parents.len() => &fields[i],
           _ => guard_expr,
@@ -7769,7 +7771,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let mir_b_data = if callback_events.is_empty() { Vec::new() } else { self.gather_borrow_data(self.bwf) };
     for (to, from, e) in callback_events {
       let name = from.real_name();
-      self.borrow_map.remove(&name);
+      // A part of a whole the scrutinee borrows (`match &mut t { (a, b)
+      // => … }`, `arm_part_borrow`): that one loan ends at the last use
+      // of any of the arm's bindings into it (#1215).
+      let whole_loan = self.borrow_map.remove(&name).and_then(|rd| rd.borrow_span);
       // The borrow ends where the borrow checker ends it, at
       // the binding's last use (#599): the end of the region
       // of the loan MIR issues for the binding on the pattern's
@@ -7778,7 +7783,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // loan of its own; its borrow lasts as long as it is
       // live.
       let ends_at = mir_b_data.iter()
-        .filter(|m| m.assigned_place.as_deref() == Some(name.as_str()) && (pat_line..=pat_end).contains(&m.region.0))
+        .filter(|m| (m.assigned_place.as_deref() == Some(name.as_str()) && (pat_line..=pat_end).contains(&m.region.0))
+          || whole_loan == Some(m.span))
         .map(|m| m.region.1)
         .max()
         .or_else(|| self.last_live_line(&name, (pat_line, end)))
@@ -10914,6 +10920,47 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       | PatKind::Err(_)
       | PatKind::Expr(_)
       | PatKind::Range(..) => {}
+    }
+  }
+
+  /// `match &mut t { (a, b) => … }` (#1215): like `let (a, b) = &mut t;`
+  /// (`mark_part_borrow`), the scrutinee is one loan of all of t, which a
+  /// and b each reach a part of. Name the part on a's borrow, and give a
+  /// the scrutinee's loan, which rustc ends at the last use of a or b:
+  /// t was given back at a's last use while b still held it.
+  fn arm_part_borrow(&mut self, guard_expr: &'tcx Expr<'tcx>, arm_pat: &'tcx Pat<'tcx>, to_ro: &ResourceAccessPoint, from: &ResourceTy, ext_ev: &mut ExternalEvent) {
+    let mut e = guard_expr;
+    while let ExprKind::DropTemps(inner) = e.kind {
+      e = inner;
+    }
+    let ExprKind::AddrOf(_, _, place) = e.kind else { return };
+    let Some(whole) = expr_to_rap_name(place, &self.tcx) else { return };
+    let ResourceTy::Value(f) = from else { return };
+    if *f.name() != whole {
+      return;
+    }
+    let (ExternalEvent::StaticBorrow { via: v @ None, .. } | ExternalEvent::MutableBorrow { via: v @ None, .. }) = ext_ev else { return };
+    let mut hirid = None;
+    arm_pat.each_binding(|_, id, _, _| {
+      if hirid.is_none() && binding_name(&self.tcx, id) == *to_ro.name() {
+        hirid = Some(id);
+      }
+    });
+    let Some(hirid) = hirid else { return };
+    let Some(path) = self.binding_part_path(hirid) else { return };
+    let part = format!("{}.{}", whole, path);
+    if !self.raps.contains_key(&part) {
+      return;
+    }
+    *v = Some(BorrowVia {
+      func: part,
+      lenders: vec![whole.clone()],
+      also_unnamed: false,
+      tie: ArgTie::default(),
+      carrier: ViaCarrier::Part,
+    });
+    if let Some(rd) = self.borrow_map.get_mut(to_ro.name()) {
+      rd.borrow_span = Some(e.span);
     }
   }
 
