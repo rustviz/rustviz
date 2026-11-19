@@ -7278,7 +7278,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "f is moved into the call (an FnOnce closure can only be called once). \
              s, which f captured, is dropped during the call",
-            "f goes out of scope. Its captured resources are dropped here only if no branch above \
+            "f goes out of scope. Its captured resource is dropped here only if no branch above \
              called it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
@@ -9254,7 +9254,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "edition2024/if_let_chain_closure_move",
         must_contain: &[
             "f may have been moved: when the condition moves f to run and then turns out false, the else branch runs after that move, so f can't be used here",
-            "f goes out of scope. Its captured resources are dropped here only if nothing above moved or called it (Rust tracks this with a runtime drop flag).",
+            "f goes out of scope. Its captured resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &["only if no branch above called it"],
     },
@@ -10570,7 +10570,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "edition2024/if_let_chain_fnonce_call",
         must_contain: &[
             "f may have been moved: when the condition calls f (it can only be called once, so the call moves it) and then turns out false, the else branch runs after that call, so f can't be used here",
-            "f goes out of scope. Its captured resources are dropped here only if nothing above moved or called it (Rust tracks this with a runtime drop flag).",
+            "f goes out of scope. Its captured resource is dropped here only if nothing above called it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             // The call may have dropped them already.
@@ -19658,7 +19658,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "f may have been moved: when the guard on line 6 calls f (it can only be called once, so the call moves it) and then turns out false, matching goes on with the later arms after that call, so f can't be used here (the borrow checker counts every later arm as one that may run after a failed guard)",
             "f may have been moved above, so it can't be used after the match. If nothing above moved it, its resource is dropped when f goes out of scope.",
-            "f goes out of scope. Its captured resources are dropped here only if nothing above moved or called it (Rust tracks this with a runtime drop flag).",
+            "f goes out of scope. Its captured resource is dropped here only if nothing above called it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             "can't be used after the if",
@@ -22699,6 +22699,26 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "show no longer borrows the resource r points to",
             "the resource r points to is immutably borrowed by the closure passed to apply",
         ],
+    },
+    TooltipExpect {
+        name: "cond_with_move_closure",
+        // #1148: the move closure made in the `if` arm owns s's String and
+        // drops it at the arm's end; main never said so (this entry's
+        // first one pinned only the arrows).
+        must_contain: &[
+            "f owns a closure which owns 1 resource via capture",
+            "f goes out of scope. Its 1 captured resource is dropped.",
+        ],
+        must_not_contain: &["=f goes out of scope", "=Closure f is bound"],
+    },
+    TooltipExpect {
+        name: "cell_ref_return",
+        // #1149: `r.set(2)` with `r: &Cell<i32>` writes the Cell.
+        must_contain: &[
+            "set uses what r points to, through the shared reference r; that has interior \
+             mutability, so set can change its contents even through a shared reference",
+        ],
+        must_not_contain: &["set reads from r"],
     },
     TooltipExpect {
         name: "closure_static_write_1203",
