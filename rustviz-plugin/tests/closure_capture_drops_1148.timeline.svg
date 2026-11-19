@@ -1,0 +1,780 @@
+<svg width="430px" height="1745px" 
+        xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" 
+        id="tl_vis">
+
+    <desc>vis</desc>
+
+    <defs>
+        <style type="text/css">
+        <![CDATA[
+        /* colour themes: every colour below is one of these properties.
+       Pick a theme with data-rv-theme="light|rust|coal|navy|ayu" on
+       the root <svg> or, for an inline <svg>, on any ancestor. */
+    :root,
+    [data-rv-theme="light"] {
+        --rv-bg: #f1f1f1;
+        --rv-code: #6e6b5e;
+        --rv-comment: #8a8a8a;
+        --rv-string: #3a6bb5;
+        --rv-line-number: #aaaaaa;
+        --rv-caption: #000000;
+        --rv-arrow: #808080;
+        --rv-drop-notch: #ffffff;
+        --rv-struct-fill: #ffffff;
+        --rv-struct-stroke: #000000;
+        --rv-underline: currentColor;
+        --rv-tooltip-bg: rgba(70, 70, 70, 0.6);
+        --rv-tooltip-fg: #ffffff;
+        --rv-tooltip-border: transparent;
+        --rv-c1: #1893ff;
+        --rv-c2: #ff7f50;
+        --rv-c3: #8635ff;
+        --rv-c4: #dc143c;
+        --rv-c5: #0a810a;
+        --rv-c6: #008080;
+        --rv-c7: #ff6cce;
+        --rv-c8: #00d6fc;
+        --rv-c9: #b99f35;
+        --rv-c10: #15a710;
+        --rv-c11: #000000;
+        --rv-c12: #463ae9;
+    }
+    @media (prefers-color-scheme: dark) {
+        :root:not([data-rv-theme]) {
+            --rv-bg: #191f26;
+            --rv-code: #c5c8c6;
+            --rv-comment: #969896;
+            --rv-string: #81a2be;
+            --rv-line-number: #868a8e;
+            --rv-caption: #bcbdd0;
+            --rv-arrow: #8e9399;
+            --rv-drop-notch: #191f26;
+            --rv-struct-fill: #000000;
+            --rv-struct-stroke: #ffffff;
+            --rv-underline: #c5c8c6;
+            --rv-tooltip-bg: #161923;
+            --rv-tooltip-fg: #bcbdd0;
+            --rv-tooltip-border: #737480;
+            --rv-c1: #4aa8ff;
+            --rv-c2: #ff8c61;
+            --rv-c3: #c084fc;
+            --rv-c4: #f0475e;
+            --rv-c5: #4cc35a;
+            --rv-c6: #2ec4b6;
+            --rv-c7: #ff7ad9;
+            --rv-c8: #3fdcff;
+            --rv-c9: #d4b94a;
+            --rv-c10: #a6e22e;
+            --rv-c11: #e8e8e8;
+            --rv-c12: #8c8cff;
+        }
+    }
+    [data-rv-theme="rust"] {
+        --rv-bg: #f6f7f6;
+        --rv-code: #6e6b5e;
+        --rv-comment: #6b6b66;
+        --rv-string: #2f5f9e;
+        --rv-line-number: #6f6f68;
+        --rv-caption: #262625;
+        --rv-arrow: #767676;
+        --rv-drop-notch: #ffffff;
+        --rv-struct-fill: #ffffff;
+        --rv-struct-stroke: #000000;
+        --rv-underline: #262625;
+        --rv-tooltip-bg: #e1e1db;
+        --rv-tooltip-fg: #262625;
+        --rv-tooltip-border: #b38f6b;
+        --rv-c1: #1a6fd6;
+        --rv-c2: #d4551f;
+        --rv-c3: #8635ff;
+        --rv-c4: #c8102e;
+        --rv-c5: #0a7d0a;
+        --rv-c6: #007f7f;
+        --rv-c7: #c93a9f;
+        --rv-c8: #0090b0;
+        --rv-c9: #a06f00;
+        --rv-c10: #5c8f00;
+        --rv-c11: #000000;
+        --rv-c12: #463ae9;
+    }
+    [data-rv-theme="coal"] {
+        --rv-bg: #1d1f21;
+        --rv-code: #c5c8c6;
+        --rv-comment: #969896;
+        --rv-string: #81a2be;
+        --rv-line-number: #868a8e;
+        --rv-caption: #98a3ad;
+        --rv-arrow: #8e9399;
+        --rv-drop-notch: #1d1f21;
+        --rv-struct-fill: #000000;
+        --rv-struct-stroke: #ffffff;
+        --rv-underline: #c5c8c6;
+        --rv-tooltip-bg: #141617;
+        --rv-tooltip-fg: #98a3ad;
+        --rv-tooltip-border: #43484d;
+        --rv-c1: #4aa8ff;
+        --rv-c2: #ff8c61;
+        --rv-c3: #c084fc;
+        --rv-c4: #f0475e;
+        --rv-c5: #4cc35a;
+        --rv-c6: #2ec4b6;
+        --rv-c7: #ff7ad9;
+        --rv-c8: #3fdcff;
+        --rv-c9: #d4b94a;
+        --rv-c10: #a6e22e;
+        --rv-c11: #e8e8e8;
+        --rv-c12: #8c8cff;
+    }
+    [data-rv-theme="navy"] {
+        --rv-bg: #191f26;
+        --rv-code: #c5c8c6;
+        --rv-comment: #969896;
+        --rv-string: #81a2be;
+        --rv-line-number: #868a8e;
+        --rv-caption: #bcbdd0;
+        --rv-arrow: #8e9399;
+        --rv-drop-notch: #191f26;
+        --rv-struct-fill: #000000;
+        --rv-struct-stroke: #ffffff;
+        --rv-underline: #c5c8c6;
+        --rv-tooltip-bg: #161923;
+        --rv-tooltip-fg: #bcbdd0;
+        --rv-tooltip-border: #737480;
+        --rv-c1: #4aa8ff;
+        --rv-c2: #ff8c61;
+        --rv-c3: #c084fc;
+        --rv-c4: #f0475e;
+        --rv-c5: #4cc35a;
+        --rv-c6: #2ec4b6;
+        --rv-c7: #ff7ad9;
+        --rv-c8: #3fdcff;
+        --rv-c9: #d4b94a;
+        --rv-c10: #a6e22e;
+        --rv-c11: #e8e8e8;
+        --rv-c12: #8c8cff;
+    }
+    [data-rv-theme="ayu"] {
+        --rv-bg: #191f26;
+        --rv-code: #e6e1cf;
+        --rv-comment: #8a96a3;
+        --rv-string: #81a2be;
+        --rv-line-number: #818c98;
+        --rv-caption: #c5c5c5;
+        --rv-arrow: #8e959e;
+        --rv-drop-notch: #191f26;
+        --rv-struct-fill: #000000;
+        --rv-struct-stroke: #ffffff;
+        --rv-underline: #e6e1cf;
+        --rv-tooltip-bg: #14191f;
+        --rv-tooltip-fg: #c5c5c5;
+        --rv-tooltip-border: #5c6773;
+        --rv-c1: #4aa8ff;
+        --rv-c2: #ff8c61;
+        --rv-c3: #c084fc;
+        --rv-c4: #f0475e;
+        --rv-c5: #4cc35a;
+        --rv-c6: #2ec4b6;
+        --rv-c7: #ff7ad9;
+        --rv-c8: #3fdcff;
+        --rv-c9: #d4b94a;
+        --rv-c10: #a6e22e;
+        --rv-c11: #e8e8e8;
+        --rv-c12: #8c8cff;
+    }
+/* general setup */
+    svg {
+        background-color: var(--rv-bg);
+    }
+    
+    text {
+        vertical-align: baseline;
+        text-anchor: start;
+    }
+    
+    #heading {
+        font-size: 24px;
+        font-weight: bold;
+    }
+    
+    #caption {
+        fill: var(--rv-caption);
+        font-size: 0.875em;
+        font-family: "Open Sans", sans-serif;
+        font-style: italic;
+    }
+    
+    /* code related styling */
+    text.code {
+        fill: var(--rv-code);
+        white-space: pre;
+        font-family: "Source Code Pro", Consolas, "Ubuntu Mono", Menlo, "DejaVu Sans Mono", monospace, monospace !important;
+        font-size: 0.875em;
+    }
+
+    text.code .kw {
+        font-weight: bold;
+    }
+
+    text.code .comment {
+        fill: var(--rv-comment);
+        font-style: italic;
+    }
+
+    text.code .string {
+        fill: var(--rv-string);
+    }
+
+    text.code .line-number {
+        fill: var(--rv-line-number);
+    }
+
+    /* the line under the code a hovered element refers to (helpers.js) */
+    .emph {
+        stroke: var(--rv-underline);
+    }
+
+    text.label {
+        font-family: "Source Code Pro", Consolas, "Ubuntu Mono", Menlo, "DejaVu Sans Mono", monospace, monospace !important;
+        font-size: 0.875em;
+    }
+    
+    /* timeline/event interaction styling */
+    .solid {
+        stroke-width: 5px;
+    }
+    
+    .hollow {
+        stroke-width: 1.5;
+    }
+    
+    .dotted {
+        stroke-width: 5px;
+        stroke-dasharray: "2 1";
+    }
+    
+    .extend {
+        stroke-width: 1px;
+        stroke-dasharray: "2 1";
+    }
+
+    /* a column while it is mutably lent out (#722): it can't be used
+       until the borrow ends. A faint row of round dots, unlike the
+       4px dashes of a branch arm that isn't running. */
+    .lent {
+        stroke-width: 2.5px;
+        stroke-dasharray: 0 6;
+        stroke-linecap: round;
+        stroke-opacity: 0.6;
+    }
+    
+    .functionIcon {
+        paint-order: stroke;
+        stroke-width: 3px;
+        fill: var(--rv-bg);
+        font-size: 20px;
+        font-family: times;
+        font-weight: lighter;
+        dominant-baseline: central;
+        text-anchor: start;
+        font-style: italic;
+    }
+    
+    .functionLogo {
+        font-size: 20px;
+        font-style: italic;
+        paint-order: stroke;
+        stroke-width: 3px;
+        fill: var(--rv-bg) !important;
+    }
+    
+    /* move, copy and call arrows */
+    .arrow-shaft {
+        stroke: var(--rv-arrow);
+    }
+
+    .arrow-head {
+        fill: var(--rv-arrow);
+    }
+
+    /* flex related styling */
+    .flex-container {
+        display: flex;
+        flex-direction: row;
+        justify-content: flex-start;
+        flex-wrap: nowrap;
+        flex-shrink: 0;
+    }
+    
+    object.tl_panel {
+        flex-grow: 1;
+    }
+    
+    object.code_panel {
+        flex-grow: 0;
+    }
+    
+    .tooltip-trigger {
+        cursor: default;
+    }
+    
+    .tooltip-trigger:hover{
+        filter: url(#glow);
+    }
+
+    /* When the cursor is anywhere inside a branch column,
+       glow every element grouped under .branch-group: one dashed or
+       solid stretch of the arm, not the whole arm (#626).
+       Single-element hover otherwise only highlighted one of
+       the two parallel sides at a time, with no feedback on
+       the transparent gap between them. */
+    .branch-group:hover .tooltip-trigger {
+        filter: url(#glow);
+    }
+
+    /* hash based styling */
+    [data-hash="0"] { fill: var(--rv-code); }
+    [data-hash="1"] { fill: var(--rv-c1); stroke: var(--rv-c1); }
+    [data-hash="2"] { fill: var(--rv-c2); stroke: var(--rv-c2); }
+    [data-hash="3"] { fill: var(--rv-c3); stroke: var(--rv-c3); }
+    [data-hash="4"] { fill: var(--rv-c4); stroke: var(--rv-c4); }
+    [data-hash="5"] { fill: var(--rv-c5); stroke: var(--rv-c5); }
+    [data-hash="6"] { fill: var(--rv-c6); stroke: var(--rv-c6); }
+    [data-hash="7"] { fill: var(--rv-c7); stroke: var(--rv-c7); }
+    [data-hash="8"] { fill: var(--rv-c8); stroke: var(--rv-c8); }
+    [data-hash="9"] { fill: var(--rv-c9); stroke: var(--rv-c9); }
+    [data-hash="10"] { fill: var(--rv-c10); stroke: var(--rv-c10); }
+    [data-hash="11"] { fill: var(--rv-c11); stroke: var(--rv-c11); }
+    [data-hash="12"] { fill: var(--rv-c12); stroke: var(--rv-c12); }
+    [data-hash="13"] { fill: var(--rv-c1); stroke: var(--rv-c1); }
+    [data-hash="14"] { fill: var(--rv-c2); stroke: var(--rv-c2); }
+    [data-hash="15"] { fill: var(--rv-c3); stroke: var(--rv-c3); }
+    [data-hash="16"] { fill: var(--rv-c4); stroke: var(--rv-c4); }
+    [data-hash="17"] { fill: var(--rv-c5); stroke: var(--rv-c5); }
+    [data-hash="18"] { fill: var(--rv-c6); stroke: var(--rv-c6); }
+    [data-hash="19"] { fill: var(--rv-c7); stroke: var(--rv-c7); }
+    [data-hash="20"] { fill: var(--rv-c8); stroke: var(--rv-c8); }
+    [data-hash="21"] { fill: var(--rv-c9); stroke: var(--rv-c9); }
+    [data-hash="22"] { fill: var(--rv-c10); stroke: var(--rv-c10); }
+    [data-hash="23"] { fill: var(--rv-c11); stroke: var(--rv-c11); }
+    [data-hash="24"] { fill: var(--rv-c12); stroke: var(--rv-c12); }
+    [data-hash="25"] { fill: var(--rv-c1); stroke: var(--rv-c1); }
+    [data-hash="26"] { fill: var(--rv-c2); stroke: var(--rv-c2); }
+    [data-hash="27"] { fill: var(--rv-c3); stroke: var(--rv-c3); }
+    [data-hash="28"] { fill: var(--rv-c4); stroke: var(--rv-c4); }
+    [data-hash="29"] { fill: var(--rv-c5); stroke: var(--rv-c5); }
+    [data-hash="30"] { fill: var(--rv-c6); stroke: var(--rv-c6); }
+    [data-hash="31"] { fill: var(--rv-c7); stroke: var(--rv-c7); }
+    [data-hash="32"] { fill: var(--rv-c8); stroke: var(--rv-c8); }
+
+        
+        text {
+            user-select: none;
+            -webkit-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
+        }
+        ]]>
+        </style>
+        <!-- used when pass to function by ref -->
+        <g id="functionDot">
+             <circle cx="0" cy="0" r="5" fill="transparent"/>
+             <text class="functionIcon" dx="-3.5" dy="0">f</text>
+        </g>
+        <marker id="arrowHead" viewBox="0 0 10 10"
+            refX="0" refY="4"
+            markerUnits="strokeWidth"
+            markerWidth="3px" markerHeight="3px"
+            orient="auto" class="arrow-head">
+            <path d="M 0 0 L 8.5 4 L 0 8 z" fill="inherit"/>
+        </marker>
+        <!-- glow highlight filter -->
+        <filter id="glow" x="-5000%" y="-5000%" width="10000%" height="10000%" filterUnits="userSpaceOnUse">
+            <feComposite in="flood" result="mask" in2="SourceGraphic" operator="in"></feComposite>
+            <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+            <feMerge>
+                <feMergeNode in="coloredBlur"></feMergeNode>
+                <feMergeNode in="coloredBlur"></feMergeNode>
+                <feMergeNode in="coloredBlur"></feMergeNode>
+                <feMergeNode in="SourceGraphic"></feMergeNode>
+            </feMerge>
+            <!-- increase brightness -->
+            <feComponentTransfer>
+                <feFuncR type="linear" slope="2"/>
+                <feFuncG type="linear" slope="2"/>
+                <feFuncB type="linear" slope="2"/>
+            </feComponentTransfer>
+        </filter>
+    </defs>
+
+        <g id="non-struct">
+	<g class="struct_instance">
+    <g id="labels">
+        <text x="70" y="215" style="text-anchor:middle" data-hash="3" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt;, mutable" data-rv-id="hdr:s" data-rv-kind="header" data-rv-var="s">s</text>
+        <text x="160" y="215" style="text-anchor:middle" data-hash="4" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;r&lt;/span&gt;, immutable" data-rv-id="hdr:r" data-rv-kind="header" data-rv-var="r">r<tspan stroke="none">|</tspan>*r</text>
+        <text x="230" y="215" style="text-anchor:middle" data-hash="5" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;f&lt;/span&gt;, mutable" data-rv-id="hdr:f" data-rv-kind="header" data-rv-var="f">f</text>
+        <text x="70" y="515" style="text-anchor:middle" data-hash="8" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;c&lt;/span&gt;, immutable" data-rv-id="hdr:c" data-rv-kind="header" data-rv-var="c">c</text>
+        <text x="165" y="515" style="text-anchor:middle" data-hash="10" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;t&lt;/span&gt;, immutable" data-rv-id="hdr:t" data-rv-kind="header" data-rv-var="t">t</text>
+        <text x="260" y="515" style="text-anchor:middle" data-hash="11" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;g&lt;/span&gt;, immutable" data-rv-id="hdr:g" data-rv-kind="header" data-rv-var="g">g</text>
+        <text x="70" y="755" style="text-anchor:middle" data-hash="13" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;k&lt;/span&gt;, immutable" data-rv-id="hdr:k" data-rv-kind="header" data-rv-var="k">k</text>
+        <text x="165" y="755" style="text-anchor:middle" data-hash="15" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;u&lt;/span&gt;, immutable" data-rv-id="hdr:u" data-rv-kind="header" data-rv-var="u">u</text>
+        <text x="260" y="755" style="text-anchor:middle" data-hash="16" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;h&lt;/span&gt;, immutable" data-rv-id="hdr:h" data-rv-kind="header" data-rv-var="h">h</text>
+        <text x="210" y="1085" style="text-anchor:middle" data-hash="20" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;k&lt;/span&gt;, immutable" data-rv-id="hdr:k#2" data-rv-kind="header" data-rv-var="k">k</text>
+        <text x="70" y="1265" style="text-anchor:middle" data-hash="22" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;c&lt;/span&gt;, immutable" data-rv-id="hdr:c#2" data-rv-kind="header" data-rv-var="c">c</text>
+        <text x="140" y="1265" style="text-anchor:middle" data-hash="24" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;w&lt;/span&gt;, immutable" data-rv-id="hdr:w" data-rv-kind="header" data-rv-var="w">w</text>
+        <text x="235" y="1265" style="text-anchor:middle" data-hash="25" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;m&lt;/span&gt;, immutable" data-rv-id="hdr:m" data-rv-kind="header" data-rv-var="m">m</text>
+        <text x="330" y="1265" style="text-anchor:middle" data-hash="26" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;n&lt;/span&gt;, immutable" data-rv-id="hdr:n" data-rv-kind="header" data-rv-var="n">n</text>
+    </g>
+
+    <g id="timelines">
+        <line data-hash="3" class="solid tooltip-trigger" x1="70.0" x2="70.0" y1="275" y2="335" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt; is the owner of the resource" data-rv-id="s@L8-10:line:full_privilege" data-rv-kind="line" data-rv-state="full_privilege" data-rv-var="s" data-rv-line="8" data-rv-line-end="10" style="opacity: 1.0; stroke-dasharray: none;"/>
+<g class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt;'s resource is mutably borrowed by &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;r&lt;/span&gt;; &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt; can't be used until the borrow ends" data-rv-id="s@L10-12:line:revoked_privilege" data-rv-kind="line" data-rv-state="revoked_privilege" data-rv-var="s" data-rv-line="10" data-rv-line-end="12" data-underline-y="335 392">
+            <line data-hash="3" class="lent" x1="70" y1="335" x2="70" y2="395"/>
+            <polygon data-hash="3" points="68.25,335 71.75,335 71.75,395 68.25,395" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+        </g>
+        <line data-hash="3" class="solid tooltip-trigger" x1="70.0" x2="70.0" y1="395" y2="455" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt; is the owner of the resource" data-rv-id="s@L12-14:line:full_privilege" data-rv-kind="line" data-rv-state="full_privilege" data-rv-var="s" data-rv-line="12" data-rv-line-end="14" style="opacity: 1.0; stroke-dasharray: none;"/>
+        <line data-hash="3" class="solid tooltip-trigger" x1="70.0" x2="70.0" y1="455" y2="485" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt; is the owner of the resource" data-rv-id="s@L14-15:line:full_privilege" data-rv-kind="line" data-rv-state="full_privilege" data-rv-var="s" data-rv-line="14" data-rv-line-end="15" style="opacity: 1.0; stroke-dasharray: none;"/>
+<g class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;r&lt;/span&gt; holds a mutable reference; it can read and write the borrowed resource" data-rv-id="r@L10-11:line:full_privilege" data-rv-kind="line" data-rv-state="full_privilege" data-rv-var="r" data-rv-line="10" data-rv-line-end="11">
+            <line data-hash="4" class="hollow" x1="158.25" y1="335.0" x2="158.25" y2="365.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <line data-hash="4" class="hollow" x1="161.75" y1="335.0" x2="161.75" y2="365.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <polygon data-hash="4" points="158.25,335.0 158.25,365.0 161.75,365.0 161.75,335.0" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+        </g>
+        <line data-hash="5" class="solid tooltip-trigger" x1="230.0" x2="230.0" y1="365" y2="425" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;f&lt;/span&gt; owns a closure" data-rv-id="f@L11-13:line:full_privilege" data-rv-kind="line" data-rv-state="full_privilege" data-rv-var="f" data-rv-line="11" data-rv-line-end="13" style="opacity: 1.0; stroke-dasharray: none;"/>
+<g class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;c&lt;/span&gt; holds a copyable value" data-rv-id="c@L16-22:line:full_privilege" data-rv-kind="line" data-rv-state="full_privilege" data-rv-var="c" data-rv-line="16" data-rv-line-end="22">
+            <line data-hash="8" class="hollow" x1="68.25" y1="545.0" x2="68.25" y2="725.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <line data-hash="8" class="hollow" x1="71.75" y1="545.0" x2="71.75" y2="725.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <polygon data-hash="8" points="68.25,545.0 68.25,725.0 71.75,725.0 71.75,545.0" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+        </g>
+        <g class="branch-group" data-arm-rows="20 22">
+            <line data-hash="10" class="hollow tooltip-trigger" x1="163.6556127607046" y1="603.8796773005871" x2="138.6556127607046" y2="633.8796773005871" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;t&lt;/span&gt; is the owner of the resource" data-rv-id="t@L18:branch_line:full_privilege/side1" data-rv-kind="branch_line" data-rv-state="full_privilege" data-rv-var="t" data-rv-line="18" data-rv-part="side1" data-underline="none" style="stroke-dasharray: none;"/>
+            <line data-hash="10" class="hollow tooltip-trigger" x1="166.3443872392954" y1="606.1203226994129" x2="141.3443872392954" y2="636.1203226994129" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;t&lt;/span&gt; is the owner of the resource" data-rv-id="t@L18:branch_line:full_privilege/side2" data-rv-kind="branch_line" data-rv-state="full_privilege" data-rv-var="t" data-rv-line="18" data-rv-part="side2" data-underline="none" style="stroke-dasharray: none;"/>
+            <polygon data-hash="10" class="tooltip-trigger" points="163.6556127607046,603.8796773005871 138.6556127607046,633.8796773005871 141.3443872392954,636.1203226994129 166.3443872392954,606.1203226994129" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;t&lt;/span&gt; is the owner of the resource" data-rv-id="t@L18:branch_line:full_privilege" data-rv-kind="branch_line" data-rv-state="full_privilege" data-rv-var="t" data-rv-line="18" data-underline="none" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+        </g>
+        <g class="branch-group">
+            <line data-hash="10" class="hollow tooltip-trigger" x1="163.6556127607046" y1="606.1203226994129" x2="188.6556127607046" y2="636.1203226994129" data-tooltip-text="This segment leads into the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;else&lt;/span&gt; branch." data-rv-id="t@L18:branch_line:full_privilege_gray/side1" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="t" data-rv-line="18" data-rv-part="side1" data-underline="none" style="stroke-dasharray: 4 4;"/>
+            <line data-hash="10" class="hollow tooltip-trigger" x1="166.3443872392954" y1="603.8796773005871" x2="191.3443872392954" y2="633.8796773005871" data-tooltip-text="This segment leads into the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;else&lt;/span&gt; branch." data-rv-id="t@L18:branch_line:full_privilege_gray/side2" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="t" data-rv-line="18" data-rv-part="side2" data-underline="none" style="stroke-dasharray: 4 4;"/>
+            <line data-hash="10" class="hollow tooltip-trigger" x1="188.25" y1="635" x2="188.25" y2="665" data-tooltip-text="This segment is for the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;else&lt;/span&gt; branch. The underlined code is not part of that branch." data-rv-id="t@L19-20:branch_line:full_privilege_gray/side1" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="t" data-rv-line="19" data-rv-line-end="20" data-rv-part="side1" data-underline-y="635 665" style="stroke-dasharray: 4 4;"/>
+            <line data-hash="10" class="hollow tooltip-trigger" x1="191.75" y1="635" x2="191.75" y2="665" data-tooltip-text="This segment is for the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;else&lt;/span&gt; branch. The underlined code is not part of that branch." data-rv-id="t@L19-20:branch_line:full_privilege_gray/side2" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="t" data-rv-line="19" data-rv-line-end="20" data-rv-part="side2" data-underline-y="635 665" style="stroke-dasharray: 4 4;"/>
+            <line data-hash="10" class="hollow tooltip-trigger" x1="188.6556127607046" y1="663.8796773005871" x2="163.6556127607046" y2="693.8796773005871" data-tooltip-text="This segment leads from the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;else&lt;/span&gt; branch to where the branches join." data-rv-id="t@L21:branch_line:full_privilege_gray/side1" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="t" data-rv-line="21" data-rv-part="side1" data-underline="none" style="stroke-dasharray: 4 4;"/>
+            <line data-hash="10" class="hollow tooltip-trigger" x1="191.3443872392954" y1="666.1203226994129" x2="166.3443872392954" y2="696.1203226994129" data-tooltip-text="This segment leads from the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;else&lt;/span&gt; branch to where the branches join." data-rv-id="t@L21:branch_line:full_privilege_gray/side2" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="t" data-rv-line="21" data-rv-part="side2" data-underline="none" style="stroke-dasharray: 4 4;"/>
+            <line data-hash="10" class="hollow tooltip-trigger" x1="188.6556127607046" y1="636.1203226994129" x2="188.25" y2="635" data-tooltip-text="This segment leads into the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;else&lt;/span&gt; branch." data-rv-id="t@L18:branch_line:full_privilege_gray/bevel1" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="t" data-rv-line="18" data-rv-part="bevel1" data-underline="none" style="stroke-dasharray: 4 4;"/>
+            <line data-hash="10" class="hollow tooltip-trigger" x1="191.3443872392954" y1="633.8796773005871" x2="191.75" y2="635" data-tooltip-text="This segment leads into the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;else&lt;/span&gt; branch." data-rv-id="t@L18:branch_line:full_privilege_gray/bevel2" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="t" data-rv-line="18" data-rv-part="bevel2" data-underline="none" style="stroke-dasharray: 4 4;"/>
+            <line data-hash="10" class="hollow tooltip-trigger" x1="188.25" y1="665" x2="188.6556127607046" y2="663.8796773005871" data-tooltip-text="This segment is for the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;else&lt;/span&gt; branch." data-rv-id="t@L19-20:branch_line:full_privilege_gray/bevel1" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="t" data-rv-line="19" data-rv-line-end="20" data-rv-part="bevel1" data-underline="none" style="stroke-dasharray: 4 4;"/>
+            <line data-hash="10" class="hollow tooltip-trigger" x1="191.75" y1="665" x2="191.3443872392954" y2="666.1203226994129" data-tooltip-text="This segment is for the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;else&lt;/span&gt; branch." data-rv-id="t@L19-20:branch_line:full_privilege_gray/bevel2" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="t" data-rv-line="19" data-rv-line-end="20" data-rv-part="bevel2" data-underline="none" style="stroke-dasharray: 4 4;"/>
+            <polygon data-hash="10" class="tooltip-trigger" points="163.6556127607046,606.1203226994129 188.6556127607046,636.1203226994129 191.3443872392954,633.8796773005871 166.3443872392954,603.8796773005871" data-tooltip-text="This segment leads into the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;else&lt;/span&gt; branch." data-rv-id="t@L18:branch_line:full_privilege_gray" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="t" data-rv-line="18" data-underline="none" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+            <polygon data-hash="10" class="tooltip-trigger" points="188.25,635 188.25,665 191.75,665 191.75,635" data-tooltip-text="This segment is for the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;else&lt;/span&gt; branch. The underlined code is not part of that branch." data-rv-id="t@L19-20:branch_line:full_privilege_gray" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="t" data-rv-line="19" data-rv-line-end="20" data-underline-y="635 665" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+            <polygon data-hash="10" class="tooltip-trigger" points="188.6556127607046,663.8796773005871 163.6556127607046,693.8796773005871 166.3443872392954,696.1203226994129 191.3443872392954,666.1203226994129" data-tooltip-text="This segment leads from the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;else&lt;/span&gt; branch to where the branches join." data-rv-id="t@L21:branch_line:full_privilege_gray" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="t" data-rv-line="21" data-underline="none" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+        </g>
+<g class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;t&lt;/span&gt; is the owner of the resource" data-rv-id="t@L17-18:line:full_privilege" data-rv-kind="line" data-rv-state="full_privilege" data-rv-var="t" data-rv-line="17" data-rv-line-end="18">
+            <line data-hash="10" class="hollow" x1="163.25" y1="575.0" x2="163.25" y2="605.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <line data-hash="10" class="hollow" x1="166.75" y1="575.0" x2="166.75" y2="605.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <polygon data-hash="10" points="163.25,575.0 163.25,605.0 166.75,605.0 166.75,575.0" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+        </g>
+<g class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;g&lt;/span&gt; owns a closure which owns 1 resource via capture" data-rv-id="g@L19-21:line:full_privilege" data-rv-kind="line" data-rv-state="full_privilege" data-rv-var="g" data-rv-line="19" data-rv-line-end="21">
+            <line data-hash="11" class="hollow" x1="258.25" y1="635.0" x2="258.25" y2="695.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <line data-hash="11" class="hollow" x1="261.75" y1="635.0" x2="261.75" y2="695.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <polygon data-hash="11" points="258.25,635.0 258.25,695.0 261.75,695.0 261.75,635.0" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+        </g>
+<g class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;k&lt;/span&gt; holds a copyable value" data-rv-id="k@L23-32:line:full_privilege" data-rv-kind="line" data-rv-state="full_privilege" data-rv-var="k" data-rv-line="23" data-rv-line-end="32">
+            <line data-hash="13" class="hollow" x1="68.25" y1="785.0" x2="68.25" y2="1055.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <line data-hash="13" class="hollow" x1="71.75" y1="785.0" x2="71.75" y2="1055.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <polygon data-hash="13" points="68.25,785.0 68.25,1055.0 71.75,1055.0 71.75,785.0" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+        </g>
+        <g class="branch-group" data-arm-rows="28 31">
+            <line data-hash="15" class="hollow tooltip-trigger" x1="163.6556127607046" y1="843.8796773005871" x2="138.6556127607046" y2="873.8796773005871" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;u&lt;/span&gt; is the owner of the resource" data-rv-id="u@L25:branch_line:full_privilege/side1" data-rv-kind="branch_line" data-rv-state="full_privilege" data-rv-var="u" data-rv-line="25" data-rv-part="side1" data-underline="none" style="stroke-dasharray: none;"/>
+            <line data-hash="15" class="hollow tooltip-trigger" x1="166.3443872392954" y1="846.1203226994129" x2="141.3443872392954" y2="876.1203226994129" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;u&lt;/span&gt; is the owner of the resource" data-rv-id="u@L25:branch_line:full_privilege/side2" data-rv-kind="branch_line" data-rv-state="full_privilege" data-rv-var="u" data-rv-line="25" data-rv-part="side2" data-underline="none" style="stroke-dasharray: none;"/>
+            <line data-hash="15" class="hollow tooltip-trigger" x1="138.25" y1="875" x2="138.25" y2="905" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;u&lt;/span&gt; is the owner of the resource" data-rv-id="u@L26-27:branch_line:full_privilege/side1" data-rv-kind="branch_line" data-rv-state="full_privilege" data-rv-var="u" data-rv-line="26" data-rv-line-end="27" data-rv-part="side1" data-underline-y="875 905" style="stroke-dasharray: none;"/>
+            <line data-hash="15" class="hollow tooltip-trigger" x1="141.75" y1="875" x2="141.75" y2="905" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;u&lt;/span&gt; is the owner of the resource" data-rv-id="u@L26-27:branch_line:full_privilege/side2" data-rv-kind="branch_line" data-rv-state="full_privilege" data-rv-var="u" data-rv-line="26" data-rv-line-end="27" data-rv-part="side2" data-underline-y="875 905" style="stroke-dasharray: none;"/>
+            <line data-hash="15" class="hollow tooltip-trigger" x1="138.6556127607046" y1="873.8796773005871" x2="138.25" y2="875" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;u&lt;/span&gt; is the owner of the resource" data-rv-id="u@L25:branch_line:full_privilege/bevel1" data-rv-kind="branch_line" data-rv-state="full_privilege" data-rv-var="u" data-rv-line="25" data-rv-part="bevel1" data-underline="none" style="stroke-dasharray: none;"/>
+            <line data-hash="15" class="hollow tooltip-trigger" x1="141.3443872392954" y1="876.1203226994129" x2="141.75" y2="875" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;u&lt;/span&gt; is the owner of the resource" data-rv-id="u@L25:branch_line:full_privilege/bevel2" data-rv-kind="branch_line" data-rv-state="full_privilege" data-rv-var="u" data-rv-line="25" data-rv-part="bevel2" data-underline="none" style="stroke-dasharray: none;"/>
+            <polygon data-hash="15" class="tooltip-trigger" points="163.6556127607046,843.8796773005871 138.6556127607046,873.8796773005871 141.3443872392954,876.1203226994129 166.3443872392954,846.1203226994129" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;u&lt;/span&gt; is the owner of the resource" data-rv-id="u@L25:branch_line:full_privilege" data-rv-kind="branch_line" data-rv-state="full_privilege" data-rv-var="u" data-rv-line="25" data-underline="none" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+            <polygon data-hash="15" class="tooltip-trigger" points="138.25,875 138.25,905 141.75,905 141.75,875" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;u&lt;/span&gt; is the owner of the resource" data-rv-id="u@L26-27:branch_line:full_privilege" data-rv-kind="branch_line" data-rv-state="full_privilege" data-rv-var="u" data-rv-line="26" data-rv-line-end="27" data-underline-y="875 905" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+        </g>
+        <g class="branch-group" data-arm-rows="32 32">
+            <line data-hash="15" class="hollow tooltip-trigger" x1="163.6556127607046" y1="846.1203226994129" x2="188.6556127607046" y2="876.1203226994129" data-tooltip-text="This segment leads into the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;_&lt;/span&gt; branch." data-rv-id="u@L25:branch_line:full_privilege_gray/side1" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="u" data-rv-line="25" data-rv-part="side1" data-underline="none" style="stroke-dasharray: 4 4;"/>
+            <line data-hash="15" class="hollow tooltip-trigger" x1="166.3443872392954" y1="843.8796773005871" x2="191.3443872392954" y2="873.8796773005871" data-tooltip-text="This segment leads into the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;_&lt;/span&gt; branch." data-rv-id="u@L25:branch_line:full_privilege_gray/side2" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="u" data-rv-line="25" data-rv-part="side2" data-underline="none" style="stroke-dasharray: 4 4;"/>
+            <line data-hash="15" class="hollow tooltip-trigger" x1="188.25" y1="875" x2="188.25" y2="980" data-tooltip-text="This segment is for the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;_&lt;/span&gt; branch. The underlined code is not part of that branch." data-rv-id="u@L26-30:branch_line:full_privilege_gray/side1" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="u" data-rv-line="26" data-rv-line-end="30" data-rv-part="side1" data-underline-y="875 980" style="stroke-dasharray: 4 4;"/>
+            <line data-hash="15" class="hollow tooltip-trigger" x1="191.75" y1="875" x2="191.75" y2="980" data-tooltip-text="This segment is for the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;_&lt;/span&gt; branch. The underlined code is not part of that branch." data-rv-id="u@L26-30:branch_line:full_privilege_gray/side2" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="u" data-rv-line="26" data-rv-line-end="30" data-rv-part="side2" data-underline-y="875 980" style="stroke-dasharray: 4 4;"/>
+            <line data-hash="15" class="hollow tooltip-trigger" x1="188.6556127607046" y1="876.1203226994129" x2="188.25" y2="875" data-tooltip-text="This segment leads into the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;_&lt;/span&gt; branch." data-rv-id="u@L25:branch_line:full_privilege_gray/bevel1" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="u" data-rv-line="25" data-rv-part="bevel1" data-underline="none" style="stroke-dasharray: 4 4;"/>
+            <line data-hash="15" class="hollow tooltip-trigger" x1="191.3443872392954" y1="873.8796773005871" x2="191.75" y2="875" data-tooltip-text="This segment leads into the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;_&lt;/span&gt; branch." data-rv-id="u@L25:branch_line:full_privilege_gray/bevel2" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="u" data-rv-line="25" data-rv-part="bevel2" data-underline="none" style="stroke-dasharray: 4 4;"/>
+            <polygon data-hash="15" class="tooltip-trigger" points="163.6556127607046,846.1203226994129 188.6556127607046,876.1203226994129 191.3443872392954,873.8796773005871 166.3443872392954,843.8796773005871" data-tooltip-text="This segment leads into the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;_&lt;/span&gt; branch." data-rv-id="u@L25:branch_line:full_privilege_gray" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="u" data-rv-line="25" data-underline="none" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+            <polygon data-hash="15" class="tooltip-trigger" points="188.25,875 188.25,980 191.75,980 191.75,875" data-tooltip-text="This segment is for the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;_&lt;/span&gt; branch. The underlined code is not part of that branch." data-rv-id="u@L26-30:branch_line:full_privilege_gray" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="u" data-rv-line="26" data-rv-line-end="30" data-underline-y="875 980" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+        </g>
+        <g class="branch-group" data-arm-rows="32 32">
+            <line data-hash="15" class="hollow tooltip-trigger" x1="188.25" y1="980" x2="188.25" y2="1010" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;u&lt;/span&gt; is the owner of the resource" data-rv-id="u@L30:branch_line:full_privilege/side1" data-rv-kind="branch_line" data-rv-state="full_privilege" data-rv-var="u" data-rv-line="30" data-rv-part="side1" data-underline-y="995 1000" style="stroke-dasharray: none;"/>
+            <line data-hash="15" class="hollow tooltip-trigger" x1="191.75" y1="980" x2="191.75" y2="1010" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;u&lt;/span&gt; is the owner of the resource" data-rv-id="u@L30:branch_line:full_privilege/side2" data-rv-kind="branch_line" data-rv-state="full_privilege" data-rv-var="u" data-rv-line="30" data-rv-part="side2" data-underline-y="995 1000" style="stroke-dasharray: none;"/>
+            <line data-hash="15" class="hollow tooltip-trigger" x1="188.25" y1="1010" x2="189.09963242800183" y2="1008.4993873800031" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;u&lt;/span&gt; is the owner of the resource" data-rv-id="u@L30:branch_line:full_privilege/bevel1" data-rv-kind="branch_line" data-rv-state="full_privilege" data-rv-var="u" data-rv-line="30" data-rv-part="bevel1" data-underline="none" style="stroke-dasharray: none;"/>
+            <line data-hash="15" class="hollow tooltip-trigger" x1="191.75" y1="1010" x2="190.90036757199817" y2="1011.5006126199969" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;u&lt;/span&gt; is the owner of the resource" data-rv-id="u@L30:branch_line:full_privilege/bevel2" data-rv-kind="branch_line" data-rv-state="full_privilege" data-rv-var="u" data-rv-line="30" data-rv-part="bevel2" data-underline="none" style="stroke-dasharray: none;"/>
+            <polygon data-hash="15" class="tooltip-trigger" points="188.25,980 188.25,1010 191.75,1010 191.75,980" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;u&lt;/span&gt; is the owner of the resource" data-rv-id="u@L30:branch_line:full_privilege" data-rv-kind="branch_line" data-rv-state="full_privilege" data-rv-var="u" data-rv-line="30" data-underline-y="995 1000" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+        </g>
+        <g class="branch-group" data-arm-rows="32 32">
+            <line data-hash="15" class="hollow tooltip-trigger" x1="189.09963242800183" y1="1008.4993873800031" x2="164.09963242800183" y2="1023.4993873800031" data-tooltip-text="This segment leads from the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;_&lt;/span&gt; branch to where the branches join." data-rv-id="u@L31:branch_line:full_privilege_gray/side1" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="u" data-rv-line="31" data-rv-part="side1" data-underline="none" style="stroke-dasharray: 4 4;"/>
+            <line data-hash="15" class="hollow tooltip-trigger" x1="190.90036757199817" y1="1011.5006126199969" x2="165.90036757199817" y2="1026.500612619997" data-tooltip-text="This segment leads from the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;_&lt;/span&gt; branch to where the branches join." data-rv-id="u@L31:branch_line:full_privilege_gray/side2" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="u" data-rv-line="31" data-rv-part="side2" data-underline="none" style="stroke-dasharray: 4 4;"/>
+            <polygon data-hash="15" class="tooltip-trigger" points="189.09963242800183,1008.4993873800031 164.09963242800183,1023.4993873800031 165.90036757199817,1026.500612619997 190.90036757199817,1011.5006126199969" data-tooltip-text="This segment leads from the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;_&lt;/span&gt; branch to where the branches join." data-rv-id="u@L31:branch_line:full_privilege_gray" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="u" data-rv-line="31" data-underline="none" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+        </g>
+<g class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;u&lt;/span&gt; is the owner of the resource" data-rv-id="u@L24-25:line:full_privilege" data-rv-kind="line" data-rv-state="full_privilege" data-rv-var="u" data-rv-line="24" data-rv-line-end="25">
+            <line data-hash="15" class="hollow" x1="163.25" y1="815.0" x2="163.25" y2="845.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <line data-hash="15" class="hollow" x1="166.75" y1="815.0" x2="166.75" y2="845.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <polygon data-hash="15" points="163.25,815.0 163.25,845.0 166.75,845.0 166.75,815.0" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+        </g>
+<g class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;h&lt;/span&gt; owns a closure which owns 1 resource via capture" data-rv-id="h@L27-29:line:full_privilege" data-rv-kind="line" data-rv-state="full_privilege" data-rv-var="h" data-rv-line="27" data-rv-line-end="29">
+            <line data-hash="16" class="hollow" x1="258.25" y1="905.0" x2="258.25" y2="965.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <line data-hash="16" class="hollow" x1="261.75" y1="905.0" x2="261.75" y2="965.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <polygon data-hash="16" points="258.25,905.0 258.25,965.0 261.75,965.0 261.75,905.0" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+        </g>
+<g class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;k&lt;/span&gt; owns a closure" data-rv-id="k@L35-37:line:full_privilege" data-rv-kind="line" data-rv-state="full_privilege" data-rv-var="k" data-rv-line="35" data-rv-line-end="37">
+            <line data-hash="20" class="hollow" x1="208.25" y1="1175.0" x2="208.25" y2="1235.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <line data-hash="20" class="hollow" x1="211.75" y1="1175.0" x2="211.75" y2="1235.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <polygon data-hash="20" points="208.25,1175.0 208.25,1235.0 211.75,1235.0 211.75,1175.0" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+        </g>
+<g class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;c&lt;/span&gt; holds a copyable value" data-rv-id="c@L38-45:line:full_privilege" data-rv-kind="line" data-rv-state="full_privilege" data-rv-var="c" data-rv-line="38" data-rv-line-end="45">
+            <line data-hash="22" class="hollow" x1="68.25" y1="1295.0" x2="68.25" y2="1505.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <line data-hash="22" class="hollow" x1="71.75" y1="1295.0" x2="71.75" y2="1505.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <polygon data-hash="22" points="68.25,1295.0 68.25,1505.0 71.75,1505.0 71.75,1295.0" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+        </g>
+<g class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;w&lt;/span&gt; is the owner of the resource" data-rv-id="w@L39-40:line:full_privilege" data-rv-kind="line" data-rv-state="full_privilege" data-rv-var="w" data-rv-line="39" data-rv-line-end="40">
+            <line data-hash="24" class="hollow" x1="138.25" y1="1325.0" x2="138.25" y2="1355.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <line data-hash="24" class="hollow" x1="141.75" y1="1325.0" x2="141.75" y2="1355.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <polygon data-hash="24" points="138.25,1325.0 138.25,1355.0 141.75,1355.0 141.75,1325.0" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+        </g>
+        <g class="branch-group" data-arm-rows="46 48">
+            <line data-hash="25" class="hollow tooltip-trigger" x1="233.6556127607046" y1="1383.8796773005872" x2="208.6556127607046" y2="1413.8796773005872" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;m&lt;/span&gt; owns a closure which owns 1 resource via capture" data-rv-id="m@L41:branch_line:full_privilege/side1" data-rv-kind="branch_line" data-rv-state="full_privilege" data-rv-var="m" data-rv-line="41" data-rv-part="side1" data-underline="none" style="stroke-dasharray: none;"/>
+            <line data-hash="25" class="hollow tooltip-trigger" x1="236.3443872392954" y1="1386.1203226994128" x2="211.3443872392954" y2="1416.1203226994128" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;m&lt;/span&gt; owns a closure which owns 1 resource via capture" data-rv-id="m@L41:branch_line:full_privilege/side2" data-rv-kind="branch_line" data-rv-state="full_privilege" data-rv-var="m" data-rv-line="41" data-rv-part="side2" data-underline="none" style="stroke-dasharray: none;"/>
+            <polygon data-hash="25" class="tooltip-trigger" points="233.6556127607046,1383.8796773005872 208.6556127607046,1413.8796773005872 211.3443872392954,1416.1203226994128 236.3443872392954,1386.1203226994128" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;m&lt;/span&gt; owns a closure which owns 1 resource via capture" data-rv-id="m@L41:branch_line:full_privilege" data-rv-kind="branch_line" data-rv-state="full_privilege" data-rv-var="m" data-rv-line="41" data-underline="none" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+        </g>
+        <g class="branch-group">
+            <line data-hash="25" class="hollow tooltip-trigger" x1="233.6556127607046" y1="1386.1203226994128" x2="258.65561276070457" y2="1416.1203226994128" data-tooltip-text="This segment leads into the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;else&lt;/span&gt; branch." data-rv-id="m@L41:branch_line:full_privilege_gray/side1" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="m" data-rv-line="41" data-rv-part="side1" data-underline="none" style="stroke-dasharray: 4 4;"/>
+            <line data-hash="25" class="hollow tooltip-trigger" x1="236.3443872392954" y1="1383.8796773005872" x2="261.34438723929543" y2="1413.8796773005872" data-tooltip-text="This segment leads into the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;else&lt;/span&gt; branch." data-rv-id="m@L41:branch_line:full_privilege_gray/side2" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="m" data-rv-line="41" data-rv-part="side2" data-underline="none" style="stroke-dasharray: 4 4;"/>
+            <line data-hash="25" class="hollow tooltip-trigger" x1="258.25" y1="1415" x2="258.25" y2="1445" data-tooltip-text="This segment is for the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;else&lt;/span&gt; branch. The underlined code is not part of that branch." data-rv-id="m@L42-43:branch_line:full_privilege_gray/side1" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="m" data-rv-line="42" data-rv-line-end="43" data-rv-part="side1" data-underline-y="1415 1445" style="stroke-dasharray: 4 4;"/>
+            <line data-hash="25" class="hollow tooltip-trigger" x1="261.75" y1="1415" x2="261.75" y2="1445" data-tooltip-text="This segment is for the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;else&lt;/span&gt; branch. The underlined code is not part of that branch." data-rv-id="m@L42-43:branch_line:full_privilege_gray/side2" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="m" data-rv-line="42" data-rv-line-end="43" data-rv-part="side2" data-underline-y="1415 1445" style="stroke-dasharray: 4 4;"/>
+            <line data-hash="25" class="hollow tooltip-trigger" x1="258.65561276070457" y1="1443.8796773005872" x2="233.6556127607046" y2="1473.8796773005872" data-tooltip-text="This segment leads from the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;else&lt;/span&gt; branch to where the branches join." data-rv-id="m@L44:branch_line:full_privilege_gray/side1" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="m" data-rv-line="44" data-rv-part="side1" data-underline="none" style="stroke-dasharray: 4 4;"/>
+            <line data-hash="25" class="hollow tooltip-trigger" x1="261.34438723929543" y1="1446.1203226994128" x2="236.3443872392954" y2="1476.1203226994128" data-tooltip-text="This segment leads from the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;else&lt;/span&gt; branch to where the branches join." data-rv-id="m@L44:branch_line:full_privilege_gray/side2" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="m" data-rv-line="44" data-rv-part="side2" data-underline="none" style="stroke-dasharray: 4 4;"/>
+            <line data-hash="25" class="hollow tooltip-trigger" x1="258.65561276070457" y1="1416.1203226994128" x2="258.25" y2="1415" data-tooltip-text="This segment leads into the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;else&lt;/span&gt; branch." data-rv-id="m@L41:branch_line:full_privilege_gray/bevel1" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="m" data-rv-line="41" data-rv-part="bevel1" data-underline="none" style="stroke-dasharray: 4 4;"/>
+            <line data-hash="25" class="hollow tooltip-trigger" x1="261.34438723929543" y1="1413.8796773005872" x2="261.75" y2="1415" data-tooltip-text="This segment leads into the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;else&lt;/span&gt; branch." data-rv-id="m@L41:branch_line:full_privilege_gray/bevel2" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="m" data-rv-line="41" data-rv-part="bevel2" data-underline="none" style="stroke-dasharray: 4 4;"/>
+            <line data-hash="25" class="hollow tooltip-trigger" x1="258.25" y1="1445" x2="258.65561276070457" y2="1443.8796773005872" data-tooltip-text="This segment is for the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;else&lt;/span&gt; branch." data-rv-id="m@L42-43:branch_line:full_privilege_gray/bevel1" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="m" data-rv-line="42" data-rv-line-end="43" data-rv-part="bevel1" data-underline="none" style="stroke-dasharray: 4 4;"/>
+            <line data-hash="25" class="hollow tooltip-trigger" x1="261.75" y1="1445" x2="261.34438723929543" y2="1446.1203226994128" data-tooltip-text="This segment is for the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;else&lt;/span&gt; branch." data-rv-id="m@L42-43:branch_line:full_privilege_gray/bevel2" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="m" data-rv-line="42" data-rv-line-end="43" data-rv-part="bevel2" data-underline="none" style="stroke-dasharray: 4 4;"/>
+            <polygon data-hash="25" class="tooltip-trigger" points="233.6556127607046,1386.1203226994128 258.65561276070457,1416.1203226994128 261.34438723929543,1413.8796773005872 236.3443872392954,1383.8796773005872" data-tooltip-text="This segment leads into the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;else&lt;/span&gt; branch." data-rv-id="m@L41:branch_line:full_privilege_gray" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="m" data-rv-line="41" data-underline="none" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+            <polygon data-hash="25" class="tooltip-trigger" points="258.25,1415 258.25,1445 261.75,1445 261.75,1415" data-tooltip-text="This segment is for the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;else&lt;/span&gt; branch. The underlined code is not part of that branch." data-rv-id="m@L42-43:branch_line:full_privilege_gray" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="m" data-rv-line="42" data-rv-line-end="43" data-underline-y="1415 1445" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+            <polygon data-hash="25" class="tooltip-trigger" points="258.65561276070457,1443.8796773005872 233.6556127607046,1473.8796773005872 236.3443872392954,1476.1203226994128 261.34438723929543,1446.1203226994128" data-tooltip-text="This segment leads from the &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;else&lt;/span&gt; branch to where the branches join." data-rv-id="m@L44:branch_line:full_privilege_gray" data-rv-kind="branch_line" data-rv-state="full_privilege_gray" data-rv-var="m" data-rv-line="44" data-underline="none" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+        </g>
+<g class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;m&lt;/span&gt; owns a closure which owns 1 resource via capture" data-rv-id="m@L40-41:line:full_privilege" data-rv-kind="line" data-rv-state="full_privilege" data-rv-var="m" data-rv-line="40" data-rv-line-end="41">
+            <line data-hash="25" class="hollow" x1="233.25" y1="1355.0" x2="233.25" y2="1385.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <line data-hash="25" class="hollow" x1="236.75" y1="1355.0" x2="236.75" y2="1385.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <polygon data-hash="25" points="233.25,1355.0 233.25,1385.0 236.75,1385.0 236.75,1355.0" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+        </g>
+<g class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;n&lt;/span&gt; owns a closure which owns 1 resource via capture" data-rv-id="n@L42-44:line:full_privilege" data-rv-kind="line" data-rv-state="full_privilege" data-rv-var="n" data-rv-line="42" data-rv-line-end="44">
+            <line data-hash="26" class="hollow" x1="328.25" y1="1415.0" x2="328.25" y2="1475.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <line data-hash="26" class="hollow" x1="331.75" y1="1415.0" x2="331.75" y2="1475.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <polygon data-hash="26" points="328.25,1415.0 328.25,1475.0 331.75,1475.0 331.75,1415.0" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+        </g>
+    </g>
+
+    <g id="ref_line">
+        <path data-hash="4" class="mutref solid tooltip-trigger" style="fill:transparent; stroke-width: 2px !important; pointer-events: all;" d="M 160 335 l 15 6 v 18 l -15 6" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;r&lt;/span&gt; holds a mutable reference" data-rv-id="r@L10-11:bracket:full_privilege" data-rv-kind="bracket" data-rv-state="full_privilege" data-rv-var="r" data-rv-line="10" data-rv-line-end="11"/>
+    </g>
+
+    <g id="arrows">
+        <g class="tooltip-trigger" data-tooltip-text="Move from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;String::from&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt;" data-rv-id="String::from>s@L8:arrow:move" data-rv-kind="arrow" data-rv-event="move" data-rv-var="String::from" data-rv-to="s" data-rv-line="8">
+            <polyline class="arrow-shaft" stroke-width="5px" points="90 275 88 275 " style="fill: none;"/>
+            <polygon points="88,281 75.25,275 88,269" class="arrow-head"/>
+        </g>
+        <g class="tooltip-trigger" data-tooltip-text="Mutable borrow from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;r&lt;/span&gt;" data-rv-id="s>r@L10:arrow:mutable_borrow" data-rv-kind="arrow" data-rv-event="mutable_borrow" data-rv-var="s" data-rv-to="r" data-rv-line="10">
+            <polyline class="arrow-shaft" stroke-width="5px" points="75.25 335 142 335 " style="fill: none;"/>
+            <polygon points="142,329 154.75,335 142,341" class="arrow-head"/>
+        </g>
+        <g class="tooltip-trigger" data-tooltip-text="Closure capture (move) from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;r&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;f&lt;/span&gt;" data-rv-id="r>f@L11:arrow:move" data-rv-kind="arrow" data-rv-event="move" data-rv-var="r" data-rv-to="f" data-rv-line="11">
+            <polyline class="arrow-shaft" stroke-width="5px" points="165.25 365 212 365 " style="fill: none;"/>
+            <polygon points="212,359 224.75,365 212,371" class="arrow-head"/>
+        </g>
+        <g class="tooltip-trigger" data-tooltip-text="Return mutably borrowed resource from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;f&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt;" data-rv-id="f>s@L12:arrow:mutable_die" data-rv-kind="arrow" data-rv-event="mutable_die" data-rv-var="f" data-rv-to="s" data-rv-line="12">
+            <polyline class="arrow-shaft" stroke-width="5px" points="224.75 395 88 395 " style="fill: none;"/>
+            <polygon points="88,401 75.25,395 88,389" class="arrow-head"/>
+        </g>
+        <g class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;c&lt;/span&gt; is a copy of the caller's value" data-rv-id="caller>c@L16:arrow:init_ref_param" data-rv-kind="arrow" data-rv-event="init_ref_param" data-rv-var="caller" data-rv-to="c" data-rv-line="16">
+            <polyline class="arrow-shaft" stroke-width="5px" points="98 537.4166666666666 98 545 88 545" style="fill: none;"/>
+            <polygon points="88,551 75.25,545 88,539" class="arrow-head"/>
+        </g>
+        <g class="tooltip-trigger" data-tooltip-text="Move from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;String::from&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;t&lt;/span&gt;" data-rv-id="String::from>t@L17:arrow:move" data-rv-kind="arrow" data-rv-event="move" data-rv-var="String::from" data-rv-to="t" data-rv-line="17">
+            <polyline class="arrow-shaft" stroke-width="5px" points="185 575 183 575 " style="fill: none;"/>
+            <polygon points="183,581 170.25,575 183,569" class="arrow-head"/>
+        </g>
+        <g class="tooltip-trigger" data-tooltip-text="Closure capture (move) from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;t&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;g&lt;/span&gt;" data-rv-id="t>g@L19:arrow:move" data-rv-kind="arrow" data-rv-event="move" data-rv-var="t" data-rv-to="g" data-rv-line="19">
+            <polyline class="arrow-shaft" stroke-width="5px" points="145.25 635 242 635 " style="fill: none;"/>
+            <polygon points="242,629 254.75,635 242,641" class="arrow-head"/>
+        </g>
+        <g class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;k&lt;/span&gt; is a copy of the caller's value" data-rv-id="caller>k@L23:arrow:init_ref_param" data-rv-kind="arrow" data-rv-event="init_ref_param" data-rv-var="caller" data-rv-to="k" data-rv-line="23">
+            <polyline class="arrow-shaft" stroke-width="5px" points="98 777.4166666666666 98 785 88 785" style="fill: none;"/>
+            <polygon points="88,791 75.25,785 88,779" class="arrow-head"/>
+        </g>
+        <g class="tooltip-trigger" data-tooltip-text="Move from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;String::from&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;u&lt;/span&gt;" data-rv-id="String::from>u@L24:arrow:move" data-rv-kind="arrow" data-rv-event="move" data-rv-var="String::from" data-rv-to="u" data-rv-line="24">
+            <polyline class="arrow-shaft" stroke-width="5px" points="185 815 183 815 " style="fill: none;"/>
+            <polygon points="183,821 170.25,815 183,809" class="arrow-head"/>
+        </g>
+        <g class="tooltip-trigger" data-tooltip-text="Closure capture (move) from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;u&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;h&lt;/span&gt;" data-rv-id="u>h@L27:arrow:move" data-rv-kind="arrow" data-rv-event="move" data-rv-var="u" data-rv-to="h" data-rv-line="27">
+            <polyline class="arrow-shaft" stroke-width="5px" points="145.25 905 242 905 " style="fill: none;"/>
+            <polygon points="242,899 254.75,905 242,911" class="arrow-head"/>
+        </g>
+        <g class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;c&lt;/span&gt; is a copy of the caller's value" data-rv-id="caller>c@L38:arrow:init_ref_param" data-rv-kind="arrow" data-rv-event="init_ref_param" data-rv-var="caller" data-rv-to="c" data-rv-line="38">
+            <polyline class="arrow-shaft" stroke-width="5px" points="98 1287.4166666666667 98 1295 88 1295" style="fill: none;"/>
+            <polygon points="88,1301 75.25,1295 88,1289" class="arrow-head"/>
+        </g>
+        <g class="tooltip-trigger" data-tooltip-text="Move from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;String::from&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;w&lt;/span&gt;" data-rv-id="String::from>w@L39:arrow:move" data-rv-kind="arrow" data-rv-event="move" data-rv-var="String::from" data-rv-to="w" data-rv-line="39">
+            <polyline class="arrow-shaft" stroke-width="5px" points="160 1325 158 1325 " style="fill: none;"/>
+            <polygon points="158,1331 145.25,1325 158,1319" class="arrow-head"/>
+        </g>
+        <g class="tooltip-trigger" data-tooltip-text="Closure capture (move) from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;w&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;m&lt;/span&gt;" data-rv-id="w>m@L40:arrow:move" data-rv-kind="arrow" data-rv-event="move" data-rv-var="w" data-rv-to="m" data-rv-line="40">
+            <polyline class="arrow-shaft" stroke-width="5px" points="145.25 1355 217 1355 " style="fill: none;"/>
+            <polygon points="217,1349 229.75,1355 217,1361" class="arrow-head"/>
+        </g>
+        <g class="tooltip-trigger" data-tooltip-text="Move from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;m&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;n&lt;/span&gt;" data-rv-id="m>n@L42:arrow:move" data-rv-kind="arrow" data-rv-event="move" data-rv-var="m" data-rv-to="n" data-rv-line="42">
+            <polyline class="arrow-shaft" stroke-width="5px" points="215.25 1415 312 1415 " style="fill: none;"/>
+            <polygon points="312,1409 324.75,1415 312,1421" class="arrow-head"/>
+        </g>
+    </g>
+
+    <g id="events">
+        <circle cx="70" cy="275" r="5" data-hash="3" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt; acquires ownership of a resource" data-rv-id="s@L8:dot:acquire" data-rv-kind="dot" data-rv-event="acquire" data-rv-var="s" data-rv-line="8"/>
+        <circle cx="70" cy="335" r="5" data-hash="3" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt;'s resource is mutably borrowed by &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;r&lt;/span&gt;; &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt; can't be used while the borrow is live" data-rv-id="s@L10:dot:mutable_lend" data-rv-kind="dot" data-rv-event="mutable_lend" data-rv-var="s" data-rv-line="10"/>
+        <circle cx="70" cy="395" r="5" data-hash="3" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt;'s resource is no longer mutably borrowed" data-rv-id="s@L12:dot:mutable_reacquire" data-rv-kind="dot" data-rv-event="mutable_reacquire" data-rv-var="s" data-rv-line="12"/>
+        <g class="tooltip-trigger" data-tooltip-text="• &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt;'s resource is immutably borrowed by &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;println!&lt;/span&gt;; &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt; is read-only while the borrow is live&lt;br&gt;• &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;println!&lt;/span&gt; reads from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt; through an implicit reference, so &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt; isn't moved&lt;br&gt;• &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt;'s resource is no longer immutably borrowed" data-rv-id="s@L14:dot:static_lend+static_reacquire+pass_by_static_reference" data-rv-kind="dot" data-rv-event="static_lend static_reacquire pass_by_static_reference" data-rv-var="s" data-rv-line="14">
+            <circle cx="70" cy="455" r="5" data-hash="3"/>
+            <use xlink:href="#functionDot" data-hash="3" x="70" y="455"/>
+        </g>
+        <g data-hash="3" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;s&lt;/span&gt; goes out of scope. Its resource is dropped." data-rv-id="s@L15:dot:owner_go_out_of_scope" data-rv-kind="dot" data-rv-event="owner_go_out_of_scope" data-rv-var="s" data-rv-line="15" data-rv-drop="true">
+            <circle cx="70" cy="485" r="5"/>
+            <polygon points="67,484 73,484 70,488" style="fill: var(--rv-drop-notch); stroke: none; pointer-events: none;"/>
+        </g>
+        <circle cx="160" cy="335" r="5" data-hash="4" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;r&lt;/span&gt; mutably borrows a resource" data-rv-id="r@L10:dot:mutable_borrow" data-rv-kind="dot" data-rv-event="mutable_borrow" data-rv-var="r" data-rv-line="10"/>
+        <circle cx="160" cy="365" r="5" data-hash="4" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;r&lt;/span&gt;'s reference is captured (moved) by closure &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;f&lt;/span&gt;; the data it points to is not moved" data-rv-id="r@L11:dot:move" data-rv-kind="dot" data-rv-event="move" data-rv-var="r" data-rv-line="11"/>
+        <circle cx="160" cy="425" r="5" data-hash="4" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;r&lt;/span&gt; goes out of scope" data-rv-id="r@L13:dot:ref_go_out_of_scope" data-rv-kind="dot" data-rv-event="ref_go_out_of_scope" data-rv-var="r" data-rv-line="13"/>
+        <circle cx="230" cy="365" r="5" data-hash="5" class="tooltip-trigger" data-tooltip-text="Closure &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;f&lt;/span&gt; captures: &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;r&lt;/span&gt; (moved)" data-rv-id="f@L11:dot:acquire" data-rv-kind="dot" data-rv-event="acquire" data-rv-var="f" data-rv-line="11"/>
+        <circle cx="230" cy="395" r="5" data-hash="5" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;f&lt;/span&gt;'s mutable borrow ends" data-rv-id="f@L12:dot:mutable_die" data-rv-kind="dot" data-rv-event="mutable_die" data-rv-var="f" data-rv-line="12"/>
+        <circle cx="230" cy="425" r="5" data-hash="5" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;f&lt;/span&gt; goes out of scope" data-rv-id="f@L13:dot:owner_go_out_of_scope" data-rv-kind="dot" data-rv-event="owner_go_out_of_scope" data-rv-var="f" data-rv-line="13"/>
+        <circle cx="70" cy="545" r="5" data-hash="8" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;c&lt;/span&gt; is a copy of the caller's value" data-rv-id="c@L16:dot:init_ref_param" data-rv-kind="dot" data-rv-event="init_ref_param" data-rv-var="c" data-rv-line="16"/>
+        <circle cx="70" cy="725" r="5" data-hash="8" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;c&lt;/span&gt; goes out of scope" data-rv-id="c@L22:dot:owner_go_out_of_scope" data-rv-kind="dot" data-rv-event="owner_go_out_of_scope" data-rv-var="c" data-rv-line="22"/>
+        <circle cx="165" cy="575" r="5" data-hash="10" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;t&lt;/span&gt; acquires ownership of a resource" data-rv-id="t@L17:dot:acquire" data-rv-kind="dot" data-rv-event="acquire" data-rv-var="t" data-rv-line="17"/>
+        <circle cx="165" cy="605" r="5" data-hash="10" class="tooltip-trigger" data-tooltip-text="t is live in a conditional expression " data-rv-id="t@L18:dot:branch" data-rv-kind="dot" data-rv-event="branch" data-rv-var="t" data-rv-line="18"/>
+        <circle cx="140" cy="635" r="5" data-hash="10" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;t&lt;/span&gt;'s resource is captured (moved) by closure &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;g&lt;/span&gt;" data-rv-id="t@L19:dot:move" data-rv-kind="dot" data-rv-event="move" data-rv-var="t" data-rv-line="19"/>
+        <circle cx="165" cy="695" r="5" data-hash="10" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;t&lt;/span&gt; was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;t&lt;/span&gt; goes out of scope." data-rv-id="t@L21:dot:branch_join" data-rv-kind="dot" data-rv-event="branch_join" data-rv-var="t" data-rv-line="21"/>
+        <g data-hash="10" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;t&lt;/span&gt; goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag)." data-rv-id="t@L22:dot:owner_go_out_of_scope" data-rv-kind="dot" data-rv-event="owner_go_out_of_scope" data-rv-var="t" data-rv-line="22" data-rv-drop="true">
+            <circle cx="165" cy="725" r="5"/>
+            <polygon points="162,724 168,724 165,728" style="fill: var(--rv-drop-notch); stroke: none; pointer-events: none;"/>
+        </g>
+        <circle cx="260" cy="635" r="5" data-hash="11" class="tooltip-trigger" data-tooltip-text="Closure &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;g&lt;/span&gt; captures: &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;t&lt;/span&gt; (moved)" data-rv-id="g@L19:dot:acquire" data-rv-kind="dot" data-rv-event="acquire" data-rv-var="g" data-rv-line="19"/>
+        <g data-hash="11" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;g&lt;/span&gt; goes out of scope. Its 1 captured resource is dropped." data-rv-id="g@L21:dot:owner_go_out_of_scope" data-rv-kind="dot" data-rv-event="owner_go_out_of_scope" data-rv-var="g" data-rv-line="21" data-rv-drop="true">
+            <circle cx="260" cy="695" r="5"/>
+            <polygon points="257,694 263,694 260,698" style="fill: var(--rv-drop-notch); stroke: none; pointer-events: none;"/>
+        </g>
+        <circle cx="70" cy="785" r="5" data-hash="13" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;k&lt;/span&gt; is a copy of the caller's value" data-rv-id="k@L23:dot:init_ref_param" data-rv-kind="dot" data-rv-event="init_ref_param" data-rv-var="k" data-rv-line="23"/>
+        <circle cx="70" cy="1055" r="5" data-hash="13" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;k&lt;/span&gt; goes out of scope" data-rv-id="k@L32:dot:owner_go_out_of_scope" data-rv-kind="dot" data-rv-event="owner_go_out_of_scope" data-rv-var="k" data-rv-line="32"/>
+        <circle cx="165" cy="815" r="5" data-hash="15" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;u&lt;/span&gt; acquires ownership of a resource" data-rv-id="u@L24:dot:acquire" data-rv-kind="dot" data-rv-event="acquire" data-rv-var="u" data-rv-line="24"/>
+        <circle cx="165" cy="845" r="5" data-hash="15" class="tooltip-trigger" data-tooltip-text="u is live in a conditional expression " data-rv-id="u@L25:dot:branch" data-rv-kind="dot" data-rv-event="branch" data-rv-var="u" data-rv-line="25"/>
+        <circle cx="140" cy="905" r="5" data-hash="15" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;u&lt;/span&gt;'s resource is captured (moved) by closure &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;h&lt;/span&gt;" data-rv-id="u@L27:dot:move" data-rv-kind="dot" data-rv-event="move" data-rv-var="u" data-rv-line="27"/>
+        <circle cx="165" cy="1025" r="5" data-hash="15" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;u&lt;/span&gt; was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;u&lt;/span&gt; goes out of scope." data-rv-id="u@L31:dot:branch_join" data-rv-kind="dot" data-rv-event="branch_join" data-rv-var="u" data-rv-line="31"/>
+        <g data-hash="15" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;u&lt;/span&gt; goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag)." data-rv-id="u@L32:dot:owner_go_out_of_scope" data-rv-kind="dot" data-rv-event="owner_go_out_of_scope" data-rv-var="u" data-rv-line="32" data-rv-drop="true">
+            <circle cx="165" cy="1055" r="5"/>
+            <polygon points="162,1054 168,1054 165,1058" style="fill: var(--rv-drop-notch); stroke: none; pointer-events: none;"/>
+        </g>
+        <circle cx="260" cy="905" r="5" data-hash="16" class="tooltip-trigger" data-tooltip-text="Closure &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;h&lt;/span&gt; captures: &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;u&lt;/span&gt; (moved)" data-rv-id="h@L27:dot:acquire" data-rv-kind="dot" data-rv-event="acquire" data-rv-var="h" data-rv-line="27"/>
+        <g data-hash="16" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;h&lt;/span&gt; goes out of scope. Its 1 captured resource is dropped." data-rv-id="h@L29:dot:owner_go_out_of_scope" data-rv-kind="dot" data-rv-event="owner_go_out_of_scope" data-rv-var="h" data-rv-line="29" data-rv-drop="true">
+            <circle cx="260" cy="965" r="5"/>
+            <polygon points="257,964 263,964 260,968" style="fill: var(--rv-drop-notch); stroke: none; pointer-events: none;"/>
+        </g>
+        <circle cx="210" cy="1175" r="5" data-hash="20" class="tooltip-trigger" data-tooltip-text="Closure &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;k&lt;/span&gt; captures: &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;p&lt;/span&gt; (moved)" data-rv-id="k@L35:dot:acquire" data-rv-kind="dot" data-rv-event="acquire" data-rv-var="k" data-rv-line="35"/>
+        <circle cx="210" cy="1235" r="5" data-hash="20" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;k&lt;/span&gt; goes out of scope" data-rv-id="k@L37:dot:owner_go_out_of_scope" data-rv-kind="dot" data-rv-event="owner_go_out_of_scope" data-rv-var="k" data-rv-line="37"/>
+        <circle cx="70" cy="1295" r="5" data-hash="22" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;c&lt;/span&gt; is a copy of the caller's value" data-rv-id="c@L38:dot:init_ref_param" data-rv-kind="dot" data-rv-event="init_ref_param" data-rv-var="c" data-rv-line="38"/>
+        <circle cx="70" cy="1505" r="5" data-hash="22" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;c&lt;/span&gt; goes out of scope" data-rv-id="c@L45:dot:owner_go_out_of_scope" data-rv-kind="dot" data-rv-event="owner_go_out_of_scope" data-rv-var="c" data-rv-line="45"/>
+        <circle cx="140" cy="1325" r="5" data-hash="24" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;w&lt;/span&gt; acquires ownership of a resource" data-rv-id="w@L39:dot:acquire" data-rv-kind="dot" data-rv-event="acquire" data-rv-var="w" data-rv-line="39"/>
+        <circle cx="140" cy="1355" r="5" data-hash="24" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;w&lt;/span&gt;'s resource is captured (moved) by closure &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;m&lt;/span&gt;" data-rv-id="w@L40:dot:move" data-rv-kind="dot" data-rv-event="move" data-rv-var="w" data-rv-line="40"/>
+        <circle cx="140" cy="1505" r="5" data-hash="24" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;w&lt;/span&gt; goes out of scope. No resource is dropped." data-rv-id="w@L45:dot:owner_go_out_of_scope" data-rv-kind="dot" data-rv-event="owner_go_out_of_scope" data-rv-var="w" data-rv-line="45"/>
+        <circle cx="235" cy="1355" r="5" data-hash="25" class="tooltip-trigger" data-tooltip-text="Closure &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;m&lt;/span&gt; captures: &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;w&lt;/span&gt; (moved)" data-rv-id="m@L40:dot:acquire" data-rv-kind="dot" data-rv-event="acquire" data-rv-var="m" data-rv-line="40"/>
+        <circle cx="235" cy="1385" r="5" data-hash="25" class="tooltip-trigger" data-tooltip-text="m is live in a conditional expression " data-rv-id="m@L41:dot:branch" data-rv-kind="dot" data-rv-event="branch" data-rv-var="m" data-rv-line="41"/>
+        <circle cx="210" cy="1415" r="5" data-hash="25" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;m&lt;/span&gt;'s resource is moved" data-rv-id="m@L42:dot:move" data-rv-kind="dot" data-rv-event="move" data-rv-var="m" data-rv-line="42"/>
+        <circle cx="235" cy="1475" r="5" data-hash="25" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;m&lt;/span&gt; was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;m&lt;/span&gt; goes out of scope." data-rv-id="m@L44:dot:branch_join" data-rv-kind="dot" data-rv-event="branch_join" data-rv-var="m" data-rv-line="44"/>
+        <g data-hash="25" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;m&lt;/span&gt; goes out of scope. Its captured resources are dropped here only if no branch above called it (Rust tracks this with a runtime drop flag)." data-rv-id="m@L45:dot:owner_go_out_of_scope" data-rv-kind="dot" data-rv-event="owner_go_out_of_scope" data-rv-var="m" data-rv-line="45" data-rv-drop="true">
+            <circle cx="235" cy="1505" r="5"/>
+            <polygon points="232,1504 238,1504 235,1508" style="fill: var(--rv-drop-notch); stroke: none; pointer-events: none;"/>
+        </g>
+        <circle cx="330" cy="1415" r="5" data-hash="26" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;n&lt;/span&gt; takes over &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;m&lt;/span&gt;'s value" data-rv-id="n@L42:dot:acquire" data-rv-kind="dot" data-rv-event="acquire" data-rv-var="n" data-rv-line="42"/>
+        <g data-hash="26" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;n&lt;/span&gt; goes out of scope. Its 1 captured resource is dropped." data-rv-id="n@L44:dot:owner_go_out_of_scope" data-rv-kind="dot" data-rv-event="owner_go_out_of_scope" data-rv-var="n" data-rv-line="44" data-rv-drop="true">
+            <circle cx="330" cy="1475" r="5"/>
+            <polygon points="327,1474 333,1474 330,1478" style="fill: var(--rv-drop-notch); stroke: none; pointer-events: none;"/>
+        </g>
+        <text x="93" y="280" data-hash="2" class="functionLogo tooltip-trigger fn-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;String::from&lt;/span&gt;" data-rv-id="String::from>s@L8:fn:move" data-rv-kind="fn" data-rv-event="move" data-rv-var="String::from" data-rv-to="s" data-rv-line="8">f</text>
+        <text x="188" y="580" data-hash="9" class="functionLogo tooltip-trigger fn-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;String::from&lt;/span&gt;" data-rv-id="String::from>t@L17:fn:move" data-rv-kind="fn" data-rv-event="move" data-rv-var="String::from" data-rv-to="t" data-rv-line="17">f</text>
+        <text x="188" y="820" data-hash="14" class="functionLogo tooltip-trigger fn-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;String::from&lt;/span&gt;" data-rv-id="String::from>u@L24:fn:move" data-rv-kind="fn" data-rv-event="move" data-rv-var="String::from" data-rv-to="u" data-rv-line="24">f</text>
+        <text x="163" y="1330" data-hash="23" class="functionLogo tooltip-trigger fn-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;String::from&lt;/span&gt;" data-rv-id="String::from>w@L39:fn:move" data-rv-kind="fn" data-rv-event="move" data-rv-var="String::from" data-rv-to="w" data-rv-line="39">f</text>
+    </g></g>
+	<g class="struct_members">
+    <g id="labels">
+    </g>
+
+    <g id="timelines">
+    </g>
+
+    <g id="ref_line">
+    </g>
+
+    <g id="arrows">
+    </g>
+
+    <g id="events">
+    </g></g>
+	</g>
+        <g id="p">
+	<g class="struct_instance">
+    <g id="labels">
+        <text x="70" y="1085" style="text-anchor:middle" data-hash="18" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;p&lt;/span&gt;, immutable" data-rv-id="hdr:p" data-rv-kind="header" data-rv-var="p">p</text>
+    </g>
+
+    <g id="timelines">
+<g class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;p&lt;/span&gt; holds a value" data-rv-id="p@L34-35:line:full_privilege" data-rv-kind="line" data-rv-state="full_privilege" data-rv-var="p" data-rv-line="34" data-rv-line-end="35">
+            <line data-hash="18" class="hollow" x1="68.25" y1="1145.0" x2="68.25" y2="1175.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <line data-hash="18" class="hollow" x1="71.75" y1="1145.0" x2="71.75" y2="1175.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <polygon data-hash="18" points="68.25,1145.0 68.25,1175.0 71.75,1175.0 71.75,1145.0" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+        </g>
+    </g>
+
+    <g id="ref_line">
+    </g>
+
+    <g id="arrows">
+        <g class="tooltip-trigger" data-tooltip-text="Closure capture (move) from &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;p&lt;/span&gt; to &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;k&lt;/span&gt;" data-rv-id="p>k@L35:arrow:move" data-rv-kind="arrow" data-rv-event="move" data-rv-var="p" data-rv-to="k" data-rv-line="35">
+            <path class="arrow-shaft" stroke-width="5px" d="M 75.25 1175 L 130 1175 A 10 10 0 0 1 150 1175 L 192 1175" style="fill: none;"/>
+            <polygon points="192,1169 204.75,1175 192,1181" class="arrow-head"/>
+        </g>
+    </g>
+
+    <g id="events">
+        <circle cx="70" cy="1145" r="5" data-hash="18" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;p&lt;/span&gt; is bound to a value" data-rv-id="p@L34:dot:acquire" data-rv-kind="dot" data-rv-event="acquire" data-rv-var="p" data-rv-line="34"/>
+        <circle cx="70" cy="1175" r="5" data-hash="18" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;p&lt;/span&gt;'s value is captured (moved) by closure &lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;k&lt;/span&gt;" data-rv-id="p@L35:dot:move" data-rv-kind="dot" data-rv-event="move" data-rv-var="p" data-rv-line="35"/>
+        <circle cx="70" cy="1235" r="5" data-hash="18" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;p&lt;/span&gt; goes out of scope" data-rv-id="p@L37:dot:owner_go_out_of_scope" data-rv-kind="dot" data-rv-event="owner_go_out_of_scope" data-rv-var="p" data-rv-line="37"/>
+    </g></g>
+	<g class="struct_members">
+    <g id="labels">
+        <text x="140" y="1085" style="text-anchor:middle" data-hash="19" class="label tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;p.a&lt;/span&gt;, immutable" data-rv-id="hdr:p.a" data-rv-kind="header" data-rv-var="p.a">p.a</text>
+    </g>
+
+    <g id="timelines">
+<g class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;p.a&lt;/span&gt; holds a copyable value" data-rv-id="p.a@L34-35:line:full_privilege" data-rv-kind="line" data-rv-state="full_privilege" data-rv-var="p.a" data-rv-line="34" data-rv-line-end="35">
+            <line data-hash="19" class="hollow" x1="138.25" y1="1145.0" x2="138.25" y2="1175.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <line data-hash="19" class="hollow" x1="141.75" y1="1145.0" x2="141.75" y2="1175.0" style="stroke-opacity: 1.0; stroke-dasharray: none;"/>
+            <polygon data-hash="19" points="138.25,1145.0 138.25,1175.0 141.75,1175.0 141.75,1145.0" style="fill:transparent; stroke:none; pointer-events:fill;"/>
+        </g>
+    </g>
+
+    <g id="ref_line">
+    </g>
+
+    <g id="arrows">
+        <rect id="18" x="50" y="1065" rx="20" ry="20" width="130" height="30" style="fill:var(--rv-struct-fill);stroke:var(--rv-struct-stroke);stroke-width:3;opacity:0.1" pointer-events="none" />
+    </g>
+
+    <g id="events">
+        <circle cx="140" cy="1145" r="5" data-hash="19" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;p.a&lt;/span&gt; is bound to a copyable value" data-rv-id="p.a@L34:dot:acquire" data-rv-kind="dot" data-rv-event="acquire" data-rv-var="p.a" data-rv-line="34"/>
+        <circle cx="140" cy="1175" r="5" data-hash="19" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;p.a&lt;/span&gt;'s value is moved" data-rv-id="p.a@L35:dot:move" data-rv-kind="dot" data-rv-event="move" data-rv-var="p.a" data-rv-line="35"/>
+        <circle cx="140" cy="1235" r="5" data-hash="19" class="tooltip-trigger" data-tooltip-text="&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;p.a&lt;/span&gt; goes out of scope" data-rv-id="p.a@L37:dot:owner_go_out_of_scope" data-rv-kind="dot" data-rv-event="owner_go_out_of_scope" data-rv-var="p.a" data-rv-line="37"/>
+    </g></g>
+	</g>
+    
+
+</svg>

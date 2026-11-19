@@ -22563,6 +22563,51 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "o's immutable borrow ends",
         ],
     },
+    TooltipExpect {
+        name: "closure_capture_drops_1148",
+        // #1148: `move || r.push('!')` moves the `&mut` r into f. f then
+        // holds the borrow and gives s back at its last use; a reference
+        // owns nothing, so f's scope end drops nothing (main: "Its 1
+        // captured resource is dropped", while s is printed after). A
+        // closure made in an `if` / `match` arm that moved a String in
+        // never said it is dropped (its captures were only looked up
+        // outside conditionals), and one that captured a value with
+        // nothing to drop (`Plain`) claimed a dropped resource. #1159:
+        // `let n = m;` in an `if` read as a capture, and n's drop
+        // wasn't stated.
+        must_contain: &[
+            "r's reference is captured (moved) by closure f; the data it points to is not moved",
+            "f's mutable borrow ends",
+            "Return mutably borrowed resource from f to s",
+            "f owns a closure",
+            "Closure g captures: t (moved)",
+            "g owns a closure which owns 1 resource via capture",
+            "g goes out of scope. Its 1 captured resource is dropped.",
+            "Closure h captures: u (moved)",
+            "h goes out of scope. Its 1 captured resource is dropped.",
+            "k owns a closure",
+            "k goes out of scope",
+            "m's resource is moved",
+            "n takes over m's value",
+            "n goes out of scope. Its 1 captured resource is dropped.",
+        ],
+        must_not_contain: &[
+            "f goes out of scope. Its 1 captured resource is dropped.",
+            "f owns a closure which owns 1 resource via capture",
+            "r's resource is captured (moved) by closure f",
+            "Return mutably borrowed resource from r to s",
+            "r's mutable borrow ends",
+            "=Closure g is bound",
+            "=Closure h is bound",
+            "k goes out of scope. Its 1 captured resource is dropped.",
+            "k owns a closure which owns 1 resource via capture",
+            "m's resource is captured (moved) by closure n",
+            // The scope ends main drew with no drop.
+            "=g goes out of scope",
+            "=h goes out of scope",
+            "=n goes out of scope",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop

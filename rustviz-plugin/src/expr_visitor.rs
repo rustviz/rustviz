@@ -9985,7 +9985,12 @@ pub fn print_out_of_scope(&mut self){
         // A holder moved into a `for` loop has no value left to end a
         // borrow on: the loop gives the lender back, drawn on the
         // lender's column alone (#767).
-        let end_from = if self.for_moved_holders.contains(k) { ResourceTy::Anonymous } else { ResourceTy::Value(from_ro) };
+        // A `&mut` a `move` closure captured (`move || r.push('!')`,
+        // #1148) is held by the closure from then on: the closure ends
+        // the borrow and gives the lender back, not r.
+        let end_from = if self.for_moved_holders.contains(k) { ResourceTy::Anonymous }
+          else if let Some(c) = self.closure_moved_into(&from_ro) { ResourceTy::Value(c) }
+          else { ResourceTy::Value(from_ro) };
         self.add_borrow_end_ev(*lifetime, to_ro, end_from, ref_data, Vec::new());
       }
     }
@@ -10207,6 +10212,24 @@ pub fn print_out_of_scope(&mut self){
   /// lent (#663). Give each such arm its own end of the borrow, ahead
   /// of the exit's drops; several ending on one line end in reverse
   /// declaration order.
+  /// The closure a `move` closure literal moved the `&mut` reference
+  /// `r` into (`let f = move || r.push('!');`, #1148), anywhere in the
+  /// body (also in a branch of a conditional).
+  fn closure_moved_into(&self, r: &ResourceAccessPoint) -> Option<ResourceAccessPoint> {
+    if !r.is_mutref() {
+      return None;
+    }
+    fn find(events: &[(usize, ExternalEvent)], hash: u64) -> Option<ResourceAccessPoint> {
+      events.iter().find_map(|(_, e)| match e {
+        ExternalEvent::Move { from: ResourceTy::Value(f), to: ResourceTy::Value(c), closure_value: false, .. }
+          if *f.hash() == hash && c.is_closure() => Some(c.clone()),
+        ExternalEvent::Branch { branches, .. } => branches.iter().find_map(|b| find(&b.e_data, hash)),
+        _ => None,
+      })
+    }
+    find(self.preprocessed_events, *r.hash())
+  }
+
   fn end_borrows_at_exits(&mut self) {
     #[expect(clippy::disallowed_methods, reason = "collected into a map")]
     let assigned: HashMap<String, usize> = self.borrow_map.iter()
