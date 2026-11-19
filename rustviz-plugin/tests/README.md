@@ -5,6 +5,16 @@ development and CI.
 
 ## How the fixtures are run
 
+`corpus_invariants_hold` (in `rustviz-lib/tests/corpus.rs`, checks in
+`rustviz-lib/tests/common/invariants.rs`) also checks every fixture,
+Book snippet and `known_bugs/` repro against properties every picture
+must have (no column used after it ended, no drop where nothing is held,
+borrow kinds consistent, ...). `known_bugs/` holds minimal repros of open
+bugs, named `<issue>_<what>.rs`; their violations, and today's in the
+corpus, are listed in `KNOWN_INVARIANT_FAILURES` by issue. A fix PR
+deletes its entries (the test fails while they're listed and no longer
+happen).
+
 `rustviz-lib/tests/corpus.rs` renders **every** `.rs` file here (and in
 `edition2024/`) through `RV_RUNNER=local` and requires well-formed SVG
 (`corpus_all_fixtures_produce_well_formed_svg`). Add a file and it is

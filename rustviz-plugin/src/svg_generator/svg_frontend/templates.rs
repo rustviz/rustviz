@@ -25,7 +25,7 @@ pub static CODE_PANEL_TEMPLATE : &'static str =
 pub static TIMELINE_PANEL_TEMPLATE: &'static str = 
 "<svg width=\"{{tl_width}}px\" height=\"{{height}}px\" 
         xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" 
-        id=\"{{tl_id}}\">
+        id=\"{{tl_id}}\"{{tl_rv}}>
 
     <desc>{{ visualization_name }}</desc>
 
