@@ -2173,6 +2173,16 @@ pub fn event_dot_mut_borrow_by_shared_ref(my_name: &String, holds_value: bool) -
     )
 }
 
+// `let first = &*r;` with `r = &mut a`, then `r = &mut b;` while first is
+// still used (#1182): first's own borrow is immutable, but its use keeps
+// r's old mutable loan of a alive, so its end gives a back.
+pub fn event_dot_reborrow_kept_mut_loan(my_name: &String, through: &str, lender: &str) -> String {
+    format!(
+        "{0}'s immutable borrow ends. {0} was made through {1}'s mutable borrow of {2}, which lasts as long as {0} is used, so {2} is mutably borrowed until here",
+        styled_name_html(my_name), styled_name_html(&through.to_owned()), styled_name_html(&lender.to_owned())
+    )
+}
+
 // A `&mut` holding a shared loan (`let r = &mut &x;`): r points to a
 // temporary (the `&x` reference) that shares x (#1131).
 pub fn event_dot_static_borrow_by_mut_ref(my_name: &String, holds_value: bool) -> String {

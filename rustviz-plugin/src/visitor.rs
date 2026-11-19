@@ -4478,6 +4478,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             self.closure_call_events(fn_expr, expr_to_line(expr, &self.tcx));
           }
         }
+        self.swap_ref_vars(fn_expr, args, expr_to_line(expr, &self.tcx));
         // `std::panic::panic_any(…)` written out (#410): it unwinds
         // once its argument has been passed.
         self.note_panic(expr);
@@ -5555,6 +5556,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     true
   }
 
+  /// Whether `e` is inside the condition of an `if` (a let-chain part
+  /// included) or a match arm's guard.
+  fn in_condition(&self, e: &'tcx Expr<'tcx>) -> bool {
+    self.tcx.hir_parent_iter(e.hir_id).any(|(_, node)| match node {
+      rustc_hir::Node::Expr(p) => matches!(p.kind, ExprKind::If(cond, ..) if cond.span.contains(e.span)),
+      rustc_hir::Node::Arm(arm) => arm.guard.is_some_and(|g| g.span.contains(e.span)),
+      _ => false,
+    })
+  }
+
   fn visit_assign(&mut self, expr: &'tcx Expr<'tcx>, lhs_expr: &'tcx Expr<'tcx>, rhs_expr: &'tcx Expr<'tcx>) {
     // `a = lhs` inside a destructuring assignment: draw it as
     // `a = <the part of the RHS lhs holds>`. That part was
@@ -5749,6 +5760,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         ResourceTy::Value(_) => {
           let ref_data = self.borrow_map.get(lhs_rap.name()).unwrap().clone();
           self.hand_loan_to_carriers(lhs_rap.name(), &ref_data);
+          self.hand_loan_to_reborrows(lhs_rap.name(), &ref_data, line_num);
           let to_ro = match ref_data.lender {
             ResourceTy::Anonymous => ResourceTy::Deref(lhs_rap.clone()),
             _ => ref_data.lender.clone()
@@ -5795,7 +5807,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // with `r` read after the `if`), and for each lender
             // of a reference that borrows from either of two
             // (#770).
-            let end_of = |this: &Self, lender: &ResourceTy| this.old_loan_end(&ref_data, lender, line_num).unwrap_or(line_num);
+            // Only the assignment is the write, not the rest of its line
+            // (a one-line `if c { r = &y; }`'s condition, #1188); unless
+            // it is part of a condition itself (a let-chain's `{ r = &s;
+            // .. }`, #603), whose other paths are drawn as the chain's.
+            let write_span = (!self.in_condition(expr)).then_some(expr.span);
+            let end_of = |this: &Self, lender: &ResourceTy| this.old_loan_end(&ref_data, lender, line_num, write_span).unwrap_or(line_num);
             let end_line = match self.loan_end(&ref_data).filter(|&end| end < line_num && end >= ref_data.assigned_at) {
               Some(end) => end,
               None => end_of(self, &ref_data.lender),
