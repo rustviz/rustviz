@@ -20776,7 +20776,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "e may have been moved",
         ],
     },
-||||||| parent of 6f0ed62a9 (plugin: an exit after a nested conditional that re-initializes drops the new value (#1135))
     TooltipExpect {
         name: "exit_after_nested_reinit_1135",
         // #1135: a move, then a nested `if` / `match` / `if let` that
@@ -20801,7 +20800,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "f goes out of scope. No resource is dropped.",
         ],
     },
-||||||| parent of 17816e937 (plugin: a block that ends before an all-exit conditional drops its locals at its `}` (#1139))
     TooltipExpect {
         name: "inner_block_before_all_exit_1139",
         // #1139: a bare `{ … }` block, then an `if` / `match` whose every
