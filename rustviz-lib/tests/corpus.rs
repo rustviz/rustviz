@@ -31165,6 +31165,68 @@ fn code_panel_shows_tabs_and_non_ascii_text_as_written() {
     }
 }
 
+/// #1189 and #1190 (`code_panel_colours_1189_1190`): every variable written
+/// on these rows is coloured in the code panel with its own column's colour
+/// (its `data-hash`), and a field name with its field column's: in
+/// destructuring lets, array literals, `arr[i]`, closure bodies, a call of
+/// a closure variable, a cast, a match guard, a method call's receiver that
+/// is a call, let-else; `a` in `q.a` and in `P { a: s }` building p. Main
+/// left them plain, and gave field names a colour of their own that no
+/// column has.
+#[test]
+fn code_panel_colours_every_variable_with_its_columns_colour() {
+    let rv = run_with_local_backend("code_panel_colours_1189_1190");
+    let (code, tl) = (rv.code_panel_string(), rv.timeline_panel_string());
+    let plain = |s: &str| -> String {
+        let mut out = String::new();
+        let mut in_tag = false;
+        for c in s.chars() {
+            match c { '<' => in_tag = true, '>' => in_tag = false, _ if !in_tag => out.push(c), _ => {} }
+        }
+        out.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+    };
+    let rows: Vec<&str> = code.split("</text>").collect();
+    let row_of = |src: &str| -> &str {
+        let hits: Vec<&&str> = rows.iter().filter(|r| plain(r).contains(src)).collect();
+        assert_eq!(hits.len(), 1, "code rows containing {:?}: {}", src, hits.len());
+        hits[0]
+    };
+    let column_hash = |var: &str| -> String {
+        let key = format!("data-rv-id=\"hdr:{}\"", var);
+        let tag = start_tags(&tl, "text").into_iter().find(|t| t.contains(&key))
+            .unwrap_or_else(|| panic!("no column header for {}", var));
+        attr(tag, "data-hash").unwrap().to_owned()
+    };
+    let token_hashes = |row: &str, word: &str| -> Vec<String> {
+        let needle = format!(">{}</tspan>", word);
+        row.match_indices(&needle)
+            .filter_map(|(i, _)| row[..i].rfind("<tspan").map(|t| &row[t..i]))
+            .filter_map(|t| attr(t, "data-hash").map(str::to_owned))
+            .collect()
+    };
+    for (line, words) in [
+        ("let (s, t) = (x, y);", &[("s", "s"), ("t", "t"), ("x", "x"), ("y", "y")][..]),
+        ("let p = P { a: s, b: t };", &[("a", "p.a"), ("b", "p.b"), ("s", "s"), ("t", "t")]),
+        ("let P { a, b } = p;", &[("a", "a"), ("b", "b"), ("p", "p")]),
+        ("let arr = [a, b];", &[("a", "a"), ("b", "b")]),
+        ("let first = &arr[0];", &[("arr", "arr")]),
+        ("first.len() + k", &[("first", "first")]),
+        ("let n = f(1) as u64;", &[("f", "f")]),
+        ("let x = q.a;", &[("a", "q.a")]),
+        ("let y = q.b;", &[("b", "q.b")]),
+        ("Some(n) if n > lim", &[("lim", "lim")]),
+        ("try_from(v)", &[("v", "v")]),
+        ("let Some(m) = o else", &[("o", "o")]),
+    ] {
+        let row = row_of(line);
+        for (word, col) in words {
+            let want = column_hash(col);
+            assert!(token_hashes(row, word).contains(&want),
+                "`{}` in `{}` isn't coloured as column {} (data-hash {}): {:?}", word, line, col, want, token_hashes(row, word));
+        }
+    }
+}
+
 /// #1157: a tuple / struct every field of which was moved out holds
 /// nothing: its line stops where the last one is moved out, like a
 /// moved variable's. It used to run on to the scope end as "t is the

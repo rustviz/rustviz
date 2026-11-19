@@ -241,17 +241,32 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
               }
               _ => {
                 let fn_name = hirid_to_var_name(fn_expr.hir_id, &self.tcx).unwrap();
-                self.annotate_src(fn_name.clone(), fn_expr.span, true, *self.raps.get(&fn_key(&fn_name)).unwrap().rap.hash());
+                if let Some(rd) = self.raps.get(&fn_key(&fn_name)) {
+                  let hash = *rd.rap.hash();
+                  self.annotate_src(fn_name.clone(), fn_expr.span, true, hash);
+                }
                 for a in fn_args.iter() {
                   self.annotate_expr(a);
                 }
               }
             }
           }
+          // Calling a closure variable (`f(1)`): `f` has a column, and
+          // gets its colour like any other use of it (#1189).
+          ExprKind::Path(QPath::Resolved(_, p)) if matches!(p.res, rustc_hir::def::Res::Local(_))
+            && self.raps.contains_key(&path_name(p, &self.tcx)) => {
+            self.annotate_expr(fn_expr);
+            for a in fn_args.iter() {
+              self.annotate_expr(a);
+            }
+          }
           _ => {
             match hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
               Some(fn_name) => {
-                self.annotate_src(fn_name.clone(), fn_expr.span, true, *self.raps.get(&fn_key(&fn_name)).unwrap().rap.hash());
+                if let Some(rd) = self.raps.get(&fn_key(&fn_name)) {
+                  let hash = *rd.rap.hash();
+                  self.annotate_src(fn_name.clone(), fn_expr.span, true, hash);
+                }
               }
               // A callee that is an expression (`(w.f)()`, `make()(x)`;
               // #703): its variables are highlighted like anywhere else.
@@ -298,7 +313,11 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
     }
     ExprKind::MethodCall(name_and_generic_args, rcvr, args, _) => {
       let fn_name = name_and_generic_args.ident.as_str().to_owned();
-      self.annotate_src(fn_name.clone(), name_and_generic_args.ident.span, true, *self.raps.get(&fn_key(&fn_name)).unwrap().rap.hash());
+      // (A call in a closure body has no function RAP: left plain.)
+      if let Some(rd) = self.raps.get(&fn_key(&fn_name)) {
+        let hash = *rd.rap.hash();
+        self.annotate_src(fn_name.clone(), name_and_generic_args.ident.span, true, hash);
+      }
       for arg in args.iter() {
         self.annotate_expr(arg);
       }
@@ -320,6 +339,10 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
         if let Some(rd) = self.raps.get(&rcvr_name) {
           self.annotate_src(rcvr_name.clone(), rcvr.span, false, *rd.rap.hash());
         }
+      } else {
+        // A receiver that is itself an expression (`make(v).len()`,
+        // `(a, b).0.len()`): its variables are coloured (#1189).
+        self.annotate_expr(rcvr);
       }
     }
     ExprKind::Assign(exp1, exp2, _) => {
@@ -364,8 +387,14 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
         // for — get the colorization skipped instead of panicking
         // on an `id_map.get(...).unwrap()`. The expression in the
         // initialiser is still walked normally below.
-        if let Some(hash) = self.id_map.get(field.ident.as_str()) {
-          self.annotate_src(field.ident.to_string(), field.ident.span, false, *hash as u64);
+        // The field of the variable the literal initialises (`p.a` in
+        // `let p = P { a: s };`) has a column: the name gets its colour
+        // (#1190). Otherwise the field name's own colour.
+        let column = self.literal_target(expr)
+          .and_then(|t| self.raps.get(&format!("{}.{}", t, field.ident.as_str())))
+          .map(|rd| *rd.rap.hash());
+        if let Some(hash) = column.or_else(|| self.id_map.get(field.ident.as_str()).map(|h| *h as u64)) {
+          self.annotate_src(field.ident.to_string(), field.ident.span, false, hash);
         }
         self.annotate_expr(field.expr);
       }
@@ -376,8 +405,13 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
       // etc.) won't have its field name in id_map. Skip the
       // colorization for that token; the receiver expression is
       // still walked.
-      if let Some(hash) = self.id_map.get(ident.as_str()) {
-        self.annotate_src(ident.to_string(), ident.span, false, *hash as u64);
+      // `p.a` with a `p.a` column: the field name gets that column's
+      // colour, so the code matches the column that draws it (#1190).
+      let column = expr_to_rap_name(expr, &self.tcx)
+        .and_then(|n| self.raps.get(&n))
+        .map(|rd| *rd.rap.hash());
+      if let Some(hash) = column.or_else(|| self.id_map.get(ident.as_str()).map(|h| *h as u64)) {
+        self.annotate_src(ident.to_string(), ident.span, false, hash);
       }
       self.annotate_expr(exp);
     }
@@ -414,26 +448,53 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
     ExprKind::Match(match_expr, arms, _) => {
       self.annotate_expr(&match_expr);
       for arm in arms {
-        match &arm.guard {
-          Some(_g) => {
-            //self.annotate_expr(&g);
-          }
-          None => {}
-        }
-
         self.annotate_pat(arm.pat);
+        // `Some(n) if n > lim =>`: the guard's variables (#1189).
+        if let Some(g) = arm.guard {
+          self.annotate_expr(g);
+        }
 
         self.annotate_expr(arm.body);
       }
     }
-    ExprKind::Tup(expr_list) => {
+    ExprKind::Tup(expr_list) | ExprKind::Array(expr_list) => {
       for e in expr_list.iter() {
         self.annotate_expr(e);
       }
     }
+    // `arr[i]`, `x as u64`, `[s; 3]`, `break v` (#1189).
+    ExprKind::Index(base, index, _) => {
+      self.annotate_expr(base);
+      self.annotate_expr(index);
+    }
+    ExprKind::Cast(ex, _) | ExprKind::Repeat(ex, _) | ExprKind::Break(_, Some(ex)) => {
+      self.annotate_expr(ex);
+    }
+    // A closure's body: the variables it captures and its own (#1189).
+    ExprKind::Closure(closure) => {
+      let body = self.tcx.hir_body(closure.body);
+      for param in body.params {
+        self.annotate_pat(param.pat);
+      }
+      self.annotate_expr(body.value);
+    }
      _ => { 
       //println!("unrecognized expr {:#?}", expr);
       }
+  }
+}
+
+/// The variable a struct literal initialises or is assigned to (`p` in
+/// `let p = P { .. };` or `p = P { .. };`), whose fields have columns.
+fn literal_target(&self, lit: &Expr) -> Option<String> {
+  use rustc_hir::Node;
+  match self.tcx.parent_hir_node(lit.hir_id) {
+    Node::LetStmt(l) => match l.pat.kind {
+      PatKind::Binding(_, hir_id, ..) => Some(binding_name(&self.tcx, hir_id)),
+      _ => None,
+    },
+    Node::Expr(Expr { kind: ExprKind::Assign(lhs, rhs, _), .. }) if rhs.hir_id == lit.hir_id => expr_to_rap_name(lhs, &self.tcx),
+    _ => None,
   }
 }
 
@@ -452,7 +513,22 @@ pub fn annotate_local(&mut self, loc: &'tcx LetStmt<'tcx>) {
         _ => {}
       }
     }
-    _ => {}
+    // `let (s, t) = (x, y);`, `let P { a, b } = p;`, `let [a, b] =
+    // arr;`: the pattern's variables and the initialiser (#1189).
+    _ => {
+      self.annotate_pat(loc.pat);
+      if let Some(exp) = loc.init {
+        self.annotate_expr(exp);
+      }
+    }
+  }
+  if let Some(els) = loc.els {
+    for stmt in els.stmts.iter() {
+      self.annotate_stmt(stmt);
+    }
+    if let Some(ex) = els.expr {
+      self.annotate_expr(ex);
+    }
   }
 }
 
@@ -473,7 +549,7 @@ pub fn annotate_stmt(&mut self, stmt: &'tcx Stmt<'tcx>) {
 
 pub fn annotate_pat(&mut self, pat: &Pat) {
   match pat.kind {
-    PatKind::Binding(_, hir_id, ident, _) => {
+    PatKind::Binding(_, hir_id, ident, sub) => {
       let name = binding_name(&self.tcx, hir_id);
       match self.raps.get(&name) {
         Some(r) => {
@@ -482,6 +558,23 @@ pub fn annotate_pat(&mut self, pat: &Pat) {
         }
         None => {}
       }
+      if let Some(p) = sub {
+        self.annotate_pat(p);
+      }
+    },
+    // `P { a, b }`, `[a, .., b]`, `&x`, `box x` (#1189).
+    PatKind::Struct(_, fields, _) => {
+      for f in fields.iter() {
+        self.annotate_pat(f.pat);
+      }
+    },
+    PatKind::Slice(before, mid, after) => {
+      for p in before.iter().chain(mid).chain(after.iter()) {
+        self.annotate_pat(p);
+      }
+    },
+    PatKind::Ref(inner, ..) | PatKind::Box(inner) | PatKind::Deref(inner) => {
+      self.annotate_pat(inner);
     },
     PatKind::TupleStruct(_, pat_list, _) | PatKind::Tuple(pat_list, _)=> {
       for p in pat_list.iter() {
