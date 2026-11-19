@@ -1519,7 +1519,32 @@ fn render_scope_end_dot(
         } else if history.iter().any(|(l, e)| l == line_number && matches!(e, Event::Move { break_out: true, .. })) {
             // A `break` carried it out of the loop on this
             // line (#431), but only on the iteration that
-            // ended the loop: every other one drops it here.
+            // ended the loop: every other one drops it here,
+            // unless the body moved it on the way (#1156).
+            let other: Vec<(usize, Event)> = history.iter()
+                .filter(|(l, e)| l < line_number || (l == line_number
+                    && !matches!(e, Event::Move { break_out: true, .. } | Event::OwnerGoOutOfScope { .. })))
+                .cloned().collect();
+            let held = other.iter().fold(false, |h, (_, e)| holds_value_after(h, e));
+            if maybe_moved_at_end(&other) {
+                let cx = timeline_data.x_val;
+                let cy = event_y;
+                let drop_data = DropDotData {
+                    hash: *hash as u64,
+                    dot_x: cx,
+                    dot_y: cy,
+                    title: hover_messages::event_dot_break_out_go_out_of_scope_maybe_moved(&name, &ro.drop_note()),
+                    p1x: cx - 3, p1y: cy - 1,
+                    p2x: cx + 3, p2y: cy - 1,
+                    p3x: cx,     p3y: cy + 3,
+                };
+                append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
+                return true;
+            }
+            if !held {
+                data.title = hover_messages::event_dot_break_out_go_out_of_scope_moved(&name);
+                return false;
+            }
             let cx = timeline_data.x_val;
             let cy = event_y;
             let drop_data = DropDotData {
@@ -2120,7 +2145,12 @@ fn render_dot(
                                 Some(r) if r.holds_value() => "value",
                                 _ => "resource",
                             };
-                            data.title = hover_messages::event_dot_break_alt_move(&name, &to.name(), alt, what);
+                            data.title = if matches!(to, ResourceTy::Caller) {
+                                // The loop is what the function returns (#1171).
+                                hover_messages::event_dot_break_alt_move_to_caller(&name, alt, what)
+                            } else {
+                                hover_messages::event_dot_break_alt_move(&name, &to.name(), alt, what)
+                            };
                         }
                         Event::Duplicate { break_alt: Some(alt), .. } => {
                             data.title.push_str(&hover_messages::break_alt_if_suffix(&alt.brk));

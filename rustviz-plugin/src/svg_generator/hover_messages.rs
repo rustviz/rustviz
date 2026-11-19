@@ -3842,6 +3842,16 @@ pub fn event_dot_go_out_of_scope_maybe_moved(my_name: &String, note: &str, by_co
 // `break` moves `k`, declared inside the loop, to the loop's receiver.
 // That is drawn where the loop ends, which is also where `k` goes out
 // of scope on the iterations that don't break (they drop it there).
+// The same when the loop is what the function returns (#1171).
+pub fn event_dot_break_out_move_to_caller(my_name: &String, value: bool) -> String {
+    format!(
+        "{0}'s {1} is moved to the caller by the {2} that ends the loop, which the function returns",
+        styled_name_html(my_name),
+        if value { "value" } else { "resource" },
+        styled_name_html(&"break".to_owned())
+    )
+}
+
 pub fn event_dot_break_out_move(my_name: &String, to: &String, value: bool) -> String {
     format!(
         "{0}'s {1} is moved to {2} by the {3} that ends the loop",
@@ -3856,6 +3866,26 @@ pub fn event_dot_break_out_go_out_of_scope(my_name: &String) -> String {
     format!(
         "{0} goes out of scope. Its resource is dropped here on every iteration that doesn't end the loop.",
         styled_name_html(my_name)
+    )
+}
+
+// The same when the loop body moved it before reaching its end (#1156):
+// on the iterations that don't end the loop it holds nothing here.
+pub fn event_dot_break_out_go_out_of_scope_moved(my_name: &String) -> String {
+    format!(
+        "{0} goes out of scope. No resource is dropped: on the iterations that don't end the loop, {0} was moved above.",
+        styled_name_html(my_name)
+    )
+}
+
+// ... or moved on some paths through the loop body only: the drop flag
+// decides on those iterations (#1156).
+pub fn event_dot_break_out_go_out_of_scope_maybe_moved(my_name: &String, note: &str) -> String {
+    let (holds, rest) = split_drop_note(note);
+    format!(
+        "{0} goes out of scope. On the iterations that don't end the loop, its resource{1} is dropped{2} here \
+         only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        styled_name_html(my_name), holds, rest
     )
 }
 
@@ -4812,6 +4842,18 @@ pub fn event_dot_break_alt_move(my_name: &String, to: &String, alt: &crate::svg_
             name, quoted_break(brk), moved, to
         )
     }
+}
+
+// The same when the loop is what the function returns (#1171): the value
+// goes to the caller, and nothing comes after the loop.
+pub fn event_dot_break_alt_move_to_caller(my_name: &String, alt: &crate::svg_generator::data::BreakAlt, what: &str) -> String {
+    let name = styled_name_html(my_name);
+    let moved = if what == "reference" {
+        format!("the reference in {0}", name)
+    } else {
+        format!("{0}'s {1}", name, what)
+    };
+    format!("{0} is moved to the caller if the loop ended with {1}", moved, quoted_break(&alt.brk))
 }
 
 // `f()` of a closure rustc inferred to be `FnOnce` (#271): `f` is
