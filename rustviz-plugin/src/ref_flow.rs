@@ -937,6 +937,33 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   }
 
   /// What the reference(s) held by the *value* of `e` borrow from.
+  /// `e` (a `&mut` variable) is an argument of a call that takes it
+  /// by value without a reborrow (a generic `T` parameter): it is
+  /// moved into the call (#200, #1128).
+  /// `mut_ref_moved_into_call`, for a reference parameter `e`, whose
+  /// column stands for the caller's data.
+  pub fn mut_ref_param_moved_into_call(&self, e: &'tcx Expr<'tcx>) -> bool {
+    matches!(e.kind, ExprKind::Path(QPath::Resolved(..)))
+      && expr_to_rap_name(e, &self.tcx).and_then(|n| self.borrow_map.get(&n))
+        .is_some_and(|rd| matches!(rd.lender, ResourceTy::Caller) && rd.co_lenders.is_empty())
+      && self.mut_ref_moved_into_call(e)
+  }
+
+  fn mut_ref_moved_into_call(&self, e: &'tcx Expr<'tcx>) -> bool {
+    let typeck = self.tcx.typeck(e.hir_id.owner);
+    if !typeck.expr_ty(e).ref_mutability().is_some_and(|m| m.is_mut()) || is_implicit_mut_reborrow(e, typeck) {
+      return false;
+    }
+    match self.tcx.parent_hir_node(e.hir_id) {
+      rustc_hir::Node::Expr(p) => match p.kind {
+        ExprKind::Call(_, args) => args.iter().any(|a| a.hir_id == e.hir_id),
+        ExprKind::MethodCall(_, _, args, _) => args.iter().any(|a| a.hir_id == e.hir_id),
+        _ => false,
+      },
+      _ => false,
+    }
+  }
+
   pub fn value_lenders(&self, e: &'tcx Expr<'tcx>) -> Vec<ResourceTy> {
     match e.kind {
       ExprKind::Path(QPath::Resolved(..)) | ExprKind::Field(..) => {
@@ -946,6 +973,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // is the caller's data, which has no column here. v's own
           // column stands for it, as it already does for `&v[0]`, so
           // `v.iter()` / `first_word(s)` borrow "from v" (#393).
+          // A `&mut` parameter moved into a call (`id(r)` with a generic
+          // parameter: no reborrow) hands its reference over: the
+          // result points to the caller's data, not into r (#1205).
+          Some(rd) if matches!(rd.lender, ResourceTy::Caller) && rd.co_lenders.is_empty()
+            && self.mut_ref_moved_into_call(e) => rd.all_lenders(),
           Some(rd) if matches!(rd.lender, ResourceTy::Caller) && rd.co_lenders.is_empty() => {
             match name.as_ref().and_then(|n| self.raps.get(n)) {
               Some(r) if r.rap.is_ref() => vec![ResourceTy::Value(r.rap.to_owned())],
