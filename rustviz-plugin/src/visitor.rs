@@ -5540,18 +5540,25 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let Res::Local(hirid) = path.res else { return false };
     let branching = matches!(rhs_expr.kind, ExprKind::If(..) | ExprKind::Match(_, _, rustc_hir::MatchSource::Normal))
       && !rhs_expr.span.from_expansion();
-    if !branching {
-      return false;
-    }
-    let Some(decl) = self.uninit_locals.remove(&hirid) else {
-      return self.reassign_from_branches(hirid, lhs_expr, rhs_expr);
+    // `x = Some(if c { a } else { b });` (#1225): the constructor takes
+    // nothing itself; x gets each branch's value in its branch.
+    let cond = if branching {
+      rhs_expr
+    } else {
+      match self.conditional_value(rhs_expr) {
+        Some(c) if c.hir_id != rhs_expr.hir_id => c,
+        _ => return false,
+      }
     };
-    let prev = self.defer_arm_binds.replace(rhs_expr.span);
-    self.init_deferred_local(hirid, decl, rhs_expr);
+    let Some(decl) = self.uninit_locals.remove(&hirid) else {
+      return self.reassign_from_branches(hirid, lhs_expr, cond, rhs_expr);
+    };
+    let prev = self.defer_arm_binds.replace(cond.span);
+    self.init_deferred_local(hirid, decl, cond);
     self.defer_arm_binds = prev;
     self.visit_expr(rhs_expr);
-    self.bind_left_arms(rhs_expr);
-    self.mark_branch_results_kept(&binding_name(&self.tcx, hirid), rhs_expr);
+    self.bind_left_arms(cond);
+    self.mark_branch_results_kept(&binding_name(&self.tcx, hirid), cond);
     // (An immutable `let x;` can't be assigned twice, E0384: a loop
     // that assigns it leaves right after.)
     if matches!(decl.annotation.1, Mutability::Mut) {
@@ -5569,7 +5576,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// a local owning a value of a type that isn't Copy, a reference, a
   /// union or a `ManuallyDrop`, or drawn with columns for its fields or
   /// as holding a borrow; returns false, having done nothing, for others.
-  fn reassign_from_branches(&mut self, hirid: HirId, lhs_expr: &'tcx Expr<'tcx>, rhs_expr: &'tcx Expr<'tcx>) -> bool {
+  /// `rhs_expr` is the conditional; `whole`, the right-hand side it is
+  /// in (the same, or a constructor around it, #1225).
+  fn reassign_from_branches(&mut self, hirid: HirId, lhs_expr: &'tcx Expr<'tcx>, rhs_expr: &'tcx Expr<'tcx>, whole: &'tcx Expr<'tcx>) -> bool {
     if self.maybe_init_locals.contains(&hirid) || self.destructure_srcs.contains_key(&hirid) {
       return false;
     }
@@ -5587,7 +5596,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let prev = self.reassign_arms.replace((rap.clone(), drops));
     self.match_rhs(ResourceTy::Value(rap.clone()), rhs_expr, Evt::Move);
     self.reassign_arms = prev;
-    self.visit_expr(rhs_expr);
+    self.visit_expr(whole);
     self.bind_left_arms(rhs_expr);
     true
   }
@@ -9907,8 +9916,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       return;
     }
+    // `let x = Some(if c { a } else { b });` (#1225): a constructor
+    // takes nothing itself (#768), so x is bound from each branch's
+    // value in its branch, as for `let x = if …`.
+    let ctor_cond = (!is_skipped && els.is_none() && matches!(pat.kind, PatKind::Binding(_, _, _, None)))
+      .then(|| self.conditional_value(init)).flatten()
+      .filter(|c| c.hir_id != init.hir_id);
     let init_is_branching = !is_skipped
-      && match init.kind {
+      && (ctor_cond.is_some() || match init.kind {
         ExprKind::If(..) => true,
         // `let r = loop { … break k; }`: the `break`s hand `r` its
         // value as they're visited (#431), so `r` is bound first.
@@ -9916,7 +9931,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         ExprKind::Match(_, _, rustc_hir::MatchSource::TryDesugar(_)) => false,
         ExprKind::Match(..) => true,
         _ => false,
-      };
+      });
     if init_is_branching {
       // `let (a, b) = loop { … break (x, y); }`: each `break` value is
       // bound against the pattern (#452).
@@ -9927,7 +9942,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // once it has been visited (#994).
         let prev = self.defer_arm_binds.take();
         let conditional = matches!(init.kind, ExprKind::If(..) | ExprKind::Match(..));
-        if conditional && matches!(pat.kind, PatKind::Binding(_, _, _, None)) {
+        if let Some(cond) = ctor_cond {
+          self.defer_arm_binds = Some(cond.span);
+          self.bind_pat(pat, cond, is_skipped);
+        } else if conditional && matches!(pat.kind, PatKind::Binding(_, _, _, None)) {
           self.defer_arm_binds = Some(init.span);
           self.bind_pat(pat, init, is_skipped);
         } else if conditional && self.destructures_by_value(pat, init) {
@@ -9942,11 +9960,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.defer_arm_binds = prev;
       }
       self.visit_expr(init);
-      self.bind_left_arms(init);
+      let cond = ctor_cond.unwrap_or(init);
+      self.bind_left_arms(cond);
       // A reference returned by a call in a branch keeps that call's
       // borrow (#337).
       if let PatKind::Binding(_, hir_id, _, None) = pat.kind {
-        self.mark_branch_results_kept(&binding_name(&self.tcx, hir_id), init);
+        self.mark_branch_results_kept(&binding_name(&self.tcx, hir_id), cond);
       }
       self.break_pats.retain(|(id, ..)| *id != init.hir_id);
       self.break_binds.retain(|(id, ..)| *id != init.hir_id);
