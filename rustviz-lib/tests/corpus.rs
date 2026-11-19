@@ -20820,6 +20820,31 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[],
     },
+    TooltipExpect {
+        name: "assign_diverging_rhs_1142",
+        // #1142: `s = return;` (and `= panic!(…)`, `= break`,
+        // `= std::process::exit(1)`, a field, `*r`) drew the assignment
+        // as if it happened: "acquires ownership of a new resource; its
+        // previous resource is dropped". The right-hand side runs first
+        // and never finishes, so nothing is assigned; the exit drops the
+        // old value (`return`, `panic!`) or nothing (`break` out of the
+        // loop, `exit`, which runs no destructors).
+        must_contain: &[
+            "a goes out of scope. Its resource is dropped.",
+            "b goes out of scope. Its resource is dropped.",
+            "p.f goes out of scope. Its resource is dropped.",
+            "u goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "a acquires ownership of a new resource",
+            "b acquires ownership of a new resource",
+            "d acquires ownership of a new resource",
+            "e acquires ownership of a new resource",
+            "p.f acquires ownership of a new resource",
+            "u acquires ownership of a new resource",
+            "*r acquires ownership of a new resource",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
