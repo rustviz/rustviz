@@ -4183,8 +4183,14 @@ impl Visualizable for VisualizationData {
         // (`let it = v.iter();`, #336) owns its own value: borrowing
         // through it, and the end of that borrow, don't change what
         // the holder itself can do.
+        // So does an owner a stored borrow's end is drawn on after the
+        // value holding it was moved there (`let y = w;` with w given a
+        // borrow by `keep_mut(&mut w, &mut m)`, #1198): the end of that
+        // borrow isn't the end of y's own value.
         let holder = self.timelines.get(hash)
-            .is_some_and(|t| t.resource_access_point.holds_borrow());
+            .is_some_and(|t| t.resource_access_point.holds_borrow()
+                || (matches!(event, Event::MutableDie { .. } | Event::StaticDie { .. })
+                    && matches!(t.resource_access_point, ResourceAccessPoint::Owner(_))));
 
         // A borrow of one field of what a reference points to
         // (`&mut self.items`, `self.items.iter_mut()` in a `for` head,
@@ -4334,6 +4340,11 @@ impl Visualizable for VisualizationData {
                 }
             },
 
+            // A `&T` field given another's reference with its struct
+            // (`o.inner = other;` moves other.r into o.inner.r, #1199):
+            // it holds that one now, as after `o.inner.r = other.r;`.
+            (State::PartialPrivilege{..}, Event::Acquire{ .. }) if self.is_ref(hash) && !self.is_mutref(hash) =>
+                State::PartialPrivilege { s: LineState::Full },
             // A `&T` is only moved as part of a struct (`let hold =
             // other;` moves other.r): the field has no reference left.
             (State::PartialPrivilege{..}, Event::Move{to: to_ro,..}) if self.is_ref(hash) && !self.is_mutref(hash) =>
