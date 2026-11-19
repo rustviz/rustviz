@@ -4183,8 +4183,14 @@ impl Visualizable for VisualizationData {
         // (`let it = v.iter();`, #336) owns its own value: borrowing
         // through it, and the end of that borrow, don't change what
         // the holder itself can do.
+        // So does an owner a stored borrow's end is drawn on after the
+        // value holding it was moved there (`let y = w;` with w given a
+        // borrow by `keep_mut(&mut w, &mut m)`, #1198): the end of that
+        // borrow isn't the end of y's own value.
         let holder = self.timelines.get(hash)
-            .is_some_and(|t| t.resource_access_point.holds_borrow());
+            .is_some_and(|t| t.resource_access_point.holds_borrow()
+                || (matches!(event, Event::MutableDie { .. } | Event::StaticDie { .. })
+                    && matches!(t.resource_access_point, ResourceAccessPoint::Owner(_))));
 
         // A borrow of one field of what a reference points to
         // (`&mut self.items`, `self.items.iter_mut()` in a `for` head,
