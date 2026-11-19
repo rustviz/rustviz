@@ -20863,6 +20863,52 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "j goes out of scope. Its resource is dropped here only if j still holds it",
         ],
     },
+    TooltipExpect {
+        name: "conditional_literal_part_1256",
+        // #1256: `(if c { d } else { e }, 1)` / `W { s: if … }` branches:
+        // d moves on the then-path only, e on the else-path, and the
+        // literal's part acquires a value on every path. Main moved both
+        // unconditionally, with no branch, then said each "is dropped
+        // here only if d still holds it", though nothing could clear the
+        // drop flag on one path only.
+        must_contain: &[
+            "d was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when d goes out of scope.",
+            "e was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when e goes out of scope.",
+            "_t.0 acquired ownership of a resource (in all branches above)",
+            "_w.s acquired ownership of a resource (in all branches above)",
+            "_p.a acquired ownership of a resource (in all branches above)",
+            "_q.0 acquired ownership of a resource (in all branches above)",
+            "x acquired ownership of a resource (in all branches above)",
+            "y acquired ownership of a resource (in all branches above)",
+            "Move from f to _p.b",
+            "Move from f to _g",
+            "Move from f to _q.1",
+        ],
+        must_not_contain: &[
+            "d goes out of scope. Its resource is dropped here only if d still holds it (Rust tracks this with a runtime drop flag).",
+            "e goes out of scope. Its resource is dropped here only if e still holds it (Rust tracks this with a runtime drop flag).",
+        ],
+    },
+    TooltipExpect {
+        name: "destructuring_assign_branches_1253",
+        // #1253: `(x, n) = if c { (s, 1) } else { (t, 2) };` (and a
+        // `match`, an `else if`) assigns each branch's value in that
+        // branch: s moves on its path only. Main moved s and t (and u)
+        // unconditionally, with no branch.
+        must_contain: &[
+            "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when s goes out of scope.",
+            "t was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when t goes out of scope.",
+            "u was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when u goes out of scope.",
+            "x acquired ownership of a resource (in all branches above)",
+            "n is bound to a value (in all branches above)",
+            "y acquired ownership of a resource (in all branches above)",
+        ],
+        must_not_contain: &[
+            "s goes out of scope. Its resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
+            "t goes out of scope. Its resource is dropped here only if t still holds it (Rust tracks this with a runtime drop flag).",
+            "u goes out of scope. Its resource is dropped here only if u still holds it (Rust tracks this with a runtime drop flag).",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop

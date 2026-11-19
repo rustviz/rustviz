@@ -7517,6 +7517,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       arm_decls.extend(arm_inner);
       arm_decls.extend(arm_scoped);
       if !inline {
+        // The arrows binding the arm's value to a `let` (`rhs_arm_ids`)
+        // are drawn from the arm's own line map. Take them out of the
+        // global one: with another arrow on a one-line match's line
+        // (`let p = P { a: match n { 0 => d, _ => e }, b: f };`, #1256)
+        // they were drawn twice.
+        if let Some((lo, hi)) = self.rhs_arm_ids.get(&arm.body.hir_id).copied() {
+          let in_arm: HashSet<usize> = branch_e_data.iter().map(|(_, e)| e.get_id()).filter(|id| (lo..hi).contains(id)).collect();
+          for evs in self.event_line_map.values_mut() {
+            evs.retain(|e| !in_arm.contains(&e.get_id()));
+          }
+        }
         let branch_line_map = create_line_map(&branch_e_data);
         // An arm of type `!` (`_ => unreachable!()`) never
         // reaches the merge (#296).
@@ -9638,11 +9649,58 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       return false;
     }
 
+    // `(x, n) = if c { (s, 1) } else { (t, 2) };` (#1253): each branch's
+    // value is taken apart and assigned in that branch, as `let (x, n) =
+    // if …` binds it (#1007): s moves on its path only, t on the other.
+    if matches!(init.kind, ExprKind::If(_, _, Some(_)) | ExprKind::Match(_, _, rustc_hir::MatchSource::Normal))
+      && !init.span.from_expansion()
+    {
+      let mut bodies = Vec::new();
+      conditional_branch_bodies(init, &mut bodies);
+      for body in bodies {
+        self.deferred_arm_binds.entry(body.hir_id).or_insert_with(|| (body, Vec::new())).1.push(ArmBind::Assign(block));
+      }
+      self.visit_expr(init);
+      self.bind_left_arms(init);
+      return true;
+    }
     // Calls, borrows and reads inside the RHS. A constructor the
     // pattern takes apart (`W(y) = W(g);`) is no actor (#950).
     self.note_let_ctor_literals(local.pat, init);
     self.visit_expr(init);
+    self.draw_destructuring_assign(local, init, assigns);
+    true
+  }
 
+  /// The value of branch body `body` of a destructuring assignment's
+  /// right-hand side (the desugared `block`), now visited, assigned to
+  /// its places in that branch (#1253). A branch of type `!` gives none.
+  pub fn assign_branch_value(&mut self, block: &'tcx rustc_hir::Block<'tcx>, body: &'tcx Expr<'tcx>) {
+    let Some(Stmt { kind: StmtKind::Let(local), .. }) = block.stmts.first() else { return };
+    let Some(value) = branch_value_expr(body) else { return };
+    if self.tcx.typeck(value.hir_id.owner).expr_ty_opt(value).is_none_or(|ty| ty.is_never()) {
+      return;
+    }
+    let mut assigns: Vec<(&'tcx Expr<'tcx>, &'tcx Expr<'tcx>, HirId)> = Vec::new();
+    for stmt in &block.stmts[1..] {
+      if let StmtKind::Semi(e) | StmtKind::Expr(e) = stmt.kind {
+        if let ExprKind::Assign(place, rhs, _) = e.kind {
+          if let Some(hid) = local_of_path(rhs) {
+            assigns.push((e, place, hid));
+          }
+        }
+      }
+    }
+    // Drawn on the branch value's line (`0 => (s, 1),` in a `match`
+    // written over several lines), not the statement's first.
+    let saved = self.line_override.replace(span_to_line(&value.span, &self.tcx));
+    self.draw_destructuring_assign(local, value, assigns);
+    self.line_override = saved;
+  }
+
+  /// The assignments `x = lhs; …` of a destructuring assignment whose
+  /// pattern (`local`) takes `init` apart.
+  fn draw_destructuring_assign(&mut self, local: &'tcx LetStmt<'tcx>, init: &'tcx Expr<'tcx>, assigns: Vec<(&'tcx Expr<'tcx>, &'tcx Expr<'tcx>, HirId)>) {
     let mut pairs: Vec<(HirId, &'tcx Expr<'tcx>)> = Vec::new();
     let mut discarded: Vec<&'tcx Expr<'tcx>> = Vec::new();
     self.pair_destructure(local.pat, init, &mut pairs, &mut discarded);
@@ -9768,7 +9826,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.destructure_moved.clear();
     self.destructure_ref_data.clear();
     self.destructure_ref_src.clear();
-    true
   }
 
   /// Pair each binding of a destructuring assignment's pattern with
@@ -9922,8 +9979,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let ctor_cond = (!is_skipped && els.is_none() && matches!(pat.kind, PatKind::Binding(_, _, _, None)))
       .then(|| self.conditional_value(init)).flatten()
       .filter(|c| c.hir_id != init.hir_id);
+    // `let t = (if c { d } else { e }, 1);` / `W { s: match o { … } }`
+    // (#1256): an element or field that is an `if` / `match` gives its
+    // part of the value from each branch, in that branch, so the literal
+    // is bound before it is visited, as a conditional initializer is.
+    let elem_conds = !is_skipped && els.is_none() && ctor_cond.is_none() && literal_has_conditional_part(init);
+    let whole_binding = matches!(pat.kind, PatKind::Binding(_, _, _, None));
     let init_is_branching = !is_skipped
-      && (ctor_cond.is_some() || match init.kind {
+      && (ctor_cond.is_some() || elem_conds || match init.kind {
         ExprKind::If(..) => true,
         // `let r = loop { … break k; }`: the `break`s hand `r` its
         // value as they're visited (#431), so `r` is bound first.
@@ -9945,6 +10008,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         if let Some(cond) = ctor_cond {
           self.defer_arm_binds = Some(cond.span);
           self.bind_pat(pat, cond, is_skipped);
+        } else if elem_conds {
+          // The other parts are bound once the literal is visited.
+          // (A pattern taking the literal apart, `let (x, n) = (if …,
+          // 1);`, pairs its parts one by one: all are bound here.)
+          self.defer_arm_binds = Some(init.span);
+          self.literal_parts = whole_binding.then_some(true);
+          self.bind_pat(pat, init, is_skipped);
+          self.literal_parts = None;
         } else if conditional && matches!(pat.kind, PatKind::Binding(_, _, _, None)) {
           self.defer_arm_binds = Some(init.span);
           self.bind_pat(pat, init, is_skipped);
@@ -9960,6 +10031,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.defer_arm_binds = prev;
       }
       self.visit_expr(init);
+      if let (true, PatKind::Binding(_, hir_id, _, None)) = (elem_conds, pat.kind) {
+        if let Some(rap) = self.raps.get(&binding_name(&self.tcx, hir_id)).map(|r| r.rap.to_owned()) {
+          self.literal_parts = Some(false);
+          self.match_rhs(ResourceTy::Value(rap), init, Evt::Move);
+          self.literal_parts = None;
+        }
+      }
       let cond = ctor_cond.unwrap_or(init);
       self.bind_left_arms(cond);
       // A reference returned by a call in a branch keeps that call's
@@ -12974,5 +13052,36 @@ pub(crate) fn is_literal_value<'tcx>(e: &Expr<'tcx>, typeck: &rustc_middle::ty::
         && args.iter().all(|x| is_literal_value(x, typeck))
     }
     _ => false,
+  }
+}
+
+/// `e` is a tuple or struct literal one of whose parts is an `if` / `else`
+/// or a `match` (`(if c { d } else { e }, 1)`, `W { s: if … }`; #1256):
+/// the part's value comes from each branch, in that branch.
+pub(crate) fn literal_has_conditional_part(e: &Expr<'_>) -> bool {
+  !e.span.from_expansion() && match e.kind {
+    ExprKind::Tup(parts) => parts.iter().any(is_conditional_part),
+    ExprKind::Struct(_, fields, _) => fields.iter().any(|f| is_conditional_part(f.expr)),
+    _ => false,
+  }
+}
+
+/// The branch bodies of the `if` / `else` or `match` `e` whose values
+/// it yields, through nested ones (`else if`), in source order.
+fn conditional_branch_bodies<'tcx>(e: &'tcx Expr<'tcx>, out: &mut Vec<&'tcx Expr<'tcx>>) {
+  let mut push = |b: &'tcx Expr<'tcx>, out: &mut Vec<&'tcx Expr<'tcx>>| match branch_value_expr(b) {
+    Some(v) if !v.span.from_expansion() && matches!(v.kind, ExprKind::If(_, _, Some(_)) | ExprKind::Match(_, _, rustc_hir::MatchSource::Normal)) =>
+      conditional_branch_bodies(v, out),
+    _ => out.push(b),
+  };
+  match e.kind {
+    ExprKind::If(_, then, Some(els)) => {
+      push(then, out);
+      push(els, out);
+    }
+    ExprKind::Match(_, arms, _) => for arm in arms.iter() {
+      push(arm.body, out);
+    },
+    _ => {}
   }
 }
