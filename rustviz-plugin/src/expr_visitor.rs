@@ -769,6 +769,10 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // Those of them, when every value the returned `if` / `match` yields
   // is a variable or a literal (`note_tied_ref_params`, #775).
   pub tail_plain: HashSet<rustc_hir::HirId>,
+  // The same for a call's argument written as an `if` / `match`
+  // (`take(if c { a } else { b })`): the value each branch yields is
+  // passed to the call named here when its branch runs (#1174).
+  pub arg_values: HashMap<rustc_hir::HirId, String>,
   // Where the arms of each if/else and match leave to when they exit
   // early, by the Branch event's id (see `end_borrows_at_exits`).
   pub exit_scopes: HashMap<usize, ExitScope>,
@@ -1030,6 +1034,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       try_moves: HashMap::new(),
       tail_values: HashSet::new(),
       tail_plain: HashSet::new(),
+      arg_values: HashMap::new(),
       exit_scopes: HashMap::new(),
     }
   }
@@ -4317,8 +4322,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     Some(ResourceTy::DerefField(rap, text()?, w, holds))
   }
 
-  /// The returned value `e` is part of a variable or static that has a
-  /// column, not all of it: `v[0]` / `g[1][0]` / `ORIGIN.x` (a Copy
+  /// The value `e`, returned (or passed to a call by value, #1170), is
+  /// part of a variable or static that has a column, not all of it: `v[0]` / `g[1][0]` / `ORIGIN.x` (a Copy
   /// element or field copied out, #1052), or `&PRIMES` / `&PRIMES[0]`
   /// (a reference to (part of) a static, #1053), or a field of an
   /// element (`pts[0].x`, #1065). Returns
@@ -4876,7 +4881,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
     else {
       match is_copyable {
-        true => self.add_ev(line_num, Evt::Copy, to_ro, from_ro, false),
+        // `show(v[0])` / `show(pts[0].x)`: a copy of one element (or a
+        // field of one), drawn out of `v[0]` on v's column, as for
+        // `let n = v[0];`; v isn't copied (#1170).
+        true => {
+          let from_ro = self.returned_part(arg).unwrap_or(from_ro);
+          self.add_ev(line_num, Evt::Copy, to_ro, from_ro, false)
+        }
         false => self.add_ev(line_num, Evt::Move, to_ro, from_ro, false)
       }
     }
