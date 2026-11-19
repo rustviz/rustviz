@@ -1683,6 +1683,11 @@ pub struct EarlyReturns {
     /// the code reaches while the loop keeps running, where it ends the
     /// column without dropping anything (#1057).
     pub runs_on: Option<LoopRunsOn>,
+    /// The scope end of a variable in scope at a call to
+    /// `process::exit` (or `abort`), drawn at the call (#1172): the
+    /// process ends there without running any destructor, so nothing is
+    /// dropped. Names the call.
+    pub process_exit: Option<&'static str>,
 }
 
 /// A variable still in scope while a `loop` that nothing breaks out of

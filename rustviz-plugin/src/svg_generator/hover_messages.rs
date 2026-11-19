@@ -1085,6 +1085,34 @@ pub fn try_drop_with_other_events(drop_text: &str) -> Option<String> {
     Some(format!("{head}. If the `?` succeeds, {owner}'s resource isn't dropped here."))
 }
 
+// The same for a variable that holds a value on some paths only (moved,
+// or given one, in some branches above, #1194): its drop flag decides
+// whether the early return drops it.
+pub fn event_dot_owner_drop_if_try_returns_maybe(my_name: &String, note: &str) -> String {
+    let my_name_fmt = styled_name_html(my_name);
+    let (holds, rest) = split_drop_note(note);
+    format!(
+        "Only if the `?` here returns early (on an `Err` or `None`): the function returns and {0}'s \
+         resource{1} is dropped{2} if {0} still holds it (Rust tracks this with a runtime drop flag). \
+         If the `?` succeeds, nothing happens to {0} here.",
+        my_name_fmt, holds, rest
+    )
+}
+
+// The same for a struct some fields of which were moved out before the
+// `?` (#1184): `scope_end` is what its scope end would say there
+// (`event_dot_struct_partial_go_out_of_scope`), "p goes out of scope. p.a
+// was moved out earlier, so only p.b is dropped."
+pub fn event_dot_owner_drop_if_try_returns_partial(my_name: &String, scope_end: &str) -> String {
+    let my_name_fmt = styled_name_html(my_name);
+    let rest = scope_end.strip_prefix(&format!("{} goes out of scope. ", my_name_fmt)).unwrap_or(scope_end);
+    format!(
+        "Only if the `?` here returns early (on an `Err` or `None`): the function returns, and drops \
+         what is left of {0}: {1} If the `?` succeeds, nothing happens to {0} here.",
+        my_name_fmt, rest
+    )
+}
+
 // `let n = a? + b?;`: b's dot holds both a's `?` (b is dropped if it
 // returns early) and b's own `?` (moves b). "If the `?` succeeds, nothing
 // happens to b here" is about a's `?` only, but read next to the move it
@@ -5828,5 +5856,27 @@ mod escape_tooltip_attrs_tests {
             escape_tooltip_attrs(svg),
             r#"<g d="a&b" data-tooltip-text="&lt;span&gt;x&amp;lt;&amp;amp;&#38;&#x26; &amp; &amp;x"/>"#
         );
+    }
+}
+
+// A variable in scope at a call to `process::exit` / `abort` (#1172):
+// the process ends there and runs no destructors. `owns`: whether it
+// holds a value that needs dropping (`Some(false)`: nothing to drop;
+// `None`: it may hold one, or only part of one).
+pub fn event_dot_process_exit(name: &String, owns: Option<bool>, call: &str) -> String {
+    let call = format!("`{}`", call);
+    match owns {
+        Some(true) => format!(
+            "{0} ends the program here without running any destructor: {1}'s resource is never dropped",
+            call, styled_name_html(name)
+        ),
+        None => format!(
+            "{0} ends the program here without running any destructor: whatever {1} still holds is never dropped",
+            call, styled_name_html(name)
+        ),
+        Some(false) => format!(
+            "{0} ends the program here. {1} holds no resource to drop",
+            call, styled_name_html(name)
+        ),
     }
 }
