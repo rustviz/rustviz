@@ -253,6 +253,9 @@ pub enum ArmBind<'tcx> {
   /// branch's value arrives, if the branch left it there (and its
   /// type needs drop: the `bool`).
   Reassign(ResourceTy, Evt, ResourceAccessPoint, bool),
+  /// Taken apart by a destructuring assignment (`(x, n) = if …`, the
+  /// block it desugars to; #1253).
+  Assign(&'tcx rustc_hir::Block<'tcx>),
 }
 
 /// A `let` binding with no initializer (`let x;`), remembered until
@@ -379,6 +382,12 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // it is paired once its body has been (`deferred_arm_binds`, keyed
   // by the body's HirId, see `bind_deferred_arm`).
   pub defer_arm_binds: Option<rustc_span::Span>,
+  /// Binding a tuple / struct literal with an `if` / `match` part to a
+  /// `let` (`let t = (if c { d } else { e }, f);`, #1256): `Some(true)`
+  /// binds only those parts, before the literal is visited (their
+  /// branches take the events), `Some(false)` only the others, after it,
+  /// as a call passes its arguments once they're visited.
+  pub literal_parts: Option<bool>,
   pub deferred_arm_binds: HashMap<rustc_hir::HirId, (&'tcx Expr<'tcx>, Vec<ArmBind<'tcx>>)>,
   // While a branch's value is matched against the variables of a
   // pattern that were declared ahead of the conditional (`let (a, b) =
@@ -755,6 +764,10 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // Those of them, when every value the returned `if` / `match` yields
   // is a variable or a literal (`note_tied_ref_params`, #775).
   pub tail_plain: HashSet<rustc_hir::HirId>,
+  // The same for a call's argument written as an `if` / `match`
+  // (`take(if c { a } else { b })`): the value each branch yields is
+  // passed to the call named here when its branch runs (#1174).
+  pub arg_values: HashMap<rustc_hir::HirId, String>,
   // Where the arms of each if/else and match leave to when they exit
   // early, by the Branch event's id (see `end_borrows_at_exits`).
   pub exit_scopes: HashMap<usize, ExitScope>,
@@ -935,6 +948,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       deferred_decl_at: HashMap::new(),
       rhs_arm_ids: HashMap::new(),
       defer_arm_binds: None,
+      literal_parts: None,
       deferred_arm_binds: HashMap::new(),
       bind_existing: false,
       reassign_arms: None,
@@ -1013,6 +1027,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       try_moves: HashMap::new(),
       tail_values: HashSet::new(),
       tail_plain: HashSet::new(),
+      arg_values: HashMap::new(),
       exit_scopes: HashMap::new(),
     }
   }
@@ -2488,6 +2503,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         ArmBind::Rhs(lhs, evt) => self.match_rhs(lhs, body, evt),
         ArmBind::Pat(pat) => self.pair_pat_with_value(pat, body),
         ArmBind::Reassign(lhs, evt, old, drops) => self.reassign_from_arm(lhs, body, evt, old, drops),
+        ArmBind::Assign(block) => self.assign_branch_value(block, body),
       }
     }
     self.rhs_arm_ids.insert(body.hir_id, (lo, *self.unique_id));
@@ -4194,8 +4210,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     Some(ResourceTy::DerefField(rap, text()?, w, holds))
   }
 
-  /// The returned value `e` is part of a variable or static that has a
-  /// column, not all of it: `v[0]` / `g[1][0]` / `ORIGIN.x` (a Copy
+  /// The value `e`, returned (or passed to a call by value, #1170), is
+  /// part of a variable or static that has a column, not all of it: `v[0]` / `g[1][0]` / `ORIGIN.x` (a Copy
   /// element or field copied out, #1052), or `&PRIMES` / `&PRIMES[0]`
   /// (a reference to (part of) a static, #1053), or a field of an
   /// element (`pts[0].x`, #1065). Returns
@@ -4661,7 +4677,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
     else {
       match is_copyable {
-        true => self.add_ev(line_num, Evt::Copy, to_ro, from_ro, false),
+        // `show(v[0])` / `show(pts[0].x)`: a copy of one element (or a
+        // field of one), drawn out of `v[0]` on v's column, as for
+        // `let n = v[0];`; v isn't copied (#1170).
+        true => {
+          let from_ro = self.returned_part(arg).unwrap_or(from_ro);
+          self.add_ev(line_num, Evt::Copy, to_ro, from_ro, false)
+        }
         false => self.add_ev(line_num, Evt::Move, to_ro, from_ro, false)
       }
     }
@@ -7762,10 +7784,14 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
         }
         _ => None,
       };
-      if !matches!(lhs, ResourceTy::Anonymous) {
+      let only = self.literal_parts.take();
+      if !matches!(lhs, ResourceTy::Anonymous) && only != Some(false) {
         self.add_ev(line_num, Evt::Bind, lhs.clone(), ResourceTy::Anonymous, false);
       }
       for (i, elem) in elems.iter().enumerate() {
+        if only.is_some_and(|c| c != is_conditional_part(elem)) {
+          continue;
+        }
         let e = elem_evt(self, elem);
         match members.as_ref().and_then(|m| m[i].clone()) {
           Some(member) => {
@@ -8392,8 +8418,14 @@ pub fn match_rhs_call(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
 /// The `ExprKind::Struct` case of `match_rhs`: `let lhs = S { f: v, ..base };`.
 pub fn match_rhs_struct(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, _qpath: &'tcx QPath<'tcx>, expr_fields: &'tcx [rustc_hir::ExprField<'tcx>], base: rustc_hir::StructTailExpr<'tcx>) {
   let line_num = span_to_line(&rhs.span, &self.tcx);
-  self.add_ev(line_num, Evt::Bind, lhs.clone(), ResourceTy::Anonymous, false);
+  let only = self.literal_parts.take();
+  if only != Some(false) {
+    self.add_ev(line_num, Evt::Bind, lhs.clone(), ResourceTy::Anonymous, false);
+  }
   for field in expr_fields.iter() {
+      if only.is_some_and(|c| c != is_conditional_part(field.expr)) {
+        continue;
+      }
       // Struct literal that isn't bound to a struct RAP: the
       // value is returned (`User { email, .. }` as a fn's tail
       // expression). The field initialisers still move/copy
@@ -8472,7 +8504,7 @@ pub fn match_rhs_struct(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, _qpat
   // Copy and copied otherwise. That's a *partial* move of `base`:
   // its explicitly-overridden fields stay put and are still
   // dropped at its scope end.
-  if let rustc_hir::StructTailExpr::Base(base_expr) = base {
+  if let (rustc_hir::StructTailExpr::Base(base_expr), true) = (base, only != Some(true)) {
     let base_line = span_to_line(&base_expr.span, &self.tcx);
     let base_name = expr_to_rap_name(base_expr, &self.tcx)
       .filter(|n| self.raps.contains_key(n));
@@ -10970,4 +11002,11 @@ pub(crate) fn copies_from_inside<'tcx>(evt: &Evt, ty: Ty<'tcx>, parent_ty: Ty<'t
 
 fn is_by_value_binding(pat: &Pat<'_>) -> bool {
   matches!(pat.kind, PatKind::Binding(ann, _, _, None) if matches!(ann.0, rustc_hir::ByRef::No))
+}
+
+/// A part of a tuple / struct literal that is an `if` / `else` or a
+/// `match` the user wrote (see `ExprVisitor::literal_parts`, #1256).
+pub(crate) fn is_conditional_part(p: &Expr<'_>) -> bool {
+  !p.span.from_expansion()
+    && matches!(p.kind, ExprKind::If(_, _, Some(_)) | ExprKind::Match(_, _, rustc_hir::MatchSource::Normal))
 }
