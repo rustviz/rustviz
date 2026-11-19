@@ -8842,7 +8842,12 @@ pub fn match_rhs_call(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
 pub fn enclosing_ctor_name(&self, e: &'tcx Expr<'tcx>) -> Option<String> {
   let mut cur = e;
   loop {
-    let rustc_hir::Node::Expr(p) = self.tcx.parent_hir_node(cur.hir_id) else { return None };
+    // A struct literal's field value's parent is the `ExprField`.
+    let mut parent = self.tcx.parent_hir_node(cur.hir_id);
+    if let rustc_hir::Node::ExprField(f) = parent {
+      parent = self.tcx.parent_hir_node(f.hir_id);
+    }
+    let rustc_hir::Node::Expr(p) = parent else { return None };
     match p.kind {
       ExprKind::Struct(..) | ExprKind::Tup(_) => cur = p,
       ExprKind::Call(callee, args) if args.iter().any(|a| a.hir_id == cur.hir_id)
