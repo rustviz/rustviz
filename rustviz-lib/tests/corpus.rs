@@ -20753,6 +20753,94 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Move from boxed to d",
         ],
     },
+    // #1161: `std::process::exit(run(config))` / `drop(tag(s, ..))`: the
+    // inner call takes the variables, the outer one only the value the
+    // inner call returns. An old `println!` decoder skipped the inner call.
+    TooltipExpect {
+        name: "call_arg_inner_call_1161",
+        must_contain: &[
+            "Move from config to run",
+            "Move from s to tag",
+            "s's resource is moved",
+            "s goes out of scope. No resource is dropped.",
+            "config's resource is moved",
+        ],
+        must_not_contain: &[
+            "Move from config to std::process::exit",
+            "to std::process::exit",
+            // s's String was never drawn as moved into tag.
+            "=s goes out of scope. Its resource is dropped.",
+        ],
+    },
+    // #1174: an `if` / `match` as a call's argument passes the value its
+    // branch yields, on that branch's path (also through a method call and
+    // a constructor). An arm's binding passed to the call isn't dropped at
+    // the arm's end.
+    TooltipExpect {
+        name: "call_arg_branch_value_1174",
+        must_contain: &[
+            "Move from a to take",
+            "Move from b to take",
+            "a's resource is moved",
+            "a was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when a goes out of scope.",
+            "Move from y to take",
+            "Move from d to take",
+            "y's resource is moved",
+            "y goes out of scope. No resource is dropped.",
+            "Move from e to push",
+            "Move from f to push",
+            "Move from g to take_opt",
+            "Move from h to take_opt",
+            // `Some(match o { Some(x) => x, None => d })` returned by wrap.
+            "x's resource is moved to the caller",
+            "x goes out of scope. No resource is dropped.",
+            "d's resource is moved to the caller",
+        ],
+        must_not_contain: &[
+            // x / y were passed on, not dropped at the arm's end.
+            "=x goes out of scope. Its resource is dropped.",
+            "=y goes out of scope. Its resource is dropped.",
+            // a / b / e / f / g / h were never drawn as moved.
+            "a goes out of scope. Its resource is dropped here only if a still holds it",
+            "e goes out of scope. Its resource is dropped here only if e still holds it",
+            "g goes out of scope. Its resource is dropped here only if g still holds it",
+        ],
+    },
+    // #1170: `show(v[0])` copies the i32 element out of v; the Vec isn't
+    // copied.
+    TooltipExpect {
+        name: "call_arg_element_copy_1170",
+        must_contain: &[
+            "Copy from v[0] to show",
+            "v[0] is copied out of v's resource",
+            "Copy from v[1] to push",
+            "v[1] is copied out of v's resource",
+            "Copy from w[0] to insert",
+            "w[0] is copied out of w's resource",
+        ],
+        must_not_contain: &[
+            "Copy from v to show",
+            "Copy from v to push",
+            "Copy from w to insert",
+            "v's value is copied",
+            "w's value is copied",
+        ],
+    },
+    // #1195: `take(s, bar()?)` moves s into the call's first argument
+    // before the `?` runs; if it returns early, s's String is dropped. The
+    // `?` dot's text is pinned by `a_try_after_an_argument_drops_what_the_argument_holds`
+    // (its second sentence is reworded by #1196).
+    TooltipExpect {
+        name: "call_arg_before_try_1195",
+        must_contain: &[
+            "s's resource is moved",
+            "w's resource is moved",
+            "q's resource is moved",
+        ],
+        // Main left the drop out rather than saying something false; the
+        // test above fails on main.
+        must_not_contain: &[],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -28297,4 +28385,24 @@ fn a_boxed_closure_borrowing_through_a_reference_keeps_it_until_dropped() {
     assert_eq!(ys("d's immutable borrow ends"), vec![row("drop(d);")]);
     assert_eq!(ys("d no longer borrows the resource p points to"), vec![row("drop(d);")]);
     assert_eq!(ys("w's resource is no longer immutably borrowed"), vec![row("drop(d);")]);
+}
+
+/// #1195 (`call_arg_before_try_1195`): a call's arguments are all
+/// evaluated before the call takes any, so in `take(s, bar()?)`,
+/// `q.put(w, bar()?)` and `q.eat(bar()?)` (by-value `self`) the `?` can
+/// return early while s / w / q's value sits in an evaluated argument: it
+/// is dropped then. That's said on the dot of the line the value is moved
+/// on, next to the move. Main drew only the move.
+#[test]
+fn a_try_after_an_argument_drops_what_the_argument_holds() {
+    let rv = run_with_local_backend("call_arg_before_try_1195");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let row = |src: &str| code_row_y(&code, src);
+    for (name, line) in [("s", "take(s, bar()?);"), ("w", "q.put(w, bar()?);"), ("q", "q.eat(bar()?);")] {
+        let drop = format!("Only if the `?` here returns early (on an `Err` or `None`): the function returns and {name}'s resource is dropped.");
+        let ys: Vec<f64> = dots_where(&tl, |lines| lines.iter().any(|l| l.starts_with(&drop))
+            && lines.iter().any(|l| *l == format!("{name}'s resource is moved")))
+            .into_iter().map(|(_, y)| y).collect();
+        assert_eq!(ys, vec![row(line)], "{name}: the `?` drop and the move belong on one dot on {line:?}");
+    }
 }
