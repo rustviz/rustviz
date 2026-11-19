@@ -2765,13 +2765,18 @@ pub(crate) fn lender_holds_value(rty: &ResourceTy) -> bool {
         || matches!(rty, ResourceTy::DerefField(_, _, _, FieldHolds { value: true }))
 }
 
-// Whether a borrow's referent is a "value" in the dot's tooltip. A
-// referent with no column of its own (`&{}`, `&5`, `&S { a: 4 }`) is
-// `Anonymous`: the type of what the borrower points to says whether it
-// needs drop (#867). Referents that need drop get a `Temporary` column
-// and stay a "resource".
+// Whether a borrow's referent is a "value" in the dot's tooltip: the
+// lender holds one, or the type of what the borrower points to has
+// nothing to drop. That covers a referent with no column of its own
+// (`&{}`, `&5`, `&S { a: 4 }`, #867; referents that need drop get a
+// `Temporary` column and stay a "resource") and a Copy part of a lender
+// that needs drop (`&mut v[0]` with `v: Vec<i32>`, `&s[..]`: the
+// reference points to an `i32` / a `str`, #1233), as the borrower's own
+// line already says. Not for `*el` (el: `&mut &String`): el's pointee is
+// the reference, not what `*el` points to.
 fn borrow_holds_value(from: &ResourceTy, borrower: &ResourceTy) -> bool {
     holds_copy_value(from)
+        || matches!(borrower, ResourceTy::Value(r) if r.points_to_copy())
         || (matches!(from, ResourceTy::Anonymous)
             && borrower.extract_rap().is_some_and(|r| r.points_to_copy()))
 }

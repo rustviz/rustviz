@@ -5705,7 +5705,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "first_word reads from my_string",
             "Immutable borrow from my_string to word: first_word's signature gives the reference it returns the same lifetime as its argument",
             "my_string's resource is immutably borrowed by word; my_string is read-only while the borrow is live",
-            "word immutably borrows a resource",
+            "word immutably borrows a value",
             "Return immutably borrowed resource from word to my_string",
         ],
         must_not_contain: &[
@@ -7852,7 +7852,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "z acquires ownership of a resource",
             "z goes out of scope. Its resource is dropped.",
-            "n immutably borrows a resource",
+            "n immutably borrows a value",
             "n's immutable borrow ends",
             "s is live in a conditional expression ",
         ],
@@ -8151,7 +8151,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `first` is declared in the `_` arm: no branched column, no
         // "no value yet" strips, no split dot, no false merge text (#425).
         must_contain: &[
-            "first immutably borrows a resource",
+            "first immutably borrows a value",
             "first goes out of scope",
         ],
         must_not_contain: &[
@@ -15763,7 +15763,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Immutable borrow from words to r",
             "words's resource is immutably borrowed by r; words is read-only while the borrow is live",
-            "r immutably borrows a resource",
+            "r immutably borrows a value",
             "Return immutably borrowed resource from r to words",
             "words's resource is no longer immutably borrowed",
             "words goes out of scope. Its resource is dropped.",
@@ -20751,6 +20751,26 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Move from boxed to m",
             "=Move from Box::new to n",
             "=Move from boxed to d",
+        ],
+    },
+    TooltipExpect {
+        name: "copy_part_borrow_value_1233",
+        // #1233: e / f / g / sl point to an i32 / u32 / str (nothing to
+        // drop): "a value", as their own lines already said. h / x point
+        // to a String: still "a resource". The lender stays "resource".
+        must_contain: &[
+            "e mutably borrows a value",
+            "f immutably borrows a value",
+            "g mutably borrows a value",
+            "sl immutably borrows a value",
+            "h immutably borrows a resource",
+            "x immutably borrows a resource",
+            "v's resource is mutably borrowed by e; v can't be used while the borrow is live",
+        ],
+        must_not_contain: &[
+            "e mutably borrows a resource",
+            "f immutably borrows a resource",
+            "sl immutably borrows a resource",
         ],
     },
 ];
