@@ -22862,6 +22862,28 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=u's resource is immutably borrowed by c; u is read-only while the borrow is live",
         ],
     },
+    TooltipExpect {
+        name: "match_whole_borrow_parts_1215",
+        // #1215: `match &mut t { (a, b) => … }` is one loan of all of t,
+        // which a and b each reach a part of, as for `let (a, b) = &mut
+        // t;` (#1130). t's dot used to read as two mutable borrows of t,
+        // and t was given back at a's last use while b still borrowed it
+        // (see `a_match_on_a_borrow_of_a_whole_gives_it_back_once`).
+        must_contain: &[
+            "t.0 is mutably borrowed by a, as part of a mutable borrow of all of t; t can't be used while the borrow is live",
+            "t.1 is mutably borrowed by b, as part of a mutable borrow of all of t; t can't be used while the borrow is live",
+            "Partial Mutable borrow from t to a: a points to t.0, but the borrow is of all of t, which stays borrowed while a is in use",
+            "u.0 is immutably borrowed by c, as part of an immutable borrow of all of u; u is read-only while the borrow is live",
+            "s.x is mutably borrowed by x, as part of a mutable borrow of all of s; s can't be used while the borrow is live",
+            "Mutable borrow from s to y: y points to s.y, but the borrow is of all of s, which stays borrowed while y is in use",
+        ],
+        must_not_contain: &[
+            "=t's resource is mutably borrowed by a; t can't be used while the borrow is live",
+            "=t's resource is mutably borrowed by b; t can't be used while the borrow is live",
+            "=u's resource is immutably borrowed by c; u is read-only while the borrow is live",
+            "=s's resource is mutably borrowed by x; s can't be used while the borrow is live",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -30505,6 +30527,27 @@ fn a_boxed_closure_borrowing_through_a_reference_keeps_it_until_dropped() {
     assert_eq!(ys("d's immutable borrow ends"), vec![row("drop(d);")]);
     assert_eq!(ys("d no longer borrows the resource p points to"), vec![row("drop(d);")]);
     assert_eq!(ys("w's resource is no longer immutably borrowed"), vec![row("drop(d);")]);
+}
+
+/// #1215: `match &mut t { (a, b) => { a.push('!'); b.push('?'); } }`
+/// gives t back once, at b's last use (the loan the scrutinee makes lives
+/// as long as either binding). It was given back at a's last use too,
+/// drawing t as owner while b still borrowed it.
+#[test]
+fn a_match_on_a_borrow_of_a_whole_gives_it_back_once() {
+    let name = "match_whole_borrow_parts_1215";
+    let rv = run_with_local_backend(name);
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (end, last_use) in [
+        ("t's resource is no longer mutably borrowed", "b.push('?');"),
+        ("u's resource is no longer immutably borrowed", "println!(\"{}\", d);"),
+        ("s's resource is no longer mutably borrowed", "y.push('2');"),
+    ] {
+        let row = code_row_y(&code, last_use);
+        let ends = dots_listing_tooltip(&timeline, end);
+        assert_eq!(ends.len(), 1, "{name}: {end:?} at {ends:?}, expected once");
+        assert!((ends[0].1 - row).abs() < 1.0, "{name}: {end:?} at y={}, expected the row of `{last_use}` (y={row})", ends[0].1);
+    }
 }
 
 /// #1203 (`closure_static_write_1203`): calling a closure that assigns a
