@@ -459,6 +459,18 @@ pub fn event_dot_owner_drop_at_reassign_maybe_moved(my_name: &String, note: &str
     )
 }
 
+// `b = Box::new(…)` after the old Box's whole contents were moved out
+// (`let s = *b;`): the old contents aren't the Box's to drop any more,
+// but its heap allocation is freed here (#1145). (Starts ". Its
+// previous", so it subsumes the line's plain acquire.)
+pub fn event_dot_owner_drop_at_reassign_box_contents_moved(my_name: &String) -> String {
+    format!(
+        "{} acquires ownership of a new resource. Its previous contents were moved out earlier, \
+         so only its previous Box's heap allocation is freed here.",
+        styled_name_html(my_name)
+    )
+}
+
 // `event_dot_owner_drop_at_reassign_maybe_moved` for a Box whose
 // contents (`*b`), not the Box itself, were moved out in some branches
 // above (#921): the drop flag decides only whether the old contents are

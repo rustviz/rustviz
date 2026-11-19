@@ -1670,9 +1670,11 @@ fn render_scope_end_dot(
             };
             append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
             return true;
-        } else if !resource_hold && ro.box_contents_moved() {
+        } else if !resource_hold && ro.box_contents_moved() && box_contents_moved_last(history) != Some(false) {
             // `take(*b)`: the contents are gone but the Box's
-            // allocation is still freed here (#609).
+            // allocation is still freed here (#609). Not when the
+            // Box was given a new value and moved away whole since
+            // (#1145).
             let cx = timeline_data.x_val;
             let cy = event_y;
             let drop_data = DropDotData {
@@ -2004,6 +2006,10 @@ fn render_dot(
                         // rustc says it only may hold a value here,
                         // though nothing drawn above says so (#1027).
                         hover_messages::event_dot_owner_drop_at_reassign_maybe_kept(&name, &note)
+                    } else if matches!(event, Event::OwnerDropAtReassign { maybe_moved: false, maybe_init: None, parts: None, payload: false, contents_gone: true, .. }) {
+                        // The old Box's contents were moved out above:
+                        // only its heap allocation is freed (#1145).
+                        hover_messages::event_dot_owner_drop_at_reassign_box_contents_moved(&name)
                     } else if let Event::OwnerDropAtReassign { maybe_init: Some(InitBy::EarlierIteration), .. } = event {
                         // Its first assignment, in a loop body (#786).
                         hover_messages::event_dot_init_drops_earlier_iteration(&name)
@@ -2809,6 +2815,39 @@ fn moved_by_leavers(branch_history: &[BranchData], out: &mut Vec<Vec<BranchExit>
 // itself, on some path: then e still owns its heap allocation on every
 // path.
 fn moves_only_box_contents(branch_history: &[BranchData]) -> bool {
+    moves_only_box_contents_impl(branch_history)
+}
+
+// Whether what last emptied a Box's column (in `history`, the events
+// before the point in question) was a move of its whole contents (`let s
+// = *b;`), not of the Box itself, nor a new value since (#1145): `Owner::
+// box_contents_moved` says only that the body moves them out somewhere,
+// and the Box may since have been given a new one and moved away whole
+// (`b = Box::new(…); drop(b);`). `None`: neither found.
+fn box_contents_moved_last(history: &[(usize, Event)]) -> Option<bool> {
+    for (_, e) in history.iter().rev() {
+        match e {
+            Event::Move { is: ResourceTy::Deref(_), .. } => return Some(true),
+            Event::Move { .. } | Event::ClosureCall { .. } | Event::OrAltMove { .. } => return Some(false),
+            Event::Acquire { is: ResourceTy::Value(_), .. } | Event::Copy { is: ResourceTy::Value(_), .. } => return Some(false),
+            Event::Branch { branch_history, .. } => {
+                let ends: Vec<Option<bool>> = branch_history.iter().filter(|b| !b.diverges)
+                    .map(|b| box_contents_moved_last(&b.e_data)).collect();
+                // Every path that reaches here moved the Box away or
+                // gave it a new value: settled. Some did and some
+                // didn't: a drop flag's business, which this can't say
+                // (`None`, as before #1145).
+                if !ends.is_empty() && ends.iter().all(|e| *e == Some(false)) { return Some(false); }
+                if ends.iter().any(|e| *e == Some(false)) { return None; }
+                if ends.iter().any(|e| *e == Some(true)) { return Some(true); }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn moves_only_box_contents_impl(branch_history: &[BranchData]) -> bool {
     // `None`: the Box itself is moved somewhere in `events`.
     fn contents_moved(events: &[(usize, Event)]) -> Option<bool> {
         let mut any = false;

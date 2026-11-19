@@ -2182,6 +2182,33 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     ownership_after(self.preprocessed_events, rap_name, None).unwrap_or(Ownership::None)
   }
 
+  /// Whether the Box `rap_name` holds nothing now because its whole
+  /// contents were moved out (`let s = *b;`) on every path, while the
+  /// Box itself wasn't: its heap allocation is still there to free
+  /// (#1145). Only a move at the top level counts (one in a branch is
+  /// the maybe-moved case, #921).
+  pub fn box_contents_only_moved_now(&self, rap_name: &str) -> bool {
+    for (_, ev) in self.preprocessed_events.iter().rev() {
+      match ev {
+        ExternalEvent::Move { from: ResourceTy::Deref(r), .. } if r.name() == rap_name => return true,
+        ExternalEvent::Move { from, to, .. }
+          if from.extract_rap().is_some_and(|r| r.name() == rap_name) || to.extract_rap().is_some_and(|r| r.name() == rap_name) => return false,
+        ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. }
+          if to.extract_rap().is_some_and(|r| r.name() == rap_name) => return false,
+        ExternalEvent::InitRefParam { param, .. } if param.name() == rap_name => return false,
+        // A conditional that does something to it: the maybe-moved
+        // case (#921), or a new value.
+        ExternalEvent::Branch { branches, .. }
+          if branches.iter().any(|b| ownership_after(&b.e_data, rap_name, None).is_some()) => return false,
+        ExternalEvent::ClosureCall { closure, .. } if closure.extract_rap().is_some_and(|r| r.name() == rap_name) => return false,
+        ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::LoopExitKept { ro, .. } | ExternalEvent::OrAltMove { ro, .. }
+          | ExternalEvent::ManuallyDropByHand { ro, .. } if ro.name() == rap_name => return false,
+        _ => {}
+      }
+    }
+    false
+  }
+
   /// `rap_ownership_now` as of before `preprocessed_events[end..]`.
   pub fn rap_ownership_before(&self, end: usize, rap_name: &str) -> Ownership {
     ownership_after(&self.preprocessed_events[..end], rap_name, None).unwrap_or(Ownership::None)
@@ -2636,6 +2663,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       parts: None,
       maybe_init: None,
       payload: false,
+      contents_gone: false,
     });
     *self.unique_id += 1;
   }
