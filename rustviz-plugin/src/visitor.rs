@@ -5597,6 +5597,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
     }
     self.visit_expr(lhs_expr);
+    // `s = return;`, `s = panic!()`, `s = break;` (#1142): the right-hand
+    // side runs first and never finishes, so the assignment never
+    // happens: no new value, and no drop of the old one. What the exit
+    // itself drops is drawn by the exit.
+    if destructure_hid.is_none() && matches!(expr.kind, ExprKind::Assign(..)) && self.expr_diverges(rhs_expr) {
+      self.visit_expr(rhs_expr);
+      return;
+    }
     if destructure_hid.is_none() && self.init_from_branches(expr, lhs_expr, rhs_expr) {
       return;
     }
