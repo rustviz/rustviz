@@ -20753,6 +20753,52 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Move from boxed to d",
         ],
     },
+    TooltipExpect {
+        name: "box_reboxed_after_deref_move_1145",
+        // #1145: after `let s = *a;`, `a = Box::new(..)` frees the old
+        // Box's heap allocation (main said only "a acquires ownership of a
+        // resource", no drop), and the new Box is whole: moved away
+        // (`drop(a)`, `let e = d;`), nothing is left at the scope end
+        // (main: "Its contents were moved out earlier, so only the Box's
+        // heap allocation is freed", a second free). b's contents are
+        // moved out again, so its scope end keeps that text.
+        must_contain: &[
+            "a acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
+            "b acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
+            "d acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
+            "f acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
+            "g acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
+            "a goes out of scope. No resource is dropped.",
+            "d goes out of scope. No resource is dropped.",
+            "b goes out of scope. Its contents were moved out earlier, so only the Box's heap allocation is freed.",
+            "g goes out of scope. Its resource is dropped (including the String it holds).",
+        ],
+        must_not_contain: &[
+            "a goes out of scope. Its contents were moved out earlier",
+            "d goes out of scope. Its contents were moved out earlier",
+        ],
+    },
+    // #1220: a Box emptied by `let _s = *b;` and re-boxed in a branch.
+    // Main (and #1221) said only the allocation is freed although the
+    // new Box was moved away (b), and "dropped here only if no branch
+    // above moved it" with the condition backwards (f).
+    TooltipExpect {
+        name: "box_rebox_branch_1220",
+        must_contain: &[
+            "b goes out of scope. What is dropped here depends on the path (Rust tracks this with runtime drop flags): where b still holds the Box whose contents were moved out earlier, only its heap allocation is freed; where b was moved away, nothing is dropped.",
+            "f goes out of scope. What is dropped here depends on the path (Rust tracks this with runtime drop flags): where f still holds the Box whose contents were moved out earlier, only its heap allocation is freed; where f was given a new Box, its resource (including the String it holds) is dropped.",
+            "g goes out of scope. What is dropped here depends on the path (Rust tracks this with runtime drop flags): where g still holds the Box whose contents were moved out earlier, only its heap allocation is freed; where g was given a new Box, its resource (including the String it holds) is dropped; where g was moved away, nothing is dropped.",
+            "g was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). What is dropped when g goes out of scope depends on the path: its contents were moved out before the branches.",
+            "j acquires ownership of a new resource. What its previous value drops here depends on the path (Rust tracks this with runtime drop flags): where j still holds the Box whose contents were moved out earlier, only its heap allocation is freed; where j was given a new Box, its resource (including the String it holds) is dropped.",
+        ],
+        must_not_contain: &[
+            "=b goes out of scope. Its contents were moved out earlier, so only the Box's heap allocation is freed.",
+            "f goes out of scope. Its resource (including the String it holds) is dropped here only if no branch above moved it",
+            "g goes out of scope. Its resource (including the String it holds) is dropped here only if no branch above moved it",
+            "If the branch that ran didn't move it, its resource (including the String it holds) is dropped when g goes out of scope",
+            "j acquires ownership of a new resource. Its previous resource (including the String it holds) is dropped here only if j still holds it",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop

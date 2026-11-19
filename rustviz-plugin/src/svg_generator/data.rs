@@ -1956,6 +1956,10 @@ pub enum ExternalEvent {
         // payload's part columns (#893): the Box itself keeps its heap
         // allocation, so the dot names `*b`.
         payload: bool,
+        // `ro` is a Box whose whole contents were moved out before, on
+        // every path (`let s = *b;`): only its heap allocation is freed
+        // (#1145).
+        contents_gone: bool,
     },
     // `ManuallyDrop::drop(&mut md)`: the value inside `md` is dropped
     // by hand. `md` itself stays in scope but must not be used again.
@@ -2579,7 +2583,7 @@ pub enum Event {
     // FullPrivilege. `maybe_moved`: see ExternalEvent::OwnerDropAtReassign.
     // `maybe_init`: see ExternalEvent::OwnerDropAtReassign.
     // `payload`, `loop_head`: see ExternalEvent::OwnerDropAtReassign.
-    OwnerDropAtReassign { maybe_moved: bool, by_cond: bool, loop_head: bool, parts: Option<ReassignParts>, maybe_init: Option<InitBy>, payload: bool },
+    OwnerDropAtReassign { maybe_moved: bool, by_cond: bool, loop_head: bool, parts: Option<ReassignParts>, maybe_init: Option<InitBy>, payload: bool, contents_gone: bool },
     // `ManuallyDrop::drop(&mut md)`: the value inside is dropped by
     // hand. The owner is left in a moved-out-like state.
     ManuallyDropByHand,
@@ -5033,8 +5037,8 @@ impl Visualizable for VisualizationData {
             }
           }
         },
-        ExternalEvent::OwnerDropAtReassign{ maybe_moved, by_cond, loop_head, parts, maybe_init, payload, .. } => {
-          vec![(line_num, Event::OwnerDropAtReassign { maybe_moved: *maybe_moved, by_cond: *by_cond, loop_head: *loop_head, parts: parts.clone(), maybe_init: *maybe_init, payload: *payload })]
+        ExternalEvent::OwnerDropAtReassign{ maybe_moved, by_cond, loop_head, parts, maybe_init, payload, contents_gone, .. } => {
+          vec![(line_num, Event::OwnerDropAtReassign { maybe_moved: *maybe_moved, by_cond: *by_cond, loop_head: *loop_head, parts: parts.clone(), maybe_init: *maybe_init, payload: *payload, contents_gone: *contents_gone })]
         },
         ExternalEvent::ManuallyDropByHand{..} => {
           vec![(line_num, Event::ManuallyDropByHand)]
@@ -5413,8 +5417,8 @@ impl Visualizable for VisualizationData {
                     }
                 }
             },
-            ExternalEvent::OwnerDropAtReassign{ro, maybe_moved, by_cond, loop_head, parts, maybe_init, payload, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropAtReassign { maybe_moved, by_cond, loop_head, parts, maybe_init, payload }, line_number);
+            ExternalEvent::OwnerDropAtReassign{ro, maybe_moved, by_cond, loop_head, parts, maybe_init, payload, contents_gone, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropAtReassign { maybe_moved, by_cond, loop_head, parts, maybe_init, payload, contents_gone }, line_number);
             },
             ExternalEvent::ManuallyDropByHand{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::ManuallyDropByHand, line_number);
