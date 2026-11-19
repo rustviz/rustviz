@@ -137,7 +137,17 @@ fn ret_tuple(a21: String) -> (B, i32) {
     (B { name: s21 }, 1)
 }
 
+// A borrow in a literal nested in a constructor is held by the value's
+// holder, not borrowed by the constructor.
+struct Wrap<'a> { w: W<'a>, n: i32 }
+fn nested_ref_in_ctor() {
+    let a22 = String::from("a");
+    let o22 = Some(Wrap { w: W { name: &a22 }, n: 1 });
+    println!("{}", o22.is_some());
+}
+
 fn main() {
+    nested_ref_in_ctor();
     call_arg();
     method_arg();
     box_new();

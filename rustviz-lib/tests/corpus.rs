@@ -21945,8 +21945,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s20's resource is moved to the caller",
             "s20 goes out of scope. No resource is dropped.",
             "s21's resource is moved to the caller",
+            "a22's resource is immutably borrowed by o22; a22 is read-only while the borrow is live",
         ],
         must_not_contain: &[
+            // A constructor is never a borrower (#768).
+            "borrowed by Some",
+            "Some reads from",
             // Drops of values the literal had moved away.
             "=a11 goes out of scope. Its resource is dropped.",
             "=s20 goes out of scope. Its resource is dropped.",
