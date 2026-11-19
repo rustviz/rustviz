@@ -441,7 +441,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// `e` itself, or the one a constructor wraps (`Some(match o { .. })`,
   /// #1174), which takes nothing itself (#768): what a branch yields
   /// goes where the built value goes. None for any other `e`.
-  fn conditional_value(&self, e: &'tcx Expr<'tcx>) -> Option<&'tcx Expr<'tcx>> {
+  pub(crate) fn conditional_value(&self, e: &'tcx Expr<'tcx>) -> Option<&'tcx Expr<'tcx>> {
     if e.span.from_expansion() {
       return None;
     }
@@ -449,6 +449,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ExprKind::If(_, _, Some(_)) | ExprKind::Match(_, _, rustc_hir::MatchSource::Normal) => Some(e),
       ExprKind::Call(callee, [inner]) if is_ctor_path(callee, self.tcx.typeck(e.hir_id.owner)) => self.conditional_value(inner),
       _ => None,
+    }
+  }
+
+  /// `e` is a tuple or struct literal one of whose parts is an `if` /
+  /// `else` or a `match`, or a constructor wrapping one (`(if c { d }
+  /// else { e }, 1)`, `W { s: if … }`, #1256; `(Some(if …), 1)`, #1267):
+  /// the part's value comes from each branch, in that branch.
+  fn literal_has_conditional_part(&self, e: &'tcx Expr<'tcx>) -> bool {
+    !e.span.from_expansion() && match e.kind {
+      ExprKind::Tup(parts) => parts.iter().any(|p| self.conditional_value(p).is_some()),
+      ExprKind::Struct(_, fields, _) => fields.iter().any(|f| self.conditional_value(f.expr).is_some()),
+      _ => false,
     }
   }
 
@@ -512,6 +524,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// the value each branch yields to be passed to `fn_name` where it is
   /// visited (`arg_values`). False for any other `arg`.
   fn mark_branch_args(&mut self, arg: &'tcx Expr<'tcx>, fn_name: &str) -> bool {
+    // A tuple built in the argument list with an `if` / `match` element
+    // (`take((if c { d } else { e }, 1))`, #1267): the element's value
+    // goes into the call with the tuple, inside its branch; `match_arg`
+    // passes the other elements.
+    if let ExprKind::Tup(parts) = arg.kind {
+      if !arg.span.from_expansion() {
+        for part in parts.iter() {
+          self.mark_branch_args(part, fn_name);
+        }
+      }
+      return false;
+    }
     let Some(arg) = self.conditional_value(arg) else { return false };
     let mut values = Vec::new();
     self.returned_values(arg, &mut values);
@@ -5068,6 +5092,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // `let r = loop { break k; }`: `r` gets `k` (#431).
         if let (Ok(target), Some(value)) = (dest.target_id, value) {
           let has_receiver = self.break_pats.iter().any(|(id, ..)| *id == target)
+            || self.break_assigns.iter().any(|(id, _)| *id == target)
             || self.break_binds.iter().any(|(id, ..)| *id == target);
           let several = self.loop_break_values(target) > 1;
           // The `break` as written, for the tooltips of a loop with
@@ -9664,6 +9689,38 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.bind_left_arms(init);
       return true;
     }
+    // `(x, n) = loop { … break (s, 1); … }` (#1253): the value of the
+    // `break` that ended the loop is taken apart and assigned, as
+    // `let (x, n) = loop { … }` binds it (#452).
+    if matches!(init.kind, ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _))
+      && !init.span.from_expansion()
+      && breaks_to(init).iter().any(|(_, value)| value.is_some())
+    {
+      let n0 = self.preprocessed_events.len();
+      self.break_assigns.push((init.hir_id, block));
+      self.visit_expr(init);
+      self.break_assigns.retain(|(id, _)| *id != init.hir_id);
+      // A place's old value is dropped when the new one is assigned,
+      // after the loop: drawn where (and just before) the first new
+      // value arrives, as for `x = loop { … }` (#586), not on the
+      // statement's first line nor on a row of its own after them.
+      let mut i = n0;
+      while i < self.preprocessed_events.len() {
+        if let ExternalEvent::OwnerDropAtReassign { ro, .. } = &self.preprocessed_events[i].1 {
+          let h = *ro.hash();
+          let first = (n0..i).find(|&j| matches!(&self.preprocessed_events[j].1,
+            ExternalEvent::Move { to: ResourceTy::Value(t), .. }
+            | ExternalEvent::Copy { to: ResourceTy::Value(t), .. }
+            | ExternalEvent::Bind { to: ResourceTy::Value(t), .. } if *t.hash() == h));
+          if let Some(j) = first {
+            self.preprocessed_events[i].0 = self.preprocessed_events[j].0;
+            self.preprocessed_events[j..=i].rotate_right(1);
+          }
+        }
+        i += 1;
+      }
+      return true;
+    }
     // Calls, borrows and reads inside the RHS. A constructor the
     // pattern takes apart (`W(y) = W(g);`) is no actor (#950).
     self.note_let_ctor_literals(local.pat, init);
@@ -9676,11 +9733,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// right-hand side (the desugared `block`), now visited, assigned to
   /// its places in that branch (#1253). A branch of type `!` gives none.
   pub fn assign_branch_value(&mut self, block: &'tcx rustc_hir::Block<'tcx>, body: &'tcx Expr<'tcx>) {
-    let Some(Stmt { kind: StmtKind::Let(local), .. }) = block.stmts.first() else { return };
     let Some(value) = branch_value_expr(body) else { return };
     if self.tcx.typeck(value.hir_id.owner).expr_ty_opt(value).is_none_or(|ty| ty.is_never()) {
       return;
     }
+    // Drawn on the branch value's line (`0 => (s, 1),` in a `match`
+    // written over several lines), not the statement's first.
+    let saved = self.line_override.replace(span_to_line(&value.span, &self.tcx));
+    self.assign_value(block, value);
+    self.line_override = saved;
+  }
+
+  /// `value` (a branch's, or what a `break` carries out of a loop)
+  /// taken apart and assigned to the places of the destructuring
+  /// assignment `block` desugars to (#1253).
+  fn assign_value(&mut self, block: &'tcx rustc_hir::Block<'tcx>, value: &'tcx Expr<'tcx>) {
+    let Some(Stmt { kind: StmtKind::Let(local), .. }) = block.stmts.first() else { return };
+    // Assigned where the value is (a lone `break (s, 1);`), unless the
+    // caller placed it (a branch's value line, a loop's end).
+    let saved = self.line_override;
+    self.line_override = saved.or_else(|| Some(span_to_line(&value.span, &self.tcx)));
     let mut assigns: Vec<(&'tcx Expr<'tcx>, &'tcx Expr<'tcx>, HirId)> = Vec::new();
     for stmt in &block.stmts[1..] {
       if let StmtKind::Semi(e) | StmtKind::Expr(e) = stmt.kind {
@@ -9691,9 +9763,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
       }
     }
-    // Drawn on the branch value's line (`0 => (s, 1),` in a `match`
-    // written over several lines), not the statement's first.
-    let saved = self.line_override.replace(span_to_line(&value.span, &self.tcx));
     self.draw_destructuring_assign(local, value, assigns);
     self.line_override = saved;
   }
@@ -9983,7 +10052,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // (#1256): an element or field that is an `if` / `match` gives its
     // part of the value from each branch, in that branch, so the literal
     // is bound before it is visited, as a conditional initializer is.
-    let elem_conds = !is_skipped && els.is_none() && ctor_cond.is_none() && literal_has_conditional_part(init);
+    let elem_conds = !is_skipped && els.is_none() && ctor_cond.is_none() && self.literal_has_conditional_part(init);
     let whole_binding = matches!(pat.kind, PatKind::Binding(_, _, _, None));
     let init_is_branching = !is_skipped
       && (ctor_cond.is_some() || elem_conds || match init.kind {
@@ -12798,7 +12867,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// pattern), as `let r = value;` would (#431, #452).
   /// `brk`: the `break` as written, kept for a receiver paired later.
   fn pair_break_value(&mut self, target: HirId, value: &'tcx Expr<'tcx>, brk: Option<String>) {
-    if let Some((_, pat, scope, inside)) = self.break_pats.iter().rev().find(|(id, ..)| *id == target).cloned() {
+    if let Some((_, block)) = self.break_assigns.iter().rev().find(|(id, _)| *id == target).copied() {
+      self.assign_value(block, value);
+    } else if let Some((_, pat, scope, inside)) = self.break_pats.iter().rev().find(|(id, ..)| *id == target).cloned() {
       // The bindings live in the `let`'s scope, not the loop's.
       let loop_scope = std::mem::replace(&mut self.current_scope, scope);
       let loop_inside = std::mem::replace(&mut self.inside_branch, inside);
@@ -13055,16 +13126,6 @@ pub(crate) fn is_literal_value<'tcx>(e: &Expr<'tcx>, typeck: &rustc_middle::ty::
   }
 }
 
-/// `e` is a tuple or struct literal one of whose parts is an `if` / `else`
-/// or a `match` (`(if c { d } else { e }, 1)`, `W { s: if … }`; #1256):
-/// the part's value comes from each branch, in that branch.
-pub(crate) fn literal_has_conditional_part(e: &Expr<'_>) -> bool {
-  !e.span.from_expansion() && match e.kind {
-    ExprKind::Tup(parts) => parts.iter().any(is_conditional_part),
-    ExprKind::Struct(_, fields, _) => fields.iter().any(|f| is_conditional_part(f.expr)),
-    _ => false,
-  }
-}
 
 /// The branch bodies of the `if` / `else` or `match` `e` whose values
 /// it yields, through nested ones (`else if`), in source order.

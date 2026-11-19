@@ -20909,6 +20909,58 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "u goes out of scope. Its resource is dropped here only if u still holds it (Rust tracks this with a runtime drop flag).",
         ],
     },
+    TooltipExpect {
+        name: "conditional_literal_ctor_part_1267",
+        // #1267: an `if` / `match` inside a constructor in a tuple / struct
+        // literal (`(Some(if …), 1)`), or as an element of a tuple passed to
+        // a call or method (`take((if …, 1))`), moves each branch's value in
+        // that branch. Main drew no move of d..k at all, then said each "is
+        // dropped here only if d still holds it", with nothing that could
+        // have cleared the flag.
+        must_contain: &[
+            "d was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when d goes out of scope.",
+            "e was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when e goes out of scope.",
+            "f was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when f goes out of scope.",
+            "g was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when g goes out of scope.",
+            "h was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when h goes out of scope.",
+            "i was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when i goes out of scope.",
+            "j was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when j goes out of scope.",
+            "k was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when k goes out of scope.",
+            "_t.0 acquired ownership of a resource (in all branches above)",
+            "_w.s acquired ownership of a resource (in all branches above)",
+            "Move from d to _t.0",
+            "Move from g to _w.s",
+            "Move from h to take",
+            "Move from k to push",
+        ],
+        must_not_contain: &[
+            "d goes out of scope. Its resource is dropped here only if d still holds it (Rust tracks this with a runtime drop flag).",
+            "e goes out of scope. Its resource is dropped here only if e still holds it (Rust tracks this with a runtime drop flag).",
+            "f goes out of scope. Its resource is dropped here only if f still holds it (Rust tracks this with a runtime drop flag).",
+            "g goes out of scope. Its resource is dropped here only if g still holds it (Rust tracks this with a runtime drop flag).",
+            "h goes out of scope. Its resource is dropped here only if h still holds it (Rust tracks this with a runtime drop flag).",
+            "i goes out of scope. Its resource is dropped here only if i still holds it (Rust tracks this with a runtime drop flag).",
+            "j goes out of scope. Its resource is dropped here only if j still holds it (Rust tracks this with a runtime drop flag).",
+            "k goes out of scope. Its resource is dropped here only if k still holds it (Rust tracks this with a runtime drop flag).",
+        ],
+    },
+    TooltipExpect {
+        name: "destructuring_assign_loop_1253",
+        // #1253: `(x, n) = loop { … break (s, 1); … }` takes apart the value
+        // of the `break` that ended the loop. Main moved s and t to an
+        // internal "Anonymous resource" and never gave n its new value.
+        must_contain: &[
+            "s may have been moved: the loop can end with break (s, 1), which moves s's resource to x, so s can't be used after the loop",
+            "t may have been moved: the loop can end with break (t, 2), which moves t's resource to x, so t can't be used after the loop",
+            "Move from s to x, if the loop ended with break (s, 1)",
+            "n is assigned a new value (from whichever break ended the loop)",
+            "Move from u to y",
+            "m is assigned a new value",
+        ],
+        must_not_contain: &[
+            "Anonymous resource",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop

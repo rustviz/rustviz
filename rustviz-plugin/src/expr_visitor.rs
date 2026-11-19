@@ -687,6 +687,11 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // A tuple/struct pattern bound to a loop's value: bound against each
   // `break` value (#452).
   pub break_pats: Vec<(rustc_hir::HirId, &'tcx Pat<'tcx>, usize, bool)>,
+  /// A destructuring assignment of a `loop`'s value (`(x, n) = loop {
+  /// … break (s, 1); … }`, #1253): the loop's HirId and the block the
+  /// assignment desugars to. Each `break` value is taken apart and
+  /// assigned as it reaches the receiver.
+  pub break_assigns: Vec<(rustc_hir::HirId, &'tcx rustc_hir::Block<'tcx>)>,
   // `break` values seen in a loop whose receiver isn't known yet (the
   // loop is the right-hand side of an assignment, a tuple pattern, an
   // argument…): `match_rhs` pairs them once it is.
@@ -1022,6 +1027,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       break_out: Vec::new(),
       break_alt: None,
       break_pats: Vec::new(),
+      break_assigns: Vec::new(),
       loop_breaks: Vec::new(),
       try_move: None,
       try_moves: HashMap::new(),
@@ -7789,10 +7795,14 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
         self.add_ev(line_num, Evt::Bind, lhs.clone(), ResourceTy::Anonymous, false);
       }
       for (i, elem) in elems.iter().enumerate() {
-        if only.is_some_and(|c| c != is_conditional_part(elem)) {
+        let cond = self.conditional_value(elem);
+        if only.is_some_and(|c| c != cond.is_some()) {
           continue;
         }
         let e = elem_evt(self, elem);
+        // `(Some(if c { d } else { e }), 1)` (#1267): the constructor
+        // takes nothing itself; the element gets each branch's value.
+        let elem = if only == Some(true) { cond.unwrap_or(elem) } else { elem };
         match members.as_ref().and_then(|m| m[i].clone()) {
           Some(member) => {
             // A reference element: resolve its lender from the
@@ -8423,9 +8433,12 @@ pub fn match_rhs_struct(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, _qpat
     self.add_ev(line_num, Evt::Bind, lhs.clone(), ResourceTy::Anonymous, false);
   }
   for field in expr_fields.iter() {
-      if only.is_some_and(|c| c != is_conditional_part(field.expr)) {
+      let cond = self.conditional_value(field.expr);
+      if only.is_some_and(|c| c != cond.is_some()) {
         continue;
       }
+      // `W { s: Some(if …) }` (#1267): as for a tuple element.
+      let field = &rustc_hir::ExprField { expr: if only == Some(true) { cond.unwrap_or(field.expr) } else { field.expr }, ..*field };
       // Struct literal that isn't bound to a struct RAP: the
       // value is returned (`User { email, .. }` as a fn's tail
       // expression). The field initialisers still move/copy
@@ -11002,11 +11015,4 @@ pub(crate) fn copies_from_inside<'tcx>(evt: &Evt, ty: Ty<'tcx>, parent_ty: Ty<'t
 
 fn is_by_value_binding(pat: &Pat<'_>) -> bool {
   matches!(pat.kind, PatKind::Binding(ann, _, _, None) if matches!(ann.0, rustc_hir::ByRef::No))
-}
-
-/// A part of a tuple / struct literal that is an `if` / `else` or a
-/// `match` the user wrote (see `ExprVisitor::literal_parts`, #1256).
-pub(crate) fn is_conditional_part(p: &Expr<'_>) -> bool {
-  !p.span.from_expansion()
-    && matches!(p.kind, ExprKind::If(_, _, Some(_)) | ExprKind::Match(_, _, rustc_hir::MatchSource::Normal))
 }
