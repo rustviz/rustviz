@@ -20753,6 +20753,39 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Move from boxed to d",
         ],
     },
+    TooltipExpect {
+        name: "fnonce_call_nested_1140",
+        // #1140: an FnOnce closure's call nested in a larger expression
+        // (`Some(f())`, `wrap(g())`, `z = Some(h())`, `v.push(k())`, a
+        // tail `Some(m())`). The closure is moved into the call; the i32
+        // the call returns is what gets copied on. Main said "f's value is
+        // copied" and drew "Copy from f to _x": a closure that owns a
+        // String is not Copy, and it is never copied.
+        must_contain: &[
+            "f is moved into the call (an FnOnce closure can only be called once). \
+             s, which f captured, is dropped during the call",
+            "Copy of the value f() returns to _x",
+            "g is moved into the call (an FnOnce closure can only be called once). \
+             t, which g captured, is dropped during the call",
+            "Copy of the value h() returns to z",
+            "k is moved into the call (an FnOnce closure can only be called once). \
+             w, which k captured, is dropped during the call",
+            "m is moved into the call (an FnOnce closure can only be called once). \
+             q, which m captured, is dropped during the call",
+            "Copy of the value m() returns to the caller",
+        ],
+        must_not_contain: &[
+            "f's value is copied",
+            "g's value is copied",
+            "h's value is copied",
+            "k's value is copied",
+            "m's value is copied",
+            "Copy from f to",
+            "Copy from g to",
+            "Copy from h to",
+            "Copy from k to",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop

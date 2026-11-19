@@ -1519,6 +1519,13 @@ pub enum LocalCallee {
   Consumed,
 }
 
+/// Whether the value `call` returns is `Copy`.
+pub fn call_result_is_copy(call: &Expr, tcx: &TyCtxt) -> bool {
+  let typeck = tcx.typeck(call.hir_id.owner);
+  typeck.expr_ty_opt(call).is_some_and(|ty|
+    tcx.type_is_copy_modulo_regions(typing_env(*tcx, call.hir_id.owner), ty))
+}
+
 /// Classify the callee of `call` (an `ExprKind::Call`). Only a path to
 /// a local binding (`Res::Local`) counts as local.
 pub fn local_callee_result_key(call: &Expr, tcx: &TyCtxt) -> LocalCallee {
@@ -1681,6 +1688,12 @@ pub fn get_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> Re
       // the call's Function RAP, never the variable (#254, #299).
       let key = match local_callee_result_key(expr, tcx) {
         LocalCallee::Call(key) => Some(key),
+        // A Copy result of an `FnOnce` call (`Some(f())`, `wrap(f())`
+        // with `f: FnOnce() -> i32`) isn't a copy of anything `f`
+        // holds: it comes from the call, like `let n = f();` (#271,
+        // #1140).
+        LocalCallee::Consumed if call_result_is_copy(expr, tcx) =>
+          hirid_to_var_name(fn_expr.hir_id, tcx).map(|n| fn_key(&n)),
         // The variable itself (`f₂` for a shadowing `let f`).
         LocalCallee::Consumed => expr_to_rap_name(fn_expr, tcx),
         LocalCallee::NotLocal => hirid_to_var_name(fn_expr.hir_id, tcx).map(|n| fn_key(&n)),
