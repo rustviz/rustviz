@@ -62,6 +62,11 @@ struct ArgFlow<'tcx> {
   /// (`id(&s)`, `Some(&s)`, `refs.push(&s)` with `T = &String`), the
   /// result carries that reference's borrow (#424).
   by_value: bool,
+  /// The argument reaches the result only through an outlives bound
+  /// (`x: &'a str` with result `&'b str` and `'a: 'b`): its lifetime
+  /// isn't the result's, but outlives it, so the result may point
+  /// there (#1125).
+  via_outlives: bool,
   /// Content flow only, and what the parameter points to is itself a
   /// reference carried whole into the result (`r: &&'a String` with
   /// result `&'a String`, or `x: &T` with `T = &String`): the result
@@ -269,16 +274,39 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
       }
     }
+    // A lifetime that outlives one the result carries (`'a: 'b`, also
+    // written `<'a: 'b, 'b>` or through a chain `'a: 'c, 'c: 'b`): a
+    // reference with it coerces to the shorter one, so the result may
+    // point where it does (#1125). The signature alone says so, as it
+    // does to the borrow checker.
+    let direct = regions.clone();
+    if let Some(def_id) = def_id {
+      let outlives: Vec<(ty::Region<'tcx>, ty::Region<'tcx>)> = self.tcx.predicates_of(def_id).predicates.iter()
+        .filter_map(|(clause, _)| clause.as_region_outlives_clause())
+        .map(|pred| { let ty::OutlivesPredicate(a, b) = pred.skip_binder(); (a, b) })
+        .collect();
+      let mut grew = true;
+      while grew {
+        grew = false;
+        for (a, b) in outlives.iter() {
+          if regions.contains(b) && !a.is_static() && !regions.contains(a) {
+            regions.push(*a);
+            grew = true;
+          }
+        }
+      }
+    }
     if regions.is_empty() && params.is_empty() {
       return Some(Vec::new());
     }
-    let shares = |t: Ty<'tcx>| -> bool {
+    let shares_in = |t: Ty<'tcx>, regions: &[ty::Region<'tcx>]| -> bool {
       t.walk().any(|g| match g.kind() {
         GenericArgKind::Lifetime(r) => regions.contains(&r),
         GenericArgKind::Type(t) => matches!(t.kind(), ty::Param(p) if params.contains(&p.index)),
         GenericArgKind::Const(_) => false,
       })
     };
+    let shares = |t: Ty<'tcx>| shares_in(t, &regions);
     let mut flows = Vec::new();
     // The receiver doesn't flow into itself.
     let skip = usize::from(matches!(target, FlowTarget::Receiver));
@@ -288,6 +316,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         _ => (false, shares(*input), false),
       };
       if place || content {
+        let via_outlives = match input.kind() {
+          ty::Ref(r, inner, _) => !direct.contains(r) && !shares_in(*inner, &direct),
+          _ => !shares_in(*input, &direct),
+        };
         let by_value = !matches!(input.kind(), ty::Ref(..));
         let referent_is_ref = !place && match input.kind() {
           ty::Ref(_, inner, _) => match inner.kind() {
@@ -312,7 +344,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             _ => None,
           }
         }).flatten();
-        flows.push(ArgFlow { index, arg, place, content, place_mut: place && place_mut, by_value, referent_is_ref, fields });
+        flows.push(ArgFlow { index, arg, place, content, place_mut: place && place_mut, by_value, via_outlives, referent_is_ref, fields });
       }
     }
     Some(flows)
@@ -478,6 +510,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let named = self.arg_lenders(&flow).iter()
         .any(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)));
       tie.tied.push(flow.index);
+      tie.via_outlives |= flow.via_outlives;
       if flow.content && !flow.place && !flow.by_value {
         tie.stored_in.push(StoredTie {
           index: flow.index,
@@ -903,6 +936,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if place {
         res.extend(match referent {
           Referent::Place(e) => self.place_lenders(e),
+          // `r.iter_mut()` / `r.first_mut()` with r a local `&mut`: the
+          // result reborrows through r, like `&mut *r`, so r can't be
+          // used while it is live (#1152).
+          Referent::Through(e) if flow.place_mut && self.local_mut_ref(e).is_some() =>
+            vec![ResourceTy::Deref(self.local_mut_ref(e).expect("checked"))],
           Referent::Through(e) => self.value_lenders(e),
           Referent::Unknown => Vec::new(),
         });
@@ -934,6 +972,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       res.extend(self.value_lenders(arg));
     }
     res
+  }
+
+  /// `e` names a local `&mut` reference variable that borrows a
+  /// variable with a column (not a parameter, whose column already
+  /// stands for the caller's data, #393).
+  fn local_mut_ref(&self, e: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
+    if !matches!(e.kind, ExprKind::Path(QPath::Resolved(None, _))) {
+      return None;
+    }
+    let name = expr_to_rap_name(e, &self.tcx)?;
+    let r = self.raps.get(&name)?.rap.to_owned();
+    let rd = self.borrow_map.get(&name)?;
+    (r.is_mutref() && matches!(&rd.lender, ResourceTy::Value(l) if !l.is_ref() && !l.is_fn())).then_some(r)
   }
 
   /// What the reference(s) held by the *value* of `e` borrow from.
