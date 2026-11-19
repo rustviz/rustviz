@@ -1621,6 +1621,11 @@ fn render_scope_end_dot(
                 // After a loop that moves it on some time rounds only
                 // (#1019).
                 hover_messages::event_dot_go_out_of_scope_maybe_kept(&name, &ro.drop_note())
+            } else if let Some(el) = ro.elems_left() {
+                // A slice pattern moved some elements out on some paths
+                // (#1144): the others are dropped here on every path.
+                hover_messages::event_dot_struct_partial_go_out_of_scope(
+                    &name, &[], &el.moved, &el.left, false, by_cond, false, false)
             } else {
                 hover_messages::event_dot_go_out_of_scope_maybe_moved(&name, &ro.drop_note(), by_cond, ro.box_contents_moved())
             };
@@ -1629,6 +1634,24 @@ fn render_scope_end_dot(
                 dot_x: cx,
                 dot_y: cy,
                 title,
+                p1x: cx - 3, p1y: cy - 1,
+                p2x: cx + 3, p2y: cy - 1,
+                p3x: cx,     p3y: cy + 3,
+            };
+            append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
+            return true;
+        } else if let (false, Some(el)) = (resource_hold, ro.elems_left()) {
+            // `let [a, _] = arr;` (#1166), `[first, ..] =>` (#1144): the
+            // elements the pattern didn't take are still in the array,
+            // and are dropped with it.
+            let cx = timeline_data.x_val;
+            let cy = event_y;
+            let drop_data = DropDotData {
+                hash: *hash as u64,
+                dot_x: cx,
+                dot_y: cy,
+                title: hover_messages::event_dot_struct_partial_go_out_of_scope(
+                    &name, &el.moved, &[], &el.left, false, false, false, false),
                 p1x: cx - 3, p1y: cy - 1,
                 p2x: cx + 3, p2y: cy - 1,
                 p3x: cx,     p3y: cy + 3,
