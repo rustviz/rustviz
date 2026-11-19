@@ -10155,6 +10155,24 @@ fn arm_holding(events: &[(usize, ExternalEvent)], line: usize) -> Option<usize> 
 /// into nested ones), or among `events` after its line's events.
 fn place_in_arms(events: &mut Vec<(usize, ExternalEvent)>, ev: (usize, ExternalEvent), holders: &[Sharer], unique_id: &mut usize) {
   let Some(k) = arm_holding(events, ev.0) else {
+    let mut ev = ev;
+    // `let x = u;` in this arm moved the holder's value, and the
+    // borrow with it, on to x: x holds it from there, so its end is
+    // x's, not u's (#1198). (Followed through further moves.)
+    if let ExternalEvent::StaticDie { from: ResourceTy::Index(holder, label, _), .. }
+      | ExternalEvent::MutableDie { from: ResourceTy::Index(holder, label, _), .. } = &mut ev.1
+    {
+      while let Some(to) = events.iter().find_map(|(l, e)| match e {
+        ExternalEvent::Move { from: ResourceTy::Value(f), to: ResourceTy::Value(t), .. }
+          if *l <= ev.0 && f.hash() == holder.hash() && t.hash() != holder.hash() && !t.is_ref() => Some(t.clone()),
+        _ => None,
+      }) {
+        if label == holder.name() {
+          *label = to.name().to_owned();
+        }
+        *holder = to;
+      }
+    }
     let at = events.iter().rposition(|(l, _)| *l <= ev.0).map_or(0, |i| i + 1);
     events.insert(at, ev);
     return;

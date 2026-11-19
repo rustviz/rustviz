@@ -21729,6 +21729,23 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[],
     },
+    TooltipExpect {
+        name: "stored_borrow_moved_in_arm_1198",
+        // #1198: `let x = u;` in an arm, with u holding a borrow
+        // `keepv(&mut u, &t)` stored: the borrow goes with u's value, so it
+        // ends on x / y / z (its last holder there), not on u after u was
+        // moved. Main drew "u's immutable borrow ends" on u after the move,
+        // and after both arms moved u said it "may have been moved".
+        must_contain: &[
+            "x's immutable borrow ends",
+            "y's immutable borrow ends",
+            "z's immutable borrow ends",
+            "u goes out of scope. No resource is dropped: u was moved or dropped in every branch above.",
+        ],
+        must_not_contain: &[
+            "u may have been moved (consumed in at least one branch above)",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
