@@ -5524,17 +5524,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// gives back the borrow the other held (both loans are in one
   /// lifetime, `swap<T>(&mut T, &mut T)`, so they end together).
   pub fn swap_ref_vars(&mut self, fn_expr: &'tcx Expr<'tcx>, args: &'tcx [Expr<'tcx>], line: usize) {
-    let [x, y] = args else { return };
     let typeck = self.tcx.typeck(fn_expr.hir_id.owner);
     let Some(rustc_middle::ty::FnDef(def_id, _)) = typeck.node_type_opt(fn_expr.hir_id).map(|t| *t.kind()) else { return };
-    if !self.tcx.is_diagnostic_item(rustc_span::sym::mem_swap, def_id) {
-      return;
-    }
     let ref_var = |a: &'tcx Expr<'tcx>| match a.kind {
       ExprKind::AddrOf(_, m, inner) if m.is_mut() => expr_to_rap_name(inner, &self.tcx)
         .filter(|n| self.raps.get(n).is_some_and(|r| r.rap.is_ref()) && self.borrow_map.contains_key(n)),
       _ => None,
     };
+    if !self.tcx.is_diagnostic_item(rustc_span::sym::mem_swap, def_id) {
+      let names: Vec<Option<String>> = args.iter().map(ref_var).collect();
+      self.exchangeable_ref_vars(def_id, &names);
+      return;
+    }
+    let [x, y] = args else { return };
     let (Some(n1), Some(n2)) = (ref_var(x), ref_var(y)) else { return };
     if n1 == n2 {
       return;
@@ -5550,6 +5552,48 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         rd.co_lenders = from.co_lenders.clone();
         rd.lender_muts = from.lender_muts.clone();
         rd.assigned_at = line;
+      }
+    }
+  }
+
+  /// `exchange(&mut r1, &mut r2)` with `fn exchange<T>(x: &mut T, y:
+  /// &mut T)` (any function but `mem::swap`, which `swap_ref_vars`
+  /// draws exactly): two `&mut` parameters of one type (one type
+  /// parameter, or a reference type with one named lifetime) let the
+  /// function exchange or copy the references r1 and r2 hold (#1249).
+  /// From the signature alone, each may point to either lender
+  /// afterwards, so each gets the other's lenders as co-lenders: its end
+  /// gives back both, as for a call result tied to several arguments
+  /// (#171). Both loans are in one lifetime, so they end together.
+  fn exchangeable_ref_vars(&mut self, def_id: rustc_hir::def_id::DefId, arg_refs: &[Option<String>]) {
+    if !matches!(self.tcx.def_kind(def_id), DefKind::Fn | DefKind::AssocFn) {
+      return;
+    }
+    let sig = self.tcx.fn_sig(def_id).instantiate_identity().skip_binder();
+    let inputs = sig.inputs();
+    let mut groups: Vec<(rustc_middle::ty::Ty<'tcx>, Vec<String>)> = Vec::new();
+    for (i, a) in arg_refs.iter().enumerate() {
+      let Some(input) = inputs.get(i) else { break };
+      let rustc_middle::ty::Ref(_, pointee, Mutability::Mut) = input.kind() else { continue };
+      let Some(n) = a.clone() else { continue };
+      match groups.iter_mut().find(|(t, _)| t == pointee) {
+        Some((_, names)) => if !names.contains(&n) { names.push(n) },
+        None => groups.push((*pointee, vec![n])),
+      }
+    }
+    for (_, names) in groups.into_iter().filter(|(_, n)| n.len() > 1) {
+      let datas: Vec<RefData> = names.iter().filter_map(|n| self.borrow_map.get(n).cloned()).collect();
+      if datas.len() != names.len() {
+        continue;
+      }
+      let all: Vec<ResourceTy> = datas.iter().flat_map(|d| d.all_lenders()).collect();
+      for n in &names {
+        let Some(rd) = self.borrow_map.get_mut(n) else { continue };
+        for l in all.iter() {
+          if *l != rd.lender && !rd.co_lenders.contains(l) && matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)) {
+            rd.co_lenders.push(l.clone());
+          }
+        }
       }
     }
   }

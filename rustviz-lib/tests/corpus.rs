@@ -22977,6 +22977,33 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return mutably borrowed resource from m2 to d",
         ],
     },
+    TooltipExpect {
+        name: "exchange_two_mut_refs_1249",
+        // #1249: after `exchange(&mut r1, &mut r2)` r1 may point to a or
+        // b: each reference gives back both lenders. Main named only its
+        // old lender. (Those old arrows are still drawn, as one of the
+        // two, so they can't go in must_not_contain.)
+        must_contain: &[
+            "Return immutably borrowed resource from r1 to a",
+            "Return immutably borrowed resource from r1 to b",
+            "Return immutably borrowed resource from r2 to a",
+            "Return immutably borrowed resource from r2 to b",
+            "Return immutably borrowed resource from r3 to d",
+            "Return immutably borrowed resource from r4 to c",
+            // Distinct lifetimes: nothing exchanged.
+            "Return immutably borrowed resource from r5 to e",
+            "Return immutably borrowed resource from r6 to f",
+            // mem::swap: exactly exchanged (#1230).
+            "Return immutably borrowed resource from r7 to h",
+            "Return immutably borrowed resource from r8 to g",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from r5 to f",
+            "Return immutably borrowed resource from r6 to e",
+            "Return immutably borrowed resource from r7 to g",
+            "Return immutably borrowed resource from r8 to h",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
