@@ -10518,6 +10518,11 @@ fn ownership_after(events: &[(usize, ExternalEvent)], rap_name: &str, start: Opt
           return Some(Ownership::None);
         }
       }
+      // Called as an `FnOnce` closure, which moves it into the call
+      // (#271, #1136).
+      ExternalEvent::ClosureCall { closure, .. } if is_rap(closure) => {
+        return Some(Ownership::None);
+      }
       ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. } => {
         if is_rap(to) {
           return Some(Ownership::Held);
