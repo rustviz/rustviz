@@ -1308,6 +1308,9 @@ pub struct BorrowVia {
     pub tie: ArgTie,
     /// What the call returned that carries the borrow.
     pub carrier: ViaCarrier,
+    /// Calls chained on `func`'s result that only pass the borrow on
+    /// (`unwrap` in `w.last_mut().unwrap()`, #1266), innermost first.
+    pub passed_on: Vec<String>,
 }
 
 /// Which arguments of a call a returned reference's lifetime is tied
