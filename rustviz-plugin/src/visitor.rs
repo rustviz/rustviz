@@ -290,7 +290,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let part = if deref.is_none() && reborrow.is_none()
       && (matches!(evt, Evt::Copy) || matches!(place_e.kind, ExprKind::AddrOf(..))) { self.returned_part(place_e) } else { None };
     let evt = if part.is_some() { Evt::Copy } else { evt };
-    let from_ro = if let Some(rty) = deref.or(reborrow).or(part) { rty } else { match fetch_rap(e, &self.tcx, &self.raps) {
+    // `*b` returned with b a Box: what the Box holds goes to the caller;
+    // the Box itself stays with b, which frees its heap allocation at
+    // the end of the function (#1191).
+    let box_contents = if deref.is_none() && reborrow.is_none() && part.is_none() { self.box_contents_of(place_e) } else { None };
+    let from_ro = if let Some(rty) = deref.or(reborrow).or(part).or(box_contents) { rty } else { match fetch_rap(e, &self.tcx, &self.raps) {
       // A unit struct / enum constructor (`Marker`) or a fn item
       // named as the returned value has no column of its own, and
       // neither has the caller: an arrow between the two can't be
@@ -324,6 +328,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let ctor_value = !e.span.from_expansion()
       && matches!(e.kind, ExprKind::Call(callee, args) if is_ctor_path(callee, tycheck_results)
         && args.iter().any(|a| matches!(a.kind, ExprKind::Path(_) | ExprKind::Field(..))
+          // `Some(*b)`: the Box's contents (#1191).
+          || self.box_contents_of(a).is_some()
           // A call's result put into the value goes to the caller too (#783).
           || (!a.span.from_expansion() && matches!(a.kind, ExprKind::Call(..) | ExprKind::MethodCall(..))
               && !tycheck_results.node_type(a.hir_id).is_ref())))
@@ -4192,6 +4198,27 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         parts,
       })
     };
+    // A parameter whose pattern binds no name (`_: String`, `(_, _):
+    // (String, String)`) still owns the caller's argument: it stays in
+    // the parameter and is dropped when the function returns. With no
+    // binding to draw it on, it gets a `(parameter)` column, like the
+    // value a `ref` binding borrows (#691), so the drop is stated (#1243).
+    if bindings.is_empty() {
+      let ty = typeck.pat_ty(param.pat);
+      let owner_id = param.hir_id.owner;
+      if self.needs_drop(ty, owner_id) {
+        let line_num = span_to_line(&param.span, &self.tcx);
+        self.param_value_count += 1;
+        let col = parameter_label(self.param_value_count);
+        self.add_owner(col.clone(), false, false, self.ty_is_plain(ty, owner_id), self.ty_has_interior_mut(ty, owner_id), self.current_scope, !self.inside_branch);
+        self.mark_owner_type(&col, ty);
+        let col_rap = self.raps.get(&col).unwrap().rap.to_owned();
+        let fn_name = self.tcx.item_name(owner_id.to_def_id()).to_string();
+        self.add_external_event(line_num, ExternalEvent::InitRefParam { param: col_rap, id: *self.unique_id, own_param: None, in_pattern: None, rest: Some(ParamRest { fn_name, parts: Vec::new() }) });
+        *self.unique_id += 1;
+      }
+      return;
+    }
     for pat in bindings {
       // `ref s` on a by-value parameter: `s` borrows the value this
       // function owns, not the caller's (#377).

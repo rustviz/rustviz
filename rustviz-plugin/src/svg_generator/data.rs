@@ -2720,7 +2720,9 @@ pub struct ParamRest {
     /// The function the parameter belongs to.
     pub fn_name: String,
     /// The parts of the argument the pattern leaves unbound that need
-    /// drop, as field paths (`bio`, `1`, `inner.tag`).
+    /// drop, as field paths (`bio`, `1`, `inner.tag`). Empty: the
+    /// pattern binds no name at all (`_: String`), and the whole
+    /// argument is in a `(parameter)` column of its own (#1243).
     pub parts: Vec<String>,
 }
 
@@ -3527,7 +3529,11 @@ impl Event {
                 if let Event::InitRefParam { rest, .. } = &mut whole {
                     *rest = None;
                 }
-                format!("{}. {}", whole.print_message_with_name(my_name), hover_messages::param_rest_dropped(&rest.fn_name, &rest.parts))
+                if rest.parts.is_empty() {
+                    hover_messages::event_dot_unbound_param_init(my_name, &rest.fn_name)
+                } else {
+                    format!("{}. {}", whole.print_message_with_name(my_name), hover_messages::param_rest_dropped(&rest.fn_name, &rest.parts))
+                }
             }
             // The column of the value a `ref` binding borrows (#691).
             Event::InitRefParam{ param: ResourceAccessPoint::Owner(_), own_param: Some(own), .. } => {
