@@ -1502,7 +1502,7 @@ fn render_scope_end_dot(
             if move_count > 0 {
                 data.title.push_str(&hover_messages::event_dot_no_resource_dropped_suffix());
             }
-        } else if ro.is_manually_drop() && !never_drops
+        } else if (ro.is_manually_drop() || ro.is_maybe_uninit() || (ro.is_union() && !ro.union_drop())) && !never_drops
             && (visualization_data.timelines[hash].history.iter()
                 .any(|(_, e)| matches!(e, Event::ManuallyDropByHand))
                 || resource_hold
@@ -1512,7 +1512,15 @@ fn render_scope_end_dot(
             // dropped here (#283). Nor when it was moved, or
             // given its value, on some paths only (#1147): a
             // ManuallyDrop has no drop glue, so no drop flag.
-            data.title = hover_messages::event_dot_manually_drop_go_out_of_scope(&name);
+            // The same for a MaybeUninit and a union without a
+            // Drop impl (#191, #1146).
+            data.title = if ro.is_union() {
+                hover_messages::event_dot_union_go_out_of_scope(&name)
+            } else if ro.is_maybe_uninit() {
+                hover_messages::event_dot_maybe_uninit_go_out_of_scope(&name)
+            } else {
+                hover_messages::event_dot_manually_drop_go_out_of_scope(&name)
+            };
         } else if is_plain {
             // Never a resource: going out of scope drops
             // nothing, whether or not it was moved earlier.
@@ -1697,6 +1705,22 @@ fn render_scope_end_dot(
                 append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
                 return true;
             }
+        } else if ro.is_union() && ro.union_drop() && !never_drops {
+            // Its own Drop impl runs; its fields are still never
+            // dropped (#191, #1146).
+            let cx = timeline_data.x_val;
+            let cy = event_y;
+            let drop_data = DropDotData {
+                hash: *hash as u64,
+                dot_x: cx,
+                dot_y: cy,
+                title: hover_messages::event_dot_union_drop_go_out_of_scope(&name),
+                p1x: cx - 3, p1y: cy - 1,
+                p2x: cx + 3, p2y: cy - 1,
+                p3x: cx,     p3y: cy + 3,
+            };
+            append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
+            return true;
         } else if ro.is_union() && !never_drops {
             // A union never drops its fields (#191).
             data.title = hover_messages::event_dot_union_go_out_of_scope(&name);
@@ -3938,8 +3962,15 @@ fn union_write_title(
         _ => return None,
     };
     let is_copy = matches!(written.place_write(), PlaceWrite::AssignCopy);
-    let first = first_value_event_id(&visualization_data.timelines.get(&hash)?.history)?;
+    let history = &visualization_data.timelines.get(&hash)?.history;
+    let first = first_value_event_id(history)?;
     if id <= first {
+        return None;
+    }
+    // Assigning a whole union with its own `Drop` impl runs that impl
+    // on the old value (#1146): the drop dot on this line says so, and
+    // "never drops its old contents" would contradict it.
+    if rap.union_drop() && reassign_drop_on_line(history, id) {
         return None;
     }
     let source = match from {
@@ -3948,6 +3979,26 @@ fn union_write_title(
         _ => None,
     };
     Some(hover_messages::event_dot_union_write(name, is_copy, source))
+}
+
+// Whether `history` (searched into branches) has a drop at reassignment
+// on the line of the event with id `id`.
+fn reassign_drop_on_line(history: &[(usize, Event)], id: usize) -> bool {
+    fn line_of(h: &[(usize, Event)], id: usize) -> Option<usize> {
+        h.iter().find_map(|(l, e)| match e {
+            Event::Branch { branch_history, .. } => branch_history.iter().find_map(|b| line_of(&b.e_data, id)),
+            Event::Acquire { id: x, .. } | Event::Copy { id: x, .. } if *x == id => Some(*l),
+            _ => None,
+        })
+    }
+    fn has_drop(h: &[(usize, Event)], line: usize) -> bool {
+        h.iter().any(|(l, e)| match e {
+            Event::Branch { branch_history, .. } => branch_history.iter().any(|b| has_drop(&b.e_data, line)),
+            Event::OwnerDropAtReassign { .. } => *l == line,
+            _ => false,
+        })
+    }
+    line_of(history, id).is_some_and(|l| has_drop(history, l))
 }
 
 // Whether a column holds a value after `event`, given whether it held

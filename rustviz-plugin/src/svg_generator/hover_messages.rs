@@ -277,6 +277,25 @@ pub fn event_dot_union_go_out_of_scope(my_name: &String) -> String {
     )
 }
 
+// A union whose type has its own `Drop` impl goes out of scope (#1146):
+// the impl runs, but the union's fields are still never dropped.
+pub fn event_dot_union_drop_go_out_of_scope(my_name: &String) -> String {
+    format!(
+        "{0} goes out of scope. Its type implements Drop, so Drop::drop runs on it here, \
+         but a union's fields are never dropped automatically.",
+        styled_name_html(my_name)
+    )
+}
+
+// A `MaybeUninit<T>` goes out of scope (#1146). Like a `ManuallyDrop<T>`
+// it never drops the `T` inside it (it can't know whether it holds one).
+pub fn event_dot_maybe_uninit_go_out_of_scope(my_name: &String) -> String {
+    format!(
+        "{0} goes out of scope. Nothing is dropped: a MaybeUninit never drops the value inside it automatically.",
+        styled_name_html(my_name)
+    )
+}
+
 // A `ManuallyDrop<T>` goes out of scope (#283). It never drops the `T`
 // inside it: that only happens through `ManuallyDrop::drop` /
 // `into_inner` / `take`, and otherwise the value is leaked.

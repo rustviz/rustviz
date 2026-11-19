@@ -3,7 +3,8 @@
 // value) on some paths only, it still drops nothing at its scope end,
 // and the join after the branches has no "its resource is dropped when
 // ... goes out of scope" to tell (#1147). The paths: an `if`, a `match`
-// arm, a let-chain condition, a `break` in a loop, a `let x;` assigned
+// arm, a `break` in a loop (a let-chain condition: edition2024/
+// manually_drop_chain_1147.rs), a `let x;` assigned
 // in an `if` or a loop. A struct whose String field was moved out drops
 // nothing more: its ManuallyDrop field drops nothing, and a field with
 // nothing to drop that some branch moved needs no drop flag either.
@@ -38,13 +39,6 @@ fn in_arm(o: Option<i32>) {
             take(ma);
         }
         None => {}
-    }
-}
-
-fn in_chain(o: Option<i32>) {
-    let mc = ManuallyDrop::new(String::from("mc"));
-    if let Some(_) = o && take(mc) {
-        println!("taken");
     }
 }
 
@@ -104,7 +98,6 @@ fn plain_field_maybe_moved(c: bool) {
 fn main() {
     in_if(true);
     in_arm(Some(1));
-    in_chain(Some(1));
     in_loop(true);
     assigned_in_if(true);
     assigned_in_loop(1);
