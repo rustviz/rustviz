@@ -20753,6 +20753,25 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Move from boxed to d",
         ],
     },
+    TooltipExpect {
+        name: "holder_moved_borrow_1198_1199",
+        // #1198: `if let Some(x) = o` / `Some(y) =>` on `p` move the
+        // value that holds the borrow into x / y, whose reference field
+        // holds it from there (see
+        // `a_holder_moved_by_a_pattern_gives_its_borrow_on`).
+        // #1199: `o.inner = other;` gives o.inner.r other.r's reference;
+        // its line goes on to its use (see
+        // `a_reference_field_assigned_with_its_struct_keeps_its_line`).
+        must_contain: &[
+            "Immutable borrow from s to x.part: x.part is a reference that came with the value moved out of o into x",
+            "Return immutably borrowed resource from q to s",
+            "Return immutably borrowed resource from y.part to s2",
+            "Return immutably borrowed resource from x to s3",
+            "o.inner.r is assigned other.r's immutable reference",
+            "Return immutably borrowed resource from o.inner.r to t",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -28297,4 +28316,43 @@ fn a_boxed_closure_borrowing_through_a_reference_keeps_it_until_dropped() {
     assert_eq!(ys("d's immutable borrow ends"), vec![row("drop(d);")]);
     assert_eq!(ys("d no longer borrows the resource p points to"), vec![row("drop(d);")]);
     assert_eq!(ys("w's resource is no longer immutably borrowed"), vec![row("drop(d);")]);
+}
+
+/// #1198: a value holding a borrow (`o: Option<Part>`), moved by a
+/// pattern into a binding whose reference field takes the borrow on
+/// (`if let Some(x) = o`, `Some(y) =>` on `p`), draws no end of the borrow
+/// in that arm: x.part / q / y.part end it. Only the other arm, where o /
+/// p keeps it, ends it on o / p. Main ended it on o in both arms.
+#[test]
+fn a_holder_moved_by_a_pattern_gives_its_borrow_on() {
+    let name = "holder_moved_borrow_1198_1199";
+    let rv = run_with_local_backend(name);
+    let tips = timeline_tooltips(&rv.timeline_panel_string());
+    for (text, want) in [
+        ("Return immutably borrowed resource from o to s", 1),
+        ("o's immutable borrow ends", 1),
+        ("Return immutably borrowed resource from p to s2", 1),
+        ("p's immutable borrow ends", 1),
+    ] {
+        let n = tips.iter().filter(|t| t.as_str() == text).count();
+        assert_eq!(n, want, "{name}: {text:?} appears {n} times, expected {want}");
+    }
+}
+
+/// #1199: `o.inner = other;` moves other.r's reference into o.inner.r,
+/// which holds it until its use on the next line. Its line used to stop
+/// at the assignment (an `Acquire` on a `&T` column had no state rule),
+/// leaving the use on an empty column.
+#[test]
+fn a_reference_field_assigned_with_its_struct_keeps_its_line() {
+    let name = "holder_moved_borrow_1198_1199";
+    let rv = run_with_local_backend(name);
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let assign = code_row_y(&code, "o.inner = other;");
+    let used = code_row_y(&code, "println!(\"{} {}\", o.inner.r, o.n);");
+    let lines = state_lines_with_tooltip(&timeline, "o.inner.r holds an immutable reference; it can read the borrowed resource");
+    assert!(
+        lines.iter().any(|(y1, y2)| *y1 <= assign + 1.0 && *y2 >= used - 1.0),
+        "{name}: no line of o.inner.r from `o.inner = other;` (y={assign}) to its use (y={used}): {lines:?}"
+    );
 }
