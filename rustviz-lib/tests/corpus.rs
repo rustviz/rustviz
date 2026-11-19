@@ -22185,6 +22185,45 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // test above fails on main.
         must_not_contain: &[],
     },
+    // #1185: `Some((s, 1))` / `Some(vec![s])` / `Some([s, t])` / `Ok((s, 1))`
+    // returned: s goes to the caller inside the value, as for `Some(s)`.
+    // The constructor receives nothing (#768).
+    TooltipExpect {
+        name: "ctor_returned_literal_1185",
+        must_contain: &[
+            "s's resource is moved to the caller",
+            "t's resource is moved to the caller",
+        ],
+        must_not_contain: &[
+            "Move from s to Some",
+            "Move from t to Some",
+            "Move from s to Ok",
+            "=s's resource is moved",
+            "=t's resource is moved",
+        ],
+    },
+    // #1183: `let _x = Some(one());` holds a Some value around the value
+    // one() returns.
+    TooltipExpect {
+        name: "ctor_call_value_1183",
+        must_contain: &[
+            "_x is initialized with a Some value holding the value one() returns",
+            "Copy of the value one() returns into a Some value held by _x",
+            "_y is initialized with a Some value holding the value h() returns",
+            "Copy of the value h() returns into a Some value held by _y",
+            "_p is initialized with an Ok value holding the value one() returns",
+            "Copy of the value one() returns into an Ok value held by _p",
+            "_f is initialized with a Some value",
+        ],
+        must_not_contain: &[
+            "=_x is initialized with the value one() returns",
+            "=_y is initialized with the value h() returns",
+            "=_p is initialized with the value one() returns",
+            "Copy of the value one() returns to _x",
+            "Copy of the value h() returns to _y",
+            "Copy of the value one() returns to _p",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
