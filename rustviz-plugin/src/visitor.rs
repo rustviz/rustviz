@@ -6005,6 +6005,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     };
     let mut payload_behind_ref = false;
     let drops_old = !lhs_ty.is_ref() && !is_copyable && !lhs_is_union_field && !union_without_drop && !lhs_is_manually_drop && self.needs_drop(lhs_ty, lhs_expr.hir_id.owner);
+    let mut contents_gone: Option<u64> = None;
     let drop_target: Option<ResourceAccessPoint> =
       if drops_old {
         match &lhs_rty {
@@ -6019,7 +6020,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // A destructuring assignment that also moves y's old
             // value out (`(a, b) = (b, a)`) doesn't drop it, even
             // if that move is drawn after y's new value arrives.
-            if self.rap_holds_resource_now(rap.name())
+            // A Box whose contents only were moved out still has its
+            // heap allocation, which the assignment frees (#1145).
+            let gone = rap.box_contents_moved() && self.box_contents_only_moved_now(rap.name());
+            if gone {
+              contents_gone = Some(*rap.hash());
+            }
+            if (self.rap_holds_resource_now(rap.name()) || gone)
               && !self.destructure_moved.contains(rap.name()) {
               Some(rap.clone())
             } else {
@@ -6325,6 +6332,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let n_before_drops = self.preprocessed_events.len();
     let payload_target = drop_target.as_ref().map(|r| *r.hash());
     for ((((rap, maybe_moved), parts), loop_head), by_cond) in drop_target.into_iter().chain(field_drop_targets).zip(maybe_moved).zip(parts).zip(loop_head).zip(by_conds) {
+      let hash = *rap.hash();
       let payload = box_payload.as_ref().is_some_and(|b| b.hash() == rap.hash())
         || (payload_behind_ref && payload_target.is_some_and(|h| h == *rap.hash()));
       self.add_external_event(drop_line, ExternalEvent::OwnerDropAtReassign {
@@ -6336,6 +6344,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         parts,
         maybe_init,
         payload,
+        contents_gone: contents_gone.is_some_and(|h| h == hash),
       });
       *self.unique_id += 1;
     }
@@ -6349,6 +6358,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         parts: None,
         maybe_init: Some(InitBy::EarlierIteration),
         payload: false,
+        contents_gone: false,
       });
       *self.unique_id += 1;
     }
@@ -11835,6 +11845,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       parts: None,
       maybe_init: Some(InitBy::EarlierIteration),
       payload: false,
+      contents_gone: false,
     });
     *self.unique_id += 1;
   }

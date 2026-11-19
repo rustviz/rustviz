@@ -20753,6 +20753,31 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Move from boxed to d",
         ],
     },
+    TooltipExpect {
+        name: "box_reboxed_after_deref_move_1145",
+        // #1145: after `let s = *a;`, `a = Box::new(..)` frees the old
+        // Box's heap allocation (main said only "a acquires ownership of a
+        // resource", no drop), and the new Box is whole: moved away
+        // (`drop(a)`, `let e = d;`), nothing is left at the scope end
+        // (main: "Its contents were moved out earlier, so only the Box's
+        // heap allocation is freed", a second free). b's contents are
+        // moved out again, so its scope end keeps that text.
+        must_contain: &[
+            "a acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
+            "b acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
+            "d acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
+            "f acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
+            "g acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
+            "a goes out of scope. No resource is dropped.",
+            "d goes out of scope. No resource is dropped.",
+            "b goes out of scope. Its contents were moved out earlier, so only the Box's heap allocation is freed.",
+            "g goes out of scope. Its resource is dropped (including the String it holds).",
+        ],
+        must_not_contain: &[
+            "a goes out of scope. Its contents were moved out earlier",
+            "d goes out of scope. Its contents were moved out earlier",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
