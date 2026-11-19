@@ -3911,6 +3911,12 @@ impl Event {
             Event::Copy{ from: ResourceTy::Value(ResourceAccessPoint::Function(f)), of: CopyOf::Pointee { part }, ..} => {
                 hover_messages::event_dot_copy_pointee_of_call(&self.deref_name(my_name), &f.name, f.inside.as_deref(), *part)
             }
+            // `let x = Some(one());`: x holds a Some value around the
+            // value one() returns (#1183).
+            Event::Copy{ from: ResourceTy::Value(ResourceAccessPoint::Function(f)), of: CopyOf::IntoCtor(ctor), ..}
+                if f.inside.is_none() && !f.name.rsplit("::").next().unwrap_or(&f.name).starts_with(|c: char| c.is_uppercase()) => {
+                hover_messages::event_dot_init_from_call_in_ctor(&self.deref_name(my_name), &f.name, ctor, f.cast_to.as_deref())
+            }
             Event::Copy{ from: ResourceTy::Value(ResourceAccessPoint::Function(f)), ..} => {
                 hover_messages::event_dot_init_from_call(&self.deref_name(my_name), &f.name, f.cast_to.as_deref(), f.inside.as_deref())
             }

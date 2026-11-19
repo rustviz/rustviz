@@ -323,10 +323,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // (a constructor never receives anything, #768).
     let ctor_value = !e.span.from_expansion()
       && matches!(e.kind, ExprKind::Call(callee, args) if is_ctor_path(callee, tycheck_results)
-        && args.iter().any(|a| matches!(a.kind, ExprKind::Path(_) | ExprKind::Field(..))
-          // A call's result put into the value goes to the caller too (#783).
-          || (!a.span.from_expansion() && matches!(a.kind, ExprKind::Call(..) | ExprKind::MethodCall(..))
-              && !tycheck_results.node_type(a.hir_id).is_ref())))
+        && args.iter().any(|a| ctor_part_carries_value(a, tycheck_results)))
       && !self.is_copy_literal_value(e);
     if (matches!(e.kind, ExprKind::Struct(..) | ExprKind::Tup(..) | ExprKind::Array(..)) && !e.span.from_expansion())
       || ctor_value
@@ -1809,6 +1806,26 @@ fn borrows_its_args(span: rustc_span::Span) -> bool {
       // `panic_display(&x)`.
       | "panic_2021" | "unreachable_2021")
   )
+}
+
+/// Whether `a`, an argument of a constructor whose value is returned
+/// (`Some(a)`), puts something into the value that came from elsewhere:
+/// a variable or field, a call's result (#783), or a tuple, array or
+/// `vec![…]` literal holding one (`Some((s, 1))`, `Some(vec![s])`,
+/// #1185). Those go to the caller inside the returned value.
+fn ctor_part_carries_value<'tcx>(a: &'tcx Expr<'tcx>, typeck: &rustc_middle::ty::TypeckResults<'_>) -> bool {
+  if let Some(elems) = vec_macro_elems(a) {
+    return elems.iter().any(|e| ctor_part_carries_value(e, typeck));
+  }
+  if a.span.from_expansion() {
+    return matches!(a.kind, ExprKind::Path(_) | ExprKind::Field(..));
+  }
+  match a.kind {
+    ExprKind::Path(_) | ExprKind::Field(..) => true,
+    ExprKind::Call(..) | ExprKind::MethodCall(..) => !typeck.node_type(a.hir_id).is_ref(),
+    ExprKind::Tup(elems) | ExprKind::Array(elems) => elems.iter().any(|e| ctor_part_carries_value(e, typeck)),
+    _ => false,
+  }
 }
 
 /// If `expr` is the expansion of `dbg!(a, b, …)`, return the user's

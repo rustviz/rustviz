@@ -2121,6 +2121,24 @@ pub fn event_dot_copyable_assign_copy_inside(my_name: &String, from_name: &Strin
 // (`Some(m) = f()`, `f()?`): the call returns the Option / Result, not
 // the variable's value. An unknown wrapper falls back to the neutral
 // "bound to a copyable value".
+// "a Some value" / "an Ok value" for a constructor's path (`Some`,
+// `Shape::Circle`).
+pub fn ctor_value_phrase(ctor: &str) -> String {
+    let last = ctor.rsplit("::").next().unwrap_or(ctor);
+    let article = if last.starts_with(|c: char| "AEIOU".contains(c)) { "an" } else { "a" };
+    format!("{} {} value", article, last)
+}
+
+// `let x = Some(one());`: x holds a Some value built around the value the
+// call returns, not that value itself (#1183).
+pub fn event_dot_init_from_call_in_ctor(my_name: &String, callee: &String, ctor: &str, cast_to: Option<&str>) -> String {
+    let value = match cast_to {
+        Some(ty) => format!("the value {}() returns, converted to {}", callee, ty),
+        None => format!("the value {}() returns", callee),
+    };
+    format!("{} is initialized with {} holding {}", my_name, ctor_value_phrase(ctor), value)
+}
+
 pub fn event_dot_init_from_call(my_name: &String, callee: &String, cast_to: Option<&str>, inside: Option<&str>) -> String {
     let ctor = callee.rsplit("::").next().unwrap_or(callee).starts_with(|c: char| c.is_uppercase());
     match inside {
@@ -5004,11 +5022,18 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
             // `?`), mirror the dot's wording (#733): never claim the
             // call returns the copied value itself.
             let inside = match from { ResourceTy::Value(ResourceAccessPoint::Function(f)) => f.inside.as_deref(), _ => None };
-            title = match inside {
-                None => format!("Copy of the value {}() returns to {}", styled_from_string, styled_to_string),
-                Some("") => format!("Copy to {}", styled_to_string),
-                Some(w @ ("Ok" | "Some")) => format!("Copy of the value inside the {} that {}() returns to {}", w, styled_from_string, styled_to_string),
-                Some(w) => format!("Copy of the value inside the {} {}() returns to {}", w, styled_from_string, styled_to_string),
+            // `let x = Some(one());`: the value goes into a Some value
+            // that x holds (#1183).
+            let wrapped = match external_event {
+                ExternalEvent::Copy { into_ctor: Some(c), .. } => Some(ctor_value_phrase(c)),
+                _ => None,
+            };
+            title = match (inside, wrapped) {
+                (None, Some(w)) => format!("Copy of the value {}() returns into {} held by {}", styled_from_string, w, styled_to_string),
+                (None, None) => format!("Copy of the value {}() returns to {}", styled_from_string, styled_to_string),
+                (Some(""), _) => format!("Copy to {}", styled_to_string),
+                (Some(w @ ("Ok" | "Some")), _) => format!("Copy of the value inside the {} that {}() returns to {}", w, styled_from_string, styled_to_string),
+                (Some(w), _) => format!("Copy of the value inside the {} {}() returns to {}", w, styled_from_string, styled_to_string),
             };
         }
     }
