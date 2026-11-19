@@ -35,6 +35,7 @@ pub mod plugin;
 pub mod utils;
 pub mod expr_visitor;
 pub mod expr_visitor_utils;
+pub mod approx_notes;
 pub mod annotated_source_gen;
 pub mod mir_data;
 pub mod ref_flow;
