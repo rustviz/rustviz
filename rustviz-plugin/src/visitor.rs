@@ -230,7 +230,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         o.is_static = true;
       }
       let rap = rd.rap.clone();
-      self.add_external_event(line_num, ExternalEvent::InitRefParam { param: rap, id: *self.unique_id, own_param: None, in_pattern: None });
+      self.add_external_event(line_num, ExternalEvent::InitRefParam { param: rap, id: *self.unique_id, own_param: None, in_pattern: None, rest: None });
       *self.unique_id += 1;
     }
   }
@@ -1608,6 +1608,75 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 /// Every `PatKind::Binding` in `pat`, in source order (left to right),
 /// including `name @ sub` and the bindings inside `sub`. Or-pattern
 /// alternatives bind the same names, so only the first is walked.
+impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
+  /// The parts of a by-value parameter's argument (of type `ty`, at the
+  /// field path `path`) that its pattern `pat` doesn't bind and that need
+  /// drop (#1181): what a `..` or `_` leaves (`P { name, .. }: P` leaves
+  /// `bio`, `(a, _): (String, String)` leaves `1`). Nothing through a
+  /// `&` pattern: that's the caller's.
+  fn unbound_param_parts(&self, pat: &'tcx Pat<'tcx>, ty: rustc_middle::ty::Ty<'tcx>, path: String, owner: rustc_hir::OwnerId, out: &mut Vec<String>) {
+    let join = |f: &str| if path.is_empty() { f.to_owned() } else { format!("{}.{}", path, f) };
+    let typeck = self.tcx.typeck(owner);
+    // Matching through a reference (default binding modes): the
+    // argument is the caller's.
+    if typeck.pat_adjustments().get(pat.hir_id).is_some_and(|a| !a.is_empty()) {
+      return;
+    }
+    match pat.kind {
+      PatKind::Wild => {
+        if !path.is_empty() && self.needs_drop(ty, owner) {
+          out.push(path);
+        }
+      }
+      PatKind::Tuple(pats, dd) => {
+        let rustc_middle::ty::TyKind::Tuple(tys) = ty.kind() else { return };
+        let split = dd.as_opt_usize().unwrap_or(pats.len());
+        let back = pats.len() - split;
+        for (i, ety) in tys.iter().enumerate() {
+          let sub = if i < split { pats.get(i) } else if i >= tys.len() - back { pats.get(i + pats.len() - tys.len()) } else { None };
+          match sub {
+            Some(p) => self.unbound_param_parts(p, ety, join(&i.to_string()), owner, out),
+            None => if self.needs_drop(ety, owner) { out.push(join(&i.to_string())) },
+          }
+        }
+      }
+      PatKind::Struct(_, fields, has_rest) => {
+        let rustc_middle::ty::TyKind::Adt(adt, args) = ty.kind() else { return };
+        if !adt.is_struct() {
+          return;
+        }
+        for fd in adt.non_enum_variant().fields.iter() {
+          let fty = fd.ty(self.tcx, args);
+          match fields.iter().find(|f| f.ident.name == fd.name) {
+            Some(f) => self.unbound_param_parts(f.pat, fty, join(fd.name.as_str()), owner, out),
+            None => if has_rest.is_some() && self.needs_drop(fty, owner) { out.push(join(fd.name.as_str())) },
+          }
+        }
+      }
+      PatKind::TupleStruct(_, pats, dd) => {
+        let rustc_middle::ty::TyKind::Adt(adt, args) = ty.kind() else { return };
+        if !adt.is_struct() {
+          return;
+        }
+        let fields: Vec<rustc_middle::ty::Ty<'tcx>> = adt.non_enum_variant().fields.iter().map(|fd| fd.ty(self.tcx, args)).collect();
+        let split = dd.as_opt_usize().unwrap_or(pats.len());
+        let back = pats.len() - split;
+        for (i, fty) in fields.iter().enumerate() {
+          let sub = if i < split { pats.get(i) } else if i >= fields.len() - back { pats.get(i + pats.len() - fields.len()) } else { None };
+          match sub {
+            Some(p) => self.unbound_param_parts(p, *fty, join(&i.to_string()), owner, out),
+            None => if self.needs_drop(*fty, owner) { out.push(join(&i.to_string())) },
+          }
+        }
+      }
+      // A binding takes its part (by value, or a `ref` borrows it, #698);
+      // `&pat` matches the caller's data.
+      _ => {}
+    }
+  }
+
+}
+
 fn binding_pats<'tcx>(pat: &'tcx Pat<'tcx>, out: &mut Vec<&'tcx Pat<'tcx>>) {
   match pat.kind {
     PatKind::Binding(_, _, _, sub) => {
@@ -4113,6 +4182,16 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
     let typeck = self.tcx.typeck(param.hir_id.owner);
     let mut own_refs = Vec::new();
     own_param_ref_bindings(param.pat, typeck, true, &mut own_refs);
+    // The parts of the argument the pattern doesn't bind are dropped
+    // when the function returns: the first binding's dot says so (#1181).
+    let mut rest = {
+      let mut parts = Vec::new();
+      self.unbound_param_parts(param.pat, typeck.pat_ty(param.pat), String::new(), param.hir_id.owner, &mut parts);
+      (!parts.is_empty()).then(|| ParamRest {
+        fn_name: self.tcx.item_name(param.hir_id.owner.to_def_id()).to_string(),
+        parts,
+      })
+    };
     for pat in bindings {
       // `ref s` on a by-value parameter: `s` borrows the value this
       // function owns, not the caller's (#377).
@@ -4187,7 +4266,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               // The caller's value arrives in the column, and `s`
               // borrows it, both on the signature's line.
               let col_rap = self.raps.get(&col).unwrap().rap.to_owned();
-              self.add_external_event(line_num, ExternalEvent::InitRefParam { param: col_rap, id: *self.unique_id, own_param: own_param.clone(), in_pattern: None });
+              self.add_external_event(line_num, ExternalEvent::InitRefParam { param: col_rap, id: *self.unique_id, own_param: own_param.clone(), in_pattern: None, rest: rest.take() });
               *self.unique_id += 1;
               // The borrows are added once every parameter is
               // registered (`visit_body`): arrows on one line are
@@ -4276,7 +4355,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             self.add_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, self.ty_is_plain(ty, param.hir_id.owner), self.ty_has_interior_mut(ty, param.hir_id.owner), self.current_scope, !self.inside_branch);
             self.mark_owner_type(&name, ty);
           }
-          self.add_external_event(line_num, ExternalEvent::InitRefParam { param: self.raps.get(&name).unwrap().rap.to_owned(), id: *self.unique_id, own_param, in_pattern: None });
+          self.add_external_event(line_num, ExternalEvent::InitRefParam { param: self.raps.get(&name).unwrap().rap.to_owned(), id: *self.unique_id, own_param, in_pattern: None, rest: rest.take() });
           *self.unique_id += 1;
           // A by-value struct parameter owns its fields' resources too
           // (and drops them at the end of the body unless moved on).
@@ -4291,7 +4370,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             .collect();
           ref_fields.sort_by_key(|r| *r.hash());
           for r in ref_fields {
-            self.add_external_event(line_num, ExternalEvent::InitRefParam { param: r, id: *self.unique_id, own_param: None, in_pattern: None });
+            self.add_external_event(line_num, ExternalEvent::InitRefParam { param: r, id: *self.unique_id, own_param: None, in_pattern: None, rest: None });
             *self.unique_id += 1;
           }
           self.annotate_src(name.clone(), ident.span, false, *self.raps.get(&name).unwrap().rap.hash());
@@ -7748,6 +7827,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // `P { a, b } => …` on a struct variable: `a` / `b`
       // come from `p.a` / `p.b` (#326).
       self.get_dec_of_pat_parts(arm_pat, &typeck_res, &parents[i], parents_ty[i], end, & mut associated_ro);
+      // A binding by reference into a call's result borrows what the
+      // call's reference points into, not the call (#1222).
+      if parents.len() == 1 {
+        for (r, e, from, _) in associated_ro.iter_mut() {
+          *from = self.retarget_tuple_borrow(guard_expr, r, e, from.clone());
+        }
+      }
       let or_evs = self.or_conflict_events(&or_conflicts, &mut associated_ro, pat_line, &scrutinee_moves, &tuple_name, end, false);
       or_events.extend(or_evs.start);
       or_end_events.extend(or_evs.end);
@@ -9713,6 +9799,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let mut pairs: Vec<(HirId, &'tcx Expr<'tcx>)> = Vec::new();
     let mut discarded: Vec<&'tcx Expr<'tcx>> = Vec::new();
     self.pair_destructure(local.pat, init, &mut pairs, &mut discarded);
+    // `_ = s;` matches the place itself against `_`, which binds
+    // nothing, so nothing is moved (as for `let _ = s;`, #1169). Only a
+    // part of a literal the RHS builds (`(a, _) = (s, t)`) is moved, by
+    // the literal.
+    if matches!(local.pat.kind, PatKind::Wild) {
+      discarded.clear();
+    }
     let src_of: HashMap<HirId, &'tcx Expr<'tcx>> = pairs.iter().cloned().collect();
 
     // Places whose value this statement moves out (a non-Copy RHS

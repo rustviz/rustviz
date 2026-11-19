@@ -21456,6 +21456,74 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "three goes out of scope. No resource is dropped.",
         ],
     },
+    TooltipExpect {
+        name: "pattern_fixes_1169_1181_1177",
+        // #1169: `_ = s;` matches the place against `_`, which binds
+        // nothing, so nothing moves (as for `let _ = s;`); s is read and
+        // dropped later. A `_` against a part of a tuple literal (`(a, _)
+        // = (t, u)`) is moved by the literal and dropped with it.
+        // #1181: a parameter pattern that leaves parts of the argument
+        // unbound (`..`, `_`): those parts are dropped when the function
+        // returns, which no column shows, so the first binding's dot says
+        // so.
+        // #1177: `whole @ Some(n)`: n is bound too, a copy of the i32 in o.
+        must_contain: &[
+            "u's resource is moved into a temporary that is dropped at the end of this statement",
+            "name acquires ownership from the caller. The pattern doesn't bind the argument's bio, so it stays in the parameter and is dropped when greet returns",
+            "a acquires ownership from the caller. The pattern doesn't bind the argument's .1, so it stays in the parameter and is dropped when first returns",
+            "nm acquires ownership from the caller. The pattern doesn't bind the argument's bio, so it stays in the parameter and is dropped when named returns",
+            "w0 acquires ownership from the caller. The pattern doesn't bind the argument's .1, so it stays in the parameter and is dropped when tuple_struct returns",
+            "n is a copy of the caller's value. The pattern doesn't bind the argument's inner.tag, so it stays in the parameter and is dropped when nested returns",
+            "b0 is an immutable borrow from the caller",
+            "whole is initialized with a copy of o",
+            "n is initialized with a copy of a value inside o",
+            "k is initialized with a copy of a value inside o",
+        ],
+        must_not_contain: &[
+            "s's resource is moved into a temporary",
+            "p.name's resource is moved into a temporary",
+            // (The parameters' L-arrows keep "name acquires ownership
+            // from the caller": the caller's argument does arrive whole.)
+            // `&(ref b0, _)` matches the caller's tuple: nothing of it is
+            // dropped here.
+            "dropped when borrowed returns",
+        ],
+    },
+    TooltipExpect {
+        name: "pattern_columns_lenders_1201_1222",
+        // #1201: `let n = match o { Some(n) => n, .. };`: the arm's n and
+        // the let's n get columns of their own (their headers say they're
+        // different variables). On one shared column the outer n had no
+        // line from its initialization to its use. The same for a
+        // `String` (`arm_string`), an `if let` (`if_let_init`), a block
+        // (`block_init`), and a non-diverging `None` arm, which panicked
+        // (#1239).
+        // #1222: a binding by reference into a call's returned reference
+        // borrows what the call borrowed (`o`, `m`), not the function.
+        // `pick(&a, &b)` may point into either: no lender is named.
+        must_contain: &[
+            "n, immutable. A different variable from the n declared on line 18 (separate scopes, so only one exists at a time)",
+            "n, immutable. A different variable from the n declared on line 17 (separate scopes, so only one exists at a time)",
+            "x, immutable. A different variable from the x declared on line 26 (separate scopes, so only one exists at a time)",
+            "v, immutable. A different variable from the v declared on line 38 (separate scopes, so only one exists at a time)",
+            "y, immutable. A different variable from the y declared on line 43 (separate scopes, so only one exists at a time)",
+            "Partial immutable borrow from o to x",
+            "Return immutably borrowed resource from x to o",
+            "Partial immutable borrow from o to z",
+            "Return immutably borrowed resource from z to o",
+            "Partial Mutable borrow from m to mx",
+            "Return mutably borrowed resource from mx to m",
+            "pq's immutable borrow ends (what it borrows from isn't shown)",
+        ],
+        must_not_contain: &[
+            "=n, immutable",
+            "borrow from get to",
+            "to get",
+            "borrow from get_mut to",
+            "borrow from pick to",
+            "to pick",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
