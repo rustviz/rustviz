@@ -1,5 +1,5 @@
 use crate::svg_generator::{
-  data::{ExternalEvent, ShadowNote, VisualizationData},
+  data::{ApproxNote, ExternalEvent, ShadowNote, VisualizationData},
   svg_frontend::svg_generation
 };
 use anyhow::Result;
@@ -30,6 +30,7 @@ impl Rustviz {
     shadow_notes: HashMap<u64, ShadowNote>,
     binding_columns: Vec<(u64, u64)>,
     hidden_source_lines: HashSet<usize>,
+    approx_notes: Vec<ApproxNote>,
   ) -> Result<Rustviz>{
     /* ******************************************
             --- Build VisualizationData ---
@@ -44,6 +45,8 @@ impl Rustviz {
       shadow_notes,
       binding_columns,
       arrow_tracks: HashMap::new(),
+      approx_notes,
+      row_lines: Vec::new(),
     };
     /* ******************************************
             --- Render SVG images ---

@@ -781,7 +781,8 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c8_15_vec_for_by_value",
-        must_contain: &["Move of each element of v to s", "s takes ownership of an element of v", "v goes out of scope. No resource is dropped."],
+        // The loop is drawn once; s's first dot says each pass has its own s (#853).
+        must_contain: &["Move of each element of v to s", "s takes ownership of an element of v", "(RustViz draws one pass through this loop; each pass has its own s.)", "v goes out of scope. No resource is dropped."],
         // #850: was "Move from v to s", as if `s` took the whole Vec.
         must_not_contain: &["Move from v to s"],
         ..E
