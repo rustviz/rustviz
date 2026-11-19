@@ -20949,6 +20949,29 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[],
     },
+    TooltipExpect {
+        name: "static_mut_ref_assign_1162",
+        // #1162: `NAME = "b"` with `static mut NAME: &str` panicked at
+        // visitor.rs:5750 (a static's column has no loan to re-point).
+        // A static is drawn like a Copy value (#690): it can only hold a
+        // `&'static` (a literal, another static, a promoted constant), so
+        // the write is a plain assignment that borrows nothing from a
+        // local and drops nothing. `NUMS = &[3, 4, 5]` borrows a promoted
+        // constant, which never needs drop: a value, not a resource.
+        must_contain: &[
+            "NAME is assigned a new value",
+            "NAME is assigned a copy of OTHER",
+            "NAME is assigned a copy of v",
+            "NUMS immutably borrows a value",
+            "Copy from NAME to n",
+            "n's borrow of what the static NAME points to ends (it lives for the whole program)",
+            "NAME is a static: it lives for the whole program and is never dropped",
+        ],
+        must_not_contain: &[
+            "NUMS immutably borrows a resource",
+            "NAME's resource",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop

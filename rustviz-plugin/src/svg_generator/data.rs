@@ -2778,7 +2778,9 @@ fn borrow_holds_value(from: &ResourceTy, borrower: &ResourceTy) -> bool {
     holds_copy_value(from)
         || matches!(borrower, ResourceTy::Value(r) if r.points_to_copy())
         || (matches!(from, ResourceTy::Anonymous)
-            && borrower.extract_rap().is_some_and(|r| r.points_to_copy()))
+            // A `static` set to `&[3, 4]` borrows a promoted constant,
+            // which can't need drop (#1162).
+            && borrower.extract_rap().is_some_and(|r| r.points_to_copy() || r.is_static()))
 }
 
 // The lender of a borrow, when it is a reference r: the borrow is then
