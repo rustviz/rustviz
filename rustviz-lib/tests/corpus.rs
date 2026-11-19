@@ -20753,6 +20753,30 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Move from boxed to d",
         ],
     },
+    TooltipExpect {
+        name: "approx_loop_one_pass_853",
+        // #853: a loop is drawn as one pass through its body. The first
+        // dot of each variable it declares says each pass has its own
+        // one; the first dot inside the body of a variable from before
+        // the loop says the loop may run many times. Each note is a line
+        // of its own after the dot's text. Main drew the same dots with
+        // no note. Where each note sits (and where none does) is pinned
+        // by `loop_notes_sit_on_the_first_dot_inside_the_loop`.
+        must_contain: &[
+            "w is bound to an immutable reference",
+            "(RustViz draws one pass through this loop; each pass has its own w.)",
+            "(RustViz draws one pass through this loop; each pass has its own s.)",
+            "(RustViz draws one pass through this loop; each pass has its own top.)",
+            "(RustViz draws one pass through this loop; each pass has its own t.)",
+            "(RustViz draws one pass through this loop, which may run many times.)",
+        ],
+        must_not_contain: &[
+            // `n` is bound once, by the `break`; `msg` is in an `if`.
+            "each pass has its own n.",
+            "each pass has its own msg.",
+            "each pass has its own total.",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -21747,9 +21771,20 @@ fn branches_that_diverge_stop_short() {
 
 /// `(cx, cy)` of every dot in a timeline panel whose tooltip is
 /// exactly `text` (plain circles, and drop dots: a tooltip `<g>`
-/// around a circle).
+/// around a circle), not counting its approximation notes: lines of
+/// their own, one parenthesised sentence each ("(RustViz draws one pass
+/// through this loop, …)", #853).
 fn dots_with_tooltip(svg: &str, text: &str) -> Vec<(f64, f64)> {
-    dots_where(svg, |lines| lines == [text])
+    dots_where(svg, |lines| {
+        let events: Vec<&String> = lines.iter().filter(|l| !is_approx_note(l)).collect();
+        events.len() == 1 && events[0] == text
+    })
+}
+
+/// Whether a tooltip line is an approximation note (see
+/// `dots_with_tooltip`).
+fn is_approx_note(line: &str) -> bool {
+    line.starts_with('(') && line.ends_with(".)")
 }
 
 /// Like `dots_with_tooltip`, for a dot that may share its event with
@@ -28297,4 +28332,31 @@ fn a_boxed_closure_borrowing_through_a_reference_keeps_it_until_dropped() {
     assert_eq!(ys("d's immutable borrow ends"), vec![row("drop(d);")]);
     assert_eq!(ys("d no longer borrows the resource p points to"), vec![row("drop(d);")]);
     assert_eq!(ys("w's resource is no longer immutably borrowed"), vec![row("drop(d);")]);
+}
+
+/// #853 (`approx_loop_one_pass_853`): the loop notes go on the first dot
+/// inside a loop of each column, and nowhere else: not on `total`'s
+/// binding before the loops, not on the `for` line where `words` is lent
+/// to the iterator once, not on the closing line where it's given back,
+/// not on `n`, bound once by the `break`, and not in the `if` block.
+#[test]
+fn loop_notes_sit_on_the_first_dot_inside_the_loop() {
+    let rv = run_with_local_backend("approx_loop_one_pass_853");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let row = |src: &str| code_row_y(&code, src);
+    let ys = |text: &str| -> Vec<f64> {
+        let mut v: Vec<f64> = dots_listing_tooltip(&tl, text).into_iter().map(|(_, y)| y).collect();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v
+    };
+    let local = |name: &str| format!("(RustViz draws one pass through this loop; each pass has its own {}.)", name);
+    // total's `+=` in the `for` and `while let` bodies, and stack's `pop`
+    // in the `while let` condition, checked on every pass.
+    let mut plain = vec![row("total += s.len();"), row("while let Some(top) = stack.pop() {"), row("total += top;")];
+    plain.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(ys("(RustViz draws one pass through this loop, which may run many times.)"), plain);
+    assert_eq!(ys(&local("w")), vec![row("for w in words.iter() {")]);
+    assert_eq!(ys(&local("s")), vec![row("let s = w.clone();")]);
+    assert_eq!(ys(&local("top")), vec![row("while let Some(top) = stack.pop() {")]);
+    assert_eq!(ys(&local("t")), vec![row("let t = String::from(\"t\");")]);
 }

@@ -5393,3 +5393,25 @@ mod escape_tooltip_attrs_tests {
         );
     }
 }
+
+/* Approximation notes (`ApproxNote`): what a figure simplifies, added to
+   the tooltip of a dot drawn on the construct anyway. Each is one
+   sentence in parentheses that says what RustViz doesn't draw, never
+   that what it draws is complete. */
+
+// On each column's first dot inside a loop's body (#853). The figure
+// shows the body once; the loop may run it any number of times (also
+// none, or once before a `break`), so this says no more than that.
+pub fn approx_note_loop() -> String {
+    "(RustViz draws one pass through this loop, which may run many times.)".to_owned()
+}
+
+// On the first dot of a variable a loop declares (its `for` pattern, a
+// `let` in its body, a `while let` binding): every pass that gets there
+// has its own (#853).
+pub fn approx_note_loop_local(name: &str) -> String {
+    format!(
+        "(RustViz draws one pass through this loop; each pass has its own {}.)",
+        styled_name_html(name)
+    )
+}
