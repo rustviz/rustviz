@@ -5834,6 +5834,52 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     true
   }
 
+  /// `slice = &mut slice[1..];`, `s = &s[i..];`, `r = &mut *r;` (#1123):
+  /// the reference is given a reborrow of (part of) what it already
+  /// points to. That new reference is derived from the loan the
+  /// reference holds, so the lender stays borrowed until the
+  /// reference's last use: no end of the old loan, no new borrow of the
+  /// lender, and the reference doesn't lend to itself. Drawn as a note
+  /// on its column. False (nothing drawn) unless the reference holds a
+  /// loan of a named variable.
+  fn reslice_in_place(&mut self, lhs_expr: &'tcx Expr<'tcx>, rhs_expr: &'tcx Expr<'tcx>) -> bool {
+    let Some(lhs_hid) = local_of_path(lhs_expr) else { return false };
+    let ExprKind::AddrOf(_, _, mut place) = rhs_expr.kind else { return false };
+    let mut indices: Vec<&'tcx Expr<'tcx>> = Vec::new();
+    let mut steps = 0;
+    loop {
+      match place.kind {
+        ExprKind::Index(base, idx, _) => { indices.push(idx); place = base; }
+        ExprKind::Unary(UnOp::Deref, inner) => place = inner,
+        _ => break,
+      }
+      steps += 1;
+    }
+    if steps == 0 || local_of_path(place) != Some(lhs_hid) {
+      return false;
+    }
+    if !self.tcx.typeck(lhs_expr.hir_id.owner).node_type(lhs_expr.hir_id).is_ref() {
+      return false;
+    }
+    let Some(name) = expr_to_rap_name(lhs_expr, &self.tcx) else { return false };
+    let Some(rap) = self.raps.get(&name).map(|r| r.rap.to_owned()) else { return false };
+    let Some(rd) = self.borrow_map.get(&name) else { return false };
+    let ResourceTy::Value(lender) = &rd.lender else { return false };
+    if !rd.co_lenders.is_empty() {
+      return false;
+    }
+    let (lender, mutable) = (lender.name().to_owned(), rd.ref_mutability);
+    for idx in indices {
+      self.visit_expr(idx);
+    }
+    let line = expr_to_line(lhs_expr, &self.tcx);
+    self.update_rap(&rap, line);
+    let id = *self.unique_id;
+    *self.unique_id += 1;
+    self.add_external_event(line, ExternalEvent::ReslicedInPlace { ro: rap, lender, mutable, id });
+    true
+  }
+
   fn visit_assign(&mut self, expr: &'tcx Expr<'tcx>, lhs_expr: &'tcx Expr<'tcx>, rhs_expr: &'tcx Expr<'tcx>) {
     // `a = lhs` inside a destructuring assignment: draw it as
     // `a = <the part of the RHS lhs holds>`. That part was
@@ -5869,6 +5915,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       return;
     }
     if destructure_hid.is_none() && self.init_from_branches(expr, lhs_expr, rhs_expr) {
+      return;
+    }
+    if destructure_hid.is_none() && matches!(expr.kind, ExprKind::Assign(..)) && self.reslice_in_place(lhs_expr, rhs_expr) {
       return;
     }
     if destructure_hid.is_none() {

@@ -2233,6 +2233,17 @@ pub enum ExternalEvent {
     // this path, whose lifetime the signature ties to the result's
     // (#775): its borrow lasts as long as the result in the caller, so
     // nothing ends here. A dot; the state is unchanged.
+    // `slice = &mut slice[1..];` / `s = &s[1..];` (#1123): the reference
+    // is given a reborrow of part of what it already points to. The loan
+    // of `lender` it holds goes on (the new reference is derived from
+    // it), so nothing is returned and nothing new is borrowed from
+    // `lender`. A dot; the state is unchanged.
+    ReslicedInPlace {
+        ro: ResourceAccessPoint,
+        lender: String,
+        mutable: bool,
+        id: usize
+    },
     TiedParamNote {
         ro: ResourceAccessPoint,
         lifetime: String,
@@ -2395,6 +2406,7 @@ impl ExternalEvent {
             &ExternalEvent::ChainFailAssign { id, .. } |
             &ExternalEvent::ChainFailUse { id, .. } |
             &ExternalEvent::TiedParamNote { id, .. } |
+            &ExternalEvent::ReslicedInPlace { id, .. } |
             &ExternalEvent::DeadElseNote { id, .. } |
             &ExternalEvent::DeadLoanNote { id, .. } |
             &ExternalEvent::RefDie { id, .. } | &ExternalEvent::Bind { id, .. } |
@@ -2695,6 +2707,8 @@ pub enum Event {
     ChainFailUse { uses: Vec<ChainUse>, definite: bool, path: FailPath, is_ref: bool, pointee_value: bool },
     // See ExternalEvent::TiedParamNote.
     TiedParamNote { lifetime: String },
+    // See ExternalEvent::ReslicedInPlace.
+    ReslicedInPlace { lender: String, mutable: bool },
     // See ExternalEvent::DeadElseNote.
     DeadElseNote,
     // See ExternalEvent::DeadLoanNote. `shown`: the column is drawn
@@ -3344,6 +3358,9 @@ impl Display for Event {
             Event::TiedParamNote { .. } => {
                 write!(f, "Not returned on this path; its borrow lasts as long as the result")
             },
+            Event::ReslicedInPlace { .. } => {
+                write!(f, "Points to part of what it pointed to; its borrow goes on")
+            },
             Event::DeadElseNote => {
                 write!(f, "This else branch never runs")
             },
@@ -3564,6 +3581,9 @@ impl Event {
             }
             Event::TiedParamNote { lifetime, .. } => {
                 hover_messages::event_dot_tied_param_note(my_name, lifetime)
+            }
+            Event::ReslicedInPlace { lender, mutable } => {
+                hover_messages::event_dot_resliced_in_place(my_name, lender, *mutable)
             }
             Event::DeadLoanNote { lender, borrower, repoint, .. } => {
                 hover_messages::event_dot_dead_loan_note(lender, borrower, *repoint)
@@ -4778,6 +4798,7 @@ impl Visualizable for VisualizationData {
             // The borrows have ended (#688): no change.
             (_, Event::ChainFailUse { .. }) => (*previous_state).clone(),
             (_, Event::TiedParamNote { .. }) => (*previous_state).clone(),
+            (_, Event::ReslicedInPlace { .. }) => (*previous_state).clone(),
             (_, Event::DeadElseNote) => (*previous_state).clone(),
             (_, Event::DeadLoanNote { .. }) => (*previous_state).clone(),
 
@@ -5279,6 +5300,9 @@ impl Visualizable for VisualizationData {
         ExternalEvent::TiedParamNote{ lifetime, .. } => {
           vec![(line_num, Event::TiedParamNote { lifetime: lifetime.clone() })]
         },
+        ExternalEvent::ReslicedInPlace{ lender, mutable, .. } => {
+          vec![(line_num, Event::ReslicedInPlace { lender: lender.clone(), mutable: *mutable })]
+        },
         ExternalEvent::DeadLoanNote{ lender, borrower, repoint, .. } => {
           vec![(line_num, Event::DeadLoanNote { lender: lender.clone(), borrower: borrower.clone(), repoint: *repoint, shown: false })]
         },
@@ -5332,6 +5356,7 @@ impl Visualizable for VisualizationData {
             ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::TupleTempDrop { ro, .. } | ExternalEvent::OrAltMove { ro, .. } | ExternalEvent::LoopIteratorDrop { ro, .. }
             | ExternalEvent::LoopMaybeInit { ro, .. } | ExternalEvent::LoopExitKept { ro, .. }
             | ExternalEvent::ChainFailAssign { ro, .. } | ExternalEvent::ChainFailUse { ro, .. } | ExternalEvent::TiedParamNote { ro, .. }
+            | ExternalEvent::ReslicedInPlace { ro, .. }
             | ExternalEvent::DeadElseNote { ro, .. } | ExternalEvent::DeadLoanNote { ro, .. } => {
                 if ro == rap {
                     b_history.extend(self.event_of_external_event(line_number, event, true));
@@ -5663,6 +5688,9 @@ impl Visualizable for VisualizationData {
             },
             ExternalEvent::TiedParamNote{ro, lifetime, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::TiedParamNote { lifetime }, line_number);
+            },
+            ExternalEvent::ReslicedInPlace{ro, lender, mutable, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::ReslicedInPlace { lender, mutable }, line_number);
             },
             ExternalEvent::DeadElseNote{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::DeadElseNote, line_number);

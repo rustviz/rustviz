@@ -1693,6 +1693,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       | ExternalEvent::ChainFailAssign { ro, .. }
       | ExternalEvent::ChainFailUse { ro, .. }
       | ExternalEvent::TiedParamNote { ro, .. }
+      | ExternalEvent::ReslicedInPlace { ro, .. }
       | ExternalEvent::DeadElseNote { ro, .. }
       | ExternalEvent::DeadLoanNote { ro, .. }
       | ExternalEvent::OwnerDropAtReassign { ro, .. }
