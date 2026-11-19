@@ -20753,6 +20753,48 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Move from boxed to d",
         ],
     },
+    // #1171: a loop that is the function's value: main drew no move of
+    // what `break` carries, and dropped it (or said nothing was dropped)
+    // at the end.
+    TooltipExpect {
+        name: "loop_value_returned_1171",
+        must_contain: &[
+            "line's resource is moved to the caller by the break that ends the loop, which the function returns",
+            "line goes out of scope. Its resource is dropped here on every iteration that doesn't end the loop.",
+            "s's resource is moved to the caller",
+            "a's resource is moved to the caller",
+            "b's resource is moved to the caller",
+            "d's resource is moved to the caller",
+            "f's resource is moved to the caller if the loop ended with break f",
+            "g's resource is moved to the caller if the loop ended with break g",
+            "h's resource is moved to the caller",
+        ],
+        must_not_contain: &[
+            "=line goes out of scope. Its resource is dropped.",
+            "=s goes out of scope. Its resource is dropped.",
+            "d goes out of scope. Its resource is dropped here only if d still holds it",
+            "moves f's resource to Caller",
+            "to Caller",
+        ],
+    },
+    // #1156: `break k` out of a loop whose body moved k on the other
+    // iterations: main drew a drop at the end of the body anyway.
+    TooltipExpect {
+        name: "break_out_after_move_1156",
+        must_contain: &[
+            "k goes out of scope. No resource is dropped: on the iterations that don't end the loop, k was moved above.",
+            "m goes out of scope. On the iterations that don't end the loop, its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "p goes out of scope. Its resource is dropped here on every iteration that doesn't end the loop.",
+            "q goes out of scope. No resource is dropped: on the iterations that don't end the loop, q was moved above.",
+            "r goes out of scope. No resource is dropped: on the iterations that don't end the loop, r was moved above.",
+            "r's resource is moved to the caller by the break that ends the loop, which the function returns",
+        ],
+        must_not_contain: &[
+            "k goes out of scope. Its resource is dropped here on every iteration",
+            "m goes out of scope. Its resource is dropped here on every iteration",
+            "q goes out of scope. Its resource is dropped here on every iteration",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop

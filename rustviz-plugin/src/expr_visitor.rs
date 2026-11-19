@@ -4433,7 +4433,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// known only after the loop: if the value was deferred to the
   /// loop's end (a `break` in a branch, #431), place the events there.
   /// Returns what `leave_deferred` restores.
-  fn enter_deferred(&mut self, loop_id: rustc_hir::HirId) -> (Option<usize>, Vec<String>) {
+  pub(crate) fn enter_deferred(&mut self, loop_id: rustc_hir::HirId) -> (Option<usize>, Vec<String>) {
     match self.deferred_lines.iter().position(|(id, ..)| *id == loop_id) {
       Some(i) => {
         let (_, line, names) = self.deferred_lines.remove(i);
@@ -4443,14 +4443,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
-  fn leave_deferred(&mut self, saved: (Option<usize>, Vec<String>)) {
+  pub(crate) fn leave_deferred(&mut self, saved: (Option<usize>, Vec<String>)) {
     self.line_override = saved.0;
     self.break_out = saved.1;
   }
 
   /// The `break` values recorded for `loop_expr` while its receiver
   /// wasn't known (#452), with each `break` as written.
-  fn take_loop_breaks(&mut self, loop_expr: &'tcx Expr<'tcx>) -> Vec<(&'tcx Expr<'tcx>, Option<String>)> {
+  pub(crate) fn take_loop_breaks(&mut self, loop_expr: &'tcx Expr<'tcx>) -> Vec<(&'tcx Expr<'tcx>, Option<String>)> {
     let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.loop_breaks)
       .into_iter().partition(|(id, ..)| *id == loop_expr.hir_id);
     self.loop_breaks = rest;
@@ -4458,7 +4458,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   }
 
   /// Whether `e` mentions a local variable declared inside `scope`.
-  fn mentions_local_declared_in(&self, e: &'tcx Expr<'tcx>, scope: rustc_span::Span) -> bool {
+  pub(crate) fn mentions_local_declared_in(&self, e: &'tcx Expr<'tcx>, scope: rustc_span::Span) -> bool {
     locals_in(e, ClosureLocals::Skip).iter().any(|m| scope.contains(self.tcx.hir_span(m.id)))
   }
 

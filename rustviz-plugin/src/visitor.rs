@@ -239,6 +239,35 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// the operand of a `return`): record it moving (or, for a Copy
   /// type or a shared reference, being copied) to the caller.
   fn return_to_caller(&mut self, e: &'tcx Expr<'tcx>) {
+    // `return loop { … break v; }`, or such a loop as the tail: what
+    // the `break` that ends it carries goes to the caller (#1171), as it
+    // would go into the argument of `f(loop { … })` (`match_arg`).
+    if let ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _) = e.kind {
+      if !e.span.from_expansion() {
+        let seen = self.take_loop_breaks(e);
+        let deferred = self.deferred_lines.iter().any(|(id, ..)| *id == e.hir_id);
+        let saved = self.enter_deferred(e.hir_id);
+        // A single `break` that isn't in a branch: the value leaves
+        // where the loop ends (not a variable the loop declares, which
+        // goes out of scope there after its move).
+        let end_line = (!deferred && seen.len() == 1 && !self.mentions_local_declared_in(seen[0].0, e.span))
+          .then(|| span_end_line(&e.span, &self.tcx));
+        let saved_line = end_line.map(|l| self.line_override.replace(l));
+        if seen.len() > 1 {
+          // Several: only the `break` that ended the loop ran (#561).
+          self.pair_break_alternatives(e, seen, |this, v| this.return_to_caller(v));
+        } else {
+          for (value, _) in seen {
+            self.return_to_caller(value);
+          }
+        }
+        if let Some(l) = saved_line {
+          self.line_override = l;
+        }
+        self.leave_deferred(saved);
+        return;
+      }
+    }
     let tycheck_results = self.tcx.typeck(e.hir_id.owner);
     let lhs_ty = tycheck_results.node_type(e.hir_id);
     let is_copyable = self.ty_is_copy(lhs_ty, e.hir_id.owner);
