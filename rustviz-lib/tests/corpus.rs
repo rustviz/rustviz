@@ -20753,6 +20753,133 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Move from boxed to d",
         ],
     },
+    TooltipExpect {
+        name: "struct_literal_moves_1143",
+        // #1143: a struct literal anywhere but directly as a `let`
+        // initializer moved nothing: `consume(B { name: a1 })` left a1
+        // owning its String to the end of the function (no move dot, no
+        // arrow), and the same in a method argument, `Box::new(..)`,
+        // `Some(..)`, `vec![..]`, an assignment, a tuple element, `v[0] =`,
+        // `*slot =` and a returned `Some(..)` / nested literal / `vec![..]`
+        // / tuple. Where a1 was dropped at its scope end, that drop was
+        // false too (the String went into the call). `..base` in a call
+        // moves base's other fields; `B { name: p8.name }` moves the field.
+        must_contain: &[
+            "Move from a1 to consume",
+            "a1's resource is moved",
+            "Move from a2 to push",
+            "a2's resource is moved",
+            "Move from a3 to Box::new",
+            "Move from a4 to o4",
+            "Move from a5 to v5",
+            "Move from name to consume",
+            "Move from a7 to take_p",
+            "Move from base.bio to take_p",
+            "base.bio's resource is moved",
+            "base goes out of scope. base.bio was moved out earlier, so only base.name is dropped.",
+            "Move from p8.name to consume",
+            "p8 goes out of scope. p8.name was moved out earlier, so no resource is dropped.",
+            "a9's resource is immutably borrowed by look; a9 is read-only while the borrow is live",
+            "a10's resource is moved",
+            "a10 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "a11's resource is moved",
+            "a11 goes out of scope. No resource is dropped.",
+            "Move from a12 to take_vec",
+            "Move from a13 to take_opt",
+            "Move from a14 to o14",
+            "Move from a15 to t15.1",
+            "Move from a16 to v16[0]",
+            "Move from s17 to *slot",
+            "s18's resource is moved to the caller",
+            "s19's resource is moved to the caller",
+            "s20's resource is moved to the caller",
+            "s20 goes out of scope. No resource is dropped.",
+            "s21's resource is moved to the caller",
+            "a22's resource is immutably borrowed by o22; a22 is read-only while the borrow is live",
+        ],
+        must_not_contain: &[
+            // A constructor is never a borrower (#768).
+            "borrowed by Some",
+            "Some reads from",
+            // Drops of values the literal had moved away.
+            "=a11 goes out of scope. Its resource is dropped.",
+            "=s20 goes out of scope. Its resource is dropped.",
+            "=base goes out of scope. Its resource is dropped.",
+            "=base.bio goes out of scope. Its resource is dropped.",
+            "=p8 goes out of scope. Its resource is dropped.",
+            "=p8.name goes out of scope. Its resource is dropped.",
+            "a10 still holds it",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_literal_moves_1173",
+        // #1173: the same as #1143 where the literal's destination has no
+        // column per field: `let m = Msg::Write { text: s }` (an enum is
+        // one column), `n = Msg::Write { .. }`, `*r = P { name: t }`,
+        // `vec![(a, 1)]`, `vec![P { .. }]`, `[(a3, 1)]`, `take(vec![(b4,
+        // 2)])`, `take(Msg::Write { .. })`, `Some(Msg::Write { .. })` and a
+        // returned `Some(P { name: d })`. Main drew no move for any of
+        // them: each variable stayed "the owner of the resource" to `}`.
+        must_contain: &[
+            "Move from s to m",
+            "s's resource is moved",
+            "Move from t to *r",
+            "t's resource is moved",
+            "Move from a to pairs",
+            "Move from c to ps",
+            "Move from a2 to n",
+            "Move from a3 to arr",
+            "Move from b4 to take",
+            "Move from e5 to take",
+            "Move from f6 to o6",
+            "d's resource is moved to the caller",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "struct_update_ref_field_1126",
+        // #1126: `S { x: 2, ..s1 }` left s1's reference field behind: s2.r
+        // had no lender ("s2.r's mutable borrow ends (what it borrows from
+        // isn't shown)") and s1.r, already moved, gave the borrow back.
+        // Checked with rustc: `s1.r.push('?')` after the update is E0382
+        // for the `&mut` field; the `&` field is copied (`t1.r` stays
+        // usable), so both hold the loan. In a call, `..u1` moves u1.r
+        // into the call.
+        must_contain: &[
+            "Move from s1.r to s2.r",
+            "s1.r's mutable reference is moved (not the resource it points to)",
+            "Return mutably borrowed resource from s2.r to a",
+            "Copy from t1.r to t2.r",
+            "t2.r is initialized with a copy of t1.r",
+            "Return immutably borrowed resource from t2.r to b",
+            "Move from u1.r to consume_s",
+        ],
+        must_not_contain: &[
+            "(what it borrows from isn't shown)",
+            "Return mutably borrowed resource from s1.r to a",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_ref_field_moved_1127",
+        // #1127: `drop(e)` moves e and the reference in e.part with it, but
+        // e.part's line ran on to the last use of `p` (a copy of e.part, or
+        // `e.part()`'s result), where e.part "returned" the borrow. Checked
+        // with rustc: `e.part` after `drop(e)` is E0382. Now e.part's
+        // borrow ends at `drop(e)` and the copy gives the lender back; that
+        // the end is on the `drop` row is pinned by
+        // `a_ref_field_ends_where_its_struct_is_moved_into_a_call`.
+        must_contain: &[
+            "e.part's immutable borrow ends",
+            "Return immutably borrowed resource from p to novel",
+            "Return immutably borrowed resource from q to book",
+            "Return immutably borrowed resource from w to text",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from e.part to novel",
+            "Return immutably borrowed resource from f.part to book",
+            "Return immutably borrowed resource from o.ex.part to text",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -28297,4 +28424,18 @@ fn a_boxed_closure_borrowing_through_a_reference_keeps_it_until_dropped() {
     assert_eq!(ys("d's immutable borrow ends"), vec![row("drop(d);")]);
     assert_eq!(ys("d no longer borrows the resource p points to"), vec![row("drop(d);")]);
     assert_eq!(ys("w's resource is no longer immutably borrowed"), vec![row("drop(d);")]);
+}
+
+/// #1127 (`struct_ref_field_moved_1127`): a struct moved into `drop` takes
+/// its reference field with it, so the field's borrow ends on the `drop`
+/// row, not at the last use of a copy of the reference.
+#[test]
+fn a_ref_field_ends_where_its_struct_is_moved_into_a_call() {
+    let rv = run_with_local_backend("struct_ref_field_moved_1127");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let row = |src: &str| code_row_y(&code, src);
+    let ys = |text: &str| -> Vec<f64> { dots_listing_tooltip(&tl, text).into_iter().map(|(_, y)| y).collect() };
+    assert_eq!(ys("e.part's immutable borrow ends"), vec![row("drop(e);")]);
+    assert_eq!(ys("f.part's immutable borrow ends"), vec![row("drop(f);")]);
+    assert_eq!(ys("o.ex.part's immutable borrow ends"), vec![row("drop(o);")]);
 }
