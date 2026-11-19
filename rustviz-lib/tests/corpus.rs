@@ -8490,8 +8490,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
              resource is dropped. If the `?` succeeds, nothing happens to u here.",
             // `v` is a `Vec<String>`: its drop says what it holds (#542).
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's \
-             resource (including every String it holds) is dropped. If the `?` succeeds, nothing \
-             happens to v here.",
+             resource (including every String it holds) is dropped. If the `?` succeeds, v's \
+             resource isn't dropped here.", // (v's dot also has the borrow by first: #1151)
         ],
         must_not_contain: &[
             "the function returns and v's resource is dropped. If",
@@ -8510,8 +8510,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and u's \
              resource is dropped. If the `?` succeeds, nothing happens to u here.",
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's \
-             resource (including every String it holds) is dropped. If the `?` succeeds, nothing \
-             happens to v here.",
+             resource (including every String it holds) is dropped. If the `?` succeeds, v's \
+             resource isn't dropped here.", // (v's dot also has the borrow by first: #1151)
         ],
         must_not_contain: &[
             "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and s's \
@@ -9976,7 +9976,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
              resource is dropped. If the `?` succeeds, nothing happens to w here.",
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and x's \
              resource (including the String it holds, if any) is dropped. If the `?` succeeds, \
-             nothing happens to x here.",
+             x's resource isn't dropped here.", // (with the borrow on x's dot: #1151)
         ],
         must_not_contain: &[
             // `a` is a reference.
@@ -9991,7 +9991,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and w's \
              resource is dropped. If the `?` succeeds, nothing happens to w here.",
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and a's \
-             resource is dropped. If the `?` succeeds, nothing happens to a here.",
+             resource is dropped. If the `?` succeeds, a's resource isn't dropped here.", // (#1151)
         ],
         must_not_contain: &[
             "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and x's \
@@ -10006,8 +10006,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and u's \
              resource is dropped. If the `?` succeeds, nothing happens to u here.",
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's \
-             resource (including every String it holds) is dropped. If the `?` succeeds, nothing \
-             happens to v here.",
+             resource (including every String it holds) is dropped. If the `?` succeeds, v's \
+             resource isn't dropped here.", // (v's dot also has the borrow by first: #1151)
         ],
         must_not_contain: &[
             // `s` is a reference, bound after the `?`.
@@ -10023,8 +10023,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and t's \
              resource is dropped. If the `?` succeeds, nothing happens to t here.",
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's \
-             resource (including every String it holds) is dropped. If the `?` succeeds, nothing \
-             happens to v here.",
+             resource (including every String it holds) is dropped. If the `?` succeeds, v's \
+             resource isn't dropped here.", // (v's dot also has the borrow by first: #1151)
         ],
         must_not_contain: &[
             // The arm's pattern moved o's String into `s`.
@@ -12201,7 +12201,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns from inside the `for` loop and it's former resource, the loop's iterator, is dropped, along with whatever it still owns (such as elements it hasn't handed out yet). If the `?` succeeds, nothing happens to the iterator here.",
             "it's former resource, the `for` loop's iterator, is dropped here, as the panic unwinds out of the loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
             // `w`'s own drop at the `?` (#430).
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and w's resource is dropped. If the `?` succeeds, nothing happens to w here.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and w's resource is dropped. If the `?` succeeds, w's resource isn't dropped here.", // (w is also borrowed on this dot: #1151)
         ],
         must_not_contain: &[
             "the function returns from inside the loop",
@@ -20751,6 +20751,46 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Move from boxed to m",
             "=Move from Box::new to n",
             "=Move from boxed to d",
+        ],
+    },
+    TooltipExpect {
+        name: "try_reassign_1151",
+        // #1151: `s = bar()?;` said "If the `?` succeeds, nothing happens
+        // to s here" next to "s acquires ownership of a new resource; its
+        // previous resource is dropped". The `?` runs before the
+        // assignment: on `Err` the function returns and the old String is
+        // dropped by the return (no assignment); on `Ok` the assignment
+        // drops the old String and s owns the new one. The same for a
+        // field, an element, a write through `&mut`, and a `?` next to a
+        // borrow (`x.push_str(&bar()?)`) or a move (`(y, bar()?)`) on the
+        // same dot, where "nothing happens" contradicted the other lines.
+        must_contain: &[
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and s's resource is dropped. If the `?` succeeds, the assignment runs: s acquires ownership of a new resource; its previous resource is dropped.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and t's resource is dropped. If the `?` succeeds, the assignment runs: t acquires ownership of a new resource; its previous resource is dropped.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and p's resource is dropped. If the `?` succeeds, the assignment to p.f runs.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and p.f's resource is dropped. If the `?` succeeds, the assignment runs: p.f acquires ownership of a new resource; its previous resource is dropped.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's resource (including every String it holds) is dropped. If the `?` succeeds, the assignment runs: v[0] acquires ownership of a new resource; its previous resource is dropped.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and u's resource is dropped. If the `?` succeeds, the assignment runs: u acquires ownership of a new resource; its previous resource is dropped.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and x's resource is dropped. If the `?` succeeds, x's resource isn't dropped here.",
+            "x's resource is mutably borrowed by push_str; x can't be used while the borrow is live",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and y's resource is dropped. If the `?` succeeds, y's resource isn't dropped here.",
+            "y's resource is moved",
+        ],
+        must_not_contain: &[
+            "nothing happens to s here",
+            "nothing happens to t here",
+            "nothing happens to p here",
+            "nothing happens to p.f here",
+            "nothing happens to v here",
+            "nothing happens to u here",
+            "nothing happens to x here",
+            "nothing happens to y here",
+            // The assignment's own line, as if it happened on both paths.
+            "=s acquires ownership of a new resource; its previous resource is dropped",
+            "=t acquires ownership of a new resource; its previous resource is dropped",
+            "=v[0] acquires ownership of a new resource; its previous resource is dropped",
+            "=u acquires ownership of a new resource; its previous resource is dropped",
+            "=p.f acquires ownership of a new resource; its previous resource is dropped",
         ],
     },
 ];
