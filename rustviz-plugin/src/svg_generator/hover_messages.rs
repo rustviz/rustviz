@@ -334,6 +334,26 @@ pub fn event_dot_copy_init_from_caller(my_name: &String) -> String {
     format!("{0} is a copy of the caller's value", styled_name_html(my_name))
 }
 
+// The parts of a parameter's argument its pattern doesn't bind (`P {
+// name, .. }: P`, `(a, _): (String, String)`) stay in the parameter and
+// are dropped when the function returns (#1181). `parts` are field paths.
+pub fn param_rest_dropped(fn_name: &str, parts: &[String]) -> String {
+    // A tuple element reads as Rust writes it (`.1`), a field by name.
+    let names: Vec<String> = parts.iter()
+        .map(|p| if p.starts_with(|c: char| c.is_ascii_digit()) { format!(".{}", p) } else { p.clone() })
+        .map(|p| styled_name_html(&p))
+        .collect();
+    let (list, verb) = match names.as_slice() {
+        [one] => (one.clone(), "is"),
+        [init @ .., last] => (format!("{} and {}", init.join(", "), last), "are"),
+        [] => (String::new(), "is"),
+    };
+    format!(
+        "The pattern doesn't bind the argument's {0}, so it stays in the parameter and {1} dropped when {2} returns",
+        list, verb, styled_name_html(fn_name)
+    )
+}
+
 pub fn event_dot_owner_init_from_caller(my_name: &String) -> String {
     let my_name_fmt = styled_name_html(my_name);
     format!("{0} acquires ownership from the caller", my_name_fmt)

@@ -268,14 +268,28 @@ fn collect_binding_names(tcx: &TyCtxt, owner: rustc_hir::OwnerId) -> BindingName
   // the bindings of one name and depth gets a column of its own: the
   // first kind the plain (or numbered) name, the others that name with
   // one, two, … `SCOPE_MARK`s, shown the same.
-  let mut kinds_seen: HashMap<(&str, usize), Vec<&Option<ColumnKind>>> = HashMap::new();
+  //
+  // A binding inside the initializer of a `let` of the same name (`let
+  // n = match o { Some(n) => n, .. };`) isn't in scope together with
+  // it, but its last row is the row the `let`'s variable starts on: on
+  // one column, the arm's `n` went out of scope where the outer `n` was
+  // initialized, which then had no line (#1201). It gets a column of its
+  // own, as a different kind would (shared by the other such bindings
+  // of that `let`, which are in separate arms).
+  let inside_init_of: Vec<Option<usize>> = (0..n).map(|i| {
+    let at = c.out[i].span.lo().0;
+    (0..i).rev().find(|&j| c.out[j].ident == c.out[i].ident && depth[j] == depth[i]
+      && c.out[j].span.hi().0 <= at && at < c.out[j].scope.0)
+  }).collect();
+  let mut kinds_seen: HashMap<(&str, usize), Vec<(&Option<ColumnKind>, Option<usize>)>> = HashMap::new();
   let mut col_names: Vec<String> = Vec::with_capacity(n);
   for i in 0..n {
     let ident = c.out[i].ident.as_str();
     let seen = kinds_seen.entry((ident, depth[i])).or_default();
-    let k = match seen.iter().position(|k| **k == c.out[i].kind) {
+    let key = (&c.out[i].kind, inside_init_of[i]);
+    let k = match seen.iter().position(|k| *k == key) {
       Some(k) => k,
-      None => { seen.push(&c.out[i].kind); seen.len() - 1 }
+      None => { seen.push(key); seen.len() - 1 }
     };
     let marked = format!("{}{}", ident, SCOPE_MARK.to_string().repeat(k));
     col_names.push(numbered_name(&marked, depth[i] + 1));
