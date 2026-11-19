@@ -21645,7 +21645,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "r4's mutable reference is moved (not the resource it points to)",
             "Move from r5 to k5",
             "r5's mutable reference is moved (not the resource it points to)",
-            "Move from r6 to k6",
+            // `W(r6)` with `struct W<T>(T)`: the reference goes into the
+            // field k6.0, which has a column (#1206).
+            "Move from r6 to k6.0",
             "r6's mutable reference is moved (not the resource it points to)",
             "r7's mutable reference is moved (not the resource it points to)",
             "s's resource is mutably borrowed by k7; s can't be used until the borrow ends",
@@ -22028,6 +22030,52 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from e.part to novel",
             "Return immutably borrowed resource from f.part to book",
             "Return immutably borrowed resource from o.ex.part to text",
+        ],
+    },
+    TooltipExpect {
+        name: "tuple_struct_ref_field_1197",
+        // #1197 / #1206: a tuple-struct constructor whose fields have
+        // columns (`Holder(&x)`, `Pair(&x, name)`, `W(rm)`) is built like
+        // the literal `Holder { 0: &x }`: each field gets its argument's
+        // borrow or value. Main drew no borrow into `h.0` (its later use sat
+        // on an empty column) and moved `name` into `p` as a whole. `W<T>(T)`
+        // takes `rm: &mut String` by move (generic field, no reborrow), as
+        // `G { f: rm }` does.
+        must_contain: &[
+            "Immutable borrow from x to h.0",
+            "x's resource is immutably borrowed by h.0; x is read-only while the borrow is live",
+            "Return immutably borrowed resource from h.0 to x",
+            "Copy from r to h2.0",
+            "Immutable borrow from x to p.0",
+            "Move from name to p.1",
+            "Immutable borrow from x to o.h.0",
+            "Move from rm to w.0",
+            "rm's mutable reference is moved (not the resource it points to)",
+            "Return mutably borrowed resource from w.0 to s",
+        ],
+        must_not_contain: &[
+            "=Move from name to p",
+            "=Move from rm to w",
+            "rm's mutable borrow ends",
+        ],
+    },
+    TooltipExpect {
+        name: "mut_ref_param_moved_1205",
+        // #1205: `let r2 = id(r);` with `r: &mut String` a parameter and
+        // `fn id<T>(x: T) -> T`: r is moved into id (no reborrow for a
+        // generic parameter), and r2 holds the reference id returns, which
+        // points to the caller's String, not into r. Main drew r2 as
+        // reborrowing through r and returning the borrow to r.
+        must_contain: &[
+            "Move from r to id",
+            "r's mutable reference is moved (not the resource it points to)",
+            "r2's mutable borrow ends (what it borrows from isn't shown)",
+        ],
+        must_not_contain: &[
+            "Mutable borrow from r to r2: id's signature gives the reference it returns the same lifetime as its argument",
+            "Return mutably borrowed resource from r2 to r",
+            "r2 no longer borrows the resource r points to",
+            "the resource r points to is mutably borrowed by r2 through r; r can't be used while the borrow is live",
         ],
     },
 ];
