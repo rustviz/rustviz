@@ -20753,6 +20753,73 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Move from boxed to d",
         ],
     },
+    // #1172: `process::exit` / `abort` run no destructor. Main drew the
+    // locals in scope there as dropped at the `}` the code never reaches
+    // (the Book's minigrep: "e goes out of scope. Its resource is
+    // dropped.").
+    TooltipExpect {
+        name: "process_exit_no_drops_1172",
+        must_contain: &[
+            "`process::exit` ends the program here without running any destructor: e's resource is never dropped",
+            "`process::exit` ends the program here without running any destructor: log's resource is never dropped",
+            "`process::exit` ends the program here without running any destructor: t's resource is never dropped",
+            "`process::exit` ends the program here without running any destructor: s's resource is never dropped",
+            "`process::exit` ends the program here without running any destructor: u's resource is never dropped",
+            "`process::exit` ends the program here without running any destructor: m's resource is never dropped",
+            "`process::exit` ends the program here without running any destructor: tag's resource is never dropped",
+            "`process::exit` ends the program here without running any destructor: w's resource is never dropped",
+            "`process::abort` ends the program here without running any destructor: y's resource is never dropped",
+            // The other paths still drop them at their scope ends.
+            "log goes out of scope. Its resource is dropped.",
+            "tag goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "=e goes out of scope. Its resource is dropped.",
+            "=t goes out of scope. Its resource is dropped.",
+            "=u goes out of scope. Its resource is dropped.",
+            "=m goes out of scope. Its resource is dropped.",
+        ],
+    },
+    // #1194: a variable moved (or given a value) on some paths only got
+    // no dot at an exit or a `?` that drops it if its drop flag is set.
+    TooltipExpect {
+        name: "exit_maybe_moved_1194",
+        must_contain: &[
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and t's resource is dropped if t still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to t here.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and u's resource is dropped if u still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to u here.",
+            "m goes out of scope. Its resource is dropped here only if m still holds it (Rust tracks this with a runtime drop flag).",
+            "p goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "k goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and a's resource is dropped if a still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to a here.",
+            "b goes out of scope. Its resource (including the String it holds) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            // A drop the drop flag decides, stated as certain.
+            "the function returns and t's resource is dropped. If",
+            "the function returns and u's resource is dropped. If",
+            "the function returns and a's resource is dropped. If",
+            // `return` in `match n` after the `if` that moved a: rustc's
+            // drop flag, not "nothing".
+            "=a goes out of scope. No resource is dropped.",
+        ],
+    },
+    // #1184: a `?` after a field was moved out said the whole struct is
+    // dropped if it returns early.
+    TooltipExpect {
+        name: "try_partial_move_1184",
+        must_contain: &[
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns, and drops what is left of p: p.a was moved out earlier, so only p.b is dropped. If the `?` succeeds, nothing happens to p here.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns, and drops what is left of r: r.a was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). r.b is dropped. If the `?` succeeds, nothing happens to r here.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and p.b's resource is dropped. If the `?` succeeds, nothing happens to p.b here.",
+        ],
+        must_not_contain: &[
+            "the function returns and p's resource is dropped",
+            "the function returns and r's resource is dropped",
+            // q.a moved, q.n is Copy: nothing of q to drop.
+            "the function returns and q's resource is dropped",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -21652,8 +21719,9 @@ fn branches_that_diverge_stop_short() {
         // `unreachable!()` on `s` (no value yet) and `panic!()` on `m`;
         // the `panic!` arm drops `s` and `t`.
         ("match_diverging_arm", &["s", "m"][..]),
-        // `process::exit` runs no destructors: its arm keeps the bars.
-        ("exit_panic_drops", &["s", "t"][..]),
+        // `process::exit` runs no destructors: its arm ends s and t in a
+        // dot saying they're never dropped (#1172), not a bar.
+        ("exit_panic_drops", &[][..]),
         ("exit_unreachable_else", &[][..]),
         // `b` lives on past the inner `continue`; `c` is dropped there.
         ("exit_break_continue_drops", &["b"][..]),
@@ -21663,7 +21731,7 @@ fn branches_that_diverge_stop_short() {
         ("exit_return_after_nested_if", &[][..]),
         // `pick`'s `s` has no value on the `_ => return 0` path: a bar,
         // not a drop. `f`'s `t` is dropped at its `return`; `g`'s `m`
-        // is path-dependent and draws neither.
+        // is path-dependent: the drop flag's dot at the `return` (#1194).
         ("exit_path_dependent_drops", &["s"][..]),
         ("exit_return_in_let_if", &[][..]),
         // The temporary Result is dropped at the `return`.
@@ -24136,11 +24204,11 @@ fn return_drops_what_the_branch_owns() {
         ("exit_continue_in_match", &[("guess", 3), ("secret", 1)][..]),
         ("exit_return_borrowed_value", &[("s", 2), ("t", 2), ("u", 2), ("v", 2)][..]),
         ("exit_return_after_nested_if", &[("s", 2), ("t", 2)][..]),
-        // `m` (moved on one path above): no drop of any kind at the
-        // `return`, and the drop-flag wording once, at the end of `g`.
+        // `m` (moved on one path above): the drop-flag wording at the
+        // `return` (#1194: main drew nothing there) and at the end of `g`.
         // (Before #179's wording reached this branch, that scope-end
         // dot said "No resource is dropped.", false on the `else` path.)
-        ("exit_path_dependent_drops", &[("s", 1), ("t", 1), ("m", 0), ("m:No", 0), ("m:Flag", 1)][..]),
+        ("exit_path_dependent_drops", &[("s", 1), ("t", 1), ("m", 0), ("m:No", 0), ("m:Flag", 2)][..]),
         // `s` has no value yet at the `return`: dropped only at the end.
         ("exit_return_in_let_if", &[("s", 1), ("s:No", 0), ("t", 2)][..]),
         // #429: exits in an `if` without `else`. `t` is dropped at the
