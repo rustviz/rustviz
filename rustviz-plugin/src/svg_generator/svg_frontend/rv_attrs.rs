@@ -14,7 +14,7 @@
 //! (`code_line_attrs`).
 
 use crate::expr_visitor_utils::display_text;
-use crate::svg_generator::data::{Event, ExternalEvent, LineState, ResourceAccessPoint, ResourceTy, State};
+use crate::svg_generator::data::{Event, ExternalEvent, LineState, ResourceAccessPoint, ResourceTy, State, VisualizationData};
 use std::collections::HashMap;
 
 /// Element kinds (`data-rv-kind`).
@@ -397,6 +397,48 @@ pub fn finalize(svg: &str, row_lines: &[Option<usize>]) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// ` data-rv-invalid="…"` for the timeline's root `<svg>`, or `""`:
+/// every stretch of a column whose state is `State::Invalid`, as
+/// `var@L<line>[-<end>]`, sorted and space-separated. `calc_state` falls
+/// through to Invalid when it has no rule for an event in the state the
+/// column is in; such a stretch draws nothing, so the column silently
+/// vanishes (#1122). Tests read this attribute to catch it
+/// (`rustviz-lib/tests/invariants.rs`); it changes nothing drawn.
+pub fn invalid_states_attr(vd: &VisualizationData, row_lines: &[Option<usize>]) -> String {
+    fn walk(name: &str, states: &[(usize, usize, State)], history: &[(usize, Event)],
+            row_lines: &[Option<usize>], out: &mut Vec<String>) {
+        for (a, b, st) in states {
+            if matches!(st, State::Invalid) {
+                let (Some(a), Some(b)) = (line_of(*a, row_lines), line_of(*b, row_lines)) else { continue };
+                out.push(if a == b { format!("{}@L{}", name, a) } else { format!("{}@L{}-{}", name, a, b) });
+            }
+        }
+        for (_, e) in history {
+            if let Event::Branch { branch_history, .. } = e {
+                for b in branch_history {
+                    walk(name, &b.states, &b.e_data, row_lines, out);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for t in vd.timelines.values() {
+        if matches!(t.resource_access_point, ResourceAccessPoint::Function(_)) {
+            continue;
+        }
+        let name = escape(&display_text(t.resource_access_point.name()));
+        let name: String = name.chars().map(|c| if c.is_whitespace() { '_' } else { c }).collect();
+        walk(&name, &t.states, &t.history, row_lines, &mut out);
+    }
+    out.sort();
+    out.dedup();
+    if out.is_empty() {
+        String::new()
+    } else {
+        format!(" data-rv-invalid=\"{}\"", out.join(" "))
+    }
 }
 
 /// Longest `data-rv-id` before the `#n` and `/part` suffixes, so that an
