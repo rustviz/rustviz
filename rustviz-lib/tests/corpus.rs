@@ -20753,6 +20753,214 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Move from boxed to d",
         ],
     },
+    // #1161: `std::process::exit(run(config))` / `drop(tag(s, ..))`: the
+    // inner call takes the variables, the outer one only the value the
+    // inner call returns. An old `println!` decoder skipped the inner call.
+    TooltipExpect {
+        name: "call_arg_inner_call_1161",
+        must_contain: &[
+            "Move from config to run",
+            "Move from s to tag",
+            "s's resource is moved",
+            "s goes out of scope. No resource is dropped.",
+            "config's resource is moved",
+        ],
+        must_not_contain: &[
+            "Move from config to std::process::exit",
+            "to std::process::exit",
+            // s's String was never drawn as moved into tag.
+            "=s goes out of scope. Its resource is dropped.",
+        ],
+    },
+    // #1174: an `if` / `match` as a call's argument passes the value its
+    // branch yields, on that branch's path (also through a method call and
+    // a constructor). An arm's binding passed to the call isn't dropped at
+    // the arm's end.
+    TooltipExpect {
+        name: "call_arg_branch_value_1174",
+        must_contain: &[
+            "Move from a to take",
+            "Move from b to take",
+            "a's resource is moved",
+            "a was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when a goes out of scope.",
+            "Move from y to take",
+            "Move from d to take",
+            "y's resource is moved",
+            "y goes out of scope. No resource is dropped.",
+            "Move from e to push",
+            "Move from f to push",
+            "Move from g to take_opt",
+            "Move from h to take_opt",
+            // `Some(match o { Some(x) => x, None => d })` returned by wrap.
+            "x's resource is moved to the caller",
+            "x goes out of scope. No resource is dropped.",
+            "d's resource is moved to the caller",
+        ],
+        must_not_contain: &[
+            // x / y were passed on, not dropped at the arm's end.
+            "=x goes out of scope. Its resource is dropped.",
+            "=y goes out of scope. Its resource is dropped.",
+            // a / b / e / f / g / h were never drawn as moved.
+            "a goes out of scope. Its resource is dropped here only if a still holds it",
+            "e goes out of scope. Its resource is dropped here only if e still holds it",
+            "g goes out of scope. Its resource is dropped here only if g still holds it",
+        ],
+    },
+    // #1170: `show(v[0])` copies the i32 element out of v; the Vec isn't
+    // copied.
+    TooltipExpect {
+        name: "call_arg_element_copy_1170",
+        must_contain: &[
+            "Copy from v[0] to show",
+            "v[0] is copied out of v's resource",
+            "Copy from v[1] to push",
+            "v[1] is copied out of v's resource",
+            "Copy from w[0] to insert",
+            "w[0] is copied out of w's resource",
+        ],
+        must_not_contain: &[
+            "Copy from v to show",
+            "Copy from v to push",
+            "Copy from w to insert",
+            "v's value is copied",
+            "w's value is copied",
+        ],
+    },
+    // #1195: `take(s, bar()?)` moves s into the call's first argument
+    // before the `?` runs; if it returns early, s's String is dropped. The
+    // `?` dot's text is pinned by `a_try_after_an_argument_drops_what_the_argument_holds`
+    // (its second sentence is reworded by #1196).
+    TooltipExpect {
+        name: "call_arg_before_try_1195",
+        must_contain: &[
+            "s's resource is moved",
+            "w's resource is moved",
+            "q's resource is moved",
+        ],
+        // Main left the drop out rather than saying something false; the
+        // test above fails on main.
+        must_not_contain: &[],
+    },
+    // #1225: `let x = Some(if c { d } else { e });` drew no branch: d and
+    // e stayed owners, with drop-flag scope ends nothing could set.
+    TooltipExpect {
+        name: "let_ctor_conditional_1225",
+        must_contain: &[
+            "Move from d to _x",
+            "Move from e to _x",
+            "_x acquired ownership of a resource (in all branches above)",
+            "Move from f to _y",
+            "Move from g to _y",
+            "d goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "z acquired ownership of a resource (in all branches above)",
+            "w acquired ownership of a resource (in all branches above)",
+            "j goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "d goes out of scope. Its resource is dropped here only if d still holds it",
+            "e goes out of scope. Its resource is dropped here only if e still holds it",
+            "h goes out of scope. Its resource is dropped here only if h still holds it",
+            "j goes out of scope. Its resource is dropped here only if j still holds it",
+        ],
+    },
+    TooltipExpect {
+        name: "conditional_literal_part_1256",
+        // #1256: `(if c { d } else { e }, 1)` / `W { s: if … }` branches:
+        // d moves on the then-path only, e on the else-path, and the
+        // literal's part acquires a value on every path. Main moved both
+        // unconditionally, with no branch, then said each "is dropped
+        // here only if d still holds it", though nothing could clear the
+        // drop flag on one path only.
+        must_contain: &[
+            "d was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when d goes out of scope.",
+            "e was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when e goes out of scope.",
+            "_t.0 acquired ownership of a resource (in all branches above)",
+            "_w.s acquired ownership of a resource (in all branches above)",
+            "_p.a acquired ownership of a resource (in all branches above)",
+            "_q.0 acquired ownership of a resource (in all branches above)",
+            "x acquired ownership of a resource (in all branches above)",
+            "y acquired ownership of a resource (in all branches above)",
+            "Move from f to _p.b",
+            "Move from f to _g",
+            "Move from f to _q.1",
+        ],
+        must_not_contain: &[
+            "d goes out of scope. Its resource is dropped here only if d still holds it (Rust tracks this with a runtime drop flag).",
+            "e goes out of scope. Its resource is dropped here only if e still holds it (Rust tracks this with a runtime drop flag).",
+        ],
+    },
+    TooltipExpect {
+        name: "destructuring_assign_branches_1253",
+        // #1253: `(x, n) = if c { (s, 1) } else { (t, 2) };` (and a
+        // `match`, an `else if`) assigns each branch's value in that
+        // branch: s moves on its path only. Main moved s and t (and u)
+        // unconditionally, with no branch.
+        must_contain: &[
+            "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when s goes out of scope.",
+            "t was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when t goes out of scope.",
+            "u was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when u goes out of scope.",
+            "x acquired ownership of a resource (in all branches above)",
+            "n is bound to a value (in all branches above)",
+            "y acquired ownership of a resource (in all branches above)",
+        ],
+        must_not_contain: &[
+            "s goes out of scope. Its resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
+            "t goes out of scope. Its resource is dropped here only if t still holds it (Rust tracks this with a runtime drop flag).",
+            "u goes out of scope. Its resource is dropped here only if u still holds it (Rust tracks this with a runtime drop flag).",
+        ],
+    },
+    TooltipExpect {
+        name: "conditional_literal_ctor_part_1267",
+        // #1267: an `if` / `match` inside a constructor in a tuple / struct
+        // literal (`(Some(if …), 1)`), or as an element of a tuple passed to
+        // a call or method (`take((if …, 1))`), moves each branch's value in
+        // that branch. Main drew no move of d..k at all, then said each "is
+        // dropped here only if d still holds it", with nothing that could
+        // have cleared the flag.
+        must_contain: &[
+            "d was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when d goes out of scope.",
+            "e was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when e goes out of scope.",
+            "f was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when f goes out of scope.",
+            "g was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when g goes out of scope.",
+            "h was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when h goes out of scope.",
+            "i was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when i goes out of scope.",
+            "j was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when j goes out of scope.",
+            "k was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when k goes out of scope.",
+            "_t.0 acquired ownership of a resource (in all branches above)",
+            "_w.s acquired ownership of a resource (in all branches above)",
+            "Move from d to _t.0",
+            "Move from g to _w.s",
+            "Move from h to take",
+            "Move from k to push",
+        ],
+        must_not_contain: &[
+            "d goes out of scope. Its resource is dropped here only if d still holds it (Rust tracks this with a runtime drop flag).",
+            "e goes out of scope. Its resource is dropped here only if e still holds it (Rust tracks this with a runtime drop flag).",
+            "f goes out of scope. Its resource is dropped here only if f still holds it (Rust tracks this with a runtime drop flag).",
+            "g goes out of scope. Its resource is dropped here only if g still holds it (Rust tracks this with a runtime drop flag).",
+            "h goes out of scope. Its resource is dropped here only if h still holds it (Rust tracks this with a runtime drop flag).",
+            "i goes out of scope. Its resource is dropped here only if i still holds it (Rust tracks this with a runtime drop flag).",
+            "j goes out of scope. Its resource is dropped here only if j still holds it (Rust tracks this with a runtime drop flag).",
+            "k goes out of scope. Its resource is dropped here only if k still holds it (Rust tracks this with a runtime drop flag).",
+        ],
+    },
+    TooltipExpect {
+        name: "destructuring_assign_loop_1253",
+        // #1253: `(x, n) = loop { … break (s, 1); … }` takes apart the value
+        // of the `break` that ended the loop. Main moved s and t to an
+        // internal "Anonymous resource" and never gave n its new value.
+        must_contain: &[
+            "s may have been moved: the loop can end with break (s, 1), which moves s's resource to x, so s can't be used after the loop",
+            "t may have been moved: the loop can end with break (t, 2), which moves t's resource to x, so t can't be used after the loop",
+            "Move from s to x, if the loop ended with break (s, 1)",
+            "n is assigned a new value (from whichever break ended the loop)",
+            "Move from u to y",
+            "m is assigned a new value",
+        ],
+        must_not_contain: &[
+            "Anonymous resource",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -28297,4 +28505,24 @@ fn a_boxed_closure_borrowing_through_a_reference_keeps_it_until_dropped() {
     assert_eq!(ys("d's immutable borrow ends"), vec![row("drop(d);")]);
     assert_eq!(ys("d no longer borrows the resource p points to"), vec![row("drop(d);")]);
     assert_eq!(ys("w's resource is no longer immutably borrowed"), vec![row("drop(d);")]);
+}
+
+/// #1195 (`call_arg_before_try_1195`): a call's arguments are all
+/// evaluated before the call takes any, so in `take(s, bar()?)`,
+/// `q.put(w, bar()?)` and `q.eat(bar()?)` (by-value `self`) the `?` can
+/// return early while s / w / q's value sits in an evaluated argument: it
+/// is dropped then. That's said on the dot of the line the value is moved
+/// on, next to the move. Main drew only the move.
+#[test]
+fn a_try_after_an_argument_drops_what_the_argument_holds() {
+    let rv = run_with_local_backend("call_arg_before_try_1195");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let row = |src: &str| code_row_y(&code, src);
+    for (name, line) in [("s", "take(s, bar()?);"), ("w", "q.put(w, bar()?);"), ("q", "q.eat(bar()?);")] {
+        let drop = format!("Only if the `?` here returns early (on an `Err` or `None`): the function returns and {name}'s resource is dropped.");
+        let ys: Vec<f64> = dots_where(&tl, |lines| lines.iter().any(|l| l.starts_with(&drop))
+            && lines.iter().any(|l| *l == format!("{name}'s resource is moved")))
+            .into_iter().map(|(_, y)| y).collect();
+        assert_eq!(ys, vec![row(line)], "{name}: the `?` drop and the move belong on one dot on {line:?}");
+    }
 }
