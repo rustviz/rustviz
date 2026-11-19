@@ -22344,6 +22344,77 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Anonymous resource",
         ],
     },
+    TooltipExpect {
+        name: "ref_cast_borrow_1175",
+        // #1175: a borrow written with an `as` cast (`&mut arr as &mut
+        // [i32]`, `&s as &dyn Display`) borrows the same place as the
+        // uncast `&mut arr` / `&s`; `as` only changes the pointee type.
+        // Main drew no borrow at all (the lender stayed a plain owner and
+        // the reference had no lender). `m as &mut String` reborrows m, as
+        // `let m2: &mut String = m;` does (checked with rustc: `m.push`
+        // after m2's last use compiles); `r as &dyn Display` copies r.
+        must_contain: &[
+            "Mutable borrow from arr to sl",
+            "arr's value is mutably borrowed by sl; arr can't be used while the borrow is live",
+            "arr's value is immutably borrowed by sum; arr is read-only while the borrow is live",
+            "Mutable borrow from t to m",
+            "t's resource is mutably borrowed by m; t can't be used while the borrow is live",
+            "Mutable reborrow from m to m2",
+            "Return mutably borrowed resource from m2 to *m",
+            "Immutable borrow from s to r",
+            "s's resource is immutably borrowed by show; s is read-only while the borrow is live",
+            "Return immutably borrowed resource from r2 to s",
+        ],
+        must_not_contain: &[
+            "sl's mutable borrow ends (what it borrows from isn't shown)",
+            "m's mutable borrow ends (what it borrows from isn't shown)",
+            "m2's mutable borrow ends (what it borrows from isn't shown)",
+            "r's immutable borrow ends (what it borrows from isn't shown)",
+            "=sl is bound to a mutable reference",
+            "=m is bound to a mutable reference",
+            "=r is bound to an immutable reference",
+        ],
+    },
+    TooltipExpect {
+        name: "element_box_field_borrow_1176",
+        // #1176: a borrow of a field of an element (`&mut people[0].age`,
+        // `grow(&mut people[0].name)`, `people[0].name.push(..)`) or of a
+        // field of what a Box holds (`&mut b.age`) is a borrow of part of
+        // people's / b's value, drawn on their columns as `&mut v[0]` is.
+        // Main drew nothing on people / b ("owner" throughout) and gave the
+        // references no lender. (age's own dot says "age mutably borrows a
+        // resource", as `&mut v[0]` with `v: Vec<i32>` already does on main,
+        // though age points to a u32: #1233, not pinned here.)
+        must_contain: &[
+            "Mutable borrow from people to age",
+            "people's resource is mutably borrowed by age; people can't be used while the borrow is live",
+            "people's resource is modified through age",
+            "people's resource is mutably borrowed by grow; people can't be used while the borrow is live",
+            "Immutable borrow from people to first",
+            "push reads from/writes to people (implicitly mutably borrowed)",
+            "len reads from people (implicitly borrowed)",
+            "Mutable borrow from b to a",
+            "b's resource is modified through a",
+            "push reads from/writes to b (implicitly mutably borrowed)",
+            "b's resource is mutably borrowed by grow; b can't be used while the borrow is live",
+        ],
+        must_not_contain: &[
+            "age's mutable borrow ends (what it borrows from isn't shown)",
+            "first's immutable borrow ends (what it borrows from isn't shown)",
+            "a's mutable borrow ends (what it borrows from isn't shown)",
+        ],
+    },
+    TooltipExpect {
+        name: "method_through_struct_ref_1216",
+        // #1216: with `r = &mut p`, `r.name.push('!')` and `grow(&mut
+        // r.name)` modify p.name; that is drawn on p.name's column, as
+        // `r.age += 1` already is on p.age's. Main put nothing on p.name.
+        must_contain: &[
+            "p.age's value is modified through r.age",
+            "p.name's resource is modified through r.name",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop

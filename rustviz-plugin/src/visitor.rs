@@ -1372,7 +1372,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       Some(rd) => (rd.rap.to_owned(), ResourceTy::Value(rd.rap.to_owned())),
       None => match self.field_access_through_ref(rcvr) {
         Some(rty @ ResourceTy::DerefField(..)) => (rty.deref_rap().unwrap().clone(), rty),
-        _ => return,
+        // `people[0].name.push(..)` / `b.name.len()` (b a Box): a
+        // borrow of part of people's / b's value (#1176). Not a by-value
+        // `self`, which would move only that part out.
+        _ => match self.place_holder(rcvr) {
+          Some(h) if self.tcx.typeck(rcvr.hir_id.owner).expr_ty_adjusted(rcvr).is_ref() =>
+            (h.clone(), ResourceTy::Value(h)),
+          _ => return,
+        },
       },
     };
     self.update_rap(&rcvr_rap, line_num);
@@ -1407,6 +1414,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                   let typeck = self.tcx.typeck(name_and_generic_args.hir_id.owner);
                   let result_has_lifetime = call_result_has_lifetime(expr, typeck);
                   self.add_pass_by_mref_ev(line_num, ResourceTy::Value(fn_rap.clone()), rcvr_rty.clone(), true, result_has_lifetime, autoref, false);
+                  // `r.name.push(..)` with `r = &mut p`: the call
+                  // modifies p.name, drawn on its column too (#1216).
+                  self.write_field_behind_ref(&rcvr_rty, rcvr, line_num);
                 }
                 AutoBorrowMutability::Mut{allow_two_phase_borrow: AllowTwoPhase::Yes} => {
                   // `r.push_str(..)` with r: `&mut String` is
@@ -5432,7 +5442,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// Nothing when the struct has no column here (a parameter's) or the
   /// write isn't to a field behind a reference. (An overwritten old
   /// value that needs drop is drawn as its drop, on the same column.)
-  fn write_field_behind_ref(&mut self, lhs_rty: &ResourceTy, lhs_expr: &'tcx Expr<'tcx>, line_num: usize) {
+  pub(crate) fn write_field_behind_ref(&mut self, lhs_rty: &ResourceTy, lhs_expr: &'tcx Expr<'tcx>, line_num: usize) {
     let ResourceTy::DerefField(p_rap, place, write, _) = lhs_rty else { return };
     if let Some(field) = self.field_column_behind_ref(lhs_expr, p_rap) {
       self.add_ev(line_num, Evt::Bind, ResourceTy::Index(field, place.clone(), *write), ResourceTy::Anonymous, false);

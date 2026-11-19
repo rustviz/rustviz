@@ -4176,6 +4176,40 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       .filter(|r| !r.is_fn())
   }
 
+  /// The column a borrow of the place `place` is drawn on when the
+  /// place has none of its own: a field of an element (`people[0].age`,
+  /// `arr[1].p.x`) or of what a `Box` holds (`b.age`), whose data is
+  /// part of the variable's value (#1176). Returns the nearest enclosing
+  /// place with a column (the variable, or a struct field such as
+  /// `w.items` in `w.items[0].name`). None when the place is reached
+  /// through a reference, a raw pointer or a smart pointer other than
+  /// `Box` (the data isn't the variable's then; reborrows through a
+  /// reference have their own handling), and when the place is itself
+  /// a reference.
+  pub fn place_holder(&self, place: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
+    let typeck = self.tcx.typeck(place.hir_id.owner);
+    if place.span.from_expansion() || !matches!(place.kind, ExprKind::Field(..)) || typeck.node_type(place.hir_id).is_ref() {
+      return None;
+    }
+    let mut cur = place;
+    loop {
+      let (ExprKind::Field(recv, _) | ExprKind::Index(recv, _, _)) = cur.kind else { return None };
+      let recv_ty = typeck.node_type(recv.hir_id);
+      let through_ptr = typeck.expr_adjustments(recv).iter().any(|a| matches!(a.kind, adjustment::Adjust::Deref(_)))
+        && !recv_ty.is_box();
+      if through_ptr || recv_ty.is_any_ptr() {
+        return None;
+      }
+      if matches!(recv.kind, ExprKind::Path(_) | ExprKind::Field(..)) {
+        if let Some(rd) = expr_to_rap_name(recv, &self.tcx).and_then(|n| self.raps.get(&n)) {
+          let rap = rd.rap.to_owned();
+          return (!rap.is_ref() && !rap.is_fn()).then_some(rap);
+        }
+      }
+      cur = recv;
+    }
+  }
+
   /// The place `expr` (fields and indexes applied to `base`) is part of
   /// what `base` holds, or of what it points to if `base` is itself a
   /// reference: no step after `base` goes through a reference or a smart
@@ -4565,6 +4599,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
+  /// `rap_or_field_through_ref` for an expression that borrows
+  /// (`&mut people[0].age`, a call argument or a reference's
+  /// initializer), also naming the variable whose value holds a place
+  /// that has no column (`borrowed_part_holder`, #1176). Not used for
+  /// patterns' scrutinees, whose bindings are drawn as copies of it.
+  pub fn borrow_source(&self, expr: &'tcx Expr<'tcx>) -> ResourceTy {
+    match self.rap_or_field_through_ref(expr) {
+      ResourceTy::Anonymous => self.borrowed_part_holder(expr).map_or(ResourceTy::Anonymous, ResourceTy::Value),
+      rty => rty,
+    }
+  }
+
+  /// `&mut people[0].age` / `&b.name` (b a Box): the borrow is of part
+  /// of a variable's value that has no column; drawn on the variable's
+  /// (`place_holder`, #1176).
+  pub fn borrowed_part_holder(&self, expr: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
+    let ExprKind::AddrOf(_, _, place) = expr.kind else { return None };
+    self.place_holder(place)
+  }
+
   /// The `(temporary N)` column `expr` takes something out of, when
   /// `expr` is a field of a temporary that it is moved out of
   /// (`make_p().name`, #469).
@@ -4672,6 +4726,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // add events for arguments in a function call
   pub fn match_arg(&mut self, arg: &'tcx Expr, fn_name: String) {
+    // `sum(&arr as &[i32])` passes the borrow `&arr` (#1175).
+    let arg = peel_ref_casts(arg, self.tcx.typeck(arg.hir_id.owner));
     // `f(loop { … break k; })`: what `break` carries is the argument
     // (#452).
     if let ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _) = arg.kind {
@@ -4798,7 +4854,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let arg_ty = tycheck_results.node_type(arg.hir_id);
     let is_copyable = self.ty_is_copy(arg_ty, arg.hir_id.owner);
     // `take(p.x)` / `look(&p.name)` with p a reference (#266).
-    let from_ro = self.rap_or_field_through_ref(arg);
+    let from_ro = self.borrow_source(arg);
     // Extend the lifetime of any reference RAP this arg touches so a
     // ref passed as a fn argument shows its dotted lifetime line out
     // to the call site. Critical for macro args like
@@ -4892,7 +4948,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             rustc_hir::Node::Expr(call) => call_result_has_lifetime(call, tycheck_results),
             _ => true,
           };
-          self.add_pass_by_mref_ev_deep(line_num, to_ro, from_ro, is_reborrow, result_has_lifetime, ImplicitRef::No, of_ref_var, deep)
+          self.add_pass_by_mref_ev_deep(line_num, to_ro, from_ro.clone(), is_reborrow, result_has_lifetime, ImplicitRef::No, of_ref_var, deep);
+          // `grow(&mut r.name)` with `r = &mut p`: the call can modify
+          // p.name, drawn on its column too (#1216).
+          self.write_field_behind_ref(&from_ro, arg, line_num);
         }
       }
     }
@@ -4915,6 +4974,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// `static_lender_of`). Every site that (re)sets a RefData's lender
   /// from an initializer goes through here.
   pub fn get_ref_data_full(&self, expr: &'tcx Expr) -> (ResourceTy, VecDeque<String>, Option<StaticLender>, Vec<ResourceTy>) {
+    // `&s as &dyn Display` borrows what `&s` does (#1175).
+    let expr = peel_ref_casts(expr, self.tcx.typeck(expr.hir_id.owner));
     let (lender, aliasing, co_lenders) = self.get_ref_data_co(expr);
     let static_lender = match lender {
       ResourceTy::Anonymous => self.static_lender_of(expr),
@@ -5020,6 +5081,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// `get_ref_data`, plus the further lenders of a reference that
   /// borrows from several variables (see `RefData::co_lenders`).
   pub fn get_ref_data_co(&self, expr: &'tcx Expr<'tcx>) -> (ResourceTy, VecDeque<String>, Vec<ResourceTy>){
+    let expr = peel_ref_casts(expr, self.tcx.typeck(expr.hir_id.owner));
     // `&String::new()` inside `let w = W { r: &String::new() };`: the
     // temporary's own column (#856).
     if let Some(tmp) = self.nested_ext_temps.get(&expr.hir_id) {
@@ -5161,7 +5223,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if is_addr(&expr) {
       // in this case we are borrowing from b; `&p.name` with p a
       // reference is a reborrow of the field through p (#266).
-      let lender = self.rap_or_field_through_ref(&expr);
+      let lender = self.borrow_source(&expr);
       // `&mut m` / `&x` coerced to `&mut String` / `&String` borrows
       // `*m` / `*x`, as `&mut *m` / `&*x` does: the borrow is given
       // back to `*m` / `*x` (#926, #939).
@@ -8116,7 +8178,15 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
             }
             rty
           }
-          None => ResourceTy::Anonymous,
+          // `&mut people[0].age` / `&b.name` (b a Box): part of
+          // people's / b's value (#1176).
+          None => match self.borrowed_part_holder(rhs) {
+            Some(h) => {
+              self.update_rap(&h, line_num);
+              ResourceTy::Value(h)
+            }
+            None => ResourceTy::Anonymous,
+          },
         },
       };
       // `&*r` / `&mut *r` with r a reference borrows *through* r (a
@@ -8518,7 +8588,11 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     ExprKind::Cast(inner, _) => {
       let typeck = self.tcx.typeck(rhs.hir_id.owner);
       let plain = |e: &Expr| typeck.expr_ty_opt(e).is_some_and(|t| t.is_numeric() || t.is_bool() || t.is_char());
-      if plain(inner) && plain(rhs) {
+      let uncast = peel_ref_casts(rhs, typeck);
+      if !std::ptr::eq(uncast, rhs) {
+        // `&mut arr as &mut [i32]` borrows arr, like `&mut arr` (#1175).
+        self.match_rhs(lhs, uncast, evt);
+      } else if plain(inner) && plain(rhs) {
         self.match_rhs(lhs, inner, evt);
       } else {
         let line_num = span_to_line(&rhs.span, &self.tcx);
