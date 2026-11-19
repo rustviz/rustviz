@@ -9,7 +9,7 @@ use rustc_utils::mir::borrowck_facts;
 use crate::expr_visitor::{ExprVisitor, RapData};
 use crate::RVPluginArgs;
 use crate::utils::{RV1Helper, annotate_enum_variant, annotate_toplevel_fn, annotate_struct_field};
-use crate::svg_generator::data::{ExternalEvent, ResourceAccessPoint, ShadowNote};
+use crate::svg_generator::data::{ApproxNote, ExternalEvent, ResourceAccessPoint, ShadowNote};
 
 /// Drain a per-fn visitor's `raps` into a global rap_map.
 ///
@@ -162,6 +162,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   // tidy when fns at the end of the file are removed).
   let mut hidden_source_lines: HashSet<usize> = HashSet::new();
   let mut shadow_notes_by_fq: HashMap<String, ShadowNote> = HashMap::new();
+  let mut approx_notes: Vec<ApproxNote> = Vec::new();
   let mut a_line_map: BTreeMap<usize, Vec<String>> = BTreeMap::new();
   let mut owner_to_hash: HashMap<String, usize> = HashMap::new();
   let mut pre_events: Vec<(usize, ExternalEvent)> = Vec::new();
@@ -278,6 +279,8 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
             visitor.emit_borrow_ends();
             visitor.print_out_of_scope();
             visitor.fill_scope_end_holds(from);
+            visitor.collect_approx_notes(hir_body);
+            approx_notes.append(&mut visitor.approx_notes);
             rap_hash_num = visitor.rap_hashes;
             binding_columns.append(&mut visitor.binding_columns);
             merge_visitor_raps(&mut rap_map, visitor.raps, fn_start_line);
@@ -340,6 +343,8 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
         visitor.emit_borrow_ends();
         visitor.print_out_of_scope();
         visitor.fill_scope_end_holds(from);
+        visitor.collect_approx_notes(hir_body);
+        approx_notes.append(&mut visitor.approx_notes);
         rap_hash_num = visitor.rap_hashes;
         binding_columns.append(&mut visitor.binding_columns);
         merge_visitor_raps(&mut rap_map, visitor.raps, fn_start_line);
@@ -420,7 +425,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   let shadow_notes: HashMap<u64, ShadowNote> = note_pairs.into_iter().map(|(h, _, n)| (h, n)).collect();
 
   // Pass information to svg-generator
-  match testing_helper.generate_vis(line_map2, pre_events, & mut a_line_map, rap_map.len() + 1, fn_start_lines, shadow_notes, binding_columns, hidden_source_lines, args.write_to_cwd) {
+  match testing_helper.generate_vis(line_map2, pre_events, & mut a_line_map, rap_map.len() + 1, fn_start_lines, shadow_notes, binding_columns, hidden_source_lines, approx_notes, args.write_to_cwd) {
     Ok(_) => {}
     Err(e) => {
       eprintln!("{}", e);

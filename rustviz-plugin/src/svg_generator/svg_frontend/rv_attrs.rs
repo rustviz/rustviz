@@ -408,7 +408,7 @@ const BASE_MAX: usize = 112;
 /// The code panel's line number for visual row `r`: its own, or for a
 /// row the renderer added, the nearest numbered row above it (below it,
 /// above the first line).
-fn line_of(r: usize, row_lines: &[Option<usize>]) -> Option<usize> {
+pub fn line_of(r: usize, row_lines: &[Option<usize>]) -> Option<usize> {
     if row_lines.is_empty() {
         return None;
     }
