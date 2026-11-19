@@ -330,6 +330,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         && args.iter().any(|a| matches!(a.kind, ExprKind::Path(_) | ExprKind::Field(..))
           // `Some(*b)`: the Box's contents (#1191).
           || self.box_contents_of(a).is_some()
+          // `Some(B { name: s })`: what the literal is built from (#1143).
+          || self.is_nested_literal(a)
           // A call's result put into the value goes to the caller too (#783).
           || (!a.span.from_expansion() && matches!(a.kind, ExprKind::Call(..) | ExprKind::MethodCall(..))
               && !tycheck_results.node_type(a.hir_id).is_ref())))

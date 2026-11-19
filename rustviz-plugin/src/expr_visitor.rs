@@ -4394,8 +4394,44 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   }
 
   pub fn match_array_elems(&mut self, lhs: ResourceTy, elems: &'tcx [Expr<'tcx>], line_num: usize) {
+    self.match_literal_parts(lhs, elems.iter().collect(), line_num);
+  }
+
+  /// The parts of a literal going into `lhs`, a place with no column per
+  /// part: the elements of an array literal or `vec![..]`, or a struct
+  /// literal written to `v[i]` / `*r` (#1143). See `match_array_elems`.
+  pub fn match_literal_parts(&mut self, lhs: ResourceTy, parts: Vec<&'tcx Expr<'tcx>>, line_num: usize) {
     let mut drew_source = false;
-    for elem in elems {
+    // An element that is itself a literal (`vec![B { name: r }]`,
+    // `[(r, 1)]`, `vec![Some(r)]`): what it is built from goes into
+    // `lhs` the same way (#1143).
+    let mut work: Vec<&'tcx Expr<'tcx>> = parts.into_iter().rev().collect();
+    while let Some(elem) = work.pop() {
+      if !elem.span.from_expansion() {
+        match elem.kind {
+          ExprKind::Struct(_, fields, tail) => {
+            work.extend(fields.iter().rev().map(|f| f.expr));
+            if let rustc_hir::StructTailExpr::Base(base) = tail {
+              if !matches!(lhs, ResourceTy::Anonymous) {
+                let before = *self.unique_id;
+                self.move_base_rest(lhs.clone(), base, fields);
+                drew_source |= *self.unique_id != before;
+              }
+            }
+            continue;
+          }
+          ExprKind::Tup(parts) | ExprKind::Array(parts) => {
+            work.extend(parts.iter().rev());
+            continue;
+          }
+          ExprKind::Call(callee, _) if !matches!(lhs, ResourceTy::Anonymous)
+            && crate::visitor::is_ctor_path(callee, self.tcx.typeck(elem.hir_id.owner)) => {
+            drew_source |= self.retarget_ctor_arg_events(elem, lhs.clone());
+            continue;
+          }
+          _ => {}
+        }
+      }
       let name = match elem.kind {
         ExprKind::Path(_) | ExprKind::Field(..) if !elem.span.from_expansion() => {
           expr_to_rap_name(elem, &self.tcx).filter(|n| self.raps.contains_key(n))
@@ -4617,6 +4653,32 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         return;
       }
     }
+    // A struct literal built in the argument list (`consume(B { name: r })`,
+    // `v.push(B { name })`, `Box::new(P { .. })`, `Some(B { name: r })`):
+    // like a tuple's elements, each field's value goes into the call
+    // with it, so `r` is moved (or copied, or borrowed) into the call
+    // (#1143). With `..base`, base's fields that aren't written out go
+    // into the call too, a partial move of `base`.
+    if let ExprKind::Struct(_, fields, tail) = arg.kind {
+      if !arg.span.from_expansion() {
+        self.add_fn(fn_name.clone());
+        // `Some(W { a: &s })`: the constructor isn't a borrower; the
+        // holder of the built value is (#768).
+        let into_ctor = self.enclosing_ctor_name(arg).is_some_and(|c| c == fn_name);
+        let typeck = self.tcx.typeck(arg.hir_id.owner);
+        for field in fields.iter() {
+          if into_ctor && typeck.node_type(field.expr.hir_id).is_ref() {
+            continue;
+          }
+          self.match_arg(field.expr, fn_name.clone());
+        }
+        if let rustc_hir::StructTailExpr::Base(base) = tail {
+          let to = ResourceTy::Value(self.raps.get(&fn_key(&fn_name)).unwrap().rap.to_owned());
+          self.move_base_rest(to, base, fields);
+        }
+        return;
+      }
+    }
     // `take(Some(&s))`: the constructor isn't an actor. A borrow it
     // wraps is made for the call the value is passed to (#768); the
     // other arguments were moved or copied into the constructor.
@@ -4656,7 +4718,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       for elem in elems.iter() {
         // `take([&s])`: the borrow is made for the call too (#705).
         let is_var = matches!(elem.kind, ExprKind::Path(_) | ExprKind::Field(..) | ExprKind::AddrOf(..));
-        if is_var {
+        // `take(vec![B { name: r }])`, `take([(r, 1)])`: what the
+        // literal element is built from goes into the call (#1143).
+        let is_literal = matches!(elem.kind, ExprKind::Struct(..) | ExprKind::Tup(_)) && !elem.span.from_expansion();
+        if is_var || is_literal {
           self.match_arg(elem, fn_name.clone());
         }
       }
@@ -8152,7 +8217,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
           // into it is still moved: record that, so it isn't shown
           // dropping the value at its scope end.
           None => {
-            if matches!(lhs, ResourceTy::Caller) && self.is_returned_call_result(elem) {
+            if matches!(lhs, ResourceTy::Caller) && (self.is_returned_call_result(elem) || self.is_nested_literal(elem)) {
               self.match_rhs(ResourceTy::Caller, elem, e);
               continue;
             }
@@ -8757,9 +8822,88 @@ pub fn match_rhs_call(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
   }
 }
 
+/// The name of the tuple-struct / variant constructor whose argument
+/// the literal `e` is, directly or as a part of an enclosing struct or
+/// tuple literal (`Some(W { a: &s })`, `Some((W { .. }, 1))`).
+pub fn enclosing_ctor_name(&self, e: &'tcx Expr<'tcx>) -> Option<String> {
+  let mut cur = e;
+  loop {
+    let rustc_hir::Node::Expr(p) = self.tcx.parent_hir_node(cur.hir_id) else { return None };
+    match p.kind {
+      ExprKind::Struct(..) | ExprKind::Tup(_) => cur = p,
+      ExprKind::Call(callee, args) if args.iter().any(|a| a.hir_id == cur.hir_id)
+        && crate::visitor::is_ctor_path(callee, self.tcx.typeck(p.hir_id.owner)) =>
+        return hirid_to_var_name(callee.hir_id, &self.tcx),
+      _ => return None,
+    }
+  }
+}
+
+/// A literal written as a part of a returned literal: a struct
+/// literal, tuple, array, `vec![..]`, or a constructor (`Some(b)`) that
+/// isn't a value of literals. What it is built from goes to the caller
+/// with it (#1143).
+pub fn is_nested_literal(&self, e: &'tcx Expr<'tcx>) -> bool {
+  if vec_macro_elems(e).is_some() {
+    return true;
+  }
+  !e.span.from_expansion() && match e.kind {
+    ExprKind::Struct(..) | ExprKind::Array(_) => true,
+    ExprKind::Tup(parts) => !parts.is_empty(),
+    ExprKind::Call(callee, args) => !args.is_empty()
+      && crate::visitor::is_ctor_path(callee, self.tcx.typeck(e.hir_id.owner))
+      && !self.is_copy_literal_value(e),
+    _ => false,
+  }
+}
+
+/// `f(S { a: e, ..base })`: the fields of `base` that aren't written
+/// out go to `to` (the call) with the new value, moved if they need it
+/// and copied otherwise, a partial move of `base` (#1143). A reference
+/// field is copied (`&T`) or moved (`&mut T`) like any other. Nothing
+/// to draw when `base` has no field columns (`..Default::default()`).
+pub fn move_base_rest(&mut self, to: ResourceTy, base: &'tcx Expr<'tcx>, written: &'tcx [rustc_hir::ExprField<'tcx>]) {
+  let line = span_to_line(&base.span, &self.tcx);
+  let Some(base_name) = expr_to_rap_name(base, &self.tcx).filter(|n| self.raps.contains_key(n)) else { return };
+  let prefix = format!("{}.", base_name);
+  #[expect(clippy::disallowed_methods, reason = "sorted by (hash, name) below")]
+  let mut members: Vec<ResourceAccessPoint> = self.raps.iter()
+    .filter(|(n, rd)| n.starts_with(&prefix) && !n[prefix.len()..].contains('.') && rd.rap.is_member())
+    .map(|(_, rd)| rd.rap.clone())
+    .collect();
+  members.sort_by(|a, b| a.hash().cmp(b.hash()).then_with(|| a.name().cmp(b.name())));
+  for m in members {
+    let field = &m.name()[prefix.len()..];
+    if written.iter().any(|f| f.ident.as_str() == field) {
+      continue;
+    }
+    let e = match &m {
+      ResourceAccessPoint::MutRef(_) => Evt::Move,
+      _ if m.never_drops() => Evt::Copy,
+      _ => Evt::Move,
+    };
+    self.add_ev(line, e, to.clone(), ResourceTy::Value(m), false);
+  }
+}
+
 /// The `ExprKind::Struct` case of `match_rhs`: `let lhs = S { f: v, ..base };`.
 pub fn match_rhs_struct(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, _qpath: &'tcx QPath<'tcx>, expr_fields: &'tcx [rustc_hir::ExprField<'tcx>], base: rustc_hir::StructTailExpr<'tcx>) {
   let line_num = span_to_line(&rhs.span, &self.tcx);
+  // `v[0] = B { name: r };`, `*slot = B { name: s };`: the place has no
+  // column per field, so what the literal is built from goes into the
+  // place itself, as for `v[0] = r;` (#1143).
+  // The same for a destination drawn as one column: an enum's struct
+  // variant (`let m = Msg::Write { text: s };`, #1173).
+  let opaque = match &lhs {
+    ResourceTy::Index(..) | ResourceTy::Deref(_) | ResourceTy::DerefField(..) => true,
+    ResourceTy::Value(rap) => !rap.is_fn() && self.struct_members_deep(rap.name()).is_empty()
+      && !expr_fields.is_empty(),
+    _ => false,
+  };
+  if opaque {
+    self.match_literal_parts(lhs, vec![rhs], line_num);
+    return;
+  }
   self.add_ev(line_num, Evt::Bind, lhs.clone(), ResourceTy::Anonymous, false);
   for field in expr_fields.iter() {
       // Struct literal that isn't bound to a struct RAP: the
@@ -8770,7 +8914,11 @@ pub fn match_rhs_struct(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, _qpat
       if matches!(lhs, ResourceTy::Caller) {
         let field_ty = self.tcx.typeck(field.expr.hir_id.owner).node_type(field.expr.hir_id);
         let is_place = matches!(field.expr.kind, ExprKind::Path(_) | ExprKind::Field(..));
-        if (is_place || self.is_returned_call_result(field.expr)) && !field_ty.is_ref() && !field.expr.span.from_expansion() {
+        // A literal in the field (`Out { inner: In { name } }`,
+        // `W { o: Some(B { name }) }`): what it is built from goes to
+        // the caller too (#1143).
+        if (is_place || self.is_returned_call_result(field.expr) || self.is_nested_literal(field.expr))
+          && !field_ty.is_ref() && !field.expr.span.from_expansion() {
           let e = if self.ty_is_copy(field_ty, field.expr.hir_id.owner) { Evt::Copy } else { Evt::Move };
           self.match_rhs(ResourceTy::Caller, field.expr, e);
         }
