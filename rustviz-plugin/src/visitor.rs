@@ -9455,6 +9455,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           return Some(("at the end of the block's final expression", end(b.expr?.span), Some(b.hir_id)));
         }
         Node::Arm(a) if a.body.hir_id == cur => return Some(("at the end of this match arm", end(a.body.span), Some(a.body.hir_id))),
+        // A match guard is a temporary scope of its own (#1167): its
+        // temporaries are dropped once it has been evaluated, before
+        // the arm's body (or the next arm) runs. (Not an `if let`
+        // guard's scrutinee, which, as in a let chain, may live on into
+        // the arm's body.)
+        Node::Arm(a) if a.guard.is_some_and(|g| g.hir_id == cur) => {
+          let g = a.guard?;
+          let has_let = matches!(g.kind, ExprKind::Let(_)) || is_let_chain(g);
+          if !has_let {
+            return Some(("at the end of the match guard", end(g.span), None));
+          }
+        }
         Node::Expr(e) => match e.kind {
           ExprKind::DropTemps(inner) => {
             if matches!(e.span.desugaring_kind(), Some(rustc_span::DesugaringKind::ForLoop)) {
