@@ -20753,6 +20753,65 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Move from boxed to d",
         ],
     },
+    TooltipExpect {
+        name: "match_on_borrow_binding_1235",
+        // #1235: `s => …` on `match &t` binds s to the reference: a
+        // borrow of t, given back at s's last use, as for `let s = &t;`.
+        must_contain: &[
+            "Immutable borrow from t to s",
+            "Return immutably borrowed resource from s to t",
+            "t's resource is immutably borrowed by s; t is read-only while the borrow is live",
+            "Mutable borrow from t to s",
+            "Return mutably borrowed resource from s to t",
+            "t's resource is mutably borrowed by s; t can't be used while the borrow is live",
+            "Immutable borrow from v to s",
+            "Return immutably borrowed resource from s to v",
+            "Immutable borrow from p.name to s",
+            "s immutably borrows a resource",
+            "s mutably borrows a resource",
+            // `match r { u => … }` with r a reference copies r.
+            "Copy from r to u",
+            "t goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Copy from t to s",
+            "Move from t to s",
+            "Copy from v to s",
+            "Copy from p.name to s",
+            "t's value is copied",
+            "t's resource is moved",
+            "v's value is copied",
+            "s is initialized with a copy of t",
+            "s is initialized with a copy of v",
+            "s's immutable borrow ends (what it borrows from isn't shown)",
+            "s's mutable borrow ends (what it borrows from isn't shown)",
+            "t goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "ref_coerced_to_raw_ptr_1251",
+        // #1251: the coercion to a raw pointer ends the borrow at once
+        // (rustc lets x be assigned while p is in scope): no borrow is
+        // drawn, as for `&mut x as *mut i32` (#194).
+        must_contain: &[
+            "p is bound to a copyable value",
+            "q is bound to a copyable value",
+            "m is assigned a new value",
+            "s.p is bound to a copyable value",
+            "r is bound to a copyable value",
+            "x is assigned a new value",
+        ],
+        must_not_contain: &[
+            "Mutable borrow from x to p",
+            "Immutable borrow from x to q",
+            "Mutable borrow from x to m",
+            "Mutable borrow from x to s.p",
+            "Immutable borrow from z to r",
+            "p mutably borrows a value",
+            "x's value is mutably borrowed by p; x can't be used until the borrow ends",
+            "z's resource is immutably borrowed by r; z is read-only while the borrow is live",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop

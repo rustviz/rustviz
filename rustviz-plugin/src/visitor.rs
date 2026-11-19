@@ -7585,6 +7585,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // element, not x (#580).
       for (r, e, from, _) in associated_ro.iter_mut() {
         *from = self.retarget_tuple_borrow(guard_expr, r, e, from.clone());
+        // `(s, n) => …` on `match (&t, 1)`: s borrows t (#1235).
+        if let Some(b) = self.addr_of_scrutinee_borrow(scrutinee, p, r, e, from) {
+          *e = b;
+        }
       }
       let or_evs = self.or_conflict_events(&or_conflicts, &mut associated_ro, pat_line, &scrutinee_moves, &tuple_name, end, false);
       or_events.extend(or_evs.start);
@@ -7647,6 +7651,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // `P { a, b } => …` on a struct variable: `a` / `b`
       // come from `p.a` / `p.b` (#326).
       self.get_dec_of_pat_parts(arm_pat, &typeck_res, &parents[i], parents_ty[i], end, & mut associated_ro);
+      // `s => …` on `match &t`: s is bound to the reference and borrows
+      // t, as in `let s = &t;` (#1235).
+      if parents.len() == 1 {
+        for (r, e, from, _) in associated_ro.iter_mut() {
+          if let Some(b) = self.addr_of_scrutinee_borrow(guard_expr, arm_pat, r, e, from) {
+            *e = b;
+          }
+        }
+      }
       let or_evs = self.or_conflict_events(&or_conflicts, &mut associated_ro, pat_line, &scrutinee_moves, &tuple_name, end, false);
       or_events.extend(or_evs.start);
       or_end_events.extend(or_evs.end);
