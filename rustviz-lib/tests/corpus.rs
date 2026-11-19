@@ -22224,6 +22224,28 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy of the value one() returns to _p",
         ],
     },
+    // #1225: `let x = Some(if c { d } else { e });` drew no branch: d and
+    // e stayed owners, with drop-flag scope ends nothing could set.
+    TooltipExpect {
+        name: "let_ctor_conditional_1225",
+        must_contain: &[
+            "Move from d to _x",
+            "Move from e to _x",
+            "_x acquired ownership of a resource (in all branches above)",
+            "Move from f to _y",
+            "Move from g to _y",
+            "d goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "z acquired ownership of a resource (in all branches above)",
+            "w acquired ownership of a resource (in all branches above)",
+            "j goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "d goes out of scope. Its resource is dropped here only if d still holds it",
+            "e goes out of scope. Its resource is dropped here only if e still holds it",
+            "h goes out of scope. Its resource is dropped here only if h still holds it",
+            "j goes out of scope. Its resource is dropped here only if j still holds it",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
