@@ -438,6 +438,12 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// r points to. Holders keep `RefData::borrow_span` unset (their
   /// loans are found by line), so `ref_var_borrows` can't say this.
   pub stored_ref_var_lends: HashSet<(String, String)>,
+  /// Ids of the moves of a `&mut` variable into a call whose result
+  /// carries its borrow on (`let r2 = id(r);` with `fn id<T>(x: T) ->
+  /// T`, `if let Some(x) = Some(r)`, #1128): the holder of the result
+  /// ends the borrow, so the moved-from reference doesn't (see
+  /// `ref_handed_off`).
+  pub moved_into_result: HashSet<usize>,
   /// Borrows a call may have stored behind one of its `&mut`
   /// arguments (`keep(&mut v, &s)`, `stored_borrow`, #513): the
   /// holder, the line of the call, the line the loan ends on, the
@@ -955,6 +961,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       tuple_temp_refs: HashSet::new(),
       ref_var_borrows: HashSet::new(),
       stored_ref_var_lends: HashSet::new(),
+      moved_into_result: HashSet::new(),
       stored_borrows: Vec::new(),
       derived: Vec::new(),
       pattern_copies: HashSet::new(),
@@ -2071,12 +2078,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     });
     // A reference variable put into a value that has a holder: the
     // holder's borrow is drawn from the lender, so the copy of the
-    // reference itself isn't drawn. Returned to the caller it is.
+    // reference itself isn't drawn. Returned to the caller it is. A
+    // `&mut` moved in (`Some(r)`: no reborrow for a generic field) is
+    // drawn too: r can't be used afterwards (#1128).
     let any = !taken.is_empty();
     if !matches!(new_to, ResourceTy::Caller) {
-      taken.retain(|(_, e)| !matches!(e,
-        ExternalEvent::Move { from, .. } | ExternalEvent::Copy { from, .. }
-          if from.extract_rap().is_some_and(|r| r.is_ref())));
+      taken.retain(|(_, e)| match e {
+        ExternalEvent::Move { from, .. } => !from.extract_rap().is_some_and(|r| r.is_ref() && !r.is_mutref()),
+        ExternalEvent::Copy { from, .. } => !from.extract_rap().is_some_and(|r| r.is_ref()),
+        _ => true,
+      });
     }
     for (l, mut e) in taken {
       match &mut e {
@@ -2390,7 +2401,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// it itself: another reference (`let r2 = r;`, `Holder { r }`) or the
   /// caller (`r` as a fn's result, also from a branch of its tail `if` / `match`). After such a move `name` holds
   /// nothing, so its own borrow-end / return-to-lender event would be
-  /// false (#209). A `&mut` moved into a call (`take(r)`) isn't covered:
+  /// false (#209). So is a `&mut` moved into a call whose result a
+  /// holder keeps (`let r2 = id(r);`, see `moved_into_result`, #1128).
+  /// Any other `&mut` moved into a call (`take(r)`) isn't covered:
   /// nothing else with a column ends that borrow, so `r`'s end stands
   /// for it.
   pub fn ref_handed_off(&self, name: &str) -> bool {
@@ -2426,12 +2439,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // (`fn id(x: &String) -> &String { x }`, #754).
     fn handed(this: &ExprVisitor, events: &[(usize, ExternalEvent)], hash: u64, mine: &dyn Fn(usize) -> bool, swapped_here: &dyn Fn(usize) -> bool, in_branch: bool, caller_only: bool) -> bool {
       events.iter().any(|(line, ev)| match ev {
-        ExternalEvent::Move { from: ResourceTy::Value(f), to, .. }
+        ExternalEvent::Move { from: ResourceTy::Value(f), to, id, .. }
           if *f.hash() == hash && mine(*line) && !swapped_here(*line) =>
         {
           match to {
             ResourceTy::Caller => true,
+            // Into a call whose result carries the borrow on (#1128).
+            ResourceTy::Value(ResourceAccessPoint::Function(_)) => !in_branch && !caller_only
+              && this.moved_into_result.contains(id),
             // Moves into another reference inside a branch keep the old drawing.
+            // A tuple struct built around it (`let w = W(r);`): the
+            // field holding it carries the borrow on (#1128).
+            ResourceTy::Value(t @ ResourceAccessPoint::Struct(_)) if !in_branch && !caller_only
+              && !this.borrow_map.contains_key(t.name()) => f.is_mutref()
+              && this.struct_members_deep(t.name()).iter().any(|m| (m.is_ref() || m.holds_borrow()) && this.borrow_map.contains_key(m.name())),
             ResourceTy::Value(t) if !in_branch && !caller_only => this.borrow_map.contains_key(t.name())
               && this.raps.get(t.name()).map_or(false, |r| r.rap.hash() == t.hash()),
             _ => false,
@@ -4391,6 +4412,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       }
       let Some(name) = name else { continue };
       if ty.is_ref() {
+        // The holder's borrow is drawn from the lender; a `&mut`
+        // moved in (`vec![r]`, no reborrow) can't be used afterwards,
+        // and the holder carries its borrow on (#1128).
+        let typeck = self.tcx.typeck(elem.hir_id.owner);
+        if ty.ref_mutability() == Some(Mutability::Mut) && !is_implicit_mut_reborrow(elem, typeck)
+          && !matches!(lhs, ResourceTy::Anonymous | ResourceTy::Caller) {
+          if let ResourceTy::Value(r) = get_rap(elem, &self.tcx, &self.raps) {
+            if r.is_mutref() {
+              self.add_ev(line_num, Evt::Move, lhs.clone(), ResourceTy::Value(r), false);
+              drew_source = true;
+            }
+          }
+        }
         continue;
       }
       let is_copy = self.ty_is_copy(ty, elem.hir_id.owner);
@@ -6855,6 +6889,21 @@ pub fn mark_borrow_kept_by_result(&mut self, call: &'tcx Expr<'tcx>, lenders: &[
   let mut fns: Vec<String> = Vec::new();
   self.call_names(call, &mut fns);
   self.mark_kept_on_lines(lo, hi, &hashes, &fns);
+  // A `&mut` variable moved into one of those calls (`id(r)` with a
+  // generic parameter, `Some(r)`; no reborrow) whose borrow is the
+  // one the result keeps: the result's holder takes the borrow over
+  // (#1128).
+  let carried: Vec<u64> = self.borrow_map.iter()
+    .filter(|(_, rd)| rd.all_lenders().iter().any(|l| lenders.contains(l)))
+    .filter_map(|(k, _)| self.raps.get(k).map(|r| *r.rap.hash()))
+    .chain(lenders.iter().filter_map(|l| match l {
+      ResourceTy::Value(r) | ResourceTy::Deref(r) if r.is_ref() => Some(*r.hash()),
+      _ => None,
+    }))
+    .collect();
+  let mut ids: Vec<usize> = Vec::new();
+  moves_into_calls(self.preprocessed_events, lo, hi, &carried, &fns, &mut ids);
+  self.moved_into_result.extend(ids);
   // A field reached through a reference (`self.items` in
   // `self.items.first_mut().unwrap()`; #1073).
   for l in lenders {
@@ -9638,7 +9687,7 @@ pub fn print_out_of_scope(&mut self){
       // that loan. An end of an earlier loan (`c = &y;` ends c's loan of
       // x, made before the conditional; #778, #801) isn't described by it.
       let made = self.borrow_map.get(r.name()).filter(|d| ends_current_loan(&ev.1, d)).map(|d| d.assigned_at);
-      end_borrow_in_arms(self.preprocessed_events, ev, &r, lender.as_ref(), made, stacked, self.unique_id);
+      end_borrow_in_arms(self.preprocessed_events, ev, &r, lender.as_ref(), made, stacked, self.unique_id, &self.moved_into_result);
     }
   }
 }
@@ -10272,10 +10321,12 @@ fn branch_ending_borrow(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoi
 
 /// Whether `events` (an arm's, not looking into nested conditionals)
 /// move the reference `r` into another reference, which then holds
-/// its borrow (see `ref_handed_off`).
-fn handed_off_in(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint) -> bool {
+/// its borrow, or into a call whose result a holder keeps (`let r2 =
+/// id(r);`, `moved_into_result`, #1128; see `ref_handed_off`).
+fn handed_off_in(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint, moved_into_result: &HashSet<usize>) -> bool {
   events.iter().any(|(_, e)| matches!(e,
-    ExternalEvent::Move { from: ResourceTy::Value(f), to: ResourceTy::Value(t), .. } if f == r && t.is_ref()))
+    ExternalEvent::Move { from: ResourceTy::Value(f), to: ResourceTy::Value(t), id, .. }
+      if f == r && (t.is_ref() || (t.is_fn() && moved_into_result.contains(id)))))
 }
 
 /// Whether `e` uses `r`; a conditional `r` is live in does.
@@ -10319,6 +10370,7 @@ fn end_borrow_in_arms(
   made: Option<usize>,
   in_line_map: bool,
   unique_id: &mut usize,
+  moved_into_result: &HashSet<usize>,
 ) {
   let Some((k, a)) = branch_ending_borrow(events, r, ev.0) else {
     // Right after r's last use on or before its line, ahead of other
@@ -10350,13 +10402,13 @@ fn end_borrow_in_arms(
       // `let h2 = h;` in this arm moved r's reference on (a `&mut`, or
       // a struct's field with the struct, #637): what holds it now
       // ends the borrow on this path, so r doesn't (#209).
-      if handed_off_in(&arm.e_data, r) {
+      if handed_off_in(&arm.e_data, r, moved_into_result) {
         continue;
       }
       if in_line_map && ev.1.is_arrow_ev() && branch_ending_borrow(&arm.e_data, r, ev.0).is_none() {
         arm.line_map.entry(ev.0).or_default().push(ev.1.clone());
       }
-      end_borrow_in_arms(&mut arm.e_data, ev.clone(), r, lender, made, in_line_map, unique_id);
+      end_borrow_in_arms(&mut arm.e_data, ev.clone(), r, lender, made, in_line_map, unique_id, moved_into_result);
       continue;
     }
     if made_in_arm {
@@ -11000,6 +11052,24 @@ fn set_kept(ev: &mut ExternalEvent) {
 /// Set `result_keeps_borrow` on the pass-by-reference events from one
 /// of `hashes` into a function on lines `lo..=hi`, including those
 /// already folded into a branch (recording their ids in `ids`).
+/// The ids of the moves, on lines `lo..=hi`, of a `&mut` variable
+/// whose hash is in `hashes` into one of the calls `fns` (see
+/// `ExprVisitor::moved_into_result`).
+fn moves_into_calls(events: &[(usize, ExternalEvent)], lo: usize, hi: usize, hashes: &[u64], fns: &[String], ids: &mut Vec<usize>) {
+  for (line, ev) in events.iter() {
+    match ev {
+      ExternalEvent::Move { from: ResourceTy::Value(f), to: ResourceTy::Value(ResourceAccessPoint::Function(t)), id, .. }
+        if (lo..=hi).contains(line) && f.is_mutref() && hashes.contains(f.hash()) && fns.contains(&t.name) => ids.push(*id),
+      ExternalEvent::Branch { branches, .. } => {
+        for b in branches.iter() {
+          moves_into_calls(&b.e_data, lo, hi, hashes, fns, ids);
+        }
+      }
+      _ => {}
+    }
+  }
+}
+
 fn mark_kept_in(events: &mut Vec<(usize, ExternalEvent)>, lo: usize, hi: usize, hashes: &[u64], place: Option<&str>, fns: &[String], ids: &mut Vec<usize>) {
   for (line, ev) in events.iter_mut() {
     let pass_from_lender = match &*ev {

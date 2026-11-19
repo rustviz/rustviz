@@ -21618,6 +21618,98 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "z's resource is immutably borrowed by r; z is read-only while the borrow is live",
         ],
     },
+    TooltipExpect {
+        // #1128: a `&mut` passed by value where no reborrow is inserted
+        // (a generic `id<T>(x: T)`, `Some(r)`, `Box::new(r)`, `vec![r]`,
+        // a tuple struct `W(r)`) is moved: using it afterwards is E0382.
+        // When the result is kept (`let k = id(r);`), k carries the
+        // borrow on, so r gives nothing back when k is done. Main drew
+        // r's borrow ending (with a return arrow) after the move, and
+        // for `Some(r)` / `vec![r]` / `W(r)` didn't draw the move at all
+        // ("r holds a mutable reference; it can read and write" through
+        // to k's last use). In a branch (`if c { let k8 = id(r8); .. }`)
+        // r8 still ends its borrow at the join, for the path that skips
+        // the branch, as for `let k = r;` there.
+        name: "mut_ref_moved_into_result_1128",
+        must_contain: &[
+            "Move from r1 to id",
+            "r1's mutable reference is moved (not the resource it points to)",
+            "Return mutably borrowed resource from k1 to s",
+            "s's resource is mutably borrowed by k1; s can't be used until the borrow ends",
+            "Move from r2 to k2",
+            "r2's mutable reference is moved (not the resource it points to)",
+            "the reference r2 held is moved into k2's value, so k2 now holds its borrow",
+            "r3's mutable reference is moved (not the resource it points to)",
+            "r4's mutable reference is moved (not the resource it points to)",
+            "Move from r5 to k5",
+            "r5's mutable reference is moved (not the resource it points to)",
+            "Move from r6 to k6",
+            "r6's mutable reference is moved (not the resource it points to)",
+            "r7's mutable reference is moved (not the resource it points to)",
+            "s's resource is mutably borrowed by k7; s can't be used until the borrow ends",
+            "r8's mutable reference is moved (not the resource it points to)",
+        ],
+        must_not_contain: &[
+            "r1's mutable borrow ends",
+            "Return mutably borrowed resource from r1 to s",
+            "r2's mutable borrow ends",
+            "Return mutably borrowed resource from r2 to s",
+            "r3's mutable borrow ends",
+            "Return mutably borrowed resource from r3 to s",
+            "r4's mutable borrow ends",
+            "Return mutably borrowed resource from r4 to s",
+            "r5's mutable borrow ends",
+            "Return mutably borrowed resource from r5 to t",
+            "r6's mutable borrow ends",
+            "Return mutably borrowed resource from r6 to u",
+            "r7's mutable borrow ends",
+            "Return mutably borrowed resource from r7 to s",
+        ],
+    },
+    TooltipExpect {
+        // #1129: `for x in r` with `r: &mut Vec<_>` (a local, a
+        // parameter, a nested loop's `row`, a field `h.hr`) moves r into
+        // the loop's iterator: `IntoIterator::into_iter` takes a generic
+        // `Self`, so no reborrow is inserted (using r after the loop is
+        // E0382). Main kept r "can read and write" through the loop and
+        // drew x giving back a borrow to r ("x no longer borrows the
+        // resource r points to") that was never lent. As for a `&mut`
+        // moved into a loop adapter (#1076), r's borrow still ends where
+        // the loop does. #1164: a field moved in by value (`for n in
+        // t.names`, `self.names`, `pair.0`) wasn't drawn as moved, and
+        // was then said to drop its Strings at scope end.
+        name: "for_head_moved_1129_1164",
+        must_contain: &[
+            "r1's mutable reference is moved (not the resource it points to)",
+            "r2's mutable reference is moved (not the resource it points to)",
+            "r3's mutable reference is moved (not the resource it points to)",
+            "row's mutable reference is moved (not the resource it points to)",
+            "h.hr's mutable reference is moved (not the resource it points to)",
+            "the resource h.hr points to is modified through e",
+            "v's resource is modified through x",
+            "Return mutably borrowed resource from r1 to v",
+            "t.names's resource is moved into the `for` loop's iterator",
+            "n takes ownership of an element of t.names",
+            "t.names goes out of scope. No resource is dropped.",
+            "pair.0's resource is moved into the `for` loop's iterator",
+            "pair.0 goes out of scope. No resource is dropped.",
+            "self.names's resource is moved into the `for` loop's iterator",
+            "self.names goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Return mutably borrowed resource from x to r1",
+            "x no longer borrows the resource r1 points to",
+            "Return mutably borrowed resource from y to r2",
+            "y no longer borrows the resource r2 points to",
+            "Return mutably borrowed resource from row to r3",
+            "Return mutably borrowed resource from z to row",
+            "Return mutably borrowed resource from e to h.hr",
+            "e no longer borrows the resource h.hr points to",
+            "t.names goes out of scope. Its resource is dropped",
+            "pair.0 goes out of scope. Its resource is dropped",
+            "self.names goes out of scope. Its resource is dropped",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop

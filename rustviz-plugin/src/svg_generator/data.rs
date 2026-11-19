@@ -3862,6 +3862,10 @@ impl Event {
                         PlaceWrite::Update | PlaceWrite::UpdateValue => hover_messages::event_dot_write_element(r.name(), place, r.is_ref(), element_update_holds_value(r, place, write)),
                     };
                     with_alternatives(msg, r, place, write, alts)
+                } else if is.holds_borrow() && matches!(from, ResourceTy::Value(r) if r.is_mutref()) {
+                    // `let o = Some(r);` / `vec![r]` with r a `&mut`:
+                    // the reference moves into o's value (#1128).
+                    hover_messages::event_dot_holder_takes_ref(&self.deref_name(my_name), &from.name())
                 } else if is.holds_borrow() && matches!(from, ResourceTy::Value(r) if !r.is_fn()) {
                     // `let it2 = it;`: the value moves, and the borrow
                     // it holds moves with it (#336).
