@@ -2389,6 +2389,14 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
             to_fmt, func_fmt
         );
     }
+    if carrier == ViaCarrier::Part {
+        // `let (a, b) = &mut t;` (#1130): `func` is the part a points to.
+        let whole = lenders.first().map_or(String::new(), |l| styled_name_html(l));
+        return format!(
+            ": {0} points to {1}, but the borrow is of all of {2}, which stays borrowed while {0} is in use",
+            to_fmt, func_fmt, whole
+        );
+    }
     if carrier == ViaCarrier::Element {
         // `let r = refs[0];` (#349): `func` is the collection.
         if lenders.len() <= 1 {
@@ -2461,7 +2469,7 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
         ViaCarrier::Reference => ("reference", String::new()),
         ViaCarrier::Value => ("value", format!("; {0} isn't a reference, but its value holds one", to_fmt)),
         ViaCarrier::StructField => ("struct", String::new()),
-        ViaCarrier::Element | ViaCarrier::StoredBy | ViaCarrier::PatternBinding { .. } | ViaCarrier::ReturnedClosure { .. } => unreachable!(),
+        ViaCarrier::Element | ViaCarrier::StoredBy | ViaCarrier::PatternBinding { .. } | ViaCarrier::ReturnedClosure { .. } | ViaCarrier::Part => unreachable!(),
     };
     // A value can hold borrows of several of them at once (`map` over
     // `v.iter()` with a closure that borrows `extra`).
@@ -2975,6 +2983,31 @@ pub fn state_closure_full_privilege_no_resource(my_name: &String) -> String {
 //      When a static reference goes out of scope, decrement this value by 1;
 //      When a decrement happens while the borrow_count is 1, the state becomes
 //          FullPrivilege once again.
+// The lender's dot of a borrow of all of `whole` by a pattern binding
+// that points to its part `part` (`let (a, b) = &mut t;`, #1130): one
+// loan of t, which a and b each reach a different part of.
+pub fn event_dot_lend_part(whole: &str, part: &str, to: &str, mutable: bool) -> String {
+    let (w, p, t) = (styled_name_html(whole), styled_name_html(part), styled_name_html(to));
+    if mutable {
+        format!("{1} is mutably borrowed by {2}, as part of a mutable borrow of all of {0}; {0} can't be used while the borrow is live", w, p, t)
+    } else {
+        format!("{1} is immutably borrowed by {2}, as part of an immutable borrow of all of {0}; {0} is read-only while the borrow is live", w, p, t)
+    }
+}
+
+// A field's segment while the struct it is in is borrowed as a whole
+// (`let r = &mut p;`, `let (a, b) = &mut t;`; #1130, #1193): the field is
+// borrowed with it. `by`: the one holder of the borrow, if known.
+pub fn state_lent_with_parent(my_name: &str, parent: &str, by: Option<&str>, mutable: bool) -> String {
+    let me = styled_name_html(my_name);
+    let by = by.map_or(String::new(), |b| format!(" by {}", styled_name_html(b)));
+    if mutable {
+        format!("{0} is mutably borrowed along with {1}{2}; {0} can't be used until the borrow ends", me, styled_name_html(parent), by)
+    } else {
+        format!("{0} is immutably borrowed along with {1}{2}; {0} is read-only while the borrow is live", me, styled_name_html(parent), by)
+    }
+}
+
 pub fn state_partial_privilege(my_name: &String, holds_value: bool) -> String {
     // update styling
     let my_name_fmt = styled_name_html(my_name);

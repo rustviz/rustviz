@@ -10861,6 +10861,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         if nested {
           self.mark_copy_inside(&name, hirid, init, first_id);
           self.mark_copy_pointee(&name, hirid, first_id);
+          self.mark_part_borrow(&name, hirid, init, first_id);
         }
         if nested && !is_skipped && self.own_ref_binding(hirid).is_none() {
           if let Some(rap) = self.raps.get(&name).map(|rd| rd.rap.to_owned()) {
@@ -10914,6 +10915,108 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       | PatKind::Expr(_)
       | PatKind::Range(..) => {}
     }
+  }
+
+  /// `let (a, b) = &mut t;`: `bind_one` drew a's borrow from all of t,
+  /// which is right (the pattern makes one loan of t), but a points to
+  /// t.0 only. Say so on the borrow (`ViaCarrier::Part`), or t's dot
+  /// reads as two mutable borrows of the same value (#1130).
+  fn mark_part_borrow(&mut self, name: &str, hirid: HirId, init: &'tcx Expr<'tcx>, first_id: usize) {
+    let mut e = init;
+    while let ExprKind::DropTemps(inner) = e.kind {
+      e = inner;
+    }
+    let ExprKind::AddrOf(_, _, place) = e.kind else { return };
+    let Some(whole) = expr_to_rap_name(place, &self.tcx) else { return };
+    let Some(path) = self.binding_part_path(hirid) else { return };
+    let part = format!("{}.{}", whole, path);
+    if !self.raps.contains_key(&part) {
+      return;
+    }
+    let via = BorrowVia {
+      func: part,
+      lenders: vec![whole.clone()],
+      also_unnamed: false,
+      tie: ArgTie::default(),
+      carrier: ViaCarrier::Part,
+    };
+    let set = |ev: &mut ExternalEvent| match ev {
+      ExternalEvent::StaticBorrow { id, from: ResourceTy::Value(f), to: ResourceTy::Value(t), via: v @ None, .. }
+      | ExternalEvent::MutableBorrow { id, from: ResourceTy::Value(f), to: ResourceTy::Value(t), via: v @ None, .. }
+        if *id >= first_id && t.name() == name && *f.name() == whole => *v = Some(via.clone()),
+      _ => {}
+    };
+    for (_, ev) in self.preprocessed_events.iter_mut() {
+      set(ev);
+    }
+    for evs in self.event_line_map.values_mut() {
+      for ev in evs.iter_mut() {
+        set(ev);
+      }
+    }
+  }
+
+  /// The field path (`0`, `name`, `inner.0`) a pattern binding takes out
+  /// of the value its pattern matches (`a` in `let (a, b) = …` gives
+  /// `0`). None through a `&` / box / deref pattern, a slice, an
+  /// or-pattern, or an enum variant: those don't name a field column.
+  fn binding_part_path(&self, hirid: HirId) -> Option<String> {
+    let typeck = self.tcx.typeck(hirid.owner);
+    let mut parts: Vec<String> = Vec::new();
+    let mut cur = hirid;
+    loop {
+      let parent = self.tcx.parent_hir_node(cur);
+      match parent {
+        rustc_hir::Node::Pat(p) => {
+          match p.kind {
+            PatKind::Tuple(ps, dotdot) => {
+              let i = ps.iter().position(|x| x.hir_id == cur)?;
+              let arity = match typeck.pat_ty(p).peel_refs().kind() {
+                rustc_middle::ty::TyKind::Tuple(tys) => tys.len(),
+                _ => return None,
+              };
+              let idx = match dotdot.as_opt_usize() {
+                Some(d) if i >= d => i + arity - ps.len(),
+                _ => i,
+              };
+              parts.push(idx.to_string());
+            }
+            PatKind::TupleStruct(..) | PatKind::Struct(..) => {
+              // Only a struct's own fields have columns (not an enum's).
+              if !typeck.pat_ty(p).peel_refs().ty_adt_def().is_some_and(|a| a.is_struct()) {
+                return None;
+              }
+              match p.kind {
+                PatKind::TupleStruct(_, ps, dotdot) => {
+                  let i = ps.iter().position(|x| x.hir_id == cur)?;
+                  let n = typeck.pat_ty(p).peel_refs().ty_adt_def()?.non_enum_variant().fields.len();
+                  let idx = match dotdot.as_opt_usize() {
+                    Some(d) if i >= d => i + n - ps.len(),
+                    _ => i,
+                  };
+                  parts.push(idx.to_string());
+                }
+                _ => {}
+              }
+            }
+            PatKind::Binding(..) => {}
+            _ => return None,
+          }
+          cur = p.hir_id;
+        }
+        rustc_hir::Node::PatField(f) => {
+          parts.push(f.ident.as_str().to_owned());
+          // The struct pattern is the field's parent.
+          cur = f.hir_id;
+        }
+        _ => break,
+      }
+    }
+    if parts.is_empty() {
+      return None;
+    }
+    parts.reverse();
+    Some(parts.join("."))
   }
 
   /// `let Some(w) = oi else { .. }` with a Copy payload: `bind_one`

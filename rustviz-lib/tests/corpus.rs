@@ -20753,6 +20753,36 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Move from boxed to d",
         ],
     },
+    TooltipExpect {
+        name: "whole_struct_borrow_fields_1130_1193",
+        // #1193: a struct borrowed as a whole (`let r = &mut p;`, `let q =
+        // &p;`) lends its fields with it, but their columns stayed solid
+        // "p.name is the owner of the resource" (the rows are pinned by
+        // `a_whole_struct_borrow_lends_its_fields`). #1130: `let (a, b) =
+        // &mut t;` makes one loan of all of t (a use of t.0 before b's last
+        // use is E0499); t's dot read like two mutable borrows of the same
+        // value ("t's resource is mutably borrowed by a … by b").
+        must_contain: &[
+            "p.name is mutably borrowed along with p by r; p.name can't be used until the borrow ends",
+            "p.age is mutably borrowed along with p by r; p.age can't be used until the borrow ends",
+            "p.name is immutably borrowed along with p by q; p.name is read-only while the borrow is live",
+            "t.0 is mutably borrowed along with t; t.0 can't be used until the borrow ends",
+            "t.1 is mutably borrowed along with t; t.1 can't be used until the borrow ends",
+            "t.0 is mutably borrowed by a, as part of a mutable borrow of all of t; t can't be used while the borrow is live",
+            "t.1 is mutably borrowed by b, as part of a mutable borrow of all of t; t can't be used while the borrow is live",
+            "Mutable borrow from t to a: a points to t.0, but the borrow is of all of t, which stays borrowed while a is in use",
+            "s.x is mutably borrowed by x, as part of a mutable borrow of all of s; s can't be used while the borrow is live",
+            "s.y is mutably borrowed along with s; s.y can't be used until the borrow ends",
+            "u.0 is immutably borrowed by c, as part of an immutable borrow of all of u; u is read-only while the borrow is live",
+            "o.inner.v is mutably borrowed along with o.inner by r; o.inner.v can't be used until the borrow ends",
+        ],
+        must_not_contain: &[
+            "=t's resource is mutably borrowed by a; t can't be used while the borrow is live",
+            "=t's resource is mutably borrowed by b; t can't be used while the borrow is live",
+            "=s's resource is mutably borrowed by x; s can't be used while the borrow is live",
+            "=u's resource is immutably borrowed by c; u is read-only while the borrow is live",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -21742,6 +21772,54 @@ fn branches_that_diverge_stop_short() {
                 }
             }
         }
+    }
+}
+
+/// The state of `var`'s top-level line segment that covers the rows from
+/// `row` to `row + 1`, from its `data-rv-id` (`p.name@L15-17:line:
+/// revoked_privilege`).
+fn line_state_at(svg: &str, var: &str, row: usize) -> Option<String> {
+    let prefix = format!("data-rv-id=\"{}@L", var);
+    for (i, _) in svg.match_indices(&prefix) {
+        let rest = &svg[i + prefix.len()..];
+        let id = &rest[..rest.find('"')?];
+        let mut parts = id.split(':');
+        let (Some(rows), Some("line"), Some(state)) = (parts.next(), parts.next(), parts.next()) else { continue };
+        let (a, b) = rows.split_once('-')?;
+        let (a, b): (usize, usize) = (a.parse().ok()?, b.parse().ok()?);
+        if a <= row && row < b {
+            return Some(state.to_owned());
+        }
+    }
+    None
+}
+
+/// A struct or tuple borrowed as a whole lends every field (#1130,
+/// #1193): each field's line is drawn as borrowed while the whole is, not
+/// as a solid owner.
+#[test]
+fn a_whole_struct_borrow_lends_its_fields() {
+    let name = "whole_struct_borrow_fields_1130_1193";
+    let rv = run_with_local_backend(name);
+    let svg = rv.timeline_panel_string();
+    let cases: &[(&str, usize, &str)] = &[
+        ("p.name", 15, "revoked_privilege"),
+        ("p.age", 16, "revoked_privilege"),
+        ("p.name", 19, "partial_privilege"),
+        ("p.age", 20, "partial_privilege"),
+        ("p.name", 17, "full_privilege"),
+        ("t.0", 26, "revoked_privilege"),
+        ("t.0", 27, "revoked_privilege"),
+        ("t.1", 27, "revoked_privilege"),
+        ("s.x", 30, "revoked_privilege"),
+        ("s.y", 31, "revoked_privilege"),
+        ("u.0", 34, "partial_privilege"),
+        ("o.inner.v", 40, "revoked_privilege"),
+        ("o.inner.n", 41, "revoked_privilege"),
+        ("o.k", 40, "full_privilege"),
+    ];
+    for (var, row, want) in cases {
+        assert_eq!(line_state_at(&svg, var, *row).as_deref(), Some(*want), "{}: {}'s line from row {}", name, var, row);
     }
 }
 
