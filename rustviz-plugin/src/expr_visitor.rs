@@ -4294,6 +4294,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       && !self.tcx.typeck(e.hir_id.owner).node_type(e.hir_id).is_unit()
   }
 
+  /// `*b` with `b` a `Box` variable (`Box<String>`; not a reference):
+  /// `Deref(b)`, drawn as `*b` on b's column, as `let s = *b;` is.
+  pub fn box_contents_of(&self, e: &'tcx Expr<'tcx>) -> Option<ResourceTy> {
+    let ExprKind::Unary(UnOp::Deref, inner) = e.kind else { return None };
+    if e.span.from_expansion() || !self.tcx.typeck(inner.hir_id.owner).node_type(inner.hir_id).is_box() {
+      return None;
+    }
+    match fetch_rap(inner, &self.tcx, &self.raps) {
+      Some(b) if !b.is_ref() && !b.is_fn() => Some(ResourceTy::Deref(b)),
+      _ => None,
+    }
+  }
+
   pub fn match_array_elems(&mut self, lhs: ResourceTy, elems: &'tcx [Expr<'tcx>], line_num: usize) {
     let mut drew_source = false;
     for elem in elems {
@@ -4301,7 +4314,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         ExprKind::Path(_) | ExprKind::Field(..) if !elem.span.from_expansion() => {
           expr_to_rap_name(elem, &self.tcx).filter(|n| self.raps.contains_key(n))
         }
-        _ => None,
+        // `[*b]`: the Box's contents move into the array (#1191).
+        _ => self.box_contents_of(elem).and_then(|b| b.extract_rap().map(|r| r.name().to_owned())),
       };
       let ty = self.tcx.typeck(elem.hir_id.owner).node_type(elem.hir_id);
       if name.is_none() && matches!(lhs, ResourceTy::Caller) && self.is_returned_call_result(elem) {
@@ -4319,7 +4333,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       self.match_rhs(lhs.clone(), elem, e);
       drew_source = true;
       // A struct moved into the array takes its fields with it.
-      if !is_copy {
+      if !is_copy && self.box_contents_of(elem).is_none() {
         let mut stack = self.struct_children(&name);
         while let Some(child) = stack.pop() {
           stack.extend(self.struct_children(child.name()));
@@ -7832,7 +7846,8 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
               self.match_rhs(ResourceTy::Caller, elem, e);
               continue;
             }
-            let is_place = matches!(elem.kind, ExprKind::Path(_) | ExprKind::Field(..));
+            // `(*b, 1)`: the Box's contents (#1191).
+            let is_place = matches!(elem.kind, ExprKind::Path(_) | ExprKind::Field(..)) || self.box_contents_of(elem).is_some();
             if is_place && matches!(e, Evt::Move) && !elem.span.from_expansion()
               && !typeck.node_type(elem.hir_id).is_ref()
             {

@@ -354,6 +354,16 @@ pub fn param_rest_dropped(fn_name: &str, parts: &[String]) -> String {
     )
 }
 
+// `fn f(_: String)`: the pattern binds no name, but f still owns the
+// argument, in the column `my_name` (`(parameter)`), until it returns
+// (#1243).
+pub fn event_dot_unbound_param_init(my_name: &String, fn_name: &String) -> String {
+    format!(
+        "{0} is the value the caller passed to {1}. The parameter's pattern binds no name, but {1} owns the value until it returns",
+        styled_name_html(my_name), styled_name_html(fn_name)
+    )
+}
+
 pub fn event_dot_owner_init_from_caller(my_name: &String) -> String {
     let my_name_fmt = styled_name_html(my_name);
     format!("{0} acquires ownership from the caller", my_name_fmt)

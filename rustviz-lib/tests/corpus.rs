@@ -20821,6 +20821,41 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "to pick",
         ],
     },
+    TooltipExpect {
+        name: "box_contents_returned_1191",
+        // #1191: returning `*b` moves the String inside b to the caller;
+        // b keeps the Box and frees its heap allocation at its scope end.
+        // Main said b's resource went to the caller (then that only the
+        // allocation is freed), and for `(*b, 1)` / `[*b]` drew no move
+        // and dropped the String at b's scope end.
+        must_contain: &[
+            "*b's resource is moved to the caller",
+            "*b's value is copied to the caller",
+            "b goes out of scope. Its contents were moved out earlier, so only the Box's heap allocation is freed.",
+            "Move from *b to _a",
+        ],
+        must_not_contain: &[
+            "=b's resource is moved to the caller",
+            "=b's value is copied to the caller",
+            "Move from *b to Some",
+            "b goes out of scope. Its resource is dropped (including the String it holds).",
+        ],
+    },
+    TooltipExpect {
+        name: "unbound_param_drop_1243",
+        // #1243: `_: String` binds nothing, but f owns the argument until
+        // it returns, where it is dropped.
+        must_contain: &[
+            "(parameter) is the value the caller passed to f. The parameter's pattern binds no name, but f owns the value until it returns",
+            "(parameter 2) is the value the caller passed to f. The parameter's pattern binds no name, but f owns the value until it returns",
+            "(parameter) goes out of scope. Its resource is dropped.",
+            "(parameter 2) goes out of scope. Its resource is dropped.",
+            "(parameter) is the value the caller passed to g. The parameter's pattern binds no name, but g owns the value until it returns",
+            "(parameter) is the value the caller passed to h. The parameter's pattern binds no name, but h owns the value until it returns",
+            "(parameter) goes out of scope. Its resource is dropped (including every String it holds).",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop

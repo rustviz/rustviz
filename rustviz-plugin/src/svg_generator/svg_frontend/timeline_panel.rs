@@ -4691,6 +4691,10 @@ fn render_return_to_caller_arrow(line_number: &usize, external_event: &ExternalE
             ExternalEvent::Copy { from: ResourceTy::Index(r, place, _), .. } =>
                 hover_messages::event_dot_copy_element_to_caller(
                     r.name(), place, r.is_ref(), if r.is_ref() { r.points_to_copy() } else { r.holds_value() }),
+            // `*b` returned with b a Box: its contents go to the caller,
+            // not b (#1191).
+            ExternalEvent::Move { from: ResourceTy::Deref(r), .. } | ExternalEvent::Copy { from: ResourceTy::Deref(r), .. } =>
+                message(&format!("*{}", r.name())),
             _ => message(&rap.name().to_string()),
         };
 
