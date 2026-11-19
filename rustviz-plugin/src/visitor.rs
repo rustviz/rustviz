@@ -5310,7 +5310,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// points to.
   fn moved_mut_ref_arg(&self, e: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
     let typeck = self.tcx.typeck(e.hir_id.owner);
-    if !matches!(e.kind, ExprKind::Path(_)) || typeck.expr_ty(e).ref_mutability() != Some(Mutability::Mut)
+    // (Also a field holding one, `for x in h.r`, #1129.)
+    if !matches!(e.kind, ExprKind::Path(_) | ExprKind::Field(..)) || typeck.expr_ty(e).ref_mutability() != Some(Mutability::Mut)
       || !typeck.expr_adjustments(e).is_empty() {
       return None;
     }
@@ -7901,30 +7902,52 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         //   anything else (Range, call result, …) ⇒ Bind (below)
         let for_line = self.tcx.sess.source_map()
           .lookup_char_pos(expr.span.lo()).line;
+        let head_rty = get_rap(head_arg, &self.tcx, &self.raps);
+        // A variable, or a field with a column of its own (`for n in
+        // t.names`, `self.names`, `pair.0`; #1164).
+        let place_head = match head_arg.kind {
+          ExprKind::Path(_) => true,
+          ExprKind::Field(..) => matches!(head_rty, ResourceTy::Value(_)),
+          _ => false,
+        };
+        // `for x in r` with `r: &mut Vec<_>`: `IntoIterator::into_iter`
+        // takes a generic `Self`, so no reborrow is inserted and r is
+        // moved into the loop's iterator (using r after the loop is
+        // E0382; #1129). A shared `&` head is copied.
+        let head_moves_ref = place_head && {
+          let typeck = self.tcx.typeck(head_arg.hir_id.owner);
+          typeck.node_type(head_arg.hir_id).ref_mutability() == Some(Mutability::Mut)
+            && typeck.expr_adjustments(head_arg).is_empty()
+            && head_rty.extract_rap().is_some_and(|r| r.is_mutref())
+        };
         let iterand_evt = match head_arg.kind {
           ExprKind::AddrOf(_, Mutability::Not, _) => Some(Evt::SBorrow),
           ExprKind::AddrOf(_, Mutability::Mut, _) => Some(Evt::MBorrow),
-          ExprKind::Path(_) => {
+          _ if head_moves_ref => Some(Evt::Move),
+          _ if place_head => {
             let head_ty = self.tcx.typeck(head_arg.hir_id.owner)
               .node_type(head_arg.hir_id);
             let is_copy = self.tcx.type_is_copy_modulo_regions(
               typing_env(self.tcx, head_arg.hir_id.owner),
               head_ty);
-            if head_ty.is_ref() { None }   // already a ref binding; skip
+            if head_ty.is_ref() { None }   // a shared ref, copied in
             else if is_copy { None }       // Range / Copy iterand
             else { Some(Evt::Move) }
           }
           _ => None,
         };
-        let head_rty = get_rap(head_arg, &self.tcx, &self.raps);
         // `for (i, a) in v.iter().enumerate()`: the loop's iterator
         // borrows `v` until the loop ends (#868).
         let loop_loans = self.keep_loop_head_loans(head_arg);
         // `a.iter_mut().zip(b)` with `b: &mut Vec<_>` moves b into the
         // loop's iterator, which writes through it until the loop ends
         // (#1076).
-        let moved_ref_args: Vec<ResourceAccessPoint> = self.loop_head_ref_args(head_arg)
+        let mut moved_ref_args: Vec<ResourceAccessPoint> = self.loop_head_ref_args(head_arg)
           .into_iter().filter(|r| r.is_mutref()).collect();
+        // The head itself (#1129).
+        if head_moves_ref {
+          moved_ref_args.extend(head_rty.extract_rap().cloned());
+        }
         // `for x in it` where `it` is already an iterator
         // (`let it = v.iter_mut();`): `IntoIterator::into_iter`
         // returns its argument unchanged, so the loop *moves*
@@ -7933,7 +7956,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // Compare the head's type with the type of the
         // `into_iter(head)` call: they are equal only for an
         // iterator.
-        let head_is_iterator = matches!(head_arg.kind, ExprKind::Path(_))
+        let head_is_iterator = place_head && !head_moves_ref
           && matches!(iterand_evt, Some(Evt::Move))
           && {
             let typeck = self.tcx.typeck(head_arg.hir_id.owner);
@@ -7952,7 +7975,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // (`it`) is the loop's iterator itself, so its drop is
         // on its own column (`iterator_head`).
         let iterator_needs_drop = matches!(iterand_evt, Some(Evt::Move))
-          && matches!(head_arg.kind, ExprKind::Path(_))
+          && place_head
           && self.needs_drop(
             self.tcx.typeck(guard_expr.hir_id.owner).node_type(guard_expr.hir_id),
             guard_expr.hir_id.owner);
@@ -8006,10 +8029,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           let pat_ty = self.tcx.typeck(user_pat.hir_id.owner)
             .pat_ty(user_pat);
             let pointee_copy = self.ref_pointee_is_copy(pat_ty, user_pat.hir_id.owner);
-          if pat_ty.is_ref() && head_is_iterator {
+          if pat_ty.is_ref() && (head_is_iterator || head_moves_ref) {
             // A reference an iterator hands out: its lender isn't
             // known here, and nothing is "returned" to the
-            // iterator (or to anything) when it ends.
+            // iterator (or to anything) when it ends. For `for x in
+            // r` with r a `&mut` moved in (#1129), a write through x
+            // goes into the resource r points to (#1046).
+            if head_moves_ref && pat_ty.ref_mutability() == Some(Mutability::Mut) {
+              if let Some(roots) = self.loop_item_roots(head_arg) {
+                let prev = self.loop_ref_into.insert(pat_name.clone(), roots);
+                loop_ref_prev.push((pat_name.clone(), prev));
+              }
+            }
             self.add_ref(
               pat_name.clone(),
               bool_of_mut(pat_ty.ref_mutability().unwrap()),
@@ -8095,6 +8126,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             } else {
               self.add_ev(for_line, Evt::Move, ResourceTy::Anonymous, head_rty, false);
             }
+            self.add_ev(for_line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
+          } else if head_moves_ref {
+            // r's reference is moved into the loop's iterator; each x
+            // is a reference `next()` hands out (#1129).
+            self.add_ev(for_line, Evt::Move, ResourceTy::Anonymous, head_rty.clone(), false);
             self.add_ev(for_line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
           } else if let Some(e) = iterand_evt {
             // `for n in a` moving a collection of Copy elements

@@ -2934,6 +2934,15 @@ pub fn event_dot_holder_acquire(my_name: &String, from_name: &String) -> String 
     )
 }
 
+// `let o = Some(r);`, `let v = vec![r];` with r a `&mut` (#1128): the
+// reference r held is moved into o's value, so o now holds the borrow.
+pub fn event_dot_holder_takes_ref(my_name: &String, from_name: &String) -> String {
+    format!(
+        "the reference {1} held is moved into {0}'s value, so {0} now holds its borrow",
+        styled_name_html(my_name), styled_name_html(from_name)
+    )
+}
+
 // `let h = g;` with g a closure (#704): h gets g's closure value, a
 // copy (a closure that captures by reference only shared borrows, and
 // otherwise Copy values, is Copy) or by a move. Nothing is captured.
