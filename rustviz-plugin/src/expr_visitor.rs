@@ -9659,6 +9659,22 @@ pub fn print_out_of_scope(&mut self){
   /// Loops are left alone: a borrow used in a loop body lasts across
   /// iterations.
   fn end_outer_borrows_in_arms(&mut self) {
+    // What holds a borrow from where it's assigned: a reference or a
+    // value holding one, or a struct one of whose reference fields does
+    // (`x` for `x.part`).
+    let holders: HashSet<String> = {
+      let mut h = HashSet::new();
+      #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "collected into a set")]
+      for k in self.borrow_map.keys() {
+        let mut n = k.as_str();
+        h.insert(n.to_owned());
+        while let Some((p, _)) = n.rsplit_once('.') {
+          h.insert(p.to_owned());
+          n = p;
+        }
+      }
+      h
+    };
     let mut i = 0;
     while i < self.preprocessed_events.len() {
       let (line, ev) = &self.preprocessed_events[i];
@@ -9689,7 +9705,7 @@ pub fn print_out_of_scope(&mut self){
       // that loan. An end of an earlier loan (`c = &y;` ends c's loan of
       // x, made before the conditional; #778, #801) isn't described by it.
       let made = self.borrow_map.get(r.name()).filter(|d| ends_current_loan(&ev.1, d)).map(|d| d.assigned_at);
-      end_borrow_in_arms(self.preprocessed_events, ev, &r, lender.as_ref(), made, stacked, self.unique_id, &self.moved_into_result);
+      end_borrow_in_arms(self.preprocessed_events, ev, &r, lender.as_ref(), made, stacked, self.unique_id, &self.moved_into_result, &holders);
     }
   }
 }
@@ -10324,11 +10340,14 @@ fn branch_ending_borrow(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoi
 /// Whether `events` (an arm's, not looking into nested conditionals)
 /// move the reference `r` into another reference, which then holds
 /// its borrow, or into a call whose result a holder keeps (`let r2 =
-/// id(r);`, `moved_into_result`, #1128; see `ref_handed_off`).
-fn handed_off_in(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint, moved_into_result: &HashSet<usize>) -> bool {
+/// id(r);`, `moved_into_result`, #1128; see `ref_handed_off`). Also a
+/// value that holds a borrow (`r`: `Vec<&T>`, `Option<Part>`) moved into
+/// a variable that holds it from there (`let x = u;`, `if let Some(x) = o`
+/// with `x.part`; `holders`, #1198).
+fn handed_off_in(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint, moved_into_result: &HashSet<usize>, holders: &HashSet<String>) -> bool {
   events.iter().any(|(_, e)| matches!(e,
     ExternalEvent::Move { from: ResourceTy::Value(f), to: ResourceTy::Value(t), id, .. }
-      if f == r && (t.is_ref() || (t.is_fn() && moved_into_result.contains(id)))))
+      if f == r && (t.is_ref() || (t.is_fn() && moved_into_result.contains(id)) || (!r.is_ref() && holders.contains(t.name())))))
 }
 
 /// Whether `e` uses `r`; a conditional `r` is live in does.
@@ -10373,6 +10392,7 @@ fn end_borrow_in_arms(
   in_line_map: bool,
   unique_id: &mut usize,
   moved_into_result: &HashSet<usize>,
+  holders: &HashSet<String>,
 ) {
   let Some((k, a)) = branch_ending_borrow(events, r, ev.0) else {
     // Right after r's last use on or before its line, ahead of other
@@ -10404,13 +10424,13 @@ fn end_borrow_in_arms(
       // `let h2 = h;` in this arm moved r's reference on (a `&mut`, or
       // a struct's field with the struct, #637): what holds it now
       // ends the borrow on this path, so r doesn't (#209).
-      if handed_off_in(&arm.e_data, r, moved_into_result) {
+      if handed_off_in(&arm.e_data, r, moved_into_result, holders) {
         continue;
       }
       if in_line_map && ev.1.is_arrow_ev() && branch_ending_borrow(&arm.e_data, r, ev.0).is_none() {
         arm.line_map.entry(ev.0).or_default().push(ev.1.clone());
       }
-      end_borrow_in_arms(&mut arm.e_data, ev.clone(), r, lender, made, in_line_map, unique_id, moved_into_result);
+      end_borrow_in_arms(&mut arm.e_data, ev.clone(), r, lender, made, in_line_map, unique_id, moved_into_result, holders);
       continue;
     }
     if made_in_arm {
