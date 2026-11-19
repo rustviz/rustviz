@@ -6282,7 +6282,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // loop ends: drawn where the new value arrives (#586), ahead
       // of the arrivals, so that several `break`s' arrows stacked
       // on that line (#561) don't push it onto a row of its own.
-      if let (ResourceTy::Value(rap), ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _)) = (&lhs_rty, rhs_expr.kind) {
+      // The same for a labeled block whose `break`s carry its value
+      // (`r = 'a: { if c { break 'a s; } t };`, #1134).
+      let valued_block = matches!(rhs_expr.kind, ExprKind::Block(b, Some(_))
+        if breaks_to_id(rhs_expr, b.hir_id).iter().any(|(_, v)| v.is_some()));
+      if let (ResourceTy::Value(rap), true) = (&lhs_rty, valued_block || matches!(rhs_expr.kind, ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _))) {
         let arrivals: Vec<(usize, usize)> = self.preprocessed_events.iter().enumerate().skip(n_events)
           .filter(|(_, (_, ev))| matches!(ev,
             ExternalEvent::Move { to: ResourceTy::Value(t), .. }
@@ -9937,7 +9941,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       };
       let saved_line = joined_at.map(|l| self.line_override.replace(l));
       let first_id = *self.unique_id;
-      self.bind_pat(pat, init, is_skipped);
+      // `let (x, n) = 'blk: { if c { break 'blk (s, 1); } (t, 2) };`
+      // (#1226): the pattern takes apart whichever value ended the
+      // block, a `break`'s or its last expression, each drawn as one of
+      // them where the block ends (as a plain binding is, #1134).
+      let block_values = (!is_skipped && els.is_none() && !matches!(pat.kind, PatKind::Binding(..))
+        && matches!(init.kind, ExprKind::Block(_, Some(_))))
+        .then(|| self.labeled_block_values(init)).filter(|v| v.len() > 1);
+      if let Some(values) = block_values {
+        self.pair_break_alternatives(init, values, |this, v| this.bind_pat(pat, v, false));
+      } else {
+        self.bind_pat(pat, init, is_skipped);
+      }
       if let Some(l) = saved_line {
         self.line_override = l;
       }
@@ -12783,7 +12798,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       for (value, brk) in &values {
         let in_loop = local_of_path(value)
           .is_some_and(|l| loop_expr.span.contains(self.tcx.hir_span(l)));
-        self.break_alt = Some(BreakAlt { brk: brk.clone(), in_loop });
+        // A labeled block's value comes from a `break` or its last
+        // expression (#1134).
+        let end = match loop_expr.kind {
+          ExprKind::Block(b, Some(_)) if b.expr.is_some_and(|t| t.hir_id == value.hir_id) => AltEnd::BlockTail,
+          ExprKind::Block(_, Some(_)) => AltEnd::Block,
+          _ => AltEnd::Loop,
+        };
+        self.break_alt = Some(BreakAlt { brk: brk.clone(), in_loop, end });
         pair(self, value);
         self.break_alt = None;
       }
@@ -12794,7 +12816,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
   /// `brk` (a `break` expression) as written, for a tooltip: `None`
   /// when it is too long or spans lines.
-  fn break_text(&self, brk: &Expr) -> Option<String> {
+  pub(crate) fn break_text(&self, brk: &Expr) -> Option<String> {
     if brk.span.from_expansion() {
       return None;
     }

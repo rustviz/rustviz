@@ -2123,7 +2123,7 @@ fn render_dot(
                             data.title = hover_messages::event_dot_break_alt_move(&name, &to.name(), alt, what);
                         }
                         Event::Duplicate { break_alt: Some(alt), .. } => {
-                            data.title.push_str(&hover_messages::break_alt_if_suffix(&alt.brk));
+                            data.title.push_str(&hover_messages::break_alt_if_suffix(alt));
                         }
                         // The lender of a borrow one of the `break`s
                         // made (`break rb` reborrowing a `&mut`, #657):
@@ -2131,10 +2131,10 @@ fn render_dot(
                         // loop.
                         Event::StaticLend { id, .. } | Event::MutableLend { id, .. } => {
                             if let Some(alt) = borrow_break_alt(*id, visualization_data) {
-                                data.title = hover_messages::with_break_alt_lend(&data.title, &alt.brk);
+                                data.title = hover_messages::with_break_alt_lend(&data.title, &alt);
                             }
                         }
-                        Event::Acquire { is, break_alt: Some(_), .. } | Event::Copy { is, break_alt: Some(_), .. } => {
+                        Event::Acquire { is, break_alt: Some(alt), .. } | Event::Copy { is, break_alt: Some(alt), .. } => {
                             // Which `break` ran isn't known here, so
                             // name no source: what a literal would say.
                             data.title = if copyable_assign {
@@ -2143,7 +2143,7 @@ fn render_dot(
                                 let generic = Event::Acquire { from: ResourceTy::Anonymous, is: is.clone(), via_try: None, id: 0, break_alt: None, loop_head: LoopHead::No };
                                 generic.print_message_with_name(&mut name.clone())
                             };
-                            data.title.push_str(&hover_messages::break_alt_receiver_suffix());
+                            data.title.push_str(&hover_messages::break_alt_receiver_suffix_for(alt));
                         }
                         _ => {}
                     }
