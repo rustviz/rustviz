@@ -4905,6 +4905,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // in this case we are borrowing from b; `&p.name` with p a
       // reference is a reborrow of the field through p (#266).
       let lender = self.rap_or_field_through_ref(&expr);
+      // `&compute()` / `&mk()[0]` with no `(temporary)` column (its value
+      // has nothing to drop, #400): the reference borrows that temporary,
+      // never the function, which lends nothing (#1155).
+      let lender = match lender {
+        ResourceTy::Value(f) if f.is_fn() => ResourceTy::Anonymous,
+        other => other,
+      };
       // `&mut m` / `&x` coerced to `&mut String` / `&String` borrows
       // `*m` / `*x`, as `&mut *m` / `&*x` does: the borrow is given
       // back to `*m` / `*x` (#926, #939).
