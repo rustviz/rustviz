@@ -286,9 +286,14 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     /// of `x` that `r` holds is dead on the way to `r = &y;` (`r` is
     /// overwritten before it is read), though it lives on to a later read
     /// of `r` on the path that skips the `if`. None when the loan is in
-    /// scope at `write_line` itself or later on a path back to it (a
+    /// scope at the write itself or later on a path back to it (a
     /// loop), or never before it.
-    pub fn loan_end_on_path_to(&self, borrow_idx: usize, write_line: usize) -> Option<usize> {
+    ///
+    /// `write`: the span of the write, when known. Only the locations on
+    /// `write_line` inside it are the write: in a one-line `if c { r =
+    /// &y; }` the condition, on the same line, is read on both paths, and
+    /// the loan can be in scope there (#1188). The end is then that line.
+    pub fn loan_end_on_path_to(&self, borrow_idx: usize, write_line: usize, write: Option<Span>) -> Option<usize> {
         let body_with_facts = self.bwf;
         let body = &body_with_facts.body;
         let borrows = Borrows::new(self.tcx, body, &body_with_facts.region_inference_context, &body_with_facts.borrow_set);
@@ -299,11 +304,16 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
             for statement_index in 0..=data.statements.len() {
                 let location = Location { block, statement_index };
                 let line = self.location_to_line(location, body_with_facts);
-                if line == write_line {
+                let is_target = line == write_line
+                    && write.is_none_or(|w| w.contains(self.location_to_span(location, body_with_facts)));
+                if is_target {
                     targets.push(location);
                 }
                 cursor.seek_before_primary_effect(location);
                 if cursor.get().iter().any(|b| b.index() == borrow_idx) {
+                    if is_target {
+                        return None;
+                    }
                     in_scope.push((location, line));
                 }
             }
@@ -330,7 +340,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
             .filter(|(l, _)| reaches.contains(l))
             .map(|(_, line)| line)
             .max()
-            .filter(|&end| end < write_line)
+            .filter(|&end| end < write_line || (write.is_some() && end == write_line))
     }
 
     /// Where rustc's borrow checker has the loan `borrow_idx` in scope
@@ -492,6 +502,24 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                     data.terminator().successors().map(|block| Location { block, statement_index: 0 }).collect()
                 }
             };
+            // The loan has to be issued on a path that reaches the write: a
+            // loan of the other branch (`if c { r = &mut s; } else { r =
+            // &mut s; }`, the write being the else's own borrow) never
+            // existed on this one (#1153).
+            let mut seen: std::collections::HashSet<Location> = std::collections::HashSet::new();
+            let mut work: Vec<Location> = succ(issued);
+            let mut reaches_write = false;
+            while let Some(l) = work.pop() {
+                if !seen.insert(l) { continue; }
+                if writes.iter().any(|(w, _)| *w == l) {
+                    reaches_write = true;
+                    break;
+                }
+                work.extend(succ(l));
+            }
+            if !reaches_write {
+                continue;
+            }
             let uses = |l: Location| -> bool {
                 let data = &body.basic_blocks[l.block];
                 let mut v = LocalUse { local: holder, found: false };
@@ -1421,6 +1449,22 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     /// `None` when this body has no MIR local named `name` (a binding
     /// inside a closure), or a field in `fields` isn't found.
     pub fn loans_held_by(&self, name: &str, fields: &[&str]) -> Option<BTreeMap<String, bool>> {
+        self.loans_held_in(name, fields, None)
+    }
+
+    /// `loans_held_by`, for only the loans issued inside `within` (a
+    /// reference's initializer): the kind of the loans that this
+    /// assignment puts in `name`'s lifetimes. That kind is not always
+    /// the reference's own: `let r: &String = &mut s;` and `let r =
+    /// downgrade(&mut s);` (`fn(&mut String) -> &str`) keep a mutable
+    /// loan of s in a shared reference, and `let r = &mut &x;` keeps a
+    /// shared loan of x in a mutable one (#1122, #1131).
+    /// (`name.f.g` when `fields` is `["f", "g"]`, as in `loans_held_by`.)
+    pub fn loans_held_from(&self, name: &str, fields: &[&str], within: Span) -> Option<BTreeMap<String, bool>> {
+        self.loans_held_in(name, fields, Some(within))
+    }
+
+    fn loans_held_in(&self, name: &str, fields: &[&str], within: Option<Span>) -> Option<BTreeMap<String, bool>> {
         let bwf = self.bwf;
         let body = &bwf.body;
         let names = self.mir_local_names(bwf);
@@ -1457,6 +1501,12 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let mut out: BTreeMap<String, bool> = BTreeMap::new();
         for loan in held {
             let b = &bwf.borrow_set[loan];
+            if let Some(w) = within {
+                let sp = self.location_to_span(b.reserve_location(), bwf);
+                if !w.contains(sp) {
+                    continue;
+                }
+            }
             if let Some(n) = self.src_name_of_local(Some(b.borrowed_place().local), &names) {
                 *out.entry(n).or_insert(false) |= b.kind().mutability().is_mut();
             }

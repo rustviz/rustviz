@@ -2095,6 +2095,8 @@ fn render_dot(
                         } else {
                             data.title = event.print_message_with_name(& mut name);
                         }
+                    } else if let Some(title) = reborrow_kept_mut_loan_title(event, &history[..i], &name, rap) {
+                        data.title = title;
                     } else if let Some(title) = ends_several_loans_title(event, history, *line_number, &mut name) {
                         data.title = title;
                     } else if let Some(title) = loop_head_lend_title(event, &name, rap, visualization_data) {
@@ -3291,6 +3293,27 @@ fn lent_out_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
 /// The dot of the borrow a `for` loop's head `&v` / `&mut v` makes when
 /// only the loop's iterator holds it (`for &y in &v`; #885): the
 /// iterator has no column, so say it is the borrower.
+/// The end of a shared reborrow made through a `&mut` reference that was
+/// then given another reference (`let first = &*r; r = &mut b;`, #1182):
+/// it gives back the lender's mutable loan (its use kept that loan
+/// alive), but its own borrow was an immutable one.
+fn reborrow_kept_mut_loan_title(event: &Event, before: &[(usize, Event)], name: &String, rap: &ResourceAccessPoint) -> Option<String> {
+    let Event::MutableDie { to: ResourceTy::Value(lender), .. } = event else { return None };
+    if !rap.is_ref() || rap.is_mutref() {
+        return None;
+    }
+    let through = before.iter().rev().find_map(|(_, e)| match e {
+        Event::StaticBorrow { from, .. } => Some(Some(from)),
+        Event::MutableBorrow { .. } => Some(None),
+        _ => None,
+    })??;
+    let r = match through {
+        ResourceTy::Deref(r) | ResourceTy::Value(r) | ResourceTy::DerefField(r, ..) | ResourceTy::Index(r, ..) if r.is_mutref() => r,
+        _ => return None,
+    };
+    Some(hover_messages::event_dot_reborrow_kept_mut_loan(name, r.name(), lender.name()))
+}
+
 fn loop_head_lend_title(event: &Event, name: &String, rap: &ResourceAccessPoint, visualization_data: &VisualizationData) -> Option<String> {
     fn is_loop_head_lend(events: &[(usize, ExternalEvent)], lend: usize) -> bool {
         events.iter().any(|(_, ev)| match ev {
