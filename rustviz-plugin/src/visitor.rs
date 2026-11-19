@@ -3152,7 +3152,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.exit_frames.push(ExitFrame::Branch { len: 0, hide: Vec::new(), binds: Vec::new(), binds_at: 0 });
     self.drop_locals_on_exit(expr_to_line(ret, &self.tcx), value, None, false, "return");
     self.exit_frames.pop();
-    self.keep_inline_exit_drops(lo..*self.unique_id);
+    self.keep_inline_exit_drops(lo..*self.unique_id, ret);
   }
 
   /// Whether statement `st` never completes normally (its expression
@@ -3259,13 +3259,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// (`all_paths_exit`): the code after it never runs and draws
   /// nothing (`visit_live_stmts`), and no scope end drops what the
   /// exit did.
-  fn keep_inline_exit_drops(&mut self, ids: std::ops::Range<usize>) {
+  fn keep_inline_exit_drops(&mut self, ids: std::ops::Range<usize>, at: &'tcx Expr<'tcx>) {
     let kept: HashSet<usize> = self.preprocessed_events.iter()
       .map(|(_, e)| e.get_id())
       .filter(|id| ids.contains(id) && self.exit_drops.contains(id))
       .collect();
     self.exit_drops.retain(|id| !kept.contains(id));
+    self.note_all_paths_exit(at);
+  }
+
+  /// Every path leaves the function at `at` (directly in its body):
+  /// see `all_paths_exit`.
+  fn note_all_paths_exit(&mut self, at: &'tcx Expr<'tcx>) {
     self.all_paths_exit = true;
+    self.all_paths_exit_from = self.all_paths_exit_from.min(expr_to_line(at, &self.tcx));
   }
 
   /// `drop_locals_on_exit` for a panic call inside a branch.
@@ -5581,6 +5588,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
     }
     self.visit_expr(lhs_expr);
+    // `s = return;`, `s = panic!()`, `s = break;` (#1142): the right-hand
+    // side runs first and never finishes, so the assignment never
+    // happens: no new value, and no drop of the old one. What the exit
+    // itself drops is drawn by the exit.
+    if destructure_hid.is_none() && matches!(expr.kind, ExprKind::Assign(..)) && self.expr_diverges(rhs_expr) {
+      self.visit_expr(rhs_expr);
+      return;
+    }
     if destructure_hid.is_none() && self.init_from_branches(expr, lhs_expr, rhs_expr) {
       return;
     }
@@ -6833,7 +6848,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // drops stay on the branch's columns, ended there (#1013).
             let leaves_branch = always_matches && !leaves_fn && self.inline_in_branch(expr) && self.ends_at_exits(if_expr, true);
             if leaves_fn {
-              self.keep_inline_exit_drops(if_ids.clone());
+              self.keep_inline_exit_drops(if_ids.clone(), expr);
             } else if !leaves_branch {
               self.discard_exit_drops(if_ids.clone());
             }
@@ -7084,7 +7099,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         *self.unique_id += 1;
     // Both branches leave the function: nothing after the `if` runs.
     if else_expr.is_some() && if_diverges && else_diverges && self.at_fn_level(expr) {
-      self.all_paths_exit = true;
+      self.note_all_paths_exit(expr);
     }
 }
 
@@ -7494,7 +7509,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if inline {
         // Unless it always leaves the function (#1004).
         if leaves_fn {
-          self.keep_inline_exit_drops(match_lo..*self.unique_id);
+          self.keep_inline_exit_drops(match_lo..*self.unique_id, expr);
         } else if !leaves_branch {
           self.discard_exit_drops(match_lo..*self.unique_id);
         }
@@ -7815,7 +7830,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // TODO marker), which landed the join dot one row above
     // the `};`, on the last arm's body line.
     if !branch_data.is_empty() && branch_data.iter().all(|b| b.diverges) && self.at_fn_level(expr) {
-      self.all_paths_exit = true;
+      self.note_all_paths_exit(expr);
     }
     self.note_exit_scope(expr);
     let loop_assigned = self.loop_assigned_now(&liveness);
@@ -10009,7 +10024,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.uninit_locals = uninit_before;
     self.maybe_init_locals = maybe_init_before;
     let ids = lo..*self.unique_id;
-    if !self.preprocessed_events.iter().any(|(_, e)| ids.contains(&e.get_id()) && self.exit_drops.contains(&e.get_id())) {
+    // Drawn inline when the block changes nothing the matched path
+    // sees: no drop at its exit, and no move out of a variable declared
+    // before it (`else { drop(s); return; }`, #1133: drawn inline, s
+    // read as moved on the matched path too).
+    let moves_outer = |e: &ExternalEvent| matches!(e, ExternalEvent::Move { from: ResourceTy::Value(r), .. }
+      if !r.is_fn() && !r.is_temporary() && *r.hash() < hash_lo as u64);
+    if !self.preprocessed_events.iter().any(|(_, e)| ids.contains(&e.get_id())
+      && (self.exit_drops.contains(&e.get_id()) || moves_outer(e))) {
       return None;
     }
     let mut else_ev = self.take_branch_events(ids, None, &HashSet::new());

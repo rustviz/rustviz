@@ -641,6 +641,10 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // branch leaving the function (`return`, panic): the closing brace
   // is unreachable, so it drops nothing (#515).
   pub all_paths_exit: bool,
+  // The first line of the earliest such construct: a block that ended
+  // above it (`{ let s = …; }` before the conditional) dropped its
+  // locals at its own `}`, which does run (#1139).
+  pub all_paths_exit_from: usize,
   // Set when, once `all_paths_exit` was set, a block's tail was left
   // unvisited: it never runs (#1004).
   pub dead_tail: bool,
@@ -989,6 +993,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       loop_maybe_entry: Vec::new(),
       break_states: Vec::new(),
       all_paths_exit: false,
+      all_paths_exit_from: usize::MAX,
       dead_tail: false,
       dead_code: HashSet::new(),
       borrow_floor: HashMap::new(),
@@ -8663,7 +8668,11 @@ pub fn print_out_of_scope(&mut self){
     // Every path left the function at a `return` / panic above, where
     // owners were dropped or moved out (#515); a reference has no
     // such event, and keeps its scope end.
-    let left_already = self.all_paths_exit && !rap.rap.never_drops() && !rap.rap.is_ref();
+    // Not a variable of a block that ended above the exit (#1139).
+    let (all_exit, exit_from) = (self.all_paths_exit, self.all_paths_exit_from);
+    let left_at = |scope: usize| all_exit && scope >= exit_from
+      && !rap.rap.never_drops() && !rap.rap.is_ref();
+    let left_already = left_at(rap.scope) && rap.extra_scopes.iter().all(|s| left_at(*s));
     // An unbound temporary is dropped by its own `TemporaryDrop`, which
     // may sit in a branch (a let chain's later part, #604): no scope end.
     // A first variable declared in a branch or loop body was ended
@@ -8685,12 +8694,12 @@ pub fn print_out_of_scope(&mut self){
           None => {}
         }
       }
-      if rap.is_global && !duplicate {
+      if rap.is_global && !duplicate && !left_at(rap.scope) {
         self.add_external_event(rap.scope, ExternalEvent::GoOutOfScope { ro: rap.rap.clone(), holds: None, id: *self.unique_id, early: None });
         *self.unique_id += 1;
       }
       // The later variables that share this column (#589).
-      for &scope in rap.extra_scopes.iter() {
+      for &scope in rap.extra_scopes.iter().filter(|s| !left_at(**s)) {
         self.add_external_event(scope, ExternalEvent::GoOutOfScope { ro: rap.rap.clone(), holds: None, id: *self.unique_id, early: None });
         *self.unique_id += 1;
       }

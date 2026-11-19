@@ -20753,6 +20753,96 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Move from boxed to d",
         ],
     },
+    TooltipExpect {
+        name: "let_else_move_1133",
+        // #1133: a `let … else` whose `else` block moves a variable but
+        // drops nothing at its exit was drawn inline: the move read as
+        // happening on the matched path too, which then borrowed and
+        // dropped a moved variable. The block runs only when the pattern
+        // fails, and leaves the function there, so after the `let` the
+        // variable still owns its value. (in_loop's else drops the loop's
+        // temporary at its exit, so it was already drawn as a branch.)
+        must_contain: &[
+            "a still owns its resource here: the branch that moved a returned before reaching this point",
+            "b still owns its resource here: the branch that moved b panicked before reaching this point",
+            "d still owns its resource here: the branch that moved d returned before reaching this point",
+            "e still owns its resource here: the branch that moved e returned before reaching this point",
+            "f still owns its resource here: the branch that moved f returned before reaching this point",
+            "a's resource is moved into drop, which drops it",
+        ],
+        must_not_contain: &[
+            // The `if c` around in_if's let-else, which looked like it
+            // moved e on its path.
+            "e may have been moved",
+        ],
+    },
+    TooltipExpect {
+        name: "exit_after_nested_reinit_1135",
+        // #1135: a move, then a nested `if` / `match` / `if let` that
+        // gives the variable a new String on every path, then an exit
+        // (`return`, `panic!`, `continue`). The exit said "No resource is
+        // dropped": the branch's state before its first gap (the nested
+        // conditional's) was the moved one. The variable owns the new
+        // String at the exit, which drops it.
+        must_contain: &[
+            "a goes out of scope. Its resource is dropped.",
+            "b goes out of scope. Its resource is dropped.",
+            "d goes out of scope. Its resource is dropped.",
+            "e goes out of scope. Its resource is dropped.",
+            "f goes out of scope. Its resource is dropped.",
+            "a acquired ownership of a resource (in all branches above)",
+        ],
+        must_not_contain: &[
+            "a goes out of scope. No resource is dropped.",
+            "b goes out of scope. No resource is dropped.",
+            "d goes out of scope. No resource is dropped.",
+            "e goes out of scope. No resource is dropped.",
+            "f goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "inner_block_before_all_exit_1139",
+        // #1139: a bare `{ … }` block, then an `if` / `match` whose every
+        // path leaves the function. The block's locals had no scope end
+        // at all (their drop was never stated): every owner was taken to
+        // have left at the exits, though the block's `}` runs first.
+        // exit_inside's h is in the block that holds the exits: it is
+        // dropped at them and gets no second scope end.
+        must_contain: &[
+            "a goes out of scope. Its resource is dropped.",
+            "b goes out of scope. Its resource is dropped.",
+            "d goes out of scope. Its resource is dropped.",
+            "e goes out of scope. Its resource is dropped.",
+            "f goes out of scope. Its resource is dropped.",
+            "h goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "assign_diverging_rhs_1142",
+        // #1142: `s = return;` (and `= panic!(…)`, `= break`,
+        // `= std::process::exit(1)`, a field, `*r`) drew the assignment
+        // as if it happened: "acquires ownership of a new resource; its
+        // previous resource is dropped". The right-hand side runs first
+        // and never finishes, so nothing is assigned; the exit drops the
+        // old value (`return`, `panic!`) or nothing (`break` out of the
+        // loop, `exit`, which runs no destructors).
+        must_contain: &[
+            "a goes out of scope. Its resource is dropped.",
+            "b goes out of scope. Its resource is dropped.",
+            "p.f goes out of scope. Its resource is dropped.",
+            "u goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "a acquires ownership of a new resource",
+            "b acquires ownership of a new resource",
+            "d acquires ownership of a new resource",
+            "e acquires ownership of a new resource",
+            "p.f acquires ownership of a new resource",
+            "u acquires ownership of a new resource",
+            "*r acquires ownership of a new resource",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
