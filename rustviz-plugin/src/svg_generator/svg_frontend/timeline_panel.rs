@@ -3228,6 +3228,13 @@ fn revoked_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationDa
     lent_out_title(rap, visualization_data, row, path)
 }
 
+/// Whether the reference `r`'s value is moved away (at the top level of
+/// its column) on a line in `from..=line`.
+fn moved_between(visualization_data: &VisualizationData, r: &ResourceAccessPoint, from: usize, line: usize) -> bool {
+    visualization_data.timelines.get(r.hash()).is_some_and(|t| t.history.iter()
+        .any(|(l, e)| (from..=line).contains(l) && matches!(e, Event::Move { .. })))
+}
+
 /// The text of a column's dotted segment from row `line` while it is
 /// mutably lent out (#722), naming who holds the borrow there: a `for`
 /// loop's iterator, or the one variable or closure whose `&mut` borrow
@@ -3260,8 +3267,11 @@ fn lent_out_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
     // Each live lend's holder, and whether it borrows the reference
     // column itself (`&mut r`, #914).
     let mut holders: Vec<(Option<(String, bool, bool)>, bool)> = Vec::new();
-    for (_, e) in history.iter().filter(|(l, _)| *l <= line) {
+    for (l, e) in history.iter().filter(|(l, _)| *l <= line) {
         match e {
+            // A `&mut` reference holder whose value was moved on since
+            // (`let k = id(r);`, #1128) holds nothing any more.
+            Event::MutableLend { to: ResourceTy::Value(r), .. } if r.is_mutref() && moved_between(visualization_data, r, *l, line) => {}
             Event::MutableLend { to, of_ref_var, .. } => holders.push((key(to), *of_ref_var)),
             Event::MutableReacquire { from, .. } => {
                 let k = key(from);
