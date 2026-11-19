@@ -1982,6 +1982,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// the borrow off (`ref_handed_off`), so it draws no end of its own.
   /// A Copy struct copies the reference: both hold the loan.
   fn transfer_ref_fields(&mut self, line_num: usize, from_name: &str, to_name: &str, is_copy: bool) {
+    self.transfer_ref_fields_except(line_num, from_name, to_name, is_copy, None);
+  }
+
+  /// `transfer_ref_fields` for the fields of `from_name` not in `skip`:
+  /// `S { x: 2, ..s1 }` takes s1's reference fields that aren't written
+  /// out (#1126). Only those move, so s1 is partly moved: a `&T` field is
+  /// copied (both hold the loan, as for `let q = s1.r;`) and a `&mut T`
+  /// field is moved, handing its borrow to the new struct's field.
+  pub fn transfer_ref_fields_except(&mut self, line_num: usize, from_name: &str, to_name: &str, is_copy: bool, skip: Option<&HashSet<String>>) {
+    let partial = skip.is_some();
     let prefix = format!("{}.", from_name);
     #[expect(clippy::disallowed_methods, reason = "sorted by (hash, name) below")]
     let mut refs: Vec<ResourceAccessPoint> = self.raps.iter()
@@ -1992,6 +2002,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     refs.sort_by(|a, b| a.hash().cmp(b.hash()).then_with(|| a.name().cmp(b.name())));
     for child in refs {
       let field = &child.name()[prefix.len()..];
+      if skip.is_some_and(|s| s.contains(field)) {
+        continue;
+      }
+      let is_copy = is_copy || (partial && !child.is_mutref());
       let Some(dest) = self.raps.get(&format!("{}.{}", to_name, field)).map(|rd| rd.rap.clone()) else { continue };
       if let Some(loan) = self.borrow_map.get(child.name()).cloned() {
         self.borrow_map.insert(dest.name().clone(), loan);
@@ -8994,6 +9008,11 @@ pub fn match_rhs_struct(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, _qpat
     let base_name = expr_to_rap_name(base_expr, &self.tcx)
       .filter(|n| self.raps.contains_key(n));
     let explicit: HashSet<String> = expr_fields.iter().map(|f| f.ident.as_str().to_owned()).collect();
+    // Its reference fields go too, with their borrows (#1126).
+    if let (Some(b), ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_))) = (&base_name, &lhs) {
+      let (b, to) = (b.clone(), rap.name().clone());
+      self.transfer_ref_fields_except(base_line, &b, &to, false, Some(&explicit));
+    }
     // Field names come from whichever side has per-field RAPs:
     // the new struct, or (when it's returned to the caller) the base.
     let (field_names, dest_prefix): (Vec<(String, bool)>, Option<String>) = match &lhs {
@@ -9418,6 +9437,47 @@ pub fn print_out_of_scope(&mut self){
     for (name, floor) in self.borrow_floor.iter() {
       if let Some(rd) = self.borrow_map.get_mut(name) {
         rd.lifetime = rd.lifetime.max(*floor);
+      }
+    }
+    // A struct's reference field goes with the struct when the struct is
+    // moved into a call (`drop(e)`, `consume(e)`): `e.part` can't be
+    // used after that, so its borrow ends there, even when a copy of it
+    // taken earlier (`let p = e.part;`) keeps the lender borrowed until
+    // later (#1127). The copy gives the borrow back. (A move to another
+    // variable hands the loan on, `transfer_ref_fields`.)
+    let mut moved_ends: Vec<(String, usize)> = Vec::new();
+    #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "collected into a Vec, each entry lowered on its own")]
+    for (name, rd) in self.borrow_map.iter() {
+      if !self.raps.get(name).is_some_and(|r| r.rap.is_ref() && r.rap.is_member()) {
+        continue;
+      }
+      let mut end: Option<usize> = None;
+      let mut parent = name.as_str();
+      while let Some((p, _)) = parent.rsplit_once('.') {
+        parent = p;
+        let Some(prap) = self.raps.get(parent).map(|r| *r.rap.hash()) else { continue };
+        for (line, ev) in self.preprocessed_events.iter() {
+          if let ExternalEvent::Move { from: ResourceTy::Value(f), to, .. } = ev {
+            let into_call = matches!(to, ResourceTy::Anonymous | ResourceTy::Value(ResourceAccessPoint::Function(_)));
+            if into_call && *f.hash() == prap && *line >= rd.assigned_at && *line < rd.lifetime {
+              end = Some(end.map_or(*line, |e: usize| e.min(*line)));
+            }
+          }
+        }
+      }
+      // Only where a drawn copy carries the loan on to where it ends:
+      // the lender's borrow end stays where the borrow checker puts it.
+      // (A struct moved into a value that keeps the loan, `v.push(e)`,
+      // keeps it with nothing else drawn holding it.)
+      let carried = !matches!(rd.lender, ResourceTy::Anonymous) && self.borrow_map.iter()
+        .any(|(n, d)| n != name && d.lender == rd.lender && d.lifetime >= rd.lifetime);
+      if let (Some(end), true) = (end, carried) {
+        moved_ends.push((name.clone(), end));
+      }
+    }
+    for (name, end) in moved_ends {
+      if let Some(rd) = self.borrow_map.get_mut(&name) {
+        rd.lifetime = end;
       }
     }
     // A reference that borrows through another one (`let r = &v[0]` with
