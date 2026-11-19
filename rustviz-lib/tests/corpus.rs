@@ -21421,6 +21421,41 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s goes out of scope. Its resource is dropped here only if s still holds it",
         ],
     },
+    TooltipExpect {
+        name: "slice_pattern_arms_1144",
+        // #1144: a slice pattern in a `match` arm or `if let` drew no
+        // bindings, and the array as never moved: "arr goes out of scope.
+        // Its resource is dropped (including every String it holds)",
+        // though a and b took both Strings. #1166: what a slice pattern
+        // doesn't take (`_`, `..`) stays in the array and is dropped with
+        // it; main said "No resource is dropped" (`let [d, _] = duo;`).
+        // Checked with rustc: `println!("{}", duo[1])` after the `let`
+        // compiles; `duo[0]` is E0382.
+        must_contain: &[
+            "Move from arr to a",
+            "Move from arr to b",
+            "arr goes out of scope. No resource is dropped.",
+            "Move from pair to c",
+            "pair goes out of scope. pair[0] was moved out earlier, so only pair[1] is dropped.",
+            "c goes out of scope. Its resource is dropped.",
+            "Move from trio to first",
+            "Move from trio to last",
+            "trio goes out of scope. trio[0] and trio[2] were moved out in some of the branches above; \
+             each is dropped here only if no branch above moved it (Rust tracks this with runtime drop \
+             flags). trio[1] is dropped.",
+            "duo goes out of scope. duo[0] was moved out earlier, so only duo[1] is dropped.",
+            "three goes out of scope. three[0] was moved out earlier, so only three[1] and three[2] are dropped.",
+            "Partial copy from nums to x",
+            "x is initialized with a copy of a value inside nums",
+        ],
+        must_not_contain: &[
+            "arr goes out of scope. Its resource is dropped",
+            "pair goes out of scope. Its resource is dropped",
+            "trio goes out of scope. Its resource is dropped",
+            "duo goes out of scope. No resource is dropped.",
+            "three goes out of scope. No resource is dropped.",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
