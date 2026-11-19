@@ -2191,6 +2191,16 @@ pub fn event_dot_capture_move_to_closure(my_name: &String, target_name: &String,
     )
 }
 
+// Source dot for a `&mut` reference a `move` closure captures (`move ||
+// r.push('!')`, #1148): the reference moves into the closure, which
+// holds the borrow from then on; the data it points to stays put.
+pub fn event_dot_capture_move_ref_to_closure(my_name: &String, target_name: &String) -> String {
+    format!(
+        "{0}'s reference is captured (moved) by closure {1}; the data it points to is not moved",
+        styled_name_html(my_name), styled_name_html(target_name)
+    )
+}
+
 // Source dot for a Copy upvar captured by value (`move || m + 1`
 // with m: i32; #311). The closure gets its own copy, so the upvar
 // stays usable and the closure has nothing of it to drop. A `&T` is
@@ -2220,6 +2230,19 @@ pub fn event_dot_capture_static_lend_to_closure(my_name: &String, target_name: &
         "{0}'s {2} is captured (immutably borrowed) by closure {1}",
         my_name_fmt, target_fmt, held(holds_value)
     )
+}
+
+// Source dot for a reference variable a closure captures itself (`||
+// println!("{}", r)`: the macro takes `&r`; #1180), not the place it
+// points to. Like `&r` (#925): r is borrowed; r owns nothing.
+pub fn event_dot_capture_ref_var_to_closure(ref_name: &String, target_name: &String, mutable: bool) -> String {
+    let r = styled_name_html(ref_name);
+    let c = styled_name_html(target_name);
+    if mutable {
+        format!("{0} is captured (mutably borrowed) by closure {1}; {0} can't be used while the borrow is live", r, c)
+    } else {
+        format!("{0} is captured (immutably borrowed) by closure {1}; {0} is read-only while the borrow is live", r, c)
+    }
 }
 
 // Source dot for a mutably captured upvar. Mirrors event_dot_mut_lend.
@@ -2660,6 +2683,27 @@ pub fn fn_dot_shared_borrow_interior_mut(fn_name: &String, my_name: &String, ref
         format!(
             "{0} borrows {1} immutably (a shared borrow); {1} has interior mutability, so its contents can change even through a shared borrow",
             f, x
+        )
+    }
+}
+
+// Call dot for a `&self` method called through a shared reference to a
+// value with interior mutability (`r.set(2)` with `r: &Cell<i32>`,
+// `r.borrow_mut()` with `r: &RefCell<T>`; #1149). "reads from r" would be
+// false: the call can change what r points to. The text doesn't say the
+// method itself changes it: `Cell::get` only copies the value out.
+pub fn fn_dot_shared_ref_interior_mut(fn_name: &String, my_name: &String, refcell_borrow_mut: bool) -> String {
+    let f = styled_name_html(fn_name);
+    let r = styled_name_html(my_name);
+    if refcell_borrow_mut {
+        format!(
+            "{0} uses what {1} points to, through the shared reference {1}; exclusive access to its contents is checked at runtime (a second {0} while this one is live would panic)",
+            f, r
+        )
+    } else {
+        format!(
+            "{0} uses what {1} points to, through the shared reference {1}; that has interior mutability, so its contents can change even through a shared reference",
+            f, r
         )
     }
 }
@@ -3859,6 +3903,19 @@ pub fn event_dot_break_out_go_out_of_scope(my_name: &String) -> String {
     )
 }
 
+// `slice = &mut slice[1..];` / `s = &s[1..];` (#1123): the reference now
+// points to part of what it pointed to. The new reference is a reborrow
+// through the old one, so the loan of `lender` goes on until the
+// reference's last use; nothing is given back here.
+pub fn event_dot_resliced_in_place(my_name: &String, lender: &String, mutable: bool, part: bool) -> String {
+    format!(
+        "{0} now points to {3} (a reborrow through {0} itself). \
+         It still borrows from {1}, so {1} stays {2} borrowed while {0} is in use",
+        styled_name_html(my_name), styled_name_html(lender), if mutable { "mutably" } else { "immutably" },
+        if part { "part of the data it pointed to" } else { "the same data again" }
+    )
+}
+
 /// A reference parameter a returned `if` / `match` doesn't return on
 /// this path, tied to the result by the signature's lifetime (#775).
 pub fn event_dot_tied_param_note(my_name: &String, lifetime: &str) -> String {
@@ -4848,12 +4905,21 @@ pub fn event_dot_closure_call_once(
 // are dropped here is decided at runtime by a drop flag (#179, #271).
 // `by_cond`: a let-chain's condition may have moved it (into a call,
 // #281); that's not a call of the closure.
-pub fn event_dot_closure_go_out_of_scope_maybe_moved(my_name: &String, by_cond: bool) -> String {
+/// `called` / `moved`: what the branches did with the closure, an
+/// `FnOnce` call (#271) or a move (`v.push(f)`, `let g = f;`, #1158).
+pub fn event_dot_closure_go_out_of_scope_maybe_moved(my_name: &String, by_cond: bool, count: usize, called: bool, moved: bool) -> String {
+    let what = match (called, moved) {
+        (true, true) => "called or moved",
+        (true, false) => "called",
+        _ => "moved",
+    };
+    let cond = if by_cond { format!("nothing above {} it", what) } else { format!("no branch above {} it", what) };
     format!(
-        "{0} goes out of scope. Its captured resources are dropped here only if {1} \
+        "{0} goes out of scope. Its captured {1} dropped here only if {2} \
          (Rust tracks this with a runtime drop flag).",
         styled_name_html(my_name),
-        if by_cond { "nothing above moved or called it" } else { "no branch above called it" }
+        if count == 1 { "resource is" } else { "resources are" },
+        cond
     )
 }
 
@@ -5114,6 +5180,9 @@ pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, fro
         // so "reads from" would be false (#203).
         let interior_mut = matches!(external_event, ExternalEvent::PassByStaticReference { implicit: ImplicitRef::No | ImplicitRef::Autoref, .. })
             && from_variable.extract_rap().map_or(false, |r| r.has_interior_mut());
+        // The same through a shared reference to such a value (`r.set(2)`
+        // with `r: &Cell<i32>`, #1149).
+        let interior_mut_through_ref = matches!(external_event, ExternalEvent::PassByStaticReference { pointee_interior_mut: true, .. });
         // The callee's signature lets it store the reference
         // (`point(&mut hold, &t)`, #513): the borrow lasts past
         // the call, until the borrow checker ends it.
@@ -5196,7 +5265,12 @@ pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, fro
             _ => None,
         };
         let alt_suffix = alt.map_or(String::new(), |a| break_alt_if_suffix(&a.brk));
-        if interior_mut {
+        if interior_mut_through_ref {
+            let msg = fn_dot_shared_ref_interior_mut(
+                &function.name, &from_variable.name(),
+                matches!(external_event, ExternalEvent::PassByStaticReference { refcell_borrow_mut: true, .. }));
+            alt.map_or(msg.clone(), |a| with_break_alt_lend(&msg, &a.brk)) + &stored_suffix
+        } else if interior_mut {
             let msg = fn_dot_shared_borrow_interior_mut(
                 &function.name, &from_variable.name(),
                 matches!(external_event, ExternalEvent::PassByStaticReference { refcell_borrow_mut: true, .. }));

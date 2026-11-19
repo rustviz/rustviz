@@ -7269,7 +7269,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "f is moved into the call (an FnOnce closure can only be called once). \
              s, which f captured, is dropped during the call",
-            "f goes out of scope. Its captured resources are dropped here only if no branch above \
+            "f goes out of scope. Its captured resource is dropped here only if no branch above \
              called it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
@@ -9245,7 +9245,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "edition2024/if_let_chain_closure_move",
         must_contain: &[
             "f may have been moved: when the condition moves f to run and then turns out false, the else branch runs after that move, so f can't be used here",
-            "f goes out of scope. Its captured resources are dropped here only if nothing above moved or called it (Rust tracks this with a runtime drop flag).",
+            "f goes out of scope. Its captured resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &["only if no branch above called it"],
     },
@@ -10561,7 +10561,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "edition2024/if_let_chain_fnonce_call",
         must_contain: &[
             "f may have been moved: when the condition calls f (it can only be called once, so the call moves it) and then turns out false, the else branch runs after that call, so f can't be used here",
-            "f goes out of scope. Its captured resources are dropped here only if nothing above moved or called it (Rust tracks this with a runtime drop flag).",
+            "f goes out of scope. Its captured resource is dropped here only if nothing above called it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             // The call may have dropped them already.
@@ -19650,7 +19650,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "f may have been moved: when the guard on line 6 calls f (it can only be called once, so the call moves it) and then turns out false, matching goes on with the later arms after that call, so f can't be used here (the borrow checker counts every later arm as one that may run after a failed guard)",
             "f may have been moved above, so it can't be used after the match. If nothing above moved it, its resource is dropped when f goes out of scope.",
-            "f goes out of scope. Its captured resources are dropped here only if nothing above moved or called it (Rust tracks this with a runtime drop flag).",
+            "f goes out of scope. Its captured resource is dropped here only if nothing above called it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             "can't be used after the if",
@@ -20752,6 +20752,183 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Move from Box::new to n",
             "=Move from boxed to d",
         ],
+    },
+    TooltipExpect {
+        name: "closure_capture_drops_1148",
+        // #1148: `move || r.push('!')` moves the `&mut` r into f. f then
+        // holds the borrow and gives s back at its last use; a reference
+        // owns nothing, so f's scope end drops nothing (main: "Its 1
+        // captured resource is dropped", while s is printed after). A
+        // closure made in an `if` / `match` arm that moved a String in
+        // never said it is dropped (its captures were only looked up
+        // outside conditionals), and one that captured a value with
+        // nothing to drop (`Plain`) claimed a dropped resource. #1159:
+        // `let n = m;` in an `if` read as a capture, and n's drop
+        // wasn't stated.
+        must_contain: &[
+            "r's reference is captured (moved) by closure f; the data it points to is not moved",
+            "f's mutable borrow ends",
+            "Return mutably borrowed resource from f to s",
+            "f owns a closure",
+            "Closure g captures: t (moved)",
+            "g owns a closure which owns 1 resource via capture",
+            "g goes out of scope. Its 1 captured resource is dropped.",
+            "Closure h captures: u (moved)",
+            "h goes out of scope. Its 1 captured resource is dropped.",
+            "k owns a closure",
+            "k goes out of scope",
+            "m's resource is moved",
+            "n takes over m's value",
+            "n goes out of scope. Its 1 captured resource is dropped.",
+        ],
+        must_not_contain: &[
+            "f goes out of scope. Its 1 captured resource is dropped.",
+            "f owns a closure which owns 1 resource via capture",
+            "r's resource is captured (moved) by closure f",
+            "Return mutably borrowed resource from r to s",
+            "r's mutable borrow ends",
+            "=Closure g is bound",
+            "=Closure h is bound",
+            "k goes out of scope. Its 1 captured resource is dropped.",
+            "k owns a closure which owns 1 resource via capture",
+            "m's resource is captured (moved) by closure n",
+            // The scope ends main drew with no drop.
+            "=g goes out of scope",
+            "=h goes out of scope",
+            "=n goes out of scope",
+        ],
+    },
+    TooltipExpect {
+        name: "reslice_in_place_1123",
+        // #1123: `slice = &mut slice[1..];` reborrows part of what slice
+        // points to and stores it back in slice. The new reference comes
+        // from slice's loan of v, so v stays borrowed until slice's last
+        // use (rustc: `v.push(1)` between the two lines is E0499). Main
+        // ended the loan at the reassignment, drew slice lending to
+        // itself, and gave v back early. Same for `s = &s[1..]` (also in a
+        // `while` loop) and `r = &mut *r`.
+        must_contain: &[
+            "slice now points to part of the data it pointed to (a reborrow through slice itself). \
+             It still borrows from v, so v stays mutably borrowed while slice is in use",
+            "s now points to part of the data it pointed to (a reborrow through s itself). \
+             It still borrows from w, so w stays immutably borrowed while s is in use",
+            "t now points to part of the data it pointed to (a reborrow through t itself). \
+             It still borrows from u, so u stays immutably borrowed while t is in use",
+            "r now points to the same data again (a reborrow through r itself). \
+             It still borrows from x, so x stays mutably borrowed while r is in use",
+            "Return mutably borrowed resource from slice to v",
+        ],
+        must_not_contain: &[
+            "Mutable reborrow from slice to slice",
+            "Immutable reborrow from s to s",
+            "Immutable reborrow from t to t",
+            "Mutable reborrow from r to r",
+            "slice's mutable borrow of v ends",
+            "borrows isn't shown",
+            "mutably borrowed by slice through slice",
+            "immutably borrowed by s through s",
+            "mutably borrowed by r through r",
+        ],
+    },
+    TooltipExpect {
+        name: "cell_through_ref_1149",
+        // #1149: `c.set(42)` with `c: &Cell<i32>` writes into the Cell c
+        // points to; main said "set reads from c". Same for
+        // `r.borrow_mut()` through `&RefCell` and for passing such a
+        // reference on (`add_one(rc)`). The text says the contents can
+        // change through the reference, not that the method changes them:
+        // `k.get()` only copies the value out (review of #1234).
+        must_contain: &[
+            "set uses what c points to, through the shared reference c; that has interior \
+             mutability, so its contents can change even through a shared reference",
+            "borrow_mut uses what r points to, through the shared reference r; exclusive access to \
+             its contents is checked at runtime (a second borrow_mut while this one is live would panic)",
+            "set uses what rc points to, through the shared reference rc; that has interior \
+             mutability, so its contents can change even through a shared reference",
+            "add_one uses what rc points to, through the shared reference rc; that has interior \
+             mutability, so its contents can change even through a shared reference",
+            "set uses what k points to, through the shared reference k; that has interior \
+             mutability, so its contents can change even through a shared reference",
+            "get uses what k points to, through the shared reference k; that has interior \
+             mutability, so its contents can change even through a shared reference",
+        ],
+        must_not_contain: &[
+            "set reads from c",
+            "borrow_mut reads from r",
+            "set reads from rc",
+            "add_one reads from rc",
+            "set reads from k",
+            "get can change its contents",
+            "set can change its contents",
+            "add_one can change its contents",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_moved_in_branch_1158",
+        // #1158: `v.push(f)` in an `if` moves the closure f (it isn't
+        // called); f's scope end said its captures are dropped "only if no
+        // branch above called it", and "resources" for one. #1232: v's
+        // scope end named rustc's internal closure type.
+        must_contain: &[
+            "f goes out of scope. Its captured resource is dropped here only if no branch above \
+             moved it (Rust tracks this with a runtime drop flag).",
+            "g goes out of scope. Its captured resource is dropped here only if no branch above \
+             called it (Rust tracks this with a runtime drop flag).",
+            "v goes out of scope. Its resource is dropped (including every closure it holds).",
+        ],
+        must_not_contain: &[
+            "f goes out of scope. Its captured resources are dropped here only if no branch above called it",
+            "Its captured resources are dropped",
+            "{closure@",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_captures_ref_var_1180",
+        // #1180: `|| println!("{}", r)` captures r itself (the macro
+        // takes `&r`): r is borrowed, as by `&r` (#925). r is a reference
+        // and owns nothing, so "r's resource" was false.
+        must_contain: &[
+            "r is captured (immutably borrowed) by closure show; r is read-only while the borrow is live",
+            "r is no longer immutably borrowed",
+            "r is immutably borrowed by the closure passed to apply; r is read-only while the borrow is live",
+            "the resource r points to is captured by closure len (an immutable reborrow through r)",
+        ],
+        must_not_contain: &[
+            "r's resource is captured",
+            "show no longer borrows the resource r points to",
+            "the resource r points to is immutably borrowed by the closure passed to apply",
+        ],
+    },
+    TooltipExpect {
+        name: "cond_with_move_closure",
+        // #1148: the move closure made in the `if` arm owns s's String and
+        // drops it at the arm's end; main never said so (this entry's
+        // first one pinned only the arrows).
+        must_contain: &[
+            "f owns a closure which owns 1 resource via capture",
+            "f goes out of scope. Its 1 captured resource is dropped.",
+        ],
+        must_not_contain: &["=f goes out of scope", "=Closure f is bound"],
+    },
+    TooltipExpect {
+        name: "cell_ref_return",
+        // #1149: `r.set(2)` with `r: &Cell<i32>` writes the Cell.
+        must_contain: &[
+            "set uses what r points to, through the shared reference r; that has interior \
+             mutability, so its contents can change even through a shared reference",
+        ],
+        must_not_contain: &["set reads from r", "set can change its contents"],
+    },
+    TooltipExpect {
+        name: "closure_static_write_1203",
+        // #1203: a closure names a static rather than capturing it; the
+        // write happens when the closure is called. Main drew nothing on
+        // COUNT's column for `f();` / `g();`. Pinned by position in
+        // `a_closure_call_writes_the_static_it_names`.
+        must_contain: &[
+            "COUNT is assigned a new value",
+        ],
+        must_not_contain: &[],
     },
 ];
 
@@ -28297,4 +28474,16 @@ fn a_boxed_closure_borrowing_through_a_reference_keeps_it_until_dropped() {
     assert_eq!(ys("d's immutable borrow ends"), vec![row("drop(d);")]);
     assert_eq!(ys("d no longer borrows the resource p points to"), vec![row("drop(d);")]);
     assert_eq!(ys("w's resource is no longer immutably borrowed"), vec![row("drop(d);")]);
+}
+
+/// #1203 (`closure_static_write_1203`): calling a closure that assigns a
+/// `static mut` writes the static on the call's row (main drew nothing
+/// there).
+#[test]
+fn a_closure_call_writes_the_static_it_names() {
+    let rv = run_with_local_backend("closure_static_write_1203");
+    let ids: Vec<String> = common::svg::rv_elements(&rv.timeline_panel_string()).into_iter().map(|e| e.id).collect();
+    for id in ["COUNT@L6:dot:acquire", "COUNT@L8:dot:acquire"] {
+        assert!(ids.iter().any(|i| i == id), "no {:?} in {:#?}", id, ids);
+    }
 }
