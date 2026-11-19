@@ -1541,10 +1541,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "GREETING is a static: it lives for the whole program and is never dropped",
             "Copy from GREETING to s",
             "s is initialized with a copy of GREETING",
-            "s holds a reference",
+            // (A shared reference, drawn as one: it was "s holds a
+            // reference", full privilege, until #1150.)
+            "s holds an immutable reference",
             "show reads from s",
         ],
         must_not_contain: &[
+            "=s holds a reference",
             // A static is never dropped, and isn't a parameter.
             "GREETING is the owner",
             "GREETING goes out of scope",
@@ -20844,6 +20847,31 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=r holds an immutable reference",
         ],
     },
+    TooltipExpect {
+        name: "shared_ref_line_from_literal_1150",
+        // #1150: the bracket of a shared reference bound to a literal (or a
+        // `&'static str` call result, a const, a struct / tuple field set
+        // to one) said "r holds a reference" (full privilege, drawn solid
+        // for a `let mut` one) until its first read. The line states are
+        // pinned by `reference_lines_follow_the_reference_type`.
+        must_contain: &[
+            "r holds an immutable reference",
+            "r holds an immutable reference; it can read the borrowed value",
+            "q holds an immutable reference",
+            "w holds an immutable reference",
+            "h.r holds an immutable reference",
+            "t.0 holds an immutable reference",
+            "k holds an immutable reference",
+        ],
+        must_not_contain: &[
+            "=r holds a reference",
+            "=q holds a reference",
+            "=w holds a reference",
+            "=h.r holds a reference",
+            "=t.0 holds a reference",
+            "=k holds a reference",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -21862,13 +21890,16 @@ fn ref_line_states(svg: &str, var: &str) -> Vec<(String, String)> {
 
 /// A reference's line shows what it can do through itself, which its type
 /// decides: a shared reference is hollow ("partial privilege") all along,
-/// a `&mut` solid ("full privilege"), whatever loan it holds. Main drew a
-/// shared reference holding a mutable loan (`let rb: &String = &mut b`)
-/// as full privilege (#1122), and `let r = &mut &x` as read-only (#1131).
+/// a `&mut` solid ("full privilege"), whatever loan it holds or however
+/// it got its value. Main drew a `let mut r: &str = "hello"` solid until
+/// its first read and again after each reassignment (#1150), a shared
+/// reference holding a mutable loan (`let rb: &String = &mut b`) as full
+/// privilege (#1122), and `let r = &mut &x` as read-only (#1131).
 #[test]
 fn reference_lines_follow_the_reference_type() {
     let cases: &[(&str, &[&str], &str)] = &[
-        ("shared_ref_holding_mut_loan_1122", &["ra", "rb", "rc", "rd", "he.r", "hf.r", "rg", "rg2", "xw"], "partial_privilege"),
+        ("shared_ref_line_from_literal_1150", &["r", "q", "w", "h.r", "t.0", "k"], "partial_privilege"),
+        ("shared_ref_holding_mut_loan_1122", &["ra", "rb", "rc", "rd", "x", "he.r", "hf.r", "rg", "rg2", "xw"], "partial_privilege"),
         ("mut_ref_to_shared_temp_1131", &["r", "h.r"], "full_privilege"),
     ];
     prerender(cases.iter().map(|c| c.0));
