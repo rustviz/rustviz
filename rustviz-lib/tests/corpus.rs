@@ -20789,6 +20789,58 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "If that value isn't y's, y's resource is dropped here",
         ],
     },
+    TooltipExpect {
+        name: "manually_drop_maybe_moved_1147",
+        // #1147: a ManuallyDrop has no drop glue, so no drop flag: moved
+        // (or assigned) on some paths only, it still drops nothing at its
+        // scope end, and its join says nothing about a drop. Main said
+        // "Its resource is dropped here only if no branch above moved it
+        // (Rust tracks this with a runtime drop flag)" (if, match arm,
+        // let-chain condition, break in a loop, `let x;` assigned in an
+        // if / a loop) and "If the branch that ran didn't move it, its
+        // resource is dropped when md goes out of scope" at the joins.
+        // Structs: s (s.a moved) drops nothing more ("only s.m is
+        // dropped"); t (t.a maybe moved) drops nothing else ("t.m is
+        // dropped"); u (u.m maybe moved) and v (v.n, nothing to drop,
+        // maybe moved) need no drop flag for that field: u / v drop u.a
+        // / v.a (still owned) as usual.
+        must_contain: &[
+            "md goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
+            "ma goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
+            "mc goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
+            "ml goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
+            "mi goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
+            "mo goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
+            "u.m goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
+            "md was moved in at least one branch above, so it can't be used after the branches.",
+            "ma was moved in at least one branch above, so it can't be used after the branches.",
+            "mc may have been moved above, so it can't be used after the if.",
+            "mi was assigned a value in only some of the branches above, so it can't be used after the branches.",
+            "u.m was moved in at least one branch above, so it can't be used after the branches.",
+            "s goes out of scope. s.a was moved out earlier, so no resource is dropped.",
+            "t goes out of scope. t.a was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "u goes out of scope. Its resource is dropped.",
+            "v goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "md goes out of scope. Its resource is dropped here only if",
+            "ma goes out of scope. Its resource is dropped here only if",
+            "mc goes out of scope. Its resource is dropped here only if",
+            "ml goes out of scope. Its resource is dropped here only if",
+            "mi goes out of scope. Its resource is dropped here only if",
+            "mo goes out of scope. Its resource is dropped here only if",
+            "u.m goes out of scope. Its resource is dropped here only if",
+            "its resource is dropped when md goes out of scope",
+            "its resource is dropped when ma goes out of scope",
+            "its resource is dropped when mc goes out of scope",
+            "its resource is dropped when mi goes out of scope",
+            "its resource is dropped when u.m goes out of scope",
+            "only s.m is dropped",
+            "t.m is dropped",
+            "u.m was moved out in at least one branch above",
+            "v.n was moved out in at least one branch above",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop

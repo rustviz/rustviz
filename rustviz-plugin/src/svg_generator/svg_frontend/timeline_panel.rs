@@ -1216,7 +1216,7 @@ fn render_branch_dots(
             } else {
                 hover_messages::event_dot_branch_merge_maybe_init(
                     &is.real_name(),
-                    is.extract_rap().map_or(false, |r| r.holds_value() || r.is_ref()),
+                    is.extract_rap().map_or(false, |r| r.drops_nothing()),
                     rap.is_mut(),
                     moved,
                     &is.extract_rap().map_or(String::new(), |r| r.drop_note()),
@@ -1233,7 +1233,7 @@ fn render_branch_dots(
             };
             Some(hover_messages::event_dot_branch_merge_maybe_held(
                 &is.real_name(),
-                is.extract_rap().map_or(false, |r| r.holds_value() || r.is_ref()),
+                is.extract_rap().map_or(false, |r| r.drops_nothing()),
                 rap.is_mut(),
                 reassigned,
             ))
@@ -1312,7 +1312,7 @@ fn render_branch_dots(
                 // (#603): no "if nothing above moved it".
                 hover_messages::event_dot_branch_merge_chain_new_value(
                     &is.real_name(), kw,
-                    is.extract_rap().map_or(false, |r| r.holds_value()),
+                    is.extract_rap().map_or(false, |r| r.drops_nothing()),
                     rap.is_mut(), reassigned_next,
                     &is.extract_rap().map_or(String::new(), |r| r.drop_note()))
             } else if reassigned_next {
@@ -1332,7 +1332,7 @@ fn render_branch_dots(
                 // every path, the scope end drops it on the others.
                 hover_messages::event_dot_branch_merge_moved_then_reassigned(&is.real_name(), by_cond, !every_path)
             } else if matches!(event, Event::Branch { loop_assigned: true, .. })
-                && !is.extract_rap().is_some_and(|r| r.holds_value() || r.is_ref()) {
+                && !is.extract_rap().is_some_and(|r| r.drops_nothing()) {
                 // In a loop whose body gives it a new value (#1026):
                 // when the loop comes back round, that assignment
                 // drops it; if it doesn't, a later one or the scope
@@ -1341,10 +1341,10 @@ fn render_branch_dots(
             } else {
                 // A `&mut` reference moved on some paths (`if b {
                 // x } else { y }` returned, #674) owns nothing to
-                // drop on the others.
+                // drop on the others, nor does a ManuallyDrop (#1147).
                 hover_messages::event_dot_branch_merge_moved_with_drop(
                     &is.real_name(),
-                    is.extract_rap().map_or(false, |r| r.holds_value() || r.is_ref()),
+                    is.extract_rap().map_or(false, |r| r.drops_nothing()),
                     rap.is_mut(),
                     &is.extract_rap().map_or(String::new(), |r| r.drop_note()),
                     by_cond,
@@ -1503,10 +1503,15 @@ fn render_scope_end_dot(
                 data.title.push_str(&hover_messages::event_dot_no_resource_dropped_suffix());
             }
         } else if ro.is_manually_drop() && !never_drops
-            && visualization_data.timelines[hash].history.iter()
-                .any(|(_, e)| matches!(e, Event::ManuallyDropByHand)) {
+            && (visualization_data.timelines[hash].history.iter()
+                .any(|(_, e)| matches!(e, Event::ManuallyDropByHand))
+                || resource_hold
+                || maybe_moved_at_end(history)
+                || matches!(init_at_end(history), Some(InitJoin::Loop | InitJoin::Maybe { .. }))) {
             // Dropped by hand earlier: still nothing is
-            // dropped here (#283).
+            // dropped here (#283). Nor when it was moved, or
+            // given its value, on some paths only (#1147): a
+            // ManuallyDrop has no drop glue, so no drop flag.
             data.title = hover_messages::event_dot_manually_drop_go_out_of_scope(&name);
         } else if is_plain {
             // Never a resource: going out of scope drops
@@ -2017,7 +2022,7 @@ fn render_dot(
                     // start with it holding nothing (#1032).
                     let rap = &visualization_data.timelines[hash].resource_access_point;
                     data.title = hover_messages::event_dot_loop_maybe_init_nested(
-                        &name, rap.holds_value() || rap.is_ref(), rap.is_mut());
+                        &name, rap.drops_nothing(), rap.is_mut());
                 }
                 Event::LoopMaybeInit { before_loop, .. } => {
                     // A loop above may have ended before assigning it
@@ -2034,7 +2039,7 @@ fn render_dot(
                         None
                     };
                     data.title = hover_messages::event_dot_loop_maybe_init(
-                        &name, rap.holds_value() || rap.is_ref(), rap.is_mut(), reassigned, *before_loop);
+                        &name, rap.drops_nothing(), rap.is_mut(), reassigned, *before_loop);
                 }
                 Event::LoopExitKept { reassigned } => {
                     let rap = &visualization_data.timelines[hash].resource_access_point;
@@ -3787,8 +3792,10 @@ fn struct_partial_move_split(
         .timelines
         .values()
         .filter_map(|t| match &t.resource_access_point {
-            ResourceAccessPoint::Struct(Struct { is_member: true, owner, name, is_copy, is_plain_value, .. })
-                if *owner == root && name.starts_with(&prefix) => Some((t, name, *is_copy || *is_plain_value)),
+            // A field with nothing to drop counts as Copy here: a
+            // ManuallyDrop one too (#1147).
+            r @ ResourceAccessPoint::Struct(Struct { is_member: true, owner, name, .. })
+                if *owner == root && name.starts_with(&prefix) => Some((t, name, r.drops_nothing())),
             _ => None,
         })
         .collect();
@@ -3822,6 +3829,13 @@ fn struct_partial_move_split(
             // Moved in one arm of a `match` on the struct, or one
             // branch of an `if`, and not in the others (#395).
             if maybe_moved_at_end(&timeline.history) {
+                // A field with nothing to drop needs no drop flag: what
+                // the struct drops doesn't depend on whether it was
+                // moved (#1147). (A struct with nothing to drop at all
+                // says it was moved, for the record.)
+                if *is_copy && !rap.is_plain_value() {
+                    continue;
+                }
                 by_cond |= moved_by_chain_condition(&timeline.history) || maybe_moved_by_let(&timeline.history);
                 kept |= maybe_moved_by_kept_round(timeline.history.iter());
                 maybe_moved.push((*name).clone());
