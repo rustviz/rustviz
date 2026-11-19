@@ -20753,6 +20753,38 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Move from boxed to d",
         ],
     },
+    TooltipExpect {
+        name: "labeled_block_value_1134",
+        // #1134: `let x = 'blk: { if c { break 'blk a; } b };` drew only
+        // "Move from b to x", unconditionally: the `break`'s value was
+        // dropped from the diagram. x gets a's value if the `break` ran,
+        // b's if the block ran to its last expression; each is drawn
+        // as one of them, as for a `loop` with several `break`s (#561).
+        // Also for an assignment, a call argument, a borrow (h's loan
+        // ends where r's last use is, as k's) and a Copy value.
+        must_contain: &[
+            "Move from a to x, if the block ended with break 'blk a",
+            "Move from b to x, if the block ended with its last expression, b",
+            "a may have been moved: the block can end with break 'blk a, which moves a's resource to x, so a can't be used after the block",
+            "b may have been moved: the block can end with its last expression, b, which moves b's resource to x, so b can't be used after the block",
+            "x acquires ownership of a resource (from whichever break or last expression ended the block)",
+            "y acquires ownership of a new resource (from whichever break or last expression ended the block); its previous resource is dropped",
+            "Move from f to take, if the block ended with break 'blk f",
+            "Move from g to take, if the block ended with its last expression, g",
+            "Immutable borrow from h to r, if the block ended with break 'blk &h",
+            "h's resource is no longer immutably borrowed",
+            "Copy from m to z, if the block ended with break 'blk m",
+            "Move from p to w, if the block ended with break 'blk p",
+        ],
+        must_not_contain: &[
+            "=Move from b to x",
+            "=Move from e to y",
+            "=Move from g to take",
+            "=Immutable borrow from k to r",
+            "=b's resource is moved",
+            "x acquires ownership of a resource (from whichever break ended the loop)",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
