@@ -414,6 +414,69 @@ pub fn statics_in<'tcx>(e: &'tcx Expr<'tcx>) -> Vec<rustc_hir::def_id::DefId> {
   f.0
 }
 
+/// The closure literal a call's callee names (`f()` with `let f = || …;`),
+/// if the callee is a local bound by a plain `let` to one.
+pub fn local_closure_of<'tcx>(tcx: &TyCtxt<'tcx>, callee: &Expr<'tcx>) -> Option<&'tcx rustc_hir::Closure<'tcx>> {
+  let ExprKind::Path(QPath::Resolved(None, p)) = callee.kind else { return None };
+  let Res::Local(hid) = p.res else { return None };
+  let rustc_hir::Node::LetStmt(l) = tcx.parent_hir_node(hid) else { return None };
+  if l.pat.hir_id != hid {
+    return None;
+  }
+  match l.init?.kind {
+    ExprKind::Closure(c) => Some(c),
+    _ => None,
+  }
+}
+
+/// The `static` items the body of `closure` assigns to (`COUNT = 9`,
+/// `COUNT += 1`), once each, in source order (#1203). A closure doesn't
+/// capture a static: it names the item, so the write happens when the
+/// closure is called.
+pub fn statics_written_in_closure<'tcx>(tcx: &TyCtxt<'tcx>, closure: &rustc_hir::Closure<'tcx>) -> Vec<rustc_hir::def_id::DefId> {
+  use rustc_hir::intravisit::{self, Visitor};
+  struct Find(Vec<rustc_hir::def_id::DefId>);
+  impl<'tcx> Visitor<'tcx> for Find {
+    fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+      if let ExprKind::Assign(lhs, _, _) | ExprKind::AssignOp(_, lhs, _) = e.kind {
+        if let ExprKind::Path(QPath::Resolved(_, p)) = lhs.kind {
+          if let Some(id) = static_of_path(p).filter(|id| !lhs.span.from_expansion() && !self.0.contains(id)) {
+            self.0.push(id);
+          }
+        }
+      }
+      intravisit::walk_expr(self, e);
+    }
+  }
+  let mut f = Find(Vec::new());
+  f.visit_expr(tcx.hir_body(closure.body).value);
+  f.0
+}
+
+/// The statics written by the local closures `e` calls (`f()` with
+/// `let f = || unsafe { COUNT = 9; };`, #1203), once each.
+pub fn statics_written_by_called_closures<'tcx>(tcx: &TyCtxt<'tcx>, e: &'tcx Expr<'tcx>) -> Vec<rustc_hir::def_id::DefId> {
+  use rustc_hir::intravisit::{self, Visitor};
+  struct Find<'a, 'tcx>(&'a TyCtxt<'tcx>, Vec<rustc_hir::def_id::DefId>);
+  impl<'a, 'tcx> Visitor<'tcx> for Find<'a, 'tcx> {
+    fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+      if let ExprKind::Call(callee, _) = e.kind {
+        if let Some(c) = local_closure_of(self.0, callee) {
+          for id in statics_written_in_closure(self.0, c) {
+            if !self.1.contains(&id) {
+              self.1.push(id);
+            }
+          }
+        }
+      }
+      intravisit::walk_expr(self, e);
+    }
+  }
+  let mut f = Find(tcx, Vec::new());
+  f.visit_expr(e);
+  f.1
+}
+
 /// For a place reached through an index projection (`v[0]`,
 /// `ps[0].r`, `grid[1][2]`), the collection that is indexed first:
 /// `v`, `ps`, `grid`. None for places without an index (`p.r`, `r`).
