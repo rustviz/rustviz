@@ -216,7 +216,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   fn register_statics(&mut self, body: &rustc_hir::Body<'tcx>) {
     let owner = body.value.hir_id.owner;
     let line_num = self.current_fn_start;
-    for def_id in statics_in(body.value) {
+    let mut statics = statics_in(body.value);
+    // A static only a called closure writes (#1203) gets a column too:
+    // the call writes it.
+    for id in statics_written_by_called_closures(&self.tcx, body.value) {
+      if !statics.contains(&id) {
+        statics.push(id);
+      }
+    }
+    for def_id in statics {
       let name = self.tcx.def_path_str(def_id);
       if self.raps.contains_key(&name) {
         continue;
@@ -1342,7 +1350,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 },
                 AutoBorrowMutability::Not => {
                   let refcell_borrow_mut = self.is_refcell_borrow_mut_call(expr);
-                  self.add_pass_by_sref_ev_deep(line_num, ResourceTy::Value(fn_rap.clone()), rcvr_rty.clone(), autoref, refcell_borrow_mut, of_ref_var, deep);
+                  // `r.set(2)` with `r: &Cell<i32>` (#1149): the call can
+                  // change what r points to, as `c.set(2)` changes c.
+                  let rcvr_ty = self.tcx.typeck(rcvr.hir_id.owner).node_type(rcvr.hir_id);
+                  let pointee_interior_mut = rcvr_rap.is_ref() && !of_ref_var && matches!(rcvr_rty, ResourceTy::Value(_))
+                    && rcvr_ty.builtin_deref(true).is_some_and(|t| self.ty_has_interior_mut(t, rcvr.hir_id.owner) == InteriorMut::Yes);
+                  self.add_pass_by_sref_ev_full(line_num, ResourceTy::Value(fn_rap.clone()), rcvr_rty.clone(), autoref, refcell_borrow_mut, pointee_interior_mut, of_ref_var, deep);
                 }
                 _ => {}
               }
@@ -1599,7 +1612,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if !already {
       // format_args! takes `&arg`; the user didn't write the `&`.
       let id = *self.unique_id;
-      self.add_external_event(line_num, ExternalEvent::PassByStaticReference { from, to, id, implicit: ImplicitRef::MacroArg, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new(), of_ref_var: false, deep: None });
+      self.add_external_event(line_num, ExternalEvent::PassByStaticReference { from, to, id, implicit: ImplicitRef::MacroArg, refcell_borrow_mut: false, pointee_interior_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new(), of_ref_var: false, deep: None });
       *self.unique_id += 1;
     }
   }
@@ -4476,6 +4489,18 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             // `f(..)` with `f` a local `FnOnce` closure: the call moves
             // it, after the arguments are evaluated (#271).
             self.closure_call_events(fn_expr, expr_to_line(expr, &self.tcx));
+            // `f()` with `let f = || unsafe { COUNT = 9; };`: the call
+            // writes the static (a closure names a static, it doesn't
+            // capture it; #1203).
+            if let Some(c) = local_closure_of(&self.tcx, fn_expr) {
+              let line = expr_to_line(expr, &self.tcx);
+              for id in statics_written_in_closure(&self.tcx, c) {
+                let name = self.tcx.def_path_str(id);
+                if let Some(rap) = self.raps.get(&name).map(|r| r.rap.to_owned()) {
+                  self.add_ev(line, Evt::Bind, ResourceTy::Value(rap), ResourceTy::Anonymous, false);
+                }
+              }
+            }
           }
         }
         // `std::panic::panic_any(…)` written out (#410): it unwinds
@@ -5567,6 +5592,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let Some(lhs_hid) = local_of_path(lhs_expr) else { return false };
     let ExprKind::AddrOf(_, _, mut place) = rhs_expr.kind else { return false };
     let mut indices: Vec<&'tcx Expr<'tcx>> = Vec::new();
+    // Taken apart through an index (`&s[1..]`), not just `&mut *r`.
     let mut steps = 0;
     loop {
       match place.kind {
@@ -5589,7 +5615,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if !rd.co_lenders.is_empty() {
       return false;
     }
-    let (lender, mutable) = (lender.name().to_owned(), rd.ref_mutability);
+    let (lender, mutable, part) = (lender.name().to_owned(), rd.ref_mutability, !indices.is_empty());
     for idx in indices {
       self.visit_expr(idx);
     }
@@ -5597,7 +5623,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.update_rap(&rap, line);
     let id = *self.unique_id;
     *self.unique_id += 1;
-    self.add_external_event(line, ExternalEvent::ReslicedInPlace { ro: rap, lender, mutable, id });
+    self.add_external_event(line, ExternalEvent::ReslicedInPlace { ro: rap, lender, mutable, part, id });
     true
   }
 

@@ -1868,6 +1868,10 @@ pub enum ExternalEvent {
         // DefId (not its name: a user type may define its own
         // `borrow_mut(&self)`). Selects the runtime-exclusivity wording.
         refcell_borrow_mut: bool,
+        // The argument is a shared reference to a value with interior
+        // mutability (`r.set(2)` with `r: &Cell<i32>`, #1149): the call
+        // can change what it points to.
+        pointee_interior_mut: bool,
         // See `StoredIn`.
         stored_in: StoredIn,
         result_keeps_borrow: bool,
@@ -2173,6 +2177,8 @@ pub enum ExternalEvent {
         ro: ResourceAccessPoint,
         lender: String,
         mutable: bool,
+        // `&s[1..]` (part of the data) rather than `&mut *r` (all of it).
+        part: bool,
         id: usize
     },
     TiedParamNote {
@@ -2634,7 +2640,7 @@ pub enum Event {
     // See ExternalEvent::TiedParamNote.
     TiedParamNote { lifetime: String },
     // See ExternalEvent::ReslicedInPlace.
-    ReslicedInPlace { lender: String, mutable: bool },
+    ReslicedInPlace { lender: String, mutable: bool, part: bool },
     // See ExternalEvent::DeadElseNote.
     DeadElseNote,
     // See ExternalEvent::DeadLoanNote. `shown`: the column is drawn
@@ -3456,8 +3462,8 @@ impl Event {
             Event::TiedParamNote { lifetime, .. } => {
                 hover_messages::event_dot_tied_param_note(my_name, lifetime)
             }
-            Event::ReslicedInPlace { lender, mutable } => {
-                hover_messages::event_dot_resliced_in_place(my_name, lender, *mutable)
+            Event::ReslicedInPlace { lender, mutable, part } => {
+                hover_messages::event_dot_resliced_in_place(my_name, lender, *mutable, *part)
             }
             Event::DeadLoanNote { lender, borrower, repoint, .. } => {
                 hover_messages::event_dot_dead_loan_note(lender, borrower, *repoint)
@@ -3680,7 +3686,10 @@ impl Event {
                 // lender is handled by event_dot_static_lend_ref_var
                 // (`&r`, #925) or event_dot_lend_through_ref.
                 let holds_value = lender_holds_value(is);
-                if to.is_closure() {
+                if let (true, true, Some(r)) = (to.is_closure(), *of_ref_var, ref_lender(is)) {
+                    // `|| println!("{}", r)` captures r itself (#1180).
+                    hover_messages::event_dot_capture_ref_var_to_closure(r.name(), &target_name(to), false)
+                } else if to.is_closure() {
                     let target_name = target_name(to);
                     hover_messages::event_dot_capture_static_lend_to_closure(&self.deref_name(my_name), &target_name, holds_value)
                 } else {
@@ -3703,7 +3712,9 @@ impl Event {
             Event::MutableLend{ to, is, of_ref_var, ..} => {
                 let holds_value = lender_holds_value(is);
                 let target_name = target_name(to);
-                if to.is_closure() {
+                if let (true, true, Some(r)) = (to.is_closure(), *of_ref_var, ref_lender(is)) {
+                    hover_messages::event_dot_capture_ref_var_to_closure(r.name(), &target_name, true)
+                } else if to.is_closure() {
                     hover_messages::event_dot_capture_mut_lend_to_closure(&self.deref_name(my_name), &target_name, holds_value)
                 } else if let (true, Some(r)) = (*of_ref_var, ref_lender(is)) {
                     hover_messages::event_dot_mut_lend_ref_var(r.name(), &target_name)
@@ -5101,8 +5112,8 @@ impl Visualizable for VisualizationData {
         ExternalEvent::TiedParamNote{ lifetime, .. } => {
           vec![(line_num, Event::TiedParamNote { lifetime: lifetime.clone() })]
         },
-        ExternalEvent::ReslicedInPlace{ lender, mutable, .. } => {
-          vec![(line_num, Event::ReslicedInPlace { lender: lender.clone(), mutable: *mutable })]
+        ExternalEvent::ReslicedInPlace{ lender, mutable, part, .. } => {
+          vec![(line_num, Event::ReslicedInPlace { lender: lender.clone(), mutable: *mutable, part: *part })]
         },
         ExternalEvent::DeadLoanNote{ lender, borrower, repoint, .. } => {
           vec![(line_num, Event::DeadLoanNote { lender: lender.clone(), borrower: borrower.clone(), repoint: *repoint, shown: false })]
@@ -5490,8 +5501,8 @@ impl Visualizable for VisualizationData {
             ExternalEvent::TiedParamNote{ro, lifetime, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::TiedParamNote { lifetime }, line_number);
             },
-            ExternalEvent::ReslicedInPlace{ro, lender, mutable, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::ReslicedInPlace { lender, mutable }, line_number);
+            ExternalEvent::ReslicedInPlace{ro, lender, mutable, part, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::ReslicedInPlace { lender, mutable, part }, line_number);
             },
             ExternalEvent::DeadElseNote{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::DeadElseNote, line_number);

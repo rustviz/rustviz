@@ -1301,6 +1301,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         Some(did) => format!("dyn {}", tcx.item_name(did)),
         None => String::from("dyn Trait"),
       },
+      // rustc prints `{closure@src/main.rs:5:13: 5:20}`: no name a
+      // student wrote or can read.
+      TyKind::Closure(..) => String::from("closure"),
       _ => rustc_middle::ty::print::with_no_trimmed_paths!(ty.to_string()),
     }
   }
@@ -2415,7 +2418,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: self.try_move, closure_value: false },
       Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None, of_ref_var: false },
       Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None, of_ref_var: false },
-      Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new(), of_ref_var: false, deep: None },
+      Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, pointee_interior_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new(), of_ref_var: false, deep: None },
       Evt::PassByMRef => ExternalEvent::PassByMutableReference {
         from: rhs, to: lhs, id, is_reborrow: false, result_has_lifetime: false, implicit: ImplicitRef::No,
         result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, of_ref_var: false, deep: None,
@@ -2901,9 +2904,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   /// `add_pass_by_sref_ev` with `deep` as for `add_pass_by_mref_ev_deep`.
   pub fn add_pass_by_sref_ev_deep(&mut self, line_num: usize, func: ResourceTy, arg: ResourceTy, implicit: ImplicitRef, refcell_borrow_mut: bool, of_ref_var: bool, deep: Option<DeepPlace>) {
+    self.add_pass_by_sref_ev_full(line_num, func, arg, implicit, refcell_borrow_mut, false, of_ref_var, deep);
+  }
+
+  /// `add_pass_by_sref_ev_deep`, also saying whether the argument is a
+  /// shared reference to a value with interior mutability (#1149).
+  pub fn add_pass_by_sref_ev_full(&mut self, line_num: usize, func: ResourceTy, arg: ResourceTy, implicit: ImplicitRef, refcell_borrow_mut: bool, pointee_interior_mut: bool, of_ref_var: bool, deep: Option<DeepPlace>) {
     let id = *self.unique_id;
     self.add_external_event(line_num, ExternalEvent::PassByStaticReference {
-      from: arg, to: func, id, implicit, refcell_borrow_mut, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new(), of_ref_var, deep,
+      from: arg, to: func, id, implicit, refcell_borrow_mut, pointee_interior_mut, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new(), of_ref_var, deep,
     });
     *self.unique_id += 1;
   }
@@ -3227,10 +3236,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           }
           let target = ResourceTy::Value(self.raps.get(&fn_key(&target_name)).unwrap().rap.to_owned());
           self.update_rap(&from_rap, line_num);
+          // The reference variable itself, not what it points to (#1180).
+          let of_ref_var = from_rap.is_ref() && capture.place.projections.is_empty();
           match kind {
             rustc_middle::ty::BorrowKind::Mutable =>
-              self.add_pass_by_mref_ev(line_num, target, ResourceTy::Value(from_rap), false, false, ImplicitRef::No, false),
-            _ => self.add_pass_by_sref_ev(line_num, target, ResourceTy::Value(from_rap), ImplicitRef::No, false, false),
+              self.add_pass_by_mref_ev(line_num, target, ResourceTy::Value(from_rap), false, false, ImplicitRef::No, of_ref_var),
+            _ => self.add_pass_by_sref_ev(line_num, target, ResourceTy::Value(from_rap), ImplicitRef::No, false, of_ref_var),
           }
           drew_any = true;
         }
@@ -4610,7 +4621,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           }
         } else {
           ExternalEvent::PassByStaticReference {
-            from: from_ro.clone(), to: to_ro, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, result_keeps_borrow: false, stored_in, break_alt: None, still_borrowed_by: Vec::new(), of_ref_var, deep: None,
+            from: from_ro.clone(), to: to_ro, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, pointee_interior_mut: false, result_keeps_borrow: false, stored_in, break_alt: None, still_borrowed_by: Vec::new(), of_ref_var, deep: None,
           }
         });
         *self.unique_id += 1;
@@ -4628,7 +4639,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // borrows `**r` (#952).
       let deep = if of_ref_var { None } else { self.deep_place(arg) };
       match arg_ty.ref_mutability().unwrap() {
-        Mutability::Not => self.add_pass_by_sref_ev_deep(line_num, to_ro, from_ro, ImplicitRef::No, false, of_ref_var, deep),
+        Mutability::Not => {
+          // `bump(rc)` with `rc: &Cell<i32>` (#1149): bump can change
+          // what rc points to.
+          let pointee_interior_mut = !of_ref_var && matches!(&from_ro, ResourceTy::Value(r) if r.is_ref())
+            && !matches!(arg.kind, ExprKind::AddrOf(..))
+            && arg_ty.builtin_deref(true).is_some_and(|t| self.ty_has_interior_mut(t, arg.hir_id.owner) == InteriorMut::Yes);
+          self.add_pass_by_sref_ev_full(line_num, to_ro, from_ro, ImplicitRef::No, false, pointee_interior_mut, of_ref_var, deep)
+        }
         Mutability::Mut => {
           // Reborrow if written `f(&mut *r)`, or if rustc inserted
           // the reborrow for `f(r)` (param type `&mut T`). `take(r)`
@@ -6864,7 +6882,7 @@ pub fn keep_loop_head_loans(&mut self, head: &'tcx Expr<'tcx>) -> Vec<(ResourceT
           }
         } else {
           ExternalEvent::PassByStaticReference {
-            from, to, id, implicit: ImplicitRef::No, refcell_borrow_mut: false,
+            from, to, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, pointee_interior_mut: false,
             result_keeps_borrow: true, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new(),
             of_ref_var: false, deep: None,
           }
@@ -8580,6 +8598,10 @@ pub fn match_rhs_closure(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, clos
     let through_ref = upvar_rap.is_ref()
       && matches!(capture.place.projections.first(),
                   Some(p) if matches!(p.kind, rustc_middle::hir::place::ProjectionKind::Deref));
+    // A reference variable captured itself (`|| println!("{}", r)`:
+    // the macro takes `&r`), not the place it points to: the closure
+    // borrows r, as `&r` does (#1180, #914).
+    let of_ref_var = upvar_rap.is_ref() && !through_ref && capture.place.projections.is_empty();
     let from = ResourceTy::Value(upvar_rap);
     let to = lhs.clone();
     let evt_kind = match capture.info.capture_kind {
@@ -8598,7 +8620,7 @@ pub fn match_rhs_closure(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, clos
     };
     match evt_kind {
       Evt::SBorrow | Evt::MBorrow =>
-        self.add_borrow_ev(line_num, evt_kind.clone(), to, from.clone(), through_ref),
+        self.add_borrow_ev_of_ref_var(line_num, evt_kind.clone(), to, from.clone(), through_ref, of_ref_var),
       _ => self.add_ev(line_num, evt_kind.clone(), to, from.clone(), false),
     }
 
@@ -8632,7 +8654,12 @@ pub fn match_rhs_closure(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, clos
         // {from: rhs, to: lhs}. We want from=closure (f),
         // to=upvar (s) so the renderer's return arrow goes
         // f → s, mirroring the borrow direction.
-        self.add_ev(die_line, die_evt, from, lhs.clone(), false);
+        let mut die = self.ext_ev_of_evt(die_evt, from, lhs.clone(), *self.unique_id, false);
+        if let ExternalEvent::StaticDie { of_ref_var: o, .. } | ExternalEvent::MutableDie { of_ref_var: o, .. } = &mut die {
+          *o = of_ref_var;
+        }
+        self.add_external_event(die_line, die);
+        *self.unique_id += 1;
       }
     }
   }

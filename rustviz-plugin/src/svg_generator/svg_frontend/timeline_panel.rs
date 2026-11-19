@@ -1482,7 +1482,10 @@ fn render_scope_end_dot(
                 // Called (so moved) on some paths only: the drop
                 // flag decides whether its captures are dropped.
                 let title = if maybe_moved {
-                    hover_messages::event_dot_closure_go_out_of_scope_maybe_moved(&name, moved_by_chain_condition(history))
+                {
+                    let (called, moved) = closure_used_up_in_branches(history);
+                    hover_messages::event_dot_closure_go_out_of_scope_maybe_moved(&name, moved_by_chain_condition(history), move_count, called, moved)
+                }
                 } else {
                     hover_messages::event_dot_closure_go_out_of_scope(&name, move_count)
                 };
@@ -2310,6 +2313,32 @@ fn merge_move_kind(branch_history: &[BranchData], ty: &BranchType) -> (bool, boo
 // True when the last thing that decided this column's ownership was a
 // conditional that moved it on some paths only, so at scope end Rust
 // drops the value only if it wasn't moved (#179).
+/// Whether the branches in `history` call the closure (an `FnOnce` call
+/// uses it up, #271) and whether they move it (`v.push(f)`, `let g =
+/// f;`, #1158), at any depth.
+fn closure_used_up_in_branches(history: &[(usize, Event)]) -> (bool, bool) {
+    fn walk(events: &[(usize, Event)], in_branch: bool, out: &mut (bool, bool)) {
+        for (_, e) in events {
+            match e {
+                Event::Branch { branch_history, .. } => {
+                    for b in branch_history {
+                        walk(&b.e_data, true, out);
+                    }
+                }
+                Event::ClosureCall { .. } if in_branch => out.0 = true,
+                Event::Move { .. } if in_branch => out.1 = true,
+                _ => {}
+            }
+        }
+    }
+    let mut out = (false, false);
+    walk(history, false, &mut out);
+    if !out.0 && !out.1 {
+        out.1 = true;
+    }
+    out
+}
+
 fn maybe_moved_at_end(history: &[(usize, Event)]) -> bool {
     let mut maybe = false;
     for (_, e) in history {
