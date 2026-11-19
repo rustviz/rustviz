@@ -4334,6 +4334,11 @@ impl Visualizable for VisualizationData {
                 }
             },
 
+            // A `&T` field given another's reference with its struct
+            // (`o.inner = other;` moves other.r into o.inner.r, #1199):
+            // it holds that one now, as after `o.inner.r = other.r;`.
+            (State::PartialPrivilege{..}, Event::Acquire{ .. }) if self.is_ref(hash) && !self.is_mutref(hash) =>
+                State::PartialPrivilege { s: LineState::Full },
             // A `&T` is only moved as part of a struct (`let hold =
             // other;` moves other.r): the field has no reference left.
             (State::PartialPrivilege{..}, Event::Move{to: to_ro,..}) if self.is_ref(hash) && !self.is_mutref(hash) =>
