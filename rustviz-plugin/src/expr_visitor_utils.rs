@@ -508,6 +508,24 @@ pub fn expr_to_line(expr:&Expr, tcx: &TyCtxt) -> usize{
   span_to_line(&expr.span, tcx)
 }
 
+/// `&mut arr as &mut [i32]`, `&s as &dyn Display`, `r as &dyn Display`:
+/// a cast from a reference to a reference borrows (or reborrows) the
+/// same place its operand does; `as` only changes the pointee type
+/// (#1175). Returns the operand, through any number of such casts, or
+/// `expr` itself. Casts to or from raw pointers or numbers are kept.
+pub fn peel_ref_casts<'a, 'tcx>(mut expr: &'a Expr<'tcx>, typeck: &TypeckResults<'tcx>) -> &'a Expr<'tcx> {
+  while let ExprKind::Cast(inner, _) = expr.kind {
+    if expr.span.from_expansion()
+      || !typeck.expr_ty_opt(expr).is_some_and(|t| t.is_ref())
+      || !typeck.expr_ty_opt(inner).is_some_and(|t| t.is_ref())
+    {
+      break;
+    }
+    expr = inner;
+  }
+  expr
+}
+
 pub fn is_addr(expr: &Expr) -> bool { // todo, probably a better way to do this using the typechecker
   match expr.kind {
     ExprKind::AddrOf(..) => true,
