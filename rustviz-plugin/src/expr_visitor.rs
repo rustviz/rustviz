@@ -4779,6 +4779,31 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   /// The `break` values recorded for `loop_expr` while its receiver
   /// wasn't known (#452), with each `break` as written.
+  /// The values that can end the labeled block `e` (#1134): what each
+  /// `break` to it carries, in source order, then its last expression
+  /// (if it has one and can reach it), each with its text for a tooltip.
+  /// The `break`s were visited with the block; their values, waiting for
+  /// a receiver (`loop_breaks`), are taken here.
+  pub(crate) fn labeled_block_values(&mut self, e: &'tcx Expr<'tcx>) -> Vec<(&'tcx Expr<'tcx>, Option<String>)> {
+    let ExprKind::Block(block, Some(_)) = e.kind else { return Vec::new() };
+    let breaks: Vec<_> = crate::expr_visitor_utils::breaks_to_id(e, block.hir_id);
+    if !breaks.iter().any(|(_, v)| v.is_some()) {
+      return Vec::new();
+    }
+    self.loop_breaks.retain(|(id, ..)| *id != block.hir_id);
+    let mut out: Vec<(&'tcx Expr<'tcx>, Option<String>)> = breaks.into_iter()
+      .filter_map(|(brk, v)| v.map(|v| (v, self.break_text(brk))))
+      .collect();
+    if let Some(tail) = block.expr {
+      if !self.expr_diverges(tail) {
+        let text = (!tail.span.from_expansion()).then(|| self.tcx.sess.source_map().span_to_snippet(tail.span).ok()).flatten()
+          .filter(|t| t.chars().count() <= 40 && !t.contains('\n'));
+        out.push((tail, text));
+      }
+    }
+    out
+  }
+
   fn take_loop_breaks(&mut self, loop_expr: &'tcx Expr<'tcx>) -> Vec<(&'tcx Expr<'tcx>, Option<String>)> {
     let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.loop_breaks)
       .into_iter().partition(|(id, ..)| *id == loop_expr.hir_id);
@@ -4795,6 +4820,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   pub fn match_arg(&mut self, arg: &'tcx Expr, fn_name: String) {
     // `sum(&arr as &[i32])` passes the borrow `&arr` (#1175).
     let arg = peel_ref_casts(arg, self.tcx.typeck(arg.hir_id.owner));
+    // `f('a: { if c { break 'a s; } t })` (#1134): the argument is what
+    // ended the block, a `break`'s value or its last expression.
+    if matches!(arg.kind, ExprKind::Block(_, Some(_))) {
+      let values = self.labeled_block_values(arg);
+      if values.len() > 1 {
+        self.pair_break_alternatives(arg, values, |this, v| this.match_arg(v, fn_name.clone()));
+        return;
+      }
+    }
     // `f(loop { … break k; })`: what `break` carries is the argument
     // (#452).
     if let ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _) = arg.kind {
@@ -8331,6 +8365,18 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
         None => panic!("internal state: a borrow expression has no `&`/`&mut` to take the mutability from")
       }
     }
+    // `let x = 'a: { if c { break 'a s; } t };` (#1134): x gets what
+    // the `break` carries or the last expression, whichever ended the
+    // block; each is paired as one of them, where the block ends.
+    // (Not into a `let` pattern that takes the value apart: not drawn yet.)
+    ExprKind::Block(_, Some(_)) if !matches!(self.tcx.parent_hir_node(rhs.hir_id),
+        rustc_hir::Node::LetStmt(l) if !matches!(l.pat.kind, PatKind::Binding(..)))
+      && self.labeled_block_values(rhs).len() > 1 => {
+      let values = self.labeled_block_values(rhs);
+      let saved = self.enter_deferred(rhs.hir_id);
+      self.pair_break_alternatives(rhs, values, |this, v| this.match_rhs(lhs.clone(), v, evt.clone()));
+      self.leave_deferred(saved);
+    }
     //a block: { <stmt1>...<stmt_n>, <expr> };
     ExprKind::Block(block, _) => {
       // set new scope when entering a block (span.hi refers to the ending brace of the block)
@@ -11676,6 +11722,16 @@ fn insert_in_arm(
 /// { … break ra; }`), as `branch_tails` gives a conditional's: `None`
 /// for anything else, or a loop none of whose `break`s carries a value.
 pub fn loop_break_tails<'tcx>(e: &'tcx Expr<'tcx>) -> Option<Vec<&'tcx Expr<'tcx>>> {
+  // A labeled block's value is a `break`'s or its last expression's
+  // (#1134).
+  if let ExprKind::Block(b, Some(_)) = e.kind {
+    let mut out: Vec<_> = breaks_to_id(e, b.hir_id).into_iter().filter_map(|(_, value)| value).collect();
+    if out.is_empty() {
+      return None;
+    }
+    out.extend(b.expr);
+    return Some(out);
+  }
   let ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _) = e.kind else { return None };
   let out: Vec<_> = breaks_to(e).into_iter().filter_map(|(_, value)| value).collect();
   (!out.is_empty()).then_some(out)

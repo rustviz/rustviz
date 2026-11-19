@@ -1769,6 +1769,18 @@ pub struct BreakAlt {
     /// was dropped there (#410) or never created, and nothing is left
     /// for a drop flag at the loop's end.
     pub in_loop: bool,
+    /// What the value ends: a `loop`, or a labeled block (`let x = 'a:
+    /// { if c { break 'a s; } t };`, #1134), through a `break` or by
+    /// running to its last expression.
+    pub end: AltEnd,
+}
+
+/// See BreakAlt::end.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AltEnd {
+    Loop,
+    Block,
+    BlockTail,
 }
 
 /// A borrow of a variable declared outside an `if` let-chain that the

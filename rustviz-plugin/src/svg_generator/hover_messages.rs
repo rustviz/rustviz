@@ -931,9 +931,11 @@ pub fn reassign_subsumes_acquire(reassign: &str, acquire: &str) -> bool {
 /// variable `reassign` is about.
 pub fn reassign_with_break_alt(reassign: &str, acquire: &str) -> Option<String> {
     const NEW: &str = " acquires ownership of a new resource";
-    let name = acquire.strip_suffix(&format!(" acquires ownership of a resource{}", break_alt_receiver_suffix()))?;
-    let rest = reassign.strip_prefix(name)?.strip_prefix(NEW)?;
-    Some(format!("{name}{NEW}{}{rest}", break_alt_receiver_suffix()))
+    [break_alt_receiver_suffix(), break_alt_block_receiver_suffix()].into_iter().find_map(|suffix| {
+        let name = acquire.strip_suffix(&format!(" acquires ownership of a resource{}", suffix))?;
+        let rest = reassign.strip_prefix(name)?.strip_prefix(NEW)?;
+        Some(format!("{name}{NEW}{}{rest}", suffix))
+    })
 }
 
 // A drop of an `Rc` / `Arc` / `Weak` doesn't necessarily free the value
@@ -5055,16 +5057,47 @@ fn quoted_break(brk: &Option<String>) -> String {
     }
 }
 
+/// What ended: "loop" or "block" (a labeled block, #1134).
+fn alt_noun(alt: &crate::svg_generator::data::BreakAlt) -> &'static str {
+    match alt.end {
+        crate::svg_generator::data::AltEnd::Loop => "loop",
+        _ => "block",
+    }
+}
+
+/// How it ended: the `break` as written, or a labeled block's last
+/// expression (#1134).
+fn alt_how(alt: &crate::svg_generator::data::BreakAlt) -> String {
+    match (alt.end, &alt.brk) {
+        (crate::svg_generator::data::AltEnd::BlockTail, Some(t)) => format!("its last expression, {}", styled_name_html(t)),
+        (crate::svg_generator::data::AltEnd::BlockTail, None) => "its last expression".to_owned(),
+        _ => quoted_break(&alt.brk),
+    }
+}
+
 /// Appended to the receiver's dot: it got the value of one `break`,
 /// whichever ran.
 pub fn break_alt_receiver_suffix() -> String {
     format!(" (from whichever {} ended the loop)", styled_name_html(&"break".to_owned()))
 }
 
+/// break_alt_receiver_suffix for `alt`'s construct: a labeled block can
+/// also end at its last expression (#1134).
+pub fn break_alt_receiver_suffix_for(alt: &crate::svg_generator::data::BreakAlt) -> String {
+    match alt.end {
+        crate::svg_generator::data::AltEnd::Loop => break_alt_receiver_suffix(),
+        _ => break_alt_block_receiver_suffix(),
+    }
+}
+
+fn break_alt_block_receiver_suffix() -> String {
+    format!(" (from whichever {} or last expression ended the block)", styled_name_html(&"break".to_owned()))
+}
+
 /// Appended to the source's dot and to the arrow: the copy or move
 /// happened only if this `break` ended the loop.
-pub fn break_alt_if_suffix(brk: &Option<String>) -> String {
-    format!(", if the loop ended with {}", quoted_break(brk))
+pub fn break_alt_if_suffix(alt: &crate::svg_generator::data::BreakAlt) -> String {
+    format!(", if the {} ended with {}", alt_noun(alt), alt_how(alt))
 }
 
 /// The lender's dot when a `break` borrows from it for the receiver
@@ -5073,8 +5106,8 @@ pub fn break_alt_if_suffix(brk: &Option<String>) -> String {
 /// the borrow, before what it means for the lender ("; rb can't be
 /// used while the borrow is live"): rustc rejects that use while the
 /// receiver is live whichever `break` ran.
-pub fn with_break_alt_lend(title: &str, brk: &Option<String>) -> String {
-    let suffix = break_alt_if_suffix(brk);
+pub fn with_break_alt_lend(title: &str, alt: &crate::svg_generator::data::BreakAlt) -> String {
+    let suffix = break_alt_if_suffix(alt);
     // The clauses' "; ", not the end of an escaped entity (`&gt; `)
     // in a styled name.
     let is_entity = |i: usize| title[..i].rfind('&')
@@ -5093,18 +5126,18 @@ pub fn with_break_alt_lend(title: &str, brk: &Option<String>) -> String {
 pub fn event_dot_break_alt_move(my_name: &String, to: &String, alt: &crate::svg_generator::data::BreakAlt, what: &str) -> String {
     let name = styled_name_html(my_name);
     let to = styled_name_html(to);
-    let brk = &alt.brk;
+    let (noun, how) = (alt_noun(alt), alt_how(alt));
     let moved = if what == "reference" {
         format!("the reference in {0}", name)
     } else {
         format!("{0}'s {1}", name, what)
     };
     if alt.in_loop {
-        format!("{0} is moved to {1} if the loop ended with {2}", moved, to, quoted_break(brk))
+        format!("{0} is moved to {1} if the {noun} ended with {2}", moved, to, how)
     } else {
         format!(
-            "{0} may have been moved: the loop can end with {1}, which moves {2} to {3}, so {0} can't be used after the loop",
-            name, quoted_break(brk), moved, to
+            "{0} may have been moved: the {noun} can end with {1}, which moves {2} to {3}, so {0} can't be used after the {noun}",
+            name, how, moved, to
         )
     }
 }
@@ -5348,7 +5381,7 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
          | ExternalEvent::Copy { break_alt: Some(alt), .. }
          | ExternalEvent::StaticBorrow { break_alt: Some(alt), .. }
          | ExternalEvent::MutableBorrow { break_alt: Some(alt), .. } = external_event {
-        title.push_str(&break_alt_if_suffix(&alt.brk));
+        title.push_str(&break_alt_if_suffix(alt));
     }
     if let ExternalEvent::StaticBorrow { via: Some(via), .. }
          | ExternalEvent::MutableBorrow { via: Some(via), .. } = external_event {
@@ -5509,17 +5542,17 @@ pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, fro
             | ExternalEvent::PassByMutableReference { break_alt: Some(alt), .. } => Some(alt),
             _ => None,
         };
-        let alt_suffix = alt.map_or(String::new(), |a| break_alt_if_suffix(&a.brk));
+        let alt_suffix = alt.map_or(String::new(), break_alt_if_suffix);
         if interior_mut_through_ref {
             let msg = fn_dot_shared_ref_interior_mut(
                 &function.name, &from_variable.name(),
                 matches!(external_event, ExternalEvent::PassByStaticReference { refcell_borrow_mut: true, .. }));
-            alt.map_or(msg.clone(), |a| with_break_alt_lend(&msg, &a.brk)) + &stored_suffix
+            alt.map_or(msg.clone(), |a| with_break_alt_lend(&msg, a)) + &stored_suffix
         } else if interior_mut {
             let msg = fn_dot_shared_borrow_interior_mut(
                 &function.name, &from_variable.name(),
                 matches!(external_event, ExternalEvent::PassByStaticReference { refcell_borrow_mut: true, .. }));
-            alt.map_or(msg.clone(), |a| with_break_alt_lend(&msg, &a.brk)) + &stored_suffix
+            alt.map_or(msg.clone(), |a| with_break_alt_lend(&msg, a)) + &stored_suffix
         } else {
             format!("{}{}{}{}{}{}{}", styled_fn_name, title_fn, styled_from_name, alt_suffix, implicit_suffix, reborrow_suffix, stored_suffix)
         }
