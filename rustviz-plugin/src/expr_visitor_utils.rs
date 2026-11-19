@@ -2105,6 +2105,12 @@ pub fn needs_drop_in<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, env: rustc_middle::t
 /// nested loop). A `break` can't cross a closure boundary (rustc rejects
 /// it), and a closure's body isn't visited anyway.
 pub fn breaks_to<'tcx>(loop_expr: &'tcx Expr<'tcx>) -> Vec<(&'tcx Expr<'tcx>, Option<&'tcx Expr<'tcx>>)> {
+  breaks_to_id(loop_expr, loop_expr.hir_id)
+}
+
+/// `breaks_to` for the target `id`: a labeled block's `break`s target
+/// its block's HirId, not the block expression's (#1134).
+pub fn breaks_to_id<'tcx>(loop_expr: &'tcx Expr<'tcx>, id: HirId) -> Vec<(&'tcx Expr<'tcx>, Option<&'tcx Expr<'tcx>>)> {
   use rustc_hir::intravisit::{self, Visitor};
   struct Find<'tcx> { id: HirId, out: Vec<(&'tcx Expr<'tcx>, Option<&'tcx Expr<'tcx>>)> }
   impl<'tcx> Visitor<'tcx> for Find<'tcx> {
@@ -2117,7 +2123,7 @@ pub fn breaks_to<'tcx>(loop_expr: &'tcx Expr<'tcx>) -> Vec<(&'tcx Expr<'tcx>, Op
       intravisit::walk_expr(self, e);
     }
   }
-  let mut f = Find { id: loop_expr.hir_id, out: Vec::new() };
+  let mut f = Find { id, out: Vec::new() };
   intravisit::walk_expr(&mut f, loop_expr);
   f.out
 }
