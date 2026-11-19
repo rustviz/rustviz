@@ -21227,6 +21227,25 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "f goes out of scope. No resource is dropped.",
         ],
     },
+||||||| parent of 17816e937 (plugin: a block that ends before an all-exit conditional drops its locals at its `}` (#1139))
+    TooltipExpect {
+        name: "inner_block_before_all_exit_1139",
+        // #1139: a bare `{ … }` block, then an `if` / `match` whose every
+        // path leaves the function. The block's locals had no scope end
+        // at all (their drop was never stated): every owner was taken to
+        // have left at the exits, though the block's `}` runs first.
+        // exit_inside's h is in the block that holds the exits: it is
+        // dropped at them and gets no second scope end.
+        must_contain: &[
+            "a goes out of scope. Its resource is dropped.",
+            "b goes out of scope. Its resource is dropped.",
+            "d goes out of scope. Its resource is dropped.",
+            "e goes out of scope. Its resource is dropped.",
+            "f goes out of scope. Its resource is dropped.",
+            "h goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
