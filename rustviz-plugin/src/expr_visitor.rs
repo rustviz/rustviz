@@ -7494,7 +7494,7 @@ fn pat_leaves(&self, pat: &'tcx Pat<'tcx>, typeck: &'tcx rustc_middle::ty::Typec
 /// bindings moved out what they bind, a part that needs drop is left
 /// in the value: under a `_`, a `ref` binding, a literal or a field
 /// skipped by `..`.
-fn pat_leaves_drop(&self, pat: &'tcx Pat<'tcx>, typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>, env: rustc_middle::ty::TypingEnv<'tcx>) -> bool {
+pub(crate) fn pat_leaves_drop(&self, pat: &'tcx Pat<'tcx>, typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>, env: rustc_middle::ty::TypingEnv<'tcx>) -> bool {
   use rustc_middle::ty::TyKind;
   let tcx = self.tcx;
   let ty = typeck.node_type(pat.hir_id);

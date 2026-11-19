@@ -2618,7 +2618,7 @@ pub enum Event {
     ChainFailAssign { place: Option<String>, drops_old: bool, rc: Option<RcDrop>, path: FailPath },
     // See ExternalEvent::ChainFailUse. `is_ref`: the column is a
     // reference, so what was lent is the resource it points to.
-    ChainFailUse { uses: Vec<ChainUse>, definite: bool, path: FailPath, is_ref: bool },
+    ChainFailUse { uses: Vec<ChainUse>, definite: bool, path: FailPath, is_ref: bool, pointee_value: bool },
     // See ExternalEvent::TiedParamNote.
     TiedParamNote { lifetime: String },
     // See ExternalEvent::DeadElseNote.
@@ -3430,8 +3430,8 @@ impl Event {
             Event::InitRefParam{ param: ResourceAccessPoint::Owner(_), own_param: Some(own), .. } => {
                 hover_messages::event_dot_param_value_init(my_name, &own.fn_name, own.whole)
             }
-            Event::ChainFailUse { uses, definite, path, is_ref } => {
-                hover_messages::event_dot_chain_fail_use(my_name, uses, *definite, *path, *is_ref)
+            Event::ChainFailUse { uses, definite, path, is_ref, pointee_value } => {
+                hover_messages::event_dot_chain_fail_use(my_name, uses, *definite, *path, *is_ref, *pointee_value)
             }
             Event::DeadElseNote => {
                 hover_messages::event_dot_dead_else_note(my_name)
@@ -3619,8 +3619,8 @@ impl Event {
             Event::Move{ to, is: ResourceTy::Value(ResourceAccessPoint::StaticRef(r)), ..} if !to.is_closure() => {
                 hover_messages::event_dot_ref_moved(my_name, matches!(to, ResourceTy::Caller), r.pointee_copy, false)
             }
-            Event::Move{ is: ResourceTy::Index(_, place, _), ..} if place.starts_with('*') => {
-                hover_messages::event_dot_move_through_element(place)
+            Event::Move{ is: ResourceTy::Index(_, place, write), ..} if place.starts_with('*') => {
+                hover_messages::event_dot_move_through_element(place, !matches!(write, PlaceWrite::AssignDropsOld))
             }
             Event::Move{ to, is, break_out: true, ..} => {
                 hover_messages::event_dot_break_out_move(&self.deref_name(my_name), &to.name(), is_plain(is))
@@ -5080,7 +5080,7 @@ impl Visualizable for VisualizationData {
           vec![(line_num, Event::DeadLoanNote { lender: lender.clone(), borrower: borrower.clone(), repoint: *repoint, shown: false })]
         },
         ExternalEvent::ChainFailUse{ro, uses, definite, path, ..} => {
-          vec![(line_num, Event::ChainFailUse { uses: uses.clone(), definite: *definite, path: *path, is_ref: ro.is_ref() })]
+          vec![(line_num, Event::ChainFailUse { uses: uses.clone(), definite: *definite, path: *path, is_ref: ro.is_ref(), pointee_value: ro.points_to_copy() })]
         },
 
         _ => panic!("internal state: a branch event reached the per-variable event expansion")
@@ -5468,8 +5468,8 @@ impl Visualizable for VisualizationData {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::DeadLoanNote { lender, borrower, repoint, shown: false }, line_number);
             },
             ExternalEvent::ChainFailUse{ro, uses, definite, path, ..} => {
-                let is_ref = ro.is_ref();
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::ChainFailUse { uses, definite, path, is_ref }, line_number);
+                let (is_ref, pointee_value) = (ro.is_ref(), ro.points_to_copy());
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::ChainFailUse { uses, definite, path, is_ref, pointee_value }, line_number);
             },
         }
     }

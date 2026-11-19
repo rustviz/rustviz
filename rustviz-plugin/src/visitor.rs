@@ -12086,6 +12086,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // pairing comes after its visit, `pat_leaves_parts`). Rust drops
     // it at the end of the `let`; on the branch's path nothing else
     // happens before then, so its drop is drawn where the literal is.
+    // What the pattern leaves in the literal is all that is dropped
+    // with it: when none of that needs drop (`let (x, _) = (s, p);`
+    // with `p: P { a: i32 }`), nothing is dropped at the end of the
+    // `let`, as for a literal with nothing to drop (#1163).
+    let typeck = self.tcx.typeck(e.hir_id.owner);
+    let env = typing_env(self.tcx, e.hir_id.owner);
+    if !self.pat_leaves_drop(let_stmt.pat, typeck, env) {
+      return None;
+    }
     if key != let_stmt.hir_id {
       let ty = self.tcx.typeck(e.hir_id.owner).expr_ty(literal);
       if !self.needs_drop(ty, e.hir_id.owner) {
