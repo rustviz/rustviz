@@ -2297,6 +2297,31 @@ pub fn event_dot_mut_borrow(my_name: &String, holds_value: bool) -> String {
     )
 }
 
+// A shared reference holding a mutable loan (`let r: &String = &mut
+// s;`, `let r = downgrade(&mut s);` with `fn(&mut String) -> &str`):
+// r can only read, but s stays mutably borrowed while r is live
+// (#1122).
+pub fn event_dot_mut_borrow_by_shared_ref(my_name: &String, holds_value: bool) -> String {
+    format!(
+        "{0} is a shared reference made from a mutable borrow of a {1}: {0} can only read it, but the borrow stays mutable while {0} is live",
+        styled_name_html(my_name), held(holds_value)
+    )
+}
+
+// A `&mut` holding a shared loan (`let r = &mut &x;`): r points to a
+// temporary (the `&x` reference) that shares x (#1131).
+pub fn event_dot_static_borrow_by_mut_ref(my_name: &String, holds_value: bool) -> String {
+    format!(
+        "{0} mutably borrows a temporary that immutably borrows a {1}",
+        styled_name_html(my_name), held(holds_value)
+    )
+}
+
+// Its end: r's own borrow of the temporary ends with the shared one.
+pub fn event_dot_mut_ref_return_of_shared(my_name: &String) -> String {
+    format!("{0}'s borrow ends", styled_name_html(my_name))
+}
+
 // 0   1
 //     |
 // *<--o   the star event (&)

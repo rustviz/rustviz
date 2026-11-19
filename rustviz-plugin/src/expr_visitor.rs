@@ -5008,6 +5008,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       rd.static_lender = static_lender;
       rd.co_lenders = co_lenders;
     }
+    self.note_loan_kinds(r.name(), loop_expr);
   }
 
   fn get_ref_data_single(&self, expr: &'tcx Expr<'tcx>) -> (ResourceTy, VecDeque<String>){
@@ -5220,6 +5221,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           rd.loan_line = call_loan_line(expr, rd.assigned_at);
           rd.co_lenders = co_lenders;
         }
+        self.note_loan_kinds(&name, expr);
         self.note_ref_carrier(&name, src_loan);
       }
     }
@@ -5324,6 +5326,52 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
+  /// The reference `name` (a variable, or a field `h.r` of one) was
+  /// just given `init`'s lenders: record the kind of each one's loan
+  /// where it isn't the reference's own kind, which `ref_mutability`
+  /// (the reference's type) would otherwise give. A shared reference
+  /// can hold a mutable loan (`let r: &String = &mut s;`, `let r =
+  /// downgrade(&mut s);` with `fn(&mut String) -> &str`): s can't be
+  /// used at all while r is live (E0502), and the borrow ends as a
+  /// mutable one (#1122). A mutable reference can hold a shared loan
+  /// (`let r = &mut &x;` borrows x shared, into a temporary `&String`
+  /// that r borrows mutably; #1131). The kinds come from rustc's loans
+  /// issued in `init` that flow into r's lifetimes; a copy of another
+  /// reference (`let r2 = r;`) holds that one's loans, of their kinds.
+  /// Clears what an earlier value of the reference recorded.
+  pub fn note_loan_kinds(&mut self, name: &str, init: &'tcx Expr<'tcx>) {
+    let Some(rd) = self.borrow_map.get(name) else { return };
+    let lenders: Vec<ResourceTy> = rd.all_lenders().into_iter()
+      .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)))
+      .collect();
+    let own = rd.ref_mutability;
+    let mut parts = name.split('.');
+    let base = parts.next().unwrap_or_default();
+    let fields: Vec<&str> = parts.collect();
+    let held = if lenders.is_empty() { None } else { self.loans_held_from(base, &fields, init.span) };
+    // `let r2 = r;` / `let q = x.part;`: no loan is issued here.
+    let mut src = init;
+    while let ExprKind::DropTemps(inner) = src.kind {
+      src = inner;
+    }
+    let copied = match src.kind {
+      ExprKind::Path(QPath::Resolved(..)) | ExprKind::Field(..) =>
+        expr_to_rap_name(src, &self.tcx).and_then(|n| self.borrow_map.get(&n)).cloned(),
+      _ => None,
+    };
+    let muts: Vec<(ResourceTy, bool)> = lenders.into_iter().map(|l| {
+      let base = l.real_name().split('.').next().unwrap_or_default().to_owned();
+      let m = held.as_ref().and_then(|h| h.get(&base).copied())
+        .or_else(|| copied.as_ref().filter(|c| c.all_lenders().contains(&l)).map(|c| c.mut_of(&l)))
+        .unwrap_or(own);
+      (l, m)
+    }).collect();
+    let muts = if muts.iter().all(|(_, m)| *m == own) { Vec::new() } else { muts };
+    if let Some(rd) = self.borrow_map.get_mut(name) {
+      rd.lender_muts = muts;
+    }
+  }
+
   /// Fields that get a column of their own under a value of type `ty`,
   /// as (name, type) pairs in declaration order: a local struct's
   /// fields (`p.name`), or a tuple's elements (`t.0`, `t.1`). Empty
@@ -5402,6 +5450,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         rd.lender = lender;
         rd.co_lenders = lenders;
         rd.aliasing = aliasing;
+        self.note_loan_kinds(&fname, init);
       }
     }
   }
@@ -5530,6 +5579,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         rd.borrow_span = None;
         rd.loan_line = None;
         rd.assigned_at = line;
+        if self.raps.get(member.name()).is_some_and(|r| r.rap.is_ref()) {
+          rd.lender_muts = Vec::new();
+        }
       }
     }
     for (fname, mut lenders) in new {
@@ -5543,6 +5595,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         rd.co_lenders = lenders;
         rd.aliasing = aliasing;
       }
+      self.note_loan_kinds(&fname, rhs);
     }
   }
 
@@ -6151,6 +6204,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       rd.static_lender = src.static_lender;
       rd.co_lenders = src.co_lenders;
       rd.borrow_span = src.borrow_span;
+      rd.lender_muts = src.lender_muts;
     }
   }
 
@@ -6693,17 +6747,34 @@ fn pattern_ref_borrows(
   // reference (a parameter standing for the caller's data, #393)
   // lends without a loan in this body, so it stays. A loan of the
   // other kind (`&mut k` in the lifetime of a `&str` field that shares
-  // it) isn't drawn: the arrow would call it a borrow of the
-  // reference's own kind.
+  // it) is left out when one of the reference's own kind is there:
+  // the field points into that one. Without one, the reference holds
+  // the other kind's loan: `if let Some(x) = first(&mut v)`
+  // (`fn(&mut Vec<i32>) -> Option<&i32>`) keeps v mutably borrowed
+  // while x is live (#1122).
   let is_mut = reference.is_mutref();
-  match self.loans_held_by(bound, fields) {
-    Some(held) => lenders.retain(|l| match l {
-      ResourceTy::Value(r) if !r.is_ref() => {
-        let base = r.name().split('.').next().unwrap_or_default();
-        held.get(base).is_some_and(|m| *m == is_mut)
+  let held = self.loans_held_by(bound, fields);
+  let kind_of = |l: &ResourceTy| match (l, &held) {
+    (ResourceTy::Value(r), Some(held)) if !r.is_ref() =>
+      held.get(r.name().split('.').next().unwrap_or_default()).copied().unwrap_or(is_mut),
+    _ => is_mut,
+  };
+  match &held {
+    Some(held) => {
+      let kept = |l: &ResourceTy, own_kind: bool| match l {
+        ResourceTy::Value(r) if !r.is_ref() => {
+          let base = r.name().split('.').next().unwrap_or_default();
+          held.get(base).is_some_and(|m| !own_kind || *m == is_mut)
+        }
+        _ => true,
+      };
+      let own: Vec<ResourceTy> = lenders.iter().filter(|l| kept(l, true)).cloned().collect();
+      if own.is_empty() {
+        lenders.retain(|l| kept(l, false));
+      } else {
+        lenders = own;
       }
-      _ => true,
-    }),
+    }
     // Without rustc's lifetimes, only a single lender is certain.
     None if lenders.len() > 1 || in_field => return Vec::new(),
     None => {}
@@ -6728,10 +6799,12 @@ fn pattern_ref_borrows(
     },
   };
   let aliasing = get_aliasing_data(&lenders[0], &self.borrow_map);
+  let kinds: Vec<bool> = lenders.iter().map(kind_of).collect();
   if let Some(rd) = self.borrow_map.get_mut(&name) {
     rd.lender = lenders[0].clone();
     rd.co_lenders = lenders[1..].to_vec();
     rd.aliasing = aliasing;
+    rd.lender_muts = if kinds.iter().all(|m| *m == is_mut) { Vec::new() } else { lenders.iter().cloned().zip(kinds.iter().copied()).collect() };
   }
   self.pattern_copies.insert(name.clone());
   if from_call {
@@ -6750,7 +6823,7 @@ fn pattern_ref_borrows(
   };
   let to = ResourceTy::Value(reference.clone());
   let mut out = Vec::new();
-  for lender in lenders {
+  for (lender, is_mut) in lenders.into_iter().zip(kinds) {
     let id = *self.unique_id;
     *self.unique_id += 1;
     let via = Some(via.clone());
@@ -6847,6 +6920,7 @@ pub fn emit_struct_field_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'
       continue;
     }
     let is_mut = if frap.is_ref() { frap.is_mutref() } else { rd.ref_mutability };
+    let kinds: Vec<bool> = lenders.iter().map(|l| if rd.lender_muts.is_empty() { is_mut } else { rd.mut_of(l) }).collect();
     let via = BorrowVia {
       func: func.clone(),
       lenders: lenders.iter().map(|l| l.name()).collect(),
@@ -6855,7 +6929,7 @@ pub fn emit_struct_field_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'
       carrier: ViaCarrier::StructField,
     };
     let to = ResourceTy::Value(frap.clone());
-    for lender in lenders.iter() {
+    for (lender, is_mut) in lenders.iter().zip(kinds) {
       let id = *self.unique_id;
       let ev = if is_mut {
         ExternalEvent::MutableBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id, of_ref_var: false }
@@ -8679,6 +8753,7 @@ pub fn match_rhs_struct(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, _qpat
           rd.static_lender = static_lender;
           rd.co_lenders = co_lenders;
         }
+        self.note_loan_kinds(&new_lhs_name, field.expr);
       }
       // A struct field initialised by a call (`O { inner: mk(&t), .. }`):
       // its reference fields borrow what the callee's signature ties
