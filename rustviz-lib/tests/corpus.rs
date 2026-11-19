@@ -20893,6 +20893,25 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the resource r points to is mutably borrowed by r2 through r; r can't be used while the borrow is live",
         ],
     },
+    TooltipExpect {
+        name: "mut_ref_moved_holder_1237",
+        // #1237: once r's `&mut` is moved into w.f (or x.0, or b), s's
+        // dotted segment names the new holder from that line. Main said
+        // "borrowed by r" until the borrow ended. ("… by r" is still right
+        // on the row before the move, so it can't go in must_not_contain;
+        // the new texts below exist only on the rows after it.)
+        must_contain: &[
+            "s's resource is mutably borrowed by r; s can't be used until the borrow ends",
+            "s's resource is mutably borrowed by w.f; s can't be used until the borrow ends",
+            "t's resource is mutably borrowed by x.0; t can't be used until the borrow ends",
+            "u's resource is mutably borrowed by b; u can't be used until the borrow ends",
+            // `H { f: c }` reborrows c: c still holds v's borrow.
+            "v's resource is mutably borrowed by c; v can't be used until the borrow ends",
+        ],
+        must_not_contain: &[
+            "v's resource is mutably borrowed by h.f; v can't be used until the borrow ends",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
