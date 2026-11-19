@@ -5,7 +5,7 @@
 //! See StmtKind at : https://doc.rust-lang.org/stable/nightly-rustc/rustc_hir/hir/enum.StmtKind.html
 //! See tcx: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TyCtxt.html
 
-use log::{info, warn};
+use log::warn;
 use rustc_hir::{StmtKind, Stmt, Expr, ExprKind, PathSegment, UnOp, Param, QPath, Pat, PatKind, BindingMode, HirId, Mutability, LetStmt, Block, def::*};
 use rustc_hir::intravisit::{self, Visitor};
 use crate::expr_visitor::*;
@@ -437,17 +437,30 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
+  /// The `if` / `else` or `match` whose branches yield the value `e`:
+  /// `e` itself, or the one a constructor wraps (`Some(match o { .. })`,
+  /// #1174), which takes nothing itself (#768): what a branch yields
+  /// goes where the built value goes. None for any other `e`.
+  fn conditional_value(&self, e: &'tcx Expr<'tcx>) -> Option<&'tcx Expr<'tcx>> {
+    if e.span.from_expansion() {
+      return None;
+    }
+    match e.kind {
+      ExprKind::If(_, _, Some(_)) | ExprKind::Match(_, _, rustc_hir::MatchSource::Normal) => Some(e),
+      ExprKind::Call(callee, [inner]) if is_ctor_path(callee, self.tcx.typeck(e.hir_id.owner)) => self.conditional_value(inner),
+      _ => None,
+    }
+  }
+
   /// `e` is returned to the caller (the function's tail, or what a
-  /// `return` carries). If it's an `if` / `else` or a `match`, mark
+  /// `return` carries). If it is an `if` / `else` or a `match` (or a
+  /// constructor wrapping one, `conditional_value`), mark
   /// the value each branch yields, which goes to the caller inside its
   /// branch, where `visit_expr` reaches it (#674): on the paths
   /// through the other branches it stays where it is. False for any
   /// other `e`, which `return_to_caller` sends to the caller as a whole.
   fn mark_branch_returns(&mut self, e: &'tcx Expr<'tcx>) -> bool {
-    if e.span.from_expansion()
-      || !matches!(e.kind, ExprKind::If(_, _, Some(_)) | ExprKind::Match(_, _, rustc_hir::MatchSource::Normal)) {
-      return false;
-    }
+    let Some(e) = self.conditional_value(e) else { return false };
     let mut values = Vec::new();
     self.returned_values(e, &mut values);
     self.tail_values.extend(values.iter().map(|v| v.hir_id));
@@ -456,6 +469,54 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if values.iter().all(|v| matches!(v.kind, ExprKind::Lit(_) | ExprKind::Path(QPath::Resolved(None, _)))
       || self.reborrow_through_ref(v).is_some()) {
       self.tail_plain.extend(values.iter().map(|v| v.hir_id));
+    }
+    true
+  }
+
+  /// Visits a call's arguments, in order, and passes each to `fn_name`
+  /// (`match_arg`).
+  ///
+  /// An argument written as an `if` / `else` or a `match` passes the
+  /// value each branch yields, inside its branch, where `visit_expr`
+  /// reaches it (#1174), as for a returned one (`mark_branch_returns`,
+  /// #674): `take(if c { a } else { b })` moves `a` on one path and `b`
+  /// on the other, and an arm's binding `x` in `take(match o { Some(x)
+  /// => x, .. })` is passed to the call, not dropped at the arm's end.
+  ///
+  /// `defer`: a `?` follows an argument (`take(s, f()?)`, `pair.eat(f()?)`
+  /// with `eat(self)`). Every argument is evaluated before the call
+  /// takes any: if the `?` returns early, the call never happens, and
+  /// what the earlier arguments (and a by-value receiver) hold is
+  /// dropped as the function returns (#1195). So all are visited (the
+  /// `?` among them, which says what it drops) before `before_pass`
+  /// runs and any is passed.
+  pub fn visit_call_args(&mut self, args: &'tcx [Expr<'tcx>], fn_name: &str, defer: bool, before_pass: impl FnOnce(&mut Self)) {
+    let in_branches: Vec<bool> = args.iter().map(|a| self.mark_branch_args(a, fn_name)).collect();
+    if defer {
+      for arg in args {
+        self.visit_expr(arg);
+      }
+    }
+    before_pass(self);
+    for (arg, branched) in args.iter().zip(&in_branches) {
+      if !defer {
+        self.visit_expr(arg);
+      }
+      if !branched {
+        self.match_arg(arg, fn_name.to_owned());
+      }
+    }
+  }
+
+  /// `arg`, a call's argument, is an `if` / `else` or a `match`: mark
+  /// the value each branch yields to be passed to `fn_name` where it is
+  /// visited (`arg_values`). False for any other `arg`.
+  fn mark_branch_args(&mut self, arg: &'tcx Expr<'tcx>, fn_name: &str) -> bool {
+    let Some(arg) = self.conditional_value(arg) else { return false };
+    let mut values = Vec::new();
+    self.returned_values(arg, &mut values);
+    for v in values {
+      self.arg_values.insert(v.hir_id, fn_name.to_owned());
     }
     true
   }
@@ -1809,6 +1870,24 @@ fn borrows_its_args(span: rustc_span::Span) -> bool {
       // `panic_display(&x)`.
       | "panic_2021" | "unreachable_2021")
   )
+}
+
+/// Whether `e` holds a `?` that can return from the function `e` is in
+/// (not one in a closure, which returns from the closure).
+fn holds_try(e: &Expr<'_>) -> bool {
+  struct Finder(bool);
+  impl<'v> rustc_hir::intravisit::Visitor<'v> for Finder {
+    fn visit_expr(&mut self, e: &'v Expr<'v>) {
+      match e.kind {
+        ExprKind::Match(_, _, rustc_hir::MatchSource::TryDesugar(_)) => self.0 = true,
+        ExprKind::Closure(_) => {}
+        _ => rustc_hir::intravisit::walk_expr(self, e),
+      }
+    }
+  }
+  let mut f = Finder(false);
+  rustc_hir::intravisit::Visitor::visit_expr(&mut f, e);
+  f.0
 }
 
 /// If `expr` is the expansion of `dbg!(a, b, …)`, return the user's
@@ -4256,6 +4335,13 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       self.note_tied_ref_params(expr);
       return;
     }
+    // Likewise a value a branch of an `if` / `match` written as a call's
+    // argument yields is passed to the call inside its branch (#1174).
+    if let Some(fn_name) = self.arg_values.remove(&expr.hir_id) {
+      self.visit_expr(expr);
+      self.match_arg(expr, fn_name);
+      return;
+    }
     // Two complementary behaviours for synthesized HIR nodes (those
     // whose span originates from a macro / desugar expansion):
     //
@@ -4390,94 +4476,40 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           }
         }
 
-        // need to specifically handle println! macro because it's common
-        // note that other macros will need to be resolved similarly (vec![], assert!, etc)
-        // Need to match through all the desugaring and onto the args to the format ({}) function
-        match fn_expr.kind {
-          ExprKind::Path(QPath::Resolved(_,rustc_hir::Path{res: rustc_hir::def::Res::Def(_, id), ..})) 
-          if !id.is_local() => {
-            // to see what the macro expansion looks like:
-            // println!("{:#?}", expr);
-            match args {
-              [Expr{kind: ExprKind::Call(_, a),..}] => {
-                match a {
-                  [_, Expr{kind: ExprKind::AddrOf(_, _, 
-                    Expr{kind: ExprKind::Array(x),..}),..}] => {
-                      for exp in x.iter() {
-                        match exp {
-                          Expr{kind: ExprKind::Call(_, format_args), ..} => {
-                            let fn_name: String = String::from("println!"); // manually overrwrite name
-                            for arg in format_args.iter() {
-                              self.visit_expr(&arg);
-                              self.match_arg(&arg, fn_name.clone());
-                            }
-                          }
-                          _ => {
-                            info!("getting here to the println 1");
-                          }
-                        }
-                      }
-                    }
-                  _ => {
-                    let fn_name: String = hirid_to_var_name(fn_expr.hir_id, &self.tcx).unwrap();
-                    self.add_fn(fn_name.clone());
-                    for arg in a.iter(){
-                      self.visit_expr(&arg);
-                      self.match_arg(&arg, fn_name.clone());
-                    }
-                  }
-                }
-              }
-              _ => {
-                let fn_name: String = hirid_to_var_name(fn_expr.hir_id, &self.tcx).unwrap();
-                self.add_fn(fn_name.clone());
-                for arg in args.iter(){
-                  self.visit_expr(&arg);
-                  self.match_arg(&arg, fn_name.clone());
-                  // self.match_args(&arg, fn_name.clone());
-                }
-              }
-            }
+        // The callee is a name (`f(x)`, `Point::new(..)`, a local
+        // closure `g()`), or an expression whose value is called:
+        // a closure in a struct field (`(w.f)()`, #703), a call's
+        // result (`make(s)(1)`), an element (`fs[0]()`). Such a
+        // callee is evaluated before the arguments; its source text
+        // names the call.
+        let fn_name: String = match hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
+          Some(name) => name,
+          None => {
+            self.visit_expr(fn_expr);
+            self.callee_text(fn_expr)
           }
-          _ => {
-            // The callee is a name (`f(x)`, `Point::new(..)`, a local
-            // closure `g()`), or an expression whose value is called:
-            // a closure in a struct field (`(w.f)()`, #703), a call's
-            // result (`make(s)(1)`), an element (`fs[0]()`). Such a
-            // callee is evaluated before the arguments; its source text
-            // names the call.
-            let fn_name: String = match hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
-              Some(name) => name,
-              None => {
-                self.visit_expr(fn_expr);
-                self.callee_text(fn_expr)
-              }
-            };
-            self.add_fn(fn_name.clone());
-            for arg in args.iter(){
-              self.visit_expr(&arg);
-              self.match_arg(&arg, fn_name.clone());
-            }
-            // `g()` with `g` a `Box<dyn Fn() + '_>` holding a borrow:
-            // calling it uses it, so it holds the borrow at least until
-            // here (#1104). A borrow rustc's facts don't give an end for
-            // (`|| r.len()` reborrows through the shared reference r)
-            // would otherwise end where g was made. (A reference `f: &F`
-            // called as `f()` keeps the end it has.)
-            if let ExprKind::Path(QPath::Resolved(None, p)) = fn_expr.kind {
-              let line = expr_to_line(expr, &self.tcx);
-              let holder = self.raps.get(&fn_name).map(|rd| rd.rap.to_owned())
-                .filter(|r| matches!(p.res, Res::Local(_)) && !r.is_ref() && r.holds_borrow())
-                .filter(|r| self.borrow_map.get(r.name()).is_some_and(|d| d.lifetime < line));
-              if let Some(rap) = holder {
-                self.update_rap(&rap, line);
-              }
-            }
-            // `f(..)` with `f` a local `FnOnce` closure: the call moves
-            // it, after the arguments are evaluated (#271).
-            self.closure_call_events(fn_expr, expr_to_line(expr, &self.tcx));
+        };
+        self.add_fn(fn_name.clone());
+        let defer = args.iter().skip(1).any(|a| holds_try(a));
+        self.visit_call_args(args, &fn_name, defer, |_| {});
+        // `g()` with `g` a `Box<dyn Fn() + '_>` holding a borrow:
+        // calling it uses it, so it holds the borrow at least until
+        // here (#1104). A borrow rustc's facts don't give an end for
+        // (`|| r.len()` reborrows through the shared reference r)
+        // would otherwise end where g was made. (A reference `f: &F`
+        // called as `f()` keeps the end it has.)
+        if let ExprKind::Path(QPath::Resolved(None, p)) = fn_expr.kind {
+          let line = expr_to_line(expr, &self.tcx);
+          let holder = self.raps.get(&fn_name).map(|rd| rd.rap.to_owned())
+            .filter(|r| matches!(p.res, Res::Local(_)) && !r.is_ref() && r.holds_borrow())
+            .filter(|r| self.borrow_map.get(r.name()).is_some_and(|d| d.lifetime < line));
+          if let Some(rap) = holder {
+            self.update_rap(&rap, line);
           }
         }
+        // `f(..)` with `f` a local `FnOnce` closure: the call moves
+        // it, after the arguments are evaluated (#271).
+        self.closure_call_events(fn_expr, expr_to_line(expr, &self.tcx));
         // `std::panic::panic_any(…)` written out (#410): it unwinds
         // once its argument has been passed.
         self.note_panic(expr);
@@ -4494,16 +4526,21 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // `.map(f)`) before this call, so events come out in
         // evaluation order.
         self.visit_expr(rcvr);
-        self.method_receiver_events(expr, name_and_generic_args, rcvr, &fn_name, line_num);
         // The arguments are visited whether or not the receiver has a
         // column. In `a.last_mut().unwrap().push(s)` the receiver of
         // `push` is a temporary, but `s` is still moved into `push`
         // (#132); in `self.items.push(s)` the receiver is a field we
         // don't model, but `s` is still moved (#250).
-        for arg in args.iter(){
-          self.visit_expr(&arg);
-          self.match_arg(&arg, fn_name.clone());
+        // A receiver taken by value (`pair.eat(f()?)`) is moved into
+        // the call only once a `?` in the arguments has gone on (#1195).
+        let by_value = !self.tcx.typeck(expr.hir_id.owner).expr_ty_adjusted(rcvr).is_ref();
+        let defer = args.iter().skip(1).any(|a| holds_try(a)) || (by_value && args.iter().any(|a| holds_try(a)));
+        if !(defer && by_value) {
+          self.method_receiver_events(expr, name_and_generic_args, rcvr, &fn_name, line_num);
         }
+        self.visit_call_args(args, &fn_name, defer, |this| if defer && by_value {
+          this.method_receiver_events(expr, name_and_generic_args, rcvr, &fn_name, line_num);
+        });
         // `refs.push(&s)`: the receiver now holds s's borrow (#392).
         if !matches!(rcvr.kind, ExprKind::MethodCall(..)) {
           let rcvr_rap = expr_to_rap_name(rcvr, &self.tcx)
@@ -5503,18 +5540,25 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let Res::Local(hirid) = path.res else { return false };
     let branching = matches!(rhs_expr.kind, ExprKind::If(..) | ExprKind::Match(_, _, rustc_hir::MatchSource::Normal))
       && !rhs_expr.span.from_expansion();
-    if !branching {
-      return false;
-    }
-    let Some(decl) = self.uninit_locals.remove(&hirid) else {
-      return self.reassign_from_branches(hirid, lhs_expr, rhs_expr);
+    // `x = Some(if c { a } else { b });` (#1225): the constructor takes
+    // nothing itself; x gets each branch's value in its branch.
+    let cond = if branching {
+      rhs_expr
+    } else {
+      match self.conditional_value(rhs_expr) {
+        Some(c) if c.hir_id != rhs_expr.hir_id => c,
+        _ => return false,
+      }
     };
-    let prev = self.defer_arm_binds.replace(rhs_expr.span);
-    self.init_deferred_local(hirid, decl, rhs_expr);
+    let Some(decl) = self.uninit_locals.remove(&hirid) else {
+      return self.reassign_from_branches(hirid, lhs_expr, cond, rhs_expr);
+    };
+    let prev = self.defer_arm_binds.replace(cond.span);
+    self.init_deferred_local(hirid, decl, cond);
     self.defer_arm_binds = prev;
     self.visit_expr(rhs_expr);
-    self.bind_left_arms(rhs_expr);
-    self.mark_branch_results_kept(&binding_name(&self.tcx, hirid), rhs_expr);
+    self.bind_left_arms(cond);
+    self.mark_branch_results_kept(&binding_name(&self.tcx, hirid), cond);
     // (An immutable `let x;` can't be assigned twice, E0384: a loop
     // that assigns it leaves right after.)
     if matches!(decl.annotation.1, Mutability::Mut) {
@@ -5532,7 +5576,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// a local owning a value of a type that isn't Copy, a reference, a
   /// union or a `ManuallyDrop`, or drawn with columns for its fields or
   /// as holding a borrow; returns false, having done nothing, for others.
-  fn reassign_from_branches(&mut self, hirid: HirId, lhs_expr: &'tcx Expr<'tcx>, rhs_expr: &'tcx Expr<'tcx>) -> bool {
+  /// `rhs_expr` is the conditional; `whole`, the right-hand side it is
+  /// in (the same, or a constructor around it, #1225).
+  fn reassign_from_branches(&mut self, hirid: HirId, lhs_expr: &'tcx Expr<'tcx>, rhs_expr: &'tcx Expr<'tcx>, whole: &'tcx Expr<'tcx>) -> bool {
     if self.maybe_init_locals.contains(&hirid) || self.destructure_srcs.contains_key(&hirid) {
       return false;
     }
@@ -5550,7 +5596,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let prev = self.reassign_arms.replace((rap.clone(), drops));
     self.match_rhs(ResourceTy::Value(rap.clone()), rhs_expr, Evt::Move);
     self.reassign_arms = prev;
-    self.visit_expr(rhs_expr);
+    self.visit_expr(whole);
     self.bind_left_arms(rhs_expr);
     true
   }
@@ -9870,8 +9916,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       return;
     }
+    // `let x = Some(if c { a } else { b });` (#1225): a constructor
+    // takes nothing itself (#768), so x is bound from each branch's
+    // value in its branch, as for `let x = if …`.
+    let ctor_cond = (!is_skipped && els.is_none() && matches!(pat.kind, PatKind::Binding(_, _, _, None)))
+      .then(|| self.conditional_value(init)).flatten()
+      .filter(|c| c.hir_id != init.hir_id);
     let init_is_branching = !is_skipped
-      && match init.kind {
+      && (ctor_cond.is_some() || match init.kind {
         ExprKind::If(..) => true,
         // `let r = loop { … break k; }`: the `break`s hand `r` its
         // value as they're visited (#431), so `r` is bound first.
@@ -9879,7 +9931,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         ExprKind::Match(_, _, rustc_hir::MatchSource::TryDesugar(_)) => false,
         ExprKind::Match(..) => true,
         _ => false,
-      };
+      });
     if init_is_branching {
       // `let (a, b) = loop { … break (x, y); }`: each `break` value is
       // bound against the pattern (#452).
@@ -9890,7 +9942,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // once it has been visited (#994).
         let prev = self.defer_arm_binds.take();
         let conditional = matches!(init.kind, ExprKind::If(..) | ExprKind::Match(..));
-        if conditional && matches!(pat.kind, PatKind::Binding(_, _, _, None)) {
+        if let Some(cond) = ctor_cond {
+          self.defer_arm_binds = Some(cond.span);
+          self.bind_pat(pat, cond, is_skipped);
+        } else if conditional && matches!(pat.kind, PatKind::Binding(_, _, _, None)) {
           self.defer_arm_binds = Some(init.span);
           self.bind_pat(pat, init, is_skipped);
         } else if conditional && self.destructures_by_value(pat, init) {
@@ -9905,11 +9960,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.defer_arm_binds = prev;
       }
       self.visit_expr(init);
-      self.bind_left_arms(init);
+      let cond = ctor_cond.unwrap_or(init);
+      self.bind_left_arms(cond);
       // A reference returned by a call in a branch keeps that call's
       // borrow (#337).
       if let PatKind::Binding(_, hir_id, _, None) = pat.kind {
-        self.mark_branch_results_kept(&binding_name(&self.tcx, hir_id), init);
+        self.mark_branch_results_kept(&binding_name(&self.tcx, hir_id), cond);
       }
       self.break_pats.retain(|(id, ..)| *id != init.hir_id);
       self.break_binds.retain(|(id, ..)| *id != init.hir_id);
