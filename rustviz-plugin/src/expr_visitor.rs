@@ -535,6 +535,10 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   //     computed before any part of the statement is drawn.
   pub destructure_srcs: HashMap<rustc_hir::HirId, &'tcx Expr<'tcx>>,
   pub destructure_moved: HashSet<String>,
+  /// The parts of an assignment's destination that its right-hand
+  /// side moves out (`t.0`, `t.1` in `t = (t.1, t.0)`, #1138): their
+  /// old values aren't dropped by the assignment.
+  pub rhs_self_moved: BTreeSet<String>,
   /// Persistent: (name, first line, last line) of each destination
   /// of a destructuring assignment whose old value the same statement
   /// moves out (`m1` in `(m1, m2) = (m2, m1)`). That move hands the
@@ -973,6 +977,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let_ctor_literals: HashSet::new(),
       destructure_srcs: HashMap::new(),
       destructure_moved: HashSet::new(),
+      rhs_self_moved: BTreeSet::new(),
       destructure_swapped: Vec::new(),
       destructure_ref_data: HashMap::new(),
       destructure_ref_src: HashMap::new(),
@@ -2310,6 +2315,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         continue;
       }
       let name = c.name().clone();
+      if self.rhs_self_moved.iter().any(|m| crate::visitor::place_within(&name, m)) {
+        out.moved.push(name);
+        continue;
+      }
       match self.rap_ownership_now(&name) {
         Ownership::None => out.moved.push(name),
         Ownership::Maybe => {
