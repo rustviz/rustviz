@@ -249,6 +249,32 @@ fn html_attr_escape(s: &str) -> String {
 	html_escape(s).replace('"', "&quot;")
 }
 
+/// The `width="Npx"` of an SVG's root element.
+fn svg_width(svg: &str) -> Option<u32> {
+	let root = &svg[svg.find("<svg")?..];
+	let root = &root[..root.find('>')?];
+	let at = root.find(" width=\"")? + 8;
+	root[at..].split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
+}
+
+/// The figure: the code panel and the timeline side by side. The timeline
+/// keeps its full width (it can't be read squeezed), and the code panel's
+/// wrapper takes the rest, scrolling sideways when a line is too long
+/// (#816). It never gets less than half the row, or its own width when
+/// that is less (#1212): a timeline about as wide as the content column
+/// left it ~30px, with the code scrolled out of view. When both don't
+/// fit, the whole figure scrolls sideways instead.
+fn figure_div(id_attr: &str, height: i32, dir: &str, code_width: Option<u32>) -> String {
+	let floor = code_width.map_or("50%".to_owned(), |w| format!("min(50%, {}px)", w));
+	format!("<div class=\"flex-container vis_block\"{} 
+      style=\"position:relative; margin-left:-75px; margin-right:-75px; display: flex; flex-direction: row; justify-content: flex-start; flex-wrap: nowrap; flex-shrink: 0; overflow-x: auto; overflow-y: hidden; height: {}px\">
+      <div style=\"flex: 1 1 auto; min-width: {}; overflow-x: auto; overflow-y: hidden\">
+      <object type=\"image/svg+xml\" class=\"{} code_panel\" data=\"examples/{}/vis_code.svg\" style=\"display: block; min-width: 100%\"></object>
+      </div>
+      <object type=\"image/svg+xml\" class=\"{} tl_panel\" data=\"examples/{}/vis_timeline.svg\" style=\"width: auto; flex-grow: 0; flex-shrink: 0\" onmouseenter=\"helpers('{}')\"></object>
+      </div>", id_attr, height, floor, dir, dir, dir, dir, dir)
+}
+
 fn rustviz_handler(code_string: &str, a_dir: &PathBuf,  ex_counter: u32, playground_url: &str, figure_id: Option<&str>) -> String{
 	// create new example directory: src/assets/example-x/
 	let example_dir_str = format!("example-{}", ex_counter);
@@ -274,13 +300,7 @@ fn rustviz_handler(code_string: &str, a_dir: &PathBuf,  ex_counter: u32, playgro
       info!("successfully created visualization for example {}", ex_counter);
       // Only with telemetry on: names the figure in usage events.
       let id_attr = figure_id.map(|id| format!(" data-rv-figure-id=\"{}\"", id)).unwrap_or_default();
-      let visualization_div = format!("<div class=\"flex-container vis_block\"{} 
-      style=\"position:relative; margin-left:-75px; margin-right:-75px; display: flex; flex-direction: row; justify-content: flex-start; flex-wrap: nowrap; flex-shrink: 0; height: {}px\">
-      <div style=\"flex: 1 1 auto; min-width: 0; overflow-x: auto; overflow-y: hidden\">
-      <object type=\"image/svg+xml\" class=\"{} code_panel\" data=\"examples/{}/vis_code.svg\" style=\"display: block; min-width: 100%\"></object>
-      </div>
-      <object type=\"image/svg+xml\" class=\"{} tl_panel\" data=\"examples/{}/vis_timeline.svg\" style=\"width: auto; flex-grow: 0; flex-shrink: 0\" onmouseenter=\"helpers('{}')\"></object>
-      </div>", id_attr, rv.height(),example_dir_str, example_dir_str, example_dir_str, example_dir_str, example_dir_str);
+      let visualization_div = figure_div(&id_attr, rv.height(), &example_dir_str, svg_width(&rv.code_panel_string()));
     
       format!("{}{}", visualization_div, playground_link(playground_url, code_string))
     }
@@ -406,6 +426,19 @@ mod tests {
 		// bytes that are `+` and `/` in standard base64
 		assert_eq!(base64url(&[0xfb, 0xff, 0xbf]), "-_-_");
 		assert_eq!(base64url("héllo".as_bytes()), "aMOpbGxv");
+	}
+
+	#[test]
+	fn code_panel_keeps_a_floor_next_to_a_wide_timeline() {
+		// #1212: the code panel's wrapper gets at least half the row (or
+		// its own width), and the figure scrolls when both don't fit.
+		let svg = "<svg width=\"715px\" height=\"455px\" xmlns=\"http://www.w3.org/2000/svg\">";
+		assert_eq!(svg_width(svg), Some(715));
+		let div = figure_div("", 455, "example-0", svg_width(svg));
+		assert!(div.contains("min-width: min(50%, 715px)"), "{}", div);
+		assert!(!div.contains("min-width: 0;"), "{}", div);
+		assert!(div.contains("flex-shrink: 0; overflow-x: auto; overflow-y: hidden; height: 455px"), "{}", div);
+		assert!(figure_div("", 1, "e", None).contains("min-width: 50%"));
 	}
 
 	#[test]
