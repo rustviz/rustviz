@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender};
+use crate::svg_generator::data::{is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier};
 use crate::svg_generator::hover_messages::{self, styled_name_html};
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use crate::svg_generator::svg_frontend::rv_attrs::{self, Rv};
@@ -2253,6 +2253,8 @@ fn render_dot(
                         }
                     } else if let Some(title) = ends_several_loans_title(event, history, *line_number, &mut name) {
                         data.title = title;
+                    } else if let Some(title) = part_lend_title(event, visualization_data) {
+                        data.title = title;
                     } else if let Some(title) = loop_head_lend_title(event, &name, rap, visualization_data) {
                         data.title = title;
                     } else if let Some(title) = loop_iterator_ref_title(event, *line_number, rap, visualization_data) {
@@ -3402,6 +3404,11 @@ fn timeline_segment_title(
     if let State::FullPrivilege { s: LineState::Uninit } = state {
         return state.print_message_with_name(rap.name());
     }
+    if let (State::PartialPrivilege { .. } | State::RevokedPrivilege { .. }, Some(line)) = (state, line) {
+        if let Some(title) = lent_with_parent_title(state, rap, visualization_data, line) {
+            return title;
+        }
+    }
     // A place an or-pattern's reference may borrow (#565): borrowed
     // only if its alternative matched, though the borrow checker treats
     // it as borrowed either way.
@@ -3506,6 +3513,70 @@ fn timeline_segment_title(
         return hover_messages::state_mut_ref_partial_privilege(rap.name(), rap.points_to_copy());
     }
     state.print_message_with_name(rap.name())
+}
+
+/// A field's segment from row `line` drawn borrowed only because the
+/// struct it is in is borrowed as a whole there (`let r = &mut p;`; see
+/// `lend_struct_borrows_to_members`): "p.name is mutably borrowed along
+/// with p by r". None when the field's own events lend it at that row.
+fn lent_with_parent_title(state: &State, rap: &ResourceAccessPoint, visualization_data: &VisualizationData, line: usize) -> Option<String> {
+    let ResourceAccessPoint::Struct(m) = rap else { return None };
+    if !m.is_member {
+        return None;
+    }
+    let own = visualization_data.timelines.get(rap.hash())?;
+    let mut live: i64 = 0;
+    for (_, e) in own.history.iter().filter(|(l, _)| *l <= line) {
+        match e {
+            Event::StaticLend { .. } | Event::MutableLend { .. } => live += 1,
+            Event::StaticReacquire { .. } | Event::MutableReacquire { .. } => live -= 1,
+            _ => {}
+        }
+    }
+    if live > 0 {
+        return None;
+    }
+    let mutable = matches!(state, State::RevokedPrivilege { .. });
+    // The innermost enclosing struct lent there (`p.inner` before `p`).
+    let mut parents: Vec<(&Struct, &Timeline)> = visualization_data.timelines.values()
+        .filter_map(|t| match &t.resource_access_point {
+            ResourceAccessPoint::Struct(p) if (if p.is_member { p.owner } else { p.hash }) == m.owner
+                && m.name.starts_with(&format!("{}.", p.name)) => Some((p, t)),
+            _ => None,
+        })
+        .collect();
+    parents.sort_by_key(|(p, _)| std::cmp::Reverse(p.name.len()));
+    for (p, t) in parents {
+        let lent_there = t.states.iter().any(|(a, b, s)| *a <= line && line < *b && if mutable {
+            matches!(s, State::RevokedPrivilege { .. })
+        } else {
+            matches!(s, State::PartialPrivilege { .. })
+        });
+        if !lent_there {
+            continue;
+        }
+        // Who holds the borrow: the one lend of p live at `line`.
+        let mut holders: Vec<String> = Vec::new();
+        for (_, e) in t.history.iter().filter(|(l, _)| *l <= line) {
+            match e {
+                Event::MutableLend { to, .. } | Event::StaticLend { to, .. } => holders.push(to.name()),
+                Event::MutableReacquire { from, .. } | Event::StaticReacquire { from, .. } => {
+                    if let Some(i) = holders.iter().position(|h| *h == from.name()) {
+                        holders.remove(i);
+                    }
+                }
+                _ => {}
+            }
+        }
+        holders.sort();
+        holders.dedup();
+        let by = match holders.as_slice() {
+            [one] if !one.is_empty() => Some(one.as_str()),
+            _ => None,
+        };
+        return Some(hover_messages::state_lent_with_parent(&m.name, &p.name, by, mutable));
+    }
+    None
 }
 
 /// Every event of a column, those in its conditionals' arms included,
@@ -3673,6 +3744,28 @@ fn lent_out_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
 /// The dot of the borrow a `for` loop's head `&v` / `&mut v` makes when
 /// only the loop's iterator holds it (`for &y in &v`; #885): the
 /// iterator has no column, so say it is the borrower.
+/// The lender's dot of a borrow of a whole struct or tuple by a pattern
+/// binding that points to one part of it (`let (a, b) = &mut t;`, #1130):
+/// "t.0 is mutably borrowed by a, as part of a mutable borrow of all of t".
+fn part_lend_title(event: &Event, visualization_data: &VisualizationData) -> Option<String> {
+    let (id, mutable) = match event {
+        Event::StaticLend { id, .. } => (*id, false),
+        Event::MutableLend { id, .. } => (*id, true),
+        _ => return None,
+    };
+    fn find(events: &[(usize, ExternalEvent)], id: usize) -> Option<(String, String, String)> {
+        events.iter().find_map(|(_, ev)| match ev {
+            ExternalEvent::StaticBorrow { id: i, from, to, via: Some(v), .. }
+            | ExternalEvent::MutableBorrow { id: i, from, to, via: Some(v), .. }
+                if *i == id && v.carrier == ViaCarrier::Part => Some((from.name(), v.func.clone(), to.name())),
+            ExternalEvent::Branch { branches, .. } => branches.iter().find_map(|b| find(&b.e_data, id)),
+            _ => None,
+        })
+    }
+    let (whole, part, to) = find(&visualization_data.external_events, id)?;
+    Some(hover_messages::event_dot_lend_part(&whole, &part, &to, mutable))
+}
+
 fn loop_head_lend_title(event: &Event, name: &String, rap: &ResourceAccessPoint, visualization_data: &VisualizationData) -> Option<String> {
     fn is_loop_head_lend(events: &[(usize, ExternalEvent)], lend: usize) -> bool {
         events.iter().any(|(_, ev)| match ev {
