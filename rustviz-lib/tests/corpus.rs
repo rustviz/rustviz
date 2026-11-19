@@ -2831,11 +2831,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the resource r points to is captured by closure len (an immutable reborrow through r); r is read-only while the borrow is live",
             "Closure len captures: *r (immutably reborrowed)",
             "Closure capture (immutable reborrow) from r to len",
-            "the resource p points to is captured by closure g (a mutable reborrow through p); p can't be used while the borrow is live",
+            "the value p points to is captured by closure g (a mutable reborrow through p); p can't be used while the borrow is live",
             "Closure h captures: t (mutably borrowed)",
             "t's resource is captured (mutably borrowed) by closure h",
         ],
         must_not_contain: &[
+            // #1163: p points to an i32, a value.
+            "the resource p points to is captured by closure g",
             "r's resource is captured (mutably borrowed) by closure f",
             "r's resource is captured (immutably borrowed) by closure len",
             "p's resource is captured (mutably borrowed) by closure g",
@@ -6394,18 +6396,21 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Copy from *slots[0] to n",
             "n is initialized with a copy of *slots[0]",
-            "the resource slots[0] points to is copied",
+            "the value slots[0] points to is copied",
             "Copy from *hs[0].r to m",
             "m is initialized with a copy of *hs[0].r",
-            "the resource hs[0].r points to is copied",
+            "the value hs[0].r points to is copied",
             "Copy from *boxes[0] to k",
             "k is initialized with a copy of *boxes[0]",
-            "the resource boxes[0] points to is copied",
+            "the value boxes[0] points to is copied",
             "Copy from *grid[0][0] to total",
             "total is assigned a copy of *grid[0][0]",
-            "the resource grid[0][0] points to is copied",
+            "the value grid[0][0] points to is copied",
         ],
         must_not_contain: &[
+            // #1163: what is copied is an i32, a value.
+            "the resource slots[0] points to is copied",
+            "the resource boxes[0] points to is copied",
             "Copy from *slots to n",
             "*slots's resource is copied",
             "m is initialized by copy from Anonymous resource",
@@ -7219,12 +7224,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Copy from *rr[0] to r",
             "r is initialized with a copy of *rr[0]",
-            "the resource rr[0] points to is copied",
+            "the value rr[0] points to is copied",
             "Copy from *rrr[0][0] to q",
-            "the resource rrr[0][0] points to is copied",
+            "the value rrr[0][0] points to is copied",
             "Copy from *b to s",
         ],
         must_not_contain: &[
+            "the resource rr[0] points to is copied",
             "Copy from *rr to r",
             "*rr's resource is copied",
             "Copy from *rrr to q",
@@ -20765,7 +20771,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "This temporary (String, String), built by the literal on the right of the let, is dropped at the end of this statement. What the pattern didn't bind by value stays in it and is dropped with it. Its resource is dropped",
             "the value slots[0] points to is copied",
             "the value r points to is captured by closure f (a mutable reborrow through r); r can't be used while the borrow is live",
-            "the value r points to may have been mutably borrowed: when the condition lends it to bump and then turns out false, the else branch runs after that borrow has ended. By then, the value r points to may have been changed by bump.",
         ],
         must_not_contain: &[
             "This temporary (String, P), built by the literal",
@@ -20779,6 +20784,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "takes the value of p",
             "takes the value of q",
             "the resource slots[0] points to",
+            "the resource r points to",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/value_not_resource_chain_1163",
+        // #1163: a let-chain's else branch after the condition lent `*r`, an
+        // i32, to bump: "the value r points to", as r's other dots say.
+        must_contain: &[
+            "the value r points to may have been mutably borrowed: when the condition lends it to bump and then turns out false, the else branch runs after that borrow has ended. By then, the value r points to may have been changed by bump.",
+        ],
+        must_not_contain: &[
             "the resource r points to",
         ],
     },
@@ -25648,7 +25664,7 @@ fn a_column_lent_out_mutably_is_dotted_until_the_borrow_ends() {
             ("f no longer borrows the resource r points to", "f();", 0),
             ("n's value is mutably borrowed by p; n can't be used while the borrow is live", "let p = &mut n;", 0),
             ("n's value is no longer mutably borrowed", "g();", 0),
-            ("the resource p points to is captured by closure g (a mutable reborrow through p); p can't be used while the borrow is live",
+            ("the value p points to is captured by closure g (a mutable reborrow through p); p can't be used while the borrow is live",
              "let mut g = || *p += 1;", 0),
             ("g no longer borrows the value p points to", "g();", 0),
             ("t's resource is captured (mutably borrowed) by closure h", "let mut h = || t.push('x');", 0),
