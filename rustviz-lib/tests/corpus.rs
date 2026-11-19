@@ -20753,6 +20753,89 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Move from boxed to d",
         ],
     },
+    TooltipExpect {
+        name: "branch_mut_lend_move_1132",
+        // #1132: s mutably lent to r in one branch and moved in the other
+        // is maybe-moved after the join (rustc: E0382 on any use until it
+        // is assigned). Main ranked the lend and the move equally, kept
+        // the first branch's lend, and when r's borrow ended drew s as
+        // "the owner" to the end of the function. Where s's column stops
+        // is pinned by `a_value_lent_in_one_branch_and_moved_in_another_stays_moved`.
+        must_contain: &[
+            "s was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+            "t goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+            "w acquires ownership of a new resource. Its previous resource is dropped here only if \
+             no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            // The scope-end wording main used after drawing s as the owner again.
+            "s goes out of scope. Its resource is dropped here only if s still holds it",
+            "t goes out of scope. Its resource is dropped here only if t still holds it",
+        ],
+    },
+    TooltipExpect {
+        name: "branch_dead_loan_move_1178",
+        // #1178: s is lent to r before the `if`; the `if` points r at t
+        // and then moves s, which rustc allows because the loan of s is
+        // dead on that path. The move fell through `calc_state` to
+        // Invalid, the join ignored that branch, and when r's borrow
+        // ended s was drawn as "the owner" again. Where the columns stop
+        // is pinned by `a_value_lent_in_one_branch_and_moved_in_another_stays_moved`.
+        must_contain: &[
+            "s was moved in at least one branch above, so it can't be used after the branches. \
+             If the branch that ran didn't move it, its resource is dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+            "u goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            // The join and scope-end wording main used for the dropped branch.
+            "s may have been moved (consumed in at least one branch above)",
+            "u may have been moved (consumed in at least one branch above)",
+            "s goes out of scope. Its resource is dropped here only if s still holds it",
+        ],
+    },
+    TooltipExpect {
+        name: "slice_pattern_arms_1144",
+        // #1144: a slice pattern in a `match` arm or `if let` drew no
+        // bindings, and the array as never moved: "arr goes out of scope.
+        // Its resource is dropped (including every String it holds)",
+        // though a and b took both Strings. #1166: what a slice pattern
+        // doesn't take (`_`, `..`) stays in the array and is dropped with
+        // it; main said "No resource is dropped" (`let [d, _] = duo;`).
+        // Checked with rustc: `println!("{}", duo[1])` after the `let`
+        // compiles; `duo[0]` is E0382.
+        must_contain: &[
+            "Move from arr to a",
+            "Move from arr to b",
+            "arr goes out of scope. No resource is dropped.",
+            "Move from pair to c",
+            "pair goes out of scope. pair[0] was moved out earlier, so only pair[1] is dropped.",
+            "c goes out of scope. Its resource is dropped.",
+            "Move from trio to first",
+            "Move from trio to last",
+            "trio goes out of scope. trio[0] and trio[2] were moved out in some of the branches above; \
+             each is dropped here only if no branch above moved it (Rust tracks this with runtime drop \
+             flags). trio[1] is dropped.",
+            "duo goes out of scope. duo[0] was moved out earlier, so only duo[1] is dropped.",
+            "three goes out of scope. three[0] was moved out earlier, so only three[1] and three[2] are dropped.",
+            "Partial copy from nums to x",
+            "x is initialized with a copy of a value inside nums",
+        ],
+        must_not_contain: &[
+            "arr goes out of scope. Its resource is dropped",
+            "pair goes out of scope. Its resource is dropped",
+            "trio goes out of scope. Its resource is dropped",
+            "duo goes out of scope. No resource is dropped.",
+            "three goes out of scope. No resource is dropped.",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -28297,4 +28380,40 @@ fn a_boxed_closure_borrowing_through_a_reference_keeps_it_until_dropped() {
     assert_eq!(ys("d's immutable borrow ends"), vec![row("drop(d);")]);
     assert_eq!(ys("d no longer borrows the resource p points to"), vec![row("drop(d);")]);
     assert_eq!(ys("w's resource is no longer immutably borrowed"), vec![row("drop(d);")]);
+}
+
+/// #1132 (`branch_mut_lend_move_1132`): a value mutably lent in one branch
+/// and moved in another has no column after the join, also once the
+/// borrow ends (main drew it as "the owner" again when the lending branch
+/// came first). When it is assigned again (`w = String::from("new")`, the
+/// branches the other way round) its column comes back from that row on;
+/// main drew nothing after the assignment. Also #1178: a value lent before
+/// the conditional and moved in a branch where that loan is dead.
+#[test]
+fn a_value_lent_in_one_branch_and_moved_in_another_stays_moved() {
+    let rv = run_with_local_backend("branch_mut_lend_move_1132");
+    let els = common::svg::rv_elements(&rv.timeline_panel_string());
+    let line_from = |var: &str, row: usize| els.iter()
+        .filter(|e| e.kind == "line" && e.var.as_deref() == Some(var))
+        .filter(|e| e.line.as_deref().and_then(|l| l.parse::<usize>().ok()).is_some_and(|l| l >= row))
+        .map(|e| e.id.clone())
+        .collect::<Vec<_>>();
+    // s: `if` lends it (L9), `else` moves it (L11), join on L13.
+    assert_eq!(line_from("s", 12), Vec::<String>::new(), "s has a column after the join");
+    // t: `match` arm 0 lends it, arm 1 moves it, join on L23.
+    assert_eq!(line_from("t", 22), Vec::<String>::new(), "t has a column after the join");
+    // w: maybe-moved after L35, assigned again on L36.
+    assert_eq!(line_from("w", 31), vec!["w@L36-37:line:full_privilege".to_string(),
+        "w@L37-38:line:full_privilege".to_string()]);
+    // #1178 (`branch_dead_loan_move_1178`): moved in the `if` after the
+    // loan of it died there; joins on L13 (s) and L24 (u).
+    let rv = run_with_local_backend("branch_dead_loan_move_1178");
+    let els = common::svg::rv_elements(&rv.timeline_panel_string());
+    let line_from = |var: &str, row: usize| els.iter()
+        .filter(|e| e.kind == "line" && e.var.as_deref() == Some(var))
+        .filter(|e| e.line.as_deref().and_then(|l| l.parse::<usize>().ok()).is_some_and(|l| l >= row))
+        .map(|e| e.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(line_from("s", 10), Vec::<String>::new(), "s has a column after the join");
+    assert_eq!(line_from("u", 21), Vec::<String>::new(), "u has a column after the join");
 }

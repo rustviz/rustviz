@@ -197,6 +197,13 @@ pub enum InteriorMut {
     Unknown,
 }
 
+/// See `Owner::elems_left`: element names (`arr[0]`) in index order.
+#[derive(Clone, Hash, PartialEq, Eq, Debug, Default)]
+pub struct ElemsLeft {
+    pub moved: Vec<String>,
+    pub left: Vec<String>,
+}
+
 // when something is not a reference
 #[derive(Clone, Hash, PartialEq, Eq, Debug, Default)]
 pub struct Owner {
@@ -272,6 +279,11 @@ pub struct Owner {
     /// isn't the box's, but its heap allocation is still freed at scope
     /// end.
     pub box_contents_moved: bool,
+    /// For an array of values that need drop from which a slice
+    /// pattern moves some elements out but not all (`let [a, _] = arr;`,
+    /// `match arr { [first, ..] => .. }`; #1144, #1166): the elements
+    /// moved out and the ones left, which are dropped at scope end.
+    pub elems_left: Option<ElemsLeft>,
     /// True iff this column is a `static` item the function uses (#690):
     /// it exists before the function runs and is never dropped.
     pub is_static: bool,
@@ -838,6 +850,14 @@ impl ResourceAccessPoint {
     /// See `Owner::box_contents_moved`.
     pub fn box_contents_moved(&self) -> bool {
         matches!(self, ResourceAccessPoint::Owner(Owner { box_contents_moved: true, .. }))
+    }
+
+    /// See `Owner::elems_left`.
+    pub fn elems_left(&self) -> Option<&ElemsLeft> {
+        match self {
+            ResourceAccessPoint::Owner(Owner { elems_left: Some(e), .. }) => Some(e),
+            _ => None,
+        }
     }
 
     pub fn is_unbound_temporary(&self) -> bool {
@@ -2857,13 +2877,21 @@ impl Ord for State {
     fn cmp(&self, other: &Self) -> Ordering {
         use State::*;
         
+        // The join of a conditional takes the lowest-ranked state of
+        // the branches that reach it. A value moved in one branch and
+        // mutably lent in another is maybe-moved: it can't be used again
+        // until it is assigned, even once the borrow ends, so a move
+        // outranks a mutable lend (#1132). With the two tied, the first
+        // branch won, and a mutable lend in it gave the value back as
+        // "the owner" when the borrow ended.
         fn rank(s: &State) -> u8 {
             match s {
-                FullPrivilege { s: LineState::Uninit } => 3,
-                ResourceMoved { .. } | RevokedPrivilege { .. } => 0,
-                PartialPrivilege { .. } => 1,
-                FullPrivilege {..} => 2,
-                Invalid | OutOfScope => 3,
+                FullPrivilege { s: LineState::Uninit } => 4,
+                ResourceMoved { .. } => 0,
+                RevokedPrivilege { .. } => 1,
+                PartialPrivilege { .. } => 2,
+                FullPrivilege {..} => 3,
+                Invalid | OutOfScope => 4,
             }
         }
 
@@ -4338,6 +4366,13 @@ impl Visualizable for VisualizationData {
             // other;` moves other.r): the field has no reference left.
             (State::PartialPrivilege{..}, Event::Move{to: to_ro,..}) if self.is_ref(hash) && !self.is_mutref(hash) =>
                 State::ResourceMoved{ move_to: to_ro.to_owned(), move_at_line: event_line, dropped_by_hand: false },
+            // An owner drawn as lent is moved: rustc allows it only where
+            // the loan is already dead (`r = &t; let m = s;` after `r =
+            // &s`, #1178). It is moved; this used to fall through to
+            // Invalid, which the join of a conditional then ignored.
+            (State::PartialPrivilege{..}, Event::Move{to: to_ro,..})
+            | (State::RevokedPrivilege{..}, Event::Move{to: to_ro,..}) if !self.is_ref(hash) =>
+                State::ResourceMoved{ move_to: to_ro.to_owned(), move_at_line: event_line, dropped_by_hand: false },
             // A reference whose reference was moved out (`let q2 = q;`)
             // is given a new one (`q = &mut s;`, #722): it holds that,
             // as when it was first initialized with a borrow.
@@ -4482,6 +4517,14 @@ impl Visualizable for VisualizationData {
             (State::RevokedPrivilege{ prev_state: p,.. }, Event::MutableReacquire{ .. }) => {
               *p.clone()
             }
+            // Maybe-moved after a conditional (one branch moved it,
+            // another lent it out): the end of that borrow doesn't
+            // give it back. It stays unusable until it is assigned
+            // again (#1132); without this arm the state became Invalid
+            // and the assignment drew no line either.
+            (State::ResourceMoved{ .. }, Event::MutableReacquire{ .. })
+            | (State::ResourceMoved{ .. }, Event::StaticReacquire{ .. }) =>
+              (*previous_state).clone(),
 
             (State::FullPrivilege{..}, Event::StaticDie { .. }) |
             (State::FullPrivilege{..}, Event::StaticBorrow { .. }) => {

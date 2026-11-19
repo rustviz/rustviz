@@ -1408,7 +1408,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // The Rc note wins: no double parenthetical (#542).
     let holds = if rc.is_some() || rc_fields.is_some() || rc_inside.is_some() || manually_drop { None } else { self.holds_phrase(ty) };
     let box_contents_moved = self.box_contents_moved_out(name, ty);
-    if rc.is_none() && !manually_drop && rc_fields.is_none() && rc_inside.is_none() && holds.is_none() && !box_contents_moved {
+    let elems_left = self.array_elems_left(name, ty);
+    if rc.is_none() && !manually_drop && rc_fields.is_none() && rc_inside.is_none() && holds.is_none() && !box_contents_moved && elems_left.is_none() {
       return;
     }
     let Some(just_added) = (self.rap_hashes as u64).checked_sub(1) else { return };
@@ -1419,6 +1420,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         o.rc_inside = rc_inside;
         o.holds = holds;
         o.box_contents_moved = box_contents_moved;
+        o.elems_left = elems_left;
       }
       Some(ResourceAccessPoint::Struct(s)) if s.hash == just_added => {
         s.is_manually_drop = manually_drop;
@@ -6068,6 +6070,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         PatKind::Struct(_, fields, _) => {
             for field in fields.iter() {
                 self.collect_pat_binding_events(field.pat, ty_results, parent, parent_ty, scope, res);
+            }
+        }
+        // `[a, b] => …`, `if let [first, .., last] = arr`, `[x, rest @ ..]`
+        // (#1144): each element the pattern names (and a `rest @ ..`
+        // sub-slice) destructures out of the same parent, as a tuple's do.
+        PatKind::Slice(before, mid, after) => {
+            for p in before.iter().chain(mid).chain(after.iter()) {
+                self.collect_pat_binding_events(p, ty_results, parent, parent_ty, scope, res);
             }
         }
         PatKind::Binding(mode, id, ident, _) => {
