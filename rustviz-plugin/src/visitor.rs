@@ -324,6 +324,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let ctor_value = !e.span.from_expansion()
       && matches!(e.kind, ExprKind::Call(callee, args) if is_ctor_path(callee, tycheck_results)
         && args.iter().any(|a| matches!(a.kind, ExprKind::Path(_) | ExprKind::Field(..))
+          // `Some(B { name: s })`: what the literal is built from (#1143).
+          || self.is_nested_literal(a)
           // A call's result put into the value goes to the caller too (#783).
           || (!a.span.from_expansion() && matches!(a.kind, ExprKind::Call(..) | ExprKind::MethodCall(..))
               && !tycheck_results.node_type(a.hir_id).is_ref())))
