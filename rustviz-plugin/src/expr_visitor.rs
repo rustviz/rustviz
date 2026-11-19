@@ -1403,18 +1403,29 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   pub fn mark_owner_type(&mut self, name: &str, ty: Ty<'tcx>) {
     let rc = self.rc_kind(ty);
     let manually_drop = ty.ty_adt_def().map_or(false, |d| d.is_manually_drop());
+    // `MaybeUninit<T>` is a union in std, but students know it as a
+    // wrapper like ManuallyDrop: it never drops its T (#1146).
+    let maybe_uninit = ty.ty_adt_def().is_some_and(|d|
+      self.tcx.is_lang_item(d.did(), rustc_hir::LangItem::MaybeUninit));
+    let union = ty.is_union() && !maybe_uninit;
+    // A union's own `Drop` impl runs when the whole union is dropped or
+    // overwritten (#1146).
+    let union_drop = union && ty.ty_adt_def().is_some_and(|d| d.has_dtor(self.tcx));
     let rc_fields = self.rc_fields_kind(ty);
     let rc_inside = self.rc_inside_kind(ty);
     // The Rc note wins: no double parenthetical (#542).
     let holds = if rc.is_some() || rc_fields.is_some() || rc_inside.is_some() || manually_drop { None } else { self.holds_phrase(ty) };
     let box_contents_moved = self.box_contents_moved_out(name, ty);
-    if rc.is_none() && !manually_drop && rc_fields.is_none() && rc_inside.is_none() && holds.is_none() && !box_contents_moved {
+    if rc.is_none() && !manually_drop && !maybe_uninit && !union && rc_fields.is_none() && rc_inside.is_none() && holds.is_none() && !box_contents_moved {
       return;
     }
     let Some(just_added) = (self.rap_hashes as u64).checked_sub(1) else { return };
     match self.raps.get_mut(name).map(|rd| &mut rd.rap) {
       Some(ResourceAccessPoint::Owner(o)) if o.hash == just_added => {
         o.is_manually_drop = manually_drop;
+        o.is_maybe_uninit = maybe_uninit;
+        o.is_union = union;
+        o.union_drop = union_drop;
         o.rc = rc;
         o.rc_inside = rc_inside;
         o.holds = holds;
@@ -1422,6 +1433,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       }
       Some(ResourceAccessPoint::Struct(s)) if s.hash == just_added => {
         s.is_manually_drop = manually_drop;
+        s.is_maybe_uninit = maybe_uninit;
+        s.is_union = union;
+        s.union_drop = union_drop;
         s.rc = rc;
         s.rc_fields = rc_fields;
         s.rc_inside = rc_inside;
@@ -1562,7 +1576,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       is_copy,
       is_plain_value,
       interior_mut,
-      is_manually_drop: false, rc: None, rc_fields: None, rc_inside: None, holds: None, is_box: false, holds_borrow: false }),
+      is_manually_drop: false, is_union: false, union_drop: false, is_maybe_uninit: false, rc: None, rc_fields: None, rc_inside: None, holds: None, is_box: false, holds_borrow: false }),
       scope, is_global);
   }
 
@@ -5176,6 +5190,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           let interior_mut = self.ty_has_interior_mut(ty, expr.hir_id.owner);
           if ty.is_union() {
             self.add_union_owner(name.clone(), mutability, is_copy, self.ty_is_plain(ty, expr.hir_id.owner), interior_mut, self.current_scope, !self.inside_branch);
+            self.mark_owner_type(&name, ty);
           } else {
             self.add_owner(name.clone(), mutability, is_copy, self.ty_is_plain(ty, expr.hir_id.owner), interior_mut, self.current_scope, !self.inside_branch);
             self.mark_owner_type(&name, ty);
@@ -6172,6 +6187,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                         let interior_mut = self.ty_has_interior_mut(ty, pat.hir_id.owner);
                         if ty.is_union() {
                             self.add_union_owner(name.clone(), muta, is_copy, self.ty_is_plain(ty, pat.hir_id.owner), interior_mut, scope, false);
+                            self.mark_owner_type(&name, ty);
                         } else {
                             self.add_owner(name.clone(), muta, is_copy, self.ty_is_plain(ty, pat.hir_id.owner), interior_mut, scope, false);
                             self.mark_owner_type(&name, ty);
