@@ -7494,10 +7494,18 @@ fn pat_leaves(&self, pat: &'tcx Pat<'tcx>, typeck: &'tcx rustc_middle::ty::Typec
 /// bindings moved out what they bind, a part that needs drop is left
 /// in the value: under a `_`, a `ref` binding, a literal or a field
 /// skipped by `..`.
-fn pat_leaves_drop(&self, pat: &'tcx Pat<'tcx>, typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>, env: rustc_middle::ty::TypingEnv<'tcx>) -> bool {
+pub(crate) fn pat_leaves_drop(&self, pat: &'tcx Pat<'tcx>, typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>, env: rustc_middle::ty::TypingEnv<'tcx>) -> bool {
   use rustc_middle::ty::TyKind;
   let tcx = self.tcx;
   let ty = typeck.node_type(pat.hir_id);
+  // A `ref` binding's own type is a reference (`a: &String` in `let
+  // (ref a, b) = (u, 1);`): what it matched, and leaves in place, is
+  // what that points to (#1163).
+  if let PatKind::Binding(ann, ..) = pat.kind {
+    let by_ref = matches!(ann.0, rustc_hir::ByRef::Yes(..))
+      || matches!(typeck.pat_binding_modes().get(pat.hir_id).map(|m| m.0), Some(rustc_hir::ByRef::Yes(..)));
+    return by_ref && self.needs_drop_in(ty.builtin_deref(true).unwrap_or(ty), env);
+  }
   if !self.needs_drop_in(ty, env) {
     return false;
   }
@@ -7509,9 +7517,7 @@ fn pat_leaves_drop(&self, pat: &'tcx Pat<'tcx>, typeck: &'tcx rustc_middle::ty::
     tys.into_iter().skip(d).take(gap).any(|t| self.needs_drop_in(t, env))
   };
   match pat.kind {
-    PatKind::Binding(..) => {
-      matches!(typeck.pat_binding_modes().get(pat.hir_id).map(|m| m.0), Some(rustc_hir::ByRef::Yes(..)))
-    }
+    PatKind::Binding(..) => unreachable!("handled above"),
     PatKind::Tuple(subs, dd) => {
       if subs.iter().any(|sp| self.pat_leaves_drop(sp, typeck, env)) {
         return true;
