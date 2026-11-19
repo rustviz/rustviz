@@ -3646,6 +3646,10 @@ impl Event {
                     ResourceTy::Value(ResourceAccessPoint::Function(f)) if f.drops_arg.0 =>
                         hover_messages::event_dot_move_to_drop(&self.deref_name(my_name), &f.name, v,
                             &is.extract_rap().map_or(String::new(), |r| r.drop_note())),
+                    // `move || r.push('!')` with `r: &mut String` moves the
+                    // reference, not what it points to (#1148).
+                    _ if to.is_closure() && is.extract_rap().is_some_and(|r| r.is_ref()) =>
+                        hover_messages::event_dot_capture_move_ref_to_closure(&self.deref_name(my_name), &target_name(to)),
                     _ if to.is_closure() => hover_messages::event_dot_capture_move_to_closure(&self.deref_name(my_name), &target_name(to), v),
                     _ => hover_messages::event_dot_move_to(&self.deref_name(my_name), v),
                 }

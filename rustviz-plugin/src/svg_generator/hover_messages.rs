@@ -2191,6 +2191,16 @@ pub fn event_dot_capture_move_to_closure(my_name: &String, target_name: &String,
     )
 }
 
+// Source dot for a `&mut` reference a `move` closure captures (`move ||
+// r.push('!')`, #1148): the reference moves into the closure, which
+// holds the borrow from then on; the data it points to stays put.
+pub fn event_dot_capture_move_ref_to_closure(my_name: &String, target_name: &String) -> String {
+    format!(
+        "{0}'s reference is captured (moved) by closure {1}; the data it points to is not moved",
+        styled_name_html(my_name), styled_name_html(target_name)
+    )
+}
+
 // Source dot for a Copy upvar captured by value (`move || m + 1`
 // with m: i32; #311). The closure gets its own copy, so the upvar
 // stays usable and the closure has nothing of it to drop. A `&T` is
