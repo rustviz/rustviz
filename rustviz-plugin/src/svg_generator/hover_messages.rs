@@ -2690,7 +2690,8 @@ pub fn fn_dot_shared_borrow_interior_mut(fn_name: &String, my_name: &String, ref
 // Call dot for a `&self` method called through a shared reference to a
 // value with interior mutability (`r.set(2)` with `r: &Cell<i32>`,
 // `r.borrow_mut()` with `r: &RefCell<T>`; #1149). "reads from r" would be
-// false: the call can change what r points to.
+// false: the call can change what r points to. The text doesn't say the
+// method itself changes it: `Cell::get` only copies the value out.
 pub fn fn_dot_shared_ref_interior_mut(fn_name: &String, my_name: &String, refcell_borrow_mut: bool) -> String {
     let f = styled_name_html(fn_name);
     let r = styled_name_html(my_name);
@@ -2701,7 +2702,7 @@ pub fn fn_dot_shared_ref_interior_mut(fn_name: &String, my_name: &String, refcel
         )
     } else {
         format!(
-            "{0} uses what {1} points to, through the shared reference {1}; that has interior mutability, so {0} can change its contents even through a shared reference",
+            "{0} uses what {1} points to, through the shared reference {1}; that has interior mutability, so its contents can change even through a shared reference",
             f, r
         )
     }

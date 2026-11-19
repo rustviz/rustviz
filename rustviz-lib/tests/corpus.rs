@@ -20835,16 +20835,22 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // #1149: `c.set(42)` with `c: &Cell<i32>` writes into the Cell c
         // points to; main said "set reads from c". Same for
         // `r.borrow_mut()` through `&RefCell` and for passing such a
-        // reference on (`add_one(rc)`).
+        // reference on (`add_one(rc)`). The text says the contents can
+        // change through the reference, not that the method changes them:
+        // `k.get()` only copies the value out (review of #1234).
         must_contain: &[
             "set uses what c points to, through the shared reference c; that has interior \
-             mutability, so set can change its contents even through a shared reference",
+             mutability, so its contents can change even through a shared reference",
             "borrow_mut uses what r points to, through the shared reference r; exclusive access to \
              its contents is checked at runtime (a second borrow_mut while this one is live would panic)",
             "set uses what rc points to, through the shared reference rc; that has interior \
-             mutability, so set can change its contents even through a shared reference",
+             mutability, so its contents can change even through a shared reference",
             "add_one uses what rc points to, through the shared reference rc; that has interior \
-             mutability, so add_one can change its contents even through a shared reference",
+             mutability, so its contents can change even through a shared reference",
+            "set uses what k points to, through the shared reference k; that has interior \
+             mutability, so its contents can change even through a shared reference",
+            "get uses what k points to, through the shared reference k; that has interior \
+             mutability, so its contents can change even through a shared reference",
         ],
         must_not_contain: &[
             "set reads from c",
@@ -20852,6 +20858,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "set reads from rc",
             "add_one reads from rc",
             "set reads from k",
+            "get can change its contents",
+            "set can change its contents",
+            "add_one can change its contents",
         ],
     },
     TooltipExpect {
@@ -20906,9 +20915,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // #1149: `r.set(2)` with `r: &Cell<i32>` writes the Cell.
         must_contain: &[
             "set uses what r points to, through the shared reference r; that has interior \
-             mutability, so set can change its contents even through a shared reference",
+             mutability, so its contents can change even through a shared reference",
         ],
-        must_not_contain: &["set reads from r"],
+        must_not_contain: &["set reads from r", "set can change its contents"],
     },
     TooltipExpect {
         name: "closure_static_write_1203",
