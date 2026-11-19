@@ -2819,6 +2819,25 @@ pub fn state_arm_join(label: &str) -> String {
 // values, not heap-backed resources. Used for the timeline-stripe
 // tooltip and the vertical lifeline.
 // A non-Copy owner with nothing to drop: also a value, not a resource (#484).
+// The line of a struct some of whose fields were moved out (#1157):
+// it can't be used as a whole any more, only the fields still in it.
+// `maybe`: on some paths through a conditional above only; Rust still
+// rejects using the struct as a whole after it.
+pub fn state_partly_moved(my_name: &String, moved: &[String], maybe: bool) -> String {
+    let names: Vec<String> = moved.iter().map(|m| styled_name_html(m)).collect();
+    let (list, verb) = match (names.as_slice(), maybe) {
+        ([one], false) => (one.clone(), "was"),
+        ([one], true) => (one.clone(), "may have been"),
+        ([init @ .., last], false) => (format!("{} and {}", init.join(", "), last), "were"),
+        ([init @ .., last], true) => (format!("{} and {}", init.join(", "), last), "may have been"),
+        ([], _) => (String::new(), "was"),
+    };
+    format!(
+        "{0} is partially moved: {1} {2} moved out, so {0} can't be used as a whole; its other fields still can",
+        styled_name_html(my_name), list, verb
+    )
+}
+
 pub fn state_full_privilege_value(my_name: &String) -> String {
     format!("{0} holds a value", styled_name_html(my_name))
 }

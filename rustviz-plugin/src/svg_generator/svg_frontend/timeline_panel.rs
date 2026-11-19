@@ -3116,6 +3116,17 @@ fn timeline_segment_title(
     if let (State::RevokedPrivilege { .. }, Some(line)) = (state, line) {
         return lent_out_title(rap, visualization_data, line, &[]);
     }
+    // A struct some fields were moved out of can't be used as a whole
+    // (E0382); one they all were has nothing left: its line stops
+    // (an empty title, #1157).
+    if let (State::FullPrivilege { .. }, Some(line), ResourceAccessPoint::Struct(_)) = (state, line, rap) {
+        if let Some(parts) = parts_moved_at(rap, visualization_data, line) {
+            if parts.all {
+                return String::new();
+            }
+            return hover_messages::state_partly_moved(rap.name(), &parts.moved, parts.maybe);
+        }
+    }
     if let Some(title) = line.and_then(|l| loop_iterator_title(state, rap, visualization_data, l)) {
         return title;
     }
@@ -6046,7 +6057,12 @@ fn render_timeline(
     render_branches(hash, rap, history, states, output, visualization_data, timeline_data, false, &[]);
 
     let apexes = CollapsedApexes::of(history);
-    let cuts = field_borrow_rows(rap, history, visualization_data);
+    let mut cuts = field_borrow_rows(rap, history, visualization_data);
+    // A struct's line changes text where a field is moved out of it,
+    // and stops once every field is (#1157).
+    cuts.extend(parts_moved_rows(rap, visualization_data));
+    cuts.sort_unstable();
+    cuts.dedup();
     for (seg_start, seg_end, state) in states {
         // println!("{} -> start: {}, end: {}, state: {}", visualization_data.get_name_from_hash(hash).unwrap(), line_start, line_end, state); // DEBUG PURPOSES
         // A field borrow through a `&mut` reference doesn't change its
@@ -6067,6 +6083,10 @@ fn render_timeline(
             }
         }
         for (line_start, line_end, title) in pieces {
+            // Every part was moved out: nothing is left to draw (#1157).
+            if title.is_empty() {
+                continue;
+            }
             let Some((y1, y2)) = apexes.segment_ys(line_start, line_end) else { continue };
             let mut data = VerticalLineData {
                     line_class: String::new(),
@@ -6084,6 +6104,101 @@ fn render_timeline(
             append_line(state, & mut data, rap, timeline_data, output, registry);
         }
     }
+}
+
+/// The member columns directly under the struct column `rap` (`p.a`,
+/// not `p.a.x`), with their timelines.
+fn direct_parts<'a>(rap: &ResourceAccessPoint, visualization_data: &'a VisualizationData) -> Vec<&'a Timeline> {
+    let ResourceAccessPoint::Struct(Struct { owner, .. }) = rap else { return Vec::new() };
+    let root = if rap.is_member() { *owner } else { *rap.hash() };
+    let prefix = format!("{}.", rap.name());
+    let mut parts: Vec<&Timeline> = visualization_data.timelines.values()
+        .filter(|t| {
+            let r = &t.resource_access_point;
+            let in_struct = match r {
+                ResourceAccessPoint::Struct(Struct { owner, is_member: true, .. }) => *owner == root,
+                ResourceAccessPoint::StaticRef(crate::svg_generator::data::StaticRef { member_of: Some(m), .. })
+                | ResourceAccessPoint::MutRef(crate::svg_generator::data::MutRef { member_of: Some(m), .. }) =>
+                    *m == root || m == rap.hash(),
+                _ => false,
+            };
+            in_struct && r.name().starts_with(&prefix) && !r.name()[prefix.len()..].contains('.')
+        })
+        .collect();
+    parts.sort_by_key(|t| *t.resource_access_point.hash());
+    parts
+}
+
+/// Whether `timeline`'s value has been moved out on the row `line`
+/// (outside any conditional). Not dropped in place by
+/// `ManuallyDrop::drop`, which moves nothing out.
+fn moved_at(timeline: &Timeline, line: usize) -> bool {
+    timeline.states.iter().any(|(start, end, st)|
+        *start <= line && line < *end && matches!(st, State::ResourceMoved { dropped_by_hand: false, .. }))
+}
+
+/// The rows where a field of the struct column `rap` (at any depth) is
+/// moved out, or gets a value again (#1157).
+fn parts_moved_rows(rap: &ResourceAccessPoint, visualization_data: &VisualizationData) -> Vec<usize> {
+    let mut rows = Vec::new();
+    if matches!(rap, ResourceAccessPoint::Struct(Struct { is_box: true, .. })) {
+        return rows;
+    }
+    for t in direct_parts(rap, visualization_data) {
+        for (start, end, st) in &t.states {
+            if matches!(st, State::ResourceMoved { dropped_by_hand: false, .. }) {
+                rows.push(*start);
+                rows.push(*end);
+            }
+        }
+        rows.extend(parts_moved_rows(&t.resource_access_point, visualization_data));
+    }
+    rows
+}
+
+/// The fields of the struct column `rap` moved out of it by the row
+/// `line` (a field all of whose own fields were counts as moved), and
+/// whether that is all of them. `None` when none is (#1157). Not for a
+/// Box drawn as its payload's parts: moving them out leaves it its heap
+/// allocation (#898).
+fn parts_moved_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, line: usize) -> Option<PartsMoved> {
+    if matches!(rap, ResourceAccessPoint::Struct(Struct { is_box: true, .. })) {
+        return None;
+    }
+    let parts = direct_parts(rap, visualization_data);
+    let mut moved = Vec::new();
+    let mut maybe = false;
+    for t in &parts {
+        let r = &t.resource_access_point;
+        if moved_at(t, line) {
+            moved.push(r.name().clone());
+            // Moved in some branches of a conditional above only.
+            let before: Vec<(usize, Event)> = t.history.iter().filter(|(l, _)| *l <= line).cloned().collect();
+            maybe |= maybe_moved_at_end(&before);
+            continue;
+        }
+        if let Some(inner) = parts_moved_at(r, visualization_data, line) {
+            maybe |= inner.maybe;
+            if inner.all {
+                moved.push(r.name().clone());
+            } else {
+                moved.extend(inner.moved);
+            }
+        }
+    }
+    if moved.is_empty() {
+        return None;
+    }
+    let all = parts.iter().all(|t| moved.contains(t.resource_access_point.name()));
+    Some(PartsMoved { moved, maybe, all })
+}
+
+/// See `parts_moved_at`.
+struct PartsMoved {
+    moved: Vec<String>,
+    /// Some of them were moved on some paths through a conditional only.
+    maybe: bool,
+    all: bool,
 }
 
 /// The rows where a borrow of a field of what the `&mut` reference
