@@ -32,7 +32,7 @@ pub fn render_code_panel(
     // figure out that max length
     let mut total_lines: usize = 0;
     for line in lines {
-        *max_x_space = max(line.len() as i64, *max_x_space);
+        *max_x_space = max(display_width(line) as i64, *max_x_space);
         total_lines += 1;
     }
 
@@ -76,7 +76,7 @@ pub fn render_code_panel(
     // styled as a comment until we see the matching `*/`.
     let mut in_block_comment = false;
     for line in annotated_lines {
-        let line_string = syntax::highlight(line, &mut in_block_comment);
+        let line_string = syntax::highlight(&expand_tabs(line), &mut in_block_comment);
         let is_synthetic_blank = synthetic_blank_rows.contains(&iter_idx);
         let mut data = BTreeMap::new();
         data.insert("X_VAL".to_string(), x.to_string());
@@ -143,4 +143,92 @@ pub fn render_code_panel(
     // shape (callers want a row count for height etc.) by returning
     // the visual row count.
     (output, visual_row as i32, row_lines)
+}
+
+/// Columns between tab stops in the code panel: rustc's (and rustfmt's)
+/// tab width.
+const TAB_WIDTH: usize = 4;
+
+/// Monospace columns a character takes: 2 for wide ones (CJK, most
+/// emoji), as rustc's diagnostics count them.
+fn char_columns(c: char) -> usize {
+    rustc_span::char_width(c)
+}
+
+/// Columns a raw source line takes in the code panel, tabs expanded to
+/// the next tab stop (`expand_tabs`). Counting bytes made a line with
+/// non-ASCII text look wider than it is, and one indented with tabs
+/// narrower (#1160).
+fn display_width(line: &str) -> usize {
+    line.chars().fold(0, |col, c| match c {
+        '\t' => col + TAB_WIDTH - col % TAB_WIDTH,
+        _ => col + char_columns(c),
+    })
+}
+
+/// Replace each tab in an annotated code line (escaped HTML with
+/// `<tspan>` markup) with spaces up to the next tab stop. SVG text draws
+/// a tab as one space, so tab-indented code lost its indentation (#1160).
+/// Markup takes no columns and an entity (`&amp;`) takes one.
+fn expand_tabs(line: &str) -> String {
+    if !line.contains('\t') {
+        return line.to_owned();
+    }
+    let mut out = String::with_capacity(line.len() + 8);
+    let mut col = 0;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\t' => {
+                let n = TAB_WIDTH - col % TAB_WIDTH;
+                out.extend(std::iter::repeat_n(' ', n));
+                col += n;
+            }
+            '<' => {
+                out.push(c);
+                for d in chars.by_ref() {
+                    out.push(d);
+                    if d == '>' { break; }
+                }
+            }
+            '&' => {
+                out.push(c);
+                for d in chars.by_ref() {
+                    out.push(d);
+                    if d == ';' { break; }
+                }
+                col += 1;
+            }
+            _ => {
+                out.push(c);
+                col += char_columns(c);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tabs_expand_to_the_next_tab_stop_skipping_markup() {
+        assert_eq!(expand_tabs("\tlet x;"), "    let x;");
+        assert_eq!(expand_tabs("\t\tlet x;"), "        let x;");
+        // `<tspan ...>` takes no columns, `&amp;` takes one.
+        assert_eq!(
+            expand_tabs("<tspan data-hash=\"1\">ab</tspan>\tc"),
+            "<tspan data-hash=\"1\">ab</tspan>  c"
+        );
+        assert_eq!(expand_tabs("&amp;\tx"), "&amp;   x");
+        assert_eq!(expand_tabs("no tabs"), "no tabs");
+    }
+
+    #[test]
+    fn display_width_counts_columns_not_bytes() {
+        assert_eq!(display_width("café"), 4);
+        assert_eq!(display_width("\tx"), 5);
+        assert_eq!(display_width("名前"), 4);
+    }
 }
