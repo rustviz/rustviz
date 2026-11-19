@@ -2162,6 +2162,31 @@ pub fn event_dot_mut_borrow(my_name: &String, holds_value: bool) -> String {
     )
 }
 
+// A shared reference holding a mutable loan (`let r: &String = &mut
+// s;`, `let r = downgrade(&mut s);` with `fn(&mut String) -> &str`):
+// r can only read, but s stays mutably borrowed while r is live
+// (#1122).
+pub fn event_dot_mut_borrow_by_shared_ref(my_name: &String, holds_value: bool) -> String {
+    format!(
+        "{0} is a shared reference made from a mutable borrow of a {1}: {0} can only read it, but the borrow stays mutable while {0} is live",
+        styled_name_html(my_name), held(holds_value)
+    )
+}
+
+// A `&mut` holding a shared loan (`let r = &mut &x;`): r points to a
+// temporary (the `&x` reference) that shares x (#1131).
+pub fn event_dot_static_borrow_by_mut_ref(my_name: &String, holds_value: bool) -> String {
+    format!(
+        "{0} mutably borrows a temporary that immutably borrows a {1}",
+        styled_name_html(my_name), held(holds_value)
+    )
+}
+
+// Its end: r's own borrow of the temporary ends with the shared one.
+pub fn event_dot_mut_ref_return_of_shared(my_name: &String) -> String {
+    format!("{0}'s borrow ends", styled_name_html(my_name))
+}
+
 // 0   1
 //     |
 // *<--o   the star event (&)
@@ -2379,7 +2404,7 @@ pub fn event_dot_mut_reacquire(my_name: &String, holds_value: bool) -> String {
 // result to several arguments (`longest(&a, &b)`): the borrow checker
 // can't know which one it points into, so all of them stay borrowed
 // for as long as the result is used.
-pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[String], also_unnamed: bool, tie: &ArgTie, carrier: ViaCarrier) -> String {
+pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[String], also_unnamed: bool, tie: &ArgTie, carrier: ViaCarrier, passed_on: &[String]) -> String {
     let func_fmt = styled_name_html(func);
     let to_fmt = styled_name_html(to_name);
     if carrier == ViaCarrier::StoredBy {
@@ -2475,7 +2500,16 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
             to_fmt, join_names(&names), kept_words(&names, false), not_ref
         );
     }
-    format!(": {}{}", signature_tie(&func_fmt, &format!("the {} it returns", noun), point, to_name, &names, also_unnamed, tie), not_ref)
+    // `w.last_mut().unwrap()` (#1266): the borrow is `last_mut`'s, whose
+    // result (an `Option`) isn't what `xw` holds; `unwrap` passes it on.
+    let (what, passed) = match passed_on {
+        [] => (format!("the {} it returns", noun), String::new()),
+        fs => {
+            let names: Vec<String> = fs.iter().map(|f| styled_name_html(f)).collect();
+            ("the value it returns".to_owned(), format!("; {} {} the borrow on", join_names(&names), if fs.len() == 1 { "passes" } else { "pass" }))
+        }
+    };
+    format!(": {}{}{}", signature_tie(&func_fmt, &what, point, to_name, &names, also_unnamed, tie), passed, not_ref)
 }
 
 /// `a and b` / `a, b, and c`.
@@ -5041,7 +5075,7 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
     }
     if let ExternalEvent::StaticBorrow { via: Some(via), .. }
          | ExternalEvent::MutableBorrow { via: Some(via), .. } = external_event {
-        title.push_str(&arrow_borrow_via_call_suffix(&to.name(), &via.func, &via.lenders, via.also_unnamed, &via.tie, via.carrier));
+        title.push_str(&arrow_borrow_via_call_suffix(&to.name(), &via.func, &via.lenders, via.also_unnamed, &via.tie, via.carrier, &via.passed_on));
     }
     title
 }
