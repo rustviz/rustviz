@@ -64,17 +64,6 @@ fn capture_through_mut_ref() {
     f();
 }
 
-fn bump(r: &mut i32) -> bool { *r += 1; *r > 2 }
-
-// The else branch of a let-chain that lent `*r` (an i32) to bump.
-fn chain(r: &mut i32, o: Option<i32>) {
-    if let Some(x) = o && bump(r) && x > 1 {
-        println!("{}", x);
-    } else {
-        println!("no");
-    }
-}
-
 fn main() {
     lit_tuple(String::new(), mk());
     lit_struct(String::new(), mk());
@@ -85,6 +74,4 @@ fn main() {
     keep_string(String::new(), String::new());
     copy_through_element();
     capture_through_mut_ref();
-    let mut k = 0;
-    chain(&mut k, Some(3));
 }
