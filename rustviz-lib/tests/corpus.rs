@@ -30724,6 +30724,140 @@ fn a_boxed_closure_borrowing_through_a_reference_keeps_it_until_dropped() {
     assert_eq!(ys("w's resource is no longer immutably borrowed"), vec![row("drop(d);")]);
 }
 
+/// The horizontal runs `(y, x_lo, x_hi)` of every gray arrow shaft, with
+/// the shaft's tooltip. A hop (`A`) over a dot ends one run and starts the
+/// next past the dot.
+fn arrow_horizontal_runs(svg: &str) -> Vec<(String, f64, f64, f64)> {
+    let mut out = Vec::new();
+    for (i, _) in svg.match_indices("<g class=\"tooltip-trigger\" data-tooltip-text=\"") {
+        let group = &svg[i..i + svg[i..].find("</g>").unwrap_or(svg.len() - i)];
+        let open = &group[..group.find('>').unwrap_or(group.len()) + 1];
+        let text = timeline_tooltips(open).join(" / ");
+        for t in start_tags(group, "polyline").into_iter().chain(start_tags(group, "path")) {
+            if !is_arrow_shaft(t) {
+                continue;
+            }
+            // Points of each unbroken stretch: a polyline's, or a path's
+            // M / L points, broken at each hop.
+            let mut stretches: Vec<Vec<(f64, f64)>> = vec![Vec::new()];
+            if let Some(pts) = attr(t, "points") {
+                let v: Vec<f64> = pts.split(|c: char| c == ' ' || c == ',').filter_map(|s| s.parse().ok()).collect();
+                stretches[0] = v.chunks(2).filter(|c| c.len() == 2).map(|c| (c[0], c[1])).collect();
+            } else if let Some(d) = attr(t, "d") {
+                let tok: Vec<&str> = d.split_whitespace().collect();
+                let num = |i: usize| tok[i].parse::<f64>().unwrap();
+                let mut k = 0;
+                while k < tok.len() {
+                    match tok[k] {
+                        "M" | "L" => { stretches.last_mut().unwrap().push((num(k + 1), num(k + 2))); k += 3; }
+                        "A" => { stretches.push(vec![(num(k + 6), num(k + 7))]); k += 8; }
+                        other => panic!("unexpected path command {:?} in {}", other, d),
+                    }
+                }
+            }
+            for s in stretches {
+                for w in s.windows(2) {
+                    let ((x1, y1), (x2, y2)) = (w[0], w[1]);
+                    if y1 == y2 && x1 != x2 {
+                        out.push((text.clone(), y1, x1.min(x2), x1.max(x2)));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// #1187 (`one_line_arm_rows_1187`): in a conditional written on one line
+/// whose arms each move two values (`let (a, b) = if c { (f, g) } else {
+/// (h, k) };`), an arm's second arrow ran along the next arm's row and
+/// the last arm's along the join's: through their dots, and along the
+/// other arm's arrows, so only one of them could be hovered. No arrow may
+/// now run through a dot, nor along another arrow.
+#[test]
+fn one_line_arms_that_stack_arrows_get_rows_of_their_own() {
+    let rv = run_with_local_backend("one_line_arm_rows_1187");
+    let tl = rv.timeline_panel_string();
+    let runs = arrow_horizontal_runs(&tl);
+    assert!(runs.len() >= 10, "expected the arms' arrows: {:?}", runs);
+    let dots = dot_centres(&tl);
+    let mut problems = Vec::new();
+    for (text, y, lo, hi) in &runs {
+        for &(cx, cy) in &dots {
+            if cy == *y && *lo < cx - 0.5 && cx + 0.5 < *hi {
+                problems.push(format!("{:?} at y={} runs through the dot at x={}", text, y, cx));
+            }
+        }
+    }
+    for (i, (t1, y1, lo1, hi1)) in runs.iter().enumerate() {
+        for (t2, y2, lo2, hi2) in &runs[i + 1..] {
+            if t1 != t2 && y1 == y2 && lo1.max(*lo2) + 1.0 < hi1.min(*hi2) {
+                problems.push(format!("{:?} and {:?} share the row y={} from x={} to x={}", t1, t2, y1, lo1.max(*lo2), hi1.min(*hi2)));
+            }
+        }
+    }
+    assert_eq!(problems, Vec::<String>::new());
+}
+
+/// #1200 and #1223 (`one_line_arm_events_1200_1223`): what happens on a
+/// one-line arm whose arrows are stacked is drawn in order on the arm's
+/// row. pr.0 is bound before it is moved (its binding was on the row
+/// below its move), and a's println! borrow and drop share the dot of
+/// its binding (they were on a row inserted below, with no code on it).
+#[test]
+fn a_one_line_arms_events_stay_on_its_row_in_order() {
+    let rv = run_with_local_backend("one_line_arm_events_1200_1223");
+    let tl = rv.timeline_panel_string();
+    let ys = |text: &str| -> Vec<f64> { dots_listing_tooltip(&tl, text).into_iter().map(|(_, y)| y).collect() };
+    for part in ["pr.0", "pr.1"] {
+        let bound = ys(&format!("{} acquires ownership of a resource", part));
+        let moved = ys(&format!("{}'s resource is moved", part));
+        let ended = ys(&format!("{} goes out of scope. No resource is dropped.", part));
+        assert_eq!(bound.len(), 2, "{}: one binding per function: {:?}", part, bound);
+        assert_eq!(bound, moved, "{}: bound and moved on one dot, on the arm's row", part);
+        for (b, e) in bound.iter().zip(&ended) {
+            assert!(b < e, "{}: bound at y={} must be above its scope end at y={}", part, b, e);
+        }
+    }
+    for v in ["a", "b"] {
+        let bound = ys(&format!("{} acquires ownership of a resource", v));
+        assert_eq!(bound.len(), 3, "{}: one binding per function: {:?}", v, bound);
+        assert_eq!(ys(&format!("{} goes out of scope. Its resource is dropped.", v)), bound,
+            "{}: dropped on the dot it is bound on", v);
+        assert_eq!(ys(&format!("{}'s resource is immutably borrowed by println!; {} is read-only while the borrow is live", v, v)), bound,
+            "{}: lent to println! on the dot it is bound on", v);
+    }
+}
+
+/// #1260: the column headers of a fn after a conditional whose arms insert
+/// rows (stacked arrows; #1187's rows of their own) sit one row above its
+/// signature, like every other fn's. They sat a row higher per inserted
+/// row, over the previous fn's code.
+#[test]
+fn headers_after_arms_that_insert_rows_sit_above_their_fn() {
+    for (name, fns) in [
+        ("one_line_arm_rows_1187", &[
+            "fn two_and_one(c: bool, f: String, g: String, h: String) {",
+            "fn one_and_two(c: bool, f: String, h: String, k: String) {",
+            "fn three_arms(n: u8, f: String, g: String, h: String, k: String, x: String, y: String) {",
+            "fn swap(s: String, t: String) {",
+        ][..]),
+        ("return_in_match_arm", &["fn main() {"]),
+    ] {
+        let rv = run_with_local_backend(name);
+        let (code, tl) = (rv.code_panel_string(), rv.timeline_panel_string());
+        let header_ys: Vec<f64> = start_tags(&tl, "text").into_iter()
+            .filter(|t| t.contains("data-rv-id=\"hdr:"))
+            .filter_map(|t| attr(t, "y")?.parse().ok())
+            .collect();
+        for f in fns {
+            let sig = code_row_y(&code, f);
+            assert!(header_ys.iter().any(|&y| (sig - 30.0 - y).abs() < 0.5),
+                "{}: no header one row above `{}` (y={}): {:?}", name, f, sig, header_ys);
+        }
+    }
+}
+
 
 /// #1182 (`reborrow_outlives_repoint_1182`): a reborrow made through a
 /// reference keeps what the reference pointed to borrowed until the

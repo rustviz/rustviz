@@ -220,6 +220,39 @@ fn binds_source_of_line(e: &ExternalEvent, group: &[ExternalEvent]) -> bool {
         && matches!(ResourceAccessPoint_extract(o).0, ResourceTy::Value(f) if *f.hash() == t))
 }
 
+/// The column a use (`println!("{}", a)` lending `a`) or a scope end
+/// is on.
+fn use_or_end_column(e: &ExternalEvent) -> Option<u64> {
+    match e {
+        ExternalEvent::GoOutOfScope { ro, .. } => Some(*ro.hash()),
+        ExternalEvent::PassByStaticReference { from: ResourceTy::Value(r), .. }
+        | ExternalEvent::PassByMutableReference { from: ResourceTy::Value(r), .. } => Some(*r.hash()),
+        _ => None,
+    }
+}
+
+/// Whether `e`, an event later on a line whose arrows (`group`) are
+/// stacked, uses or ends a variable that one of those arrows moves or
+/// copies into, and that nothing else on the line does anything else to
+/// (`rest`: the line's other events): `E::V(a, b) => println!("{} {}",
+/// a, b),` moves e into a and into b, then lends both to println! and
+/// drops them (#1223). It goes on the row of the arrival's dot, the
+/// line's own. On the row inserted below for the stack, a's column had a
+/// second dot, on a row with no code, which the dipped `e -> b` ran
+/// through.
+fn follows_arrival_on_line(e: &ExternalEvent, group: &[ExternalEvent], rest: &[ExternalEvent]) -> bool {
+    let Some(col) = use_or_end_column(e) else { return false };
+    let arrival = |g: &ExternalEvent| matches!(g, ExternalEvent::Move { .. } | ExternalEvent::Copy { .. })
+        && matches!(ResourceAccessPoint_extract(g).1, ResourceTy::Value(t) if *t.hash() == col);
+    // (Nor when an arrow moves a part of it: `Some(pr) => pr,` moves
+    // o into pr, then pr.0 into m below, and pr ends after that.)
+    let part_of_col = |t: &ResourceTy| t.extract_rap().is_some_and(|r| r.is_member() && r.get_owner() as u64 == col);
+    group.iter().filter(|g| arrival(g)).count() == 1
+        && !group.iter().any(|g| !arrival(g) && uses_rap(g, col))
+        && !group.iter().any(|g| { let (f, t) = ResourceAccessPoint_extract(g); part_of_col(f) || part_of_col(t) })
+        && rest.iter().all(|o| use_or_end_column(o).is_some() || !uses_rap(o, col))
+}
+
 /// The (source, binding) column pairs of the arrows `evs` of one line of
 /// an arm, when they are all bindings of the arm's pattern (`to` is
 /// declared by the arm) from distinct variables that aren't bound there
@@ -330,6 +363,81 @@ fn half_row_tracks_extra_rows(n: usize) -> usize {
     n.saturating_sub(1) / 2
 }
 
+/// Rows to add around the arms of a conditional written on one line
+/// whose arms stack arrows (`let (a, b) = if c { (f, g) } else { (h,
+/// k) };`, #1187). Each arm's stacked arrows run on rows inserted below
+/// its own, and the next arm, on the same source line, started on the
+/// first of those rows, with the join on the last arm's: an arrow of one
+/// arm ran along the other arm's row or the join's, through their dots
+/// and along their arrows. Instead each arm with events after the first
+/// gets a row of its own below the previous arms' rows (an arm with no
+/// events, like an implicit `else`, needs none), and the join one below
+/// the last arm's (`before_merge`). A one-line conditional with no
+/// stacked arrows keeps its arms side by side on one row (#117).
+struct OneLineArmGaps {
+    /// Arm j starts on the source line arm j - 1 ends on, has events,
+    /// and comes after an arm with events.
+    gap_before: Vec<bool>,
+    /// The last arm with events ends on the join's line.
+    ends_on_merge: bool,
+}
+
+impl OneLineArmGaps {
+    fn of(
+        branches: &[ExtBranchData],
+        branch_type: &crate::svg_generator::data::BranchType,
+        merge_point: usize,
+        line_num: usize,
+        l_map: &HashMap<usize, usize>,
+        binding_columns: &[(u64, u64)],
+        arrow_tracks: &HashMap<usize, usize>,
+    ) -> Self {
+        let spans: Vec<(usize, usize)> = (0..branches.len()).map(|j| branch_type.get_start_end(j)).collect();
+        // Arm j and an earlier arm both have events on the line arm j
+        // starts on (so they would be drawn on one row), and one of them
+        // stacks arrows there. A `} else {` line, where the arm before
+        // has nothing, needs no gap.
+        let on_line = |b: &ExtBranchData, line: usize| b.e_data.iter().any(|(l, _)| *l == line);
+        let stacks_on = |b: &ExtBranchData, line: usize| b.line_map.get(&line).is_some_and(|v| v.len() > 1);
+        let gap_before: Vec<bool> = (0..spans.len()).map(|j| {
+            let line = spans[j].0;
+            j > 0
+                && spans[j].0 == spans[j - 1].1
+                && on_line(&branches[j], line)
+                && branches[..j].iter().any(|b| on_line(b, line))
+                && branches[..=j].iter().any(|b| stacks_on(b, line))
+        }).collect();
+        let none = OneLineArmGaps { gap_before: vec![false; spans.len()], ends_on_merge: false };
+        if !gap_before.iter().any(|&s| s) {
+            return none;
+        }
+        // Whether any arm stacks arrows: the rows it would insert, on
+        // copies of everything `mutate_branch_lines` changes.
+        let stacks = branches.iter().zip(&spans).any(|(b, &(start, _))| {
+            mutate_branch_lines(&mut b.clone(), &mut l_map.clone(), 0, (line_num, start),
+                &mut binding_columns.to_vec(), &mut arrow_tracks.clone()) > 0
+        });
+        if !stacks {
+            return none;
+        }
+        let ends_on_merge = branches.iter().zip(&spans).rev()
+            .find(|(b, _)| !b.e_data.is_empty())
+            .is_some_and(|(b, &(_, end))| end == merge_point && on_line(b, end));
+        OneLineArmGaps { gap_before, ends_on_merge }
+    }
+
+    fn before_arm(&self, j: usize) -> bool {
+        self.gap_before.get(j).copied().unwrap_or(false)
+    }
+
+    /// The join goes on a row of its own below the arms when they were
+    /// given rows of their own (the conditional is no longer drawn as a
+    /// one-row diamond, whose join sits half a row below it).
+    fn before_merge(&self) -> bool {
+        self.ends_on_merge && self.gap_before.iter().any(|&g| g)
+    }
+}
+
 /// Shifts the lines of the arm `b_data` by the rows inserted above it
 /// and below its stacked arrows. `pattern_lines` are the (unshifted)
 /// lines its conditional splits on and the arm starts on, where its
@@ -374,15 +482,23 @@ pub fn mutate_branch_lines(
         match e {
             ExternalEvent::Branch {branches, split_point, merge_point, branch_type, .. } => {
                 *split_point = *l; // update split point
+                let gaps = OneLineArmGaps::of(branches, branch_type, *merge_point, line_num, l_map, binding_columns, arrow_tracks);
                 for (j, branch) in branches.iter_mut().enumerate(){ // mutate branches
                     let (start, end) = branch_type.get_mut_start_end(j);
+                    if gaps.before_arm(j) {
+                        *l_map.entry(*start + extra_lines).or_insert(0) += 1;
+                        extra_lines += 1;
+                    }
                     let pattern_lines = (line_num, *start);
                     *start += extra_lines;
                     let b = mutate_branch_lines(branch, l_map, extra_lines, pattern_lines, binding_columns, arrow_tracks);
                     extra_lines += b;
                     *end += extra_lines;
                 }
-                
+                if gaps.before_merge() {
+                    *l_map.entry(*merge_point + extra_lines).or_insert(0) += 1;
+                    extra_lines += 1;
+                }
                 *merge_point += extra_lines;
             }
             _ => {
@@ -429,6 +545,26 @@ pub fn mutate_branch_lines(
                                     break;
                                 }
                                 j += 1;
+                            }
+                        }
+                        // As in the top-level loop: a variable bound on this
+                        // line that an arrow moves out of is bound on the
+                        // line's own row, before the arrow's dot (#731;
+                        // `Some(pr) => pr,` binds pr.0 and moves it into
+                        // m, #1200), and the uses and scope ends of a
+                        // variable an arrow moves into share the arrival's
+                        // dot (#1223).
+                        let rest: Vec<ExternalEvent> = b_data.e_data[i + 1..].iter()
+                            .filter(|(l, p_e)| *l == line_num && !skippable_ev.contains(&p_e.get_id()) && !ev.iter().any(|g| g.get_id() == p_e.get_id()))
+                            .map(|(_, p_e)| p_e.clone())
+                            .collect();
+                        let own_row: HashSet<usize> = rest.iter()
+                            .filter(|p_e| binds_source_of_line(p_e, &ev) || follows_arrival_on_line(p_e, &ev, &rest))
+                            .map(|p_e| p_e.get_id())
+                            .collect();
+                        for (l, p_e) in b_data.e_data[i + 1..].iter_mut() {
+                            if own_row.contains(&p_e.get_id()) && skippable_ev.insert(p_e.get_id()) {
+                                *l = new_line_num;
                             }
                         }
                         let mut ev_len = ev.len() - 1;
@@ -731,6 +867,10 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
     // stacked arrow would land its label on top of the previous fn's
     // last timeline row.
     let mut extras_at_source_line: Vec<(usize, usize)> = Vec::new();
+    // Rows a conditional's arms inserted (stacked arrows in an arm, and
+    // the rows `OneLineArmGaps` adds), by the conditional's source line:
+    // only for placing the fns' column headers below.
+    let mut branch_extras: Vec<(usize, usize)> = Vec::new();
     // A variable moved / copied into a call (`take(y)`, `takes(s, r.len())`)
     // on a line where another arrow lands (typically a borrow ending)
     // joins that line's stacked arrows, so the two are drawn on separate
@@ -801,8 +941,14 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
             ExternalEvent::Branch { branches, split_point, merge_point, branch_type, .. } => {
                 *split_point += extra_lines;
                 branch_line = *line_num + extra_lines;
+                let gaps = OneLineArmGaps::of(branches, branch_type, *merge_point, *line_num, &line_insertion_map, &visualization_data.binding_columns, &visualization_data.arrow_tracks);
+                let extra_before = extra_lines;
                 for (j, branch) in branches.iter_mut().enumerate() {
                     let (start, end) = branch_type.get_mut_start_end(j);
+                    if gaps.before_arm(j) {
+                        *line_insertion_map.entry(*start + extra_lines).or_insert(0) += 1;
+                        extra_lines += 1;
+                    }
                     let pattern_lines = (*line_num, *start);
                     *start += extra_lines;
                     // recurse into the branch
@@ -810,8 +956,14 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                     extra_lines += b;
                     *end += extra_lines;
                 }
-
+                if gaps.before_merge() {
+                    *line_insertion_map.entry(*merge_point + extra_lines).or_insert(0) += 1;
+                    extra_lines += 1;
+                }
                 *merge_point += extra_lines;
+                if extra_lines > extra_before {
+                    branch_extras.push((*line_num, extra_lines - extra_before));
+                }
             }
             _ => {}
         }
@@ -977,6 +1129,13 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                         }
                         skippable_ev.insert(e.get_id()); // they all become skippable
                     }
+                    // What later uses or ends a variable an arrow moved
+                    // into shares the arrival's dot (#1223).
+                    for e in rest_of_line.iter().filter(|e| follows_arrival_on_line(e, &ev, &rest_of_line)) {
+                        if skippable_ev.insert(e.get_id()) {
+                            visualization_data.append_processed_external_event(e.clone(), final_line_num);
+                        }
+                    }
                     // Stacked arrows draw at consecutive vertical positions
                     // starting at this line's row; we'd normally insert
                     // (n - 1) blank rows below to give them clearance.
@@ -1062,6 +1221,10 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
     // inserted strictly before that source line. Events with the
     // same source line as a fn signature don't shift the signature
     // (the extras are placed *after* the event's row, not before).
+    // A fn after a conditional whose arms inserted rows starts that much
+    // lower too: its headers sat on the rows above it, over its code
+    // (#1187's one-line arms add rows of their own).
+    extras_at_source_line.extend(branch_extras);
     extras_at_source_line.sort_by_key(|(s, _)| *s);
     #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "updates each value on its own")]
     for src_line in visualization_data.fn_start_lines.values_mut() {
