@@ -23122,6 +23122,92 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "each pass has its own copy",
         ],
     },
+    TooltipExpect {
+        name: "approx_runtime_borrow_685",
+        // #685: RefCell::borrow / borrow_mut, Mutex::lock and RwLock::read / write take a run-time borrow or lock that lasts until the guard is dropped, which isn't drawn; the receiver's dot says so. Main drew the same dots with no note. Where each note
+        // sits (and where none does) is pinned by
+        // `approximation_notes_sit_on_their_constructs`.
+        must_contain: &[
+            "(RefCell also tracks this borrow at run time, until the RefMut that borrow_mut returns is dropped; RustViz doesn't draw run-time borrows.)",
+            "(RefCell also tracks this borrow at run time, until the Ref that borrow returns is dropped; RustViz doesn't draw run-time borrows.)",
+            "(The Mutex stays locked until the guard that lock returns is dropped; RustViz doesn't draw the lock.)",
+            "(The RwLock stays locked for reading until the guard that read returns is dropped; RustViz doesn't draw the lock.)",
+            "(The RwLock stays locked for writing until the guard that write returns is dropped; RustViz doesn't draw the lock.)",
+        ],
+        must_not_contain: &[
+            "doesn't draw the value that lock returns",
+        ],
+    },
+    TooltipExpect {
+        name: "approx_raw_pointer_194",
+        // #194: raw pointers aren't modelled: `&mut x as *mut i32` draws no borrow of x, and `*p` is drawn on p's column only. Main drew the same dots with no note. Where each note
+        // sits (and where none does) is pinned by
+        // `approximation_notes_sit_on_their_constructs`.
+        must_contain: &[
+            "(p is a raw pointer to x; RustViz doesn't draw raw pointers as borrows, so x's column shows nothing here.)",
+            "(p is a raw pointer; RustViz doesn't show this on what p points to.)",
+            "(q is a raw pointer to x; RustViz doesn't draw raw pointers as borrows, so x's column shows nothing here.)",
+            "(q is a raw pointer; RustViz doesn't show this on what q points to.)",
+        ],
+        must_not_contain: &[
+            "r is a raw pointer",
+        ],
+    },
+    TooltipExpect {
+        name: "approx_method_chain_687",
+        // #687: the value a method chain's later calls work on has no column; the variable's dot at the first call says so. Main drew the same dots with no note. Where each note
+        // sits (and where none does) is pinned by
+        // `approximation_notes_sit_on_their_constructs`.
+        must_contain: &[
+            "(RustViz doesn't draw the value that iter returns, which map and then collect go on to use.)",
+            "(RustViz doesn't draw the value that trim returns, which to_string goes on to use.)",
+        ],
+        must_not_contain: &[
+            "doesn't draw the value that len returns",
+            "doesn't draw the value that borrow returns",
+        ],
+    },
+    TooltipExpect {
+        name: "approx_element_ref_689",
+        // #689: `*slots[0]` is drawn on slots's column; the variable slots[0] borrows from isn't followed. Main drew the same dots with no note. Where each note
+        // sits (and where none does) is pinned by
+        // `approximation_notes_sit_on_their_constructs`.
+        must_contain: &[
+            "(RustViz doesn't follow slots[0] to what it points to, so this isn't drawn on the variable it borrows from.)",
+        ],
+        must_not_contain: &[
+            "doesn't follow v[0]",
+            "doesn't follow boxes[0]",
+        ],
+    },
+    TooltipExpect {
+        name: "approx_closure_body_133",
+        // #133, #278, #347: a closure's captures are drawn; the uses in its body aren't drawn where it is called. Main drew the same dots with no note. Where each note
+        // sits (and where none does) is pinned by
+        // `approximation_notes_sit_on_their_constructs`.
+        must_contain: &[
+            "(RustViz draws f's captures here; the uses in f's body aren't drawn where f is called.)",
+            "(RustViz draws g's captures here; the uses in g's body aren't drawn where g is called.)",
+        ],
+        must_not_contain: &[
+            "add's captures",
+            "eat's captures",
+        ],
+    },
+    TooltipExpect {
+        name: "approx_async_135",
+        // #135: async fn bodies and async blocks aren't drawn. Main drew the same dots with no note. Where each note
+        // sits (and where none does) is pinned by
+        // `approximation_notes_sit_on_their_constructs`.
+        must_contain: &[
+            "(get is an async fn; RustViz doesn't draw its body, which runs when the future it returns is awaited.)",
+            "(get is an async fn; RustViz doesn't draw its body, which runs when fut is awaited.)",
+            "(RustViz doesn't draw the async block's body, which runs when block is awaited.)",
+        ],
+        must_not_contain: &[
+            "plain is an async fn",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -30805,6 +30891,68 @@ fn loop_notes_sit_on_each_loops_first_dot() {
     for (fixture, notes) in cases {
         let rv = run_with_local_backend(fixture);
         let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+        let listed: Vec<&str> = notes.iter().map(|(n, _)| *n).collect();
+        for line in timeline_tooltips(&tl) {
+            if is_approx_note(&line) {
+                assert!(listed.contains(&line.as_str()), "{}: unexpected note {:?}", fixture, line);
+            }
+        }
+        for (note, rows) in notes.iter() {
+            let mut got: Vec<f64> = dots_listing_tooltip(&tl, note).into_iter().map(|(_, y)| y).collect();
+            got.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let mut want: Vec<f64> = rows.iter().map(|r| code_row_y(&code, r)).collect();
+            want.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            assert_eq!(got, want, "{}: rows of {:?}", fixture, note);
+        }
+    }
+}
+
+/// Approximation notes for constructs RustViz simplifies (#685, #194,
+/// #687, #689, #133/#278/#347, #135): each goes on the dot drawn for the
+/// construct, on its row, and on no other dot: not on `Borrow::borrow` or
+/// `Cell::set` (no run-time borrow), a write through a reference, a Copy
+/// result (`s.len().max(1)`), a chain whose value is drawn as a temporary
+/// (`cell.borrow().len()`), an element write not through a reference, a
+/// closure with no captures, or a plain fn's parameter.
+#[test]
+fn approximation_notes_sit_on_their_constructs() {
+    let cases: &[(&str, &[(&str, &[&str])])] = &[
+        ("approx_runtime_borrow_685", &[
+            ("(RefCell also tracks this borrow at run time, until the RefMut that borrow_mut returns is dropped; RustViz doesn't draw run-time borrows.)", &["*cell.borrow_mut() += 1;"]),
+            ("(RefCell also tracks this borrow at run time, until the Ref that borrow returns is dropped; RustViz doesn't draw run-time borrows.)", &["let seen = *cell.borrow();"]),
+            ("(The Mutex stays locked until the guard that lock returns is dropped; RustViz doesn't draw the lock.)", &["*m.lock().unwrap() += 1;"]),
+            ("(The RwLock stays locked for reading until the guard that read returns is dropped; RustViz doesn't draw the lock.)", &["let r = *l.read().unwrap();"]),
+            ("(The RwLock stays locked for writing until the guard that write returns is dropped; RustViz doesn't draw the lock.)", &["*l.write().unwrap() += r;"]),
+        ]),
+        ("approx_raw_pointer_194", &[
+            ("(p is a raw pointer to x; RustViz doesn't draw raw pointers as borrows, so x's column shows nothing here.)", &["let p = &mut x as *mut i32;"]),
+            ("(p is a raw pointer; RustViz doesn't show this on what p points to.)", &["*p = 2;"]),
+            ("(q is a raw pointer to x; RustViz doesn't draw raw pointers as borrows, so x's column shows nothing here.)", &["let q = &x as *const i32;"]),
+            ("(q is a raw pointer; RustViz doesn't show this on what q points to.)", &["let y = unsafe { *q };"]),
+        ]),
+        ("approx_method_chain_687", &[
+            ("(RustViz doesn't draw the value that iter returns, which map and then collect go on to use.)", &["let w: Vec<i32> = v.iter().map(|x| x + 1).collect();"]),
+            ("(RustViz doesn't draw the value that trim returns, which to_string goes on to use.)", &["let t = s.trim().to_string();"]),
+            // The Ref is drawn as a temporary: no chain note, only RefCell's.
+            ("(RefCell also tracks this borrow at run time, until the Ref that borrow returns is dropped; RustViz doesn't draw run-time borrows.)", &["let k = cell.borrow().len();"]),
+        ]),
+        ("approx_element_ref_689", &[
+            ("(RustViz doesn't follow slots[0] to what it points to, so this isn't drawn on the variable it borrows from.)", &["*slots[0] += 10;", "let n = *slots[0];"]),
+        ]),
+        ("approx_closure_body_133", &[
+            ("(RustViz draws f's captures here; the uses in f's body aren't drawn where f is called.)", &["let f = || show(&s);"]),
+            ("(RustViz draws g's captures here; the uses in g's body aren't drawn where g is called.)", &["let g = || f();"]),
+        ]),
+        ("approx_async_135", &[
+            ("(get is an async fn; RustViz doesn't draw its body, which runs when the future it returns is awaited.)", &["async fn get(s: String) -> usize {"]),
+            ("(get is an async fn; RustViz doesn't draw its body, which runs when fut is awaited.)", &["let fut = get(a);"]),
+            ("(RustViz doesn't draw the async block's body, which runs when block is awaited.)", &["let block = async { 1 };"]),
+        ]),
+    ];
+    for (fixture, notes) in cases {
+        let rv = run_with_local_backend(fixture);
+        let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+        // Every note line of the figure is one of the listed ones.
         let listed: Vec<&str> = notes.iter().map(|(n, _)| *n).collect();
         for line in timeline_tooltips(&tl) {
             if is_approx_note(&line) {
