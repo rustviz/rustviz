@@ -138,6 +138,38 @@ pub fn event_dot_box_contents_moved_go_out_of_scope(my_name: &String) -> String 
     )
 }
 
+// A Box whose contents were moved out (`let s = *b;`) on some paths and
+// that, on the others, was given a new Box since (`whole`) or moved away
+// whole (`nothing`) goes out of scope (#1220): drop flags decide what is
+// dropped.
+pub fn event_dot_box_paths_go_out_of_scope(my_name: &String, note: &str, kept: bool, reboxed: bool, nothing: bool) -> String {
+    let (holds, rest) = split_drop_note(note);
+    let name = styled_name_html(my_name);
+    let parts: Vec<String> = [
+        Some(format!("where {0} still holds the Box whose contents were moved out earlier, only its heap allocation is freed", name)),
+        kept.then(|| format!("where {0} still holds its first Box whole, its resource{1} is dropped{2}", name, holds, rest)),
+        reboxed.then(|| format!("where {0} was given a new Box, its resource{1} is dropped{2}", name, holds, rest)),
+        nothing.then(|| format!("where {0} was moved away, nothing is dropped", name)),
+    ].into_iter().flatten().collect();
+    format!(
+        "{0} goes out of scope. What is dropped here depends on the path (Rust tracks this with runtime drop flags): {1}.",
+        name, parts.join("; ")
+    )
+}
+
+// The same where the Box is given a new value (#1220): what its old value
+// drops depends on the path.
+pub fn event_dot_owner_drop_at_reassign_box_paths(my_name: &String, note: &str, kept: bool, reboxed: bool, nothing: bool) -> String {
+    let scope_end = event_dot_box_paths_go_out_of_scope(my_name, note, kept, reboxed, nothing);
+    let name = styled_name_html(my_name);
+    let rest = scope_end.strip_prefix(&format!("{} goes out of scope. What is dropped here depends on the path (Rust tracks this with runtime drop flags): ", name))
+        .unwrap_or(&scope_end);
+    format!(
+        "{0} acquires ownership of a new resource. What its previous value drops here depends on the path (Rust tracks this with runtime drop flags): {1}",
+        name, rest
+    )
+}
+
 // A struct whose fields were partly moved out goes out of scope. Rust
 // drops only the fields that still hold a value (`dropped`); the
 // moved-out ones (`moved`) are already gone, and the struct as a whole
@@ -836,6 +868,8 @@ pub fn reassign_subsumes_acquire(reassign: &str, acquire: &str) -> bool {
             rest.strip_prefix("; its previous resource")
                 .is_some_and(|tail| tail.starts_with(" is dropped") || tail.starts_with(" (including "))
                 || rest.starts_with(". Its previous ")
+                // A re-boxed Box's path-dependent drop (#1220).
+                || rest.starts_with(". What its previous value drops ")
         })
 }
 
@@ -3424,6 +3458,19 @@ pub fn event_dot_branch_merge_moved_with_drop(my_name: &String, value: bool, mut
     format!(
         "{0}{3}. {4}, its resource{1} is dropped{2} when {5} goes out of scope.",
         moved, holds, rest, again, branch_merge_unless(by_cond.is_some()), my_name_fmt
+    )
+}
+
+// `event_dot_branch_merge_moved_with_drop` for a Box whose contents were
+// moved out before the branches, some of which gave it a new Box or moved
+// it away (#1220): on the paths that didn't move it, it may hold only the
+// emptied Box, so what its scope end drops depends on the path.
+pub fn event_dot_branch_merge_moved_box_paths(my_name: &String, mutable: bool, by_cond: Option<&str>) -> String {
+    let my_name_fmt = styled_name_html(my_name);
+    let again = if mutable { " (until it's assigned again)" } else { "" };
+    format!(
+        "{0}{1}. What is dropped when {2} goes out of scope depends on the path: its contents were moved out before the branches.",
+        branch_merge_moved(&my_name_fmt, by_cond), again, my_name_fmt
     )
 }
 
