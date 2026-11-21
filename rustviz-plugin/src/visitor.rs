@@ -11623,6 +11623,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       also_unnamed: false,
       tie: ArgTie::default(),
       carrier: ViaCarrier::Part,
+      passed_on: Vec::new(),
     };
     let set = |ev: &mut ExternalEvent| match ev {
       ExternalEvent::StaticBorrow { id, from: ResourceTy::Value(f), to: ResourceTy::Value(t), via: v @ None, .. }
