@@ -1085,6 +1085,34 @@ pub fn try_drop_with_other_events(drop_text: &str) -> Option<String> {
     Some(format!("{head}. If the `?` succeeds, {owner}'s resource isn't dropped here."))
 }
 
+// The same for a variable that holds a value on some paths only (moved,
+// or given one, in some branches above, #1194): its drop flag decides
+// whether the early return drops it.
+pub fn event_dot_owner_drop_if_try_returns_maybe(my_name: &String, note: &str) -> String {
+    let my_name_fmt = styled_name_html(my_name);
+    let (holds, rest) = split_drop_note(note);
+    format!(
+        "Only if the `?` here returns early (on an `Err` or `None`): the function returns and {0}'s \
+         resource{1} is dropped{2} if {0} still holds it (Rust tracks this with a runtime drop flag). \
+         If the `?` succeeds, nothing happens to {0} here.",
+        my_name_fmt, holds, rest
+    )
+}
+
+// The same for a struct some fields of which were moved out before the
+// `?` (#1184): `scope_end` is what its scope end would say there
+// (`event_dot_struct_partial_go_out_of_scope`), "p goes out of scope. p.a
+// was moved out earlier, so only p.b is dropped."
+pub fn event_dot_owner_drop_if_try_returns_partial(my_name: &String, scope_end: &str) -> String {
+    let my_name_fmt = styled_name_html(my_name);
+    let rest = scope_end.strip_prefix(&format!("{} goes out of scope. ", my_name_fmt)).unwrap_or(scope_end);
+    format!(
+        "Only if the `?` here returns early (on an `Err` or `None`): the function returns, and drops \
+         what is left of {0}: {1} If the `?` succeeds, nothing happens to {0} here.",
+        my_name_fmt, rest
+    )
+}
+
 // `let n = a? + b?;`: b's dot holds both a's `?` (b is dropped if it
 // returns early) and b's own `?` (moves b). "If the `?` succeeds, nothing
 // happens to b here" is about a's `?` only, but read next to the move it
@@ -2328,6 +2356,16 @@ pub fn event_dot_mut_borrow_by_shared_ref(my_name: &String, holds_value: bool) -
     )
 }
 
+// `let first = &*r;` with `r = &mut a`, then `r = &mut b;` while first is
+// still used (#1182): first's own borrow is immutable, but its use keeps
+// r's old mutable loan of a alive, so its end gives a back.
+pub fn event_dot_reborrow_kept_mut_loan(my_name: &String, through: &str, lender: &str) -> String {
+    format!(
+        "{0}'s immutable borrow ends. {0} was made through {1}'s mutable borrow of {2}, which lasts as long as {0} is used, so {2} is mutably borrowed until here",
+        styled_name_html(my_name), styled_name_html(&through.to_owned()), styled_name_html(&lender.to_owned())
+    )
+}
+
 // A `&mut` holding a shared loan (`let r = &mut &x;`): r points to a
 // temporary (the `&x` reference) that shares x (#1131).
 pub fn event_dot_static_borrow_by_mut_ref(my_name: &String, holds_value: bool) -> String {
@@ -2595,6 +2633,14 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
             to_fmt, func_fmt
         );
     }
+    if carrier == ViaCarrier::Part {
+        // `let (a, b) = &mut t;` (#1130): `func` is the part a points to.
+        let whole = lenders.first().map_or(String::new(), |l| styled_name_html(l));
+        return format!(
+            ": {0} points to {1}, but the borrow is of all of {2}, which stays borrowed while {0} is in use",
+            to_fmt, func_fmt, whole
+        );
+    }
     if carrier == ViaCarrier::Element {
         // `let r = refs[0];` (#349): `func` is the collection.
         if lenders.len() <= 1 {
@@ -2667,7 +2713,7 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
         ViaCarrier::Reference => ("reference", String::new()),
         ViaCarrier::Value => ("value", format!("; {0} isn't a reference, but its value holds one", to_fmt)),
         ViaCarrier::StructField => ("struct", String::new()),
-        ViaCarrier::Element | ViaCarrier::StoredBy | ViaCarrier::PatternBinding { .. } | ViaCarrier::ReturnedClosure { .. } => unreachable!(),
+        ViaCarrier::Element | ViaCarrier::StoredBy | ViaCarrier::PatternBinding { .. } | ViaCarrier::ReturnedClosure { .. } | ViaCarrier::Part => unreachable!(),
     };
     // A value can hold borrows of several of them at once (`map` over
     // `v.iter()` with a closure that borrows `extra`).
@@ -3244,6 +3290,31 @@ pub fn state_closure_full_privilege_no_resource(my_name: &String) -> String {
 //      When a static reference goes out of scope, decrement this value by 1;
 //      When a decrement happens while the borrow_count is 1, the state becomes
 //          FullPrivilege once again.
+// The lender's dot of a borrow of all of `whole` by a pattern binding
+// that points to its part `part` (`let (a, b) = &mut t;`, #1130): one
+// loan of t, which a and b each reach a different part of.
+pub fn event_dot_lend_part(whole: &str, part: &str, to: &str, mutable: bool) -> String {
+    let (w, p, t) = (styled_name_html(whole), styled_name_html(part), styled_name_html(to));
+    if mutable {
+        format!("{1} is mutably borrowed by {2}, as part of a mutable borrow of all of {0}; {0} can't be used while the borrow is live", w, p, t)
+    } else {
+        format!("{1} is immutably borrowed by {2}, as part of an immutable borrow of all of {0}; {0} is read-only while the borrow is live", w, p, t)
+    }
+}
+
+// A field's segment while the struct it is in is borrowed as a whole
+// (`let r = &mut p;`, `let (a, b) = &mut t;`; #1130, #1193): the field is
+// borrowed with it. `by`: the one holder of the borrow, if known.
+pub fn state_lent_with_parent(my_name: &str, parent: &str, by: Option<&str>, mutable: bool) -> String {
+    let me = styled_name_html(my_name);
+    let by = by.map_or(String::new(), |b| format!(" by {}", styled_name_html(b)));
+    if mutable {
+        format!("{0} is mutably borrowed along with {1}{2}; {0} can't be used until the borrow ends", me, styled_name_html(parent), by)
+    } else {
+        format!("{0} is immutably borrowed along with {1}{2}; {0} is read-only while the borrow is live", me, styled_name_html(parent), by)
+    }
+}
+
 pub fn state_partial_privilege(my_name: &String, holds_value: bool) -> String {
     // update styling
     let my_name_fmt = styled_name_html(my_name);
@@ -4124,6 +4195,16 @@ pub fn event_dot_go_out_of_scope_maybe_moved(my_name: &String, note: &str, by_co
 // `break` moves `k`, declared inside the loop, to the loop's receiver.
 // That is drawn where the loop ends, which is also where `k` goes out
 // of scope on the iterations that don't break (they drop it there).
+// The same when the loop is what the function returns (#1171).
+pub fn event_dot_break_out_move_to_caller(my_name: &String, value: bool) -> String {
+    format!(
+        "{0}'s {1} is moved to the caller by the {2} that ends the loop, which the function returns",
+        styled_name_html(my_name),
+        if value { "value" } else { "resource" },
+        styled_name_html(&"break".to_owned())
+    )
+}
+
 pub fn event_dot_break_out_move(my_name: &String, to: &String, value: bool) -> String {
     format!(
         "{0}'s {1} is moved to {2} by the {3} that ends the loop",
@@ -4151,6 +4232,26 @@ pub fn event_dot_resliced_in_place(my_name: &String, lender: &String, mutable: b
          It still borrows from {1}, so {1} stays {2} borrowed while {0} is in use",
         styled_name_html(my_name), styled_name_html(lender), if mutable { "mutably" } else { "immutably" },
         if part { "part of the data it pointed to" } else { "the same data again" }
+    )
+}
+
+// The same when the loop body moved it before reaching its end (#1156):
+// on the iterations that don't end the loop it holds nothing here.
+pub fn event_dot_break_out_go_out_of_scope_moved(my_name: &String) -> String {
+    format!(
+        "{0} goes out of scope. No resource is dropped: on the iterations that don't end the loop, {0} was moved above.",
+        styled_name_html(my_name)
+    )
+}
+
+// ... or moved on some paths through the loop body only: the drop flag
+// decides on those iterations (#1156).
+pub fn event_dot_break_out_go_out_of_scope_maybe_moved(my_name: &String, note: &str) -> String {
+    let (holds, rest) = split_drop_note(note);
+    format!(
+        "{0} goes out of scope. On the iterations that don't end the loop, its resource{1} is dropped{2} here \
+         only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        styled_name_html(my_name), holds, rest
     )
 }
 
@@ -5142,6 +5243,18 @@ pub fn event_dot_break_alt_move(my_name: &String, to: &String, alt: &crate::svg_
     }
 }
 
+// The same when the loop is what the function returns (#1171): the value
+// goes to the caller, and nothing comes after the loop.
+pub fn event_dot_break_alt_move_to_caller(my_name: &String, alt: &crate::svg_generator::data::BreakAlt, what: &str) -> String {
+    let name = styled_name_html(my_name);
+    let moved = if what == "reference" {
+        format!("the reference in {0}", name)
+    } else {
+        format!("{0}'s {1}", name, what)
+    };
+    format!("{0} is moved to the caller if the loop ended with {1}", moved, quoted_break(&alt.brk))
+}
+
 // `f()` of a closure rustc inferred to be `FnOnce` (#271): `f` is
 // moved into the call, and each value it captured by value is dropped
 // or moved out of it inside the call. `fates` comes from the closure
@@ -5743,5 +5856,27 @@ mod escape_tooltip_attrs_tests {
             escape_tooltip_attrs(svg),
             r#"<g d="a&b" data-tooltip-text="&lt;span&gt;x&amp;lt;&amp;amp;&#38;&#x26; &amp; &amp;x"/>"#
         );
+    }
+}
+
+// A variable in scope at a call to `process::exit` / `abort` (#1172):
+// the process ends there and runs no destructors. `owns`: whether it
+// holds a value that needs dropping (`Some(false)`: nothing to drop;
+// `None`: it may hold one, or only part of one).
+pub fn event_dot_process_exit(name: &String, owns: Option<bool>, call: &str) -> String {
+    let call = format!("`{}`", call);
+    match owns {
+        Some(true) => format!(
+            "{0} ends the program here without running any destructor: {1}'s resource is never dropped",
+            call, styled_name_html(name)
+        ),
+        None => format!(
+            "{0} ends the program here without running any destructor: whatever {1} still holds is never dropped",
+            call, styled_name_html(name)
+        ),
+        Some(false) => format!(
+            "{0} ends the program here. {1} holds no resource to drop",
+            call, styled_name_html(name)
+        ),
     }
 }

@@ -6,8 +6,8 @@
 // - `f`: the `else` returns after the `if` body moved `t`; on the
 //   `else` path `t` still owns its String and is dropped there.
 // - `g`: `m` was moved on one path above only, so whether the
-//   `return` drops it depends on the path; no drop is drawn there
-//   (Rust decides with a runtime drop flag).
+//   `return` drops it depends on the path: Rust decides with a runtime
+//   drop flag, which its dot there says (#1194).
 
 fn consume(s: String) -> usize {
     s.len()

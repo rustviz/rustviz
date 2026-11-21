@@ -1446,6 +1446,11 @@ pub enum ViaCarrier {
     /// reference its capture made. `func` names the call; `through_ref`
     /// when the capture reborrows what a reference variable points to.
     ReturnedClosure { mutable: bool, through_ref: bool },
+    /// The borrower is a binding of a pattern matched against a borrow of
+    /// a whole struct or tuple (`let (a, b) = &mut t;`), which points to
+    /// one part of it (#1130). `func` names the part (`t.0`), `lenders`
+    /// the whole: the one loan is of all of it.
+    Part,
 }
 
 /// Where the tuple an `if let` / `match` scrutinee `(x, y)` builds is
@@ -1678,6 +1683,11 @@ pub struct EarlyReturns {
     /// the code reaches while the loop keeps running, where it ends the
     /// column without dropping anything (#1057).
     pub runs_on: Option<LoopRunsOn>,
+    /// The scope end of a variable in scope at a call to
+    /// `process::exit` (or `abort`), drawn at the call (#1172): the
+    /// process ends there without running any destructor, so nothing is
+    /// dropped. Names the call.
+    pub process_exit: Option<&'static str>,
 }
 
 /// A variable still in scope while a `loop` that nothing breaks out of
@@ -3196,6 +3206,65 @@ fn reference_used_later(rest: &[(usize, Event)]) -> bool {
     false
 }
 
+/// A struct or tuple borrowed as a whole (`let r = &mut p;`, `let (a, b)
+/// = &mut t;`) lends every field with it: rustc rejects a use of `p.name`
+/// while r is live (E0502), as it does a use of p. The borrow's events are
+/// on p's column only, so its fields' columns were drawn as unborrowed
+/// owners (#1130, #1193). Draw each field (and a nested struct's fields)
+/// in p's state for as long as p is lent, where the field itself is held
+/// and not borrowed more strongly. Rows of top-level timelines only.
+fn lend_struct_borrows_to_members(timelines: &mut BTreeMap<u64, Timeline>) {
+    // (parent name, the owner hash its members carry, lent spans)
+    let mut lent: Vec<(String, u64, Vec<(usize, usize, State)>)> = Vec::new();
+    for (hash, t) in timelines.iter() {
+        let ResourceAccessPoint::Struct(st) = &t.resource_access_point else { continue };
+        let spans: Vec<(usize, usize, State)> = t.states.iter()
+            .filter(|(a, b, s)| a < b && matches!(s, State::RevokedPrivilege { .. } | State::PartialPrivilege { .. }))
+            .cloned()
+            .collect();
+        if !spans.is_empty() {
+            lent.push((st.name.clone(), if st.is_member { st.owner } else { *hash }, spans));
+        }
+    }
+    if lent.is_empty() {
+        return;
+    }
+    for t in timelines.values_mut() {
+        let (name, owner) = match &t.resource_access_point {
+            ResourceAccessPoint::Struct(m) if m.is_member => (m.name.clone(), m.owner),
+            ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_) | ResourceAccessPoint::MutRef(_)
+            | ResourceAccessPoint::StaticRef(_) | ResourceAccessPoint::Function(_) => continue,
+        };
+        for (pname, powner, spans) in lent.iter() {
+            if *powner != owner || !name.starts_with(&format!("{}.", pname)) {
+                continue;
+            }
+            for (a, b, pstate) in spans {
+                let mut out: Vec<(usize, usize, State)> = Vec::new();
+                for (x, y, s) in t.states.drain(..) {
+                    let held = matches!(s, State::FullPrivilege { s: LineState::Full })
+                        || (matches!(s, State::PartialPrivilege { .. }) && matches!(pstate, State::RevokedPrivilege { .. }));
+                    let (lo, hi) = (x.max(*a), y.min(*b));
+                    if !held || lo >= hi {
+                        out.push((x, y, s));
+                        continue;
+                    }
+                    let lent_state = match pstate {
+                        State::RevokedPrivilege { to, borrow_to, .. } =>
+                            State::RevokedPrivilege { to: to.clone(), borrow_to: borrow_to.clone(), prev_state: Box::new(s.clone()) },
+                        _ => State::PartialPrivilege { s: LineState::Full },
+                    };
+                    if x < lo { out.push((x, lo, s.clone())); }
+                    out.push((lo, hi, lent_state));
+                    if hi < y { out.push((hi, y, s)); }
+                }
+                t.states = out;
+            }
+        }
+    }
+}
+
+
 /// #700, #722: a reference column's borrow end recorded on the row
 /// where it gets a new reference, after that new reference (`y = &x;`
 /// ends y's old borrow and starts a new one), is the old value's end
@@ -3785,6 +3854,10 @@ impl Event {
             }
             Event::Move{ is: ResourceTy::Index(_, place, write), ..} if place.starts_with('*') => {
                 hover_messages::event_dot_move_through_element(place, !matches!(write, PlaceWrite::AssignDropsOld))
+            }
+            // `return loop { … break k; }` (#1171): to the caller.
+            Event::Move{ to: ResourceTy::Caller, is, break_out: true, ..} => {
+                hover_messages::event_dot_break_out_move_to_caller(&self.deref_name(my_name), is_plain(is))
             }
             Event::Move{ to, is, break_out: true, ..} => {
                 hover_messages::event_dot_break_out_move(&self.deref_name(my_name), &to.name(), is_plain(is))
@@ -4427,6 +4500,23 @@ impl Visualizable for VisualizationData {
             | (State::PartialPrivilege { .. }, Event::RefDie { .. }) if holder =>
                 (*previous_state).clone(),
 
+            // A `&mut` moved into a call (`take(x)`) has its borrow's
+            // end drawn on it, on the same dot (#200): it stays moved.
+            (State::ResourceMoved { .. }, Event::StaticDie { .. })
+            | (State::ResourceMoved { .. }, Event::MutableDie { .. })
+            | (State::ResourceMoved { .. }, Event::RefDie { .. }) if self.is_ref(hash) =>
+                (*previous_state).clone(),
+            // Borrows of fields of what a reference points to that end
+            // on the row its own borrow ends (`&mut r.a` and `&r.b`
+            // last used where r is, #1080): it holds nothing either way.
+            (State::OutOfScope, Event::StaticReacquire { .. })
+            | (State::OutOfScope, Event::MutableReacquire { .. }) if self.is_ref(hash) =>
+                State::OutOfScope,
+            // `break k` out of a loop whose body declares `k` (#431): the
+            // move is drawn on the row where `k` goes out of scope on the
+            // other iterations, after that.
+            (State::OutOfScope, Event::Move { break_out: true, .. }) => State::OutOfScope,
+
             // A reference copied out of `it` ended its part of the
             // borrow `it` still holds: the lender stays borrowed (#575).
             (_, Event::StaticReacquire { still_borrowed_by, .. })
@@ -4623,6 +4713,12 @@ impl Visualizable for VisualizationData {
 
             // happends when a mutable reference returns, invalid otherwise
             (State::FullPrivilege{..}, Event::MutableDie{ .. }) =>
+                State::OutOfScope,
+            // A `&mut` whose own borrow ends while a shared reborrow
+            // through it is still live (`let first = &*r; r = &mut b;`
+            // with `first` used later, #1182): r holds no reference
+            // until it is given its next one.
+            (State::PartialPrivilege{..}, Event::MutableDie{ .. }) if self.is_mutref(hash) =>
                 State::OutOfScope,
 
             (State::FullPrivilege{..}, Event::Acquire{ from: _ ,..}) | (State::FullPrivilege{..}, Event::Copy{ from: _ ,..}) => {
@@ -5152,6 +5248,7 @@ impl Visualizable for VisualizationData {
             }
             self.compute_timeline_states(& mut timeline.history, &mut timeline.states, hash);
         }
+        lend_struct_borrows_to_members(&mut timelines);
         self.timelines = timelines;
     }
 

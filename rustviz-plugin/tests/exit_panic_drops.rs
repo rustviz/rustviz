@@ -2,7 +2,7 @@
 // owns, right at the `panic!` (#410). `s` is only borrowed by the
 // panic's message, so it's dropped there too. `std::process::exit`
 // also never returns, but runs no destructors: nothing is dropped at
-// it, and its arm's columns end in a bar.
+// it, and its arm's columns end in a dot that says so (#1172).
 
 fn show(s: &String) -> usize {
     s.len()

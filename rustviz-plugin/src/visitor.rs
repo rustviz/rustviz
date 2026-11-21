@@ -247,6 +247,35 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// the operand of a `return`): record it moving (or, for a Copy
   /// type or a shared reference, being copied) to the caller.
   fn return_to_caller(&mut self, e: &'tcx Expr<'tcx>) {
+    // `return loop { … break v; }`, or such a loop as the tail: what
+    // the `break` that ends it carries goes to the caller (#1171), as it
+    // would go into the argument of `f(loop { … })` (`match_arg`).
+    if let ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _) = e.kind {
+      if !e.span.from_expansion() {
+        let seen = self.take_loop_breaks(e);
+        let deferred = self.deferred_lines.iter().any(|(id, ..)| *id == e.hir_id);
+        let saved = self.enter_deferred(e.hir_id);
+        // A single `break` that isn't in a branch: the value leaves
+        // where the loop ends (not a variable the loop declares, which
+        // goes out of scope there after its move).
+        let end_line = (!deferred && seen.len() == 1 && !self.mentions_local_declared_in(seen[0].0, e.span))
+          .then(|| span_end_line(&e.span, &self.tcx));
+        let saved_line = end_line.map(|l| self.line_override.replace(l));
+        if seen.len() > 1 {
+          // Several: only the `break` that ended the loop ran (#561).
+          self.pair_break_alternatives(e, seen, |this, v| this.return_to_caller(v));
+        } else {
+          for (value, _) in seen {
+            self.return_to_caller(value);
+          }
+        }
+        if let Some(l) = saved_line {
+          self.line_override = l;
+        }
+        self.leave_deferred(saved);
+        return;
+      }
+    }
     let tycheck_results = self.tcx.typeck(e.hir_id.owner);
     let lhs_ty = tycheck_results.node_type(e.hir_id);
     let is_copyable = self.ty_is_copy(lhs_ty, e.hir_id.owner);
@@ -2437,8 +2466,34 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // dots below; what else it holds is dropped with them (#1141).
     let part_maybe_moved = |rap: &ResourceAccessPoint| moved_some.iter()
       .any(|m| place_within(m, rap.name()) && m != rap.name());
-    let droppable: Vec<(usize, ResourceAccessPoint)> = self.droppable_locals_at(from, end, &moved, true, line, false)
-      .into_iter().filter(|(_, rap)| !declared_outside(rap) && !part_maybe_moved(rap)).collect();
+    // (What the value moves on some paths only gets its own dot below.)
+    let handed_on: BTreeSet<String> = moved.union(&moved_some).cloned().collect();
+    let droppable: Vec<(usize, ResourceAccessPoint)> = self.droppable_locals_at(from, end, &handed_on, true, line, false)
+      .into_iter().filter(|(_, rap)| !declared_outside(rap)).collect();
+    // `process::exit` ends the process: nothing is dropped, and each
+    // local's column ends here with a dot that says so (#1172). (A
+    // temporary or a tuple scrutinee isn't dropped either; they have
+    // no column to end.)
+    let process_exit = match how {
+      "process::exit" => Some("process::exit"),
+      "process::abort" => Some("process::abort"),
+      _ => None,
+    };
+    if process_exit.is_some() {
+      for (_, rap) in droppable {
+        if rap.is_temporary() {
+          continue;
+        }
+        let id = *self.unique_id;
+        *self.unique_id += 1;
+        self.exit_drops.insert(id);
+        let early = Some(EarlyReturns { process_exit, ..EarlyReturns::default() });
+        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, holds: None, id, early });
+      }
+      return;
+    }
+    let droppable: Vec<(usize, ResourceAccessPoint)> = droppable.into_iter()
+      .filter(|(_, rap)| !part_maybe_moved(rap)).collect();
     for (idx, rap) in droppable {
       // A tuple is dropped after what its arm declared, before the
       // locals declared before its match.
@@ -2547,7 +2602,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if rd.rap.is_temporary() && rd.scope < line {
         continue;
       }
-      if !self.owns_value_here(*rd.rap.hash(), binds) {
+      // One its drop flag decides about (moved, or given a value, on
+      // some paths only) is included too: the exit drops it if it
+      // still holds a value (#1194).
+      if self.ownership_here(*rd.rap.hash(), binds) == OwnHere::No {
         continue;
       }
       out.push((idx, rd.rap.clone()));
@@ -2999,7 +3057,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // Those of an owner after a loop that never repeats: removed.
     let mut removed: HashSet<usize> = HashSet::new();
     let mut mark = |line: usize, ev: &mut ExternalEvent| match ev {
-      ExternalEvent::GoOutOfScope { ro, early, id, .. } if !exit_ids.contains(id) => {
+      ExternalEvent::GoOutOfScope { ro, early, id, .. } if !exit_ids.contains(id)
+        && !early.as_ref().is_some_and(|e| e.process_exit.is_some()) => {
         let mut e = EarlyReturns::default();
         for r in &returns {
           match r.vars.iter().find(|(v, _)| v.hash() == ro.hash()) {
@@ -3215,6 +3274,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       || def_path == "::panic::panic_any"
       || def_path == "::panic::resume_unwind";
     unwinds.then(|| span_to_line(&call.span.source_callsite(), &self.tcx))
+  }
+
+  /// If `call` is a call to `std::process::exit` or `abort`, which end
+  /// the process without running any destructor (#1172), the line of
+  /// the call and how to name it.
+  fn process_exit_line(&self, call: &'tcx Expr<'tcx>) -> Option<(usize, &'static str)> {
+    let ExprKind::Call(callee, _) = call.kind else { return None };
+    let ExprKind::Path(QPath::Resolved(_, path)) = callee.kind else { return None };
+    let Res::Def(DefKind::Fn, def_id) = path.res else { return None };
+    if self.tcx.crate_name(def_id.krate).as_str() != "std" {
+      return None;
+    }
+    let name = match self.tcx.def_path(def_id).to_string_no_crate_verbose().as_str() {
+      "::process::exit" => "process::exit",
+      "::process::abort" => "process::abort",
+      _ => return None,
+    };
+    Some((span_to_line(&call.span.source_callsite(), &self.tcx), name))
   }
 
   /// Whether `e` never completes normally: its type is `!` (`return`,
@@ -3538,8 +3615,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.all_paths_exit_from = self.all_paths_exit_from.min(expr_to_line(at, &self.tcx));
   }
 
-  /// `drop_locals_on_exit` for a panic call inside a branch.
+  /// `drop_locals_on_exit` for a panic call inside a branch. A call to
+  /// `process::exit` (`process_exit_line`) ends what is in scope there
+  /// without dropping it, in a branch or directly in the function's
+  /// body (#1172).
   fn note_panic(&mut self, call: &'tcx Expr<'tcx>) {
+    if let Some((line, name)) = self.process_exit_line(call) {
+      if self.in_closure(call) {
+        return;
+      }
+      if self.exit_frames.is_empty() && self.at_fn_level(call) {
+        let lo = *self.unique_id;
+        self.exit_frames.push(ExitFrame::Branch { len: 0, hide: Vec::new(), binds: Vec::new(), binds_at: 0 });
+        self.drop_locals_on_exit(line, None, None, false, name);
+        self.exit_frames.pop();
+        self.keep_inline_exit_drops(lo..*self.unique_id, call);
+      } else {
+        self.drop_locals_on_exit(line, None, None, false, name);
+      }
+      return;
+    }
     if let Some(line) = self.panic_line(call) {
       self.drop_locals_on_exit(line, None, None, false, "panic");
       if !self.in_closure(call) && self.exit_frames.iter().any(|f| matches!(f, ExitFrame::Branch { .. })) {
@@ -3564,8 +3659,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// scrutinee, whose dot says from the column's state that nothing is
   /// dropped.)
   fn owns_value_here(&self, hash: u64, binds: bool) -> bool {
-    #[derive(Clone, Copy, PartialEq)]
-    enum Own { Yes, No, Maybe }
+    self.ownership_here(hash, binds) == OwnHere::Yes
+  }
+
+  /// `owns_value_here`, telling a variable that holds no value on any
+  /// path (`No`) from one that holds one on some paths only (`Maybe`:
+  /// its drop flag decides whether an exit here drops it, #1194).
+  fn ownership_here(&self, hash: u64, binds: bool) -> OwnHere {
+    use OwnHere as Own;
     fn step(events: &[(usize, ExternalEvent)], hash: u64, hide: &[std::ops::Range<usize>], mut own: Own) -> Own {
       let is = |r: &ResourceTy| *r.hash() == hash;
       for (_, e) in events {
@@ -3615,7 +3716,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       Vec::new()
     };
     if frame_binds.is_empty() {
-      return step(self.preprocessed_events, hash, &hide, Own::No) == Own::Yes;
+      return step(self.preprocessed_events, hash, &hide, Own::No);
     }
     // The events in the order they happened: each arm's bindings
     // where its body starts.
@@ -3628,7 +3729,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       from = at;
     }
     events.extend_from_slice(&self.preprocessed_events[from..]);
-    step(&events, hash, &hide, Own::No) == Own::Yes
+    step(&events, hash, &hide, Own::No)
   }
 
   /// At the start of the body of `loop_expr` (#992): the variables
@@ -4228,7 +4329,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // A `break` out of a labelled block drops nothing drawn.
       ExprKind::Break(dest, _) => branch && dest.target_id.is_ok_and(|t|
         matches!(self.tcx.hir_node(t), Node::Expr(Expr { kind: ExprKind::Loop(..), .. }))),
-      ExprKind::Call(..) => branch && self.panic_line(e).is_some(),
+      ExprKind::Call(..) => branch && (self.panic_line(e).is_some() || self.process_exit_line(e).is_some()),
       // A body drawn inline (an `if let` whose pattern always matches,
       // a lone match arm) is where the code around it is: its exits'
       // drops are drawn as they would be there (#1013).
@@ -4748,6 +4849,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             }
           }
         }
+        self.swap_ref_vars(fn_expr, args, expr_to_line(expr, &self.tcx));
         // `std::panic::panic_any(…)` written out (#410): it unwinds
         // once its argument has been passed.
         self.note_panic(expr);
@@ -5906,6 +6008,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     true
   }
 
+  /// Whether `e` is inside the condition of an `if` (a let-chain part
+  /// included) or a match arm's guard.
+  fn in_condition(&self, e: &'tcx Expr<'tcx>) -> bool {
+    self.tcx.hir_parent_iter(e.hir_id).any(|(_, node)| match node {
+      rustc_hir::Node::Expr(p) => matches!(p.kind, ExprKind::If(cond, ..) if cond.span.contains(e.span)),
+      rustc_hir::Node::Arm(arm) => arm.guard.is_some_and(|g| g.span.contains(e.span)),
+      _ => false,
+    })
+  }
+
   fn visit_assign(&mut self, expr: &'tcx Expr<'tcx>, lhs_expr: &'tcx Expr<'tcx>, rhs_expr: &'tcx Expr<'tcx>) {
     // `a = lhs` inside a destructuring assignment: draw it as
     // `a = <the part of the RHS lhs holds>`. That part was
@@ -6116,6 +6228,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         ResourceTy::Value(_) => {
           let ref_data = self.borrow_map.get(lhs_rap.name()).unwrap().clone();
           self.hand_loan_to_carriers(lhs_rap.name(), &ref_data);
+          self.hand_loan_to_reborrows(lhs_rap.name(), &ref_data, line_num);
           let to_ro = match ref_data.lender {
             ResourceTy::Anonymous => ResourceTy::Deref(lhs_rap.clone()),
             _ => ref_data.lender.clone()
@@ -6162,7 +6275,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // with `r` read after the `if`), and for each lender
             // of a reference that borrows from either of two
             // (#770).
-            let end_of = |this: &Self, lender: &ResourceTy| this.old_loan_end(&ref_data, lender, line_num).unwrap_or(line_num);
+            // Only the assignment is the write, not the rest of its line
+            // (a one-line `if c { r = &y; }`'s condition, #1188); unless
+            // it is part of a condition itself (a let-chain's `{ r = &s;
+            // .. }`, #603), whose other paths are drawn as the chain's.
+            let write_span = (!self.in_condition(expr)).then_some(expr.span);
+            let end_of = |this: &Self, lender: &ResourceTy| this.old_loan_end(&ref_data, lender, line_num, write_span).unwrap_or(line_num);
             let end_line = match self.loan_end(&ref_data).filter(|&end| end < line_num && end >= ref_data.assigned_at) {
               Some(end) => end,
               None => end_of(self, &ref_data.lender),
@@ -8023,7 +8141,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let is_partial = partial.unwrap_or(!(parent_ty == typeck_res.node_type(p.hir_id)));
         let id = *self.unique_id;
         *self.unique_id += 1;
-        let ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), from.clone(), id, is_partial);
+        let mut ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), from.clone(), id, is_partial);
+        self.arm_part_borrow(guard_expr, arm_pat, to_ro, from, &mut ext_ev);
         // A reference copied out of a value that holds a
         // borrow also borrows what that value borrows (#391).
         pending_borrows.extend(self.pattern_ref_copy_borrow(to_ro, e, scrutinee));
@@ -8098,7 +8217,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
         let id = *self.unique_id;
         *self.unique_id += 1;
-        let ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), from.clone(), id, partial.unwrap_or(false));
+        let mut ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), from.clone(), id, partial.unwrap_or(false));
+        self.arm_part_borrow(guard_expr, arm_pat, to_ro, from, &mut ext_ev);
         let scrutinee = match self.literal_elems(guard_expr) {
           Some(fields) if fields.len() == parents.len() => &fields[i],
           _ => guard_expr,
@@ -8207,7 +8327,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let mir_b_data = if callback_events.is_empty() { Vec::new() } else { self.gather_borrow_data(self.bwf) };
     for (to, from, e) in callback_events {
       let name = from.real_name();
-      self.borrow_map.remove(&name);
+      // A part of a whole the scrutinee borrows (`match &mut t { (a, b)
+      // => … }`, `arm_part_borrow`): that one loan ends at the last use
+      // of any of the arm's bindings into it (#1215).
+      let whole_loan = self.borrow_map.remove(&name).and_then(|rd| rd.borrow_span);
       // The borrow ends where the borrow checker ends it, at
       // the binding's last use (#599): the end of the region
       // of the loan MIR issues for the binding on the pattern's
@@ -8216,7 +8339,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // loan of its own; its borrow lasts as long as it is
       // live.
       let ends_at = mir_b_data.iter()
-        .filter(|m| m.assigned_place.as_deref() == Some(name.as_str()) && (pat_line..=pat_end).contains(&m.region.0))
+        .filter(|m| (m.assigned_place.as_deref() == Some(name.as_str()) && (pat_line..=pat_end).contains(&m.region.0))
+          || whole_loan == Some(m.span))
         .map(|m| m.region.1)
         .max()
         .or_else(|| self.last_live_line(&name, (pat_line, end)))
@@ -11516,6 +11640,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         if nested {
           self.mark_copy_inside(&name, hirid, init, first_id);
           self.mark_copy_pointee(&name, hirid, first_id);
+          self.mark_part_borrow(&name, hirid, init, first_id);
         }
         if nested && !is_skipped && self.own_ref_binding(hirid).is_none() {
           if let Some(rap) = self.raps.get(&name).map(|rd| rd.rap.to_owned()) {
@@ -11569,6 +11694,151 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       | PatKind::Expr(_)
       | PatKind::Range(..) => {}
     }
+  }
+
+  /// `match &mut t { (a, b) => … }` (#1215): like `let (a, b) = &mut t;`
+  /// (`mark_part_borrow`), the scrutinee is one loan of all of t, which a
+  /// and b each reach a part of. Name the part on a's borrow, and give a
+  /// the scrutinee's loan, which rustc ends at the last use of a or b:
+  /// t was given back at a's last use while b still held it.
+  fn arm_part_borrow(&mut self, guard_expr: &'tcx Expr<'tcx>, arm_pat: &'tcx Pat<'tcx>, to_ro: &ResourceAccessPoint, from: &ResourceTy, ext_ev: &mut ExternalEvent) {
+    let mut e = guard_expr;
+    while let ExprKind::DropTemps(inner) = e.kind {
+      e = inner;
+    }
+    let ExprKind::AddrOf(_, _, place) = e.kind else { return };
+    let Some(whole) = expr_to_rap_name(place, &self.tcx) else { return };
+    let ResourceTy::Value(f) = from else { return };
+    if *f.name() != whole {
+      return;
+    }
+    let (ExternalEvent::StaticBorrow { via: v @ None, .. } | ExternalEvent::MutableBorrow { via: v @ None, .. }) = ext_ev else { return };
+    let mut hirid = None;
+    arm_pat.each_binding(|_, id, _, _| {
+      if hirid.is_none() && binding_name(&self.tcx, id) == *to_ro.name() {
+        hirid = Some(id);
+      }
+    });
+    let Some(hirid) = hirid else { return };
+    let Some(path) = self.binding_part_path(hirid) else { return };
+    let part = format!("{}.{}", whole, path);
+    if !self.raps.contains_key(&part) {
+      return;
+    }
+    *v = Some(BorrowVia {
+      func: part,
+      lenders: vec![whole.clone()],
+      also_unnamed: false,
+      tie: ArgTie::default(),
+      carrier: ViaCarrier::Part,
+      passed_on: Vec::new(),
+    });
+    if let Some(rd) = self.borrow_map.get_mut(to_ro.name()) {
+      rd.borrow_span = Some(e.span);
+    }
+  }
+
+  /// `let (a, b) = &mut t;`: `bind_one` drew a's borrow from all of t,
+  /// which is right (the pattern makes one loan of t), but a points to
+  /// t.0 only. Say so on the borrow (`ViaCarrier::Part`), or t's dot
+  /// reads as two mutable borrows of the same value (#1130).
+  fn mark_part_borrow(&mut self, name: &str, hirid: HirId, init: &'tcx Expr<'tcx>, first_id: usize) {
+    let mut e = init;
+    while let ExprKind::DropTemps(inner) = e.kind {
+      e = inner;
+    }
+    let ExprKind::AddrOf(_, _, place) = e.kind else { return };
+    let Some(whole) = expr_to_rap_name(place, &self.tcx) else { return };
+    let Some(path) = self.binding_part_path(hirid) else { return };
+    let part = format!("{}.{}", whole, path);
+    if !self.raps.contains_key(&part) {
+      return;
+    }
+    let via = BorrowVia {
+      func: part,
+      lenders: vec![whole.clone()],
+      also_unnamed: false,
+      tie: ArgTie::default(),
+      carrier: ViaCarrier::Part,
+      passed_on: Vec::new(),
+    };
+    let set = |ev: &mut ExternalEvent| match ev {
+      ExternalEvent::StaticBorrow { id, from: ResourceTy::Value(f), to: ResourceTy::Value(t), via: v @ None, .. }
+      | ExternalEvent::MutableBorrow { id, from: ResourceTy::Value(f), to: ResourceTy::Value(t), via: v @ None, .. }
+        if *id >= first_id && t.name() == name && *f.name() == whole => *v = Some(via.clone()),
+      _ => {}
+    };
+    for (_, ev) in self.preprocessed_events.iter_mut() {
+      set(ev);
+    }
+    for evs in self.event_line_map.values_mut() {
+      for ev in evs.iter_mut() {
+        set(ev);
+      }
+    }
+  }
+
+  /// The field path (`0`, `name`, `inner.0`) a pattern binding takes out
+  /// of the value its pattern matches (`a` in `let (a, b) = …` gives
+  /// `0`). None through a `&` / box / deref pattern, a slice, an
+  /// or-pattern, or an enum variant: those don't name a field column.
+  fn binding_part_path(&self, hirid: HirId) -> Option<String> {
+    let typeck = self.tcx.typeck(hirid.owner);
+    let mut parts: Vec<String> = Vec::new();
+    let mut cur = hirid;
+    loop {
+      let parent = self.tcx.parent_hir_node(cur);
+      match parent {
+        rustc_hir::Node::Pat(p) => {
+          match p.kind {
+            PatKind::Tuple(ps, dotdot) => {
+              let i = ps.iter().position(|x| x.hir_id == cur)?;
+              let arity = match typeck.pat_ty(p).peel_refs().kind() {
+                rustc_middle::ty::TyKind::Tuple(tys) => tys.len(),
+                _ => return None,
+              };
+              let idx = match dotdot.as_opt_usize() {
+                Some(d) if i >= d => i + arity - ps.len(),
+                _ => i,
+              };
+              parts.push(idx.to_string());
+            }
+            PatKind::TupleStruct(..) | PatKind::Struct(..) => {
+              // Only a struct's own fields have columns (not an enum's).
+              if !typeck.pat_ty(p).peel_refs().ty_adt_def().is_some_and(|a| a.is_struct()) {
+                return None;
+              }
+              match p.kind {
+                PatKind::TupleStruct(_, ps, dotdot) => {
+                  let i = ps.iter().position(|x| x.hir_id == cur)?;
+                  let n = typeck.pat_ty(p).peel_refs().ty_adt_def()?.non_enum_variant().fields.len();
+                  let idx = match dotdot.as_opt_usize() {
+                    Some(d) if i >= d => i + n - ps.len(),
+                    _ => i,
+                  };
+                  parts.push(idx.to_string());
+                }
+                _ => {}
+              }
+            }
+            PatKind::Binding(..) => {}
+            _ => return None,
+          }
+          cur = p.hir_id;
+        }
+        rustc_hir::Node::PatField(f) => {
+          parts.push(f.ident.as_str().to_owned());
+          // The struct pattern is the field's parent.
+          cur = f.hir_id;
+        }
+        _ => break,
+      }
+    }
+    if parts.is_empty() {
+      return None;
+    }
+    parts.reverse();
+    Some(parts.join("."))
   }
 
   /// `let Some(w) = oi else { .. }` with a Copy payload: `bind_one`
@@ -13043,6 +13313,11 @@ struct BranchLeaves {
   /// mention, sorted: what the break carries out of the loop.
   break_carries: Vec<String>,
 }
+
+/// Whether a variable holds a value at some point, on the paths that
+/// reach it (`ExprVisitor::ownership_here`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum OwnHere { Yes, No, Maybe }
 
 /// The local variables `e` mentions, pushed onto `out`.
 fn mentioned_locals<'tcx>(e: &'tcx Expr<'tcx>, out: &mut Vec<String>) {

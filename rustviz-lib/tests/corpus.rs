@@ -21071,12 +21071,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "f is moved into the call (an FnOnce closure can only be called once). s, which f captured, is dropped during the call",
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and k's resource is dropped. If the `?` succeeds, nothing happens to k here.",
             "h goes out of scope. Its captured resource is dropped here only if no branch above called it (Rust tracks this with a runtime drop flag).",
+            // m, called in an `if` above the `?`, may still hold w: the
+            // drop flag decides (#1194).
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and m's resource is dropped if m still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to m here.",
         ],
         must_not_contain: &[
             "the function returns and f's resource is dropped",
             "the function returns and g's resource is dropped",
             "the function returns and h's resource is dropped",
-            "the function returns and m's resource is dropped",
+            "the function returns and m's resource is dropped. If",
         ],
     },
     TooltipExpect {
@@ -22106,7 +22109,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from config to run",
             "Move from s to tag",
             "s's resource is moved",
-            "s goes out of scope. No resource is dropped.",
             "config's resource is moved",
         ],
         must_not_contain: &[
@@ -22114,6 +22116,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "to std::process::exit",
             // s's String was never drawn as moved into tag.
             "=s goes out of scope. Its resource is dropped.",
+            // process::exit never returns: main's `}` is never reached,
+            // so nothing goes out of scope there (#1172).
+            "=s goes out of scope. No resource is dropped.",
         ],
     },
     // #1174: an `if` / `match` as a call's argument passes the value its
@@ -22788,6 +22793,289 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=v's resource is moved",
             "=x acquires ownership of a resource",
             "=a acquires ownership of a resource",
+        ],
+    },
+    // #1171: a loop that is the function's value: main drew no move of
+    // what `break` carries, and dropped it (or said nothing was dropped)
+    // at the end.
+    TooltipExpect {
+        name: "loop_value_returned_1171",
+        must_contain: &[
+            "line's resource is moved to the caller by the break that ends the loop, which the function returns",
+            "line goes out of scope. Its resource is dropped here on every iteration that doesn't end the loop.",
+            "s's resource is moved to the caller",
+            "a's resource is moved to the caller",
+            "b's resource is moved to the caller",
+            "d's resource is moved to the caller",
+            "f's resource is moved to the caller if the loop ended with break f",
+            "g's resource is moved to the caller if the loop ended with break g",
+            "h's resource is moved to the caller",
+        ],
+        must_not_contain: &[
+            "=line goes out of scope. Its resource is dropped.",
+            "=s goes out of scope. Its resource is dropped.",
+            "d goes out of scope. Its resource is dropped here only if d still holds it",
+            "moves f's resource to Caller",
+            "to Caller",
+        ],
+    },
+    // #1156: `break k` out of a loop whose body moved k on the other
+    // iterations: main drew a drop at the end of the body anyway.
+    TooltipExpect {
+        name: "break_out_after_move_1156",
+        must_contain: &[
+            "k goes out of scope. No resource is dropped: on the iterations that don't end the loop, k was moved above.",
+            "m goes out of scope. On the iterations that don't end the loop, its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "p goes out of scope. Its resource is dropped here on every iteration that doesn't end the loop.",
+            "q goes out of scope. No resource is dropped: on the iterations that don't end the loop, q was moved above.",
+            "r goes out of scope. No resource is dropped: on the iterations that don't end the loop, r was moved above.",
+            "r's resource is moved to the caller by the break that ends the loop, which the function returns",
+        ],
+        must_not_contain: &[
+            "k goes out of scope. Its resource is dropped here on every iteration",
+            "m goes out of scope. Its resource is dropped here on every iteration",
+            "q goes out of scope. Its resource is dropped here on every iteration",
+        ],
+    },
+    TooltipExpect {
+        name: "whole_struct_borrow_fields_1130_1193",
+        // #1193: a struct borrowed as a whole (`let r = &mut p;`, `let q =
+        // &p;`) lends its fields with it, but their columns stayed solid
+        // "p.name is the owner of the resource" (the rows are pinned by
+        // `a_whole_struct_borrow_lends_its_fields`). #1130: `let (a, b) =
+        // &mut t;` makes one loan of all of t (a use of t.0 before b's last
+        // use is E0499); t's dot read like two mutable borrows of the same
+        // value ("t's resource is mutably borrowed by a … by b").
+        must_contain: &[
+            "p.name is mutably borrowed along with p by r; p.name can't be used until the borrow ends",
+            "p.age is mutably borrowed along with p by r; p.age can't be used until the borrow ends",
+            "p.name is immutably borrowed along with p by q; p.name is read-only while the borrow is live",
+            "t.0 is mutably borrowed along with t; t.0 can't be used until the borrow ends",
+            "t.1 is mutably borrowed along with t; t.1 can't be used until the borrow ends",
+            "t.0 is mutably borrowed by a, as part of a mutable borrow of all of t; t can't be used while the borrow is live",
+            "t.1 is mutably borrowed by b, as part of a mutable borrow of all of t; t can't be used while the borrow is live",
+            "Mutable borrow from t to a: a points to t.0, but the borrow is of all of t, which stays borrowed while a is in use",
+            "s.x is mutably borrowed by x, as part of a mutable borrow of all of s; s can't be used while the borrow is live",
+            "s.y is mutably borrowed along with s; s.y can't be used until the borrow ends",
+            "u.0 is immutably borrowed by c, as part of an immutable borrow of all of u; u is read-only while the borrow is live",
+            "o.inner.v is mutably borrowed along with o.inner by r; o.inner.v can't be used until the borrow ends",
+        ],
+        must_not_contain: &[
+            "=t's resource is mutably borrowed by a; t can't be used while the borrow is live",
+            "=t's resource is mutably borrowed by b; t can't be used while the borrow is live",
+            "=s's resource is mutably borrowed by x; s can't be used while the borrow is live",
+            "=u's resource is immutably borrowed by c; u is read-only while the borrow is live",
+        ],
+    },
+    TooltipExpect {
+        name: "match_whole_borrow_parts_1215",
+        // #1215: `match &mut t { (a, b) => … }` is one loan of all of t,
+        // which a and b each reach a part of, as for `let (a, b) = &mut
+        // t;` (#1130). t's dot used to read as two mutable borrows of t,
+        // and t was given back at a's last use while b still borrowed it
+        // (see `a_match_on_a_borrow_of_a_whole_gives_it_back_once`).
+        must_contain: &[
+            "t.0 is mutably borrowed by a, as part of a mutable borrow of all of t; t can't be used while the borrow is live",
+            "t.1 is mutably borrowed by b, as part of a mutable borrow of all of t; t can't be used while the borrow is live",
+            "Partial Mutable borrow from t to a: a points to t.0, but the borrow is of all of t, which stays borrowed while a is in use",
+            "u.0 is immutably borrowed by c, as part of an immutable borrow of all of u; u is read-only while the borrow is live",
+            "s.x is mutably borrowed by x, as part of a mutable borrow of all of s; s can't be used while the borrow is live",
+            "Mutable borrow from s to y: y points to s.y, but the borrow is of all of s, which stays borrowed while y is in use",
+        ],
+        must_not_contain: &[
+            "=t's resource is mutably borrowed by a; t can't be used while the borrow is live",
+            "=t's resource is mutably borrowed by b; t can't be used while the borrow is live",
+            "=u's resource is immutably borrowed by c; u is read-only while the borrow is live",
+            "=s's resource is mutably borrowed by x; s can't be used while the borrow is live",
+        ],
+    },
+    TooltipExpect {
+        name: "reborrow_outlives_repoint_1182",
+        // #1182: a reborrow through r (`&*r`, `&q[..1]`, `&t.name`) that is
+        // used after r is given a new reference keeps what r pointed to
+        // borrowed until its last use, and gives it back there (where, is
+        // pinned by `a_reborrow_keeps_its_lender_past_a_repoint`). Main
+        // ended it at the reassignment and returned it to `*r`, which by
+        // then pointed elsewhere.
+        must_contain: &[
+            "Return mutably borrowed resource from first to a",
+            "Return immutably borrowed resource from part to c",
+            "Return immutably borrowed resource from n to p",
+            "Return immutably borrowed resource from one to e",
+            "Return mutably borrowed resource from kept to g",
+            // first's own borrow is immutable; its use is what keeps a
+            // mutably borrowed.
+            "first's immutable borrow ends. first was made through r's mutable borrow of a, which lasts as long as first is used, so a is mutably borrowed until here",
+            "kept's immutable borrow ends. kept was made through w's mutable borrow of g, which lasts as long as kept is used, so g is mutably borrowed until here",
+            // Control: a reborrow dead before the write.
+            "Return mutably borrowed resource from x to g2",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from first to *r",
+            "Return mutably borrowed resource from r to a",
+            "first no longer borrows the resource r points to",
+            "=first's immutable borrow ends",
+            "first's mutable borrow ends",
+            "kept's mutable borrow ends",
+            "Return immutably borrowed resource from q to c",
+            "Return immutably borrowed resource from part to q",
+            "Return immutably borrowed resource from t to p",
+            "Return immutably borrowed resource from n to t.name",
+            "Return immutably borrowed resource from one to *u",
+            "Return mutably borrowed resource from w to g",
+            "Return immutably borrowed resource from kept to *w",
+        ],
+    },
+    TooltipExpect {
+        name: "oneline_if_repoint_1188",
+        // #1188: a reference re-pointed in a one-line conditional keeps its
+        // old lender borrowed on the path that skips the write, until the
+        // read after the conditional (rows pinned by
+        // `a_one_line_conditional_repoint_keeps_the_old_lender`). Main
+        // ended the old borrow at the `if` (r's dot said its borrow ended
+        // there), or, for a bare-expression match arm, drew d still shared
+        // after the join with no end.
+        must_contain: &[
+            "Return immutably borrowed resource from r to a",
+            "Return immutably borrowed resource from q to d",
+            "Return mutably borrowed resource from m to f",
+            "Return immutably borrowed resource from t to h",
+            "Return immutably borrowed resource from u to k",
+        ],
+        must_not_contain: &[
+            "d is live in a conditional expression",
+        ],
+    },
+    TooltipExpect {
+        name: "dead_loan_note_sibling_branch_1153",
+        // #1153: no "already over here" note on a borrow (or a field write)
+        // in the branch that didn't take the other branch's loan: on that
+        // path the reference never held it. The note stays where it is
+        // true (`still_noted`, #796).
+        must_contain: &[
+            "s's resource is mutably borrowed by r; s can't be used while the borrow is live",
+            "p.n is assigned a new value",
+            "t's resource is mutably borrowed by w; t can't be used while the borrow is live",
+            "x is assigned a new value. On this path z is given a new reference on line 55 before it is used again, so z's borrow of x is already over here; x stays borrowed only on paths that skip line 55",
+        ],
+        must_not_contain: &[
+            "r's borrow of s is already over here",
+            "q's borrow of p is already over here",
+            "w's borrow of t is already over here",
+        ],
+    },
+    TooltipExpect {
+        name: "mem_swap_ref_vars_1230",
+        // #1230: after `std::mem::swap(&mut r1, &mut r2)` r1 points to b and
+        // r2 to a: each gives back the borrow the other made. Main's
+        // arrows named each variable's old lender.
+        must_contain: &[
+            "Return immutably borrowed resource from r1 to b",
+            "Return immutably borrowed resource from r2 to a",
+            "Return mutably borrowed resource from m1 to d",
+            "Return mutably borrowed resource from m2 to c",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from r1 to a",
+            "Return immutably borrowed resource from r2 to b",
+            "Return mutably borrowed resource from m1 to c",
+            "Return mutably borrowed resource from m2 to d",
+        ],
+    },
+    TooltipExpect {
+        name: "exchange_two_mut_refs_1249",
+        // #1249: after `exchange(&mut r1, &mut r2)` r1 may point to a or
+        // b: each reference gives back both lenders. Main named only its
+        // old lender. (Those old arrows are still drawn, as one of the
+        // two, so they can't go in must_not_contain.)
+        must_contain: &[
+            "Return immutably borrowed resource from r1 to a",
+            "Return immutably borrowed resource from r1 to b",
+            "Return immutably borrowed resource from r2 to a",
+            "Return immutably borrowed resource from r2 to b",
+            "Return immutably borrowed resource from r3 to d",
+            "Return immutably borrowed resource from r4 to c",
+            // Distinct lifetimes: nothing exchanged.
+            "Return immutably borrowed resource from r5 to e",
+            "Return immutably borrowed resource from r6 to f",
+            // mem::swap: exactly exchanged (#1230).
+            "Return immutably borrowed resource from r7 to h",
+            "Return immutably borrowed resource from r8 to g",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from r5 to f",
+            "Return immutably borrowed resource from r6 to e",
+            "Return immutably borrowed resource from r7 to g",
+            "Return immutably borrowed resource from r8 to h",
+        ],
+    },
+    // #1172: `process::exit` / `abort` run no destructor. Main drew the
+    // locals in scope there as dropped at the `}` the code never reaches
+    // (the Book's minigrep: "e goes out of scope. Its resource is
+    // dropped.").
+    TooltipExpect {
+        name: "process_exit_no_drops_1172",
+        must_contain: &[
+            "`process::exit` ends the program here without running any destructor: e's resource is never dropped",
+            "`process::exit` ends the program here without running any destructor: log's resource is never dropped",
+            "`process::exit` ends the program here without running any destructor: t's resource is never dropped",
+            "`process::exit` ends the program here without running any destructor: s's resource is never dropped",
+            "`process::exit` ends the program here without running any destructor: u's resource is never dropped",
+            "`process::exit` ends the program here without running any destructor: m's resource is never dropped",
+            "`process::exit` ends the program here without running any destructor: tag's resource is never dropped",
+            "`process::exit` ends the program here without running any destructor: w's resource is never dropped",
+            "`process::abort` ends the program here without running any destructor: y's resource is never dropped",
+            // The other paths still drop them at their scope ends.
+            "log goes out of scope. Its resource is dropped.",
+            "tag goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "=e goes out of scope. Its resource is dropped.",
+            "=t goes out of scope. Its resource is dropped.",
+            "=u goes out of scope. Its resource is dropped.",
+            "=m goes out of scope. Its resource is dropped.",
+        ],
+    },
+    // #1194: a variable moved (or given a value) on some paths only got
+    // no dot at an exit or a `?` that drops it if its drop flag is set.
+    TooltipExpect {
+        name: "exit_maybe_moved_1194",
+        must_contain: &[
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            // `t = bar()?;`: on success the assignment runs (#1151).
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and t's resource is dropped if t still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, the assignment runs: t acquires ownership of a new resource. Its previous resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and u's resource is dropped if u still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to u here.",
+            "m goes out of scope. Its resource is dropped here only if m still holds it (Rust tracks this with a runtime drop flag).",
+            "p goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "k goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and a's resource is dropped if a still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, a's resource isn't dropped here.",
+            "b goes out of scope. Its resource (including the String it holds) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            // A drop the drop flag decides, stated as certain.
+            "the function returns and t's resource is dropped. If",
+            "the function returns and u's resource is dropped. If",
+            "the function returns and a's resource is dropped. If",
+            "If the `?` succeeds, nothing happens to t here",
+            // `return` in `match n` after the `if` that moved a: rustc's
+            // drop flag, not "nothing".
+            "=a goes out of scope. No resource is dropped.",
+        ],
+    },
+    // #1184: a `?` after a field was moved out said the whole struct is
+    // dropped if it returns early.
+    TooltipExpect {
+        name: "try_partial_move_1184",
+        must_contain: &[
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns, and drops what is left of p: p.a was moved out earlier, so only p.b is dropped. If the `?` succeeds, nothing happens to p here.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns, and drops what is left of r: r.a was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). r.b is dropped. If the `?` succeeds, nothing happens to r here.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and p.b's resource is dropped. If the `?` succeeds, nothing happens to p.b here.",
+        ],
+        must_not_contain: &[
+            "the function returns and p's resource is dropped",
+            "the function returns and r's resource is dropped",
+            // q.a moved, q.n is Copy: nothing of q to drop.
+            "the function returns and q's resource is dropped",
         ],
     },
 ];
@@ -23689,8 +23977,9 @@ fn branches_that_diverge_stop_short() {
         // `unreachable!()` on `s` (no value yet) and `panic!()` on `m`;
         // the `panic!` arm drops `s` and `t`.
         ("match_diverging_arm", &["s", "m"][..]),
-        // `process::exit` runs no destructors: its arm keeps the bars.
-        ("exit_panic_drops", &["s", "t"][..]),
+        // `process::exit` runs no destructors: its arm ends s and t in a
+        // dot saying they're never dropped (#1172), not a bar.
+        ("exit_panic_drops", &[][..]),
         ("exit_unreachable_else", &[][..]),
         // `b` lives on past the inner `continue`; `c` is dropped there.
         ("exit_break_continue_drops", &["b"][..]),
@@ -23700,7 +23989,7 @@ fn branches_that_diverge_stop_short() {
         ("exit_return_after_nested_if", &[][..]),
         // `pick`'s `s` has no value on the `_ => return 0` path: a bar,
         // not a drop. `f`'s `t` is dropped at its `return`; `g`'s `m`
-        // is path-dependent and draws neither.
+        // is path-dependent: the drop flag's dot at the `return` (#1194).
         ("exit_path_dependent_drops", &["s"][..]),
         ("exit_return_in_let_if", &[][..]),
         // The temporary Result is dropped at the `return`.
@@ -23830,6 +24119,54 @@ fn reference_lines_follow_the_reference_type() {
             let wrong: Vec<_> = states.iter().filter(|(_, s)| s != want).collect();
             assert!(wrong.is_empty(), "{}: {}'s line should be {} throughout, got {:?}", name, var, want, wrong);
         }
+    }
+}
+
+/// The state of `var`'s top-level line segment that covers the rows from
+/// `row` to `row + 1`, from its `data-rv-id` (`p.name@L15-17:line:
+/// revoked_privilege`).
+fn line_state_at(svg: &str, var: &str, row: usize) -> Option<String> {
+    let prefix = format!("data-rv-id=\"{}@L", var);
+    for (i, _) in svg.match_indices(&prefix) {
+        let rest = &svg[i + prefix.len()..];
+        let id = &rest[..rest.find('"')?];
+        let mut parts = id.split(':');
+        let (Some(rows), Some("line"), Some(state)) = (parts.next(), parts.next(), parts.next()) else { continue };
+        let (a, b) = rows.split_once('-')?;
+        let (a, b): (usize, usize) = (a.parse().ok()?, b.parse().ok()?);
+        if a <= row && row < b {
+            return Some(state.to_owned());
+        }
+    }
+    None
+}
+
+/// A struct or tuple borrowed as a whole lends every field (#1130,
+/// #1193): each field's line is drawn as borrowed while the whole is, not
+/// as a solid owner.
+#[test]
+fn a_whole_struct_borrow_lends_its_fields() {
+    let name = "whole_struct_borrow_fields_1130_1193";
+    let rv = run_with_local_backend(name);
+    let svg = rv.timeline_panel_string();
+    let cases: &[(&str, usize, &str)] = &[
+        ("p.name", 15, "revoked_privilege"),
+        ("p.age", 16, "revoked_privilege"),
+        ("p.name", 19, "partial_privilege"),
+        ("p.age", 20, "partial_privilege"),
+        ("p.name", 17, "full_privilege"),
+        ("t.0", 26, "revoked_privilege"),
+        ("t.0", 27, "revoked_privilege"),
+        ("t.1", 27, "revoked_privilege"),
+        ("s.x", 30, "revoked_privilege"),
+        ("s.y", 31, "revoked_privilege"),
+        ("u.0", 34, "partial_privilege"),
+        ("o.inner.v", 40, "revoked_privilege"),
+        ("o.inner.n", 41, "revoked_privilege"),
+        ("o.k", 40, "full_privilege"),
+    ];
+    for (var, row, want) in cases {
+        assert_eq!(line_state_at(&svg, var, *row).as_deref(), Some(*want), "{}: {}'s line from row {}", name, var, row);
     }
 }
 
@@ -26224,11 +26561,11 @@ fn return_drops_what_the_branch_owns() {
         ("exit_continue_in_match", &[("guess", 3), ("secret", 1)][..]),
         ("exit_return_borrowed_value", &[("s", 2), ("t", 2), ("u", 2), ("v", 2)][..]),
         ("exit_return_after_nested_if", &[("s", 2), ("t", 2)][..]),
-        // `m` (moved on one path above): no drop of any kind at the
-        // `return`, and the drop-flag wording once, at the end of `g`.
+        // `m` (moved on one path above): the drop-flag wording at the
+        // `return` (#1194: main drew nothing there) and at the end of `g`.
         // (Before #179's wording reached this branch, that scope-end
         // dot said "No resource is dropped.", false on the `else` path.)
-        ("exit_path_dependent_drops", &[("s", 1), ("t", 1), ("m", 0), ("m:No", 0), ("m:Flag", 1)][..]),
+        ("exit_path_dependent_drops", &[("s", 1), ("t", 1), ("m", 0), ("m:No", 0), ("m:Flag", 2)][..]),
         // `s` has no value yet at the `return`: dropped only at the end.
         ("exit_return_in_let_if", &[("s", 1), ("s:No", 0), ("t", 2)][..]),
         // #429: exits in an `if` without `else`. `t` is dropped at the
@@ -30385,6 +30722,82 @@ fn a_boxed_closure_borrowing_through_a_reference_keeps_it_until_dropped() {
     assert_eq!(ys("d's immutable borrow ends"), vec![row("drop(d);")]);
     assert_eq!(ys("d no longer borrows the resource p points to"), vec![row("drop(d);")]);
     assert_eq!(ys("w's resource is no longer immutably borrowed"), vec![row("drop(d);")]);
+}
+
+
+/// #1182 (`reborrow_outlives_repoint_1182`): a reborrow made through a
+/// reference keeps what the reference pointed to borrowed until the
+/// reborrow's last use, even after the reference is given another one.
+#[test]
+fn a_reborrow_keeps_its_lender_past_a_repoint() {
+    let rv = run_with_local_backend("reborrow_outlives_repoint_1182");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let row = |src: &str| code_row_y(&code, src);
+    let ys = |text: &str| -> Vec<f64> { dots_listing_tooltip(&tl, text).into_iter().map(|(_, y)| y).collect() };
+    assert_eq!(ys("a's resource is no longer mutably borrowed"), vec![row(r#"println!("{} {}", first, r);"#)]);
+    assert_eq!(ys("c's resource is no longer immutably borrowed"), vec![row(r#"println!("{} {}", part, q);"#)]);
+    assert_eq!(ys("p's resource is no longer immutably borrowed"), vec![row(r#"println!("{} {}", n, t.name);"#)]);
+    assert_eq!(ys("e's resource is no longer immutably borrowed"), vec![row(r#"println!("{} {}", one, u);"#)]);
+    assert_eq!(ys("other's immutable borrow ends"), vec![row(r#"println!("{}", other);"#)]);
+    assert_eq!(ys("g's resource is no longer mutably borrowed"), vec![row(r#"println!("{} {}", kept, w);"#)]);
+    // Control: the reborrow is dead before the write: g2's loan ends at
+    // its last use, as before.
+    assert_eq!(ys("g2's resource is no longer mutably borrowed"), vec![row(r#"println!("{}", early);"#)]);
+}
+
+/// #1188 (`oneline_if_repoint_1188`): a reference re-pointed in a
+/// conditional written on one line keeps its old lender borrowed until the
+/// read after it, as the same conditional over several lines does.
+#[test]
+fn a_one_line_conditional_repoint_keeps_the_old_lender() {
+    let rv = run_with_local_backend("oneline_if_repoint_1188");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let row = |src: &str| code_row_y(&code, src);
+    let ys = |text: &str| -> Vec<f64> { dots_listing_tooltip(&tl, text).into_iter().map(|(_, y)| y).collect() };
+    assert_eq!(ys("a's resource is no longer immutably borrowed"), vec![row(r#"println!("{}", r);"#)]);
+    assert_eq!(ys("d's resource is no longer immutably borrowed"), vec![row(r#"println!("{}", q);"#)]);
+    assert_eq!(ys("f's resource is no longer mutably borrowed"), vec![row("m.push('!');")]);
+    assert_eq!(ys("h's resource is no longer immutably borrowed"), vec![row(r#"println!("{}", t);"#)]);
+    assert_eq!(ys("k's resource is no longer immutably borrowed"), vec![row(r#"println!("{}", u);"#)]);
+}
+
+/// #1192 (`move_into_deref_one_dot_1192`): `*r = t;` draws one dot on p's
+/// column, on the write's row, for the end of r's borrow and the drop of
+/// p's old value (and the drop of p.name's on that row too).
+#[test]
+fn a_move_into_deref_gives_the_lender_one_dot() {
+    let rv = run_with_local_backend("move_into_deref_one_dot_1192");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let row = |src: &str| code_row_y(&code, src);
+    let ys = |text: &str| -> Vec<f64> { dots_listing_tooltip(&tl, text).into_iter().map(|(_, y)| y).collect() };
+    let write = row("*r = t;");
+    assert_eq!(ys("p's resource is no longer mutably borrowed"), vec![write]);
+    assert_eq!(ys("p acquires ownership of a new resource; its previous resource is dropped"), vec![write]);
+    assert_eq!(ys("p.name acquires ownership of a new resource; its previous resource is dropped"), vec![write]);
+    let write = row("*q = u;");
+    assert_eq!(ys("s's resource is no longer mutably borrowed"), vec![write]);
+    assert_eq!(ys("s acquires ownership of a new resource; its previous resource is dropped"), vec![write]);
+}
+
+/// #1215: `match &mut t { (a, b) => { a.push('!'); b.push('?'); } }`
+/// gives t back once, at b's last use (the loan the scrutinee makes lives
+/// as long as either binding). It was given back at a's last use too,
+/// drawing t as owner while b still borrowed it.
+#[test]
+fn a_match_on_a_borrow_of_a_whole_gives_it_back_once() {
+    let name = "match_whole_borrow_parts_1215";
+    let rv = run_with_local_backend(name);
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (end, last_use) in [
+        ("t's resource is no longer mutably borrowed", "b.push('?');"),
+        ("u's resource is no longer immutably borrowed", "println!(\"{}\", d);"),
+        ("s's resource is no longer mutably borrowed", "y.push('2');"),
+    ] {
+        let row = code_row_y(&code, last_use);
+        let ends = dots_listing_tooltip(&timeline, end);
+        assert_eq!(ends.len(), 1, "{name}: {end:?} at {ends:?}, expected once");
+        assert!((ends[0].1 - row).abs() < 1.0, "{name}: {end:?} at y={}, expected the row of `{last_use}` (y={row})", ends[0].1);
+    }
 }
 
 /// #1203 (`closure_static_write_1203`): calling a closure that assigns a

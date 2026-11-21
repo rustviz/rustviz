@@ -4762,7 +4762,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// known only after the loop: if the value was deferred to the
   /// loop's end (a `break` in a branch, #431), place the events there.
   /// Returns what `leave_deferred` restores.
-  fn enter_deferred(&mut self, loop_id: rustc_hir::HirId) -> (Option<usize>, Vec<String>) {
+  pub(crate) fn enter_deferred(&mut self, loop_id: rustc_hir::HirId) -> (Option<usize>, Vec<String>) {
     match self.deferred_lines.iter().position(|(id, ..)| *id == loop_id) {
       Some(i) => {
         let (_, line, names) = self.deferred_lines.remove(i);
@@ -4772,7 +4772,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
-  fn leave_deferred(&mut self, saved: (Option<usize>, Vec<String>)) {
+  pub(crate) fn leave_deferred(&mut self, saved: (Option<usize>, Vec<String>)) {
     self.line_override = saved.0;
     self.break_out = saved.1;
   }
@@ -4804,7 +4804,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     out
   }
 
-  fn take_loop_breaks(&mut self, loop_expr: &'tcx Expr<'tcx>) -> Vec<(&'tcx Expr<'tcx>, Option<String>)> {
+  pub(crate) fn take_loop_breaks(&mut self, loop_expr: &'tcx Expr<'tcx>) -> Vec<(&'tcx Expr<'tcx>, Option<String>)> {
     let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.loop_breaks)
       .into_iter().partition(|(id, ..)| *id == loop_expr.hir_id);
     self.loop_breaks = rest;
@@ -4812,7 +4812,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   }
 
   /// Whether `e` mentions a local variable declared inside `scope`.
-  fn mentions_local_declared_in(&self, e: &'tcx Expr<'tcx>, scope: rustc_span::Span) -> bool {
+  pub(crate) fn mentions_local_declared_in(&self, e: &'tcx Expr<'tcx>, scope: rustc_span::Span) -> bool {
     locals_in(e, ClosureLocals::Skip).iter().any(|m| scope.contains(self.tcx.hir_span(m.id)))
   }
 
@@ -5468,7 +5468,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// that reach the write (#770), as the loan can be live on another
   /// path, or past the write for a read of the old reference there is
   /// none; None when it is live up to the write.
-  pub fn old_loan_end(&self, rd: &RefData, lender: &ResourceTy, write_line: usize) -> Option<usize> {
+  pub fn old_loan_end(&self, rd: &RefData, lender: &ResourceTy, write_line: usize, write: Option<rustc_span::Span>) -> Option<usize> {
     let ResourceTy::Value(lender_rap) = lender else { return None };
     if lender_rap.is_fn() {
       return None;
@@ -5495,8 +5495,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         // keeps the lender borrowed until the latest end over the paths
         // that meet there (#778), not where the loan stops on the path
         // through the write.
-        let path_end = self.loan_end_on_path_to(own.borrow_idx, write_line).filter(|&end| in_range(end))?;
-        Some(if own.region.1 > write_line { own.region.1 } else { path_end })
+        // (On the write's own line before it, in a one-line `if`, #1188:
+        // then only the end past the write is one.)
+        let path_end = self.loan_end_on_path_to(own.borrow_idx, write_line, write)
+          .filter(|&end| end >= rd.assigned_at)?;
+        if own.region.1 > write_line { Some(own.region.1) } else { Some(path_end).filter(|&end| in_range(end)) }
       })
   }
 
@@ -5515,6 +5518,130 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
     self.ref_carriers.retain(|(_, s, _)| s != src);
   }
+
+  /// `std::mem::swap(&mut r1, &mut r2)` with r1 and r2 reference
+  /// variables (#1230): each now holds the other's reference, so each
+  /// gives back the borrow the other held (both loans are in one
+  /// lifetime, `swap<T>(&mut T, &mut T)`, so they end together).
+  pub fn swap_ref_vars(&mut self, fn_expr: &'tcx Expr<'tcx>, args: &'tcx [Expr<'tcx>], line: usize) {
+    let typeck = self.tcx.typeck(fn_expr.hir_id.owner);
+    let Some(rustc_middle::ty::FnDef(def_id, _)) = typeck.node_type_opt(fn_expr.hir_id).map(|t| *t.kind()) else { return };
+    let ref_var = |a: &'tcx Expr<'tcx>| match a.kind {
+      ExprKind::AddrOf(_, m, inner) if m.is_mut() => expr_to_rap_name(inner, &self.tcx)
+        .filter(|n| self.raps.get(n).is_some_and(|r| r.rap.is_ref()) && self.borrow_map.contains_key(n)),
+      _ => None,
+    };
+    if !self.tcx.is_diagnostic_item(rustc_span::sym::mem_swap, def_id) {
+      let names: Vec<Option<String>> = args.iter().map(ref_var).collect();
+      self.exchangeable_ref_vars(def_id, &names);
+      return;
+    }
+    let [x, y] = args else { return };
+    let (Some(n1), Some(n2)) = (ref_var(x), ref_var(y)) else { return };
+    if n1 == n2 {
+      return;
+    }
+    let (Some(d1), Some(d2)) = (self.borrow_map.get(&n1).cloned(), self.borrow_map.get(&n2).cloned()) else { return };
+    for (n, from) in [(&n1, &d2), (&n2, &d1)] {
+      if let Some(rd) = self.borrow_map.get_mut(n) {
+        rd.lender = from.lender.clone();
+        rd.aliasing = from.aliasing.clone();
+        rd.static_lender = from.static_lender.clone();
+        rd.borrow_span = from.borrow_span;
+        rd.loan_line = from.loan_line;
+        rd.co_lenders = from.co_lenders.clone();
+        rd.lender_muts = from.lender_muts.clone();
+        rd.assigned_at = line;
+      }
+    }
+  }
+
+  /// `exchange(&mut r1, &mut r2)` with `fn exchange<T>(x: &mut T, y:
+  /// &mut T)` (any function but `mem::swap`, which `swap_ref_vars`
+  /// draws exactly): two `&mut` parameters of one type (one type
+  /// parameter, or a reference type with one named lifetime) let the
+  /// function exchange or copy the references r1 and r2 hold (#1249).
+  /// From the signature alone, each may point to either lender
+  /// afterwards, so each gets the other's lenders as co-lenders: its end
+  /// gives back both, as for a call result tied to several arguments
+  /// (#171). Both loans are in one lifetime, so they end together.
+  fn exchangeable_ref_vars(&mut self, def_id: rustc_hir::def_id::DefId, arg_refs: &[Option<String>]) {
+    if !matches!(self.tcx.def_kind(def_id), DefKind::Fn | DefKind::AssocFn) {
+      return;
+    }
+    let sig = self.tcx.fn_sig(def_id).instantiate_identity().skip_binder();
+    let inputs = sig.inputs();
+    let mut groups: Vec<(rustc_middle::ty::Ty<'tcx>, Vec<String>)> = Vec::new();
+    for (i, a) in arg_refs.iter().enumerate() {
+      let Some(input) = inputs.get(i) else { break };
+      let rustc_middle::ty::Ref(_, pointee, Mutability::Mut) = input.kind() else { continue };
+      let Some(n) = a.clone() else { continue };
+      match groups.iter_mut().find(|(t, _)| t == pointee) {
+        Some((_, names)) => if !names.contains(&n) { names.push(n) },
+        None => groups.push((*pointee, vec![n])),
+      }
+    }
+    for (_, names) in groups.into_iter().filter(|(_, n)| n.len() > 1) {
+      let datas: Vec<RefData> = names.iter().filter_map(|n| self.borrow_map.get(n).cloned()).collect();
+      if datas.len() != names.len() {
+        continue;
+      }
+      let all: Vec<ResourceTy> = datas.iter().flat_map(|d| d.all_lenders()).collect();
+      for n in &names {
+        let Some(rd) = self.borrow_map.get_mut(n) else { continue };
+        for l in all.iter() {
+          if *l != rd.lender && !rd.co_lenders.contains(l) && matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)) {
+            rd.co_lenders.push(l.clone());
+          }
+        }
+      }
+    }
+  }
+
+  /// `src` (its old data `old`) is being given a new value on `line`
+  /// while a reference that reborrowed through it (`let first = &*r;`,
+  /// `&r[..1]`) is still used after the write (#1182). That reference
+  /// points into what `src` pointed to *then*: the borrow checker kills
+  /// its own loan of `*src` at the write, but keeps `src`'s old loan live
+  /// as long as the reborrow is. So the reborrow takes over `src`'s old
+  /// lender: its end, at its last use, gives the lender back (with the
+  /// old loan's kind, a `&mut` one for `let r = &mut a`), and `src`
+  /// itself is free to hold its new reference (its old borrow ends at
+  /// the write without giving the lender back: another reference still
+  /// holds it).
+  pub fn hand_loan_to_reborrows(&mut self, src: &str, old: &RefData, line: usize) {
+    let Some(src_rap) = self.raps.get(src).map(|r| r.rap.clone()) else { return };
+    if !matches!(old.lender, ResourceTy::Value(_)) || !old.co_lenders.is_empty() {
+      return;
+    }
+    // Its lender is `*src`, `src` itself (`&r[..1]`, a call's result),
+    // or a field of `*src` (`&r.name`). (A reference that borrows the
+    // variable `src`, `&r`, can't be live across the write: rustc
+    // rejects it.)
+    let through = |l: &ResourceTy| match l {
+      ResourceTy::Deref(x) | ResourceTy::Value(x) | ResourceTy::DerefField(x, ..) | ResourceTy::Index(x, ..) =>
+        x.hash() == src_rap.hash() && x.name() == src_rap.name(),
+      _ => false,
+    };
+    #[expect(clippy::disallowed_methods, reason = "collected and sorted")]
+    let mut names: Vec<String> = self.borrow_map.iter()
+      .filter(|(n, rd)| n.as_str() != src && through(&rd.lender) && rd.assigned_at <= line)
+      .map(|(n, _)| n.clone())
+      .collect();
+    names.sort();
+    let old_mut = old.mut_of(&old.lender);
+    for n in names {
+      // The reborrow's own loan of `*src` ends at the write: its end
+      // is its last use.
+      let Some(last) = self.last_live_line(&n, (line, usize::MAX)).filter(|&l| l > line) else { continue };
+      let Some(rd) = self.borrow_map.get_mut(&n) else { continue };
+      rd.lender = old.lender.clone();
+      rd.lender_muts = if old_mut == rd.ref_mutability { Vec::new() } else { vec![(old.lender.clone(), old_mut)] };
+      let floor = self.borrow_floor.entry(n).or_insert(last);
+      *floor = (*floor).max(last);
+    }
+  }
+
 
   // Add a RAP to our collection of raps for a let stmt
   pub fn define_lhs(&mut self, name: String, mutability: bool, expr: &'tcx Expr, ty: Ty <'tcx>) {
