@@ -11642,6 +11642,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       also_unnamed: false,
       tie: ArgTie::default(),
       carrier: ViaCarrier::Part,
+      passed_on: Vec::new(),
     });
     if let Some(rd) = self.borrow_map.get_mut(to_ro.name()) {
       rd.borrow_span = Some(e.span);
