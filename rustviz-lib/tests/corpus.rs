@@ -22432,7 +22432,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x's immutable borrow ends (what it borrows from isn't shown)",
             "h.r's immutable borrow ends (what it borrows from isn't shown)",
             "t.0's immutable borrow ends (what it borrows from isn't shown)",
-            "it's mutable borrow ends (what it borrows from isn't shown)",
+            // With #1209, it borrows the temporary iterator, which
+            // borrows v: its end gives v back.
+            "it's borrow ends",
         ],
         must_not_contain: &[
             "Return immutably borrowed resource from r to compute",
