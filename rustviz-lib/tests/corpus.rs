@@ -21071,12 +21071,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "f is moved into the call (an FnOnce closure can only be called once). s, which f captured, is dropped during the call",
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and k's resource is dropped. If the `?` succeeds, nothing happens to k here.",
             "h goes out of scope. Its captured resource is dropped here only if no branch above called it (Rust tracks this with a runtime drop flag).",
+            // m, called in an `if` above the `?`, may still hold w: the
+            // drop flag decides (#1194).
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and m's resource is dropped if m still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to m here.",
         ],
         must_not_contain: &[
             "the function returns and f's resource is dropped",
             "the function returns and g's resource is dropped",
             "the function returns and h's resource is dropped",
-            "the function returns and m's resource is dropped",
+            "the function returns and m's resource is dropped. If",
         ],
     },
     TooltipExpect {
@@ -22106,7 +22109,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from config to run",
             "Move from s to tag",
             "s's resource is moved",
-            "s goes out of scope. No resource is dropped.",
             "config's resource is moved",
         ],
         must_not_contain: &[
@@ -22114,6 +22116,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "to std::process::exit",
             // s's String was never drawn as moved into tag.
             "=s goes out of scope. Its resource is dropped.",
+            // process::exit never returns: main's `}` is never reached,
+            // so nothing goes out of scope there (#1172).
+            "=s goes out of scope. No resource is dropped.",
         ],
     },
     // #1174: an `if` / `match` as a call's argument passes the value its
@@ -23037,12 +23042,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "exit_maybe_moved_1194",
         must_contain: &[
             "s goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and t's resource is dropped if t still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to t here.",
+            // `t = bar()?;`: on success the assignment runs (#1151).
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and t's resource is dropped if t still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, the assignment runs: t acquires ownership of a new resource. Its previous resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and u's resource is dropped if u still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to u here.",
             "m goes out of scope. Its resource is dropped here only if m still holds it (Rust tracks this with a runtime drop flag).",
             "p goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "k goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and a's resource is dropped if a still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to a here.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and a's resource is dropped if a still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, a's resource isn't dropped here.",
             "b goes out of scope. Its resource (including the String it holds) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
@@ -23050,6 +23056,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the function returns and t's resource is dropped. If",
             "the function returns and u's resource is dropped. If",
             "the function returns and a's resource is dropped. If",
+            "If the `?` succeeds, nothing happens to t here",
             // `return` in `match n` after the `if` that moved a: rustc's
             // drop flag, not "nothing".
             "=a goes out of scope. No resource is dropped.",

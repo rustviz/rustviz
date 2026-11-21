@@ -4437,7 +4437,9 @@ fn try_partial_move_split(visualization_data: &VisualizationData, hash: u64, lin
         .values()
         .filter_map(|t| match &t.resource_access_point {
             ResourceAccessPoint::Struct(Struct { is_member: true, owner, name, is_copy: false, is_plain_value: false, .. })
-                if *owner == root && name.starts_with(&prefix) => Some((t, name)),
+                // A field with nothing to drop (a ManuallyDrop, #1137)
+                // gets no `?` dot, but wasn't moved out.
+                if *owner == root && name.starts_with(&prefix) && !t.resource_access_point.drops_nothing() => Some((t, name)),
             _ => None,
         })
         .collect();

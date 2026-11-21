@@ -3629,7 +3629,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.exit_frames.push(ExitFrame::Branch { len: 0, hide: Vec::new(), binds: Vec::new(), binds_at: 0 });
         self.drop_locals_on_exit(line, None, None, false, name);
         self.exit_frames.pop();
-        self.keep_inline_exit_drops(lo..*self.unique_id);
+        self.keep_inline_exit_drops(lo..*self.unique_id, call);
       } else {
         self.drop_locals_on_exit(line, None, None, false, name);
       }
