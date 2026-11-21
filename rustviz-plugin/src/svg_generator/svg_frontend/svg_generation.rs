@@ -388,6 +388,75 @@ fn half_row_tracks_extra_rows(n: usize) -> usize {
     n.saturating_sub(1) / 2
 }
 
+/// The (from, to) columns of the arrows an arm draws on `line`, its
+/// nested conditionals' included (`else if`): moves, copies, borrows,
+/// their ends and pattern bindings between two variables' columns. An
+/// arrow to or from a function (`take(f)`) is a short one beside its dot.
+fn arm_arrows_on_line(e_data: &[(usize, ExternalEvent)], line: usize, out: &mut Vec<(u64, u64)>) {
+    for (l, e) in e_data {
+        if let ExternalEvent::Branch { branches, .. } = e {
+            for b in branches {
+                arm_arrows_on_line(&b.e_data, line, out);
+            }
+            continue;
+        }
+        if *l != line {
+            continue;
+        }
+        let (from, to) = ResourceAccessPoint_extract(e);
+        if let (Some(f), Some(t)) = (from.extract_rap(), to.extract_rap()) {
+            if !f.is_fn() && !t.is_fn() && f.hash() != t.hash() {
+                out.push((*f.hash(), *t.hash()));
+            }
+        }
+    }
+}
+
+/// Whether an arrow arm `j` draws on `line` would run along a stretch of
+/// one an earlier arm draws there, both on the one row of a one-line
+/// conditional (#1264). Columns are in declaration (hash) order, with
+/// the moves `binding_columns` makes (as `timeline_panel` lays them
+/// out), and in each column the arms' dots sit left to right in arm
+/// order, all within the column's own slot. So an arrow spans the
+/// positions (column, arm) from its left end to its right end, and two
+/// arrows of different arms share a stretch when those spans overlap:
+/// `f -> a` in the `if` arm and `h -> a` in the `else` arm, with f, h,
+/// a left to right, share the stretch from h's `else` dot to a's `if`
+/// dot. Arrows into a from opposite sides (`f -> a`, `a`, `h`) don't.
+fn arms_arrows_overlap(branches: &[ExtBranchData], j: usize, line: usize, binding_columns: &[(u64, u64)]) -> bool {
+    let arrows: Vec<Vec<(u64, u64)>> = branches[..=j].iter().map(|b| {
+        let mut v = Vec::new();
+        arm_arrows_on_line(&b.e_data, line, &mut v);
+        v
+    }).collect();
+    if arrows[j].is_empty() {
+        return false;
+    }
+    let mut order: Vec<u64> = arrows.iter().flatten().flat_map(|&(f, t)| [f, t])
+        .chain(binding_columns.iter().flat_map(|&(f, t)| [f, t]))
+        .collect();
+    order.sort_unstable();
+    order.dedup();
+    for (from, to) in binding_columns {
+        let (Some(_), Some(k)) = (order.iter().position(|h| h == from), order.iter().position(|h| h == to)) else { continue };
+        let to = order.remove(k);
+        let i = order.iter().position(|h| h == from).unwrap_or(k);
+        order.insert(i + 1, to);
+    }
+    let rank = |h: u64| order.iter().position(|&o| o == h).unwrap_or(0);
+    let span = |(f, t): (u64, u64), arm: usize| {
+        let (a, b) = ((rank(f), arm), (rank(t), arm));
+        (a.min(b), a.max(b))
+    };
+    arrows[j].iter().any(|&aj| {
+        let (lo_j, hi_j) = span(aj, j);
+        arrows[..j].iter().enumerate().any(|(i, ai)| ai.iter().any(|&a| {
+            let (lo_i, hi_i) = span(a, i);
+            lo_i.max(lo_j) < hi_i.min(hi_j)
+        }))
+    })
+}
+
 /// Rows to add around the arms of a conditional written on one line
 /// whose arms stack arrows (`let (a, b) = if c { (f, g) } else { (h,
 /// k) };`, #1187). Each arm's stacked arrows run on rows inserted below
@@ -397,11 +466,16 @@ fn half_row_tracks_extra_rows(n: usize) -> usize {
 /// and along their arrows. Instead each arm with events after the first
 /// gets a row of its own below the previous arms' rows (an arm with no
 /// events, like an implicit `else`, needs none), and the join one below
-/// the last arm's (`before_merge`). A one-line conditional with no
-/// stacked arrows keeps its arms side by side on one row (#117).
+/// the last arm's (`before_merge`). Arms with one arrow each get rows of
+/// their own too when those arrows would run along one stretch of the
+/// row (`let a = if c { f } else { h };`: f -> a passes h's column on its
+/// way to a, alongside h -> a, so only one of the two could be hovered
+/// there, #1264). A one-line conditional whose arrows don't stack and
+/// don't overlap keeps its arms side by side on one row (#117).
 struct OneLineArmGaps {
     /// Arm j starts on the source line arm j - 1 ends on, has events,
-    /// and comes after an arm with events.
+    /// comes after an arm with events, and one of them stacks arrows or
+    /// an arrow of arm j runs alongside one of an earlier arm's.
     gap_before: Vec<bool>,
     /// The last arm with events ends on the join's line.
     ends_on_merge: bool,
@@ -424,26 +498,28 @@ impl OneLineArmGaps {
         // has nothing, needs no gap.
         let on_line = |b: &ExtBranchData, line: usize| b.e_data.iter().any(|(l, _)| *l == line);
         let stacks_on = |b: &ExtBranchData, line: usize| b.line_map.get(&line).is_some_and(|v| v.len() > 1);
-        let gap_before: Vec<bool> = (0..spans.len()).map(|j| {
+        let shares_row = |j: usize| {
             let line = spans[j].0;
             j > 0
                 && spans[j].0 == spans[j - 1].1
                 && on_line(&branches[j], line)
                 && branches[..j].iter().any(|b| on_line(b, line))
-                && branches[..=j].iter().any(|b| stacks_on(b, line))
-        }).collect();
-        let none = OneLineArmGaps { gap_before: vec![false; spans.len()], ends_on_merge: false };
-        if !gap_before.iter().any(|&s| s) {
-            return none;
-        }
+        };
         // Whether any arm stacks arrows: the rows it would insert, on
         // copies of everything `mutate_branch_lines` changes.
-        let stacks = branches.iter().zip(&spans).any(|(b, &(start, _))| {
+        let stacks = || branches.iter().zip(&spans).any(|(b, &(start, _))| {
             mutate_branch_lines(&mut b.clone(), &mut l_map.clone(), 0, (line_num, start),
                 &mut binding_columns.to_vec(), &mut arrow_tracks.clone()) > 0
         });
-        if !stacks {
-            return none;
+        let stacked: Vec<bool> = (0..spans.len())
+            .map(|j| shares_row(j) && branches[..=j].iter().any(|b| stacks_on(b, spans[j].0)))
+            .collect();
+        let stacked = if stacked.iter().any(|&s| s) && stacks() { stacked } else { vec![false; spans.len()] };
+        let gap_before: Vec<bool> = (0..spans.len())
+            .map(|j| stacked[j] || (shares_row(j) && arms_arrows_overlap(branches, j, spans[j].0, binding_columns)))
+            .collect();
+        if !gap_before.iter().any(|&s| s) {
+            return OneLineArmGaps { gap_before, ends_on_merge: false };
         }
         let ends_on_merge = branches.iter().zip(&spans).rev()
             .find(|(b, _)| !b.e_data.is_empty())

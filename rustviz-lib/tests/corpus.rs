@@ -27274,10 +27274,14 @@ fn reassign_from_branches_drops_old_value_in_each_arm() {
         assert!(dots.iter().any(|(_, dy)| *dy == y),
             "no dot on the {:?} row lists {:?}; dots listing it: {:?}", row, drop, dots);
     }
-    // In each branch of the one-line `v = if c { f } else { g };`.
+    // In each branch of the one-line `v = if c { f } else { g };`: the
+    // `if` arm's on the line's row, the `else` arm's on the row below,
+    // its own (f -> v and g -> v would share a stretch of one row, #1264).
     let y = code_row_y(&code, "v = if c { f } else { g };");
     let v_dots = dots_listing_tooltip(&timeline, "v acquires ownership of a new resource; its previous resource is dropped");
-    assert_eq!(v_dots.iter().filter(|(_, dy)| *dy == y).count(), 2,
+    let mut v_ys: Vec<f64> = v_dots.iter().map(|(_, dy)| *dy).filter(|dy| *dy >= y && *dy <= y + 30.0).collect();
+    v_ys.sort_by(f64::total_cmp);
+    assert_eq!(v_ys, vec![y, y + 30.0],
         "want a drop of v's old String in each branch; dots: {:?}", v_dots);
 }
 
@@ -29449,8 +29453,13 @@ fn a_borrow_every_branch_ended_is_not_ended_again_at_the_join() {
         // (`a.len()` above the loop ends its own implicit borrow too.)
         let after: Vec<_> = ends.iter().filter(|(_, y)| *y >= branch_row).collect();
         assert_eq!(after.len(), 2, "{:?}: one end per branch, none at the join: {:?}", text, ends);
-        assert!(after.iter().all(|(_, y)| *y == branch_row),
-            "{:?} should only be on the branches' row {}: {:?}", text, branch_row, ends);
+        // The `else` arm is on a row of its own below the `if` arm's: the
+        // two arms' `ra -> a` arrows would share a stretch of one row
+        // (#1264).
+        let mut ys: Vec<f64> = after.iter().map(|(_, y)| *y).collect();
+        ys.sort_by(f64::total_cmp);
+        assert_eq!(ys, vec![branch_row, branch_row + 30.0],
+            "{:?} should only be on the branches' rows: {:?}", text, ends);
     }
 }
 
@@ -29521,9 +29530,12 @@ fn loop_break_row_returns_only_the_lenders_the_break_doesnt_carry() {
         ("if c { break ra; } else { break rb; }", "mutably", "mutable", [("a", "ra"), ("b", "rb")]),
         ("if c { break re; } else { break rf; }", "immutably", "immutable", [("e", "re"), ("f", "rf")]),
     ] {
+        // The `break` arms' rows: the line's, and the `else` arm's own row
+        // below it (the two arms' return arrows would share a stretch of
+        // one row, #1264).
         let row = code_row_y(&code, brk);
         let on_row = |text: String| dots_listing_tooltip(&tl, &text).into_iter()
-            .filter(|d| d.1 == row).map(|d| d.0).collect::<Vec<f64>>();
+            .filter(|d| d.1 == row || d.1 == row + 30.0).map(|d| d.0).collect::<Vec<f64>>();
         let [lender1, lender2] = [l1, l2].map(|l| on_row(format!("{l}'s resource is no longer {kind} borrowed")));
         let [ref1, ref2] = [r1, r2].map(|r| on_row(format!("{r}'s {borrow} borrow ends")));
         // The first branch breaks with r1: it gives l2 back (r2 is dead
@@ -31218,11 +31230,24 @@ fn approximation_notes_sit_on_their_constructs() {
 /// the shaft's tooltip. A hop (`A`) over a dot ends one run and starts the
 /// next past the dot.
 fn arrow_horizontal_runs(svg: &str) -> Vec<(String, f64, f64, f64)> {
+    arrow_runs_keyed(svg, |open, _| timeline_tooltips(open).join(" / "))
+}
+
+/// `arrow_horizontal_runs`, keyed by each arrow's `data-rv-id`
+/// (`f>a@L9:arrow:move`) instead of its tooltip.
+fn arrow_horizontal_runs_by_id(svg: &str) -> Vec<(String, f64, f64, f64)> {
+    arrow_runs_keyed(svg, |_, group| {
+        let at = group.find("data-rv-id=\"").map_or(group.len(), |i| i + "data-rv-id=\"".len());
+        group[at..].split('"').next().unwrap_or("").to_string()
+    })
+}
+
+fn arrow_runs_keyed(svg: &str, key: impl Fn(&str, &str) -> String) -> Vec<(String, f64, f64, f64)> {
     let mut out = Vec::new();
     for (i, _) in svg.match_indices("<g class=\"tooltip-trigger\" data-tooltip-text=\"") {
         let group = &svg[i..i + svg[i..].find("</g>").unwrap_or(svg.len() - i)];
         let open = &group[..group.find('>').unwrap_or(group.len()) + 1];
-        let text = timeline_tooltips(open).join(" / ");
+        let text = key(open, group);
         for t in start_tags(group, "polyline").into_iter().chain(start_tags(group, "path")) {
             if !is_arrow_shaft(t) {
                 continue;
@@ -31270,7 +31295,16 @@ fn one_line_arms_that_stack_arrows_get_rows_of_their_own() {
     let tl = rv.timeline_panel_string();
     let runs = arrow_horizontal_runs(&tl);
     assert!(runs.len() >= 10, "expected the arms' arrows: {:?}", runs);
-    let dots = dot_centres(&tl);
+    assert_eq!(arrow_row_problems(&tl), Vec::<String>::new());
+}
+
+/// Arrows whose horizontal runs cross a dot (other than at a hop) or
+/// share a stretch of a row with another arrow: only one of the two can
+/// be hovered there. Arrows are told apart by `data-rv-id`, so two with
+/// one text (each arm's `ra -> a` return) count too.
+fn arrow_row_problems(tl: &str) -> Vec<String> {
+    let runs = arrow_horizontal_runs_by_id(tl);
+    let dots = dot_centres(tl);
     let mut problems = Vec::new();
     for (text, y, lo, hi) in &runs {
         for &(cx, cy) in &dots {
@@ -31286,7 +31320,7 @@ fn one_line_arms_that_stack_arrows_get_rows_of_their_own() {
             }
         }
     }
-    assert_eq!(problems, Vec::<String>::new());
+    problems
 }
 
 /// #1200 and #1223 (`one_line_arm_events_1200_1223`): what happens on a
@@ -31765,4 +31799,63 @@ fn a_struct_whose_fields_are_all_moved_out_has_no_line_after() {
         let below: Vec<&(f64, f64)> = lines.iter().filter(|(_, y2)| *y2 > row + 1.0).collect();
         assert!(below.is_empty(), "{name}: {var}'s line goes on below `{last_move}` (y={row}): {below:?}");
     }
+}
+
+/// #1264 (`one_line_arm_overlap_1264`): a one-line conditional whose arms
+/// draw one arrow each was a one-row diamond (#117) even when the two
+/// arrows run along one stretch of that row: in `let a = if c { f } else
+/// { h };` f -> a passes h's column alongside h -> a, so only one of them
+/// could be hovered there. Moves, borrows (and their ends), copies, an
+/// `else if`, a `match`, arrows pointing left, and arrows into different
+/// variables: each arm whose arrow would run along another arm's now gets
+/// a row of its own (#1187's rows). Where the arrows don't overlap (from
+/// opposite sides, one past the other, into calls), the arms stay side
+/// by side on one row, so those figures keep their height.
+#[test]
+fn one_line_arms_whose_arrows_overlap_get_rows_of_their_own() {
+    let rv = run_with_local_backend("one_line_arm_overlap_1264");
+    let tl = rv.timeline_panel_string();
+    assert_eq!(arrow_row_problems(&tl), Vec::<String>::new());
+    let runs = arrow_horizontal_runs_by_id(&tl);
+    // The row of each arrow: the y of its runs (all on one row).
+    let row = |id: &str| -> f64 {
+        let ys: Vec<f64> = runs.iter().filter(|(k, ..)| k == id).map(|(_, y, ..)| *y).collect();
+        assert!(!ys.is_empty() && ys.iter().all(|y| *y == ys[0]), "{}: one horizontal row, got {:?}", id, ys);
+        ys[0]
+    };
+    for arms in [
+        &["f>a@L9:arrow:move", "h>a@L9:arrow:move"][..],
+        &["f>r@L14:arrow:static_borrow", "h>r@L14:arrow:static_borrow"],
+        &["f>r@L19:arrow:mutable_borrow", "h>r@L19:arrow:mutable_borrow"],
+        &["x>a@L24:arrow:copy", "y>a@L24:arrow:copy"],
+        &["f>a@L29:arrow:move", "g>a@L29:arrow:move", "h>a@L29:arrow:move"],
+        &["f>r@L34:arrow:static_borrow", "g>r@L34:arrow:static_borrow"],
+        &["f>a@L43:arrow:move", "h>a@L43:arrow:move"],
+        &["f>b@L50:arrow:move", "h>a@L50:arrow:move"],
+    ] {
+        let ys: Vec<f64> = arms.iter().map(|id| row(id)).collect();
+        assert!(ys.windows(2).all(|w| w[0] + 25.0 < w[1]), "{:?}: each arm's arrow a row below the previous arm's, got {:?}", arms, ys);
+    }
+    for arms in [
+        ["f>a@L57:arrow:move", "h>a@L57:arrow:move"],
+        ["f>a@L64:arrow:move", "h>b@L64:arrow:move"],
+        ["f>take@L73:arrow:move", "h>take@L73:arrow:move"],
+    ] {
+        assert_eq!(row(arms[0]), row(arms[1]), "{:?}: arrows that don't overlap stay on the one row", arms);
+    }
+    // ... and the code row after each of those three conditionals is two
+    // below it (the one-row diamond's split and join rows, #117), as
+    // before; after an arm-per-row conditional it is four below.
+    let code = rv.code_panel_string();
+    let code_y = |line: usize| -> f64 {
+        let id = format!("code:L{}", line);
+        start_tags(&code, "text").into_iter()
+            .find(|t| attr(t, "data-rv-id") == Some(id.as_str()))
+            .and_then(|t| attr(t, "y")?.parse().ok())
+            .unwrap_or_else(|| panic!("no code row for line {}", line))
+    };
+    for line in [57, 64, 73] {
+        assert_eq!(code_y(line + 1) - code_y(line), 60.0, "line {}: a one-row diamond", line);
+    }
+    assert_eq!(code_y(10) - code_y(9), 120.0, "line 9: two arms' rows and the join's");
 }
