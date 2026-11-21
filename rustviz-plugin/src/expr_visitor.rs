@@ -6893,7 +6893,8 @@ pub fn mark_borrow_kept_by_result(&mut self, call: &'tcx Expr<'tcx>, lenders: &[
   // generic parameter, `Some(r)`; no reborrow) whose borrow is the
   // one the result keeps: the result's holder takes the borrow over
   // (#1128).
-  let carried: Vec<u64> = self.borrow_map.iter()
+  #[expect(clippy::disallowed_methods, reason = "sorted below; used as a set")]
+  let mut carried: Vec<u64> = self.borrow_map.iter()
     .filter(|(_, rd)| rd.all_lenders().iter().any(|l| lenders.contains(l)))
     .filter_map(|(k, _)| self.raps.get(k).map(|r| *r.rap.hash()))
     .chain(lenders.iter().filter_map(|l| match l {
@@ -6901,6 +6902,7 @@ pub fn mark_borrow_kept_by_result(&mut self, call: &'tcx Expr<'tcx>, lenders: &[
       _ => None,
     }))
     .collect();
+  carried.sort_unstable();
   let mut ids: Vec<usize> = Vec::new();
   moves_into_calls(self.preprocessed_events, lo, hi, &carried, &fns, &mut ids);
   self.moved_into_result.extend(ids);
