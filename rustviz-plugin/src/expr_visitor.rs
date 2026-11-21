@@ -1403,18 +1403,29 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   pub fn mark_owner_type(&mut self, name: &str, ty: Ty<'tcx>) {
     let rc = self.rc_kind(ty);
     let manually_drop = ty.ty_adt_def().map_or(false, |d| d.is_manually_drop());
+    // `MaybeUninit<T>` is a union in std, but students know it as a
+    // wrapper like ManuallyDrop: it never drops its T (#1146).
+    let maybe_uninit = ty.ty_adt_def().is_some_and(|d|
+      self.tcx.is_lang_item(d.did(), rustc_hir::LangItem::MaybeUninit));
+    let union = ty.is_union() && !maybe_uninit;
+    // A union's own `Drop` impl runs when the whole union is dropped or
+    // overwritten (#1146).
+    let union_drop = union && ty.ty_adt_def().is_some_and(|d| d.has_dtor(self.tcx));
     let rc_fields = self.rc_fields_kind(ty);
     let rc_inside = self.rc_inside_kind(ty);
     // The Rc note wins: no double parenthetical (#542).
     let holds = if rc.is_some() || rc_fields.is_some() || rc_inside.is_some() || manually_drop { None } else { self.holds_phrase(ty) };
     let box_contents_moved = self.box_contents_moved_out(name, ty);
-    if rc.is_none() && !manually_drop && rc_fields.is_none() && rc_inside.is_none() && holds.is_none() && !box_contents_moved {
+    if rc.is_none() && !manually_drop && !maybe_uninit && !union && rc_fields.is_none() && rc_inside.is_none() && holds.is_none() && !box_contents_moved {
       return;
     }
     let Some(just_added) = (self.rap_hashes as u64).checked_sub(1) else { return };
     match self.raps.get_mut(name).map(|rd| &mut rd.rap) {
       Some(ResourceAccessPoint::Owner(o)) if o.hash == just_added => {
         o.is_manually_drop = manually_drop;
+        o.is_maybe_uninit = maybe_uninit;
+        o.is_union = union;
+        o.union_drop = union_drop;
         o.rc = rc;
         o.rc_inside = rc_inside;
         o.holds = holds;
@@ -1422,6 +1433,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       }
       Some(ResourceAccessPoint::Struct(s)) if s.hash == just_added => {
         s.is_manually_drop = manually_drop;
+        s.is_maybe_uninit = maybe_uninit;
+        s.is_union = union;
+        s.union_drop = union_drop;
         s.rc = rc;
         s.rc_fields = rc_fields;
         s.rc_inside = rc_inside;
@@ -1562,7 +1576,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       is_copy,
       is_plain_value,
       interior_mut,
-      is_manually_drop: false, rc: None, rc_fields: None, rc_inside: None, holds: None, is_box: false, holds_borrow: false }),
+      is_manually_drop: false, is_union: false, union_drop: false, is_maybe_uninit: false, rc: None, rc_fields: None, rc_inside: None, holds: None, is_box: false, holds_borrow: false }),
       scope, is_global);
   }
 
@@ -1883,9 +1897,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if let Some(from_name) = from_struct.filter(|_| !from_children.is_empty()) {
       let pass_through = match to {
         ResourceTy::Caller => true,
-        ResourceTy::Value(r) => r.is_fn() || r.is_closure(),
+        // `let (a, _) = (1, q);`, `let _ = (q, 5);`: q's fields go into
+        // the temporary the literal builds, and are dropped with it (#1154).
+        ResourceTy::Value(r) => r.is_fn() || r.is_closure() || r.is_temporary(),
+        // `(a, _) = (1, q);`: the same for a destructuring assignment's.
+        // (A `match (s, q)` scrutinee's tuple moves q's fields itself.)
+        ResourceTy::Temporary { tuple: None, .. } => true,
         // `v[i] = p`: p's fields go into the element with it.
         ResourceTy::Index(..) => true,
+        // `*slot = s` (#1168): s's fields go into the place slot points to.
+        ResourceTy::Deref(_) | ResourceTy::DerefField(..) => true,
         _ => false,
       };
       if to_struct.is_none() && !pass_through {
@@ -5176,6 +5197,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           let interior_mut = self.ty_has_interior_mut(ty, expr.hir_id.owner);
           if ty.is_union() {
             self.add_union_owner(name.clone(), mutability, is_copy, self.ty_is_plain(ty, expr.hir_id.owner), interior_mut, self.current_scope, !self.inside_branch);
+            self.mark_owner_type(&name, ty);
           } else {
             self.add_owner(name.clone(), mutability, is_copy, self.ty_is_plain(ty, expr.hir_id.owner), interior_mut, self.current_scope, !self.inside_branch);
             self.mark_owner_type(&name, ty);
@@ -6172,6 +6194,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                         let interior_mut = self.ty_has_interior_mut(ty, pat.hir_id.owner);
                         if ty.is_union() {
                             self.add_union_owner(name.clone(), muta, is_copy, self.ty_is_plain(ty, pat.hir_id.owner), interior_mut, scope, false);
+                            self.mark_owner_type(&name, ty);
                         } else {
                             self.add_owner(name.clone(), muta, is_copy, self.ty_is_plain(ty, pat.hir_id.owner), interior_mut, scope, false);
                             self.mark_owner_type(&name, ty);
@@ -7494,10 +7517,18 @@ fn pat_leaves(&self, pat: &'tcx Pat<'tcx>, typeck: &'tcx rustc_middle::ty::Typec
 /// bindings moved out what they bind, a part that needs drop is left
 /// in the value: under a `_`, a `ref` binding, a literal or a field
 /// skipped by `..`.
-fn pat_leaves_drop(&self, pat: &'tcx Pat<'tcx>, typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>, env: rustc_middle::ty::TypingEnv<'tcx>) -> bool {
+pub(crate) fn pat_leaves_drop(&self, pat: &'tcx Pat<'tcx>, typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>, env: rustc_middle::ty::TypingEnv<'tcx>) -> bool {
   use rustc_middle::ty::TyKind;
   let tcx = self.tcx;
   let ty = typeck.node_type(pat.hir_id);
+  // A `ref` binding's own type is a reference (`a: &String` in `let
+  // (ref a, b) = (u, 1);`): what it matched, and leaves in place, is
+  // what that points to (#1163).
+  if let PatKind::Binding(ann, ..) = pat.kind {
+    let by_ref = matches!(ann.0, rustc_hir::ByRef::Yes(..))
+      || matches!(typeck.pat_binding_modes().get(pat.hir_id).map(|m| m.0), Some(rustc_hir::ByRef::Yes(..)));
+    return by_ref && self.needs_drop_in(ty.builtin_deref(true).unwrap_or(ty), env);
+  }
   if !self.needs_drop_in(ty, env) {
     return false;
   }
@@ -7509,9 +7540,7 @@ fn pat_leaves_drop(&self, pat: &'tcx Pat<'tcx>, typeck: &'tcx rustc_middle::ty::
     tys.into_iter().skip(d).take(gap).any(|t| self.needs_drop_in(t, env))
   };
   match pat.kind {
-    PatKind::Binding(..) => {
-      matches!(typeck.pat_binding_modes().get(pat.hir_id).map(|m| m.0), Some(rustc_hir::ByRef::Yes(..)))
-    }
+    PatKind::Binding(..) => unreachable!("handled above"),
     PatKind::Tuple(subs, dd) => {
       if subs.iter().any(|sp| self.pat_leaves_drop(sp, typeck, env)) {
         return true;
@@ -10517,6 +10546,11 @@ fn ownership_after(events: &[(usize, ExternalEvent)], rap_name: &str, start: Opt
         if is_rap(from) {
           return Some(Ownership::None);
         }
+      }
+      // Called as an `FnOnce` closure, which moves it into the call
+      // (#271, #1136).
+      ExternalEvent::ClosureCall { closure, .. } if is_rap(closure) => {
+        return Some(Ownership::None);
       }
       ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. } => {
         if is_rap(to) {

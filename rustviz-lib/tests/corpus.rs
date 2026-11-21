@@ -2831,11 +2831,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the resource r points to is captured by closure len (an immutable reborrow through r); r is read-only while the borrow is live",
             "Closure len captures: *r (immutably reborrowed)",
             "Closure capture (immutable reborrow) from r to len",
-            "the resource p points to is captured by closure g (a mutable reborrow through p); p can't be used while the borrow is live",
+            "the value p points to is captured by closure g (a mutable reborrow through p); p can't be used while the borrow is live",
             "Closure h captures: t (mutably borrowed)",
             "t's resource is captured (mutably borrowed) by closure h",
         ],
         must_not_contain: &[
+            // #1163: p points to an i32, a value.
+            "the resource p points to is captured by closure g",
             "r's resource is captured (mutably borrowed) by closure f",
             "r's resource is captured (immutably borrowed) by closure len",
             "p's resource is captured (mutably borrowed) by closure g",
@@ -5705,7 +5707,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "first_word reads from my_string",
             "Immutable borrow from my_string to word: first_word's signature gives the reference it returns the same lifetime as its argument",
             "my_string's resource is immutably borrowed by word; my_string is read-only while the borrow is live",
-            "word immutably borrows a resource",
+            "word immutably borrows a value",
             "Return immutably borrowed resource from word to my_string",
         ],
         must_not_contain: &[
@@ -6394,18 +6396,21 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Copy from *slots[0] to n",
             "n is initialized with a copy of *slots[0]",
-            "the resource slots[0] points to is copied",
+            "the value slots[0] points to is copied",
             "Copy from *hs[0].r to m",
             "m is initialized with a copy of *hs[0].r",
-            "the resource hs[0].r points to is copied",
+            "the value hs[0].r points to is copied",
             "Copy from *boxes[0] to k",
             "k is initialized with a copy of *boxes[0]",
-            "the resource boxes[0] points to is copied",
+            "the value boxes[0] points to is copied",
             "Copy from *grid[0][0] to total",
             "total is assigned a copy of *grid[0][0]",
-            "the resource grid[0][0] points to is copied",
+            "the value grid[0][0] points to is copied",
         ],
         must_not_contain: &[
+            // #1163: what is copied is an i32, a value.
+            "the resource slots[0] points to is copied",
+            "the resource boxes[0] points to is copied",
             "Copy from *slots to n",
             "*slots's resource is copied",
             "m is initialized by copy from Anonymous resource",
@@ -7219,12 +7224,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Copy from *rr[0] to r",
             "r is initialized with a copy of *rr[0]",
-            "the resource rr[0] points to is copied",
+            "the value rr[0] points to is copied",
             "Copy from *rrr[0][0] to q",
-            "the resource rrr[0][0] points to is copied",
+            "the value rrr[0][0] points to is copied",
             "Copy from *b to s",
         ],
         must_not_contain: &[
+            "the resource rr[0] points to is copied",
             "Copy from *rr to r",
             "*rr's resource is copied",
             "Copy from *rrr to q",
@@ -7852,7 +7858,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "z acquires ownership of a resource",
             "z goes out of scope. Its resource is dropped.",
-            "n immutably borrows a resource",
+            "n immutably borrows a value",
             "n's immutable borrow ends",
             "s is live in a conditional expression ",
         ],
@@ -8151,7 +8157,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `first` is declared in the `_` arm: no branched column, no
         // "no value yet" strips, no split dot, no false merge text (#425).
         must_contain: &[
-            "first immutably borrows a resource",
+            "first immutably borrows a value",
             "first goes out of scope",
         ],
         must_not_contain: &[
@@ -15763,7 +15769,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Immutable borrow from words to r",
             "words's resource is immutably borrowed by r; words is read-only while the borrow is live",
-            "r immutably borrows a resource",
+            "r immutably borrows a value",
             "Return immutably borrowed resource from r to words",
             "words's resource is no longer immutably borrowed",
             "words goes out of scope. Its resource is dropped.",
@@ -20765,6 +20771,374 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "This temporary String is dropped at the end of this statement",
         ],
     },
+    TooltipExpect {
+        name: "fnonce_call_nested_1140",
+        // #1140: an FnOnce closure's call nested in a larger expression
+        // (`Some(f())`, `wrap(g())`, `z = Some(h())`, `v.push(k())`, a
+        // tail `Some(m())`). The closure is moved into the call; the i32
+        // the call returns is what gets copied on. Main said "f's value is
+        // copied" and drew "Copy from f to _x": a closure that owns a
+        // String is not Copy, and it is never copied.
+        must_contain: &[
+            "f is moved into the call (an FnOnce closure can only be called once). \
+             s, which f captured, is dropped during the call",
+            "Copy of the value f() returns to _x",
+            "g is moved into the call (an FnOnce closure can only be called once). \
+             t, which g captured, is dropped during the call",
+            "Copy of the value h() returns to z",
+            "k is moved into the call (an FnOnce closure can only be called once). \
+             w, which k captured, is dropped during the call",
+            "m is moved into the call (an FnOnce closure can only be called once). \
+             q, which m captured, is dropped during the call",
+            "Copy of the value m() returns to the caller",
+        ],
+        must_not_contain: &[
+            "f's value is copied",
+            "g's value is copied",
+            "h's value is copied",
+            "k's value is copied",
+            "m's value is copied",
+            "Copy from f to",
+            "Copy from g to",
+            "Copy from h to",
+            "Copy from k to",
+        ],
+    },
+    TooltipExpect {
+        name: "value_not_resource_1163",
+        // #1163: a value with nothing to drop is a "value". The temporary of
+        // `let (x, _) = (s, p);` holds only `p: P { a: i32 }` once x took s,
+        // which has no drop glue: nothing is dropped at the end of the let,
+        // so no temporary column and no drop triangle (in a tuple, a struct
+        // literal, a constructor, a branch's literal, a nested literal, and
+        // next to a fresh value). With a String left over it is still drawn.
+        must_contain: &[
+            "This temporary (String, String), built by the literal on the right of the let, is dropped at the end of this statement. What the pattern didn't bind by value stays in it and is dropped with it. Its resource is dropped",
+            "the value slots[0] points to is copied",
+            "the value r points to is captured by closure f (a mutable reborrow through r); r can't be used while the borrow is live",
+        ],
+        must_not_contain: &[
+            "This temporary (String, P), built by the literal",
+            "This temporary Q, built by the literal",
+            "This temporary W, built by the literal",
+            "This temporary ((String, P), P), built by the literal",
+            "=Move from p to (temporary)",
+            "=Move from q to (temporary)",
+            "=Move from p to (temporary 2)",
+            "=Move from q to (temporary 2)",
+            "takes the value of p",
+            "takes the value of q",
+            "the resource slots[0] points to",
+            "the resource r points to",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/value_not_resource_chain_1163",
+        // #1163: a let-chain's else branch after the condition lent `*r`, an
+        // i32, to bump: "the value r points to", as r's other dots say.
+        must_contain: &[
+            "the value r points to may have been mutably borrowed: when the condition lends it to bump and then turns out false, the else branch runs after that borrow has ended. By then, the value r points to may have been changed by bump.",
+        ],
+        must_not_contain: &[
+            "the resource r points to",
+        ],
+    },
+    TooltipExpect {
+        name: "copy_part_borrow_value_1233",
+        // #1233: e / f / g / sl point to an i32 / u32 / str (nothing to
+        // drop): "a value", as their own lines already said. h / x point
+        // to a String: still "a resource". The lender stays "resource".
+        must_contain: &[
+            "e mutably borrows a value",
+            "f immutably borrows a value",
+            "g mutably borrows a value",
+            "sl immutably borrows a value",
+            "h immutably borrows a resource",
+            "x immutably borrows a resource",
+            "v's resource is mutably borrowed by e; v can't be used while the borrow is live",
+        ],
+        must_not_contain: &[
+            "e mutably borrows a resource",
+            "f immutably borrows a resource",
+            "sl immutably borrows a resource",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_parts_follow_moves_1154_1168",
+        // #1154 / #1168: a struct moved into the temporary a `let`'s
+        // literal builds (`let (a, _) = (1, q2);`, `let _ = (q3, 5);`, an
+        // array literal, the tuple a destructuring assignment builds) or
+        // into the place a reference points to (`*slot = s`, `o.inner =
+        // s3`, `**pp = s4`) takes its fields with it: the String is dropped
+        // with the temporary, or is now b.name. Its field columns used to
+        // stay owners to the end and claim a second drop there.
+        must_contain: &[
+            "q2.s's resource is moved",
+            "q2.s goes out of scope. No resource is dropped.",
+            "q3.s's resource is moved",
+            "q3.s goes out of scope. No resource is dropped.",
+            "q4.s's resource is moved",
+            "q4.s goes out of scope. No resource is dropped.",
+            "q5.s's resource is moved",
+            "q5.s goes out of scope. No resource is dropped.",
+            "q6.s's resource is moved",
+            "q7.s's resource is moved",
+            "q7.s goes out of scope. No resource is dropped.",
+            "s.name's resource is moved",
+            "s.name goes out of scope. No resource is dropped.",
+            "s2.name's resource is moved",
+            "s2.name goes out of scope. No resource is dropped.",
+            "s3.name's resource is moved",
+            "s3.name goes out of scope. No resource is dropped.",
+            "s4.name's resource is moved",
+            "s4.name goes out of scope. No resource is dropped.",
+            "s5.name's resource is moved",
+        ],
+        must_not_contain: &[
+            "q2.s goes out of scope. Its resource is dropped.",
+            "q3.s goes out of scope. Its resource is dropped.",
+            "q4.s goes out of scope. Its resource is dropped.",
+            "q5.s goes out of scope. Its resource is dropped.",
+            "=q6.s goes out of scope. Its resource is dropped.",
+            "q7.s goes out of scope. Its resource is dropped.",
+            "s.name goes out of scope. Its resource is dropped.",
+            "s2.name goes out of scope. Its resource is dropped.",
+            "s3.name goes out of scope. Its resource is dropped.",
+            "s4.name goes out of scope. Its resource is dropped.",
+            "=s5.name goes out of scope. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_parts_moved_out_1157",
+        // #1157: once a field is moved out of a struct or tuple, it can't
+        // be used as a whole (E0382, "use of partially moved value"), and
+        // its line no longer says it owns "the resource". Once every field
+        // is, its line stops (see
+        // `a_struct_whose_fields_are_all_moved_out_has_no_line_after`).
+        // A Copy field (`u.1`) stays, so u stays partially moved; refilling
+        // the field (`r.a = ra`) makes r whole again.
+        must_contain: &[
+            "p is partially moved: p.a was moved out, so p can't be used as a whole; its other fields still can",
+            "u is partially moved: u.0 was moved out, so u can't be used as a whole; its other fields still can",
+            "o is partially moved: o.inner.x was moved out, so o can't be used as a whole; its other fields still can",
+            "o is partially moved: o.inner was moved out, so o can't be used as a whole; its other fields still can",
+            "o.inner is partially moved: o.inner.x was moved out, so o.inner can't be used as a whole; its other fields still can",
+            "q is partially moved: q.a may have been moved out, so q can't be used as a whole; its other fields still can",
+            "r is partially moved: r.a was moved out, so r can't be used as a whole; its other fields still can",
+            "r is the owner of the resource",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "non_ascii_names_1160",
+        // #1160: a non-ASCII identifier (`café`, a field `größe`, a fn
+        // `länge`, a variant `Grün`, `名前`) panicked in the code panel's
+        // annotation ("end of range should be a character boundary"), so
+        // nothing rendered. The timeline is the same as for ASCII names;
+        // the code panel is pinned by
+        // `code_panel_shows_tabs_and_non_ascii_text_as_written`.
+        must_contain: &[
+            "Move from café to t",
+            "café goes out of scope. No resource is dropped.",
+            "Move from t to länge",
+            "Copy of the value länge() returns to n",
+            "p.größe holds a copyable value",
+            "Immutable borrow from 名前 to r",
+            "名前 goes out of scope. Its resource is dropped.",
+            "f is initialized with a Grün value",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "static_mut_ref_assign_1162",
+        // #1162: `NAME = "b"` with `static mut NAME: &str` panicked at
+        // visitor.rs:5750 (a static's column has no loan to re-point).
+        // A static is drawn like a Copy value (#690): it can only hold a
+        // `&'static` (a literal, another static, a promoted constant), so
+        // the write is a plain assignment that borrows nothing from a
+        // local and drops nothing. `NUMS = &[3, 4, 5]` borrows a promoted
+        // constant, which never needs drop: a value, not a resource.
+        must_contain: &[
+            "NAME is assigned a new value",
+            "NAME is assigned a copy of OTHER",
+            "NAME is assigned a copy of v",
+            "NUMS immutably borrows a value",
+            "Copy from NAME to n",
+            "n's borrow of what the static NAME points to ends (it lives for the whole program)",
+            "NAME is a static: it lives for the whole program and is never dropped",
+        ],
+        must_not_contain: &[
+            "NUMS immutably borrows a resource",
+            "NAME's resource",
+        ],
+    },
+    TooltipExpect {
+        name: "try_no_drop_glue_1137",
+        // #1137: a `?` that returns early drops only what needs drop. md
+        // (a ManuallyDrop never drops what it holds), nd / pair / maybe
+        // (Copy values inside), f / g / k (closures capturing nothing, a
+        // Copy value by `move`, a reference) and mixed.n / mixed.m have no
+        // drop glue (`needs_drop` is false): main gave each a dot saying
+        // "...md's resource is dropped". b, mixed.s (and mixed, which holds
+        // it) still get theirs. The `?`s are in a `let`, an `if`, a loop
+        // body and a call argument.
+        // pick: the `return if d { x } else { y }` dot said "If that value
+        // isn't x's, x's resource is dropped here". (Its other bullet, the
+        // branch join's "its resource is dropped when x goes out of
+        // scope", is #1147.)
+        must_contain: &[
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and b's resource is dropped. If the `?` succeeds, nothing happens to b here.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and mixed.s's resource is dropped. If the `?` succeeds, nothing happens to mixed.s here.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and mixed's resource is dropped. If the `?` succeeds, nothing happens to mixed here.",
+            "The `return` here hands the caller one of the values its `if` / `match` chooses between. If that value isn't x's, x goes out of scope here as the function returns (it has nothing to drop). If it is x's, x's value goes to the caller.",
+            "The `return` here hands the caller one of the values its `if` / `match` chooses between. If that value isn't y's, y goes out of scope here as the function returns (it has nothing to drop). If it is y's, y's value goes to the caller.",
+        ],
+        must_not_contain: &[
+            "the function returns and md's resource is dropped",
+            "the function returns and nd's resource is dropped",
+            "the function returns and pair's resource is dropped",
+            "the function returns and pair.0's resource is dropped",
+            "the function returns and maybe's resource is dropped",
+            "the function returns and f's resource is dropped",
+            "the function returns and g's resource is dropped",
+            "the function returns and k's resource is dropped",
+            "the function returns and mixed.n's resource is dropped",
+            "the function returns and mixed.m's resource is dropped",
+            "If that value isn't x's, x's resource is dropped here",
+            "If that value isn't y's, y's resource is dropped here",
+        ],
+    },
+    TooltipExpect {
+        name: "manually_drop_maybe_moved_1147",
+        // #1147: a ManuallyDrop has no drop glue, so no drop flag: moved
+        // (or assigned) on some paths only, it still drops nothing at its
+        // scope end, and its join says nothing about a drop. Main said
+        // "Its resource is dropped here only if no branch above moved it
+        // (Rust tracks this with a runtime drop flag)" (if, match arm,
+        // break in a loop, `let x;` assigned in an
+        // if / a loop) and "If the branch that ran didn't move it, its
+        // resource is dropped when md goes out of scope" at the joins.
+        // Structs: s (s.a moved) drops nothing more ("only s.m is
+        // dropped"); t (t.a maybe moved) drops nothing else ("t.m is
+        // dropped"); u (u.m maybe moved) and v (v.n, nothing to drop,
+        // maybe moved) need no drop flag for that field: u / v drop u.a
+        // / v.a (still owned) as usual.
+        must_contain: &[
+            "md goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
+            "ma goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
+            "ml goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
+            "mi goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
+            "mo goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
+            "u.m goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
+            "md was moved in at least one branch above, so it can't be used after the branches.",
+            "ma was moved in at least one branch above, so it can't be used after the branches.",
+            "mi was assigned a value in only some of the branches above, so it can't be used after the branches.",
+            "u.m was moved in at least one branch above, so it can't be used after the branches.",
+            "s goes out of scope. s.a was moved out earlier, so no resource is dropped.",
+            "t goes out of scope. t.a was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "u goes out of scope. Its resource is dropped.",
+            "v goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "md goes out of scope. Its resource is dropped here only if",
+            "ma goes out of scope. Its resource is dropped here only if",
+            "ml goes out of scope. Its resource is dropped here only if",
+            "mi goes out of scope. Its resource is dropped here only if",
+            "mo goes out of scope. Its resource is dropped here only if",
+            "u.m goes out of scope. Its resource is dropped here only if",
+            "its resource is dropped when md goes out of scope",
+            "its resource is dropped when ma goes out of scope",
+            "its resource is dropped when mi goes out of scope",
+            "its resource is dropped when u.m goes out of scope",
+            "only s.m is dropped",
+            "t.m is dropped",
+            "u.m was moved out in at least one branch above",
+            "v.n was moved out in at least one branch above",
+        ],
+    },
+    TooltipExpect {
+        name: "try_after_fnonce_call_1136",
+        // #1136: calling an FnOnce closure moves it into the call, so a
+        // `?` after the call has nothing of it to drop. Main drew "the
+        // function returns and f's resource is dropped" for f (call
+        // before the `?`), g (`g()?`: the call consumes g before the `?`),
+        // h (call and `?` in the same `if`) and m (called in an `if`
+        // above: maybe-called, which the dot can't say either way). k is
+        // an Fn closure (it only reads q), so its dot stays.
+        must_contain: &[
+            "f is moved into the call (an FnOnce closure can only be called once). s, which f captured, is dropped during the call",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and k's resource is dropped. If the `?` succeeds, nothing happens to k here.",
+            "h goes out of scope. Its captured resources are dropped here only if no branch above called it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "the function returns and f's resource is dropped",
+            "the function returns and g's resource is dropped",
+            "the function returns and h's resource is dropped",
+            "the function returns and m's resource is dropped",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/manually_drop_chain_1147",
+        // #1147, a let-chain condition that moves the ManuallyDrop mc and
+        // then fails: main said "If nothing above moved it, its resource
+        // is dropped when mc goes out of scope" / "Its resource is dropped
+        // here only if nothing above moved it (… runtime drop flag)".
+        must_contain: &[
+            "mc may have been moved above, so it can't be used after the if.",
+            "mc goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
+        ],
+        must_not_contain: &[
+            "its resource is dropped when mc goes out of scope",
+            "mc goes out of scope. Its resource is dropped here only if",
+        ],
+    },
+    TooltipExpect {
+        name: "union_maybe_uninit_drops_1146",
+        // #1146: MaybeUninit<String> (m, m2 from a call, mu maybe moved)
+        // never drops its String: main said "Its resource is dropped" and
+        // the drop-flag text. A union without a Drop impl drops nothing,
+        // also as a struct field (w.u, main: "Its resource is dropped") and
+        // when moved on some paths (uu). A union whose type implements
+        // Drop (d, wd.d) runs it at scope end (main hid it: "A union's
+        // fields are never dropped automatically." / "Its resource is
+        // dropped.") and when the whole union is overwritten (`d = D {..}`,
+        // where main's other bullet said "writing to a union never drops
+        // its old contents"); a field write `d.a = 3` drops nothing. At
+        // the `?`, only d (a Drop union) and the structs holding a String
+        // or a Drop union keep their dots.
+        must_contain: &[
+            "m goes out of scope. Nothing is dropped: a MaybeUninit never drops the value inside it automatically.",
+            "m2 goes out of scope. Nothing is dropped: a MaybeUninit never drops the value inside it automatically.",
+            "mu goes out of scope. Nothing is dropped: a MaybeUninit never drops the value inside it automatically.",
+            "u goes out of scope. A union's fields are never dropped automatically.",
+            "uu goes out of scope. A union's fields are never dropped automatically.",
+            "w.u goes out of scope. A union's fields are never dropped automatically.",
+            "d goes out of scope. Its type implements Drop, so Drop::drop runs on it here, but a union's fields are never dropped automatically.",
+            "wd.d goes out of scope. Its type implements Drop, so Drop::drop runs on it here, but a union's fields are never dropped automatically.",
+            "d acquires ownership of a new resource; its previous resource is dropped",
+            "d is assigned a new value; writing to a union never drops its old contents",
+            "mu was moved in at least one branch above, so it can't be used after the branches.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and d's resource is dropped. If the `?` succeeds, nothing happens to d here.",
+        ],
+        must_not_contain: &[
+            "the function returns and m's resource is dropped",
+            "the function returns and m2's resource is dropped",
+            "the function returns and u's resource is dropped",
+            "the function returns and mu's resource is dropped",
+            "the function returns and uu's resource is dropped",
+            "the function returns and w.u's resource is dropped",
+            "m goes out of scope. Its resource is dropped",
+            "m2 goes out of scope. Its resource is dropped",
+            "w.u goes out of scope. Its resource is dropped",
+            "mu goes out of scope. Its resource is dropped here only if",
+            "uu goes out of scope. Its resource is dropped here only if",
+            "its resource is dropped when mu goes out of scope",
+            "its resource is dropped when uu goes out of scope",
+            "=d goes out of scope. A union's fields are never dropped automatically.",
+            "=wd.d goes out of scope. Its resource is dropped.",
+            "d acquires ownership of a resource; writing to a union never drops its old contents",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -25631,7 +26005,7 @@ fn a_column_lent_out_mutably_is_dotted_until_the_borrow_ends() {
             ("f no longer borrows the resource r points to", "f();", 0),
             ("n's value is mutably borrowed by p; n can't be used while the borrow is live", "let p = &mut n;", 0),
             ("n's value is no longer mutably borrowed", "g();", 0),
-            ("the resource p points to is captured by closure g (a mutable reborrow through p); p can't be used while the borrow is live",
+            ("the value p points to is captured by closure g (a mutable reborrow through p); p can't be used while the borrow is live",
              "let mut g = || *p += 1;", 0),
             ("g no longer borrows the value p points to", "g();", 0),
             ("t's resource is captured (mutably borrowed) by closure h", "let mut h = || t.push('x');", 0),
@@ -28309,4 +28683,123 @@ fn a_boxed_closure_borrowing_through_a_reference_keeps_it_until_dropped() {
     assert_eq!(ys("d's immutable borrow ends"), vec![row("drop(d);")]);
     assert_eq!(ys("d no longer borrows the resource p points to"), vec![row("drop(d);")]);
     assert_eq!(ys("w's resource is no longer immutably borrowed"), vec![row("drop(d);")]);
+}
+
+/// Each source row of a code panel as (line number, the text it shows,
+/// the names wrapped in a hover-highlight span): gutter and markup
+/// removed, entities decoded.
+fn code_panel_rows(code_svg: &str) -> Vec<(usize, String, Vec<String>)> {
+    let decode = |t: &str| t.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&");
+    start_tags(code_svg, "text")
+        .into_iter()
+        .filter_map(|tag| {
+            let line: usize = attr(tag, "data-rv-line")?.parse().ok()?;
+            let at = code_svg.find(tag)?;
+            let body = &code_svg[at + tag.len() + 1..];
+            let body = &body[..body.find("</text>")?];
+            // The gutter (`<tspan class="line-number">12  </tspan>`) and
+            // the space the template puts after the line.
+            let body = &body[body.find("</tspan>")? + "</tspan>".len()..];
+            let body = body.strip_suffix(' ')?;
+            let mut text = String::new();
+            let mut in_tag = false;
+            for ch in body.chars() {
+                match ch {
+                    '<' => in_tag = true,
+                    '>' => in_tag = false,
+                    _ if !in_tag => text.push(ch),
+                    _ => {}
+                }
+            }
+            let names = body.match_indices("data-hash=\"")
+                .filter_map(|(i, _)| {
+                    let rest = &body[i..];
+                    let inner = &rest[rest.find('>')? + 1..];
+                    Some(decode(&inner[..inner.find("</tspan>")?]))
+                })
+                .collect();
+            Some((line, decode(&text), names))
+        })
+        .collect()
+}
+
+/// #1160: rustc's display columns (a tab counts 4, `é` 1, `名` 2) were
+/// used as byte offsets into the line: a tab-indented line came out
+/// garbled (`let s = String::from("hi");String::fromi");`) with its names
+/// highlighted on the wrong characters, and a non-ASCII identifier
+/// panicked. Every row must show the source as written (a tab as spaces
+/// up to the next 4-column stop: SVG text draws a tab as one space), and
+/// each name must be the exact text of its highlight span.
+#[test]
+fn code_panel_shows_tabs_and_non_ascii_text_as_written() {
+    fn expand_tabs(line: &str) -> String {
+        let mut out = String::new();
+        let mut col = 0;
+        for c in line.chars() {
+            if c == '\t' {
+                let n = 4 - col % 4;
+                out.push_str(&" ".repeat(n));
+                col += n;
+            } else {
+                out.push(c);
+                // The fixtures' wide characters (`名前`, `日本語`, `🦀`) come
+                // after their lines' last tab, so this needn't count them.
+                col += 1;
+            }
+        }
+        out
+    }
+    let cases: &[(&str, &[(usize, &[&str])])] = &[
+        ("code_panel_tabs_1160", &[
+            (4, &["s", "String::from"]),
+            (5, &["t", "s"]),
+            (7, &["u", "t"]),
+            (8, &["u"]),
+        ]),
+        ("non_ascii_names_1160", &[
+            (4, &["größe"]),
+            (5, &["Grün", "Blau"]),
+            (6, &["länge", "s", "s", "len"]),
+            (8, &["café", "String::from", "t", "café"]),
+            (10, &["t", "p", "größe"]),
+            (11, &["n", "länge", "t"]),
+            (12, &["名前", "String::from", "r", "名前"]),
+        ]),
+    ];
+    for &(name, names) in cases {
+        let rv = run_with_local_backend(name);
+        let rows = code_panel_rows(&rv.code_panel_string());
+        let src = read_corpus(name);
+        let want: Vec<String> = src.lines().map(expand_tabs).collect();
+        let shown: Vec<String> = rows.iter().map(|(_, t, _)| t.clone()).collect();
+        assert_eq!(shown, want, "{name}: the code panel must show the source as written");
+        for &(line, expect) in names {
+            let (_, _, got) = rows.iter().find(|(l, _, _)| *l == line).unwrap_or_else(|| panic!("{name}: no row {line}"));
+            assert_eq!(got, expect, "{name}: highlighted names on line {line}");
+        }
+    }
+}
+
+/// #1157: a tuple / struct every field of which was moved out holds
+/// nothing: its line stops where the last one is moved out, like a
+/// moved variable's. It used to run on to the scope end as "t is the
+/// owner of the resource".
+#[test]
+fn a_struct_whose_fields_are_all_moved_out_has_no_line_after() {
+    let name = "struct_parts_moved_out_1157";
+    let rv = run_with_local_backend(name);
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (var, last_move) in [
+        ("t", "let (x, y) = t;"),
+        ("p", "let pb = p.b;"),
+        ("o.inner", "let oy = o.inner.y;"),
+    ] {
+        let row = code_row_y(&code, last_move);
+        let mut lines = state_lines_with_tooltip(&timeline, &format!("{var} is the owner of the resource"));
+        lines.extend(state_lines_with_tooltip(&timeline, &format!("{var} is partially moved: {var}.a was moved out, so {var} can't be used as a whole; its other fields still can")));
+        lines.extend(state_lines_with_tooltip(&timeline, &format!("{var} is partially moved: {var}.x was moved out, so {var} can't be used as a whole; its other fields still can")));
+        assert!(!lines.is_empty(), "{name}: no line for {var}");
+        let below: Vec<&(f64, f64)> = lines.iter().filter(|(_, y2)| *y2 > row + 1.0).collect();
+        assert!(below.is_empty(), "{name}: {var}'s line goes on below `{last_move}` (y={row}): {below:?}");
+    }
 }

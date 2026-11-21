@@ -2359,6 +2359,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if moved.as_ref().is_some_and(|(r, _, _)| r.hash() == rap.hash()) {
         continue;
       }
+      // Nothing to drop if it returns early: no dot (#1137). (An exit's
+      // scope end still ends such a column; a `?` ends none.)
+      if rap.drops_nothing() {
+        continue;
+      }
       let dup = self.preprocessed_events.iter().any(|(l, e)| *l == line
         && matches!(e, ExternalEvent::OwnerDropIfTryReturns { ro, .. } if *ro == rap));
       if dup {
@@ -3306,6 +3311,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           ExternalEvent::Move { to, .. } | ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. }
             if is(to) => Own::Yes,
           ExternalEvent::Move { from, .. } if is(from) => Own::No,
+          // An `FnOnce` closure's call moves it into the call (#271):
+          // it holds nothing after (#1136).
+          ExternalEvent::ClosureCall { closure, .. } if is(closure) => Own::No,
           // Moved into an or-pattern's binding only if its alternative
           // matched (#533). (Out of a tuple scrutinee, `tuple`, the
           // place was moved into the tuple already.)
@@ -4210,6 +4218,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 let interior_mut = self.ty_has_interior_mut(ty, param.hir_id.owner);
                 if ty.is_union() {
                   self.add_union_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, self.ty_is_plain(ty, param.hir_id.owner), interior_mut, self.current_scope, !self.inside_branch);
+                  self.mark_owner_type(&name, ty);
                 } else {
                   self.add_owner(name.clone(), bool_of_mut(binding_annotation.1), is_copy, self.ty_is_plain(ty, param.hir_id.owner), interior_mut, self.current_scope, !self.inside_branch);
                   self.mark_owner_type(&name, ty);
@@ -5667,6 +5676,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // stored in a place, like `*r = 5` through `r: &mut i32` (#897).
     let repoints_ref_var = match &lhs_rty {
       ResourceTy::Deref(_) if lhs_ty.is_ref() => self.deref_is_ref_var(&lhs_rty.real_name(), lhs_expr, lhs_ty),
+      // A reference-typed `static mut` (`NAME = "b"` with
+      // `NAME: &str`) has a column but no loan to end or re-point:
+      // it can only hold a `&'static`, so it is drawn like a Copy
+      // value (#690), and the write is a plain assignment (#1162).
+      ResourceTy::Value(rap) if rap.is_static() => false,
       _ => true,
     };
     let assign_kind = || if is_copyable {
@@ -12086,6 +12100,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // pairing comes after its visit, `pat_leaves_parts`). Rust drops
     // it at the end of the `let`; on the branch's path nothing else
     // happens before then, so its drop is drawn where the literal is.
+    // What the pattern leaves in the literal is all that is dropped
+    // with it: when none of that needs drop (`let (x, _) = (s, p);`
+    // with `p: P { a: i32 }`), nothing is dropped at the end of the
+    // `let`, as for a literal with nothing to drop (#1163).
+    let typeck = self.tcx.typeck(e.hir_id.owner);
+    let env = typing_env(self.tcx, e.hir_id.owner);
+    if !self.pat_leaves_drop(let_stmt.pat, typeck, env) {
+      return None;
+    }
     if key != let_stmt.hir_id {
       let ty = self.tcx.typeck(e.hir_id.owner).expr_ty(literal);
       if !self.needs_drop(ty, e.hir_id.owner) {

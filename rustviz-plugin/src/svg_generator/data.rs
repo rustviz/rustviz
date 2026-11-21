@@ -228,6 +228,13 @@ pub struct Owner {
     /// True iff this owner's type is `ManuallyDrop<T>`: it never drops
     /// the `T` inside it, at scope end or when overwritten (#283).
     pub is_manually_drop: bool,
+    /// True iff this owner is a union (`is_union`) whose type has its
+    /// own `Drop` impl: dropping or overwriting the whole union runs it,
+    /// though its fields are still never dropped (#1146).
+    pub union_drop: bool,
+    /// True iff this owner's type is `MaybeUninit<T>`: like a
+    /// `ManuallyDrop<T>`, it never drops the `T` inside it (#1146).
+    pub is_maybe_uninit: bool,
     /// True iff this owner is an unbound temporary (see
     /// `ResourceAccessPoint::is_unbound_temporary`).
     pub unbound_temp: bool,
@@ -359,6 +366,12 @@ pub struct Struct {
     pub interior_mut: InteriorMut,
     /// Same as Owner::is_manually_drop, for a `ManuallyDrop<T>` field.
     pub is_manually_drop: bool,
+    /// Same as Owner::is_union, for a union-typed field (#1146).
+    pub is_union: bool,
+    /// Same as Owner::union_drop.
+    pub union_drop: bool,
+    /// Same as Owner::is_maybe_uninit, for a `MaybeUninit<T>` field.
+    pub is_maybe_uninit: bool,
     /// `Some` iff this member's own type is `Rc<T>`, `Arc<T>` or one of
     /// their `Weak<T>`s (same role as `Owner::rc`).
     pub rc: Option<RcKind>,
@@ -920,6 +933,19 @@ impl ResourceAccessPoint {
         }
     }
 
+    /// True iff nothing is ever dropped when this binding's value is:
+    /// `never_drops`, a non-Copy value with no drop glue (#484: a plain
+    /// struct, a closure that captures no resource), or a `ManuallyDrop`
+    /// (#283). A drop dot that says "only if ..., its resource is
+    /// dropped" has nothing to say for it (#1137).
+    ///
+    /// Also a `MaybeUninit` and a union without a `Drop` impl of its own
+    /// (#1146): neither ever drops what it holds.
+    pub fn drops_nothing(&self) -> bool {
+        self.never_drops() || self.is_plain_value() || self.is_manually_drop()
+            || self.is_maybe_uninit() || (self.is_union() && !self.union_drop())
+    }
+
     pub fn is_mutref(&self) -> bool {
         match self {
             ResourceAccessPoint::MutRef(_) => true,
@@ -970,7 +996,20 @@ impl ResourceAccessPoint {
     }
 
     pub fn is_union(&self) -> bool {
-        matches!(self, ResourceAccessPoint::Owner(Owner { is_union: true, .. }))
+        matches!(self, ResourceAccessPoint::Owner(Owner { is_union: true, .. })
+                     | ResourceAccessPoint::Struct(Struct { is_union: true, .. }))
+    }
+
+    /// True iff this is a union whose type implements `Drop` (#1146).
+    pub fn union_drop(&self) -> bool {
+        matches!(self, ResourceAccessPoint::Owner(Owner { union_drop: true, .. })
+                     | ResourceAccessPoint::Struct(Struct { union_drop: true, .. }))
+    }
+
+    /// True iff this owner's (or field's) type is `MaybeUninit<T>` (#1146).
+    pub fn is_maybe_uninit(&self) -> bool {
+        matches!(self, ResourceAccessPoint::Owner(Owner { is_maybe_uninit: true, .. })
+                     | ResourceAccessPoint::Struct(Struct { is_maybe_uninit: true, .. }))
     }
 
     pub fn is_manually_drop(&self) -> bool {
@@ -2618,7 +2657,7 @@ pub enum Event {
     ChainFailAssign { place: Option<String>, drops_old: bool, rc: Option<RcDrop>, path: FailPath },
     // See ExternalEvent::ChainFailUse. `is_ref`: the column is a
     // reference, so what was lent is the resource it points to.
-    ChainFailUse { uses: Vec<ChainUse>, definite: bool, path: FailPath, is_ref: bool },
+    ChainFailUse { uses: Vec<ChainUse>, definite: bool, path: FailPath, is_ref: bool, pointee_value: bool },
     // See ExternalEvent::TiedParamNote.
     TiedParamNote { lifetime: String },
     // See ExternalEvent::DeadElseNote.
@@ -2765,15 +2804,22 @@ pub(crate) fn lender_holds_value(rty: &ResourceTy) -> bool {
         || matches!(rty, ResourceTy::DerefField(_, _, _, FieldHolds { value: true }))
 }
 
-// Whether a borrow's referent is a "value" in the dot's tooltip. A
-// referent with no column of its own (`&{}`, `&5`, `&S { a: 4 }`) is
-// `Anonymous`: the type of what the borrower points to says whether it
-// needs drop (#867). Referents that need drop get a `Temporary` column
-// and stay a "resource".
+// Whether a borrow's referent is a "value" in the dot's tooltip: the
+// lender holds one, or the type of what the borrower points to has
+// nothing to drop. That covers a referent with no column of its own
+// (`&{}`, `&5`, `&S { a: 4 }`, #867; referents that need drop get a
+// `Temporary` column and stay a "resource") and a Copy part of a lender
+// that needs drop (`&mut v[0]` with `v: Vec<i32>`, `&s[..]`: the
+// reference points to an `i32` / a `str`, #1233), as the borrower's own
+// line already says. Not for `*el` (el: `&mut &String`): el's pointee is
+// the reference, not what `*el` points to.
 fn borrow_holds_value(from: &ResourceTy, borrower: &ResourceTy) -> bool {
     holds_copy_value(from)
+        || matches!(borrower, ResourceTy::Value(r) if r.points_to_copy())
         || (matches!(from, ResourceTy::Anonymous)
-            && borrower.extract_rap().is_some_and(|r| r.points_to_copy()))
+            // A `static` set to `&[3, 4]` borrows a promoted constant,
+            // which can't need drop (#1162).
+            && borrower.extract_rap().is_some_and(|r| r.points_to_copy() || r.is_static()))
 }
 
 // The lender of a borrow, when it is a reference r: the borrow is then
@@ -3430,8 +3476,8 @@ impl Event {
             Event::InitRefParam{ param: ResourceAccessPoint::Owner(_), own_param: Some(own), .. } => {
                 hover_messages::event_dot_param_value_init(my_name, &own.fn_name, own.whole)
             }
-            Event::ChainFailUse { uses, definite, path, is_ref } => {
-                hover_messages::event_dot_chain_fail_use(my_name, uses, *definite, *path, *is_ref)
+            Event::ChainFailUse { uses, definite, path, is_ref, pointee_value } => {
+                hover_messages::event_dot_chain_fail_use(my_name, uses, *definite, *path, *is_ref, *pointee_value)
             }
             Event::DeadElseNote => {
                 hover_messages::event_dot_dead_else_note(my_name)
@@ -3619,8 +3665,8 @@ impl Event {
             Event::Move{ to, is: ResourceTy::Value(ResourceAccessPoint::StaticRef(r)), ..} if !to.is_closure() => {
                 hover_messages::event_dot_ref_moved(my_name, matches!(to, ResourceTy::Caller), r.pointee_copy, false)
             }
-            Event::Move{ is: ResourceTy::Index(_, place, _), ..} if place.starts_with('*') => {
-                hover_messages::event_dot_move_through_element(place)
+            Event::Move{ is: ResourceTy::Index(_, place, write), ..} if place.starts_with('*') => {
+                hover_messages::event_dot_move_through_element(place, !matches!(write, PlaceWrite::AssignDropsOld))
             }
             Event::Move{ to, is, break_out: true, ..} => {
                 hover_messages::event_dot_break_out_move(&self.deref_name(my_name), &to.name(), is_plain(is))
@@ -5080,7 +5126,7 @@ impl Visualizable for VisualizationData {
           vec![(line_num, Event::DeadLoanNote { lender: lender.clone(), borrower: borrower.clone(), repoint: *repoint, shown: false })]
         },
         ExternalEvent::ChainFailUse{ro, uses, definite, path, ..} => {
-          vec![(line_num, Event::ChainFailUse { uses: uses.clone(), definite: *definite, path: *path, is_ref: ro.is_ref() })]
+          vec![(line_num, Event::ChainFailUse { uses: uses.clone(), definite: *definite, path: *path, is_ref: ro.is_ref(), pointee_value: ro.points_to_copy() })]
         },
 
         _ => panic!("internal state: a branch event reached the per-variable event expansion")
@@ -5468,8 +5514,8 @@ impl Visualizable for VisualizationData {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::DeadLoanNote { lender, borrower, repoint, shown: false }, line_number);
             },
             ExternalEvent::ChainFailUse{ro, uses, definite, path, ..} => {
-                let is_ref = ro.is_ref();
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::ChainFailUse { uses, definite, path, is_ref }, line_number);
+                let (is_ref, pointee_value) = (ro.is_ref(), ro.points_to_copy());
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::ChainFailUse { uses, definite, path, is_ref, pointee_value }, line_number);
             },
         }
     }
