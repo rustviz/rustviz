@@ -41,15 +41,28 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 /// the ones in those directories. One entry covers every violation of
 /// that invariant in that snippet.
 pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
-    // A `&mut` moved into a call whose result carries the borrow.
-    ("chain_writes_1082", "event-on-dead-column", 1128),
-    ("ref_into_adapter_1076", "event-on-dead-column", 1128),
     // A struct moved as a whole while a field column goes on.
     ("ctor_literals_768", "field-outlives-moved-struct", 1127),
     ("deref_assign_wording", "field-outlives-moved-struct", 1168),
     ("deref_write_drops_old", "field-outlives-moved-struct", 1168),
+    // ... its field's move drawn a row below the struct's.
+    ("move_into_deref_one_dot_1192", "field-outlives-moved-struct", 1283),
+    ("struct_parts_follow_moves_1154_1168", "field-outlives-moved-struct", 1283),
+    // ... or never drawn, when nothing in the literal needs drop.
+    ("value_not_resource_1163", "field-outlives-moved-struct", 1284),
     // One line's events stacked out of order.
     ("edition2024/whole_value_moved_by_chain_953", "event-on-dead-column", 1200),
+    // A let-chain condition's last use of a reference: borrow end off the column.
+    ("edition2024/value_not_resource_chain_1163", "event-on-dead-column", 1279),
+    // `break l.name` out of a loop.
+    ("early_return_field_1141", "invalid-state", 1280),
+    // `match (&t, 1) { (s, n) => … }`: n never gets a value.
+    ("match_on_borrow_binding_1235", "event-on-dead-column", 1281),
+    ("match_on_borrow_binding_1235", "invalid-state", 1281),
+    // `Box::new(r)` with r a `&mut`.
+    ("mut_ref_moved_into_result_1128", "invalid-state", 1282),
+    // A slice pattern's partial move drawn as a move of the whole array.
+    ("slice_pattern_arms_1144", "drop-without-value", 1285),
 ];
 
 /// The invariants, by the name the failure list and messages use.
@@ -312,6 +325,46 @@ fn says_maybe_moved(d: &Dot) -> bool {
     MAYBE_PHRASES.iter().any(|p| d.tip.contains(p))
 }
 
+/// What a scope end says when only part of the value is left to drop,
+/// or a drop flag decides: a struct whose fields were moved out (one
+/// in a `match` arm, an or-pattern binding from either field, one a
+/// `loop` moves on some rounds), a value a branch or a `break` moved
+/// on some paths only, a Box re-boxed on some paths. The column rightly
+/// stops where the (partial or maybe) move made the whole unusable, and
+/// the drop of what's left is stated on its own dot below, which no
+/// line reaches. (A Box whose contents were moved out says "Its
+/// contents were moved out earlier, so only the Box's heap allocation";
+/// `contents_moved` covers it.)
+const PARTIAL_DROP_PHRASES: &[&str] = &["drop flag", "moved out earlier, so only"];
+/// A move drawn on the column's own line that says it happens on some
+/// paths only (`break f` in a loop whose value is returned, #1171).
+const CONDITIONAL_MOVE_PHRASES: &[&str] = &["if the loop ended with"];
+
+fn states_partial_drop(d: &Dot) -> bool {
+    PARTIAL_DROP_PHRASES.iter().any(|p| d.tip.contains(p)) && !d.tip.contains("Its contents were moved out earlier")
+}
+
+/// `break k` out of a `loop` is drawn where the loop ends, on the dot
+/// where `k` goes out of scope on the iterations that don't break
+/// (#431, #1156). When the body moves `k` on those iterations
+/// (`take(k)` after the `if … { break k; }`), its line has ended above,
+/// but on the iteration that breaks it still held its value.
+fn break_out_move(d: &Dot) -> bool {
+    d.has("move") && d.tip.contains("break that ends the loop")
+}
+
+/// Line `line` of `src` is a `for` loop's head (`for x in r {`,
+/// `'outer: for x in r {`).
+fn is_for_head(src: &str, line: u32) -> bool {
+    let Some(l) = src.lines().nth((line as usize).wrapping_sub(1)) else { return false };
+    let l = l.trim_start();
+    let l = match l.strip_prefix('\'') {
+        Some(rest) => rest.split_once(':').map_or(l, |(_, r)| r.trim_start()),
+        None => l,
+    };
+    l.starts_with("for ") && l.contains(" in ")
+}
+
 /// Every violation in one timeline: (invariant, what and where).
 pub fn check(fig: &Fig, src: &str) -> Vec<(&'static str, String)> {
     let mut out: Vec<(&'static str, String)> = Vec::new();
@@ -346,6 +399,13 @@ pub fn check(fig: &Fig, src: &str) -> Vec<(&'static str, String)> {
         (r, c)
     };
 
+    let on_main = |d: &Dot| fig.header_x.get(&d.hash).is_some_and(|x| (x - d.x).abs() < 1.0);
+    // A move of the whole value on the column's own line, on every path
+    // as drawn: after it, a scope end that says part of the value is
+    // left, or that a drop flag decides, contradicts the picture (the
+    // reason the value may still be there isn't drawn).
+    let whole_move = |p: &Dot| p.has("move") && on_main(p) && !contents_moved(p)
+        && !says_maybe_moved(p) && !CONDITIONAL_MOVE_PHRASES.iter().any(|c| p.tip.contains(c));
     for d in &fig.dots {
         let (reached, _) = meets_col(d, false);
         // A conditional's other arms (dashed) don't carry this path's value on.
@@ -359,13 +419,22 @@ pub fn check(fig: &Fig, src: &str) -> Vec<(&'static str, String)> {
             || (p.has("branch_join") && meets_col(p, false).0 && !meets_col(p, true).1));
 
         if !reached && !inits && !split_or_join && !skip {
+            // `for x in r` (r a `&mut`) moves r into the loop's iterator,
+            // which holds r's loan until the loop ends; that end is drawn
+            // on r's column (the `for` loop has none, #1129).
+            let into_for = fig.ref_hashes.contains(&d.hash)
+                && earlier.iter().rev().find(|p| p.has_any(END))
+                    .is_some_and(|p| p.has("move") && is_for_head(src, p.line));
+            let uses = d.events.iter().any(|e| USE.contains(&e.as_str()) && !(e == "move" && break_out_move(d)));
             // A maybe-moved value can't be used, but a loan of it can still end.
-            if d.has_any(USE) || (d.has_any(BORROW_END) && !maybe) {
+            if uses || (d.has_any(BORROW_END) && !maybe && !into_for) {
                 out.push(("event-on-dead-column", d.describe()));
             }
             if d.drop && !d.has_any(TEMP_DROPS) {
                 let box_contents = earlier.iter().rev().find(|p| p.has("move")).is_some_and(|p| contents_moved(p));
-                if !maybe && !box_contents {
+                let partial = states_partial_drop(d)
+                    && !earlier.iter().rev().find(|p| p.has_any(END)).is_some_and(|p| whole_move(p));
+                if !maybe && !box_contents && !partial {
                     out.push(("drop-without-value", d.describe()));
                 }
             }
@@ -382,8 +451,7 @@ pub fn check(fig: &Fig, src: &str) -> Vec<(&'static str, String)> {
             }
         }
         // A whole struct moved away from its own column (not in an arm).
-        let on_main = fig.header_x.get(&d.hash).is_some_and(|x| (x - d.x).abs() < 1.0);
-        if d.has("move") && !inits && !continues && on_main && !contents_moved(d) && !d.var.contains('.') {
+        if d.has("move") && !inits && !continues && on_main(d) && !contents_moved(d) && !d.var.contains('.') {
             let prefix = format!("{}.", d.var);
             for s in fig.segs.iter().filter(|s| s.main && s.live() && s.var.starts_with(&prefix)) {
                 if s.lines.iter().any(|&(_, y1, _, y2)| y1.min(y2) <= d.y + 0.5 && y1.max(y2) > d.y + 2.0) {
@@ -393,7 +461,19 @@ pub fn check(fig: &Fig, src: &str) -> Vec<(&'static str, String)> {
         }
     }
 
-    // A column's borrows end as the kind they started.
+    // A column's borrows end as the kind they started. Except a reborrow
+    // through a reference that's re-pointed while the reborrow is live
+    // (`let first = &*r; r = &mut b;`, #1182): r's old loan of `a` lasts
+    // as long as `first` is used, so `first`'s last use gives `a`'s
+    // *mutable* loan back (arrows a -> r -> first, then first -> a).
+    let via_reborrow = |d: &Dot, e: &str| {
+        let kind = e.split('_').next().unwrap_or("");
+        let borrow = format!("{kind}_borrow");
+        fig.arrows.iter().any(|ret| ret.var == d.var && ret.event == e && ret.line == d.line
+            && fig.arrows.iter().any(|lend| lend.var == ret.to && lend.event == borrow && lend.line <= d.line
+                && fig.arrows.iter().any(|re| re.var == lend.to && re.to == d.var && re.line <= d.line
+                    && matches!(re.event.as_str(), "static_borrow" | "mutable_borrow"))))
+    };
     for ds in dots_of.values() {
         let (mut borrows, mut lends) = (BTreeSet::new(), BTreeSet::new());
         for d in ds {
@@ -402,7 +482,7 @@ pub fn check(fig: &Fig, src: &str) -> Vec<(&'static str, String)> {
                 match e.as_str() {
                     "static_borrow" | "mutable_borrow" => { borrows.insert(kind); }
                     "static_lend" | "mutable_lend" => { lends.insert(kind); }
-                    "static_die" | "mutable_die" if !borrows.is_empty() && !borrows.contains(kind) =>
+                    "static_die" | "mutable_die" if !borrows.is_empty() && !borrows.contains(kind) && !via_reborrow(d, e) =>
                         out.push(("borrow-kind-mismatch", d.describe())),
                     "static_reacquire" | "mutable_reacquire" if !lends.is_empty() && !lends.contains(kind) =>
                         out.push(("borrow-kind-mismatch", d.describe())),
@@ -563,6 +643,37 @@ mod unit {
         let r = [header("r", 2), line("r", 2, 95, 155, "full_privilege"),
                  dot("r", 2, 95, "mutable_borrow", false, "b"), dot("r", 2, 155, "static_die ref_go_out_of_scope", false, "e")].concat();
         assert_eq!(invs(&r), vec!["borrow-kind-mismatch"]);
+    }
+
+    #[test]
+    fn a_stated_partial_drop_needs_a_reason_on_the_column() {
+        // A struct whose fields were moved out in arms: its line stops
+        // with no move of its own, and the scope end says a drop flag
+        // decides.
+        let flag = "s goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).";
+        let arms = [header("s", 1), line("s", 1, 95, 155, "full_privilege"), dot("s", 1, 95, "acquire", false, "a"),
+                    dot("s", 1, 215, "owner_go_out_of_scope", true, flag)].concat();
+        assert_eq!(invs(&arms), Vec::<&str>::new());
+        // The same after a move of the whole value on every path as drawn:
+        // nothing says why it may still be there.
+        let moved = [arms.clone(), dot("s", 1, 155, "move", false, "s's resource is moved into drop, which drops it")].concat();
+        assert_eq!(invs(&moved), vec!["drop-without-value"]);
+        // A plain drop after a move is caught as before.
+        let plain = moved.replace(flag, "s goes out of scope. Its resource is dropped.");
+        assert_eq!(invs(&plain), vec!["drop-without-value"]);
+    }
+
+    #[test]
+    fn a_break_value_moved_at_the_loops_end_is_allowed() {
+        // `break k` drawn where the loop ends, after the body moved k on
+        // the iterations that don't break (#1156).
+        let k = [header("k", 1), line("k", 1, 95, 155, "full_privilege"), dot("k", 1, 95, "acquire", false, "a"),
+                 dot("k", 1, 155, "move", false, "k's resource is moved"),
+                 dot("k", 1, 185, "owner_go_out_of_scope move", false,
+                     "k goes out of scope. No resource is dropped. / k's resource is moved to found by the break that ends the loop")].concat();
+        assert_eq!(invs(&k), Vec::<&str>::new());
+        let other = k.replace("by the break that ends the loop", "by take");
+        assert_eq!(invs(&other), vec!["event-on-dead-column"]);
     }
 
     #[test]
