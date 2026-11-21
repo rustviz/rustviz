@@ -20753,6 +20753,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Move from boxed to d",
         ],
     },
+    // #1167: a match guard's temporaries are dropped at the end of the
+    // guard; main kept them to the end of the whole `match` statement.
+    TooltipExpect {
+        name: "match_guard_temporary_1167",
+        must_contain: &[
+            "This temporary String is dropped at the end of the match guard: nothing bound it to a variable or moved it on. Its resource is dropped",
+        ],
+        must_not_contain: &[
+            "This temporary String is dropped at the end of the block's final expression",
+            "This temporary String is dropped at the end of this statement",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
