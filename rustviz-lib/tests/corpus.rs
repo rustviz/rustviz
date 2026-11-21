@@ -20784,10 +20784,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "f is moved into the call (an FnOnce closure can only be called once). \
              s, which f captured, is dropped during the call",
-            "Copy of the value f() returns to _x",
+            "Copy of the value f() returns into a Some value held by _x",
             "g is moved into the call (an FnOnce closure can only be called once). \
              t, which g captured, is dropped during the call",
-            "Copy of the value h() returns to z",
+            "Copy of the value h() returns into a Some value held by z",
             "k is moved into the call (an FnOnce closure can only be called once). \
              w, which k captured, is dropped during the call",
             "m is moved into the call (an FnOnce closure can only be called once). \
