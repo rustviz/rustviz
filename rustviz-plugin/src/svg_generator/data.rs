@@ -2855,6 +2855,17 @@ pub(crate) fn lender_holds_value(rty: &ResourceTy) -> bool {
 // reference points to an `i32` / a `str`, #1233), as the borrower's own
 // line already says. Not for `*el` (el: `&mut &String`): el's pointee is
 // the reference, not what `*el` points to.
+// Whether what a loan is of is a "value", for the dots that describe
+// the loan a reference was made from rather than what the reference
+// itself points to (#1122: `ra: &str` made from a mutable borrow of the
+// String a; #1131: `r = &mut &x` points to a temporary reference that
+// borrows x). The borrower's own pointee (a `str`, a reference) has
+// nothing to drop there although the loan's lender does, so #1233's
+// pointee rule in `borrow_holds_value` doesn't apply.
+fn loan_holds_value(from: &ResourceTy, borrower: &ResourceTy) -> bool {
+    holds_copy_value(from) || (matches!(from, ResourceTy::Anonymous) && borrow_holds_value(from, borrower))
+}
+
 fn borrow_holds_value(from: &ResourceTy, borrower: &ResourceTy) -> bool {
     holds_copy_value(from)
         || matches!(borrower, ResourceTy::Value(r) if r.points_to_copy())
@@ -4055,7 +4066,7 @@ impl Event {
                     // `refs.push(&mut m)` stores a borrow of m itself (#973).
                     hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), true, if *of_ref_var { hover_messages::HolderLender::Own } else { holder_lender_kind(from) }, *of_ref_var || holds_copy_value(from))
                 } else if matches!(is, ResourceTy::Value(r) if r.is_ref() && !r.is_mutref()) {
-                    hover_messages::event_dot_mut_borrow_by_shared_ref(&self.deref_name(my_name), *of_ref_var || borrow_holds_value(from, is))
+                    hover_messages::event_dot_mut_borrow_by_shared_ref(&self.deref_name(my_name), *of_ref_var || loan_holds_value(from, is))
                 } else {
                     // `&mut r` borrows the reference r holds, a value (#914).
                     hover_messages::event_dot_mut_borrow(&self.deref_name(my_name), *of_ref_var || borrow_holds_value(from, is))
@@ -4068,7 +4079,7 @@ impl Event {
                     // `refs.push(&x)` stores a borrow of x itself (#973).
                     hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), false, if *of_ref_var { hover_messages::HolderLender::Own } else { holder_lender_kind(from) }, *of_ref_var || holds_copy_value(from))
                 } else if matches!(is, ResourceTy::Value(r) if r.is_mutref()) {
-                    hover_messages::event_dot_static_borrow_by_mut_ref(&self.deref_name(my_name), *of_ref_var || borrow_holds_value(from, is))
+                    hover_messages::event_dot_static_borrow_by_mut_ref(&self.deref_name(my_name), *of_ref_var || loan_holds_value(from, is))
                 } else {
                     // `&r` borrows the reference r holds, a value (#925).
                     hover_messages::event_dot_static_borrow(&self.deref_name(my_name), *of_ref_var || borrow_holds_value(from, is))
