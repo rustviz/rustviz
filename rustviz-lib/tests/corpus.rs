@@ -25805,6 +25805,73 @@ fn shared_reborrow_keeps_param_column_to_its_end() {
     assert!(end_y - first_y >= 60.0, "v's borrow ends too early: {} .. {}", first_y, end_y);
 }
 
+/// Every fixture, Book snippet and known-bug repro satisfies the
+/// corpus-wide invariants (`common/invariants.rs`), except the violations
+/// listed in `KNOWN_INVARIANT_FAILURES`, each tracked by an issue. A new
+/// violation fails, and so does a listed one that's gone (delete its
+/// entry). Reuses this binary's renders of the fixtures.
+#[test]
+fn corpus_invariants_hold() {
+    use common::invariants::{check, known_list_problems, parse, report, INVARIANTS, KNOWN_INVARIANT_FAILURES};
+    let problems = known_list_problems();
+    assert!(problems.is_empty(), "KNOWN_INVARIANT_FAILURES: {:#?}", problems);
+    let skipped: Vec<&str> = SKIP_WELL_FORMED.iter().map(|(n, _)| *n).collect();
+    let mut names: Vec<String> = all_fixtures().into_iter().filter(|n| !skipped.contains(&n.as_str())).collect();
+    for dir in ["book", "known_bugs"] {
+        let d = corpus_dir().join(dir);
+        for entry in fs::read_dir(&d).unwrap_or_else(|e| panic!("read {:?}: {}", d, e)) {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                names.push(format!("{}/{}", dir, path.file_stem().unwrap().to_str().unwrap()));
+            }
+        }
+    }
+    // Programs outside the corpus (a generator's output, bug repros):
+    // reported like the rest. An absolute name is read from its path.
+    if let Ok(extra) = env::var("RV_INVARIANTS_EXTRA") {
+        for entry in fs::read_dir(&extra).unwrap_or_else(|e| panic!("read {:?}: {}", extra, e)) {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                let path = fs::canonicalize(&path).unwrap();
+                names.push(path.with_extension("").to_str().unwrap().to_owned());
+            }
+        }
+    }
+    if let Ok(only) = env::var("RV_INVARIANTS_ONLY") {
+        let prefixes: Vec<&str> = only.split(',').filter(|p| !p.is_empty()).collect();
+        names.retain(|n| prefixes.iter().any(|p| n.starts_with(p)));
+    }
+    names.sort();
+    prerender(names.iter().map(|n| n.as_str()));
+    let mut found: BTreeMap<(String, &'static str), Vec<String>> = BTreeMap::new();
+    let mut failed = Vec::new();
+    for name in &names {
+        match render_cell(name) {
+            Ok(rv) => {
+                let fig = parse(&rv.timeline_panel_string());
+                for (inv, what) in check(&fig, &read_corpus(name)) {
+                    found.entry((name.clone(), inv)).or_default().push(what);
+                }
+            }
+            Err(e) => failed.push(e),
+        }
+    }
+    let checked: std::collections::HashSet<String> = names.iter().cloned().collect();
+    let diff = report(&found, &checked);
+    eprintln!(
+        "invariants: {} snippets, {} invariants, {} known violations",
+        names.len(), INVARIANTS.len(),
+        KNOWN_INVARIANT_FAILURES.iter().filter(|(s, _, _)| checked.contains(*s)).count()
+    );
+    assert!(
+        diff.is_empty() && failed.is_empty(),
+        "invariant violations differ from KNOWN_INVARIANT_FAILURES (rustviz-lib/tests/common/invariants.rs). \
+         A NEW one is a bug this change introduced, or an old one nobody listed (file an issue and add an \
+         entry with its number); a GONE one was fixed (delete its entry).\n{}\nSnippets the plugin failed on: {:#?}",
+        diff, failed
+    );
+}
+
 #[test]
 fn corpus_all_fixtures_produce_well_formed_svg() {
     let skipped: Vec<&str> = SKIP_WELL_FORMED.iter().map(|(n, _)| *n).collect();

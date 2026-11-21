@@ -30,6 +30,7 @@ The plugin only writes these attributes. It records and sends nothing.
 | `data-rv-line-end` | segments covering several lines | The segment's last line. |
 | `data-rv-part` | some nodes of a `branch_line` or `stop_bar` | The node is part of an element drawn as several nodes. See [Parts](#parts). |
 | `data-rv-drop` | `dot` | `true` on a dot drawn with the drop mark: the column's value is dropped there. |
+| `data-rv-invalid` | the timeline's root `<svg>` | Only when something went wrong: each stretch of a column whose state the plugin couldn't compute (`State::Invalid`), as `var@L<line>[-<end>]`, space-separated. Nothing is drawn there. The corpus invariant checks (`rustviz-lib/tests/common/invariants.rs`) fail on it. |
 
 Values are XML-escaped like any attribute (`String::from<T>` is written
 `String::from&lt;T&gt;`); read them with `getAttribute` / `dataset`,

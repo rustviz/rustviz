@@ -19,6 +19,9 @@ struct SvgData {
     tl_id: String,
     tl_width: i32,
     height: i32,
+    /// Attributes for the timeline's root `<svg>` that draw nothing
+    /// (`rv_attrs::invalid_states_attr`).
+    tl_rv: String,
 }
 
 /// Empty space kept below the last code line's text baseline, in px.
@@ -1354,6 +1357,7 @@ pub fn render_svg(
     let (timeline_panel_string, max_width) = timeline_panel::render_timeline_panel(visualization_data);
     // Each element's `data-rv-id`, and its rows as code-panel lines.
     let timeline_panel_string = rv_attrs::finalize(&timeline_panel_string, &row_lines);
+    let tl_rv = rv_attrs::invalid_states_attr(visualization_data, &row_lines);
     
     // Code-panel width: scale with the longest source line so long
     // function signatures (e.g. `fn compare_strings(_a: &String,
@@ -1381,6 +1385,7 @@ pub fn render_svg(
         // the first line. It used to be a fixed 100px band (#844).
         height: (num_lines + 1) * LINE_SPACE as i32 + BOTTOM_MARGIN
             - (OLD_FIRST_ROW_Y - FIRST_ROW_Y) as i32,
+        tl_rv,
     };
 
     let final_code_svg_content = handlebars.render("code_svg_template", &svg_data).unwrap();
