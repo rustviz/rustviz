@@ -785,7 +785,7 @@ const BOOK: &[Snippet] = &[
         id: "c8_15_vec_for_by_value",
         // The loop is drawn once; its first dot (s's, on the `for` line)
         // says so (#853).
-        must_contain: &["Move of each element of v to s", "s takes ownership of an element of v", "(RustViz draws one pass through this loop, which may run many times; each pass has its own copy of the variables declared inside it.)", "v goes out of scope. No resource is dropped."],
+        must_contain: &["Move of each element of v to s", "s takes ownership of an element of v", "(RustViz draws one pass through this loop, which may run many times; the variables declared inside it are new on each pass.)", "v goes out of scope. No resource is dropped."],
         // #850: was "Move from v to s", as if `s` took the whole Vec.
         must_not_contain: &["Move from v to s"],
         ..E

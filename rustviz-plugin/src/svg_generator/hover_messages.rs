@@ -5890,11 +5890,11 @@ pub fn event_dot_process_exit(name: &String, owns: Option<bool>, call: &str) -> 
 // figure shows the body once; the loop may run it any number of times
 // (also none, or once before a `break`), so this says no more than that.
 // `declares`: the loop declares variables (its pattern, a `let` in its
-// body, a `while let` binding), and every pass that gets there makes
-// its own.
+// body, a `while let` binding), which every pass that gets there
+// makes anew.
 pub fn approx_note_loop(declares: bool) -> String {
     if declares {
-        "(RustViz draws one pass through this loop, which may run many times; each pass has its own copy of the variables declared inside it.)".to_owned()
+        "(RustViz draws one pass through this loop, which may run many times; the variables declared inside it are new on each pass.)".to_owned()
     } else {
         "(RustViz draws one pass through this loop, which may run many times.)".to_owned()
     }

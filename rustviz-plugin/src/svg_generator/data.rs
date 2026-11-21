@@ -4357,8 +4357,8 @@ pub enum ApproxNote {
     /// loop declares (`locals`) or that have a dot before `head` count:
     /// a column first given a value inside the loop is the loop's
     /// receiver (`let n = loop { … break v; }`, bound once) or a
-    /// temporary. Dots on the lines of a loop inside it (`nested`) count
-    /// only if it has no other. `declares`: whether the loop declares
+    /// temporary. Dots on the lines of a loop inside it (`nested`) don't
+    /// count: a loop with no other dot gets no note. `declares`: whether the loop declares
     /// any variable (the note then says each pass has its own).
     Loop {
         head: usize,

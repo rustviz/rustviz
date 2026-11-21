@@ -1,6 +1,7 @@
-// #853: one note per loop, also for nested loops and loops that declare
-// no variable of their own (their note doesn't say "each pass has its
-// own copy of the variables declared inside it").
+// #853: at most one note per loop, also for nested loops (the `loop` below has
+// no dot outside its `while let`, so only the `while let` gets a note),
+// and for loops that declare no variable of their own (their
+// note has no "the variables declared inside it are new on each pass").
 fn main() {
     let mut total = 0;
     let grid = vec![vec![1, 2], vec![3]];

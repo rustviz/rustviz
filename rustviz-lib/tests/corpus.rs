@@ -23089,9 +23089,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `loop_notes_sit_on_each_loops_first_dot`.
         must_contain: &[
             "w is bound to an immutable reference",
-            "(RustViz draws one pass through this loop, which may run many times; each pass has its own copy of the variables declared inside it.)",
+            "(RustViz draws one pass through this loop, which may run many times; the variables declared inside it are new on each pass.)",
         ],
         must_not_contain: &[
+            // The first wording, before review.
+            "each pass has its own copy",
             // One note per loop, not one per variable.
             "each pass has its own w.",
             "each pass has its own s.",
@@ -23107,16 +23109,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "approx_loop_nested_853",
         // #853: one note per loop, also for nested loops, and a loop that
         // declares no variable (`while total < 100`, `for _ in 0..2`) gets
-        // the note without "each pass has its own copy …". Rows pinned by
+        // the note without "the variables … are new on each pass". Rows pinned by
         // `loop_notes_sit_on_each_loops_first_dot`.
         must_contain: &[
             "(RustViz draws one pass through this loop, which may run many times.)",
-            "(RustViz draws one pass through this loop, which may run many times; each pass has its own copy of the variables declared inside it.)",
+            "(RustViz draws one pass through this loop, which may run many times; the variables declared inside it are new on each pass.)",
         ],
         must_not_contain: &[
             "each pass has its own row.",
             "each pass has its own cell.",
             "each pass has its own s.",
+            "each pass has its own copy",
         ],
     },
 ];
@@ -30783,19 +30786,20 @@ fn a_boxed_closure_borrowing_through_a_reference_keeps_it_until_dropped() {
 /// to the iterator once, not on the closing line where it's given back,
 /// not on `n`, bound once by the `break`, not in the `if` block, and not
 /// on the other variables' first dots in a loop. An outer loop whose
-/// dots are all in a loop nested in it (`loop { while let … }`) takes
-/// the first one the nested loop's note isn't on.
+/// dots are all in a loop nested in it (`loop { while let … }`) gets no
+/// note: only the `while let`'s is there (the first version also put the
+/// `loop`'s on s's dot, on the same row).
 #[test]
 fn loop_notes_sit_on_each_loops_first_dot() {
     let plain = "(RustViz draws one pass through this loop, which may run many times.)";
-    let declares = "(RustViz draws one pass through this loop, which may run many times; each pass has its own copy of the variables declared inside it.)";
+    let declares = "(RustViz draws one pass through this loop, which may run many times; the variables declared inside it are new on each pass.)";
     let cases: &[(&str, &[(&str, &[&str])])] = &[
         ("approx_loop_one_pass_853", &[
             (declares, &["for w in words.iter() {", "while let Some(top) = stack.pop() {", "let t = String::from(\"t\");"]),
         ]),
         ("approx_loop_nested_853", &[
             (plain, &["while total < 100 {", "total += 1;"]),
-            (declares, &["for row in grid.iter() {", "for cell in row.iter() {", "while let Some(s) = stack.pop() {", "while let Some(s) = stack.pop() {"]),
+            (declares, &["for row in grid.iter() {", "for cell in row.iter() {", "while let Some(s) = stack.pop() {"]),
         ]),
     ];
     for (fixture, notes) in cases {

@@ -181,43 +181,30 @@ impl DotLayer {
                 }
             }
         };
-        // Loops, one note each: first on a dot outside the loops nested
-        // in it, then (for a loop with none) on any of its pass's dots
-        // that no other loop's note is on.
-        let loops: Vec<&ApproxNote> = notes.iter().filter(|n| matches!(n, ApproxNote::Loop { .. })).collect();
-        let mut placed: Vec<Option<usize>> = vec![None; loops.len()];
-        for outside_nested in [true, false] {
-            for (k, note) in loops.iter().enumerate() {
-                let ApproxNote::Loop { head, pass: (lo, hi), head_cols, locals, nested, declares } = note else { continue };
-                if placed[k].is_some() {
+        // Loops, one note each, on a dot outside the loops nested in it.
+        // A loop whose dots are all in nested loops gets none: its note
+        // would sit inside a nested loop, where "this loop" reads as the
+        // nested one, whose own note already says it.
+        for note in notes {
+            let ApproxNote::Loop { head, pass: (lo, hi), head_cols, locals, nested, declares } = note else { continue };
+            let mut best: Option<(usize, i64, usize)> = None;
+            for (hash, col) in &by_col {
+                if !locals.contains(hash) && !col.iter().any(|(l, _)| l < head) {
                     continue;
                 }
-                let mut best: Option<(usize, i64, usize)> = None;
-                for (hash, col) in &by_col {
-                    if !locals.contains(hash) && !col.iter().any(|(l, _)| l < head) {
+                for &(line, i) in col {
+                    let in_pass = (*lo..=*hi).contains(&line) || (line == *head && head_cols.contains(hash));
+                    if !in_pass || nested.iter().any(|(h, e)| (*h..=*e).contains(&line)) {
                         continue;
                     }
-                    for &(line, i) in col {
-                        let in_pass = (*lo..=*hi).contains(&line) || (line == *head && head_cols.contains(hash));
-                        if !in_pass {
-                            continue;
-                        }
-                        if outside_nested && nested.iter().any(|(h, e)| (*h..=*e).contains(&line)) {
-                            continue;
-                        }
-                        if !outside_nested && placed.contains(&Some(i)) {
-                            continue;
-                        }
-                        let key = (self.dots[i].row, self.dots[i].x, i);
-                        if best.is_none_or(|b| key < b) {
-                            best = Some(key);
-                        }
+                    let key = (self.dots[i].row, self.dots[i].x, i);
+                    if best.is_none_or(|b| key < b) {
+                        best = Some(key);
                     }
                 }
-                if let Some((.., i)) = best {
-                    placed[k] = Some(i);
-                    add(&mut self.dots, vec![i], DotNote::Loop(*declares));
-                }
+            }
+            if let Some((.., i)) = best {
+                add(&mut self.dots, vec![i], DotNote::Loop(*declares));
             }
         }
         for note in notes {
