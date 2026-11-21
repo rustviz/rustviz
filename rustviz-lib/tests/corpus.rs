@@ -20784,10 +20784,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "f is moved into the call (an FnOnce closure can only be called once). \
              s, which f captured, is dropped during the call",
-            "Copy of the value f() returns to _x",
+            "Copy of the value f() returns into a Some value held by _x",
             "g is moved into the call (an FnOnce closure can only be called once). \
              t, which g captured, is dropped during the call",
-            "Copy of the value h() returns to z",
+            "Copy of the value h() returns into a Some value held by z",
             "k is moved into the call (an FnOnce closure can only be called once). \
              w, which k captured, is dropped during the call",
             "m is moved into the call (an FnOnce closure can only be called once). \
@@ -21645,7 +21645,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "r4's mutable reference is moved (not the resource it points to)",
             "Move from r5 to k5",
             "r5's mutable reference is moved (not the resource it points to)",
-            "Move from r6 to k6",
+            // `W(r6)` with `struct W<T>(T)`: the reference goes into the
+            // field k6.0, which has a column (#1206).
+            "Move from r6 to k6.0",
             "r6's mutable reference is moved (not the resource it points to)",
             "r7's mutable reference is moved (not the resource it points to)",
             "s's resource is mutably borrowed by k7; s can't be used until the borrow ends",
@@ -21901,6 +21903,393 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return mutably borrowed resource from im to iter_mut",
             "Return immutably borrowed resource from r to as_str",
             "it mutably borrows a value",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_literal_moves_1143",
+        // #1143: a struct literal anywhere but directly as a `let`
+        // initializer moved nothing: `consume(B { name: a1 })` left a1
+        // owning its String to the end of the function (no move dot, no
+        // arrow), and the same in a method argument, `Box::new(..)`,
+        // `Some(..)`, `vec![..]`, an assignment, a tuple element, `v[0] =`,
+        // `*slot =` and a returned `Some(..)` / nested literal / `vec![..]`
+        // / tuple. Where a1 was dropped at its scope end, that drop was
+        // false too (the String went into the call). `..base` in a call
+        // moves base's other fields; `B { name: p8.name }` moves the field.
+        must_contain: &[
+            "Move from a1 to consume",
+            "a1's resource is moved",
+            "Move from a2 to push",
+            "a2's resource is moved",
+            "Move from a3 to Box::new",
+            "Move from a4 to o4",
+            "Move from a5 to v5",
+            "Move from name to consume",
+            "Move from a7 to take_p",
+            "Move from base.bio to take_p",
+            "base.bio's resource is moved",
+            "base goes out of scope. base.bio was moved out earlier, so only base.name is dropped.",
+            "Move from p8.name to consume",
+            "p8 goes out of scope. p8.name was moved out earlier, so no resource is dropped.",
+            "a9's resource is immutably borrowed by look; a9 is read-only while the borrow is live",
+            "a10's resource is moved",
+            "a10 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "a11's resource is moved",
+            "a11 goes out of scope. No resource is dropped.",
+            "Move from a12 to take_vec",
+            "Move from a13 to take_opt",
+            "Move from a14 to o14",
+            "Move from a15 to t15.1",
+            "Move from a16 to v16[0]",
+            "Move from s17 to *slot",
+            "s18's resource is moved to the caller",
+            "s19's resource is moved to the caller",
+            "s20's resource is moved to the caller",
+            "s20 goes out of scope. No resource is dropped.",
+            "s21's resource is moved to the caller",
+            "a22's resource is immutably borrowed by o22; a22 is read-only while the borrow is live",
+        ],
+        must_not_contain: &[
+            // A constructor is never a borrower (#768).
+            "borrowed by Some",
+            "Some reads from",
+            // Drops of values the literal had moved away.
+            "=a11 goes out of scope. Its resource is dropped.",
+            "=s20 goes out of scope. Its resource is dropped.",
+            "=base goes out of scope. Its resource is dropped.",
+            "=base.bio goes out of scope. Its resource is dropped.",
+            "=p8 goes out of scope. Its resource is dropped.",
+            "=p8.name goes out of scope. Its resource is dropped.",
+            "a10 still holds it",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_literal_moves_1173",
+        // #1173: the same as #1143 where the literal's destination has no
+        // column per field: `let m = Msg::Write { text: s }` (an enum is
+        // one column), `n = Msg::Write { .. }`, `*r = P { name: t }`,
+        // `vec![(a, 1)]`, `vec![P { .. }]`, `[(a3, 1)]`, `take(vec![(b4,
+        // 2)])`, `take(Msg::Write { .. })`, `Some(Msg::Write { .. })` and a
+        // returned `Some(P { name: d })`. Main drew no move for any of
+        // them: each variable stayed "the owner of the resource" to `}`.
+        must_contain: &[
+            "Move from s to m",
+            "s's resource is moved",
+            "Move from t to *r",
+            "t's resource is moved",
+            "Move from a to pairs",
+            "Move from c to ps",
+            "Move from a2 to n",
+            "Move from a3 to arr",
+            "Move from b4 to take",
+            "Move from e5 to take",
+            "Move from f6 to o6",
+            "d's resource is moved to the caller",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "struct_update_ref_field_1126",
+        // #1126: `S { x: 2, ..s1 }` left s1's reference field behind: s2.r
+        // had no lender ("s2.r's mutable borrow ends (what it borrows from
+        // isn't shown)") and s1.r, already moved, gave the borrow back.
+        // Checked with rustc: `s1.r.push('?')` after the update is E0382
+        // for the `&mut` field; the `&` field is copied (`t1.r` stays
+        // usable), so both hold the loan. In a call, `..u1` moves u1.r
+        // into the call.
+        must_contain: &[
+            "Move from s1.r to s2.r",
+            "s1.r's mutable reference is moved (not the resource it points to)",
+            "Return mutably borrowed resource from s2.r to a",
+            "Copy from t1.r to t2.r",
+            "t2.r is initialized with a copy of t1.r",
+            "Return immutably borrowed resource from t2.r to b",
+            "Move from u1.r to consume_s",
+        ],
+        must_not_contain: &[
+            "(what it borrows from isn't shown)",
+            "Return mutably borrowed resource from s1.r to a",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_ref_field_moved_1127",
+        // #1127: `drop(e)` moves e and the reference in e.part with it, but
+        // e.part's line ran on to the last use of `p` (a copy of e.part, or
+        // `e.part()`'s result), where e.part "returned" the borrow. Checked
+        // with rustc: `e.part` after `drop(e)` is E0382. Now e.part's
+        // borrow ends at `drop(e)` and the copy gives the lender back; that
+        // the end is on the `drop` row is pinned by
+        // `a_ref_field_ends_where_its_struct_is_moved_into_a_call`.
+        must_contain: &[
+            "e.part's immutable borrow ends",
+            "Return immutably borrowed resource from p to novel",
+            "Return immutably borrowed resource from q to book",
+            "Return immutably borrowed resource from w to text",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from e.part to novel",
+            "Return immutably borrowed resource from f.part to book",
+            "Return immutably borrowed resource from o.ex.part to text",
+        ],
+    },
+    TooltipExpect {
+        name: "tuple_struct_ref_field_1197",
+        // #1197 / #1206: a tuple-struct constructor whose fields have
+        // columns (`Holder(&x)`, `Pair(&x, name)`, `W(rm)`) is built like
+        // the literal `Holder { 0: &x }`: each field gets its argument's
+        // borrow or value. Main drew no borrow into `h.0` (its later use sat
+        // on an empty column) and moved `name` into `p` as a whole. `W<T>(T)`
+        // takes `rm: &mut String` by move (generic field, no reborrow), as
+        // `G { f: rm }` does.
+        must_contain: &[
+            "Immutable borrow from x to h.0",
+            "x's resource is immutably borrowed by h.0; x is read-only while the borrow is live",
+            "Return immutably borrowed resource from h.0 to x",
+            "Copy from r to h2.0",
+            "Immutable borrow from x to p.0",
+            "Move from name to p.1",
+            "Immutable borrow from x to o.h.0",
+            "Move from rm to w.0",
+            "rm's mutable reference is moved (not the resource it points to)",
+            "Return mutably borrowed resource from w.0 to s",
+        ],
+        must_not_contain: &[
+            "=Move from name to p",
+            "=Move from rm to w",
+            "rm's mutable borrow ends",
+        ],
+    },
+    TooltipExpect {
+        name: "mut_ref_param_moved_1205",
+        // #1205: `let r2 = id(r);` with `r: &mut String` a parameter and
+        // `fn id<T>(x: T) -> T`: r is moved into id (no reborrow for a
+        // generic parameter), and r2 holds the reference id returns, which
+        // points to the caller's String, not into r. Main drew r2 as
+        // reborrowing through r and returning the borrow to r.
+        must_contain: &[
+            "Move from r to id",
+            "r's mutable reference is moved (not the resource it points to)",
+            "r2's mutable borrow ends (what it borrows from isn't shown)",
+        ],
+        must_not_contain: &[
+            "Mutable borrow from r to r2: id's signature gives the reference it returns the same lifetime as its argument",
+            "Return mutably borrowed resource from r2 to r",
+            "r2 no longer borrows the resource r points to",
+            "the resource r points to is mutably borrowed by r2 through r; r can't be used while the borrow is live",
+        ],
+    },
+    TooltipExpect {
+        name: "mut_ref_moved_holder_1237",
+        // #1237: once r's `&mut` is moved into w.f (or x.0, or b), s's
+        // dotted segment names the new holder from that line. Main said
+        // "borrowed by r" until the borrow ended. ("… by r" is still right
+        // on the row before the move, so it can't go in must_not_contain;
+        // the new texts below exist only on the rows after it.)
+        must_contain: &[
+            "s's resource is mutably borrowed by r; s can't be used until the borrow ends",
+            "s's resource is mutably borrowed by w.f; s can't be used until the borrow ends",
+            "t's resource is mutably borrowed by x.0; t can't be used until the borrow ends",
+            "u's resource is mutably borrowed by b; u can't be used until the borrow ends",
+            // `H { f: c }` reborrows c: c still holds v's borrow.
+            "v's resource is mutably borrowed by c; v can't be used until the borrow ends",
+        ],
+        must_not_contain: &[
+            "v's resource is mutably borrowed by h.f; v can't be used until the borrow ends",
+        ],
+    },
+    // #1161: `std::process::exit(run(config))` / `drop(tag(s, ..))`: the
+    // inner call takes the variables, the outer one only the value the
+    // inner call returns. An old `println!` decoder skipped the inner call.
+    TooltipExpect {
+        name: "call_arg_inner_call_1161",
+        must_contain: &[
+            "Move from config to run",
+            "Move from s to tag",
+            "s's resource is moved",
+            "s goes out of scope. No resource is dropped.",
+            "config's resource is moved",
+        ],
+        must_not_contain: &[
+            "Move from config to std::process::exit",
+            "to std::process::exit",
+            // s's String was never drawn as moved into tag.
+            "=s goes out of scope. Its resource is dropped.",
+        ],
+    },
+    // #1174: an `if` / `match` as a call's argument passes the value its
+    // branch yields, on that branch's path (also through a method call and
+    // a constructor). An arm's binding passed to the call isn't dropped at
+    // the arm's end.
+    TooltipExpect {
+        name: "call_arg_branch_value_1174",
+        must_contain: &[
+            "Move from a to take",
+            "Move from b to take",
+            "a's resource is moved",
+            "a was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when a goes out of scope.",
+            "Move from y to take",
+            "Move from d to take",
+            "y's resource is moved",
+            "y goes out of scope. No resource is dropped.",
+            "Move from e to push",
+            "Move from f to push",
+            "Move from g to take_opt",
+            "Move from h to take_opt",
+            // `Some(match o { Some(x) => x, None => d })` returned by wrap.
+            "x's resource is moved to the caller",
+            "x goes out of scope. No resource is dropped.",
+            "d's resource is moved to the caller",
+        ],
+        must_not_contain: &[
+            // x / y were passed on, not dropped at the arm's end.
+            "=x goes out of scope. Its resource is dropped.",
+            "=y goes out of scope. Its resource is dropped.",
+            // a / b / e / f / g / h were never drawn as moved.
+            "a goes out of scope. Its resource is dropped here only if a still holds it",
+            "e goes out of scope. Its resource is dropped here only if e still holds it",
+            "g goes out of scope. Its resource is dropped here only if g still holds it",
+        ],
+    },
+    // #1170: `show(v[0])` copies the i32 element out of v; the Vec isn't
+    // copied.
+    TooltipExpect {
+        name: "call_arg_element_copy_1170",
+        must_contain: &[
+            "Copy from v[0] to show",
+            "v[0] is copied out of v's resource",
+            "Copy from v[1] to push",
+            "v[1] is copied out of v's resource",
+            "Copy from w[0] to insert",
+            "w[0] is copied out of w's resource",
+        ],
+        must_not_contain: &[
+            "Copy from v to show",
+            "Copy from v to push",
+            "Copy from w to insert",
+            "v's value is copied",
+            "w's value is copied",
+        ],
+    },
+    // #1195: `take(s, bar()?)` moves s into the call's first argument
+    // before the `?` runs; if it returns early, s's String is dropped. The
+    // `?` dot's text is pinned by `a_try_after_an_argument_drops_what_the_argument_holds`
+    // (its second sentence is reworded by #1196).
+    TooltipExpect {
+        name: "call_arg_before_try_1195",
+        must_contain: &[
+            "s's resource is moved",
+            "w's resource is moved",
+            "q's resource is moved",
+        ],
+        // Main left the drop out rather than saying something false; the
+        // test above fails on main.
+        must_not_contain: &[],
+    },
+    // #1185: `Some((s, 1))` / `Some(vec![s])` / `Some([s, t])` / `Ok((s, 1))`
+    // returned: s goes to the caller inside the value, as for `Some(s)`.
+    // The constructor receives nothing (#768).
+    TooltipExpect {
+        name: "ctor_returned_literal_1185",
+        must_contain: &[
+            "s's resource is moved to the caller",
+            "t's resource is moved to the caller",
+        ],
+        must_not_contain: &[
+            "Move from s to Some",
+            "Move from t to Some",
+            "Move from s to Ok",
+            "=s's resource is moved",
+            "=t's resource is moved",
+        ],
+    },
+    // #1183: `let _x = Some(one());` holds a Some value around the value
+    // one() returns.
+    TooltipExpect {
+        name: "ctor_call_value_1183",
+        must_contain: &[
+            "_x is initialized with a Some value holding the value one() returns",
+            "Copy of the value one() returns into a Some value held by _x",
+            "_y is initialized with a Some value holding the value h() returns",
+            "Copy of the value h() returns into a Some value held by _y",
+            "_p is initialized with an Ok value holding the value one() returns",
+            "Copy of the value one() returns into an Ok value held by _p",
+            "_f is initialized with a Some value",
+        ],
+        must_not_contain: &[
+            "=_x is initialized with the value one() returns",
+            "=_y is initialized with the value h() returns",
+            "=_p is initialized with the value one() returns",
+            "Copy of the value one() returns to _x",
+            "Copy of the value h() returns to _y",
+            "Copy of the value one() returns to _p",
+        ],
+    },
+    // #1225: `let x = Some(if c { d } else { e });` drew no branch: d and
+    // e stayed owners, with drop-flag scope ends nothing could set.
+    TooltipExpect {
+        name: "let_ctor_conditional_1225",
+        must_contain: &[
+            "Move from d to _x",
+            "Move from e to _x",
+            "_x acquired ownership of a resource (in all branches above)",
+            "Move from f to _y",
+            "Move from g to _y",
+            "d goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "z acquired ownership of a resource (in all branches above)",
+            "w acquired ownership of a resource (in all branches above)",
+            "j goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "d goes out of scope. Its resource is dropped here only if d still holds it",
+            "e goes out of scope. Its resource is dropped here only if e still holds it",
+            "h goes out of scope. Its resource is dropped here only if h still holds it",
+            "j goes out of scope. Its resource is dropped here only if j still holds it",
+        ],
+    },
+    TooltipExpect {
+        name: "conditional_literal_part_1256",
+        // #1256: `(if c { d } else { e }, 1)` / `W { s: if … }` branches:
+        // d moves on the then-path only, e on the else-path, and the
+        // literal's part acquires a value on every path. Main moved both
+        // unconditionally, with no branch, then said each "is dropped
+        // here only if d still holds it", though nothing could clear the
+        // drop flag on one path only.
+        must_contain: &[
+            "d was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when d goes out of scope.",
+            "e was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when e goes out of scope.",
+            "_t.0 acquired ownership of a resource (in all branches above)",
+            "_w.s acquired ownership of a resource (in all branches above)",
+            "_p.a acquired ownership of a resource (in all branches above)",
+            "_q.0 acquired ownership of a resource (in all branches above)",
+            "x acquired ownership of a resource (in all branches above)",
+            "y acquired ownership of a resource (in all branches above)",
+            "Move from f to _p.b",
+            "Move from f to _g",
+            "Move from f to _q.1",
+        ],
+        must_not_contain: &[
+            "d goes out of scope. Its resource is dropped here only if d still holds it (Rust tracks this with a runtime drop flag).",
+            "e goes out of scope. Its resource is dropped here only if e still holds it (Rust tracks this with a runtime drop flag).",
+        ],
+    },
+    TooltipExpect {
+        name: "destructuring_assign_branches_1253",
+        // #1253: `(x, n) = if c { (s, 1) } else { (t, 2) };` (and a
+        // `match`, an `else if`) assigns each branch's value in that
+        // branch: s moves on its path only. Main moved s and t (and u)
+        // unconditionally, with no branch.
+        must_contain: &[
+            "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when s goes out of scope.",
+            "t was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when t goes out of scope.",
+            "u was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when u goes out of scope.",
+            "x acquired ownership of a resource (in all branches above)",
+            "n is bound to a value (in all branches above)",
+            "y acquired ownership of a resource (in all branches above)",
+        ],
+        must_not_contain: &[
+            "s goes out of scope. Its resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
+            "t goes out of scope. Its resource is dropped here only if t still holds it (Rust tracks this with a runtime drop flag).",
+            "u goes out of scope. Its resource is dropped here only if u still holds it (Rust tracks this with a runtime drop flag).",
         ],
     },
 ];
@@ -29498,6 +29887,40 @@ fn a_boxed_closure_borrowing_through_a_reference_keeps_it_until_dropped() {
     assert_eq!(ys("d's immutable borrow ends"), vec![row("drop(d);")]);
     assert_eq!(ys("d no longer borrows the resource p points to"), vec![row("drop(d);")]);
     assert_eq!(ys("w's resource is no longer immutably borrowed"), vec![row("drop(d);")]);
+}
+
+/// #1195 (`call_arg_before_try_1195`): a call's arguments are all
+/// evaluated before the call takes any, so in `take(s, bar()?)`,
+/// `q.put(w, bar()?)` and `q.eat(bar()?)` (by-value `self`) the `?` can
+/// return early while s / w / q's value sits in an evaluated argument: it
+/// is dropped then. That's said on the dot of the line the value is moved
+/// on, next to the move. Main drew only the move.
+#[test]
+fn a_try_after_an_argument_drops_what_the_argument_holds() {
+    let rv = run_with_local_backend("call_arg_before_try_1195");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let row = |src: &str| code_row_y(&code, src);
+    for (name, line) in [("s", "take(s, bar()?);"), ("w", "q.put(w, bar()?);"), ("q", "q.eat(bar()?);")] {
+        let drop = format!("Only if the `?` here returns early (on an `Err` or `None`): the function returns and {name}'s resource is dropped.");
+        let ys: Vec<f64> = dots_where(&tl, |lines| lines.iter().any(|l| l.starts_with(&drop))
+            && lines.iter().any(|l| *l == format!("{name}'s resource is moved")))
+            .into_iter().map(|(_, y)| y).collect();
+        assert_eq!(ys, vec![row(line)], "{name}: the `?` drop and the move belong on one dot on {line:?}");
+    }
+}
+
+/// #1127 (`struct_ref_field_moved_1127`): a struct moved into `drop` takes
+/// its reference field with it, so the field's borrow ends on the `drop`
+/// row, not at the last use of a copy of the reference.
+#[test]
+fn a_ref_field_ends_where_its_struct_is_moved_into_a_call() {
+    let rv = run_with_local_backend("struct_ref_field_moved_1127");
+    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let row = |src: &str| code_row_y(&code, src);
+    let ys = |text: &str| -> Vec<f64> { dots_listing_tooltip(&tl, text).into_iter().map(|(_, y)| y).collect() };
+    assert_eq!(ys("e.part's immutable borrow ends"), vec![row("drop(e);")]);
+    assert_eq!(ys("f.part's immutable borrow ends"), vec![row("drop(f);")]);
+    assert_eq!(ys("o.ex.part's immutable borrow ends"), vec![row("drop(o);")]);
 }
 
 /// #1198: a value holding a borrow (`o: Option<Part>`), moved by a

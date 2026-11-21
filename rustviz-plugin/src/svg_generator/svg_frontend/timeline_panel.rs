@@ -3451,6 +3451,50 @@ fn revoked_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationDa
     lent_out_title(rap, visualization_data, row, path)
 }
 
+/// The `&mut` reference that holds what `r` held on line `from`, after
+/// the moves of r's value up to `line` (#1237): `r2` for `let r2 = r;`,
+/// `w.f` for `let w = G { f: r };`, through several moves. `None` once it
+/// is moved into anything but a reference (a call, a holder value: that
+/// one's own lend names it, #1128).
+fn holder_after_moves(visualization_data: &VisualizationData, r: &ResourceAccessPoint, from: usize, line: usize) -> Option<ResourceAccessPoint> {
+    let mut cur = r.clone();
+    // The first hop may happen on the lend's own line; each later one
+    // strictly after the previous (`(m1, m2) = (m2, m1)` moves each into
+    // the other on one line: one hop each).
+    let mut after = from.checked_sub(1);
+    for _ in 0..16 {
+        let next = visualization_data.timelines.get(cur.hash()).and_then(|t| t.history.iter()
+            .find_map(|(l, e)| match e {
+                Event::Move { to, .. } if after.is_none_or(|a| *l > a) && *l <= line => Some((*l, to.clone())),
+                _ => None,
+            }));
+        match next {
+            None => return Some(cur),
+            Some((l, ResourceTy::Value(t))) if t.is_mutref() && t.hash() != cur.hash() => { cur = t; after = Some(l); }
+            Some(_) => return None,
+        }
+    }
+    None
+}
+
+/// Rows strictly inside `start..end` where a `&mut` reference's value is
+/// moved into another reference (`let r2 = r;`, `G { f: r }`): a column
+/// mutably lent out over them is cut there, so its text can name the new
+/// holder (#1237). (Pieces with the same text are joined again.)
+fn ref_move_rows(visualization_data: &VisualizationData, start: usize, end: usize) -> Vec<usize> {
+    let mut rows: Vec<usize> = visualization_data.timelines.values()
+        .flat_map(|t| t.history.iter())
+        .filter_map(|(l, e)| match e {
+            Event::Move { is: ResourceTy::Value(f), to: ResourceTy::Value(t), .. }
+                if f.is_mutref() && t.is_mutref() && *l > start && *l < end => Some(*l),
+            _ => None,
+        })
+        .collect();
+    rows.sort_unstable();
+    rows.dedup();
+    rows
+}
+
 /// Whether the reference `r`'s value is moved away (at the top level of
 /// its column) on a line in `from..=line`.
 fn moved_between(visualization_data: &VisualizationData, r: &ResourceAccessPoint, from: usize, line: usize) -> bool {
@@ -3490,11 +3534,22 @@ fn lent_out_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
     // Each live lend's holder, and whether it borrows the reference
     // column itself (`&mut r`, #914).
     let mut holders: Vec<(Option<(String, bool, bool)>, bool)> = Vec::new();
+    // Holders reached by following a reference's moves (#1237).
+    let mut moved_to: Vec<Option<(String, bool, bool)>> = Vec::new();
     for (l, e) in history.iter().filter(|(l, _)| *l <= line) {
         match e {
             // A `&mut` reference holder whose value was moved on since
-            // (`let k = id(r);`, #1128) holds nothing any more.
-            Event::MutableLend { to: ResourceTy::Value(r), .. } if r.is_mutref() && moved_between(visualization_data, r, *l, line) => {}
+            // holds nothing any more: into another reference (`let r2 =
+            // r;`, `G { f: r }`), that one holds the borrow now (#1237);
+            // into a call's result (`let k = id(r);`, #1128), the result's
+            // holder has a lend of its own.
+            Event::MutableLend { to: ResourceTy::Value(r), of_ref_var, .. } if r.is_mutref() && moved_between(visualization_data, r, *l, line) => {
+                if let Some(h) = holder_after_moves(visualization_data, r, *l, line) {
+                    let k = key(&ResourceTy::Value(h));
+                    moved_to.push(k.clone());
+                    holders.push((k, *of_ref_var));
+                }
+            }
             Event::MutableLend { to, of_ref_var, .. } => holders.push((key(to), *of_ref_var)),
             Event::MutableReacquire { from, .. } => {
                 let k = key(from);
@@ -3504,6 +3559,12 @@ fn lent_out_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
             }
             _ => {}
         }
+    }
+    // A holder reached through moves gives way to a later lend still
+    // live (`let r3 = pass(r2);` reborrows through r2, which r's value
+    // moved into: r3 is named, as before #1237).
+    if holders.len() > 1 && holders.iter().any(|h| !moved_to.contains(&h.0)) {
+        holders.retain(|h| !moved_to.contains(&h.0));
     }
     let of_ref_var = !holders.is_empty() && holders.iter().all(|h| h.1);
     // A call that handed its borrow on to its result isn't the holder.
@@ -6333,6 +6394,9 @@ fn render_timeline(
         let mut bounds = vec![*seg_start];
         if matches!(state, State::FullPrivilege { .. } | State::PartialPrivilege { .. }) {
             bounds.extend(cuts.iter().copied().filter(|l| l > seg_start && l < seg_end));
+        }
+        if matches!(state, State::RevokedPrivilege { .. }) {
+            bounds.extend(ref_move_rows(visualization_data, *seg_start, *seg_end));
         }
         bounds.push(*seg_end);
         // (Pieces with the same text are drawn as one.)
