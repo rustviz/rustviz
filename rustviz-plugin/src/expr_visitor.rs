@@ -535,6 +535,10 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   //     computed before any part of the statement is drawn.
   pub destructure_srcs: HashMap<rustc_hir::HirId, &'tcx Expr<'tcx>>,
   pub destructure_moved: HashSet<String>,
+  /// The parts of an assignment's destination that its right-hand
+  /// side moves out (`t.0`, `t.1` in `t = (t.1, t.0)`, #1138): their
+  /// old values aren't dropped by the assignment.
+  pub rhs_self_moved: BTreeSet<String>,
   /// Persistent: (name, first line, last line) of each destination
   /// of a destructuring assignment whose old value the same statement
   /// moves out (`m1` in `(m1, m2) = (m2, m1)`). That move hands the
@@ -641,6 +645,10 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // branch leaving the function (`return`, panic): the closing brace
   // is unreachable, so it drops nothing (#515).
   pub all_paths_exit: bool,
+  // The first line of the earliest such construct: a block that ended
+  // above it (`{ let s = …; }` before the conditional) dropped its
+  // locals at its own `}`, which does run (#1139).
+  pub all_paths_exit_from: usize,
   // Set when, once `all_paths_exit` was set, a block's tail was left
   // unvisited: it never runs (#1004).
   pub dead_tail: bool,
@@ -969,6 +977,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let_ctor_literals: HashSet::new(),
       destructure_srcs: HashMap::new(),
       destructure_moved: HashSet::new(),
+      rhs_self_moved: BTreeSet::new(),
       destructure_swapped: Vec::new(),
       destructure_ref_data: HashMap::new(),
       destructure_ref_src: HashMap::new(),
@@ -989,6 +998,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       loop_maybe_entry: Vec::new(),
       break_states: Vec::new(),
       all_paths_exit: false,
+      all_paths_exit_from: usize::MAX,
       dead_tail: false,
       dead_code: HashSet::new(),
       borrow_floor: HashMap::new(),
@@ -1416,7 +1426,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // The Rc note wins: no double parenthetical (#542).
     let holds = if rc.is_some() || rc_fields.is_some() || rc_inside.is_some() || manually_drop { None } else { self.holds_phrase(ty) };
     let box_contents_moved = self.box_contents_moved_out(name, ty);
-    if rc.is_none() && !manually_drop && !maybe_uninit && !union && rc_fields.is_none() && rc_inside.is_none() && holds.is_none() && !box_contents_moved {
+    let elems_left = self.array_elems_left(name, ty);
+    if rc.is_none() && !manually_drop && !maybe_uninit && !union && rc_fields.is_none() && rc_inside.is_none() && holds.is_none() && !box_contents_moved && elems_left.is_none() {
       return;
     }
     let Some(just_added) = (self.rap_hashes as u64).checked_sub(1) else { return };
@@ -1430,6 +1441,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         o.rc_inside = rc_inside;
         o.holds = holds;
         o.box_contents_moved = box_contents_moved;
+        o.elems_left = elems_left;
       }
       Some(ResourceAccessPoint::Struct(s)) if s.hash == just_added => {
         s.is_manually_drop = manually_drop;
@@ -2172,6 +2184,33 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     ownership_after(self.preprocessed_events, rap_name, None).unwrap_or(Ownership::None)
   }
 
+  /// Whether the Box `rap_name` holds nothing now because its whole
+  /// contents were moved out (`let s = *b;`) on every path, while the
+  /// Box itself wasn't: its heap allocation is still there to free
+  /// (#1145). Only a move at the top level counts (one in a branch is
+  /// the maybe-moved case, #921).
+  pub fn box_contents_only_moved_now(&self, rap_name: &str) -> bool {
+    for (_, ev) in self.preprocessed_events.iter().rev() {
+      match ev {
+        ExternalEvent::Move { from: ResourceTy::Deref(r), .. } if r.name() == rap_name => return true,
+        ExternalEvent::Move { from, to, .. }
+          if from.extract_rap().is_some_and(|r| r.name() == rap_name) || to.extract_rap().is_some_and(|r| r.name() == rap_name) => return false,
+        ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. }
+          if to.extract_rap().is_some_and(|r| r.name() == rap_name) => return false,
+        ExternalEvent::InitRefParam { param, .. } if param.name() == rap_name => return false,
+        // A conditional that does something to it: the maybe-moved
+        // case (#921), or a new value.
+        ExternalEvent::Branch { branches, .. }
+          if branches.iter().any(|b| ownership_after(&b.e_data, rap_name, None).is_some()) => return false,
+        ExternalEvent::ClosureCall { closure, .. } if closure.extract_rap().is_some_and(|r| r.name() == rap_name) => return false,
+        ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::LoopExitKept { ro, .. } | ExternalEvent::OrAltMove { ro, .. }
+          | ExternalEvent::ManuallyDropByHand { ro, .. } if ro.name() == rap_name => return false,
+        _ => {}
+      }
+    }
+    false
+  }
+
   /// `rap_ownership_now` as of before `preprocessed_events[end..]`.
   pub fn rap_ownership_before(&self, end: usize, rap_name: &str) -> Ownership {
     ownership_after(&self.preprocessed_events[..end], rap_name, None).unwrap_or(Ownership::None)
@@ -2305,6 +2344,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         continue;
       }
       let name = c.name().clone();
+      if self.rhs_self_moved.iter().any(|m| crate::visitor::place_within(&name, m)) {
+        out.moved.push(name);
+        continue;
+      }
       match self.rap_ownership_now(&name) {
         Ownership::None => out.moved.push(name),
         Ownership::Maybe => {
@@ -2622,6 +2665,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       parts: None,
       maybe_init: None,
       payload: false,
+      contents_gone: false,
     });
     *self.unique_id += 1;
   }
@@ -6092,7 +6136,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                 self.collect_pat_binding_events(field.pat, ty_results, parent, parent_ty, scope, res);
             }
         }
-        PatKind::Binding(mode, id, ident, _) => {
+        // `[a, b] => …`, `if let [first, .., last] = arr`, `[x, rest @ ..]`
+        // (#1144): each element the pattern names (and a `rest @ ..`
+        // sub-slice) destructures out of the same parent, as a tuple's do.
+        PatKind::Slice(before, mid, after) => {
+            for p in before.iter().chain(mid).chain(after.iter()) {
+                self.collect_pat_binding_events(p, ty_results, parent, parent_ty, scope, res);
+            }
+        }
+        PatKind::Binding(mode, id, ident, sub_pat) => {
             // add raps that appear in binding
             let muta = bool_of_mut(mode.1); // You need to define this function
             let line_num = span_to_line(&ident.span, &self.tcx); // Assuming self.span_to_line exists
@@ -6183,7 +6235,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                             for r in ref_fields {
                               let id = *self.unique_id;
                               *self.unique_id += 1;
-                              self.add_external_event(line_num, ExternalEvent::InitRefParam { param: r, id, own_param: None, in_pattern: Some(name.clone()) });
+                              self.add_external_event(line_num, ExternalEvent::InitRefParam { param: r, id, own_param: None, in_pattern: Some(name.clone()), rest: None });
                             }
                         }
                     },
@@ -6242,6 +6294,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                 self.pointee_copies.insert(*rap.hash(), (parent.clone(), part));
             }
             res.push((rap, evt, ty));
+            // `whole @ Some(n)`: the names bound inside the sub-pattern
+            // are bound from the same matched value (copies, or `ref`
+            // borrows; #1177).
+            if let Some(sp) = sub_pat {
+                self.collect_pat_binding_events(sp, ty_results, parent, parent_ty, scope, res);
+            }
         }
         // `Some(&y)` on an `Option<&i32>`: y copies the value the
         // reference inside the matched value points to (#874). A `&`
@@ -7194,6 +7252,33 @@ pub fn tuple_elem_lender(&self, scrutinee: &'tcx Expr<'tcx>, evt: &Evt, from: Re
   from
 }
 
+/// A binding by reference into what a call's returned reference points
+/// to (`Some(x) => …` on `match get(&o)`, `[first, ..]` on `match
+/// v.as_slice()`): a function lends nothing, so it borrows what that
+/// reference borrows, the one variable the call's signature ties its
+/// result to (#1222). With several, none is named; with none (the call
+/// borrows nothing we track), `from` stays.
+fn call_result_lender(&self, scrutinee: &'tcx Expr<'tcx>, evt: &Evt, from: ResourceTy) -> ResourceTy {
+  if !matches!(evt, Evt::SBorrow | Evt::MBorrow) || !from.extract_rap().is_some_and(|r| r.is_fn()) {
+    return from;
+  }
+  let mut call = scrutinee;
+  while let ExprKind::DropTemps(inner) = call.kind {
+    call = inner;
+  }
+  if !matches!(call.kind, ExprKind::Call(..) | ExprKind::MethodCall(..))
+    || !self.tcx.typeck(call.hir_id.owner).expr_ty(call).is_ref() {
+    return from;
+  }
+  match self.call_lenders(call).as_slice() {
+    [one] => one.clone(),
+    // `pick(&a, &b)`: it may point into either; no arrow, rather than
+    // one from the function.
+    [_, _, ..] => ResourceTy::Anonymous,
+    [] => from,
+  }
+}
+
 /// `tuple_elem_lender` for the binding `binding`, also pointing the
 /// borrow its `ref` registered (add_ref) at the tuple, so the borrow's
 /// end isn't drawn as giving x its value back (#580).
@@ -7201,6 +7286,15 @@ pub fn retarget_tuple_borrow(&mut self, scrutinee: &'tcx Expr<'tcx>, binding: &R
   let lender = self.tuple_elem_lender(scrutinee, evt, from.clone());
   if lender != from {
     self.tuple_temp_refs.insert(binding.name().to_string());
+    if let Some(rd) = self.borrow_map.get_mut(binding.name()) {
+      if rd.lender == from {
+        rd.lender = lender.clone();
+      }
+    }
+    return lender;
+  }
+  let lender = self.call_result_lender(scrutinee, evt, from.clone());
+  if lender != from {
     if let Some(rd) = self.borrow_map.get_mut(binding.name()) {
       if rd.lender == from {
         rd.lender = lender.clone();
@@ -8692,7 +8786,11 @@ pub fn print_out_of_scope(&mut self){
     // Every path left the function at a `return` / panic above, where
     // owners were dropped or moved out (#515); a reference has no
     // such event, and keeps its scope end.
-    let left_already = self.all_paths_exit && !rap.rap.never_drops() && !rap.rap.is_ref();
+    // Not a variable of a block that ended above the exit (#1139).
+    let (all_exit, exit_from) = (self.all_paths_exit, self.all_paths_exit_from);
+    let left_at = |scope: usize| all_exit && scope >= exit_from
+      && !rap.rap.never_drops() && !rap.rap.is_ref();
+    let left_already = left_at(rap.scope) && rap.extra_scopes.iter().all(|s| left_at(*s));
     // An unbound temporary is dropped by its own `TemporaryDrop`, which
     // may sit in a branch (a let chain's later part, #604): no scope end.
     // A first variable declared in a branch or loop body was ended
@@ -8714,12 +8812,12 @@ pub fn print_out_of_scope(&mut self){
           None => {}
         }
       }
-      if rap.is_global && !duplicate {
+      if rap.is_global && !duplicate && !left_at(rap.scope) {
         self.add_external_event(rap.scope, ExternalEvent::GoOutOfScope { ro: rap.rap.clone(), holds: None, id: *self.unique_id, early: None });
         *self.unique_id += 1;
       }
       // The later variables that share this column (#589).
-      for &scope in rap.extra_scopes.iter() {
+      for &scope in rap.extra_scopes.iter().filter(|s| !left_at(**s)) {
         self.add_external_event(scope, ExternalEvent::GoOutOfScope { ro: rap.rap.clone(), holds: None, id: *self.unique_id, early: None });
         *self.unique_id += 1;
       }

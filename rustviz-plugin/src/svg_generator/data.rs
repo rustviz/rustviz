@@ -197,6 +197,13 @@ pub enum InteriorMut {
     Unknown,
 }
 
+/// See `Owner::elems_left`: element names (`arr[0]`) in index order.
+#[derive(Clone, Hash, PartialEq, Eq, Debug, Default)]
+pub struct ElemsLeft {
+    pub moved: Vec<String>,
+    pub left: Vec<String>,
+}
+
 // when something is not a reference
 #[derive(Clone, Hash, PartialEq, Eq, Debug, Default)]
 pub struct Owner {
@@ -279,6 +286,11 @@ pub struct Owner {
     /// isn't the box's, but its heap allocation is still freed at scope
     /// end.
     pub box_contents_moved: bool,
+    /// For an array of values that need drop from which a slice
+    /// pattern moves some elements out but not all (`let [a, _] = arr;`,
+    /// `match arr { [first, ..] => .. }`; #1144, #1166): the elements
+    /// moved out and the ones left, which are dropped at scope end.
+    pub elems_left: Option<ElemsLeft>,
     /// True iff this column is a `static` item the function uses (#690):
     /// it exists before the function runs and is never dropped.
     pub is_static: bool,
@@ -851,6 +863,14 @@ impl ResourceAccessPoint {
     /// See `Owner::box_contents_moved`.
     pub fn box_contents_moved(&self) -> bool {
         matches!(self, ResourceAccessPoint::Owner(Owner { box_contents_moved: true, .. }))
+    }
+
+    /// See `Owner::elems_left`.
+    pub fn elems_left(&self) -> Option<&ElemsLeft> {
+        match self {
+            ResourceAccessPoint::Owner(Owner { elems_left: Some(e), .. }) => Some(e),
+            _ => None,
+        }
     }
 
     pub fn is_unbound_temporary(&self) -> bool {
@@ -1995,6 +2015,10 @@ pub enum ExternalEvent {
         // payload's part columns (#893): the Box itself keeps its heap
         // allocation, so the dot names `*b`.
         payload: bool,
+        // `ro` is a Box whose whole contents were moved out before, on
+        // every path (`let s = *b;`): only its heap allocation is freed
+        // (#1145).
+        contents_gone: bool,
     },
     // `ManuallyDrop::drop(&mut md)`: the value inside `md` is dropped
     // by hand. `md` itself stays in scope but must not be used again.
@@ -2243,6 +2267,11 @@ pub enum ExternalEvent {
         // isn't tracked there, so it isn't "from the caller" (#352).
         // Never set together with `own_param`.
         in_pattern: Option<String>,
+        // `Some`: `param` is the first binding of a parameter pattern
+        // that leaves parts of the argument unbound (`P { name, .. }:
+        // P`, `(a, _): (String, String)`): those are dropped when the
+        // function returns, with no column to show it (#1181).
+        rest: Option<ParamRest>,
     },
     
     // A call `f()` of a local closure that rustc inferred to be
@@ -2618,7 +2647,7 @@ pub enum Event {
     // FullPrivilege. `maybe_moved`: see ExternalEvent::OwnerDropAtReassign.
     // `maybe_init`: see ExternalEvent::OwnerDropAtReassign.
     // `payload`, `loop_head`: see ExternalEvent::OwnerDropAtReassign.
-    OwnerDropAtReassign { maybe_moved: bool, by_cond: bool, loop_head: bool, parts: Option<ReassignParts>, maybe_init: Option<InitBy>, payload: bool },
+    OwnerDropAtReassign { maybe_moved: bool, by_cond: bool, loop_head: bool, parts: Option<ReassignParts>, maybe_init: Option<InitBy>, payload: bool, contents_gone: bool },
     // `ManuallyDrop::drop(&mut md)`: the value inside is dropped by
     // hand. The owner is left in a moved-out-like state.
     ManuallyDropByHand,
@@ -2674,6 +2703,7 @@ pub enum Event {
         id: usize,
         own_param: Option<OwnParam>,
         in_pattern: Option<String>,
+        rest: Option<ParamRest>,
     },
     // `f()` of an `FnOnce` closure `is`: `is` is moved into the call
     // (ExternalEvent::ClosureCall).
@@ -2682,6 +2712,16 @@ pub enum Event {
         fates: Vec<CapturedFate>,
         id: usize
     },
+}
+
+/// What a fn parameter's pattern leaves of the argument (#1181).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ParamRest {
+    /// The function the parameter belongs to.
+    pub fn_name: String,
+    /// The parts of the argument the pattern leaves unbound that need
+    /// drop, as field paths (`bio`, `1`, `inner.tag`).
+    pub parts: Vec<String>,
 }
 
 /// A `ref` / `ref mut` binding in a by-value fn parameter's pattern
@@ -2903,13 +2943,21 @@ impl Ord for State {
     fn cmp(&self, other: &Self) -> Ordering {
         use State::*;
         
+        // The join of a conditional takes the lowest-ranked state of
+        // the branches that reach it. A value moved in one branch and
+        // mutably lent in another is maybe-moved: it can't be used again
+        // until it is assigned, even once the borrow ends, so a move
+        // outranks a mutable lend (#1132). With the two tied, the first
+        // branch won, and a mutable lend in it gave the value back as
+        // "the owner" when the borrow ended.
         fn rank(s: &State) -> u8 {
             match s {
-                FullPrivilege { s: LineState::Uninit } => 3,
-                ResourceMoved { .. } | RevokedPrivilege { .. } => 0,
-                PartialPrivilege { .. } => 1,
-                FullPrivilege {..} => 2,
-                Invalid | OutOfScope => 3,
+                FullPrivilege { s: LineState::Uninit } => 4,
+                ResourceMoved { .. } => 0,
+                RevokedPrivilege { .. } => 1,
+                PartialPrivilege { .. } => 2,
+                FullPrivilege {..} => 3,
+                Invalid | OutOfScope => 4,
             }
         }
 
@@ -3471,6 +3519,15 @@ impl Event {
                     (true, false) => hover_messages::event_dot_static_return(my_name),
                     (true, true) => hover_messages::event_dot_mut_return(my_name),
                 }
+            }
+            // What the parameter's pattern leaves unbound is dropped when
+            // the function returns (#1181).
+            Event::InitRefParam{ rest: Some(rest), .. } => {
+                let mut whole = self.clone();
+                if let Event::InitRefParam { rest, .. } = &mut whole {
+                    *rest = None;
+                }
+                format!("{}. {}", whole.print_message_with_name(my_name), hover_messages::param_rest_dropped(&rest.fn_name, &rest.parts))
             }
             // The column of the value a `ref` binding borrows (#691).
             Event::InitRefParam{ param: ResourceAccessPoint::Owner(_), own_param: Some(own), .. } => {
@@ -4384,6 +4441,13 @@ impl Visualizable for VisualizationData {
             // other;` moves other.r): the field has no reference left.
             (State::PartialPrivilege{..}, Event::Move{to: to_ro,..}) if self.is_ref(hash) && !self.is_mutref(hash) =>
                 State::ResourceMoved{ move_to: to_ro.to_owned(), move_at_line: event_line, dropped_by_hand: false },
+            // An owner drawn as lent is moved: rustc allows it only where
+            // the loan is already dead (`r = &t; let m = s;` after `r =
+            // &s`, #1178). It is moved; this used to fall through to
+            // Invalid, which the join of a conditional then ignored.
+            (State::PartialPrivilege{..}, Event::Move{to: to_ro,..})
+            | (State::RevokedPrivilege{..}, Event::Move{to: to_ro,..}) if !self.is_ref(hash) =>
+                State::ResourceMoved{ move_to: to_ro.to_owned(), move_at_line: event_line, dropped_by_hand: false },
             // A reference whose reference was moved out (`let q2 = q;`)
             // is given a new one (`q = &mut s;`, #722): it holds that,
             // as when it was first initialized with a borrow.
@@ -4528,6 +4592,14 @@ impl Visualizable for VisualizationData {
             (State::RevokedPrivilege{ prev_state: p,.. }, Event::MutableReacquire{ .. }) => {
               *p.clone()
             }
+            // Maybe-moved after a conditional (one branch moved it,
+            // another lent it out): the end of that borrow doesn't
+            // give it back. It stays unusable until it is assigned
+            // again (#1132); without this arm the state became Invalid
+            // and the assignment drew no line either.
+            (State::ResourceMoved{ .. }, Event::MutableReacquire{ .. })
+            | (State::ResourceMoved{ .. }, Event::StaticReacquire{ .. }) =>
+              (*previous_state).clone(),
 
             (State::FullPrivilege{..}, Event::StaticDie { .. }) |
             (State::FullPrivilege{..}, Event::StaticBorrow { .. }) => {
@@ -5060,8 +5132,8 @@ impl Visualizable for VisualizationData {
             (line_num,  Event::MutableReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: *id, still_borrowed_by: Vec::new(), of_ref_var: *of_ref_var})]
           }
         },
-        ExternalEvent::InitRefParam{param: ro, id, own_param, in_pattern} => {
-          vec![(line_num, Event::InitRefParam{param : ro.to_owned(), id: *id, own_param: own_param.clone(), in_pattern: in_pattern.clone()})]
+        ExternalEvent::InitRefParam{param: ro, id, own_param, in_pattern, rest} => {
+          vec![(line_num, Event::InitRefParam{param : ro.to_owned(), id: *id, own_param: own_param.clone(), in_pattern: in_pattern.clone(), rest: rest.clone()})]
         },
         ExternalEvent::GoOutOfScope{ro, holds, early, ..} => {
           match ro {
@@ -5079,8 +5151,8 @@ impl Visualizable for VisualizationData {
             }
           }
         },
-        ExternalEvent::OwnerDropAtReassign{ maybe_moved, by_cond, loop_head, parts, maybe_init, payload, .. } => {
-          vec![(line_num, Event::OwnerDropAtReassign { maybe_moved: *maybe_moved, by_cond: *by_cond, loop_head: *loop_head, parts: parts.clone(), maybe_init: *maybe_init, payload: *payload })]
+        ExternalEvent::OwnerDropAtReassign{ maybe_moved, by_cond, loop_head, parts, maybe_init, payload, contents_gone, .. } => {
+          vec![(line_num, Event::OwnerDropAtReassign { maybe_moved: *maybe_moved, by_cond: *by_cond, loop_head: *loop_head, parts: parts.clone(), maybe_init: *maybe_init, payload: *payload, contents_gone: *contents_gone })]
         },
         ExternalEvent::ManuallyDropByHand{..} => {
           vec![(line_num, Event::ManuallyDropByHand)]
@@ -5440,8 +5512,8 @@ impl Visualizable for VisualizationData {
             ExternalEvent::ClosureCall { closure, fates, id } => {
                 maybe_append_event(self, &closure, Event::ClosureCall { is: closure.clone(), fates, id }, line_number);
             },
-            ExternalEvent::InitRefParam{param: ro, id, own_param, in_pattern} => {
-                maybe_append_event(self, &ResourceTy::Value(ro.clone()), Event::InitRefParam{param : ro.to_owned(), id: id, own_param, in_pattern}, line_number);
+            ExternalEvent::InitRefParam{param: ro, id, own_param, in_pattern, rest} => {
+                maybe_append_event(self, &ResourceTy::Value(ro.clone()), Event::InitRefParam{param : ro.to_owned(), id: id, own_param, in_pattern, rest}, line_number);
             },
             ExternalEvent::GoOutOfScope{ro, holds, early, ..} => {
                 match ro {
@@ -5459,8 +5531,8 @@ impl Visualizable for VisualizationData {
                     }
                 }
             },
-            ExternalEvent::OwnerDropAtReassign{ro, maybe_moved, by_cond, loop_head, parts, maybe_init, payload, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropAtReassign { maybe_moved, by_cond, loop_head, parts, maybe_init, payload }, line_number);
+            ExternalEvent::OwnerDropAtReassign{ro, maybe_moved, by_cond, loop_head, parts, maybe_init, payload, contents_gone, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropAtReassign { maybe_moved, by_cond, loop_head, parts, maybe_init, payload, contents_gone }, line_number);
             },
             ExternalEvent::ManuallyDropByHand{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::ManuallyDropByHand, line_number);

@@ -8496,8 +8496,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
              resource is dropped. If the `?` succeeds, nothing happens to u here.",
             // `v` is a `Vec<String>`: its drop says what it holds (#542).
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's \
-             resource (including every String it holds) is dropped. If the `?` succeeds, nothing \
-             happens to v here.",
+             resource (including every String it holds) is dropped. If the `?` succeeds, v's \
+             resource isn't dropped here.", // (v's dot also has the borrow by first: #1151)
         ],
         must_not_contain: &[
             "the function returns and v's resource is dropped. If",
@@ -8516,8 +8516,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and u's \
              resource is dropped. If the `?` succeeds, nothing happens to u here.",
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's \
-             resource (including every String it holds) is dropped. If the `?` succeeds, nothing \
-             happens to v here.",
+             resource (including every String it holds) is dropped. If the `?` succeeds, v's \
+             resource isn't dropped here.", // (v's dot also has the borrow by first: #1151)
         ],
         must_not_contain: &[
             "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and s's \
@@ -9982,7 +9982,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
              resource is dropped. If the `?` succeeds, nothing happens to w here.",
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and x's \
              resource (including the String it holds, if any) is dropped. If the `?` succeeds, \
-             nothing happens to x here.",
+             x's resource isn't dropped here.", // (with the borrow on x's dot: #1151)
         ],
         must_not_contain: &[
             // `a` is a reference.
@@ -9997,7 +9997,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and w's \
              resource is dropped. If the `?` succeeds, nothing happens to w here.",
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and a's \
-             resource is dropped. If the `?` succeeds, nothing happens to a here.",
+             resource is dropped. If the `?` succeeds, a's resource isn't dropped here.", // (#1151)
         ],
         must_not_contain: &[
             "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and x's \
@@ -10012,8 +10012,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and u's \
              resource is dropped. If the `?` succeeds, nothing happens to u here.",
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's \
-             resource (including every String it holds) is dropped. If the `?` succeeds, nothing \
-             happens to v here.",
+             resource (including every String it holds) is dropped. If the `?` succeeds, v's \
+             resource isn't dropped here.", // (v's dot also has the borrow by first: #1151)
         ],
         must_not_contain: &[
             // `s` is a reference, bound after the `?`.
@@ -10029,8 +10029,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and t's \
              resource is dropped. If the `?` succeeds, nothing happens to t here.",
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's \
-             resource (including every String it holds) is dropped. If the `?` succeeds, nothing \
-             happens to v here.",
+             resource (including every String it holds) is dropped. If the `?` succeeds, v's \
+             resource isn't dropped here.", // (v's dot also has the borrow by first: #1151)
         ],
         must_not_contain: &[
             // The arm's pattern moved o's String into `s`.
@@ -12207,7 +12207,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns from inside the `for` loop and it's former resource, the loop's iterator, is dropped, along with whatever it still owns (such as elements it hasn't handed out yet). If the `?` succeeds, nothing happens to the iterator here.",
             "it's former resource, the `for` loop's iterator, is dropped here, as the panic unwinds out of the loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
             // `w`'s own drop at the `?` (#430).
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and w's resource is dropped. If the `?` succeeds, nothing happens to w here.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and w's resource is dropped. If the `?` succeeds, w's resource isn't dropped here.", // (w is also borrowed on this dot: #1151)
         ],
         must_not_contain: &[
             "the function returns from inside the loop",
@@ -21139,6 +21139,391 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "d acquires ownership of a resource; writing to a union never drops its old contents",
         ],
     },
+    TooltipExpect {
+        name: "try_reassign_1151",
+        // #1151: `s = bar()?;` said "If the `?` succeeds, nothing happens
+        // to s here" next to "s acquires ownership of a new resource; its
+        // previous resource is dropped". The `?` runs before the
+        // assignment: on `Err` the function returns and the old String is
+        // dropped by the return (no assignment); on `Ok` the assignment
+        // drops the old String and s owns the new one. The same for a
+        // field, an element, a write through `&mut`, and a `?` next to a
+        // borrow (`x.push_str(&bar()?)`) or a move (`(y, bar()?)`) on the
+        // same dot, where "nothing happens" contradicted the other lines.
+        must_contain: &[
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and s's resource is dropped. If the `?` succeeds, the assignment runs: s acquires ownership of a new resource; its previous resource is dropped.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and t's resource is dropped. If the `?` succeeds, the assignment runs: t acquires ownership of a new resource; its previous resource is dropped.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and p's resource is dropped. If the `?` succeeds, the assignment to p.f runs.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and p.f's resource is dropped. If the `?` succeeds, the assignment runs: p.f acquires ownership of a new resource; its previous resource is dropped.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's resource (including every String it holds) is dropped. If the `?` succeeds, the assignment runs: v[0] acquires ownership of a new resource; its previous resource is dropped.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and u's resource is dropped. If the `?` succeeds, the assignment runs: u acquires ownership of a new resource; its previous resource is dropped.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and x's resource is dropped. If the `?` succeeds, x's resource isn't dropped here.",
+            "x's resource is mutably borrowed by push_str; x can't be used while the borrow is live",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and y's resource is dropped. If the `?` succeeds, y's resource isn't dropped here.",
+            "y's resource is moved",
+        ],
+        must_not_contain: &[
+            "nothing happens to s here",
+            "nothing happens to t here",
+            "nothing happens to p here",
+            "nothing happens to p.f here",
+            "nothing happens to v here",
+            "nothing happens to u here",
+            "nothing happens to x here",
+            "nothing happens to y here",
+            // The assignment's own line, as if it happened on both paths.
+            "=s acquires ownership of a new resource; its previous resource is dropped",
+            "=t acquires ownership of a new resource; its previous resource is dropped",
+            "=v[0] acquires ownership of a new resource; its previous resource is dropped",
+            "=u acquires ownership of a new resource; its previous resource is dropped",
+            "=p.f acquires ownership of a new resource; its previous resource is dropped",
+        ],
+    },
+    TooltipExpect {
+        name: "let_else_move_1133",
+        // #1133: a `let … else` whose `else` block moves a variable but
+        // drops nothing at its exit was drawn inline: the move read as
+        // happening on the matched path too, which then borrowed and
+        // dropped a moved variable. The block runs only when the pattern
+        // fails, and leaves the function there, so after the `let` the
+        // variable still owns its value. (in_loop's else drops the loop's
+        // temporary at its exit, so it was already drawn as a branch.)
+        must_contain: &[
+            "a still owns its resource here: the branch that moved a returned before reaching this point",
+            "b still owns its resource here: the branch that moved b panicked before reaching this point",
+            "d still owns its resource here: the branch that moved d returned before reaching this point",
+            "e still owns its resource here: the branch that moved e returned before reaching this point",
+            "f still owns its resource here: the branch that moved f returned before reaching this point",
+            "a's resource is moved into drop, which drops it",
+        ],
+        must_not_contain: &[
+            // The `if c` around in_if's let-else, which looked like it
+            // moved e on its path.
+            "e may have been moved",
+        ],
+    },
+    TooltipExpect {
+        name: "exit_after_nested_reinit_1135",
+        // #1135: a move, then a nested `if` / `match` / `if let` that
+        // gives the variable a new String on every path, then an exit
+        // (`return`, `panic!`, `continue`). The exit said "No resource is
+        // dropped": the branch's state before its first gap (the nested
+        // conditional's) was the moved one. The variable owns the new
+        // String at the exit, which drops it.
+        must_contain: &[
+            "a goes out of scope. Its resource is dropped.",
+            "b goes out of scope. Its resource is dropped.",
+            "d goes out of scope. Its resource is dropped.",
+            "e goes out of scope. Its resource is dropped.",
+            "f goes out of scope. Its resource is dropped.",
+            "a acquired ownership of a resource (in all branches above)",
+        ],
+        must_not_contain: &[
+            "a goes out of scope. No resource is dropped.",
+            "b goes out of scope. No resource is dropped.",
+            "d goes out of scope. No resource is dropped.",
+            "e goes out of scope. No resource is dropped.",
+            "f goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "inner_block_before_all_exit_1139",
+        // #1139: a bare `{ … }` block, then an `if` / `match` whose every
+        // path leaves the function. The block's locals had no scope end
+        // at all (their drop was never stated): every owner was taken to
+        // have left at the exits, though the block's `}` runs first.
+        // exit_inside's h is in the block that holds the exits: it is
+        // dropped at them and gets no second scope end.
+        must_contain: &[
+            "a goes out of scope. Its resource is dropped.",
+            "b goes out of scope. Its resource is dropped.",
+            "d goes out of scope. Its resource is dropped.",
+            "e goes out of scope. Its resource is dropped.",
+            "f goes out of scope. Its resource is dropped.",
+            "h goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "assign_diverging_rhs_1142",
+        // #1142: `s = return;` (and `= panic!(…)`, `= break`,
+        // `= std::process::exit(1)`, a field, `*r`) drew the assignment
+        // as if it happened: "acquires ownership of a new resource; its
+        // previous resource is dropped". The right-hand side runs first
+        // and never finishes, so nothing is assigned; the exit drops the
+        // old value (`return`, `panic!`) or nothing (`break` out of the
+        // loop, `exit`, which runs no destructors).
+        must_contain: &[
+            "a goes out of scope. Its resource is dropped.",
+            "b goes out of scope. Its resource is dropped.",
+            "p.f goes out of scope. Its resource is dropped.",
+            "u goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "a acquires ownership of a new resource",
+            "b acquires ownership of a new resource",
+            "d acquires ownership of a new resource",
+            "e acquires ownership of a new resource",
+            "p.f acquires ownership of a new resource",
+            "u acquires ownership of a new resource",
+            "*r acquires ownership of a new resource",
+        ],
+    },
+    TooltipExpect {
+        name: "early_return_field_1141",
+        // #1141: `return p.name;` (in an `if`, a match arm, `Some(..)`, a
+        // `break` out of a loop, nested `o.inner.first`, through a Box)
+        // dropped nothing on its path: p.bio, which the function still
+        // owns, was never stated as dropped there. Main counted the whole
+        // of p as moved to the caller. With `if d { e.name } else { e.bio
+        // }` returned, each field is dropped unless it is the one returned.
+        must_contain: &[
+            "p goes out of scope. p.name was moved out earlier, so only p.bio is dropped.",
+            "p.bio goes out of scope. Its resource is dropped.",
+            "q.bio goes out of scope. Its resource is dropped.",
+            "t goes out of scope. t.0 was moved out earlier, so only t.1 is dropped.",
+            "t.1 goes out of scope. Its resource is dropped.",
+            "o goes out of scope. o.inner.first was moved out earlier, so only o.inner.tag and o.note are dropped.",
+            "o.inner.tag goes out of scope. Its resource is dropped.",
+            "o.note goes out of scope. Its resource is dropped.",
+            "w.bio goes out of scope. Its resource is dropped.",
+            "The `return` here hands the caller one of the values its `if` / `match` chooses between. If that value isn't e.name's, e.name's resource is dropped here as the function returns. If it is e.name's, its resource goes to the caller instead and isn't dropped.",
+            "The `return` here hands the caller one of the values its `if` / `match` chooses between. If that value isn't e.bio's, e.bio's resource is dropped here as the function returns. If it is e.bio's, its resource goes to the caller instead and isn't dropped.",
+            "b.bio goes out of scope. Its resource is dropped.",
+            "l.bio goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            // The struct itself isn't one of the values `either` chooses.
+            "If that value isn't e's",
+        ],
+    },
+    TooltipExpect {
+        name: "tuple_self_swap_1138",
+        // #1138: `t = (t.1, t.0);` evaluates the tuple first, moving both
+        // fields out, so the assignment drops nothing (main drew three
+        // "its previous resource is dropped" triangles) and both fields
+        // own their new values to the end (main: "t.0 goes out of scope.
+        // No resource is dropped."). The same for `p = P { a: p.b, b: p.a
+        // }` and in a loop; `u = (u.1, String::from("c"))` drops only the
+        // old u.0. `w = (x, y)` after both fields were moved out drops
+        // nothing and now draws no drop triangle either.
+        must_contain: &[
+            "t acquires ownership of a resource",
+            "t.0 goes out of scope. Its resource is dropped.",
+            "t.1 goes out of scope. Its resource is dropped.",
+            "u acquires ownership of a new resource. Its previous u.1 was moved out earlier, so only its previous u.0 is dropped.",
+            "p.a goes out of scope. Its resource is dropped.",
+            "v.0 goes out of scope. Its resource is dropped.",
+            "w acquires ownership of a new resource. Its previous w.0 and w.1 were moved out earlier, so nothing of it is dropped.",
+        ],
+        must_not_contain: &[
+            "=t acquires ownership of a new resource; its previous resource is dropped",
+            "=t.0 acquires ownership of a new resource; its previous resource is dropped",
+            "=t.1 acquires ownership of a new resource; its previous resource is dropped",
+            "=t.0 goes out of scope. No resource is dropped.",
+            "=u.1 acquires ownership of a new resource; its previous resource is dropped",
+            "=p acquires ownership of a new resource; its previous resource is dropped",
+            "=p.a goes out of scope. No resource is dropped.",
+            "=v.0 goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "box_reboxed_after_deref_move_1145",
+        // #1145: after `let s = *a;`, `a = Box::new(..)` frees the old
+        // Box's heap allocation (main said only "a acquires ownership of a
+        // resource", no drop), and the new Box is whole: moved away
+        // (`drop(a)`, `let e = d;`), nothing is left at the scope end
+        // (main: "Its contents were moved out earlier, so only the Box's
+        // heap allocation is freed", a second free). b's contents are
+        // moved out again, so its scope end keeps that text.
+        must_contain: &[
+            "a acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
+            "b acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
+            "d acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
+            "f acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
+            "g acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
+            "a goes out of scope. No resource is dropped.",
+            "d goes out of scope. No resource is dropped.",
+            "b goes out of scope. Its contents were moved out earlier, so only the Box's heap allocation is freed.",
+            "g goes out of scope. Its resource is dropped (including the String it holds).",
+        ],
+        must_not_contain: &[
+            "a goes out of scope. Its contents were moved out earlier",
+            "d goes out of scope. Its contents were moved out earlier",
+        ],
+    },
+    // #1220: a Box emptied by `let _s = *b;` and re-boxed in a branch.
+    // Main (and #1221) said only the allocation is freed although the
+    // new Box was moved away (b), and "dropped here only if no branch
+    // above moved it" with the condition backwards (f).
+    TooltipExpect {
+        name: "box_rebox_branch_1220",
+        must_contain: &[
+            "b goes out of scope. What is dropped here depends on the path (Rust tracks this with runtime drop flags): where b still holds the Box whose contents were moved out earlier, only its heap allocation is freed; where b was moved away, nothing is dropped.",
+            "f goes out of scope. What is dropped here depends on the path (Rust tracks this with runtime drop flags): where f still holds the Box whose contents were moved out earlier, only its heap allocation is freed; where f was given a new Box, its resource (including the String it holds) is dropped.",
+            "g goes out of scope. What is dropped here depends on the path (Rust tracks this with runtime drop flags): where g still holds the Box whose contents were moved out earlier, only its heap allocation is freed; where g was given a new Box, its resource (including the String it holds) is dropped; where g was moved away, nothing is dropped.",
+            "g was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). What is dropped when g goes out of scope depends on the path: its contents were moved out before the branches.",
+            "j acquires ownership of a new resource. What its previous value drops here depends on the path (Rust tracks this with runtime drop flags): where j still holds the Box whose contents were moved out earlier, only its heap allocation is freed; where j was given a new Box, its resource (including the String it holds) is dropped.",
+        ],
+        must_not_contain: &[
+            "=b goes out of scope. Its contents were moved out earlier, so only the Box's heap allocation is freed.",
+            "f goes out of scope. Its resource (including the String it holds) is dropped here only if no branch above moved it",
+            "g goes out of scope. Its resource (including the String it holds) is dropped here only if no branch above moved it",
+            "If the branch that ran didn't move it, its resource (including the String it holds) is dropped when g goes out of scope",
+            "j acquires ownership of a new resource. Its previous resource (including the String it holds) is dropped here only if j still holds it",
+        ],
+    },
+    TooltipExpect {
+        name: "branch_mut_lend_move_1132",
+        // #1132: s mutably lent to r in one branch and moved in the other
+        // is maybe-moved after the join (rustc: E0382 on any use until it
+        // is assigned). Main ranked the lend and the move equally, kept
+        // the first branch's lend, and when r's borrow ended drew s as
+        // "the owner" to the end of the function. Where s's column stops
+        // is pinned by `a_value_lent_in_one_branch_and_moved_in_another_stays_moved`.
+        must_contain: &[
+            "s was moved in at least one branch above, so it can't be used after the branches \
+             (until it's assigned again). If the branch that ran didn't move it, its resource is \
+             dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+            "t goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+            "w acquires ownership of a new resource. Its previous resource is dropped here only if \
+             no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            // The scope-end wording main used after drawing s as the owner again.
+            "s goes out of scope. Its resource is dropped here only if s still holds it",
+            "t goes out of scope. Its resource is dropped here only if t still holds it",
+        ],
+    },
+    TooltipExpect {
+        name: "branch_dead_loan_move_1178",
+        // #1178: s is lent to r before the `if`; the `if` points r at t
+        // and then moves s, which rustc allows because the loan of s is
+        // dead on that path. The move fell through `calc_state` to
+        // Invalid, the join ignored that branch, and when r's borrow
+        // ended s was drawn as "the owner" again. Where the columns stop
+        // is pinned by `a_value_lent_in_one_branch_and_moved_in_another_stays_moved`.
+        must_contain: &[
+            "s was moved in at least one branch above, so it can't be used after the branches. \
+             If the branch that ran didn't move it, its resource is dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+            "u goes out of scope. Its resource is dropped here only if no branch above moved it \
+             (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            // The join and scope-end wording main used for the dropped branch.
+            "s may have been moved (consumed in at least one branch above)",
+            "u may have been moved (consumed in at least one branch above)",
+            "s goes out of scope. Its resource is dropped here only if s still holds it",
+        ],
+    },
+    TooltipExpect {
+        name: "slice_pattern_arms_1144",
+        // #1144: a slice pattern in a `match` arm or `if let` drew no
+        // bindings, and the array as never moved: "arr goes out of scope.
+        // Its resource is dropped (including every String it holds)",
+        // though a and b took both Strings. #1166: what a slice pattern
+        // doesn't take (`_`, `..`) stays in the array and is dropped with
+        // it; main said "No resource is dropped" (`let [d, _] = duo;`).
+        // Checked with rustc: `println!("{}", duo[1])` after the `let`
+        // compiles; `duo[0]` is E0382.
+        must_contain: &[
+            "Move from arr to a",
+            "Move from arr to b",
+            "arr goes out of scope. No resource is dropped.",
+            "Move from pair to c",
+            "pair goes out of scope. pair[0] was moved out earlier, so only pair[1] is dropped.",
+            "c goes out of scope. Its resource is dropped.",
+            "Move from trio to first",
+            "Move from trio to last",
+            "trio goes out of scope. trio[0] and trio[2] were moved out in some of the branches above; \
+             each is dropped here only if no branch above moved it (Rust tracks this with runtime drop \
+             flags). trio[1] is dropped.",
+            "duo goes out of scope. duo[0] was moved out earlier, so only duo[1] is dropped.",
+            "three goes out of scope. three[0] was moved out earlier, so only three[1] and three[2] are dropped.",
+            "Partial copy from nums to x",
+            "x is initialized with a copy of a value inside nums",
+        ],
+        must_not_contain: &[
+            "arr goes out of scope. Its resource is dropped",
+            "pair goes out of scope. Its resource is dropped",
+            "trio goes out of scope. Its resource is dropped",
+            "duo goes out of scope. No resource is dropped.",
+            "three goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "pattern_fixes_1169_1181_1177",
+        // #1169: `_ = s;` matches the place against `_`, which binds
+        // nothing, so nothing moves (as for `let _ = s;`); s is read and
+        // dropped later. A `_` against a part of a tuple literal (`(a, _)
+        // = (t, u)`) is moved by the literal and dropped with it.
+        // #1181: a parameter pattern that leaves parts of the argument
+        // unbound (`..`, `_`): those parts are dropped when the function
+        // returns, which no column shows, so the first binding's dot says
+        // so.
+        // #1177: `whole @ Some(n)`: n is bound too, a copy of the i32 in o.
+        must_contain: &[
+            "u's resource is moved into a temporary that is dropped at the end of this statement",
+            "name acquires ownership from the caller. The pattern doesn't bind the argument's bio, so it stays in the parameter and is dropped when greet returns",
+            "a acquires ownership from the caller. The pattern doesn't bind the argument's .1, so it stays in the parameter and is dropped when first returns",
+            "nm acquires ownership from the caller. The pattern doesn't bind the argument's bio, so it stays in the parameter and is dropped when named returns",
+            "w0 acquires ownership from the caller. The pattern doesn't bind the argument's .1, so it stays in the parameter and is dropped when tuple_struct returns",
+            "n is a copy of the caller's value. The pattern doesn't bind the argument's inner.tag, so it stays in the parameter and is dropped when nested returns",
+            "b0 is an immutable borrow from the caller",
+            "whole is initialized with a copy of o",
+            "n is initialized with a copy of a value inside o",
+            "k is initialized with a copy of a value inside o",
+        ],
+        must_not_contain: &[
+            "s's resource is moved into a temporary",
+            "p.name's resource is moved into a temporary",
+            // (The parameters' L-arrows keep "name acquires ownership
+            // from the caller": the caller's argument does arrive whole.)
+            // `&(ref b0, _)` matches the caller's tuple: nothing of it is
+            // dropped here.
+            "dropped when borrowed returns",
+        ],
+    },
+    TooltipExpect {
+        name: "pattern_columns_lenders_1201_1222",
+        // #1201: `let n = match o { Some(n) => n, .. };`: the arm's n and
+        // the let's n get columns of their own (their headers say they're
+        // different variables). On one shared column the outer n had no
+        // line from its initialization to its use. The same for a
+        // `String` (`arm_string`), an `if let` (`if_let_init`), a block
+        // (`block_init`), and a non-diverging `None` arm, which panicked
+        // (#1239).
+        // #1222: a binding by reference into a call's returned reference
+        // borrows what the call borrowed (`o`, `m`), not the function.
+        // `pick(&a, &b)` may point into either: no lender is named.
+        must_contain: &[
+            "n, immutable. A different variable from the n declared on line 18 (separate scopes, so only one exists at a time)",
+            "n, immutable. A different variable from the n declared on line 17 (separate scopes, so only one exists at a time)",
+            "x, immutable. A different variable from the x declared on line 26 (separate scopes, so only one exists at a time)",
+            "v, immutable. A different variable from the v declared on line 38 (separate scopes, so only one exists at a time)",
+            "y, immutable. A different variable from the y declared on line 43 (separate scopes, so only one exists at a time)",
+            "Partial immutable borrow from o to x",
+            "Return immutably borrowed resource from x to o",
+            "Partial immutable borrow from o to z",
+            "Return immutably borrowed resource from z to o",
+            "Partial Mutable borrow from m to mx",
+            "Return mutably borrowed resource from mx to m",
+            "pq's immutable borrow ends (what it borrows from isn't shown)",
+        ],
+        must_not_contain: &[
+            "=n, immutable",
+            "borrow from get to",
+            "to get",
+            "borrow from get_mut to",
+            "borrow from pick to",
+            "to pick",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -28683,6 +29068,57 @@ fn a_boxed_closure_borrowing_through_a_reference_keeps_it_until_dropped() {
     assert_eq!(ys("d's immutable borrow ends"), vec![row("drop(d);")]);
     assert_eq!(ys("d no longer borrows the resource p points to"), vec![row("drop(d);")]);
     assert_eq!(ys("w's resource is no longer immutably borrowed"), vec![row("drop(d);")]);
+}
+
+/// #1132 (`branch_mut_lend_move_1132`): a value mutably lent in one branch
+/// and moved in another has no column after the join, also once the
+/// borrow ends (main drew it as "the owner" again when the lending branch
+/// came first). When it is assigned again (`w = String::from("new")`, the
+/// branches the other way round) its column comes back from that row on;
+/// main drew nothing after the assignment. Also #1178: a value lent before
+/// the conditional and moved in a branch where that loan is dead.
+#[test]
+fn a_value_lent_in_one_branch_and_moved_in_another_stays_moved() {
+    let rv = run_with_local_backend("branch_mut_lend_move_1132");
+    let els = common::svg::rv_elements(&rv.timeline_panel_string());
+    let line_from = |var: &str, row: usize| els.iter()
+        .filter(|e| e.kind == "line" && e.var.as_deref() == Some(var))
+        .filter(|e| e.line.as_deref().and_then(|l| l.parse::<usize>().ok()).is_some_and(|l| l >= row))
+        .map(|e| e.id.clone())
+        .collect::<Vec<_>>();
+    // s: `if` lends it (L9), `else` moves it (L11), join on L13.
+    assert_eq!(line_from("s", 12), Vec::<String>::new(), "s has a column after the join");
+    // t: `match` arm 0 lends it, arm 1 moves it, join on L23.
+    assert_eq!(line_from("t", 22), Vec::<String>::new(), "t has a column after the join");
+    // w: maybe-moved after L35, assigned again on L36.
+    assert_eq!(line_from("w", 31), vec!["w@L36-37:line:full_privilege".to_string(),
+        "w@L37-38:line:full_privilege".to_string()]);
+    // #1178 (`branch_dead_loan_move_1178`): moved in the `if` after the
+    // loan of it died there; joins on L13 (s) and L24 (u).
+    let rv = run_with_local_backend("branch_dead_loan_move_1178");
+    let els = common::svg::rv_elements(&rv.timeline_panel_string());
+    let line_from = |var: &str, row: usize| els.iter()
+        .filter(|e| e.kind == "line" && e.var.as_deref() == Some(var))
+        .filter(|e| e.line.as_deref().and_then(|l| l.parse::<usize>().ok()).is_some_and(|l| l >= row))
+        .map(|e| e.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(line_from("s", 10), Vec::<String>::new(), "s has a column after the join");
+    assert_eq!(line_from("u", 21), Vec::<String>::new(), "u has a column after the join");
+}
+
+
+/// #1138 (`tuple_self_swap_1138`): a reassignment that drops nothing
+/// (`w = (x, y)` after both of w's fields were moved out) draws no drop
+/// triangle, only a dot whose tooltip says nothing is dropped.
+#[test]
+fn a_reassignment_that_drops_nothing_has_no_drop_triangle() {
+    let rv = run_with_local_backend("tuple_self_swap_1138");
+    let tl = rv.timeline_panel_string();
+    // The drop dot is a <g> holding a circle and the triangle polygon; a
+    // plain dot is a lone <circle>.
+    let at = tl.find("nothing of it is dropped").expect("w's reassignment dot");
+    let start = tl[..at].rfind('<').unwrap();
+    assert!(tl[start..].starts_with("<circle"), "drop dot drawn for a reassignment that drops nothing: {}", &tl[start..start + 200.min(tl.len() - start)]);
 }
 
 /// Each source row of a code panel as (line number, the text it shows,
