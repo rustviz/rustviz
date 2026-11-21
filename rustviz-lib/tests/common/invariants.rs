@@ -41,73 +41,15 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 /// the ones in those directories. One entry covers every violation of
 /// that invariant in that snippet.
 pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
-    // State::Invalid where nothing more is drawn (yet).
-    ("borrow_stored_by_call", "invalid-state", 1202),
-    ("call_reborrow_kinds", "invalid-state", 1202),
-    ("loop_break_ref_lender", "invalid-state", 1202),
-    ("loop_break_several_fallthrough", "invalid-state", 1202),
-    ("loop_break_value_local", "invalid-state", 1202),
-    ("mutref_moved_into_generic", "invalid-state", 1202),
-    ("two_field_borrow_through_ref_1080", "invalid-state", 1202),
     // A `&mut` moved into a call whose result carries the borrow.
     ("chain_writes_1082", "event-on-dead-column", 1128),
-    ("chain_writes_1082", "invalid-state", 1128),
     ("ref_into_adapter_1076", "event-on-dead-column", 1128),
-    ("ref_into_adapter_1076", "invalid-state", 1128),
     // A struct moved as a whole while a field column goes on.
     ("ctor_literals_768", "field-outlives-moved-struct", 1127),
     ("deref_assign_wording", "field-outlives-moved-struct", 1168),
     ("deref_write_drops_old", "field-outlives-moved-struct", 1168),
-    // A value holding a borrow moved by a pattern or `let x = u;`.
-    ("pattern_struct_ref_field", "event-on-dead-column", 1198),
-    ("pattern_struct_ref_fields", "event-on-dead-column", 1198),
-    ("stored_borrow_end_in_arms_997", "drop-without-value", 1198),
-    ("stored_borrow_end_in_arms_997", "event-on-dead-column", 1198),
-    ("stored_borrow_end_in_arms_997", "invalid-state", 1198),
-    ("stored_borrow_end_in_arms_997", "owner-after-maybe-moved-join", 1198),
-    ("stored_borrow_holder_copy_or_arm_997", "event-on-dead-column", 1198),
-    ("stored_borrow_holder_copy_or_arm_997", "invalid-state", 1198),
-    ("stored_borrow_holder_copy_or_arm_997", "owner-after-maybe-moved-join", 1198),
-    // `o.inner = other;`: the reference field's line stops.
-    ("borrow_struct_field_overwrite_var", "event-on-dead-column", 1199),
-    ("borrow_struct_field_overwrite_var", "invalid-state", 1199),
-    ("field_write_in_arm_end_659", "invalid-state", 1199),
     // One line's events stacked out of order.
     ("edition2024/whole_value_moved_by_chain_953", "event-on-dead-column", 1200),
-    ("let_tuple_branch_value_1007", "event-on-dead-column", 1200),
-    ("let_tuple_branch_value_1007", "line-after-column-ends", 1200),
-    // An outer variable sharing a column with a same-named arm binding.
-    ("exit_outer_borrow_unused", "event-on-dead-column", 1201),
-    // Repros of open bugs (known_bugs/), by issue.
-    ("known_bugs/1122_mut_call_returns_shared", "drop-without-value", 1122),
-    ("known_bugs/1122_mut_call_returns_shared", "event-on-dead-column", 1122),
-    ("known_bugs/1122_mut_call_returns_shared", "invalid-state", 1122),
-    ("known_bugs/1123_self_reslice", "self-borrow", 1123),
-    ("known_bugs/1126_struct_update_ref_field", "event-on-dead-column", 1126),
-    ("known_bugs/1126_struct_update_ref_field", "invalid-state", 1126),
-    ("known_bugs/1127_drop_struct_with_ref", "field-outlives-moved-struct", 1127),
-    ("known_bugs/1128_mut_ref_through_generic", "event-on-dead-column", 1128),
-    ("known_bugs/1128_mut_ref_through_generic", "invalid-state", 1128),
-    ("known_bugs/1129_for_over_mut_ref", "return-without-lend", 1129),
-    ("known_bugs/1131_mut_ref_to_temp_ref", "borrow-kind-mismatch", 1131),
-    ("known_bugs/1131_mut_ref_to_temp_ref", "drop-without-value", 1131),
-    ("known_bugs/1131_mut_ref_to_temp_ref", "invalid-state", 1131),
-    ("known_bugs/1132_mut_borrow_vs_drop_arms", "owner-after-maybe-moved-join", 1132),
-    ("known_bugs/1133_let_else_moves", "drop-without-value", 1133),
-    ("known_bugs/1133_let_else_moves", "event-on-dead-column", 1133),
-    ("known_bugs/1133_let_else_moves", "invalid-state", 1133),
-    ("known_bugs/1134_labeled_block_value", "drop-without-value", 1134),
-    ("known_bugs/1136_try_after_fnonce", "drop-without-value", 1136),
-    ("known_bugs/1138_tuple_self_swap", "drop-of-moved-value-at-reassign", 1138),
-    ("known_bugs/1138_tuple_self_swap", "event-on-dead-column", 1138),
-    ("known_bugs/1138_tuple_self_swap", "invalid-state", 1138),
-    ("known_bugs/1139_inner_block_then_all_exit", "column-ends-without-scope-end", 1139),
-    ("known_bugs/1145_box_reboxed_then_moved", "drop-without-value", 1145),
-    ("known_bugs/1148_move_closure_mut_ref", "event-on-dead-column", 1148),
-    ("known_bugs/1148_move_closure_mut_ref", "invalid-state", 1148),
-    ("known_bugs/1152_iter_mut_through_ref", "borrow-kind-mismatch", 1152),
-    ("known_bugs/1197_tuple_struct_ref", "event-on-dead-column", 1197),
-    ("known_bugs/1197_tuple_struct_ref", "invalid-state", 1197),
 ];
 
 /// The invariants, by the name the failure list and messages use.
