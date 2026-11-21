@@ -5880,3 +5880,108 @@ pub fn event_dot_process_exit(name: &String, owns: Option<bool>, call: &str) -> 
         ),
     }
 }
+
+/* Approximation notes (`ApproxNote`): what a figure simplifies, added to
+   the tooltip of a dot drawn on the construct anyway. Each is one
+   sentence in parentheses that says what RustViz doesn't draw, never
+   that what it draws is complete. */
+
+// On a loop's first dot drawn for a pass (#853), one per loop. The
+// figure shows the body once; the loop may run it any number of times
+// (also none, or once before a `break`), so this says no more than that.
+// `declares`: the loop declares variables (its pattern, a `let` in its
+// body, a `while let` binding), which every pass that gets there
+// makes anew.
+pub fn approx_note_loop(declares: bool) -> String {
+    if declares {
+        "(RustViz draws one pass through this loop, which may run many times; the variables declared inside it are new on each pass.)".to_owned()
+    } else {
+        "(RustViz draws one pass through this loop, which may run many times.)".to_owned()
+    }
+}
+
+// On the receiver's dot of `c.borrow()` / `c.borrow_mut()` (c a RefCell;
+// #685). The compile-time shared borrow is what's drawn; RefCell's own
+// run-time borrow lasts until the Ref / RefMut is dropped (whose drop
+// may itself be drawn, as a temporary's).
+pub fn approx_note_refcell(method: &str) -> String {
+    let guard = if method == "borrow_mut" { "RefMut" } else { "Ref" };
+    format!(
+        "(RefCell also tracks this borrow at run time, until the {} that {} returns is dropped; RustViz doesn't draw run-time borrows.)",
+        guard, styled_name_html(method)
+    )
+}
+
+// On the receiver's dot of `m.lock()` (Mutex), `l.read()` / `l.write()`
+// (RwLock; #685). `reading`: Some for an RwLock.
+pub fn approx_note_lock(kind: &str, method: &str, reading: Option<bool>) -> String {
+    let how = match reading {
+        Some(true) => " for reading",
+        Some(false) => " for writing",
+        None => "",
+    };
+    format!(
+        "(The {} stays locked{} until the guard that {} returns is dropped; RustViz doesn't draw the lock.)",
+        kind, how, styled_name_html(method)
+    )
+}
+
+// On p's dot where `*p` reads or writes through the raw pointer p
+// (#194): it's drawn on p's column only.
+pub fn approx_note_raw_deref(name: &str) -> String {
+    format!(
+        "({0} is a raw pointer; RustViz doesn't show this on what {0} points to.)",
+        styled_name_html(name)
+    )
+}
+
+// On p's first dot for `let p = &mut x as *mut T;` (#194): x's column
+// shows no borrow.
+pub fn approx_note_raw_cast(name: &str, lender: &str) -> String {
+    format!(
+        "({0} is a raw pointer to {1}; RustViz doesn't draw raw pointers as borrows, so {1}'s column shows nothing here.)",
+        styled_name_html(name), styled_name_html(lender)
+    )
+}
+
+// On the collection's dot for `*slots[0]` with slots[0] a reference
+// (#689): which variable it borrows from isn't known statically.
+pub fn approx_note_element_ref(place: &str) -> String {
+    format!(
+        "(RustViz doesn't follow {} to what it points to, so this isn't drawn on the variable it borrows from.)",
+        styled_name_html(place)
+    )
+}
+
+// On the first dot of a closure with captures (#133, #278, #347).
+pub fn approx_note_closure(name: &str) -> String {
+    format!(
+        "(RustViz draws {0}'s captures here; the uses in {0}'s body aren't drawn where {0} is called.)",
+        styled_name_html(name)
+    )
+}
+
+// On the first dot of a variable holding an async block (#135).
+pub fn approx_note_async_block(name: &str) -> String {
+    format!(
+        "(RustViz doesn't draw the async block's body, which runs when {} is awaited.)",
+        styled_name_html(name)
+    )
+}
+
+// On the first dot of a variable holding the future an async fn call
+// returns (#135).
+pub fn approx_note_async_call(name: &str, fn_name: &str) -> String {
+    format!(
+        "({1} is an async fn; RustViz doesn't draw its body, which runs when {0} is awaited.)",
+        styled_name_html(name), styled_name_html(fn_name)
+    )
+}
+
+// On the first dot of each parameter of an async fn (#135).
+pub fn approx_note_async_fn(fn_name: &str) -> String {
+    format!(
+        "({} is an async fn; RustViz doesn't draw its body, which runs when the future it returns is awaited.)",
+        styled_name_html(fn_name)
+    )
+}

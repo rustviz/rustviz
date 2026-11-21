@@ -4317,6 +4317,15 @@ pub struct VisualizationData {
     /// `struct_write_tracks`); the renderer draws a line's tracks half a
     /// row apart instead of a whole row per arrow.
     pub arrow_tracks: HashMap<usize, usize>,
+
+    /// Notes on dots saying what is simplified (`ApproxNote`), in the
+    /// order the plugin found them.
+    pub approx_notes: Vec<ApproxNote>,
+
+    /// The source line the code panel shows on each visual row (`None`
+    /// on rows it adds), set by `render_svg` before the timeline is
+    /// drawn: approximation notes are placed by source line.
+    pub row_lines: Vec<Option<usize>>,
 }
 
 impl VisualizationData {
@@ -4328,6 +4337,53 @@ impl VisualizationData {
         matches!(state, State::PartialPrivilege { .. } | State::RevokedPrivilege { .. })
             || matches!(self.timelines.get(hash).map(|t| &t.resource_access_point),
                 Some(ResourceAccessPoint::Struct(Struct { is_member: true, .. })))
+    }
+}
+
+/// A note saying that what the figure shows of a construct is a
+/// simplification RustViz makes (a loop drawn as one pass, #853). It is
+/// added to the tooltip of an event dot that is drawn anyway, never
+/// drawn as a dot of its own: a column with no dot where a note would
+/// go gets none.
+#[derive(Debug, Clone)]
+pub enum ApproxNote {
+    /// `text` on the first event dot of column `hash` on a source line
+    /// in `lines` (inclusive).
+    At { hash: u64, lines: (usize, usize), text: String },
+    /// A loop whose first line is `head`. It gets one note, on its
+    /// first event dot in source order (then leftmost) that is drawn for
+    /// a pass: on a line in `pass` (inclusive), or on `head` for a
+    /// column in `head_cols` (a `for` loop's pattern). Only columns the
+    /// loop declares (`locals`) or that have a dot before `head` count:
+    /// a column first given a value inside the loop is the loop's
+    /// receiver (`let n = loop { … break v; }`, bound once) or a
+    /// temporary. Dots on the lines of a loop inside it (`nested`) don't
+    /// count: a loop with no other dot gets no note. `declares`: whether the loop declares
+    /// any variable (the note then says each pass has its own).
+    Loop {
+        head: usize,
+        pass: (usize, usize),
+        head_cols: Vec<u64>,
+        locals: Vec<u64>,
+        nested: Vec<(usize, usize)>,
+        declares: bool,
+    },
+}
+
+impl ApproxNote {
+    /// The note with its source lines mapped by `f` (lines hidden from
+    /// the figure removed before it).
+    pub fn map_lines(&mut self, f: impl Fn(usize) -> usize) {
+        match self {
+            ApproxNote::At { lines, .. } => *lines = (f(lines.0), f(lines.1)),
+            ApproxNote::Loop { head, pass, nested, .. } => {
+                *head = f(*head);
+                *pass = (f(pass.0), f(pass.1));
+                for n in nested.iter_mut() {
+                    *n = (f(n.0), f(n.1));
+                }
+            }
+        }
     }
 }
 

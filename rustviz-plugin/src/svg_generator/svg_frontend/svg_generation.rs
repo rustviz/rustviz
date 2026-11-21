@@ -727,6 +727,12 @@ fn hide_source_lines(annotated_src_str: &str, source_rs_str: &str, visualization
             .collect();
         visualization_data.event_line_map = shifted_elm;
 
+        // The approximation notes' lines too (a note in a hidden fn
+        // finds no dot).
+        for note in visualization_data.approx_notes.iter_mut() {
+            note.map_lines(|l| shift(l));
+        }
+
         (pruned_a, pruned_s)
     }
 }
@@ -1344,6 +1350,7 @@ pub fn render_svg(
     let num_lines = line_of_code;
 
     // data for tl panel
+    visualization_data.row_lines = row_lines.clone();
     let (timeline_panel_string, max_width) = timeline_panel::render_timeline_panel(visualization_data);
     // Each element's `data-rv-id`, and its rows as code-panel lines.
     let timeline_panel_string = rv_attrs::finalize(&timeline_panel_string, &row_lines);

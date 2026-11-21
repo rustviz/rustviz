@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier};
+use crate::svg_generator::data::{ApproxNote, is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier};
 use crate::svg_generator::hover_messages::{self, styled_name_html};
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use crate::svg_generator::svg_frontend::rv_attrs::{self, Rv};
@@ -40,6 +40,25 @@ struct PendingDot {
     var: String,
     row: usize,
     events: Vec<&'static str>,
+    /// Approximation notes (`ApproxNote`), after the events' text.
+    notes: Vec<DotNote>,
+}
+
+/// An approximation note on a dot, and whether it is a loop's.
+#[derive(Clone, PartialEq)]
+enum DotNote {
+    /// A loop's note; whether the loop declares variables.
+    Loop(bool),
+    Other(String),
+}
+
+impl DotNote {
+    fn text(&self) -> String {
+        match self {
+            DotNote::Loop(declares) => hover_messages::approx_note_loop(*declares),
+            DotNote::Other(t) => t.clone(),
+        }
+    }
 }
 
 /// Collects the dots of every column, merging events that share a
@@ -72,7 +91,7 @@ impl DotLayer {
             dots.push(PendingDot {
                 hash, x, y, owner_key, is_member,
                 lines: Vec::new(), drop: false, event: false, call: false,
-                var: column.name.clone(), row, events: Vec::new(),
+                var: column.name.clone(), row, events: Vec::new(), notes: Vec::new(),
             });
             dots.len() - 1
         });
@@ -134,6 +153,67 @@ impl DotLayer {
             .position(|(lend, _)| *lend == Some(id))
             .map_or(dot.lines.len(), |i| i + 1);
         dot.lines.insert(at, (None, title));
+    }
+
+    /// Puts each approximation note on the event dots it belongs to
+    /// (see `ApproxNote`). `row_lines` maps a dot's row to its source
+    /// line.
+    fn add_approx_notes(&mut self, notes: &[ApproxNote], row_lines: &[Option<usize>]) {
+        // Event dots by column, with their source lines, in dot order.
+        let mut by_col: BTreeMap<u64, Vec<(usize, usize)>> = BTreeMap::new();
+        for (i, dot) in self.dots.iter().enumerate() {
+            if !dot.event {
+                continue;
+            }
+            if let Some(line) = rv_attrs::line_of(dot.row, row_lines) {
+                by_col.entry(dot.hash).or_default().push((line, i));
+            }
+        }
+        // The dots of `col` on the first of its lines in `lo..=hi`.
+        let first_in = |col: &[(usize, usize)], lo: usize, hi: usize| -> Vec<usize> {
+            let Some(first) = col.iter().map(|(l, _)| *l).filter(|l| (lo..=hi).contains(l)).min() else { return Vec::new() };
+            col.iter().filter(|(l, _)| *l == first).map(|(_, i)| *i).collect()
+        };
+        let add = |dots: &mut Vec<PendingDot>, at: Vec<usize>, note: DotNote| {
+            for i in at {
+                if !dots[i].notes.contains(&note) {
+                    dots[i].notes.push(note.clone());
+                }
+            }
+        };
+        // Loops, one note each, on a dot outside the loops nested in it.
+        // A loop whose dots are all in nested loops gets none: its note
+        // would sit inside a nested loop, where "this loop" reads as the
+        // nested one, whose own note already says it.
+        for note in notes {
+            let ApproxNote::Loop { head, pass: (lo, hi), head_cols, locals, nested, declares } = note else { continue };
+            let mut best: Option<(usize, i64, usize)> = None;
+            for (hash, col) in &by_col {
+                if !locals.contains(hash) && !col.iter().any(|(l, _)| l < head) {
+                    continue;
+                }
+                for &(line, i) in col {
+                    let in_pass = (*lo..=*hi).contains(&line) || (line == *head && head_cols.contains(hash));
+                    if !in_pass || nested.iter().any(|(h, e)| (*h..=*e).contains(&line)) {
+                        continue;
+                    }
+                    let key = (self.dots[i].row, self.dots[i].x, i);
+                    if best.is_none_or(|b| key < b) {
+                        best = Some(key);
+                    }
+                }
+            }
+            if let Some((.., i)) = best {
+                add(&mut self.dots, vec![i], DotNote::Loop(*declares));
+            }
+        }
+        for note in notes {
+            if let ApproxNote::At { hash, lines: (lo, hi), text } = note {
+                if let Some(col) = by_col.get(hash) {
+                    add(&mut self.dots, first_in(col, *lo, *hi), DotNote::Other(text.clone()));
+                }
+            }
+        }
     }
 
     fn flush(self, output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>, registry: &Handlebars) {
@@ -217,6 +297,17 @@ fn merged_dot_title(lines: &[(Option<usize>, String)]) -> String {
         .join("&lt;br&gt;")
 }
 
+/// A dot's tooltip with its approximation notes, each on a line of its
+/// own after the events' text (which stays as it was).
+fn with_approx_notes(title: String, notes: &[DotNote]) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    if !title.is_empty() {
+        lines.push(title);
+    }
+    lines.extend(notes.iter().map(DotNote::text));
+    lines.join("&lt;br&gt;")
+}
+
 /// Template data plus the `data-rv-*` attributes (`{{rv}}`).
 #[derive(Serialize)]
 struct WithRv<'a, T: Serialize> {
@@ -226,7 +317,7 @@ struct WithRv<'a, T: Serialize> {
 }
 
 fn render_pending_dot(dot: &PendingDot, registry: &Handlebars) -> String {
-    let title = merged_dot_title(&dot.lines);
+    let title = with_approx_notes(merged_dot_title(&dot.lines), &dot.notes);
     let (cx, cy) = (dot.x, dot.y);
     let kind = if dot.event { rv_attrs::DOT } else { rv_attrs::CALL };
     let rv = Rv::new(kind).events(&dot.events).var(&dot.var).row(dot.row).drop(dot.drop).attrs();
@@ -484,6 +575,7 @@ pub fn render_timeline_panel(visualization_data : & mut VisualizationData) -> (S
     render_arrows_string_external_events_version(&mut output, visualization_data, &resource_owners_layout, &mut dots, &registry); // arrows
     // Written last: a call icon (`f`) added by the arrow pass shares
     // the dot of the borrow it makes.
+    dots.add_approx_notes(&visualization_data.approx_notes, &visualization_data.row_lines);
     dots.flush(&mut output, &registry);
     render_struct_box(&mut output, &structs_info, &visualization_data.fn_start_lines, &registry); // struct box
 

@@ -765,6 +765,11 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // `VisualizationData::binding_columns`.
   pub binding_columns: Vec<(u64, u64)>,
 
+  // Notes on dots saying what the figure simplifies (a loop drawn as one
+  // pass, #853); handed to the renderer's
+  // `VisualizationData::approx_notes`.
+  pub approx_notes: Vec<ApproxNote>,
+
   // `r?` with `r` a non-`Copy` place moves `r` (#652). Set while
   // `match_rhs` draws that move into the variable `r?` is bound to;
   // the Move events made meanwhile carry it.
@@ -1037,6 +1042,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       premoved: HashSet::new(),
       live_tuples: Vec::new(),
       binding_columns: Vec::new(),
+      approx_notes: Vec::new(),
       break_binds: Vec::new(),
       deferred_breaks: Vec::new(),
       line_override: None,
