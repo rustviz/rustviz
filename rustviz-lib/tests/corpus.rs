@@ -23155,14 +23155,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "approx_method_chain_687",
-        // #687: the value a method chain's later calls work on has no column; the variable's dot at the first call says so. Main drew the same dots with no note. Where each note
-        // sits (and where none does) is pinned by
-        // `approximation_notes_sit_on_their_constructs`.
+        // #687: a method chain's intermediate values have no column, but
+        // they're dropped by the end of the statement, so the chain gets
+        // no note. The first version of this PR noted each chain on the
+        // variable's dot at the first call; review dropped it, since the
+        // figure isn't wrong there.
         must_contain: &[
-            "(RustViz doesn't draw the value that iter returns, which map and then collect go on to use.)",
-            "(RustViz doesn't draw the value that trim returns, which to_string goes on to use.)",
+            "v's resource is immutably borrowed by iter; v is read-only while the borrow is live",
         ],
         must_not_contain: &[
+            "doesn't draw the value that iter returns",
+            "doesn't draw the value that trim returns",
             "doesn't draw the value that len returns",
             "doesn't draw the value that borrow returns",
         ],
@@ -30908,12 +30911,11 @@ fn loop_notes_sit_on_each_loops_first_dot() {
 }
 
 /// Approximation notes for constructs RustViz simplifies (#685, #194,
-/// #687, #689, #133/#278/#347, #135): each goes on the dot drawn for the
+/// #689, #133/#278/#347, #135): each goes on the dot drawn for the
 /// construct, on its row, and on no other dot: not on `Borrow::borrow` or
-/// `Cell::set` (no run-time borrow), a write through a reference, a Copy
-/// result (`s.len().max(1)`), a chain whose value is drawn as a temporary
-/// (`cell.borrow().len()`), an element write not through a reference, a
-/// closure with no captures, or a plain fn's parameter.
+/// `Cell::set` (no run-time borrow), a write through a reference, a
+/// method chain (#687: no note), an element write not through a
+/// reference, a closure with no captures, or a plain fn's parameter.
 #[test]
 fn approximation_notes_sit_on_their_constructs() {
     let cases: &[(&str, &[(&str, &[&str])])] = &[
@@ -30931,9 +30933,7 @@ fn approximation_notes_sit_on_their_constructs() {
             ("(q is a raw pointer; RustViz doesn't show this on what q points to.)", &["let y = unsafe { *q };"]),
         ]),
         ("approx_method_chain_687", &[
-            ("(RustViz doesn't draw the value that iter returns, which map and then collect go on to use.)", &["let w: Vec<i32> = v.iter().map(|x| x + 1).collect();"]),
-            ("(RustViz doesn't draw the value that trim returns, which to_string goes on to use.)", &["let t = s.trim().to_string();"]),
-            // The Ref is drawn as a temporary: no chain note, only RefCell's.
+            // Method chains get no note; the Ref is RefCell's.
             ("(RefCell also tracks this borrow at run time, until the Ref that borrow returns is dropped; RustViz doesn't draw run-time borrows.)", &["let k = cell.borrow().len();"]),
         ]),
         ("approx_element_ref_689", &[

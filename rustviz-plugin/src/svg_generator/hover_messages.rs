@@ -5953,22 +5953,6 @@ pub fn approx_note_element_ref(place: &str) -> String {
     )
 }
 
-// On the variable's dot at the first call of a method chain (#687): the
-// value that call returns, and what later calls make of it, have no
-// column.
-pub fn approx_note_method_chain(first: &str, later: &[String]) -> String {
-    let later: Vec<String> = later.iter().map(|m| styled_name_html(m)).collect();
-    let (users, verb) = match later.as_slice() {
-        [one] => (one.clone(), "goes"),
-        [init @ .., last] => (format!("{} and then {}", init.join(", "), last), "go"),
-        [] => (String::new(), "go"),
-    };
-    format!(
-        "(RustViz doesn't draw the value that {} returns, which {} {} on to use.)",
-        styled_name_html(first), users, verb
-    )
-}
-
 // On the first dot of a closure with captures (#133, #278, #347).
 pub fn approx_note_closure(name: &str) -> String {
     format!(

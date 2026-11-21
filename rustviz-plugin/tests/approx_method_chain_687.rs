@@ -1,8 +1,8 @@
 // #687: in a method chain, the value each call after the first works on
-// is a temporary with no column. The variable's dot at the first call
-// says so. No note where that value is a plain Copy value
-// (`s.len().max(1)`), where it is drawn as a temporary column of its own
-// (`cell.borrow().len()`), or where there is no chain (`v.len()`).
+// is a temporary with no column. That needs no note: such a temporary
+// is dropped by the end of the statement, so the figure isn't wrong
+// about any variable. No chain here gets one; `cell.borrow().len()`
+// keeps RefCell's run-time borrow note.
 use std::cell::RefCell;
 
 fn main() {

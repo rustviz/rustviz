@@ -15,9 +15,8 @@ use crate::svg_generator::hover_messages;
 use rustc_hir::def::Res;
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_hir::{
-  ClosureKind, CoroutineDesugaring, CoroutineKind, Expr, ExprKind, LetStmt, LoopSource, Node, Pat, PatKind, QPath, UnOp,
+  ClosureKind, CoroutineDesugaring, CoroutineKind, Expr, ExprKind, LetStmt, LoopSource, Pat, PatKind, QPath, UnOp,
 };
-use rustc_middle::ty::{GenericArgKind, TypeVisitableExt};
 
 /// The loops of a body (not inside closures, whose bodies aren't drawn),
 /// outermost first.
@@ -78,7 +77,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.runtime_lock_note(e);
       self.raw_deref_note(e);
       self.element_ref_deref_note(e);
-      self.method_chain_note(e);
     }
     for l in &sites.lets {
       if l.span.from_expansion() {
@@ -189,40 +187,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let Some((hash, _)) = self.local_column(coll) else { return };
     let Some(text) = self.snippet(place) else { return };
     self.note_at(hash, e.span, hover_messages::approx_note_element_ref(&text));
-  }
-
-  /// `v.iter().map(f).collect()` (#687): the value each call after the
-  /// first works on is a temporary with no column. Noted on the
-  /// variable's dot at the first call, unless that value is drawn (a
-  /// temporary column of its own) or is a plain Copy value with no
-  /// reference in it (`s.len().max(1)`).
-  fn method_chain_note(&mut self, e: &'tcx Expr<'tcx>) {
-    let ExprKind::MethodCall(first, recv, ..) = e.kind else { return };
-    let Some((hash, _)) = self.local_column(recv) else { return };
-    // The later calls, each one's receiver the one before.
-    let mut later = Vec::new();
-    let mut cur = e;
-    while let Node::Expr(p) = self.tcx.parent_hir_node(cur.hir_id) {
-      match p.kind {
-        ExprKind::MethodCall(seg, r, ..) if r.hir_id == cur.hir_id && !p.span.from_expansion() => {
-          later.push(seg.ident.name.as_str().to_owned());
-          cur = p;
-        }
-        _ => break,
-      }
-    }
-    // (A guard's run-time borrow or lock has its own note.)
-    if later.is_empty() || self.temp_drops_noted.contains(&e.hir_id) || self.runtime_lock_text(e).is_some() {
-      return;
-    }
-    let ty = self.tcx.typeck(e.hir_id.owner).expr_ty(e);
-    let has_ref = ty.walk().any(|a| matches!(a.kind(), GenericArgKind::Lifetime(_)));
-    let env = rustc_middle::ty::TypingEnv::post_analysis(self.tcx, e.hir_id.owner.to_def_id());
-    if !has_ref && !ty.has_param() && self.tcx.type_is_copy_modulo_regions(env, ty) {
-      return;
-    }
-    let span = e.span.to(cur.span);
-    self.note_at(hash, span, hover_messages::approx_note_method_chain(first.ident.name.as_str(), &later));
   }
 
   /// `let f = || …;` with captures (#133, #278, #347): what f captures
