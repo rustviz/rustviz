@@ -1367,6 +1367,9 @@ pub struct BorrowVia {
     pub tie: ArgTie,
     /// What the call returned that carries the borrow.
     pub carrier: ViaCarrier,
+    /// Calls chained on `func`'s result that only pass the borrow on
+    /// (`unwrap` in `w.last_mut().unwrap()`, #1266), innermost first.
+    pub passed_on: Vec<String>,
 }
 
 /// Which arguments of a call a returned reference's lifetime is tied
@@ -2720,7 +2723,9 @@ pub struct ParamRest {
     /// The function the parameter belongs to.
     pub fn_name: String,
     /// The parts of the argument the pattern leaves unbound that need
-    /// drop, as field paths (`bio`, `1`, `inner.tag`).
+    /// drop, as field paths (`bio`, `1`, `inner.tag`). Empty: the
+    /// pattern binds no name at all (`_: String`), and the whole
+    /// argument is in a `(parameter)` column of its own (#1243).
     pub parts: Vec<String>,
 }
 
@@ -2853,6 +2858,17 @@ pub(crate) fn lender_holds_value(rty: &ResourceTy) -> bool {
 // reference points to an `i32` / a `str`, #1233), as the borrower's own
 // line already says. Not for `*el` (el: `&mut &String`): el's pointee is
 // the reference, not what `*el` points to.
+// Whether what a loan is of is a "value", for the dots that describe
+// the loan a reference was made from rather than what the reference
+// itself points to (#1122: `ra: &str` made from a mutable borrow of the
+// String a; #1131: `r = &mut &x` points to a temporary reference that
+// borrows x). The borrower's own pointee (a `str`, a reference) has
+// nothing to drop there although the loan's lender does, so #1233's
+// pointee rule in `borrow_holds_value` doesn't apply.
+fn loan_holds_value(from: &ResourceTy, borrower: &ResourceTy) -> bool {
+    holds_copy_value(from) || (matches!(from, ResourceTy::Anonymous) && borrow_holds_value(from, borrower))
+}
+
 fn borrow_holds_value(from: &ResourceTy, borrower: &ResourceTy) -> bool {
     holds_copy_value(from)
         || matches!(borrower, ResourceTy::Value(r) if r.points_to_copy())
@@ -3527,7 +3543,11 @@ impl Event {
                 if let Event::InitRefParam { rest, .. } = &mut whole {
                     *rest = None;
                 }
-                format!("{}. {}", whole.print_message_with_name(my_name), hover_messages::param_rest_dropped(&rest.fn_name, &rest.parts))
+                if rest.parts.is_empty() {
+                    hover_messages::event_dot_unbound_param_init(my_name, &rest.fn_name)
+                } else {
+                    format!("{}. {}", whole.print_message_with_name(my_name), hover_messages::param_rest_dropped(&rest.fn_name, &rest.parts))
+                }
             }
             // The column of the value a `ref` binding borrows (#691).
             Event::InitRefParam{ param: ResourceAccessPoint::Owner(_), own_param: Some(own), .. } => {
@@ -3792,6 +3812,9 @@ impl Event {
                     hover_messages::event_dot_mut_lend(&self.deref_name(my_name), &target_name, holds_value)
                 }
             }
+            Event::StaticDie{ is: ResourceTy::Value(r), .. } if r.is_mutref() => {
+                hover_messages::event_dot_mut_ref_return_of_shared(&self.deref_name(my_name))
+            }
             Event::StaticDie{ .. } => {
                 hover_messages::event_dot_static_return(&self.deref_name(my_name))
             }
@@ -3856,6 +3879,10 @@ impl Event {
                         PlaceWrite::Update | PlaceWrite::UpdateValue => hover_messages::event_dot_write_element(r.name(), place, r.is_ref(), element_update_holds_value(r, place, write)),
                     };
                     with_alternatives(msg, r, place, write, alts)
+                } else if is.holds_borrow() && matches!(from, ResourceTy::Value(r) if r.is_mutref()) {
+                    // `let o = Some(r);` / `vec![r]` with r a `&mut`:
+                    // the reference moves into o's value (#1128).
+                    hover_messages::event_dot_holder_takes_ref(&self.deref_name(my_name), &from.name())
                 } else if is.holds_borrow() && matches!(from, ResourceTy::Value(r) if !r.is_fn()) {
                     // `let it2 = it;`: the value moves, and the borrow
                     // it holds moves with it (#336).
@@ -4041,6 +4068,8 @@ impl Event {
                 } else if is.holds_borrow() {
                     // `refs.push(&mut m)` stores a borrow of m itself (#973).
                     hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), true, if *of_ref_var { hover_messages::HolderLender::Own } else { holder_lender_kind(from) }, *of_ref_var || holds_copy_value(from))
+                } else if matches!(is, ResourceTy::Value(r) if r.is_ref() && !r.is_mutref()) {
+                    hover_messages::event_dot_mut_borrow_by_shared_ref(&self.deref_name(my_name), *of_ref_var || loan_holds_value(from, is))
                 } else {
                     // `&mut r` borrows the reference r holds, a value (#914).
                     hover_messages::event_dot_mut_borrow(&self.deref_name(my_name), *of_ref_var || borrow_holds_value(from, is))
@@ -4052,6 +4081,8 @@ impl Event {
                 } else if is.holds_borrow() {
                     // `refs.push(&x)` stores a borrow of x itself (#973).
                     hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), false, if *of_ref_var { hover_messages::HolderLender::Own } else { holder_lender_kind(from) }, *of_ref_var || holds_copy_value(from))
+                } else if matches!(is, ResourceTy::Value(r) if r.is_mutref()) {
+                    hover_messages::event_dot_static_borrow_by_mut_ref(&self.deref_name(my_name), *of_ref_var || loan_holds_value(from, is))
                 } else {
                     // `&r` borrows the reference r holds, a value (#925).
                     hover_messages::event_dot_static_borrow(&self.deref_name(my_name), *of_ref_var || borrow_holds_value(from, is))
@@ -4286,8 +4317,14 @@ impl Visualizable for VisualizationData {
         // (`let it = v.iter();`, #336) owns its own value: borrowing
         // through it, and the end of that borrow, don't change what
         // the holder itself can do.
+        // So does an owner a stored borrow's end is drawn on after the
+        // value holding it was moved there (`let y = w;` with w given a
+        // borrow by `keep_mut(&mut w, &mut m)`, #1198): the end of that
+        // borrow isn't the end of y's own value.
         let holder = self.timelines.get(hash)
-            .is_some_and(|t| t.resource_access_point.holds_borrow());
+            .is_some_and(|t| t.resource_access_point.holds_borrow()
+                || (matches!(event, Event::MutableDie { .. } | Event::StaticDie { .. })
+                    && matches!(t.resource_access_point, ResourceAccessPoint::Owner(_))));
 
         // A borrow of one field of what a reference points to
         // (`&mut self.items`, `self.items.iter_mut()` in a `for` head,
@@ -4339,6 +4376,35 @@ impl Visualizable for VisualizationData {
             (_, Event::StaticReacquire { still_borrowed_by, .. })
             | (_, Event::MutableReacquire { still_borrowed_by, .. }) if !still_borrowed_by.is_empty() =>
                 (*previous_state).clone(),
+
+            // A reference's line shows what it can do through itself,
+            // which its own type decides, not the kind of loan it
+            // holds. A shared reference can hold a mutable loan (`let
+            // r: &String = &mut s;`, `downgrade(&mut s)` returning a
+            // `&str`): it can still only read (#1122). A `&mut` can hold
+            // a shared loan (`let r = &mut &x;`, a `&mut` to a temporary
+            // that shares x): it can write what it points to, the
+            // temporary (#1131).
+            // (Also after the copy that binds it in a pattern, or from a
+            // further lender.)
+            (State::OutOfScope | State::FullPrivilege { .. } | State::PartialPrivilege { .. }, Event::MutableBorrow { .. })
+                if self.is_ref(hash) && !self.is_mutref(hash) =>
+                State::PartialPrivilege { s: LineState::Full },
+            (State::PartialPrivilege { .. }, Event::MutableDie { .. }) if self.is_ref(hash) && !self.is_mutref(hash) =>
+                State::OutOfScope,
+            (State::OutOfScope, Event::StaticBorrow { .. }) if self.is_mutref(hash) =>
+                State::FullPrivilege { s: LineState::Full },
+            (State::FullPrivilege { .. }, Event::StaticDie { .. }) if self.is_mutref(hash) =>
+                State::OutOfScope,
+            // A shared reference bound to (or given) a value that borrows
+            // no variable here (`let mut r: &str = "hello";`, `r =
+            // "world";`, `q = name();` with `name() -> &'static str`), or
+            // a copy of another reference
+            // can only read, like one made by `&a`: its line is drawn the
+            // same way throughout, not solid until its first read (#1150).
+            (State::OutOfScope | State::FullPrivilege { .. } | State::PartialPrivilege { .. }, Event::Acquire { .. } | Event::Copy { .. })
+                if self.is_ref(hash) && !self.is_mutref(hash) =>
+                State::PartialPrivilege { s: LineState::Full },
 
             // A variable is initialized through a Move
             (State::OutOfScope, Event::Acquire{ .. }) => State::FullPrivilege {s: LineState::Full},
@@ -4437,6 +4503,11 @@ impl Visualizable for VisualizationData {
                 }
             },
 
+            // A `&T` field given another's reference with its struct
+            // (`o.inner = other;` moves other.r into o.inner.r, #1199):
+            // it holds that one now, as after `o.inner.r = other.r;`.
+            (State::PartialPrivilege{..}, Event::Acquire{ .. }) if self.is_ref(hash) && !self.is_mutref(hash) =>
+                State::PartialPrivilege { s: LineState::Full },
             // A `&T` is only moved as part of a struct (`let hold =
             // other;` moves other.r): the field has no reference left.
             (State::PartialPrivilege{..}, Event::Move{to: to_ro,..}) if self.is_ref(hash) && !self.is_mutref(hash) =>
@@ -4559,9 +4630,10 @@ impl Visualizable for VisualizationData {
             | (State::RevokedPrivilege{ to, borrow_to, .. }, Event::MutableBorrow{ .. })
             | (State::RevokedPrivilege{ to, borrow_to, .. }, Event::StaticDie{ .. })
             | (State::RevokedPrivilege{ to, borrow_to, .. }, Event::MutableDie{ .. }) if self.is_ref(hash) => {
+                // (By the reference's own type, as above.)
                 let holds = match event {
-                    Event::StaticBorrow { .. } => State::PartialPrivilege { s: LineState::Full },
-                    Event::MutableBorrow { .. } => State::FullPrivilege { s: LineState::Full },
+                    Event::StaticBorrow { .. } | Event::MutableBorrow { .. } if self.is_mutref(hash) => State::FullPrivilege { s: LineState::Full },
+                    Event::StaticBorrow { .. } | Event::MutableBorrow { .. } => State::PartialPrivilege { s: LineState::Full },
                     _ => State::OutOfScope,
                 };
                 State::RevokedPrivilege { to: to.clone(), borrow_to: borrow_to.clone(), prev_state: Box::new(holds) }

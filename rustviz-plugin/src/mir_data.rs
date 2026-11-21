@@ -1481,6 +1481,22 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     /// `None` when this body has no MIR local named `name` (a binding
     /// inside a closure), or a field in `fields` isn't found.
     pub fn loans_held_by(&self, name: &str, fields: &[&str]) -> Option<BTreeMap<String, bool>> {
+        self.loans_held_in(name, fields, None)
+    }
+
+    /// `loans_held_by`, for only the loans issued inside `within` (a
+    /// reference's initializer): the kind of the loans that this
+    /// assignment puts in `name`'s lifetimes. That kind is not always
+    /// the reference's own: `let r: &String = &mut s;` and `let r =
+    /// downgrade(&mut s);` (`fn(&mut String) -> &str`) keep a mutable
+    /// loan of s in a shared reference, and `let r = &mut &x;` keeps a
+    /// shared loan of x in a mutable one (#1122, #1131).
+    /// (`name.f.g` when `fields` is `["f", "g"]`, as in `loans_held_by`.)
+    pub fn loans_held_from(&self, name: &str, fields: &[&str], within: Span) -> Option<BTreeMap<String, bool>> {
+        self.loans_held_in(name, fields, Some(within))
+    }
+
+    fn loans_held_in(&self, name: &str, fields: &[&str], within: Option<Span>) -> Option<BTreeMap<String, bool>> {
         let bwf = self.bwf;
         let body = &bwf.body;
         let names = self.mir_local_names(bwf);
@@ -1517,6 +1533,12 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let mut out: BTreeMap<String, bool> = BTreeMap::new();
         for loan in held {
             let b = &bwf.borrow_set[loan];
+            if let Some(w) = within {
+                let sp = self.location_to_span(b.reserve_location(), bwf);
+                if !w.contains(sp) {
+                    continue;
+                }
+            }
             if let Some(n) = self.src_name_of_local(Some(b.borrowed_place().local), &names) {
                 *out.entry(n).or_insert(false) |= b.kind().mutability().is_mut();
             }
