@@ -23080,26 +23080,43 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "approx_loop_one_pass_853",
-        // #853: a loop is drawn as one pass through its body. The first
-        // dot of each variable it declares says each pass has its own
-        // one; the first dot inside the body of a variable from before
-        // the loop says the loop may run many times. Each note is a line
-        // of its own after the dot's text. Main drew the same dots with
-        // no note. Where each note sits (and where none does) is pinned
-        // by `loop_notes_sit_on_the_first_dot_inside_the_loop`.
+        // #853: a loop is drawn as one pass through its body. The loop's
+        // first dot drawn for a pass gets one note line saying so, after
+        // the dot's text. Main drew the same dots with no note; the first
+        // version of this PR put a note on every variable's first dot in
+        // the loop, naming it (`each pass has its own s.`). Where each
+        // note sits (and where none does) is pinned by
+        // `loop_notes_sit_on_each_loops_first_dot`.
         must_contain: &[
             "w is bound to an immutable reference",
-            "(RustViz draws one pass through this loop; each pass has its own w.)",
-            "(RustViz draws one pass through this loop; each pass has its own s.)",
-            "(RustViz draws one pass through this loop; each pass has its own top.)",
-            "(RustViz draws one pass through this loop; each pass has its own t.)",
-            "(RustViz draws one pass through this loop, which may run many times.)",
+            "(RustViz draws one pass through this loop, which may run many times; each pass has its own copy of the variables declared inside it.)",
         ],
         must_not_contain: &[
-            // `n` is bound once, by the `break`; `msg` is in an `if`.
+            // One note per loop, not one per variable.
+            "each pass has its own w.",
+            "each pass has its own s.",
+            "each pass has its own top.",
+            "each pass has its own t.",
             "each pass has its own n.",
             "each pass has its own msg.",
-            "each pass has its own total.",
+            // Every loop here declares a variable.
+            "=(RustViz draws one pass through this loop, which may run many times.)",
+        ],
+    },
+    TooltipExpect {
+        name: "approx_loop_nested_853",
+        // #853: one note per loop, also for nested loops, and a loop that
+        // declares no variable (`while total < 100`, `for _ in 0..2`) gets
+        // the note without "each pass has its own copy …". Rows pinned by
+        // `loop_notes_sit_on_each_loops_first_dot`.
+        must_contain: &[
+            "(RustViz draws one pass through this loop, which may run many times.)",
+            "(RustViz draws one pass through this loop, which may run many times; each pass has its own copy of the variables declared inside it.)",
+        ],
+        must_not_contain: &[
+            "each pass has its own row.",
+            "each pass has its own cell.",
+            "each pass has its own s.",
         ],
     },
 ];
@@ -30759,31 +30776,45 @@ fn a_boxed_closure_borrowing_through_a_reference_keeps_it_until_dropped() {
     assert_eq!(ys("w's resource is no longer immutably borrowed"), vec![row("drop(d);")]);
 }
 
-/// #853 (`approx_loop_one_pass_853`): the loop notes go on the first dot
-/// inside a loop of each column, and nowhere else: not on `total`'s
+/// #853 (`approx_loop_one_pass_853`, `approx_loop_nested_853`): each
+/// loop gets one note, on its first dot drawn for a pass (in source
+/// order, then leftmost), and there is no other note: not on `total`'s
 /// binding before the loops, not on the `for` line where `words` is lent
 /// to the iterator once, not on the closing line where it's given back,
-/// not on `n`, bound once by the `break`, and not in the `if` block.
+/// not on `n`, bound once by the `break`, not in the `if` block, and not
+/// on the other variables' first dots in a loop. An outer loop whose
+/// dots are all in a loop nested in it (`loop { while let … }`) takes
+/// the first one the nested loop's note isn't on.
 #[test]
-fn loop_notes_sit_on_the_first_dot_inside_the_loop() {
-    let rv = run_with_local_backend("approx_loop_one_pass_853");
-    let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
-    let row = |src: &str| code_row_y(&code, src);
-    let ys = |text: &str| -> Vec<f64> {
-        let mut v: Vec<f64> = dots_listing_tooltip(&tl, text).into_iter().map(|(_, y)| y).collect();
-        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        v
-    };
-    let local = |name: &str| format!("(RustViz draws one pass through this loop; each pass has its own {}.)", name);
-    // total's `+=` in the `for` and `while let` bodies, and stack's `pop`
-    // in the `while let` condition, checked on every pass.
-    let mut plain = vec![row("total += s.len();"), row("while let Some(top) = stack.pop() {"), row("total += top;")];
-    plain.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    assert_eq!(ys("(RustViz draws one pass through this loop, which may run many times.)"), plain);
-    assert_eq!(ys(&local("w")), vec![row("for w in words.iter() {")]);
-    assert_eq!(ys(&local("s")), vec![row("let s = w.clone();")]);
-    assert_eq!(ys(&local("top")), vec![row("while let Some(top) = stack.pop() {")]);
-    assert_eq!(ys(&local("t")), vec![row("let t = String::from(\"t\");")]);
+fn loop_notes_sit_on_each_loops_first_dot() {
+    let plain = "(RustViz draws one pass through this loop, which may run many times.)";
+    let declares = "(RustViz draws one pass through this loop, which may run many times; each pass has its own copy of the variables declared inside it.)";
+    let cases: &[(&str, &[(&str, &[&str])])] = &[
+        ("approx_loop_one_pass_853", &[
+            (declares, &["for w in words.iter() {", "while let Some(top) = stack.pop() {", "let t = String::from(\"t\");"]),
+        ]),
+        ("approx_loop_nested_853", &[
+            (plain, &["while total < 100 {", "total += 1;"]),
+            (declares, &["for row in grid.iter() {", "for cell in row.iter() {", "while let Some(s) = stack.pop() {", "while let Some(s) = stack.pop() {"]),
+        ]),
+    ];
+    for (fixture, notes) in cases {
+        let rv = run_with_local_backend(fixture);
+        let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+        let listed: Vec<&str> = notes.iter().map(|(n, _)| *n).collect();
+        for line in timeline_tooltips(&tl) {
+            if is_approx_note(&line) {
+                assert!(listed.contains(&line.as_str()), "{}: unexpected note {:?}", fixture, line);
+            }
+        }
+        for (note, rows) in notes.iter() {
+            let mut got: Vec<f64> = dots_listing_tooltip(&tl, note).into_iter().map(|(_, y)| y).collect();
+            got.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let mut want: Vec<f64> = rows.iter().map(|r| code_row_y(&code, r)).collect();
+            want.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            assert_eq!(got, want, "{}: rows of {:?}", fixture, note);
+        }
+    }
 }
 
 /// The horizontal runs `(y, x_lo, x_hi)` of every gray arrow shaft, with

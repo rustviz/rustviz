@@ -47,18 +47,15 @@ struct PendingDot {
 /// An approximation note on a dot, and whether it is a loop's.
 #[derive(Clone, PartialEq)]
 enum DotNote {
-    /// The plain note of a loop.
-    Loop,
-    /// The note on a variable a loop declares, naming it.
-    LoopLocal(String),
+    /// A loop's note; whether the loop declares variables.
+    Loop(bool),
     Other(String),
 }
 
 impl DotNote {
     fn text(&self) -> String {
         match self {
-            DotNote::Loop => hover_messages::approx_note_loop(),
-            DotNote::LoopLocal(name) => hover_messages::approx_note_loop_local(name),
+            DotNote::Loop(declares) => hover_messages::approx_note_loop(*declares),
             DotNote::Other(t) => t.clone(),
         }
     }
@@ -184,41 +181,50 @@ impl DotLayer {
                 }
             }
         };
-        for note in notes {
-            match note {
-                ApproxNote::At { hash, lines: (lo, hi), text } => {
-                    if let Some(col) = by_col.get(hash) {
-                        add(&mut self.dots, first_in(col, *lo, *hi), DotNote::Other(text.clone()));
+        // Loops, one note each: first on a dot outside the loops nested
+        // in it, then (for a loop with none) on any of its pass's dots
+        // that no other loop's note is on.
+        let loops: Vec<&ApproxNote> = notes.iter().filter(|n| matches!(n, ApproxNote::Loop { .. })).collect();
+        let mut placed: Vec<Option<usize>> = vec![None; loops.len()];
+        for outside_nested in [true, false] {
+            for (k, note) in loops.iter().enumerate() {
+                let ApproxNote::Loop { head, pass: (lo, hi), head_cols, locals, nested, declares } = note else { continue };
+                if placed[k].is_some() {
+                    continue;
+                }
+                let mut best: Option<(usize, i64, usize)> = None;
+                for (hash, col) in &by_col {
+                    if !locals.contains(hash) && !col.iter().any(|(l, _)| l < head) {
+                        continue;
+                    }
+                    for &(line, i) in col {
+                        let in_pass = (*lo..=*hi).contains(&line) || (line == *head && head_cols.contains(hash));
+                        if !in_pass {
+                            continue;
+                        }
+                        if outside_nested && nested.iter().any(|(h, e)| (*h..=*e).contains(&line)) {
+                            continue;
+                        }
+                        if !outside_nested && placed.contains(&Some(i)) {
+                            continue;
+                        }
+                        let key = (self.dots[i].row, self.dots[i].x, i);
+                        if best.is_none_or(|b| key < b) {
+                            best = Some(key);
+                        }
                     }
                 }
-                ApproxNote::Loop { head, end, body: (lo, hi), locals } => {
-                    let mut named: BTreeSet<u64> = BTreeSet::new();
-                    for (hash, name) in locals {
-                        let Some(col) = by_col.get(hash) else { continue };
-                        let at = first_in(col, 0, usize::MAX);
-                        if at.first().is_some_and(|&i| (*head..=*end).contains(&rv_attrs::line_of(self.dots[i].row, row_lines).unwrap_or(0))) {
-                            add(&mut self.dots, at, DotNote::LoopLocal(name.clone()));
-                            named.insert(*hash);
-                        }
-                    }
-                    // Only columns that hold something before the loop: a
-                    // variable first given a value inside it is the loop's
-                    // receiver (`let n = loop { … break v; }`, bound once)
-                    // or a temporary.
-                    for (hash, col) in &by_col {
-                        let before = col.iter().any(|(l, _)| l < head);
-                        if before && !named.contains(hash) {
-                            add(&mut self.dots, first_in(col, *lo, *hi), DotNote::Loop);
-                        }
-                    }
+                if let Some((.., i)) = best {
+                    placed[k] = Some(i);
+                    add(&mut self.dots, vec![i], DotNote::Loop(*declares));
                 }
             }
         }
-        // A dot that names the variable its loop declares doesn't also
-        // need the plain note of an enclosing loop.
-        for dot in self.dots.iter_mut() {
-            if dot.notes.iter().any(|n| matches!(n, DotNote::LoopLocal(_))) {
-                dot.notes.retain(|n| *n != DotNote::Loop);
+        for note in notes {
+            if let ApproxNote::At { hash, lines: (lo, hi), text } = note {
+                if let Some(col) = by_col.get(hash) {
+                    add(&mut self.dots, first_in(col, *lo, *hi), DotNote::Other(text.clone()));
+                }
             }
         }
     }

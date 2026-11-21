@@ -4350,14 +4350,24 @@ pub enum ApproxNote {
     /// `text` on the first event dot of column `hash` on a source line
     /// in `lines` (inclusive).
     At { hash: u64, lines: (usize, usize), text: String },
-    /// A loop written on lines `head..=end`. Each variable it declares
-    /// (`locals`: column hash and name) gets the note naming it on its
-    /// first dot, if that dot is the column's first anywhere and on a
-    /// line of the loop (not a column it shares with an earlier
-    /// same-named variable). Every other column with a dot before the
-    /// loop gets the plain loop note on its first event dot on a line in
-    /// `body` (inclusive): the lines that only run as part of a pass.
-    Loop { head: usize, end: usize, body: (usize, usize), locals: Vec<(u64, String)> },
+    /// A loop whose first line is `head`. It gets one note, on its
+    /// first event dot in source order (then leftmost) that is drawn for
+    /// a pass: on a line in `pass` (inclusive), or on `head` for a
+    /// column in `head_cols` (a `for` loop's pattern). Only columns the
+    /// loop declares (`locals`) or that have a dot before `head` count:
+    /// a column first given a value inside the loop is the loop's
+    /// receiver (`let n = loop { … break v; }`, bound once) or a
+    /// temporary. Dots on the lines of a loop inside it (`nested`) count
+    /// only if it has no other. `declares`: whether the loop declares
+    /// any variable (the note then says each pass has its own).
+    Loop {
+        head: usize,
+        pass: (usize, usize),
+        head_cols: Vec<u64>,
+        locals: Vec<u64>,
+        nested: Vec<(usize, usize)>,
+        declares: bool,
+    },
 }
 
 impl ApproxNote {
@@ -4366,10 +4376,12 @@ impl ApproxNote {
     pub fn map_lines(&mut self, f: impl Fn(usize) -> usize) {
         match self {
             ApproxNote::At { lines, .. } => *lines = (f(lines.0), f(lines.1)),
-            ApproxNote::Loop { head, end, body, .. } => {
+            ApproxNote::Loop { head, pass, nested, .. } => {
                 *head = f(*head);
-                *end = f(*end);
-                *body = (f(body.0), f(body.1));
+                *pass = (f(pass.0), f(pass.1));
+                for n in nested.iter_mut() {
+                    *n = (f(n.0), f(n.1));
+                }
             }
         }
     }
