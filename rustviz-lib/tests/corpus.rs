@@ -22546,10 +22546,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the resource r1 points to is mutably borrowed by it through r1; r1 can't be used until the borrow ends",
             "it's mutable borrow ends",
             "_x's mutable borrow ends",
-            "Mutable reborrow from r2 to x: unwrap's signature gives the reference it returns the same lifetime as the value it was called on",
+            "Mutable reborrow from r2 to x: first_mut's signature gives the value it returns the same lifetime as the value it was called on; unwrap passes the borrow on",
             "x no longer borrows the resource r2 points to",
             "Mutable reborrow from r3 to o: get_mut's signature gives the value it returns the same lifetime as the value it was called on; o isn't a reference, but its value holds one",
-            "Mutable reborrow from r4 to y: unwrap's signature gives the reference it returns the same lifetime as the value it was called on",
+            "Mutable reborrow from r4 to y: last_mut's signature gives the value it returns the same lifetime as the value it was called on; unwrap passes the borrow on",
         ],
         must_not_contain: &[
             "Mutable borrow from v to it",
