@@ -21070,7 +21070,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "f is moved into the call (an FnOnce closure can only be called once). s, which f captured, is dropped during the call",
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and k's resource is dropped. If the `?` succeeds, nothing happens to k here.",
-            "h goes out of scope. Its captured resources are dropped here only if no branch above called it (Rust tracks this with a runtime drop flag).",
+            "h goes out of scope. Its captured resource is dropped here only if no branch above called it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             "the function returns and f's resource is dropped",
