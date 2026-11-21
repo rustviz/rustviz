@@ -1511,7 +1511,10 @@ fn render_scope_end_dot(
                 // Called (so moved) on some paths only: the drop
                 // flag decides whether its captures are dropped.
                 let title = if maybe_moved {
-                    hover_messages::event_dot_closure_go_out_of_scope_maybe_moved(&name, moved_by_chain_condition(history))
+                {
+                    let (called, moved) = closure_used_up_in_branches(history);
+                    hover_messages::event_dot_closure_go_out_of_scope_maybe_moved(&name, moved_by_chain_condition(history), move_count, called, moved)
+                }
                 } else {
                     hover_messages::event_dot_closure_go_out_of_scope(&name, move_count)
                 };
@@ -2251,7 +2254,7 @@ fn render_dot(
                             data.title = hover_messages::event_dot_break_alt_move(&name, &to.name(), alt, what);
                         }
                         Event::Duplicate { break_alt: Some(alt), .. } => {
-                            data.title.push_str(&hover_messages::break_alt_if_suffix(&alt.brk));
+                            data.title.push_str(&hover_messages::break_alt_if_suffix(alt));
                         }
                         // The lender of a borrow one of the `break`s
                         // made (`break rb` reborrowing a `&mut`, #657):
@@ -2259,10 +2262,10 @@ fn render_dot(
                         // loop.
                         Event::StaticLend { id, .. } | Event::MutableLend { id, .. } => {
                             if let Some(alt) = borrow_break_alt(*id, visualization_data) {
-                                data.title = hover_messages::with_break_alt_lend(&data.title, &alt.brk);
+                                data.title = hover_messages::with_break_alt_lend(&data.title, &alt);
                             }
                         }
-                        Event::Acquire { is, break_alt: Some(_), .. } | Event::Copy { is, break_alt: Some(_), .. } => {
+                        Event::Acquire { is, break_alt: Some(alt), .. } | Event::Copy { is, break_alt: Some(alt), .. } => {
                             // Which `break` ran isn't known here, so
                             // name no source: what a literal would say.
                             data.title = if copyable_assign {
@@ -2271,7 +2274,7 @@ fn render_dot(
                                 let generic = Event::Acquire { from: ResourceTy::Anonymous, is: is.clone(), via_try: None, id: 0, break_alt: None, loop_head: LoopHead::No };
                                 generic.print_message_with_name(&mut name.clone())
                             };
-                            data.title.push_str(&hover_messages::break_alt_receiver_suffix());
+                            data.title.push_str(&hover_messages::break_alt_receiver_suffix_for(alt));
                         }
                         _ => {}
                     }
@@ -2438,6 +2441,32 @@ fn merge_move_kind(branch_history: &[BranchData], ty: &BranchType) -> (bool, boo
 // True when the last thing that decided this column's ownership was a
 // conditional that moved it on some paths only, so at scope end Rust
 // drops the value only if it wasn't moved (#179).
+/// Whether the branches in `history` call the closure (an `FnOnce` call
+/// uses it up, #271) and whether they move it (`v.push(f)`, `let g =
+/// f;`, #1158), at any depth.
+fn closure_used_up_in_branches(history: &[(usize, Event)]) -> (bool, bool) {
+    fn walk(events: &[(usize, Event)], in_branch: bool, out: &mut (bool, bool)) {
+        for (_, e) in events {
+            match e {
+                Event::Branch { branch_history, .. } => {
+                    for b in branch_history {
+                        walk(&b.e_data, true, out);
+                    }
+                }
+                Event::ClosureCall { .. } if in_branch => out.0 = true,
+                Event::Move { .. } if in_branch => out.1 = true,
+                _ => {}
+            }
+        }
+    }
+    let mut out = (false, false);
+    walk(history, false, &mut out);
+    if !out.0 && !out.1 {
+        out.1 = true;
+    }
+    out
+}
+
 fn maybe_moved_at_end(history: &[(usize, Event)]) -> bool {
     let mut maybe = false;
     for (_, e) in history {
@@ -3032,7 +3061,8 @@ fn collect_closure_captures(
     line: usize,
 ) -> Vec<(String, &'static str)> {
     let mut out = Vec::new();
-    for (l, ev) in &visualization_data.external_events {
+    // Also a closure made in a branch of a conditional (#1148).
+    for (l, ev) in all_external_events(visualization_data) {
         if *l != line {
             continue;
         }
@@ -3190,12 +3220,18 @@ fn closure_move_capture_count(
     visualization_data: &VisualizationData,
     closure_hash: u64,
 ) -> usize {
-    fn count(visualization_data: &VisualizationData, closure_hash: u64, depth: usize) -> usize {
+    let events = all_external_events(visualization_data);
+    // A capture by move brings a resource along only if what is moved
+    // needs drop: not a reference (`move || r.push('!')` with `r: &mut
+    // String` moves the reference; references never own, #1148), nor a
+    // value with nothing to drop (#484).
+    let owns_resource = |from: &ResourceTy| from.extract_rap()
+        .is_none_or(|r| !r.is_ref() && !r.holds_value());
+    fn count(events: &[&(usize, ExternalEvent)], owns_resource: &dyn Fn(&ResourceTy) -> bool, closure_hash: u64, depth: usize) -> usize {
         if depth > 8 {
             return 0;
         }
-        visualization_data
-            .external_events
+        events
             .iter()
             .map(|(line, ev)| match ev {
                 // `let h = keep_mut(|| t.push('!'));` (#686): the closure a
@@ -3203,24 +3239,46 @@ fn closure_move_capture_count(
                 // nothing. It owns what the closure literal passed to that
                 // call on the same line moved in (none here: `&mut t`).
                 ExternalEvent::Move { from: ResourceTy::Value(f), to, .. } if f.is_fn() && matches_closure(to, closure_hash) =>
-                    visualization_data.external_events.iter()
+                    events.iter()
                         .filter(|(l, e)| l == line && matches!(e,
-                            ExternalEvent::Move { to: ResourceTy::Value(g), into_closure: true, .. } if g.hash() == f.hash()))
+                            ExternalEvent::Move { from, to: ResourceTy::Value(g), into_closure: true, .. }
+                                if g.hash() == f.hash() && owns_resource(from)))
                         .count(),
-                ExternalEvent::Move { to, closure_value: false, .. } if matches_closure(to, closure_hash) => 1,
+                ExternalEvent::Move { from, to, closure_value: false, .. } if matches_closure(to, closure_hash) =>
+                    usize::from(owns_resource(from)),
                 ExternalEvent::Move { from, to, closure_value: true, .. } if matches_closure(to, closure_hash) =>
-                    from.extract_rap().map_or(0, |g| count(visualization_data, *g.hash(), depth + 1)),
+                    from.extract_rap().map_or(0, |g| count(events, owns_resource, *g.hash(), depth + 1)),
                 _ => 0,
             })
             .sum()
     }
-    count(visualization_data, closure_hash, 0)
+    count(&events, &owns_resource, closure_hash, 0)
+}
+
+/// Every external event, also those inside the branches of a
+/// conditional (and of conditionals nested in those), in order. A
+/// closure made or moved in an `if` / `match` arm records its captures
+/// there (#1148, #1159).
+fn all_external_events(visualization_data: &VisualizationData) -> Vec<&(usize, ExternalEvent)> {
+    fn walk<'a>(events: &'a [(usize, ExternalEvent)], out: &mut Vec<&'a (usize, ExternalEvent)>) {
+        for e in events {
+            out.push(e);
+            if let ExternalEvent::Branch { branches, .. } = &e.1 {
+                for b in branches {
+                    walk(&b.e_data, out);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&visualization_data.external_events, &mut out);
+    out
 }
 
 /// The `let h = g;` event (#704) with id `id`, if that's what it is:
 /// (g, h, whether it's a copy).
 fn closure_value_event(visualization_data: &VisualizationData, id: usize) -> Option<(&ResourceTy, &ResourceTy, bool)> {
-    visualization_data.external_events.iter().find_map(|(_, ev)| match ev {
+    all_external_events(visualization_data).into_iter().find_map(|(_, ev)| match ev {
         ExternalEvent::Copy { from, to, closure_value: true, id: i, .. } if *i == id => Some((from, to, true)),
         ExternalEvent::Move { from, to, closure_value: true, id: i, .. } if *i == id => Some((from, to, false)),
         _ => None,
@@ -3231,7 +3289,7 @@ fn closure_value_event(visualization_data: &VisualizationData, id: usize) -> Opt
 /// reference, or those of the closure it was copied or moved from).
 fn closure_borrow_count(visualization_data: &VisualizationData, closure_hash: u64) -> usize {
     let mut lenders: Vec<String> = Vec::new();
-    for (_, ev) in &visualization_data.external_events {
+    for (_, ev) in all_external_events(visualization_data) {
         if let ExternalEvent::StaticDie { from, to, .. } | ExternalEvent::MutableDie { from, to, .. } = ev {
             if matches_closure(from, closure_hash) && !lenders.contains(&to.name()) {
                 lenders.push(to.name());
@@ -3260,7 +3318,7 @@ fn closure_value_title(event: &Event, my_name: &String, visualization_data: &Vis
             let borrows = closure_borrow_count(visualization_data, *h_rap.hash());
             // `h = g;` after h had a value (a Copy closure: the old
             // value has nothing to drop).
-            let assigned = visualization_data.external_events.iter().any(|(_, ev)| match ev {
+            let assigned = all_external_events(visualization_data).into_iter().any(|(_, ev)| match ev {
                 ExternalEvent::Bind { to, id: i, .. } | ExternalEvent::Copy { to, id: i, .. } | ExternalEvent::Move { to, id: i, .. } =>
                     *i < id && matches_closure(to, *h_rap.hash()),
                 _ => false,

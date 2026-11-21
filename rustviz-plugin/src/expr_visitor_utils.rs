@@ -414,6 +414,69 @@ pub fn statics_in<'tcx>(e: &'tcx Expr<'tcx>) -> Vec<rustc_hir::def_id::DefId> {
   f.0
 }
 
+/// The closure literal a call's callee names (`f()` with `let f = || …;`),
+/// if the callee is a local bound by a plain `let` to one.
+pub fn local_closure_of<'tcx>(tcx: &TyCtxt<'tcx>, callee: &Expr<'tcx>) -> Option<&'tcx rustc_hir::Closure<'tcx>> {
+  let ExprKind::Path(QPath::Resolved(None, p)) = callee.kind else { return None };
+  let Res::Local(hid) = p.res else { return None };
+  let rustc_hir::Node::LetStmt(l) = tcx.parent_hir_node(hid) else { return None };
+  if l.pat.hir_id != hid {
+    return None;
+  }
+  match l.init?.kind {
+    ExprKind::Closure(c) => Some(c),
+    _ => None,
+  }
+}
+
+/// The `static` items the body of `closure` assigns to (`COUNT = 9`,
+/// `COUNT += 1`), once each, in source order (#1203). A closure doesn't
+/// capture a static: it names the item, so the write happens when the
+/// closure is called.
+pub fn statics_written_in_closure<'tcx>(tcx: &TyCtxt<'tcx>, closure: &rustc_hir::Closure<'tcx>) -> Vec<rustc_hir::def_id::DefId> {
+  use rustc_hir::intravisit::{self, Visitor};
+  struct Find(Vec<rustc_hir::def_id::DefId>);
+  impl<'tcx> Visitor<'tcx> for Find {
+    fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+      if let ExprKind::Assign(lhs, _, _) | ExprKind::AssignOp(_, lhs, _) = e.kind {
+        if let ExprKind::Path(QPath::Resolved(_, p)) = lhs.kind {
+          if let Some(id) = static_of_path(p).filter(|id| !lhs.span.from_expansion() && !self.0.contains(id)) {
+            self.0.push(id);
+          }
+        }
+      }
+      intravisit::walk_expr(self, e);
+    }
+  }
+  let mut f = Find(Vec::new());
+  f.visit_expr(tcx.hir_body(closure.body).value);
+  f.0
+}
+
+/// The statics written by the local closures `e` calls (`f()` with
+/// `let f = || unsafe { COUNT = 9; };`, #1203), once each.
+pub fn statics_written_by_called_closures<'tcx>(tcx: &TyCtxt<'tcx>, e: &'tcx Expr<'tcx>) -> Vec<rustc_hir::def_id::DefId> {
+  use rustc_hir::intravisit::{self, Visitor};
+  struct Find<'a, 'tcx>(&'a TyCtxt<'tcx>, Vec<rustc_hir::def_id::DefId>);
+  impl<'a, 'tcx> Visitor<'tcx> for Find<'a, 'tcx> {
+    fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+      if let ExprKind::Call(callee, _) = e.kind {
+        if let Some(c) = local_closure_of(self.0, callee) {
+          for id in statics_written_in_closure(self.0, c) {
+            if !self.1.contains(&id) {
+              self.1.push(id);
+            }
+          }
+        }
+      }
+      intravisit::walk_expr(self, e);
+    }
+  }
+  let mut f = Find(tcx, Vec::new());
+  f.visit_expr(e);
+  f.1
+}
+
 /// For a place reached through an index projection (`v[0]`,
 /// `ps[0].r`, `grid[1][2]`), the collection that is indexed first:
 /// `v`, `ps`, `grid`. None for places without an index (`p.r`, `r`).
@@ -520,6 +583,24 @@ pub fn span_end_line(span:&Span, tcx: &TyCtxt) -> usize{
 
 pub fn expr_to_line(expr:&Expr, tcx: &TyCtxt) -> usize{
   span_to_line(&expr.span, tcx)
+}
+
+/// `&mut arr as &mut [i32]`, `&s as &dyn Display`, `r as &dyn Display`:
+/// a cast from a reference to a reference borrows (or reborrows) the
+/// same place its operand does; `as` only changes the pointee type
+/// (#1175). Returns the operand, through any number of such casts, or
+/// `expr` itself. Casts to or from raw pointers or numbers are kept.
+pub fn peel_ref_casts<'a, 'tcx>(mut expr: &'a Expr<'tcx>, typeck: &TypeckResults<'tcx>) -> &'a Expr<'tcx> {
+  while let ExprKind::Cast(inner, _) = expr.kind {
+    if expr.span.from_expansion()
+      || !typeck.expr_ty_opt(expr).is_some_and(|t| t.is_ref())
+      || !typeck.expr_ty_opt(inner).is_some_and(|t| t.is_ref())
+    {
+      break;
+    }
+    expr = inner;
+  }
+  expr
 }
 
 pub fn is_addr(expr: &Expr) -> bool { // todo, probably a better way to do this using the typechecker
@@ -983,6 +1064,7 @@ pub fn collect_event_live_vars(
             | ExternalEvent::InitRefParam { .. } => {}
             ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::TupleTempDrop { ro, .. } | ExternalEvent::OrAltMove { ro, .. }
             | ExternalEvent::OrAltBorrow { ro, .. } | ExternalEvent::ChainFailAssign { ro, .. } | ExternalEvent::ChainFailUse { ro, .. } | ExternalEvent::TiedParamNote { ro, .. }
+            | ExternalEvent::ReslicedInPlace { ro, .. }
             | ExternalEvent::DeadElseNote { ro, .. } | ExternalEvent::DeadLoanNote { ro, .. } => {
                 out.insert(ro.clone());
             }
@@ -2132,6 +2214,12 @@ pub fn needs_drop_in<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, env: rustc_middle::t
 /// nested loop). A `break` can't cross a closure boundary (rustc rejects
 /// it), and a closure's body isn't visited anyway.
 pub fn breaks_to<'tcx>(loop_expr: &'tcx Expr<'tcx>) -> Vec<(&'tcx Expr<'tcx>, Option<&'tcx Expr<'tcx>>)> {
+  breaks_to_id(loop_expr, loop_expr.hir_id)
+}
+
+/// `breaks_to` for the target `id`: a labeled block's `break`s target
+/// its block's HirId, not the block expression's (#1134).
+pub fn breaks_to_id<'tcx>(loop_expr: &'tcx Expr<'tcx>, id: HirId) -> Vec<(&'tcx Expr<'tcx>, Option<&'tcx Expr<'tcx>>)> {
   use rustc_hir::intravisit::{self, Visitor};
   struct Find<'tcx> { id: HirId, out: Vec<(&'tcx Expr<'tcx>, Option<&'tcx Expr<'tcx>>)> }
   impl<'tcx> Visitor<'tcx> for Find<'tcx> {
@@ -2144,7 +2232,7 @@ pub fn breaks_to<'tcx>(loop_expr: &'tcx Expr<'tcx>) -> Vec<(&'tcx Expr<'tcx>, Op
       intravisit::walk_expr(self, e);
     }
   }
-  let mut f = Find { id: loop_expr.hir_id, out: Vec::new() };
+  let mut f = Find { id, out: Vec::new() };
   intravisit::walk_expr(&mut f, loop_expr);
   f.out
 }

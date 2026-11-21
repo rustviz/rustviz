@@ -7278,7 +7278,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "f is moved into the call (an FnOnce closure can only be called once). \
              s, which f captured, is dropped during the call",
-            "f goes out of scope. Its captured resources are dropped here only if no branch above \
+            "f goes out of scope. Its captured resource is dropped here only if no branch above \
              called it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
@@ -9254,7 +9254,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "edition2024/if_let_chain_closure_move",
         must_contain: &[
             "f may have been moved: when the condition moves f to run and then turns out false, the else branch runs after that move, so f can't be used here",
-            "f goes out of scope. Its captured resources are dropped here only if nothing above moved or called it (Rust tracks this with a runtime drop flag).",
+            "f goes out of scope. Its captured resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &["only if no branch above called it"],
     },
@@ -10570,7 +10570,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "edition2024/if_let_chain_fnonce_call",
         must_contain: &[
             "f may have been moved: when the condition calls f (it can only be called once, so the call moves it) and then turns out false, the else branch runs after that call, so f can't be used here",
-            "f goes out of scope. Its captured resources are dropped here only if nothing above moved or called it (Rust tracks this with a runtime drop flag).",
+            "f goes out of scope. Its captured resource is dropped here only if nothing above called it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             // The call may have dropped them already.
@@ -19658,7 +19658,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "f may have been moved: when the guard on line 6 calls f (it can only be called once, so the call moves it) and then turns out false, matching goes on with the later arms after that call, so f can't be used here (the borrow checker counts every later arm as one that may run after a failed guard)",
             "f may have been moved above, so it can't be used after the match. If nothing above moved it, its resource is dropped when f goes out of scope.",
-            "f goes out of scope. Its captured resources are dropped here only if nothing above moved or called it (Rust tracks this with a runtime drop flag).",
+            "f goes out of scope. Its captured resource is dropped here only if nothing above called it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             "can't be used after the if",
@@ -21070,7 +21070,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "f is moved into the call (an FnOnce closure can only be called once). s, which f captured, is dropped during the call",
             "Only if the `?` here returns early (on an `Err` or `None`): the function returns and k's resource is dropped. If the `?` succeeds, nothing happens to k here.",
-            "h goes out of scope. Its captured resources are dropped here only if no branch above called it (Rust tracks this with a runtime drop flag).",
+            "h goes out of scope. Its captured resource is dropped here only if no branch above called it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             "the function returns and f's resource is dropped",
@@ -22290,6 +22290,504 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s goes out of scope. Its resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
             "t goes out of scope. Its resource is dropped here only if t still holds it (Rust tracks this with a runtime drop flag).",
             "u goes out of scope. Its resource is dropped here only if u still holds it (Rust tracks this with a runtime drop flag).",
+        ],
+    },
+    TooltipExpect {
+        name: "conditional_literal_ctor_part_1267",
+        // #1267: an `if` / `match` inside a constructor in a tuple / struct
+        // literal (`(Some(if …), 1)`), or as an element of a tuple passed to
+        // a call or method (`take((if …, 1))`), moves each branch's value in
+        // that branch. Main drew no move of d..k at all, then said each "is
+        // dropped here only if d still holds it", with nothing that could
+        // have cleared the flag.
+        must_contain: &[
+            "d was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when d goes out of scope.",
+            "e was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when e goes out of scope.",
+            "f was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when f goes out of scope.",
+            "g was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when g goes out of scope.",
+            "h was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when h goes out of scope.",
+            "i was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when i goes out of scope.",
+            "j was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when j goes out of scope.",
+            "k was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when k goes out of scope.",
+            "_t.0 acquired ownership of a resource (in all branches above)",
+            "_w.s acquired ownership of a resource (in all branches above)",
+            "Move from d to _t.0",
+            "Move from g to _w.s",
+            "Move from h to take",
+            "Move from k to push",
+        ],
+        must_not_contain: &[
+            "d goes out of scope. Its resource is dropped here only if d still holds it (Rust tracks this with a runtime drop flag).",
+            "e goes out of scope. Its resource is dropped here only if e still holds it (Rust tracks this with a runtime drop flag).",
+            "f goes out of scope. Its resource is dropped here only if f still holds it (Rust tracks this with a runtime drop flag).",
+            "g goes out of scope. Its resource is dropped here only if g still holds it (Rust tracks this with a runtime drop flag).",
+            "h goes out of scope. Its resource is dropped here only if h still holds it (Rust tracks this with a runtime drop flag).",
+            "i goes out of scope. Its resource is dropped here only if i still holds it (Rust tracks this with a runtime drop flag).",
+            "j goes out of scope. Its resource is dropped here only if j still holds it (Rust tracks this with a runtime drop flag).",
+            "k goes out of scope. Its resource is dropped here only if k still holds it (Rust tracks this with a runtime drop flag).",
+        ],
+    },
+    TooltipExpect {
+        name: "destructuring_assign_loop_1253",
+        // #1253: `(x, n) = loop { … break (s, 1); … }` takes apart the value
+        // of the `break` that ended the loop. Main moved s and t to an
+        // internal "Anonymous resource" and never gave n its new value.
+        must_contain: &[
+            "s may have been moved: the loop can end with break (s, 1), which moves s's resource to x, so s can't be used after the loop",
+            "t may have been moved: the loop can end with break (t, 2), which moves t's resource to x, so t can't be used after the loop",
+            "Move from s to x, if the loop ended with break (s, 1)",
+            "n is assigned a new value (from whichever break ended the loop)",
+            "Move from u to y",
+            "m is assigned a new value",
+        ],
+        must_not_contain: &[
+            "Anonymous resource",
+        ],
+    },
+    TooltipExpect {
+        name: "ref_cast_borrow_1175",
+        // #1175: a borrow written with an `as` cast (`&mut arr as &mut
+        // [i32]`, `&s as &dyn Display`) borrows the same place as the
+        // uncast `&mut arr` / `&s`; `as` only changes the pointee type.
+        // Main drew no borrow at all (the lender stayed a plain owner and
+        // the reference had no lender). `m as &mut String` reborrows m, as
+        // `let m2: &mut String = m;` does (checked with rustc: `m.push`
+        // after m2's last use compiles); `r as &dyn Display` copies r.
+        must_contain: &[
+            "Mutable borrow from arr to sl",
+            "arr's value is mutably borrowed by sl; arr can't be used while the borrow is live",
+            "arr's value is immutably borrowed by sum; arr is read-only while the borrow is live",
+            "Mutable borrow from t to m",
+            "t's resource is mutably borrowed by m; t can't be used while the borrow is live",
+            "Mutable reborrow from m to m2",
+            "Return mutably borrowed resource from m2 to *m",
+            "Immutable borrow from s to r",
+            "s's resource is immutably borrowed by show; s is read-only while the borrow is live",
+            "Return immutably borrowed resource from r2 to s",
+        ],
+        must_not_contain: &[
+            "sl's mutable borrow ends (what it borrows from isn't shown)",
+            "m's mutable borrow ends (what it borrows from isn't shown)",
+            "m2's mutable borrow ends (what it borrows from isn't shown)",
+            "r's immutable borrow ends (what it borrows from isn't shown)",
+            "=sl is bound to a mutable reference",
+            "=m is bound to a mutable reference",
+            "=r is bound to an immutable reference",
+        ],
+    },
+    TooltipExpect {
+        name: "element_box_field_borrow_1176",
+        // #1176: a borrow of a field of an element (`&mut people[0].age`,
+        // `grow(&mut people[0].name)`, `people[0].name.push(..)`) or of a
+        // field of what a Box holds (`&mut b.age`) is a borrow of part of
+        // people's / b's value, drawn on their columns as `&mut v[0]` is.
+        // Main drew nothing on people / b ("owner" throughout) and gave the
+        // references no lender. (age's own dot says "age mutably borrows a
+        // resource", as `&mut v[0]` with `v: Vec<i32>` already does on main,
+        // though age points to a u32: #1233, not pinned here.)
+        must_contain: &[
+            "Mutable borrow from people to age",
+            "people's resource is mutably borrowed by age; people can't be used while the borrow is live",
+            "people's resource is modified through age",
+            "people's resource is mutably borrowed by grow; people can't be used while the borrow is live",
+            "Immutable borrow from people to first",
+            "push reads from/writes to people (implicitly mutably borrowed)",
+            "len reads from people (implicitly borrowed)",
+            "Mutable borrow from b to a",
+            "b's resource is modified through a",
+            "push reads from/writes to b (implicitly mutably borrowed)",
+            "b's resource is mutably borrowed by grow; b can't be used while the borrow is live",
+        ],
+        must_not_contain: &[
+            "age's mutable borrow ends (what it borrows from isn't shown)",
+            "first's immutable borrow ends (what it borrows from isn't shown)",
+            "a's mutable borrow ends (what it borrows from isn't shown)",
+        ],
+    },
+    TooltipExpect {
+        name: "method_through_struct_ref_1216",
+        // #1216: with `r = &mut p`, `r.name.push('!')` and `grow(&mut
+        // r.name)` modify p.name; that is drawn on p.name's column, as
+        // `r.age += 1` already is on p.age's. Main put nothing on p.name.
+        must_contain: &[
+            "p.age's value is modified through r.age",
+            "p.name's resource is modified through r.name",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "borrow_call_result_no_drop_1155",
+        // #1155: `let r = &compute();` borrows a temporary holding the
+        // value compute returned (extended to the end of the block). With
+        // nothing to drop it has no `(temporary)` column (#400), so the
+        // borrow's end says its lender isn't shown. Main said it was
+        // "returned to compute" (a function lends nothing), or drew no end
+        // at all. `&mut v.iter()` likewise no longer returns a borrow to
+        // `iter` (#1209; that v stays borrowed until it's last use is
+        // still not drawn).
+        must_contain: &[
+            "r's immutable borrow ends (what it borrows from isn't shown)",
+            "m's mutable borrow ends (what it borrows from isn't shown)",
+            "p's immutable borrow ends (what it borrows from isn't shown)",
+            "x's immutable borrow ends (what it borrows from isn't shown)",
+            "h.r's immutable borrow ends (what it borrows from isn't shown)",
+            "t.0's immutable borrow ends (what it borrows from isn't shown)",
+            // With #1209, it borrows the temporary iterator, which
+            // borrows v: its end gives v back.
+            "it's borrow ends",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from r to compute",
+            "Return mutably borrowed resource from m to compute",
+            "Return immutably borrowed resource from p to make",
+            "Return immutably borrowed resource from t.0 to compute",
+            "Return mutably borrowed resource from it to iter",
+        ],
+    },
+    TooltipExpect {
+        name: "extended_temp_projection_1165",
+        // #1165: a `let` that borrows a field or an index of a temporary
+        // (`&String::from("hello")[1..]`, `&make_user().name`, `&mk()[0]`)
+        // extends that temporary to the end of the block, as for
+        // `&String::from("a")` (#400): it gets a `(temporary)` column, is
+        // borrowed (a field through its own column), and its drop at the
+        // block's end is stated. Checked with rustc: all compile and use the
+        // reference after the `let`. Main gave the temporary no column, never
+        // stated its drop, and "returned" the borrow to String::from.
+        must_contain: &[
+            "Move from String::from to (temporary)",
+            "Immutable borrow from (temporary) to s",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+            "Move from make_user to (temporary 2)",
+            "Immutable borrow from (temporary 2).name to name",
+            "(temporary 2).name goes out of scope. Its resource is dropped.",
+            "Mutable borrow from (temporary 3).age to age",
+            "Immutable borrow from (temporary 4) to e",
+            "Immutable borrow from (temporary 5) to h.r",
+            "Immutable borrow from (temporary 6) to inner",
+            "(temporary 6) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from s to String::from",
+            "Return immutably borrowed resource from inner to String::from",
+            "name's immutable borrow ends (what it borrows from isn't shown)",
+            "age's mutable borrow ends (what it borrows from isn't shown)",
+            "h.r's immutable borrow ends (what it borrows from isn't shown)",
+        ],
+    },
+    TooltipExpect {
+        // #1125: an outlives bound (`where 'a: 'b`, `<'a, 'b: 'a>`) lets a
+        // `&'a str` stand in for the `&'b str` a fn returns, so the
+        // result may point into either argument: both stay borrowed while
+        // it is in use (with `s1.push('x')` before `println!("{}", r1)`,
+        // rustc says E0502). Main tied the result to only the argument
+        // whose lifetime is spelled in the return type, and freed the
+        // other one at the call. Also for an assignment (`r3 = ..`) and a
+        // struct result (`p4.text`).
+        name: "outlives_bound_1125",
+        must_contain: &[
+            "Immutable borrow from s1 to r1: shorten's signature lets the reference it returns point into both arguments (a lifetime bound like `'a: 'b` lets a longer-lived reference stand in for a shorter one), so it may point into either, and both stay borrowed while r1 is in use",
+            "Return immutably borrowed resource from r1 to s1",
+            "Return immutably borrowed resource from r1 to t1",
+            "Immutable borrow from t2 to r2: pick's signature lets the reference it returns point into both arguments (a lifetime bound like `'a: 'b` lets a longer-lived reference stand in for a shorter one), so it may point into either, and both stay borrowed while r2 is in use",
+            "Return immutably borrowed resource from r2 to t2",
+            "Return immutably borrowed resource from r3 to s3",
+            "Return immutably borrowed resource from p4.text to s4",
+        ],
+        must_not_contain: &[
+            "shorten's signature gives the reference it returns the same lifetime as its second argument",
+            "pick's signature gives the reference it returns the same lifetime as its first argument",
+            "part's signature gives the struct it returns the same lifetime as its second argument",
+        ],
+    },
+    TooltipExpect {
+        // #1124: a call whose signature lets it store a reference in a
+        // reference variable passed as `&mut r` (`store(&mut r, src)` with
+        // `dst: &mut &'a str, src: &'a str`, `std::mem::replace(&mut r,
+        // &b)`) makes r point into b, so b stays borrowed while r is in
+        // use. Main ended b's borrow at the call ("b's resource is no
+        // longer immutably borrowed" on the same line) and drew b as its
+        // owner's while `println!("{}", r)` read it. Also when the stored
+        // reference is a call's result (`b2.as_str()`), when the `&mut` is
+        // a local (`rr = &mut r5`), and in a branch. Storing into a
+        // container (`keep(&mut v, &b)`) was already right (#513).
+        name: "store_through_mut_ref_1124",
+        must_contain: &[
+            "store_s reads from b1; store_s's signature lets it store this reference in r1, so b1 stays borrowed while r1 is in use",
+            "store reads from b2; store's signature lets it store this reference in r2, so b2 stays borrowed while r2 is in use",
+            "store reads from b3; store's signature lets it store this reference in r3, so b3 stays borrowed while r3 is in use",
+            "std::mem::replace reads from b4; std::mem::replace's signature lets it store this reference in r4, so b4 stays borrowed while r4 is in use",
+            "store_s reads from b5; store_s's signature lets it store this reference in r5, so b5 stays borrowed while r5 is in use",
+            "std::mem::replace reads from b6; std::mem::replace's signature lets it store this reference in r6, so b6 stays borrowed while r6 is in use",
+            "b6's resource is no longer borrowed by _old, but is still immutably borrowed by r6",
+        ],
+        must_not_contain: &[
+            // The stored-in suffix was missing; the borrow ended at the call.
+            "=store_s reads from b1",
+            "=store reads from b3",
+            "=std::mem::replace reads from b4",
+            "=store_s reads from b5",
+            "=std::mem::replace reads from b6",
+        ],
+    },
+    TooltipExpect {
+        // #1152: a call through a local `&mut` r whose result keeps the
+        // borrow (`r1.iter_mut()`, `r2.first_mut().unwrap()`,
+        // `r3.get_mut(0)`, in a loop `r4.last_mut()`) reborrows through
+        // r, like `&mut *r`: r can't be used until the result is done
+        // (`r1.push(4)` between `r1.iter_mut()` and `it.next()` is
+        // E0499). Main drew the result borrowing v directly, left r "can
+        // read and write" throughout ("iter_mut no longer borrows the
+        // resource r1 points to" on the call's line), and ended the
+        // holders' mutable borrows as "immutable".
+        name: "reborrow_through_local_mut_ref_1152",
+        must_contain: &[
+            "Mutable reborrow from r1 to it: iter_mut's signature gives the value it returns the same lifetime as the value it was called on; it isn't a reference, but its value holds one",
+            "the resource r1 points to is mutably borrowed by it through r1; r1 can't be used until the borrow ends",
+            "it's mutable borrow ends",
+            "_x's mutable borrow ends",
+            "Mutable reborrow from r2 to x: first_mut's signature gives the value it returns the same lifetime as the value it was called on; unwrap passes the borrow on",
+            "x no longer borrows the resource r2 points to",
+            "Mutable reborrow from r3 to o: get_mut's signature gives the value it returns the same lifetime as the value it was called on; o isn't a reference, but its value holds one",
+            "Mutable reborrow from r4 to y: last_mut's signature gives the value it returns the same lifetime as the value it was called on; unwrap passes the borrow on",
+        ],
+        must_not_contain: &[
+            "Mutable borrow from v to it",
+            "Mutable borrow from v to x",
+            "Mutable borrow from v to o",
+            "Mutable borrow from v to y",
+            "iter_mut no longer borrows the resource r1 points to",
+            "first_mut no longer borrows the resource r2 points to",
+            "it's immutable borrow ends",
+            "_x's immutable borrow ends",
+            "o's immutable borrow ends",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_capture_drops_1148",
+        // #1148: `move || r.push('!')` moves the `&mut` r into f. f then
+        // holds the borrow and gives s back at its last use; a reference
+        // owns nothing, so f's scope end drops nothing (main: "Its 1
+        // captured resource is dropped", while s is printed after). A
+        // closure made in an `if` / `match` arm that moved a String in
+        // never said it is dropped (its captures were only looked up
+        // outside conditionals), and one that captured a value with
+        // nothing to drop (`Plain`) claimed a dropped resource. #1159:
+        // `let n = m;` in an `if` read as a capture, and n's drop
+        // wasn't stated.
+        must_contain: &[
+            "r's reference is captured (moved) by closure f; the data it points to is not moved",
+            "f's mutable borrow ends",
+            "Return mutably borrowed resource from f to s",
+            "f owns a closure",
+            "Closure g captures: t (moved)",
+            "g owns a closure which owns 1 resource via capture",
+            "g goes out of scope. Its 1 captured resource is dropped.",
+            "Closure h captures: u (moved)",
+            "h goes out of scope. Its 1 captured resource is dropped.",
+            "k owns a closure",
+            "k goes out of scope",
+            "m's resource is moved",
+            "n takes over m's value",
+            "n goes out of scope. Its 1 captured resource is dropped.",
+        ],
+        must_not_contain: &[
+            "f goes out of scope. Its 1 captured resource is dropped.",
+            "f owns a closure which owns 1 resource via capture",
+            "r's resource is captured (moved) by closure f",
+            "Return mutably borrowed resource from r to s",
+            "r's mutable borrow ends",
+            "=Closure g is bound",
+            "=Closure h is bound",
+            "k goes out of scope. Its 1 captured resource is dropped.",
+            "k owns a closure which owns 1 resource via capture",
+            "m's resource is captured (moved) by closure n",
+            // The scope ends main drew with no drop.
+            "=g goes out of scope",
+            "=h goes out of scope",
+            "=n goes out of scope",
+        ],
+    },
+    TooltipExpect {
+        name: "reslice_in_place_1123",
+        // #1123: `slice = &mut slice[1..];` reborrows part of what slice
+        // points to and stores it back in slice. The new reference comes
+        // from slice's loan of v, so v stays borrowed until slice's last
+        // use (rustc: `v.push(1)` between the two lines is E0499). Main
+        // ended the loan at the reassignment, drew slice lending to
+        // itself, and gave v back early. Same for `s = &s[1..]` (also in a
+        // `while` loop) and `r = &mut *r`.
+        must_contain: &[
+            "slice now points to part of the data it pointed to (a reborrow through slice itself). \
+             It still borrows from v, so v stays mutably borrowed while slice is in use",
+            "s now points to part of the data it pointed to (a reborrow through s itself). \
+             It still borrows from w, so w stays immutably borrowed while s is in use",
+            "t now points to part of the data it pointed to (a reborrow through t itself). \
+             It still borrows from u, so u stays immutably borrowed while t is in use",
+            "r now points to the same data again (a reborrow through r itself). \
+             It still borrows from x, so x stays mutably borrowed while r is in use",
+            "Return mutably borrowed resource from slice to v",
+        ],
+        must_not_contain: &[
+            "Mutable reborrow from slice to slice",
+            "Immutable reborrow from s to s",
+            "Immutable reborrow from t to t",
+            "Mutable reborrow from r to r",
+            "slice's mutable borrow of v ends",
+            "borrows isn't shown",
+            "mutably borrowed by slice through slice",
+            "immutably borrowed by s through s",
+            "mutably borrowed by r through r",
+        ],
+    },
+    TooltipExpect {
+        name: "cell_through_ref_1149",
+        // #1149: `c.set(42)` with `c: &Cell<i32>` writes into the Cell c
+        // points to; main said "set reads from c". Same for
+        // `r.borrow_mut()` through `&RefCell` and for passing such a
+        // reference on (`add_one(rc)`). The text says the contents can
+        // change through the reference, not that the method changes them:
+        // `k.get()` only copies the value out (review of #1234).
+        must_contain: &[
+            "set uses what c points to, through the shared reference c; that has interior \
+             mutability, so its contents can change even through a shared reference",
+            "borrow_mut uses what r points to, through the shared reference r; exclusive access to \
+             its contents is checked at runtime (a second borrow_mut while this one is live would panic)",
+            "set uses what rc points to, through the shared reference rc; that has interior \
+             mutability, so its contents can change even through a shared reference",
+            "add_one uses what rc points to, through the shared reference rc; that has interior \
+             mutability, so its contents can change even through a shared reference",
+            "set uses what k points to, through the shared reference k; that has interior \
+             mutability, so its contents can change even through a shared reference",
+            "get uses what k points to, through the shared reference k; that has interior \
+             mutability, so its contents can change even through a shared reference",
+        ],
+        must_not_contain: &[
+            "set reads from c",
+            "borrow_mut reads from r",
+            "set reads from rc",
+            "add_one reads from rc",
+            "set reads from k",
+            "get can change its contents",
+            "set can change its contents",
+            "add_one can change its contents",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_moved_in_branch_1158",
+        // #1158: `v.push(f)` in an `if` moves the closure f (it isn't
+        // called); f's scope end said its captures are dropped "only if no
+        // branch above called it", and "resources" for one. #1232: v's
+        // scope end named rustc's internal closure type.
+        must_contain: &[
+            "f goes out of scope. Its captured resource is dropped here only if no branch above \
+             moved it (Rust tracks this with a runtime drop flag).",
+            "g goes out of scope. Its captured resource is dropped here only if no branch above \
+             called it (Rust tracks this with a runtime drop flag).",
+            "v goes out of scope. Its resource is dropped (including every closure it holds).",
+        ],
+        must_not_contain: &[
+            "f goes out of scope. Its captured resources are dropped here only if no branch above called it",
+            "Its captured resources are dropped",
+            "{closure@",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_captures_ref_var_1180",
+        // #1180: `|| println!("{}", r)` captures r itself (the macro
+        // takes `&r`): r is borrowed, as by `&r` (#925). r is a reference
+        // and owns nothing, so "r's resource" was false.
+        must_contain: &[
+            "r is captured (immutably borrowed) by closure show; r is read-only while the borrow is live",
+            "r is no longer immutably borrowed",
+            "r is immutably borrowed by the closure passed to apply; r is read-only while the borrow is live",
+            "the resource r points to is captured by closure len (an immutable reborrow through r)",
+        ],
+        must_not_contain: &[
+            "r's resource is captured",
+            "show no longer borrows the resource r points to",
+            "the resource r points to is immutably borrowed by the closure passed to apply",
+        ],
+    },
+    TooltipExpect {
+        name: "cond_with_move_closure",
+        // #1148: the move closure made in the `if` arm owns s's String and
+        // drops it at the arm's end; main never said so (this entry's
+        // first one pinned only the arrows).
+        must_contain: &[
+            "f owns a closure which owns 1 resource via capture",
+            "f goes out of scope. Its 1 captured resource is dropped.",
+        ],
+        must_not_contain: &["=f goes out of scope", "=Closure f is bound"],
+    },
+    TooltipExpect {
+        name: "cell_ref_return",
+        // #1149: `r.set(2)` with `r: &Cell<i32>` writes the Cell.
+        must_contain: &[
+            "set uses what r points to, through the shared reference r; that has interior \
+             mutability, so its contents can change even through a shared reference",
+        ],
+        must_not_contain: &["set reads from r", "set can change its contents"],
+    },
+    TooltipExpect {
+        name: "closure_static_write_1203",
+        // #1203: a closure names a static rather than capturing it; the
+        // write happens when the closure is called. Main drew nothing on
+        // COUNT's column for `f();` / `g();`. Pinned by position in
+        // `a_closure_call_writes_the_static_it_names`.
+        must_contain: &[
+            "COUNT is assigned a new value",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "labeled_block_value_1134",
+        // #1134: `let x = 'blk: { if c { break 'blk a; } b };` drew only
+        // "Move from b to x", unconditionally: the `break`'s value was
+        // dropped from the diagram. x gets a's value if the `break` ran,
+        // b's if the block ran to its last expression; each is drawn
+        // as one of them, as for a `loop` with several `break`s (#561).
+        // Also for an assignment, a call argument, a borrow (h's loan
+        // ends where r's last use is, as k's) and a Copy value.
+        must_contain: &[
+            "Move from a to x, if the block ended with break 'blk a",
+            "Move from b to x, if the block ended with its last expression, b",
+            "a may have been moved: the block can end with break 'blk a, which moves a's resource to x, so a can't be used after the block",
+            "b may have been moved: the block can end with its last expression, b, which moves b's resource to x, so b can't be used after the block",
+            "x acquires ownership of a resource (from whichever break or last expression ended the block)",
+            "y acquires ownership of a new resource (from whichever break or last expression ended the block); its previous resource is dropped",
+            "Move from f to take, if the block ended with break 'blk f",
+            "Move from g to take, if the block ended with its last expression, g",
+            "Immutable borrow from h to r, if the block ended with break 'blk &h",
+            "h's resource is no longer immutably borrowed",
+            "Copy from m to z, if the block ended with break 'blk m",
+            "Move from p to w, if the block ended with break 'blk p",
+        ],
+        must_not_contain: &[
+            "=Move from b to x",
+            "=Move from e to y",
+            "=Move from g to take",
+            "=Immutable borrow from k to r",
+            "=b's resource is moved",
+            "x acquires ownership of a resource (from whichever break ended the loop)",
+        ],
+    },
+    // #1226: a destructuring `let` of a labeled block took only the
+    // block's last expression, unconditionally (t moved, s never).
+    TooltipExpect {
+        name: "labeled_block_pattern_1226",
+        must_contain: &[
+            "Move from s to x, if the block ended with break 'blk (s, 1)",
+            "Move from t to x, if the block ended with its last expression, (t, 2)",
+            "x acquires ownership of a resource (from whichever break or last expression ended the block)",
+            "Move from u to a, if the block ended with break 'blk P { a: u, b: 1 }",
+            "Move from v to a, if the block ended with its last expression, P { a: v, b: 2 }",
+        ],
+        must_not_contain: &[
+            "=t's resource is moved",
+            "=v's resource is moved",
+            "=x acquires ownership of a resource",
+            "=a acquires ownership of a resource",
         ],
     },
 ];
@@ -29887,6 +30385,18 @@ fn a_boxed_closure_borrowing_through_a_reference_keeps_it_until_dropped() {
     assert_eq!(ys("d's immutable borrow ends"), vec![row("drop(d);")]);
     assert_eq!(ys("d no longer borrows the resource p points to"), vec![row("drop(d);")]);
     assert_eq!(ys("w's resource is no longer immutably borrowed"), vec![row("drop(d);")]);
+}
+
+/// #1203 (`closure_static_write_1203`): calling a closure that assigns a
+/// `static mut` writes the static on the call's row (main drew nothing
+/// there).
+#[test]
+fn a_closure_call_writes_the_static_it_names() {
+    let rv = run_with_local_backend("closure_static_write_1203");
+    let ids: Vec<String> = common::svg::rv_elements(&rv.timeline_panel_string()).into_iter().map(|e| e.id).collect();
+    for id in ["COUNT@L6:dot:acquire", "COUNT@L8:dot:acquire"] {
+        assert!(ids.iter().any(|i| i == id), "no {:?} in {:#?}", id, ids);
+    }
 }
 
 /// #1195 (`call_arg_before_try_1195`): a call's arguments are all

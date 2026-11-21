@@ -1397,6 +1397,9 @@ pub struct ArgTie {
     /// stored in that argument, not the argument's own, so the caller's
     /// variable isn't kept borrowed (#1084).
     pub stored_in: Vec<StoredTie>,
+    /// Some tied argument has a lifetime that only outlives the
+    /// result's (`'a: 'b`, #1125): "the same lifetime" isn't true of it.
+    pub via_outlives: bool,
 }
 
 /// An argument a call's result is tied to only through the references
@@ -1766,6 +1769,18 @@ pub struct BreakAlt {
     /// was dropped there (#410) or never created, and nothing is left
     /// for a drop flag at the loop's end.
     pub in_loop: bool,
+    /// What the value ends: a `loop`, or a labeled block (`let x = 'a:
+    /// { if c { break 'a s; } t };`, #1134), through a `break` or by
+    /// running to its last expression.
+    pub end: AltEnd,
+}
+
+/// See BreakAlt::end.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AltEnd {
+    Loop,
+    Block,
+    BlockTail,
 }
 
 /// A borrow of a variable declared outside an `if` let-chain that the
@@ -1930,6 +1945,10 @@ pub enum ExternalEvent {
         // DefId (not its name: a user type may define its own
         // `borrow_mut(&self)`). Selects the runtime-exclusivity wording.
         refcell_borrow_mut: bool,
+        // The argument is a shared reference to a value with interior
+        // mutability (`r.set(2)` with `r: &Cell<i32>`, #1149): the call
+        // can change what it points to.
+        pointee_interior_mut: bool,
         // See `StoredIn`.
         stored_in: StoredIn,
         result_keeps_borrow: bool,
@@ -2230,6 +2249,19 @@ pub enum ExternalEvent {
     // this path, whose lifetime the signature ties to the result's
     // (#775): its borrow lasts as long as the result in the caller, so
     // nothing ends here. A dot; the state is unchanged.
+    // `slice = &mut slice[1..];` / `s = &s[1..];` (#1123): the reference
+    // is given a reborrow of part of what it already points to. The loan
+    // of `lender` it holds goes on (the new reference is derived from
+    // it), so nothing is returned and nothing new is borrowed from
+    // `lender`. A dot; the state is unchanged.
+    ReslicedInPlace {
+        ro: ResourceAccessPoint,
+        lender: String,
+        mutable: bool,
+        // `&s[1..]` (part of the data) rather than `&mut *r` (all of it).
+        part: bool,
+        id: usize
+    },
     TiedParamNote {
         ro: ResourceAccessPoint,
         lifetime: String,
@@ -2392,6 +2424,7 @@ impl ExternalEvent {
             &ExternalEvent::ChainFailAssign { id, .. } |
             &ExternalEvent::ChainFailUse { id, .. } |
             &ExternalEvent::TiedParamNote { id, .. } |
+            &ExternalEvent::ReslicedInPlace { id, .. } |
             &ExternalEvent::DeadElseNote { id, .. } |
             &ExternalEvent::DeadLoanNote { id, .. } |
             &ExternalEvent::RefDie { id, .. } | &ExternalEvent::Bind { id, .. } |
@@ -2692,6 +2725,8 @@ pub enum Event {
     ChainFailUse { uses: Vec<ChainUse>, definite: bool, path: FailPath, is_ref: bool, pointee_value: bool },
     // See ExternalEvent::TiedParamNote.
     TiedParamNote { lifetime: String },
+    // See ExternalEvent::ReslicedInPlace.
+    ReslicedInPlace { lender: String, mutable: bool, part: bool },
     // See ExternalEvent::DeadElseNote.
     DeadElseNote,
     // See ExternalEvent::DeadLoanNote. `shown`: the column is drawn
@@ -3341,6 +3376,9 @@ impl Display for Event {
             Event::TiedParamNote { .. } => {
                 write!(f, "Not returned on this path; its borrow lasts as long as the result")
             },
+            Event::ReslicedInPlace { .. } => {
+                write!(f, "Points to part of what it pointed to; its borrow goes on")
+            },
             Event::DeadElseNote => {
                 write!(f, "This else branch never runs")
             },
@@ -3562,6 +3600,9 @@ impl Event {
             Event::TiedParamNote { lifetime, .. } => {
                 hover_messages::event_dot_tied_param_note(my_name, lifetime)
             }
+            Event::ReslicedInPlace { lender, mutable, part } => {
+                hover_messages::event_dot_resliced_in_place(my_name, lender, *mutable, *part)
+            }
             Event::DeadLoanNote { lender, borrower, repoint, .. } => {
                 hover_messages::event_dot_dead_loan_note(lender, borrower, *repoint)
             }
@@ -3769,6 +3810,10 @@ impl Event {
                     ResourceTy::Value(ResourceAccessPoint::Function(f)) if f.drops_arg.0 =>
                         hover_messages::event_dot_move_to_drop(&self.deref_name(my_name), &f.name, v,
                             &is.extract_rap().map_or(String::new(), |r| r.drop_note())),
+                    // `move || r.push('!')` with `r: &mut String` moves the
+                    // reference, not what it points to (#1148).
+                    _ if to.is_closure() && is.extract_rap().is_some_and(|r| r.is_ref()) =>
+                        hover_messages::event_dot_capture_move_ref_to_closure(&self.deref_name(my_name), &target_name(to)),
                     _ if to.is_closure() => hover_messages::event_dot_capture_move_to_closure(&self.deref_name(my_name), &target_name(to), v),
                     _ => hover_messages::event_dot_move_to(&self.deref_name(my_name), v),
                 }
@@ -3779,7 +3824,10 @@ impl Event {
                 // lender is handled by event_dot_static_lend_ref_var
                 // (`&r`, #925) or event_dot_lend_through_ref.
                 let holds_value = lender_holds_value(is);
-                if to.is_closure() {
+                if let (true, true, Some(r)) = (to.is_closure(), *of_ref_var, ref_lender(is)) {
+                    // `|| println!("{}", r)` captures r itself (#1180).
+                    hover_messages::event_dot_capture_ref_var_to_closure(r.name(), &target_name(to), false)
+                } else if to.is_closure() {
                     let target_name = target_name(to);
                     hover_messages::event_dot_capture_static_lend_to_closure(&self.deref_name(my_name), &target_name, holds_value)
                 } else {
@@ -3802,7 +3850,9 @@ impl Event {
             Event::MutableLend{ to, is, of_ref_var, ..} => {
                 let holds_value = lender_holds_value(is);
                 let target_name = target_name(to);
-                if to.is_closure() {
+                if let (true, true, Some(r)) = (to.is_closure(), *of_ref_var, ref_lender(is)) {
+                    hover_messages::event_dot_capture_ref_var_to_closure(r.name(), &target_name, true)
+                } else if to.is_closure() {
                     hover_messages::event_dot_capture_mut_lend_to_closure(&self.deref_name(my_name), &target_name, holds_value)
                 } else if let (true, Some(r)) = (*of_ref_var, ref_lender(is)) {
                     hover_messages::event_dot_mut_lend_ref_var(r.name(), &target_name)
@@ -4771,6 +4821,7 @@ impl Visualizable for VisualizationData {
             // The borrows have ended (#688): no change.
             (_, Event::ChainFailUse { .. }) => (*previous_state).clone(),
             (_, Event::TiedParamNote { .. }) => (*previous_state).clone(),
+            (_, Event::ReslicedInPlace { .. }) => (*previous_state).clone(),
             (_, Event::DeadElseNote) => (*previous_state).clone(),
             (_, Event::DeadLoanNote { .. }) => (*previous_state).clone(),
 
@@ -5171,7 +5222,7 @@ impl Visualizable for VisualizationData {
         ExternalEvent::RefDie { from: from_ro, to: to_ro, id ,..} => {
           match from_ro.clone() {
               ResourceTy::Deref(ro_is) | ResourceTy::Value(ro_is) => {
-                  if ro_is.is_mutref() && !to_o {
+                  if (ro_is.is_mutref() || holds_mut_borrow(self, &ro_is)) && !to_o {
                     vec![(line_num, Event::MutableDie {to: ResourceTy::Anonymous, is: from_ro.clone(), id: *id})]
                   }
                   else {
@@ -5272,6 +5323,9 @@ impl Visualizable for VisualizationData {
         ExternalEvent::TiedParamNote{ lifetime, .. } => {
           vec![(line_num, Event::TiedParamNote { lifetime: lifetime.clone() })]
         },
+        ExternalEvent::ReslicedInPlace{ lender, mutable, part, .. } => {
+          vec![(line_num, Event::ReslicedInPlace { lender: lender.clone(), mutable: *mutable, part: *part })]
+        },
         ExternalEvent::DeadLoanNote{ lender, borrower, repoint, .. } => {
           vec![(line_num, Event::DeadLoanNote { lender: lender.clone(), borrower: borrower.clone(), repoint: *repoint, shown: false })]
         },
@@ -5325,6 +5379,7 @@ impl Visualizable for VisualizationData {
             ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::TupleTempDrop { ro, .. } | ExternalEvent::OrAltMove { ro, .. } | ExternalEvent::LoopIteratorDrop { ro, .. }
             | ExternalEvent::LoopMaybeInit { ro, .. } | ExternalEvent::LoopExitKept { ro, .. }
             | ExternalEvent::ChainFailAssign { ro, .. } | ExternalEvent::ChainFailUse { ro, .. } | ExternalEvent::TiedParamNote { ro, .. }
+            | ExternalEvent::ReslicedInPlace { ro, .. }
             | ExternalEvent::DeadElseNote { ro, .. } | ExternalEvent::DeadLoanNote { ro, .. } => {
                 if ro == rap {
                     b_history.extend(self.event_of_external_event(line_number, event, true));
@@ -5551,7 +5606,7 @@ impl Visualizable for VisualizationData {
             ExternalEvent::RefDie { from: from_ro, to: _, id, ..} => { // need Ref Event to avoid drawing redundant arrows when rendering timelines
                 match from_ro.clone() {
                     ResourceTy::Deref(ro_is) | ResourceTy::Value(ro_is) => {
-                        if ro_is.is_mutref() {
+                        if ro_is.is_mutref() || holds_mut_borrow(self, &ro_is) {
                             maybe_append_event(self, &from_ro.clone(), Event::MutableDie { to: ResourceTy::Anonymous, is: from_ro.clone(), id: id }, line_number);
                             //maybe_append_event(self, &to_ro.clone(), Event::MutableReacquire { from: from_ro, is: to_ro }, &line_number);
                         }
@@ -5657,6 +5712,9 @@ impl Visualizable for VisualizationData {
             ExternalEvent::TiedParamNote{ro, lifetime, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::TiedParamNote { lifetime }, line_number);
             },
+            ExternalEvent::ReslicedInPlace{ro, lender, mutable, part, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::ReslicedInPlace { lender, mutable, part }, line_number);
+            },
             ExternalEvent::DeadElseNote{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::DeadElseNote, line_number);
             },
@@ -5669,4 +5727,11 @@ impl Visualizable for VisualizationData {
             },
         }
     }
+}
+/// A value that holds a borrow without being a reference (`let it =
+/// r.iter_mut();`) whose borrow is a mutable one: its column drew a
+/// mutable borrow. Its end then says "mutable" too (#1152).
+fn holds_mut_borrow(vd: &VisualizationData, ro: &ResourceAccessPoint) -> bool {
+    !ro.is_ref() && ro.holds_borrow() && vd.timelines.get(ro.hash())
+        .is_some_and(|t| t.history.iter().any(|(_, e)| matches!(e, Event::MutableBorrow { .. })))
 }
