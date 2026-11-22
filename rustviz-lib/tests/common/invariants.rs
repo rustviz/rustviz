@@ -26,6 +26,10 @@
 //! entries (and may move the repro from `known_bugs/` into the corpus with
 //! `EXPECTED_TOOLTIPS` entries in `corpus.rs`).
 //!
+//! `geometry.rs` adds checks of the drawing itself (a column that starts
+//! or ends in mid-air, a segment drawn past a fork dot, two arrows along
+//! one stretch, ...); they share this file's list and test.
+//!
 //! The test is `corpus_invariants_hold` in `corpus.rs` (it reuses that
 //! binary's renders). `RV_INVARIANTS_ONLY=a,b` checks only the snippets
 //! whose name starts with one of the prefixes (`book/c4`, `known_bugs/`);
@@ -45,6 +49,123 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("ctor_literals_768", "field-outlives-moved-struct", 1127),
     // One line's events stacked out of order.
     ("edition2024/whole_value_moved_by_chain_953", "event-on-dead-column", 1200),
+    // Geometric (`geometry.rs`), from here on.
+    // A reference's borrow ends in an arm: the arm's column restarts, dashed, a row lower.
+    ("borrow_end_join_else", "line-starts-nowhere", 1292),
+    ("borrow_end_two_loans_mut", "line-starts-nowhere", 1292),
+    ("borrow_made_in_arm_else", "line-starts-nowhere", 1292),
+    ("borrow_made_in_arm_if", "line-starts-nowhere", 1292),
+    ("borrow_read_in_arm_repoint_else", "line-starts-nowhere", 1292),
+    ("dead_loan_write_near_796", "line-starts-nowhere", 1292),
+    ("edition2024/chain_assigns_call_ref_1068", "line-starts-nowhere", 1292),
+    ("edition2024/chain_assigns_mut_ref_603", "line-starts-nowhere", 1292),
+    ("edition2024/chain_assigns_ref_603", "line-starts-nowhere", 1292),
+    ("edition2024/chain_assigns_ref_from_literal_1068", "line-starts-nowhere", 1292),
+    ("edition2024/chain_assigns_ref_lenders_1068", "line-starts-nowhere", 1292),
+    ("edition2024/chain_assigns_ref_no_else_603", "line-starts-nowhere", 1292),
+    ("edition2024/if_let_chain_deref_write", "line-starts-nowhere", 1292),
+    ("edition2024/if_let_chain_else_reads", "line-starts-nowhere", 1292),
+    ("edition2024/if_let_chain_field_write", "line-starts-nowhere", 1292),
+    ("field_read_through_ref", "line-starts-nowhere", 1292),
+    ("field_write_through_ref_branch", "line-starts-nowhere", 1292),
+    ("field_write_through_ref_column", "line-starts-nowhere", 1292),
+    ("let_ref_arms_1069", "line-starts-nowhere", 1292),
+    ("match_guard_assigns_call_ref_1068", "line-starts-nowhere", 1292),
+    ("match_guard_assigns_ref_603", "line-starts-nowhere", 1292),
+    ("match_local_ref_reborrow", "line-starts-nowhere", 1292),
+    ("match_mut_ref_param_reborrow", "line-starts-nowhere", 1292),
+    ("match_ref_param_reborrow", "line-starts-nowhere", 1292),
+    ("outer_mut_ref_end_in_if_arm", "line-starts-nowhere", 1292),
+    ("outer_ref_end_in_if_arm", "line-starts-nowhere", 1292),
+    ("outer_ref_end_in_nested_if", "line-starts-nowhere", 1292),
+    ("reassign_through_ref_in_branch", "line-starts-nowhere", 1292),
+    // `else if`: the outer join leg starts beside the inner join.
+    ("else_reassign_drop_245", "line-starts-nowhere", 1294),
+    ("repoint_if_chain_806", "line-starts-nowhere", 1294),
+    ("repoint_if_chain_read_middle_806", "line-starts-nowhere", 1294),
+    ("stored_borrow_end_in_arms_997", "line-starts-nowhere", 1294),
+    ("temporary_drop_early_exit", "line-starts-nowhere", 1294),
+    // Columns restart in mid-air after a `loop` left by `break`.
+    ("loop_break_borrow_scope_end", "line-starts-nowhere", 1296),
+    ("loop_break_call_arg", "line-starts-nowhere", 1296),
+    ("loop_break_several_locals", "line-starts-nowhere", 1296),
+    ("loop_break_value_local", "line-starts-nowhere", 1296),
+    // A join diagonal to a join with no dot.
+    ("edition2024/chain_assigns_call_ref_1068", "line-ends-nowhere", 1293),
+    ("edition2024/chain_assigns_moved_603", "line-ends-nowhere", 1293),
+    ("edition2024/chain_assigns_mut_ref_603", "line-ends-nowhere", 1293),
+    ("edition2024/chain_assigns_ref_603", "line-ends-nowhere", 1293),
+    ("edition2024/chain_assigns_ref_from_literal_1068", "line-ends-nowhere", 1293),
+    ("edition2024/chain_assigns_ref_lenders_1068", "line-ends-nowhere", 1293),
+    ("maybe_moved_returned_1037", "line-ends-nowhere", 1293),
+    // A one-line diverging arm: legs with no stop bar.
+    ("loop_break_call_arg", "line-ends-nowhere", 1295),
+    ("loop_break_several_locals", "line-ends-nowhere", 1295),
+    ("return_in_match_arm", "line-ends-nowhere", 1295),
+    // A join that also ends a mutable loan, a row below its legs.
+    ("branch_dead_loan_move_1178", "line-ends-nowhere", 1297),
+    ("branch_mut_lend_move_1132", "line-ends-nowhere", 1297),
+    ("known_bugs/1132_mut_borrow_vs_drop_arms", "line-ends-nowhere", 1297),
+    // An `if` inside a let-chain block.
+    ("edition2024/if_let_chain_nested_effects", "line-ends-nowhere", 1298),
+    // Tuple column goes on after its fields were moved out.
+    ("edition2024/if_let_chain_irrefutable_move", "line-ends-nowhere", 1157),
+    // `Box::new(r)` with r a `&mut` (State::Invalid).
+    ("mut_ref_moved_into_result_1128", "arrows-overlap", 1282),
+    ("mut_ref_moved_into_result_1128", "line-starts-nowhere", 1282),
+    // Two calls returned in one tuple: logos and arrows on one spot.
+    ("bare_call_return_792", "arrows-overlap", 1299),
+    ("bare_call_return_792", "marks-on-one-spot", 1299),
+    // One-line if/else: the arms' arrows along one stretch (PR #1278 fixes these).
+    ("assign_branch_value_1006", "arrows-overlap", 1264),
+    ("borrow_end_two_lenders", "arrows-overlap", 1264),
+    ("branch_ref_if_addr", "arrows-overlap", 1264),
+    ("conditional_literal_ctor_part_1267", "arrows-overlap", 1264),
+    ("destructuring_assign_branches_1253", "arrows-overlap", 1264),
+    ("let_ctor_conditional_1225", "arrows-overlap", 1264),
+    ("loop_break_call_arg", "arrows-overlap", 1264),
+    ("reassign_branch_value_1010", "arrows-overlap", 1264),
+    ("value_not_resource_1163", "arrows-overlap", 1264),
+    // Arrows on one row along one stretch (re-pointing in an arm, several loans back, let-chain parts).
+    ("borrow_end_join_else", "arrows-overlap", 1300),
+    ("borrow_end_two_loans_mut", "arrows-overlap", 1300),
+    ("borrow_made_in_arm_else", "arrows-overlap", 1300),
+    ("borrow_made_in_arm_if", "arrows-overlap", 1300),
+    ("borrow_made_in_arm_match", "arrows-overlap", 1300),
+    ("borrow_read_in_arm_repoint_else", "arrows-overlap", 1300),
+    ("borrow_struct_field_overwrite_var", "arrows-overlap", 1300),
+    ("borrow_struct_moved_holder", "arrows-overlap", 1300),
+    ("borrow_struct_overwrite_whole", "arrows-overlap", 1300),
+    ("call_arg_branch_value_1174", "arrows-overlap", 1300),
+    ("conditional_literal_part_1256", "arrows-overlap", 1300),
+    ("edition2024/box_contents_moved_by_chain_940", "arrows-overlap", 1300),
+    ("edition2024/box_partial_move_chain_892", "arrows-overlap", 1300),
+    ("edition2024/chain_assigns_call_ref_1068", "arrows-overlap", 1300),
+    ("edition2024/chain_assigns_mut_ref_603", "arrows-overlap", 1300),
+    ("edition2024/chain_assigns_ref_603", "arrows-overlap", 1300),
+    ("edition2024/chain_assigns_ref_after_603", "arrows-overlap", 1300),
+    ("edition2024/chain_assigns_ref_lenders_1068", "arrows-overlap", 1300),
+    ("edition2024/chain_assigns_ref_no_else_603", "arrows-overlap", 1300),
+    ("edition2024/if_let_chain_assign", "arrows-overlap", 1300),
+    ("edition2024/if_let_chain_assign_no_else", "arrows-overlap", 1300),
+    ("edition2024/if_let_chain_elem_write", "arrows-overlap", 1300),
+    ("edition2024/if_let_chain_field_write", "arrows-overlap", 1300),
+    ("edition2024/shared_name_in_chain_969", "arrows-overlap", 1300),
+    ("edition2024/whole_value_moved_by_chain_953", "arrows-overlap", 1300),
+    ("exit_outer_borrow_unused", "arrows-overlap", 1300),
+    ("field_write_in_arm_end_659", "arrows-overlap", 1300),
+    ("if_exit_borrow_end", "arrows-overlap", 1300),
+    ("outlives_bound_1125", "arrows-overlap", 1300),
+    ("pattern_ref_several_lenders", "arrows-overlap", 1300),
+    ("pattern_struct_ref_field", "arrows-overlap", 1300),
+    ("pattern_struct_ref_fields", "arrows-overlap", 1300),
+    ("repoint_if_chain_806", "arrows-overlap", 1300),
+    ("repoint_if_chain_read_middle_806", "arrows-overlap", 1300),
+    ("repoint_match_arms_806", "arrows-overlap", 1300),
+    ("repoint_match_read_first_806", "arrows-overlap", 1300),
+    ("struct_literal_mixed_borrows_pattern", "arrows-overlap", 1300),
+    ("struct_update_ref_field_1126", "arrows-overlap", 1300),
+    ("struct_update_unbound", "arrows-overlap", 1300),
 ];
 
 /// The invariants, by the name the failure list and messages use.
@@ -81,6 +202,24 @@ pub const INVARIANTS: &[(&str, &str)] = &[
     ("column-ends-without-scope-end",
      "an owner's column ends on a dot that neither moves it nor ends its scope, so its drop \
       (or that nothing is dropped) is never stated"),
+    // Geometric: where things are drawn (`geometry.rs`).
+    ("line-starts-nowhere",
+     "a column's segment starts where none of its dots, other segments or (for a struct) its fields' \
+      dots are: the column appears out of nowhere"),
+    ("line-ends-nowhere",
+     "a column's segment ends where none of its dots, other segments, stop bars or (for a struct) its \
+      fields' dots are: it stops in mid-air"),
+    ("line-through-fork",
+     "a column's segment runs through a fork or join dot and on past it, so it reads as one more arm"),
+    ("arrows-overlap",
+     "two arrows with different tooltips run along the same stretch, so only the one on top can be hovered"),
+    ("marks-on-one-spot",
+     "two dots of one column, or two function logos, drawn on the same spot with different tooltips: \
+      only one can be hovered"),
+    ("arrow-misses-target",
+     "an arrow to a column ends at none of that column's dots"),
+    ("outside-figure",
+     "an element is drawn outside the timeline's width or height"),
 ];
 
 // ─── Reading a timeline ─────────────────────────────────────────────
@@ -157,6 +296,8 @@ pub struct Fig {
     /// Hashes of reference columns (they have a bracket).
     ref_hashes: HashSet<String>,
     invalid: String,
+    /// Where things are drawn, for the geometric invariants.
+    geo: super::geometry::Geo,
 }
 
 /// Tooltip text without its markup: `<br>` becomes " / ".
@@ -191,6 +332,7 @@ pub fn parse(svg: &str) -> Fig {
     let doc = roxmltree::Document::parse(svg).expect("well-formed timeline SVG");
     let mut fig = Fig {
         invalid: doc.root_element().attribute("data-rv-invalid").unwrap_or("").to_owned(),
+        geo: super::geometry::parse(&doc),
         ..Default::default()
     };
     for n in doc.descendants().filter(|n| n.attribute("data-rv-id").is_some()) {
@@ -357,7 +499,7 @@ fn is_for_head(src: &str, line: u32) -> bool {
 
 /// Every violation in one timeline: (invariant, what and where).
 pub fn check(fig: &Fig, src: &str) -> Vec<(&'static str, String)> {
-    let mut out: Vec<(&'static str, String)> = Vec::new();
+    let mut out: Vec<(&'static str, String)> = super::geometry::check(&fig.geo);
     if !fig.invalid.is_empty() {
         out.push(("invalid-state", fig.invalid.clone()));
     }
@@ -610,8 +752,12 @@ mod unit {
     fn header(var: &str, hash: u32) -> String {
         format!("<text x=\"70\" y=\"35\" data-hash=\"{hash}\" data-rv-id=\"hdr:{var}\" data-rv-kind=\"header\" data-rv-var=\"{var}\">{var}</text>")
     }
+    /// The ownership invariants a hand-written timeline violates (these
+    /// pictures leave out what doesn't matter to them, so their geometry,
+    /// tested in `geometry.rs`, is incomplete).
     fn invs(body: &str) -> Vec<&'static str> {
-        check(&parse(&svg(body, "")), "").into_iter().map(|(i, _)| i).collect()
+        check(&parse(&svg(body, "")), "").into_iter().map(|(i, _)| i)
+            .filter(|i| !super::super::geometry::INVARIANTS.contains(i)).collect()
     }
 
     #[test]
