@@ -23473,6 +23473,106 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "c.n is mutably borrowed along with c by reset; c.n can't be used",
         ],
     },
+    TooltipExpect {
+        name: "edition2024/chain_last_use_borrow_end_1279",
+        // #1279: a reference last used by a later part of a let-chain
+        // (`if let Some(x) = o && bump(r)`). That part runs only on the
+        // way into the `if` arm, so the borrow ends there, on the dot of
+        // the use; the else arm starts with it ended, and the join says
+        // it ended in each arm. Main drew the end on r's column above the
+        // split (before the use: `chain_local`, `chain_shared`,
+        // `chain_two_lets`) or beside the arms where no line runs
+        // (`chain_param`, `chain_multiline`), with the arms going on to a
+        // join that said "r isn't moved in any of the branches above"
+        // (in `chain_else_if`, in the outer `if` arm instead). Where the
+        // ends are drawn is checked by `corpus_invariants_hold`
+        // (`event-on-dead-column`).
+        must_contain: &[
+            "r1's borrow ended in each branch above",
+            "r2's borrow ended in each branch above",
+            "r3's borrow ended in each branch above",
+            "r4's borrow ended in each branch above",
+            "r5's borrow ended in each branch above",
+            "r6's borrow ended in each branch above",
+            "r2's mutable borrow ends",
+            "r3's immutable borrow ends",
+            "a's value is no longer mutably borrowed",
+            "b's value is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            "r1 isn't moved in any of the branches above",
+            "r2 isn't moved in any of the branches above",
+            "r3 isn't moved in any of the branches above",
+            "r4 isn't moved in any of the branches above",
+            "r5 isn't moved in any of the branches above",
+            "r6 isn't moved in any of the branches above",
+        ],
+    },
+    TooltipExpect {
+        name: "box_holds_mut_ref_1282",
+        // #1282: `k1.push('!')` with `k1: Box<&mut String>` is
+        // `String::push(&mut **k1, '!')`: it reborrows s1's String
+        // through the `&mut` k1's Box holds, so k1 needn't be `mut` and
+        // its Box isn't borrowed. Main drew it as a mutable borrow of
+        // k1's own resource, which its state machine has no rule for
+        // when k1 isn't `mut`: k1's column vanished (`State::Invalid`)
+        // and its scope end said "No resource is dropped", though the
+        // Box is freed there (only s1's String isn't). The same for
+        // `Box::new(&mut s2)`, a Box moved on (`let k5 = k4;`, whose
+        // scope end also didn't say the borrowed data isn't dropped),
+        // in an `if` arm, through a generic `wrap(r8) -> Box<T>`. A
+        // shared reference (`k3.len()`) reads through the Box the same
+        // way. (`param`: r9's loan from the caller goes on in k9, which
+        // RustViz doesn't draw yet, #1289; only the push text is pinned.)
+        must_contain: &[
+            "the resource *k1 points to is mutably borrowed by push through k1; k1 can't be used while the borrow is live",
+            "push reads and writes through k1 (mutable reborrow — k1 can't be used until push returns)",
+            "push no longer borrows the resource *k1 points to",
+            "k1 goes out of scope. Its resource is dropped, but not the data it borrowed.",
+            "the resource *k2 points to is mutably borrowed by push through k2; k2 can't be used while the borrow is live",
+            "k2 goes out of scope. Its resource is dropped, but not the data it borrowed.",
+            "the resource *k3 points to is immutably borrowed by len",
+            "k3 goes out of scope. Its resource is dropped, but not the data it borrowed.",
+            "k5 takes over k4's value, and the borrow it holds",
+            "the resource *k5 points to is mutably borrowed by push through k5; k5 can't be used while the borrow is live",
+            "k5 goes out of scope. Its resource is dropped, but not the data it borrowed.",
+            "the resource *k7 points to is mutably borrowed by push through k7; k7 can't be used while the borrow is live",
+            "k7 goes out of scope. Its resource is dropped, but not the data it borrowed.",
+            "the resource *k8 points to is mutably borrowed by push through k8; k8 can't be used while the borrow is live",
+            "k8 goes out of scope. Its resource is dropped, but not the data it borrowed.",
+            "the resource *k9 points to is mutably borrowed by push through k9; k9 can't be used while the borrow is live",
+            "the resource p10.f points to is mutably borrowed by push through p10.f; p10.f can't be used while the borrow is live",
+        ],
+        must_not_contain: &[
+            "k1's resource is mutably borrowed by push",
+            "push reads from/writes to k1",
+            "k1 goes out of scope. No resource is dropped.",
+            "k2's resource is mutably borrowed by push",
+            "k2 goes out of scope. No resource is dropped.",
+            "k3's resource is immutably borrowed by len",
+            "k5's resource is mutably borrowed by push",
+            "k5 goes out of scope. No resource is dropped.",
+            "=k5 goes out of scope. Its resource is dropped.",
+            "k7's resource is mutably borrowed by push",
+            "k7 goes out of scope. No resource is dropped.",
+            "k8's resource is mutably borrowed by push",
+            "k8 goes out of scope. No resource is dropped.",
+            "k9's resource is mutably borrowed by push",
+        ],
+    },
+    TooltipExpect {
+        name: "mut_ref_moved_into_result_1128",
+        // #1282: `k4.push('!')` with `k4 = Box::new(r4)` (see
+        // `box_holds_mut_ref_1282`).
+        must_contain: &[
+            "the resource *k4 points to is mutably borrowed by push through k4; k4 can't be used while the borrow is live",
+            "k4 goes out of scope. Its resource is dropped, but not the data it borrowed.",
+        ],
+        must_not_contain: &[
+            "k4's resource is mutably borrowed by push",
+            "k4 goes out of scope. No resource is dropped.",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
