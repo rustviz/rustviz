@@ -1,6 +1,6 @@
 extern crate handlebars;
 
-use crate::svg_generator::data::{branch_is_collapsed, is_param_value_line, returned_closure, ExtBranchData, ExternalEvent, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, StaticLender, Visualizable, VisualizationData, FIRST_ROW_Y, OLD_FIRST_ROW_Y, LINE_SPACE};
+use crate::svg_generator::data::{branch_is_collapsed, is_param_value_line, returned_closure, Event, ExtBranchData, ExternalEvent, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, StaticLender, Visualizable, VisualizationData, FIRST_ROW_Y, OLD_FIRST_ROW_Y, LINE_SPACE};
 use crate::svg_generator::svg_frontend::{code_panel, rv_attrs, timeline_panel};
 use handlebars::Handlebars;
 use serde::Serialize;
@@ -457,6 +457,125 @@ fn arms_arrows_overlap(branches: &[ExtBranchData], j: usize, line: usize, bindin
     })
 }
 
+/// For each variable declared in an arm of a conditional (or of one
+/// nested in an arm), the row of its last event there after the arms'
+/// lines were shifted: its last use, or its scope end if it has no
+/// other event (#1277).
+fn arm_decl_last_rows(branches: &[ExtBranchData], out: &mut HashMap<u64, usize>) {
+    fn last_rows(e_data: &[(usize, ExternalEvent)], decl: &HashSet<u64>, uses: &mut HashMap<u64, usize>, ends: &mut HashMap<u64, usize>) {
+        for (l, e) in e_data {
+            if let ExternalEvent::Branch { branches, .. } = e {
+                for b in branches {
+                    last_rows(&b.e_data, decl, uses, ends);
+                }
+                continue;
+            }
+            let (from, to) = ResourceAccessPoint_extract(e);
+            let rows = if e.is_gos_ev().is_some() { &mut *ends } else { &mut *uses };
+            for r in [from.extract_rap(), to.extract_rap(), e.is_gos_ev()].into_iter().flatten() {
+                if decl.contains(r.hash()) {
+                    let row = rows.entry(*r.hash()).or_insert(*l);
+                    *row = (*row).max(*l);
+                }
+            }
+        }
+    }
+    for b in branches {
+        #[expect(clippy::disallowed_methods, reason = "collected into a set")]
+        let decl: HashSet<u64> = b.decl_vars.iter().map(|v| *v.hash()).collect();
+        let (mut uses, mut ends) = (HashMap::new(), HashMap::new());
+        last_rows(&b.e_data, &decl, &mut uses, &mut ends);
+        // A variable's last use, else its scope end.
+        out.extend(ends);
+        out.extend(uses);
+        for (_, e) in &b.e_data {
+            if let ExternalEvent::Branch { branches, .. } = e {
+                arm_decl_last_rows(branches, out);
+            }
+        }
+    }
+}
+
+/// The row for a borrow end recorded after a conditional, on its line,
+/// whose reference was declared in one of its arms (`let x = ra;` in
+/// `if c { .. } else { let x = ra; .. }`), when the conditional is
+/// written on one line. `nest_borrow_ends_in_arms` (plugin) leaves such
+/// an end at the top level when its lender has no column in the
+/// conditional, so it was placed after the conditional: on its join
+/// row, once the arms got rows of their own (#1187, #1264), below the
+/// reference's scope end in the arm, on a row where the reference no
+/// longer exists. It ends with the reference's last use, on that
+/// event's row in the arm (#1277).
+fn arm_ref_end_row(e: &ExternalEvent, arm_rows: &HashMap<u64, usize>) -> Option<usize> {
+    match e {
+        ExternalEvent::StaticDie { from: ResourceTy::Value(r), .. }
+        | ExternalEvent::MutableDie { from: ResourceTy::Value(r), .. }
+        | ExternalEvent::RefDie { from: ResourceTy::Value(r), .. } => arm_rows.get(r.hash()).copied(),
+        _ => None,
+    }
+}
+
+/// The ends `arm_ref_end_row` moves onto their arms' rows, out of the
+/// events after the conditional `events[i]` on its line, with the rows
+/// they go on. The lender's column shows each as its own "no longer
+/// borrowed" dot, above the join, where the ends left on the line (a
+/// reference declared before the conditional, `ra` in `let x = ra;`)
+/// still hold the same lender: those are named as still borrowing it.
+fn take_arm_ref_ends(events: &[(usize, ExternalEvent)], i: usize, arm_rows: &HashMap<u64, usize>, skip: &HashSet<usize>) -> Vec<(ExternalEvent, usize)> {
+    let line = events[i].0;
+    let on_line: Vec<&ExternalEvent> = events[i + 1..].iter()
+        .filter(|(l, e)| *l == line && !skip.contains(&e.get_id()))
+        .map(|(_, e)| e)
+        .collect();
+    let lender = |e: &ExternalEvent| match e {
+        ExternalEvent::StaticDie { to, .. } | ExternalEvent::MutableDie { to, .. } => to.extract_rap().map(|r| *r.hash()),
+        _ => None,
+    };
+    let row_of = |e: &ExternalEvent| arm_ref_end_row(e, arm_rows);
+    on_line.iter().filter_map(|e| row_of(e).map(|row| (*e, row))).map(|(e, row)| {
+        let mut e = e.clone();
+        let later: Vec<String> = on_line.iter()
+            .filter(|o| o.get_id() != e.get_id() && lender(o).is_some() && lender(o) == lender(&e)
+                && row_of(o).is_none_or(|r| r > row))
+            .filter_map(|o| ResourceAccessPoint_extract(o).0.extract_rap().map(|r| r.name().to_owned()))
+            .collect();
+        if let ExternalEvent::StaticDie { still_borrowed_by, .. } | ExternalEvent::MutableDie { still_borrowed_by, .. } = &mut e {
+            for name in later {
+                if !still_borrowed_by.contains(&name) {
+                    still_borrowed_by.push(name);
+                }
+            }
+        }
+        (e, row)
+    }).collect()
+}
+
+/// A reference's own borrow end listed after its scope end on one row
+/// (`x goes out of scope / x's immutable borrow ends`) reads as the
+/// borrow ending once x is gone (#1277): it goes first.
+fn ends_before_scope_ends(history: &mut Vec<(usize, Event)>) {
+    for (_, e) in history.iter_mut() {
+        if let Event::Branch { branch_history, .. } = e {
+            for b in branch_history.iter_mut() {
+                ends_before_scope_ends(&mut b.e_data);
+            }
+        }
+    }
+    let mut i = 0;
+    while i < history.len() {
+        if matches!(history[i].1, Event::RefGoOutOfScope { .. } | Event::OwnerGoOutOfScope { .. }) {
+            let row = history[i].0;
+            let end = history[i + 1..].iter().position(|(l, e)| *l == row
+                && matches!(e, Event::StaticDie { .. } | Event::MutableDie { .. } | Event::RefDie { .. }));
+            if let Some(k) = end {
+                let ev = history.remove(i + 1 + k);
+                history.insert(i, ev);
+            }
+        }
+        i += 1;
+    }
+}
+
 /// Rows to add around the arms of a conditional written on one line
 /// whose arms stack arrows (`let (a, b) = if c { (f, g) } else { (h,
 /// k) };`, #1187). Each arm's stacked arrows run on rows inserted below
@@ -554,7 +673,7 @@ pub fn mutate_branch_lines(
     arrow_tracks: &mut HashMap<usize, usize>,
 ) -> usize {
     let old_extra_lines = extra_lines;
-    let old_line_map = b_data.line_map.clone();
+    let mut old_line_map = b_data.line_map.clone();
     let mut new_line_map: BTreeMap<usize, Vec<ExternalEvent>> = BTreeMap::new();
     let mut skippable_ev: HashSet<usize> = HashSet::new();
     // (source line, shift) for the rest of a line whose arrows were
@@ -601,6 +720,23 @@ pub fn mutate_branch_lines(
                     extra_lines += 1;
                 }
                 *merge_point += extra_lines;
+                // Borrow ends of references declared in the arms, on the
+                // conditional's line: on their arm's rows (#1277).
+                let mut arm_rows = HashMap::new();
+                arm_decl_last_rows(branches, &mut arm_rows);
+                if !arm_rows.is_empty() {
+                    for (end, row) in take_arm_ref_ends(&b_data.e_data, i, &arm_rows, &skippable_ev) {
+                        let id = end.get_id();
+                        if let Some(slot) = b_data.e_data[i + 1..].iter_mut().find(|(_, p_e)| p_e.get_id() == id) {
+                            *slot = (row, end);
+                        }
+                        skippable_ev.insert(id);
+                        if let Some(group) = old_line_map.get_mut(&line_num) {
+                            group.retain(|g| g.get_id() != id);
+                            if group.is_empty() { old_line_map.remove(&line_num); }
+                        }
+                    }
+                }
             }
             _ => {
                 // add extra lines if we need to
@@ -1038,6 +1174,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
         }
         let (line_num, event) = visualization_data.preprocess_external_events.get_mut(i).unwrap();
         let mut branch_line = 0;
+        let mut arm_rows: HashMap<u64, usize> = HashMap::new();
         if skippable_ev.contains(&event.get_id()) {
             i += 1;
             continue;
@@ -1072,12 +1209,30 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                 if extra_lines > extra_before {
                     branch_extras.push((*line_num, extra_lines - extra_before));
                 }
+                arm_decl_last_rows(branches, &mut arm_rows);
             }
             _ => {}
         }
         // copies
         let line_num = *line_num;
         let event = event.clone();
+        // Borrow ends of references declared in the arms of the
+        // conditional just placed, on its line: on their arm's rows
+        // (`arm_ref_end_row`, #1277), out of the line's stacked arrows.
+        // Appended after the conditional, so after the arm's own events.
+        let arm_ends = if arm_rows.is_empty() {
+            Vec::new()
+        } else {
+            take_arm_ref_ends(&visualization_data.preprocess_external_events, i, &arm_rows, &skippable_ev)
+        };
+        for (e, _) in &arm_ends {
+            let id = e.get_id();
+            if let Some(group) = visualization_data.event_line_map.get_mut(&line_num) {
+                group.retain(|g| g.get_id() != id);
+                if group.is_empty() { visualization_data.event_line_map.remove(&line_num); }
+            }
+            skippable_ev.insert(id);
+        }
         let final_line_num = match same_line_row {
             _ if branch_line != 0 => branch_line,
             Some((src, row)) if src == line_num => row,
@@ -1326,11 +1481,17 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
             };
             visualization_data.append_processed_external_event(event.clone(), final_line_num - same_line);
         }
+        for (e, row) in arm_ends {
+            visualization_data.append_processed_external_event(e, row);
+        }
 
         i += 1;
     }
     for (_, e, row) in deferred_ends {
         visualization_data.append_processed_external_event(e, row);
+    }
+    for timeline in visualization_data.timelines.values_mut() {
+        ends_before_scope_ends(&mut timeline.history);
     }
 
     info!("insert line map {:#?}", line_insertion_map);

@@ -6321,14 +6321,22 @@ fn render_branches(
                 (parent_x, split_y), (branch_x, column_top_y),
                 leading_state.clone(), visualization_data, &arm_label, Leg::Split, *split_point, *split_point, &arm_path,
             );
+            let apexes = CollapsedApexes::of(&branch.e_data);
             // An arm that starts below the raised fork's row (the `else`)
-            // runs down to its first row in the state it forked with.
+            // runs down to its first row in the state it forked with. When
+            // that row starts a conditional of the arm's own whose fork is
+            // raised above it too (`else if d { g } else { h }` on the
+            // line, its arms on rows of their own, #1264), the leg ends at
+            // that fork's dot, half a row up: run on to the row, it went
+            // past the dot between the inner arms' diagonals, like a third
+            // arm.
             if raised {
                 let first_row = branch.states.iter().find(|(top, bot, _)| top <= bot).map(|s| s.0);
                 if let Some(first_row) = first_row.filter(|r| r > split_point) {
+                    let rise = if apexes.raised_splits.contains(&first_row) { PATTERN_SPLIT_RISE } else { 0 };
                     push_seg_if_renderable(
                         &mut segs, rap,
-                        (branch_x, column_top_y), (branch_x, get_y_axis_pos(first_row) as f64),
+                        (branch_x, column_top_y), (branch_x, (get_y_axis_pos(first_row) - rise) as f64),
                         leading_state, visualization_data, &arm_label, Leg::Column, *split_point, first_row, &arm_path,
                     );
                 }
@@ -6341,7 +6349,6 @@ fn render_branches(
                 let (lo, hi) = branch_column_rows(*split_point, *merge_point);
                 ty.get_start_end(i).1.clamp(lo, hi.max(lo))
             });
-            let apexes = CollapsedApexes::of(&branch.e_data);
             // A reference declared before the conditional whose borrow
             // ends in this arm (`end_outer_borrows_in_arms`): the
             // dashed rest of the arm is "no value" only in the sense
