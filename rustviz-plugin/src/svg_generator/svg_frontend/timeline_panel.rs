@@ -6316,12 +6316,24 @@ fn render_branches(
             // Build segments. Empty-classified states drop out so
             // a Move (anywhere) ends the visible run there.
             let mut segs: Vec<BranchSeg> = Vec::new();
+            let apexes = CollapsedApexes::of(&branch.e_data);
+            // The arm's own first row starts a conditional whose fork is
+            // raised half a row above it (`else if d { g } else { h }` on
+            // one line with its arms on rows of their own, #1264): the
+            // leg into the arm ends at that fork's dot. Run on to the
+            // row, it ended in mid-air below the fork.
+            let leg_end_y = if !raised && !branch_is_collapsed(*split_point, *merge_point)
+                && apexes.raised_splits.contains(&(*split_point + 1))
+            {
+                column_top_y - PATTERN_SPLIT_RISE as f64
+            } else {
+                column_top_y
+            };
             push_seg_if_renderable(
                 &mut segs, rap,
-                (parent_x, split_y), (branch_x, column_top_y),
+                (parent_x, split_y), (branch_x, leg_end_y),
                 leading_state.clone(), visualization_data, &arm_label, Leg::Split, *split_point, *split_point, &arm_path,
             );
-            let apexes = CollapsedApexes::of(&branch.e_data);
             // An arm that starts below the raised fork's row (the `else`)
             // runs down to its first row in the state it forked with. When
             // that row starts a conditional of the arm's own whose fork is

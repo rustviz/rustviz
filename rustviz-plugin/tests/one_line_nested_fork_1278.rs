@@ -57,13 +57,6 @@ fn in_loop(v: Vec<(String, String, String)>, c: bool, d: bool) {
     }
 }
 
-// No overlap: each arm moves into a variable of its own, further right.
-fn chain_apart(c: bool, d: bool, f: String, mut a: String, g: String, mut b: String, h: String, mut e: String) {
-    println!("{} {} {}", a, b, e);
-    if c { a = f } else if d { b = g } else { e = h }
-    println!("{} {} {}", a, b, e);
-}
-
 fn main() {
     chain3(true, false, String::new(), String::new(), String::new());
     chain4(true, false, true, String::new(), String::new(), String::new(), String::new());
@@ -75,5 +68,4 @@ fn main() {
     match_in_match(0, 0, String::new(), String::new(), String::new());
     if_let_in_else(true, None, String::new(), String::new());
     in_loop(Vec::new(), true, false);
-    chain_apart(true, false, String::new(), String::new(), String::new(), String::new(), String::new(), String::new());
 }

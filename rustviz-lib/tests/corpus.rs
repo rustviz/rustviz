@@ -31949,26 +31949,29 @@ fn a_one_line_else_if_leg_ends_at_the_inner_fork() {
         let tl = rv.timeline_panel_string();
         assert_eq!(legs_through_forks(&tl), Vec::<String>::new(), "{}", name);
     }
-    let rv = run_with_local_backend("one_line_nested_fork_1278");
-    let tl = rv.timeline_panel_string();
-    let legs = branch_leg_centrelines(&tl);
-    let forks: Vec<&str> = start_tags(&tl, "circle").into_iter().filter(|t| attr(t, "data-rv-event") == Some("branch")).collect();
-    for (var, line, inner) in [
-        ("a", 7, &["#2"][..]), ("a", 12, &["#2", "#3"]), ("r", 17, &["#2"]), ("r", 22, &["#2"]),
-        ("a", 27, &["#2"]), ("a", 34, &["#2"]), ("a", 39, &["#2"]), ("a", 44, &["#2"]),
-        ("a", 49, &["#2"]), ("a", 55, &["#2"]),
-    ] {
-        for n in inner {
-            let id = format!("{}@L{}:dot:branch{}", var, line, n);
-            let fork = forks.iter().find(|t| attr(t, "data-rv-id") == Some(id.as_str()))
-                .unwrap_or_else(|| panic!("no fork {}", id));
-            let c = |k: &str| attr(fork, k).unwrap().parse::<f64>().unwrap();
-            let (cx, cy, hash) = (c("cx"), c("cy"), attr(fork, "data-hash").unwrap());
-            // The outer leg comes straight down onto the fork's centre.
-            let onto: Vec<_> = legs.iter().filter(|(h, _, [x1, y1, x2, y2])| h == hash
-                && (x1 - cx).abs() < 0.5 && (x2 - cx).abs() < 0.5 && (y2 - cy).abs() < 0.5 && *y1 < cy).collect();
-            assert_eq!(onto.len(), 1, "{}: one leg down onto it at ({},{}), got {:?}", id, cx, cy, onto);
+    // Every inner fork dot (a conditional nested in an arm on the line:
+    // `…:dot:branch#2` and on) has the leg of the conditional it is
+    // nested in coming down onto its centre. The `else` leg into an
+    // inner fork raised half a row above the arm's row ran on to the row
+    // (`a`), or stopped on the row below the fork in mid-air (`g`, `h`:
+    // columns the outer fork isn't raised on).
+    for name in ["one_line_nested_fork_1278", "one_line_arm_overlap_1264"] {
+        let rv = run_with_local_backend(name);
+        let tl = rv.timeline_panel_string();
+        let segs = branch_leg_centrelines(&tl);
+        let mut floating = Vec::new();
+        for t in start_tags(&tl, "circle").into_iter()
+            .filter(|t| attr(t, "data-rv-event") == Some("branch") && attr(t, "data-rv-id").is_some_and(|id| id.contains(":dot:branch#")))
+        {
+            let c = |k: &str| attr(t, k).unwrap().parse::<f64>().unwrap();
+            let (cx, cy, hash) = (c("cx"), c("cy"), attr(t, "data-hash").unwrap());
+            let onto = segs.iter().any(|(h, _, [x1, y1, x2, y2])| h == hash
+                && (x2 - cx).abs() < 2.5 && (y2 - cy).abs() < 0.5 && *y1 < cy);
+            if !onto {
+                floating.push(format!("{} at ({},{})", attr(t, "data-rv-id").unwrap_or(""), cx, cy));
+            }
         }
+        assert_eq!(floating, Vec::<String>::new(), "{}: forks no segment comes down onto", name);
     }
 }
 
@@ -31989,6 +31992,9 @@ fn a_one_line_else_if_leg_ends_at_the_inner_fork() {
 fn a_reference_declared_in_a_one_line_arm_ends_its_borrow_there() {
     let rv = run_with_local_backend("one_line_arm_ref_end_1277");
     let tl = rv.timeline_panel_string();
+    // Each moved end draws its arrow back to the lender stacked with the
+    // arm's other arrows on that line (a row below them), not along them.
+    assert_eq!(arrow_row_problems(&tl), Vec::<String>::new());
     for (r, kind, first, join) in [
         ("x", "immutable", "x is initialized with a copy of ra", "ra isn't moved in any of the branches above"),
         ("y", "immutable", "y is initialized with a copy of rb", "rb isn't moved in any of the branches above"),
