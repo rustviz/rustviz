@@ -2,8 +2,8 @@
 // continue,`, `if c { return n; } else { … }`) has no rows of its own, so
 // the columns it doesn't end are just the fork's diagonal into it. Like a
 // longer diverging arm's column (#317), that diagonal ends in a stop bar;
-// it used to stop in mid-air. A column the arm moves or drops ends at that
-// dot instead (`0 => return s,`).
+// it used to stop in mid-air. A column with a dot of its own on that row
+// ends at the dot instead (`0 => return s,` moves s; `return n;` copies n).
 
 fn ret_if(c: bool) -> i32 {
     let s = String::from("s");

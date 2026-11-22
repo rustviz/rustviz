@@ -24377,9 +24377,10 @@ fn branch_columns_start_and_stop_at_their_marks() {
             "r@L106-108:branch_line:full_privilege_uninit/",
         ]),
         // #1295: an arm of type `!` on one row ends the columns it doesn't
-        // end itself in a stop bar, like a longer one.
+        // end itself in a stop bar, like a longer one. (Not one with a dot
+        // of its own on that row: `return n;` ends n's leg at its dot.)
         ("one_line_diverging_arm_1295", &[
-            "n@L11:stop_bar", "s@L20:stop_bar", "n@L29:stop_bar", "m@L29:stop_bar",
+            "s@L20:stop_bar", "n@L29:stop_bar", "m@L29:stop_bar",
             "n@L39:stop_bar", "k@L39:stop_bar",
         ]),
         ("return_in_match_arm", &["n@L7:stop_bar", "k@L7:stop_bar"]),
@@ -24394,7 +24395,7 @@ fn branch_columns_start_and_stop_at_their_marks() {
         // #1296: the arms all `break` or `continue`.
         ("loop_break_join_1296", &["j@L17:dot:branch_join", "j@L28:stop_bar", "j@L30:dot:branch_join", "a@L38:dot:branch_join"]),
         ("loop_break_value_local", &["j@L24:dot:branch_join"]),
-        ("loop_break_borrow_scope_end", &["a@L12:stop_bar", "a@L12:dot:branch_join"]),
+        ("loop_break_borrow_scope_end", &["a@L12:dot:branch_join"]),
     ];
     for (name, ids) in cases {
         let timeline = run_with_local_backend(name).timeline_panel_string();
@@ -24439,11 +24440,10 @@ fn branches_that_diverge_stop_short() {
         // is path-dependent: the drop flag's dot at the `return` (#1194).
         ("exit_path_dependent_drops", &["s"][..]),
         ("exit_return_in_let_if", &[][..]),
-        // The temporary Result is dropped at the `return`. `f`'s `0 =>
-        // return n,` is an arm on one row: n's column there is the fork's
-        // diagonal alone, which ends in a bar too (#1295); `g`'s n (no
-        // value yet) stops at `Err(_) => return 0,`.
-        ("exit_temporary_drops", &["n", "n"][..]),
+        // The temporary Result is dropped at the `return`. (`f`'s `0 =>
+        // return n,` arm, on one row, ends n's leg at the dot where n is
+        // copied out, not in a bar, #1295.)
+        ("exit_temporary_drops", &["n"][..]),
         // early_return: r is dropped at each `return`; r₂ moves out.
         ("shadow_matrix_scopes", &["r₂"][..]),
         // #429: an `if` without `else` whose body exits ends its column

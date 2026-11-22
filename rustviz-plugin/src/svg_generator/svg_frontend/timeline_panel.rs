@@ -6487,9 +6487,12 @@ fn render_branches(
             // `if c { break a; } else { break b; }`) has no rows of its
             // own: its column is the split diagonal alone, which ends in
             // the bar like a longer arm's column does (#1295), unless the
-            // arm ended the value there (a move or a drop has its dot).
+            // arm ended the value there (a move or a drop has its dot) or
+            // has any other dot of this column on that row (`return n,`
+            // copying n out): the diagonal ends at that dot, and a bar
+            // under it would only poke out at its sides.
             if let (None, Some(stop)) = (stop_y, stop_line) {
-                if seg_drawn(rap, &end_state) {
+                if seg_drawn(rap, &end_state) && !branch.e_data.iter().any(|(l, _)| *l == stop) {
                     let stop_row_y = get_y_axis_pos(stop) as f64;
                     stop_y = segs.last()
                         .filter(|seg| seg.p2.0 == branch_x && seg.p2.1 <= stop_row_y + 0.5)
