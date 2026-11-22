@@ -19754,11 +19754,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "r's borrow ends here, so t's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whether or not the condition had assigned &s to r)",
             "t's resource is no longer immutably borrowed",
             "s's resource is no longer immutably borrowed",
+            // r's last use is in each branch (the `println!`s), so its
+            // borrow ends in both. The join said nothing, and the `if`
+            // branch's dashed "borrow has ended" line ran on to a join
+            // with no dot (#1293): the `else` branch's end (where r may
+            // point to s or to t) wasn't counted as one.
+            "r's borrow ended in each branch above",
         ],
         must_not_contain: &[
             "s may have been immutably borrowed: when the condition lends s to r",
             "the resource r points to may have been immutably borrowed",
-            "r's borrow ended in each branch above",
         ],
     },
     TooltipExpect {
@@ -23402,6 +23407,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "arr may have been moved (consumed in at least one branch above)",
             "opts was moved in at least one branch above",
         ],
+    },
+    TooltipExpect {
+        name: "maybe_init_join_1293",
+        // #1293: the branches that get past the conditional leave the `let
+        // mut w;` as it was (maybe assigned by the `if` above); main drew
+        // their dashed line to a join with no dot. Where the dot is, is
+        // pinned by `branch_legs_and_joins_meet_their_dots`.
+        must_contain: &[
+            "w may still have no value here: the branch that assigned w panicked before reaching this point",
+            "w may still have no value here: the branch that assigned w returned before reaching this point",
+        ],
+        must_not_contain: &[],
     },
 ];
 
@@ -31813,6 +31830,125 @@ fn a_struct_whose_fields_are_all_moved_out_has_no_line_after() {
         let below: Vec<&(f64, f64)> = lines.iter().filter(|(_, y2)| *y2 > row + 1.0).collect();
         assert!(below.is_empty(), "{name}: {var}'s line goes on below `{last_move}` (y={row}): {below:?}");
     }
+}
+
+/// Branch legs (`branch_line` centre lines) whose top or bottom end is at
+/// no dot of their column, no other segment of it and no stop bar: a leg
+/// that starts or stops in mid-air (`data-rv-id`, `starts` / `ends`, and
+/// the point).
+fn branch_legs_in_mid_air(svg: &str) -> Vec<String> {
+    let doc = roxmltree::Document::parse(svg).expect("timeline svg parses");
+    let num = |n: roxmltree::Node, a: &str| n.attribute(a).and_then(|v| v.parse::<f64>().ok()).unwrap_or(f64::NAN);
+    let ends = |n: roxmltree::Node| ((num(n, "x1"), num(n, "y1")), (num(n, "x2"), num(n, "y2")));
+    // var -> segments (id, a, b); var -> anchor points.
+    let mut sides: BTreeMap<String, (String, Vec<((f64, f64), (f64, f64))>)> = BTreeMap::new();
+    let mut segs: Vec<(String, String, (f64, f64), (f64, f64))> = Vec::new();
+    let mut anchors: Vec<(String, (f64, f64))> = Vec::new();
+    for n in doc.descendants().filter(|n| n.is_element()) {
+        let (Some(kind), Some(var)) = (n.attribute("data-rv-kind"), n.attribute("data-rv-var")) else { continue };
+        let var = var.to_owned();
+        match kind {
+            "branch_line" if n.has_tag_name("line") => {
+                let id = n.attribute("data-rv-id").unwrap_or("");
+                let (base, part) = id.rsplit_once('/').unwrap_or((id, ""));
+                match part {
+                    "line" => { let (a, b) = ends(n); segs.push((var, base.to_owned(), a, b)); }
+                    "side1" | "side2" => sides.entry(base.to_owned()).or_insert_with(|| (var, Vec::new())).1.push(ends(n)),
+                    _ => {}
+                }
+            }
+            "line" if n.has_tag_name("g") => {
+                let ls: Vec<_> = n.children().filter(|c| c.has_tag_name("line")).map(ends).collect();
+                if ls.is_empty() { continue; }
+                let k = ls.len() as f64;
+                let a = (ls.iter().map(|l| l.0 .0).sum::<f64>() / k, ls.iter().map(|l| l.0 .1).sum::<f64>() / k);
+                let b = (ls.iter().map(|l| l.1 .0).sum::<f64>() / k, ls.iter().map(|l| l.1 .1).sum::<f64>() / k);
+                anchors.push((var.clone(), a));
+                anchors.push((var, b));
+            }
+            "dot" => {
+                let c = if n.has_tag_name("circle") { Some(n) } else { n.children().find(|c| c.has_tag_name("circle")) };
+                if let Some(c) = c { anchors.push((var, (num(c, "cx"), num(c, "cy")))); }
+            }
+            "stop_bar" if n.has_tag_name("line") => {
+                let (a, b) = ends(n);
+                anchors.push((var, ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0)));
+            }
+            _ => {}
+        }
+    }
+    for (base, (var, ls)) in sides {
+        if ls.len() == 2 {
+            let mid = |p: (f64, f64), q: (f64, f64)| ((p.0 + q.0) / 2.0, (p.1 + q.1) / 2.0);
+            segs.push((var, base, mid(ls[0].0, ls[1].0), mid(ls[0].1, ls[1].1)));
+        }
+    }
+    let near = |p: (f64, f64), q: (f64, f64)| (p.0 - q.0).abs() <= 1.0 && (p.1 - q.1).abs() <= 1.0;
+    let mut out = Vec::new();
+    for (i, (var, id, a, b)) in segs.iter().enumerate() {
+        let (top, bottom) = if a.1 <= b.1 { (*a, *b) } else { (*b, *a) };
+        for (what, end) in [("starts", top), ("ends", bottom)] {
+            let anchored = anchors.iter().any(|(v, p)| v == var && near(*p, end))
+                || segs.iter().enumerate().any(|(j, (v, _, c, d))| j != i && v == var && (near(*c, end) || near(*d, end)));
+            if !anchored {
+                out.push(format!("{} {} at ({:.0}, {:.0})", id, what, end.0, end.1));
+            }
+        }
+    }
+    out
+}
+
+/// #1293, #1294, #1297, #1287, #1298: every leg of a conditional starts and
+/// ends at a dot (a fork, a join, an event) or another stretch of its
+/// column. Main drew legs to joins it drew no dot for (#1293: a `let mut
+/// w;` maybe assigned above, a reference whose borrow ended in a
+/// let-chain's arm; #1297: the join of a value lent in one arm and moved
+/// in another went a row down, onto the loan's end), the outer `else`
+/// leg of an `else if` from beside the inner join (#1294), and the arm of
+/// an `if let` chain whose block holds a one-line `if` into the middle of
+/// that `if`'s diamond, with a dashed stretch below it ending in mid-air
+/// (#1287, #1298). Also checked: where the joins and forks now are.
+#[test]
+fn branch_legs_and_joins_meet_their_dots() {
+    let mut bad = Vec::new();
+    for name in [
+        "else_if_join_1294", "maybe_init_join_1293", "mut_lend_move_join_1297", "edition2024/chain_block_if_1287",
+        "maybe_moved_returned_1037", "branch_mut_lend_move_1132", "branch_dead_loan_move_1178",
+        "known_bugs/1132_mut_borrow_vs_drop_arms", "else_reassign_drop_245", "stored_borrow_end_in_arms_997",
+        "temporary_drop_early_exit", "edition2024/if_let_chain_nested_effects", "edition2024/chain_assigns_moved_603",
+        "edition2024/chain_assigns_call_ref_1068", "edition2024/chain_assigns_mut_ref_603",
+        "edition2024/chain_assigns_ref_from_literal_1068", "edition2024/chain_assigns_ref_lenders_1068",
+    ] {
+        let rv = run_with_local_backend(name);
+        for leg in branch_legs_in_mid_air(&rv.timeline_panel_string()) {
+            // A reference whose borrow ends in a let-chain's arm restarts
+            // dashed a row below its last use (#1292, not fixed here).
+            if name.starts_with("edition2024/chain_assigns_") && leg.contains(" starts at ") {
+                continue;
+            }
+            bad.push(format!("{}: {}", name, leg));
+        }
+    }
+    assert_eq!(bad, Vec::<String>::new());
+    let dot = |tl: &str, id: &str| -> (f64, f64) {
+        let t = start_tags(tl, "circle").into_iter().find(|t| attr(t, "data-rv-id") == Some(id))
+            .unwrap_or_else(|| panic!("no dot {}", id));
+        (attr(t, "cx").unwrap().parse().unwrap(), attr(t, "cy").unwrap().parse().unwrap())
+    };
+    // #1294, `moves`: s's inner join (the `else if`'s, right of the outer
+    // one) is above the outer one, both for the `}` on line 53.
+    let tl = run_with_local_backend("else_if_join_1294").timeline_panel_string();
+    let (inner, outer) = (dot(&tl, "s@L53:dot:branch_join"), dot(&tl, "s@L53:dot:branch_join#2"));
+    assert!(inner.1 < outer.1 && inner.0 > outer.0, "s's joins: inner {:?}, outer {:?}", inner, outer);
+    // #1297: s's join is on the `}` row (L17), where its legs end; the
+    // loan's end is a dot of its own on r's last use (L18).
+    let tl = run_with_local_backend("mut_lend_move_join_1297").timeline_panel_string();
+    assert!(dot(&tl, "s@L17:dot:branch_join").1 < dot(&tl, "s@L18:dot:mutable_reacquire").1);
+    // #1287: the outer `if let` fork on s's column is above the inner
+    // one-line `if`'s fork (`issue`, line 54).
+    let tl = run_with_local_backend("edition2024/chain_block_if_1287").timeline_panel_string();
+    let (outer, inner) = (dot(&tl, "s@L54:dot:branch"), dot(&tl, "s@L54:dot:branch#2"));
+    assert!(outer.1 < inner.1, "s's forks: outer {:?}, inner {:?}", outer, inner);
 }
 
 /// #1264 (`one_line_arm_overlap_1264`): a one-line conditional whose arms

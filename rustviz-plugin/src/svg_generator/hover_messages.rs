@@ -4445,6 +4445,18 @@ pub fn event_dot_branch_merge_still_unassigned(my_name: &String, leavers: &[Vec<
     format!("{} still has no value here: {}", name, leavers_never_got_here("assigned", &name, leavers))
 }
 
+// Join of a conditional for a `let x;` local that may or may not have a
+// value as the conditional starts (an `if` or a loop above may have
+// assigned it), where the branches that assigned it return or panic
+// (#1037, #1293): the paths that get here leave it as it was.
+pub fn event_dot_branch_merge_maybe_still_unassigned(my_name: &String, leavers: &[Vec<BranchExit>]) -> String {
+    let name = styled_name_html(my_name);
+    format!(
+        "{} may still have no value here: {}",
+        name, leavers_never_got_here("assigned", &name, leavers)
+    )
+}
+
 // At the end of a loop, for a variable declared outside it that a
 // branch inside moved before a `break` out of the loop. `definite`:
 // every way out of the loop is such a `break`.
