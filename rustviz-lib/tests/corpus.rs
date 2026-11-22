@@ -24918,7 +24918,15 @@ fn a_loop_that_can_break_keeps_its_loan_to_the_loop_end() {
 fn a_one_armed_if_that_leaves_ends_the_borrow_in_its_arm() {
     let rv = run_with_local_backend("if_exit_borrow_end");
     let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
-    let ends = |arrow: &str| -> Vec<f64> { arrow_points(&timeline, arrow).iter().map(|pts| pts[0].1).collect() };
+    // The row of the dot each (return) arrow leaves: its shaft starts
+    // 5.25 px out from the dot's centre (an arrow moved to a track off its
+    // row, #1300, leaves the dot on a slant).
+    let ends = |arrow: &str| -> Vec<f64> {
+        arrow_points(&timeline, arrow).iter().map(|pts| {
+            let (t, n) = (pts[0], pts[1]);
+            t.1 - (n.1 - t.1) / (n.0 - t.0).hypot(n.1 - t.1) * 5.25
+        }).collect()
+    };
     let breaks = code_rows_y(&code, "break;");
     let r_uses = code_rows_y(&code, "println!(\"{}\", r);");
     let (cont, ret) = (code_row_y(&code, "continue;"), code_row_y(&code, "return 0;"));
@@ -26923,10 +26931,12 @@ fn borrow_ends_where_rustc_ends_the_loan() {
 /// arrows: x's and y's borrows returned from p.a and p.b, and z lent to
 /// both. Each arrow after the first dipped a whole row lower than the one
 /// before, with a row added for it, so the line took four rows, the
-/// println! below it three rows away from its code. z's two borrows now
-/// share one track (a fork out of z), and tracks are half a row apart:
-/// the write takes two rows, the `let` above it one, and the println!'s
-/// two returns to z (a fan-in) share its row.
+/// println! below it three rows away from its code. Tracks are half a row
+/// apart: the write takes two rows, the `let` above it one. z's two
+/// borrows shared one track (a fork out of z) and the println!'s two
+/// returns to z its row, so only one of each pair could be hovered along
+/// the shared stretch (#1300): each now has a track of its own within
+/// those rows.
 #[test]
 fn struct_write_arrows_share_rows() {
     let rv = run_with_local_backend("borrow_struct_overwrite_whole");
@@ -26941,33 +26951,19 @@ fn struct_write_arrows_share_rows() {
     for (text, row, below) in [
         ("Immutable borrow from y to p.b", init, 15.0),
         ("Return immutably borrowed resource from p.b to y", write, 15.0),
-        ("Immutable borrow from z to p.a", write, 30.0),
+        ("Immutable borrow from z to p.a", write, 45.0),
         ("Immutable borrow from z to p.b", write, 30.0),
+        ("Return immutably borrowed resource from p.a to z", read, 0.0),
+        ("Return immutably borrowed resource from p.b to z", read, 15.0),
     ] {
         let arrow = arrow_points(&svg, text);
         assert_eq!(arrow.len(), 1, "{}", text);
         let lowest = arrow[0].iter().map(|p| p.1).fold(f64::MIN, f64::max);
         assert_eq!(lowest, row + below, "{}: {:?}", text, arrow[0]);
     }
-    // z's two borrows leave z along one trunk.
+    // z's two borrows don't leave z along one trunk.
     let (to_a, to_b) = (arrow_points(&svg, "Immutable borrow from z to p.a"), arrow_points(&svg, "Immutable borrow from z to p.b"));
-    assert_eq!(to_a[0][..2], to_b[0][..2], "z's borrows should fork from one trunk");
-    // Both returns to z run straight along the println!'s row (the one
-    // from p.b hops over p.a's dot).
-    for text in ["Return immutably borrowed resource from p.a to z", "Return immutably borrowed resource from p.b to z"] {
-        let shafts = arrow_shafts(&svg, text);
-        assert_eq!(shafts.len(), 1, "{}", text);
-        let shaft = shafts[0];
-        // The y of every point: after `M` / `L` in a path, every second
-        // number in a polyline. An arc's own numbers are skipped.
-        let toks: Vec<&str> = shaft.split(|c: char| c == ' ' || c == ',').filter(|t| !t.is_empty()).collect();
-        let ys: Vec<f64> = if toks[0] == "M" {
-            toks.windows(3).filter(|w| w[0] == "M" || w[0] == "L").filter_map(|w| w[2].parse().ok()).collect()
-        } else {
-            toks.chunks(2).filter_map(|c| c.get(1)?.parse().ok()).collect()
-        };
-        assert!(!ys.is_empty() && ys.iter().all(|&y| y == read), "{}: {}", text, shaft);
-    }
+    assert_ne!(to_a[0][..2], to_b[0][..2], "z's borrows share a trunk");
 }
 
 #[test]
@@ -32037,6 +32033,195 @@ fn a_struct_whose_fields_are_all_moved_out_has_no_line_after() {
         let below: Vec<&(f64, f64)> = lines.iter().filter(|(_, y2)| *y2 > row + 1.0).collect();
         assert!(below.is_empty(), "{name}: {var}'s line goes on below `{last_move}` (y={row}): {below:?}");
     }
+}
+
+/// The arrows and function logos of a timeline, for
+/// `marks_lying_on_marks`: each arrow's id (`data-rv-id`), tooltip, the
+/// straight pieces of its shaft (a hop's arc left out) and its head's
+/// triangle; each logo's id and the box its italic `f` covers.
+#[allow(clippy::type_complexity)]
+fn arrows_and_logos(svg: &str) -> (Vec<(String, String, Vec<((f64, f64), (f64, f64))>, Vec<(f64, f64)>)>, Vec<(String, (f64, f64, f64, f64))>) {
+    let doc = roxmltree::Document::parse(svg).expect("well-formed timeline SVG");
+    let nums = |s: &str| -> Vec<f64> { s.split(|c: char| c == ',' || c.is_whitespace()).filter_map(|t| t.parse().ok()).collect() };
+    let mut arrows = Vec::new();
+    let mut logos = Vec::new();
+    for n in doc.descendants().filter(|n| n.attribute("data-rv-id").is_some()) {
+        let id = n.attribute("data-rv-id").unwrap().to_owned();
+        let class = |c: roxmltree::Node, k: &str| c.attribute("class").is_some_and(|v| v.split(' ').any(|v| v == k));
+        match n.attribute("data-rv-kind") {
+            Some("arrow") => {
+                let mut pieces = Vec::new();
+                for c in n.descendants().filter(|c| class(*c, "arrow-shaft")) {
+                    if let Some(p) = c.attribute("points") {
+                        let v = nums(p);
+                        let pts: Vec<(f64, f64)> = v.chunks(2).filter(|c| c.len() == 2).map(|c| (c[0], c[1])).collect();
+                        pieces.extend(pts.windows(2).map(|w| (w[0], w[1])));
+                    } else if let Some(d) = c.attribute("d") {
+                        let tok: Vec<&str> = d.split_whitespace().collect();
+                        let (mut k, mut at) = (0, None);
+                        while k < tok.len() {
+                            let (step, to) = match tok[k] {
+                                "M" | "L" => (3, (tok[k + 1].parse().unwrap(), tok[k + 2].parse().unwrap())),
+                                "A" => (8, (tok[k + 6].parse().unwrap(), tok[k + 7].parse().unwrap())),
+                                other => panic!("unexpected path command {:?} in {}", other, d),
+                            };
+                            if let (Some(from), "L") = (at, tok[k]) {
+                                pieces.push((from, to));
+                            }
+                            at = Some(to);
+                            k += step;
+                        }
+                    }
+                }
+                let head = n.descendants().find(|c| class(*c, "arrow-head"))
+                    .map(|c| nums(c.attribute("points").unwrap_or("")).chunks(2).map(|c| (c[0], c[1])).collect())
+                    .unwrap_or_default();
+                arrows.push((id, n.attribute("data-tooltip-text").unwrap_or("").to_owned(), pieces, head));
+            }
+            Some("fn") => {
+                let (x, y): (f64, f64) = (n.attribute("x").unwrap().parse().unwrap(), n.attribute("y").unwrap().parse().unwrap());
+                logos.push((id, (x - 1.0, y - 15.0, x + 11.0, y + 3.0)));
+            }
+            _ => {}
+        }
+    }
+    (arrows, logos)
+}
+
+/// What lies on what in a timeline (#1300, #1307, #1299): two arrows along
+/// one stretch of a row, an arrow's head on another arrow, a function
+/// logo on an arrow not its own or on another logo. Only one of the two
+/// can be hovered there, and the picture reads as one mark. (A one-line
+/// function's parameter arriving and its value returned share the stub
+/// right of its dot by design, and are not reported.)
+fn marks_lying_on_marks(svg: &str) -> Vec<String> {
+    let (arrows, logos) = arrows_and_logos(svg);
+    let len = |a: (f64, f64), b: (f64, f64)| (b.0 - a.0).hypot(b.1 - a.1);
+    let samples = |pieces: &[((f64, f64), (f64, f64))]| -> Vec<(f64, f64)> {
+        pieces.iter().flat_map(|&(p, q)| {
+            let n = (len(p, q).ceil() as usize).max(1);
+            (0..=n).map(move |k| { let t = k as f64 / n as f64; (p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t) })
+        }).collect()
+    };
+    let edges = |t: &[(f64, f64)]| -> Vec<((f64, f64), (f64, f64))> {
+        if t.len() == 3 { vec![(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] } else { Vec::new() }
+    };
+    // How far p is inside the triangle t (negative outside).
+    let inside = |t: &[(f64, f64)], p: (f64, f64)| -> f64 {
+        if t.len() != 3 { return f64::NEG_INFINITY }
+        let s = ((t[1].0 - t[0].0) * (t[2].1 - t[0].1) - (t[2].0 - t[0].0) * (t[1].1 - t[0].1)).signum();
+        edges(t).iter().map(|&(a, b)| s * ((b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0)) / len(a, b).max(1e-9))
+            .fold(f64::INFINITY, f64::min)
+    };
+    let in_box = |b: (f64, f64, f64, f64), p: (f64, f64), m: f64| p.0 > b.0 - m && p.0 < b.2 + m && p.1 > b.1 - m && p.1 < b.3 + m;
+    // `s>caller@L3:arrow:move` and `caller>s@L3:arrow:init_ref_param`.
+    let elbow = |a: &str, b: &str| {
+        let parts = |id: &str| { let (ends, rest) = id.split_once('@').unwrap_or((id, "")); (ends.to_owned(), rest.split(':').next().unwrap_or("").to_owned()) };
+        let ((ea, la), (eb, lb)) = (parts(a), parts(b));
+        let flip = |e: &str| e.split_once('>').map(|(f, t)| format!("{t}>{f}")).unwrap_or_default();
+        la == lb && flip(&ea) == eb && (ea.starts_with("caller>") || eb.starts_with("caller>"))
+    };
+    let mut out = Vec::new();
+    for (i, (ia, ta, pa, ha)) in arrows.iter().enumerate() {
+        for (j, (ib, tb, pb, hb)) in arrows.iter().enumerate() {
+            // A borrow of a literal or static ending is drawn as a short
+            // arrow out of its column into empty space (`r>r`); one coming
+            // into that column from the same side still meets it head to
+            // head (#1316).
+            let to_itself = |id: &str| id.split_once('@').and_then(|(e, _)| e.split_once('>')).is_some_and(|(f, t)| f == t);
+            if i == j || ta == tb || elbow(ia, ib) || to_itself(ia) || to_itself(ib) {
+                continue;
+            }
+            if i < j {
+                let mut most: f64 = 0.0;
+                for &(p, q) in pa.iter().filter(|(p, q)| p.1 == q.1) {
+                    for &(r, s) in pb.iter().filter(|(r, s)| r.1 == s.1 && r.1 == p.1) {
+                        most = most.max(p.0.max(q.0).min(r.0.max(s.0)) - p.0.min(q.0).max(r.0.min(s.0)));
+                    }
+                }
+                if most > 2.0 {
+                    out.push(format!("{ia} and {ib} run along one stretch ({most:.0} px)"));
+                }
+            }
+            if samples(pb).into_iter().any(|p| inside(ha, p) > -1.5) {
+                out.push(format!("the head of {ia} lies on the shaft of {ib}"));
+            } else if i < j && samples(&edges(hb)).into_iter().any(|p| inside(ha, p) > 1.0) {
+                out.push(format!("the head of {ia} lies on the head of {ib}"));
+            }
+        }
+    }
+    for (i, (il, bx)) in logos.iter().enumerate() {
+        let own = il.replace(":fn:", ":arrow:");
+        for (ia, _, pa, ha) in &arrows {
+            if *ia != own && (samples(pa).into_iter().any(|p| in_box(*bx, p, 1.5))
+                || samples(&edges(ha)).into_iter().any(|p| in_box(*bx, p, -1.0))) {
+                out.push(format!("the logo {il} lies on {ia}"));
+            }
+        }
+        for (jl, c) in &logos[i + 1..] {
+            if bx.0.max(c.0) < bx.2.min(c.2) - 1.0 && bx.1.max(c.1) < bx.3.min(c.3) - 1.0 {
+                out.push(format!("the logo {il} lies on the logo {jl}"));
+            }
+        }
+    }
+    out
+}
+
+/// #1300, #1307, #1299: no arrow, arrowhead or function logo of a row lies
+/// on another. Arrows on one row along one stretch (a re-pointed
+/// reference's old loan returned as its new one is made, two loans given
+/// back at one use, a let-chain's parts) move to tracks half a row off
+/// the row; a call's logo on the arrow into its argument (`Some(s) =>
+/// show(s)`, `for s in v`'s `into_iter`, `.collect()` returned beside
+/// `into_iter`) goes to the dot's other side; results of several calls
+/// handed to the caller (`(make(), String::from("b"))`) stack in the
+/// gutter.
+#[test]
+fn marks_of_a_row_lie_on_no_other() {
+    let mut problems = Vec::new();
+    for name in [
+        "arrow_tracks_1300",
+        "book/x17_match_arm_fn_call_body", "book/c8_15_vec_for_by_value", "book/c13_07_into_iter_filter",
+        "book/c8_03_vec_get_match", "bare_call_return_792",
+        "borrow_end_join_else", "borrow_end_two_loans_mut", "borrow_made_in_arm_else", "borrow_made_in_arm_if",
+        "borrow_made_in_arm_match", "borrow_read_in_arm_repoint_else", "borrow_struct_field_overwrite_var",
+        "borrow_struct_moved_holder", "call_arg_branch_value_1174", "conditional_literal_part_1256",
+        "exit_outer_borrow_unused", "field_write_in_arm_end_659", "if_exit_borrow_end", "outlives_bound_1125",
+        "pattern_struct_ref_field", "pattern_struct_ref_fields", "repoint_if_chain_806",
+        "repoint_if_chain_read_middle_806", "repoint_match_arms_806", "repoint_match_read_first_806",
+        "struct_literal_mixed_borrows_pattern", "struct_update_ref_field_1126", "struct_update_unbound",
+        "edition2024/box_contents_moved_by_chain_940", "edition2024/box_partial_move_chain_892",
+        "edition2024/if_let_chain_assign", "edition2024/if_let_chain_assign_no_else",
+        "edition2024/if_let_chain_elem_write", "edition2024/if_let_chain_field_write",
+        "edition2024/shared_name_in_chain_969", "edition2024/whole_value_moved_by_chain_953",
+    ] {
+        let rv = run_with_local_backend(name);
+        problems.extend(marks_lying_on_marks(&rv.timeline_panel_string()).into_iter().map(|p| format!("{name}: {p}")));
+    }
+    assert_eq!(problems, Vec::<String>::new());
+}
+
+/// #1312 (`arrow_tracks_1300` `get_match`, Book 8.1): the two arrows
+/// dipping below `Some(third) => …` (third's borrow of v returned, v lent
+/// to the arm's third) don't cross: the one whose span lies inside the
+/// other's takes the upper track.
+#[test]
+fn arrows_dipping_below_a_line_do_not_cross() {
+    let rv = run_with_local_backend("arrow_tracks_1300");
+    let (arrows, _) = arrows_and_logos(&rv.timeline_panel_string());
+    let shaft = |id: &str| arrows.iter().find(|a| a.0 == id).map(|a| a.2.clone())
+        .unwrap_or_else(|| panic!("no arrow {:?}: {:?}", id, arrows.iter().map(|a| &a.0).collect::<Vec<_>>()));
+    // "Return immutably borrowed resource from third to v", "Immutable
+    // borrow from v to third₂".
+    let back = shaft("third>v@L81:arrow:static_die");
+    let lent = shaft("v>third₂@L81:arrow:static_borrow");
+    let cross = |(p, q): ((f64, f64), (f64, f64)), (r, s): ((f64, f64), (f64, f64))| {
+        let side = |a: (f64, f64), b: (f64, f64), c: (f64, f64)| (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
+        side(p, q, r) * side(p, q, s) < 0.0 && side(r, s, p) * side(r, s, q) < 0.0
+    };
+    let crossings: Vec<_> = back.iter().flat_map(|&a| lent.iter().filter(move |&&b| cross(a, b)).map(move |&b| (a, b))).collect();
+    assert!(back.len() > 1 && lent.len() > 1, "both dip: {:?} {:?}", back, lent);
+    assert_eq!(crossings, Vec::new(), "the two arrows cross");
 }
 
 /// Branch legs (`branch_line` centre lines) whose top or bottom end is at
