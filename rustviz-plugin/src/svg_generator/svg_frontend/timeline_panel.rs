@@ -1780,6 +1780,34 @@ fn render_scope_end_dot(
             };
             append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
             return true;
+        } else if let Some((el, maybe)) = ro.elems_left().map(|el| (el, elems_moved_before(history, usize::MAX, false)))
+            .filter(|(_, (moved, _))| !moved.is_empty()).map(|(el, (_, maybe))| (el, maybe)) {
+            // `let [a, _] = arr;` (#1166), `[first, ..] =>` (#1144): the
+            // elements the pattern didn't take are still in the array
+            // (whose column goes on, #1285), and are dropped with it; in
+            // some branches only, those it took are dropped only on the
+            // paths that didn't.
+            let cx = timeline_data.x_val;
+            let cy = event_y;
+            let title = if maybe {
+                let by_cond = moved_by_chain_condition(history) || maybe_moved_by_let(history);
+                hover_messages::event_dot_struct_partial_go_out_of_scope(
+                    &name, &[], &el.moved, &el.left, false, by_cond, false, false)
+            } else {
+                hover_messages::event_dot_struct_partial_go_out_of_scope(
+                    &name, &el.moved, &[], &el.left, false, false, false, false)
+            };
+            let drop_data = DropDotData {
+                hash: *hash as u64,
+                dot_x: cx,
+                dot_y: cy,
+                title,
+                p1x: cx - 3, p1y: cy - 1,
+                p2x: cx + 3, p2y: cy - 1,
+                p3x: cx,     p3y: cy + 3,
+            };
+            append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
+            return true;
         } else if !resource_hold && (maybe_moved_at_end(history)
             // An exit's drop in a branch, after a conditional above the
             // branch's that moved it on some paths (#1194).
@@ -3019,6 +3047,21 @@ fn branch_join_message(branch_history: &[BranchData], ty: &BranchType, is: &Reso
         .filter(|(_, b)| b.diverges)
         .map(|(i, b)| (ty.string_of_branch(i), b.exits.clone()))
         .collect();
+    // An array a slice pattern took elements out of in some branches
+    // (#1285): the rest stay in it.
+    if let Some(left) = is.extract_rap().and_then(|r| r.elems_left()) {
+        let mut moved: Vec<String> = Vec::new();
+        for b in branch_history.iter().filter(|b| !b.diverges) {
+            for p in elems_moved_before(&b.e_data, usize::MAX, true).0 {
+                if !moved.contains(&p) {
+                    moved.push(p);
+                }
+            }
+        }
+        if !moved.is_empty() {
+            return hover_messages::event_dot_branch_merge_elems_moved(var_name, &moved, &left.left);
+        }
+    }
     match compute_branch_join(branch_history, ty) {
         BranchJoin::MovedAfter => hover_messages::event_dot_branch_merge_moved(var_name),
         // A reference bound in every arm (`let msg = match n { .. => "a", .. }`)
@@ -3572,6 +3615,16 @@ fn timeline_segment_title(
                 return String::new();
             }
             return hover_messages::state_partly_moved(rap.name(), &parts.moved, parts.maybe);
+        }
+    }
+    // An array a slice pattern moved some elements out of (#1285): the
+    // rest stay in it, but it can't be used as a whole.
+    if let (State::FullPrivilege { .. }, Some(line), Some(left)) = (state, line, rap.elems_left()) {
+        if let Some(t) = visualization_data.timelines.get(rap.hash()) {
+            let (moved, maybe) = elems_moved_before(&t.history, line, false);
+            if !moved.is_empty() {
+                return hover_messages::state_elems_moved(rap.name(), &moved, &left.left, maybe);
+            }
         }
     }
     if let Some(title) = line.and_then(|l| loop_iterator_title(state, rap, visualization_data, l)) {
@@ -6826,6 +6879,11 @@ fn render_timeline(
     // A struct's line changes text where a field is moved out of it,
     // and stops once every field is (#1157).
     cuts.extend(parts_moved_rows(rap, visualization_data));
+    // So does an array's where a slice pattern moves an element out of
+    // it (#1285).
+    if rap.elems_left().is_some() {
+        cuts.extend(history.iter().filter(|(_, e)| matches!(e, Event::Move { is: ResourceTy::Index(_, place, _), .. } if !place.starts_with('*'))).map(|(l, _)| *l));
+    }
     cuts.sort_unstable();
     cuts.dedup();
     for (seg_start, seg_end, state) in states {
@@ -6959,6 +7017,40 @@ fn parts_moved_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
     }
     let all = parts.iter().all(|t| moved.contains(t.resource_access_point.name()));
     Some(PartsMoved { moved, maybe, all })
+}
+
+/// The elements (`pair[0]`) a slice pattern moved out of an array's
+/// column by the row `line`, in its `history` (#1285), and whether
+/// that happened in a branch of a conditional only (`in_branch`: the
+/// history is a branch's).
+fn elems_moved_before(history: &[(usize, Event)], line: usize, in_branch: bool) -> (Vec<String>, bool) {
+    let (mut moved, mut maybe) = (Vec::new(), false);
+    for (l, e) in history {
+        if *l > line {
+            break;
+        }
+        match e {
+            Event::Move { is: ResourceTy::Index(_, place, _), .. } if !place.starts_with('*') => {
+                if !moved.contains(place) {
+                    moved.push(place.clone());
+                }
+                maybe |= in_branch;
+            }
+            Event::Branch { branch_history, .. } => {
+                for b in branch_history {
+                    let (m, _) = elems_moved_before(&b.e_data, line, true);
+                    for p in m {
+                        maybe = true;
+                        if !moved.contains(&p) {
+                            moved.push(p);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (moved, maybe)
 }
 
 /// See `parts_moved_at`.

@@ -21439,22 +21439,33 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // though a and b took both Strings. #1166: what a slice pattern
         // doesn't take (`_`, `..`) stays in the array and is dropped with
         // it; main said "No resource is dropped" (`let [d, _] = duo;`).
-        // Checked with rustc: `println!("{}", duo[1])` after the `let`
-        // compiles; `duo[0]` is E0382.
+        // Checked with rustc: after the `let`, `duo[0]` and `duo[1]` are
+        // both E0382 ("use of partially moved value: `duo`"); only a
+        // pattern can still take duo[1]. #1285: such a pattern moves only
+        // the elements it binds (`pair[0]`), not the whole array; main
+        // said "pair's resource is moved" and ended pair's line there.
         must_contain: &[
             "Move from arr to a",
             "Move from arr to b",
             "arr goes out of scope. No resource is dropped.",
-            "Move from pair to c",
+            "Move from pair[0] to c",
+            "pair[0]'s resource is moved",
             "pair goes out of scope. pair[0] was moved out earlier, so only pair[1] is dropped.",
             "c goes out of scope. Its resource is dropped.",
-            "Move from trio to first",
-            "Move from trio to last",
+            "Move from trio[0] to first",
+            "Move from trio[2] to last",
+            "trio[0]'s resource is moved",
+            "trio[2]'s resource is moved",
             "trio goes out of scope. trio[0] and trio[2] were moved out in some of the branches above; \
              each is dropped here only if no branch above moved it (Rust tracks this with runtime drop \
              flags). trio[1] is dropped.",
             "duo goes out of scope. duo[0] was moved out earlier, so only duo[1] is dropped.",
             "three goes out of scope. three[0] was moved out earlier, so only three[1] and three[2] are dropped.",
+            "Move from duo[0] to d",
+            "duo[0]'s resource is moved",
+            "duo is partially moved: duo[0] was moved out, so duo can't be used as a whole; duo[1] is still in it",
+            "Move from three[0] to e",
+            "three[0]'s resource is moved",
             "Partial copy from nums to x",
             "x is initialized with a copy of a value inside nums",
         ],
@@ -21464,6 +21475,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "trio goes out of scope. Its resource is dropped",
             "duo goes out of scope. No resource is dropped.",
             "three goes out of scope. No resource is dropped.",
+            "=Move from pair to c",
+            "=Move from duo to d",
+            "=Move from three to e",
+            "pair's resource is moved",
+            "trio's resource is moved",
+            "duo's resource is moved",
+            "three's resource is moved",
+            "trio was moved in at least one branch above",
         ],
     },
     TooltipExpect {
@@ -23293,6 +23312,81 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p goes out of scope. p.name was moved out earlier, so only p.bio is dropped.",
             "w was moved before the loop ended",
             "b may have been moved",
+        ],
+    },
+    TooltipExpect {
+        name: "literal_elem_binding_1281",
+        // #1281: a name bound from a literal in the scrutinee's tuple gets
+        // its value where it is bound, as in `let (s, n) = (&t, 1);`. main
+        // drew no event giving it one: its first dot was a use.
+        must_contain: &[
+            "n is bound to a copyable value",
+            "m is bound to a copyable value",
+            "k is bound to a copyable value",
+            "a is bound to a copyable value",
+            "b is bound to a copyable value",
+            "p is bound to a value",
+            "f is bound to a copyable value",
+            "Immutable borrow from t to s",
+            "Move from t to s",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "plain_struct_fields_move_1284",
+        // #1284: a struct with nothing to drop (`P { a: i32 }`) moved into
+        // a literal takes its fields with it, also when the literal has no
+        // column (#1163) and when a `match` / `if let` scrutinee's tuple
+        // takes it. main left p.a "holds a copyable value" to its scope end.
+        must_contain: &[
+            "p.a's value is moved",
+            "q.a's value is moved",
+            "p.a's value is moved into the temporary tuple (s, p)",
+            "q.b's value is moved",
+            "q.b.a's value is moved",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "slice_elem_moves_1285",
+        // #1285: a slice pattern that leaves elements in the array moves
+        // only the ones it binds; the array's line goes on, holding the
+        // rest, which are dropped at its scope end. In a branch (a
+        // refutable `if let`, a `match` arm) it may have moved them. main
+        // drew the whole array as moved ("pair's resource is moved").
+        must_contain: &[
+            "Move from pair[0] to c",
+            "pair[0]'s resource is moved",
+            "pair is partially moved: pair[0] was moved out, so pair can't be used as a whole; pair[1] is still in it",
+            "pair goes out of scope. pair[0] was moved out earlier, so only pair[1] is dropped.",
+            "three is partially moved: three[0] was moved out, so three can't be used as a whole; three[1] and three[2] are still in it",
+            "Move from opts[0] to a",
+            "opts[0] may have been moved out of opts in a branch above, so opts can't be used as a whole; opts[1] is still in it",
+            "opts goes out of scope. opts[0] was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). opts[1] is dropped.",
+            "Move from arr[0] to a",
+            "Move from arr[1] to b",
+            "arr[0] and arr[1] may have been moved out of arr in a branch above, so arr can't be used as a whole; arr[2] is still in it",
+            "arr is partially moved: arr[0] and arr[1] may have been moved out, so arr can't be used as a whole; arr[2] is still in it",
+            "arr goes out of scope. arr[0] and arr[1] were moved out in some of the branches above; each is dropped here only if no branch above moved it (Rust tracks this with runtime drop flags). arr[2] is dropped.",
+            "Move from opts[0] to c",
+            "opts goes out of scope. opts[0] was moved out earlier, so only opts[1] is dropped.",
+            "Move from pair[1] to last",
+            "pair goes out of scope. pair[1] was moved out earlier, so only pair[0] is dropped.",
+            // A parameter's slice pattern: what `_` / `..` leaves is dropped
+            // when the function returns, as for a tuple's (#1181). main
+            // didn't say so.
+            "p acquires ownership from the caller. The pattern doesn't bind the argument's [1], so it stays in the parameter and is dropped when param returns",
+            "first acquires ownership from the caller. The pattern doesn't bind the argument's [1] and [2], so they stay in the parameter and are dropped when param_rest returns",
+        ],
+        must_not_contain: &[
+            "pair's resource is moved",
+            "three's resource is moved",
+            "opts's resource is moved",
+            "arr's resource is moved",
+            "=Move from pair to c",
+            "=Move from arr to a",
+            "arr may have been moved (consumed in at least one branch above)",
+            "opts was moved in at least one branch above",
         ],
     },
 ];
@@ -31307,6 +31401,32 @@ fn a_move_into_deref_gives_the_lender_one_dot() {
     let write = row("*q = u;");
     assert_eq!(ys("s's resource is no longer mutably borrowed"), vec![write]);
     assert_eq!(ys("s acquires ownership of a new resource; its previous resource is dropped"), vec![write]);
+}
+
+/// #1283 (`field_moves_with_struct_1283`): a struct moved as a whole
+/// moves its fields on the same row, also when the line has a second
+/// arrow (`r`'s borrow ending at `*r = t;`). main drew `t.name`'s move a
+/// row below `t`'s, so t.name was drawn owned after t had moved.
+#[test]
+fn a_struct_s_fields_move_on_its_row() {
+    let name = "field_moves_with_struct_1283";
+    let rv = run_with_local_backend(name);
+    let tl = rv.timeline_panel_string();
+    let ys = |text: &str| -> Vec<f64> { dots_listing_tooltip(&tl, text).into_iter().map(|(_, y)| y).collect() };
+    for (whole, parts, n) in [
+        ("t", &["t.name", "t.inner", "t.inner.name"][..], 4),
+        ("q", &["q.name"][..], 1),
+    ] {
+        let rows = ys(&format!("{whole}'s resource is moved"));
+        assert_eq!(rows.len(), n, "{name}: {whole}'s moves at {rows:?}");
+        for part in parts {
+            let part_rows = ys(&format!("{part}'s resource is moved"));
+            assert!(!part_rows.is_empty(), "{name}: no move of {part}");
+            for y in part_rows {
+                assert!(rows.iter().any(|r| (r - y).abs() < 1.0), "{name}: {part} moved at y={y}, not on a row where {whole} moves ({rows:?})");
+            }
+        }
+    }
 }
 
 /// #1215: `match &mut t { (a, b) => { a.push('!'); b.push('?'); } }`

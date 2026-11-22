@@ -43,24 +43,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // A struct moved as a whole while a field column goes on.
     ("ctor_literals_768", "field-outlives-moved-struct", 1127),
-    ("deref_assign_wording", "field-outlives-moved-struct", 1168),
-    ("deref_write_drops_old", "field-outlives-moved-struct", 1168),
-    // ... its field's move drawn a row below the struct's.
-    ("move_into_deref_one_dot_1192", "field-outlives-moved-struct", 1283),
-    ("struct_parts_follow_moves_1154_1168", "field-outlives-moved-struct", 1283),
-    // ... or never drawn, when nothing in the literal needs drop.
-    ("value_not_resource_1163", "field-outlives-moved-struct", 1284),
     // One line's events stacked out of order.
     ("edition2024/whole_value_moved_by_chain_953", "event-on-dead-column", 1200),
     // A let-chain condition's last use of a reference: borrow end off the column.
     ("edition2024/value_not_resource_chain_1163", "event-on-dead-column", 1279),
-    // `match (&t, 1) { (s, n) => … }`: n never gets a value.
-    ("match_on_borrow_binding_1235", "event-on-dead-column", 1281),
-    ("match_on_borrow_binding_1235", "invalid-state", 1281),
     // `Box::new(r)` with r a `&mut`.
     ("mut_ref_moved_into_result_1128", "invalid-state", 1282),
-    // A slice pattern's partial move drawn as a move of the whole array.
-    ("slice_pattern_arms_1144", "drop-without-value", 1285),
 ];
 
 /// The invariants, by the name the failure list and messages use.
@@ -319,6 +307,14 @@ fn contents_moved(d: &Dot) -> bool {
     d.tip.starts_with('*')
 }
 
+/// A slice pattern's move of some elements out of an array that keeps
+/// the rest (`[c, _] => …`, #1285), or the join after branches that did:
+/// the array's line goes on, holding the elements left. Its dot names
+/// the elements (`pair[0]'s resource is moved`).
+fn elems_moved(d: &Dot) -> bool {
+    d.tip.trim_start_matches("• ").starts_with(&format!("{}[", d.var))
+}
+
 fn says_maybe_moved(d: &Dot) -> bool {
     MAYBE_PHRASES.iter().any(|p| d.tip.contains(p))
 }
@@ -437,10 +433,10 @@ pub fn check(fig: &Fig, src: &str) -> Vec<(&'static str, String)> {
                 }
             }
         }
-        if continues && !inits && d.has_any(END) && !split_or_join && !contents_moved(d) {
+        if continues && !inits && d.has_any(END) && !split_or_join && !contents_moved(d) && !elems_moved(d) {
             out.push(("line-after-column-ends", d.describe()));
         }
-        if d.has("branch_join") && says_maybe_moved(d) && continues && !inits {
+        if d.has("branch_join") && says_maybe_moved(d) && continues && !inits && !elems_moved(d) {
             out.push(("owner-after-maybe-moved-join", d.describe()));
         }
         if let (Some(m), Some(r)) = (d.pos("move"), d.pos("owner_drop_at_reassign")) {
