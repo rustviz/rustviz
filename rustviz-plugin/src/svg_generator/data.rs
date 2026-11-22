@@ -2755,6 +2755,12 @@ pub enum Event {
     ReslicedInPlace { lender: String, mutable: bool, part: bool },
     // See ExternalEvent::DeadElseNote.
     DeadElseNote,
+    // A struct's field while the struct is borrowed as a whole by a call
+    // on this row (`c.reset()`, `inc(&mut c)`, `show(&c)`; #1311): the
+    // field is borrowed with it, and the borrow ends on the row. Added to
+    // the field's column by `note_call_borrows_on_members` (a column-only
+    // note: no state change). `to`: who borrows the struct.
+    LentWithParent { parent: String, to: String, mutable: bool },
     // See ExternalEvent::DeadLoanNote. `shown`: the column is drawn
     // borrowed at the write (set while computing its states); a note
     // on a column that isn't is dropped then.
@@ -2862,7 +2868,7 @@ pub enum State {
 
 /// A diverging branch that leaves only by `break`ing out of a loop
 /// (or a labeled block): what follows that is reached.
-fn breaks_out_only(exits: &[BranchExit]) -> bool {
+pub fn breaks_out_only(exits: &[BranchExit]) -> bool {
     !exits.is_empty() && exits.iter().all(|x| matches!(x, BranchExit::Break | BranchExit::BreakBlock))
 }
 
@@ -3281,6 +3287,83 @@ fn lend_struct_borrows_to_members(timelines: &mut BTreeMap<u64, Timeline>) {
 }
 
 
+/// #1311: a struct borrowed as a whole by a call (`c.reset()`, `inc(&mut
+/// c)`, `show(&c)`) is lent and given back on one row, so it has no lent
+/// span for `lend_struct_borrows_to_members` to draw on its fields: their
+/// columns showed nothing on that row, as if the call couldn't touch them
+/// (`reset` writes `c.n`). Each field column that holds its value there
+/// gets a dot saying it is borrowed along with the struct. Not where the
+/// field has an event of its own on the row (its own dot speaks for it),
+/// nor where its column branches around the row (its top-level states
+/// don't hold it there).
+fn note_call_borrows_on_members(timelines: &mut BTreeMap<u64, Timeline>) {
+    // A lend given back to the same borrower on the same row, also in
+    // a branch's arm: (row, borrower, mutable).
+    fn call_lends(history: &[(usize, Event)], out: &mut Vec<(usize, String, bool)>) {
+        for (i, (l, e)) in history.iter().enumerate() {
+            match e {
+                Event::MutableLend { to, .. } | Event::StaticLend { to, .. } => {
+                    let mutable = matches!(e, Event::MutableLend { .. });
+                    let back = history[i + 1..].iter().take_while(|(l2, _)| l2 == l).any(|(_, e2)| match e2 {
+                        Event::MutableReacquire { from, .. } if mutable => from.name() == to.name(),
+                        Event::StaticReacquire { from, .. } if !mutable => from.name() == to.name(),
+                        _ => false,
+                    });
+                    if back && !out.iter().any(|(l2, t2, m2)| l2 == l && *t2 == to.name() && *m2 == mutable) {
+                        out.push((*l, to.name(), mutable));
+                    }
+                }
+                Event::Branch { branch_history, .. } => {
+                    for b in branch_history {
+                        call_lends(&b.e_data, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    fn has_event_at(history: &[(usize, Event)], line: usize) -> bool {
+        history.iter().any(|(l, e)| *l == line || match e {
+            Event::Branch { branch_history, .. } => branch_history.iter().any(|b| has_event_at(&b.e_data, line)),
+            _ => false,
+        })
+    }
+    // (parent name, the owner hash its members carry, row, borrower, mutable)
+    let mut calls: Vec<(String, u64, usize, String, bool)> = Vec::new();
+    for (hash, t) in timelines.iter() {
+        let ResourceAccessPoint::Struct(st) = &t.resource_access_point else { continue };
+        let mut lends = Vec::new();
+        call_lends(&t.history, &mut lends);
+        for (line, to, mutable) in lends {
+            calls.push((st.name.clone(), if st.is_member { st.owner } else { *hash }, line, to, mutable));
+        }
+    }
+    if calls.is_empty() {
+        return;
+    }
+    // The innermost struct first (`c.inner` before `c`), so a field says
+    // what it is borrowed along with most directly.
+    calls.sort_by_key(|(p, _, l, _, _)| (*l, std::cmp::Reverse(p.len())));
+    for t in timelines.values_mut() {
+        let (name, owner) = match &t.resource_access_point {
+            ResourceAccessPoint::Struct(m) if m.is_member => (m.name.clone(), m.owner),
+            _ => continue,
+        };
+        for (pname, powner, line, to, mutable) in calls.iter() {
+            if *powner != owner || !name.starts_with(&format!("{}.", pname)) || has_event_at(&t.history, *line) {
+                continue;
+            }
+            let held = t.states.iter().any(|(a, b, s)| a < b && *a <= *line && *line <= *b
+                && matches!(s, State::FullPrivilege { s: LineState::Full } | State::PartialPrivilege { .. }));
+            if !held {
+                continue;
+            }
+            let at = t.history.iter().position(|(l, _)| *l > *line).unwrap_or(t.history.len());
+            t.history.insert(at, (*line, Event::LentWithParent { parent: pname.clone(), to: to.clone(), mutable: *mutable }));
+        }
+    }
+}
+
 /// #700, #722: a reference column's borrow end recorded on the row
 /// where it gets a new reference, after that new reference (`y = &x;`
 /// ends y's old borrow and starts a new one), is the old value's end
@@ -3466,6 +3549,9 @@ impl Display for Event {
             },
             Event::DeadElseNote => {
                 write!(f, "This else branch never runs")
+            },
+            Event::LentWithParent { parent, .. } => {
+                write!(f, "Borrowed along with {}", parent)
             },
             Event::DeadLoanNote { .. } => {
                 write!(f, "Written where the borrow is already over on this path")
@@ -3684,6 +3770,9 @@ impl Event {
             }
             Event::DeadElseNote => {
                 hover_messages::event_dot_dead_else_note(my_name)
+            }
+            Event::LentWithParent { parent, to, mutable } => {
+                hover_messages::event_dot_lent_with_parent(my_name, parent, to, *mutable)
             }
             Event::TiedParamNote { lifetime, .. } => {
                 hover_messages::event_dot_tied_param_note(my_name, lifetime)
@@ -5004,6 +5093,7 @@ impl Visualizable for VisualizationData {
             (_, Event::TiedParamNote { .. }) => (*previous_state).clone(),
             (_, Event::ReslicedInPlace { .. }) => (*previous_state).clone(),
             (_, Event::DeadElseNote) => (*previous_state).clone(),
+            (_, Event::LentWithParent { .. }) => (*previous_state).clone(),
             (_, Event::DeadLoanNote { .. }) => (*previous_state).clone(),
 
 
@@ -5363,6 +5453,7 @@ impl Visualizable for VisualizationData {
             self.compute_timeline_states(& mut timeline.history, &mut timeline.states, hash);
         }
         lend_struct_borrows_to_members(&mut timelines);
+        note_call_borrows_on_members(&mut timelines);
         self.timelines = timelines;
     }
 

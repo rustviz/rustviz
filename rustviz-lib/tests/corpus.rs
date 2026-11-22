@@ -19847,6 +19847,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "can't be used after the if",
             "the else branch",
+            // #1292: the later arms' dashed rest after r's last use there:
+            // r had a reference (t or s), its borrow ended.
+            "r has no value yet",
         ],
     },
     TooltipExpect {
@@ -20118,6 +20121,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "v may have been immutably borrowed: when the guard on line 11 lends v to first",
+            // #1292, as in match_guard_assigns_ref_603.
+            "r has no value yet",
         ],
     },
     TooltipExpect {
@@ -23420,6 +23425,54 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[],
     },
+    TooltipExpect {
+        name: "loop_break_join_1296",
+        // #1296: every branch of the conditional leaves (`break`, `continue`),
+        // and the columns go on after the loop through the `break`s: from a
+        // dot where the conditional ends, not from mid-air. (Main drew no dot
+        // there, so these fail on it; where the lines start is pinned by
+        // `branch_columns_start_and_stop_at_their_marks`.) `j` is dropped by
+        // the `continue` branch, so it goes on from the one `break j`.
+        must_contain: &[
+            "No branch above reaches this point: j goes on after the loop from the branch that breaks out of it",
+            "No branch above reaches this point: a goes on after the loop from the branches that break out of it",
+        ],
+        must_not_contain: &[
+            "j goes on after the loop from the branches that break out of it",
+        ],
+    },
+    TooltipExpect {
+        name: "loop_break_several_locals",
+        // #1296: `if c { break k; } else { break j; }`: k goes on after the
+        // loop only from `break k` (the other branch drops it, #410).
+        must_contain: &[
+            "No branch above reaches this point: k goes on after the loop from the branch that breaks out of it",
+            "No branch above reaches this point: j goes on after the loop from the branch that breaks out of it",
+        ],
+        must_not_contain: &[
+            "k goes on after the loop from the branches that break out of it",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_lent_whole_to_call_1311",
+        // #1311: a call that borrows the whole struct borrows its fields with
+        // it, and a mutable borrow may change them (`reset` writes `self.n`).
+        // Main drew nothing on the fields' columns on that row, so `c.n` read
+        // as untouched (5) up to a print that prints 0.
+        must_contain: &[
+            "c.n is mutably borrowed along with c by reset, which may change c.n; the borrow ends here",
+            "c.name is mutably borrowed along with c by reset, which may change c.name; the borrow ends here",
+            "c.n is mutably borrowed along with c by inc, which may change c.n; the borrow ends here",
+            "c.n is immutably borrowed along with c by show, which can read c.n; the borrow ends here",
+            "c.name is immutably borrowed along with c by get, which can read c.name; the borrow ends here",
+        ],
+        must_not_contain: &[
+            // A call's borrow ends on its row: not the wording of a borrow
+            // kept in a variable (#1217).
+            "c.n can't be used until the borrow ends",
+            "c.n is mutably borrowed along with c by reset; c.n can't be used",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -24302,6 +24355,58 @@ fn svg_lines(svg: &str) -> Vec<(f64, f64, f64, f64)> {
         .collect()
 }
 
+/// Where a column's line stops and starts again around a conditional:
+/// each line starts at a dot or where another of its column's lines ends,
+/// and ends at a dot, a stop bar or another line (#1292, #1295, #1296).
+/// Pinned by the marks each fixture now has (all missing on main).
+#[test]
+fn branch_columns_start_and_stop_at_their_marks() {
+    let cases: &[(&str, &[&str])] = &[
+        // #1292: a reference's dashed "borrow has ended" rest of an arm
+        // starts on the row of the dot where its borrow ends (in an
+        // `if`/`else`, a `for` body, a `match` arm, an `else if` chain, a
+        // closure, a `&mut`, an `if let`, after a nested `if`), not a row
+        // below it in mid-air.
+        ("ref_borrow_end_in_arm_1292", &[
+            "c@L14-16:branch_line:full_privilege_uninit/",
+            "r@L39-41:branch_line:full_privilege_uninit/",
+            "r@L52-54:branch_line:full_privilege_uninit/",
+            "r@L79-81:branch_line:full_privilege_uninit/",
+            "r@L91-93:branch_line:full_privilege_uninit/",
+            "r@L103-104:branch_line:full_privilege_uninit/",
+            "r@L106-108:branch_line:full_privilege_uninit/",
+        ]),
+        // #1295: an arm of type `!` on one row ends the columns it doesn't
+        // end itself in a stop bar, like a longer one.
+        ("one_line_diverging_arm_1295", &[
+            "n@L11:stop_bar", "s@L20:stop_bar", "n@L29:stop_bar", "m@L29:stop_bar",
+            "n@L39:stop_bar", "k@L39:stop_bar",
+        ]),
+        ("return_in_match_arm", &["n@L7:stop_bar", "k@L7:stop_bar"]),
+        // #1295 and #1296: `if c { break ra; } else { break rb; }` on one
+        // line; the columns go on after the loop from the dot where the
+        // conditional ends.
+        ("loop_break_call_arg", &[
+            "a@L15:stop_bar", "ra@L15:stop_bar", "a@L15:dot:branch_join", "ra@L15:dot:branch_join",
+            "re@L31:stop_bar", "re@L31:dot:branch_join",
+        ]),
+        ("loop_break_several_locals", &["k@L11:stop_bar", "k@L11:dot:branch_join", "j@L11:dot:branch_join"]),
+        // #1296: the arms all `break` or `continue`.
+        ("loop_break_join_1296", &["j@L17:dot:branch_join", "j@L28:stop_bar", "j@L30:dot:branch_join", "a@L38:dot:branch_join"]),
+        ("loop_break_value_local", &["j@L24:dot:branch_join"]),
+        ("loop_break_borrow_scope_end", &["a@L12:stop_bar", "a@L12:dot:branch_join"]),
+    ];
+    for (name, ids) in cases {
+        let timeline = run_with_local_backend(name).timeline_panel_string();
+        for id in *ids {
+            assert!(
+                timeline.contains(&format!("data-rv-id=\"{}", id)),
+                "{}: no element {}", name, id
+            );
+        }
+    }
+}
+
 /// #317: a branch of type `!` (`return`, `panic!()`, …) used to be
 /// drawn converging into the merge dot like the others. It now ends in
 /// a short bar, and nothing leaves its column below that bar. The bar's
@@ -24334,8 +24439,11 @@ fn branches_that_diverge_stop_short() {
         // is path-dependent: the drop flag's dot at the `return` (#1194).
         ("exit_path_dependent_drops", &["s"][..]),
         ("exit_return_in_let_if", &[][..]),
-        // The temporary Result is dropped at the `return`.
-        ("exit_temporary_drops", &["n"][..]),
+        // The temporary Result is dropped at the `return`. `f`'s `0 =>
+        // return n,` is an arm on one row: n's column there is the fork's
+        // diagonal alone, which ends in a bar too (#1295); `g`'s n (no
+        // value yet) stops at `Err(_) => return 0,`.
+        ("exit_temporary_drops", &["n", "n"][..]),
         // early_return: r is dropped at each `return`; r₂ moves out.
         ("shadow_matrix_scopes", &["r₂"][..]),
         // #429: an `if` without `else` whose body exits ends its column

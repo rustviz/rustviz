@@ -4297,6 +4297,18 @@ pub fn event_dot_break_out_go_out_of_scope_maybe_moved(my_name: &String, note: &
 
 /// A reference parameter a returned `if` / `match` doesn't return on
 /// this path, tied to the result by the signature's lifetime (#775).
+/// A struct's field on the row a call borrows the whole struct (#1311):
+/// the field is borrowed with it, for the call, and may be changed
+/// through a mutable borrow (`reset(&mut self)` writes `self.n`).
+pub fn event_dot_lent_with_parent(my_name: &String, parent: &str, to: &str, mutable: bool) -> String {
+    let (me, p, t) = (styled_name_html(my_name), styled_name_html(parent), styled_name_html(to));
+    if mutable {
+        format!("{0} is mutably borrowed along with {1} by {2}, which may change {0}; the borrow ends here", me, p, t)
+    } else {
+        format!("{0} is immutably borrowed along with {1} by {2}, which can read {0}; the borrow ends here", me, p, t)
+    }
+}
+
 pub fn event_dot_tied_param_note(my_name: &String, lifetime: &str) -> String {
     format!(
         "{0} isn't returned on this path, but its borrow lasts as long as the result (same lifetime {1})",
@@ -4388,6 +4400,17 @@ pub fn shadowed_name_note(name: &String, note: Option<&crate::svg_generator::dat
 // doesn't use it, as the arm starts.
 pub fn event_dot_branch_merge_borrow_ended(my_name: &String) -> String {
     format!("{0}'s borrow ended in each branch above", styled_name_html(my_name))
+}
+
+// Dot where a conditional ends whose branches all diverge, some by
+// `break`ing out of the loop around it (#1296): nothing gets here, but the
+// column goes on after the loop, from the branches that break.
+pub fn event_dot_branch_merge_after_break(my_name: &String, breaking: usize) -> String {
+    format!(
+        "No branch above reaches this point: {0} goes on after the loop from the {1}",
+        styled_name_html(my_name),
+        if breaking == 1 { "branch that breaks out of it" } else { "branches that break out of it" },
+    )
 }
 
 // Dashed rest of an `if` / `match` arm after the borrow held by a
