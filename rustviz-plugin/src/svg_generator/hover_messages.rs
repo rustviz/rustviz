@@ -4414,7 +4414,14 @@ pub fn event_dot_loop_exit_move(my_name: &String, definite: bool, labeled_block:
     let name = styled_name_html(my_name);
     let brk = styled_name_html(&"break".to_owned());
     let what = if labeled_block { "block" } else { "loop" };
-    if definite {
+    if definite && labeled_block {
+        // A labeled block also ends by reaching its end (#1286).
+        format!(
+            "{0} was moved before the block ended: every {1} out of the block comes after {0} is moved, \
+             and so does the block's end, so {0} can't be used after the block",
+            name, brk
+        )
+    } else if definite {
         format!(
             "{0} was moved before the {2} ended: the only way out of the {2} is a {1} that comes after {0} is moved, so {0} can't be used after the {2}",
             name, brk, what
@@ -4425,6 +4432,20 @@ pub fn event_dot_loop_exit_move(my_name: &String, definite: bool, labeled_block:
             name, brk, what
         )
     }
+}
+
+// At the end of a labeled block (#1286), for a variable declared before
+// it that the code on the way to the block's end moves, after a `break`
+// out of the block that skips that code: `'a: { if c { break 'a 1; }
+// drop(s); 2 }`. Which way the block ended decides whether s still holds
+// its value after it.
+pub fn event_dot_block_break_skips_move(my_name: &String) -> String {
+    format!(
+        "{0} may have been moved: the block can end through a {1} that comes before {0} is moved, \
+         or by reaching its end after {0} is moved, so {0} can't be used after the block",
+        styled_name_html(my_name),
+        styled_name_html(&"break".to_owned())
+    )
 }
 
 // At the end of a bare `loop` (#1000), for a variable declared before

@@ -21296,10 +21296,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "The `return` here hands the caller one of the values its `if` / `match` chooses between. If that value isn't e.bio's, e.bio's resource is dropped here as the function returns. If it is e.bio's, its resource goes to the caller instead and isn't dropped.",
             "b.bio goes out of scope. Its resource is dropped.",
             "l.bio goes out of scope. Its resource is dropped.",
+            // #1280: `break l.name` moves l.name only on the iteration
+            // that ends the loop; the others drop all of l.
+            "l goes out of scope. Its resource is dropped here on every iteration that doesn't end the loop.",
+            "l.name's resource is moved to r by the break that ends the loop",
         ],
         must_not_contain: &[
             // The struct itself isn't one of the values `either` chooses.
             "If that value isn't e's",
+            "l.name goes out of scope. No resource is dropped.",
         ],
     },
     TooltipExpect {
@@ -23209,6 +23214,85 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "plain is an async fn",
+        ],
+    },
+    TooltipExpect {
+        name: "break_field_out_1280",
+        // #1280: `break l.name` out of a `loop` (a field of a struct
+        // declared in the loop) moves l.name only on the iteration that
+        // ends the loop. Main drew that move after l.name's scope end
+        // with no rule for it (`State::Invalid`), said "l.name goes out of
+        // scope. No resource is dropped." and "only l.bio is dropped" where
+        // the other iterations drop all of l. The same for the fields of a
+        // whole struct `break k`, a tuple field, a nested field, a `break`
+        // in a match arm, after another field was moved, in a tuple, a
+        // loop the function returns, and a field of a Box.
+        must_contain: &[
+            "l goes out of scope. Its resource is dropped here on every iteration that doesn't end the loop.",
+            "l.name goes out of scope. Its resource is dropped here on every iteration that doesn't end the loop.",
+            "l.name's resource is moved to r by the break that ends the loop",
+            "l.bio goes out of scope. Its resource is dropped.",
+            "k.name goes out of scope. Its resource is dropped here on every iteration that doesn't end the loop.",
+            "k.name's resource is moved to r.name by the break that ends the loop",
+            "t goes out of scope. Its resource is dropped here on every iteration that doesn't end the loop.",
+            "t.0's resource is moved to r by the break that ends the loop",
+            "o goes out of scope. Its resource is dropped here on every iteration that doesn't end the loop.",
+            "o.inner goes out of scope. Its resource is dropped here on every iteration that doesn't end the loop.",
+            "o.inner.first's resource is moved to r by the break that ends the loop",
+            "m.name's resource is moved to r by the break that ends the loop",
+            // Moved out above on every path: only p.name is left to drop.
+            "p goes out of scope. p.bio was moved out earlier, so only p.name is dropped.",
+            "p.name goes out of scope. Its resource is dropped here on every iteration that doesn't end the loop.",
+            "q.name's resource is moved to r.0 by the break that ends the loop",
+            "v.name's resource is moved to the caller by the break that ends the loop, which the function returns",
+            "b.name's resource is moved to r by the break that ends the loop",
+            "b goes out of scope. Its resource is dropped here on every iteration that doesn't end the loop.",
+        ],
+        must_not_contain: &[
+            "l.name goes out of scope. No resource is dropped.",
+            "k.name goes out of scope. No resource is dropped.",
+            "k.bio goes out of scope. No resource is dropped.",
+            "t.0 goes out of scope. No resource is dropped.",
+            "o.inner.first goes out of scope. No resource is dropped.",
+            "m.name goes out of scope. No resource is dropped.",
+            "p.name goes out of scope. No resource is dropped.",
+            "q.name goes out of scope. No resource is dropped.",
+            "v.name goes out of scope. No resource is dropped.",
+            "b.name goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "block_break_skips_move_1286",
+        // #1286: `if c { break 'blk 1; } drop(s);` in a labeled block: the
+        // `break` skips the move, so s may still hold its value after the
+        // block. Main said nothing where the block ends, so the drop flag
+        // at s's scope end had no stated reason (and a field moved that
+        // way, p.name, was "moved out earlier" with "No resource is
+        // dropped."). Also a valueless `break 'blk;`, a match arm, the
+        // move in the `else` branch, a labeled block in a loop (main: "w
+        // was moved before the loop ended") and a `break 'outer` out of a
+        // nested block. A move before every `break` and the block's end
+        // is definite (main: "b may have been moved").
+        must_contain: &[
+            "s may have been moved: the block can end through a break that comes before s is moved, or by reaching its end after s is moved, so s can't be used after the block",
+            "s goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "u may have been moved: the block can end through a break that comes before u is moved, or by reaching its end after u is moved, so u can't be used after the block",
+            "a may have been moved: the block can end through a break that comes before a is moved, or by reaching its end after a is moved, so a can't be used after the block",
+            "e may have been moved: the block can end through a break that comes before e is moved, or by reaching its end after e is moved, so e can't be used after the block",
+            "p.name may have been moved: the block can end through a break that comes before p.name is moved, or by reaching its end after p.name is moved, so p.name can't be used after the block",
+            "p.name goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "p goes out of scope. p.name may have been moved out above, so it's dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag). p.bio is dropped.",
+            "w may have been moved: the block can end through a break that comes before w is moved, or by reaching its end after w is moved, so w can't be used after the block",
+            "w may have been moved: the loop can end through a break that comes after w is moved, so w can't be used after the loop",
+            "n may have been moved: the block can end through a break that comes before n is moved, or by reaching its end after n is moved, so n can't be used after the block",
+            "b was moved before the block ended: every break out of the block comes after b is moved, and so does the block's end, so b can't be used after the block",
+            "b goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "p.name goes out of scope. No resource is dropped.",
+            "p goes out of scope. p.name was moved out earlier, so only p.bio is dropped.",
+            "w was moved before the loop ended",
+            "b may have been moved",
         ],
     },
 ];

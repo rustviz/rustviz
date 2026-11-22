@@ -1528,7 +1528,10 @@ pub enum MaybeMovedAt {
     /// still holds it" (#1029).
     Loop { nothing_above: bool, kept: bool },
     /// The end of a labeled block (`'a: { … break 'a; … }`).
-    LabeledBlock,
+    /// `skipped`: the move is on the way to the block's end, and a
+    /// `break` out of it before the move skips it (`'a: { if c { break
+    /// 'a; } drop(s); }`, #1286); otherwise a `break` comes after it.
+    LabeledBlock { skipped: bool },
     /// The start of the `else` branch (`path`: or the implicit empty
     /// one) of an `if` whose let-chain condition moves the variable in
     /// a part that a part which can be false comes after
@@ -3596,7 +3599,10 @@ impl Event {
             Event::LoopExitMove { definite, at: MaybeMovedAt::Loop { .. } } => {
                 hover_messages::event_dot_loop_exit_move(my_name, *definite, false)
             }
-            Event::LoopExitMove { definite, at: MaybeMovedAt::LabeledBlock } => {
+            Event::LoopExitMove { at: MaybeMovedAt::LabeledBlock { skipped: true }, .. } => {
+                hover_messages::event_dot_block_break_skips_move(my_name)
+            }
+            Event::LoopExitMove { definite, at: MaybeMovedAt::LabeledBlock { skipped: false } } => {
                 hover_messages::event_dot_loop_exit_move(my_name, *definite, true)
             }
             Event::LoopExitMove { definite, at: MaybeMovedAt::ChainFail { to, dropped, path, how } } => {
