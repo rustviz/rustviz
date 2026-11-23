@@ -636,6 +636,8 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // (#344), recorded when the branch is built; the loop turns them
   // into `LoopExitMove` events at its end.
   pub break_moves: Vec<BreakMove>,
+  // The labeled blocks being visited, innermost last (#1286).
+  pub labeled_frames: Vec<LabeledFrame>,
   // The loops being visited (by the HirId their `break`s name) and
   // the variables declared before each that hold no value where it
   // starts but may where it comes back round (`given_round_loop`,
@@ -836,6 +838,20 @@ pub struct BreakMove {
   /// only in the branch that breaks: the move may be outside any
   /// branch, so a drop-flag text says "nothing above" moved it.
   pub on_path: bool,
+}
+
+/// A labeled block being visited (`'a: { … }`, #1286): its block's
+/// HirId (what its `break`s target), `preprocessed_events.len()`,
+/// `exit_frames.len()` and `in_scope.len()` where it starts, and the
+/// path to each `break` out of it seen so far.
+#[derive(Clone)]
+pub struct LabeledFrame {
+  pub id: rustc_hir::HirId,
+  pub events_at: usize,
+  pub frames_at: usize,
+  pub len: usize,
+  /// The path to each `break` out of it (`path_events_since`).
+  pub paths: Vec<(Vec<(usize, ExternalEvent)>, Vec<std::ops::Range<usize>>)>,
 }
 
 /// See `ExprVisitor::break_states`.
@@ -1048,6 +1064,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       line_override: None,
       deferred_lines: Vec::new(),
       break_out: Vec::new(),
+      labeled_frames: Vec::new(),
       break_alt: None,
       break_pats: Vec::new(),
       break_assigns: Vec::new(),
@@ -1731,7 +1748,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   pub fn add_external_event(&mut self, line_num: usize, mut event: ExternalEvent) {
     let line_num = self.line_override.unwrap_or(line_num);
     if let ExternalEvent::Move { from: ResourceTy::Value(from), break_out, .. } = &mut event {
-      if self.break_out.contains(from.name()) {
+      // Or one of its fields, which move with it (#1280).
+      if self.break_out.iter().any(|n| from.name() == n
+        || from.name().strip_prefix(n.as_str()).is_some_and(|rest| rest.starts_with('.'))) {
         *break_out = true;
       }
     }
@@ -11626,7 +11645,7 @@ fn ownership_after(events: &[(usize, ExternalEvent)], rap_name: &str, start: Opt
       // a move further down (#992), and the end of a `while` / `for`
       // loop that can stop after such a time round.
       ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::WhileCondFail { .. } | MaybeMovedAt::Loop { .. }
-        | MaybeMovedAt::LabeledBlock | MaybeMovedAt::LoopHead | MaybeMovedAt::LoopRound { .. }, .. } if ro.name() == rap_name => {
+        | MaybeMovedAt::LabeledBlock { .. } | MaybeMovedAt::LoopHead | MaybeMovedAt::LoopRound { .. }, .. } if ro.name() == rap_name => {
         return Some(Ownership::Maybe);
       }
       // Moved into a name an or-pattern binds, if its alternative

@@ -54,8 +54,6 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("edition2024/whole_value_moved_by_chain_953", "event-on-dead-column", 1200),
     // A let-chain condition's last use of a reference: borrow end off the column.
     ("edition2024/value_not_resource_chain_1163", "event-on-dead-column", 1279),
-    // `break l.name` out of a loop.
-    ("early_return_field_1141", "invalid-state", 1280),
     // `match (&t, 1) { (s, n) => … }`: n never gets a value.
     ("match_on_borrow_binding_1235", "event-on-dead-column", 1281),
     ("match_on_borrow_binding_1235", "invalid-state", 1281),

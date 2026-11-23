@@ -1651,7 +1651,12 @@ fn render_scope_end_dot(
                     hover_messages::event_dot_struct_partial_go_out_of_scope(&name, &split.moved, &split.maybe_moved, &[], true, split.by_cond, split.kept, false),
                 _ => event.print_message_with_name(&mut name),
             };
-        } else if history.iter().any(|(l, e)| l == line_number && matches!(e, Event::Move { break_out: true, .. })) {
+        } else if history.iter().any(|(l, e)| l == line_number && matches!(e, Event::Move { break_out: true, .. }))
+            // Or only a field of it (`break l.name`, #1280), when nothing
+            // else moved part of it: all of it is dropped here on the
+            // iterations that don't break.
+            || (exit.is_none() && field_broken_out_at(visualization_data, *hash, *line_number)
+                && struct_partial_move_split(visualization_data, *hash, None).is_none()) {
             // A `break` carried it out of the loop on this
             // line (#431), but only on the iteration that
             // ended the loop: every other one drops it here,
@@ -2860,7 +2865,8 @@ fn all_moved_at_end(history: &[(usize, Event)]) -> Option<bool> {
 // True when a let-chain's condition (or a match guard, #247) may have
 // moved this column's value before failing (#281), or a `while` loop's
 // (#968), or a loop body before a `break` outside any branch that
-// breaks (#980), or before the loop comes back round (#992), so a
+// breaks (#980), or before the loop comes back round (#992), or on the
+// way to a labeled block's end that a `break` skips (#1286), so a
 // drop-flag message says "nothing above" moved it rather than "no
 // branch above". Not when the column got a new value after that on the
 // same path (`s = …` in the else branch): from there it holds one
@@ -2875,7 +2881,8 @@ fn chain_move_lasts(mut lasts: bool, events: &[(usize, Event)]) -> bool {
     for (_, e) in events {
         match e {
             Event::LoopExitMove { at: MaybeMovedAt::ChainFail { .. } | MaybeMovedAt::WhileCondFail { .. }
-                | MaybeMovedAt::Loop { nothing_above: true, .. } | MaybeMovedAt::LoopHead | MaybeMovedAt::LoopRound { .. }, .. } => lasts = true,
+                | MaybeMovedAt::Loop { nothing_above: true, .. } | MaybeMovedAt::LoopHead | MaybeMovedAt::LoopRound { .. }
+                | MaybeMovedAt::LabeledBlock { skipped: true }, .. } => lasts = true,
             e if gives_new_value(e) => lasts = false,
             Event::Branch { branch_history, .. } => {
                 lasts = branch_history.iter().any(|b| chain_move_lasts(lasts, &b.e_data));
@@ -4360,6 +4367,20 @@ fn render_dots_string(
 // Whether an owner / struct column still holds its resource just
 // before going out of scope: the penultimate state (the last one is the
 // out-of-scope state) is FullPrivilege / PartialPrivilege.
+// Whether a `break` carries a field of the struct column `hash` (at any
+// depth) out of its loop on `line` (#1280): a Move marked `break_out`.
+fn field_broken_out_at(visualization_data: &VisualizationData, hash: u64, line: usize) -> bool {
+    let Some(rap @ ResourceAccessPoint::Struct(Struct { owner, .. })) =
+        visualization_data.timelines.get(&hash).map(|t| &t.resource_access_point) else { return false };
+    let root = if rap.is_member() { *owner } else { hash };
+    let prefix = format!("{}.", rap.name());
+    visualization_data.timelines.values().any(|t| match &t.resource_access_point {
+        ResourceAccessPoint::Struct(Struct { is_member: true, owner, name, .. }) if *owner == root && name.starts_with(&prefix) =>
+            t.history.iter().any(|(l, e)| *l == line && matches!(e, Event::Move { break_out: true, .. })),
+        _ => false,
+    })
+}
+
 fn holds_resource_at_scope_end(timeline: &Timeline) -> bool {
     let penultimate_state = timeline
         .states
