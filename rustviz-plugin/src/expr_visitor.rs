@@ -4068,9 +4068,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// The local whose value holds the borrows (`refs` in `let mut refs
   /// = vec![&a1];`, see `holds_borrow`) that a write to the
   /// reference-typed place `place` replaces one of: an element
-  /// `refs[0]`, or `*el` after `let el = &mut refs[0];` (#1361). None
-  /// for anything else (a place behind a parameter, a holder we don't
-  /// track).
+  /// `refs[0]`, or `*el` after `let el = &mut refs[0];` (#1361), or
+  /// `*refs.get_mut(0).unwrap()`, through a call's result that points
+  /// into refs only (#1384). None for anything else (a place behind a
+  /// parameter, a holder we don't track).
   fn element_holder(&self, place: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
     let holder_of = |e: &'tcx Expr<'tcx>| -> Option<ResourceAccessPoint> {
       if !matches!(e.kind, ExprKind::Path(QPath::Resolved(None, _))) || self.is_ref_param(e) {
@@ -4082,6 +4083,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     };
     match place.kind {
       ExprKind::Index(base, _, _) => holder_of(base),
+      ExprKind::Unary(UnOp::Deref, inner) if matches!(inner.kind, ExprKind::Call(..) | ExprKind::MethodCall(..))
+        && !inner.span.from_expansion() => {
+        let lenders = self.pointer_lenders(inner).unwrap_or_else(|| self.call_lenders(inner));
+        let [ResourceTy::Value(h)] = lenders.as_slice() else { return None };
+        (h.holds_borrow() && self.borrow_map.contains_key(h.name())).then(|| h.to_owned())
+      }
       ExprKind::Unary(UnOp::Deref, inner) => {
         if !matches!(inner.kind, ExprKind::Path(QPath::Resolved(None, _))) || self.is_ref_param(inner) {
           return None;
@@ -4136,6 +4143,62 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       }
     }
     true
+  }
+
+  /// `refs[0] = tr;` / `*el = tr;` (el borrowing `refs[0]`), with `tr`
+  /// a reference (#1384): the element gets a copy of tr (or, for a
+  /// `&mut`, tr itself), so refs now holds tr's borrow, which lasts
+  /// until refs's last use, as for `refs[0] = &t1` (#1361) and
+  /// `refs.push(tr)`. Draws the borrows of what tr borrows into refs's
+  /// column and records them as refs's lenders. (`&t1` on the right is
+  /// `store_into_holder`'s.)
+  /// `match_rhs` drew the write from event `n_events` on.
+  pub fn store_ref_copy_into_holder(&mut self, place: &'tcx Expr<'tcx>, rhs: &'tcx Expr<'tcx>, n_events: usize) {
+    if matches!(rhs.kind, ExprKind::AddrOf(..)) || rhs.span.from_expansion() {
+      return;
+    }
+    let ty = self.tcx.typeck(rhs.hir_id.owner).expr_ty(rhs);
+    let Some(m) = ty.ref_mutability() else { return };
+    let Some(holder) = self.element_holder(place) else { return };
+    // (A local `&mut` tr is reborrowed, `&mut *tr`: refs borrows
+    // through tr, which can't be used while refs holds it, #1329.)
+    let lenders: Vec<(ResourceTy, bool)> = self.value_lenders(rhs).into_iter()
+      .filter_map(|l| match l {
+        ResourceTy::Value(r) if !r.is_fn() && r.hash() != holder.hash() => Some((ResourceTy::Value(r), false)),
+        ResourceTy::Deref(r) if r.is_mutref() => Some((ResourceTy::Value(r), true)),
+        _ => None,
+      })
+      .collect();
+    if lenders.is_empty() {
+      return;
+    }
+    let line = expr_to_line(rhs, &self.tcx);
+    let to = ResourceTy::Value(holder.clone());
+    for (from, is_reborrow) in &lenders {
+      let (from, to, is_reborrow, id) = (from.clone(), to.clone(), *is_reborrow, *self.unique_id);
+      *self.unique_id += 1;
+      self.add_external_event(line, if m.is_mut() {
+        ExternalEvent::MutableBorrow { from, to, is_partial: false, is_reborrow, break_alt: None, via: None, id, of_ref_var: false }
+      } else {
+        ExternalEvent::StaticBorrow { from, to, is_partial: false, is_reborrow, break_alt: None, via: None, id, of_ref_var: false }
+      });
+    }
+    // A reborrowed tr isn't moved (`match_rhs` drew a move).
+    for (l, _) in lenders.iter().filter(|(_, reborrow)| *reborrow) {
+      let moved = |e: &ExternalEvent| matches!(e, ExternalEvent::Move { from: ResourceTy::Value(f), .. } if f.hash() == l.hash());
+      let ids: Vec<usize> = self.preprocessed_events[n_events..].iter().filter(|(_, e)| moved(e)).map(|(_, e)| e.get_id()).collect();
+      self.preprocessed_events.retain(|(_, e)| !ids.contains(&e.get_id()));
+      self.event_line_map.values_mut().for_each(|evs| evs.retain(|e| !ids.contains(&e.get_id())));
+    }
+    let lenders: Vec<ResourceTy> = lenders.into_iter().map(|(l, _)| l).collect();
+    if let Some(rd) = self.borrow_map.get_mut(holder.name()) {
+      for l in lenders {
+        if l != rd.lender && !rd.co_lenders.contains(&l) {
+          rd.co_lenders.push(l);
+        }
+      }
+      rd.ref_mutability |= m.is_mut();
+    }
   }
 
   /// After `match_rhs` drew `&x` (from event `n_events` on) going into
@@ -5640,6 +5703,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// borrows from several variables (see `RefData::co_lenders`).
   pub fn get_ref_data_co(&self, expr: &'tcx Expr<'tcx>) -> (ResourceTy, VecDeque<String>, Vec<ResourceTy>){
     let expr = peel_ref_casts(expr, self.tcx.typeck(expr.hir_id.owner));
+    // `let r = { &String::from("x") };`: what the block's last
+    // expression borrows (#1383).
+    if let Some(tail) = plain_block_tail(expr) {
+      return self.get_ref_data_co(tail);
+    }
     // `&String::new()` inside `let w = W { r: &String::new() };`: the
     // temporary's own column (#856).
     if let Some(tmp) = self.nested_ext_temps.get(&expr.hir_id) {
@@ -5655,7 +5723,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // A call's result: who it borrows from is decided by the callee's
     // signature (`ref_flow.rs`, #171), not by its receiver.
     if matches!(expr.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) {
-      let mut lenders = self.call_lenders(expr);
+      // A reference into an element whose value is itself a reference
+      // (`refs.last_mut().unwrap()`) points into the collection, not
+      // at what the element borrows (#1382).
+      let mut lenders = self.pointer_lenders(expr).unwrap_or_else(|| self.call_lenders(expr));
       // Only the fields reached through a reference (#1073, #1080).
       if let Some(fields) = self.field_call_lenders(expr, &lenders) {
         lenders = fields.into_iter().map(|(l, _)| l).collect();
@@ -8047,13 +8118,28 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
   if self.try_of_operand(call).is_some() {
     passed_on.push(crate::svg_generator::hover_messages::TRY_PASSES_ON.to_owned());
   }
-  let via = BorrowVia {
-    func,
-    lenders: lenders.iter().map(|l| l.name()).collect(),
-    also_unnamed: self.call_lenders_full(call).1,
-    tie: self.call_arg_tie(borrower, None),
-    carrier: if lhs_rap.is_ref() { ViaCarrier::Reference } else { ViaCarrier::Value },
-    passed_on,
+  // `refs.last().copied().unwrap()`: the reference stored in the
+  // element last's result points to, copied out (#1382).
+  let via = match self.copied_out_of(call) {
+    Some(inner) if lhs_rap.is_ref() => BorrowVia {
+      func: match inner.kind {
+        ExprKind::MethodCall(seg, ..) => seg.ident.to_string(),
+        _ => func,
+      },
+      lenders: lenders.iter().map(|l| l.name()).collect(),
+      also_unnamed: false,
+      tie: ArgTie::default(),
+      carrier: ViaCarrier::PatternBinding { from_call: true, moved: lhs_rap.is_mutref(), field_of: false },
+      passed_on: Vec::new(),
+    },
+    _ => BorrowVia {
+      func,
+      lenders: lenders.iter().map(|l| l.name()).collect(),
+      also_unnamed: self.call_lenders_full(call).1,
+      tie: self.narrowed_tie(call, borrower).unwrap_or_else(|| self.call_arg_tie(borrower, None)),
+      carrier: if lhs_rap.is_ref() { ViaCarrier::Reference } else { ViaCarrier::Value },
+      passed_on,
+    },
   };
   for lender in lenders.iter() {
     let id = *self.unique_id;

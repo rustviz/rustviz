@@ -5784,7 +5784,7 @@ fn same_place(a: &Expr, b: &Expr) -> bool {
 /// which Rust's temporary lifetime extension reaches too (#1165). None
 /// when the `&` borrows a place (`&x`, `&v[0]`, `&p.f`, `&*r`) or
 /// another borrow (`&&x`).
-fn extended_temp_operand<'a, 'tcx>(operand: &'a Expr<'tcx>) -> Option<&'a Expr<'tcx>> {
+pub(crate) fn extended_temp_operand<'a, 'tcx>(operand: &'a Expr<'tcx>) -> Option<&'a Expr<'tcx>> {
   let mut base = operand;
   while let ExprKind::Field(b, _) | ExprKind::Index(b, _, _) = base.kind {
     base = b;
@@ -6367,7 +6367,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // place with no column (#282).
           self.store_borrow_in_unmodelled_place(lhs_expr, rhs_expr, e);
         } else {
+          let n_events = self.preprocessed_events.len();
           self.match_rhs(ResourceTy::Anonymous, rhs_expr, e);
+          // `refs[0] = tr;`: refs now holds tr's borrow (#1384).
+          if matches!(expr.kind, ExprKind::Assign(..)) {
+            self.store_ref_copy_into_holder(lhs_expr, rhs_expr, n_events);
+          }
         }
         return;
       }
@@ -7064,6 +7069,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           let place = ResourceTy::Index(r.clone(), format!("*{}", r.name()), PlaceWrite::Update);
           self.end_stored_borrow(lhs_expr, n_events, &lhs_rty, place);
         }
+      } else if let (true, ExprKind::AddrOf(..), ResourceTy::Anonymous) = (lhs_ty.is_ref(), rhs_expr.kind, &lhs_rty) {
+        // `*refs.get_mut(0).unwrap() = &t1;` (a place with no name):
+        // kept in refs (#1384).
+        self.store_into_holder(lhs_expr, n_events, &lhs_rty);
+      } else if is_assign && lhs_ty.is_ref() && match &lhs_rty {
+        ResourceTy::Deref(_) => !repoints_ref_var,
+        ResourceTy::Anonymous => true,
+        _ => false,
+      } {
+        // `*el = tr;` / `*refs.get_mut(0).unwrap() = tr;`: refs now
+        // holds tr's borrow (#1384).
+        self.store_ref_copy_into_holder(lhs_expr, rhs_expr, n_events);
       }
       self.draw_struct_field_borrow_ends(struct_field_ends);
       // `v[1] = v[2]`: match_rhs has nothing to say about some
@@ -10835,8 +10852,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // Drawn on the branch value's line (`0 => (s, 1),` in a `match`
     // written over several lines), not the statement's first.
     let saved = self.line_override.replace(span_to_line(&value.span, &self.tcx));
+    // A literal whose part the pattern leaves (`(a, _) = if c { (f(),
+    // g()) } ..`) has a temporary of the branch, as a `let`'s does
+    // (#1011, #1387).
+    let owner = match body.kind {
+      ExprKind::Block(b, _) => b.hir_id,
+      _ => body.hir_id,
+    };
+    let prev_owner = self.branch_value_owner.replace(owner);
     self.assign_value(block, value);
+    self.branch_value_owner = prev_owner;
     self.line_override = saved;
+    for (line, tmp, ty) in std::mem::take(&mut self.branch_temp_drops) {
+      let id = *self.unique_id;
+      *self.unique_id += 1;
+      self.add_external_event(line, ExternalEvent::TemporaryDrop { ro: tmp, ty: Some(ty), when: "at the end of this statement".to_owned(), literal: true, early: false, part: None, id });
+    }
   }
 
   /// `value` (a branch's, or what a `break` carries out of a loop)
@@ -10965,8 +10996,44 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // statement. The temporary has no column, so the move's tooltip
     // is where that drop is stated (unless the type has nothing to
     // drop).
+    // A fresh value among them (`(a, _) = (make(), make());`, #1387)
+    // has no variable to say so: the literal's temporary gets a column,
+    // as a `let`'s does (#483), and what is moved in goes there. (rustc
+    // lowers the assignment to `{ let (lhs, _) = (..); a = lhs; }`.)
+    let in_branch = self.branch_value_owner.is_some();
+    // (`init` is the right-hand side, a branch's value or a `break`'s.)
+    let literal_init = match init.kind {
+      ExprKind::Tup(_) | ExprKind::Array(_) | ExprKind::Struct(..) => true,
+      ExprKind::Call(callee, _) => is_ctor_path(callee, self.tcx.typeck(init.hir_id.owner)),
+      _ => false,
+    };
+    let fresh = discarded.iter().copied().find(|e| !e.span.from_expansion() && !matches!(e.kind,
+      ExprKind::Path(_) | ExprKind::Field(..) | ExprKind::Index(..) | ExprKind::Unary(UnOp::Deref, _))
+      && self.needs_drop(self.tcx.typeck(e.hir_id.owner).expr_ty(e), e.hir_id.owner));
+    // (In a branch, the temporary is the literal's, `literal_temp_key`.)
+    let prev_existing = self.bind_existing;
+    self.bind_existing |= in_branch;
+    let column = match fresh {
+      Some(e) if literal_init => {
+        // What a call among them returns is moved into it, as in the
+        // `let` form (#1376).
+        let mut calls = Vec::new();
+        for &d in &discarded {
+          if !matches!(d.kind, ExprKind::Path(_) | ExprKind::Field(..) | ExprKind::Index(..) | ExprKind::Unary(UnOp::Deref, _)) {
+            self.literal_calls(d, &mut calls);
+          }
+        }
+        self.start_literal_temp(e, false, calls);
+        self.literal_temps.contains_key(&if in_branch { init.hir_id } else { local.hir_id })
+      }
+      _ => false,
+    };
     for e in &discarded {
       if moved_name(self, e).is_some() {
+        if column {
+          self.move_into_literal(e, false);
+          continue;
+        }
         let ty = self.tcx.typeck(e.hir_id.owner).node_type(e.hir_id);
         let needs_drop = self.needs_drop(ty, e.hir_id.owner);
         let to = if needs_drop { ResourceTy::Temporary { extended: false, tuple: None } } else { ResourceTy::Anonymous };
@@ -10974,6 +11041,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
     }
     let n0 = self.preprocessed_events.len();
+    self.bind_existing = prev_existing;
     for &i in &order {
       self.visit_expr(assigns[i].0);
     }
@@ -11639,6 +11707,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
       }
       ExprKind::Cast(inner, _) => self.walk_extending(inner, out),
+      // `let r = { &String::from("x") };`: a block's last expression
+      // is extending too (#1383).
+      ExprKind::Block(b, None) if b.rules == rustc_hir::BlockCheckMode::DefaultBlock => {
+        if let Some(tail) = b.expr {
+          self.walk_extending(tail, out);
+        }
+      }
       _ => {}
     }
   }
@@ -13695,6 +13770,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if let Some(ResourceAccessPoint::Owner(o)) = self.raps.get_mut(&tmp_name).map(|rd| &mut rd.rap) {
         o.unbound_temp = true;
         o.let_literal_temp = true;
+        o.assign_literal_temp = matches!(let_stmt.source, rustc_hir::LocalSource::AssignDesugar);
       }
       self.raps.get_mut(&tmp_name).unwrap().temp_owner = self.branch_value_owner;
       let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();
@@ -13722,6 +13798,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if let Some(ResourceAccessPoint::Owner(o)) = self.raps.get_mut(&tmp_name).map(|rd| &mut rd.rap) {
         o.unbound_temp = true;
         o.let_literal_temp = true;
+        o.assign_literal_temp = matches!(let_stmt.source, rustc_hir::LocalSource::AssignDesugar);
       }
       self.raps.get_mut(&tmp_name).unwrap().temp_owner = owner;
       let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();

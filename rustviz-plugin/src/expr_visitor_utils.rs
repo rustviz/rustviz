@@ -2423,3 +2423,13 @@ pub fn locals_in<'tcx>(e: &'tcx Expr<'tcx>, closures: ClosureLocals<'tcx>) -> Ve
   f.visit_expr(e);
   f.out
 }
+
+/// The last expression of a plain block `{ ..; tail }` (no label, not
+/// `unsafe`, not from a macro): the block's value, which a `let` whose
+/// initializer it is extends like the initializer itself (#1383).
+pub fn plain_block_tail<'a, 'tcx>(e: &'a Expr<'tcx>) -> Option<&'a Expr<'tcx>> {
+  match e.kind {
+    ExprKind::Block(b, None) if b.rules == rustc_hir::BlockCheckMode::DefaultBlock && !e.span.from_expansion() => b.expr,
+    _ => None,
+  }
+}

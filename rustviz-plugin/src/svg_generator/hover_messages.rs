@@ -930,7 +930,15 @@ pub fn event_dot_extended_temporary_drop(my_name: &String, when: &String) -> Str
     )
 }
 
-pub fn event_dot_temporary_drop(ty: &String, when: &String, literal: bool) -> String {
+pub fn event_dot_temporary_drop(ty: &String, when: &String, literal: bool, assign: bool) -> String {
+    if literal && assign {
+        // `(a, _) = (m, n);` (#1387): rustc lowers it to `{ let (lhs, _)
+        // = (m, n); a = lhs; }`, so the temporary goes first.
+        return format!(
+            "This temporary {0}, built by the literal on the right of the destructuring assignment, is dropped as soon as the assignment has taken it apart (before the places on the left get their new values), and with it whatever the pattern didn't assign to a place. Its resource is dropped",
+            styled_name_html(ty)
+        );
+    }
     if literal {
         // `let (x, _) = (m, n);`: m went into x, n stayed in the literal.
         return format!(
@@ -1282,7 +1290,13 @@ pub fn event_dot_owner_drop_unless_returned(my_name: &String, value: bool, note:
 // doesn't bind it by value (`_`, `..`, a `ref` binding): #439. The
 // temporary is dropped at the end of the statement, unless a `ref`
 // binding borrows from it, which extends it to the end of the block.
-pub fn event_dot_literal_temporary_acquire(from_name: &String, ends_with_statement: bool) -> String {
+pub fn event_dot_literal_temporary_acquire(from_name: &String, ends_with_statement: bool, assign: bool) -> String {
+    if assign {
+        return format!(
+            "The temporary that the literal on the right of this destructuring assignment builds takes the value of {0}. Rust drops it, with that value, as soon as the assignment has taken it apart, before the places on the left get their new values",
+            styled_name_html(from_name)
+        );
+    }
     let when = if ends_with_statement {
         "No `ref` binding borrows from it, so Rust drops it at the end of this statement"
     } else {
@@ -1295,8 +1309,15 @@ pub fn event_dot_literal_temporary_acquire(from_name: &String, ends_with_stateme
 }
 
 // The same for a call's result in that literal (`mk()` in `let (a, _) =
-// (1, mk());`, #1376), which the pattern doesn't bind by value.
-pub fn event_dot_literal_temporary_takes_result(from_name: &String, ends_with_statement: bool) -> String {
+// (1, mk());`, #1376), which the pattern doesn't bind by value; `assign`:
+// the literal of a destructuring assignment (`(a, _) = (1, mk());`, #1387).
+pub fn event_dot_literal_temporary_takes_result(from_name: &String, ends_with_statement: bool, assign: bool) -> String {
+    if assign {
+        return format!(
+            "The temporary that the literal on the right of this destructuring assignment builds takes the value that {0}. Rust drops it, with whatever the pattern doesn't assign to a place, as soon as the assignment has taken it apart, before the places on the left get their new values",
+            temporary_source(from_name)
+        );
+    }
     let when = if ends_with_statement {
         "No `ref` binding borrows from it, so Rust drops it at the end of this statement, with whatever the pattern didn't bind by value"
     } else {
@@ -1312,7 +1333,11 @@ pub fn event_dot_literal_temporary_takes_result(from_name: &String, ends_with_st
 // no variable is moved into it (every element the pattern leaves is a
 // fresh value, #483). Dropped at the end of the statement: with a `ref`
 // binding it is the extended kind, whose start says why it lives on.
-pub fn event_dot_literal_temporary_start() -> String {
+pub fn event_dot_literal_temporary_start(assign: bool) -> String {
+    if assign {
+        // `(x, _) = (m(), n());` (#1387).
+        return "The literal on the right of this destructuring assignment builds a temporary. Rust drops it, with whatever the pattern doesn't assign to a place, as soon as the assignment has taken it apart, before the places on the left get their new values".to_owned();
+    }
     "The literal on the right of this let builds a temporary. No `ref` binding borrows from it, so Rust drops it at the end of this statement, with whatever the pattern didn't bind by value".to_owned()
 }
 
@@ -6283,6 +6308,21 @@ pub fn approx_note_lock(kind: &str, method: &str, reading: Option<bool>) -> Stri
 pub fn approx_note_raw_deref(name: &str) -> String {
     format!(
         "({0} is a raw pointer; RustViz doesn't show this on what {0} points to.)",
+        styled_name_html(name)
+    )
+}
+
+// On the first binding's dot at the end of the block of `let r = if c {
+// &String::from("x") } else { &s };` (#1383): the temporary a branch
+// borrows, which Rust extends to the end of the block, has no column.
+pub fn approx_note_branch_extended_temp(name: &str, code: Option<&str>, line: usize) -> String {
+    let what = match code {
+        Some(c) => format!("{} on line {}", styled_name_html(c), line),
+        None => format!("the borrow of a temporary on line {}", line),
+    };
+    format!(
+        "(If {} ran, the temporary it borrows is dropped here: Rust keeps it alive until the end of this block because {} holds a reference to it. RustViz doesn't draw a column for this temporary.)",
+        what,
         styled_name_html(name)
     )
 }

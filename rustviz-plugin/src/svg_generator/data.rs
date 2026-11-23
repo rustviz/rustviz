@@ -293,6 +293,10 @@ pub struct Owner {
     /// array literal on the right of a `let` builds (#439), which the
     /// variables in the literal are moved into.
     pub let_literal_temp: bool,
+    /// With `let_literal_temp`: the literal is on the right of a
+    /// destructuring assignment (`(a, _) = (make(), make());`, which
+    /// rustc lowers to a `let`; #1387), not of a `let`.
+    pub assign_literal_temp: bool,
     /// For an unbound temporary that something is moved out of before
     /// it is dropped (`make_p().name`, a `match` scrutinee whose pattern
     /// binds by value): what that is; the rest is dropped with it (#469).
@@ -972,6 +976,13 @@ impl ResourceAccessPoint {
     /// `let` builds (#439); see `Owner::let_literal_temp`.
     pub fn is_let_literal_temporary(&self) -> bool {
         matches!(self, ResourceAccessPoint::Owner(Owner { let_literal_temp: true, .. }))
+    }
+
+    /// True iff this RAP is the temporary a literal on the right of a
+    /// destructuring assignment builds (#1387); see
+    /// `Owner::assign_literal_temp`.
+    pub fn is_assign_literal_temporary(&self) -> bool {
+        matches!(self, ResourceAccessPoint::Owner(Owner { let_literal_temp: true, assign_literal_temp: true, .. }))
     }
 
     /// See `Owner::temp_part`.
@@ -2832,7 +2843,7 @@ pub enum Event {
     // hand. The owner is left in a moved-out-like state.
     ManuallyDropByHand,
     // An unbound temporary is dropped (see ExternalEvent).
-    TemporaryDrop { ty: Option<String>, when: String, literal: bool, early: bool, part: Option<TempPart> },
+    TemporaryDrop { ty: Option<String>, when: String, literal: bool, early: bool, part: Option<TempPart>, assign: bool },
     // See ExternalEvent::LoopIteratorDrop.
     LoopIteratorDrop { left: LoopLeft, early: Vec<usize> },
     // See ExternalEvent::LoopMaybeInit.
@@ -3907,8 +3918,8 @@ impl Event {
             Event::InitRefParam{ param, in_pattern: Some(bound), .. } => {
                 hover_messages::event_dot_ref_init_in_pattern(my_name, bound, matches!(param, ResourceAccessPoint::MutRef(_)))
             }
-            Event::TemporaryDrop { ty: Some(ty), when, literal, part: None, .. } => {
-                hover_messages::event_dot_temporary_drop(ty, when, *literal)
+            Event::TemporaryDrop { ty: Some(ty), when, literal, part: None, assign, .. } => {
+                hover_messages::event_dot_temporary_drop(ty, when, *literal, *assign)
             }
             Event::OwnerDropIfTryReturns => {
                 hover_messages::event_dot_owner_drop_if_try_returns(my_name, "")
@@ -4304,13 +4315,16 @@ impl Event {
                     // temporary the literal builds (#439).
                     let ends_with_statement = matches!(is, ResourceTy::Value(rap) if rap.is_unbound_temporary());
                     let from_name = match from { ResourceTy::Deref(r) => format!("*{}", r.name()), _ => from.name() };
-                    hover_messages::event_dot_literal_temporary_acquire(&from_name, ends_with_statement)
+                    let assign = matches!(is, ResourceTy::Value(rap) if rap.is_assign_literal_temporary());
+                    hover_messages::event_dot_literal_temporary_acquire(&from_name, ends_with_statement, assign)
                 } else if matches!(is, ResourceTy::Value(rap) if rap.is_let_literal_temporary())
                     && matches!(from, ResourceTy::Value(f) if f.is_fn()) {
                     // `let (a, _) = (1, mk());`: what mk returns is moved
-                    // into the temporary (#1376).
+                    // into the temporary (#1376); `(a, _) = (1, mk());`
+                    // (#1387).
                     let ends_with_statement = matches!(is, ResourceTy::Value(rap) if rap.is_unbound_temporary());
-                    hover_messages::event_dot_literal_temporary_takes_result(&from.name(), ends_with_statement)
+                    let assign = matches!(is, ResourceTy::Value(rap) if rap.is_assign_literal_temporary());
+                    hover_messages::event_dot_literal_temporary_takes_result(&from.name(), ends_with_statement, assign)
                 } else if let ResourceTy::Value(ResourceAccessPoint::Owner(Owner { unbound_temp: true, taken: Some(taken), temp_part: Some(part), .. })) = is {
                     // `if let (Some(c), m) = (z, make())`: the pattern
                     // can take all of it (#1367).
@@ -4322,8 +4336,8 @@ impl Event {
                     hover_messages::event_dot_ctor_temporary_part_acquire(from_name.as_ref(), part)
                 } else if matches!(is, ResourceTy::Value(rap) if rap.is_unbound_temporary()) && matches!(from, ResourceTy::Anonymous) {
                     // `let (x, _) = (m(), n());`: the literal's own value
-                    // (#483).
-                    hover_messages::event_dot_literal_temporary_start()
+                    // (#483); `(x, _) = (m(), n());` (#1387).
+                    hover_messages::event_dot_literal_temporary_start(matches!(is, ResourceTy::Value(rap) if rap.is_assign_literal_temporary()))
                 } else if matches!(is, ResourceTy::Value(rap) if rap.is_unbound_temporary())
                     && matches!(from, ResourceTy::Value(f) if !f.is_fn()) {
                     // `vec![s];`: s is moved into the temporary (#570).
@@ -5792,8 +5806,8 @@ impl Visualizable for VisualizationData {
         ExternalEvent::ManuallyDropByHand{..} => {
           vec![(line_num, Event::ManuallyDropByHand)]
         },
-        ExternalEvent::TemporaryDrop{ ty, when, literal, early, part, .. } => {
-          vec![(line_num, Event::TemporaryDrop { ty: ty.clone(), when: when.clone(), literal: *literal, early: *early, part: part.clone() })]
+        ExternalEvent::TemporaryDrop{ ro, ty, when, literal, early, part, .. } => {
+          vec![(line_num, Event::TemporaryDrop { ty: ty.clone(), when: when.clone(), literal: *literal, early: *early, part: part.clone(), assign: ro.is_assign_literal_temporary() })]
         },
         ExternalEvent::LoopIteratorDrop{ left, early, .. } => {
           vec![(line_num, Event::LoopIteratorDrop { left: *left, early: early.clone() })]
@@ -6238,7 +6252,8 @@ impl Visualizable for VisualizationData {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::ManuallyDropByHand, line_number);
             },
             ExternalEvent::TemporaryDrop{ro, ty, when, literal, early, part, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::TemporaryDrop { ty, when, literal, early, part }, line_number);
+                let assign = ro.is_assign_literal_temporary();
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::TemporaryDrop { ty, when, literal, early, part, assign }, line_number);
             },
             ExternalEvent::LoopIteratorDrop{ro, left, early, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopIteratorDrop { left, early }, line_number);
