@@ -448,6 +448,17 @@ struct ArrowData {
     head_points: String,
     title: String,
     rv: String,
+    /// The arrow's (event id, line) and the names of its two ends, as
+    /// `data-rv-var` / `data-rv-to` give them (`Drawn`).
+    #[serde(skip)]
+    key: (usize, usize),
+    #[serde(skip)]
+    names: (String, String),
+    /// An arrow from a column to itself (a literal's or static's borrow
+    /// ending, drawn beside the column) drawn on the dot's right instead
+    /// of its left (`ArrowLanes::self_right`).
+    #[serde(skip)]
+    self_right: bool,
 }
 
 #[derive(Serialize)]
@@ -5004,13 +5015,15 @@ fn tail_off_dot(tail: (f64, f64), next: (f64, f64), dots: &DotPositions) -> (f64
 /// `x1` is where the head lands, `x2` the source column (the caller's
 /// convention). Returns `None` when no dot is in the way; the caller
 /// then draws the usual polyline, so those arrows are unchanged.
+/// Also returns what it draws (`Drawn`: its straight pieces, the arcs
+/// left out, and its head).
 fn render_hopping_arrow(
     x1: i64, y: i64, x2: i64,
     title: &str,
     rv: &str,
     dot_positions: &DotPositions,
     head_offset: f64,
-) -> Option<String> {
+) -> Option<(String, Vec<Piece>, Vec<(f64, f64)>, Vec<(f64, f64)>)> {
     let (lo_x, hi_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
 
     // Pull every (x, y) dot position that sits at this arrow's y
@@ -5064,6 +5077,9 @@ fn render_hopping_arrow(
     };
     let (source_x, _) = tail_off_dot((source_x, y_f), (first_x, y_f), dot_positions);
     let mut d = format!("M {} {}", source_x, y_f);
+    let mut pieces = Vec::new();
+    let mut arcs = Vec::new();
+    let mut at = source_x;
     for ox in &hops {
         let oxf = *ox as f64;
         let near = if goes_right { oxf - r } else { oxf + r };
@@ -5072,8 +5088,15 @@ fn render_hopping_arrow(
         // arc over it, then continue.
         d.push_str(&format!(" L {} {}", near, y_f));
         d.push_str(&format!(" A {} {} 0 0 {} {} {}", r, r, sweep, far, y_f));
+        pieces.push(((at, y_f), (near, y_f)));
+        arcs.extend((0..=12).map(|k| {
+            let a = std::f64::consts::PI * k as f64 / 12.0;
+            (oxf - r * a.cos(), y_f - r * a.sin())
+        }));
+        at = far;
     }
     d.push_str(&format!(" L {} {}", end_x_pulled, y_f));
+    pieces.push(((at, y_f), (end_x_pulled, y_f)));
 
     // Inline arrow head triangle, same geometry the polyline path
     // computes after its `head_offset` pullback. Direction at the
@@ -5085,14 +5108,14 @@ fn render_hopping_arrow(
     let v2 = (tip_x, y_f);
     let v3 = (end_x_pulled, y_f + 6.0);
 
-    Some(format!(
+    Some((format!(
         "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\"{rv}>\n\
             \x20           <path class=\"arrow-shaft\" stroke-width=\"5px\" d=\"{d}\" style=\"fill: none;\"/>\n\
             \x20           <polygon points=\"{},{} {},{} {},{}\" class=\"arrow-head\"/>\n\
             \x20       </g>\n",
         v1.0, v1.1, v2.0, v2.1, v3.0, v3.1,
         title = title, d = d, rv = rv,
-    ))
+    ), pieces, vec![v1, v2, v3], arcs))
 }
 
 /// What one arrow (or function logo with its short arrow) covers on a
@@ -5158,8 +5181,48 @@ struct ArrowLanes {
     /// How far along the row a dipping arrow's leg runs from its head's
     /// (`true`) or tail's dot, where it isn't the usual 20 px.
     leg_dx: HashMap<((usize, usize), bool), i64>,
+    /// Arrows whose track runs on past the target's dot, so the head
+    /// comes back to it from the far side (#1316).
+    far: std::collections::HashSet<(usize, usize)>,
+    /// A column's arrow to itself drawn right of its dot (#1316).
+    self_right: std::collections::HashSet<(usize, usize)>,
+    /// Every arrow between two columns' dots, by the first pass: its
+    /// head's dot, its tail's dot and its line's row.
+    ends: HashMap<(usize, usize), ((i64, i64), (i64, i64), i64)>,
+    /// A probing pass (`untangle`): what each arrow and
+    /// logo is drawn as goes into `drawn`, and nothing is added to the
+    /// dots.
+    probing: bool,
+    drawn: Vec<Drawn>,
+    /// A call's logo's dot's y, by the first pass.
+    logo_rows: HashMap<(usize, usize), i64>,
 }
 
+/// A straight piece of an arrow's shaft.
+type Piece = ((f64, f64), (f64, f64));
+
+/// An arrow or a function logo as a probing pass draws it: the shaft's
+/// straight pieces (a hop's arcs left out), the head's triangle, or the
+/// logo's anchor; the same reading of the drawing as the geometric checks
+/// (`rustviz-lib/tests/common/geometry.rs`).
+#[derive(Clone, Debug, Default)]
+struct Drawn {
+    key: (usize, usize),
+    tip: String,
+    /// `data-rv-var` / `data-rv-to`.
+    var: String,
+    to: String,
+    pieces: Vec<Piece>,
+    tri: Vec<(f64, f64)>,
+    logo: Option<(f64, f64)>,
+    /// Points along a hop's arcs (not shafts to the checks, but a head on
+    /// one still lies on the arrow).
+    arcs: Vec<(f64, f64)>,
+}
+
+/// How far below or above its dot a call's logo moved off it goes
+/// (`ArrowLanes::alternatives`): more than a logo's height.
+const LOGO_DIP: i64 = 20;
 /// How far apart a row's tracks are: half a row, between two rows.
 const LANE_STEP: i64 = LINE_SPACE / 2;
 /// Two stretches on one track share more than this: they overlap.
@@ -5448,6 +5511,370 @@ fn free_lane(it: &LaneItem, placed: &[LaneItem], dots: &DotPositions) -> Option<
         .find(|&y| y != it.y && !lies_on(y) && !passes_dot(y) && !legs_meet(y) && !crosses_head(y))
 }
 
+impl ArrowLanes {
+    /// Keeps what a probing pass draws (`untangle`).
+    fn capture(&mut self, d: Drawn) {
+        if self.probing {
+            self.drawn.push(d);
+        }
+    }
+
+    fn settings(&self) -> LaneSettings {
+        LaneSettings {
+            lane_y: self.lane_y.clone(), flipped: self.flipped.clone(), slot: self.slot.clone(),
+            leg_dx: self.leg_dx.clone(), far: self.far.clone(), self_right: self.self_right.clone(),
+        }
+    }
+
+    fn set(&mut self, s: LaneSettings) {
+        self.lane_y = s.lane_y;
+        self.flipped = s.flipped;
+        self.slot = s.slot;
+        self.leg_dx = s.leg_dx;
+        self.far = s.far;
+        self.self_right = s.self_right;
+    }
+
+    /// The other ways `untangle` may draw the arrow or logo `key`, given
+    /// how it is drawn now (`drawn`): a column's arrow to itself on its
+    /// dot's other side; a logo on its dot's other side; an arrow between
+    /// two columns on another track (level with either dot, or half or a
+    /// whole row off either, at most half a row above them, within `ys`),
+    /// and, where it runs on a track, with its legs at other angles. With
+    /// `far` (a last resort) also: its track running on past its head's
+    /// dot, a logo off its dot's row, a result to the caller half a row
+    /// lower.
+    fn alternatives(&self, key: (usize, usize), drawn: &[Drawn], ys: (i64, i64), far: bool) -> Vec<LaneSettings> {
+        let now = self.settings();
+        let mut out = Vec::new();
+        let mine: Vec<&Drawn> = drawn.iter().filter(|d| d.key == key).collect();
+        if let Some(&((tx, ty), (fx, fy), line_y)) = self.ends.get(&key) {
+            if (tx, ty) == (fx, fy) {
+                let mut s = now.clone();
+                if !s.self_right.remove(&key) {
+                    s.self_right.insert(key);
+                }
+                out.push(s);
+                return out;
+            }
+            let width = (tx - fx).abs();
+            // The track it runs on now, if any: a trapezoid's middle piece.
+            let track = mine.iter().find(|d| d.logo.is_none() && d.pieces.len() == 3)
+                .map(|d| d.pieces[1].0 .1.round() as i64);
+            if let Some(track) = track {
+                let depth = (track - ty).abs() as f64;
+                let tail_depth = (track - fy).abs() as f64;
+                let lane = self.lane_y.contains_key(&key);
+                let default = if lane { (width / 3).min(20) } else { 20 };
+                let tail = self.leg_dx.get(&(key, false)).copied().unwrap_or(default);
+                // No leg steeper than 75 degrees: it would run along the
+                // column it leaves or reaches.
+                let steepest = |depth: f64| (depth * 15f64.to_radians().tan()).ceil() as i64;
+                let mut legs = Vec::new();
+                for angle in [25.0_f64, 35.0, 45.0, 55.0, 65.0, 75.0] {
+                    let d = (depth / angle.to_radians().tan()).round() as i64;
+                    if d < 2 || d > width - 6 {
+                        continue;
+                    }
+                    // The tail's leg at the same angle (nested inside, or
+                    // around, another arrow between the same two dots), or
+                    // as it is, if there is room.
+                    for t in [(tail_depth / angle.to_radians().tan()).round() as i64, tail.min(width - d - 4)] {
+                        if t >= 2 && t >= steepest(tail_depth) && d + t <= width - 4 && !legs.contains(&(d, t)) {
+                            legs.push((d, t));
+                        }
+                    }
+                }
+                for (d, t) in legs {
+                    let mut s = now.clone();
+                    s.leg_dx.insert((key, true), d);
+                    s.leg_dx.insert((key, false), t);
+                    out.push(s);
+                }
+                if far {
+                    let mut s = now.clone();
+                    if !s.far.remove(&key) {
+                        s.far.insert(key);
+                    }
+                    out.push(s);
+                }
+            }
+            let mut cands = vec![ty, fy];
+            for base in [ty, fy, line_y] {
+                for k in [1, -1, 2, -2] {
+                    cands.push(base + k * LANE_STEP);
+                }
+            }
+            let mut seen = std::collections::HashSet::new();
+            for y in cands {
+                // (Never more than half a row above its higher dot: it
+                // would run among the line above's marks.)
+                if y < ys.0 || y > ys.1 || y < ty.min(fy) - LANE_STEP || Some(y) == track || !seen.insert(y) {
+                    continue;
+                }
+                // Level, on its own row: no track at all.
+                if y == ty && ty == fy && track.is_none() {
+                    continue;
+                }
+                let mut s = now.clone();
+                s.lane_y.insert(key, y);
+                s.leg_dx.remove(&(key, true));
+                s.leg_dx.remove(&(key, false));
+                s.far.remove(&key);
+                out.push(s);
+            }
+        }
+        for d in &mine {
+            if d.logo.is_none() {
+                continue;
+            }
+            if d.to == "caller" {
+                // (A last resort too: its L may cross the row's arrows.)
+                if !far {
+                    continue;
+                }
+                let mut s = now.clone();
+                let k = s.slot.get(&key).copied().unwrap_or(0);
+                s.slot.insert(key, k + 1);
+                out.push(s);
+            } else {
+                let mut s = now.clone();
+                if !s.flipped.remove(&key) {
+                    s.flipped.insert(key);
+                }
+                out.push(s.clone());
+                // Below or above its dot, on either side of it, clear of
+                // a logo left on the dot (a last resort, with `far`).
+                for dy in [LOGO_DIP, -LOGO_DIP].into_iter().filter(|_| far) {
+                    for flip in [now.flipped.contains(&key), !now.flipped.contains(&key)] {
+                        let mut s = now.clone();
+                        let Some(&base) = self.logo_rows.get(&key) else { continue };
+                        if base + dy < ys.0 || base + dy > ys.1 {
+                            continue;
+                        }
+                        s.lane_y.insert(key, base + dy);
+                        if flip { s.flipped.insert(key); } else { s.flipped.remove(&key); }
+                        out.push(s);
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+/// The settings of `ArrowLanes` that `untangle` changes.
+#[derive(Clone)]
+struct LaneSettings {
+    lane_y: HashMap<(usize, usize), i64>,
+    flipped: std::collections::HashSet<(usize, usize)>,
+    slot: HashMap<(usize, usize), i64>,
+    leg_dx: HashMap<((usize, usize), bool), i64>,
+    far: std::collections::HashSet<(usize, usize)>,
+    self_right: std::collections::HashSet<(usize, usize)>,
+}
+
+fn dist(a: (f64, f64), b: (f64, f64)) -> f64 {
+    (b.0 - a.0).hypot(b.1 - a.1)
+}
+
+/// Points 1 px apart along `pieces`.
+fn samples(pieces: &[Piece]) -> Vec<(f64, f64)> {
+    let mut v = Vec::new();
+    for &(p, q) in pieces {
+        let n = (dist(p, q).ceil() as usize).max(1);
+        for k in 0..=n {
+            let t = k as f64 / n as f64;
+            v.push((p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t));
+        }
+    }
+    v
+}
+
+fn tri_edges(t: &[(f64, f64)]) -> Vec<Piece> {
+    if t.len() < 3 {
+        return Vec::new();
+    }
+    vec![(t[0], t[1]), (t[1], t[2]), (t[2], t[0])]
+}
+
+/// How far `p` lies inside the triangle `t` (negative outside).
+fn inside_tri(t: &[(f64, f64)], p: (f64, f64)) -> f64 {
+    if t.len() < 3 {
+        return f64::NEG_INFINITY;
+    }
+    let area = (t[1].0 - t[0].0) * (t[2].1 - t[0].1) - (t[2].0 - t[0].0) * (t[1].1 - t[0].1);
+    let s = area.signum();
+    tri_edges(t).iter().map(|&(a, b)| {
+        let l = dist(a, b).max(1e-9);
+        s * ((b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0)) / l
+    }).fold(f64::INFINITY, f64::min)
+}
+
+/// Where `p` lies along the segment a–b, in px from a, if it's within
+/// `tol` of the segment's line.
+fn along_piece(p: (f64, f64), a: (f64, f64), b: (f64, f64), tol: f64) -> Option<f64> {
+    let l = dist(a, b);
+    if l < 1e-9 {
+        return None;
+    }
+    let (dx, dy) = ((b.0 - a.0) / l, (b.1 - a.1) / l);
+    let off = ((p.0 - a.0) * dy - (p.1 - a.1) * dx).abs();
+    (off <= tol).then(|| (p.0 - a.0) * dx + (p.1 - a.1) * dy)
+}
+
+/// The marks that lie on others, the way the geometric checks
+/// (`rustviz-lib/tests/common/geometry.rs`, `arrows-overlap` and
+/// `heads-or-logos-overlap`) find them: pairs of indices into `drawn`,
+/// the first one's head or logo on the second, or the two along one
+/// stretch.
+fn marks_on_others(drawn: &[Drawn]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let arrows: Vec<usize> = (0..drawn.len()).filter(|&i| drawn[i].logo.is_none()).collect();
+    // What each covers, a little wider: two whose boxes don't meet can't
+    // lie on each other.
+    let boxes: Vec<(f64, f64, f64, f64)> = drawn.iter().map(|d| {
+        let pts = d.pieces.iter().flat_map(|&(p, q)| [p, q]).chain(d.tri.iter().copied())
+            .chain(d.logo.into_iter().flat_map(|(x, y)| [(x - 1.0, y - 15.0), (x + 11.0, y + 3.0)]));
+        pts.fold((f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+            |b, p| (b.0.min(p.0 - 3.0), b.1.min(p.1 - 3.0), b.2.max(p.0 + 3.0), b.3.max(p.1 + 3.0)))
+    }).collect();
+    let meet = |i: usize, j: usize| {
+        let (a, b) = (boxes[i], boxes[j]);
+        a.0 <= b.2 && b.0 <= a.2 && a.1 <= b.3 && b.1 <= a.3
+    };
+    // Two arrows along one stretch (more than 12 px).
+    for (n, &i) in arrows.iter().enumerate() {
+        for &j in &arrows[n + 1..] {
+            let (a, b) = (&drawn[i], &drawn[j]);
+            if a.tip == b.tip || !meet(i, j) {
+                continue;
+            }
+            let mut most: f64 = 0.0;
+            for &(p, q) in &a.pieces {
+                let l = dist(p, q);
+                for &(r, s) in &b.pieces {
+                    if let (Some(t1), Some(t2)) = (along_piece(r, p, q, 1.0), along_piece(s, p, q, 1.0)) {
+                        most = most.max(t1.max(t2).min(l) - t1.min(t2).max(0.0));
+                    }
+                }
+            }
+            if most > 12.0 {
+                out.push((i, j));
+            }
+        }
+    }
+    // A head on another arrow's shaft or head.
+    for &i in &arrows {
+        for &j in &arrows {
+            let (a, b) = (&drawn[i], &drawn[j]);
+            let elbow = (a.var == "caller" && b.to == "caller" && a.to == b.var)
+                || (b.var == "caller" && a.to == "caller" && b.to == a.var);
+            if i == j || a.tip == b.tip || a.tri.len() < 3 || (elbow && a.key.1 == b.key.1) || !meet(i, j) {
+                continue;
+            }
+            let shaft = samples(&b.pieces).into_iter().any(|p| inside_tri(&a.tri, p) > -1.5);
+            let head = b.tri.len() == 3 && i < j
+                && samples(&tri_edges(&b.tri)).into_iter().any(|p| inside_tri(&a.tri, p) > 1.0);
+            if shaft || head {
+                out.push((i, j));
+            }
+        }
+    }
+    // A logo on an arrow not its own, or on another logo.
+    let logo_box = |(x, y): (f64, f64)| (x - 1.0, y - 15.0, x + 11.0, y + 3.0);
+    let in_box = |b: (f64, f64, f64, f64), p: (f64, f64), m: f64| p.0 > b.0 - m && p.0 < b.2 + m && p.1 > b.1 - m && p.1 < b.3 + m;
+    for (i, l) in drawn.iter().enumerate() {
+        let Some(at) = l.logo else { continue };
+        let bx = logo_box(at);
+        for &j in &arrows {
+            let b = &drawn[j];
+            if (b.var == l.var && b.to == l.to && b.key.1 == l.key.1) || !meet(i, j) {
+                continue;
+            }
+            if samples(&b.pieces).into_iter().any(|p| in_box(bx, p, 1.5))
+                || samples(&tri_edges(&b.tri)).into_iter().any(|p| in_box(bx, p, -1.0)) {
+                out.push((i, j));
+            }
+        }
+        for (j, m) in drawn.iter().enumerate().skip(i + 1) {
+            let Some(mat) = m.logo else { continue };
+            let c = logo_box(mat);
+            if l.tip != m.tip && bx.0.max(c.0) < bx.2.min(c.2) - 1.0 && bx.1.max(c.1) < bx.3.min(c.3) - 1.0 {
+                out.push((i, j));
+            }
+        }
+    }
+    out
+}
+
+/// How badly the arrows are drawn: the marks on others, and the dots an
+/// arrow's shaft runs through (not its own ends; a hop's arc isn't a
+/// shaft).
+/// Second, to choose between drawings with as few of those: how many
+/// times two arrows cross.
+fn untangle_cost(drawn: &[Drawn], dots: &DotPositions) -> (usize, usize) {
+    let through = drawn.iter().filter(|d| d.logo.is_none()).map(|d| {
+        dots.iter().filter(|&&(x, y)| {
+            let c = (x as f64, y as f64);
+            d.pieces.iter().any(|&(p, q)| {
+                let l = dist(p, q);
+                let t = if l < 1e-9 { 0.0 } else { (((c.0 - p.0) * (q.0 - p.0) + (c.1 - p.1) * (q.1 - p.1)) / (l * l)).clamp(0.0, 1.0) };
+                dist(c, (p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t)) < 4.5
+            })
+        }).count()
+    }).sum::<usize>();
+    let cross = |(p, q): Piece, (r, t): Piece| {
+        let d = (q.0 - p.0) * (t.1 - r.1) - (q.1 - p.1) * (t.0 - r.0);
+        if d.abs() < 1e-9 {
+            return false;
+        }
+        let u = ((r.0 - p.0) * (t.1 - r.1) - (r.1 - p.1) * (t.0 - r.0)) / d;
+        let v = ((r.0 - p.0) * (q.1 - p.1) - (r.1 - p.1) * (q.0 - p.0)) / d;
+        u > 0.0 && u < 1.0 && v > 0.0 && v < 1.0
+    };
+    let arrows: Vec<&Drawn> = drawn.iter().filter(|d| d.logo.is_none()).collect();
+    let mut crossings = 0;
+    for (n, a) in arrows.iter().enumerate() {
+        for b in &arrows[n + 1..] {
+            crossings += a.pieces.iter().map(|&p| b.pieces.iter().filter(|&&q| cross(p, q)).count()).sum::<usize>();
+        }
+    }
+    // Two arrows' pieces in line and touching (one running on where the
+    // other stops reads as one arrow), however short the shared stretch.
+    let seg_dist = |c: (f64, f64), (p, q): Piece| {
+        let l = dist(p, q);
+        let t = if l < 1e-9 { 0.0 } else { (((c.0 - p.0) * (q.0 - p.0) + (c.1 - p.1) * (q.1 - p.1)) / (l * l)).clamp(0.0, 1.0) };
+        dist(c, (p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t))
+    };
+    let in_line = |a: Piece, b: Piece| {
+        let (la, lb) = (dist(a.0, a.1), dist(b.0, b.1));
+        if la < 1.0 || lb < 1.0 {
+            return false;
+        }
+        let sin = (((a.1 .0 - a.0 .0) * (b.1 .1 - b.0 .1) - (a.1 .1 - a.0 .1) * (b.1 .0 - b.0 .0)) / (la * lb)).abs();
+        sin < 0.17 && [seg_dist(a.0, b), seg_dist(a.1, b), seg_dist(b.0, a), seg_dist(b.1, a)].iter().any(|&d| d < 4.0)
+    };
+    let mut touching = 0;
+    for (n, a) in arrows.iter().enumerate() {
+        for b in &arrows[n + 1..] {
+            if a.tip != b.tip && a.pieces.iter().any(|&p| b.pieces.iter().any(|&q| in_line(p, q))) {
+                touching += 1;
+            }
+        }
+    }
+    // (A shaft through a dot, or two arrows reading as one, is worse
+    // than a head on another arrow: never traded for one.)
+    // Two logos on one spot, even of one function.
+    let logos: Vec<(f64, f64)> = drawn.iter().filter_map(|d| d.logo).collect();
+    let stacked = logos.iter().enumerate().filter(|&(i, a)| logos[i + 1..].iter()
+        .any(|b| (a.0 - b.0).abs() < 12.0 && (a.1 - b.1).abs() < 18.0)).count();
+    // A head on another arrow's hop.
+    let on_arcs = arrows.iter().filter(|a| a.tri.len() == 3 && arrows.iter()
+        .any(|b| b.tip != a.tip && b.arcs.iter().any(|&p| inside_tri(&a.tri, p) > -1.5))).count();
+    (marks_on_others(drawn).len() + on_arcs + 10 * (through + touching + stacked), crossings)
+}
+
 /// How many rows below its line an arrow is stacked: its place among the
 /// arrows its line map lists for `row`. An arrow the map doesn't list (a
 /// borrow's end moved into an arm, see `nest_borrow_ends_in_arms`) is drawn
@@ -5634,6 +6061,9 @@ fn render_generic_arrow(
         title: title,
         rv: Rv::new(rv_attrs::ARROW).event(rv_attrs::external_event_name(external_event))
             .var(&rv_attrs::party_name(from)).to(&rv_attrs::party_name(to)).row(*line_number).attrs(),
+        key: (external_event.get_id(), *line_number),
+        names: (rv_attrs::party_name(from).to_string(), rv_attrs::party_name(to).to_string()),
+        self_right: dots.lanes.self_right.contains(&(external_event.get_id(), *line_number)),
     };
 
     let arrow_length = 20;
@@ -5687,11 +6117,17 @@ fn render_generic_arrow(
             // first: on the right it sat inside the diamond, on the other
             // arm's leg (#1309, `diamond_arm_outer_left`).
             let key = (external_event.get_id(), *line_number);
+            // (Or half a row off its dot, the arrow from it slanting:
+            // `untangle`.)
+            let y2 = dots.lanes.lane_y.get(&key).copied().unwrap_or(y2);
             let right = (x1 as f64 + 5.0, (x1 + arrow_length + clearance + 15) as f64);
             let left = (x1 as f64 - (arrow_length + 15) as f64, x1 as f64 - 5.0);
             let prefer_left = diamond_arm_outer_left(to_variable.hash(), visualization_data, resource_owners_layout, external_event.get_id(), x1) == Some(true);
             let (preferred, other) = if prefer_left { (left, right) } else { (right, left) };
             dots.lanes.record(key, y1, preferred.0, preferred.1, LaneKind::Logo { alt: other });
+            if dots.lanes.recording {
+                dots.lanes.logo_rows.insert(key, y1);
+            }
             let flip = dots.lanes.flipped.contains(&key) != prefer_left;
             let (x2, logo_x) = if flip {
                 (x1 - arrow_length, x1 - arrow_length - 12)
@@ -5709,6 +6145,11 @@ fn render_generic_arrow(
                 rv: Rv::new(rv_attrs::FN).event(rv_attrs::external_event_name(external_event))
                     .var(&from_function.name).to(&rv_attrs::party_name(to_variable)).row(*line_number).attrs(),
             };
+            dots.lanes.capture(Drawn {
+                key, tip: function_data.title.clone(), var: from_function.name.clone(),
+                to: rv_attrs::party_name(to_variable).to_string(),
+                logo: Some((logo_x as f64, (y2 + 5) as f64)), ..Default::default()
+            });
     
             if to_timeline.is_struct_group {
                 let owner_entry = ensure_owner_entry(output, to_timeline.owner as i64);
@@ -5729,7 +6170,7 @@ fn render_generic_arrow(
             let from_timeline = fetch_timeline(from_variable.hash(), visualization_data, resource_owners_layout, external_event.get_id());
 
             let title = hover_messages::arrow_call_title(external_event, function, from_variable);
-            if dots.lanes.recording {
+            if dots.lanes.recording || dots.lanes.probing {
                 return;
             }
 
@@ -5768,12 +6209,18 @@ fn render_generic_arrow(
             let prefer_right = diamond_arm_outer_left(from_variable.hash(), visualization_data, resource_owners_layout, external_event.get_id(), cx) == Some(false);
             let (preferred, other) = if prefer_right { (right, left) } else { (left, right) };
             dots.lanes.record(key, y1, preferred.0, preferred.1, LaneKind::Logo { alt: other });
+            if dots.lanes.recording {
+                dots.lanes.logo_rows.insert(key, y1);
+            }
             let flip = dots.lanes.flipped.contains(&key) != prefer_right;
             let (x1, x2, logo_x) = if flip {
                 (cx + 5 + arrow_length, cx + 5, cx + 5 + arrow_length + 5)
             } else {
                 (cx - 5 - arrow_length, cx - 5, cx - 5 - arrow_length - 10)
             };
+            // (Or half a row off its dot, the arrow to it slanting:
+            // `untangle`.)
+            let y1 = dots.lanes.lane_y.get(&key).copied().unwrap_or(y1);
             data.coordinates.push((x1 as f64, y1 as f64));
             data.coordinates.push((x2 as f64, y2 as f64));
     
@@ -5786,6 +6233,11 @@ fn render_generic_arrow(
                 rv: Rv::new(rv_attrs::FN).event(rv_attrs::external_event_name(external_event))
                     .var(&rv_attrs::party_name(from_variable)).to(&to_function.name).row(*line_number).attrs(),
             };
+            dots.lanes.capture(Drawn {
+                key, tip: function_data.title.clone(), var: rv_attrs::party_name(from_variable).to_string(),
+                to: to_function.name.clone(),
+                logo: Some((logo_x as f64, (y1 + 5) as f64)), ..Default::default()
+            });
     
             if from_timeline.is_struct_group {
                 let owner_entry = ensure_owner_entry(output, from_timeline.owner as i64);
@@ -5878,6 +6330,11 @@ fn render_init_param_arrow(line_number: &usize, param: &ResourceAccessPoint, id:
         // is overkill for one site.
         let rv = Rv::new(rv_attrs::ARROW).event("init_ref_param")
             .var("caller").to(param.name()).row(*line_number).attrs();
+        dots.lanes.capture(Drawn {
+            key: (*id, *line_number), tip: title.clone(), var: "caller".into(), to: param.name().to_string(),
+            pieces: vec![((bend_x, top_y), (bend_x, cy)), ((bend_x, cy), (head_x, head_y))],
+            tri: vec![bot_v1, bot_v2, bot_v3], logo: None, arcs: Vec::new(),
+        });
         let rendered = format!(
             "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\"{rv}>\n\
                 \x20           <polyline class=\"arrow-shaft\" stroke-width=\"5px\" points=\"{polyline_pts}\" style=\"fill: none;\"/>\n\
@@ -5939,6 +6396,15 @@ fn render_function_result_arrow(line_number: &usize, external_event: &ExternalEv
             title: styled_fn,
             rv: Rv::new(rv_attrs::FN).event(ev).var(&f.name).to("caller").row(*line_number).attrs(),
         };
+        dots.lanes.capture(Drawn {
+            key, tip: title.clone(), var: f.name.clone(), to: "caller".into(),
+            pieces: vec![((source_x, y), (bend_x, y)), ((bend_x, y), (bend_x, head_end_y))],
+            tri: vec![(bend_x - 6.0, head_end_y), (bend_x, head_end_y - tip), (bend_x + 6.0, head_end_y)], logo: None, arcs: Vec::new(),
+        });
+        dots.lanes.capture(Drawn {
+            key, tip: logo.title.clone(), var: f.name.clone(), to: "caller".into(),
+            logo: Some((logo.x as f64, logo.y as f64)), ..Default::default()
+        });
         let out = &mut output.get_mut(&-1).unwrap().0;
         out.arrows.push_str(&rendered);
         out.dots.push_str(&registry.render("function_logo_template", &logo).unwrap());
@@ -6041,6 +6507,11 @@ fn render_return_to_caller_arrow(line_number: &usize, external_event: &ExternalE
 
         let rv = Rv::new(rv_attrs::ARROW).event(rv_attrs::external_event_name(external_event))
             .var(rap.name()).to("caller").row(*line_number).attrs();
+        dots.lanes.capture(Drawn {
+            key: (*id, *line_number), tip: title.clone(), var: rap.name().to_string(), to: "caller".into(),
+            pieces: vec![((source_x, cy), (bend_x, cy)), ((bend_x, cy), (bend_x, head_end_y))],
+            tri: vec![head_v1, head_v2, head_v3], logo: None, arcs: Vec::new(),
+        });
         let rendered = format!(
             "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\"{rv}>\n\
                 \x20           <polyline class=\"arrow-shaft\" stroke-width=\"5px\" points=\"{polyline_pts}\" style=\"fill: none;\"/>\n\
@@ -6120,6 +6591,9 @@ fn plan_variable_arrow(line_number: &usize, external_event: &ExternalEvent, from
         let line_y = get_y_axis_pos(*line_number);
         let mut y_row = if chained { y1 + row_drop } else { line_y + row_drop };
         let (lo, hi) = (x1.min(x2) as f64, x1.max(x2) as f64);
+        if dots.lanes.recording {
+            dots.lanes.ends.insert(key, ((x1, y1), (x2, y2), line_y));
+        }
         let whole_rows = !chained && dip > 0 && dip % LINE_SPACE == 0
             && !visualization_data.arrow_tracks.contains_key(&external_event.get_id())
             && !fetch_line_map(visualization_data, external_event.get_id()).get(line_number).is_some_and(|evs| is_param_value_line(evs));
@@ -6144,7 +6618,9 @@ fn plan_variable_arrow(line_number: &usize, external_event: &ExternalEvent, from
             }
             None => row_drop,
         };
-        let lane = lane.filter(|&y| y != y1);
+        // (A track level with the head's dot is one for an arrow whose
+        // tail's dot is higher or lower.)
+        let lane = lane.filter(|&y| y != y1 || y1 != y2);
         if lane.is_some() || row_drop > 0 {
             // A trapezoid: down (or up) from the source's dot to the track,
             // along it, and back to the target's dot. Its legs are 20 px
@@ -6153,7 +6629,10 @@ fn plan_variable_arrow(line_number: &usize, external_event: &ExternalEvent, from
             let default = if lane.is_some() { ((hi - lo) / 3.0).min(20.0) as i64 } else { 20 };
             let d_to = dots.lanes.leg_dx.get(&(key, true)).copied().unwrap_or(default);
             let d_from = dots.lanes.leg_dx.get(&(key, false)).copied().unwrap_or(default);
-            let (x3, x4) = if x2 <= x1 { (x2 + d_from, x1 - d_to) } else { (x2 - d_from, x1 + d_to) };
+            // (Its track running on past the head's dot, the head comes
+            // back to it from the far side: `ArrowLanes::far`.)
+            let far = if dots.lanes.far.contains(&key) { -1 } else { 1 };
+            let (x3, x4) = if x2 <= x1 { (x2 + d_from, x1 - far * d_to) } else { (x2 - d_from, x1 + far * d_to) };
             data.coordinates.push((x1 as f64, y1 as f64));
             data.coordinates.push((x4 as f64, y_row as f64));
             data.coordinates.push((x3 as f64, y_row as f64));
@@ -6168,13 +6647,17 @@ fn plan_variable_arrow(line_number: &usize, external_event: &ExternalEvent, from
             // tooltip-trigger sits on top. (Not when one end
             // is on a split dot and the other isn't, see
             // `event_dot_y`: that arrow isn't level.)
-            if let Some(rendered) = (y1 == y2).then(|| render_hopping_arrow(
+            if let Some((rendered, pieces, tri, arcs)) = (y1 == y2).then(|| render_hopping_arrow(
                 x1, y1, x2,
                 &data.title,
                 &data.rv,
                 &dots.positions,
                 if x2 > x1 && head_lands_on_call_icon(&(x1 as f64, y1 as f64), dots) { head_offset + CALL_ICON_CLEARANCE } else { head_offset },
             )).flatten() {
+                dots.lanes.capture(Drawn {
+                    key, tip: data.title.clone(), var: data.names.0.clone(), to: data.names.1.clone(),
+                    pieces, tri, logo: None, arcs,
+                });
                 // Inline render done; push to the right
                 // output bucket and bypass the post-match
                 // polyline pipeline by leaving coordinates
@@ -6213,7 +6696,10 @@ fn finish_arrow(mut data: ArrowData, mut head_offset: f64, from: &ResourceTy, ou
         if data.coordinates.len() == 2 && data.coordinates[0].1 == data.coordinates[1].1 {
             // [0]     [last index]
             // <-------------------
-            if data.coordinates[0].0 < data.coordinates[last_index].0 {
+            // (An arrow from a column to itself points left, or right
+            // where `self_right` says.)
+            if data.coordinates[0].0 < data.coordinates[last_index].0
+                || (data.self_right && data.coordinates[0].0 == data.coordinates[last_index].0) {
 
                 data.coordinates[0].0 += head_offset;
             }
@@ -6279,6 +6765,11 @@ fn finish_arrow(mut data: ArrowData, mut head_offset: f64, from: &ResourceTy, ou
                 "{},{} {},{} {},{}",
                 v1.0, v1.1, v2.0, v2.1, v3.0, v3.1
             );
+            dots.lanes.capture(Drawn {
+                key: data.key, tip: data.title.clone(), var: data.names.0.clone(), to: data.names.1.clone(),
+                pieces: data.coordinates.windows(2).map(|w| (w[1], w[0])).collect(),
+                tri: vec![v1, v2, v3], logo: None, arcs: Vec::new(),
+            });
         }
 
         while !data.coordinates.is_empty() {
@@ -6343,37 +6834,165 @@ fn render_arrows_string_external_events_version(
             }
         }
     }
-    // Twice: first only recording what each arrow covers, into a scratch
-    // output, so that the tracks can be picked (`ArrowLanes`); then for
-    // real.
+    // First only recording what each arrow covers, into a scratch
+    // output, so that the tracks can be picked (`ArrowLanes`); then
+    // probing passes (`untangle`); then for real.
     let mut scratch: BTreeMap<i64, (TimelinePanelData, TimelinePanelData)> = BTreeMap::new();
     scratch.insert(-1, (TimelinePanelData::empty(), TimelinePanelData::empty()));
     dots.lanes = ArrowLanes { recording: true, ..Default::default() };
-    for pass in 0..2 {
-        let out = if pass == 0 { &mut scratch } else { &mut *output };
-        for (line_number, external_event) in &visualization_data.external_events {
-            match external_event {
-                // events that should be skipped (we don't render arrows for them)
-                ExternalEvent::Bind {..} | ExternalEvent::GoOutOfScope {..}
-                | ExternalEvent::RefDie {..} | ExternalEvent::ClosureCall {..} => {}
-                // InitRefParam falls into render_arrow because owned-param
-                // initializations get an L-shaped "ownership from caller"
-                // arrow there. Ref params are filtered out inside
-                // render_arrow itself rather than here, since the
-                // event-vs-arrow split is already a render_arrow concern.
+    render_all_arrows(&mut scratch, visualization_data, resource_owners_layout, dots, registry);
+    let positions = dots.positions.clone();
+    dots.lanes.resolve(&positions);
+    untangle(visualization_data, resource_owners_layout, dots, registry);
+    render_all_arrows(output, visualization_data, resource_owners_layout, dots, registry);
+}
 
-                _ => {
+fn render_all_arrows(
+    out: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
+    visualization_data: &VisualizationData,
+    resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
+    dots: &mut DotLayer,
+    registry: &Handlebars
+) {
+    for (line_number, external_event) in &visualization_data.external_events {
+        match external_event {
+            // events that should be skipped (we don't render arrows for them)
+            ExternalEvent::Bind {..} | ExternalEvent::GoOutOfScope {..}
+            | ExternalEvent::RefDie {..} | ExternalEvent::ClosureCall {..} => {}
+            // InitRefParam falls into render_arrow because owned-param
+            // initializations get an L-shaped "ownership from caller"
+            // arrow there. Ref params are filtered out inside
+            // render_arrow itself rather than here, since the
+            // event-vs-arrow split is already a render_arrow concern.
+            _ => render_arrow(line_number, external_event, out, visualization_data, resource_owners_layout, dots, registry),
+        }
+    }
+}
 
-                    // render external event arrow
-                    render_arrow(line_number,
-                        external_event,
-                        out, visualization_data, resource_owners_layout, dots, registry)
+/// What the arrows are drawn as with `dots.lanes`' current settings,
+/// drawn into a scratch output (`ArrowLanes::probing`).
+fn probe_arrows(
+    visualization_data: &VisualizationData,
+    resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
+    dots: &mut DotLayer,
+    registry: &Handlebars
+) -> Vec<Drawn> {
+    let mut scratch: BTreeMap<i64, (TimelinePanelData, TimelinePanelData)> = BTreeMap::new();
+    scratch.insert(-1, (TimelinePanelData::empty(), TimelinePanelData::empty()));
+    dots.lanes.probing = true;
+    dots.lanes.drawn.clear();
+    render_all_arrows(&mut scratch, visualization_data, resource_owners_layout, dots, registry);
+    dots.lanes.probing = false;
+    std::mem::take(&mut dots.lanes.drawn)
+}
+
+/// The heads and logos that still lie on another arrow once `resolve`
+/// has picked the tracks (#1316): several arrows into one dot from one
+/// side, an arrow whose two dots are on different heights, a column's
+/// arrow to itself beside an arrow into its dot, a call's logo on a
+/// result to the caller, an arrow dipping into a row that has dots
+/// (#1323). Probing passes draw the arrows into a scratch output; for
+/// each mark on another, the two arrows' (or logos') other ways of being
+/// drawn (`ArrowLanes::alternatives`) are tried, and the one that leaves
+/// the fewest marks on others and shafts through dots (`untangle_cost`)
+/// is kept, if it leaves fewer than now. Rows are never added: the
+/// tracks stay between the figure's first and last dots or tracks.
+fn untangle(
+    visualization_data: &VisualizationData,
+    resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
+    dots: &mut DotLayer,
+    registry: &Handlebars
+) {
+    let mut drawn = probe_arrows(visualization_data, resource_owners_layout, dots, registry);
+    if marks_on_others(&drawn).is_empty() {
+        return;
+    }
+    let dot_ys = dots.positions.iter().map(|&(_, y)| y);
+    let drawn_ys = drawn.iter().flat_map(|d| d.pieces.iter().flat_map(|&(p, q)| [p.1, q.1])).map(|y| y.round() as i64);
+    let ys = (dots.positions.iter().map(|&(_, y)| y).min().unwrap_or(0), dot_ys.chain(drawn_ys).max().unwrap_or(0));
+    let mut cost = untangle_cost(&drawn, &dots.positions);
+    // Every drawing tried costs a pass over the arrows.
+    let mut budget: usize = 4000;
+    let eval = |dots: &mut DotLayer, s: &LaneSettings, budget: &mut usize| {
+        *budget = budget.saturating_sub(1);
+        dots.lanes.set(s.clone());
+        let d = probe_arrows(visualization_data, resource_owners_layout, dots, registry);
+        (untangle_cost(&d, &dots.positions), d)
+    };
+    let keys_of = |d: &[Drawn], (i, j): (usize, usize)| {
+        let mut keys = vec![d[i].key, d[j].key];
+        keys.dedup();
+        keys
+    };
+    for _ in 0..24 {
+        let now = dots.lanes.settings();
+        let marks = marks_on_others(&drawn);
+        // One arrow or logo drawn another way, for the first mark where
+        // that helps; else two, the second for a mark the first leaves;
+        // a track running on past its head's dot only where nothing else
+        // helps. Of the drawings with the fewest marks, the one with the
+        // fewest crossings.
+        let mut best: Option<((usize, usize), LaneSettings, Vec<Drawn>)> = None;
+        let better = |c: (usize, usize), best: &Option<((usize, usize), LaneSettings, Vec<Drawn>)>| {
+            c.0 < cost.0 && best.as_ref().is_none_or(|b| c < b.0)
+        };
+        for far in [false, true] {
+            'one: for &m in &marks {
+                for key in keys_of(&drawn, m) {
+                    for s in dots.lanes.alternatives(key, &drawn, ys, far) {
+                        let (c, d) = eval(dots, &s, &mut budget);
+                        if better(c, &best) {
+                            best = Some((c, s, d));
+                        }
+                    }
+                    dots.lanes.set(now.clone());
+                }
+                if best.is_some() {
+                    break 'one;
                 }
             }
+            if best.is_some() {
+                break;
+            }
+            'two: for &m in &marks {
+                for key in keys_of(&drawn, m) {
+                    for s1 in dots.lanes.alternatives(key, &drawn, ys, far) {
+                        if budget == 0 {
+                            break 'two;
+                        }
+                        let (c1, d1) = eval(dots, &s1, &mut budget);
+                        if c1.0 > cost.0 + 12 {
+                            continue;
+                        }
+                        for m2 in marks_on_others(&d1) {
+                            for key2 in keys_of(&d1, m2) {
+                                dots.lanes.set(s1.clone());
+                                for s2 in dots.lanes.alternatives(key2, &d1, ys, far) {
+                                    let (c, d) = eval(dots, &s2, &mut budget);
+                                    if better(c, &best) {
+                                        best = Some((c, s2, d));
+                                    }
+                                }
+                            }
+                        }
+                        dots.lanes.set(now.clone());
+                    }
+                }
+                if best.is_some() {
+                    break 'two;
+                }
+            }
+            if best.is_some() {
+                break;
+            }
         }
-        if pass == 0 {
-            let positions = dots.positions.clone();
-            dots.lanes.resolve(&positions);
+        dots.lanes.set(now);
+        let Some((c, s, d)) = best else { break };
+        dots.lanes.set(s);
+        cost = c;
+        drawn = d;
+        if budget == 0 || marks_on_others(&drawn).is_empty() {
+            break;
         }
     }
 }

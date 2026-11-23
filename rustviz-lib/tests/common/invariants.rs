@@ -50,32 +50,6 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // Geometric (`geometry.rs`), from here on.
     // Tuple column goes on after its fields were moved out.
     ("edition2024/if_let_chain_irrefutable_move", "line-ends-nowhere", 1157),
-    // Arrowheads or logos on another arrow after #1317's arrow tracks (#1316's groups).
-    // A literal's borrow end meeting an arrow into its column head to head.
-    ("edition2024/chain_assigns_ref_from_literal_1068", "heads-or-logos-overlap", 1316),
-    ("outlives_bound_1125", "heads-or-logos-overlap", 1316),
-    ("ref_static_lender", "heads-or-logos-overlap", 1316),
-    // Several arrows meeting at one dot from the same side.
-    ("borrow_struct_overwrite_whole", "heads-or-logos-overlap", 1316),
-    ("closure_field_capture_through_ref_1093", "heads-or-logos-overlap", 1316),
-    ("holder_closure_capture", "heads-or-logos-overlap", 1316),
-    ("lifetime_inside_arg_1084", "heads-or-logos-overlap", 1316),
-    ("one_line_arm_ref_end_1277", "heads-or-logos-overlap", 1316),
-    ("ref_copy_value_wording", "heads-or-logos-overlap", 1316),
-    ("refs_array_literal", "heads-or-logos-overlap", 1316),
-    ("refs_index_untracked", "heads-or-logos-overlap", 1316),
-    ("two_field_borrow_through_ref_1080", "heads-or-logos-overlap", 1316),
-    // A diagonal arrow (ends on different heights) not given a track.
-    ("edition2024/chain_block_if_1287", "heads-or-logos-overlap", 1316),
-    ("if_let_copy_and_move_out_of_scrutinee", "heads-or-logos-overlap", 1316),
-    ("iflet_tuple_pattern", "heads-or-logos-overlap", 1316),
-    ("loop_break_several_locals", "heads-or-logos-overlap", 1316),
-    ("one_line_arm_events_1200_1223", "heads-or-logos-overlap", 1316),
-    // A one-line function's parameter moved into a call: its head and logo on the return L.
-    ("box_holds_mut_ref_1282", "heads-or-logos-overlap", 1316),
-    ("holder_moved", "heads-or-logos-overlap", 1316),
-    // A half-row track crossing the next row's return-to-caller L.
-    ("break_field_out_1280", "heads-or-logos-overlap", 1320),
     // A `&mut` moved out of an arm binding into another reference: its
     // borrow end after the move; the lender's lent segments in mid-air.
     ("arm_binding_value_1327", "event-on-dead-column", 1333),

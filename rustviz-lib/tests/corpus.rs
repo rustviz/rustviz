@@ -27127,7 +27127,9 @@ fn borrow_ends_where_rustc_ends_the_loan() {
 /// borrows shared one track (a fork out of z) and the println!'s two
 /// returns to z its row, so only one of each pair could be hovered along
 /// the shared stretch (#1300): each now has a track of its own within
-/// those rows.
+/// those rows. (#1316: z's borrow of p.a, whose head lay on p.b's return
+/// to y, and y's borrow of p.b on the line above take the tracks half a
+/// row above their lines instead.)
 #[test]
 fn struct_write_arrows_share_rows() {
     let rv = run_with_local_backend("borrow_struct_overwrite_whole");
@@ -27137,8 +27139,8 @@ fn struct_write_arrows_share_rows() {
     let read = code_row_y(&code, "println!(\"{} {}\", p.a, p.b);");
     assert_eq!(write - init, 30.0, "a row is added below the `let` of p");
     assert_eq!(read - write, 60.0, "the write of p should take two rows");
-    // Each arrow stays within its line's rows: (arrow, its line's row,
-    // how far below it may run).
+    // Each arrow stays within its line's rows, or half a row above them:
+    // (arrow, its line's row, how far below it may run).
     for (text, row, below) in [
         ("Immutable borrow from y to p.b", init, 15.0),
         ("Return immutably borrowed resource from p.b to y", write, 15.0),
@@ -27150,7 +27152,8 @@ fn struct_write_arrows_share_rows() {
         let arrow = arrow_points(&svg, text);
         assert_eq!(arrow.len(), 1, "{}", text);
         let lowest = arrow[0].iter().map(|p| p.1).fold(f64::MIN, f64::max);
-        assert_eq!(lowest, row + below, "{}: {:?}", text, arrow[0]);
+        let highest = arrow[0].iter().map(|p| p.1).fold(f64::MAX, f64::min);
+        assert!(lowest <= row + below && highest >= row - 15.0, "{}: {:?}", text, arrow[0]);
     }
     // z's two borrows don't leave z along one trunk.
     let (to_a, to_b) = (arrow_points(&svg, "Immutable borrow from z to p.a"), arrow_points(&svg, "Immutable borrow from z to p.b"));
@@ -32338,12 +32341,7 @@ fn marks_lying_on_marks(svg: &str) -> Vec<String> {
     let mut out = Vec::new();
     for (i, (ia, ta, pa, ha)) in arrows.iter().enumerate() {
         for (j, (ib, tb, pb, hb)) in arrows.iter().enumerate() {
-            // A borrow of a literal or static ending is drawn as a short
-            // arrow out of its column into empty space (`r>r`); one coming
-            // into that column from the same side still meets it head to
-            // head (#1316).
-            let to_itself = |id: &str| id.split_once('@').and_then(|(e, _)| e.split_once('>')).is_some_and(|(f, t)| f == t);
-            if i == j || ta == tb || elbow(ia, ib) || to_itself(ia) || to_itself(ib) {
+            if i == j || ta == tb || elbow(ia, ib) {
                 continue;
             }
             if i < j {
@@ -32408,6 +32406,18 @@ fn marks_of_a_row_lie_on_no_other() {
         "edition2024/if_let_chain_assign", "edition2024/if_let_chain_assign_no_else",
         "edition2024/if_let_chain_elem_write", "edition2024/if_let_chain_field_write",
         "edition2024/shared_name_in_chain_969", "edition2024/whole_value_moved_by_chain_953",
+        // #1316: a literal's or static's borrow end beside an arrow into its
+        // column; several arrows into one dot from one side; arrows whose
+        // two dots are on different heights; a one-line function's
+        // parameter moved into the call it returns. #1323: a one-line
+        // `match` / `if let` returning to the caller. #1320: a track half a
+        // row below a row, through the next row's returns to the caller.
+        "arrow_heads_1316", "ref_static_lender", "edition2024/chain_assigns_ref_from_literal_1068",
+        "borrow_struct_overwrite_whole", "closure_field_capture_through_ref_1093", "holder_closure_capture",
+        "lifetime_inside_arg_1084", "one_line_arm_ref_end_1277", "ref_copy_value_wording", "refs_array_literal",
+        "refs_index_untracked", "two_field_borrow_through_ref_1080", "edition2024/chain_block_if_1287",
+        "if_let_copy_and_move_out_of_scrutinee", "iflet_tuple_pattern", "loop_break_several_locals",
+        "one_line_arm_events_1200_1223", "box_holds_mut_ref_1282", "holder_moved", "break_field_out_1280",
     ] {
         let rv = run_with_local_backend(name);
         problems.extend(marks_lying_on_marks(&rv.timeline_panel_string()).into_iter().map(|p| format!("{name}: {p}")));
