@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 /// The geometric invariants' names (described in `invariants::INVARIANTS`).
 pub const INVARIANTS: &[&str] = &[
     "line-starts-nowhere", "line-ends-nowhere", "line-through-fork", "arrows-overlap",
-    "marks-on-one-spot", "arrow-misses-target", "outside-figure",
+    "marks-on-one-spot", "arrow-misses-target", "outside-figure", "heads-or-logos-overlap",
 ];
 
 /// How far apart two points the drawing means to be one may be.
@@ -68,6 +68,8 @@ struct Arrow {
     /// The shaft's straight pieces (a hop's arc left out).
     pieces: Vec<((f64, f64), (f64, f64))>,
     head: Option<(f64, f64)>,
+    /// The head's triangle.
+    tri: Vec<(f64, f64)>,
 }
 
 /// A function logo (`fn`).
@@ -201,12 +203,13 @@ pub fn parse(doc: &roxmltree::Document) -> Geo {
                         pieces.extend(path_pieces(c.attribute("d").unwrap_or("")));
                     }
                 }
-                let head = n.descendants()
+                let tri = n.descendants()
                     .find(|c| c.attribute("class").is_some_and(|k| k.split(' ').any(|k| k == "arrow-head")))
-                    .and_then(|c| points(c.attribute("points").unwrap_or("")).get(1).copied());
+                    .map(|c| points(c.attribute("points").unwrap_or(""))).unwrap_or_default();
+                let head = tri.get(1).copied();
                 g.arrows.push(Arrow {
                     id, var: a("data-rv-var"), to: a("data-rv-to"), line: a("data-rv-line"),
-                    tip: a("data-tooltip-text"), pieces, head,
+                    tip: a("data-tooltip-text"), pieces, head, tri,
                 });
             }
             "fn" => g.logos.push(Logo {
@@ -365,6 +368,76 @@ pub fn check(g: &Geo) -> Vec<(&'static str, String)> {
         }
     }
 
+    // An arrow's head on another arrow (its shaft or head), or a logo on
+    // an arrow other than its own or on another logo (#1307): under
+    // `OVERLAP_PX` of shared shaft, so `arrows-overlap` misses them.
+    let samples = |pieces: &[((f64, f64), (f64, f64))]| -> Vec<(f64, f64)> {
+        let mut v = Vec::new();
+        for &(p, q) in pieces {
+            let n = (len(p, q).ceil() as usize).max(1);
+            for k in 0..=n {
+                let t = k as f64 / n as f64;
+                v.push((p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t));
+            }
+        }
+        v
+    };
+    let tri_edges = |t: &[(f64, f64)]| -> Vec<((f64, f64), (f64, f64))> {
+        if t.len() < 3 { return Vec::new() }
+        vec![(t[0], t[1]), (t[1], t[2]), (t[2], t[0])]
+    };
+    // Signed distance of p inside triangle t (positive inside).
+    let inside = |t: &[(f64, f64)], p: (f64, f64)| -> f64 {
+        if t.len() < 3 { return f64::NEG_INFINITY }
+        let area = (t[1].0 - t[0].0) * (t[2].1 - t[0].1) - (t[2].0 - t[0].0) * (t[1].1 - t[0].1);
+        let s = area.signum();
+        tri_edges(t).iter().map(|&(a, b)| {
+            let l = len(a, b).max(1e-9);
+            s * ((b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0)) / l
+        }).fold(f64::INFINITY, f64::min)
+    };
+    // A logo's box: the italic `f` at 20px, from its text anchor.
+    let logo_box = |l: &Logo| (l.x - 1.0, l.y - 15.0, l.x + 11.0, l.y + 3.0);
+    let in_box = |b: (f64, f64, f64, f64), p: (f64, f64), m: f64| p.0 > b.0 - m && p.0 < b.2 + m && p.1 > b.1 - m && p.1 < b.3 + m;
+    let mut hl: Vec<String> = Vec::new();
+    for a in &g.arrows {
+        for b in &g.arrows {
+            // A one-line function's parameter arriving and its value
+            // returned share the stub right of its dot by design.
+            let elbow = (a.var == "caller" && b.to == "caller" && a.to == b.var)
+                || (b.var == "caller" && a.to == "caller" && b.to == a.var);
+            if std::ptr::eq(a, b) || a.tip == b.tip || a.tri.len() < 3 || (elbow && a.line == b.line) {
+                continue;
+            }
+            // b's shaft (2.5 px either side of its centre line) or head in a's head.
+            let shaft = samples(&b.pieces).into_iter().any(|p| inside(&a.tri, p) > -1.5);
+            let head = b.tri.len() == 3 && std::ptr::addr_of!(*a) < std::ptr::addr_of!(*b)
+                && samples(&tri_edges(&b.tri)).into_iter().any(|p| inside(&a.tri, p) > 1.0);
+            if shaft || head {
+                hl.push(format!("head of {} on {} of {}", a.id, if shaft { "the shaft" } else { "the head" }, b.id));
+            }
+        }
+    }
+    for (i, l) in g.logos.iter().enumerate() {
+        let bx = logo_box(l);
+        for b in &g.arrows {
+            if b.var == l.var && b.to == l.to && b.line == l.line {
+                continue;
+            }
+            if samples(&b.pieces).into_iter().any(|p| in_box(bx, p, 1.5))
+                || samples(&tri_edges(&b.tri)).into_iter().any(|p| in_box(bx, p, -1.0)) {
+                hl.push(format!("logo {} on {}", l.id, b.id));
+            }
+        }
+        for m in &g.logos[i + 1..] {
+            let c = logo_box(m);
+            if l.tip != m.tip && bx.0.max(c.0) < bx.2.min(c.2) - 1.0 && bx.1.max(c.1) < bx.3.min(c.3) - 1.0 {
+                hl.push(format!("logo {} on logo {}", l.id, m.id));
+            }
+        }
+    }
+    out.extend(hl.into_iter().map(|w| ("heads-or-logos-overlap", w)));
+
     // Inside the figure.
     let (w, ht) = g.size;
     if w.is_finite() && ht.is_finite() {
@@ -478,7 +551,8 @@ mod unit {
         let h = arrow("h>a", "h", "a", "195 135 300 135", "300,129 312.75,135 300,141");
         let k = arrow("k>b", "k", "b", "75 165 300 165", "300,159 312.75,165 300,171");
         assert_eq!(invs(&[f.clone(), k.clone()].concat()), Vec::<&str>::new());
-        assert_eq!(invs(&[f.clone(), h].concat()), vec!["arrows-overlap"]);
+        // (Their heads lie on one spot too.)
+        assert_eq!(invs(&[f.clone(), h].concat()), vec!["arrows-overlap", "heads-or-logos-overlap"]);
         // A one-line function's parameter in and result out touch at the elbow.
         let p = arrow("caller>s", "caller", "s", "98 117 98 125 88 125", "88,131 75.25,125 88,119");
         let r = arrow("s>caller", "s", "caller", "75.25 125 98 125 98 120", "92,120 98,107.25 104,120");
@@ -489,13 +563,28 @@ mod unit {
     }
 
     #[test]
+    fn heads_and_logos_on_other_arrows_are_caught() {
+        // g runs level along row 135; h comes up to it from below.
+        let g = arrow("g>a", "g", "a", "75 135 300 135", "300,129 312.75,135 300,141");
+        let clear = arrow("h>b", "h", "b", "200 200 200 160", "194,160 200,147.25 206,160");
+        assert_eq!(invs(&[g.clone(), clear].concat()), Vec::<&str>::new());
+        // h's head ends on g's shaft: under `OVERLAP_PX` of shared stretch.
+        let onto = arrow("h>b", "h", "b", "200 200 200 141", "194,141 200,128.25 206,141");
+        assert_eq!(invs(&[g.clone(), onto].concat()), vec!["heads-or-logos-overlap"]);
+        // A call's logo on an arrow not its own.
+        let logo = "<text x=\"150\" y=\"140\" data-rv-id=\"q>caller@L5:fn:move\" data-rv-kind=\"fn\" \
+                    data-rv-var=\"q\" data-rv-to=\"caller\" data-tooltip-text=\"q\">f</text>".to_string();
+        assert_eq!(invs(&[g, logo].concat()), vec!["heads-or-logos-overlap"]);
+    }
+
+    #[test]
     fn hidden_marks_and_stray_arrows_are_caught() {
         let two = [dot("p", 70.0, 95.0, "acquire"), dot("p", 70.0, 95.0, "mutable_reacquire")].concat();
         assert_eq!(invs(&two), vec!["marks-on-one-spot"]);
         let logo = |f: &str| format!("<text x=\"14\" y=\"190\" data-rv-id=\"{f}>caller@L5:fn:move\" data-rv-kind=\"fn\" \
                                       data-rv-var=\"{f}\" data-rv-to=\"caller\" data-tooltip-text=\"{f}\">f</text>");
         assert_eq!(invs(&[logo("make"), logo("make")].concat()), Vec::<&str>::new());
-        assert_eq!(invs(&[logo("make"), logo("String::from")].concat()), vec!["marks-on-one-spot"]);
+        assert_eq!(invs(&[logo("make"), logo("String::from")].concat()), vec!["heads-or-logos-overlap", "marks-on-one-spot"]);
         let to_a = [header("a"), dot("a", 70.0, 95.0, "acquire")].concat();
         let hit = arrow("f>a", "f", "a", "200 95 88 95", "88,101 75.25,95 88,89");
         assert_eq!(invs(&[to_a.clone(), hit].concat()), Vec::<&str>::new());
