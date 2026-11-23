@@ -88,6 +88,15 @@ impl<'tcx> Visitor<'tcx> for UserArgs<'tcx> {
 impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
 pub fn annotate_src(&mut self, name: String, s: Span, is_func: bool, hash: u64) {
+  // A `// rustviz: skip` variable has no column, so a colour for it
+  // would match nothing on the timeline (#1313): leave it plain.
+  #[expect(clippy::disallowed_methods, reason = "any() makes order irrelevant")]
+  let skipped = !is_func && self.skip_raps.iter().any(|n| {
+    self.raps.get(n).is_some_and(|rd| *rd.rap.hash() == hash)
+  });
+  if skipped {
+    return;
+  }
   let line: usize = span_to_line(&s, &self.tcx);
 
   // The tspan markup is written with MARK_OPEN/MARK_CLOSE instead of `<`/`>`

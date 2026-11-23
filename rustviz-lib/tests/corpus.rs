@@ -32119,6 +32119,29 @@ fn a_struct_whose_fields_are_all_moved_out_has_no_line_after() {
     }
 }
 
+/// #1313: a `// rustviz: skip` variable has no column, so the code panel
+/// leaves it plain, wherever it is written (its `let`, a tuple pattern,
+/// an `if` condition, a method receiver, a closure body, a call argument).
+/// Main coloured it with a colour that no column has. Variables with a
+/// column (`s`, `r1`, `p`) stay coloured.
+#[test]
+fn skipped_variables_are_not_coloured_in_the_code_panel() {
+    let rv = run_with_local_backend("skipped_var_uncoloured_1313");
+    let code = rv.code_panel_string();
+    let coloured = |word: &str| -> usize {
+        let needle = format!(">{}</tspan>", word);
+        code.match_indices(&needle)
+            .filter(|(i, _)| code[..*i].rfind("<tspan").is_some_and(|t| code[t..*i].contains("data-hash=")))
+            .count()
+    };
+    for var in ["q", "cond", "n", "u", "v"] {
+        assert_eq!(coloured(var), 0, "skipped `{var}` is coloured in the code panel");
+    }
+    for var in ["s", "r1", "p", "c"] {
+        assert!(coloured(var) > 0, "`{var}` has a column but is not coloured");
+    }
+}
+
 /// The arrows and function logos of a timeline, for
 /// `marks_lying_on_marks`: each arrow's id (`data-rv-id`), tooltip, the
 /// straight pieces of its shaft (a hop's arc left out) and its head's
