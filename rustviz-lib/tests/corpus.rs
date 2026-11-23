@@ -23482,16 +23482,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // it ended in each arm. Main drew the end on r's column above the
         // split (before the use: `chain_local`, `chain_shared`,
         // `chain_two_lets`) or beside the arms where no line runs
-        // (`chain_param`, `chain_multiline`), with the arms going on to a
+        // (`chain_param`), with the arms going on to a
         // join that said "r isn't moved in any of the branches above"
         // (in `chain_else_if`, in the outer `if` arm instead). Where the
         // ends are drawn is checked by `corpus_invariants_hold`
-        // (`event-on-dead-column`).
+        // (`event-on-dead-column`). A condition over several lines is
+        // #1291.
         must_contain: &[
             "r1's borrow ended in each branch above",
             "r2's borrow ended in each branch above",
             "r3's borrow ended in each branch above",
-            "r4's borrow ended in each branch above",
             "r5's borrow ended in each branch above",
             "r6's borrow ended in each branch above",
             "r2's mutable borrow ends",
@@ -23503,7 +23503,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "r1 isn't moved in any of the branches above",
             "r2 isn't moved in any of the branches above",
             "r3 isn't moved in any of the branches above",
-            "r4 isn't moved in any of the branches above",
             "r5 isn't moved in any of the branches above",
             "r6 isn't moved in any of the branches above",
         ],

@@ -1,7 +1,8 @@
 // #1279: a reference whose last use is a later part of a let-chain
 // condition (`if let Some(x) = o && bump(r)`). That part runs only on the
 // way into the `if` arm, so the borrow ends there, after the use; on the
-// path into the else arm it has already ended.
+// path into the else arm it has already ended. (A condition over several
+// lines is #1291.)
 fn bump(r: &mut i32) -> bool { *r += 1; *r > 2 }
 
 // A reference parameter.
@@ -37,20 +38,6 @@ fn chain_shared(o: Option<i32>) {
     println!("{}", b);
 }
 
-// The condition over several lines.
-fn chain_multiline(o: Option<i32>) {
-    let mut c = 0;
-    let r4 = &mut c;
-    if let Some(x) = o
-        && bump(r4)
-    {
-        println!("{}", x);
-    } else {
-        println!("no");
-    }
-    println!("{}", c);
-}
-
 // Two `let` parts before the use.
 fn chain_two_lets(o: Option<i32>, p: Option<i32>) {
     let mut d = 0;
@@ -82,7 +69,6 @@ fn main() {
     chain_param(&mut n, Some(1));
     chain_local(Some(2));
     chain_shared(None);
-    chain_multiline(Some(3));
     chain_two_lets(Some(1), Some(2));
     chain_else_if(false, Some(4));
 }
