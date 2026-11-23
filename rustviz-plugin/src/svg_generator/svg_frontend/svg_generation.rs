@@ -1382,6 +1382,26 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                 continue;
             }
             let res = line_ev.cloned();
+            // The end, recorded after a conditional that splits on this
+            // line, of a reference one of its arms declares (`wr` in `if
+            // let Some(x) = o && { let wr = r; take(wr); true } {`, whose
+            // block is drawn in the if arm, #1262): it happens after the
+            // arm's events, and `nest_arm_ref_ends` moves it into that arm
+            // when the conditional's turn comes. It keeps its row in the
+            // stack here, but isn't drawn on it, before wr is bound.
+            let nested_later: HashSet<usize> = visualization_data.preprocess_external_events[i + 1..].iter()
+                .position(|(l, e)| *l == line_num && matches!(e, ExternalEvent::Branch { .. }) && !skippable_ev.contains(&e.get_id()))
+                .map(|b| {
+                    let ExternalEvent::Branch { branches, .. } = &visualization_data.preprocess_external_events[i + 1 + b].1 else { unreachable!() };
+                    visualization_data.preprocess_external_events[i + 2 + b..].iter()
+                        .filter(|(l, e)| *l == line_num && matches!(e,
+                            ExternalEvent::StaticDie { from: ResourceTy::Value(r), .. }
+                            | ExternalEvent::MutableDie { from: ResourceTy::Value(r), .. }
+                            | ExternalEvent::RefDie { from: ResourceTy::Value(r), .. } if arm_declares(branches, r)))
+                        .map(|(_, e)| e.get_id())
+                        .collect()
+                })
+                .unwrap_or_default();
             let ex = match res {
                 Some(ev) if chain_bindings_side_by_side(&ev, &chain_pairs) => {
                     // A let-chain's bindings (#584): all on the line's
@@ -1431,6 +1451,9 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                         // there, on this row of the stack; not here too.
                         if arm_drawn.contains(&e.get_id()) {
                             skippable_ev.insert(e.get_id());
+                            continue;
+                        }
+                        if nested_later.contains(&e.get_id()) {
                             continue;
                         }
                         // append all the events in the line map on the same line

@@ -10721,7 +10721,7 @@ pub fn print_out_of_scope(&mut self){
         _ => { i += 1; continue; }
       };
       // A function's column isn't drawn in a conditional's arms.
-      let Some((k, _)) = branch_ending_borrow(self.preprocessed_events, r, *line).filter(|_| !lender.is_some_and(|l| l.is_fn())) else {
+      let Some((k, a)) = branch_ending_borrow(self.preprocessed_events, r, *line).filter(|_| !lender.is_some_and(|l| l.is_fn())) else {
         i += 1;
         continue;
       };
@@ -10732,8 +10732,19 @@ pub fn print_out_of_scope(&mut self){
       // arm, which lists it in its line map (`arm_drawn` in
       // svg_generation.rs).
       let at_split = matches!(&self.preprocessed_events[k].1, ExternalEvent::Branch { split_point, .. } if split_point == line);
+      // (Unless that arm moved r on, `&& { let w = r; take(w); true }`,
+      // #1262: what holds it now ends the borrow there, and no arm
+      // draws this end, so it leaves the top level's stack.)
+      let handed_off = at_split && matches!(&self.preprocessed_events[k].1, ExternalEvent::Branch { branches, .. }
+        if handed_off_in(&branches[a].e_data, r, &self.moved_into_result, &holders));
       let (r, lender) = (r.clone(), lender.cloned());
       let ev = self.preprocessed_events.remove(i);
+      if handed_off {
+        let id = ev.1.get_id();
+        if let Some(evs) = self.event_line_map.get_mut(&ev.0) {
+          evs.retain(|e| e.get_id() != id);
+        }
+      }
       // Arrows listed together on a line are drawn one below the other,
       // with a blank row per extra arrow. An arm's line map also lists
       // arrows to and from functions (#419), so listing the moved arrow
@@ -11392,13 +11403,14 @@ fn branch_ending_borrow(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoi
     // split line: a last use of r among them ends its borrow in that arm
     // (and so before the other arms), not on r's column above the split,
     // before that use, or beside the arms (#1279). (A condition over
-    // several lines draws its parts above the split, #1291: left alone.)
-    // (Not when the part moves r on, `&& { let w = r; take(w); true }`:
-    // what it moved r into ends the borrow, #1200.)
-    let moves_r = |a: usize| branches[a].e_data.iter().any(|(l, e)| *l == line
-      && matches!(e, ExternalEvent::Move { from: ResourceTy::Value(f), .. } if f == r));
+    // several lines splits on the `if` line, #1291, so its parts are on
+    // the arm's own lines.) When the part moves r on, `&& { let w = r;
+    // take(w); true }`, what it moved r into ends the borrow in that arm
+    // (`end_borrow_in_arms` skips it there); the other arms still end
+    // r's own, after the condition, not above the split before r was
+    // moved (#1262).
     let chain_part = |line: usize| (matches!(branch_type, BranchType::If(..)) && line < *merge_point)
-      .then(|| (0..branches.len()).find(|&a| touching(a)).filter(|&a| !moves_r(a)))
+      .then(|| (0..branches.len()).find(|&a| touching(a)))
       .flatten();
     if line == *split_point && *if_line == *split_point {
       return chain_part(line).map(|a| (k, a));
@@ -11412,6 +11424,11 @@ fn branch_ending_borrow(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoi
       .filter(|&a| { let (start, end) = branch_type.get_start_end(a); start <= line && line <= end })
       .collect();
     match holding.as_slice() {
+      // A `match` arm's pattern and guard written over lines of their
+      // own, before the arm's body (`Some(x)` / `if bump(r) =>` / `{`):
+      // the guard runs on the way into its arm, drawn there, as when it
+      // is on the body's first line (#1291).
+      [] if matches!(branch_type, BranchType::Match(..)) => (0..branches.len()).find(|&a| touching(a)).map(|a| (k, a)),
       [] => None,
       [a] => Some((k, *a)),
       // A line two arms share (`} else if let Some(x) = o && bump(r) {`):
