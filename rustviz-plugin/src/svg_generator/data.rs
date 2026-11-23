@@ -202,6 +202,50 @@ pub enum InteriorMut {
 pub struct ElemsLeft {
     pub moved: Vec<String>,
     pub left: Vec<String>,
+    /// When `left` is empty (patterns on several lines move every
+    /// element, #1302): the elements whose move empties the array, on
+    /// the last of those lines. Empty when no one move does (the moves
+    /// are in different arms).
+    pub last: Vec<String>,
+}
+
+impl ElemsLeft {
+    /// Every element of the array, in index order.
+    pub fn all(&self) -> Vec<String> {
+        let mut all: Vec<String> = self.moved.iter().chain(self.left.iter()).cloned().collect();
+        all.sort_by_key(|n| elem_index(n));
+        all
+    }
+
+    /// Does moving `place` (`arr[1]`, or `arr[1..3]` for a `rest @ ..`)
+    /// empty the array (`last`)?
+    pub fn empties(&self, place: &str) -> bool {
+        place_elem_names(place).iter().any(|n| self.last.contains(n))
+    }
+
+    /// Is `place` the last of the moves that empty the array (it takes
+    /// the last element of `last`)? Its dot says nothing is left.
+    pub fn empties_last(&self, place: &str) -> bool {
+        self.last.last().is_some_and(|l| place_elem_names(place).contains(l))
+    }
+}
+
+/// `arr[3]` -> 3.
+fn elem_index(name: &str) -> u64 {
+    name.rsplit('[').next().and_then(|t| t.trim_end_matches(']').parse().ok()).unwrap_or(0)
+}
+
+/// The element names a slice pattern's place stands for: `arr[1]` ->
+/// [`arr[1]`]; `arr[1..3]` -> [`arr[1]`, `arr[2]`].
+pub fn place_elem_names(place: &str) -> Vec<String> {
+    let Some((base, idx)) = place.strip_suffix(']').and_then(|p| p.rsplit_once('[')) else { return vec![place.to_string()] };
+    match idx.split_once("..") {
+        Some((a, b)) => match (a.parse::<u64>(), b.parse::<u64>()) {
+            (Ok(a), Ok(b)) => (a..b).map(|i| format!("{}[{}]", base, i)).collect(),
+            _ => vec![place.to_string()],
+        },
+        None => vec![place.to_string()],
+    }
 }
 
 // when something is not a reference
@@ -3983,13 +4027,19 @@ impl Event {
             }
             // `[c, _] => …`: only the element `pair[0]` moves out (#1285).
             Event::Move{ is: is @ ResourceTy::Index(r, place, _), ..} if r.elems_left().is_some() => {
-                hover_messages::event_dot_move_to(place, is_plain(is))
+                if r.elems_left().is_some_and(|e| e.empties_last(place)) {
+                    hover_messages::event_dot_move_last_elems(place, &self.deref_name(my_name), is_plain(is))
+                } else {
+                    hover_messages::event_dot_move_to(place, is_plain(is))
+                }
             }
             Event::Move{ to, is, ..} => {
                 let v = is_plain(is);
                 match to {
                     ResourceTy::Caller => hover_messages::event_dot_move_to_caller(&self.deref_name(my_name), v),
                     ResourceTy::Temporary { tuple: Some(t), .. } => hover_messages::event_dot_move_to_tuple_temporary(&self.deref_name(my_name), t, v),
+                    // With nothing to drop (`let _ = (p, 5);`, `p: P { a: i32 }`, #1301).
+                    ResourceTy::Temporary { extended: false, tuple: None } if v => hover_messages::event_dot_move_value_to_temporary(&self.deref_name(my_name)),
                     ResourceTy::Temporary { extended, tuple: None } => hover_messages::event_dot_move_to_temporary(&self.deref_name(my_name), *extended),
                     // `vec![s];`: s is moved into the temporary the macro or
                     // literal builds, which nothing takes (#570). (A `let`'s
@@ -4312,6 +4362,9 @@ impl Event {
             Event::MutableBorrow{ from, is, of_ref_var, ..} => {
                 if is.is_closure() {
                     hover_messages::event_dot_closure_capture_mut_borrow(&self.deref_name(my_name), &from.name())
+                } else if is.holds_borrow() && matches!(from, ResourceTy::Caller) {
+                    // `let k = Box::new(r);` with r a `&mut` parameter (#1289).
+                    hover_messages::event_dot_holder_borrow_caller(&self.deref_name(my_name))
                 } else if is.holds_borrow() {
                     // `refs.push(&mut m)` stores a borrow of m itself (#973).
                     hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), true, if *of_ref_var { hover_messages::HolderLender::Own } else { holder_lender_kind(from) }, *of_ref_var || holds_copy_value(from))
@@ -4807,11 +4860,18 @@ impl Visualizable for VisualizationData {
             // allocation, freed at its scope end (#898).
             (State::FullPrivilege{..}, Event::Move{is: ResourceTy::Deref(ResourceAccessPoint::Struct(Struct { is_box: true, .. })), ..}) =>
                 (*previous_state).clone(),
+            // A labeled block's local carried out by one of the block's
+            // ways out (#1288): on the paths that reach the block's end
+            // it still holds its value, which is dropped there.
+            (State::FullPrivilege{..}, Event::Move{ break_out: true, break_alt: Some(BreakAlt { end: AltEnd::Block | AltEnd::BlockTail, .. }), .. }) =>
+                (*previous_state).clone(),
             // `[c, _] => …` on an array that keeps its other elements
             // (`Owner::elems_left`): one element moves out, and the array
             // still holds the rest until its scope end, where they are
             // dropped (#1285).
-            (State::FullPrivilege{..}, Event::Move{is: ResourceTy::Index(r, place, _), ..}) if !place.starts_with('*') && r.elems_left().is_some() =>
+            // Unless it takes the last elements left in it (#1302).
+            (State::FullPrivilege{..}, Event::Move{is: ResourceTy::Index(r, place, _), ..})
+                if !place.starts_with('*') && r.elems_left().is_some_and(|e| !e.empties(place)) =>
                 (*previous_state).clone(),
             // The current RAP's resource is moved
             (State::FullPrivilege{..}, Event::Move{to: to_ro,..}) =>
@@ -4822,6 +4882,11 @@ impl Visualizable for VisualizationData {
             // left for the closure to drop at scope end.
             (State::FullPrivilege{..}, Event::ClosureCall{..}) =>
                 State::ResourceMoved{ move_to: ResourceTy::Anonymous, move_at_line: event_line, dropped_by_hand: false },
+            // `'blk: { if c { break 'blk k; } drop(k); .. }` (#1288): the
+            // `break`'s move is drawn where the block ends, below the
+            // move on the way there; on its own path it came first.
+            (State::ResourceMoved{ .. }, Event::Move{ break_alt: Some(BreakAlt { end: AltEnd::Block, in_loop: true, .. }), .. }) =>
+                (*previous_state).clone(),
             // `let t = f();` also records the call's result as moving
             // out of `f`, on the same line: `f` is already moved.
             (State::ResourceMoved{ move_at_line, .. }, Event::Move{..}) if *move_at_line == event_line && event_line != 0 =>

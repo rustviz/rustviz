@@ -69,8 +69,8 @@ fn via_generic() {
     println!("{}", s8);
 }
 
-// A reference parameter moved into the Box (the caller's loan going on
-// in k9 isn't drawn yet: #1289).
+// A reference parameter moved into the Box: k9 holds the caller's
+// loan until its last use (#1289).
 fn param(r9: &mut String) {
     let k9 = Box::new(r9);
     k9.push('!');

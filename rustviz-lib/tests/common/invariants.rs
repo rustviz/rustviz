@@ -373,8 +373,19 @@ fn states_partial_drop(d: &Dot) -> bool {
 /// (#431, #1156). When the body moves `k` on those iterations
 /// (`take(k)` after the `if … { break k; }`), its line has ended above,
 /// but on the iteration that breaks it still held its value.
+/// The same for a local of a labeled block carried out by one of its ways
+/// out, drawn where the block ends (#1288: "k's resource is moved to r if
+/// the block ended with break 'blk k").
 fn break_out_move(d: &Dot) -> bool {
-    d.has("move") && d.tip.contains("break that ends the loop")
+    d.has("move") && (d.tip.contains("break that ends the loop") || block_local_break_move(d))
+}
+
+/// A move of a labeled block's local by one of the block's ways out
+/// (#1288): on the paths that leave the block another way, the local is
+/// still there, and dropped where the block ends, below.
+fn block_local_break_move(d: &Dot) -> bool {
+    d.has("move") && d.tip.contains("if the block ended with")
+        && !d.tip.contains("may have been moved")
 }
 
 /// Line `line` of `src` is a `for` loop's head (`for x in r {`,
@@ -463,7 +474,8 @@ pub fn check(fig: &Fig, src: &str) -> Vec<(&'static str, String)> {
                 }
             }
         }
-        if continues && !inits && d.has_any(END) && !split_or_join && !contents_moved(d) && !elems_moved(d) {
+        if continues && !inits && d.has_any(END) && !split_or_join && !contents_moved(d) && !elems_moved(d)
+            && !block_local_break_move(d) {
             out.push(("line-after-column-ends", d.describe()));
         }
         if d.has("branch_join") && says_maybe_moved(d) && continues && !inits && !elems_moved(d) {

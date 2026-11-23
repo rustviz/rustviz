@@ -276,6 +276,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         return;
       }
     }
+    // A labeled block as the returned value (`'blk: { if c { break 'blk
+    // k; } t }`, #1288): what the `break` that ended it carries, or its
+    // last expression, goes to the caller, as into a `let` (#1134).
+    if let ExprKind::Block(_, Some(_)) = e.kind {
+      if !e.span.from_expansion() {
+        let values = self.labeled_block_values(e);
+        if values.len() > 1 {
+          let saved = self.enter_deferred(e.hir_id);
+          self.pair_break_alternatives(e, values, |this, v| this.return_to_caller(v));
+          self.leave_deferred(saved);
+          return;
+        }
+      }
+    }
     let tycheck_results = self.tcx.typeck(e.hir_id.owner);
     let lhs_ty = tycheck_results.node_type(e.hir_id);
     let is_copyable = self.ty_is_copy(lhs_ty, e.hir_id.owner);
@@ -9351,7 +9365,55 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// its column, so it stops owning the value (#570).
   fn note_container_temporary_drop(&mut self, expr: &'tcx Expr<'tcx>, name: String) {
     let Some(places) = self.literal_moved_places(expr) else { return };
+    let ty = self.tcx.typeck(expr.hir_id.owner).expr_ty(expr);
+    if !self.needs_drop(ty, expr.hir_id.owner) {
+      self.note_plain_literal_moves(expr);
+      return;
+    }
     self.note_temporary_drop(expr, name, places);
+  }
+
+  /// `let _ = (p, 5);`, `[p];` with `p: P { a: i32 }`: a literal with
+  /// nothing to drop gets no `(temporary)` column, but the variables in
+  /// it are moved into it all the same (P isn't Copy), and can't be used
+  /// after it (#1301). Only for a literal nothing takes, discarded at the
+  /// end of its statement.
+  fn note_plain_literal_moves(&mut self, expr: &'tcx Expr<'tcx>) {
+    if expr.span.from_expansion() || self.temp_drops_noted.contains(&expr.hir_id) {
+      return;
+    }
+    let typeck = self.tcx.typeck(expr.hir_id.owner);
+    let env = typing_env(self.tcx, expr.hir_id.owner);
+    if !self.is_unmoved_temporary(expr, typeck, env)
+      || self.temporary_scope_end(expr).is_none_or(|(when, _, _)| when != "at the end of this statement") {
+      return;
+    }
+    self.temp_drops_noted.insert(expr.hir_id);
+    let mut todo = vec![expr];
+    let mut moved = Vec::new();
+    while let Some(e) = todo.pop() {
+      let elems: Vec<&'tcx Expr<'tcx>> = match e.kind {
+        ExprKind::Struct(_, fields, _) => fields.iter().map(|f| f.expr).collect(),
+        ExprKind::Tup(items) | ExprKind::Array(items) => items.iter().collect(),
+        _ => Vec::new(),
+      };
+      for x in elems {
+        if is_place_expr(x) {
+          if !self.ty_is_copy(typeck.expr_ty(x), expr.hir_id.owner) && !self.premoved.contains(&x.hir_id) {
+            if let Some(src) = fetch_rap(x, &self.tcx, &self.raps) {
+              moved.push((src, expr_to_line(x, &self.tcx)));
+            }
+          }
+        } else if matches!(x.kind, ExprKind::Struct(..) | ExprKind::Tup(_) | ExprKind::Array(_)) {
+          todo.push(x);
+        }
+      }
+    }
+    let line = expr_to_line(expr, &self.tcx);
+    for (src, src_line) in moved {
+      self.update_rap(&src, line);
+      self.add_ev(src_line, Evt::Move, ResourceTy::Temporary { extended: false, tuple: None }, ResourceTy::Value(src), false);
+    }
   }
 
   /// A call whose result is a temporary that Rust drops at the end of
@@ -13816,9 +13878,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// they go out of scope on the iterations that don't break, and
   /// those drop them. Their Move is marked `break_out` (#431).
   fn break_out_names(&self, loop_expr: &'tcx Expr<'tcx>, values: &[&'tcx Expr<'tcx>]) -> Vec<String> {
-    let ExprKind::Loop(body, ..) = loop_expr.kind else { return Vec::new() };
-    if self.block_diverges(body) {
-      return Vec::new();
+    match loop_expr.kind {
+      ExprKind::Loop(body, ..) if !self.block_diverges(body) => {}
+      // A labeled block's local (or a field of one) carried out by a
+      // `break 'blk`, when the block can also end another way (#1288):
+      // that way drops it where the block ends.
+      ExprKind::Block(_, Some(_)) => {}
+      _ => return Vec::new(),
     }
     let mut names: Vec<String> = Vec::new();
     for value in values {
@@ -13870,16 +13936,25 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   ) {
     let line = self.line_override.replace(span_end_line(&loop_expr.span, &self.tcx));
     let all: Vec<&'tcx Expr<'tcx>> = values.iter().map(|(v, _)| *v).collect();
-    let names = self.break_out_names(loop_expr, &all);
-    let saved_names = std::mem::replace(&mut self.break_out, names);
     let first = local_of_path(values[0].0);
-    if first.is_some() && values.iter().all(|(v, _)| local_of_path(v) == first) {
+    let one_move = first.is_some() && values.iter().all(|(v, _)| local_of_path(v) == first);
+    // (A labeled block all of whose ends move the same local moves it
+    // on every path: nothing is left to drop where it ends.)
+    let names = if one_move && matches!(loop_expr.kind, ExprKind::Block(..)) { Vec::new() } else { self.break_out_names(loop_expr, &all) };
+    let saved_names = std::mem::replace(&mut self.break_out, names);
+    if one_move {
       // `if c { break a; } else { break a; }`: a moves to the receiver
       // whichever ran, so that is one plain move.
       pair(self, values[0].0);
     } else {
       for (value, brk) in &values {
-        let in_loop = local_of_path(value)
+        // A field of a local (`break 'blk g.name`) goes with the local
+        // (#1288).
+        let mut root: &Expr = value;
+        while let ExprKind::Field(inner, _) = root.kind {
+          root = inner;
+        }
+        let in_loop = local_of_path(root)
           .is_some_and(|l| loop_expr.span.contains(self.tcx.hir_span(l)));
         // A labeled block's value comes from a `break` or its last
         // expression (#1134).
