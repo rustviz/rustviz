@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{ApproxNote, breaks_out_only, is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier};
+use crate::svg_generator::data::{AltEnd, ApproxNote, ElemsLeft, place_elem_names, breaks_out_only, is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier};
 use crate::svg_generator::hover_messages::{self, styled_name_html};
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use crate::svg_generator::svg_frontend::rv_attrs::{self, Rv};
@@ -1515,6 +1515,25 @@ fn render_branch_dots(
                 // what the paths that didn't move it still hold isn't
                 // the whole Box on all of them.
                 hover_messages::event_dot_branch_merge_moved_box_paths(&is.real_name(), rap.is_mut(), by_cond)
+            } else if let Some(el) = rap.elems_left() {
+                // A slice pattern in a branch took the last elements
+                // left in the array (#1302): the others were moved
+                // before it, so only those may still be in it.
+                let mut moved: Vec<String> = Vec::new();
+                for b in branch_history.iter().filter(|b| !b.diverges) {
+                    for p in elems_moved_before(&b.e_data, usize::MAX, true).0.iter().flat_map(|p| place_elem_names(p)) {
+                        if !moved.contains(&p) {
+                            moved.push(p);
+                        }
+                    }
+                }
+                let before: Vec<String> = history.iter().take_while(|(_, e)| !std::ptr::eq(e, event))
+                    .filter_map(|(_, e)| match e {
+                        Event::Move { is: ResourceTy::Index(_, place, _), .. } if !place.starts_with('*') => Some(place_elem_names(place)),
+                        _ => None,
+                    }).flatten().collect();
+                let still: Vec<String> = el.all().into_iter().filter(|n| !moved.contains(n) && !before.contains(n)).collect();
+                hover_messages::event_dot_branch_merge_elems_moved(&is.real_name(), &moved, &still)
             } else {
                 // A `&mut` reference moved on some paths (`if b {
                 // x } else { y }` returned, #674) owns nothing to
@@ -1720,14 +1739,26 @@ fn render_scope_end_dot(
             // else moved part of it: all of it is dropped here on the
             // iterations that don't break.
             || (exit.is_none() && field_broken_out_at(visualization_data, *hash, *line_number)
+                && struct_partial_move_split(visualization_data, *hash, None).is_none())
+            // Or out of a labeled block it is declared in, by one of the
+            // ways the block can end (#1288).
+            || (exit.is_none() && broken_out_of_block(visualization_data, *hash).is_some()
                 && struct_partial_move_split(visualization_data, *hash, None).is_none()) {
             // A `break` carried it out of the loop on this
             // line (#431), but only on the iteration that
             // ended the loop: every other one drops it here,
             // unless the body moved it on the way (#1156).
+            // Out of a labeled block (#1288): the block can end another
+            // way, which drops it. (The move's arrow may have a row of
+            // its own, next to this one.)
+            let block = broken_out_of_block(visualization_data, *hash);
             let other: Vec<(usize, Event)> = history.iter()
-                .filter(|(l, e)| l < line_number || (l == line_number
-                    && !matches!(e, Event::Move { break_out: true, .. } | Event::OwnerGoOutOfScope { .. })))
+                .filter(|(l, e)| match (&block, e) {
+                    (Some(_), Event::Move { break_out: true, .. } | Event::OwnerGoOutOfScope { .. }) => false,
+                    (Some(_), _) => true,
+                    _ => l < line_number || (l == line_number
+                        && !matches!(e, Event::Move { break_out: true, .. } | Event::OwnerGoOutOfScope { .. })),
+                })
                 .cloned().collect();
             let held = other.iter().fold(false, |h, (_, e)| holds_value_after(h, e));
             if maybe_moved_at_end(&other) {
@@ -1737,7 +1768,10 @@ fn render_scope_end_dot(
                     hash: *hash as u64,
                     dot_x: cx,
                     dot_y: cy,
-                    title: hover_messages::event_dot_break_out_go_out_of_scope_maybe_moved(&name, &ro.drop_note()),
+                    title: match &block {
+                        Some((alt, _)) => hover_messages::event_dot_block_break_out_go_out_of_scope_maybe_moved(&name, &ro.drop_note(), alt),
+                        None => hover_messages::event_dot_break_out_go_out_of_scope_maybe_moved(&name, &ro.drop_note()),
+                    },
                     p1x: cx - 3, p1y: cy - 1,
                     p2x: cx + 3, p2y: cy - 1,
                     p3x: cx,     p3y: cy + 3,
@@ -1746,7 +1780,10 @@ fn render_scope_end_dot(
                 return true;
             }
             if !held {
-                data.title = hover_messages::event_dot_break_out_go_out_of_scope_moved(&name);
+                data.title = match &block {
+                    Some(_) => hover_messages::event_dot_block_break_out_go_out_of_scope_moved(&name),
+                    None => hover_messages::event_dot_break_out_go_out_of_scope_moved(&name),
+                };
                 return false;
             }
             let cx = timeline_data.x_val;
@@ -1755,7 +1792,11 @@ fn render_scope_end_dot(
                 hash: *hash as u64,
                 dot_x: cx,
                 dot_y: cy,
-                title: hover_messages::event_dot_break_out_go_out_of_scope(&name),
+                title: match &block {
+                    Some((alt, Some(part))) => hover_messages::event_dot_block_break_out_part_go_out_of_scope(&name, alt, part),
+                    Some((alt, None)) => hover_messages::event_dot_block_break_out_go_out_of_scope(&name, alt),
+                    None => hover_messages::event_dot_break_out_go_out_of_scope(&name),
+                },
                 p1x: cx - 3, p1y: cy - 1,
                 p2x: cx + 3, p2y: cy - 1,
                 p3x: cx,     p3y: cy + 3,
@@ -1844,23 +1885,19 @@ fn render_scope_end_dot(
             };
             append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
             return true;
-        } else if let Some((el, maybe)) = ro.elems_left().map(|el| (el, elems_moved_before(history, usize::MAX, false)))
-            .filter(|(_, (moved, _))| !moved.is_empty()).map(|(el, (_, maybe))| (el, maybe)) {
+        } else if let Some((moved, maybe, left)) = ro.elems_left().map(|el| elems_split(history, el))
+            .filter(|(moved, maybe, left)| !maybe.is_empty() || !moved.is_empty() && !left.is_empty()) {
             // `let [a, _] = arr;` (#1166), `[first, ..] =>` (#1144): the
             // elements the pattern didn't take are still in the array
             // (whose column goes on, #1285), and are dropped with it; in
             // some branches only, those it took are dropped only on the
-            // paths that didn't.
+            // paths that didn't. (Patterns that took every element on
+            // every path leave nothing, #1302: the column has stopped.)
             let cx = timeline_data.x_val;
             let cy = event_y;
-            let title = if maybe {
-                let by_cond = moved_by_chain_condition(history) || maybe_moved_by_let(history);
-                hover_messages::event_dot_struct_partial_go_out_of_scope(
-                    &name, &[], &el.moved, &el.left, false, by_cond, false, false)
-            } else {
-                hover_messages::event_dot_struct_partial_go_out_of_scope(
-                    &name, &el.moved, &[], &el.left, false, false, false, false)
-            };
+            let by_cond = !maybe.is_empty() && (moved_by_chain_condition(history) || maybe_moved_by_let(history));
+            let title = hover_messages::event_dot_struct_partial_go_out_of_scope(
+                &name, &moved, &maybe, &left, false, by_cond, false, false);
             let drop_data = DropDotData {
                 hash: *hash as u64,
                 dot_x: cx,
@@ -1919,6 +1956,13 @@ fn render_scope_end_dot(
             append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
             return true;
         } else if let (false, Some(el)) = (resource_hold, ro.elems_left()) {
+            // Patterns that took every element (#1302): nothing is left
+            // to drop, so a plain dot.
+            if el.left.is_empty() {
+                data.title = hover_messages::event_dot_struct_partial_go_out_of_scope(
+                    &name, &el.moved, &[], &[], false, false, false, false);
+                return false;
+            }
             // `let [a, _] = arr;` (#1166), `[first, ..] =>` (#1144): the
             // elements the pattern didn't take are still in the array,
             // and are dropped with it.
@@ -2123,6 +2167,13 @@ fn render_dot(
         held = holds_value_after(held, event);
         moved_out = match event {
             e if e.is_box_payload_move() => moved_out && !held,
+            // A slice pattern that takes some of an array's elements
+            // leaves the rest in it: a conditional after it splits the
+            // column at a dot as for any live value (#1302).
+            Event::Move { is: ResourceTy::Index(_, place, _), .. }
+                if !place.starts_with('*')
+                    && visualization_data.timelines[hash].resource_access_point.elems_left().is_some_and(|el| !el.empties(place)) =>
+                moved_out && !held,
             Event::Move { .. } | Event::LoopExitMove { definite: true, .. } => true,
             _ => moved_out && !held,
         };
@@ -3127,6 +3178,9 @@ fn branch_join_message(branch_history: &[BranchData], ty: &BranchType, is: &Reso
             }
         }
         if !moved.is_empty() {
+            // What is surely still in it: not what is moved at the end
+            // (`left`), nor, when every element is moved, the rest
+            // (#1302: they are moved above or below the branch).
             return hover_messages::event_dot_branch_merge_elems_moved(var_name, &moved, &left.left);
         }
     }
@@ -3640,9 +3694,13 @@ fn holder_starts_empty(visualization_data: &VisualizationData, rap: &ResourceAcc
 fn holder_never_borrows(visualization_data: &VisualizationData, rap: &ResourceAccessPoint) -> bool {
     // (`let k2 = k;` takes over the borrow k's value holds, #1282.)
     visualization_data.timelines.get(rap.hash()).is_none_or(|t| {
+        // (Or that took the reference a `&mut` moved into it held:
+        // `vec![r]` with r a parameter, #1289.)
         !t.history.iter().any(|(_, e)| match e {
             Event::StaticBorrow { .. } | Event::MutableBorrow { .. } => true,
-            Event::Acquire { from: ResourceTy::Value(f), .. } => !f.is_ref() && f.holds_borrow(),
+            Event::Acquire { from: ResourceTy::Value(f), .. } => {
+                (!f.is_ref() && f.holds_borrow()) || f.is_mutref()
+            }
             _ => false,
         })
     })
@@ -3700,7 +3758,11 @@ fn timeline_segment_title(
         if let Some(t) = visualization_data.timelines.get(rap.hash()) {
             let (moved, maybe) = elems_moved_before(&t.history, line, false);
             if !moved.is_empty() {
-                return hover_messages::state_elems_moved(rap.name(), &moved, &left.left, maybe);
+                // Still in it here: every element not moved yet (later
+                // patterns may take more of them, #1302).
+                let taken: Vec<String> = moved.iter().flat_map(|p| place_elem_names(p)).collect();
+                let still: Vec<String> = left.all().into_iter().filter(|n| !taken.contains(n)).collect();
+                return hover_messages::state_elems_moved(rap.name(), &moved, &still, maybe);
             }
         }
     }
@@ -4511,6 +4573,42 @@ fn field_broken_out_at(visualization_data: &VisualizationData, hash: u64, line: 
     })
 }
 
+/// A labeled block's local (field) whose only move is a `break 'blk`
+/// carrying it out where the block ends (#1288): on the path that
+/// reaches the block's end, it still holds its value there.
+fn moved_only_by_block_break(history: &[(usize, Event)]) -> bool {
+    let moves: Vec<&Event> = history.iter().map(|(_, e)| e)
+        .filter(|e| matches!(e, Event::Move { .. } | Event::Branch { .. } | Event::LoopExitMove { .. }))
+        .collect();
+    matches!(moves.as_slice(), [Event::Move { break_out: true, break_alt: Some(alt), .. }] if alt.end != AltEnd::Loop)
+}
+
+/// The way out of a labeled block (as a BreakAlt: a `break 'blk`, or
+/// the block's last expression) that carries the column `hash`, or a
+/// field of it, out of the block it is declared in, as the last thing
+/// that happens to it (#1288); None for a loop's `break`.
+/// With the field carried out, when it is one (`g.name` for `g`).
+fn broken_out_of_block(visualization_data: &VisualizationData, hash: u64) -> Option<(BreakAlt, Option<String>)> {
+    let alt_in = |t: &Timeline| t.history.iter().rev()
+        .find(|(_, e)| !matches!(e, Event::OwnerGoOutOfScope { .. }))
+        .and_then(|(_, e)| match e {
+            Event::Move { break_out: true, break_alt: Some(alt), .. } if alt.end != AltEnd::Loop =>
+                Some((alt.clone(), Some(t.resource_access_point.name().clone()))),
+            _ => None,
+        });
+    let t = visualization_data.timelines.get(&hash)?;
+    if let Some((alt, _)) = alt_in(t) {
+        return Some((alt, None));
+    }
+    let rap @ ResourceAccessPoint::Struct(Struct { owner, .. }) = &t.resource_access_point else { return None };
+    let root = if rap.is_member() { *owner } else { hash };
+    let prefix = format!("{}.", rap.name());
+    let mut fields: Vec<&Timeline> = visualization_data.timelines.values().filter(|f| matches!(&f.resource_access_point,
+        ResourceAccessPoint::Struct(Struct { is_member: true, owner, name, .. }) if *owner == root && name.starts_with(&prefix))).collect();
+    fields.sort_by_key(|f| f.resource_access_point.name().clone());
+    fields.into_iter().find_map(alt_in)
+}
+
 fn holds_resource_at_scope_end(timeline: &Timeline) -> bool {
     let penultimate_state = timeline
         .states
@@ -4591,7 +4689,7 @@ fn struct_partial_move_split(
         // yet. (A Copy field has no drop to tell: it holds its value.)
         let holds = match exit {
             Some(at) if !is_copy => dropped_at_exit(&timeline.history, at),
-            _ => holds_resource_at_scope_end(timeline),
+            _ => holds_resource_at_scope_end(timeline) || moved_only_by_block_break(&timeline.history),
         };
         if !holds {
             // A Copy part of a Box's payload moved out with all of it
@@ -6573,6 +6671,10 @@ fn arrow_is_undrawn(external_event: &ExternalEvent, from: &ResourceTy, to: &Reso
         // arrow out of the collection's column: #438.)
         (ResourceTy::Index(..), _)
             if matches!(external_event, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. }) => return true,
+        // A holder of a `&mut` parameter moved into it (`Box::new(r)`,
+        // #1289) borrows the caller's data, which has no column.
+        (ResourceTy::Caller, _)
+            if matches!(external_event, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }) => return true,
         (_, ResourceTy::Index(..))
             if matches!(external_event, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }) => return true,
         _ => {}
@@ -8349,6 +8451,34 @@ fn elems_moved_before(history: &[(usize, Event)], line: usize, in_branch: bool) 
         }
     }
     (moved, maybe)
+}
+
+/// For an array slice patterns move elements out of
+/// (`Owner::elems_left`): the elements surely moved by the scope end (by
+/// moves outside any conditional), those moved only in some branches,
+/// and those left in it.
+fn elems_split(history: &[(usize, Event)], el: &ElemsLeft) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut moved: Vec<String> = Vec::new();
+    for (_, e) in history {
+        if let Event::Move { is: ResourceTy::Index(_, place, _), .. } = e {
+            if !place.starts_with('*') {
+                moved.extend(place_elem_names(place).into_iter().filter(|n| !moved.contains(n)).collect::<Vec<_>>());
+            }
+        }
+    }
+    let mut maybe: Vec<String> = Vec::new();
+    let (all_moved, _) = elems_moved_before(history, usize::MAX, false);
+    for p in all_moved.iter().flat_map(|p| place_elem_names(p)) {
+        if !moved.contains(&p) && !maybe.contains(&p) {
+            maybe.push(p);
+        }
+    }
+    let all = el.all();
+    let order = |v: &mut Vec<String>| v.sort_by_key(|n| all.iter().position(|a| a == n));
+    order(&mut moved);
+    order(&mut maybe);
+    let left = all.iter().filter(|n| !moved.contains(n) && !maybe.contains(n)).cloned().collect();
+    (moved, maybe, left)
 }
 
 /// See `parts_moved_at`.

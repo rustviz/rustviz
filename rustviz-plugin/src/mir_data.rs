@@ -121,7 +121,7 @@ impl<'tcx> Visitor<'tcx> for BoxContentsMoves {
 /// out one by one (`move _1[0 of 2]`, `move _1[1..2]`), and whether the
 /// whole array is moved or assigned somewhere (then the elements' fate
 /// isn't one fixed set).
-struct ArrayElemMoves { local: Local, len: u64, moved: BTreeSet<u64>, whole: bool, assigns: usize }
+struct ArrayElemMoves { local: Local, len: u64, moved: BTreeSet<u64>, whole: bool, assigns: usize, at: Vec<(Location, u64)> }
 
 impl<'tcx> Visitor<'tcx> for ArrayElemMoves {
     fn visit_operand(&mut self, op: &Operand<'tcx>, loc: Location) {
@@ -130,11 +130,14 @@ impl<'tcx> Visitor<'tcx> for ArrayElemMoves {
                 match place.projection.first() {
                     None => self.whole = true,
                     Some(ProjectionElem::ConstantIndex { offset, from_end, .. }) => {
-                        self.moved.insert(if *from_end { self.len.saturating_sub(*offset) } else { *offset });
+                        let i = if *from_end { self.len.saturating_sub(*offset) } else { *offset };
+                        self.moved.insert(i);
+                        self.at.push((loc, i));
                     }
                     Some(ProjectionElem::Subslice { from, to, from_end }) => {
                         let end = if *from_end { self.len.saturating_sub(*to) } else { *to };
                         self.moved.extend(*from..end);
+                        self.at.extend((*from..end).map(|i| (loc, i)));
                     }
                     _ => {}
                 }
@@ -155,8 +158,11 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     /// patterns move some elements out but leave others (`let [a, _] =
     /// arr;`, `[first, ..] =>`): which elements are moved and which are
     /// left in it and dropped at its scope end (#1144, #1166). None if
-    /// every element is moved, none is, or the array is also moved or
-    /// assigned as a whole.
+    /// none is moved, or the array is also moved or assigned as a whole,
+    /// or one pattern moves every element (`let [a, b] = arr;`: a move
+    /// of all of it). Several patterns that together move every element
+    /// (`let [a, _] = arr; let [_, b] = arr;`, #1302) leave nothing in
+    /// it: `ElemsLeft::last` names the elements whose move empties it.
     pub fn array_elems_left(&self, name: &str, ty: Ty<'tcx>) -> Option<crate::svg_generator::data::ElemsLeft> {
         let TyKind::Array(elem, len) = ty.kind() else { return None };
         let len = len.try_to_target_usize(self.tcx)?;
@@ -166,15 +172,36 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let names = self.mir_local_names(self.bwf);
         #[expect(clippy::disallowed_methods, reason = "a name is bound to one local; min() makes order irrelevant")]
         let local = names.iter().filter(|(_, n)| n.as_str() == name).map(|(l, _)| *l).min()?;
-        let mut v = ArrayElemMoves { local, len, moved: BTreeSet::new(), whole: false, assigns: 0 };
+        let mut v = ArrayElemMoves { local, len, moved: BTreeSet::new(), whole: false, assigns: 0, at: Vec::new() };
         v.visit_body(&self.bwf.body);
-        if v.whole || v.assigns > 1 || v.moved.is_empty() || v.moved.len() as u64 >= len {
+        if v.whole || v.assigns > 1 || v.moved.is_empty() {
             return None;
         }
         let elem_name = |i: u64| format!("{}[{}]", name, i);
+        let mut last = Vec::new();
+        if v.moved.len() as u64 >= len {
+            // Every element is moved, by patterns on more than one line
+            // (else it is one pattern taking all of it). The array is
+            // empty once the last of them has run: the moves on the last
+            // line, if every other move comes before them on every path
+            // to them (in a `match`'s arms, no move empties it).
+            let body = &self.bwf.body;
+            let line_of = |l: Location| span_to_line(&self.location_to_span(l, self.bwf), &self.tcx);
+            let lines: BTreeSet<usize> = v.at.iter().map(|(l, _)| line_of(*l)).collect();
+            let last_line = *lines.last()?;
+            if lines.len() < 2 {
+                return None;
+            }
+            let doms = body.basic_blocks.dominators();
+            let (tail, rest): (Vec<_>, Vec<_>) = v.at.iter().partition(|(l, _)| line_of(*l) == last_line);
+            if rest.iter().all(|(r, _)| tail.iter().all(|(t, _)| r.dominates(*t, doms))) {
+                last = tail.iter().map(|(_, i)| *i).collect::<BTreeSet<u64>>().into_iter().map(elem_name).collect();
+            }
+        }
         Some(crate::svg_generator::data::ElemsLeft {
             moved: v.moved.iter().map(|&i| elem_name(i)).collect(),
             left: (0..len).filter(|i| !v.moved.contains(i)).map(elem_name).collect(),
+            last,
         })
     }
 

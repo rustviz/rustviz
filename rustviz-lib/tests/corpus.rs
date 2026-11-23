@@ -23521,8 +23521,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // scope end also didn't say the borrowed data isn't dropped),
         // in an `if` arm, through a generic `wrap(r8) -> Box<T>`. A
         // shared reference (`k3.len()`) reads through the Box the same
-        // way. (`param`: r9's loan from the caller goes on in k9, which
-        // RustViz doesn't draw yet, #1289; only the push text is pinned.)
+        // way. (`param`: r9's loan from the caller goes on in k9 until
+        // its last use, the push, #1289.)
         must_contain: &[
             "the resource *k1 points to is mutably borrowed by push through k1; k1 can't be used while the borrow is live",
             "push reads and writes through k1 (mutable reborrow — k1 can't be used until push returns)",
@@ -23540,6 +23540,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the resource *k8 points to is mutably borrowed by push through k8; k8 can't be used while the borrow is live",
             "k8 goes out of scope. Its resource is dropped, but not the data it borrowed.",
             "the resource *k9 points to is mutably borrowed by push through k9; k9 can't be used while the borrow is live",
+            "k9's value holds the reference moved into it, so k9 mutably borrows the caller's data (k9 isn't a reference itself)",
+            "k9's mutable borrow ends",
+            "k9 goes out of scope. Its resource is dropped, but not the data it borrowed.",
             "the resource p10.f points to is mutably borrowed by push through p10.f; p10.f can't be used while the borrow is live",
         ],
         must_not_contain: &[
@@ -23557,6 +23560,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "k8's resource is mutably borrowed by push",
             "k8 goes out of scope. No resource is dropped.",
             "k9's resource is mutably borrowed by push",
+            "r9's mutable borrow ends",
         ],
     },
     TooltipExpect {
@@ -23731,6 +23735,154 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "a reference from y is returned to the caller; the data it points to is not copied",
         ],
         must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "block_break_local_1288",
+        // #1288: `break 'blk k` with k (or g, whose field it carries)
+        // declared inside the labeled block. The block's other way out
+        // drops it as the block ends; the `break` moves it out instead.
+        // main said "Its resource is dropped." unconditionally, a drop
+        // flag (and "can't be used after the block") for g.name / t.0,
+        // nothing for a block that is the fn's value, "No resource is
+        // dropped." for y, which the `break` path drops, and drew m
+        // `State::Invalid`.
+        must_contain: &[
+            "k's resource is moved to r if the block ended with break 'blk k",
+            "k goes out of scope. Its resource is dropped as the block ends, unless the block ended with break 'blk k",
+            "g.name's resource is moved to r if the block ended with break 'blk g.name",
+            "g.name goes out of scope. Its resource is dropped as the block ends, unless the block ended with break 'blk g.name",
+            "g goes out of scope. Its resource is dropped as the block ends (if the block ended with break 'blk g.name, that moved g.name out first, and only the rest of g is dropped)",
+            "g.bio goes out of scope. Its resource is dropped.",
+            "t.0's resource is moved to r if the block ended with break 'blk t.0",
+            "t goes out of scope. Its resource is dropped as the block ends (if the block ended with break 'blk t.0, that moved t.0 out first, and only the rest of t is dropped)",
+            "a goes out of scope. Its resource is dropped as the block ends, unless the block ended with break 'blk a",
+            "v's resource is moved to the caller if the block ended with break 'blk v",
+            "v goes out of scope. Its resource is dropped as the block ends, unless the block ended with break 'blk v",
+            "m goes out of scope. No resource is dropped: on the way to the block's end, m was moved above.",
+            "x goes out of scope. Its resource is dropped as the block ends, unless the block ended with break 'blk x",
+            "y's resource is moved to r if the block ended with its last expression, y",
+            "y goes out of scope. Its resource is dropped as the block ends, unless the block ended with its last expression, y",
+        ],
+        must_not_contain: &[
+            "=k goes out of scope. Its resource is dropped.",
+            "=a goes out of scope. Its resource is dropped.",
+            "=v goes out of scope. Its resource is dropped.",
+            "=x goes out of scope. Its resource is dropped.",
+            "=y goes out of scope. No resource is dropped.",
+            "g.name may have been moved",
+            "t.0 may have been moved",
+            "g.name was moved out in at least one branch above",
+            "t.0 was moved out in at least one branch above",
+            "runtime drop flag",
+        ],
+    },
+    TooltipExpect {
+        name: "mut_ref_param_into_holder_1289",
+        // #1289: a `&mut` parameter moved into a value that keeps its
+        // borrow (`Some(r)`, `vec![r]`, `Box::new(r)`, `id(Some(r))`): k
+        // holds the caller's borrow until its last use, and r, moved, has
+        // no borrow left to end. main ended r's borrow at the move, drew
+        // k holding none, and lent r to k after moving it for `vec![r]`
+        // (`State::Invalid`).
+        must_contain: &[
+            "r's mutable reference is moved (not the resource it points to)",
+            "the reference r held is moved into k's value, so k now holds its borrow",
+            "k's value holds the reference moved into it, so k mutably borrows the caller's data (k isn't a reference itself)",
+            "k's mutable borrow ends",
+            "k goes out of scope. Its resource is dropped, but not the data it borrowed.",
+            // `k.push('!')` with k a `Box<&mut String>` writes through the
+            // reference in the Box (#1282).
+            "the resource *k points to is mutably borrowed by push through k; k can't be used while the borrow is live",
+        ],
+        must_not_contain: &[
+            "r's mutable borrow ends",
+            "k's resource is mutably borrowed by push",
+            "k goes out of scope. No resource is dropped.",
+            "the resource r points to is mutably borrowed by k through r",
+            "k no longer borrows the resource r points to",
+        ],
+    },
+    TooltipExpect {
+        name: "plain_literal_moves_1301",
+        // #1301: a non-Copy struct with nothing to drop put in a literal
+        // nothing takes (`let _ = (p, 5);`, `[q]`, `W { p: u }`, `_ = (v,
+        // 5);`, `(w, 5);`) is moved into it. main drew nothing on p.
+        // `let _ = y;` moves nothing, and t is Copy.
+        must_contain: &[
+            "p's value is moved into a temporary that is discarded at the end of this statement (it has nothing to drop)",
+            "p.a's value is moved",
+            "q's value is moved into a temporary that is discarded at the end of this statement (it has nothing to drop)",
+            "u's value is moved into a temporary that is discarded at the end of this statement (it has nothing to drop)",
+            "v's value is moved into a temporary that is discarded at the end of this statement (it has nothing to drop)",
+            "w's value is moved into a temporary that is discarded at the end of this statement (it has nothing to drop)",
+            "x's value is moved into a temporary that is discarded at the end of this statement (it has nothing to drop)",
+        ],
+        must_not_contain: &[
+            "y's value is moved",
+            "t's value is moved",
+            "p's resource",
+        ],
+    },
+    TooltipExpect {
+        name: "slice_patterns_all_elems_1302",
+        // #1302: slice patterns on several lines that together take every
+        // element. Each moves only its own; the last leaves the array
+        // empty. main drew whole-array moves (the second on a column with
+        // no value, `State::Invalid`), and for the `match` arms, which
+        // take different elements, "No resource is dropped: am was moved
+        // or dropped in every branch above" though each arm leaves one.
+        must_contain: &[
+            "arr[0]'s resource is moved",
+            "arr[1]'s resource is moved; nothing is left in arr",
+            "arr is partially moved: arr[0] was moved out, so arr can't be used as a whole; arr[1] is still in it",
+            "arr goes out of scope. arr[0] and arr[1] were moved out earlier, so no resource is dropped.",
+            "tri is partially moved: tri[0] was moved out, so tri can't be used as a whole; tri[1] and tri[2] are still in it",
+            "tri[2]'s resource is moved; nothing is left in tri",
+            "rs[1..3]'s resource is moved; nothing is left in rs",
+            "st is partially moved: st[0] and st[1] were moved out, so st can't be used as a whole; st[2] is still in it",
+            "st[2]'s resource is moved; nothing is left in st",
+            // The `if` after `let [a, _] = br;` splits br's column at a dot
+            // (br[1] is still in it).
+            "br is live in a conditional expression ",
+            "br[1] may have been moved out of br in a branch above, so br can't be used as a whole",
+            "br goes out of scope. br[0] was moved out earlier. br[1] was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "am goes out of scope. am[0] and am[1] were moved out in some of the branches above; each is dropped here only if no branch above moved it (Rust tracks this with runtime drop flags).",
+            "pa[1]'s resource is moved; nothing is left in pa",
+        ],
+        must_not_contain: &[
+            "arr's resource is moved",
+            "tri's resource is moved",
+            "st's resource is moved",
+            "am's resource is moved",
+            "=Move from arr to b",
+            "am was moved or dropped in every branch above",
+            "br was moved in at least one branch above",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_literal_ref_unused_1310",
+        // #1310: a reference field given a copy of another reference in
+        // a literal the program never uses again: the borrow ends at the
+        // literal (the struct has no Drop impl), and so does n's loan.
+        // main drew i.p's borrow, and n borrowed, to the end of the fn.
+        // With `impl Drop` (h) it does last to the scope end.
+        must_contain: &[
+            "i.p is initialized with a copy of first",
+            "i.p's immutable borrow ends",
+            "t.0's immutable borrow ends",
+            "i5.p's immutable borrow ends",
+            "j6.p's immutable borrow ends",
+            "Return immutably borrowed resource from first to n",
+            "n's resource is no longer immutably borrowed",
+            "n goes out of scope. Its resource is dropped.",
+            "Return immutably borrowed resource from h.p to n3",
+        ],
+        // (Where the borrows end is pinned by
+        // `unused_struct_literal_ends_its_field_borrow`.)
+        must_not_contain: &[
+            "Return immutably borrowed resource from j6.p to n6",
+            "Return immutably borrowed resource from i6.p to n6",
+        ],
     },
 ];
 
@@ -24848,6 +25000,32 @@ fn line_state_at(svg: &str, var: &str, row: usize) -> Option<String> {
         }
     }
     None
+}
+
+/// #1310: a struct (or tuple) literal whose reference field holds a copy of
+/// another reference, never used again, gives the borrow back at the
+/// literal when it has no Drop impl: the lender is no longer borrowed on
+/// the next row, and the field's line stops there. main drew both to the
+/// end of the fn. With `impl Drop` (h), dropping it uses the borrow, so
+/// it lasts to the scope end.
+#[test]
+fn unused_struct_literal_ends_its_field_borrow() {
+    let name = "struct_literal_ref_unused_1310";
+    let rv = run_with_local_backend(name);
+    let svg = rv.timeline_panel_string();
+    let cases: &[(&str, usize, Option<&str>)] = &[
+        ("n", 20, Some("full_privilege")),
+        ("i.p", 20, None),
+        ("n3", 34, Some("partial_privilege")),
+        ("h.p", 34, Some("partial_privilege")),
+        ("n4", 41, Some("full_privilege")),
+        ("t.0", 41, None),
+        ("n5", 49, Some("full_privilege")),
+        ("i5.p", 49, None),
+    ];
+    for (var, row, want) in cases {
+        assert_eq!(line_state_at(&svg, var, *row).as_deref(), *want, "{}: {}'s line from row {}", name, var, row);
+    }
 }
 
 /// A struct or tuple borrowed as a whole lends every field (#1130,

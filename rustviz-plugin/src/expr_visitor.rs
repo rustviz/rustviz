@@ -6227,6 +6227,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       self.mark_holder(name);
       return;
     }
+    if lenders.is_empty() && self.moves_mut_ref_param_in(init) {
+      // `let k = Some(r);`, `Box::new(r)`, `vec![r]` with r a `&mut`
+      // parameter (#1289): k holds r's reference, which borrows the
+      // caller's data. That has no column here: k's borrow comes from
+      // nothing drawn, as for `let r2 = id(r);` (#1205).
+      lenders.push(ResourceTy::Caller);
+    }
     if lenders.is_empty() {
       // `let mut refs = Vec::new();` that a later `refs.push(&s)`
       // fills with borrows (#392): a holder from the start, with no
@@ -6264,6 +6271,35 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       co_lenders: lenders,
       lender_muts,
     });
+  }
+
+  /// Whether `init` moves a `&mut` parameter into the value it builds
+  /// (`Some(r)`, `Box::new(r)`, `vec![r]`, `[r]`, `id(Some(r))`: no
+  /// reborrow, see `mut_ref_param_moved_into_call`).
+  pub fn moves_mut_ref_param_in(&self, init: &'tcx Expr<'tcx>) -> bool {
+    let mut found = Vec::new();
+    self.mut_ref_params_moved_in(init, &mut found);
+    !found.is_empty()
+  }
+
+  /// The `&mut` parameters `e` moves into the value it builds (see
+  /// `moves_mut_ref_param_in`).
+  pub fn mut_ref_params_moved_in(&self, e: &'tcx Expr<'tcx>, out: &mut Vec<&'tcx Expr<'tcx>>) {
+    if self.mut_ref_param_moved_into_call(e) {
+      out.push(e);
+      return;
+    }
+    let inner: Vec<&'tcx Expr<'tcx>> = match e.kind {
+      ExprKind::Call(_, args) => args.iter().collect(),
+      ExprKind::MethodCall(_, rcvr, args, _) => std::iter::once(rcvr).chain(args.iter()).collect(),
+      ExprKind::Array(elems) | ExprKind::Tup(elems) => elems.iter().collect(),
+      ExprKind::DropTemps(x) => vec![x],
+      ExprKind::Block(b, _) => b.expr.into_iter().collect(),
+      _ => Vec::new(),
+    };
+    for x in inner {
+      self.mut_ref_params_moved_in(x, out);
+    }
   }
 
   /// The lenders `holder_lenders` found for the value a call returns
@@ -9355,15 +9391,35 @@ pub fn match_rhs_call(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
   }
   // `let r2 = id(r);` with r a `&mut` parameter moved into the call:
   // r2 holds r's reference now, so r's borrow doesn't end at the move
-  // (#1205).
+  // (#1205). So does a value that holds it (`let k = Some(r);`, `let k =
+  // Box::new(r);`, #1289).
   if let ExprKind::Call(_, args) = rhs.kind {
-    if matches!(&lhs, ResourceTy::Value(l) if l.is_ref()) {
-      let moved: Vec<ResourceTy> = args.iter()
-        .filter(|a| self.mut_ref_param_moved_into_call(a))
+    if matches!(&lhs, ResourceTy::Value(l) if l.is_ref() || l.holds_borrow()) {
+      let mut found = Vec::new();
+      for a in args {
+        self.mut_ref_params_moved_in(a, &mut found);
+      }
+      let moved: Vec<ResourceTy> = found.into_iter()
         .filter_map(|a| expr_to_rap_name(a, &self.tcx).and_then(|n| self.raps.get(&n)).map(|rd| ResourceTy::Value(rd.rap.to_owned())))
         .collect();
       if !moved.is_empty() {
         self.mark_borrow_kept_by_result(rhs, &moved);
+        // A value built by a call (`Box::new(r)`, `id(Some(r))`) that
+        // holds the reference: say so on its column, as a borrow of
+        // the caller's data (no column here). (A constructor, `Some(r)`,
+        // draws r's move into it instead.)
+        if matches!(&lhs, ResourceTy::Value(l) if !l.is_ref() && l.holds_borrow())
+          && !crate::visitor::is_ctor_path(fn_expr, self.tcx.typeck(rhs.hir_id.owner)) {
+          // The value comes from the call, then the borrow it holds.
+          if let Some(f) = hirid_to_var_name(fn_expr.hir_id, &self.tcx)
+            .and_then(|n| self.raps.get(&fn_key(&n)).map(|rd| rd.rap.to_owned())) {
+            self.add_ev(line_num, Evt::Move, lhs.clone(), ResourceTy::Value(f), false);
+          }
+          let id = *self.unique_id;
+          self.add_external_event(line_num, ExternalEvent::MutableBorrow { from: ResourceTy::Caller, to: lhs.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: None, id, of_ref_var: false });
+          *self.unique_id += 1;
+          return;
+        }
       }
     }
   }
@@ -10045,6 +10101,34 @@ pub fn print_out_of_scope(&mut self){
     for (name, last) in field_ends {
       if let Some(rd) = self.borrow_map.get_mut(&name) {
         rd.lifetime = rd.lifetime.max(last);
+      }
+    }
+    // A struct's (or tuple's) reference field given a copy of another
+    // reference (`Excerpt { p: first }`, `(first, 1)`) holds no loan of
+    // its own: its line starts out reaching the struct's scope end
+    // (`register_struct_members`). The borrow it holds is live only
+    // while the struct is: up to its last use, or to its drop when
+    // that drop may use the borrow (an `impl Drop`). A struct never
+    // used again gives it back at the literal (#1310).
+    let mut member_ends: Vec<(String, usize)> = Vec::new();
+    #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "collected into a Vec, each entry lowered on its own")]
+    for (name, rd) in self.borrow_map.iter() {
+      if !self.raps.get(name).is_some_and(|r| r.rap.is_ref() && r.rap.is_member())
+        || matches!(rd.lender, ResourceTy::Caller | ResourceTy::Anonymous)
+        || self.pattern_copies.contains(name)
+        || mir_b_data.iter().any(|m| ExprVisitor::borrow_span_match(rd, m) || ExprVisitor::borrow_match(rd, m).is_some()) {
+        continue;
+      }
+      let Some((root, _)) = name.split_once('.') else { continue };
+      let live = self.last_live_line(root, (rd.assigned_at, usize::MAX)).unwrap_or(rd.assigned_at)
+        .max(self.last_drop_use_line(root).unwrap_or(rd.assigned_at));
+      if live < rd.lifetime {
+        member_ends.push((name.clone(), live.max(rd.assigned_at)));
+      }
+    }
+    for (name, end) in member_ends {
+      if let Some(rd) = self.borrow_map.get_mut(&name) {
+        rd.lifetime = end;
       }
     }
     // A holder whose drop may use the borrow it holds (`let m =

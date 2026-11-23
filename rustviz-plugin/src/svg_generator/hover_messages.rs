@@ -1260,6 +1260,12 @@ pub fn event_dot_move_to(my_name: &String, holds_value: bool) -> String {
     format!("{0}'s {1} is moved", styled_name_html(my_name), held(holds_value))
 }
 
+// `let [_, b] = arr;` after `let [a, _] = arr;` (#1302): the move of the
+// last element(s) still in the array; nothing is left in it.
+pub fn event_dot_move_last_elems(place: &String, arr: &String, holds_value: bool) -> String {
+    format!("{0}'s {1} is moved; nothing is left in {2}", styled_name_html(place), held(holds_value), styled_name_html(arr))
+}
+
 // Source dot for the head of a `for` loop that is moved into the
 // iterator `IntoIterator::into_iter` builds from it (`for s in v`, `v:
 // Vec<String>`), when that iterator has drop glue (#482). Its drop is
@@ -1381,6 +1387,16 @@ pub fn event_dot_move_to_temporary(my_name: &String, extended: bool) -> String {
         "{0}'s resource is moved into a temporary that is dropped at the end of {1}",
         styled_name_html(my_name),
         if extended { "the block (a `ref` binding borrows from it)" } else { "this statement" }
+    )
+}
+
+// `let _ = (p, 5);` with `p: P { a: i32 }` (#1301): p is moved into the
+// tuple, which has nothing to drop and is discarded at the end of the
+// statement.
+pub fn event_dot_move_value_to_temporary(my_name: &String) -> String {
+    format!(
+        "{0}'s value is moved into a temporary that is discarded at the end of this statement (it has nothing to drop)",
+        styled_name_html(my_name)
     )
 }
 
@@ -3142,9 +3158,14 @@ pub fn state_elems_moved(my_name: &String, moved: &[String], left: &[String], ma
         (true, false) => "were",
         (false, false) => "was",
     };
+    let rest = if left.is_empty() {
+        String::new()
+    } else {
+        format!("; {} {} still in it", list(left), if left.len() > 1 { "are" } else { "is" })
+    };
     format!(
-        "{0} is partially moved: {1} {2} moved out, so {0} can't be used as a whole; {3} {4} still in it",
-        styled_name_html(my_name), list(moved), verb, list(left), if left.len() > 1 { "are" } else { "is" }
+        "{0} is partially moved: {1} {2} moved out, so {0} can't be used as a whole{3}",
+        styled_name_html(my_name), list(moved), verb, rest
     )
 }
 
@@ -3251,6 +3272,16 @@ pub fn event_dot_holder_borrow(my_name: &String, from_name: &String, is_mut: boo
         styled_name_html(my_name),
         if is_mut { "mutably" } else { "immutably" },
         what
+    )
+}
+
+// `let k = Box::new(r);` with r a `&mut` parameter (#1289): k's value
+// holds the reference r held, which borrows the caller's data (no
+// column in this fn).
+pub fn event_dot_holder_borrow_caller(my_name: &String) -> String {
+    format!(
+        "{0}'s value holds the reference moved into it, so {0} mutably borrows the caller's data ({0} isn't a reference itself)",
+        styled_name_html(my_name)
     )
 }
 
@@ -3631,9 +3662,14 @@ pub fn event_dot_branch_merge_elems_moved(my_name: &String, moved: &[String], le
             _ => fmt.concat(),
         }
     };
+    let rest = if left.is_empty() {
+        String::new()
+    } else {
+        format!("; {} {} still in it", list(left), if left.len() > 1 { "are" } else { "is" })
+    };
     format!(
-        "{1} may have been moved out of {0} in a branch above, so {0} can't be used as a whole; {2} {3} still in it",
-        styled_name_html(my_name), list(moved), list(left), if left.len() > 1 { "are" } else { "is" }
+        "{1} may have been moved out of {0} in a branch above, so {0} can't be used as a whole{2}",
+        styled_name_html(my_name), list(moved), rest
     )
 }
 
@@ -4259,6 +4295,41 @@ pub fn event_dot_break_out_go_out_of_scope(my_name: &String) -> String {
     format!(
         "{0} goes out of scope. Its resource is dropped here on every iteration that doesn't end the loop.",
         styled_name_html(my_name)
+    )
+}
+
+// The same at the end of a labeled block (#1288): `'blk: { let k = ..;
+// if c { break 'blk k; } .. }`. Leaving the block through that `break`
+// moves k (or a field of it) out; reaching the block's end drops it.
+pub fn event_dot_block_break_out_go_out_of_scope(my_name: &String, alt: &crate::svg_generator::data::BreakAlt) -> String {
+    format!(
+        "{0} goes out of scope. Its resource is dropped as the block ends, unless the block ended with {1}",
+        styled_name_html(my_name), alt_how(alt)
+    )
+}
+
+// The struct a field of which such a way out carries out (`break 'blk
+// g.name`): that way drops the rest of it as it leaves the block.
+pub fn event_dot_block_break_out_part_go_out_of_scope(my_name: &String, alt: &crate::svg_generator::data::BreakAlt, part: &String) -> String {
+    format!(
+        "{0} goes out of scope. Its resource is dropped as the block ends (if the block ended with {1}, that moved {2} out first, and only the rest of {0} is dropped)",
+        styled_name_html(my_name), alt_how(alt), styled_name_html(part)
+    )
+}
+
+pub fn event_dot_block_break_out_go_out_of_scope_moved(my_name: &String) -> String {
+    format!(
+        "{0} goes out of scope. No resource is dropped: on the way to the block's end, {0} was moved above.",
+        styled_name_html(my_name)
+    )
+}
+
+pub fn event_dot_block_break_out_go_out_of_scope_maybe_moved(my_name: &String, note: &str, alt: &crate::svg_generator::data::BreakAlt) -> String {
+    let (holds, rest) = split_drop_note(note);
+    format!(
+        "{0} goes out of scope. Unless the block ended with {3}, its resource{1} is dropped{2} as the block ends \
+         only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        styled_name_html(my_name), holds, rest, alt_how(alt)
     )
 }
 
@@ -5348,7 +5419,8 @@ pub fn event_dot_break_alt_move_to_caller(my_name: &String, alt: &crate::svg_gen
     } else {
         format!("{0}'s {1}", name, what)
     };
-    format!("{0} is moved to the caller if the loop ended with {1}", moved, quoted_break(&alt.brk))
+    // (Or a labeled block, #1288.)
+    format!("{0} is moved to the caller if the {1} ended with {2}", moved, alt_noun(alt), alt_how(alt))
 }
 
 // `f()` of a closure rustc inferred to be `FnOnce` (#271): `f` is

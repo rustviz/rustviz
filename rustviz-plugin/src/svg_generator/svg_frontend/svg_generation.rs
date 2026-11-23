@@ -139,13 +139,35 @@ fn drop_with_lender_return(drop: &ExternalEvent, die: &ExternalEvent) -> bool {
 
 /// Whether `die` is the end (`RefDie`) of the borrow of the reference
 /// that the arrow `arrow` copies or moves a new value into.
-fn ref_die_before_arrow(die: &ExternalEvent, arrow: &ExternalEvent) -> bool {
+/// `first_lines`: the first line each column has an event on. A
+/// reference given its first value by the arrow (`j.p` in `let j =
+/// Excerpt { p: i.p };`) has no old value: an end of its borrow on that
+/// line is of the new one, after the arrow (#1310).
+fn ref_die_before_arrow(die: &ExternalEvent, arrow: &ExternalEvent, line: usize, first_lines: &HashMap<u64, usize>) -> bool {
     let ExternalEvent::RefDie { from, .. } = die else { return false };
     if !matches!(arrow, ExternalEvent::Copy { .. } | ExternalEvent::Move { .. }) {
         return false;
     }
     let (Some(r), Some(dest)) = (from.extract_rap(), ResourceAccessPoint_extract(arrow).1.extract_rap()) else { return false };
-    r.hash() == dest.hash()
+    r.hash() == dest.hash() && first_lines.get(dest.hash()) != Some(&line)
+}
+
+/// The first line each column (by RAP hash) has an event on, in
+/// `events` and the branches in them.
+fn first_event_lines(events: &[(usize, ExternalEvent)], out: &mut HashMap<u64, usize>) {
+    for (line, e) in events {
+        if let ExternalEvent::Branch { branches, .. } = e {
+            for b in branches {
+                first_event_lines(&b.e_data, out);
+            }
+            continue;
+        }
+        let (from, to) = ResourceAccessPoint_extract(e);
+        for r in [from, to].into_iter().filter_map(|r| r.extract_rap()) {
+            let first = out.entry(*r.hash()).or_insert(*line);
+            *first = (*first).min(*line);
+        }
+    }
 }
 
 /// The hash of the reference whose borrow `e` ends, if it is a
@@ -1227,6 +1249,8 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
     // Borrow ends held back until the rest of their source line has been
     // appended (see `ends_after_line_uses`): (source line, event, row).
     let mut deferred_ends: Vec<(usize, ExternalEvent, usize)> = Vec::new();
+    let mut first_lines: HashMap<u64, usize> = HashMap::new();
+    first_event_lines(&visualization_data.preprocess_external_events, &mut first_lines);
     while i < size {
         // Append each held-back borrow end once its line has no event
         // left that uses the reference (so before the reference's own
@@ -1466,7 +1490,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                         // new value, on the arrow's row. Left in the
                         // line's sequence it was appended after the rows
                         // inserted for the stack, below the swap.
-                        for d in rest_of_line.iter().filter(|d| ref_die_before_arrow(d, e) || drop_before_new_borrow(d, e) || drop_with_lender_return(d, e)) {
+                        for d in rest_of_line.iter().filter(|d| ref_die_before_arrow(d, e, line_num, &first_lines) || drop_before_new_borrow(d, e) || drop_with_lender_return(d, e)) {
                             if skippable_ev.contains(&d.get_id()) {
                                 continue;
                             }

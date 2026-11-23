@@ -409,26 +409,27 @@ fn main() {
     );
 
     // emit_borrow_ends resolves i.p's transitive lender (n) and
-    // emits the matching return-of-borrow at end of scope.
+    // emits the matching return-of-borrow. i is never used again and
+    // Excerpt has no Drop impl, so that is at the literal, not at the
+    // end of the scope (#1310).
     assert!(
         timeline.contains("Return immutably borrowed resource from i.p to n"),
         "i.p didn't return its borrow to n"
     );
 
-    // Both ref-lines render with a real trapezoid range.
+    // Both ref-lines are drawn; first's spans a row (from `split` to the
+    // literal), i.p's only the literal's row (#1310).
     let lines = ref_line_paths(&timeline);
     assert!(
         lines.len() >= 2,
         "expected ref-lines for both first and i.p, got {}",
         lines.len()
     );
-    for d in &lines {
-        assert!(
-            ref_line_v(d) > 10.0,
-            "loan trapezoid collapsed: {:?}",
-            d
-        );
-    }
+    assert!(
+        lines.iter().any(|d| ref_line_v(d) > 10.0),
+        "first's loan trapezoid collapsed: {:?}",
+        lines
+    );
 
     // Struct bounding box around i + i.p is drawn.
     let raw = run(src).timeline_panel_string();

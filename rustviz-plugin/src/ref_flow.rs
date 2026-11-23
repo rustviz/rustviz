@@ -1009,6 +1009,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       rustc_hir::Node::Expr(p) => match p.kind {
         ExprKind::Call(_, args) => args.iter().any(|a| a.hir_id == e.hir_id),
         ExprKind::MethodCall(_, _, args, _) => args.iter().any(|a| a.hir_id == e.hir_id),
+        // An array element (`[r]`, what `vec![r]` expands to) is no
+        // coercion site either: r is moved in (#1289).
+        ExprKind::Array(_) => true,
         _ => false,
       },
       _ => false,
