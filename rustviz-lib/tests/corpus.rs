@@ -5862,8 +5862,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // The `IntoIter` the scrutinee builds outlives the pattern
             // match (#469): the `return` in the first branch drops it
             // (#410), and the `else` path drops it before the `else` block.
+            // Its column forks at the `if let`, one drop per path (#1360).
             "This temporary IntoIter<String> is dropped here, where `return` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary IntoIter<String> is dropped before the `else` block of this `if let` runs, or when the block it matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary IntoIter<String> is dropped before the `else` block of this `if let` runs: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "(temporary) is live in a conditional expression ",
         ],
         must_not_contain: &[
             "v is live in a conditional expression ",
@@ -5876,6 +5878,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "dropped at the end of the condition",
             // Stated once, with #410's wording.
             "is left early, while this temporary is still alive",
+            // One straight column with both drops on it, the else path's
+            // after the `return`'s (#1360).
+            "This temporary IntoIter<String> is dropped before the `else` block of this `if let` runs, or when the block it matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
         ],
     },
     TooltipExpect {
@@ -10187,12 +10192,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "This temporary IntoIter<String> is dropped at the end of each iteration of this `while let` loop: nothing bound it to a variable or moved it on. Its resource is dropped",
             "This temporary IntoIter<String> is dropped when the `for` loop ends: nothing bound it to a variable or moved it on. Its resource is dropped",
             "This temporary Vec<String> is dropped here, where `return` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary Vec<String> is dropped before the `else` block of this `if let` runs, or when the block it matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            // The `if let` scrutinee's column forks at the `if let` (#1360):
+            // one drop per path that reaches the `else` line.
+            "This temporary Vec<String> is dropped before the `else` block of this `if let` runs: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Vec<String> is dropped when the block of this `if let` ends (its pattern matched): nothing bound it to a variable or moved it on. Its resource is dropped",
             "This temporary (String, usize) is dropped here, where `return` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
         ],
         must_not_contain: &[
             // #469's own wording for the same drop, before #410 merged.
             "is left early, while this temporary is still alive",
+            // #1360: one straight column, the `return`'s drop and then this
+            // one on it.
+            "This temporary Vec<String> is dropped before the `else` block of this `if let` runs, or when the block it matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
             "(temporary) goes out of scope at the end of the block: a let borrowed it",
             "(temporary 2) goes out of scope at the end of the block: a let borrowed it",
         ],
@@ -20199,12 +20210,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the resource b points to is immutably borrowed by the `for` loop's iterator, through a copy of b, until the loop ends",
             "the `for` loop's iterator no longer borrows the resource b points to",
             "b's mutable reference is moved (not the resource it points to)",
-            "the resource b points to is modified through y",
             "q's resource is modified through y",
+            "q's resource is no longer mutably borrowed",
         ],
         must_not_contain: &[
             "zip no longer borrows the resource b points to",
             "chain no longer borrows the resource b points to",
+            // #1365: after the move, b's (and r's) column has ended; the
+            // loop's iterator holds the loan. These were drawn on it.
+            "the resource b points to is modified through y",
+            "b's mutable borrow ends",
+            "r's mutable borrow ends",
+            "Return mutably borrowed resource from r to q",
         ],
     },
     TooltipExpect {
@@ -20349,7 +20366,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the resource b points to is modified through x when x points into it (x points into the resource a or b points to)",
             "the resource d points to is modified through y",
             "*x acquires ownership of a new resource; its previous resource is dropped, when x points into the resource e points to (x points into the resource e or f points to)",
-            "*x acquires ownership of a new resource; its previous resource is dropped, when x points into the resource f points to (x points into the resource e or f points to)",
+            "*x acquires ownership of a new resource; its previous resource is dropped",
             "p's resource is modified through x when x points into it (x points into p's resource or q's value)",
             "q's value is modified through x when x points into it (x points into p's resource or q's value)",
         ],
@@ -20357,6 +20374,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=the resource a points to is modified through x",
             "=p's resource is modified through x",
             "the resource c points to is modified through",
+            // #1365: f was moved into the loop's iterator by `chain(f)`;
+            // its column ended there.
+            "*x acquires ownership of a new resource; its previous resource is dropped, when x points into the resource f points to (x points into the resource e or f points to)",
+            "f's mutable borrow ends",
         ],
     },
     // ─── A holder's scope end follows the resource rule (#484) ───────
@@ -21750,9 +21771,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "r3's mutable reference is moved (not the resource it points to)",
             "row's mutable reference is moved (not the resource it points to)",
             "h.hr's mutable reference is moved (not the resource it points to)",
-            "the resource h.hr points to is modified through e",
             "v's resource is modified through x",
-            "Return mutably borrowed resource from r1 to v",
+            // r1 moved into the loop's iterator, which gives v back where
+            // the loop ends (#1365).
+            "v's resource is no longer mutably borrowed",
             "t.names's resource is moved into the `for` loop's iterator",
             "n takes ownership of an element of t.names",
             "t.names goes out of scope. No resource is dropped.",
@@ -21770,6 +21792,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return mutably borrowed resource from z to row",
             "Return mutably borrowed resource from e to h.hr",
             "e no longer borrows the resource h.hr points to",
+            // #1365: drawn on the moved references' columns after the move.
+            "the resource h.hr points to is modified through e",
+            "the resource r2 points to is modified through y",
+            "Return mutably borrowed resource from r1 to v",
+            "r1's mutable borrow ends",
+            "r2's mutable borrow ends",
+            "r3's mutable borrow ends",
+            "row's mutable borrow ends",
+            "h.hr's mutable borrow ends",
             "t.names goes out of scope. Its resource is dropped",
             "pair.0 goes out of scope. Its resource is dropped",
             "self.names goes out of scope. Its resource is dropped",
@@ -24303,6 +24334,66 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // #1351.
         must_contain: &["Move from + to the caller"],
         must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "if_let_temp_exit_fork_1360",
+        // #1360: an `if let` scrutinee temporary that an exit in the
+        // matched block drops forks at the `if let` (and at the nested
+        // conditional the exit is in), one drop per path; the layout is
+        // pinned by `if_let_temporary_drops_once_per_path`. A `return` two
+        // levels down, or in an `if let` without `else`, wasn't stated at
+        // all, nor was the drop at a `?` in the block.
+        must_contain: &[
+            "This temporary Vec<String> is dropped here, where `return` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Vec<String> is dropped here, where `break` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Vec<String> is dropped before the `else` block of this `if let` runs: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Vec<String> is dropped when the block of this `if let` ends (its pattern matched): nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Vec<String> is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs): nothing bound it to a variable or moved it on. Its resource is dropped",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and (temporary)'s resource is dropped. If the `?` succeeds, nothing happens to (temporary) here.",
+            "(temporary) is live in a conditional expression ",
+        ],
+        must_not_contain: &[
+            // Each said both paths, on a column that also had the exit's
+            // drop on it.
+            "This temporary Vec<String> is dropped before the `else` block of this `if let` runs, or when the block it matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "(temporary) still has no value here",
+            "(temporary) may have no value after the branches",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/if_let_chain_temp_exit_fork_1360",
+        // #1360 in a let chain (see `if_let_temp_exit_fork_1360`).
+        must_contain: &[
+            "This temporary Vec<String> is dropped here, where `return` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Vec<String> is dropped before the `else` block of this `if` runs: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Vec<String> is dropped when the block its let chain matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "(temporary) is live in a conditional expression ",
+        ],
+        must_not_contain: &[
+            "This temporary Vec<String> is dropped before the `else` block of this `if` runs, or when the block its let chain matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "(temporary) still has no value here",
+        ],
+    },
+    TooltipExpect {
+        name: "mut_ref_moved_into_loop_1365",
+        // #1365: a `&mut` moved into a `for` loop's iterator (`zip(b)`,
+        // `for y in b`, `chain(b)`) had a write through the loop variable
+        // and its borrow's end drawn on its column after the move. The
+        // loop's iterator holds the loan; a lender with a column (w) is
+        // given back where the loop ends.
+        must_contain: &[
+            "b's mutable reference is moved (not the resource it points to)",
+            "the resource a points to is modified through y when y points into it (y points into the resource a or b points to)",
+            "w's resource is mutably borrowed by b; w can't be used while the borrow is live",
+            "w's resource is modified through y",
+            "w's resource is no longer mutably borrowed",
+        ],
+        must_not_contain: &[
+            "the resource b points to is modified through y",
+            "the resource b points to is modified through y when y points into it (y points into the resource a or b points to)",
+            "b's mutable borrow ends",
+            "Return mutably borrowed resource from b to w",
+        ],
     },
 ];
 
@@ -29882,7 +29973,8 @@ fn column_bottom(timeline: &str, hash: &str) -> f64 {
 /// branch and down to a join dot ("(temporary) isn't moved in any of
 /// the branches above"), its segments saying "(temporary) is the owner
 /// of the resource" there. Now nothing of the column is drawn below the
-/// drop, and it gets no join.
+/// drop, and it gets no join. (A conditional nested in the matched block
+/// that exits joins above that drop: the temporary forks there, #1360.)
 #[test]
 fn if_let_scrutinee_temporary_ends_at_its_else_drop() {
     for name in ["if_let_scrutinee_move", "temporary_drop_early_exit"] {
@@ -29897,6 +29989,7 @@ fn if_let_scrutinee_temporary_ends_at_its_else_drop() {
                 name, hash, bottom, y);
             let joins: Vec<String> = start_tags(&timeline, "circle").into_iter()
                 .filter(|t| attr(t, "data-hash") == Some(hash.as_str()))
+                .filter(|t| attr(t, "cy").and_then(|v| v.parse::<f64>().ok()).is_some_and(|cy| cy >= y))
                 .flat_map(|t| timeline_tooltips(&format!("{}>", t)))
                 .filter(|t| t.contains("branches above"))
                 .collect();
@@ -31585,7 +31678,9 @@ fn a_holder_overwrite_ends_the_old_borrow_before_the_new_one() {
 /// passed as it is to an adapter in a `for` head (`.zip(b)`, `.chain(b)`)
 /// stays borrowed by the loop's iterator until the loop's `}`: a `&T` is
 /// copied in, a `&mut` moved in, and writes through y are drawn on the
-/// column of what it writes into.
+/// column of what it writes into. A moved `&mut`'s column ends at the
+/// move (#1365): the write and the loan's end aren't drawn on it, and its
+/// lender, when it has a column, is borrowed by the iterator until then.
 #[test]
 fn ref_passed_into_an_adapter_stays_borrowed_until_the_loop_ends() {
     let rv = run_with_local_backend("ref_into_adapter_1076");
@@ -31603,13 +31698,10 @@ fn ref_passed_into_an_adapter_stays_borrowed_until_the_loop_ends() {
         ("b", zips[0], kept),
         ("b", closes[0], "the `for` loop's iterator no longer borrows the resource b points to"),
         ("b", zips[1], "b's mutable reference is moved (not the resource it points to)"),
-        ("b", writes[0], "the resource b points to is modified through y"),
-        ("b", closes[2], "b's mutable borrow ends"),
         ("b", chain, kept),
         ("b", closes[4], "the `for` loop's iterator no longer borrows the resource b points to"),
         ("q", writes[1], "q's resource is modified through y"),
         ("q", closes[6], "q's resource is no longer mutably borrowed"),
-        ("r", closes[6], "r's mutable borrow ends"),
     ];
     for (column, y, text) in rows {
         let at = (label_x(&tl, column), y);
@@ -31628,6 +31720,16 @@ fn ref_passed_into_an_adapter_stays_borrowed_until_the_loop_ends() {
         let at = (label_x(&tl, column), y);
         let ends_there = dots_where(&tl, |lines| lines.iter().any(|l| l == end));
         assert!(!ends_there.contains(&at), "{:?} still on {}'s `for` line: {:?}", end, column, ends_there);
+    }
+    // Nor anything on a moved `&mut`'s column after the move (#1365).
+    for (column, y, after_move) in [
+        ("b", writes[0], "the resource b points to is modified through y"),
+        ("b", closes[2], "b's mutable borrow ends"),
+        ("r", closes[6], "r's mutable borrow ends"),
+    ] {
+        let at = (label_x(&tl, column), y);
+        let there = dots_where(&tl, |lines| lines.iter().any(|l| l == after_move));
+        assert!(!there.contains(&at), "{:?} on {}'s column after it was moved: {:?}", after_move, column, there);
     }
 }
 
@@ -31690,7 +31792,9 @@ fn shared_ref_iter_loop_keeps_its_borrow_until_the_loop_ends() {
 
 /// #1082 (`chain_writes_1082`): a write through x from a `chain` is drawn
 /// on each column x may point into, on the write's line; with
-/// `std::iter::zip(c.iter_mut(), d.iter_mut())` one through y on d's.
+/// `std::iter::zip(c.iter_mut(), d.iter_mut())` one through y on d's. Not
+/// on f's, moved into the loop's iterator by `chain(f)`: its column ended
+/// at the move (#1365); x's own dot says the old value is dropped.
 #[test]
 fn chain_writes_are_drawn_on_each_column_x_may_point_into() {
     let rv = run_with_local_backend("chain_writes_1082");
@@ -31706,7 +31810,6 @@ fn chain_writes_are_drawn_on_each_column_x_may_point_into() {
         ("b", incr, either("b")),
         ("d", zipped, "the resource d points to is modified through y".to_owned()),
         ("e", assign, assigned("e")),
-        ("f", assign, assigned("f")),
         ("p", double, "p's resource is modified through x when x points into it (x points into p's resource or q's value)".to_owned()),
         ("q", double, "q's value is modified through x when x points into it (x points into p's resource or q's value)".to_owned()),
     ];
@@ -31720,11 +31823,15 @@ fn chain_writes_are_drawn_on_each_column_x_may_point_into() {
     for (column, y, wrong) in [
         ("a", incr, "the resource a points to is modified through x"),
         ("c", zipped, "the resource c points to is modified through x"),
+        ("f", assign, &assigned("f")),
     ] {
         let at = (label_x(&tl, column), y);
         let there = dots_where(&tl, |lines| lines.iter().any(|l| l == wrong));
         assert!(!there.contains(&at), "{:?} on {}'s column: {:?}", wrong, column, there);
     }
+    // x's own dot says the old value is dropped, wherever x points.
+    let x_drop = dots_where(&tl, |lines| lines.iter().any(|l| l == "*x acquires ownership of a new resource; its previous resource is dropped"));
+    assert!(x_drop.iter().any(|&(_, y)| y == assign), "no dot on the `*x = String::new();` row says the old value is dropped: {:?}", x_drop);
 }
 
 /// #1068: a let-chain part (or a match guard) that assigns a reference
@@ -33413,6 +33520,66 @@ fn a_reference_declared_in_a_one_line_arm_ends_its_borrow_there() {
         assert_eq!(at[0].1, end[0].1, "{:?} on {}'s end's row", text, r);
     }
 }
+
+
+/// #1360 (`if_let_temp_exit_fork_1360`): an `if let` scrutinee temporary
+/// an exit in the matched block drops forks, so no two of its drops sit
+/// on one straight stretch of its column: in each function, its drop dots
+/// are at different x (one per leg). It used to be one line with the
+/// exit's drop and then the drop before the `else` on it.
+#[test]
+fn if_let_temporary_drops_once_per_path() {
+    let name = "if_let_temp_exit_fork_1360";
+    let rv = run_with_local_backend(name);
+    let tl = rv.timeline_panel_string();
+    let src = read_corpus(name);
+    // Each function's first line.
+    let fn_starts: Vec<usize> = src.lines().enumerate()
+        .filter(|(_, l)| l.starts_with("fn "))
+        .map(|(i, _)| i + 1).collect();
+    let doc = roxmltree::Document::parse(&tl).expect("well-formed timeline SVG");
+    let mut drops: Vec<(usize, String, f64, f64)> = Vec::new();
+    for n in doc.descendants().filter(|n| n.attribute("data-rv-kind") == Some("dot")) {
+        if !n.attribute("data-rv-event").is_some_and(|e| e.split(' ').any(|e| e == "temporary_drop")) {
+            continue;
+        }
+        let line: usize = n.attribute("data-rv-line").and_then(|l| l.parse().ok()).expect("data-rv-line");
+        let f = fn_starts.iter().filter(|&&s| s <= line).count();
+        let c = if n.has_tag_name("circle") { n } else { n.descendants().find(|c| c.has_tag_name("circle")).expect("dot circle") };
+        let num = |k: &str| c.attribute(k).and_then(|v| v.parse::<f64>().ok()).expect("dot centre");
+        drops.push((f, n.attribute("data-hash").unwrap_or("").to_owned(), num("cx"), num("cy")));
+    }
+    let mut stacked = Vec::new();
+    for (i, a) in drops.iter().enumerate() {
+        for b in &drops[i + 1..] {
+            if a.0 == b.0 && a.1 == b.1 && (a.2 - b.2).abs() < 1.0 {
+                stacked.push(format!("fn #{}: drops at {:?} and {:?}", a.0, (a.2, a.3), (b.2, b.3)));
+            }
+        }
+    }
+    assert!(stacked.is_empty(), "two drops of one temporary on one stretch of its column:\n{}", stacked.join("\n"));
+    // Ten functions, two drops or more each (one per leg; `no_else_nested`
+    // forks only at the inner `if`, its `if let` being drawn inline).
+    assert!(drops.len() >= 20, "drops: {:?}", drops);
+}
+
+/// #1364 (`temp_ref_ends_one_row_1364`): the ends of borrows whose lender
+/// has no column (`&compute()`, a string literal) are drawn on their
+/// line's row, so no empty rows go below it: the next line is one row
+/// down. Three such ends inserted two empty rows, two one.
+#[test]
+fn borrow_ends_with_no_lender_column_add_no_rows() {
+    let rv = run_with_local_backend("temp_ref_ends_one_row_1364");
+    let code = rv.code_panel_string();
+    for (line, next) in [
+        ("println!(\"{} {} {}\", r, m, q);", "let v = 1;"),
+        ("println!(\"{} {}\", a, b);", "let v = 2;"),
+    ] {
+        let (a, b) = (code_row_y(&code, line), code_row_y(&code, next));
+        assert_eq!(b - a, 30.0, "{:?} at y={} and {:?} at y={}: empty rows between", line, a, next, b);
+    }
+}
+
 
 /// #1348: a Copy value or a reference declared in a block that leaves
 /// early goes out of scope on the exit's row, as a value dropped there

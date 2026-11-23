@@ -1317,6 +1317,14 @@ fn render_branch_dots(
             }
             return;
         }
+        // An `if let`'s scrutinee temporary forked because an exit in the
+        // matched block drops it (#1360): every branch that gets here
+        // dropped it too (at the end of the matched block, or before the
+        // `else` block), so its column ends in those drops, with no join.
+        if rap.is_unbound_temporary() && branch_history.iter().filter(|b| !b.diverges)
+            .all(|b| matches!(b.states.last().map(|s| &s.2), Some(State::OutOfScope))) {
+            return;
+        }
         let (mixed_moved, all_moved) = merge_move_kind(branch_history, ty);
         // `let s;` left unassigned on some path (#234): that
         // branch ends with no value, not with a move, so
