@@ -16817,7 +16817,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // temporary (with tag). Main said only "everything in it but its
         // field name", so name's drop was never stated; the temporary is
         // now drawn as matched through its field name, like `match
-        // make_q().name`.
+        // make_q().name`. #1350: that was false too: building the tuple
+        // moves name out of the temporary before any pattern is matched, so
+        // the temporary's text says that, and that name, if no pattern takes
+        // it, is dropped with the tuple.
         // #954: `let (Some(a), _) = (v, make()) else { .. }` is one tuple
         // temporary: v is moved into it once and a is moved out of it.
         // Main drew a second `(temporary 5)` for the same tuple, moved v
@@ -16826,9 +16829,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x's resource is moved into a temporary that this `if let` examines; the temporary is dropped before the `else` block of this `if let` runs, or when the block it matched ends",
             "This temporary takes the value of x, which is moved into it",
             "This temporary P is dropped before the `else` block of this `if let` runs, or when the block it matched ends, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
-            "A temporary holds the value that make_q returns, for the `if let` to match its field name against. If the pattern matches, it can move that field, or parts of it, into its bindings; what is left in the temporary (all of it, if the pattern doesn't match) is dropped with it",
-            "This temporary Q is dropped before the `else` block of this `if let` runs, or when the block it matched ends, and with it everything in it but what the pattern moved out of its field name (all of it, if the pattern didn't match)",
-            "This temporary Q is dropped at the end of this statement, after the arm that ran, and with it everything in it but what that arm's pattern moved out of its field name",
+            "A temporary holds the value that make_q returns. Its field name is moved out of it, into the temporary tuple (y, make_q().name); nothing takes the rest, which is dropped with the temporary",
+            "This temporary Q is dropped before the `else` block of this `if let` runs, or when the block it matched ends, and with it everything in it but its field name, which was moved into the temporary tuple (y, make_q().name): if no pattern takes name out of the tuple, it is dropped with the tuple, at the same time",
+            "A temporary holds the value that make_q returns. Its field name is moved out of it, into the temporary tuple (w, make_q().name); nothing takes the rest, which is dropped with the temporary",
+            "This temporary Q is dropped at the end of this statement, and with it everything in it but its field name, which was moved into the temporary tuple (w, make_q().name): if no pattern takes name out of the tuple, it is dropped with the tuple, at the same time",
             "v's resource is moved into a temporary that this `let`-`else` examines; the temporary is dropped as soon as the pattern has been matched against it (before the `else` block runs, if it doesn't match)",
             "This temporary takes the value of v, which is moved into it",
             "Partial move from (temporary 4) to a",
@@ -16841,6 +16845,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "everything in it but its field name, which was moved out of it",
             "v's resource is moved into a temporary that is dropped at the end of this statement",
             "Move from v to a",
+            // #1350: the pattern never sees the temporary Q, only the tuple.
+            "A temporary holds the value that make_q returns, for the `if let` to match its field name against",
+            "A temporary holds the value that make_q returns, for the match to inspect its field name",
+            "but what the pattern moved out of its field name",
+            "but what that arm's pattern moved out of its field name",
             "=(temporary 5), immutable",
             "The literal on the right of this let builds a temporary",
             "built by the literal on the right of the let",
@@ -16852,14 +16861,21 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // (no layout column: n was drawn moving out of make_q()'s column
         // inside the branch). If the pattern doesn't match, name is
         // dropped with the tuple, at the same time as the rest of
-        // make_q()'s value (#956).
+        // make_q()'s value (#956). #1350: n had no arrow in, and the
+        // temporary's text said the pattern may move name out of it (name
+        // left it when the tuple was built). n now comes from make_q, as a
+        // call's whole result in a tuple scrutinee does (`(z, mk())`): an
+        // arm can't draw a move out of the temporary's column.
         must_contain: &[
-            "This temporary Q is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), or when the block it matched ends, and with it everything in it but what the pattern moved out of its field name (all of it, if the pattern didn't match)",
+            "This temporary Q is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), or when the block it matched ends, and with it everything in it but its field name, which was moved into the temporary tuple (z, make_q().name): if no pattern takes name out of the tuple, it is dropped with the tuple, at the same time",
+            "Move from make_q to n",
             "n acquires ownership of a resource",
             "n goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
             "everything in it but its field name, which was moved out of it",
+            "but what the pattern moved out of its field name",
+            "for the `if let` to match its field name against",
         ],
     },
     TooltipExpect {
@@ -22510,7 +22526,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "(temporary 2).name goes out of scope. Its resource is dropped.",
             "Mutable borrow from (temporary 3).age to age",
             "Immutable borrow from (temporary 4) to e",
-            "Immutable borrow from (temporary 5) to h.r",
+            // #1346: the field, as for `name` above (was: the whole temporary).
+            "Immutable borrow from (temporary 5).name to h.r",
             "Immutable borrow from (temporary 6) to inner",
             "(temporary 6) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
         ],
@@ -22520,6 +22537,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "name's immutable borrow ends (what it borrows from isn't shown)",
             "age's mutable borrow ends (what it borrows from isn't shown)",
             "h.r's immutable borrow ends (what it borrows from isn't shown)",
+            "Immutable borrow from (temporary 5) to h.r",
+            "(temporary 5).age is immutably borrowed along with (temporary 5) by h.r; (temporary 5).age is read-only while the borrow is live",
         ],
     },
     TooltipExpect {
@@ -23130,7 +23149,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // note sits (and where none does) is pinned by
         // `loop_notes_sit_on_each_loops_first_dot`.
         must_contain: &[
-            "w is bound to an immutable reference",
+            // `for w in words.iter()`: w borrows from words (#1347).
+            "w immutably borrows a resource",
             "(RustViz draws one pass through this loop, which may run many times; the variables declared inside it are new on each pass.)",
         ],
         must_not_contain: &[
@@ -24121,6 +24141,168 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s5's immutable borrow ends (what it borrows from isn't shown)",
             "s6's mutable borrow ends (what it borrows from isn't shown)",
         ],
+    },
+    TooltipExpect {
+        name: "operator_result_destination_1351",
+        // #1351: an overloaded operator is a call (`s + "!"` is
+        // `Add::add(s, "!")`), and its result goes where the expression is
+        // bound or returned, from the operator, as a call's result does.
+        // Main drew "Move from s to +" and then nothing: t, x and s3 got
+        // their value from nowhere, and the tail / `return` / field forms
+        // gave the caller nothing. `+=` writes in place (no move), and a
+        // Copy result (`x + 1` on `&i32`) is a plain number, no arrow.
+        must_contain: &[
+            "Move from s to +",
+            "Move from + to the caller",
+            "Move from + to t",
+            "Move from + to x",
+            "Move from + to s3",
+            "Move from - to flipped",
+            "+= reads from/writes to s (implicitly mutably borrowed)",
+        ],
+        must_not_contain: &[
+            "Move from s to +=",
+            "Copy of the value +() returns to the caller",
+            "Move from + to y",
+        ],
+    },
+    TooltipExpect {
+        name: "copy_local_exit_scope_1348",
+        // #1348: a Copy value or a reference declared in a block that
+        // leaves early goes out of scope at the exit, like a value that is
+        // dropped there; main drew it alive to the block's `}`, which that
+        // path never reaches. Where each one ends is pinned by
+        // `copy_locals_end_at_the_exit_1348`.
+        must_contain: &[
+            "n goes out of scope",
+            "s goes out of scope. Its resource is dropped.",
+            "r goes out of scope",
+            "`process::exit` ends the program here. q holds no resource to drop",
+        ],
+        must_not_contain: &[
+            "=q goes out of scope",
+        ],
+    },
+    TooltipExpect {
+        name: "for_iter_method_borrow_1347",
+        // #1347: `for x in v.iter_mut()` / `v.iter()`: each x is a reference
+        // into v (through the iterator the call returns), drawn as a borrow
+        // from v on the `for` line, as for `for z in &mut v`. Main drew only
+        // the return from x to v at the loop's end, with no borrow.
+        must_contain: &[
+            "Mutable borrow from v to x",
+            "Return mutably borrowed resource from x to v",
+            "Immutable borrow from v to y",
+            "Return immutably borrowed resource from y to v",
+            "Immutable borrow from q.items to s",
+            "Return immutably borrowed resource from s to q.items",
+            "Mutable borrow from v to z",
+            "v's resource is mutably borrowed by x; v can't be used until the borrow ends",
+        ],
+        must_not_contain: &[
+            "x is bound to a mutable reference",
+            "y is bound to an immutable reference",
+            "s is bound to an immutable reference",
+            "=v's resource is mutably borrowed; v can't be used until the borrow ends",
+        ],
+    },
+    TooltipExpect {
+        name: "nested_ext_temp_field_1346",
+        // #1346: `H { r: &make_user().name }`: the let extends make_user()'s
+        // temporary, and h.r borrows its field `name`, as `let name =
+        // &make_user().name;` does (#1165); `age` isn't borrowed. Main drew
+        // the borrow from the whole temporary, `age` "borrowed along with"
+        // it, in a struct literal, a tuple, a nested literal, and by `&mut`.
+        must_contain: &[
+            "Immutable borrow from (temporary).name to h.r",
+            "Return immutably borrowed resource from h.r to (temporary).name",
+            "Immutable borrow from (temporary 2).name to t.0",
+            "Mutable borrow from (temporary 6).age to m.r",
+            "Return mutably borrowed value from m.r to (temporary 6).age",
+            "Immutable borrow from (temporary 7).name to hh.h.r",
+        ],
+        must_not_contain: &[
+            "Immutable borrow from (temporary) to h.r",
+            "Immutable borrow from (temporary 2) to t.0",
+            "Mutable borrow from (temporary 6) to m.r",
+            "Immutable borrow from (temporary 7) to hh.h.r",
+            "(temporary).age is immutably borrowed along with (temporary) by h.r; (temporary).age is read-only while the borrow is live",
+            "(temporary 6).name is mutably borrowed along with (temporary 6) by m.r; (temporary 6).name can't be used until the borrow ends",
+        ],
+    },
+    TooltipExpect {
+        name: "tuple_scrutinee_call_field_1350",
+        // #1350: `(z, make_q().name)` as an `if let` / `match` scrutinee:
+        // building the tuple moves name out of make_q()'s temporary before
+        // any pattern is matched. Main gave n / k no arrow in, and said the
+        // pattern may move name out of the temporary Q (false: it isn't in
+        // Q any more). n and k now come from make_q, as a call's whole
+        // result in a tuple scrutinee does; the `let` form is unchanged.
+        must_contain: &[
+            "Move from make_q to n",
+            "Move from make_q to k",
+            "A temporary holds the value that make_q returns. Its field name is moved out of it, into the temporary tuple (z, make_q().name); nothing takes the rest, which is dropped with the temporary",
+            "This temporary Q is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), or when the block it matched ends, and with it everything in it but its field name, which was moved into the temporary tuple (z, make_q().name): if no pattern takes name out of the tuple, it is dropped with the tuple, at the same time",
+            "This temporary Q is dropped at the end of this statement, and with it everything in it but its field name, which was moved into the temporary tuple (w, make_q().name): if no pattern takes name out of the tuple, it is dropped with the tuple, at the same time",
+            "Partial move from (temporary 3) to m",
+        ],
+        must_not_contain: &[
+            "for the `if let` to match its field name against",
+            "for the match to inspect its field name",
+            "but what the pattern moved out of its field name",
+            "but what that arm's pattern moved out of its field name",
+        ],
+    },
+    TooltipExpect {
+        name: "store_through_ref_arrows_1353",
+        // #1353: `store_s(&mut r, &b)` (`dst: &mut &'a String`) may leave r
+        // pointing to b: b stays borrowed while r is in use (E0505 if b is
+        // moved before r's last use; a too, since r may still point to it).
+        // Main said so on b's dot but drew no arrow between b and r; now the
+        // borrow into r at the call and r's return to b at its last use, as
+        // for `r = &b;`. A container (`keep(&mut v, &e)`, #513) keeps the
+        // borrow on e's column only.
+        must_contain: &[
+            "Immutable borrow from b to r: store_s's signature lets it store this reference in r",
+            "Return immutably borrowed resource from r to b",
+            "Return immutably borrowed resource from r to a",
+            "Mutable borrow from d to m: store_m's signature lets it store this reference in m",
+            "Return mutably borrowed resource from m to d",
+            "store_s reads from b; store_s's signature lets it store this reference in r, so b stays borrowed while r is in use",
+        ],
+        must_not_contain: &[
+            "Immutable borrow from e to v",
+        ],
+    },
+    TooltipExpect {
+        name: "store_through_mut_ref_1124",
+        // #1353: each stored reference is drawn as a borrow into the
+        // reference variable and returned from it at its last use.
+        must_contain: &[
+            "Immutable borrow from b1 to r1: store_s's signature lets it store this reference in r1",
+            "Return immutably borrowed resource from r1 to b1",
+            "Immutable borrow from b2 to r2: store's signature lets it store this reference in r2",
+            "Return immutably borrowed resource from r2 to b2",
+            "Immutable borrow from b3 to r3: store's signature lets it store this reference in r3",
+            "Immutable borrow from b4 to r4: std::mem::replace's signature lets it store this reference in r4",
+            "Return immutably borrowed resource from r4 to b4",
+            "Immutable borrow from b5 to r5: store_s's signature lets it store this reference in r5",
+            "Return immutably borrowed resource from r5 to b5",
+            "Immutable borrow from b6 to r6: std::mem::replace's signature lets it store this reference in r6",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "iter_mut_deref",
+        // #1347.
+        must_contain: &["Mutable borrow from v to x", "Return mutably borrowed resource from x to v"],
+        must_not_contain: &["x is bound to a mutable reference"],
+    },
+    TooltipExpect {
+        name: "string_add_in_fn",
+        // #1351.
+        must_contain: &["Move from + to the caller"],
+        must_not_contain: &[],
     },
 ];
 
@@ -33230,6 +33412,39 @@ fn a_reference_declared_in_a_one_line_arm_ends_its_borrow_there() {
         let end = dots_listing_tooltip(&tl, &format!("{}'s immutable borrow ends", r));
         assert_eq!(at[0].1, end[0].1, "{:?} on {}'s end's row", text, r);
     }
+}
+
+/// #1348: a Copy value or a reference declared in a block that leaves
+/// early goes out of scope on the exit's row, as a value dropped there
+/// does, not on the block's `}` (which that path never reaches). Main
+/// ended each of these one row (or more) further down.
+#[test]
+fn copy_locals_end_at_the_exit_1348() {
+    let timeline = run_with_local_backend("copy_local_exit_scope_1348").timeline_panel_string();
+    // (id at the exit, id main drew at the closing brace)
+    let cases = [
+        // let-else `else { .. return; }`
+        ("n@L9:dot:owner_go_out_of_scope", "n@L10:dot:owner_go_out_of_scope"),
+        // `if c { .. return; }`
+        ("n@L17:dot:owner_go_out_of_scope", "n@L18:dot:owner_go_out_of_scope"),
+        // a match arm's block, a reference too
+        ("k@L28:dot:owner_go_out_of_scope", "k@L29:dot:owner_go_out_of_scope"),
+        ("r@L28:dot:ref_go_out_of_scope", "r@L29:dot:ref_go_out_of_scope"),
+        // `break` / `continue`
+        ("n@L36:dot:owner_go_out_of_scope", "n@L37:dot:owner_go_out_of_scope"),
+        ("m@L40:dot:owner_go_out_of_scope", "m@L41:dot:owner_go_out_of_scope"),
+        // both inner branches return: n ends in each of them
+        ("n@L47:dot:owner_go_out_of_scope", "n@L48:dot:owner_go_out_of_scope"),
+        // a panic, `process::exit`
+        ("p@L50:dot:owner_go_out_of_scope", "p@L51:dot:owner_go_out_of_scope"),
+        ("q@L56:dot:owner_go_out_of_scope", "q@L57:dot:owner_go_out_of_scope"),
+    ];
+    for (at_exit, at_brace) in cases {
+        assert!(timeline.contains(&format!("data-rv-id=\"{}\"", at_exit)), "no {}", at_exit);
+        assert!(!timeline.contains(&format!("data-rv-id=\"{}\"", at_brace)), "still {}", at_brace);
+    }
+    // n's end in each inner branch of `if d { return; } else { return; }`.
+    assert!(timeline.contains("data-rv-id=\"n@L47:dot:owner_go_out_of_scope#2\""), "n ends in one inner branch only");
 }
 
 /// #1326: a reference whose borrow ended in every arm of an `else if`

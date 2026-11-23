@@ -695,8 +695,10 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c8_09_string_add",
+        note: "s3 is drawn getting s1's String back from + (was: s3's value came from nowhere, #1351)",
         must_contain: &[
             "Move from s1 to +",
+            "Move from + to s3",
             "+ reads from s2",
             "s1 goes out of scope. No resource is dropped.",
             "s2 goes out of scope. Its resource is dropped.",
@@ -1094,6 +1096,8 @@ const BOOK: &[Snippet] = &[
             "iter_mut reads from/writes to v (implicitly mutably borrowed)",
             "the value x points to is modified through *x",
             "Return mutably borrowed resource from x to v",
+            // x's borrow of v, on the `for` line (#1347).
+            "Mutable borrow from v to x",
             "x's mutable borrow ends",
             "L5 v's resource is no longer mutably borrowed",
             "v goes out of scope. Its resource is dropped.",
@@ -1575,6 +1579,8 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "s acquires ownership from the caller",
             "Move from s to +",
+            // The result goes to the caller (#1351).
+            "Move from + to the caller",
             "L3 s goes out of scope. No resource is dropped.",
             "Move from shout to s",
             "L8 s goes out of scope. Its resource is dropped.",

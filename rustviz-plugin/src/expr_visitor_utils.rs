@@ -1628,6 +1628,26 @@ pub fn overloaded_by_value_binop<'tcx>(expr: &Expr<'tcx>, tcx: &TyCtxt<'tcx>) ->
   }
 }
 
+/// An overloaded operator whose result is a new value the trait method
+/// returns: a by-value binary one (`s + "!"` is `Add::add(s, "!")`) or
+/// `-x` / `!x` (`Neg::neg(x)`). Like a call's result, it goes from the
+/// operator to wherever the expression is bound or returned (#1351).
+/// Only a result that isn't `Copy`: `x + 1` with `x: &i32` is a call
+/// to `<&i32 as Add<i32>>::add` too, but its result is a plain number,
+/// as for `*x + 1` (#908).
+pub fn overloaded_value_op<'tcx>(expr: &Expr<'tcx>, tcx: &TyCtxt<'tcx>) -> Option<&'static str> {
+  let typeck = tcx.typeck(expr.hir_id.owner);
+  if expr.span.from_expansion() || !typeck.is_method_call(expr)
+    || tcx.type_is_copy_modulo_regions(typing_env(*tcx, expr.hir_id.owner), typeck.expr_ty(expr)) {
+    return None;
+  }
+  match expr.kind {
+    ExprKind::Binary(op, ..) if op.node.is_by_value() => Some(op.node.as_str()),
+    ExprKind::Unary(op @ (UnOp::Neg | UnOp::Not), _) => Some(op.as_str()),
+    _ => None,
+  }
+}
+
 /// `a == b`, `a < b`, … where the comparison is a call to a trait
 /// method, i.e. the operands aren't primitives (`String`, `Vec`, a
 /// struct with `#[derive(PartialEq)]`). Such a comparison is

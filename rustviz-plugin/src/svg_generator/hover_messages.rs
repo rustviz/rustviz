@@ -705,6 +705,11 @@ fn temporary_part_acquire(source: String, part: &TempPart) -> String {
             "A temporary holds the value that {0}. Its field {1} is moved out of it; nothing takes the rest, so Rust drops the temporary, and what is left in it, as soon as its statement (or enclosing expression) is done",
             source, styled_name_html(f)
         ),
+        // `(z, make_q().name)` as an `if let` / `match` scrutinee (#1350).
+        TempPart::TupleField(f, tuple) => format!(
+            "A temporary holds the value that {0}. Its field {1} is moved out of it, into the temporary tuple {2}; nothing takes the rest, which is dropped with the temporary",
+            source, styled_name_html(f), styled_name_html(tuple)
+        ),
         // `P { n: 1, ..make_p() }` (#605).
         TempPart::UpdateBase(fs) => format!(
             "A temporary holds the value that {0}. The struct update `..` moves {1} out of it, into the struct being built; nothing takes the rest, so Rust drops the temporary, and what is left in it, as soon as its statement (or enclosing expression) is done",
@@ -850,6 +855,10 @@ pub fn event_dot_temporary_part_drop(ty: &String, when: &String, part: &TempPart
         TempPart::Field(f) => format!(
             "This temporary {0} is dropped {1}, and with it everything in it but its field {2}, which was moved out of it",
             styled_name_html(ty), when, styled_name_html(f)
+        ),
+        TempPart::TupleField(f, tuple) => format!(
+            "This temporary {0} is dropped {1}, and with it everything in it but its field {2}, which was moved into the temporary tuple {3}: if no pattern takes {2} out of the tuple, it is dropped with the tuple, at the same time",
+            styled_name_html(ty), when, styled_name_html(f), styled_name_html(tuple)
         ),
         TempPart::UpdateBase(fs) => format!(
             "This temporary {0} is dropped {1}, and with it everything in it but {2}, which the struct update moved out of it",
@@ -2659,6 +2668,10 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
             to_fmt, func_fmt
         );
     }
+    if carrier == ViaCarrier::StoredThrough {
+        // `store_s(&mut r, &b)` (#1353): `func` is the call.
+        return format!(": {0}'s signature lets it store this reference in {1}", func_fmt, to_fmt);
+    }
     if carrier == ViaCarrier::Part {
         // `let (a, b) = &mut t;` (#1130): `func` is the part a points to.
         let whole = lenders.first().map_or(String::new(), |l| styled_name_html(l));
@@ -2755,7 +2768,7 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
         ViaCarrier::Value => ("value", format!("; {0} isn't a reference, but its value holds one", to_fmt)),
         ViaCarrier::StructField => ("struct", String::new()),
         ViaCarrier::TupleField => ("tuple", String::new()),
-        ViaCarrier::Element | ViaCarrier::StoredBy | ViaCarrier::PatternBinding { .. } | ViaCarrier::PatternRef | ViaCarrier::ReturnedClosure { .. } | ViaCarrier::Part => unreachable!(),
+        ViaCarrier::Element | ViaCarrier::StoredBy | ViaCarrier::PatternBinding { .. } | ViaCarrier::PatternRef | ViaCarrier::ReturnedClosure { .. } | ViaCarrier::Part | ViaCarrier::StoredThrough => unreachable!(),
     };
     // A value can hold borrows of several of them at once (`map` over
     // `v.iter()` with a closure that borrows `extra`).
