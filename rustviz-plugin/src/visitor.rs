@@ -3600,6 +3600,81 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
+  /// The scrutinee temporaries (`temps`) of an edition-2024 `if let` /
+  /// let chain drawn as a branch that an exit in its matched block drops
+  /// (`if_ev` holds that drop, or a nested conditional of it does), or
+  /// would drop if a `?` in it returned early (that dot was lost: the
+  /// temporary had no column in the branch). With one unsplit column,
+  /// the exit's drop and the drop before the `else` were two drops of
+  /// one value on one line (#1360). So each forks at the `if`, like a
+  /// `match` scrutinee: the drop that said both
+  /// paths at once becomes the else branch's drop (before the `else`
+  /// block runs, or, without one, when the pattern doesn't match) and,
+  /// when the matched block can reach its end, the if branch's drop
+  /// there. Returns those temporaries: live in the branches.
+  fn fork_exited_temps(
+    &mut self,
+    temps: &HashSet<ResourceAccessPoint>,
+    if_ev: &mut Vec<(usize, ExternalEvent)>,
+    else_ev: &mut Vec<(usize, ExternalEvent)>,
+    if_diverges: bool,
+  ) -> HashSet<ResourceAccessPoint> {
+    // A drop at an exit (`exit_drops`), or the dot of a `?`, in the
+    // block or a conditional nested in it.
+    fn exits_in(evs: &[(usize, ExternalEvent)], exit_drops: &HashSet<usize>, out: &mut HashSet<ResourceAccessPoint>) {
+      for (_, e) in evs {
+        match e {
+          ExternalEvent::TemporaryDrop { ro, id, .. } if exit_drops.contains(id) => { out.insert(ro.clone()); }
+          ExternalEvent::OwnerDropIfTryReturns { ro, .. } => { out.insert(ro.clone()); }
+          ExternalEvent::Branch { branches, .. } => branches.iter().for_each(|b| exits_in(&b.e_data, exit_drops, out)),
+          _ => {}
+        }
+      }
+    }
+    let mut exited = HashSet::new();
+    exits_in(if_ev, &self.exit_drops, &mut exited);
+    let forked: HashSet<ResourceAccessPoint> = &exited & temps;
+    if forked.is_empty() {
+      return forked;
+    }
+    // The drop that said both paths: on the function's timeline, or
+    // (a let chain's, whose later parts are the if branch's) in the if
+    // branch.
+    let is_end = |e: &ExternalEvent, exit_drops: &HashSet<usize>| matches!(e,
+      ExternalEvent::TemporaryDrop { ro, id, .. } if forked.contains(ro) && !exit_drops.contains(id));
+    let mut ends: Vec<(usize, ExternalEvent)> = Vec::new();
+    let exit_drops = &self.exit_drops;
+    self.preprocessed_events.retain(|(l, e)| if is_end(e, exit_drops) { ends.push((*l, e.clone())); false } else { true });
+    if_ev.retain(|(l, e)| if is_end(e, exit_drops) { ends.push((*l, e.clone())); false } else { true });
+    let mut else_front = Vec::new();
+    for (line, ev) in ends {
+      let ExternalEvent::TemporaryDrop { ro, ty, when, literal, part, id, .. } = ev else { continue };
+      // "before the `else` block … runs, or when the block it matched
+      // ends": one path each.
+      let (else_when, then_when) = match when.split_once(", or when the block ") {
+        Some((e, _)) if when.contains("its let chain matched") => (e.to_owned(), "when the block its let chain matched ends".to_owned()),
+        Some((e, _)) => (e.to_owned(), "when the block of this `if let` ends (its pattern matched)".to_owned()),
+        None => (when.clone(), when.clone()),
+      };
+      else_front.push((line, ExternalEvent::TemporaryDrop { ro: ro.clone(), ty: ty.clone(), when: else_when, literal, early: false, part: part.clone(), id }));
+      if !if_diverges {
+        if_ev.push((line, ExternalEvent::TemporaryDrop { ro, ty, when: then_when, literal, early: false, part, id: *self.unique_id }));
+        *self.unique_id += 1;
+      }
+    }
+    // (A drop at an exit directly in the matched block ends the if
+    // branch's column: see `take_branch_events`.)
+    for (_, e) in if_ev.iter_mut() {
+      if let ExternalEvent::TemporaryDrop { ro, early, .. } = e {
+        if forked.contains(ro) {
+          *early = false;
+        }
+      }
+    }
+    else_ev.splice(0..0, else_front);
+    forked
+  }
+
   /// Remove the drops of exits (`drop_locals_on_exit`) emitted while
   /// event ids `ids` were handed out (see `take_branch_events`) and
   /// still on the function's own column: they're in a branch that
@@ -5972,12 +6047,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ResourceTy::Deref(r) => self.part_holders(r, 0),
       _ => Vec::new(),
     };
+    // (Not on a `&mut` parameter a `for` loop's head moved into the
+    // loop's iterator: its column ended at the move, and the caller's
+    // resource it pointed to has no column, #1365.)
+    let moved: Vec<String> = holders.iter().chain(std::iter::once(&owner))
+      .filter(|h| h.is_ref() && self.borrow_map.get(h.name())
+        .is_some_and(|rd| self.loop_moved_refs.get(h.name()) == Some(&rd.assigned_at)))
+      .map(|h| h.name().to_owned()).collect();
+    let moved_away = |h: &ResourceAccessPoint| moved.iter().any(|m| m == h.name());
     if holders.len() > 1 && holders.contains(&owner) {
       let ResourceTy::Deref(r) = lhs_rty else { return };
       let place = place_with_alternatives(&place, r.name(), &holders);
-      for h in holders {
+      for h in holders.iter().filter(|h| !moved_away(h)).cloned() {
         self.add_ev(line_num, Evt::Bind, ResourceTy::Index(h, place.clone(), write), ResourceTy::Anonymous, false);
       }
+      return;
+    }
+    if moved_away(&owner) {
       return;
     }
     self.add_ev(line_num, Evt::Bind, ResourceTy::Index(owner, place, write), ResourceTy::Anonymous, false);
@@ -7193,6 +7279,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     };
     #[expect(clippy::disallowed_methods, reason = "inserted into a set; order is lost")]
     self.unbranched_temps.extend(scrutinee_temps.iter().cloned());
+    #[expect(clippy::disallowed_methods, reason = "inserted into a set; order is lost")]
+    self.matched_block_temps.extend(scrutinee_temps.iter().cloned());
     self.exit_frames.push(ExitFrame::Branch { len: frame_len, hide, binds: Vec::new(), binds_at: 0, fn_level: false });
     // An exit in the if branch drops the tuple scrutinee (#327), or
     // those of a let chain's parts (#971).
@@ -7511,6 +7599,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             } else if !leaves_branch {
               self.discard_exit_drops(if_ids.clone());
             }
+            #[expect(clippy::iter_over_hash_type, reason = "removing from a set; order is irrelevant")]
+            for t in &scrutinee_temps {
+              self.matched_block_temps.remove(t);
+            }
             let left = self.left_at_exits(leaves_fn || leaves_branch, &if_decl);
             for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v) && !left.contains(v)) {
                 self.preprocessed_events.push((
@@ -7548,6 +7640,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       None => self.take_branch_events(if_ids, Some(if_expr), &pre_split),
     };
     let mut else_ev = self.take_branch_events(else_ids, else_expr, &HashSet::new());
+    #[expect(clippy::iter_over_hash_type, reason = "removing from a set; order is irrelevant")]
+    for t in &scrutinee_temps {
+      self.matched_block_temps.remove(t);
+    }
+    // A scrutinee temporary that an exit in the matched block drops
+    // forks here (#1360), as a `match` scrutinee's does.
+    let forked_temps = self.fork_exited_temps(&scrutinee_temps, &mut if_ev, &mut else_ev, self.expr_diverges(if_expr));
     // The arrows now inside the branches are drawn from each
     // branch's own line map. Take them out of the global one, or an
     // arrow that stays on the split line (a copy out of an if-let
@@ -7576,15 +7675,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // Variables declared inside a loop in a branch already go out
     // of scope there (see scoped_in_events). A `return`'s drops
     // (#363) are not that: they leave the enclosing scope.
-    let if_scoped = scoped_in_events(&if_ev, &self.exit_drops);
-    let else_scoped = scoped_in_events(&else_ev, &self.exit_drops);
+    // (Not a forked scrutinee temporary: its drops in the branches end
+    // its legs, #1360.)
+    let if_scoped = &scoped_in_events(&if_ev, &self.exit_drops) - &forked_temps;
+    let else_scoped = &scoped_in_events(&else_ev, &self.exit_drops) - &forked_temps;
     // Variables declared inside a branch (let-stmts within the
     // body, plus if-let pattern bindings) live only for that
     // branch — they're not pre-existing variables that need a
     // branched timeline. Subtract them out.
     let declared_in_branches: HashSet<ResourceAccessPoint> =
       &(&if_scope | &else_scope) | &(&if_scoped | &else_scoped);
-    liveness = &liveness - &declared_in_branches;
+    liveness = &(&liveness - &declared_in_branches) | &forked_temps;
 
     // add gos events for variables declared in each block, except
     // where every path through the branch leaves it at an exit
@@ -7602,6 +7703,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     if_decl.extend(if_inner);
     if_decl.extend(if_scoped);
+    // (A let chain's scrutinee temporary counts as declared in the if
+    // branch, but a forked one is live in both, #1360.)
+    let if_decl = &if_decl - &forked_temps;
     let mut else_decl = else_decl;
     else_decl.extend(else_inner);
     else_decl.extend(else_scoped);
@@ -8707,6 +8811,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         if head_moves_ref {
           moved_ref_args.extend(head_rty.extract_rap().cloned());
         }
+        // Their columns end at the move (#1365): no write through a loop
+        // variable, and no borrow end, is drawn on them after it.
+        for r in &moved_ref_args {
+          if let Some(rd) = self.borrow_map.get(r.name()) {
+            self.loop_moved_refs.insert(r.name().to_owned(), rd.assigned_at);
+          }
+        }
         // `for x in it` where `it` is already an iterator
         // (`let it = v.iter_mut();`): `IntoIterator::into_iter`
         // returns its argument unchanged, so the loop *moves*
@@ -9128,6 +9239,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           .flat_map(|rd| rd.all_lenders())
           .collect();
         self.emit_scope_end(loop_decls, body_end);
+        // The loan of a reference it moved in lasts until the loop ends (#1076):
+        // its lender (a variable with a column) is borrowed by the loop's
+        // iterator up to there. The reference itself was moved, so it
+        // draws no end (#1365: its end was drawn on its column after the
+        // move); a parameter's caller-side lender isn't drawn.
+        let mut moved_ref_loans: Vec<(ResourceTy, bool, StaticLender)> = Vec::new();
+        for r in moved_ref_args {
+          let Some(rd) = self.borrow_map.get(r.name()) else { continue };
+          let is_r = |a: &'tcx Expr<'tcx>| matches!(a.kind, ExprKind::Path(_) | ExprKind::Field(..))
+            && get_rap(a, &self.tcx, &self.raps).extract_rap().is_some_and(|x| x.hash() == r.hash());
+          let call = head_call_taking(head_arg, &is_r, &self.tcx).unwrap_or_else(|| "into_iter".to_owned());
+          for l in rd.all_lenders() {
+            if matches!(&l, ResourceTy::Value(x) if !x.is_fn() && self.raps.get(x.name()).is_some_and(|d| d.rap.hash() == x.hash()))
+              && !moved_ref_loans.iter().any(|(o, _, _)| *o == l) {
+              moved_ref_loans.push((l, true, StaticLender::LoopIterator { call: call.clone() }));
+            }
+          }
+        }
         // The loop's iterator (`v.iter().enumerate()`) holds its loans
         // until the loop ends: `v.push(..)` anywhere in the body is
         // E0502 even after the last use of the loop variable (#868).
@@ -9136,15 +9265,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let loop_loans = loop_loans.into_iter()
           .filter(|(l, _, _)| !carried.contains(l))
           .map(|(l, m, call)| (l, m, StaticLender::LoopIterator { call }))
-          .chain(head_loan.map(|(l, m, lend)| (l, m, StaticLender::LoopHeadBorrow { lend })));
-        // The reference it moved in stays live until then: its borrow
-        // ends where the loop does, not where it was moved (#1076).
-        for r in moved_ref_args {
-          if self.borrow_map.contains_key(r.name()) {
-            let floor = self.borrow_floor.entry(r.name().to_owned()).or_insert(body_end);
-            *floor = (*floor).max(body_end);
-          }
-        }
+          .chain(head_loan.map(|(l, m, lend)| (l, m, StaticLender::LoopHeadBorrow { lend })))
+          .chain(moved_ref_loans);
         for (lender, is_mut, static_lender) in loop_loans {
           if !is_mut {
             let head_call = matches!(static_lender, StaticLender::LoopIterator { .. });
@@ -14267,5 +14389,26 @@ fn conditional_branch_bodies<'tcx>(e: &'tcx Expr<'tcx>, out: &mut Vec<&'tcx Expr
       push(arm.body, out);
     },
     _ => {}
+  }
+}
+
+/// The name of the call in a `for` loop's head `head` that takes as it
+/// is an argument `is_var` picks (`zip` in `a.iter_mut().zip(b)`), if
+/// any.
+fn head_call_taking<'tcx>(head: &'tcx Expr<'tcx>, is_var: &dyn Fn(&'tcx Expr<'tcx>) -> bool, tcx: &rustc_middle::ty::TyCtxt<'tcx>) -> Option<String> {
+  match head.kind {
+    ExprKind::MethodCall(seg, rcvr, args, _) => {
+      if args.iter().any(|a| is_var(a)) {
+        return Some(seg.ident.as_str().to_owned());
+      }
+      args.iter().find_map(|a| head_call_taking(a, is_var, tcx)).or_else(|| head_call_taking(rcvr, is_var, tcx))
+    }
+    ExprKind::Call(f, args) => {
+      if args.iter().any(|a| is_var(a)) {
+        return hirid_to_var_name(f.hir_id, tcx);
+      }
+      args.iter().find_map(|a| head_call_taking(a, is_var, tcx))
+    }
+    _ => None,
   }
 }

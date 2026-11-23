@@ -436,6 +436,13 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// Several when e may point into any of them: `for x in
   /// a.iter_mut().chain(b.iter_mut())` (#1082).
   pub loop_ref_into: HashMap<String, Vec<ResourceAccessPoint>>,
+  /// `&mut` reference variables a `for` loop's head moved into the
+  /// loop's iterator (`for x in r`, `a.iter_mut().zip(b)`; #1076,
+  /// #1129), each with the line it was last assigned on (its
+  /// `RefData::assigned_at`) when moved. Its column ends at the move:
+  /// the iterator holds the loan until the loop ends, so the variable
+  /// draws no write and no borrow end after it (#1365).
+  pub loop_moved_refs: HashMap<String, usize>,
   /// `ref` / `ref mut` bindings out of a tuple-literal scrutinee's
   /// element (#580): they borrow the temporary tuple, which has no
   /// column, so their borrow's end is drawn as a plain end dot with no
@@ -500,11 +507,18 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // call the visitor reaches twice says it once.
   pub temp_drops_noted: HashSet<rustc_hir::HirId>,
   // Scrutinee temporaries of an `if let` / let chain that are dropped
-  // before its `else` block runs (edition 2024, #469, #604). They are
-  // never split into a conditional's branches: their column ends at
-  // that drop, and a drop at an early exit inside the matched block is
-  // a dot on it (see `take_branch_events`).
+  // before its `else` block runs (edition 2024, #469, #604). They get
+  // no column in that `if`'s branches, unless an exit in the matched
+  // block drops them (#1360, see `fork_exited_temps`): their column
+  // then forks there, like a `match` scrutinee's. A drop at an exit
+  // that isn't taken into a branch is a dot on the column that doesn't
+  // end it (see `take_branch_events`).
   pub unbranched_temps: HashSet<ResourceAccessPoint>,
+  // Those of the `if let`s whose matched block is being visited. A
+  // conditional nested in that block takes the drop at an exit in its
+  // branch, like any live variable's, so the column forks there and the
+  // exit's leg ends in the drop (#1360).
+  pub matched_block_temps: HashSet<ResourceAccessPoint>,
   // The variables moved into the `for` loops being visited as their
   // iterators (`for s in it`, `LoopHead::Iterator`), innermost last: a
   // `return` inside drops each loop's iterator (#482), and so does a
@@ -1007,6 +1021,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       exit_scope_ended: HashSet::new(),
       unlent_refs: HashSet::new(),
       loop_ref_into: HashMap::new(),
+      loop_moved_refs: HashMap::new(),
       tuple_temp_refs: HashSet::new(),
       ref_var_borrows: HashSet::new(),
       stored_ref_var_lends: HashSet::new(),
@@ -1022,6 +1037,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       pending_param_borrows: Vec::new(),
       temp_drops_noted: HashSet::new(),
       unbranched_temps: HashSet::new(),
+      matched_block_temps: HashSet::new(),
       loop_iterators: Vec::new(),
       loop_returns: Vec::new(),
       dead_ends: HashMap::new(),
@@ -2522,6 +2538,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let (Some(rd), Some(rap_data)) = (self.borrow_map.get(name), self.raps.get(name)) else {
       return false;
     };
+    // Moved into a `for` loop's iterator, which ends the loan where the
+    // loop ends (#1365).
+    if !caller_only && self.loop_moved_refs.get(name) == Some(&rd.assigned_at) {
+      return true;
+    }
     let hash = *rap_data.rap.hash();
     let real_name = rap_data.rap.name();
     let swapped_here = |line: usize| self.destructure_swapped.iter()
@@ -2855,6 +2876,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let rhs = body.and_then(|b| self.rhs_arm_ids.get(&b.hir_id).copied());
     let mine = |id: usize| (ids.contains(&id) && !keep.contains(&id)) || rhs.is_some_and(|(lo, hi)| (lo..hi).contains(&id));
     let unbranched = &self.unbranched_temps;
+    let matched_block = &self.matched_block_temps;
+    let exit_drops = &self.exit_drops;
     // The end of a loan a field write in the branch leaves to last
     // until the struct's last use (#531) is drawn on a line after the
     // branch when that use is: it happens after the branches join, so
@@ -2864,13 +2887,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       && matches!(ev, ExternalEvent::StaticDie { from: ResourceTy::Index(..), .. } | ExternalEvent::MutableDie { from: ResourceTy::Index(..), .. });
     let mut taken = Vec::new();
     self.preprocessed_events.retain(|(l, ev)| {
-      // A drop of a temporary in `unbranched_temps` (at an early exit)
-      // stays on its own, unsplit column.
-      if matches!(ev, ExternalEvent::TemporaryDrop { ro, .. } if unbranched.contains(ro)) {
+      // A drop of a temporary in `unbranched_temps` stays on its own,
+      // unsplit column. Except a drop at an exit in the block its `if
+      // let` matched, in a branch of a conditional there (or of the `if
+      // let` itself): the exit's leg ends in it (#1360).
+      let in_matched_block = matches!(ev, ExternalEvent::TemporaryDrop { ro, id, .. } if matched_block.contains(ro) && exit_drops.contains(id));
+      if matches!(ev, ExternalEvent::TemporaryDrop { ro, .. } if unbranched.contains(ro)) && !in_matched_block {
         return true;
       }
       if mine(ev.get_id()) && !escapes(*l, ev) {
-        taken.push((*l, ev.clone()));
+        let mut ev = ev.clone();
+        if let ExternalEvent::TemporaryDrop { early, .. } = &mut ev {
+          if in_matched_block {
+            *early = false;
+          }
+        }
+        taken.push((*l, ev));
         false
       } else {
         true

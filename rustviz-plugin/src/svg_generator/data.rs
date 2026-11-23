@@ -5421,7 +5421,12 @@ impl Visualizable for VisualizationData {
         states.push((previous_line, end, previous_state.clone()));
 
         // Render opaque line if branch does not end at merge point
-        if end < branch_end {
+        // (Not after the drop of a forked scrutinee temporary, #1360: its
+        // leg ends there. A `let x;` local this branch doesn't assign
+        // has no value yet in those rows.)
+        let dropped_temp = matches!(previous_state, State::OutOfScope)
+            && self.timelines[hash].resource_access_point.is_unbound_temporary();
+        if end < branch_end && !dropped_temp {
             states.push((end, branch_end, branch_state_converter(&previous_state)));
         }
 

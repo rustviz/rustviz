@@ -30,18 +30,7 @@ const BOTTOM_MARGIN: i32 = 25;
 fn sort_branch_external_events(b_data: & mut ExtBranchData) {
     // sort first,
     for (_, event_vec) in b_data.line_map.iter_mut() {
-        event_vec.sort_by(|a, b| {
-            ResourceAccessPoint_extract(a)
-                .1
-                .hash()
-                .cmp(&ResourceAccessPoint_extract(b).1.hash())
-                .then(
-                    ResourceAccessPoint_extract(a)
-                        .0
-                        .hash()
-                        .cmp(&ResourceAccessPoint_extract(b).0.hash()),
-                )
-        });
+        event_vec.sort_by(by_rap_hashes);
     }
     
     // then recurse
@@ -55,6 +44,47 @@ fn sort_branch_external_events(b_data: & mut ExtBranchData) {
             _ => {}
         }
     }
+}
+
+/// The order `sort_line_map_events` / `sort_branch_external_events` draw
+/// one line's stacked arrows in: by the hashes of their target, then their
+/// source.
+fn by_rap_hashes(a: &ExternalEvent, b: &ExternalEvent) -> std::cmp::Ordering {
+    let (af, at) = ResourceAccessPoint_extract(a);
+    let (bf, bt) = ResourceAccessPoint_extract(b);
+    at.hash().cmp(&bt.hash()).then(af.hash().cmp(&bf.hash()))
+}
+
+/// A move or copy into a call: drawn first among the top-level line's
+/// arrows (#200).
+fn moves_into_fn(e: &ExternalEvent) -> bool {
+    matches!(e, ExternalEvent::Move { .. } | ExternalEvent::Copy { .. })
+        && ResourceAccessPoint_extract(e).1.extract_rap().map_or(false, |rap| rap.is_fn())
+}
+
+/// The rows a line's stacked arrows (`evs`, one line map entry) reach
+/// below the line's own row. Each arrow dips a row per arrow drawn before
+/// it (`timeline_panel::arrow_order_of`), except the end of a borrow whose
+/// lender has no column (`let r = &compute();`: an arrow from r to r
+/// pointing into empty space), which is always drawn level on the row. So
+/// the rows needed run down to the last arrow in drawing order that isn't
+/// such an end: n of those ends on one line need none, where they used to
+/// get n - 1 empty rows (#1364). `top_level`: the line map is the
+/// function's own, which `sort_line_map_events` sorts after placement;
+/// an arm's is drawn in the order `mutate_branch_lines` leaves it (the
+/// timeline draws the copies of the arms made during placement, so
+/// `sort_branch_external_events` doesn't reach them).
+fn stacked_arrow_rows(evs: &[ExternalEvent], top_level: bool) -> usize {
+    let mut drawn = evs.to_vec();
+    if top_level {
+        drawn.sort_by(by_rap_hashes);
+        drawn.sort_by_key(|e| !moves_into_fn(e));
+    }
+    drawn.iter()
+        .rposition(|e| !matches!(e,
+            ExternalEvent::StaticDie { from, to, .. } | ExternalEvent::MutableDie { from, to, .. }
+                if from.is_same_underlying(to)))
+        .unwrap_or(0)
 }
 
 /// Splits the arrows that share one source line (and so get stacked
@@ -873,7 +903,7 @@ pub fn mutate_branch_lines(
                                 *l = new_line_num;
                             }
                         }
-                        let mut ev_len = ev.len() - 1;
+                        let mut ev_len = if back.is_empty() { stacked_arrow_rows(&front, false) } else { ev.len() - 1 };
                         if let Some((tracks, n)) = struct_write_tracks(&front).filter(|_| back.is_empty()) {
                             arrow_tracks.extend(tracks);
                             ev_len = half_row_tracks_extra_rows(n);
@@ -1536,7 +1566,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                     // lines right after `line_num`, those blank rows do
                     // the same job — reuse them instead of stacking our
                     // own on top, which produces an awkward double gap.
-                    let mut needed = ev.len() - 1;
+                    let mut needed = if back.is_empty() { stacked_arrow_rows(&front, true) } else { ev.len() - 1 };
                     if let Some((tracks, n)) = struct_write_tracks(&front).filter(|_| back.is_empty()) {
                         visualization_data.arrow_tracks.extend(tracks);
                         needed = half_row_tracks_extra_rows(n);
@@ -1649,27 +1679,12 @@ fn sort_line_map_events(visualization_data: &mut VisualizationData) {
     // but because of sorting the order gets switched such that at line x: [StaticDie(b, c), StaticDie(a, b)]
     // then (due to how events are appended above) b will return it's resource to c before reacquiring it from b which messes up its state
     for (_, event_vec) in &mut visualization_data.event_line_map {
-        event_vec.sort_by(|a, b| {
-            ResourceAccessPoint_extract(a)
-                .1
-                .hash()
-                .cmp(&ResourceAccessPoint_extract(b).1.hash())
-                .then(
-                    ResourceAccessPoint_extract(a)
-                        .0
-                        .hash()
-                        .cmp(&ResourceAccessPoint_extract(b).0.hash()),
-                )
-        });
+        event_vec.sort_by(by_rap_hashes);
     }
     // A move into a call goes first: it sits on the line's own row, and
     // the line's other arrows (a borrow's return) stack below it (#200).
     for (_, event_vec) in &mut visualization_data.event_line_map {
-        event_vec.sort_by_key(|e| {
-            let into_fn = matches!(e, ExternalEvent::Move { .. } | ExternalEvent::Copy { .. })
-                && ResourceAccessPoint_extract(e).1.extract_rap().map_or(false, |rap| rap.is_fn());
-            !into_fn
-        });
+        event_vec.sort_by_key(|e| !moves_into_fn(e));
     }
     // sort all the line maps in the branch events
     for (_, e) in visualization_data.preprocess_external_events.iter_mut() {
