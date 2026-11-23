@@ -1871,6 +1871,10 @@ pub enum LoopHead {
     /// A collection (`v: Vec<String>`): moved into the iterator
     /// `IntoIterator::into_iter` builds from it.
     Collection,
+    /// A collection of Copy elements (`ys: Vec<i32>`, `Vec<&String>`):
+    /// moved into the iterator like `Collection`; each element the loop
+    /// variable gets is a copy (#1372).
+    CollectionCopy,
     /// Already an iterator (`it: vec::IntoIter<String>`):
     /// `into_iter` returns it unchanged, so it becomes the loop's
     /// iterator, dropped when the loop ends (`LoopIteratorDrop`).
@@ -4028,7 +4032,7 @@ impl Event {
                 };
                 hover_messages::event_dot_copy_through_deref_field(r.name(), place, &target, r.points_to_copy())
             }
-            Event::Move{ loop_head: LoopHead::Collection, ..} => {
+            Event::Move{ loop_head: LoopHead::Collection | LoopHead::CollectionCopy, ..} => {
                 hover_messages::event_dot_move_into_loop_iterator(&self.deref_name(my_name))
             }
             Event::Move{ loop_head: LoopHead::Iterator, ..} => {
@@ -4198,8 +4202,19 @@ impl Event {
             }
             // `for w in words`: each iteration moves one element of the
             // collection into `w` (#850).
+            // A reference never owns: `for r in refs` with `refs:
+            // Vec<&mut String>` binds r to a reference moved out.
+            Event::Acquire{ from: ResourceTy::Value(from), is, loop_head: LoopHead::Collection, ..}
+                if is.extract_rap().is_some_and(|r| r.is_ref()) => {
+                hover_messages::event_dot_acquire_loop_element_ref(&self.deref_name(my_name), &from.name())
+            }
             Event::Acquire{ from: ResourceTy::Value(from), loop_head: LoopHead::Collection, ..} => {
                 hover_messages::event_dot_acquire_loop_element(&self.deref_name(my_name), &from.name())
+            }
+            // `for y in ys` with `ys: Vec<i32>` (or `Vec<&String>`):
+            // each y is a copy of an element (#1372).
+            Event::Acquire{ from: ResourceTy::Value(from), loop_head: LoopHead::CollectionCopy, ..} => {
+                hover_messages::event_dot_acquire_loop_element_copy(&self.deref_name(my_name), &from.name())
             }
             Event::Acquire{ from, is, ..} => {
                 if is.is_closure() && from.extract_rap().is_some() {
@@ -4556,6 +4571,15 @@ pub struct VisualizationData {
     /// the let-chain bindings the plugin found (`chain_binding_columns`,
     /// #583, #584); `render_svg` adds the arms' pattern bindings.
     pub binding_columns: Vec<(u64, u64)>,
+
+    /// Ids of moves out of a place that the place's column draws before
+    /// the new value it gets on the same line, though the plugin
+    /// emitted the new value first: a destructuring assignment's cycle
+    /// (`(a, b) = (b, a)`) reads every part before assigning any, so a
+    /// gives its value to b before it gets b's (#1343). Also the ids of
+    /// the plugin's re-acquire `Bind`s for those places, which aren't
+    /// drawn.
+    pub moves_out_first: HashSet<usize>,
 
     /// Arrows of a struct write that share a track (#624): event id ->
     /// the id of its track's first arrow. Filled in by `render_svg` (see
@@ -5972,6 +5996,13 @@ impl Visualizable for VisualizationData {
     // Branches are slightly more complicated, and we need to recurse down the tree to append all the events 
     // inside of them.
     fn append_processed_external_event(&mut self, event: ExternalEvent, line_number: usize) {
+        // The plugin's own record that a cycle's destination owns again
+        // (#1343): its reordered move already ends with the acquire.
+        if let ExternalEvent::Bind { id, .. } = &event {
+            if self.moves_out_first.contains(id) {
+                return;
+            }
+        }
         self.external_events.push((line_number, event.clone()));        
         // append_event to timelines unless interacting with an anonymous owner
         // Eventually we should collect these interactions with anonymous owners and display them in the code panel
@@ -5988,7 +6019,22 @@ impl Visualizable for VisualizationData {
             // eg let ro_to = String::from("");
             ExternalEvent::Move{from: from_ro, to: to_ro, id, into_closure, loop_head, break_alt, break_out, via_try, ..} => {
                 maybe_append_event(self, &to_ro.clone(), Event::Acquire{from : from_ro.to_owned(), is: to_ro.clone(), via_try, id: id, break_alt: break_alt.clone(), loop_head}, line_number);
+                let out_first = self.moves_out_first.contains(&id);
+                let source = from_ro.extract_rap().map(|r| *r.hash());
                 maybe_append_event(self, &from_ro.clone(), Event::Move{to : to_ro.to_owned(), is: from_ro, into_closure, loop_head, via_try, id: id, break_alt, break_out}, line_number);
+                // A destructuring assignment's cycle (#1343): the source's
+                // move goes before the new value it got on this line.
+                if let (true, Some(h)) = (out_first, source) {
+                    if let Some(t) = self.timelines.get_mut(&h) {
+                        let n = t.history.len();
+                        let first_new = t.history.iter().rposition(|(l, e)| *l == line_number
+                            && matches!(e, Event::Acquire { .. } | Event::Copy { .. }));
+                        if let Some(i) = first_new.filter(|&i| i + 1 < n) {
+                            let mv = t.history.remove(n - 1);
+                            t.history.insert(i, mv);
+                        }
+                    }
+                }
             },
             // eg: let ro_to = 5;
             ExternalEvent::Bind{from: from_ro, to: to_ro, id, break_alt} => {

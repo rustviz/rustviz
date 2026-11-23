@@ -2069,6 +2069,27 @@ pub fn event_dot_acquire_loop_element(my_name: &String, collection: &String) -> 
     )
 }
 
+// The same with Copy elements (`for y in ys`, `ys: Vec<i32>` or
+// `Vec<&String>`): the collection is moved into the iterator, and each
+// iteration gives y a copy of one element (#1372).
+pub fn event_dot_acquire_loop_element_copy(my_name: &String, collection: &String) -> String {
+    format!(
+        "{0} is bound to a copy of an element of {1}",
+        styled_name_html(my_name),
+        styled_name_html(collection)
+    )
+}
+
+// The same with `&mut` elements (`v: Vec<&mut String>`): r is a
+// reference, which never owns; each iteration moves one out (#1372).
+pub fn event_dot_acquire_loop_element_ref(my_name: &String, collection: &String) -> String {
+    format!(
+        "{0} is bound to a mutable reference moved out of {1}",
+        styled_name_html(my_name),
+        styled_name_html(collection)
+    )
+}
+
 pub fn event_dot_acquire(my_name: &String) -> String {
     // update styling
     let my_name_fmt = styled_name_html(my_name);
@@ -5753,6 +5774,10 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
     // element out of the collection, not the collection (#850).
     if let ExternalEvent::Move { loop_head: LoopHead::Collection, .. } = external_event {
         title = format!("Move of each element of {} to {}", styled_from_string, styled_to_string);
+    }
+    // `for y in ys` with Copy elements: each is copied (#1372).
+    if let ExternalEvent::Move { loop_head: LoopHead::CollectionCopy, .. } = external_event {
+        title = format!("Copy of each element of {} to {}", styled_from_string, styled_to_string);
     }
     // A Copy-typed value a call returns (`let n = v.len();`): the
     // source is the call's result, not a variable (or anything)

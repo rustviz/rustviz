@@ -6481,7 +6481,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // add event
           // (None if the old reference was moved on, `let r2 = r;`
           // before `r = &mut t;`: r had no borrow left to end, #209.)
-          let borrowers = get_borrowers(&lhs_rty.real_name(), &self.borrow_map);
+          let mut borrowers = get_borrowers(&lhs_rty.real_name(), &self.borrow_map);
+          // A reference already out of scope (`y` in `r = if c { let y =
+          // &a; y } else { &b };`) holds nothing: what of its loan lives
+          // on is the copy r took, so r's old loan is the one to end
+          // here, and y's ends with its scope (#1335).
+          #[expect(clippy::disallowed_methods, reason = "filtered into a sorted Vec")]
+          let mut gone: Vec<String> = borrowers.iter()
+            .filter(|b| **b != lhs_rty.real_name() && self.went_out_of_scope(b))
+            .cloned().collect();
+          gone.sort();
+          for g in &gone {
+            borrowers.remove(g);
+          }
           // In a destructuring assignment, another destination may
           // take this borrow over in the same statement: in
           // `(r1, r2) = (r2, r1)` r1 stops borrowing x but r2 now
@@ -6491,6 +6503,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           let taken_over = matches!(ref_data.lender, ResourceTy::Value(_))
             && destructure_hid.is_some_and(|me| self.destructure_ref_data.iter()
               .any(|(h, (lender, _, _, _))| *h != me && *lender == ref_data.lender));
+          if !self.ref_handed_off(lhs_rap.name()) && !(borrowers.len() > 1 || taken_over) {
+            self.loans_carried_on.extend(gone);
+          }
           if self.ref_handed_off(lhs_rap.name()) {
           }
           else if borrowers.len() > 1 || taken_over { // there is another active reference at this point, the resource cannot be returned
@@ -6798,6 +6813,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               None
             } else {
               match self.box_deref_through_ref(lhs_expr) {
+                // `*b = v` with b a Box drawn as one column (`Box<String>`):
+                // the old contents are dropped on b's own column, which
+                // keeps its heap allocation, as `**rb = v` draws it on
+                // the owner's (#1345). (Only when b's contents are there
+                // on every path: `AssignDropsOld`, see `box_contents_write`.
+                // Not yet in a let-chain's condition, whose events are
+                // drawn in its arms: the drop landed after them.)
+                None if !p_rap.is_ref() && matches!(p_rap.place_write(), PlaceWrite::AssignDropsOld)
+                  && !self.in_condition(expr)
+                  && matches!(lhs_expr.kind, ExprKind::Unary(UnOp::Deref, inner)
+                    if self.tcx.typeck(inner.hir_id.owner).node_type(inner.hir_id).is_box()) => {
+                  payload_behind_ref = true;
+                  Some(p_rap.clone())
+                }
                 None => self.owner_behind_ref(p_rap, ""),
                 Some(true) => {
                   payload_behind_ref = true;
@@ -9028,16 +9057,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // iterator, and each `n` is a copy `next()` hands
             // out, not something moved from `a` (#772). Draw the
             // move on the head and give `n` a plain binding.
-            let elem_copy = matches!(e, Evt::Move) && !pat_ty.is_ref() && self.tcx.type_is_copy_modulo_regions(
+            // The copy is drawn as an arrow from `a` into `n` (a move
+            // draws an arrow out of its source, #1372), "Copy of each
+            // element of a to n". So for `&T` elements (`Vec<&String>`),
+            // which are Copy too.
+            let elem_copy = matches!(e, Evt::Move) && self.tcx.type_is_copy_modulo_regions(
               typing_env(self.tcx, user_pat.hir_id.owner),
               pat_ty);
             if elem_copy {
-              if iterator_needs_drop {
-                self.add_loop_head_move_ev(for_line, ResourceTy::Anonymous, head_rty, LoopHead::Collection);
-              } else {
-                self.add_ev(for_line, Evt::Move, ResourceTy::Anonymous, head_rty, false);
-              }
-              self.add_ev(for_line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
+              self.add_loop_head_move_ev(for_line, to_rty, head_rty, LoopHead::CollectionCopy);
             } else if iterator_needs_drop {
               self.add_loop_head_move_ev(for_line, to_rty, head_rty, LoopHead::Collection);
             } else {
@@ -10677,9 +10705,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// assignments are drawn so that a variable's move out comes before
   /// its new value arrives where possible (`(b, a) = (c, b)` draws
   /// `a = b` first). A cycle (`(a, b) = (b, a)`) can't be ordered
-  /// that way; after drawing it, each variable whose new value was
-  /// drawn before its old one left gets a second "acquires" event so
-  /// it ends up owning. Its old value is never drawn as dropped.
+  /// that way; the renderer then draws the move out of each variable
+  /// whose new value was drawn first before that new value on its
+  /// column (`moves_out_first`, #1343). Its old value is never drawn as
+  /// dropped.
   ///
   /// Returns false (and does nothing) if `block` isn't this lowering.
   pub fn visit_destructuring_assign(&mut self, block: &'tcx rustc_hir::Block<'tcx>) -> bool {
@@ -10944,17 +10973,29 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.match_rhs(to, e, Evt::Move);
       }
     }
+    let n0 = self.preprocessed_events.len();
     for &i in &order {
       self.visit_expr(assigns[i].0);
     }
+    // Every part is read before any is assigned, so in a cycle each
+    // destination's old value leaves before its new one arrives, though
+    // the cycle's first assignment is drawn before the move out of its
+    // destination: the renderer puts that move first on the
+    // destination's column (#1343). So for a struct's non-Copy fields,
+    // which move with it. Each such destination gets a second
+    // "acquires" event here, so that the events say it owns a value
+    // after the statement (`rap_holds_resource_now`); the renderer
+    // leaves it out, as the reordered move already ends with the
+    // acquire.
     let line = span_to_line(&local.span, &self.tcx);
-    // A struct's non-Copy fields moved out with it, so they own
-    // again too.
     let mut stack: Vec<String> = reacquire;
     stack.reverse();
+    let mut hashes: Vec<u64> = Vec::new();
     while let Some(name) = stack.pop() {
       if let Some(rd) = self.raps.get(&name) {
         let rap = rd.rap.clone();
+        hashes.push(*rap.hash());
+        self.moves_out_first.push(*self.unique_id);
         self.add_ev(line, Evt::Bind, ResourceTy::Value(rap), ResourceTy::Anonymous, false);
         let mut children: Vec<String> = self.struct_children(&name).into_iter()
           .filter(|c| !c.never_drops())
@@ -10962,6 +11003,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           .collect();
         children.reverse();
         stack.extend(children);
+      }
+    }
+    for (_, ev) in &self.preprocessed_events[n0..] {
+      if let ExternalEvent::Move { from: ResourceTy::Value(f), id, .. } = ev {
+        if hashes.contains(f.hash()) {
+          self.moves_out_first.push(*id);
+        }
       }
     }
     self.destructure_srcs.clear();

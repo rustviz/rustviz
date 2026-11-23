@@ -50,15 +50,19 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // Geometric (`geometry.rs`), from here on.
     // Tuple column goes on after its fields were moved out.
     ("edition2024/if_let_chain_irrefutable_move", "line-ends-nowhere", 1157),
-    // A `&mut` moved out of an arm binding into another reference: its
-    // borrow end after the move. (The lender's lent segments start and end
-    // at its fork and join dots since #1371.)
-    ("arm_binding_value_1327", "event-on-dead-column", 1333),
     // Both fields may borrow from either of two lenders: four borrows on
     // one row and four returns on the next, more than the free tracks
     // between the rows hold.
     ("field_two_lenders_1354", "arrows-overlap", 1354),
     ("field_two_lenders_1354", "heads-or-logos-overlap", 1354),
+    // `for r in refs` over a Vec of references: r's borrow given back
+    // to refs, which the loop moved.
+    ("for_copy_elems_1372", "drop-without-value", 1389),
+    ("for_copy_elems_1372", "event-on-dead-column", 1389),
+    ("for_copy_elems_1372", "invalid-state", 1389),
+    // `r = match o { Some(x) => { let z = x; z } .. }` with r a
+    // reference: the copy into r drawn after z's scope end.
+    ("assign_branch_ref_1335", "event-on-dead-column", 1393),
 ];
 
 /// The invariants, by the name the failure list and messages use.

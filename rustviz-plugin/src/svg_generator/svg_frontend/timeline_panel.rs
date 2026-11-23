@@ -2501,8 +2501,10 @@ fn render_dot(
                     // A reference variable that already holds a
                     // reference is reassigned (`r = s;`), not
                     // initialized: the reference is copied (`&T`) or
-                    // moved (`&mut T`) into it (#414).
-                    let ref_assign = held_at_event && rap.is_ref();
+                    // moved (`&mut T`) into it (#414). So is one whose
+                    // reference was moved out of it before (`(m1, m2) =
+                    // (m2, m1)` moves m1's out first, #1343).
+                    let ref_assign = (held_at_event || moved_at_event) && rap.is_ref();
                     let ref_assign_title = match (ref_assign, event) {
                         (true, Event::Copy { from: ResourceTy::Value(f), is: ResourceTy::Value(_), .. }) =>
                             hover_messages::event_dot_ref_assign(&name, f, true, rap.is_mutref()),
@@ -7850,6 +7852,10 @@ fn render_branches(
             } else {
                 branch_state_converter(&parent_active)
             };
+            // A passive arm's column is drawn dashed beside the other
+            // arms' rows unless the state has no inactive look (a lent
+            // owner's dotted line, #1333).
+            let passive_dashed = state_is_dashed(&branch_state_converter(&parent_active));
             let end_state = arm_end_state(rap, branch, branch_history, ty);
 
             // Build segments. Empty-classified states drop out so
@@ -8088,6 +8094,10 @@ fn render_branches(
                 && own_first == own_last && own_first > *split_point && own_first < *merge_point
                 && !branch_is_collapsed(*split_point, *merge_point)
                 && !state_is_dashed(&parent_active)
+                // Lent (dotted) beside the other arms too: the column is
+                // drawn the same over this row already. A second segment
+                // over it ended and started in mid-air (#1333).
+                && passive_dashed
             {
                 let row_y = get_y_axis_pos(own_first) as f64;
                 let top = (row_y - LINE_SPACE as f64 / 2.0).max(column_top_y);
