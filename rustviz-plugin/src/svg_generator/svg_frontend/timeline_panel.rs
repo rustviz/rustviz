@@ -2495,7 +2495,9 @@ fn render_dot(
                     // (they'd stack on this one and the topmost
                     // tooltip would mask the rest).
                     let rap = &visualization_data.timelines[hash].resource_access_point;
-                    let copyable_assign = held_at_event && rap.holds_value() && !rap.is_closure();
+                    // (A `let` literal's temporary takes each element's
+                    // value in turn: not a reassignment, #1363.)
+                    let copyable_assign = held_at_event && rap.holds_value() && !rap.is_closure() && !rap.is_let_literal_temporary();
                     // A reference variable that already holds a
                     // reference is reassigned (`r = s;`), not
                     // initialized: the reference is copied (`&T`) or

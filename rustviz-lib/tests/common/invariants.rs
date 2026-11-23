@@ -548,7 +548,12 @@ pub fn check(fig: &Fig, src: &str) -> Vec<(&'static str, String)> {
                 continue;
             }
             let last = ds.last().unwrap();
-            if !last.has_any(END) && !last.has_any(&["tuple_temp_drop", "temporary_drop", "dead_else_note"]) {
+            // A scrutinee temporary a binding can empty is one dot that
+            // owns nothing; its tooltip states the drop on the paths where
+            // no binding takes the value (#1367).
+            let taken_temp = ds.len() == 1 && last.has("acquire")
+                && last.tip.contains("what the temporary holds is dropped with it");
+            if !last.has_any(END) && !last.has_any(&["tuple_temp_drop", "temporary_drop", "dead_else_note"]) && !taken_temp {
                 out.push(("column-ends-without-scope-end", last.describe()));
             }
         }

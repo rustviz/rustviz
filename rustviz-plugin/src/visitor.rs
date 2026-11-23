@@ -2588,6 +2588,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let t = tuples.pop().unwrap();
         self.drop_tuple_on_exit(&t, line);
       }
+      // A scrutinee temporary drawn owning nothing (#1367): inside the
+      // body its pattern matched, a binding took what it held.
+      if matches!(&rap, ResourceAccessPoint::Owner(Owner { taken: Some(_), .. })) {
+        continue;
+      }
       let id = *self.unique_id;
       *self.unique_id += 1;
       self.exit_drops.insert(id);
@@ -9529,7 +9534,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
   /// The text that names a tuple scrutinee's temporary (see
   /// `tuple_scrutinee_target`).
-  fn tuple_scrutinee_text(&self, scrutinee: &'tcx Expr<'tcx>) -> String {
+  pub(crate) fn tuple_scrutinee_text(&self, scrutinee: &'tcx Expr<'tcx>) -> String {
     match self.tuple_scrutinee_target(scrutinee) {
       ResourceTy::Temporary { tuple: Some(t), .. } => t,
       _ => String::new(),
@@ -10126,6 +10131,37 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if matches!(&tmp, ResourceAccessPoint::Owner(Owner { ctor_temp: true, temp_part: None, .. })) {
       self.ctor_temps.insert(expr.hir_id, (tmp.clone(), *self.unique_id));
     }
+    // A pattern moves something out of it by value (#1367, #1362): an
+    // arm can't draw that move out of the temporary, whose column isn't
+    // split into the arms, so the bindings are drawn taking it straight
+    // from the call that made it (or from nothing), and a note says so.
+    // When a pattern can take everything in it that needs drop, the
+    // temporary is one dot that owns nothing (no arrow into it, no line,
+    // no drop), so the value isn't drawn owned and dropped twice; its
+    // tooltip says what happens to it on each path.
+    if let Some(moves) = self.scrutinee_temp_moves(expr, part.as_ref()) {
+      let literal = matches!(expr.kind, ExprKind::Tup(_) | ExprKind::Struct(..) | ExprKind::Array(_));
+      let drawn_from = if literal { None } else { source.as_ref().map(|f| f.name().to_owned()) };
+      let ids = moves.mover_ids.iter().map(|(id, _)| *id).collect();
+      self.scrut_temp_notes.push((*tmp.hash(), line, moves.movers.clone(), ids, drawn_from));
+      for (id, l) in &moves.mover_ids {
+        self.scrut_movers.push((*id, *l, tmp_name.clone()));
+      }
+      if !moves.takers.is_empty() && into.is_empty() {
+        let taken = TakenTemp {
+          made_by: if ctor_literal { source.as_ref().map(|f| f.name().to_owned()) } else { Some(fn_name.clone()) },
+          ctor: ctor_literal,
+          when: when.to_owned(),
+          takers: moves.takers,
+        };
+        if let Some(ResourceAccessPoint::Owner(o)) = self.raps.get_mut(&tmp_name).map(|rd| &mut rd.rap) {
+          o.taken = Some(taken);
+        }
+        let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();
+        self.add_ev(line, Evt::Bind, ResourceTy::Value(tmp.clone()), ResourceTy::Anonymous, false);
+        return Some(tmp);
+      }
+    }
     match source {
       Some(fn_rap) => self.add_ev(line, Evt::Move, ResourceTy::Value(tmp.clone()), ResourceTy::Value(fn_rap), false),
       None => self.add_ev(line, Evt::Bind, ResourceTy::Value(tmp.clone()), ResourceTy::Anonymous, false),
@@ -10309,6 +10345,78 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ExprKind::Let(l) => Some((path, vec![l.pat], false)),
       _ => None,
     }
+  }
+
+  /// For the temporary of `expr`, a `match` / `if let` / `while let` /
+  /// let-chain scrutinee (`part`): what its patterns move out of it by
+  /// value (#1367, #1362). None when they move nothing out of it.
+  fn scrutinee_temp_moves(&self, expr: &'tcx Expr<'tcx>, part: Option<&TempPart>) -> Option<ScrutTempMoves> {
+    use rustc_hir::Node;
+    if !matches!(part, Some(TempPart::Match(_) | TempPart::IfLet(_) | TempPart::WhileLet(_) | TempPart::LetChain(_))) {
+      return None;
+    }
+    let typeck = self.tcx.typeck(expr.hir_id.owner);
+    let env = typing_env(self.tcx, expr.hir_id.owner);
+    // The patterns, the place of the temporary in what they match, and
+    // whether a field beside the one matched needs drop (`match
+    // make_p().name { .. }` with another `String` field: the temporary
+    // always keeps it).
+    let (path, pats, kept) = match self.tuple_scrutinee_elem(expr) {
+      Some((path, pats, _)) => (path, pats, false),
+      None => {
+        let top = self.field_top(expr);
+        let mut kept = false;
+        let mut e = top;
+        while let ExprKind::Field(base, f) = e.kind {
+          kept |= self.other_fields_need_drop(typeck.expr_ty(base), f.as_str(), env);
+          e = base;
+        }
+        let pats: Vec<&'tcx Pat<'tcx>> = match self.tcx.parent_hir_node(top.hir_id) {
+          Node::Expr(p) => match p.kind {
+            ExprKind::Match(s, arms, rustc_hir::MatchSource::Normal) if s.hir_id == top.hir_id => arms.iter().map(|a| a.pat).collect(),
+            ExprKind::Let(l) if l.init.hir_id == top.hir_id => vec![l.pat],
+            _ => return None,
+          },
+          _ => return None,
+        };
+        // `Err(e)` on `Ok(make())` can't match (#807).
+        let pats = pats.into_iter().filter(|p| !self.ctor_pat_mismatch(p, top)).collect();
+        (Vec::new(), pats, kept)
+      }
+    };
+    let mut out = ScrutTempMoves::default();
+    let mut by_ref = false;
+    for p in &pats {
+      let Some(sub) = self.pat_at_path(p, &path, typeck) else { continue };
+      let mut names = Vec::new();
+      sub.walk_always(|b| {
+        if let PatKind::Binding(_, _, ident, _) = b.kind {
+          match typeck.pat_binding_modes().get(b.hir_id).map(|m| m.0) {
+            Some(rustc_hir::ByRef::Yes(..)) => by_ref = true,
+            _ if !self.ty_is_copy(typeck.node_type(b.hir_id), b.hir_id.owner) => names.push((ident.to_string(), b.hir_id, span_to_line(&b.span, &self.tcx))),
+            _ => {}
+          }
+        }
+      });
+      match self.path_left(p, &path, typeck, env) {
+        // Moves nothing out.
+        Some(false) => continue,
+        // Moves everything that needs drop out.
+        None if !kept => out.takers.push(names.iter().map(|n| n.0.clone()).collect()),
+        _ => {}
+      }
+      for (n, id, l) in names {
+        if !out.movers.contains(&n) {
+          out.movers.push(n);
+        }
+        out.mover_ids.push((id, l));
+      }
+    }
+    // A `ref` binding borrows from the temporary: it keeps its column.
+    if by_ref {
+      out.takers.clear();
+    }
+    (!out.movers.is_empty()).then_some(out)
   }
 
   /// True iff `elem` is a `tuple_scrutinee_elem` that no pattern binds
@@ -13318,7 +13426,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // leaves is part of the same temporary: with no variable moved in,
     // the temporary still exists, and is dropped (or, with a `ref`
     // binding, kept) with everything in it (#483).
-    let leftover = pairs.iter()
+    let fresh: Vec<&'tcx Expr<'tcx>> = pairs.iter()
       .filter(|(sp, _)| match sp.kind {
         PatKind::Wild => true,
         PatKind::Binding(ann, ..) => matches!(ann.0, rustc_hir::ByRef::Yes(..)),
@@ -13326,22 +13434,57 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       })
       .map(|(_, se)| *se)
       .chain(ignored.iter().copied())
-      .find(|e| !matches!(
+      .filter(|e| !matches!(
         e.kind,
         ExprKind::Path(_) | ExprKind::Field(..) | ExprKind::Index(..) | ExprKind::Unary(UnOp::Deref, _)
-      ));
+      ))
+      .collect();
     for se in ignored {
       self.move_into_literal(se, is_skipped);
     }
-    if let Some(e) = leftover {
-      self.start_literal_temp(e, is_skipped);
+    if let Some(e) = fresh.first() {
+      // What a call among them returns is moved into it (#1376), drawn
+      // like a variable's value: an arrow from the call.
+      let mut calls = Vec::new();
+      for f in &fresh {
+        self.literal_calls(f, &mut calls);
+      }
+      self.start_literal_temp(e, is_skipped, calls);
+    }
+  }
+
+  /// The calls (not constructors) among the elements of the literal `e`,
+  /// or `e` itself, whose results need drop, with their functions' names
+  /// (`mk` in `(1, mk())`, `Some(mk())`, `P { b: mk(), .. }`).
+  fn literal_calls(&self, e: &'tcx Expr<'tcx>, out: &mut Vec<(&'tcx Expr<'tcx>, String)>) {
+    if e.span.from_expansion() {
+      return;
+    }
+    let typeck = self.tcx.typeck(e.hir_id.owner);
+    match e.kind {
+      ExprKind::Tup(es) | ExprKind::Array(es) => es.iter().for_each(|x| self.literal_calls(x, out)),
+      ExprKind::Struct(_, fs, _) => fs.iter().for_each(|f| self.literal_calls(f.expr, out)),
+      ExprKind::Call(callee, args) if is_ctor_path(callee, typeck) => args.iter().for_each(|x| self.literal_calls(x, out)),
+      ExprKind::Call(callee, _) | ExprKind::MethodCall(_, callee, ..) if self.needs_drop(typeck.expr_ty(e), e.hir_id.owner) => {
+        let name = match e.kind {
+          ExprKind::MethodCall(seg, ..) => Some(seg.ident.as_str().to_owned()),
+          _ => hirid_to_var_name(callee.hir_id, &self.tcx),
+        };
+        if let Some(n) = name {
+          out.push((e, n));
+        }
+      }
+      _ => {}
     }
   }
 
   /// The temporary of a literal that nothing was moved into (every
   /// element the pattern leaves is a fresh value): made here, and
-  /// holding the literal's value from this line (#483).
-  fn start_literal_temp(&mut self, e: &'tcx Expr<'tcx>, is_skipped: bool) {
+  /// holding the literal's value from this line (#483). What the `calls`
+  /// among those values return is drawn moving into it (#1376). (When a
+  /// variable was moved into it first, its tooltips already say that
+  /// what the pattern didn't bind stays in it.)
+  fn start_literal_temp(&mut self, e: &'tcx Expr<'tcx>, is_skipped: bool, calls: Vec<(&'tcx Expr<'tcx>, String)>) {
     if is_skipped || e.span.from_expansion() {
       return;
     }
@@ -13349,9 +13492,32 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if self.literal_temps.contains_key(&key) {
       return;
     }
-    if let Some(tmp) = self.literal_temp(e) {
+    let Some(tmp) = self.literal_temp(e) else { return };
+    // (A `let`-`else`'s literal temporary is drawn as built by the
+    // literal itself, `(..)`.)
+    // One arrow per function: `(make(), make())` draws one from make.
+    let mut seen: Vec<String> = Vec::new();
+    let calls: Vec<(&'tcx Expr<'tcx>, String)> = calls.into_iter().filter(|(_, n)| {
+      let new = !seen.contains(n);
+      seen.push(n.clone());
+      new
+    }).collect();
+    let fns: Vec<(usize, ResourceAccessPoint)> = if tmp.is_let_literal_temporary() {
+      calls.into_iter().filter_map(|(call, name)| {
+        self.add_fn(name.clone());
+        let f = self.raps.get(&fn_key(&name))?.rap.to_owned();
+        Some((expr_to_line(call, &self.tcx), f))
+      }).collect()
+    } else {
+      Vec::new()
+    };
+    if fns.is_empty() {
       let line = expr_to_line(e, &self.tcx);
       self.add_ev(line, Evt::Bind, ResourceTy::Value(tmp), ResourceTy::Anonymous, false);
+      return;
+    }
+    for (line, f) in fns {
+      self.add_ev(line, Evt::Move, ResourceTy::Value(tmp.clone()), ResourceTy::Value(f), false);
     }
   }
 
@@ -13452,7 +13618,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // `let`, as for a literal with nothing to drop (#1163).
     let typeck = self.tcx.typeck(e.hir_id.owner);
     let env = typing_env(self.tcx, e.hir_id.owner);
-    if !self.pat_leaves_drop(let_stmt.pat, typeck, env) {
+    let (mut extended, mut mutable) = (false, false);
+    let_stmt.pat.each_binding(|ann, _, _, _| {
+      if let rustc_hir::ByRef::Yes(_, m) = ann.0 {
+        extended = true;
+        mutable |= m == Mutability::Mut;
+      }
+    });
+    // `let (ref x, _) = (p, q);` with `p`, `q` of a type that isn't Copy
+    // but has nothing to drop: x borrows from the literal's temporary,
+    // which takes p's and q's values and lives to the end of the block
+    // (#1363). It is drawn too, holding a plain value.
+    let plain_borrowed = extended && key == let_stmt.hir_id
+      && !self.ty_is_copy(typeck.expr_ty(literal), e.hir_id.owner)
+      && !self.needs_drop(typeck.expr_ty(literal), e.hir_id.owner);
+    if !self.pat_leaves_drop(let_stmt.pat, typeck, env) && !plain_borrowed {
       return None;
     }
     if key != let_stmt.hir_id {
@@ -13475,24 +13655,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.literal_temps.insert(key, tmp.clone());
       return Some(tmp);
     }
-    let typeck = self.tcx.typeck(e.hir_id.owner);
     let ty = typeck.expr_ty(literal);
-    if !self.needs_drop(ty, e.hir_id.owner) || self.inside_one_line_branch(e) {
+    if (!self.needs_drop(ty, e.hir_id.owner) && !plain_borrowed) || self.inside_one_line_branch(e) {
       return None;
     }
-    let (mut extended, mut mutable) = (false, false);
-    let_stmt.pat.each_binding(|ann, _, _, _| {
-      if let rustc_hir::ByRef::Yes(_, m) = ann.0 {
-        extended = true;
-        mutable |= m == Mutability::Mut;
-      }
-    });
     self.temp_count += 1;
     let tmp_name = temporary_label(self.temp_count);
     // The variables moved into it read as moving into the literal on
     // the right of the `let`, not into one nothing binds (#570).
     if extended {
-      self.add_owner(tmp_name.clone(), mutable, false, false, InteriorMut::No, self.current_scope, !self.inside_branch);
+      self.add_owner(tmp_name.clone(), mutable, false, plain_borrowed, InteriorMut::No, self.current_scope, !self.inside_branch);
       if let Some(ResourceAccessPoint::Owner(o)) = self.raps.get_mut(&tmp_name).map(|rd| &mut rd.rap) {
         o.let_literal_temp = true;
       }
@@ -14419,4 +14591,18 @@ fn head_call_taking<'tcx>(head: &'tcx Expr<'tcx>, is_var: &dyn Fn(&'tcx Expr<'tc
     }
     _ => None,
   }
+}
+
+/// What the patterns of a scrutinee temporary move out of it by value
+/// (`scrutinee_temp_moves`, #1367).
+#[derive(Default)]
+struct ScrutTempMoves {
+  /// The by-value bindings that move something out of it, in pattern
+  /// order.
+  movers: Vec<String>,
+  /// For each pattern that, when it matches, leaves nothing that needs
+  /// drop in it, its by-value bindings.
+  takers: Vec<Vec<String>>,
+  /// The movers' bindings, each with its line.
+  mover_ids: Vec<(HirId, usize)>,
 }

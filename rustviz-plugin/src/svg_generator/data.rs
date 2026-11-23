@@ -306,6 +306,10 @@ pub struct Owner {
     /// by value): what examines it ("`match`") and when it is dropped,
     /// for the tooltip of what moved into it.
     pub scrutinee: Option<(String, String)>,
+    /// For a scrutinee temporary that a pattern's bindings can empty
+    /// (`m` in `if let (Some(c), m) = (z, make())`, #1367): see
+    /// `TakenTemp`.
+    pub taken: Option<TakenTemp>,
     /// Set only on the copy a write event carries (see `PlaceWrite`).
     pub write: PlaceWrite,
     /// True iff this owner isn't a reference but its value holds a
@@ -374,6 +378,31 @@ pub enum TempPart {
     /// the temporary tuple (the literal's text) before any pattern is
     /// matched; the pattern takes it, if at all, from the tuple (#1350).
     TupleField(String, String),
+}
+
+/// A `match` / `if let` / `while let` / let-chain scrutinee temporary
+/// whose pattern can move everything in it that needs drop into its
+/// bindings (`m` in `if let (Some(c), m) = (z, make())`, `r` in `match
+/// Some(make()) { Some(r) if g => .., _ => .. }`; #1367). The bindings
+/// are drawn taking the value straight from where it came from (`make`),
+/// since an arm can't draw a move out of a column that isn't split into
+/// the arms. So that the value isn't drawn owned (and dropped) twice, the
+/// temporary is drawn as one dot that owns nothing; its tooltip says
+/// what happens to it on each path, including its drop when no binding
+/// takes the value.
+#[derive(Clone, Hash, PartialEq, Eq, Debug, Default)]
+pub struct TakenTemp {
+    /// What made the value: a call (`make`), a literal (`(..)`, `P { ..
+    /// }`), or for a constructor (`ctor`), the call that made its
+    /// payload, if any.
+    pub made_by: Option<String>,
+    /// True iff the temporary is a constructor's value (`Some(make())`).
+    pub ctor: bool,
+    /// When the temporary is dropped, as `TemporaryDrop::when` says it.
+    pub when: String,
+    /// The by-value bindings of each pattern that takes the value (one
+    /// group per pattern), in pattern order.
+    pub takers: Vec<Vec<String>>,
 }
 
 /// Which reference-counted pointer an `Owner` is (found by the std
@@ -4261,6 +4290,16 @@ impl Event {
                     let ends_with_statement = matches!(is, ResourceTy::Value(rap) if rap.is_unbound_temporary());
                     let from_name = match from { ResourceTy::Deref(r) => format!("*{}", r.name()), _ => from.name() };
                     hover_messages::event_dot_literal_temporary_acquire(&from_name, ends_with_statement)
+                } else if matches!(is, ResourceTy::Value(rap) if rap.is_let_literal_temporary())
+                    && matches!(from, ResourceTy::Value(f) if f.is_fn()) {
+                    // `let (a, _) = (1, mk());`: what mk returns is moved
+                    // into the temporary (#1376).
+                    let ends_with_statement = matches!(is, ResourceTy::Value(rap) if rap.is_unbound_temporary());
+                    hover_messages::event_dot_literal_temporary_takes_result(&from.name(), ends_with_statement)
+                } else if let ResourceTy::Value(ResourceAccessPoint::Owner(Owner { unbound_temp: true, taken: Some(taken), temp_part: Some(part), .. })) = is {
+                    // `if let (Some(c), m) = (z, make())`: the pattern
+                    // can take all of it (#1367).
+                    hover_messages::event_dot_taken_scrutinee_temporary(taken, part)
                 } else if let ResourceTy::Value(ResourceAccessPoint::Owner(Owner { unbound_temp: true, ctor_temp: true, temp_part: Some(part), .. })) = is {
                     // `match Some(make()) { Some(s) if .. => .., _ => .. }`:
                     // a constructor a pattern takes apart (#807).

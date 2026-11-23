@@ -1,4 +1,4 @@
-use crate::svg_generator::data::{BranchExit, EarlyReturns, LoopExits, LoopLeft, ResourceAccessPoint, TempPart, IF_LET_ARM};
+use crate::svg_generator::data::{BranchExit, EarlyReturns, LoopExits, LoopLeft, ResourceAccessPoint, TakenTemp, TempPart, IF_LET_ARM};
 
 
 /* Event Dot messages: shows up when someone hovers over a dot */
@@ -753,6 +753,104 @@ fn temporary_part_acquire(source: String, part: &TempPart) -> String {
     }
 }
 
+// The one dot of a scrutinee temporary that a pattern's bindings can
+// empty (`m` in `if let (Some(c), m) = (z, make())`, `r` in `match
+// Some(make()) { Some(r) if g => .., _ => .. }`; #1367). The bindings
+// are drawn taking the value straight from the call, and the temporary
+// owns nothing in the figure, so this says what it holds on each path,
+// and when that is dropped if no binding takes it.
+pub fn event_dot_taken_scrutinee_temporary(t: &TakenTemp, part: &TempPart) -> String {
+    let source = match &t.made_by {
+        Some(f) if t.ctor => format!("is built from what {}", temporary_source(f)),
+        Some(f) => temporary_source(f),
+        None => "the constructor builds".to_owned(),
+    };
+    // "c and m" for one pattern's bindings; "r or e" for several patterns.
+    let groups: Vec<String> = t.takers.iter().map(|g| and_list(g)).collect();
+    let takers = groups.join(" or ");
+    match part {
+        TempPart::Match(_) => {
+            let arm = if groups.len() == 1 {
+                format!("If the arm that binds {0} runs, its pattern moves what the temporary holds into {0}", takers)
+            } else {
+                format!("If an arm that binds {} runs, its pattern moves what the temporary holds into its bindings", takers)
+            };
+            format!(
+                "A temporary holds the value that {0}, for the match to inspect. {1}; if another arm runs, what the temporary holds is dropped with it {2}",
+                source, arm, t.when
+            )
+        }
+        _ if matches!(part, TempPart::WhileLet(_)) || t.when.contains("`while let` loop") => format!(
+            "A temporary holds the value that {0}, for the {1} to match against on each pass. If the pattern matches, it moves what the temporary holds into {2}; if not, the loop ends, and what the temporary holds is dropped with it",
+            source, let_kind(part), takers
+        ),
+        _ => {
+            // When an `if let` / let chain that doesn't match drops it: as
+            // its drop's `when` says (edition 2024 with an `else`, or an
+            // `else if let`), else before the code after the `if`.
+            let fail = if t.when.starts_with("before the `else` block") {
+                "before the `else` block runs".to_owned()
+            } else if t.when.contains("(before the code after the `if` runs)") {
+                "before the code after the `if` runs".to_owned()
+            } else {
+                t.when.clone()
+            };
+            format!(
+                "A temporary holds the value that {0}, for the {1} to match against. If the pattern matches, it moves what the temporary holds into {2}; if not, what the temporary holds is dropped with it {3}",
+                source, let_kind(part), takers, fail
+            )
+        }
+    }
+}
+
+// "a", "a and b", "a, b and c", styled.
+fn and_list(names: &[String]) -> String {
+    let names: Vec<String> = names.iter().map(|n| styled_name_html(n)).collect();
+    match names.as_slice() {
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {}", rest.join(", "), last),
+        [] => String::new(),
+    }
+}
+
+// The approximation note on the first dot of a scrutinee temporary that
+// a pattern moves something out of by value (#1367, #1362): an arm
+// can't draw a move out of a column that isn't split into the arms, so
+// that move isn't drawn. `drawn_from`: the column the bindings are drawn
+// taking the value from instead (`make`), if any.
+pub fn approx_note_scrutinee_temporary_moves(movers: &[String], drawn_from: Option<&String>) -> String {
+    let n = movers.len();
+    let movers = and_list(movers);
+    match drawn_from {
+        Some(f) => format!(
+            "(RustViz draws {} taking {} straight from {}; it doesn't draw the move out of this temporary.)",
+            movers, if n > 1 { "their values" } else { "its value" }, styled_name_html(f)
+        ),
+        None => format!("(RustViz doesn't draw the move out of this temporary into {}.)", movers),
+    }
+}
+
+// On the first dot of such a binding when no arrow is drawn into it
+// (`s` in `if let P { a: Some(s), .. } = (P { a: x, .. })`, #1362).
+pub fn approx_note_moved_out_of_temporary(name: &str, tmp: &str) -> String {
+    format!(
+        "({0}'s value is moved out of {1}; RustViz doesn't draw that move.)",
+        styled_name_html(name), styled_name_html(tmp)
+    )
+}
+
+// On the first dot of a `ref` / `ref mut` binding into a tuple
+// scrutinee's element (`a` in `(Some(ref a), _)` on `(x, y)`, #1363): it
+// borrows the part of the temporary tuple that holds x's value, not x,
+// whose value was moved into the tuple (#580); the tuple has no column.
+pub fn approx_note_tuple_elem_borrow(name: &str, var: &str, tuple: &str, mutable: bool) -> String {
+    let tuple = if tuple.is_empty() { "the temporary tuple".to_owned() } else { format!("the temporary tuple {}", styled_name_html(tuple)) };
+    format!(
+        "({0} {1} borrows the part of {2} that holds {3}'s value; the tuple has no column, so no arrow shows this borrow.)",
+        styled_name_html(name), if mutable { "mutably" } else { "immutably" }, tuple, styled_name_html(var)
+    )
+}
+
 // "`if let`", "`while let`", "`let`-`else`".
 fn let_kind(part: &TempPart) -> &'static str {
     match part {
@@ -1193,6 +1291,20 @@ pub fn event_dot_literal_temporary_acquire(from_name: &String, ends_with_stateme
     format!(
         "The temporary that the literal on the right of this let builds takes the value of {0}. {1}",
         styled_name_html(from_name), when
+    )
+}
+
+// The same for a call's result in that literal (`mk()` in `let (a, _) =
+// (1, mk());`, #1376), which the pattern doesn't bind by value.
+pub fn event_dot_literal_temporary_takes_result(from_name: &String, ends_with_statement: bool) -> String {
+    let when = if ends_with_statement {
+        "No `ref` binding borrows from it, so Rust drops it at the end of this statement, with whatever the pattern didn't bind by value"
+    } else {
+        "A `ref` binding borrows from it, so it lives until the end of the enclosing block, not just to the end of the statement"
+    };
+    format!(
+        "The temporary that the literal on the right of this let builds takes the value that {0}. {1}",
+        temporary_source(from_name), when
     )
 }
 
