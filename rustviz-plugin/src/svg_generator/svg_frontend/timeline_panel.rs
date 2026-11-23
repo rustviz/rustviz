@@ -4,7 +4,7 @@ use crate::svg_generator::hover_messages::{self, styled_name_html};
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use crate::svg_generator::svg_frontend::rv_attrs::{self, Rv};
 use handlebars::Handlebars;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use serde::Serialize;
 use std::cmp::{self, max};
 
@@ -591,7 +591,7 @@ pub fn render_timeline_panel(visualization_data : & mut VisualizationData) -> (S
     // render resource owner labels
     let mut bars = Vec::new();
     render_timelines(&mut output, visualization_data, &resource_owners_layout, &registry, &mut bars); // vertical bars
-    render_labels_string(&mut output, &resource_owners_layout, &visualization_data.fn_start_lines, &registry); // headers
+    render_labels_string(&mut output, &resource_owners_layout, &visualization_data.fn_start_lines, &visualization_data.raised_headers, &registry); // headers
     // Dots are drawn before arrows, and the arrow pass needs to know
     // where they landed: a straight arrow hops over any dot between
     // its two ends (see `render_hopping_arrow`).
@@ -603,7 +603,7 @@ pub fn render_timeline_panel(visualization_data : & mut VisualizationData) -> (S
     // the dot of the borrow it makes.
     dots.add_approx_notes(&visualization_data.approx_notes, &visualization_data.row_lines);
     dots.flush(&mut output, &registry);
-    render_struct_box(&mut output, &structs_info, &visualization_data.fn_start_lines, &registry); // struct box
+    render_struct_box(&mut output, &structs_info, &visualization_data.fn_start_lines, &visualization_data.raised_headers, &registry); // struct box
 
     let mut output_string : String = String::new();
     for (hash, (timelinepanel, member_timelinepanel)) in output{
@@ -1085,10 +1085,18 @@ fn compute_column_layout<'a>(
     (resource_owners_layout, (max_x as i32) + 100)
 }
 
+/// How many rows above its fn's signature the column header of `hash` is
+/// drawn: one, or two over a one-line conditional's fork on the signature
+/// row (`VisualizationData::raised_headers`, #1342).
+fn header_rows_up(raised_headers: &HashSet<u64>, hash: u64) -> i64 {
+    if raised_headers.contains(&hash) { 2 } else { 1 }
+}
+
 fn render_labels_string(
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
     resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
     fn_start_lines: &HashMap<u64, usize>,
+    raised_headers: &HashSet<u64>,
     registry: &Handlebars
 ) {
     // Default label-y matches the legacy "all labels at the top of
@@ -1103,7 +1111,8 @@ fn render_labels_string(
         // top-of-svg position for RAPs without an fn association
         // (e.g. globals — none today, but defensive).
         let y_val = match fn_start_lines.get(hash) {
-            Some(&line) => get_y_axis_pos(line) - LINE_SPACE,
+            // A row higher over a one-line conditional's fork (#1342).
+            Some(&line) => get_y_axis_pos(line) - LINE_SPACE * header_rows_up(raised_headers, *hash),
             None => DEFAULT_LABEL_Y,
         };
         let mut data = ResourceAccessPointLabelData {
@@ -8001,6 +8010,29 @@ fn render_branches(
                     // dot ends it.
                     let dropped_at_stop = branch.e_data.iter().any(|(l, e)| *l == stop
                         && matches!(e, Event::OwnerGoOutOfScope { .. } | Event::RefGoOutOfScope { .. } | Event::TemporaryDrop { .. }));
+                    // Nor where the arm moved the value away on that line
+                    // (`return take(q);`), as in a one-row arm (#1295) and
+                    // an arm whose move comes before its last line, or a
+                    // reference's borrow ends there (`1 => continue,` after
+                    // its last use): the column ends at that dot, which
+                    // covered the bar drawn under it but for a 1px nub
+                    // (#1375).
+                    let at_stop = |e: &Event| !matches!(e, Event::Branch { .. });
+                    let ended_at_stop = branch.e_data.iter().any(|(l, e)| *l == stop && at_stop(e)
+                        && (!seg_drawn(rap, &end_state)
+                            || matches!(e, Event::StaticDie { .. } | Event::MutableDie { .. } | Event::RefDie { .. })));
+                    // A dot of the still-live column on that line (`s.push('a');
+                    // break;`) covered it too: the column runs on a little
+                    // past the dot and the bar goes there.
+                    if !dropped_at_stop && !ended_at_stop && branch.e_data.iter().any(|(l, e)| *l == stop && at_stop(e)) {
+                        if let (Some(y), Some(seg)) = (stop_y, segs.last_mut()) {
+                            if seg.p2 == (branch_x, y) {
+                                seg.p2.1 += STOP_BAR_BELOW_DOT;
+                                stop_y = Some(y + STOP_BAR_BELOW_DOT);
+                            }
+                        }
+                    }
+                    let dropped_at_stop = dropped_at_stop || ended_at_stop;
                     // The bar is a marker, not a line of code: hovering it
                     // underlines nothing (#369), like the dashed columns.
                     if let Some(stop_y) = stop_y.filter(|y| !dropped_at_stop && segs.last().is_some_and(|seg| seg.p2 == (branch_x, *y))) {
@@ -8437,6 +8469,11 @@ fn render_branch_run(
     let stretches = lines.iter().zip(&polys).map(|(l, p)| format!("{}{}", l, p)).collect();
     (svg, stretches)
 }
+
+/// How far below a dot on its row a diverging arm's stop bar is drawn:
+/// half a row, clear of the dot (radius 5) and of a call's `f` logo
+/// drawn on it, which hangs some 12px below its centre (#1375).
+const STOP_BAR_BELOW_DOT: f64 = 15.0;
 
 /// Half the height of the hover polygon over a stop bar (the bar's 3px
 /// stroke, with room for its round caps).
@@ -9098,6 +9135,7 @@ fn render_struct_box(
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
     structs_info: &StructsInfo,
     fn_start_lines: &HashMap<u64, usize>,
+    raised_headers: &HashSet<u64>,
     registry: &Handlebars,
 ) {
     // Default y matches the legacy "all labels at the top of the
@@ -9111,7 +9149,7 @@ fn render_struct_box(
             // (see render_labels_string). Box centers on that label
             // row: 20px above (matches the legacy 70 - 20 = 50 offset)
             // and 30px tall.
-            Some(&line) => get_y_axis_pos(line) - LINE_SPACE - 20,
+            Some(&line) => get_y_axis_pos(line) - LINE_SPACE * header_rows_up(raised_headers, owner_hash) - 20,
             None => DEFAULT_BOX_Y,
         };
         // Fixed padding around the end columns, or the end labels'
