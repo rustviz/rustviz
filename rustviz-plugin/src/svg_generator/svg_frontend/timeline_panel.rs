@@ -1186,11 +1186,11 @@ fn render_branch_dots(
         // it, it isn't drawn, and its text goes on the column's
         // next dot (`DotLayer::carry`, #702).
         // The split: the arms leave it in the state the column has
-        // there (as `render_branches` draws them). None does while
-        // the column is mutably borrowed (`r = &mut s` live across
-        // the conditional): the arms start dotted, lent out (#722),
-        // with no split dot; each arm's first dot then says s is live
-        // in the conditional.
+        // there (as `render_branches` draws them), dotted while the
+        // column is mutably borrowed (`r = &mut s` live across the
+        // conditional, #722). The legs start at the split dot then too
+        // (#1371): left out, the dotted diamond forked in mid-line and
+        // each arm's first dot said s is live in the conditional.
         let split_has_line = branch_history.first()
             .and_then(|b| b.entry_state.as_ref())
             .map_or(true, |entry| {
@@ -1198,7 +1198,7 @@ fn render_branch_dots(
                     State::OutOfScope => State::FullPrivilege { s: LineState::Uninit },
                     s => convert_back(s),
                 };
-                line_drawn(rap, &leading)
+                seg_drawn(rap, &leading)
             });
         // A conditional on a column whose value was already moved
         // away (a nested `if` in an arm after `match (x, y)` moved
@@ -1587,13 +1587,13 @@ fn render_branch_dots(
         // the dot would float: its text goes on the column's next
         // dot instead, the scope end or the next event (#702).
         // An arm still mutably lent out at the join (`r = &mut s` in it)
-        // reaches it with a dotted line. Where the column goes on after
-        // the join, so does that line (#722), and the text goes on the
-        // column's next dot; where it doesn't (another arm moved s),
-        // the line ends at the join, and the dot is drawn (#1297).
+        // reaches it with a dotted line (#722), and the dot is drawn
+        // where that line ends (another arm moved s, #1297) and where
+        // the column goes on after the join, dotted: the legs end at the
+        // join dot, not in mid-line (#1371).
         let join_has_line = branch_history.iter().any(|b| {
-            let end = b.states.last().map_or(State::OutOfScope, |s| s.2.clone());
-            !b.diverges && (line_drawn(rap, &end) || (mixed_moved && seg_drawn(rap, &end)))
+            let end = arm_end_state(rap, b, branch_history, ty);
+            !b.diverges && seg_drawn(rap, &end)
         });
         match title {
             Some(title) if join_has_line => {
@@ -2736,6 +2736,34 @@ fn ends_borrow(history: &[(usize, Event)]) -> bool {
         Event::Branch { branch_history, .. } => branch_history.iter().all(|b| ends_borrow(&b.e_data)),
         _ => false,
     })
+}
+
+/// The state an arm reaches its conditional's join in, for drawing: the
+/// arm's last state, except for a reference whose borrow ended in the arm
+/// (`end_outer_borrows_in_arms`), which reaches the join with the dashed
+/// "r's borrow has ended on this path" rest of the arm (#495). Every arm
+/// that gets to the join has that rest, down to the join dot, which says
+/// "r's borrow ended in each branch above". An arm whose borrow ends on its
+/// last row has no rows left after it, and its last state (the borrow
+/// over, nothing held) drew no leg on to the join: the last arm of an
+/// `if` / `else` or `match`, and an `else if use(r)` whose condition is
+/// r's last use (#1370, #1338). Only where the borrow ended on every
+/// path (that join dot is drawn): an arm beside one that moved r has no
+/// join to go on to. Likewise an arm that ends with a conditional of its
+/// own whose every arm ended the borrow (#1326).
+fn arm_end_state(rap: &ResourceAccessPoint, branch: &BranchData, branch_history: &[BranchData], ty: &BranchType) -> State {
+    let end = branch.states.last().map_or(State::OutOfScope, |s| s.2.clone());
+    if !matches!(end, State::OutOfScope) || !rap.is_ref() || branch.diverges {
+        return end;
+    }
+    let ended_here = !matches!(ty, BranchType::Loop(..))
+        && all_paths_present(ty, branch_history.len())
+        && branch_history.iter().all(|b| ends_borrow(&b.e_data))
+        && branch.e_data.iter().any(|(_, e)| matches!(e,
+            Event::StaticDie { .. } | Event::MutableDie { .. } | Event::OrAltBorrow { end: true, .. }));
+    let ended_in_nested = matches!(branch.e_data.last(), Some((_, Event::Branch { branch_history: inner, ty: inner_ty, .. }))
+        if all_paths_present(inner_ty, inner.len()) && inner.iter().all(|b| ends_borrow(&b.e_data)));
+    if ended_here || ended_in_nested { State::FullPrivilege { s: LineState::Uninit } } else { end }
 }
 
 // Classify a conditional's merge for one variable by each branch's
@@ -7820,24 +7848,7 @@ fn render_branches(
             } else {
                 branch_state_converter(&parent_active)
             };
-            let end_state = branch.states.last()
-                .map(|s| s.2.clone())
-                .unwrap_or(State::OutOfScope);
-            // A reference whose borrow ended in every arm of a conditional
-            // that ends this arm (`else if let … && bump(r) { … } else { …
-            // }`, a `match` or an `if` / `else` nested in an `else`, each
-            // arm ending r's borrow, #1326): that conditional's join dot
-            // says so, and the rest of this arm, down to its own join, is
-            // the dashed "borrow has ended" rest, as on an arm that ended
-            // the borrow itself. Left out, the nested join had no leg on.
-            let end_state = match (&end_state, branch.e_data.last()) {
-                (State::OutOfScope, Some((_, Event::Branch { branch_history: inner, ty: inner_ty, .. })))
-                    if rap.is_ref() && !branch.diverges
-                        && all_paths_present(inner_ty, inner.len())
-                        && inner.iter().all(|b| ends_borrow(&b.e_data)) =>
-                    State::FullPrivilege { s: LineState::Uninit },
-                _ => end_state,
-            };
+            let end_state = arm_end_state(rap, branch, branch_history, ty);
 
             // Build segments. Empty-classified states drop out so
             // a Move (anywhere) ends the visible run there.
@@ -8059,13 +8070,19 @@ fn render_branches(
                 }
             }
 
-            // An arm of one row with no events for the variable (`None =>
-            // println!(..),`) has no rows of its own in its column to be
-            // solid over. It still gets the half row around its own row,
-            // so it reads as the arm that runs here (#845). The join
+            // An arm of one row (`None => println!(..),`, `1 => show(&s),`)
+            // has no rows of its own in its column to be solid over. It
+            // still gets the half row around its own row, so it reads as
+            // the arm that runs here (#845): above the row in the state the
+            // arm starts in, below it in the state its events there leave
+            // (none after a move; a reference whose borrow ended there goes
+            // on dashed). Left out for an arm with events, its leg was
+            // dashed straight through its own dot (#1373). The join
             // diagonal starts below it; the join point doesn't move.
             let (own_first, own_last) = ty.get_start_end(i);
-            if branch.e_data.is_empty() && !branch.diverges && !is_active
+            let on_own_row = branch.e_data.iter()
+                .all(|(l, e)| *l == own_first && !matches!(e, Event::Branch { .. }));
+            if on_own_row && !branch.diverges && !is_active
                 && own_first == own_last && own_first > *split_point && own_first < *merge_point
                 && !branch_is_collapsed(*split_point, *merge_point)
                 && !state_is_dashed(&parent_active)
@@ -8073,18 +8090,50 @@ fn render_branches(
                 let row_y = get_y_axis_pos(own_first) as f64;
                 let top = (row_y - LINE_SPACE as f64 / 2.0).max(column_top_y);
                 let bot = (row_y + LINE_SPACE as f64 / 2.0).min(merge_y);
+                // What the row's events leave: the last state from the row
+                // on (a move's), or, where the arm's column goes on dashed
+                // beside the arms below, the state before those dashes.
+                let after = if branch.e_data.is_empty() {
+                    Some(parent_active.clone())
+                } else {
+                    let from_row: Vec<&State> = branch.states.iter()
+                        .filter(|(t, _, _)| *t == own_first).map(|s| &s.2).collect();
+                    match from_row.as_slice() {
+                        [.., before, last] if state_is_dashed(last) => Some((*before).clone()),
+                        [.., last] => Some((*last).clone()),
+                        [] => None,
+                    }.filter(|st| !state_is_dashed(st))
+                };
+                let halves: Vec<((f64, f64), State)> = match after {
+                    Some(st) if st == parent_active => vec![((top, bot), st)],
+                    Some(st) => vec![((top, row_y), parent_active.clone()), ((row_y, bot), st)],
+                    None => vec![((top, row_y), parent_active.clone())],
+                };
                 // After the dashes above it, before any below it and the join.
-                let at = segs.iter().position(|s| s.p1.1 >= row_y - 1e-6)
+                let mut at = segs.iter().position(|s| s.p1.1 >= row_y - 1e-6)
                     .unwrap_or(segs.len());
-                let n = segs.len();
-                push_seg_if_renderable(
-                    &mut segs, rap, (branch_x, top), (branch_x, bot),
-                    parent_active.clone(), visualization_data, &arm_label, Leg::Column, own_first, own_first, &arm_path,
-                );
-                if segs.len() > n {
-                    let mut solid = segs.pop().unwrap();
-                    solid.own_row = true;
-                    segs.insert(at, solid);
+                let mut solid_bot = None;
+                // Not over a stretch the arm already draws solid there.
+                let solid_at = |segs: &[BranchSeg], y1: f64, y2: f64| segs.iter().any(|s| {
+                    s.p1.0 == branch_x && s.p2.0 == branch_x && !state_is_dashed(&s.state)
+                        && s.p1.1.min(s.p2.1) < y2 - 1e-6 && s.p1.1.max(s.p2.1) > y1 + 1e-6
+                });
+                for ((y1, y2), st) in halves {
+                    if solid_at(&segs, y1, y2) { continue; }
+                    let n = segs.len();
+                    push_seg_if_renderable(
+                        &mut segs, rap, (branch_x, y1), (branch_x, y2),
+                        st, visualization_data, &arm_label, Leg::Column, own_first, own_first, &arm_path,
+                    );
+                    if segs.len() > n {
+                        let mut solid = segs.pop().unwrap();
+                        solid.own_row = true;
+                        segs.insert(at, solid);
+                        at += 1;
+                        solid_bot = Some(y2);
+                    }
+                }
+                if let Some(bot) = solid_bot.filter(|y| *y > row_y) {
                     if let Some(join) = segs.iter_mut().find(|s| (s.p1.0 - s.p2.0).abs() > 1e-6 && s.p1.0 == branch_x) {
                         if join.p1.1 < bot { join.p1.1 = bot; }
                     }
