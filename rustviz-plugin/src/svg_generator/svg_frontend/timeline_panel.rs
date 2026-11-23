@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{ApproxNote, is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier};
+use crate::svg_generator::data::{ApproxNote, breaks_out_only, is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier};
 use crate::svg_generator::hover_messages::{self, styled_name_html};
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use crate::svg_generator::svg_frontend::rv_attrs::{self, Rv};
@@ -1269,6 +1269,31 @@ fn render_branch_dots(
         // `match` whose branches all `return` or panic): nothing
         // reaches the merge, so there's no join to mark (#515).
         if !branch_history.is_empty() && branch_history.iter().all(|b| b.diverges) {
+            // Unless some of them `break` out of a loop (#759): the
+            // column goes on after the loop, in the state those branches
+            // left it (`compute_branch_states`), from a dot here, so it
+            // doesn't start in mid-air below the arms' stop bars (#1296).
+            let mut broke: Vec<State> = branch_history.iter()
+                .filter(|b| breaks_out_only(&b.exits))
+                .filter_map(|b| b.states.last().map(|s| s.2.clone()))
+                .collect();
+            broke.sort();
+            if broke.first().map(convert_back).is_some_and(|s| seg_drawn(rap, &s)) {
+                // The branches it goes on from: those that break still
+                // holding something (not one that dropped it, #410).
+                let breaking = branch_history.iter()
+                    .filter(|b| breaks_out_only(&b.exits)
+                        && b.states.last().is_some_and(|s| seg_drawn(rap, &convert_back(&s.2))))
+                    .count();
+                let cy = get_y_axis_pos(*merge_point) + if collapsed { COLLAPSED_APEX } else { 0 };
+                let m_data = EventDotData {
+                    hash: *hash as u64,
+                    dot_x: timeline_data.x_val,
+                    dot_y: cy,
+                    title: hover_messages::event_dot_branch_merge_after_break(&is.real_name(), breaking),
+                };
+                append_dot(m_data, timeline_data, dots, None, rv_attrs::BRANCH_JOIN, *merge_point);
+            }
             return;
         }
         let (mixed_moved, all_moved) = merge_move_kind(branch_history, ty);
@@ -2599,6 +2624,8 @@ fn ends_several_loans_title(event: &Event, history: &[(usize, Event)], line: usi
 // arm's events), looking into conditionals nested in it.
 fn first_borrow_end(history: &[(usize, Event)]) -> Option<usize> {
     history.iter().filter_map(|(l, e)| match e {
+        // (`OrAltBorrow { end }`: the use after a failed guard's
+        // assignment that ends the borrow, #603.)
         Event::StaticDie { .. } | Event::MutableDie { .. } | Event::OrAltBorrow { end: true, .. } => Some(*l),
         Event::Branch { branch_history, .. } => branch_history.iter().filter_map(|b| first_borrow_end(&b.e_data)).min(),
         _ => None,
@@ -6417,6 +6444,34 @@ fn render_branches(
                     Some(stop) if *top >= stop => continue,
                     Some(stop) => (*bot).min(stop),
                 };
+                // After the borrow ends in an arm whose dashed "borrow has
+                // ended" rest runs on to the join (the arm's last rows are
+                // dashed), the rows between the dot where it ended and those
+                // have no state to draw (the reference holds nothing), so the
+                // dashes started a row below the dot, in mid-air (#1292). They
+                // start at the dot. From the join of a conditional nested in
+                // the arm, if the stretch starts with one (where it ended):
+                // over the nested arms the column is theirs. (An arm whose
+                // column has no dashed rest just ends at the dot, as a
+                // reference's column does outside a conditional.)
+                let (top, state) = match state {
+                    State::OutOfScope if stop_line.is_none() && borrow_end.is_some() && seg_drawn(rap, &end_state) => {
+                        let from = branch.e_data.iter()
+                            .filter_map(|(_, e)| match e {
+                                Event::Branch { merge_point, .. } if *merge_point > *top && *merge_point <= bot => Some(*merge_point),
+                                _ => None,
+                            })
+                            .max()
+                            .unwrap_or(*top);
+                        if from < bot && borrow_end.is_some_and(|end| from >= end) {
+                            (from, State::FullPrivilege { s: LineState::Uninit })
+                        } else {
+                            (*top, state.clone())
+                        }
+                    }
+                    s => (*top, s.clone()),
+                };
+                let top = &top;
                 let Some((y1, y2)) = apexes.segment_ys(*top, bot) else { continue };
                 if stop_line == Some(bot) { stop_y = Some(y2 as f64); }
                 let n = segs.len();
@@ -6424,9 +6479,25 @@ fn render_branches(
                     &mut segs, rap,
                     (branch_x, y1 as f64),
                     (branch_x, y2 as f64),
-                    state.clone(), visualization_data, &arm_label, Leg::Column, *top, bot, &arm_path,
+                    state, visualization_data, &arm_label, Leg::Column, *top, bot, &arm_path,
                 );
                 if segs.len() > n { ended_title(&mut segs, bot); }
+            }
+            // A diverging arm on one row (`0 => return s,`, a one-line
+            // `if c { break a; } else { break b; }`) has no rows of its
+            // own: its column is the split diagonal alone, which ends in
+            // the bar like a longer arm's column does (#1295), unless the
+            // arm ended the value there (a move or a drop has its dot) or
+            // has any other dot of this column on that row (`return n,`
+            // copying n out): the diagonal ends at that dot, and a bar
+            // under it would only poke out at its sides.
+            if let (None, Some(stop)) = (stop_y, stop_line) {
+                if seg_drawn(rap, &end_state) && !branch.e_data.iter().any(|(l, _)| *l == stop) {
+                    let stop_row_y = get_y_axis_pos(stop) as f64;
+                    stop_y = segs.last()
+                        .filter(|seg| seg.p2.0 == branch_x && seg.p2.1 <= stop_row_y + 0.5)
+                        .map(|seg| seg.p2.1);
+                }
             }
             let mut stop_bar = String::new();
             // Where the stop bar sits, if one is drawn: the last
@@ -6865,11 +6936,19 @@ fn render_branch_run(
         let mut quad = seg_quad(seg);
         // The segment that ends at the stop bar leaves the bar's rows to
         // the bar's own polygon, so no polygon shows the other's tooltip.
+        // A split diagonal that ends at the bar (a one-row arm, #1295)
+        // is pulled back along itself, far enough that its slanted end
+        // clears the bar's rows too.
         if stop_at == Some(seg.p2) {
-            let up = if seg.p2.1 >= seg.p1.1 { -1.0 } else { 1.0 };
-            if (seg.p2.1 - seg.p1.1).abs() > 2.0 * STOP_BAR_HOVER_HALF_H {
-                quad[1].1 += up * (STOP_BAR_HOVER_HALF_H - 1.0);
-                quad[2].1 += up * (STOP_BAR_HOVER_HALF_H - 1.0);
+            let len = (dx * dx + dy * dy).sqrt();
+            let (ux, uy) = (dx / len, dy / len);
+            let slant = BRANCH_HALF_W * ux.abs();
+            let back = (STOP_BAR_HOVER_HALF_H - 1.0 + slant) / uy.abs().max(1e-6);
+            if dy.abs() > 2.0 * (STOP_BAR_HOVER_HALF_H + slant) && back < len {
+                quad[1].0 -= ux * back;
+                quad[1].1 -= uy * back;
+                quad[2].0 -= ux * back;
+                quad[2].1 -= uy * back;
             }
         }
         let pts_str = quad.iter()

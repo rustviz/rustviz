@@ -195,6 +195,7 @@ pub fn event_name(e: &Event) -> &'static str {
         Event::TiedParamNote { .. } => "tied_param_note",
         Event::ReslicedInPlace { .. } => "resliced_in_place",
         Event::DeadElseNote => "dead_else_note",
+        Event::LentWithParent { .. } => "lent_with_parent",
         Event::DeadLoanNote { .. } => "dead_loan_note",
         Event::InitRefParam { .. } => "init_ref_param",
         Event::ClosureCall { .. } => "closure_call",

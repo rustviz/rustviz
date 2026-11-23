@@ -1441,9 +1441,11 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "x02_mut_self_field_assign_plain",
         status: Missing,
-        note: "was a crash at c2037dd. `self.n = 0` through &mut self isn't drawn: c.n's column shows no write (#147)",
+        note: "was a crash at c2037dd. `self.n = 0` through &mut self isn't drawn: c.n's column shows no write (#147), \
+               only that reset borrows it with c and may change it (#1311)",
         must_contain: &[
             "self is a mutable borrow from the caller",
+            "L13 c.n is mutably borrowed along with c by reset, which may change c.n; the borrow ends here",
             "reset reads from/writes to c (implicitly mutably borrowed)",
             "println! reads from c.n through an implicit reference, so c.n isn't moved",
         ],
@@ -1452,9 +1454,11 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "x03_free_fn_mut_ref_field_compound",
         status: Missing,
-        note: "was a crash at c2037dd. `c.n += 1` through c: &mut Counter isn't drawn: main's c.n shows no write (#147)",
+        note: "was a crash at c2037dd. `c.n += 1` through c: &mut Counter isn't drawn: main's c.n shows no write (#147), \
+               only that inc borrows it with c and may change it (#1311)",
         must_contain: &[
             "c is a mutable borrow from the caller",
+            "L11 c.n is mutably borrowed along with c by inc, which may change c.n; the borrow ends here",
             "inc reads from/writes to c",
             "c goes out of scope",
         ],
