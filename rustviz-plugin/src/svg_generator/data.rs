@@ -369,6 +369,11 @@ pub enum TempPart {
     /// The base of a struct update (`P { n: 1, ..make_p() }`): these
     /// fields, which the literal doesn't name, are moved out (#605).
     UpdateBase(Vec<String>),
+    /// `make_q().name` as an element of an `if let` / `match` scrutinee
+    /// tuple (`(z, make_q().name)`): the field (a path) is moved out into
+    /// the temporary tuple (the literal's text) before any pattern is
+    /// matched; the pattern takes it, if at all, from the tuple (#1350).
+    TupleField(String, String),
 }
 
 /// Which reference-counted pointer an `Owner` is (found by the std
@@ -1540,6 +1545,10 @@ pub enum ViaCarrier {
     /// one part of it (#1130). `func` names the part (`t.0`), `lenders`
     /// the whole: the one loan is of all of it.
     Part,
+    /// The borrower is a reference variable a call may have stored the
+    /// borrow in, through a `&mut` to it (`store_s(&mut r, &b)` with
+    /// `dst: &mut &'a String`; #1353). `func` names the call.
+    StoredThrough,
 }
 
 /// Where the tuple an `if let` / `match` scrutinee `(x, y)` builds is

@@ -2516,6 +2516,39 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let handed_on: BTreeSet<String> = moved.union(&moved_some).cloned().collect();
     let droppable: Vec<(usize, ResourceAccessPoint)> = self.droppable_locals_at(from, end, &handed_on, true, line, false)
       .into_iter().filter(|(_, rap)| !declared_outside(rap)).collect();
+    // A Copy value or a reference declared in the branch the exit is in
+    // (in the outermost one, if they nest) has nothing to drop, but its
+    // scope ends here too: the `}` that would end it is never reached
+    // on this path (#1348). Not one declared outside every branch (the
+    // function's own, or the frame `drop_locals_at_fn_return` stands
+    // in): that keeps its scope end at the function's end, as on the
+    // paths that don't leave.
+    let branch_from = self.exit_frames.iter().enumerate().find_map(|(i, f)| match f {
+      ExitFrame::Branch { len, fn_level: false, .. } => Some((i, *len)),
+      _ => None,
+    });
+    let scoped: Vec<ResourceAccessPoint> = match branch_from {
+      None => Vec::new(),
+      Some((frame_at, branch_from)) => {
+        // (A `let n;` declared before the branch, first given a value in
+        // it, is the enclosing code's, #930.)
+        let before_branch = |rap: &ResourceAccessPoint| self.deferred_decl_at
+          .get(rap.name().split('.').next().unwrap_or("")).is_some_and(|at| *at <= frame_at);
+        let mut seen: HashSet<&str> = HashSet::new();
+        self.in_scope[from.max(branch_from).min(end)..end].iter().rev()
+          .filter(|n| seen.insert(n.as_str()))
+          .filter_map(|n| self.raps.get(n))
+          .filter(|rd| rd.rap.never_drops() && !rd.rap.is_fn() && !rd.rap.is_static() && !rd.rap.is_temporary()
+            && !handed_on.iter().any(|m| place_within(rd.rap.name(), m))
+            && !self.skip_raps.contains(rd.rap.name())
+            && !declared_outside(&rd.rap)
+            && !before_branch(&rd.rap)
+            // (A reference holds a value once it has a lender.)
+            && if rd.rap.is_ref() { self.borrow_map.contains_key(rd.rap.name()) } else { self.ownership_here(*rd.rap.hash(), false) != OwnHere::No })
+          .map(|rd| rd.rap.clone())
+          .collect()
+      }
+    };
     // `process::exit` ends the process: nothing is dropped, and each
     // local's column ends here with a dot that says so (#1172). (A
     // temporary or a tuple scrutinee isn't dropped either; they have
@@ -2533,6 +2566,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let id = *self.unique_id;
         *self.unique_id += 1;
         self.exit_drops.insert(id);
+        let early = Some(EarlyReturns { process_exit, ..EarlyReturns::default() });
+        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, holds: None, id, early });
+      }
+      for rap in scoped {
+        let id = *self.unique_id;
+        *self.unique_id += 1;
+        self.exit_drops.insert(id);
+        self.exit_scope_ended.insert(rap.name().to_string());
         let early = Some(EarlyReturns { process_exit, ..EarlyReturns::default() });
         self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, holds: None, id, early });
       }
@@ -2577,6 +2618,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     while let Some(t) = tuples.pop() {
       self.drop_tuple_on_exit(&t, line);
+    }
+    for rap in scoped {
+      let id = *self.unique_id;
+      *self.unique_id += 1;
+      self.exit_drops.insert(id);
+      self.exit_scope_ended.insert(rap.name().to_string());
+      self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, holds: None, id, early: None });
     }
     // Innermost first, like the drops above. Not `exit_drops`: the
     // column doesn't end in this dot, whose drop happens on some paths
@@ -3535,7 +3583,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// the function (`all_paths_exit`): nothing after it is drawn.
   fn drop_locals_at_fn_return(&mut self, ret: &'tcx Expr<'tcx>, value: Option<&'tcx Expr<'tcx>>) {
     let lo = *self.unique_id;
-    self.exit_frames.push(ExitFrame::Branch { len: 0, hide: Vec::new(), binds: Vec::new(), binds_at: 0 });
+    self.exit_frames.push(ExitFrame::Branch { len: 0, hide: Vec::new(), binds: Vec::new(), binds_at: 0, fn_level: true });
     self.drop_locals_on_exit(expr_to_line(ret, &self.tcx), value, None, false, "return");
     self.exit_frames.pop();
     self.keep_inline_exit_drops(lo..*self.unique_id, ret);
@@ -3672,7 +3720,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       if self.exit_frames.is_empty() && self.at_fn_level(call) {
         let lo = *self.unique_id;
-        self.exit_frames.push(ExitFrame::Branch { len: 0, hide: Vec::new(), binds: Vec::new(), binds_at: 0 });
+        self.exit_frames.push(ExitFrame::Branch { len: 0, hide: Vec::new(), binds: Vec::new(), binds_at: 0, fn_level: true });
         self.drop_locals_on_exit(line, None, None, false, name);
         self.exit_frames.pop();
         self.keep_inline_exit_drops(lo..*self.unique_id, call);
@@ -4439,12 +4487,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// exits, or was moved away before them. A Copy value or a reference
   /// has no drop at an exit, and keeps its scope end (as at the end of
   /// a function every path left, #515).
-  fn left_at_exits(ends: bool, decls: &HashSet<ResourceAccessPoint>) -> HashSet<ResourceAccessPoint> {
+  /// A Copy value or a reference declared in a branch that the exits
+  /// ended (`exit_scope_ended`) is left too: its scope ends at the
+  /// exit (#1348).
+  fn left_at_exits(&self, ends: bool, decls: &HashSet<ResourceAccessPoint>) -> HashSet<ResourceAccessPoint> {
     if !ends {
       return HashSet::new();
     }
     #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
-    let left = decls.iter().filter(|v| !v.never_drops()).cloned().collect();
+    let left = decls.iter().filter(|v| !v.never_drops() || self.exit_scope_ended.contains(v.name().as_str())).cloned().collect();
     left
   }
 
@@ -5179,7 +5230,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         if self.inside_branch
           && matches!(self.tcx.parent_hir_node(expr.hir_id), rustc_hir::Node::Stmt(_) | rustc_hir::Node::Block(_))
         {
-          let left = Self::left_at_exits(self.inline_in_branch(expr) && self.ends_at_exits(expr, true),
+          let left = self.left_at_exits(self.inline_in_branch(expr) && self.ends_at_exits(expr, true),
             &get_decl_of_block(block, &self.tcx, &self.raps));
           let decls: HashSet<ResourceAccessPoint> = get_decl_of_block(block, &self.tcx, &self.raps)
             .into_iter().filter(|v| needs_scope_end(v) && !left.contains(v)).collect();
@@ -5396,7 +5447,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 let mut decls = get_decl_of_expr(then_body, &self.tcx, &self.raps);
                 decls.extend(bindings);
                 // Not where every path breaks or continues first (#631).
-                let decls = &decls - &Self::left_at_exits(self.ends_at_exits(then_body, false), &decls);
+                let decls = &decls - &self.left_at_exits(self.ends_at_exits(then_body, false), &decls);
                 self.emit_scope_end(decls, body_end);
                 // A `while` also ends when its condition is false.
                 let broke_moved = self.emit_loop_exit_moves(expr, None, &before, true, None);
@@ -5455,7 +5506,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               .lookup_char_pos(block.span.hi()).line;
             let decls = get_decl_of_block(block, &self.tcx, &self.raps);
             // Not where every path breaks or continues first (#631).
-            let decls = &decls - &Self::left_at_exits(self.block_ends_at_exits(block, false), &decls);
+            let decls = &decls - &self.left_at_exits(self.block_ends_at_exits(block, false), &decls);
             self.emit_scope_end(decls, body_end);
             // A bare `loop` ends only through a `break`.
             let broke_moved = self.emit_loop_exit_moves(expr, None, &before, false, None);
@@ -7142,7 +7193,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     };
     #[expect(clippy::disallowed_methods, reason = "inserted into a set; order is lost")]
     self.unbranched_temps.extend(scrutinee_temps.iter().cloned());
-    self.exit_frames.push(ExitFrame::Branch { len: frame_len, hide, binds: Vec::new(), binds_at: 0 });
+    self.exit_frames.push(ExitFrame::Branch { len: frame_len, hide, binds: Vec::new(), binds_at: 0, fn_level: false });
     // An exit in the if branch drops the tuple scrutinee (#327), or
     // those of a let chain's parts (#971).
     let if_tuples: Vec<&'tcx rustc_hir::LetExpr<'tcx>> = iflet_tuple.filter(|_| !scrutinee_moves.is_empty())
@@ -7460,7 +7511,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             } else if !leaves_branch {
               self.discard_exit_drops(if_ids.clone());
             }
-            let left = Self::left_at_exits(leaves_fn || leaves_branch, &if_decl);
+            let left = self.left_at_exits(leaves_fn || leaves_branch, &if_decl);
             for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v) && !left.contains(v)) {
                 self.preprocessed_events.push((
                     if_end,
@@ -7538,8 +7589,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // add gos events for variables declared in each block, except
     // where every path through the branch leaves it at an exit
     // that drops them (#630)
-    let if_left = Self::left_at_exits(self.ends_at_exits(if_expr, true), &if_decl);
-    let else_left = Self::left_at_exits(else_expr.is_some_and(|e| self.ends_at_exits(e, true)), &else_decl);
+    let if_left = self.left_at_exits(self.ends_at_exits(if_expr, true), &if_decl);
+    let else_left = self.left_at_exits(else_expr.is_some_and(|e| self.ends_at_exits(e, true)), &else_decl);
     for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v) && !if_scoped.contains(v) && !if_left.contains(v)) {
       if_ev.push((if_end, ExternalEvent::GoOutOfScope { ro: var.clone(), holds: None, id: *self.unique_id, early: None }));
       *self.unique_id += 1;
@@ -7849,7 +7900,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let entry_len = self.in_scope.len();
     let match_lo = *self.unique_id;
     let hide = self.rhs_ids_of(arms.iter().map(|a| Some(a.body)));
-    self.exit_frames.push(ExitFrame::Branch { len: entry_len, hide, binds: Vec::new(), binds_at: 0 });
+    self.exit_frames.push(ExitFrame::Branch { len: entry_len, hide, binds: Vec::new(), binds_at: 0, fn_level: false });
     // `match (x, y) { … }` moves `x` and `y` into the tuple
     // whatever arm is taken (#327).
     let scrutinee_moves = self.tuple_scrutinee_moves(guard_expr);
@@ -8076,7 +8127,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // an exit that drops them (#630)
       // (A lone arm that always leaves the function drops them there
       // too, #1004.)
-      let arm_left = Self::left_at_exits((!inline || leaves_fn || leaves_branch) && self.ends_at_exits(arm.body, true), &arm_decls);
+      let arm_left = self.left_at_exits((!inline || leaves_fn || leaves_branch) && self.ends_at_exits(arm.body, true), &arm_decls);
       for r in in_decl_order(&arm_decls).into_iter().filter(|v| needs_scope_end(v) && !arm_scoped.contains(v) && !arm_left.contains(v)) {
         let id = *self.unique_id;
         *self.unique_id += 1;
@@ -8732,6 +8783,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // The loop variable's `loop_ref_into` entry, and the one it
         // shadows (a loop nested in another with the same variable).
         let mut loop_ref_prev: Vec<(String, Option<Vec<ResourceAccessPoint>>)> = Vec::new();
+        // `for x in v.iter_mut()`: the variable that lends x (v), and
+        // whether mutably (#1347).
+        let mut call_lender: Option<(ResourceTy, Evt)> = None;
         if let PatKind::Binding(_, pat_hirid, pat_ident, None) = user_pat.kind {
           let pat_name = binding_name(&self.tcx, pat_hirid);
           let pat_ty = self.tcx.typeck(user_pat.hir_id.owner)
@@ -8802,6 +8856,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 loop_ref_prev.push((pat_name.clone(), prev));
               }
             }
+            if matches!(head_arg.kind, ExprKind::MethodCall(..)) && matches!(&lender, ResourceTy::Value(r) if !r.is_fn()) {
+              let evt = if pat_ty.ref_mutability() == Some(Mutability::Mut) { Evt::MBorrow } else { Evt::SBorrow };
+              call_lender = Some((lender.clone(), evt));
+            }
             self.add_ref(
               pat_name.clone(),
               bool_of_mut(pat_ty.ref_mutability().unwrap()),
@@ -8861,6 +8919,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             } else {
               self.add_ev(for_line, e, to_rty, head_rty, false);
             }
+          } else if let Some((lender, evt)) = call_lender.take() {
+            // `for x in v.iter_mut()` / `v.iter()`: each x is a
+            // reference into v, which v lends (through the iterator
+            // `iter_mut` returns) as `for x in &mut v` does; x gives
+            // the loan back where it ends (#1347).
+            self.add_ev(for_line, evt, to_rty, lender, false);
           } else {
             // A Range or a call result (`0..n`, `s.chars()`) has
             // no place to borrow or move from: each iteration's
@@ -9035,7 +9099,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let mut loop_decls = get_decl_of_expr(body_expr, &self.tcx, &self.raps);
         collect_pat_bindings(user_pat, &self.tcx, &self.raps, &mut loop_decls);
         // Not where every path breaks or continues first (#631).
-        let loop_decls = &loop_decls - &Self::left_at_exits(self.ends_at_exits(body_expr, false), &loop_decls);
+        let loop_decls = &loop_decls - &self.left_at_exits(self.ends_at_exits(body_expr, false), &loop_decls);
         // The loop's iterator holds the loan the head made
         // (`&mut m`, `&pairs`) until the loop ends, so the
         // lender is borrowed through the whole body, not just
@@ -10150,6 +10214,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     use rustc_hir::Node;
     let (path, pats, is_match) = self.tuple_scrutinee_elem(elem)?;
     let leaves = left || pats.iter().any(|p| self.path_left(p, &path, typeck, env).is_some());
+    // `(z, make_q().name)`: the literal moves the field out of the
+    // temporary into the tuple, before any pattern is matched; the
+    // pattern never sees the rest of the temporary (#1350).
+    if let Some(field) = &field {
+      let tuple = self.tcx.hir_parent_iter(elem.hir_id)
+        .map_while(|(_, n)| match n { Node::Expr(t) if matches!(t.kind, ExprKind::Tup(_)) => Some(t), _ => None })
+        .last()
+        .and_then(|t| self.tcx.sess.source_map().span_to_snippet(t.span).ok());
+      if let Some(tuple) = tuple {
+        if !leaves && !pats.iter().any(|p| pat_refutable(p)) {
+          return None;
+        }
+        return Some(TempPart::TupleField(field.clone(), tuple));
+      }
+    }
     if is_match {
       return leaves.then_some(TempPart::Match(field));
     }
@@ -10966,7 +11045,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let uninit_before = self.uninit_locals.clone();
     let maybe_init_before = self.maybe_init_locals.clone();
     let prev_inside_branch = std::mem::replace(&mut self.inside_branch, true);
-    self.exit_frames.push(ExitFrame::Branch { len: entry_len, hide: Vec::new(), binds: Vec::new(), binds_at: 0 });
+    self.exit_frames.push(ExitFrame::Branch { len: entry_len, hide: Vec::new(), binds: Vec::new(), binds_at: 0, fn_level: false });
     let arm_borrows = self.arm_borrows_begin();
     self.arm_frames.push((split, merge, block_lo, merge));
     self.visit_block(els);
@@ -11001,7 +11080,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let decl = get_decl_of_block(els, &self.tcx, &self.raps);
     let mut decl_vars = &(&decl | &inner) | &scoped;
     liveness = &liveness - &decl_vars;
-    let left = Self::left_at_exits(self.block_ends_at_exits(els, true), &decl);
+    let left = self.left_at_exits(self.block_ends_at_exits(els, true), &decl);
     for var in in_decl_order(&decl).into_iter().filter(|v| needs_scope_end(v) && !scoped.contains(v) && !left.contains(v)) {
       else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), holds: None, id: *self.unique_id, early: None }));
       *self.unique_id += 1;
@@ -11236,6 +11315,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ExprKind::AddrOf(rustc_hir::BorrowKind::Ref, borrow_mut, operand) => {
         // `&x`, `&v[0]`, `&p.f`, `&*r` borrow a place, not a temporary;
         // `&make().name` borrows part of the temporary `make()` (#1165).
+        let place = operand;
         let operand = match extended_temp_operand(operand) {
           Some(o) => o,
           None if matches!(operand.kind, ExprKind::AddrOf(..)) => operand,
@@ -11251,6 +11331,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
         let tmp = self.extended_temp_column(operand, borrow_mut, tmp_ty, expr_to_line(operand, &self.tcx));
         out.push(tmp.name().to_owned());
+        // `H { r: &make_user().name }`: what holds the reference borrows
+        // the temporary's field column, as `let name = &make_user().name;`
+        // does (#1346).
+        let tmp = self.temp_field_column(&tmp, place, operand).unwrap_or(tmp);
         self.nested_ext_temps.insert(e.hir_id, tmp);
       }
       ExprKind::Struct(_, fields, _) => {

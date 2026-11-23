@@ -419,6 +419,11 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // doesn't), and are kept only in a branch that diverges: see
   // `keep_exit_drops`.
   pub exit_drops: std::collections::HashSet<usize>,
+  /// Variables with nothing to drop (a Copy value, a reference) declared
+  /// in a branch that an exit in it ended (#1348): like a value that is
+  /// dropped there, their scope ends at the exit, not at the block's
+  /// `}`, which that path never reaches (see `left_at_exits`).
+  pub exit_scope_ended: HashSet<String>,
   /// References that point into something the plugin can't name (the
   /// loop variable of `for x in it`, #417): they get no lender, so no
   /// borrow is "returned" when they end.
@@ -930,7 +935,10 @@ pub enum ExitFrame {
   // bindings and guard, kept in the arm's own list), and `binds_at`
   // the length `preprocessed_events` had when they happened. See
   // `owns_value_here`.
-  Branch { len: usize, hide: Vec<std::ops::Range<usize>>, binds: Vec<(usize, ExternalEvent)>, binds_at: usize },
+  //
+  // `fn_level`: not a branch, but the stand-in frame for an exit
+  // directly in the function's body (`drop_locals_at_fn_return`).
+  Branch { len: usize, hide: Vec<std::ops::Range<usize>>, binds: Vec<(usize, ExternalEvent)>, binds_at: usize, fn_level: bool },
   // `head_from`: for a `for` loop, where in `in_scope` the temporaries
   // its head made begin (they're dropped where the loop is left, but
   // declared before `len`); `len` for any other loop.
@@ -996,6 +1004,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       branch_temp_drops: Vec::new(),
       ctor_arg_ids: HashMap::new(),
       exit_drops: HashSet::new(),
+      exit_scope_ended: HashSet::new(),
       unlent_refs: HashSet::new(),
       loop_ref_into: HashMap::new(),
       tuple_temp_refs: HashSet::new(),
@@ -4728,6 +4737,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         ExprKind::Call(callee, _) => !crate::visitor::is_ctor_path(callee, self.tcx.typeck(e.hir_id.owner))
           && !self.is_copy_literal_value(e),
         ExprKind::MethodCall(..) => true,
+        // `s + "!"`: a call to `Add::add` (#1351).
+        ExprKind::Binary(..) | ExprKind::Unary(..) => overloaded_value_op(e, &self.tcx).is_some(),
         _ => false,
       }
       && !self.tcx.typeck(e.hir_id.owner).node_type(e.hir_id).is_ref()
@@ -5241,6 +5252,39 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           }
         });
         *self.unique_id += 1;
+        // `store_s(&mut r, &b)`: the place is the reference variable r
+        // (`&mut &'a String`), which may now point to b: draw the
+        // borrow into r, and its end as an arrow back from r, as for
+        // `r = &b;` (#1353). (A place that isn't a reference, `keep(&mut
+        // v, &b)`, keeps the borrow on b's column only.)
+        let ref_holder = match &place {
+          ResourceTy::Index(p, _, _) if p.is_ref() && !p.is_member() && self.borrow_map.contains_key(p.name()) => Some(p.clone()),
+          _ => None,
+        };
+        let place = match &ref_holder {
+          Some(p) => {
+            let via = BorrowVia {
+              func: fn_name.clone(),
+              lenders: vec![from_ro.name()],
+              also_unnamed: false,
+              tie: ArgTie::default(),
+              carrier: ViaCarrier::StoredThrough,
+              passed_on: Vec::new(),
+            };
+            let (from, to) = (from_ro.clone(), ResourceTy::Value(p.clone()));
+            // (Its id comes after the borrow end's: that one is the
+            // event after the call's, see `stored_borrows`.)
+            let id = *self.unique_id + 1;
+            let ev = if mutable {
+              ExternalEvent::MutableBorrow { from, to, is_partial: false, is_reborrow: false, break_alt: None, via: Some(via), id, of_ref_var }
+            } else {
+              ExternalEvent::StaticBorrow { from, to, is_partial: false, is_reborrow: false, break_alt: None, via: Some(via), id, of_ref_var }
+            };
+            self.add_external_event(line_num, ev);
+            ResourceTy::Value(p.clone())
+          }
+          None => place,
+        };
         // StaticDie/MutableDie { from: place, to: lender }: drawn on
         // the lender's column only, like a borrow stored in an element.
         let mut die = self.ext_ev_of_evt(if mutable { Evt::MDie } else { Evt::SDie }, from_ro, place, *self.unique_id, false);
@@ -5249,6 +5293,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         }
         self.add_external_event(end_line, die);
         *self.unique_id += 1;
+        if ref_holder.is_some() {
+          *self.unique_id += 1;
+        }
       }
       if !stored.is_empty() {
         return;
@@ -8634,10 +8681,25 @@ pub fn literal_pat_parents(&self, pat: &'tcx Pat<'tcx>, scrutinee: &'tcx Expr<'t
         out.push((p, self.rap_or_field_through_ref(l), typeck.node_type(el.hir_id), l));
       }
     } else {
-      out.push((p, self.rap_or_field_through_ref(el), typeck.node_type(el.hir_id), el));
+      out.push((p, self.literal_elem_source(el), typeck.node_type(el.hir_id), el));
     }
   }
   out
+}
+
+/// What the element `el` of a scrutinee literal gives the pattern: its
+/// variable (or field through a reference), or for a field of a call's
+/// result (`make_q().name` in `(z, make_q().name)`), the call, as for
+/// the call `mk()` itself: an arm can't draw a move out of the call's
+/// temporary, whose column isn't split into the arms (#1350).
+fn literal_elem_source(&self, el: &'tcx Expr<'tcx>) -> ResourceTy {
+  match self.rap_or_field_through_ref(el) {
+    ResourceTy::Anonymous => match field_call_root(el).map(|c| get_rap(c, &self.tcx, &self.raps)) {
+      Some(f @ ResourceTy::Value(ResourceAccessPoint::Function(_))) => f,
+      _ => ResourceTy::Anonymous,
+    },
+    r => r,
+  }
 }
 
 /// Each sub-pattern of `pat` with the element of the tuple literal `e`
@@ -8831,6 +8893,20 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     // second arg, is a list of args to the function
     ExprKind::Call(fn_expr, _) => self.match_rhs_call(lhs, rhs, evt, fn_expr),
     
+    // `let t = s + "!";`, `let f = -wave;` with an overloaded operator:
+    // the operator is a call (`Add::add(s, "!")`), and t gets what it
+    // returns, drawn from the operator's logo as from a function's
+    // (#1351). (For String, that is s's own buffer, moved on.)
+    ExprKind::Binary(..) | ExprKind::Unary(UnOp::Neg | UnOp::Not, _) if overloaded_value_op(rhs, &self.tcx).is_some() => {
+      let op = overloaded_value_op(rhs, &self.tcx).unwrap().to_owned();
+      let line_num = span_to_line(&rhs.span, &self.tcx);
+      if !self.raps.contains_key(&fn_key(&op)) {
+        self.add_fn(op.clone());
+      }
+      let from = self.raps.get(&fn_key(&op))
+        .map_or(ResourceTy::Anonymous, |rd| ResourceTy::Value(rd.rap.to_owned()));
+      self.add_ev(line_num, evt, lhs, from, false);
+    }
     ExprKind::Lit(_) | ExprKind::Binary(..) | // Any type of literal on RHS implies a bind
     ExprKind::Unary(UnOp::Neg, _) | // ~<expr>
     ExprKind::Unary(UnOp::Not, _) // !<expr>
