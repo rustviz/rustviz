@@ -23911,6 +23911,75 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "*k can't be used",
         ],
     },
+    TooltipExpect {
+        name: "mut_ref_passed_as_shared_1329",
+        // #1329: a `&mut i32` r used where a `&i32` is expected (a call or
+        // closure or method argument, an annotated `let`, an assignment, a
+        // `&i32` struct field, `Some(r)` / a tuple with the type written,
+        // a `-> &i32` return) is coerced by an implicit `&*r`: an
+        // immutable reborrow, not a move. main drew `look(r)` as moving r
+        // (and then panicked at the `*r += 1` after it), `let s: &i32 = r`
+        // as a copy of r, and `Some(r)` as a move of r (or, with nothing
+        // after it, as o mutably borrowing e).
+        must_contain: &[
+            "the value r points to is immutably borrowed by look through r; r is read-only while the borrow is live",
+            "look reads from r",
+            "look no longer borrows the value r points to",
+            "the value r points to is immutably borrowed by check through r; r is read-only while the borrow is live",
+            "the value r points to is immutably borrowed by add through r; r is read-only while the borrow is live",
+            "the value r points to is immutably borrowed by get through r; r is read-only while the borrow is live",
+            "the value r points to is immutably borrowed by s through r; r is read-only while the borrow is live",
+            "s no longer borrows the value r points to",
+            "the value r points to is immutably borrowed by t through r; r is read-only while the borrow is live",
+            "the value r points to is immutably borrowed by v.r through r; r is read-only while the borrow is live",
+            "the value r points to is immutably borrowed by o through r; r is read-only while the borrow is live",
+            "o holds a value that immutably borrows the data r points to (o isn't a reference itself)",
+            "the value r points to is immutably borrowed by p.0 through r; r is read-only while the borrow is live",
+            "a reference to *r, reborrowed through r, is returned to the caller; the data it points to is not copied",
+            // The `else if look(r)` arm: both joins are drawn.
+            "r's borrow ended in each branch above",
+            "the resource r points to is immutably borrowed by w through r; r is read-only while the borrow is live",
+            "w no longer borrows the resource r points to",
+            // A generic `T` parameter does take the reference: m is moved.
+            "m's mutable reference is moved (not the value it points to)",
+        ],
+        must_not_contain: &[
+            "r's mutable reference is moved",
+            "s is initialized with a copy of r",
+            "t is initialized with a copy of r",
+            "=r's value is copied",
+            "e's value is mutably borrowed by o",
+            "e's value is immutably borrowed by o",
+            "o's mutable borrow ends",
+        ],
+    },
+    TooltipExpect {
+        name: "array_of_mut_refs_1330",
+        // #1330: in `[a, b]` with a, b `&mut String`, a is moved into the
+        // array and b is coerced to a's type with an implicit `&mut *b`
+        // (array elements are coercion sites; checked with rustc: b is
+        // usable after k's last use). main drew the local k as borrowing
+        // t directly, with nothing on b's column, and ended a parameter
+        // b's borrow on the line k was made (pinned by
+        // `reborrowed_array_elements_stay_borrowed_with_the_array`).
+        must_contain: &[
+            "the resource b points to is mutably borrowed by k through b; b can't be used while the borrow is live",
+            "k no longer borrows the resource b points to",
+            "k holds a value that mutably borrows the data b points to (k isn't a reference itself)",
+            "t's resource is mutably borrowed by b; t can't be used while the borrow is live",
+            "a's mutable reference is moved (not the resource it points to)",
+            // `let k: [&String; 2] = [a, b];`: both immutably reborrowed.
+            "the resource a points to is immutably borrowed by k through a; a is read-only while the borrow is live",
+            "the resource b points to is immutably borrowed by k through b; b is read-only while the borrow is live",
+            // `(a, b)` moves both.
+            "b's mutable reference is moved (not the resource it points to)",
+        ],
+        must_not_contain: &[
+            "t's resource is mutably borrowed by k",
+            "k holds a value that mutably borrows t's resource",
+            "*b points to",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -33015,6 +33084,27 @@ fn ended_borrow_inner_join_has_a_leg_on() {
             (near(a, i) && b.1 > i.1 + 1.0) || (near(b, i) && a.1 > i.1 + 1.0)
         });
         assert!(leaves, "{}: no leg leaves the inner join downwards", inner);
+    }
+}
+
+/// #1330: a `&mut` reborrowed into an array (`[a, b, c]`'s b and c,
+/// `[&mut *a, &mut *b]`) stays borrowed until the array's last use: its
+/// borrow doesn't end on the line the array is made. main ended a second
+/// element's borrow there, before the array gave it back.
+#[test]
+fn reborrowed_array_elements_stay_borrowed_with_the_array() {
+    let timeline = run_with_local_backend("array_of_mut_refs_1330").timeline_panel_string();
+    let ids = |prefix: &str| -> Vec<String> {
+        common::svg::rv_elements(&timeline).into_iter().map(|e| e.id).filter(|id| id.starts_with(prefix)).collect()
+    };
+    // `let k = [a, b, c];` on line 30, k's last use on line 31.
+    // `let k = [&mut *a, &mut *b];` on line 49, k's last use on line 50.
+    for (made, last) in [(30, 31), (49, 50)] {
+        let early: Vec<String> = ids(&format!("b@L{made}:dot:")).into_iter().filter(|id| id.contains("mutable_die")).collect();
+        assert!(early.is_empty(), "b's borrow ends where k is made (line {made}): {early:?}");
+        let ends = ids(&format!("b@L{last}:dot:"));
+        assert!(ends.iter().any(|id| id.contains("mutable_die") && id.contains("mutable_reacquire")),
+            "b's borrow doesn't end with k's on line {last}: {ends:?}");
     }
 }
 

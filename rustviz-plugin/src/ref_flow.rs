@@ -738,10 +738,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// Whether the borrow held by the value of `e` is a mutable one.
   fn value_borrow_is_mut(&self, e: &'tcx Expr<'tcx>) -> bool {
     match e.kind {
+      // (`Some(r)` with r a `&mut` where an `Option<&T>` is expected
+      // holds an immutable reborrow, `&*r`, #1329.)
       ExprKind::Path(QPath::Resolved(..)) | ExprKind::Field(..) => {
-        expr_to_rap_name(e, &self.tcx)
-          .and_then(|n| self.borrow_map.get(&n))
-          .is_some_and(|rd| rd.ref_mutability)
+        !is_implicit_shared_reborrow_of_mut(e, self.tcx.typeck(e.hir_id.owner))
+          && expr_to_rap_name(e, &self.tcx)
+            .and_then(|n| self.borrow_map.get(&n))
+            .is_some_and(|rd| rd.ref_mutability)
       }
       ExprKind::AddrOf(_, m, _) => m.is_mut(),
       ExprKind::Call(..) | ExprKind::MethodCall(..) => self.call_borrow_is_mut(e),
@@ -974,6 +977,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     res
   }
 
+  /// The local `&mut` reference variable r (see `local_mut_ref`) that
+  /// `e` reborrows: `&mut *r`, `&*r`, or `r` itself where rustc inserts
+  /// the reborrow (`is_implicit_reborrow`).
+  fn reborrowed_local_mut_ref(&self, e: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
+    match e.kind {
+      ExprKind::AddrOf(_, _, inner) => match inner.kind {
+        ExprKind::Unary(UnOp::Deref, r) => self.local_mut_ref(r),
+        _ => None,
+      },
+      ExprKind::Path(_) if is_implicit_reborrow(e, self.tcx.typeck(e.hir_id.owner)) => self.local_mut_ref(e),
+      _ => None,
+    }
+  }
+
   /// `e` names a local `&mut` reference variable that borrows a
   /// variable with a column (not a parameter, whose column already
   /// stands for the caller's data, #393).
@@ -1002,7 +1019,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
   fn mut_ref_moved_into_call(&self, e: &'tcx Expr<'tcx>) -> bool {
     let typeck = self.tcx.typeck(e.hir_id.owner);
-    if !typeck.expr_ty(e).ref_mutability().is_some_and(|m| m.is_mut()) || is_implicit_mut_reborrow(e, typeck) {
+    // (`look(r)` with `look(x: &T)` reborrows `&*r` too, #1329.)
+    if !typeck.expr_ty(e).ref_mutability().is_some_and(|m| m.is_mut()) || is_implicit_reborrow(e, typeck) {
       return false;
     }
     match self.tcx.parent_hir_node(e.hir_id) {
@@ -1019,6 +1037,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   }
 
   pub fn value_lenders(&self, e: &'tcx Expr<'tcx>) -> Vec<ResourceTy> {
+    // A local `&mut` r reborrowed: `&mut *r` / `&*r`, or `r` where rustc
+    // inserts that (an element of `[a, b]` after the first, coerced to
+    // its type; `Some(r)` where an `Option<&T>` is expected). The value
+    // holds a borrow through r, like `let k = &mut *r;`, so r can't be
+    // used (or is read-only) while it is live; r still holds its own
+    // borrow (#1329, #1330).
+    if let Some(r) = self.reborrowed_local_mut_ref(e) {
+      return vec![ResourceTy::Deref(r)];
+    }
     match e.kind {
       ExprKind::Path(QPath::Resolved(..)) | ExprKind::Field(..) => {
         let name = expr_to_rap_name(e, &self.tcx);
