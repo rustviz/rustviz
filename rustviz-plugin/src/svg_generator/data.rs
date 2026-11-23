@@ -1508,6 +1508,9 @@ pub enum ViaCarrier {
     /// The borrower is a reference field of the struct the call
     /// returned (`Excerpt::new(&novel)` → `ex.part`; #336).
     StructField,
+    /// The borrower is a reference element of the tuple the call
+    /// returned (`pair(&s)` → `q.0`; #1341).
+    TupleField,
     /// The borrower is a reference copied out of a collection that
     /// holds references (`let r = refs[0];`; #349). `func` names the
     /// collection.

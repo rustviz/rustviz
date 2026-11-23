@@ -4493,7 +4493,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
     // `v.get_mut(0).unwrap()` / `v.first().unwrap()` with `v` a
     // reference: a reference into what v points to (#1078).
-    if matches!(e.kind, ExprKind::MethodCall(..) | ExprKind::Call(..)) {
+    if matches!(e.kind, ExprKind::MethodCall(..) | ExprKind::Call(..))
+      || try_operand(e).is_some_and(|op| matches!(op.kind, ExprKind::MethodCall(..) | ExprKind::Call(..))) {
       let r = self.call_reborrows_through(e)?;
       let is_mut = typeck.node_type(e.hir_id).ref_mutability().is_some_and(|m| m.is_mut());
       let place = crate::svg_generator::hover_messages::reborrow_place_via_call(is_mut, &r.method, &r.target);
@@ -4624,6 +4625,93 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     Some(ResourceTy::DerefField(rap, place, PlaceWrite::Update, self.field_holds(typeck.node_type(expr.hir_id), expr.hir_id.owner)))
   }
 
+  /// The `e?` whose operand is `e` (see `try_operand`), if any.
+  pub fn try_of_operand(&self, e: &'tcx Expr<'tcx>) -> Option<&'tcx Expr<'tcx>> {
+    let rustc_hir::Node::Expr(branch) = self.tcx.parent_hir_node(e.hir_id) else { return None };
+    let rustc_hir::Node::Expr(m) = self.tcx.parent_hir_node(branch.hir_id) else { return None };
+    try_operand(m).filter(|op| op.hir_id == e.hir_id).map(|_| m)
+  }
+
+  /// `Part { text: x }` / `(x, 1)` / `[x, y]` returned with `x` a
+  /// reference variable: the reference is copied (`&T`) or moved
+  /// (`&mut T`) into the value the caller gets, so x's borrow goes on
+  /// in the caller, as for a bare `x` or `Some(x)` (#1340). A reference
+  /// reborrowed through one (`(x.trim(), 1)`, `Part { text: &x[1..] }`)
+  /// goes the same way, as a bare `x.trim()` does (#784, #1078). Returns
+  /// whether it drew that.
+  pub fn ref_part_to(&mut self, elem: &'tcx Expr<'tcx>, to: ResourceTy) -> bool {
+    if elem.span.from_expansion() {
+      return false;
+    }
+    let Some(m) = self.tcx.typeck(elem.hir_id.owner).node_type(elem.hir_id).ref_mutability() else { return false };
+    let line = expr_to_line(elem, &self.tcx);
+    if matches!(elem.kind, ExprKind::Path(_) | ExprKind::Field(..)) {
+      let ResourceTy::Value(rap) = get_rap(elem, &self.tcx, &self.raps) else { return false };
+      if !rap.is_ref() || rap.is_fn() {
+        return false;
+      }
+      self.update_rap(&rap, line);
+      let evt = if m == Mutability::Mut { Evt::Move } else { Evt::Copy };
+      self.add_ev(line, evt, to, ResourceTy::Value(rap), false);
+      return true;
+    }
+    let Some(reborrow) = self.reborrow_through_ref(elem) else { return false };
+    // The borrow the call takes through `x` goes on in the value.
+    if let Some(r) = self.call_reborrows_through(elem) {
+      self.mark_borrow_kept_by_result(try_operand(elem).unwrap_or(elem), &[ResourceTy::Value(r.through)]);
+    }
+    self.add_ev(line, Evt::Copy, to, reborrow, false);
+    true
+  }
+
+  /// The tuple-struct / variant constructor call whose argument the
+  /// literal `e` is, directly or as a part of an enclosing struct or
+  /// tuple literal (see `enclosing_ctor_name`).
+  pub fn enclosing_ctor(&self, e: &'tcx Expr<'tcx>) -> Option<&'tcx Expr<'tcx>> {
+    let mut cur = e;
+    loop {
+      // A struct literal's field value's parent is the `ExprField`.
+      let mut parent = self.tcx.parent_hir_node(cur.hir_id);
+      if let rustc_hir::Node::ExprField(f) = parent {
+        parent = self.tcx.parent_hir_node(f.hir_id);
+      }
+      let rustc_hir::Node::Expr(p) = parent else { return None };
+      match p.kind {
+        ExprKind::Struct(..) | ExprKind::Tup(_) => cur = p,
+        ExprKind::Call(callee, args) if args.iter().any(|a| a.hir_id == cur.hir_id)
+          && crate::visitor::is_ctor_path(callee, self.tcx.typeck(p.hir_id.owner)) => return Some(p),
+        _ => return None,
+      }
+    }
+  }
+
+  /// A reference variable `elem` in a struct or tuple literal built as
+  /// the argument of the constructor `fn_name` (`Some(Part { text: x })`,
+  /// `Ok((x, 2))`): like `Some(x)`, its copy (or move, for `&mut`) goes
+  /// where the built value goes, drawn there once that is known
+  /// (`retarget_ctor_arg_events`; #1340). Not when the value is passed
+  /// to a call, which borrows through it (`match_arg`'s constructor case).
+  /// Returns whether it drew that.
+  pub fn ref_part_into_ctor(&mut self, lit: &'tcx Expr<'tcx>, elem: &'tcx Expr<'tcx>, fn_name: &str) -> bool {
+    let typeck = self.tcx.typeck(elem.hir_id.owner);
+    if !typeck.node_type(elem.hir_id).is_ref() {
+      return false;
+    }
+    let Some(ctor) = self.enclosing_ctor(lit) else { return false };
+    if self.enclosing_ctor_name(lit).as_deref() != Some(fn_name) {
+      return false;
+    }
+    let to_call = matches!(self.tcx.parent_hir_node(ctor.hir_id),
+      rustc_hir::Node::Expr(p) if matches!(p.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)));
+    if to_call {
+      return false;
+    }
+    match self.raps.get(&fn_key(fn_name)).map(|rd| ResourceTy::Value(rd.rap.to_owned())) {
+      Some(to) => self.ref_part_to(elem, to),
+      None => false,
+    }
+  }
+
   /// The elements of an array literal (or `vec![…]`) going into `lhs`.
   /// Each element that is a variable (`[s, t]`, `vec![x, y]`) is moved
   /// into `lhs` (copied if its type is Copy), drawn as an arrow from the
@@ -4710,6 +4798,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         let e = if self.ty_is_copy(ty, elem.hir_id.owner) { Evt::Copy } else { Evt::Move };
         self.match_rhs(ResourceTy::Caller, elem, e);
         drew_source = true;
+        continue;
+      }
+      // `[x, y]` returned with x, y references (#1340).
+      if ty.is_ref() && matches!(lhs, ResourceTy::Caller) {
+        drew_source |= self.ref_part_to(elem, ResourceTy::Caller);
         continue;
       }
       let Some(name) = name else { continue };
@@ -4969,7 +5062,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // so `s` is moved into the call (#189).
     if let ExprKind::Tup(elems) = arg.kind {
       if !arg.span.from_expansion() {
+        // `Ok((x, 2))`: the constructor doesn't read x; x's reference
+        // goes where the built value goes (#1340).
+        let into_ctor = self.enclosing_ctor_name(arg).is_some_and(|c| c == fn_name);
+        let typeck = self.tcx.typeck(arg.hir_id.owner);
         for elem in elems.iter() {
+          if into_ctor && typeck.node_type(elem.hir_id).is_ref() {
+            self.ref_part_into_ctor(arg, elem, &fn_name);
+            continue;
+          }
           self.match_arg(elem, fn_name.clone());
         }
         return;
@@ -4990,6 +5091,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         let typeck = self.tcx.typeck(arg.hir_id.owner);
         for field in fields.iter() {
           if into_ctor && typeck.node_type(field.expr.hir_id).is_ref() {
+            // `Some(Part { text: x })` returned: x's reference goes
+            // with the value (#1340).
+            self.ref_part_into_ctor(arg, field.expr, &fn_name);
             continue;
           }
           self.match_arg(field.expr, fn_name.clone());
@@ -5010,6 +5114,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         let mut borrowed = false;
         for a in ctor_args.iter() {
           let nested = matches!(a.kind, ExprKind::Call(c, _) if crate::visitor::is_ctor_path(c, typeck));
+          // `take(Some((x, 1)))` / `take(Some(Part { text: &s }))`: the
+          // references in the literal are passed to the call with it
+          // (the constructor skipped them, #1340).
+          let refs = literal_ref_parts(a, typeck);
+          if !refs.is_empty() {
+            borrowed = true;
+            for r in refs {
+              self.match_arg(r, fn_name.clone());
+            }
+          }
           if typeck.node_type(a.hir_id).is_ref() {
             borrowed = true;
             self.match_arg(a, fn_name.clone());
@@ -5322,6 +5436,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // temporary's own column (#856).
     if let Some(tmp) = self.nested_ext_temps.get(&expr.hir_id) {
       return (ResourceTy::Value(tmp.clone()), VecDeque::new(), Vec::new());
+    }
+    // `v.first()?`: the `?` passes on the borrow its operand's value
+    // holds, as `unwrap` does (#1352).
+    if let Some(op) = try_operand(expr) {
+      if matches!(op.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) && !op.span.from_expansion() {
+        return self.get_ref_data_co(op);
+      }
     }
     // A call's result: who it borrows from is decided by the callee's
     // signature (`ref_flow.rs`, #171), not by its receiver.
@@ -5846,6 +5967,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         is_global: !self.inside_branch,
         ref_lender: Some(ResourceTy::Anonymous),
       });
+      self.register_struct_field_lenders(&name, expr, ty);
     }
     // `let b = Box::new(P { .. });` with a field moved out through the
     // box (`take(b.name)`, #602): drawn like the plain struct, with a
@@ -6011,23 +6133,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// each field's lifetime to (#336). `register_struct_members` gave
   /// them an Anonymous lender; fill in the real ones.
   fn register_struct_field_lenders(&mut self, name: &str, init: &'tcx Expr<'tcx>, ty: Ty<'tcx>) {
-    if !matches!(init.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) {
+    // `let p = opart(&s)?;`: the `?` passes on what the call's value
+    // holds (#1352).
+    let init = try_operand(init).unwrap_or(init);
+    if !matches!(init.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) || init.span.from_expansion() {
       return;
     }
-    let Some(adt) = ty.ty_adt_def() else { return };
-    let TyKind::Adt(_, args) = ty.kind() else { return };
-    for field in adt.all_fields() {
-      let fname = format!("{}.{}", name, field.name.as_str());
+    // A tuple's elements too (`let q = pair(&s);`, #1341).
+    for (field_name, field_ty) in self.member_fields(ty) {
+      let fname = format!("{}.{}", name, field_name);
       // A field drawn as one column that holds a borrow (`items:
       // Vec<&'a str>`) becomes a holder, as in a struct literal (#1088).
-      let field_ty = field.ty(self.tcx, args);
       let holder = !field_ty.is_ref() && !self.has_member_columns(field_ty)
         && field_ty.walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_)))
         && matches!(self.raps.get(&fname).map(|rd| &rd.rap), Some(ResourceAccessPoint::Struct(Struct { is_member: true, .. })));
       if !holder && !self.borrow_map.contains_key(&fname) {
         continue;
       }
-      let (mut lenders, _, is_mut) = self.call_field_lenders(init, field.name.as_str());
+      let (mut lenders, _, is_mut) = self.call_field_lenders(init, &field_name);
       if holder && self.narrow_holder_lenders(&fname, init, &mut lenders, &mut Vec::new()) && lenders.is_empty() {
         self.mark_holder(&fname);
         continue;
@@ -6170,9 +6293,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// in `match_rhs`.) Without this, the old lender stayed recorded:
   /// `make`'s borrow was drawn from `s` instead of `t`.
   pub fn reassign_struct_field_lenders(&mut self, st: &ResourceAccessPoint, rhs: &'tcx Expr<'tcx>, ty: Ty<'tcx>, line: usize) {
-    let new: Vec<(String, Vec<ResourceTy>)> = match (rhs.kind, ty.ty_adt_def()) {
-      (ExprKind::Call(..) | ExprKind::MethodCall(..), Some(adt)) => adt.all_fields()
-        .map(|f| (format!("{}.{}", st.name(), f.name.as_str()), self.call_field_lenders(rhs, f.name.as_str()).0))
+    let rhs = try_operand(rhs).unwrap_or(rhs);
+    let new: Vec<(String, Vec<ResourceTy>)> = match rhs.kind {
+      ExprKind::Call(..) | ExprKind::MethodCall(..) if !rhs.span.from_expansion() => self.member_fields(ty).into_iter()
+        .map(|(f, _)| (format!("{}.{}", st.name(), f), self.call_field_lenders(rhs, &f).0))
         .collect(),
       _ => Vec::new(),
     };
@@ -7626,11 +7750,15 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
   }
   // `w.last_mut().unwrap()` (#1266): the borrow comes from `last_mut`;
   // `unwrap` only passes it on.
-  let (borrower, passed_on) = self.borrowing_call(call);
+  let (borrower, mut passed_on) = self.borrowing_call(call);
   let func = match borrower.kind {
     ExprKind::MethodCall(seg, ..) if !passed_on.is_empty() => seg.ident.to_string(),
     _ => func,
   };
+  // `let x = v.first()?;` (#1352).
+  if self.try_of_operand(call).is_some() {
+    passed_on.push(crate::svg_generator::hover_messages::TRY_PASSES_ON.to_owned());
+  }
   let via = BorrowVia {
     func,
     lenders: lenders.iter().map(|l| l.name()).collect(),
@@ -7668,11 +7796,28 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
 /// `O { inner: mk(&t), .. }`, #638).
 pub fn emit_struct_field_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'tcx>, func: String, line_num: usize) {
   let ResourceTy::Value(ResourceAccessPoint::Struct(st)) = lhs else { return };
-  let ty = self.tcx.typeck(call.hir_id.owner).expr_ty(call);
-  let Some(adt) = ty.ty_adt_def() else { return };
+  // `opart(&s)?` (#1352): the value bound is what the `?` yields.
+  let try_expr = self.try_of_operand(call);
+  let ty = self.tcx.typeck(call.hir_id.owner).expr_ty(try_expr.unwrap_or(call));
+  // `opart(&s).unwrap()`: the borrow is `opart`'s; `unwrap` (and a
+  // `?`) only pass it on.
+  let (borrower, mut passed_on) = self.pass_through_chain(call);
+  if try_expr.is_some() {
+    passed_on.push(crate::svg_generator::hover_messages::TRY_PASSES_ON.to_owned());
+  }
+  let func = if std::ptr::eq(borrower, call) {
+    func
+  } else {
+    match borrower.kind {
+      ExprKind::MethodCall(seg, ..) => seg.ident.to_string(),
+      ExprKind::Call(fn_expr, _) => hirid_to_var_name(fn_expr.hir_id, &self.tcx).unwrap_or(func),
+      _ => func,
+    }
+  };
   let mut all: Vec<ResourceTy> = Vec::new();
-  for field in adt.all_fields() {
-    let fname = format!("{}.{}", st.name, field.name.as_str());
+  // A tuple's elements too (`let q = pair(&s);`, #1341).
+  for (field_name, _) in self.member_fields(ty) {
+    let fname = format!("{}.{}", st.name, field_name);
     let (Some(rd), Some(frap)) = (self.borrow_map.get(&fname), self.raps.get(&fname)) else { continue };
     let frap = frap.rap.to_owned();
     let lenders: Vec<ResourceTy> = rd.all_lenders().into_iter()
@@ -7686,10 +7831,10 @@ pub fn emit_struct_field_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'
     let via = BorrowVia {
       func: func.clone(),
       lenders: lenders.iter().map(|l| l.name()).collect(),
-      also_unnamed: self.call_field_lenders(call, field.name.as_str()).1,
-      tie: self.call_arg_tie(call, Some(field.name.as_str())),
-      carrier: ViaCarrier::StructField,
-      passed_on: Vec::new(),
+      also_unnamed: self.call_field_lenders(call, &field_name).1,
+      tie: self.call_arg_tie(borrower, Some(&field_name)),
+      carrier: if matches!(ty.kind(), TyKind::Tuple(_)) { ViaCarrier::TupleField } else { ViaCarrier::StructField },
+      passed_on: passed_on.clone(),
     };
     let to = ResourceTy::Value(frap.clone());
     for (lender, is_mut) in lenders.iter().zip(kinds) {
@@ -8897,6 +9042,10 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
               self.match_rhs(ResourceTy::Caller, elem, e);
               continue;
             }
+            // `(x, 1)` returned with x a reference (#1340).
+            if matches!(lhs, ResourceTy::Caller) && self.ref_part_to(elem, ResourceTy::Caller) {
+              continue;
+            }
             // `(*b, 1)`: the Box's contents (#1191).
             let is_place = matches!(elem.kind, ExprKind::Path(_) | ExprKind::Field(..)) || self.box_contents_of(elem).is_some();
             if is_place && matches!(e, Evt::Move) && !elem.span.from_expansion()
@@ -9075,6 +9224,27 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
                 self.try_move = Some(kind);
                 self.match_rhs(lhs, operand, Evt::Move);
                 self.try_move = None;
+                return;
+              }
+            }
+            // `let z = w?;` with `w: Option<&String>` (Copy): z gets a
+            // copy of the value inside w, not of w; a reference copied
+            // out of w borrows what w borrows, as for `let Some(z) = w`
+            // (#1352).
+            if let (ResourceTy::Value(rap), Evt::Copy) = (&lhs, &evt) {
+              if matches!(operand.kind, ExprKind::Path(_) | ExprKind::Field(..)) && !operand.span.from_expansion() {
+                let rap = rap.clone();
+                let line = span_to_line(&rhs.span, &self.tcx);
+                match get_rap(operand, &self.tcx, &self.raps) {
+                  ResourceTy::Value(from) if !from.is_fn() => {
+                    self.update_rap(&from, line);
+                    self.add_ev(line, Evt::Copy, lhs, ResourceTy::Value(from), true);
+                  }
+                  _ => self.match_rhs(lhs, operand, evt.clone()),
+                }
+                for b in self.pattern_ref_copy_borrow(&rap, &evt, operand) {
+                  self.add_external_event(line, b);
+                }
                 return;
               }
             }
@@ -9566,21 +9736,9 @@ pub fn match_rhs_call(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
 /// the literal `e` is, directly or as a part of an enclosing struct or
 /// tuple literal (`Some(W { a: &s })`, `Some((W { .. }, 1))`).
 pub fn enclosing_ctor_name(&self, e: &'tcx Expr<'tcx>) -> Option<String> {
-  let mut cur = e;
-  loop {
-    // A struct literal's field value's parent is the `ExprField`.
-    let mut parent = self.tcx.parent_hir_node(cur.hir_id);
-    if let rustc_hir::Node::ExprField(f) = parent {
-      parent = self.tcx.parent_hir_node(f.hir_id);
-    }
-    let rustc_hir::Node::Expr(p) = parent else { return None };
-    match p.kind {
-      ExprKind::Struct(..) | ExprKind::Tup(_) => cur = p,
-      ExprKind::Call(callee, args) if args.iter().any(|a| a.hir_id == cur.hir_id)
-        && crate::visitor::is_ctor_path(callee, self.tcx.typeck(p.hir_id.owner)) =>
-        return hirid_to_var_name(callee.hir_id, &self.tcx),
-      _ => return None,
-    }
+  match self.enclosing_ctor(e)?.kind {
+    ExprKind::Call(callee, _) => hirid_to_var_name(callee.hir_id, &self.tcx),
+    _ => None,
   }
 }
 
@@ -9745,6 +9903,9 @@ pub fn match_rhs_struct(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, _qpat
           && !field_ty.is_ref() && !field.expr.span.from_expansion() {
           let e = if self.ty_is_copy(field_ty, field.expr.hir_id.owner) { Evt::Copy } else { Evt::Move };
           self.match_rhs(ResourceTy::Caller, field.expr, e);
+        } else if field_ty.is_ref() {
+          // `Part { text: x }` returned with x a reference (#1340).
+          self.ref_part_to(field.expr, ResourceTy::Caller);
         }
         continue;
       }
@@ -12253,6 +12414,44 @@ pub fn loop_break_tails<'tcx>(e: &'tcx Expr<'tcx>) -> Option<Vec<&'tcx Expr<'tcx
   let ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _) = e.kind else { return None };
   let out: Vec<_> = breaks_to(e).into_iter().filter_map(|(_, value)| value).collect();
   (!out.is_empty()).then_some(out)
+}
+
+/// The parts of reference type of the struct or tuple literal `e`, and
+/// of the literals nested in it (`x` in `(x, 1)`, `&s` in `Part { text:
+/// &s }`). Empty for anything else.
+pub fn literal_ref_parts<'tcx>(e: &'tcx Expr<'tcx>, typeck: &rustc_middle::ty::TypeckResults<'tcx>) -> Vec<&'tcx Expr<'tcx>> {
+  let mut out = Vec::new();
+  let mut work = vec![e];
+  while let Some(cur) = work.pop() {
+    if cur.span.from_expansion() {
+      continue;
+    }
+    let parts: Vec<&'tcx Expr<'tcx>> = match cur.kind {
+      ExprKind::Tup(elems) => elems.iter().collect(),
+      ExprKind::Struct(_, fields, _) => fields.iter().map(|f| f.expr).collect(),
+      _ => continue,
+    };
+    for p in parts.into_iter().rev() {
+      if typeck.node_type(p.hir_id).is_ref() {
+        out.push(p);
+      } else {
+        work.push(p);
+      }
+    }
+  }
+  out
+}
+
+/// `e?`'s operand `e`: `e?` is a `MatchSource::TryDesugar` match on
+/// `Try::branch(e)`. None for any other expression.
+pub fn try_operand<'tcx>(e: &'tcx Expr<'tcx>) -> Option<&'tcx Expr<'tcx>> {
+  match e.kind {
+    ExprKind::Match(scrutinee, _, rustc_hir::MatchSource::TryDesugar(_)) => match scrutinee.kind {
+      ExprKind::Call(_, [operand]) => Some(operand),
+      _ => None,
+    },
+    _ => None,
+  }
 }
 
 /// The expressions an `if` / `match` (or a block ending in one)

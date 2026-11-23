@@ -2638,6 +2638,10 @@ pub fn event_dot_mut_reacquire(my_name: &String, holds_value: bool) -> String {
 
 /* Arrow messages: shows up when someone hovers over an arrow */
 
+/// In a `BorrowVia`'s `passed_on`, the `?` operator (`v.first()?`,
+/// #1352), which passes the borrow on like `unwrap`.
+pub const TRY_PASSES_ON: &str = "\u{1d}?";
+
 // Appended to the "Immutable borrow from s to w" / "Mutable borrow
 // from s to w" arrow title when `w` is the reference a call returned
 // (`let w = first_word(&s);`, #171): says why, via the lifetimes in the
@@ -2735,6 +2739,7 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
         ViaCarrier::Reference => ("reference", String::new()),
         ViaCarrier::Value => ("value", format!("; {0} isn't a reference, but its value holds one", to_fmt)),
         ViaCarrier::StructField => ("struct", String::new()),
+        ViaCarrier::TupleField => ("tuple", String::new()),
         ViaCarrier::Element | ViaCarrier::StoredBy | ViaCarrier::PatternBinding { .. } | ViaCarrier::ReturnedClosure { .. } | ViaCarrier::Part => unreachable!(),
     };
     // A value can hold borrows of several of them at once (`map` over
@@ -2754,7 +2759,7 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
     let (what, passed) = match passed_on {
         [] => (format!("the {} it returns", noun), String::new()),
         fs => {
-            let names: Vec<String> = fs.iter().map(|f| styled_name_html(f)).collect();
+            let names: Vec<String> = fs.iter().map(|f| if f == TRY_PASSES_ON { "the `?`".to_owned() } else { styled_name_html(f) }).collect();
             ("the value it returns".to_owned(), format!("; {} {} the borrow on", join_names(&names), if fs.len() == 1 { "passes" } else { "pass" }))
         }
     };

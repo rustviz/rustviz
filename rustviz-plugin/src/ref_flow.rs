@@ -192,6 +192,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       FlowTarget::Field(f) => match sig.output().kind() {
         ty::Adt(def, fargs) if def.is_struct() =>
           def.all_fields().find(|fd| fd.name.as_str() == f)?.ty(self.tcx, fargs),
+        // `pair(&s)` returning `(&'a str, i32)`: element `0` (#1341).
+        ty::Tuple(tys) => *tys.get(f.parse::<usize>().ok()?)?,
+        // The struct or tuple comes out of an `Option` / `Result`
+        // (`opart(&s)?`, `opart(&s).unwrap()`, #1341): with a single
+        // lifetime in the result, every reference in it has that one,
+        // so the field carries what the whole result does.
+        _ if self.call_result_has_one_lifetime(self.passed_through_from(call)) => sig.output(),
         _ => return None,
       },
       // What a `&mut self` method can store into its receiver: the
@@ -490,6 +497,35 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     regions.len() == 1 && !regions[0].is_static()
   }
 
+  /// The call whose result `call`'s value comes out of, peeling the
+  /// methods that only pass a call's result on (`unwrap`, `expect`):
+  /// `opart(&s)` for `opart(&s).unwrap()`. `call` itself otherwise.
+  pub fn passed_through_from(&self, call: &'tcx Expr<'tcx>) -> &'tcx Expr<'tcx> {
+    self.pass_through_chain(call).0
+  }
+
+  /// `passed_through_from`, plus the names of the methods peeled,
+  /// innermost first (`["unwrap"]`). Unlike `borrowing_call`, the inner
+  /// call may be a function call (`opart(&s).unwrap()`).
+  pub fn pass_through_chain(&self, call: &'tcx Expr<'tcx>) -> (&'tcx Expr<'tcx>, Vec<String>) {
+    let mut c = call;
+    let mut passed: Vec<String> = Vec::new();
+    while let ExprKind::MethodCall(seg, recv, ..) = c.kind {
+      if c.span.from_expansion() || recv.span.from_expansion()
+        || !matches!(recv.kind, ExprKind::MethodCall(..) | ExprKind::Call(..)) {
+        break;
+      }
+      let tie = self.call_arg_tie(c, None);
+      if !(tie.receiver && tie.tied == [0] && tie.stored_in.is_empty() && tie.unnamed == 0) {
+        break;
+      }
+      passed.push(seg.ident.to_string());
+      c = recv;
+    }
+    passed.reverse();
+    (c, passed)
+  }
+
   /// Which of `call`'s arguments its signature ties the result to,
   /// and how many of those have no column (see `ArgTie`).
   pub fn call_arg_tie(&self, call: &'tcx Expr<'tcx>, field: Option<&str>) -> ArgTie {
@@ -606,12 +642,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// behind `&T`, a reference stored in the Vec rather than one into
   /// it, so it isn't this. If `v` is a parameter, the function's own
   /// signature must tie the result to it.
+  /// `v.first()?` passes the reference on as `unwrap` does (#1352).
   pub fn call_reborrows_through(&self, call: &'tcx Expr<'tcx>) -> Option<CallReborrow> {
     let typeck = self.tcx.typeck(call.hir_id.owner);
     if call.span.from_expansion() || !typeck.node_type(call.hir_id).is_ref() {
       return None;
     }
-    let found = self.call_reborrow_source(call)?;
+    let source = try_operand(call).unwrap_or(call);
+    let found = self.call_reborrow_source(source)?;
     self.param_tied_to_result(call, found.through.name()).then_some(found)
   }
 
