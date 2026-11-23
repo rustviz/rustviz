@@ -2662,13 +2662,50 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let lo = *self.unique_id;
     for bind in binds {
       match bind {
-        ArmBind::Rhs(lhs, evt) => self.match_rhs(lhs, body, evt),
+        ArmBind::Rhs(lhs, evt) => {
+          self.add_arm_lenders(&lhs, body);
+          self.match_rhs(lhs, body, evt)
+        }
         ArmBind::Pat(pat) => self.pair_pat_with_value(pat, body),
         ArmBind::Reassign(lhs, evt, old, drops) => self.reassign_from_arm(lhs, body, evt, old, drops),
         ArmBind::Assign(block) => self.assign_branch_value(block, body),
       }
     }
     self.rhs_arm_ids.insert(body.hir_id, (lo, *self.unique_id));
+  }
+
+  /// `let r = match o { Some(x) => x, None => "d" };` with `r` a
+  /// reference (#1327): r was declared before the branches were
+  /// visited, when the value of branch body `body`, which names a
+  /// variable the branch declares (`x`, or `y` in `{ let y = &a; y }`),
+  /// had no lender yet (`get_ref_data_co` leaves it out). Now that the
+  /// branch has been visited, and before its variables go out of scope,
+  /// r also borrows what that value borrows: as rustc sees it, r may
+  /// hold either branch's reference.
+  fn add_arm_lenders(&mut self, lhs: &ResourceTy, body: &'tcx Expr<'tcx>) {
+    let ResourceTy::Value(r) = lhs else { return };
+    if !r.is_ref() || self.holder_shadowed(r.name()) {
+      return;
+    }
+    let Some(value) = branch_value_expr(body) else { return };
+    let (lender, _, co) = self.get_ref_data_co(value);
+    let found: Vec<ResourceTy> = std::iter::once(lender).chain(co)
+      .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)))
+      .collect();
+    for l in found {
+      let aliasing = get_aliasing_data(&l, &self.borrow_map);
+      let Some(rd) = self.borrow_map.get_mut(r.name()) else { return };
+      if rd.all_lenders().contains(&l) {
+        continue;
+      }
+      if matches!(rd.lender, ResourceTy::Value(_) | ResourceTy::Deref(_)) {
+        rd.co_lenders.push(l);
+      } else {
+        rd.lender = l;
+        rd.aliasing = aliasing;
+        rd.static_lender = None;
+      }
+    }
   }
 
   /// `let (a, b) = if … / match …;` (#1007): `a` and `b` are declared
@@ -5286,9 +5323,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // naming a variable declared in the loop isn't known before the
     // loop is visited; `inherit_break_lenders` adds it when its `break`
     // is paired.
+    // Likewise a branch's value naming a variable the branch itself
+    // declares (`x` in `match o { Some(x) => x, None => "d" }`, #1327)
+    // when `let r = match …` declares r before the branches are
+    // visited: `add_arm_lenders` adds it once its branch has been.
     let loop_tails = || loop_break_tails(expr)
       .map(|ts| ts.into_iter().filter(|t| self.locals_registered(t)).collect::<Vec<_>>());
-    if let Some(tails) = branch_tails(expr).or_else(loop_tails) {
+    let own_tails = || branch_tails(expr)
+      .map(|ts| ts.into_iter().filter(|t| !self.uses_unregistered_local_in(t, expr.span)).collect::<Vec<_>>());
+    if let Some(tails) = own_tails().or_else(loop_tails) {
       let mut lenders: Vec<ResourceTy> = Vec::new();
       for tail in tails {
         let (l, _, co) = self.get_ref_data_co(tail);
@@ -5345,6 +5388,30 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let mut c = Check { tcx: self.tcx, raps: &self.raps, ok: true };
     c.visit_expr(e);
     c.ok
+  }
+
+  /// Whether `e` names a variable declared within `within` that has no
+  /// column yet: one a branch of the conditional spanning `within`
+  /// declares (an arm's pattern binding, a `let` in the branch), which
+  /// isn't registered until that branch is visited (#1327).
+  fn uses_unregistered_local_in(&self, e: &'tcx Expr<'tcx>, within: rustc_span::Span) -> bool {
+    use rustc_hir::intravisit::{self, Visitor};
+    struct Check<'b, 'tcx> { tcx: TyCtxt<'tcx>, raps: &'b HashMap<String, RapData>, within: rustc_span::Span, found: bool }
+    impl<'b, 'tcx> Visitor<'tcx> for Check<'b, 'tcx> {
+      fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+        if let ExprKind::Path(QPath::Resolved(None, p)) = e.kind {
+          if let Res::Local(hid) = p.res {
+            if self.within.contains(self.tcx.hir_span(hid)) && !self.raps.contains_key(&path_key(p, &self.tcx)) {
+              self.found = true;
+            }
+          }
+        }
+        intravisit::walk_expr(self, e);
+      }
+    }
+    let mut c = Check { tcx: self.tcx, raps: &self.raps, within, found: false };
+    c.visit_expr(e);
+    c.found
   }
 
   /// `let r = loop { … break k; }` with `r` a reference: once a
@@ -10178,23 +10245,37 @@ pub fn print_out_of_scope(&mut self){
       // `print_out_of_scope` draws later, or a scope end already drawn
       // (a loop body's `let`, `emit_scope_end`).
       // (`raps` outlives one fn: match the column, not just the name.)
+      // A variable declared in a branch (`x` in `Some(x) => x`, #1327)
+      // goes out of scope in that branch's events.
+      fn gos_line(evs: &[(usize, ExternalEvent)], rap: &ResourceAccessPoint) -> Option<usize> {
+        evs.iter().find_map(|(l, e)| match e {
+          ExternalEvent::GoOutOfScope { ro, .. } if ro.hash() == rap.hash() => Some(*l),
+          ExternalEvent::Branch { branches, .. } => branches.iter().find_map(|b| gos_line(&b.e_data, rap)),
+          _ => None,
+        })
+      }
       let scope_end = |name: &str| {
         let rd = self.raps.get(name).filter(|rd| rd.rap.is_ref() && rd.extra_scopes.is_empty())?;
-        self.preprocessed_events.iter().find_map(|(l, e)| match e {
-          ExternalEvent::GoOutOfScope { ro, .. } if ro.hash() == rd.rap.hash() => Some(*l),
-          _ => None,
-        }).or(rd.is_global.then_some(rd.scope))
+        gos_line(&self.preprocessed_events, &rd.rap).or(rd.is_global.then_some(rd.scope))
       };
       #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "each (ref, lender) pair is decided on its own")]
       for (lender, refs) in lender_to_refs.iter() {
-        let ends: Vec<(String, usize, Option<usize>)> = refs.iter()
+        let ends: Vec<(String, usize, Option<usize>, bool)> = refs.iter()
           .filter(|r| ultimate_refs.contains(&(r.to_string(), lender.to_owned())))
-          .filter(|r| self.borrow_map.get(*r).is_some_and(|d| d.co_lenders.is_empty()))
-          .map(|r| (r.clone(), self.borrow_map.get(r).unwrap().lifetime, scope_end(r)))
+          .map(|r| {
+            let d = self.borrow_map.get(r).unwrap();
+            (r.clone(), d.lifetime, scope_end(r), d.co_lenders.is_empty())
+          })
           .collect();
-        for (r, lifetime, end) in ends.iter() {
+        for (r, lifetime, end, single) in ends.iter() {
+          if !single {
+            continue;
+          }
           let Some(end) = end.filter(|e| *e < *lifetime) else { continue };
-          let carried_on = ends.iter().any(|(o, l, e)| o != r && l == lifetime && e.is_none_or(|e| e >= *l));
+          // The copy may borrow from other variables too: `let r =
+          // match &o { Some(x) => x, None => &t };` copies x, a
+          // reference into o, so r gives o back (#1327).
+          let carried_on = ends.iter().any(|(o, l, e, _)| o != r && l == lifetime && e.is_none_or(|e| e >= *l));
           if carried_on {
             ultimate_refs.remove(&(r.clone(), lender.to_owned()));
             outlived.insert(r.clone(), end);

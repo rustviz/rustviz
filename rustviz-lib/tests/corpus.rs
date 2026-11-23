@@ -23572,6 +23572,90 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "k4 goes out of scope. No resource is dropped.",
         ],
     },
+    TooltipExpect {
+        name: "arm_binding_value_1327",
+        // #1327: crashed (`find_lender` on the arm binding, which had no
+        // column when r was declared). r copies the reference the arm
+        // takes out of o, so it borrows what o's Some held (s2, s3, ...),
+        // never the binding itself.
+        must_contain: &[
+            "Copy from x1 to r1",
+            "Immutable borrow from s2 to x2: x2 is a reference copied out of o2",
+            "Copy from x2 to r2",
+            "Return immutably borrowed resource from r2 to s2",
+            "Move from x3 to r3",
+            "Return mutably borrowed resource from r3 to s3",
+            "Return mutably borrowed resource from r3 to t3",
+            "Copy from x4 to r4",
+            "Return immutably borrowed resource from r4 to s4",
+            "Immutable borrow from s5 to r5: as_str's signature gives the reference it returns the same lifetime as the value it was called on",
+            "Return immutably borrowed resource from r5 to s5",
+            "Copy from y6 to r6",
+            "Return immutably borrowed resource from r6 to a6",
+            "Return immutably borrowed resource from r6 to b6",
+            "Copy from x7 to h7.r",
+            "Return immutably borrowed resource from h7.r to s7",
+            "Copy from x8 to r8",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from r2 to x2",
+            "Return mutably borrowed resource from r3 to x3",
+            "Return immutably borrowed resource from r4 to x4",
+            "Return immutably borrowed resource from r6 to y6",
+            "Return immutably borrowed resource from h7.r to x7",
+            "r2 no longer borrows the resource x2 points to",
+            "r4 no longer borrows the resource x4 points to",
+            "r6 no longer borrows the resource y6 points to",
+            "h7.r no longer borrows the resource x7 points to",
+        ],
+    },
+    TooltipExpect {
+        name: "arm_ref_binding_value_1327",
+        // #1327: crashed. x1 / x2 borrow o1 / o2; r1 / r2 copy them, so
+        // they borrow o1 / o2 until their last use.
+        must_contain: &[
+            "Partial immutable borrow from o1 to x1",
+            "Copy from x1 to r1",
+            "Return immutably borrowed resource from r1 to o1",
+            "Partial immutable borrow from o2 to x2",
+            "Copy from x2 to r2",
+            "Return immutably borrowed resource from r2 to o2",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from r1 to x1",
+            "Return immutably borrowed resource from r2 to x2",
+            "r1 no longer borrows the resource x1 points to",
+            "r2 no longer borrows the resource x2 points to",
+        ],
+    },
+    TooltipExpect {
+        name: "assign_arm_ref_binding_1327",
+        // #1327: main drew r borrowing x (x's borrow of o had ended at the
+        // arm's end, so r's lender fell back to x itself).
+        must_contain: &[
+            "Partial immutable borrow from o to x",
+            "Return immutably borrowed resource from r to o",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from r to x",
+            "r no longer borrows the resource x points to",
+        ],
+    },
+    TooltipExpect {
+        name: "arm_ref_binding_passed_on_1327",
+        // #1327 sibling: x2 (a reborrow through the parameter o2) is the
+        // function's result, so its borrow goes to the caller; main ended
+        // it at the arm's end ("x2 no longer borrows ...", returned to o2).
+        must_contain: &[
+            "Partial immutable borrow from o1 to x1",
+            "a reference from x2 is returned to the caller; the data it points to is not copied",
+            "o2 isn't returned on this path, but its borrow lasts as long as the result (same lifetime 'a)",
+        ],
+        must_not_contain: &[
+            "x2 no longer borrows the resource o2 points to",
+            "Return immutably borrowed resource from x2 to o2",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop

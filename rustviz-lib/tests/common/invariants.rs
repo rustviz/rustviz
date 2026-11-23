@@ -80,6 +80,15 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("holder_moved", "heads-or-logos-overlap", 1316),
     // A half-row track crossing the next row's return-to-caller L.
     ("break_field_out_1280", "heads-or-logos-overlap", 1320),
+    // A `&mut` moved out of an arm binding into another reference: its
+    // borrow end after the move; the lender's lent segments in mid-air.
+    ("arm_binding_value_1327", "event-on-dead-column", 1333),
+    ("arm_binding_value_1327", "line-ends-nowhere", 1333),
+    ("arm_binding_value_1327", "line-starts-nowhere", 1333),
+    // An arm's value that is its own binding: the pattern's arrows and
+    // the copy into the result on one row.
+    ("arm_binding_value_1327", "arrows-overlap", 1334),
+    ("arm_binding_value_1327", "heads-or-logos-overlap", 1334),
 ];
 
 /// The invariants, by the name the failure list and messages use.

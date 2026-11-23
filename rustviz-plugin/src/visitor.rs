@@ -8396,12 +8396,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // ex: if a pattern binding borrows from a parent
     let pat_end = span_end_line(&arm.pat.span, &self.tcx);
     let mir_b_data = if callback_events.is_empty() { Vec::new() } else { self.gather_borrow_data(self.bwf) };
+    // `let r = match &o { Some(x) => x, None => &t };` (#1327): the
+    // arm's value is a reference that is (or borrows through) its
+    // binding, so the loan goes on in what the `match` gives, past the
+    // arm.
+    let value_uses_binding = branch_value_expr(arm.body).is_some_and(|v|
+      self.tcx.typeck(v.hir_id.owner).expr_ty_opt(v).is_some_and(|t| t.is_ref())
+        && self.mentions_local_declared_in(v, arm.pat.span));
     for (to, from, e) in callback_events {
       let name = from.real_name();
       // A part of a whole the scrutinee borrows (`match &mut t { (a, b)
       // => … }`, `arm_part_borrow`): that one loan ends at the last use
       // of any of the arm's bindings into it (#1215).
-      let whole_loan = self.borrow_map.remove(&name).and_then(|rd| rd.borrow_span);
+      let whole_loan = self.borrow_map.get(&name).and_then(|rd| rd.borrow_span);
       // The borrow ends where the borrow checker ends it, at
       // the binding's last use (#599): the end of the region
       // of the loan MIR issues for the binding on the pattern's
@@ -8409,11 +8416,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // reference (`(x, _)` on `o: &(String, String)`) has no
       // loan of its own; its borrow lasts as long as it is
       // live.
-      let ends_at = mir_b_data.iter()
+      let region_end = mir_b_data.iter()
         .filter(|m| (m.assigned_place.as_deref() == Some(name.as_str()) && (pat_line..=pat_end).contains(&m.region.0))
           || whole_loan == Some(m.span))
         .map(|m| m.region.1)
-        .max()
+        .max();
+      // A loan the arm's value carries out of the `match` ends where
+      // that value's last use ends it, after the branches join: as for
+      // `if let Some(x) = &o { x } else { &t }`, `emit_borrow_ends`
+      // ends it, not the arm.
+      if value_uses_binding && region_end.is_none_or(|l| l > end) {
+        continue;
+      }
+      self.borrow_map.remove(&name);
+      let ends_at = region_end
         .or_else(|| self.last_live_line(&name, (pat_line, end)))
         .filter(|l| (pat_line..=end).contains(l))
         .unwrap_or(end);
