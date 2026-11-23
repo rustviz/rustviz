@@ -4877,6 +4877,21 @@ fn traverse_timeline2<'a> (t: &'a TimelineColumnData, history: & 'a Vec<(usize, 
 }
 
 
+/// The x of the column the arm holding event `id` forks from: the
+/// variable's own column, or the arm of an enclosing conditional. `None`
+/// when the event is on the variable's own column, in no arm.
+fn arm_parent_x(hash: &u64, vd: &VisualizationData, ro_layout: &BTreeMap<u64, TimelineColumnData>, id: usize) -> Option<i64> {
+    fn walk(parent: &TimelineColumnData, history: &[(usize, Event)], id: usize) -> Option<Option<i64>> {
+        history.iter().find_map(|(_, e)| match e {
+            Event::Branch { branch_history, .. } => branch_history.iter().find_map(|b|
+                walk(&b.t_data, &b.e_data, id).map(|inner| inner.or(Some(parent.x_val)))),
+            _ if e.get_id() == id => Some(None),
+            _ => None,
+        })
+    }
+    walk(&ro_layout[hash], &vd.timelines.get(hash)?.history, id).flatten()
+}
+
 fn fetch_timeline<'a>(hash: &u64, vd: &'a VisualizationData, ro_layout: & 'a BTreeMap<u64, TimelineColumnData>, id: usize) -> & 'a TimelineColumnData {
     match traverse_timeline2(&ro_layout[hash], &vd.timelines[hash].history, id) {
         Some(t) => t,
@@ -5890,8 +5905,16 @@ fn render_return_to_caller_arrow(line_number: &usize, external_event: &ExternalE
         // length to keep the L compact (matches the spirit
         // of the input L's shortened vertical, which clears
         // the label above the param dot).
-        let source_x = cx + 5.25;
-        let bend_x = cx + head_offset + leg;
+        // On an arm left of the column it forks from (the `if` arm of a
+        // one-line `if c { x } else { y }`), the L goes out to the left:
+        // drawn to the right, it ran into the diamond, across the other
+        // arm's leg, and ended under the fork dot (#1309).
+        let side = match arm_parent_x(rap.hash(), visualization_data, resource_owners_layout, *id) {
+            Some(parent_x) if (timeline.x_val) < parent_x => -1.0,
+            _ => 1.0,
+        };
+        let source_x = cx + side * 5.25;
+        let bend_x = cx + side * (head_offset + leg);
         let vertical_line: f64 = leg / 2.0;
         let head_end_y = cy - vertical_line;
         dots.lanes.record((*id, *line_number), cy as i64, source_x, bend_x + 6.0, LaneKind::Fixed);
@@ -6737,11 +6760,12 @@ fn render_branches(
         // An `else if` (#1294): this join may sit above the merge row,
         // and an arm's leg starts at the join of the one nested in it.
         let merge_y = merge_y - join_rise(visualization_data, hash, history, *split_point, *merge_point) as f64;
-        // The first arm starts with a one-line conditional on the split
-        // line (#1287): its leg ends at that conditional's fork.
-        let first_arm_fork_y = arm_starts_with_collapsed(branch_history, *split_point)
+        // The first arm starts with a conditional on the split line whose
+        // fork is raised above it (a one-line one, #1287, or one binding
+        // from this column, #1306): its leg ends at that fork.
+        let first_arm_fork_y = arm_first_fork_rise(branch_history, *split_point)
             .filter(|_| raised)
-            .map(|s| (get_y_axis_pos(s) - COLLAPSED_APEX) as f64);
+            .map(|rise| (get_y_axis_pos(*split_point) - rise) as f64);
 
         // Parent's state at the split. The active arm uses this
         // directly; passive arms Gray-convert it so their leading
@@ -7689,28 +7713,37 @@ fn binds_at_split(history: &[(usize, Event)], i: usize) -> bool {
         && branch_history.first().is_some_and(|arm| arm.e_data.iter().any(|(l, _)| l == split_point))
 }
 
-/// The conditional on the split line that the first arm of `branch_history`
-/// (a conditional splitting on `split_point`) starts with, when it's one
-/// whose arms share that line: the one-line `if` in a let-chain's block
-/// (`if let Some(a) = y && { if a > 2 { take(s); } … } {`, #1287). Its
-/// fork is drawn a row above the line (`COLLAPSED_APEX`), so the outer
-/// fork goes above that, and the first arm's leg ends at it.
-fn arm_starts_with_collapsed(branch_history: &[BranchData], split_point: usize) -> Option<usize> {
-    match branch_history.first()?.e_data.first()? {
-        (l, Event::Branch { split_point: s, merge_point: m, .. })
-            if *l == split_point && *s == split_point && branch_is_collapsed(*s, *m) => Some(*s),
+/// How far above the split line the fork of the conditional that the
+/// first arm of `branch_history` (a conditional splitting on
+/// `split_point`) starts with is drawn, when that fork is raised above the
+/// line: one whose arms share that line, like the one-line `if` in a
+/// let-chain's block (`if let Some(a) = y && { if a > 2 { take(s); } … }
+/// {`, #1287), is a row up (`COLLAPSED_APEX`); one whose first arm starts
+/// on the line with an event of this column (`binds_at_split`), like the
+/// inner `if` of `if c { if d { take(f) } else { take(g) } } else {
+/// take(h) }` with its arms on rows of their own (#1306), is half a row
+/// up. The outer fork goes above that, and the first arm's leg ends at it.
+fn arm_first_fork_rise(branch_history: &[BranchData], split_point: usize) -> Option<i64> {
+    let arm = branch_history.first()?;
+    match arm.e_data.first()? {
+        (l, Event::Branch { split_point: s, merge_point: m, .. }) if *l == split_point && *s == split_point =>
+            if branch_is_collapsed(*s, *m) {
+                Some(COLLAPSED_APEX)
+            } else {
+                binds_at_split(&arm.e_data, 0).then(|| split_rise(&arm.e_data, 0))
+            },
         _ => None,
     }
 }
 
 /// How far above its row the split dot of the conditional `history[i]` is
 /// raised (`binds_at_split`): `PATTERN_SPLIT_RISE`, or that above the
-/// fork of a one-line conditional its first arm starts with
-/// (`arm_starts_with_collapsed`).
+/// raised fork of a conditional its first arm starts with
+/// (`arm_first_fork_rise`).
 fn split_rise(history: &[(usize, Event)], i: usize) -> i64 {
     match &history[i].1 {
-        Event::Branch { branch_history, split_point, .. }
-            if arm_starts_with_collapsed(branch_history, *split_point).is_some() => COLLAPSED_APEX + PATTERN_SPLIT_RISE,
+        Event::Branch { branch_history, split_point, .. } =>
+            arm_first_fork_rise(branch_history, *split_point).unwrap_or(0) + PATTERN_SPLIT_RISE,
         _ => PATTERN_SPLIT_RISE,
     }
 }
@@ -7917,6 +7950,11 @@ fn render_ref_line(
                 let apexes = CollapsedApexes::of(&timeline.history);
                 let start_y = |line: usize| get_y_axis_pos(line)
                     + if apexes.merges.contains(&line) { COLLAPSED_APEX } else { 0 };
+                let end_y = |line: usize| get_y_axis_pos(line) - if apexes.splits.contains(&line) {
+                    COLLAPSED_APEX
+                } else {
+                    apexes.raised_splits.get(&line).copied().unwrap_or(0)
+                };
                 // struct can live over events
                 let mut alive = false;
                 let mut data = RefLineData {
@@ -7940,8 +7978,14 @@ fn render_ref_line(
                             if alive {
                                 // finish line template
                                 data.x2 = data.x1.clone();
-                                data.y2 = get_y_axis_pos(*line_start);
-                                let dv = get_y_axis_pos(*line_start)-data.y1;
+                                // Before a conditional whose fork is drawn
+                                // above its row (one-line, or `if let`
+                                // binding from x), the column stops at the
+                                // fork dot, and so does the bracket: run on
+                                // to the row, it ended in the middle of the
+                                // diamond (#1308).
+                                data.y2 = end_y(*line_start).max(data.y1);
+                                let dv = data.y2 - data.y1;
                                 data.v = dv - 2*dv/5;
                                 data.dy = dv/5;
                                 data.rv = bracket.clone().rows(bracket_start, *line_start).attrs();

@@ -23720,6 +23720,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=n is assigned a new value",
         ],
     },
+    TooltipExpect {
+        name: "one_line_diamond_1306_1308_1309",
+        // #1306, #1308, #1309 are about where things are drawn, pinned by
+        // `one_line_diamonds_end_brackets_at_forks_and_return_outward`; the
+        // returns' wording is unchanged: a returned `&str` is a copy of
+        // the reference, a returned `String` is moved.
+        must_contain: &[
+            "a reference from x is returned to the caller; the data it points to is not copied",
+            "a reference from y is returned to the caller; the data it points to is not copied",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -32755,4 +32767,99 @@ fn a_reference_declared_in_a_one_line_arm_ends_its_borrow_there() {
         let end = dots_listing_tooltip(&tl, &format!("{}'s immutable borrow ends", r));
         assert_eq!(at[0].1, end[0].1, "{:?} on {}'s end's row", text, r);
     }
+}
+
+/// #1306, #1308, #1309 (`one_line_diamond_1306_1308_1309`; the Book's
+/// `longest`, c10_06 and c10_07, and playground example 15): the one-row
+/// diamond of a one-line conditional.
+/// - #1308: a reference's dashed bracket ended at the row of the
+///   conditional, one row below the fork dot where its column stops: in
+///   the middle of the diamond, between the arm dots, on nothing. Every
+///   bracket now ends on a dot of its column (also before an `if let`
+///   whose fork is raised half a row because its pattern binds from the
+///   column).
+/// - #1309: a return to the caller from an arm is an L beside the arm's
+///   dot. It always went right, so from the left arm (`{ x }` in `if … {
+///   x } else { y }`) it ran into the diamond, across the other leg, and
+///   its head stopped under the fork. It now goes out on the arm's own
+///   side: left from an arm left of its fork, right otherwise.
+/// - #1306: a one-line conditional with another one-line conditional in
+///   an arm (`if c { take(f) } else if d { take(g) } else { take(h) }`)
+///   drew the inner one as a one-row diamond inside the outer one, its
+///   fork level with the outer fork (or above it, when nested in the
+///   first arm) and the outer leg ending in its middle. Both now give
+///   their arms rows of their own (#1264's layout), so the inner fork is
+///   below the outer one and the outer leg ends at it.
+#[test]
+fn one_line_diamonds_end_brackets_at_forks_and_return_outward() {
+    fn dot_xy(doc: &roxmltree::Document, id: &str) -> Option<(f64, f64)> {
+        let n = doc.descendants().find(|n| n.attribute("data-rv-id") == Some(id))?;
+        let c = if n.has_tag_name("circle") { n } else { n.descendants().find(|d| d.has_tag_name("circle"))? };
+        Some((c.attribute("cx")?.parse().ok()?, c.attribute("cy")?.parse().ok()?))
+    }
+    let fixture = "one_line_diamond_1306_1308_1309";
+    let mut bad = Vec::new();
+    // #1308: brackets end on a dot.
+    for name in [fixture, "book/c10_06_longest", "book/c10_07_longest_inner_scope", "edition2024/if_let_chain_else_reads"] {
+        let tl = run_with_local_backend(name).timeline_panel_string();
+        let doc = roxmltree::Document::parse(&tl).expect("timeline svg parses");
+        let dots: Vec<(f64, f64)> = doc.descendants().filter(|n| n.has_tag_name("circle"))
+            .filter_map(|c| Some((c.attribute("cx")?.parse().ok()?, c.attribute("cy")?.parse().ok()?)))
+            .collect();
+        for b in doc.descendants().filter(|n| n.attribute("data-rv-kind") == Some("bracket") && n.has_tag_name("path")) {
+            // `M x y l 15 a v b l -15 c`
+            let d: Vec<f64> = b.attribute("d").unwrap_or("").split_whitespace()
+                .filter_map(|w| w.parse().ok()).collect();
+            let [x, y, _, a, v, _, c] = d[..] else { panic!("{name}: bracket path {:?}", b.attribute("d")) };
+            let end = y + a + v + c;
+            if !dots.iter().any(|(cx, cy)| (cx - x).abs() < 0.5 && (cy - end).abs() < 0.5) {
+                bad.push(format!("{name}: {} ends at ({x}, {end}), on no dot", b.attribute("data-rv-id").unwrap_or("")));
+            }
+        }
+    }
+    // #1309: which way each return's L goes from its arm's dot.
+    let leftward = |tl: &str, id: &str| -> bool {
+        let doc = roxmltree::Document::parse(tl).expect("timeline svg parses");
+        let g = doc.descendants().find(|n| n.attribute("data-rv-id") == Some(id))
+            .unwrap_or_else(|| panic!("no arrow {id}"));
+        let p: Vec<f64> = g.descendants().find(|n| n.has_tag_name("polyline")).and_then(|n| n.attribute("points"))
+            .unwrap_or("").split_whitespace().filter_map(|w| w.parse().ok()).collect();
+        p[2] < p[0]
+    };
+    let tl = run_with_local_backend(fixture).timeline_panel_string();
+    for (id, left) in [
+        ("x>caller@L11:arrow:copy", true), ("y>caller@L11:arrow:copy", false),
+        ("a>caller@L14:arrow:copy", true), ("b>caller@L14:arrow:copy", false),
+        ("x>caller@L17:arrow:copy", true), ("y>caller@L17:arrow:copy", false),
+        ("s>caller@L20:arrow:move", true), ("t>caller@L20:arrow:move", false),
+        ("s>caller@L24:arrow:move", true),
+        // `else if`: y is the inner `if`'s left arm.
+        ("x>caller@L29:arrow:copy", true), ("y>caller@L29:arrow:copy", true), ("z>caller@L29:arrow:copy", false),
+        // `if c { if d { x } else { y } } else { z }`
+        ("x>caller@L32:arrow:copy", true), ("y>caller@L32:arrow:copy", false), ("z>caller@L32:arrow:copy", false),
+    ] {
+        if leftward(&tl, id) != left {
+            bad.push(format!("{fixture}: {id} goes {}", if left { "right, into the diamond" } else { "left" }));
+        }
+    }
+    let book = run_with_local_backend("book/c10_06_longest").timeline_panel_string();
+    if !leftward(&book, "x>caller@L2:arrow:copy") || leftward(&book, "y>caller@L2:arrow:copy") {
+        bad.push("book/c10_06_longest: x's return should go left, y's right".into());
+    }
+    // #1306: legs end at dots, none runs through a fork, and each inner
+    // fork (`…:dot:branch#2`) is below the fork of the conditional it is
+    // nested in (`…:dot:branch`, same column and line).
+    for leg in branch_legs_in_mid_air(&tl).into_iter().chain(legs_through_forks(&tl)) {
+        bad.push(format!("{fixture}: {leg}"));
+    }
+    let doc = roxmltree::Document::parse(&tl).expect("timeline svg parses");
+    for n in doc.descendants() {
+        let Some(id) = n.attribute("data-rv-id").filter(|id| id.ends_with(":dot:branch#2")) else { continue };
+        let outer = id.trim_end_matches("#2");
+        match (dot_xy(&doc, outer), dot_xy(&doc, id)) {
+            (Some(o), Some(i)) if i.1 > o.1 + 10.0 => {}
+            (o, i) => bad.push(format!("{fixture}: inner fork {id} at {i:?} not below the outer fork at {o:?}")),
+        }
+    }
+    assert_eq!(bad, Vec::<String>::new());
 }
