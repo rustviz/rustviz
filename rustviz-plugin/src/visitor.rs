@@ -6350,7 +6350,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // `t.1 = s` moves `s`. Record that
     // against an anonymous destination, otherwise `s` would later
     // be shown dropping a resource it no longer owns.
-    let lhs_rty = match self.resource_of_lhs(lhs_expr) {
+    // `rh.r = &t` with `let rh = &mut hold;` writes the reference field
+    // `hold.r`, which has a column: drawn as `hold.r = &t;` is (#531),
+    // with t's borrow going into hold.r and the old lender kept
+    // borrowed while hold is in use (#1361).
+    let lhs_rty = match self.resource_of_lhs(lhs_expr).or_else(|| self.ref_field_through_local_ref(lhs_expr)) {
       Some(rty) => rty,
       None => {
         if let ExprKind::AddrOf(..) = rhs_expr.kind {
@@ -7019,9 +7023,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // (`&mut words[0]`): t stays borrowed as long as the place
       // holds the new reference, as for `words[0] = &t` (#897), and
       // that end is drawn on t's column only, like #664's.
+      // An element of a local holding borrows (`*el = &t1` with
+      // `el = &mut refs[0]`) keeps it in that local instead (#1361).
       if let (false, ExprKind::AddrOf(..), ResourceTy::Deref(r)) = (repoints_ref_var, rhs_expr.kind, &lhs_rty) {
-        let place = ResourceTy::Index(r.clone(), format!("*{}", r.name()), PlaceWrite::Update);
-        self.end_stored_borrow(lhs_expr, n_events, &lhs_rty, place);
+        if !self.store_into_holder(lhs_expr, n_events, &lhs_rty) {
+          let place = ResourceTy::Index(r.clone(), format!("*{}", r.name()), PlaceWrite::Update);
+          self.end_stored_borrow(lhs_expr, n_events, &lhs_rty, place);
+        }
       }
       self.draw_struct_field_borrow_ends(struct_field_ends);
       // `v[1] = v[2]`: match_rhs has nothing to say about some

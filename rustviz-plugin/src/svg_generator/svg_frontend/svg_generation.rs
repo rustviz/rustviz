@@ -1458,7 +1458,19 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                     || ref_param_ends
                     || place_borrow
                     || loop_iterator_end {
-                    visualization_data.append_processed_external_event(event.clone(), final_line_num);
+                    // The end of the caller's loan held by a column whose
+                    // other borrows the line's stacked arrows give back
+                    // (`k` in `let k = [a, b, c];` with `a` a moved `&mut`
+                    // parameter, #1337) goes on the dot those arrows leave
+                    // from, the line's own row, not on the row below the
+                    // stack, where it was a second dot saying the same.
+                    let row = match line_ev {
+                        Some(g) if ref_param_ends && !matches!(same_line_row, Some((src, _)) if src == line_num)
+                            && g.iter().filter_map(ended_ref).any(|r| ended_ref(&event) == Some(r)) =>
+                            final_line_num - extras_at_source_line.iter().filter(|(s, _)| *s == line_num).map(|(_, ex)| *ex).sum::<usize>(),
+                        _ => final_line_num,
+                    };
+                    visualization_data.append_processed_external_event(event.clone(), row);
                 }
                 i += 1;
                 continue;

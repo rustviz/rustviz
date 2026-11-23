@@ -4020,7 +4020,82 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     };
     let n_events = self.preprocessed_events.len();
     self.match_rhs(dest.clone(), rhs, evt);
-    self.end_stored_borrow(lhs, n_events, &dest, dest.clone());
+    if !self.store_into_holder(lhs, n_events, &dest) {
+      self.end_stored_borrow(lhs, n_events, &dest, dest.clone());
+    }
+  }
+
+  /// The local whose value holds the borrows (`refs` in `let mut refs
+  /// = vec![&a1];`, see `holds_borrow`) that a write to the
+  /// reference-typed place `place` replaces one of: an element
+  /// `refs[0]`, or `*el` after `let el = &mut refs[0];` (#1361). None
+  /// for anything else (a place behind a parameter, a holder we don't
+  /// track).
+  fn element_holder(&self, place: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
+    let holder_of = |e: &'tcx Expr<'tcx>| -> Option<ResourceAccessPoint> {
+      if !matches!(e.kind, ExprKind::Path(QPath::Resolved(None, _))) || self.is_ref_param(e) {
+        return None;
+      }
+      let name = expr_to_rap_name(e, &self.tcx)?;
+      let rap = self.raps.get(&name)?.rap.to_owned();
+      (rap.holds_borrow() && self.borrow_map.contains_key(&name)).then_some(rap)
+    };
+    match place.kind {
+      ExprKind::Index(base, _, _) => holder_of(base),
+      ExprKind::Unary(UnOp::Deref, inner) => {
+        if !matches!(inner.kind, ExprKind::Path(QPath::Resolved(None, _))) || self.is_ref_param(inner) {
+          return None;
+        }
+        let name = expr_to_rap_name(inner, &self.tcx)?;
+        let ResourceTy::Value(h) = &self.borrow_map.get(&name)?.lender else { return None };
+        (h.holds_borrow() && self.borrow_map.contains_key(h.name())).then(|| h.to_owned())
+      }
+      _ => None,
+    }
+  }
+
+  /// `refs[0] = &t1;` / `*el = &t1;` (el borrowing `refs[0]`): the new
+  /// reference is stored in refs's value, so refs now holds t1's
+  /// borrow, which lasts until refs's last use, as for
+  /// `refs.push(&t1)` (#392). Retarget the borrows `match_rhs` drew
+  /// into `dest` (from event `n_events` on) to refs's column and record
+  /// their lenders as refs's. (The old element's lender stays borrowed
+  /// too: refs's type has one lifetime for both.) True if it did.
+  pub fn store_into_holder(&mut self, place: &'tcx Expr<'tcx>, n_events: usize, dest: &ResourceTy) -> bool {
+    let Some(holder) = self.element_holder(place) else { return false };
+    let mut lenders: Vec<(ResourceTy, bool)> = Vec::new();
+    for (_, ev) in self.preprocessed_events[n_events..].iter() {
+      match ev {
+        ExternalEvent::StaticBorrow { from: from @ ResourceTy::Value(l), to, .. } if to == dest && !l.is_fn() =>
+          lenders.push((from.clone(), false)),
+        ExternalEvent::MutableBorrow { from: from @ ResourceTy::Value(l), to, .. } if to == dest && !l.is_fn() =>
+          lenders.push((from.clone(), true)),
+        _ => {}
+      }
+    }
+    if lenders.is_empty() {
+      return false;
+    }
+    let to = ResourceTy::Value(holder.clone());
+    let retarget = |e: &mut ExternalEvent| {
+      if let ExternalEvent::StaticBorrow { to: t, .. } | ExternalEvent::MutableBorrow { to: t, .. } = e {
+        if t == dest {
+          *t = to.clone();
+        }
+      }
+    };
+    self.preprocessed_events[n_events..].iter_mut().for_each(|(_, e)| retarget(e));
+    let first_id = self.preprocessed_events[n_events..].iter().map(|(_, e)| e.get_id()).min().unwrap_or(usize::MAX);
+    self.event_line_map.values_mut().flatten().filter(|e| e.get_id() >= first_id).for_each(retarget);
+    if let Some(rd) = self.borrow_map.get_mut(holder.name()) {
+      for (l, m) in lenders {
+        if l != rd.lender && !rd.co_lenders.contains(&l) {
+          rd.co_lenders.push(l);
+        }
+        rd.ref_mutability |= m;
+      }
+    }
+    true
   }
 
   /// After `match_rhs` drew `&x` (from event `n_events` on) going into
@@ -4219,6 +4294,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     self.gather_borrow_data(self.bwf).iter().find_map(|b| {
       (b.region.0 == line && b.borrowed_place.as_deref() == Some(root)).then_some(b.region.1)
     })
+  }
+
+  /// `rh.r` / `(*rh).r` / `ri.r`, a reference-typed field reached
+  /// through a local reference that borrows a struct with field
+  /// columns (`let rh = &mut hold;`, `let ri = &mut o.inner;`): the
+  /// field's own column (`hold.r`, `o.inner.r`), for a write to it
+  /// (#1361). None for anything else.
+  pub fn ref_field_through_local_ref(&self, place: &'tcx Expr<'tcx>) -> Option<ResourceTy> {
+    let ExprKind::Field(..) = place.kind else { return None };
+    let (root, false) = self.place_root(place)? else { return None };
+    let root_name = expr_to_rap_name(root, &self.tcx)?;
+    let name = self.field_through_local_ref(root, &root_name, place)?;
+    let rap = self.raps.get(&name)?.rap.to_owned();
+    (rap.is_ref() && self.borrow_map.contains_key(&name)).then_some(ResourceTy::Value(rap))
   }
 
   /// `rh.r` (or `(*rh).r`) where `rh` is a local reference that
@@ -6515,6 +6604,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let line = expr_to_line(&init, &self.tcx);
     let lender = lenders.remove(0);
     let aliasing = get_aliasing_data(&lender, &self.borrow_map);
+    // A borrow of a temporary the `let` extends (`Some(&mut
+    // String::new())`, #1357): MIR names no local for it, so its loan
+    // is found by the `&`'s span, as for `let r = &String::new();`.
+    let borrow_span = match &lender {
+      ResourceTy::Value(t) if lenders.is_empty() => self.ext_temp_borrow_span(t),
+      _ => None,
+    };
     self.borrow_map.insert(name.clone(), RefData {
       lender,
       assigned_at: line,
@@ -6522,11 +6618,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       ref_mutability: is_mut,
       aliasing,
       static_lender: None,
-      borrow_span: None,
+      borrow_span,
       loan_line: None,
       co_lenders: lenders,
       lender_muts,
     });
+  }
+
+  /// The span of the `&` that borrows the `let`-extended temporary
+  /// column `tmp` (or a field column of it), if one does
+  /// (`nested_ext_temps`).
+  fn ext_temp_borrow_span(&self, tmp: &ResourceAccessPoint) -> Option<rustc_span::Span> {
+    #[expect(clippy::disallowed_methods, reason = "a temporary's column is recorded under one `&` only; the minimum keeps it deterministic")]
+    let span = self.nested_ext_temps.iter()
+      .filter(|(_, t)| t.hash() == tmp.hash() && t.name() == tmp.name())
+      .map(|(h, _)| self.tcx.hir_span(*h))
+      .min();
+    span
   }
 
   /// Whether `init` moves a `&mut` parameter into the value it builds
@@ -7708,10 +7816,13 @@ fn pattern_ref_borrows(
   };
   match &held {
     Some(held) => {
+      // A temporary the `let` extends (`let m = Some(&String::new());`,
+      // #1357) has no named local in MIR to find its loan by: it stays.
+      let is_temp = |base: &str| self.raps.get(base).is_some_and(|rd| rd.rap.is_temporary());
       let kept = |l: &ResourceTy, own_kind: bool| match l {
         ResourceTy::Value(r) if !r.is_ref() => {
           let base = r.name().split('.').next().unwrap_or_default();
-          held.get(base).is_some_and(|m| !own_kind || *m == is_mut)
+          is_temp(base) || held.get(base).is_some_and(|m| !own_kind || *m == is_mut)
         }
         _ => true,
       };
@@ -7920,6 +8031,7 @@ pub fn emit_struct_field_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'
     }
   };
   let mut all: Vec<ResourceTy> = Vec::new();
+  let mut unlent: Vec<(String, ResourceAccessPoint, String)> = Vec::new();
   // A tuple's elements too (`let q = pair(&s);`, #1341).
   for (field_name, _) in self.member_fields(ty) {
     let fname = format!("{}.{}", st.name, field_name);
@@ -7928,6 +8040,15 @@ pub fn emit_struct_field_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'
     let lenders: Vec<ResourceTy> = rd.all_lenders().into_iter()
       .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)))
       .collect();
+    // A reference field whose argument has no column (`part("a")`, a
+    // call's result we don't track): the field still gets its value
+    // here, or its first use lands on a column that never started
+    // (#1356). Like `Part { text: "a" }`, it is bound with no arrow, and
+    // its borrow's end names a string literal / static it points to.
+    if lenders.is_empty() && frap.is_ref() && matches!(rd.lender, ResourceTy::Anonymous) && rd.co_lenders.is_empty() {
+      unlent.push((fname, frap, field_name));
+      continue;
+    }
     if lenders.is_empty() || !(frap.is_ref() || frap.holds_borrow()) {
       continue;
     }
@@ -7958,6 +8079,15 @@ pub fn emit_struct_field_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'
   }
   if !all.is_empty() {
     self.mark_borrow_kept_by_result(call, &all);
+  }
+  for (fname, frap, field_name) in unlent {
+    let static_lender = self.call_field_static_lender(borrower, &field_name);
+    if let Some(rd) = self.borrow_map.get_mut(&fname) {
+      rd.static_lender = static_lender;
+    }
+    let id = *self.unique_id;
+    *self.unique_id += 1;
+    self.add_external_event(line_num, ExternalEvent::Bind { from: ResourceTy::Anonymous, to: ResourceTy::Value(frap), id, break_alt: None });
   }
 }
 
