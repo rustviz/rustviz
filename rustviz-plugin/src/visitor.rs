@@ -382,7 +382,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // `Some(*b)`: the Box's contents (#1191).
           || self.box_contents_of(a).is_some()
           // `Some(B { name: s })`: what the literal is built from (#1143).
-          || self.is_nested_literal(a)))
+          || self.is_nested_literal(a)
+          // `Some(x.trim())`: a reborrow through a reference (#1340).
+          || (tycheck_results.node_type(a.hir_id).is_ref() && self.reborrow_through_ref(a).is_some())))
       && !self.is_copy_literal_value(e);
     if (matches!(e.kind, ExprKind::Struct(..) | ExprKind::Tup(..) | ExprKind::Array(..)) && !e.span.from_expansion())
       || ctor_value
@@ -4864,6 +4866,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                   // copy (#1329).
                   let evt = if arg_ty.ref_mutability() == Some(Mutability::Mut) && !is_implicit_reborrow(arg, typeck) { Evt::Move } else { Evt::Copy };
                   self.add_ev(line, evt, to, from, false);
+                }
+              } else if !to_call {
+                // `Some(x.trim())` with x a reference: the reborrow goes
+                // where the value goes, as `Some(x)` does (#1340).
+                if let Some(to) = self.raps.get(&fn_key(&name)).map(|rd| ResourceTy::Value(rd.rap.to_owned())) {
+                  self.ref_part_to(arg, to);
                 }
               }
             }

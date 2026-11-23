@@ -836,23 +836,27 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c9_04_question_option",
-        status: Wrong,
-        note: "renders since #155 (was a crash in the probe). x (from v.first()?) borrows *v until L3, but v's borrow ends at L2 (#171)",
+        status: Correct,
+        note: "renders since #155 (was a crash in the probe). x (from v.first()?) borrows *v until L3: the `?` passes first's borrow on, as unwrap does (#1352)",
         must_contain: &[
             "v is an immutable borrow from the caller",
             "first reads from v",
             "x holds an immutable reference; it can read the borrowed value",
-            "L3 x's immutable borrow ends (what it borrows from isn't shown)",
+            "L2 Immutable borrow from v to x: first's signature gives the value it returns the same lifetime as the value it was called on; the `?` passes the borrow on",
+            "L3 Return immutably borrowed resource from x to v",
+            "L3 v's immutable borrow ends",
             "first_plus_one reads from v",
             "v goes out of scope. Its resource is dropped.",
-            "L2 first no longer borrows the resource v points to",
         ],
         must_not_contain: &[
             "x is the owner of the resource",
             "Return immutably borrowed resource from x to *x",
             "L2 v's resource is no longer immutably borrowed",
+            "L2 v's immutable borrow ends",
+            "x's immutable borrow ends (what it borrows from isn't shown)",
+            "L2 first no longer borrows the resource v points to",
+            "Copy of the value inside the Some that first() returns to x",
         ],
-        known_wrong: &["L2 v's immutable borrow ends"],
         ..E
     },
     Snippet {

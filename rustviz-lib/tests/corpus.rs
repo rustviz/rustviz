@@ -10875,12 +10875,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s acquires ownership of the resource the `?` takes out of rs's `Ok`",
             "o's resource is moved into the `?`. If o is `Some`, t gets the value inside it; if it is `None`, the function returns `None` early.",
             "t acquires ownership of the resource the `?` takes out of o's `Some`",
-            "Copy from c to m",
-            "m is initialized with a copy of c",
+            // m gets the i32 inside c's `Ok`, not a copy of c (#1352).
+            "Partial copy from c to m",
+            "m is initialized with a copy of a value inside c",
             "e's resource is moved into the `?`. If e is `Ok`, `e?` gives the value inside it; if it is `Err`, the function returns early and the error goes to the caller.",
             "e goes out of scope. No resource is dropped.",
         ],
         must_not_contain: &[
+            "=Copy from c to m",
+            "=m is initialized with a copy of c",
             "Copy from r to n",
             "n is initialized with a copy of r",
             "r's value is copied",
@@ -23978,6 +23981,84 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t's resource is mutably borrowed by k",
             "k holds a value that mutably borrows t's resource",
             "*b points to",
+        ],
+    },
+    TooltipExpect {
+        // #1340, #1341, #1352: a borrow that flows out of a call inside a
+        // struct, tuple, array or Option, or through `?`. Callee: a
+        // reference parameter put into the returned literal (`Part { text:
+        // x }`, `(x, 1)`, `[e, f]`, `Some(Part { text: g })`, `Ok((h,
+        // 2))`, in a branch, after `return`, `&mut` too), or a reborrow
+        // through it (`(n.trim(), 1)`, `Part { text: &o[1..] }`,
+        // `Some(rr.trim())`, `Some(hv.first()?)`), is copied (moved) into
+        // the value the caller gets; main said its borrow ends there
+        // and drew no return. Caller: the lender stays borrowed until the
+        // holder's last use (`let q1 = pair(&s1); s1.push('!');` before
+        // `q1.0` is E0502), for a tuple bound whole (Copy or not), through
+        // `unwrap` / `ok()` / `?`, and on reassignment; main freed it at the
+        // call and said the field's lender "isn't shown". `let x1 =
+        // v.first()?;` borrows v like `unwrap` does (`v.clear()` before
+        // x1's use is E0502); main drew a copy. `let z1 = w1?;` with `w1:
+        // Option<&String>` copies the reference inside w1. Passed to a call
+        // (`take_pair(Some((t, 1)))`), the call reads t, not `Some`.
+        name: "borrow_through_aggregate_1340",
+        must_contain: &[
+            "a reference from x is returned to the caller; the data it points to is not copied",
+            "a reference from c is returned to the caller; the data it points to is not copied",
+            "a reference from d is returned to the caller; the data it points to is not copied",
+            "a reference from e is returned to the caller; the data it points to is not copied",
+            "a reference from g is returned to the caller; the data it points to is not copied",
+            "a reference from h is returned to the caller; the data it points to is not copied",
+            "a reference from k is returned to the caller; the data it points to is not copied",
+            "a reference from m is returned to the caller; the data it points to is not copied",
+            "y's mutable reference is moved to the caller (not the resource it points to)",
+            "z's mutable reference is moved to the caller (not the resource it points to)",
+            "a reference into n (from trim), reborrowed through n, is returned to the caller; the data it points to is not copied",
+            "a reference to o[1..], reborrowed through o, is returned to the caller; the data it points to is not copied",
+            "a reference into rr (from trim), reborrowed through rr, is returned to the caller; the data it points to is not copied",
+            "a reference into hv (from first), reborrowed through hv, is returned to the caller; the data it points to is not copied",
+            "take_pair reads from t",
+            "Immutable borrow from s1 to q1.0: pair's signature gives the tuple it returns the same lifetime as its argument",
+            "Return immutably borrowed resource from q1.0 to s1",
+            "Immutable borrow from s2 to q2.0: pair_owned's signature gives the tuple it returns the same lifetime as its argument",
+            "Return immutably borrowed resource from q2.0 to s2",
+            "Immutable borrow from s3 to p3.text: nested's signature gives the value it returns the same lifetime as its argument; unwrap passes the borrow on",
+            "Immutable borrow from s4 to q4.0: ok_pair's signature gives the value it returns the same lifetime as its argument; unwrap passes the borrow on",
+            "Immutable borrow from s5 to p5.text: nested's signature gives the value it returns the same lifetime as its argument; the `?` passes the borrow on",
+            "Immutable borrow from s5 to q5.0: ok_pair's signature gives the value it returns the same lifetime as its argument; ok and the `?` pass the borrow on",
+            "Mutable borrow from s6 to q6.0: pair_mut's signature gives the tuple it returns the same lifetime as its argument",
+            "Return mutably borrowed resource from q6.0 to s6",
+            "Immutable borrow from t7 to q7.0: pair's signature gives the tuple it returns the same lifetime as its argument",
+            "Immutable borrow from u7 to q7.0: pair's signature gives the tuple it returns the same lifetime as its argument",
+            "Return immutably borrowed resource from q7.0 to u7",
+            "Immutable borrow from s8 to e8.0: either's signature gives the tuple it returns the same lifetime as its first argument",
+            "Return immutably borrowed resource from e8.0 to s8",
+            "Immutable borrow from v to x1: first's signature gives the value it returns the same lifetime as the value it was called on; the `?` passes the borrow on",
+            "Return immutably borrowed resource from x1 to v",
+            "Immutable borrow from v to z1: z1 is a reference copied out of w1",
+            "Return immutably borrowed resource from z1 to v",
+            "z1 is initialized with a copy of a value inside w1",
+            "Return immutably borrowed resource from x2 to v",
+        ],
+        must_not_contain: &[
+            "=x's immutable borrow ends",
+            "=c's immutable borrow ends",
+            "=g's immutable borrow ends",
+            "=k's immutable borrow ends",
+            "=m's immutable borrow ends",
+            "=y's mutable borrow ends",
+            "=z's mutable borrow ends",
+            "=n's immutable borrow ends",
+            "=o's immutable borrow ends",
+            "=rr's immutable borrow ends",
+            "=hv's immutable borrow ends",
+            "Some reads from t",
+            "Ok reads from h",
+            "what it borrows from isn't shown",
+            "Copy of the value inside the Some that first() returns to x1",
+            "Copy of the value inside the Ok that ok_or() returns to x2",
+            "z1 is initialized with a copy of w1",
+            "Copy from w1 to z1",
         ],
     },
 ];
