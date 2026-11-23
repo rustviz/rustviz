@@ -24,6 +24,7 @@ pub const INVARIANTS: &[&str] = &[
     "line-starts-nowhere", "line-ends-nowhere", "line-through-fork", "arrows-overlap",
     "marks-on-one-spot", "arrow-misses-target", "outside-figure", "heads-or-logos-overlap",
     "shaft-through-mark", "arrows-end-to-end",
+    "fork-without-dot",
 ];
 
 /// How far apart two points the drawing means to be one may be.
@@ -339,6 +340,37 @@ pub fn check(g: &Geo) -> Vec<(&'static str, String)> {
         }
     }
 
+    // Two or more legs of one column leaving a point downwards in different
+    // directions (a fork), or arriving at it from above (a join), meet at a
+    // dot: the conditional's split or join. Without one the diamond starts
+    // or ends in mid-line (#1371: a column mutably lent out across an
+    // `if let` forked and joined with no dots).
+    let mut forks: Vec<(String, (f64, f64))> = Vec::new();
+    for s in g.segs.iter().filter(|s| len(s.a, s.b) >= TOL) {
+        for (end, other) in [(s.a, s.b), (s.b, s.a)] {
+            let down = other.1 > end.1 + TOL;
+            let up = other.1 < end.1 - TOL;
+            if !down && !up {
+                continue;
+            }
+            let dir = |p: (f64, f64), q: (f64, f64)| { let l = len(p, q); ((q.0 - p.0) / l, (q.1 - p.1) / l) };
+            let d1 = dir(end, other);
+            let splits = g.segs.iter().filter(|o| o.hash == s.hash && !std::ptr::eq(*o, s) && len(o.a, o.b) >= TOL)
+                .filter_map(|o| if near(end, o.a) { Some(o.b) } else if near(end, o.b) { Some(o.a) } else { None })
+                .any(|q| {
+                    let same_side = if down { q.1 > end.1 + TOL } else { q.1 < end.1 - TOL };
+                    let d2 = dir(end, q);
+                    same_side && (d1.0 * d2.1 - d1.1 * d2.0).abs() > 0.05
+                });
+            if splits && !g.dots.iter().any(|d| d.hash == s.hash && near(end, (d.x, d.y)))
+                && !forks.iter().any(|(h, p)| *h == s.hash && near(*p, end)) {
+                forks.push((s.hash.clone(), end));
+                out.push(("fork-without-dot", format!("{} legs {} at {}, where {} has no dot",
+                    s.var, if down { "fork" } else { "join" }, fmt(end), s.var)));
+            }
+        }
+    }
+
     // Two arrows along one stretch: the pointer reaches only the one drawn
     // on top (#1264, #1187).
     for (i, a) in g.arrows.iter().enumerate() {
@@ -602,6 +634,18 @@ mod unit {
     fn a_column_drawn_past_a_fork_is_caught() {
         assert_eq!(invs(&else_if(false)), Vec::<&str>::new());
         assert_eq!(invs(&else_if(true)), vec!["line-ends-nowhere", "line-through-fork"]);
+    }
+
+    #[test]
+    fn a_fork_or_join_with_no_dot_is_caught() {
+        // #1371: the legs of a column lent out across an `if let` forked
+        // and joined in mid-line.
+        for (gone, inv) in [("branch 150 130", "fork-without-dot"), ("branch_join 100 220", "fork-without-dot")] {
+            let body = else_if(false).split_inclusive("/>")
+                .filter(|el| !el.contains(&format!("data-tooltip-text=\"{gone}\"")))
+                .collect::<String>();
+            assert_eq!(invs(&body), vec![inv], "{gone}");
+        }
     }
 
     #[test]

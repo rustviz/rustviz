@@ -51,10 +51,9 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // Tuple column goes on after its fields were moved out.
     ("edition2024/if_let_chain_irrefutable_move", "line-ends-nowhere", 1157),
     // A `&mut` moved out of an arm binding into another reference: its
-    // borrow end after the move; the lender's lent segments in mid-air.
+    // borrow end after the move. (The lender's lent segments start and end
+    // at its fork and join dots since #1371.)
     ("arm_binding_value_1327", "event-on-dead-column", 1333),
-    ("arm_binding_value_1327", "line-ends-nowhere", 1333),
-    ("arm_binding_value_1327", "line-starts-nowhere", 1333),
     // Both fields may borrow from either of two lenders: four borrows on
     // one row and four returns on the next, more than the free tracks
     // between the rows hold.
@@ -114,6 +113,9 @@ pub const INVARIANTS: &[(&str, &str)] = &[
      "an arrow to a column ends at none of that column's dots"),
     ("outside-figure",
      "an element is drawn outside the timeline's width or height"),
+    ("fork-without-dot",
+     "two legs of a column leave a point in different directions (a fork) or meet there (a join) \
+      with no dot of that column there: the conditional's split or join is drawn in mid-line"),
     ("heads-or-logos-overlap",
      "an arrow's head lies on another arrow's shaft or head, or a function logo lies on an arrow not its \
       own or on another logo: the marks under it can't be told apart or hovered"),
