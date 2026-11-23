@@ -5413,9 +5413,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x is bound to a copyable value",
             // for_outer
             // `y₂` is an i32 copied out of the iterator (#772), so no
-            // arrow says it was moved from `ys`.
+            // arrow says it was moved from `ys`; the copy is drawn (#1372).
             "ys's resource is moved into the `for` loop's iterator",
-            "y₂ is bound to a copyable value",
+            "y₂ is bound to a copy of an element of ys",
+            "Copy of each element of ys to y₂",
             "y goes out of scope. Its resource is dropped.",
             // else_if_let
             "z is initialized with a copy of a value inside a",
@@ -7202,7 +7203,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "for_copy_elements",
         must_contain: &[
-            "x is bound to a copyable value",
+            "x is bound to a copy of an element of xs",
             "xs acquires ownership of a resource",
         ],
         must_not_contain: &[
@@ -12977,11 +12978,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // #772: `a` is moved into the loop's iterator; each `n` / `p` is
         // an i32 / (i32, i32) copied out of it, so no arrow says it was
         // moved from `a`. A String is moved out of the iterator into `s`.
+        // #1372: the copy is drawn, so an arrow leaves `a`.
         must_contain: &[
             "a's resource is moved into the `for` loop's iterator",
             "pts's resource is moved into the `for` loop's iterator",
-            "n is bound to a copyable value",
-            "p is bound to a copyable value",
+            "n is bound to a copy of an element of a",
+            "p is bound to a copy of an element of pts",
+            "Copy of each element of a to n",
+            "Copy of each element of pts to p",
             // (#850: reworded from "Move from names to s", which read as
             // `s` taking the whole Vec.)
             "Move of each element of names to s",
@@ -24442,6 +24446,110 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "b's mutable borrow ends",
             "Return mutably borrowed resource from b to w",
         ],
+    },    TooltipExpect {
+        name: "arm_ref_handoff_1333",
+        // #1333: a `&mut` declared in an arm and moved into another
+        // reference there hands its borrow on: the new reference gives
+        // the lender back; the moved one draws no borrow end after the
+        // move (it was drawn on its dead column, and r's end before r's
+        // use).
+        must_contain: &[
+            "Move from x to r",
+            "Return mutably borrowed resource from r to s",
+            "x goes out of scope",
+            "r's mutable borrow ends",
+            "Move from x2 to r2",
+            "Return mutably borrowed resource from r2 to s2",
+            "x2's mutable reference is moved (not the resource it points to)",
+            "Move from y3 to r3",
+            "Return mutably borrowed resource from r3 to s3",
+            "Return mutably borrowed resource from r3 to t3",
+            "y3 goes out of scope",
+        ],
+        must_not_contain: &[
+            "Return mutably borrowed resource from x to s",
+            "x's mutable borrow ends",
+            "x2's mutable borrow ends",
+            "Return mutably borrowed resource from x2 to s2",
+            "y3's mutable borrow ends",
+            "Return mutably borrowed resource from y3 to s3",
+        ],
+    },
+    TooltipExpect {
+        name: "assign_branch_ref_1335",
+        // #1335: `r = if c { let y = &a; y } else { &b };`: r holds a copy
+        // of y's loan; y's borrow ends with its scope, at the arm's end
+        // (no arrow), and r gives a back at its last use. It was drawn
+        // ending at r's use, after y had gone out of scope.
+        must_contain: &[
+            "Copy from y to r",
+            "y goes out of scope",
+            "Return immutably borrowed resource from r to a",
+            "Return immutably borrowed resource from r to b",
+            "Return immutably borrowed resource from r to c",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from y to a",
+        ],
+    },
+    TooltipExpect {
+        name: "destructure_cycle_1343",
+        // #1343: in a swap or rotation by destructuring assignment every
+        // part is read before any is assigned, so each target's value
+        // moves out before its new one arrives: one dot per target. The
+        // first target had a second "acquires" dot, and its first said
+        // "acquires", then "moved".
+        must_contain: &[
+            // (The order on each dot, moved then acquires, and one dot
+            // per target: `destructure_cycle_one_dot_per_target`.)
+            "m1 is assigned m2's mutable reference",
+            "m2 is assigned m1's mutable reference",
+            "Return mutably borrowed resource from m1 to w",
+            "Return mutably borrowed resource from m2 to u",
+        ],
+        must_not_contain: &[
+            "m1 is bound to a mutable reference",
+            "m2 is bound to a mutable reference",
+        ],
+    },
+    TooltipExpect {
+        name: "box_deref_write_1345",
+        // #1345: `*b = u;` on a Box<String> drops the old String: the
+        // dot has the drop mark (`owner_drop_at_reassign`, checked in
+        // `box_deref_write_drop_marks`). `*b2 = o;` on a Box drawn as its
+        // payload's parts is one dot, as `*b2 = (..)` is.
+        must_contain: &[
+            "Move from u to *b",
+            "*b acquires ownership of a new resource; its previous resource is dropped",
+            "Move from make to *b3",
+            "*b3 acquires ownership of a new resource; its previous resource is dropped",
+            "Move from o to *b2",
+            "*b2 acquires ownership of a new resource. Its previous b2.0 was moved out earlier, so nothing of it is dropped.",
+            "Move from o2 to *b4",
+            "*b4 acquires ownership of a new resource; its previous resource is dropped",
+        ],
+        must_not_contain: &[
+            "=*b2 acquires ownership of a resource",
+        ],
+    },
+    TooltipExpect {
+        name: "for_copy_elems_1372",
+        // #1372: `for y in ys` with Copy elements moves ys into the
+        // loop's iterator and copies each element into y: an arrow out
+        // of ys says so (nothing left ys). The `&mut` elements of `refs`
+        // are references moved out, which own nothing (r's lender is
+        // #1389).
+        must_contain: &[
+            "ys's resource is moved into the `for` loop's iterator",
+            "Copy of each element of ys to y",
+            "y is bound to a copy of an element of ys",
+            "Move of each element of refs to r",
+            "r is bound to a mutable reference moved out of refs",
+        ],
+        must_not_contain: &[
+            "y is bound to a copyable value",
+            "r takes ownership of an element of refs",
+        ],
     },
     TooltipExpect {
         name: "reborrow_explicit_deref_into_call_1332",
@@ -34374,5 +34482,39 @@ fn every_arm_that_ended_a_borrow_reaches_the_join() {
         }
         assert!(checked > 0, "{}: no join of a borrow that ended in every arm", name);
         assert_eq!(bad, Vec::<String>::new(), "{}", name);
+    }
+}
+
+/// #1345: `*b = …` on a Box drawn as one column drops the old contents
+/// on the write's dot (the drop mark of `owner_drop_at_reassign`), as `v
+/// = w` does; a Box drawn as its payload's parts gets one dot for the
+/// write, whatever the right-hand side (`*b2 = o` had a second dot for
+/// the drop, a row below).
+#[test]
+fn box_deref_write_drop_marks() {
+    let tl = run_with_local_backend("box_deref_write_1345").timeline_panel_string();
+    for id in ["b@L12", "b3@L14", "b4@L21", "b2@L18"] {
+        let dots: Vec<&str> = tl.match_indices(&format!("data-rv-id=\"{}:dot:", id))
+            .map(|(i, _)| { let rest = &tl[i + 12..]; &rest[..rest.find('"').unwrap()] })
+            .collect();
+        assert_eq!(dots, vec![format!("{}:dot:acquire+owner_drop_at_reassign", id).as_str()], "{}'s dots at the write", id);
+    }
+}
+
+/// #1343: a swap or rotation by destructuring assignment draws one dot
+/// per target on its line; the first target had two, with a gap in its
+/// column between them.
+#[test]
+fn destructure_cycle_one_dot_per_target() {
+    let tl = run_with_local_backend("destructure_cycle_1343").timeline_panel_string();
+    for (line, vars) in [(11, &["a", "b"][..]), (13, &["a", "b", "c"][..]), (16, &["p", "p.name", "q", "q.name"][..]), (21, &["m1", "m2"][..])] {
+        for v in vars {
+            let ids: Vec<&str> = tl.match_indices(&format!("data-rv-id=\"{}@L{}:dot:", v, line))
+                .map(|(i, _)| { let rest = &tl[i + 12..]; &rest[..rest.find('"').unwrap()] })
+                .collect();
+            assert_eq!(ids.len(), 1, "{} has dots {:?} on line {}", v, ids, line);
+            // Its value moves out, then the new one arrives.
+            assert!(ids[0].ends_with("move+acquire") && !ids[0].contains("acquire+move"), "{} on line {}: {}", v, line, ids[0]);
+        }
     }
 }

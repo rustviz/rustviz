@@ -633,6 +633,11 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// replace the earlier one's, whose borrow then never ended.
   /// `emit_borrow_ends` ends each one like the loans `borrow_map` holds.
   pub retired_loans: Vec<RetiredLoan>,
+  /// References gone out of scope whose loan another reference took a
+  /// copy of and has since ended, at its own reassignment (`y` in `r =
+  /// if c { let y = &a; y } else { &b }; … r = &t;`): y gives nothing
+  /// back; its borrow ends with its scope (#1335).
+  pub loans_carried_on: Vec<String>,
   /// While `emit_borrow_ends` runs: for each retired loan's key
   /// (`retired_key`), the line from which events are the later
   /// variable's.
@@ -785,6 +790,12 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // (`chain_binding_columns`, #583, #584); handed to the renderer's
   // `VisualizationData::binding_columns`.
   pub binding_columns: Vec<(u64, u64)>,
+
+  /// Moves of a destructuring assignment's cycle (`(a, b) = (b, a)`) out
+  /// of a place whose new value is drawn first (`a = b` before `b = a`):
+  /// the renderer puts each such move before that place's new value on
+  /// its column (#1343); handed to `VisualizationData::moves_out_first`.
+  pub moves_out_first: Vec<usize>,
 
   // Notes on dots saying what the figure simplifies (a loop drawn as one
   // pass, #853); handed to the renderer's
@@ -1069,6 +1080,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       loan_end_overrides: Vec::new(),
       arm_loans: Vec::new(),
       retired_loans: Vec::new(),
+      loans_carried_on: Vec::new(),
       retired_until: HashMap::new(),
       arm_frames: Vec::new(),
       defer_old_ends: false,
@@ -1092,6 +1104,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       premoved: HashSet::new(),
       live_tuples: Vec::new(),
       binding_columns: Vec::new(),
+      moves_out_first: Vec::new(),
       approx_notes: Vec::new(),
       scrut_movers: Vec::new(),
       scrut_temp_notes: Vec::new(),
@@ -2534,6 +2547,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// Any other `&mut` moved into a call (`take(r)`) isn't covered:
   /// nothing else with a column ends that borrow, so `r`'s end stands
   /// for it.
+  /// Whether reference `name` has gone out of scope in the events drawn
+  /// so far (its block or arm ended).
+  pub fn went_out_of_scope(&self, name: &str) -> bool {
+    self.raps.get(name).is_some_and(|rd| rd.rap.is_ref()
+      && gos_line_of(self.preprocessed_events, &rd.rap).is_some())
+  }
+
   pub fn ref_handed_off(&self, name: &str) -> bool {
     self.ref_handed_off_to(name, false)
   }
@@ -2580,7 +2600,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             // Into a call whose result carries the borrow on (#1128).
             ResourceTy::Value(ResourceAccessPoint::Function(_)) => !in_branch && !caller_only
               && this.moved_into_result.contains(id),
-            // Moves into another reference inside a branch keep the old drawing.
+            // Moves into another reference inside a branch keep the old
+            // drawing, unless the reference was declared in that branch.
             // A tuple struct built around it (`let w = W(r);`): the
             // field holding it carries the borrow on (#1128).
             ResourceTy::Value(t @ ResourceAccessPoint::Struct(_)) if !in_branch && !caller_only
@@ -2596,8 +2617,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         // `&self.s` returned: a reborrow through `self` goes to the caller (#784).
         ExternalEvent::Copy { from: ResourceTy::DerefField(f, place, _, _), to: ResourceTy::Caller, .. }
           if place.starts_with('&') && *f.hash() == hash && mine(*line) => true,
+        // A reference declared in the branch (an arm's pattern binding,
+        // `Some(x) => { let r = x; .. }`, or a `let` in the arm) exists
+        // on that path only: a move into another reference there hands
+        // its borrow off for good, as outside a conditional (#1333).
         ExternalEvent::Branch { branches, .. } => branches.iter()
-          .any(|b| handed(this, &b.e_data, hash, mine, swapped_here, true, caller_only)),
+          .any(|b| {
+            #[expect(clippy::disallowed_methods, reason = "any() makes order irrelevant")]
+            let declared_here = b.decl_vars.iter().any(|v| *v.hash() == hash);
+            handed(this, &b.e_data, hash, mine, swapped_here, !declared_here, caller_only)
+          }),
         _ => false,
       })
     }
@@ -5906,7 +5935,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       LoanId::Span(sp) => self.gather_borrow_data(self.bwf).iter()
         .find(|b| b.span == sp).map(|b| b.region.1),
       LoanId::Line(l) => match &rd.lender {
-        ResourceTy::Value(lender) if !lender.is_fn() => self.loan_end_line(l, lender.name()),
+        ResourceTy::Value(lender) if !lender.is_fn() => {
+          let first = self.loan_end_line(l, lender.name());
+          // A loan that ends before a use of the reference isn't the
+          // one it holds: `r = if a.len() > 0 { let y = &a; y } ..`
+          // holds a copy of y's loan, not `a.len()`'s on the same line
+          // (#1335).
+          match first {
+            Some(end) if end < rd.lifetime => {
+              let root = lender.name().split('.').next().unwrap_or(lender.name()).to_owned();
+              self.gather_borrow_data(self.bwf).iter()
+                .filter(|b| b.region.0 == l && b.borrowed_place.as_deref() == Some(root.as_str()) && b.region.1 >= rd.lifetime)
+                .map(|b| b.region.1)
+                .min()
+                .or(first)
+            }
+            _ => first,
+          }
+        }
         _ => None,
       },
     }
@@ -5938,6 +5984,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           && b.region.0 >= rd.assigned_at && b.region.0 <= write_line)
         .min_by_key(|b| (b.region.0, b.borrow_idx)),
     }?;
+    // Not a loan that ends before a use of the reference: another loan
+    // of the lender made on that line is the one it holds (a copy of
+    // `y`'s in `r = if a.len() > 0 { let y = &a; y } else { &b };`,
+    // not `a.len()`'s, #1335).
+    // (`rd.lifetime` counts the write itself as a use: the loan that
+    // lasts longest up to it.)
+    let own = if own.region.1 < rd.lifetime && !matches!(rd.loan(), Some(LoanId::Span(_))) {
+      loans.iter()
+        .filter(|b| b.region.0 == own.region.0 && b.borrowed_place == own.borrowed_place
+          && b.region.1 < write_line.max(own.region.1 + 1))
+        .max_by_key(|b| (b.region.1, std::cmp::Reverse(b.borrow_idx)))
+        .unwrap_or(own)
+    } else {
+      own
+    };
     let in_range = |end: usize| end < write_line && end >= rd.assigned_at;
     Some(own.region.1).filter(|&end| in_range(end))
       .or_else(|| {
@@ -10588,6 +10649,20 @@ pub fn print_out_of_scope(&mut self){
         _ => kills.iter().copied().find(|k| *k >= data.lifetime)
           .or_else(|| kills.iter().copied().max()),
       };
+      // Every such loan ends before a use of the reference: it holds a
+      // loan a reference made on its line holds too, as a copy of it
+      // (`r = if c { let y = &a; y } else { &b };`: r is a copy of y,
+      // and the other loan of `a` on that line, `a.len()`'s, ends
+      // there, #1335). Take the one of those that lasts to the use.
+      let chosen = match chosen {
+        Some(k) if k < data.lifetime => mir_b_data.iter()
+          .filter(|m| by_span.contains(&m.borrow_idx))
+          .filter_map(|m_data| ExprVisitor::borrow_match(data, m_data))
+          .filter(|kill| *kill >= data.lifetime)
+          .min()
+          .or(Some(k)),
+        c => c,
+      };
       if let Some(kill) = chosen {
         data.lifetime = kill;
       }
@@ -10846,13 +10921,7 @@ pub fn print_out_of_scope(&mut self){
       // (`raps` outlives one fn: match the column, not just the name.)
       // A variable declared in a branch (`x` in `Some(x) => x`, #1327)
       // goes out of scope in that branch's events.
-      fn gos_line(evs: &[(usize, ExternalEvent)], rap: &ResourceAccessPoint) -> Option<usize> {
-        evs.iter().find_map(|(l, e)| match e {
-          ExternalEvent::GoOutOfScope { ro, .. } if ro.hash() == rap.hash() => Some(*l),
-          ExternalEvent::Branch { branches, .. } => branches.iter().find_map(|b| gos_line(&b.e_data, rap)),
-          _ => None,
-        })
-      }
+      let gos_line = gos_line_of;
       let scope_end = |name: &str| {
         let rd = self.raps.get(name).filter(|rd| rd.rap.is_ref() && rd.extra_scopes.is_empty())?;
         gos_line(&self.preprocessed_events, &rd.rap).or(rd.is_global.then_some(rd.scope))
@@ -10880,6 +10949,17 @@ pub fn print_out_of_scope(&mut self){
             outlived.insert(r.clone(), end);
           }
         }
+      }
+    }
+
+    // A copy of it ended its loan already, at that copy's reassignment
+    // (`loans_carried_on`, #1335): it ends with its scope.
+    for name in std::mem::take(&mut self.loans_carried_on) {
+      let Some(rd) = self.raps.get(&name).filter(|rd| rd.rap.is_ref()) else { continue };
+      let Some(end) = gos_line_of(self.preprocessed_events, &rd.rap) else { continue };
+      if let Some(d) = self.borrow_map.get(&name) {
+        ultimate_refs.remove(&(name.clone(), d.lender.real_name()));
+        outlived.insert(name, end);
       }
     }
 
@@ -13004,4 +13084,15 @@ pub(crate) fn copies_from_inside<'tcx>(evt: &Evt, ty: Ty<'tcx>, parent_ty: Ty<'t
 
 fn is_by_value_binding(pat: &Pat<'_>) -> bool {
   matches!(pat.kind, PatKind::Binding(ann, _, _, None) if matches!(ann.0, rustc_hir::ByRef::No))
+}
+
+/// The line where `rap` goes out of scope in `evs` (a variable declared
+/// in a branch, `x` in `Some(x) => x`, goes out of scope in that
+/// branch's events, #1327).
+pub fn gos_line_of(evs: &[(usize, ExternalEvent)], rap: &ResourceAccessPoint) -> Option<usize> {
+  evs.iter().find_map(|(l, e)| match e {
+    ExternalEvent::GoOutOfScope { ro, .. } if ro.hash() == rap.hash() => Some(*l),
+    ExternalEvent::Branch { branches, .. } => branches.iter().find_map(|b| gos_line_of(&b.e_data, rap)),
+    _ => None,
+  })
 }

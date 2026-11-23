@@ -176,6 +176,9 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   let mut ids: usize = 0;
   // Let-chain bindings drawn beside their sources (#583, #584).
   let mut binding_columns: Vec<(u64, u64)> = Vec::new();
+  // Moves of destructuring-assignment cycles drawn before the source's
+  // new value (#1343).
+  let mut moves_out_first: Vec<usize> = Vec::new();
 
   
   
@@ -283,6 +286,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
             approx_notes.append(&mut visitor.approx_notes);
             rap_hash_num = visitor.rap_hashes;
             binding_columns.append(&mut visitor.binding_columns);
+            moves_out_first.append(&mut visitor.moves_out_first);
             merge_visitor_raps(&mut rap_map, visitor.raps, fn_start_line);
             collect_shadow_notes(&tcx, impl_item.owner_id, fn_start_line, &mut shadow_notes_by_fq);
           }
@@ -347,6 +351,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
         approx_notes.append(&mut visitor.approx_notes);
         rap_hash_num = visitor.rap_hashes;
         binding_columns.append(&mut visitor.binding_columns);
+        moves_out_first.append(&mut visitor.moves_out_first);
         merge_visitor_raps(&mut rap_map, visitor.raps, fn_start_line);
         collect_shadow_notes(&tcx, item.owner_id, fn_start_line, &mut shadow_notes_by_fq);
       },
@@ -425,7 +430,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   let shadow_notes: HashMap<u64, ShadowNote> = note_pairs.into_iter().map(|(h, _, n)| (h, n)).collect();
 
   // Pass information to svg-generator
-  match testing_helper.generate_vis(line_map2, pre_events, & mut a_line_map, rap_map.len() + 1, fn_start_lines, shadow_notes, binding_columns, hidden_source_lines, approx_notes, args.write_to_cwd) {
+  match testing_helper.generate_vis(line_map2, pre_events, & mut a_line_map, rap_map.len() + 1, fn_start_lines, shadow_notes, binding_columns, moves_out_first, hidden_source_lines, approx_notes, args.write_to_cwd) {
     Ok(_) => {}
     Err(e) => {
       eprintln!("{}", e);

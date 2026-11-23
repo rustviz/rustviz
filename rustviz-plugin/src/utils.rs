@@ -251,6 +251,7 @@ impl RV1Helper {
     fn_start_lines: HashMap<u64, usize>,
     shadow_notes: HashMap<u64, ShadowNote>,
     binding_columns: Vec<(u64, u64)>,
+    moves_out_first: Vec<usize>,
     hidden_source_lines: HashSet<usize>,
     approx_notes: Vec<ApproxNote>,
     write_to_cwd: bool) -> Result<()> {
@@ -270,7 +271,7 @@ impl RV1Helper {
 
 
     // send stuff to RV1
-    let rv = Rustviz::new(&annotated_source_str, &self.source_str, p_events, line_map, num_raps, fn_start_lines, shadow_notes, binding_columns, hidden_source_lines, approx_notes)?;
+    let rv = Rustviz::new(&annotated_source_str, &self.source_str, p_events, line_map, num_raps, fn_start_lines, shadow_notes, binding_columns, moves_out_first, hidden_source_lines, approx_notes)?;
 
     if write_to_cwd { // write the SVG files
       self.source_path.pop(); // just write to inside cwd

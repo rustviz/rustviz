@@ -167,6 +167,18 @@ fn drop_with_lender_return(drop: &ExternalEvent, die: &ExternalEvent) -> bool {
     r.is_ref() && (ro.hash() == lender.hash() || ro.name().starts_with(&format!("{}.", lender.name())))
 }
 
+/// Whether `drop` is the drop of the old value of the place the arrow
+/// `arrow` moves or copies a new value into (`*b = o;` with b a Box
+/// drawn as its payload's parts, whose fields get arrows of their own):
+/// the drop goes with the arrival, on its row and dot. Left in the
+/// line's sequence, it was appended on the last row the line's other
+/// arrows added, as a second dot for the one write (#1345).
+fn drop_at_arrival(drop: &ExternalEvent, arrow: &ExternalEvent) -> bool {
+    let ExternalEvent::OwnerDropAtReassign { ro, .. } = drop else { return false };
+    matches!(arrow, ExternalEvent::Move { .. } | ExternalEvent::Copy { .. })
+        && ResourceAccessPoint_extract(arrow).1.extract_rap().is_some_and(|t| t.hash() == ro.hash())
+}
+
 /// Whether `die` is the end (`RefDie`) of the borrow of the reference
 /// that the arrow `arrow` copies or moves a new value into.
 /// `first_lines`: the first line each column has an event on. A
@@ -1625,6 +1637,11 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                         skippable_ev.insert(e.get_id()); // they all become skippable
                         // The struct's fields move with it, on its row (#1283).
                         for d in rest_of_line.iter().filter(|d| part_moves_with_whole(d, e)) {
+                            if skippable_ev.insert(d.get_id()) {
+                                visualization_data.append_processed_external_event(d.clone(), row);
+                            }
+                        }
+                        for d in rest_of_line.iter().filter(|d| drop_at_arrival(d, e)) {
                             if skippable_ev.insert(d.get_id()) {
                                 visualization_data.append_processed_external_event(d.clone(), row);
                             }
