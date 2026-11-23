@@ -4857,7 +4857,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 if let (ResourceTy::Value(rap) | ResourceTy::Deref(rap), Some(to)) = (&from, self.raps.get(&fn_key(&name))) {
                   let (rap, to) = (rap.to_owned(), ResourceTy::Value(to.rap.to_owned()));
                   self.update_rap(&rap, line);
-                  let evt = if arg_ty.ref_mutability() == Some(Mutability::Mut) { Evt::Move } else { Evt::Copy };
+                  // `let o: Option<&i32> = Some(r);` (or `Option<&mut
+                  // i32>`) with r a `&mut`: rustc reborrows r where the
+                  // expected type is a reference, so r isn't moved; the
+                  // holder's borrow is drawn as for a shared reference's
+                  // copy (#1329).
+                  let evt = if arg_ty.ref_mutability() == Some(Mutability::Mut) && !is_implicit_reborrow(arg, typeck) { Evt::Move } else { Evt::Copy };
                   self.add_ev(line, evt, to, from, false);
                 }
               }

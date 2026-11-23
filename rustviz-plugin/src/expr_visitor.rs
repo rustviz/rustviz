@@ -2576,6 +2576,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       && is_implicit_mut_reborrow(rhs, self.tcx.typeck(rhs.hir_id.owner))
   }
 
+  /// `let s: &String = r;`, `V { r }` with a `&String` field, `q = r;`
+  /// with `q: &String`, r a `&mut String`: the `&mut` is coerced to a
+  /// `&` by an implicit `&*r`, an immutable reborrow through r, not a
+  /// move (or a copy) of r (#1329). The shared counterpart of
+  /// `is_coerced_mut_reborrow`.
+  pub fn is_coerced_shared_reborrow(&self, lhs: &ResourceTy, rhs_rap: &ResourceAccessPoint, rhs: &Expr, evt: &Evt) -> bool {
+    matches!(evt, Evt::Move | Evt::Copy)
+      && matches!(lhs, ResourceTy::Value(_))
+      && rhs_rap.is_mutref()
+      && is_implicit_shared_reborrow_of_mut(rhs, self.tcx.typeck(rhs.hir_id.owner))
+  }
+
   pub fn ext_ev_of_evt(&self, evt: Evt, lhs: ResourceTy, rhs: ResourceTy, id: usize, is_partial: bool) -> ExternalEvent{
     match evt {
       Evt::Bind => ExternalEvent::Bind { from: rhs, to: lhs, id, break_alt: None },
@@ -4464,6 +4476,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       return None;
     }
     let typeck = self.tcx.typeck(e.hir_id.owner);
+    // `fn f(r: &mut i32) -> &i32 { r }`: r is coerced to the `&i32` the
+    // caller gets by an implicit `&*r`, an immutable reborrow, not
+    // moved (#1329).
+    if let ExprKind::Path(QPath::Resolved(None, _)) = e.kind {
+      if !is_implicit_shared_reborrow_of_mut(e, typeck) {
+        return None;
+      }
+      let rap = expr_to_rap_name(e, &self.tcx)
+        .and_then(|n| self.raps.get(&n))
+        .map(|rd| rd.rap.to_owned())
+        .filter(|r| r.is_mutref() && !r.is_static() && !r.is_fn())?;
+      let pointee = typeck.node_type(e.hir_id).builtin_deref(true)?;
+      let place = format!("&*{}", rap.name());
+      return Some(ResourceTy::DerefField(rap, place, PlaceWrite::Update, self.field_holds(pointee, e.hir_id.owner)));
+    }
     // `v.get_mut(0).unwrap()` / `v.first().unwrap()` with `v` a
     // reference: a reference into what v points to (#1078).
     if matches!(e.kind, ExprKind::MethodCall(..) | ExprKind::Call(..)) {
@@ -4691,7 +4718,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         // moved in (`vec![r]`, no reborrow) can't be used afterwards,
         // and the holder carries its borrow on (#1128).
         let typeck = self.tcx.typeck(elem.hir_id.owner);
-        if ty.ref_mutability() == Some(Mutability::Mut) && !is_implicit_mut_reborrow(elem, typeck)
+        if ty.ref_mutability() == Some(Mutability::Mut) && !is_implicit_reborrow(elem, typeck)
           && !matches!(lhs, ResourceTy::Anonymous | ResourceTy::Caller) {
           if let ResourceTy::Value(r) = get_rap(elem, &self.tcx, &self.raps) {
             if r.is_mutref() {
@@ -5058,6 +5085,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
     // type-check the arg and add event accordingly
     if arg_ty.is_ref() {
+      // `look(r)` with `r: &mut i32` and `look(x: &i32)`: rustc passes
+      // `&*r`, an immutable reborrow, so r isn't moved and is usable
+      // again after the call; drawn like `look(&*r)` (#1329).
+      let arg_mut = if !matches!(arg.kind, ExprKind::AddrOf(..)) && is_implicit_shared_reborrow_of_mut(arg, tycheck_results) {
+        Mutability::Not
+      } else {
+        arg_ty.ref_mutability().unwrap()
+      };
       // `show(&x)` / `bump(&mut m)` with x / m a reference variable and
       // a `&&String` / `&mut &mut String` parameter: the call borrows
       // x / m itself, not what it points to (#938).
@@ -5071,7 +5106,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         None => self.stored_call_result_borrows(arg, line_num),
       };
       for (from_ro, place, end_line) in stored.iter().cloned() {
-        let mutable = arg_ty.ref_mutability() == Some(Mutability::Mut);
+        let mutable = arg_mut == Mutability::Mut;
         let id = *self.unique_id;
         let loans = self.loans_issued_in(arg.span);
         self.stored_borrows.push(StoredBorrow {
@@ -5113,7 +5148,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         (ResourceTy::Deref(r), Some(DeepPlace { elem: Some(_), .. })) => ResourceTy::Value(r.clone()),
         _ => from_ro,
       };
-      match arg_ty.ref_mutability().unwrap() {
+      match arg_mut {
         Mutability::Not => {
           // `bump(rc)` with `rc: &Cell<i32>` (#1149): bump can change
           // what rc points to.
@@ -5503,8 +5538,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // ... unless rustc reborrows it (`let r2: &mut String = r;`,
       // see is_coerced_mut_reborrow): then, as for `&mut *r`, the new
       // reference borrows through r and gives the borrow back to *r.
+      // (`let s: &String = r;` reborrows `&*r` the same way, #1329.)
       if matches!(expr.kind, ExprKind::Path(_) | ExprKind::Field(..))
-        && is_implicit_mut_reborrow(expr, self.tcx.typeck(expr.hir_id.owner)) {
+        && is_implicit_reborrow(expr, self.tcx.typeck(expr.hir_id.owner)) {
         if let ResourceTy::Value(x) = get_rap(&expr, &self.tcx, &self.raps) {
           if x.is_mutref() {
             let lender = ResourceTy::Deref(x);
@@ -6217,7 +6253,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let to = ResourceTy::Value(rap);
     for l in rd.all_lenders().into_iter().filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_))) {
       let evt = if rd.mut_of(&l) { Evt::MBorrow } else { Evt::SBorrow };
-      self.add_ev(line, evt, to.clone(), l, false);
+      match l {
+        // `[a, b]` with b a local `&mut` (#1330): a reborrow through b,
+        // drawn from b's column as `let k = &mut *b;` is.
+        ResourceTy::Deref(r) => self.add_borrow_ev(line, evt, to.clone(), ResourceTy::Value(r), true),
+        l => self.add_ev(line, evt, to.clone(), l, false),
+      }
     }
   }
 
@@ -8923,6 +8964,10 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
           self.add_borrow_ev(line_num, Evt::MBorrow, lhs, ResourceTy::Value(rhs_rap), true);
           return;
         }
+        if self.is_coerced_shared_reborrow(&lhs, &rhs_rap, rhs, &evt) {
+          self.add_borrow_ev(line_num, Evt::SBorrow, lhs, ResourceTy::Value(rhs_rap), true);
+          return;
+        }
         self.add_ev(line_num, evt, lhs, ResourceTy::Value(rhs_rap), false);
       } else if let Some(tmp) = self.part_temp_of(rhs) {
         // `let s = make_q().a;`: a field moved out of a temporary,
@@ -9239,6 +9284,10 @@ pub fn match_rhs_path(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
       self.update_rap(&rhs_rap, line_num);
       if self.is_coerced_mut_reborrow(&lhs, &rhs_rap, rhs, &evt) {
         self.add_borrow_ev(line_num, Evt::MBorrow, lhs, ResourceTy::Value(rhs_rap), true);
+        return;
+      }
+      if self.is_coerced_shared_reborrow(&lhs, &rhs_rap, rhs, &evt) {
+        self.add_borrow_ev(line_num, Evt::SBorrow, lhs, ResourceTy::Value(rhs_rap), true);
         return;
       }
       if rhs_rap.is_closure() && lhs.is_closure() && matches!(evt, Evt::Copy | Evt::Move) {
@@ -10227,22 +10276,22 @@ pub fn print_out_of_scope(&mut self){
     // lending reference to the end of the references borrowed from it,
     // or `v`'s borrow end lands on the line that creates `r` (#416).
     // Taking the max makes the order of the passes irrelevant.
+    // Every lender counts, not just the first: `let k = [a, b];` with
+    // a moved in and b reborrowed holds a borrow through b, which
+    // can't end before k's (#1330).
     #[expect(clippy::disallowed_methods, reason = "collected into a BTreeMap")]
-    let ends: BTreeMap<String, (usize, Option<String>)> = self.borrow_map.iter().map(|(n, d)| {
-      let lender = d.lender.extract_rap().map(|r| r.name().to_string());
-      (n.clone(), (d.lifetime, lender))
+    let ends: BTreeMap<String, (usize, Vec<String>)> = self.borrow_map.iter().map(|(n, d)| {
+      let lenders = d.all_lenders().iter().filter_map(|l| l.extract_rap().map(|r| r.name().to_string())).collect();
+      (n.clone(), (d.lifetime, lenders))
     }).collect();
     for (name, (kill, _)) in &ends {
-      let mut cur = ends.get(name).and_then(|e| e.1.clone());
+      let mut todo: Vec<String> = ends.get(name).map(|e| e.1.clone()).unwrap_or_default();
       let mut seen: BTreeSet<String> = BTreeSet::new();
-      while let Some(l) = cur {
-        if !seen.insert(l.clone()) { break; }
-        match self.borrow_map.get_mut(&l) {
-          Some(d) => {
-            if d.lifetime < *kill { d.lifetime = *kill; }
-            cur = ends.get(&l).and_then(|e| e.1.clone());
-          }
-          None => break,
+      while let Some(l) = todo.pop() {
+        if !seen.insert(l.clone()) { continue; }
+        if let Some(d) = self.borrow_map.get_mut(&l) {
+          if d.lifetime < *kill { d.lifetime = *kill; }
+          todo.extend(ends.get(&l).map(|e| e.1.clone()).unwrap_or_default());
         }
       }
     }

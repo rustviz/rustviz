@@ -1430,6 +1430,29 @@ pub fn is_implicit_mut_reborrow(expr: &Expr, typeck: &TypeckResults) -> bool {
     ))
 }
 
+/// True iff rustc coerced `expr`, a `&mut T` value, to a shared `&T`
+/// by reborrowing it: its adjustments start with a deref of the
+/// reference and include a shared autoborrow. `look(r)` with
+/// `look(x: &i32)` becomes `look(&*r)`, as does `let s: &i32 = r;`, a
+/// `&T` struct field `V { r }` or `Some(r)` where an `Option<&T>` is
+/// expected (#1329). r isn't moved: it can be read while the reborrow
+/// is live and used as before once it ends.
+pub fn is_implicit_shared_reborrow_of_mut(expr: &Expr, typeck: &TypeckResults) -> bool {
+  if typeck.expr_ty(expr).ref_mutability() != Some(Mutability::Mut) {
+    return false;
+  }
+  let adjs = typeck.expr_adjustments(expr);
+  matches!(adjs.first().map(|a| &a.kind), Some(Adjust::Deref(_)))
+    && adjs.iter().any(|a| matches!(a.kind, Adjust::Borrow(AutoBorrow::Ref(AutoBorrowMutability::Not))))
+}
+
+/// True iff rustc reborrowed `expr`, a `&mut T` value used where a
+/// reference is expected, instead of moving it: `is_implicit_mut_reborrow`
+/// or `is_implicit_shared_reborrow_of_mut`.
+pub fn is_implicit_reborrow(expr: &Expr, typeck: &TypeckResults) -> bool {
+  is_implicit_mut_reborrow(expr, typeck) || is_implicit_shared_reborrow_of_mut(expr, typeck)
+}
+
 /// True iff rustc auto-referenced the method receiver `rcvr` in place:
 /// `s.len()` is `String::len(&s)`, `s.push_str(t)` is
 /// `String::push_str(&mut s, t)`, `v.iter()` is `<[T]>::iter(&*v)`. The
