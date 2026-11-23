@@ -80,6 +80,9 @@ struct DotLayer {
     /// Where each arrow of a row goes so that none lies on another
     /// (`ArrowLanes`): filled by a first, recording pass of the arrows.
     lanes: ArrowLanes,
+    /// The centres of the columns' stop bars (`render_branches`): an arrow
+    /// drawn along one hides it (#1344).
+    bars: Vec<(f64, f64)>,
 }
 
 impl DotLayer {
@@ -586,12 +589,14 @@ pub fn render_timeline_panel(visualization_data : & mut VisualizationData) -> (S
     // Note: key {-1} = non-struct timelines
     
     // render resource owner labels
-    render_timelines(&mut output, visualization_data, &resource_owners_layout, &registry); // vertical bars
+    let mut bars = Vec::new();
+    render_timelines(&mut output, visualization_data, &resource_owners_layout, &registry, &mut bars); // vertical bars
     render_labels_string(&mut output, &resource_owners_layout, &visualization_data.fn_start_lines, &registry); // headers
     // Dots are drawn before arrows, and the arrow pass needs to know
     // where they landed: a straight arrow hops over any dot between
     // its two ends (see `render_hopping_arrow`).
     let mut dots = render_dots_string(visualization_data, &resource_owners_layout); // dot events
+    dots.bars = bars;
     render_ref_line(&mut output, visualization_data, &resource_owners_layout, &registry); // reference lines
     render_arrows_string_external_events_version(&mut output, visualization_data, &resource_owners_layout, &mut dots, &registry); // arrows
     // Written last: a call icon (`f`) added by the arrow pass shares
@@ -5301,6 +5306,9 @@ struct ArrowLanes {
     /// dots.
     probing: bool,
     drawn: Vec<Drawn>,
+    /// A probing pass draws a track's hops over dots (`track_hops`), as
+    /// the final drawing always does (`untangle` searches both ways).
+    probe_hops: bool,
     /// A call's logo's dot's y, by the first pass.
     logo_rows: HashMap<(usize, usize), i64>,
 }
@@ -5325,6 +5333,9 @@ struct Drawn {
     /// Points along a hop's arcs (not shafts to the checks, but a head on
     /// one still lies on the arrow).
     arcs: Vec<(f64, f64)>,
+    /// How many dots its track (off its dots' row) hops (`track_hops`):
+    /// `untangle` tries another track for it first.
+    track_hops: usize,
 }
 
 /// How far below or above its dot a call's logo moved off it goes
@@ -5935,28 +5946,92 @@ fn marks_on_others(drawn: &[Drawn]) -> Vec<(usize, usize)> {
     out
 }
 
-/// How badly the arrows are drawn: the marks on others, and the dots an
-/// arrow's shaft runs through or touches (not its own ends; a hop's arc
-/// isn't a shaft).
-/// Second, to choose between drawings with as few of those: how many
-/// times two arrows cross.
-fn untangle_cost(drawn: &[Drawn], dots: &DotPositions) -> (usize, usize) {
-    let through = drawn.iter().filter(|d| d.logo.is_none()).map(|d| {
+/// The marks an arrow's shaft runs through or touches, one entry (the
+/// arrow's index into `drawn`) per mark: a dot not its own end (#1316's
+/// `y -> a` past z's dot), or a column's stop bar (#1344). A hop's arc
+/// isn't a shaft.
+fn through_marks(drawn: &[Drawn], dots: &DotPositions, bars: &[(f64, f64)]) -> Vec<usize> {
+    let off = |c: (f64, f64), (p, q): Piece| {
+        let l = dist(p, q);
+        let t = if l < 1e-9 { 0.0 } else { (((c.0 - p.0) * (q.0 - p.0) + (c.1 - p.1) * (q.1 - p.1)) / (l * l)).clamp(0.0, 1.0) };
+        dist(c, (p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t))
+    };
+    let mut out = Vec::new();
+    for (i, d) in drawn.iter().enumerate().filter(|(_, d)| d.logo.is_none()) {
         // Where its pieces start and stop, and its head's tip: a dot within
         // 6 px of one is a dot it leaves (5.25 px off it) or points at.
         let ends: Vec<(f64, f64)> = d.pieces.iter().flat_map(|&(p, q)| [p, q]).chain(d.tri.get(1).copied()).collect();
-        dots.iter().filter(|&&(x, y)| {
+        for &(x, y) in dots {
             let c = (x as f64, y as f64);
-            // Through its centre, or (#1316's `y -> a` past z's dot)
-            // the 5 px stroke touching the dot's rim.
+            // Through its centre, or the 5 px stroke touching the dot's rim.
             let reach = if ends.iter().any(|&e| dist(e, c) < 6.0) { 4.5 } else { 5.0 + 2.5 };
-            d.pieces.iter().any(|&(p, q)| {
-                let l = dist(p, q);
-                let t = if l < 1e-9 { 0.0 } else { (((c.0 - p.0) * (q.0 - p.0) + (c.1 - p.1) * (q.1 - p.1)) / (l * l)).clamp(0.0, 1.0) };
-                dist(c, (p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t)) < reach
-            })
-        }).count()
-    }).sum::<usize>();
+            if d.pieces.iter().any(|&p| off(c, p) < reach) {
+                out.push(i);
+            }
+        }
+        // Along a stop bar (12 px wide, level): its middle under the shaft.
+        for &c in bars {
+            if d.pieces.iter().any(|&p| off(c, p) < 4.5) {
+                out.push(i);
+            }
+        }
+    }
+    out
+}
+
+/// Two arrows between columns end to end on one line: the first's head
+/// points at a dot and the second leaves that dot straight on in the same
+/// direction, so they read as one arrow through the dot (#1349, as #577's
+/// two returns did). Pairs of indices into `drawn`. (Not a call's short
+/// arrow to or from its logo, nor a column's arrow to itself: `ends`
+/// holds the arrows between two columns' dots.)
+fn end_to_end(drawn: &[Drawn], ends: &HashMap<(usize, usize), ((i64, i64), (i64, i64), i64)>) -> Vec<(usize, usize)> {
+    let between = |d: &Drawn| d.logo.is_none() && d.tri.len() == 3
+        && ends.get(&d.key).is_some_and(|(t, f, _)| t != f);
+    // Its piece into the head, and the one leaving its tail (the pieces
+    // aren't in one order: a hop arrow's run from the tail, a polyline's
+    // from the head).
+    let head_piece = |d: &Drawn| d.pieces.iter().copied()
+        .min_by(|a, b| dist(a.1, d.tri[1]).total_cmp(&dist(b.1, d.tri[1])));
+    let tail_piece = |d: &Drawn| d.pieces.iter().copied()
+        .find(|&(p, _)| !d.pieces.iter().any(|&(_, q)| dist(p, q) < 0.5));
+    let mut out = Vec::new();
+    for (i, a) in drawn.iter().enumerate().filter(|(_, d)| between(d)) {
+        let Some((p, q)) = head_piece(a) else { continue };
+        for (j, b) in drawn.iter().enumerate().filter(|(_, d)| between(d)) {
+            let Some((r, t)) = tail_piece(b) else { continue };
+            let (la, lb) = (dist(p, q), dist(r, t));
+            if i == j || a.tip == b.tip || la < 1.0 || lb < 1.0 {
+                continue;
+            }
+            let cos = ((q.0 - p.0) * (t.0 - r.0) + (q.1 - p.1) * (t.1 - r.1)) / (la * lb);
+            if cos > 0.99 && along_piece(r, p, q, 1.0).is_some_and(|x| x > la) && dist(a.tri[1], r) < 15.0 {
+                out.push((i, j));
+            }
+        }
+    }
+    out
+}
+
+/// What `untangle` tries to draw another way: the marks on others
+/// (`marks_on_others`), the shafts through marks (`through_marks`, as
+/// `(i, i)`), the tracks hopping dots (`track_hops`; another track that
+/// passes none is better) and the arrows end to end (`end_to_end`).
+fn defects(drawn: &[Drawn], dots: &DotLayer) -> Vec<(usize, usize)> {
+    let mut out = marks_on_others(drawn);
+    out.extend(through_marks(drawn, &dots.positions, &dots.bars).into_iter().map(|i| (i, i)));
+    out.extend((0..drawn.len()).filter(|&i| drawn[i].track_hops > 0).map(|i| (i, i)));
+    out.extend(end_to_end(drawn, &dots.lanes.ends));
+    out
+}
+
+/// How badly the arrows are drawn: the marks on others, the dots a track
+/// hops, the marks a shaft runs through (`through_marks`) and the arrows
+/// end to end.
+/// Second, to choose between drawings with as few of those: how many
+/// times two arrows cross.
+fn untangle_cost(drawn: &[Drawn], dots: &DotLayer) -> (usize, usize) {
+    let through = through_marks(drawn, &dots.positions, &dots.bars).len() + end_to_end(drawn, &dots.lanes.ends).len();
     let cross = |(p, q): Piece, (r, t): Piece| {
         let d = (q.0 - p.0) * (t.1 - r.1) - (q.1 - p.1) * (t.0 - r.0);
         if d.abs() < 1e-9 {
@@ -6005,7 +6080,8 @@ fn untangle_cost(drawn: &[Drawn], dots: &DotPositions) -> (usize, usize) {
     // A head on another arrow's hop.
     let on_arcs = arrows.iter().filter(|a| a.tri.len() == 3 && arrows.iter()
         .any(|b| b.tip != a.tip && b.arcs.iter().any(|&p| inside_tri(&a.tri, p) > -1.5))).count();
-    (marks_on_others(drawn).len() + on_arcs + 10 * (through + touching + stacked), crossings)
+    let hops: usize = drawn.iter().map(|d| d.track_hops).sum();
+    (marks_on_others(drawn).len() + on_arcs + hops + 10 * (through + touching + stacked), crossings)
 }
 
 /// How many rows below its line an arrow is stacked: its place among the
@@ -6466,7 +6542,7 @@ fn render_init_param_arrow(line_number: &usize, param: &ResourceAccessPoint, id:
         dots.lanes.capture(Drawn {
             key: (*id, *line_number), tip: title.clone(), var: "caller".into(), to: param.name().to_string(),
             pieces: vec![((bend_x, top_y), (bend_x, cy)), ((bend_x, cy), (head_x, head_y))],
-            tri: vec![bot_v1, bot_v2, bot_v3], logo: None, arcs: Vec::new(),
+            tri: vec![bot_v1, bot_v2, bot_v3], logo: None, arcs: Vec::new(), track_hops: 0,
         });
         let rendered = format!(
             "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\"{rv}>\n\
@@ -6532,7 +6608,7 @@ fn render_function_result_arrow(line_number: &usize, external_event: &ExternalEv
         dots.lanes.capture(Drawn {
             key, tip: title.clone(), var: f.name.clone(), to: "caller".into(),
             pieces: vec![((source_x, y), (bend_x, y)), ((bend_x, y), (bend_x, head_end_y))],
-            tri: vec![(bend_x - 6.0, head_end_y), (bend_x, head_end_y - tip), (bend_x + 6.0, head_end_y)], logo: None, arcs: Vec::new(),
+            tri: vec![(bend_x - 6.0, head_end_y), (bend_x, head_end_y - tip), (bend_x + 6.0, head_end_y)], logo: None, arcs: Vec::new(), track_hops: 0,
         });
         dots.lanes.capture(Drawn {
             key, tip: logo.title.clone(), var: f.name.clone(), to: "caller".into(),
@@ -6643,7 +6719,7 @@ fn render_return_to_caller_arrow(line_number: &usize, external_event: &ExternalE
         dots.lanes.capture(Drawn {
             key: (*id, *line_number), tip: title.clone(), var: rap.name().to_string(), to: "caller".into(),
             pieces: vec![((source_x, cy), (bend_x, cy)), ((bend_x, cy), (bend_x, head_end_y))],
-            tri: vec![head_v1, head_v2, head_v3], logo: None, arcs: Vec::new(),
+            tri: vec![head_v1, head_v2, head_v3], logo: None, arcs: Vec::new(), track_hops: 0,
         });
         let rendered = format!(
             "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\"{rv}>\n\
@@ -6793,7 +6869,7 @@ fn plan_variable_arrow(line_number: &usize, external_event: &ExternalEvent, from
             )).flatten() {
                 dots.lanes.capture(Drawn {
                     key, tip: data.title.clone(), var: data.names.0.clone(), to: data.names.1.clone(),
-                    pieces, tri, logo: None, arcs,
+                    pieces, tri, logo: None, arcs, track_hops: 0,
                 });
                 // Inline render done; push to the right
                 // output bucket and bypass the post-match
@@ -6902,10 +6978,29 @@ fn finish_arrow(mut data: ArrowData, mut head_offset: f64, from: &ResourceTy, ou
                 "{},{} {},{} {},{}",
                 v1.0, v1.1, v2.0, v2.1, v3.0, v3.1
             );
+            // A track off its dots' row hops the dots on it (#1344), the
+            // way an arrow level on its row does (`render_hopping_arrow`).
+            let route: Vec<(f64, f64)> = data.coordinates.iter().rev().copied().collect();
+            let hops = if dots.lanes.probing && !dots.lanes.probe_hops { None } else { track_hops(&route, &dots.positions) };
+            if let Some((d, pieces, arcs, n)) = hops {
+                dots.lanes.capture(Drawn {
+                    key: data.key, tip: data.title.clone(), var: data.names.0.clone(), to: data.names.1.clone(),
+                    pieces, tri: vec![v1, v2, v3], logo: None, arcs, track_hops: n,
+                });
+                let rendered = format!(
+                    "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\"{rv}>\n\
+                        \x20           <path class=\"arrow-shaft\" stroke-width=\"5px\" d=\"{d}\" style=\"fill: none;\"/>\n\
+                        \x20           <polygon points=\"{head}\" class=\"arrow-head\"/>\n\
+                        \x20       </g>\n",
+                    title = data.title, rv = data.rv, d = d, head = data.head_points,
+                );
+                file_arrow(rendered, from, output, resource_owners_layout);
+                return;
+            }
             dots.lanes.capture(Drawn {
                 key: data.key, tip: data.title.clone(), var: data.names.0.clone(), to: data.names.1.clone(),
                 pieces: data.coordinates.windows(2).map(|w| (w[1], w[0])).collect(),
-                tri: vec![v1, v2, v3], logo: None, arcs: Vec::new(),
+                tri: vec![v1, v2, v3], logo: None, arcs: Vec::new(), track_hops: 0,
             });
         }
 
@@ -6917,21 +7012,81 @@ fn finish_arrow(mut data: ArrowData, mut head_offset: f64, from: &ResourceTy, ou
             data.coordinates_hbs.push_str(&String::from(" "));
         }
 
-        // will need to change this later for structs in conditionals
-        if resource_owners_layout.contains_key(from.hash()) && resource_owners_layout[from.hash()].is_struct_group {
-            let is_member = resource_owners_layout[from.hash()].is_member;
-            let owner_key = resource_owners_layout[from.hash()].owner as i64;
-            let owner_entry = ensure_owner_entry(output, owner_key);
-            if is_member {
-                owner_entry.1.arrows.push_str(&registry.render("arrow_template", &data).unwrap());
-            } else {
-                owner_entry.0.arrows.push_str(&registry.render("arrow_template", &data).unwrap());
-            }
-        }
-        else {
-            output.get_mut(&-1).unwrap().0.arrows.push_str(&registry.render("arrow_template", &data).unwrap());
-        }
+        file_arrow(registry.render("arrow_template", &data).unwrap(), from, output, resource_owners_layout);
     }
+}
+
+/// Files a drawn arrow under its source's column (a struct's group, or
+/// the plain columns).
+fn file_arrow(rendered: String, from: &ResourceTy, output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>, resource_owners_layout: &BTreeMap<u64, TimelineColumnData>) {
+    // will need to change this later for structs in conditionals
+    if resource_owners_layout.contains_key(from.hash()) && resource_owners_layout[from.hash()].is_struct_group {
+        let is_member = resource_owners_layout[from.hash()].is_member;
+        let owner_key = resource_owners_layout[from.hash()].owner as i64;
+        let owner_entry = ensure_owner_entry(output, owner_key);
+        if is_member {
+            owner_entry.1.arrows.push_str(&rendered);
+        } else {
+            owner_entry.0.arrows.push_str(&rendered);
+        }
+    } else {
+        output.get_mut(&-1).unwrap().0.arrows.push_str(&rendered);
+    }
+}
+
+/// An arrow's route (tail first) with more than one piece, as a path
+/// whose level pieces hop over the dots on them (#1344: `match (a, (b,
+/// c))`'s `b -> x` dipping through c's dot): its `d`, its straight pieces,
+/// points along its arcs, and how many dots it hops. `None` when no such
+/// dot is in the way (a level arrow of one piece is
+/// `render_hopping_arrow`'s). A hop bulges up, or down where a dot
+/// half a row above would be under it.
+fn track_hops(route: &[(f64, f64)], dots: &DotPositions) -> Option<(String, Vec<Piece>, Vec<(f64, f64)>, usize)> {
+    const R: f64 = 10.0;
+    if route.len() < 3 {
+        return None;
+    }
+    let on = |(p, q): Piece| -> Vec<i64> {
+        if (p.1 - q.1).abs() > 1e-9 || p.1.fract() != 0.0 {
+            return Vec::new();
+        }
+        let (lo, hi) = (p.0.min(q.0), p.0.max(q.0));
+        let mut xs: Vec<i64> = dots.iter().filter(|&&(x, y)| y == p.1 as i64 && x as f64 > lo + R && (x as f64) < hi - R)
+            .map(|&(x, _)| x).collect();
+        if q.0 < p.0 {
+            xs.reverse();
+        }
+        xs
+    };
+    if route.windows(2).all(|w| on((w[0], w[1])).is_empty()) {
+        return None;
+    }
+    let mut d = format!("M {} {}", route[0].0, route[0].1);
+    let (mut pieces, mut arcs, mut n) = (Vec::new(), Vec::new(), 0);
+    for w in route.windows(2) {
+        let (p, q) = (w[0], w[1]);
+        let mut at = p;
+        for x in on((p, q)) {
+            let (xf, y) = (x as f64, p.1);
+            let right = q.0 > p.0;
+            let (near, far) = if right { (xf - R, xf + R) } else { (xf + R, xf - R) };
+            let up = !dots.contains(&(x, y as i64 - LANE_STEP)) || dots.contains(&(x, y as i64 + LANE_STEP));
+            // Sweep 1 turns clockwise on screen: going right, over the top.
+            let sweep = if right == up { 1 } else { 0 };
+            d.push_str(&format!(" L {} {} A {} {} 0 0 {} {} {}", near, y, R, R, sweep, far, y));
+            pieces.push((at, (near, y)));
+            let side = if up { -1.0 } else { 1.0 };
+            arcs.extend((0..=12).map(|k| {
+                let a = std::f64::consts::PI * k as f64 / 12.0;
+                (xf - R * a.cos(), y + side * R * a.sin())
+            }));
+            at = (far, y);
+            n += 1;
+        }
+        d.push_str(&format!(" L {} {}", q.0, q.1));
+        pieces.push((at, q));
+    }
+    Some((d, pieces, arcs, n))
 }
 
 /// Every arrow event with the row it is drawn on, including those nested
@@ -7034,27 +7189,56 @@ fn probe_arrows(
 /// the fewest marks on others and shafts through dots (`untangle_cost`)
 /// is kept, if it leaves fewer than now. Rows are never added: the
 /// tracks stay between the figure's first and last dots or tracks.
+///
+/// Also a shaft through a dot or along a stop bar, and two arrows end to
+/// end (#1344, #1349, `defects`). A track still on a dot hops it
+/// (`track_hops`); the search is run with the probes drawing those hops
+/// and without (where a hop costs little, the greedy search can settle
+/// on one beside a head on a shaft, where without it would have found a
+/// clean drawing), and the better drawing (with its hops) is kept.
 fn untangle(
     visualization_data: &VisualizationData,
     resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
     dots: &mut DotLayer,
     registry: &Handlebars
 ) {
+    let start = dots.lanes.settings();
+    let mut results = Vec::new();
+    for hops in [false, true] {
+        dots.lanes.set(start.clone());
+        dots.lanes.probe_hops = hops;
+        untangle_search(visualization_data, resource_owners_layout, dots, registry);
+        dots.lanes.probe_hops = true;
+        let drawn = probe_arrows(visualization_data, resource_owners_layout, dots, registry);
+        results.push((untangle_cost(&drawn, dots), dots.lanes.settings()));
+    }
+    // (The first on a tie: no hops weighed.)
+    let best = results.into_iter().min_by_key(|(c, _)| *c).map(|(_, s)| s).unwrap_or(start);
+    dots.lanes.set(best);
+}
+
+/// One of `untangle`'s searches, from the current settings.
+fn untangle_search(
+    visualization_data: &VisualizationData,
+    resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
+    dots: &mut DotLayer,
+    registry: &Handlebars
+) {
     let mut drawn = probe_arrows(visualization_data, resource_owners_layout, dots, registry);
-    if marks_on_others(&drawn).is_empty() {
+    if defects(&drawn, dots).is_empty() {
         return;
     }
     let dot_ys = dots.positions.iter().map(|&(_, y)| y);
     let drawn_ys = drawn.iter().flat_map(|d| d.pieces.iter().flat_map(|&(p, q)| [p.1, q.1])).map(|y| y.round() as i64);
     let ys = (dots.positions.iter().map(|&(_, y)| y).min().unwrap_or(0), dot_ys.chain(drawn_ys).max().unwrap_or(0));
-    let mut cost = untangle_cost(&drawn, &dots.positions);
+    let mut cost = untangle_cost(&drawn, dots);
     // Every drawing tried costs a pass over the arrows.
     let mut budget: usize = 4000;
     let eval = |dots: &mut DotLayer, s: &LaneSettings, budget: &mut usize| {
         *budget = budget.saturating_sub(1);
         dots.lanes.set(s.clone());
         let d = probe_arrows(visualization_data, resource_owners_layout, dots, registry);
-        (untangle_cost(&d, &dots.positions), d)
+        (untangle_cost(&d, dots), d)
     };
     let keys_of = |d: &[Drawn], (i, j): (usize, usize)| {
         let mut keys = vec![d[i].key, d[j].key];
@@ -7063,7 +7247,7 @@ fn untangle(
     };
     for _ in 0..24 {
         let now = dots.lanes.settings();
-        let marks = marks_on_others(&drawn);
+        let marks = defects(&drawn, dots);
         // One arrow or logo drawn another way, for the first mark where
         // that helps; else two, the second for a mark the first leaves;
         // a track running on past its head's dot only where nothing else
@@ -7101,7 +7285,7 @@ fn untangle(
                         if c1.0 > cost.0 + 12 {
                             continue;
                         }
-                        for m2 in marks_on_others(&d1) {
+                        for m2 in defects(&d1, dots) {
                             for key2 in keys_of(&d1, m2) {
                                 dots.lanes.set(s1.clone());
                                 for s2 in dots.lanes.alternatives(key2, &d1, ys, far) {
@@ -7128,7 +7312,7 @@ fn untangle(
         dots.lanes.set(s);
         cost = c;
         drawn = d;
-        if budget == 0 || marks_on_others(&drawn).is_empty() {
+        if budget == 0 || defects(&drawn, dots).is_empty() {
             break;
         }
     }
@@ -7537,6 +7721,7 @@ fn render_branches(
     timeline_data: &TimelineColumnData,
     maybe_init: bool,
     path: &[(usize, usize)],
+    bars: &mut Vec<(f64, f64)>,
 ) {
     if rap.is_fn() { return; }
     for (k, (_, ev)) in history.iter().enumerate() {
@@ -7820,6 +8005,7 @@ fn render_branches(
                     // underlines nothing (#369), like the dashed columns.
                     if let Some(stop_y) = stop_y.filter(|y| !dropped_at_stop && segs.last().is_some_and(|seg| seg.p2 == (branch_x, *y))) {
                         stop_at = Some((branch_x, stop_y));
+                        bars.push((branch_x, stop_y));
                         let title = hover_messages::branch_never_reaches_merge();
                         let rv = Rv::new(rv_attrs::STOP_BAR).var(rap.name()).row(stop)
                             .at(format!("stop {} {}", branch_x, stop_y));
@@ -7936,7 +8122,7 @@ fn render_branches(
 
             render_branches(
                 hash, rap, &branch.e_data, &branch.states,
-                output, visualization_data, &branch.t_data, entry_maybe_init, &arm_path,
+                output, visualization_data, &branch.t_data, entry_maybe_init, &arm_path, bars,
             );
         }
     }
@@ -8287,7 +8473,8 @@ fn render_timeline(
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
     visualization_data: &VisualizationData,
     timeline_data: &TimelineColumnData,
-    registry: &Handlebars
+    registry: &Handlebars,
+    bars: &mut Vec<(f64, f64)>,
 ) {
     if rap.is_fn() { return; } // functions have no timelines
     // Branch columns + convergences render as polylines via
@@ -8296,7 +8483,7 @@ fn render_timeline(
     // ranges (clean_states leaves an OOS placeholder over the
     // branch's split..merge span, so those rows naturally render
     // as nothing).
-    render_branches(hash, rap, history, states, output, visualization_data, timeline_data, false, &[]);
+    render_branches(hash, rap, history, states, output, visualization_data, timeline_data, false, &[], bars);
 
     let apexes = CollapsedApexes::of(history);
     let mut cuts = field_borrow_rows(rap, history, visualization_data);
@@ -8775,7 +8962,8 @@ fn render_timelines(
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
     visualization_data: &VisualizationData,
     resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
-    registry: &Handlebars
+    registry: &Handlebars,
+    bars: &mut Vec<(f64, f64)>,
 ){
     let timelines = &visualization_data.timelines;
     for (hash, timeline) in timelines {
@@ -8785,7 +8973,7 @@ fn render_timelines(
             _ => {
                 // println!("hash {}, timeline {:#?}", hash, timeline);
                 let t_data = resource_owners_layout.get(hash).unwrap();
-                render_timeline(hash, rap, &timeline.history, &timeline.states, output, visualization_data, t_data, registry);
+                render_timeline(hash, rap, &timeline.history, &timeline.states, output, visualization_data, t_data, registry, bars);
             }
         }
     }

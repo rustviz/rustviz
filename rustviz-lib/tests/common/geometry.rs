@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
 pub const INVARIANTS: &[&str] = &[
     "line-starts-nowhere", "line-ends-nowhere", "line-through-fork", "arrows-overlap",
     "marks-on-one-spot", "arrow-misses-target", "outside-figure", "heads-or-logos-overlap",
+    "shaft-through-mark", "arrows-end-to-end",
 ];
 
 /// How far apart two points the drawing means to be one may be.
@@ -278,6 +279,13 @@ fn within(a: (f64, f64), b: (f64, f64), c: (f64, f64), d: (f64, f64)) -> bool {
     [a, b].iter().all(|&p| along(p, c, d, TOL).is_some_and(|t| t >= -TOL && t <= l + TOL))
 }
 
+/// How far `c` is from the segment p–q.
+fn off_piece(c: (f64, f64), p: (f64, f64), q: (f64, f64)) -> f64 {
+    let l = len(p, q);
+    let t = if l < 1e-9 { 0.0 } else { (((c.0 - p.0) * (q.0 - p.0) + (c.1 - p.1) * (q.1 - p.1)) / (l * l)).clamp(0.0, 1.0) };
+    len(c, (p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t))
+}
+
 fn is_fork_or_join(d: &Dot) -> bool {
     d.events.iter().any(|e| e == "branch" || e == "branch_join")
 }
@@ -471,6 +479,46 @@ pub fn check(g: &Geo) -> Vec<(&'static str, String)> {
     }
     out.extend(hl.into_iter().map(|w| ("heads-or-logos-overlap", w)));
 
+    // A shaft through a dot's centre, or along a stop bar, with no hop
+    // (#1344): the mark reads as part of the arrow (a column it doesn't
+    // touch looks moved or lent), and the arrow, drawn on top, takes its
+    // hover. An arrow's own ends are 5.25 px or more off its dots'
+    // centres, so they never count.
+    for a in &g.arrows {
+        for d in &g.dots {
+            if a.pieces.iter().any(|&(p, q)| off_piece((d.x, d.y), p, q) < SHAFT_HALF) {
+                out.push(("shaft-through-mark", format!("{} runs through {} at {}", a.id, d.id, fmt((d.x, d.y)))));
+            }
+        }
+        for (h, c) in &g.stops {
+            if a.pieces.iter().any(|&(p, q)| (p.1 - q.1).abs() < TOL && (p.1 - c.1).abs() < TOL
+                && c.0 > p.0.min(q.0) && c.0 < p.0.max(q.0)) {
+                out.push(("shaft-through-mark", format!("{} runs along the stop bar of column {h} at {}", a.id, fmt(*c))));
+            }
+        }
+    }
+
+    // Two arrows between columns end to end on one line: one's head
+    // points at a dot and the other leaves that dot straight on in the
+    // same direction, so the two read as one arrow through the dot
+    // (#1349, #577). (Not a call's short arrow to or from its logo: the
+    // logo marks where it starts or ends.)
+    let between_columns = |a: &Arrow| a.var != a.to && g.headers.contains(&a.var) && g.headers.contains(&a.to);
+    for a in g.arrows.iter().filter(|a| between_columns(a)) {
+        let (Some(&(p, q)), Some(tip)) = (a.pieces.last(), a.head) else { continue };
+        for b in g.arrows.iter().filter(|a| between_columns(a)) {
+            let Some(&(r, s)) = b.pieces.first() else { continue };
+            if std::ptr::eq(a, b) || a.tip == b.tip || len(p, q) < TOL || len(r, s) < TOL {
+                continue;
+            }
+            let cos = ((q.0 - p.0) * (s.0 - r.0) + (q.1 - p.1) * (s.1 - r.1)) / (len(p, q) * len(r, s));
+            let beyond = along(r, p, q, TOL).map(|t| t - len(p, q));
+            if cos > 0.99 && beyond.is_some_and(|t| t > 0.0) && len(tip, r) < 15.0 {
+                out.push(("arrows-end-to-end", format!("{} runs on from the head of {} at {}", b.id, a.id, fmt(r))));
+            }
+        }
+    }
+
     // Inside the figure.
     let (w, ht) = g.size;
     if w.is_finite() && ht.is_finite() {
@@ -625,6 +673,52 @@ mod unit {
         let logo = "<text x=\"150\" y=\"140\" data-rv-id=\"q>caller@L5:fn:move\" data-rv-kind=\"fn\" \
                     data-rv-var=\"q\" data-rv-to=\"caller\" data-tooltip-text=\"q\">f</text>".to_string();
         assert_eq!(invs(&[g, logo].concat()), vec!["heads-or-logos-overlap"]);
+    }
+
+    #[test]
+    fn shafts_through_dots_and_stop_bars_are_caught() {
+        // `match (a, (b, c))` (#1344): b's move to x dips half a row, onto
+        // the row of c's dot.
+        let c = dot("c", 210.0, 245.0, "move");
+        let through = arrow("b>x", "b", "x", "142.9 219.4 160 245 330 245 340 230", "334.8,226.7 345.6,219.3 344.8,233.3");
+        assert_eq!(invs(&[c.clone(), through].concat()), vec!["shaft-through-mark"]);
+        // On a track that misses it, or hopping it, it's fine.
+        let clear = arrow("b>x", "b", "x", "144.2 218.2 160 230 330 230 335.6 225.8", "332,221 345.8,218 339.2,230.6");
+        assert_eq!(invs(&[c.clone(), clear].concat()), Vec::<&str>::new());
+        let hop = "<g data-rv-id=\"b>x\" data-rv-kind=\"arrow\" data-rv-var=\"b\" data-rv-to=\"x\" data-rv-line=\"1\" \
+                   data-tooltip-text=\"b>x\"><path class=\"arrow-shaft\" d=\"M 142.9 219.4 L 160 245 L 200 245 A 10 10 0 0 1 220 245 L 330 245 L 340 230\"/>\
+                   <polygon class=\"arrow-head\" points=\"334.8,226.7 345.6,219.3 344.8,233.3\"/></g>";
+        assert_eq!(invs(&[c.clone(), hop.to_string()].concat()), Vec::<&str>::new());
+        // Its own dots (5.25 px off their centres) don't count.
+        let own = [dot("b", 70.0, 245.0, "move"), dot("x", 300.0, 245.0, "acquire"),
+                   arrow("b>x", "b", "x", "75.25 245 282 245", "282,239 294.75,245 282,251")].concat();
+        assert_eq!(invs(&own), Vec::<&str>::new());
+        // A return along the row of a `break` arm's stop bars
+        // (`loop_break_call_arg`): they look like legs ending on the shaft.
+        let bar = "<line data-hash=\"f\" x1=\"184\" y1=\"175\" x2=\"196\" y2=\"175\" data-rv-id=\"f@L31:stop_bar\" data-rv-kind=\"stop_bar\"/>";
+        let along = arrow("re>e", "re", "e", "374.75 175 138 175", "138,169 125.25,175 138,181");
+        assert_eq!(invs(&[bar, &along].concat()), vec!["shaft-through-mark"]);
+        assert_eq!(invs(&[bar, &along.replace("175 138 175", "190 138 190")].concat()), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn arrows_end_to_end_are_caught() {
+        // `r.name = a` then r's borrow returned to p on one row (#1349):
+        // the move's head at r's dot, the return leaving it straight on.
+        let cols = [header("a"), header("r"), header("p"), dot("a", 420.0, 335.0, "move"),
+                    dot("r", 300.0, 335.0, "mutable_die"), dot("p", 40.0, 335.0, "mutable_reacquire")].concat();
+        let a_r = arrow("a>r", "a", "r", "414.75 335 318 335", "318,329 305.25,335 318,341");
+        let r_p = arrow("r>p", "r", "p", "294.75 335 58 335", "58,329 45.25,335 58,341");
+        assert_eq!(invs(&[cols.clone(), a_r.clone(), r_p].concat()), vec!["arrows-end-to-end"]);
+        // The return dipping half a row instead.
+        let dips = arrow("r>p", "r", "p", "295.8 338.15 280 350 60 350 54.4 345.8", "50.8,350.6 44.2,339 57.9,341");
+        assert_eq!(invs(&[cols.clone(), a_r.clone(), dips].concat()), Vec::<&str>::new());
+        // Two heads meeting at a dot from either side read as two arrows.
+        let p_r = arrow("p>r", "p", "r", "45.25 335 282 335", "282,329 294.75,335 282,341");
+        assert_eq!(invs(&[cols.clone(), a_r.clone(), p_r].concat()), Vec::<&str>::new());
+        // Nor a call's short arrow on to its logo (`opt>s` then `s>show`).
+        let call = arrow("r>show", "r", "show", "294.75 335 270 335", "270,329 257.25,335 270,341");
+        assert_eq!(invs(&[cols, a_r, call].concat()), Vec::<&str>::new());
     }
 
     #[test]

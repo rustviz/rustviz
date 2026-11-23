@@ -55,6 +55,11 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("arm_binding_value_1327", "event-on-dead-column", 1333),
     ("arm_binding_value_1327", "line-ends-nowhere", 1333),
     ("arm_binding_value_1327", "line-starts-nowhere", 1333),
+    // Both fields may borrow from either of two lenders: four borrows on
+    // one row and four returns on the next, more than the free tracks
+    // between the rows hold.
+    ("field_two_lenders_1354", "arrows-overlap", 1354),
+    ("field_two_lenders_1354", "heads-or-logos-overlap", 1354),
 ];
 
 /// The invariants, by the name the failure list and messages use.
@@ -112,6 +117,12 @@ pub const INVARIANTS: &[(&str, &str)] = &[
     ("heads-or-logos-overlap",
      "an arrow's head lies on another arrow's shaft or head, or a function logo lies on an arrow not its \
       own or on another logo: the marks under it can't be told apart or hovered"),
+    ("shaft-through-mark",
+     "an arrow's shaft runs through the centre of a dot, or along a column's stop bar, with no hop: the \
+      mark reads as part of the arrow and can't be hovered"),
+    ("arrows-end-to-end",
+     "one arrow leaves the dot another points at straight on in the same direction: the two read as \
+      one arrow through the dot"),
 ];
 
 // ─── Reading a timeline ─────────────────────────────────────────────
