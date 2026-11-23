@@ -92,6 +92,7 @@ def norm_var(name, types):
     out = []
     for part in name.split(">"):
         base, dot, field = part.partition(".")
+        base = base.rstrip("₀₁₂₃₄₅₆₇₈₉")  # a shadowed name (`s₂`)
         star = ""
         while base.startswith("*"):
             star += "*"

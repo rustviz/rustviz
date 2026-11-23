@@ -274,7 +274,7 @@ class Gen:
         self.types.setdefault(name, ty)
         return v
 
-    def deps_ok(self, v, seen=None):
+    def deps_ok(self, v):
         for (l, kind, t0) in v.deps:
             if l.w > t0 or (kind == "mut" and l.r > t0):
                 return False
@@ -332,12 +332,7 @@ class Gen:
             return
         for key, (v, st0, *_rest) in base.items():
             sts = [o[key][1] for o in outs]
-            if all(s == sts[0] for s in sts):
-                st = sts[0]
-            elif all(s in ("ok", "uninit") for s in sts) and st0 == "uninit":
-                st = "maybe"
-            else:
-                st = "maybe"
+            st = sts[0] if all(s == sts[0] for s in sts) else "maybe"
             v.state = st
             v.moved_fields = set().union(*[o[key][2] for o in outs])
             deps = []
@@ -653,7 +648,6 @@ class Gen:
         elif ty == "VS":
             if rng.random() < 0.5:
                 e, mut = "Vec::new()", True
-                annot = True
             else:
                 a, _ = self.string_value()
                 b, _ = self.string_value()
@@ -670,8 +664,6 @@ class Gen:
             if not r:
                 return None
             e = rng.choice(["Holder { r: %s, n: 1 }", "holder(%s)"]) % r[0]
-            if r[0].startswith("&") and "holder" in e:
-                pass
             deps = r[1]
             tag = "let_struct_ref_field"
             h2 = self.pick_ty({"H"})
@@ -1299,7 +1291,7 @@ class Gen:
         self.merge(base, [e] if e else [])
         return Stmt("inner_block", [(0, "{"), (1, b), (0, "}")])
 
-    def arms(self, specs, scrut_tags):
+    def arms(self, specs):
         """specs: [(head, [(ty, name, mut, deps)])] -> (Arm list, outs)."""
         base = self.snap()
         arms, outs = [], []
@@ -1339,13 +1331,12 @@ class Gen:
                     tags.append("pattern_ref")
                 else:
                     self.touch(o, write=True)
-                    pre = self.snap()
                     o.state = "moved"
                     specs = [("Some(%s)" % x + (" if %s.len() > 1" % x if guard else ""), [("S", x, False, [])])]
                     if guard:
                         specs.append(("Some(_)", []))
                     tags.append("match_move")
-                    arms = self.arms(specs + [("None", [])], tags)
+                    arms = self.arms(specs + [("None", [])])
                     # None and Some(_) arms don't move o; the arms merge says maybe.
                     return self._match_stmt(scrut, arms, tags + (["match_guard"] if guard else []))
                 if guard:
@@ -1356,21 +1347,21 @@ class Gen:
                 scrut = rng.choice(["&%s", "%s.as_ref()"]) % o.name
                 specs = [("Some(%s)" % x, [("RS", x, False, d)]), ("None", [])]
                 tags.append("match_ref")
-            return self._match_stmt(scrut, self.arms(specs, tags), tags)
+            return self._match_stmt(scrut, self.arms(specs), tags)
         if k == "int":
             n = self.pick_ty({"I"})
             if not n:
                 return None
             self.touch(n)
             specs = [("0 | 1", []), ("2..=4", []), ("_", [])] if rng.random() < 0.5 else [("1 | 2", []), ("_", [])]
-            return self._match_stmt(n.name, self.arms(specs, tags), tags + ["or_pattern"])
+            return self._match_stmt(n.name, self.arms(specs), tags + ["or_pattern"])
         if k == "str":
             s = self.pick_ty({"S", "RS", "B"})
             if not s:
                 return None
             self.touch(s)
             specs = [('"hi" | "ab"', []), ("_", [])]
-            return self._match_stmt("%s.as_str()" % s.name, self.arms(specs, tags), tags + ["or_pattern"])
+            return self._match_stmt("%s.as_str()" % s.name, self.arms(specs), tags + ["or_pattern"])
         if k == "tuple":
             t = self.pick(lambda v: v.ty == "T" and self.movable(v))
             if not t:
@@ -1385,8 +1376,8 @@ class Gen:
                 d = self.borrow(t, "shr")
                 specs = [("(%s, _)" % x, [("RS", x, False, d)])]
                 t_scrut = "&" + t.name
-                return self._match_stmt(t_scrut, self.arms(specs, tags), tags + ["match_ref"])
-            return self._match_stmt(t.name, self.arms(specs, tags), tags)
+                return self._match_stmt(t_scrut, self.arms(specs), tags + ["match_ref"])
+            return self._match_stmt(t.name, self.arms(specs), tags)
         if k == "pair":
             p = self.pick(lambda v: v.ty == "P" and self.movable(v))
             if not p:
@@ -1401,7 +1392,7 @@ class Gen:
                 a = self.fresh("a")
                 specs = [("Pair { a: ref %s, .. }" % a, [("RS", a, False, d)])]
                 tags.append("pattern_ref")
-            return self._match_stmt(p.name, self.arms(specs, tags), tags)
+            return self._match_stmt(p.name, self.arms(specs), tags)
         if k == "slice":
             v = self.pick_ty({"VS"})
             if not v:
@@ -1412,7 +1403,7 @@ class Gen:
                      ("[%s, %s @ ..]" % (x + "1", rest), [("RS", x + "1", False, d)])]
             self.names.add(x + "1")
             scrut = rng.choice(["%s.as_slice()", "&%s[..]"]) % v.name
-            return self._match_stmt(scrut, self.arms(specs, tags), tags + ["slice_pattern"])
+            return self._match_stmt(scrut, self.arms(specs), tags + ["slice_pattern"])
         if k == "array":
             a = self.pick(lambda v: v.ty == "A" and self.movable(v))
             if not a:
@@ -1421,10 +1412,10 @@ class Gen:
             if rng.random() < 0.5:
                 self.move(a)
                 specs = [("[%s, %s]" % (x, y), [("S", x, False, []), ("S", y, False, [])])]
-                return self._match_stmt(a.name, self.arms(specs, tags), tags + ["array_pattern", "match_move"])
+                return self._match_stmt(a.name, self.arms(specs), tags + ["array_pattern", "match_move"])
             d = self.borrow(a, "shr")
             specs = [("[%s, ..]" % x, [("RS", x, False, d)])]
-            return self._match_stmt("&" + a.name, self.arms(specs, tags), tags + ["array_pattern", "match_ref"])
+            return self._match_stmt("&" + a.name, self.arms(specs), tags + ["array_pattern", "match_ref"])
         return None
 
     def _match_stmt(self, scrut, arms, tags):
