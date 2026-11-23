@@ -790,6 +790,15 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // pass, #853); handed to the renderer's
   // `VisualizationData::approx_notes`.
   pub approx_notes: Vec<ApproxNote>,
+  // The by-value bindings that a pattern moves out of a scrutinee
+  // temporary (#1362), with the line of the pattern and the
+  // temporary's name: a binding drawn with no arrow into it gets an
+  // approximation note saying where its value came from.
+  pub scrut_movers: Vec<(rustc_hir::HirId, usize, String)>,
+  // The approximation notes of those temporaries (`hash`, line, the
+  // movers' names and bindings, the call they're drawn from if they all
+  // are), made once the events are known (#1367).
+  pub scrut_temp_notes: Vec<(u64, usize, Vec<String>, Vec<rustc_hir::HirId>, Option<String>)>,
 
   // `r?` with `r` a non-`Copy` place moves `r` (#652). Set while
   // `match_rhs` draws that move into the variable `r?` is bound to;
@@ -1084,6 +1093,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       live_tuples: Vec::new(),
       binding_columns: Vec::new(),
       approx_notes: Vec::new(),
+      scrut_movers: Vec::new(),
+      scrut_temp_notes: Vec::new(),
       break_binds: Vec::new(),
       deferred_breaks: Vec::new(),
       line_override: None,
@@ -8594,6 +8605,14 @@ pub fn addr_of_scrutinee_borrow(&mut self, scrutinee: &'tcx Expr<'tcx>, pat: &'t
 pub fn retarget_tuple_borrow(&mut self, scrutinee: &'tcx Expr<'tcx>, binding: &ResourceAccessPoint, evt: &Evt, from: ResourceTy) -> ResourceTy {
   let lender = self.tuple_elem_lender(scrutinee, evt, from.clone());
   if lender != from {
+    // The tuple has no column, so no arrow shows the borrow: the
+    // binding's first dot says what it borrows (#1363).
+    if let Some(x) = from.extract_rap() {
+      let tuple = self.tuple_scrutinee_text(scrutinee);
+      let text = crate::svg_generator::hover_messages::approx_note_tuple_elem_borrow(binding.name(), x.name(), &tuple, matches!(evt, Evt::MBorrow));
+      let lines = (span_to_line(&scrutinee.span, &self.tcx), self.tuple_scrutinee_user_end(scrutinee));
+      self.approx_notes.push(ApproxNote::At { hash: *binding.hash(), lines, text });
+    }
     self.tuple_temp_refs.insert(binding.name().to_string());
     if let Some(rd) = self.borrow_map.get_mut(binding.name()) {
       if rd.lender == from {
@@ -8611,6 +8630,16 @@ pub fn retarget_tuple_borrow(&mut self, scrutinee: &'tcx Expr<'tcx>, binding: &R
     }
   }
   lender
+}
+
+/// The last line of the `match` / `if let` / `while let` whose
+/// scrutinee is `scrutinee` (its line, for anything else).
+fn tuple_scrutinee_user_end(&self, scrutinee: &'tcx Expr<'tcx>) -> usize {
+  let user = self.tcx.hir_parent_iter(scrutinee.hir_id).find_map(|(_, n)| match n {
+    rustc_hir::Node::Expr(e) if matches!(e.kind, ExprKind::Match(..) | ExprKind::If(..) | ExprKind::Loop(..)) => Some(e.span),
+    _ => None,
+  });
+  span_end_line(&user.unwrap_or(scrutinee.span), &self.tcx)
 }
 
 /// Where a tuple-literal scrutinee's variables go: the move into the
@@ -8805,7 +8834,7 @@ fn path_takers(&self, pat: &'tcx Pat<'tcx>, path: &[String],
 /// The part of `pat` that matches the place at `path`: as far down as
 /// the pattern goes (a name or `_` matching all of it, an or-pattern).
 /// `None` when it's skipped by `..`.
-fn pat_at_path(&self, pat: &'tcx Pat<'tcx>, path: &[String],
+pub(crate) fn pat_at_path(&self, pat: &'tcx Pat<'tcx>, path: &[String],
   typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>) -> Option<&'tcx Pat<'tcx>> {
   let Some((step, rest)) = path.split_first() else { return Some(pat) };
   match self.sub_pat_at(pat, step, typeck) {
