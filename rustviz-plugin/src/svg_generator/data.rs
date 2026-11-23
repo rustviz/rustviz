@@ -675,6 +675,19 @@ fn element_update_holds_value(r: &ResourceAccessPoint, place: &str, write: &Plac
 /// `v.last_mut().unwrap().n = 5` (the call's events end its borrow of v,
 /// "v's resource is no longer mutably borrowed", as one event), and x
 /// in `*x += 1` as x's last use.
+/// A borrow end with no arrow (`RefDie`) of a reference declared in
+/// an arm, which the renderer moved into that arm (`nest_arm_ref_ends`,
+/// #1277): on the reference's column, as at the top level.
+/// `append_branch_event` leaves RefDies out (`ResourceAccessPoint_extract`
+/// names neither side of one).
+fn append_decl_ref_die(vd: &VisualizationData, e: &ExternalEvent, line: usize, var: &ResourceAccessPoint, b_history: &mut Vec<(usize, Event)>) {
+    if let ExternalEvent::RefDie { from: ResourceTy::Value(r), .. } = e {
+        if r == var {
+            b_history.extend(vd.event_of_external_event(line, e, false));
+        }
+    }
+}
+
 fn push_history_event(history: &mut Vec<(usize, Event)>, line: usize, event: Event) {
     if let Event::Acquire { is: ResourceTy::Index(_, place, _), .. } = &event {
         let place = split_alternatives(place).0;
@@ -5633,6 +5646,7 @@ impl Visualizable for VisualizationData {
                             let is = &ResourceTy::Value(var.clone());
                             for (l, e) in branch.e_data.iter() {
                                 self.append_branch_event(e, *l, is, & mut b_history);
+                                append_decl_ref_die(self, e, *l, var, &mut b_history);
                             }
                             for (l, e) in b_history {
                                 self._append_event(var, e, &l);
@@ -5728,12 +5742,50 @@ impl Visualizable for VisualizationData {
                         let is = &ResourceTy::Value(var.clone());
                         for (l, e) in branch.e_data.iter() {
                             self.append_branch_event(e, *l, is, & mut b_history);
+                            append_decl_ref_die(self, e, *l, var, &mut b_history);
                         }
                         for (l, e) in b_history {
                             self._append_event(var, e, &l);
                         }
                     }
                     self.append_decl_branch_events(&branch.e_data);
+                }
+
+                // A borrow end the renderer moved into the arm declaring
+                // its reference (`nest_arm_ref_ends`, #1277) whose lender
+                // has no column in the conditional: the lender gets its
+                // "no longer borrowed" on its own column, at the end's row.
+                let mut decls: Vec<ResourceAccessPoint> = Vec::new();
+                fn all_decls(branches: &[ExtBranchData], out: &mut Vec<ResourceAccessPoint>) {
+                    for b in branches {
+                        out.extend(in_decl_order(&b.decl_vars).into_iter().cloned());
+                        for (_, e) in &b.e_data {
+                            if let ExternalEvent::Branch { branches, .. } = e { all_decls(branches, out); }
+                        }
+                    }
+                }
+                all_decls(&branches, &mut decls);
+                fn outside_ends(branches: &[ExtBranchData], skip: &dyn Fn(&ResourceAccessPoint) -> bool, out: &mut Vec<(usize, ExternalEvent)>) {
+                    for b in branches {
+                        for (l, e) in &b.e_data {
+                            match e {
+                                ExternalEvent::Branch { branches, .. } => outside_ends(branches, skip, out),
+                                ExternalEvent::StaticDie { to: ResourceTy::Value(lender), .. }
+                                | ExternalEvent::MutableDie { to: ResourceTy::Value(lender), .. }
+                                    if !lender.is_fn() && !skip(lender) => out.push((*l, e.clone())),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                let mut ends = Vec::new();
+                outside_ends(&branches, &|r| live_vars.contains(r) || decls.contains(r), &mut ends);
+                for (l, e) in ends {
+                    let (ExternalEvent::StaticDie { to: ResourceTy::Value(lender), .. }
+                        | ExternalEvent::MutableDie { to: ResourceTy::Value(lender), .. }) = &e else { continue };
+                    for (ln, ev) in self.event_of_external_event(l, &e, true) {
+                        self._append_event(lender, ev, &ln);
+                    }
                 }
             }
             // A borrow stored in an element (`v[0] = &u`) has the

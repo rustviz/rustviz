@@ -1,6 +1,6 @@
 extern crate handlebars;
 
-use crate::svg_generator::data::{branch_is_collapsed, is_param_value_line, returned_closure, ExtBranchData, ExternalEvent, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, StaticLender, Visualizable, VisualizationData, FIRST_ROW_Y, OLD_FIRST_ROW_Y, LINE_SPACE};
+use crate::svg_generator::data::{branch_is_collapsed, is_param_value_line, returned_closure, Event, ExtBranchData, ExternalEvent, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, StaticLender, Visualizable, VisualizationData, FIRST_ROW_Y, OLD_FIRST_ROW_Y, LINE_SPACE};
 use crate::svg_generator::svg_frontend::{code_panel, rv_attrs, timeline_panel};
 use handlebars::Handlebars;
 use serde::Serialize;
@@ -250,6 +250,8 @@ fn binds_source_of_line(e: &ExternalEvent, group: &[ExternalEvent]) -> bool {
 fn use_or_end_column(e: &ExternalEvent) -> Option<u64> {
     match e {
         ExternalEvent::GoOutOfScope { ro, .. } => Some(*ro.hash()),
+        // A reference's borrow end with no arrow (#1277).
+        ExternalEvent::RefDie { from: ResourceTy::Value(r), .. } => Some(*r.hash()),
         ExternalEvent::PassByStaticReference { from: ResourceTy::Value(r), .. }
         | ExternalEvent::PassByMutableReference { from: ResourceTy::Value(r), .. } => Some(*r.hash()),
         _ => None,
@@ -388,6 +390,207 @@ fn half_row_tracks_extra_rows(n: usize) -> usize {
     n.saturating_sub(1) / 2
 }
 
+/// The (from, to) columns of the arrows an arm draws on `line`, its
+/// nested conditionals' included (`else if`): moves, copies, borrows,
+/// their ends and pattern bindings between two variables' columns. An
+/// arrow to or from a function (`take(f)`) is a short one beside its dot.
+fn arm_arrows_on_line(e_data: &[(usize, ExternalEvent)], line: usize, out: &mut Vec<(u64, u64)>) {
+    for (l, e) in e_data {
+        if let ExternalEvent::Branch { branches, .. } = e {
+            for b in branches {
+                arm_arrows_on_line(&b.e_data, line, out);
+            }
+            continue;
+        }
+        if *l != line {
+            continue;
+        }
+        let (from, to) = ResourceAccessPoint_extract(e);
+        if let (Some(f), Some(t)) = (from.extract_rap(), to.extract_rap()) {
+            if !f.is_fn() && !t.is_fn() && f.hash() != t.hash() {
+                out.push((*f.hash(), *t.hash()));
+            }
+        }
+    }
+}
+
+/// Whether an arrow arm `j` draws on `line` would run along a stretch of
+/// one an earlier arm draws there, both on the one row of a one-line
+/// conditional (#1264). Columns are in declaration (hash) order, with
+/// the moves `binding_columns` makes (as `timeline_panel` lays them
+/// out), and in each column the arms' dots sit left to right in arm
+/// order, all within the column's own slot. So an arrow spans the
+/// positions (column, arm) from its left end to its right end, and two
+/// arrows of different arms share a stretch when those spans overlap:
+/// `f -> a` in the `if` arm and `h -> a` in the `else` arm, with f, h,
+/// a left to right, share the stretch from h's `else` dot to a's `if`
+/// dot. Arrows into a from opposite sides (`f -> a`, `a`, `h`) don't.
+fn arms_arrows_overlap(branches: &[ExtBranchData], j: usize, line: usize, binding_columns: &[(u64, u64)]) -> bool {
+    let arrows: Vec<Vec<(u64, u64)>> = branches[..=j].iter().map(|b| {
+        let mut v = Vec::new();
+        arm_arrows_on_line(&b.e_data, line, &mut v);
+        v
+    }).collect();
+    if arrows[j].is_empty() {
+        return false;
+    }
+    let mut order: Vec<u64> = arrows.iter().flatten().flat_map(|&(f, t)| [f, t])
+        .chain(binding_columns.iter().flat_map(|&(f, t)| [f, t]))
+        .collect();
+    order.sort_unstable();
+    order.dedup();
+    for (from, to) in binding_columns {
+        let (Some(_), Some(k)) = (order.iter().position(|h| h == from), order.iter().position(|h| h == to)) else { continue };
+        let to = order.remove(k);
+        let i = order.iter().position(|h| h == from).unwrap_or(k);
+        order.insert(i + 1, to);
+    }
+    let rank = |h: u64| order.iter().position(|&o| o == h).unwrap_or(0);
+    let span = |(f, t): (u64, u64), arm: usize| {
+        let (a, b) = ((rank(f), arm), (rank(t), arm));
+        (a.min(b), a.max(b))
+    };
+    arrows[j].iter().any(|&aj| {
+        let (lo_j, hi_j) = span(aj, j);
+        arrows[..j].iter().enumerate().any(|(i, ai)| ai.iter().any(|&a| {
+            let (lo_i, hi_i) = span(a, i);
+            lo_i.max(lo_j) < hi_i.min(hi_j)
+        }))
+    })
+}
+
+/// Whether an arm of `branches`, or of a conditional nested in one,
+/// declares `r`.
+fn arm_declares(branches: &[ExtBranchData], r: &ResourceAccessPoint) -> bool {
+    branches.iter().any(|arm| arm.decl_vars.contains(r) || arm.e_data.iter().any(|(_, e)|
+        matches!(e, ExternalEvent::Branch { branches, .. } if arm_declares(branches, r))))
+}
+
+/// Puts the borrow end `end` of `r` into the arm declaring `r` (see
+/// `arm_declares`), after that arm's events on its line and before r's
+/// scope end there, and into the arm's line map with the line's other
+/// arrows, so it is stacked with them as it would be at the top level.
+fn insert_in_declaring_arm(branches: &mut [ExtBranchData], r: &ResourceAccessPoint, end: (usize, ExternalEvent)) {
+    let Some(arm) = branches.iter_mut().find(|arm| arm_declares(std::slice::from_ref(&**arm), r)) else { return };
+    if !arm.decl_vars.contains(r) {
+        for (_, e) in arm.e_data.iter_mut() {
+            if let ExternalEvent::Branch { branches, .. } = e {
+                if arm_declares(branches, r) {
+                    return insert_in_declaring_arm(branches, r, end);
+                }
+            }
+        }
+        return;
+    }
+    let line = end.0;
+    let mut at = arm.e_data.iter().rposition(|(l, _)| *l <= line).map_or(0, |i| i + 1);
+    if let Some(k) = arm.e_data[..at].iter().rposition(|(l, e)| *l == line && e.is_gos_ev() == Some(r)) {
+        at = k;
+    }
+    if end.1.is_var_arrow_ev() {
+        arm.line_map.entry(line).or_default().push(end.1.clone());
+    }
+    arm.e_data.insert(at, end);
+}
+
+/// A borrow end recorded after the conditional `events[i]`, on its
+/// line, of a reference declared in one of its arms (`let x = ra;` in
+/// `if c { .. } else { let x = ra; .. }` on one line). The plugin nests
+/// such an end in the arm only when the lender has a column in the
+/// conditional (`nest_borrow_ends_in_arms`); otherwise it came after
+/// the conditional, and once the arms got rows of their own (#1187,
+/// #1264) it was drawn on the join row, below the reference's scope end
+/// in the arm, where the reference no longer exists (#1277). Each such
+/// end moves into its arm, before the arm's rows are laid out (it is
+/// one of the arm's stacked arrows there), out of `line_map`'s group
+/// for the line. The lender's column still gets it (`data.rs`, the
+/// Branch's ends of lenders it doesn't draw), and its dot there names
+/// the references whose ends stay after the conditional as still
+/// borrowing it (`ra`, on the join row). Returns how many events left
+/// `events`.
+fn nest_arm_ref_ends(events: &mut Vec<(usize, ExternalEvent)>, i: usize, skip: &HashSet<usize>, line_map: &mut BTreeMap<usize, Vec<ExternalEvent>>) -> usize {
+    let line = events[i].0;
+    let ExternalEvent::Branch { branches, .. } = &events[i].1 else { return 0 };
+    let ended = |e: &ExternalEvent| match e {
+        ExternalEvent::StaticDie { from: ResourceTy::Value(r), .. }
+        | ExternalEvent::MutableDie { from: ResourceTy::Value(r), .. }
+        | ExternalEvent::RefDie { from: ResourceTy::Value(r), .. } => Some(r.clone()),
+        _ => None,
+    };
+    let on_line: Vec<usize> = (i + 1..events.len())
+        .filter(|&j| events[j].0 == line && !skip.contains(&events[j].1.get_id()))
+        .collect();
+    let moved: Vec<usize> = on_line.iter().copied()
+        .filter(|&j| ended(&events[j].1).is_some_and(|r| arm_declares(branches, &r)))
+        .collect();
+    if moved.is_empty() {
+        return 0;
+    }
+    let lender = |e: &ExternalEvent| match e {
+        ExternalEvent::StaticDie { to, .. } | ExternalEvent::MutableDie { to, .. } => to.extract_rap().map(|r| *r.hash()),
+        _ => None,
+    };
+    let mut taken: Vec<(ResourceAccessPoint, (usize, ExternalEvent))> = Vec::new();
+    for &j in &moved {
+        let mut end = events[j].clone();
+        let holders: Vec<String> = on_line.iter()
+            .filter(|k| !moved.contains(k))
+            .map(|&k| &events[k].1)
+            .filter(|o| lender(o).is_some() && lender(o) == lender(&end.1))
+            .filter_map(|o| ended(o).map(|r| r.name().to_owned()))
+            .collect();
+        if let ExternalEvent::StaticDie { still_borrowed_by, .. } | ExternalEvent::MutableDie { still_borrowed_by, .. } = &mut end.1 {
+            for name in holders {
+                if !still_borrowed_by.contains(&name) {
+                    still_borrowed_by.push(name);
+                }
+            }
+        }
+        taken.push((ended(&end.1).unwrap(), end));
+    }
+    for &j in moved.iter().rev() {
+        let id = events[j].1.get_id();
+        events.remove(j);
+        if let Some(group) = line_map.get_mut(&line) {
+            group.retain(|g| g.get_id() != id);
+            if group.is_empty() {
+                line_map.remove(&line);
+            }
+        }
+    }
+    let ExternalEvent::Branch { branches, .. } = &mut events[i].1 else { unreachable!() };
+    for (r, end) in taken {
+        insert_in_declaring_arm(branches, &r, end);
+    }
+    moved.len()
+}
+
+/// A reference's own borrow end listed after its scope end on one row
+/// (`x goes out of scope / x's immutable borrow ends`) reads as the
+/// borrow ending once x is gone (#1277): it goes first.
+fn ends_before_scope_ends(history: &mut Vec<(usize, Event)>) {
+    for (_, e) in history.iter_mut() {
+        if let Event::Branch { branch_history, .. } = e {
+            for b in branch_history.iter_mut() {
+                ends_before_scope_ends(&mut b.e_data);
+            }
+        }
+    }
+    let mut i = 0;
+    while i < history.len() {
+        if matches!(history[i].1, Event::RefGoOutOfScope { .. } | Event::OwnerGoOutOfScope { .. }) {
+            let row = history[i].0;
+            let end = history[i + 1..].iter().position(|(l, e)| *l == row
+                && matches!(e, Event::StaticDie { .. } | Event::MutableDie { .. } | Event::RefDie { .. }));
+            if let Some(k) = end {
+                let ev = history.remove(i + 1 + k);
+                history.insert(i, ev);
+            }
+        }
+        i += 1;
+    }
+}
+
 /// Rows to add around the arms of a conditional written on one line
 /// whose arms stack arrows (`let (a, b) = if c { (f, g) } else { (h,
 /// k) };`, #1187). Each arm's stacked arrows run on rows inserted below
@@ -397,11 +600,16 @@ fn half_row_tracks_extra_rows(n: usize) -> usize {
 /// and along their arrows. Instead each arm with events after the first
 /// gets a row of its own below the previous arms' rows (an arm with no
 /// events, like an implicit `else`, needs none), and the join one below
-/// the last arm's (`before_merge`). A one-line conditional with no
-/// stacked arrows keeps its arms side by side on one row (#117).
+/// the last arm's (`before_merge`). Arms with one arrow each get rows of
+/// their own too when those arrows would run along one stretch of the
+/// row (`let a = if c { f } else { h };`: f -> a passes h's column on its
+/// way to a, alongside h -> a, so only one of the two could be hovered
+/// there, #1264). A one-line conditional whose arrows don't stack and
+/// don't overlap keeps its arms side by side on one row (#117).
 struct OneLineArmGaps {
     /// Arm j starts on the source line arm j - 1 ends on, has events,
-    /// and comes after an arm with events.
+    /// comes after an arm with events, and one of them stacks arrows or
+    /// an arrow of arm j runs alongside one of an earlier arm's.
     gap_before: Vec<bool>,
     /// The last arm with events ends on the join's line.
     ends_on_merge: bool,
@@ -424,26 +632,28 @@ impl OneLineArmGaps {
         // has nothing, needs no gap.
         let on_line = |b: &ExtBranchData, line: usize| b.e_data.iter().any(|(l, _)| *l == line);
         let stacks_on = |b: &ExtBranchData, line: usize| b.line_map.get(&line).is_some_and(|v| v.len() > 1);
-        let gap_before: Vec<bool> = (0..spans.len()).map(|j| {
+        let shares_row = |j: usize| {
             let line = spans[j].0;
             j > 0
                 && spans[j].0 == spans[j - 1].1
                 && on_line(&branches[j], line)
                 && branches[..j].iter().any(|b| on_line(b, line))
-                && branches[..=j].iter().any(|b| stacks_on(b, line))
-        }).collect();
-        let none = OneLineArmGaps { gap_before: vec![false; spans.len()], ends_on_merge: false };
-        if !gap_before.iter().any(|&s| s) {
-            return none;
-        }
+        };
         // Whether any arm stacks arrows: the rows it would insert, on
         // copies of everything `mutate_branch_lines` changes.
-        let stacks = branches.iter().zip(&spans).any(|(b, &(start, _))| {
+        let stacks = || branches.iter().zip(&spans).any(|(b, &(start, _))| {
             mutate_branch_lines(&mut b.clone(), &mut l_map.clone(), 0, (line_num, start),
                 &mut binding_columns.to_vec(), &mut arrow_tracks.clone()) > 0
         });
-        if !stacks {
-            return none;
+        let stacked: Vec<bool> = (0..spans.len())
+            .map(|j| shares_row(j) && branches[..=j].iter().any(|b| stacks_on(b, spans[j].0)))
+            .collect();
+        let stacked = if stacked.iter().any(|&s| s) && stacks() { stacked } else { vec![false; spans.len()] };
+        let gap_before: Vec<bool> = (0..spans.len())
+            .map(|j| stacked[j] || (shares_row(j) && arms_arrows_overlap(branches, j, spans[j].0, binding_columns)))
+            .collect();
+        if !gap_before.iter().any(|&s| s) {
+            return OneLineArmGaps { gap_before, ends_on_merge: false };
         }
         let ends_on_merge = branches.iter().zip(&spans).rev()
             .find(|(b, _)| !b.e_data.is_empty())
@@ -478,7 +688,7 @@ pub fn mutate_branch_lines(
     arrow_tracks: &mut HashMap<usize, usize>,
 ) -> usize {
     let old_extra_lines = extra_lines;
-    let old_line_map = b_data.line_map.clone();
+    let mut old_line_map = b_data.line_map.clone();
     let mut new_line_map: BTreeMap<usize, Vec<ExternalEvent>> = BTreeMap::new();
     let mut skippable_ev: HashSet<usize> = HashSet::new();
     // (source line, shift) for the rest of a line whose arrows were
@@ -491,8 +701,11 @@ pub fn mutate_branch_lines(
 
     // mutate actual events
     let mut i: usize = 0;
-    let size: usize = b_data.e_data.len();
+    let mut size: usize = b_data.e_data.len();
     while i < size {
+        if matches!(b_data.e_data[i].1, ExternalEvent::Branch { .. }) && !skippable_ev.contains(&b_data.e_data[i].1.get_id()) {
+            size -= nest_arm_ref_ends(&mut b_data.e_data, i, &skippable_ev, &mut old_line_map);
+        }
         let (l, e) = b_data.e_data.get_mut(i).unwrap();
         let line_num = *l;
         let new_line_num = *l + extra_lines;
@@ -600,6 +813,22 @@ pub fn mutate_branch_lines(
                         }
                         if is_param_value_line(&ev) {
                             ev_len = 0;
+                        }
+                        // A stack that ends the borrow of a reference the arm
+                        // declares (`let x = ra; (x.to_string(), h)`, #1277):
+                        // the rest of the line went on the stack's last row,
+                        // where that return arrow runs back to its lender, so
+                        // a call's result moved into a column or a scope end
+                        // put its dot under the arrow, which ran through it.
+                        // Those go a row below the stack instead.
+                        let ends_arm_ref = ev.iter().any(|g| matches!(g,
+                            ExternalEvent::StaticDie { from: ResourceTy::Value(r), .. }
+                            | ExternalEvent::MutableDie { from: ResourceTy::Value(r), .. } if b_data.decl_vars.contains(r)));
+                        let below = ends_arm_ref && rest.iter().any(|p_e| !own_row.contains(&p_e.get_id())
+                            && !matches!(p_e, ExternalEvent::ClosureCall { .. })
+                            && !uses_ref_ended_on_line(p_e, &ev));
+                        if ev_len > 0 && back.is_empty() && below {
+                            ev_len += 1;
                         }
                         if !back.is_empty() {
                             same_line_shift = Some((line_num, back_line - line_num));
@@ -885,7 +1114,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
     // but it turned out this way because it's built on RV1 code.
     // It's disgusting because it needs to be a single pass.
     let mut i: usize = 0;
-    let size: usize = visualization_data.preprocess_external_events.len();
+    let mut size: usize = visualization_data.preprocess_external_events.len();
     let mut event_line_map_replace: BTreeMap<usize, Vec<ExternalEvent>> = BTreeMap::new();
     let mut extra_lines: usize = 0;
     // Source lines used to absorb stacked-arrow extras into pre-existing
@@ -959,6 +1188,11 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
             for (_, e, row) in ready {
                 visualization_data.append_processed_external_event(e, row);
             }
+        }
+        if matches!(visualization_data.preprocess_external_events[i].1, ExternalEvent::Branch { .. })
+            && !skippable_ev.contains(&visualization_data.preprocess_external_events[i].1.get_id())
+        {
+            size -= nest_arm_ref_ends(&mut visualization_data.preprocess_external_events, i, &skippable_ev, &mut visualization_data.event_line_map);
         }
         let (line_num, event) = visualization_data.preprocess_external_events.get_mut(i).unwrap();
         let mut branch_line = 0;
@@ -1255,6 +1489,9 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
     }
     for (_, e, row) in deferred_ends {
         visualization_data.append_processed_external_event(e, row);
+    }
+    for timeline in visualization_data.timelines.values_mut() {
+        ends_before_scope_ends(&mut timeline.history);
     }
 
     info!("insert line map {:#?}", line_insertion_map);

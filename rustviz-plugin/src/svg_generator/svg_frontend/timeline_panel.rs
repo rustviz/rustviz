@@ -6316,19 +6316,39 @@ fn render_branches(
             // Build segments. Empty-classified states drop out so
             // a Move (anywhere) ends the visible run there.
             let mut segs: Vec<BranchSeg> = Vec::new();
+            let apexes = CollapsedApexes::of(&branch.e_data);
+            // The arm's own first row starts a conditional whose fork is
+            // raised half a row above it (`else if d { g } else { h }` on
+            // one line with its arms on rows of their own, #1264): the
+            // leg into the arm ends at that fork's dot. Run on to the
+            // row, it ended in mid-air below the fork.
+            let leg_end_y = if !raised && !branch_is_collapsed(*split_point, *merge_point)
+                && apexes.raised_splits.contains(&(*split_point + 1))
+            {
+                column_top_y - PATTERN_SPLIT_RISE as f64
+            } else {
+                column_top_y
+            };
             push_seg_if_renderable(
                 &mut segs, rap,
-                (parent_x, split_y), (branch_x, column_top_y),
+                (parent_x, split_y), (branch_x, leg_end_y),
                 leading_state.clone(), visualization_data, &arm_label, Leg::Split, *split_point, *split_point, &arm_path,
             );
             // An arm that starts below the raised fork's row (the `else`)
-            // runs down to its first row in the state it forked with.
+            // runs down to its first row in the state it forked with. When
+            // that row starts a conditional of the arm's own whose fork is
+            // raised above it too (`else if d { g } else { h }` on the
+            // line, its arms on rows of their own, #1264), the leg ends at
+            // that fork's dot, half a row up: run on to the row, it went
+            // past the dot between the inner arms' diagonals, like a third
+            // arm.
             if raised {
                 let first_row = branch.states.iter().find(|(top, bot, _)| top <= bot).map(|s| s.0);
                 if let Some(first_row) = first_row.filter(|r| r > split_point) {
+                    let rise = if apexes.raised_splits.contains(&first_row) { PATTERN_SPLIT_RISE } else { 0 };
                     push_seg_if_renderable(
                         &mut segs, rap,
-                        (branch_x, column_top_y), (branch_x, get_y_axis_pos(first_row) as f64),
+                        (branch_x, column_top_y), (branch_x, (get_y_axis_pos(first_row) - rise) as f64),
                         leading_state, visualization_data, &arm_label, Leg::Column, *split_point, first_row, &arm_path,
                     );
                 }
@@ -6341,7 +6361,6 @@ fn render_branches(
                 let (lo, hi) = branch_column_rows(*split_point, *merge_point);
                 ty.get_start_end(i).1.clamp(lo, hi.max(lo))
             });
-            let apexes = CollapsedApexes::of(&branch.e_data);
             // A reference declared before the conditional whose borrow
             // ends in this arm (`end_outer_borrows_in_arms`): the
             // dashed rest of the arm is "no value" only in the sense
