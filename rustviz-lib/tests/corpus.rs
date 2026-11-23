@@ -23486,8 +23486,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // join that said "r isn't moved in any of the branches above"
         // (in `chain_else_if`, in the outer `if` arm instead). Where the
         // ends are drawn is checked by `corpus_invariants_hold`
-        // (`event-on-dead-column`). A condition over several lines is
-        // #1291.
+        // (`event-on-dead-column`). A condition over several lines:
+        // `chain_multiline_split_1291`.
         must_contain: &[
             "r1's borrow ended in each branch above",
             "r2's borrow ended in each branch above",
@@ -23654,6 +23654,70 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "x2 no longer borrows the resource o2 points to",
             "Return immutably borrowed resource from x2 to o2",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/chain_multiline_split_1291",
+        // #1291: a let-chain condition over several lines splits on the
+        // `if` line, as one on a single line does (#1279): the later
+        // parts are drawn in the `if` arm, the borrow they last use ends
+        // there, and the join says it ended in each arm. Main split on
+        // the `{` line, drew the parts above where the arm's column
+        // starts and the borrow end beside the arms, and its join said
+        // the reference "isn't moved in any of the branches above". Where
+        // the events are drawn is checked by `corpus_invariants_hold`
+        // (`event-on-dead-column`, `line-after-column-ends`), also for a
+        // lone `if let` over two lines and a `match` guard on a line of
+        // its own.
+        must_contain: &[
+            "r4's borrow ended in each branch above",
+            "q's borrow ended in each branch above",
+            "r's borrow ended in each branch above",
+        ],
+        must_not_contain: &[
+            "r4 isn't moved in any of the branches above",
+            "q isn't moved in any of the branches above",
+            "r isn't moved in any of the branches above",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/chain_block_moves_ref_1262",
+        // #1262: `&& { let wr = r; take(wr); true } &&` is drawn in the
+        // `if` arm: wr's borrow ends there after `take`, and r's own
+        // borrow ends in the other arm, so v gets its value back on each
+        // path and has a column in the conditional. Main drew both ends
+        // on the `if` line's row, above the arm (wr's borrow ending
+        // before wr was bound; `corpus_invariants_hold`'s
+        // `event-on-dead-column`).
+        must_contain: &[
+            "v isn't moved in any of the branches above",
+            "r may have been moved: when the condition moves r to wr and then turns out false, the body is skipped but the move has happened, so r can't be used after the if",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "destructuring_assign_block_1253",
+        // #1253: `(x, n) = 'blk: { if c { break 'blk (s, 1); } (t, 2) };`
+        // assigns whichever value ended the block, as `let (x, n) =
+        // 'blk: { … }` binds it (#1226): s moves into x only if that
+        // `break` ran, t only if the block reached its end. Main moved t
+        // unconditionally (and u, behind two `break`s) and never s.
+        must_contain: &[
+            "Move from s to x, if the block ended with break 'blk (s, 1)",
+            "Move from t to x, if the block ended with its last expression, (t, 2)",
+            "s may have been moved: the block can end with break 'blk (s, 1), which moves s's resource to x, so s can't be used after the block",
+            "t may have been moved: the block can end with its last expression, (t, 2), which moves t's resource to x, so t can't be used after the block",
+            "Move from t to x, if the block ended with break 'blk (t, 2)",
+            "u may have been moved: the block can end with its last expression, (u, 3), which moves u's resource to x, so u can't be used after the block",
+            "x acquires ownership of a new resource (from whichever break or last expression ended the block); its previous resource is dropped",
+            "n is assigned a new value (from whichever break or last expression ended the block)",
+            "m is assigned a new value (from whichever break or last expression ended the block)",
+        ],
+        must_not_contain: &[
+            "=t's resource is moved",
+            "=u's resource is moved",
+            "=x acquires ownership of a new resource; its previous resource is dropped",
+            "=n is assigned a new value",
         ],
     },
 ];
@@ -26311,6 +26375,37 @@ fn shared_reborrow_keeps_param_column_to_its_end() {
     assert_eq!(reached, end_y, "v's column stops at y={} but its borrow ends at y={}", reached, end_y);
     // `end_y` is line 3, one row below the borrow on line 2.
     assert!(end_y - first_y >= 60.0, "v's borrow ends too early: {} .. {}", first_y, end_y);
+}
+
+/// #1321: a one-line `if let` / `match` arm with rows of its own whose
+/// borrow of s ends on the conditional's line. The arm's lent stretch
+/// runs down to the dot where s gets its value back, so the leg into the
+/// join starts there. Main drew it from the row above, a solid "s is the
+/// owner" diagonal that started in mid-air beside the lent stretch.
+#[test]
+fn one_line_arm_join_leg_starts_at_a_dot() {
+    let rv = run_with_local_backend("one_line_arm_join_leg_1321");
+    let timeline = rv.timeline_panel_string();
+    let dots: Vec<(f64, f64)> = start_tags(&timeline, "circle")
+        .into_iter()
+        .filter(|t| attr(t, "data-rv-var").is_some_and(|v| v == "s"))
+        .map(|t| (num_attr(t, "cx"), num_attr(t, "cy")))
+        .collect();
+    let legs: Vec<&str> = start_tags(&timeline, "line")
+        .into_iter()
+        .filter(|t| attr(t, "data-rv-var").is_some_and(|v| v == "s")
+            && attr(t, "data-rv-kind").is_some_and(|k| k == "branch_line")
+            && attr(t, "data-rv-state").is_some_and(|k| k == "full_privilege"))
+        .collect();
+    assert!(!legs.is_empty(), "no arm leg of s drawn");
+    for leg in legs {
+        let (a, b) = ((num_attr(leg, "x1"), num_attr(leg, "y1")), (num_attr(leg, "x2"), num_attr(leg, "y2")));
+        let top = if a.1 <= b.1 { a } else { b };
+        assert!(
+            dots.iter().any(|d| (d.0 - top.0).abs() < 1.0 && (d.1 - top.1).abs() < 1.0),
+            "s's leg {:?} -> {:?} starts where s has no dot", a, b
+        );
+    }
 }
 
 /// Every fixture, Book snippet and known-bug repro satisfies the

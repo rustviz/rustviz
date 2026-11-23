@@ -6928,6 +6928,16 @@ fn render_branches(
                             Some((get_y_axis_pos(*m) - join_rise(visualization_data, hash, history, *s, *m)) as f64),
                         _ => None,
                     }).unwrap_or(column_bot_y);
+                    // An arm whose own column runs on below that row, to
+                    // the merge row (a one-line arm with rows of its own
+                    // whose borrow ends on the conditional's line, #1321):
+                    // the leg starts where the column stops, not in
+                    // mid-air beside it.
+                    let leg_top_y = segs.iter().rev()
+                        .find(|seg| seg.p2.0 == branch_x && seg.p1.0 == branch_x)
+                        .map(|seg| seg.p2.1)
+                        .filter(|&y| y > leg_top_y && y <= merge_y)
+                        .unwrap_or(leg_top_y);
                     let n = segs.len();
                     push_seg_if_renderable(
                         &mut segs, rap,

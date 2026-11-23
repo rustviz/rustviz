@@ -7607,6 +7607,25 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     //
     // Branches that share lines (#117) are drawn on the split..merge
     // rows themselves; each is active on its own lines.
+    // An `if let` / let-chain condition over several lines (`if let
+    // Some(x) = o` / `&& bump(r)` / `{`): what its pattern or later
+    // parts do to the variables the arms branch on happens on the
+    // if-branch's path, on those lines, before the body's `{`. The
+    // arms then split on the `if` line, as for a condition on one line
+    // (#1279), and those events are drawn in the if arm, not on rows
+    // above where its column starts (#1291).
+    let touches_live = |e: &ExternalEvent| {
+      let mut vs = HashSet::new();
+      collect_event_live_vars(&[(0, e.clone())], &mut vs);
+      !vs.is_disjoint(&liveness)
+    };
+    let split = if (iflet_tuple.is_some() || is_let_chain(guard_expr))
+      && if_ev.iter().any(|(l, e)| (line_num..split).contains(l) && touches_live(e))
+    {
+      line_num
+    } else {
+      split
+    };
     let merge_minus_one = merge.saturating_sub(1);
     let collapsed = branch_is_collapsed(split, merge);
     let if_slice = if collapsed { (split, if_end) } else { (split + 1, if_end) };
@@ -10314,26 +10333,29 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.break_assigns.push((init.hir_id, block));
       self.visit_expr(init);
       self.break_assigns.retain(|(id, _)| *id != init.hir_id);
-      // A place's old value is dropped when the new one is assigned,
-      // after the loop: drawn where (and just before) the first new
-      // value arrives, as for `x = loop { … }` (#586), not on the
-      // statement's first line nor on a row of its own after them.
-      let mut i = n0;
-      while i < self.preprocessed_events.len() {
-        if let ExternalEvent::OwnerDropAtReassign { ro, .. } = &self.preprocessed_events[i].1 {
-          let h = *ro.hash();
-          let first = (n0..i).find(|&j| matches!(&self.preprocessed_events[j].1,
-            ExternalEvent::Move { to: ResourceTy::Value(t), .. }
-            | ExternalEvent::Copy { to: ResourceTy::Value(t), .. }
-            | ExternalEvent::Bind { to: ResourceTy::Value(t), .. } if *t.hash() == h));
-          if let Some(j) = first {
-            self.preprocessed_events[i].0 = self.preprocessed_events[j].0;
-            self.preprocessed_events[j..=i].rotate_right(1);
-          }
-        }
-        i += 1;
-      }
+      self.drops_before_new_values(n0);
       return true;
+    }
+    // `(x, n) = 'blk: { if c { break 'blk (s, 1); } (t, 2) };` (#1253):
+    // whichever value ended the block, a `break`'s or its last
+    // expression, is taken apart and assigned where the block ends, each
+    // drawn as one of them, as `let (x, n) = 'blk: { … }` binds it
+    // (#1226). (s moves only if that `break` ran, t only if it didn't.)
+    if let ExprKind::Block(b, Some(_)) = init.kind {
+      let values = crate::expr_visitor_utils::breaks_to_id(init, b.hir_id).iter().filter(|(_, v)| v.is_some()).count()
+        + usize::from(b.expr.is_some());
+      if values > 1 && !init.span.from_expansion() {
+        self.visit_expr(init);
+        let n0 = self.preprocessed_events.len();
+        let values = self.labeled_block_values(init);
+        if values.len() > 1 {
+          self.pair_break_alternatives(init, values, |this, v| this.assign_value(block, v));
+        } else if let Some((v, _)) = values.first() {
+          self.assign_value(block, v);
+        }
+        self.drops_before_new_values(n0);
+        return true;
+      }
     }
     // Calls, borrows and reads inside the RHS. A constructor the
     // pattern takes apart (`W(y) = W(g);`) is no actor (#950).
@@ -10341,6 +10363,30 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.visit_expr(init);
     self.draw_destructuring_assign(local, init, assigns);
     true
+  }
+
+  /// After a destructuring assignment of a `loop`'s or labeled block's
+  /// value, whose events start at `preprocessed_events[n0]`: a place's
+  /// old value is dropped when the new one is assigned, after the loop
+  /// or block: drawn where (and just before) the first new value
+  /// arrives, as for `x = loop { … }` (#586), not on the statement's
+  /// first line nor on a row of its own after them.
+  fn drops_before_new_values(&mut self, n0: usize) {
+    let mut i = n0;
+    while i < self.preprocessed_events.len() {
+      if let ExternalEvent::OwnerDropAtReassign { ro, .. } = &self.preprocessed_events[i].1 {
+        let h = *ro.hash();
+        let first = (n0..i).find(|&j| matches!(&self.preprocessed_events[j].1,
+          ExternalEvent::Move { to: ResourceTy::Value(t), .. }
+          | ExternalEvent::Copy { to: ResourceTy::Value(t), .. }
+          | ExternalEvent::Bind { to: ResourceTy::Value(t), .. } if *t.hash() == h));
+        if let Some(j) = first {
+          self.preprocessed_events[i].0 = self.preprocessed_events[j].0;
+          self.preprocessed_events[j..=i].rotate_right(1);
+        }
+      }
+      i += 1;
+    }
   }
 
   /// The value of branch body `body` of a destructuring assignment's

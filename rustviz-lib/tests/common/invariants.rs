@@ -47,13 +47,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // A struct moved as a whole while a field column goes on.
     ("ctor_literals_768", "field-outlives-moved-struct", 1127),
-    // One line's events stacked out of order.
-    ("edition2024/whole_value_moved_by_chain_953", "event-on-dead-column", 1200),
     // Geometric (`geometry.rs`), from here on.
     // Tuple column goes on after its fields were moved out.
     ("edition2024/if_let_chain_irrefutable_move", "line-ends-nowhere", 1157),
-    // A one-line `if let` whose arm's borrow ends on the join row: the join leg starts mid-way down the lent stretch.
-    ("mut_ref_moved_into_result_1128", "line-starts-nowhere", 1321),
     // Arrowheads or logos on another arrow after #1317's arrow tracks (#1316's groups).
     // A literal's borrow end meeting an arrow into its column head to head.
     ("edition2024/chain_assigns_ref_from_literal_1068", "heads-or-logos-overlap", 1316),
