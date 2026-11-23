@@ -77,6 +77,9 @@ struct DotLayer {
     /// its column reaches it (#702), per column: it goes on the next
     /// event dot drawn on that column, before that dot's own text.
     carry: HashMap<u64, Vec<(String, &'static str)>>,
+    /// Where each arrow of a row goes so that none lies on another
+    /// (`ArrowLanes`): filled by a first, recording pass of the arrows.
+    lanes: ArrowLanes,
 }
 
 impl DotLayer {
@@ -380,6 +383,13 @@ struct TimelinePanelData {
     timelines: String,
     ref_line: String,
     arrows: String
+}
+
+impl TimelinePanelData {
+    fn empty() -> Self {
+        TimelinePanelData { labels: String::new(), dots: String::new(), timelines: String::new(),
+            ref_line: String::new(), arrows: String::new() }
+    }
 }
 
 #[derive(Serialize)]
@@ -5048,6 +5058,328 @@ fn render_hopping_arrow(
     ))
 }
 
+/// What one arrow (or function logo with its short arrow) covers on a
+/// horizontal track, recorded by the first pass of the arrows
+/// (`ArrowLanes::recording`).
+#[derive(Clone, Debug)]
+struct LaneItem {
+    /// (event id, line): an event can be drawn on more than one line.
+    key: (usize, usize),
+    /// The track's y, and the stretch of it covered (head and logo
+    /// included).
+    y: i64,
+    lo: f64,
+    hi: f64,
+    kind: LaneKind,
+    /// Render order, for ties.
+    order: usize,
+    /// An arrow between two columns' dots: the dots' y and the x of its
+    /// head's and tail's dots.
+    ends: Option<(i64, f64, f64)>,
+}
+
+#[derive(Clone, Debug)]
+enum LaneKind {
+    /// An arrow between two columns: `base` is the y of its two dots, and
+    /// it may move to another track of that row (`free_lane`).
+    Movable { base: i64, die: bool },
+    /// An arrow dipping whole rows below its line (its place among the
+    /// line's arrows, `arrow_order_of`); `line_y` is the line's row.
+    WholeRows { line_y: i64, dip: i64 },
+    /// A call's logo and its short arrow on a column's dot; `alt` is the
+    /// stretch it covers drawn on the dot's other side.
+    Logo { alt: (f64, f64) },
+    /// A call's result handed to the caller (the logo in the gutter).
+    FnResult,
+    /// Anything else (an L to or from the caller): stays where it is.
+    Fixed,
+}
+
+/// Where the arrows of a row go so that no two lie along one stretch
+/// (#1300), no logo sits on another arrow (#1307), no two results to the
+/// caller share the gutter's spot (#1299), and arrows dipping below a
+/// line don't cross (#1312). The arrows are drawn twice: a first pass
+/// records what each covers (`items`) without drawing; `resolve` then
+/// picks the tracks, and the second pass draws with them.
+#[derive(Default, Debug)]
+struct ArrowLanes {
+    recording: bool,
+    items: Vec<LaneItem>,
+    /// A movable arrow's track's y, where it isn't its own row's.
+    lane_y: HashMap<(usize, usize), i64>,
+    /// A whole-row dip, where the arrows of a line swap tracks.
+    dip: HashMap<(usize, usize), i64>,
+    /// A logo drawn on its dot's other side.
+    flipped: std::collections::HashSet<(usize, usize)>,
+    /// A result to the caller's place in the gutter, after the row's first.
+    slot: HashMap<(usize, usize), i64>,
+    /// How far along the row a dipping arrow's leg runs from its head's
+    /// (`true`) or tail's dot, where it isn't the usual 20 px.
+    leg_dx: HashMap<((usize, usize), bool), i64>,
+}
+
+/// How far apart a row's tracks are: half a row, between two rows.
+const LANE_STEP: i64 = LINE_SPACE / 2;
+/// Two stretches on one track share more than this: they overlap.
+const LANE_OVERLAP: f64 = 2.0;
+/// How wide an arrowhead is, in degrees, seen from the centre of the dot
+/// it points at (6 px either side, 18 px out).
+const HEAD_WIDTH_DEG: f64 = 36.0;
+/// Where a result to the caller's logo goes in the gutter, and the x of
+/// its L's bend (`render_function_result_arrow`); each later result on
+/// the row goes half a row lower, with its bend this much farther right.
+const FN_RESULT_LOGO_X: f64 = 14.0;
+const FN_RESULT_BEND_X: f64 = 44.0;
+const FN_RESULT_SLOT_DX: f64 = 14.0;
+const FN_RESULT_SLOT_LOGO_DX: f64 = 12.0;
+
+fn stretches_overlap(a: (f64, f64), b: (f64, f64)) -> bool {
+    a.0.max(b.0) < a.1.min(b.1) - LANE_OVERLAP
+}
+
+impl ArrowLanes {
+    fn record(&mut self, key: (usize, usize), y: i64, lo: f64, hi: f64, kind: LaneKind) {
+        if self.recording {
+            let order = self.items.len();
+            self.items.push(LaneItem { key, y, lo: lo.min(hi), hi: lo.max(hi), kind, order, ends: None });
+        }
+    }
+
+    /// `record` for an arrow from the dot at (`from_x`, `dot_y`) to the
+    /// one at (`to_x`, `dot_y`).
+    fn record_arrow(&mut self, key: (usize, usize), y: i64, dot_y: i64, to_x: f64, from_x: f64, kind: LaneKind) {
+        self.record(key, y, to_x, from_x, kind);
+        if let Some(it) = self.items.last_mut().filter(|_| self.recording) {
+            it.ends = Some((dot_y, to_x, from_x));
+        }
+    }
+
+    /// Picks every arrow's track from what the first pass recorded.
+    fn resolve(&mut self, dots: &DotPositions) {
+        let mut items = std::mem::take(&mut self.items);
+
+        // #1312: the arrows dipping whole rows below one line take their
+        // tracks narrowest first, so one whose span lies inside
+        // another's runs above it and they don't cross.
+        let mut lines: BTreeMap<(i64, usize), Vec<usize>> = BTreeMap::new();
+        for (i, it) in items.iter().enumerate() {
+            if let LaneKind::WholeRows { line_y, .. } = it.kind {
+                lines.entry((line_y, it.key.1)).or_default().push(i);
+            }
+        }
+        let dip_of = |it: &LaneItem| match it.kind { LaneKind::WholeRows { dip, .. } => dip, _ => 0 };
+        for group in lines.values().filter(|g| g.len() > 1) {
+            // Only where one arrow's span lies inside another's that runs
+            // above it (they cross); otherwise the line's order stands.
+            let inside = |a: &LaneItem, b: &LaneItem| a.lo >= b.lo && a.hi <= b.hi && a.hi - a.lo < b.hi - b.lo;
+            if !group.iter().any(|&a| group.iter().any(|&b| inside(&items[a], &items[b]) && dip_of(&items[a]) > dip_of(&items[b]))) {
+                continue;
+            }
+            let mut dips: Vec<i64> = group.iter().map(|&i| dip_of(&items[i])).collect();
+            dips.sort();
+            let mut by_width = group.clone();
+            by_width.sort_by(|&a, &b| (items[a].hi - items[a].lo).total_cmp(&(items[b].hi - items[b].lo))
+                .then(dip_of(&items[a]).cmp(&dip_of(&items[b]))));
+            for (&i, &dip) in by_width.iter().zip(&dips) {
+                if let LaneKind::WholeRows { line_y, dip: old } = items[i].kind {
+                    if dip != old {
+                        self.dip.insert(items[i].key, dip);
+                        items[i].y = line_y + dip;
+                        items[i].kind = LaneKind::WholeRows { line_y, dip };
+                    }
+                }
+            }
+        }
+
+        // #1299: results to the caller on one row, one below the other.
+        let mut seen: HashMap<i64, i64> = HashMap::new();
+        for it in items.iter_mut().filter(|it| matches!(it.kind, LaneKind::FnResult)) {
+            let k = seen.entry(it.y).or_insert(0);
+            if *k > 0 {
+                self.slot.insert(it.key, *k);
+                it.y += *k * LANE_STEP;
+                it.hi += *k as f64 * FN_RESULT_SLOT_DX;
+                if *k % 2 == 1 {
+                    it.lo -= FN_RESULT_SLOT_LOGO_DX;
+                }
+            }
+            *k += 1;
+        }
+
+        // #1307: a logo on another arrow or logo goes to its dot's other
+        // side, if that is free.
+        let clash = |items: &[LaneItem], i: usize, y: i64, span: (f64, f64)| {
+            items.iter().enumerate().any(|(j, o)| j != i && o.y == y && stretches_overlap(span, (o.lo, o.hi)))
+        };
+        for i in 0..items.len() {
+            let LaneKind::Logo { alt } = items[i].kind else { continue };
+            let y = items[i].y;
+            if clash(&items, i, y, (items[i].lo, items[i].hi)) && !clash(&items, i, y, alt) {
+                self.flipped.insert(items[i].key);
+                let old = (items[i].lo, items[i].hi);
+                items[i].lo = alt.0;
+                items[i].hi = alt.1;
+                items[i].kind = LaneKind::Logo { alt: old };
+            }
+        }
+
+        // #1300: movable arrows, narrowest first, each on its own track
+        // where that lies on nothing placed; then each of the others on
+        // the first track of its row (half a row apart) where it lies on
+        // nothing placed and passes no dot.
+        let (mut movable, mut placed): (Vec<LaneItem>, Vec<LaneItem>) =
+            items.into_iter().partition(|it| matches!(it.kind, LaneKind::Movable { .. }));
+        movable.sort_by(|a, b| (a.hi - a.lo).total_cmp(&(b.hi - b.lo))
+            .then((matches!(a.kind, LaneKind::Movable { die: true, .. }))
+                .cmp(&matches!(b.kind, LaneKind::Movable { die: true, .. })))
+            .then(a.order.cmp(&b.order)));
+        let lies_on = |it: &LaneItem, y: i64, placed: &[LaneItem]| {
+            placed.iter().any(|o| o.y == y && stretches_overlap((it.lo, it.hi), (o.lo, o.hi)))
+        };
+        let mut left = Vec::new();
+        for it in movable {
+            if lies_on(&it, it.y, &placed) {
+                left.push(it);
+            } else {
+                placed.push(it);
+            }
+        }
+        for mut it in left {
+            if let Some(y) = free_lane(&it, &placed, dots) {
+                self.lane_y.insert(it.key, y);
+                it.y = y;
+                placed.push(it);
+                continue;
+            }
+            // No track of its own: it stays, and the one arrow it lies on
+            // moves instead, if that one has a track to go to.
+            let blockers: Vec<usize> = placed.iter().enumerate()
+                .filter(|(_, o)| matches!(o.kind, LaneKind::Movable { .. }) && o.y == it.y
+                    && stretches_overlap((it.lo, it.hi), (o.lo, o.hi)))
+                .map(|(j, _)| j).collect();
+            if let [j] = blockers[..] {
+                let mut b = placed.remove(j);
+                placed.push(it.clone());
+                if let Some(y) = free_lane(&b, &placed, dots) {
+                    self.lane_y.insert(b.key, y);
+                    b.y = y;
+                    placed.push(b);
+                    continue;
+                }
+                placed.pop();
+                placed.insert(j, b);
+            }
+            placed.push(it);
+        }
+        self.spread_legs(&placed);
+        self.recording = false;
+    }
+
+    /// Where arrows meet at a dot from the same side, one arriving (its
+    /// head) and another arriving or leaving, the legs of those that dip
+    /// leave the dot at angles far enough apart that no head lies on the
+    /// other arrow (#1312: v's borrow returned and v lent again, on one
+    /// dot). A head is about 36 degrees wide seen from the dot, so the
+    /// legs go 42 and 84 degrees below (or above) a level arrow there,
+    /// else 28 and 72 (20, 55 and 85 for three).
+    fn spread_legs(&mut self, placed: &[LaneItem]) {
+        // (dot's y, its x, goes right) -> (item, is its head, depth).
+        let mut at: BTreeMap<(i64, i64, bool), Vec<(usize, bool, i64)>> = BTreeMap::new();
+        for (i, it) in placed.iter().enumerate() {
+            let Some((dot_y, to, from)) = it.ends else { continue };
+            if !matches!(it.kind, LaneKind::Movable { .. } | LaneKind::WholeRows { .. }) {
+                continue;
+            }
+            let depth = it.y - dot_y;
+            at.entry((dot_y, to.round() as i64, from > to)).or_default().push((i, true, depth));
+            at.entry((dot_y, from.round() as i64, to > from)).or_default().push((i, false, depth));
+        }
+        for legs in at.values() {
+            if legs.len() < 2 || !legs.iter().any(|l| l.1) {
+                continue;
+            }
+            let level: Vec<&(usize, bool, i64)> = legs.iter().filter(|l| l.2 == 0).collect();
+            for down in [true, false] {
+                let mut side: Vec<&(usize, bool, i64)> = legs.iter().filter(|l| l.2 != 0 && (l.2 > 0) == down).collect();
+                if side.is_empty() || (side.len() == 1 && level.is_empty()) {
+                    continue;
+                }
+                side.sort_by_key(|l| (l.2.abs(), placed[l.0].order));
+                // Only where, drawn as usual, a head comes within a head's
+                // width of another leg.
+                let usual = |&&(i, _, depth): &&(usize, bool, i64)| {
+                    let it = &placed[i];
+                    let d = if self.lane_y.contains_key(&it.key) { ((it.hi - it.lo) / 3.0).min(20.0) } else { 20.0 };
+                    (depth.abs() as f64).atan2(d).to_degrees()
+                };
+                let mut fan: Vec<(f64, bool)> = level.iter().map(|l| (0.0, l.1)).chain(side.iter().map(|l| (usual(l), l.1))).collect();
+                fan.sort_by(|a, b| a.0.total_cmp(&b.0));
+                if !fan.windows(2).any(|w| (w[0].1 || w[1].1) && w[1].0 - w[0].0 < HEAD_WIDTH_DEG) {
+                    continue;
+                }
+                let level = !level.is_empty();
+                let angles: &[f64] = match (level, side.len()) {
+                    (true, _) => &[42.0, 84.0],
+                    (false, 2) => &[28.0, 72.0],
+                    _ => &[20.0, 55.0, 85.0],
+                };
+                for (k, &&(i, head, depth)) in side.iter().enumerate() {
+                    let it = &placed[i];
+                    let angle = angles[k.min(angles.len() - 1)].to_radians();
+                    let d = (depth.abs() as f64 / angle.tan()).round() as i64;
+                    let d = d.clamp(2, (((it.hi - it.lo) / 2.0) as i64).max(2));
+                    self.leg_dx.insert((it.key, head), d);
+                }
+            }
+        }
+    }
+}
+
+/// A track of `it`'s row other than its own (half a row apart, or below
+/// the rows inserted under it) where it lies on no placed arrow or logo,
+/// passes no dot, its legs down (or up) to the track don't run along
+/// another arrow's legs out of the same dot, and it doesn't cross the leg
+/// into another arrow's head.
+fn free_lane(it: &LaneItem, placed: &[LaneItem], dots: &DotPositions) -> Option<i64> {
+    let LaneKind::Movable { base, .. } = it.kind else { return None };
+    let lies_on = |y: i64| placed.iter().any(|o| o.y == y && stretches_overlap((it.lo, it.hi), (o.lo, o.hi)));
+    let passes_dot = |y: i64| y != base
+        && dots.iter().any(|&(dx, dy)| dy == y && (dx as f64) > it.lo && (dx as f64) < it.hi);
+    // A leg: its dot's x, the way it goes along the row (towards the
+    // arrow's other end), up or down, and whether it ends in the head.
+    // (Two tails leaving one dot fork; a head beside another leg doesn't
+    // read.)
+    let legs = |o: &LaneItem, y: i64| -> Vec<(f64, bool, bool, bool)> {
+        match o.ends {
+            Some((dot_y, to, from)) if y != dot_y => vec![(to, from > to, y > dot_y, true), (from, to > from, y > dot_y, false)],
+            _ => Vec::new(),
+        }
+    };
+    let legs_meet = |y: i64| legs(it, y).iter().any(|&(x, right, down, head)| placed.iter().any(|o| {
+        o.ends.is_some_and(|(dy, _, _)| Some(dy) == it.ends.map(|e| e.0))
+            && legs(o, o.y).iter().any(|&(ox, oright, odown, ohead)|
+                (ox - x).abs() < 1.0 && oright == right && odown == down && (head || ohead))
+    }));
+    // The track would cross the leg into another dipping arrow's head.
+    let crosses_head = |y: i64| placed.iter().any(|o| match o.ends {
+        Some((dot_y, to, from)) if o.y != dot_y && (y - dot_y).signum() == (o.y - dot_y).signum()
+            && (y - dot_y).abs() < (o.y - dot_y).abs() => {
+            let d = ((to - from).abs() / 3.0).min(20.0) * (y - dot_y) as f64 / (o.y - dot_y) as f64;
+            let x = if from > to { to + d } else { to - d };
+            x > it.lo && x < it.hi
+        }
+        _ => false,
+    });
+    // Below the arrows dipping whole rows under the row, if there are any:
+    // the rows inserted for them leave room.
+    let deepest = placed.iter()
+        .filter(|o| o.ends.is_some_and(|(dy, _, _)| dy == base) && o.y - base >= LINE_SPACE)
+        .map(|o| o.y).max();
+    [base, base + LANE_STEP, base - LANE_STEP, it.y + LANE_STEP, it.y - LANE_STEP].into_iter()
+        .chain(deepest.map(|y| y + LANE_STEP))
+        .find(|&y| y != it.y && !lies_on(y) && !passes_dot(y) && !legs_meet(y) && !crosses_head(y))
+}
+
 /// How many rows below its line an arrow is stacked: its place among the
 /// arrows its line map lists for `row`. An arrow the map doesn't list (a
 /// borrow's end moved into an arm, see `nest_borrow_ends_in_arms`) is drawn
@@ -5177,14 +5509,14 @@ fn render_arrow (
         // ownership transfers); falls through to the generic
         // logic below for those, which sees an (Anonymous,
         // Anonymous) extraction and early-returns.
-        ExternalEvent::InitRefParam { param, id, .. } => render_init_param_arrow(line_number, param, id, output, visualization_data, resource_owners_layout),
+        ExternalEvent::InitRefParam { param, id, .. } => render_init_param_arrow(line_number, param, id, output, visualization_data, resource_owners_layout, dots),
         // A call's result handed to the caller (`Err(String::from(..))`
         // as the returned value, #783). A function has no column to
         // return from, so its logo is drawn in the gutter left of the
         // fn's first column (columns start at x = 70), with the same L
         // up to the caller as a returned variable's.
         ExternalEvent::Move { from: ResourceTy::Value(ResourceAccessPoint::Function(f)), to: ResourceTy::Caller, .. }
-        | ExternalEvent::Copy { from: ResourceTy::Value(ResourceAccessPoint::Function(f)), to: ResourceTy::Caller, .. } => render_function_result_arrow(line_number, external_event, f, output, registry),
+        | ExternalEvent::Copy { from: ResourceTy::Value(ResourceAccessPoint::Function(f)), to: ResourceTy::Caller, .. } => render_function_result_arrow(line_number, external_event, f, output, registry, dots),
         // Move/Copy out to the caller (function tail expression):
         // L on the dot's *right* side, matching the InitRefParam
         // L's positioning so callers and returns occupy the same
@@ -5203,7 +5535,7 @@ fn render_arrow (
         // the vertical sits beyond that as an extra cap so neither
         // leg is visually amputated by the head's body.
         ExternalEvent::Move { from, to: ResourceTy::Caller, id, .. }
-        | ExternalEvent::Copy { from, to: ResourceTy::Caller, id, .. } => render_return_to_caller_arrow(line_number, external_event, from, id, output, visualization_data, resource_owners_layout),
+        | ExternalEvent::Copy { from, to: ResourceTy::Caller, id, .. } => render_return_to_caller_arrow(line_number, external_event, from, id, output, visualization_data, resource_owners_layout, dots),
         _ => render_generic_arrow(line_number, external_event, output, visualization_data, resource_owners_layout, dots, registry),
     }
 }
@@ -5281,12 +5613,25 @@ fn render_generic_arrow(
             } else {
                 0
             };
-            let x2 = x1 + arrow_length + clearance;
+            // The logo goes right of the dot, or left of it where the
+            // right lies on another arrow of the row (#1307,
+            // `ArrowLanes`).
+            let key = (external_event.get_id(), *line_number);
+            let right = (x1 as f64 + 5.0, (x1 + arrow_length + clearance + 15) as f64);
+            let left = (x1 as f64 - (arrow_length + 15) as f64, x1 as f64 - 5.0);
+            let flip = dots.lanes.flipped.contains(&key);
+            let (span, alt) = if flip { (left, right) } else { (right, left) };
+            dots.lanes.record(key, y1, span.0, span.1, LaneKind::Logo { alt });
+            let (x2, logo_x) = if flip {
+                (x1 - arrow_length, x1 - arrow_length - 12)
+            } else {
+                (x1 + arrow_length + clearance, x1 + arrow_length + clearance + 3)
+            };
             data.coordinates.push((x1 as f64, y1 as f64));
             data.coordinates.push((x2 as f64, y2 as f64));
     
             let function_data = FunctionLogoData {
-                x: x2 + 3,
+                x: logo_x,
                 y: y2 + 5,
                 hash: from_function.hash.to_owned() as u64,
                 title: styled_name_html(&from_function.name),
@@ -5313,6 +5658,9 @@ fn render_generic_arrow(
             let from_timeline = fetch_timeline(from_variable.hash(), visualization_data, resource_owners_layout, external_event.get_id());
 
             let title = hover_messages::arrow_call_title(external_event, function, from_variable);
+            if dots.lanes.recording {
+                return;
+            }
 
             // The call icon shares the dot of the borrow it makes
             // (see `DotLayer::add_call`).
@@ -5335,16 +5683,29 @@ fn render_generic_arrow(
             // (no dot to clear) so the gentler 10px pullback
             // looks better than the dot-clearing 18px.
             head_offset = 10.0;
-            let x2 = from_timeline.x_val - 5;
-            let x1 = x2 - arrow_length;
             let y1 = column_event_y(visualization_data, from_variable.hash(), external_event.get_id(), *line_number);
             let y2 = y1;
+            // The logo goes left of the dot, or right of it where the
+            // left lies on another arrow or logo of the row (#1307,
+            // `ArrowLanes`).
+            let cx = from_timeline.x_val;
+            let key = (external_event.get_id(), *line_number);
+            let left = ((cx - 5 - arrow_length - 12) as f64, cx as f64 - 5.0);
+            let right = (cx as f64 + 5.0, (cx + 5 + arrow_length + 15) as f64);
+            let flip = dots.lanes.flipped.contains(&key);
+            let (span, alt) = if flip { (right, left) } else { (left, right) };
+            dots.lanes.record(key, y1, span.0, span.1, LaneKind::Logo { alt });
+            let (x1, x2, logo_x) = if flip {
+                (cx + 5 + arrow_length, cx + 5, cx + 5 + arrow_length + 5)
+            } else {
+                (cx - 5 - arrow_length, cx - 5, cx - 5 - arrow_length - 10)
+            };
             data.coordinates.push((x1 as f64, y1 as f64));
             data.coordinates.push((x2 as f64, y2 as f64));
     
             let function_data = FunctionLogoData {
                 // adjust Function logo pos
-                x: x1 - 10,  
+                x: logo_x,  
                 y: y1 + 5,
                 hash: to_function.hash.to_owned() as u64,
                 title: styled_fn_name,
@@ -5376,7 +5737,7 @@ fn render_generic_arrow(
 
 /// `render_arrow` for an owned function parameter's init (see the comment
 /// in `render_arrow`): the L-shaped arrow from outside the scope.
-fn render_init_param_arrow(line_number: &usize, param: &ResourceAccessPoint, id: &usize, output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>, visualization_data: &VisualizationData, resource_owners_layout: &BTreeMap<u64, TimelineColumnData>) {
+fn render_init_param_arrow(line_number: &usize, param: &ResourceAccessPoint, id: &usize, output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>, visualization_data: &VisualizationData, resource_owners_layout: &BTreeMap<u64, TimelineColumnData>, dots: &mut DotLayer) {
         let is_owned = matches!(
             param,
             ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_)
@@ -5411,6 +5772,7 @@ fn render_init_param_arrow(line_number: &usize, param: &ResourceAccessPoint, id:
         // leftward, landing 0.25px past the dot's right edge.
         let head_x = cx + head_offset;
         let head_y = cy;
+        dots.lanes.record((*id, *line_number), cy as i64, cx + 5.0, bend_x + 3.0, LaneKind::Fixed);
 
         // Polyline string in render order (source → bend → head).
         let polyline_pts = format!(
@@ -5467,12 +5829,20 @@ fn render_init_param_arrow(line_number: &usize, param: &ResourceAccessPoint, id:
 
 /// `render_arrow` for a call's result handed to the caller (#783): the
 /// function's logo in the gutter and the L up to the caller.
-fn render_function_result_arrow(line_number: &usize, external_event: &ExternalEvent, f: &crate::svg_generator::data::Function, output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>, registry: &Handlebars) {
-        let y = get_y_axis_pos(*line_number) as f64;
-        let logo_x: f64 = 14.0;
+fn render_function_result_arrow(line_number: &usize, external_event: &ExternalEvent, f: &crate::svg_generator::data::Function, output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>, registry: &Handlebars, dots: &mut DotLayer) {
+        let row_y = get_y_axis_pos(*line_number) as f64;
+        let key = (external_event.get_id(), *line_number);
+        dots.lanes.record(key, row_y as i64, FN_RESULT_LOGO_X - 2.0, FN_RESULT_BEND_X + 6.0, LaneKind::FnResult);
+        // A later result on the row (`(make(), String::from("b"))`, #1299)
+        // goes half a row lower, its L bending farther right, round the
+        // first's.
+        let slot = dots.lanes.slot.get(&key).copied().unwrap_or(0);
+        let y = row_y + (slot * LANE_STEP) as f64;
+        // Its logo also a little left of the one above, clear of it.
+        let logo_x = FN_RESULT_LOGO_X - if slot % 2 == 1 { FN_RESULT_SLOT_LOGO_DX } else { 0.0 };
         let source_x = logo_x + 16.0;
-        let bend_x = source_x + 14.0;
-        let head_end_y = y - 5.0;
+        let bend_x = FN_RESULT_BEND_X + slot as f64 * FN_RESULT_SLOT_DX;
+        let head_end_y = row_y - 5.0;
         let tip: f64 = 12.75;
         let styled_fn = styled_name_html(&f.name);
         let last = f.name.rsplit("::").next().unwrap_or(&f.name);
@@ -5501,7 +5871,7 @@ fn render_function_result_arrow(line_number: &usize, external_event: &ExternalEv
 
 /// `render_arrow` for a Move/Copy out to the caller (a function's tail
 /// expression): the L on the dot's right side.
-fn render_return_to_caller_arrow(line_number: &usize, external_event: &ExternalEvent, from: &ResourceTy, id: &usize, output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>, visualization_data: &VisualizationData, resource_owners_layout: &BTreeMap<u64, TimelineColumnData>) {
+fn render_return_to_caller_arrow(line_number: &usize, external_event: &ExternalEvent, from: &ResourceTy, id: &usize, output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>, visualization_data: &VisualizationData, resource_owners_layout: &BTreeMap<u64, TimelineColumnData>, dots: &mut DotLayer) {
         let rap = match from.extract_rap() {
             Some(r) => r,
             None => return,
@@ -5524,6 +5894,7 @@ fn render_return_to_caller_arrow(line_number: &usize, external_event: &ExternalE
         let bend_x = cx + head_offset + leg;
         let vertical_line: f64 = leg / 2.0;
         let head_end_y = cy - vertical_line;
+        dots.lanes.record((*id, *line_number), cy as i64, source_x, bend_x + 6.0, LaneKind::Fixed);
 
         let polyline_pts = format!(
             "{} {} {} {} {} {}",
@@ -5646,36 +6017,58 @@ fn plan_variable_arrow(line_number: &usize, external_event: &ExternalEvent, from
         // row ends (`s` gives back to `r`, `r` to `x`) would be
         // drawn level with it and read as one long arrow
         // through `r`'s dot (#577). It dips half a row instead.
-        let dip = arrow_dip_of(visualization_data, *line_number, external_event);
+        let key = (external_event.get_id(), *line_number);
+        let natural_dip = arrow_dip_of(visualization_data, *line_number, external_event);
+        // The arrows dipping whole rows below a line swap tracks so they
+        // don't cross (#1312, `ArrowLanes`).
+        let dip = dots.lanes.dip.get(&key).copied().unwrap_or(natural_dip);
         // The same goes for a return that retraces a borrow on its
         // row (#710).
         let chained = dip == 0 && y1 == y2
             && (returns_chain_on_row(visualization_data, *line_number, external_event)
                 || return_overlaps_borrow_on_row(visualization_data, *line_number, external_event));
         let row_drop = if chained { LINE_SPACE / 2 } else { dip };
-        let y_row = if chained { y1 + row_drop } else { get_y_axis_pos(*line_number) + row_drop };
-        if row_drop > 0 && x2 <= x1{ // trapezoid
-            let x3 = from_timeline.x_val + 20;
-            let x4 = to_timeline.x_val - 20;
-            let y3 = y_row;
-            let y4 = y_row;
-    
+        let line_y = get_y_axis_pos(*line_number);
+        let mut y_row = if chained { y1 + row_drop } else { line_y + row_drop };
+        let (lo, hi) = (x1.min(x2) as f64, x1.max(x2) as f64);
+        let whole_rows = !chained && dip > 0 && dip % LINE_SPACE == 0
+            && !visualization_data.arrow_tracks.contains_key(&external_event.get_id())
+            && !fetch_line_map(visualization_data, external_event.get_id()).get(line_number).is_some_and(|evs| is_param_value_line(evs));
+        if whole_rows {
+            dots.lanes.record_arrow(key, y_row, y1, x1 as f64, x2 as f64, LaneKind::WholeRows { line_y, dip });
+        } else if y1 == y2 {
+            // On its row or a track half a row off it: it may move to
+            // another track of the row, where it lies on no other arrow
+            // (#1300).
+            let y = if row_drop > 0 { y_row } else { y1 };
+            let die = matches!(external_event, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. });
+            dots.lanes.record_arrow(key, y, y1, x1 as f64, x2 as f64, LaneKind::Movable { base: y1, die });
+        }
+        // Moved to another track of its row: a trapezoid down (or up) to
+        // it and back, the way a dipping arrow is drawn.
+        // (Back on its own row: straight, hopping any dot between.)
+        let lane = dots.lanes.lane_y.get(&key).copied();
+        let row_drop = match lane {
+            Some(y) => {
+                y_row = y;
+                y - y1
+            }
+            None => row_drop,
+        };
+        let lane = lane.filter(|&y| y != y1);
+        if lane.is_some() || row_drop > 0 {
+            // A trapezoid: down (or up) from the source's dot to the track,
+            // along it, and back to the target's dot. Its legs are 20 px
+            // wide, or as `ArrowLanes::spread_legs` sets them where they
+            // meet another arrow at a dot.
+            let default = if lane.is_some() { ((hi - lo) / 3.0).min(20.0) as i64 } else { 20 };
+            let d_to = dots.lanes.leg_dx.get(&(key, true)).copied().unwrap_or(default);
+            let d_from = dots.lanes.leg_dx.get(&(key, false)).copied().unwrap_or(default);
+            let (x3, x4) = if x2 <= x1 { (x2 + d_from, x1 - d_to) } else { (x2 - d_from, x1 + d_to) };
             data.coordinates.push((x1 as f64, y1 as f64));
-            data.coordinates.push((x4 as f64, y4 as f64));
-            data.coordinates.push((x3 as f64, y3 as f64));
+            data.coordinates.push((x4 as f64, y_row as f64));
+            data.coordinates.push((x3 as f64, y_row as f64));
             data.coordinates.push((x2 as f64, y2 as f64));
-    
-        } else if row_drop > 0 && x2 > x1 { // deeper trapezoid
-            let x3 = from_timeline.x_val - 20;
-            let x4 = to_timeline.x_val + 20;
-            let y3 = y_row;
-            let y4 = y_row;
-    
-            data.coordinates.push((x1 as f64, y1 as f64));
-            data.coordinates.push((x4 as f64, y4 as f64));
-            data.coordinates.push((x3 as f64, y3 as f64));
-            data.coordinates.push((x2 as f64, y2 as f64));
-    
         } else { // straight line
             // Hop over any event dot that sits between the
             // arrow's source and target columns at this line.
@@ -5861,24 +6254,37 @@ fn render_arrows_string_external_events_version(
             }
         }
     }
-    for (line_number, external_event) in &visualization_data.external_events {
-        match external_event {
-            // events that should be skipped (we don't render arrows for them)
-            ExternalEvent::Bind {..} | ExternalEvent::GoOutOfScope {..}
-            | ExternalEvent::RefDie {..} | ExternalEvent::ClosureCall {..} => {}
-            // InitRefParam falls into render_arrow because owned-param
-            // initializations get an L-shaped "ownership from caller"
-            // arrow there. Ref params are filtered out inside
-            // render_arrow itself rather than here, since the
-            // event-vs-arrow split is already a render_arrow concern.
+    // Twice: first only recording what each arrow covers, into a scratch
+    // output, so that the tracks can be picked (`ArrowLanes`); then for
+    // real.
+    let mut scratch: BTreeMap<i64, (TimelinePanelData, TimelinePanelData)> = BTreeMap::new();
+    scratch.insert(-1, (TimelinePanelData::empty(), TimelinePanelData::empty()));
+    dots.lanes = ArrowLanes { recording: true, ..Default::default() };
+    for pass in 0..2 {
+        let out = if pass == 0 { &mut scratch } else { &mut *output };
+        for (line_number, external_event) in &visualization_data.external_events {
+            match external_event {
+                // events that should be skipped (we don't render arrows for them)
+                ExternalEvent::Bind {..} | ExternalEvent::GoOutOfScope {..}
+                | ExternalEvent::RefDie {..} | ExternalEvent::ClosureCall {..} => {}
+                // InitRefParam falls into render_arrow because owned-param
+                // initializations get an L-shaped "ownership from caller"
+                // arrow there. Ref params are filtered out inside
+                // render_arrow itself rather than here, since the
+                // event-vs-arrow split is already a render_arrow concern.
 
-            _ => {
+                _ => {
 
-                // render external event arrow
-                render_arrow(line_number,
-                    external_event,
-                    output, visualization_data, resource_owners_layout, dots, registry)
+                    // render external event arrow
+                    render_arrow(line_number,
+                        external_event,
+                        out, visualization_data, resource_owners_layout, dots, registry)
+                }
             }
+        }
+        if pass == 0 {
+            let positions = dots.positions.clone();
+            dots.lanes.resolve(&positions);
         }
     }
 }
