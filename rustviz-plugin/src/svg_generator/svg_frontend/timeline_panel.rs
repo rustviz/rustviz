@@ -5711,6 +5711,18 @@ fn inside_tri(t: &[(f64, f64)], p: (f64, f64)) -> f64 {
     }).fold(f64::INFINITY, f64::min)
 }
 
+/// How far `p` lies from the triangle `t` (0 inside it).
+fn off_tri(t: &[(f64, f64)], p: (f64, f64)) -> f64 {
+    if inside_tri(t, p) >= 0.0 {
+        return 0.0;
+    }
+    tri_edges(t).iter().map(|&(a, b)| {
+        let l = dist(a, b).max(1e-9);
+        let u = (((p.0 - a.0) * (b.0 - a.0) + (p.1 - a.1) * (b.1 - a.1)) / (l * l)).clamp(0.0, 1.0);
+        dist(p, (a.0 + (b.0 - a.0) * u, a.1 + (b.1 - a.1) * u))
+    }).fold(f64::INFINITY, f64::min)
+}
+
 /// Where `p` lies along the segment a–b, in px from a, if it's within
 /// `tol` of the segment's line.
 fn along_piece(p: (f64, f64), a: (f64, f64), b: (f64, f64), tol: f64) -> Option<f64> {
@@ -5773,7 +5785,15 @@ fn marks_on_others(drawn: &[Drawn]) -> Vec<(usize, usize)> {
             if i == j || a.tip == b.tip || a.tri.len() < 3 || (elbow && a.key.1 == b.key.1) || !meet(i, j) {
                 continue;
             }
-            let shaft = samples(&b.pieces).into_iter().any(|p| inside_tri(&a.tri, p) > -1.5);
+            // A shaft passing by a head may not touch it (its 5 px stroke
+            // within 1 px of the triangle); one that starts or ends at the
+            // head's column, or hops over the dot it points at, may.
+            // (A hop's 13 arc points run from one side of the dot to the
+            // other: their chord's midpoint is its centre.)
+            let related = b.var == a.to || b.to == a.to
+                || b.arcs.chunks(13).any(|c| dist(((c[0].0 + c[c.len() - 1].0) / 2.0, (c[0].1 + c[c.len() - 1].1) / 2.0), a.tri[1]) < 8.0);
+            let shaft = samples(&b.pieces).into_iter()
+                .any(|p| inside_tri(&a.tri, p) > -1.5 || (!related && off_tri(&a.tri, p) < 3.5));
             let head = b.tri.len() == 3 && i < j
                 && samples(&tri_edges(&b.tri)).into_iter().any(|p| inside_tri(&a.tri, p) > 1.0);
             if shaft || head {
@@ -5809,18 +5829,24 @@ fn marks_on_others(drawn: &[Drawn]) -> Vec<(usize, usize)> {
 }
 
 /// How badly the arrows are drawn: the marks on others, and the dots an
-/// arrow's shaft runs through (not its own ends; a hop's arc isn't a
-/// shaft).
+/// arrow's shaft runs through or touches (not its own ends; a hop's arc
+/// isn't a shaft).
 /// Second, to choose between drawings with as few of those: how many
 /// times two arrows cross.
 fn untangle_cost(drawn: &[Drawn], dots: &DotPositions) -> (usize, usize) {
     let through = drawn.iter().filter(|d| d.logo.is_none()).map(|d| {
+        // Where its pieces start and stop, and its head's tip: a dot within
+        // 6 px of one is a dot it leaves (5.25 px off it) or points at.
+        let ends: Vec<(f64, f64)> = d.pieces.iter().flat_map(|&(p, q)| [p, q]).chain(d.tri.get(1).copied()).collect();
         dots.iter().filter(|&&(x, y)| {
             let c = (x as f64, y as f64);
+            // Through its centre, or (#1316's `y -> a` past z's dot)
+            // the 5 px stroke touching the dot's rim.
+            let reach = if ends.iter().any(|&e| dist(e, c) < 6.0) { 4.5 } else { 5.0 + 2.5 };
             d.pieces.iter().any(|&(p, q)| {
                 let l = dist(p, q);
                 let t = if l < 1e-9 { 0.0 } else { (((c.0 - p.0) * (q.0 - p.0) + (c.1 - p.1) * (q.1 - p.1)) / (l * l)).clamp(0.0, 1.0) };
-                dist(c, (p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t)) < 4.5
+                dist(c, (p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t)) < reach
             })
         }).count()
     }).sum::<usize>();

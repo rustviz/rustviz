@@ -32,6 +32,8 @@ const TOL: f64 = 1.0;
 /// parameter coming in and its result going out) they touch for up to
 /// 10 px. An arrow head is 12.75 px long.
 const OVERLAP_PX: f64 = 12.0;
+/// Half a shaft's stroke (5 px wide).
+const SHAFT_HALF: f64 = 2.5;
 /// An arrow's head stops this close to the target dot's centre (8.2 px
 /// for a diagonal one).
 const HEAD_REACH: f64 = 10.0;
@@ -67,6 +69,8 @@ struct Arrow {
     tip: String,
     /// The shaft's straight pieces (a hop's arc left out).
     pieces: Vec<((f64, f64), (f64, f64))>,
+    /// The centres of the dots its hops go over.
+    hops: Vec<(f64, f64)>,
     head: Option<(f64, f64)>,
     /// The head's triangle.
     tri: Vec<(f64, f64)>,
@@ -122,9 +126,16 @@ fn points(s: &str) -> Vec<(f64, f64)> {
 /// L x y …`, absolute commands only): the arcs hop over a column and are
 /// left out.
 fn path_pieces(d: &str) -> Vec<((f64, f64), (f64, f64))> {
+    path_parts(d).0
+}
+
+/// A hop arrow's straight pieces, and the midpoints of its arcs' chords
+/// (the dots it hops over).
+fn path_parts(d: &str) -> (Vec<((f64, f64), (f64, f64))>, Vec<(f64, f64)>) {
     let toks: Vec<&str> = d.split(|c: char| c == ',' || c.is_whitespace()).filter(|t| !t.is_empty()).collect();
     let f = |i: usize| toks.get(i).and_then(|t| t.parse::<f64>().ok());
     let mut out = Vec::new();
+    let mut hops = Vec::new();
     let mut at: Option<(f64, f64)> = None;
     let mut i = 0;
     while i < toks.len() {
@@ -134,15 +145,17 @@ fn path_pieces(d: &str) -> Vec<((f64, f64), (f64, f64))> {
             _ => break,
         };
         let Some(to) = to else { break };
-        if toks[i] == "L" {
-            if let Some(from) = at {
-                out.push((from, to));
+        if let Some(from) = at {
+            match toks[i] {
+                "L" => out.push((from, to)),
+                "A" => hops.push(mid(from, to)),
+                _ => {}
             }
         }
         at = Some(to);
         i += n;
     }
-    out
+    (out, hops)
 }
 
 pub fn parse(doc: &roxmltree::Document) -> Geo {
@@ -195,12 +208,15 @@ pub fn parse(doc: &roxmltree::Document) -> Geo {
             }
             "arrow" => {
                 let mut pieces = Vec::new();
+                let mut hops = Vec::new();
                 for c in n.descendants().filter(|c| c.attribute("class").is_some_and(|k| k.split(' ').any(|k| k == "arrow-shaft"))) {
                     if c.has_tag_name("polyline") {
                         let p = points(c.attribute("points").unwrap_or(""));
                         pieces.extend(p.windows(2).map(|w| (w[0], w[1])));
                     } else {
-                        pieces.extend(path_pieces(c.attribute("d").unwrap_or("")));
+                        let (p, h) = path_parts(c.attribute("d").unwrap_or(""));
+                        pieces.extend(p);
+                        hops.extend(h);
                     }
                 }
                 let tri = n.descendants()
@@ -209,7 +225,7 @@ pub fn parse(doc: &roxmltree::Document) -> Geo {
                 let head = tri.get(1).copied();
                 g.arrows.push(Arrow {
                     id, var: a("data-rv-var"), to: a("data-rv-to"), line: a("data-rv-line"),
-                    tip: a("data-tooltip-text"), pieces, head, tri,
+                    tip: a("data-tooltip-text"), pieces, hops, head, tri,
                 });
             }
             "fn" => g.logos.push(Logo {
@@ -396,6 +412,15 @@ pub fn check(g: &Geo) -> Vec<(&'static str, String)> {
             s * ((b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0)) / l
         }).fold(f64::INFINITY, f64::min)
     };
+    // How far p is from triangle t (0 inside it).
+    let off_tri = |t: &[(f64, f64)], p: (f64, f64)| -> f64 {
+        if inside(t, p) >= 0.0 { return 0.0 }
+        tri_edges(t).iter().map(|&(a, b)| {
+            let l = len(a, b).max(1e-9);
+            let u = (((p.0 - a.0) * (b.0 - a.0) + (p.1 - a.1) * (b.1 - a.1)) / (l * l)).clamp(0.0, 1.0);
+            len(p, (a.0 + (b.0 - a.0) * u, a.1 + (b.1 - a.1) * u))
+        }).fold(f64::INFINITY, f64::min)
+    };
     // A logo's box: the italic `f` at 20px, from its text anchor.
     let logo_box = |l: &Logo| (l.x - 1.0, l.y - 15.0, l.x + 11.0, l.y + 3.0);
     let in_box = |b: (f64, f64, f64, f64), p: (f64, f64), m: f64| p.0 > b.0 - m && p.0 < b.2 + m && p.1 > b.1 - m && p.1 < b.3 + m;
@@ -410,7 +435,15 @@ pub fn check(g: &Geo) -> Vec<(&'static str, String)> {
                 continue;
             }
             // b's shaft (2.5 px either side of its centre line) or head in a's head.
-            let shaft = samples(&b.pieces).into_iter().any(|p| inside(&a.tri, p) > -1.5);
+            // A shaft that starts or ends at the head's column, or hops over
+            // the dot the head points at, can't keep clear of it there: it
+            // may come up to the head. One passing by may not touch it (its
+            // edge within 1 px of the triangle, #1316's `y -> a` grazing
+            // `a -> z`'s head).
+            let related = b.var == a.to || b.to == a.to
+                || a.head.is_some_and(|h| b.hops.iter().any(|&c| len(c, h) < 8.0));
+            let shaft = samples(&b.pieces).into_iter()
+                .any(|p| inside(&a.tri, p) > -1.5 || (!related && off_tri(&a.tri, p) < SHAFT_HALF + 1.0));
             let head = b.tri.len() == 3 && std::ptr::addr_of!(*a) < std::ptr::addr_of!(*b)
                 && samples(&tri_edges(&b.tri)).into_iter().any(|p| inside(&a.tri, p) > 1.0);
             if shaft || head {
@@ -571,6 +604,23 @@ mod unit {
         // h's head ends on g's shaft: under `OVERLAP_PX` of shared stretch.
         let onto = arrow("h>b", "h", "b", "200 200 200 141", "194,141 200,128.25 206,141");
         assert_eq!(invs(&[g.clone(), onto].concat()), vec!["heads-or-logos-overlap"]);
+        // A shaft passing by g's head, its centre line 3 px off the triangle
+        // (its edge 0.5 px off): touching (#1316's `y -> a` at
+        // `chain_block_if_1287` line 54).
+        let by = arrow("k>c", "k", "c", "100 126 400 126", "400,120 412.75,126 400,132");
+        assert_eq!(invs(&[g.clone(), by.clone()].concat()), vec!["heads-or-logos-overlap"]);
+        assert_eq!(invs(&[g.clone(), by.replace("126", "125")].concat()), Vec::<&str>::new());
+        // An arrow leaving a's column may come that close to a head into it.
+        let from_a = arrow("a>c", "a", "c", "100 126 400 126", "400,120 412.75,126 400,132");
+        assert_eq!(invs(&[g.clone(), from_a].concat()), Vec::<&str>::new());
+        // So may one hopping over the dot the head points at: a head coming
+        // up into b's dot under the hop (`match_copy_ref_out_of_tuple` l6).
+        let hop = "<g data-rv-id=\"p>a\" data-rv-kind=\"arrow\" data-rv-var=\"p\" data-rv-to=\"a\" data-rv-line=\"1\" \
+                   data-tooltip-text=\"p>a\"><path class=\"arrow-shaft\" d=\"M 295.75 215 L 150 215 A 10 10 0 0 0 130 215 L 88 215\"/>\
+                   <polygon class=\"arrow-head\" points=\"88,209 75.25,215 88,221\"/></g>";
+        let up = arrow("q>b", "q", "b", "155.38 224.35 160 240", "152.26,229.48 144.49,217.73 158.5,219.23");
+        assert_eq!(invs(&[hop.to_string(), up.clone()].concat()), Vec::<&str>::new());
+        assert_eq!(invs(&[hop.replace("A 10 10 0 0 0 130 215", "L 130 215"), up].concat()), vec!["heads-or-logos-overlap"]);
         // A call's logo on an arrow not its own.
         let logo = "<text x=\"150\" y=\"140\" data-rv-id=\"q>caller@L5:fn:move\" data-rv-kind=\"fn\" \
                     data-rv-var=\"q\" data-rv-to=\"caller\" data-tooltip-text=\"q\">f</text>".to_string();

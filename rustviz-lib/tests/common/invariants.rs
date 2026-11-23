@@ -55,10 +55,6 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("arm_binding_value_1327", "event-on-dead-column", 1333),
     ("arm_binding_value_1327", "line-ends-nowhere", 1333),
     ("arm_binding_value_1327", "line-starts-nowhere", 1333),
-    // An arm's value that is its own binding: the pattern's arrows and
-    // the copy into the result on one row.
-    ("arm_binding_value_1327", "arrows-overlap", 1334),
-    ("arm_binding_value_1327", "heads-or-logos-overlap", 1334),
 ];
 
 /// The invariants, by the name the failure list and messages use.
