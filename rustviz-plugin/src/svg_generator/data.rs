@@ -3873,6 +3873,10 @@ impl Event {
             Event::Move{ to, is: ResourceTy::Value(ResourceAccessPoint::Owner(Owner { temp_part: Some(part), .. })), ..} => {
                 hover_messages::event_dot_move_out_of_temporary(&self.deref_name(my_name), &to.name(), part)
             }
+            // `[c, _] => …`: only the element `pair[0]` moves out (#1285).
+            Event::Move{ is: is @ ResourceTy::Index(r, place, _), ..} if r.elems_left().is_some() => {
+                hover_messages::event_dot_move_to(place, is_plain(is))
+            }
             Event::Move{ to, is, ..} => {
                 let v = is_plain(is);
                 match to {
@@ -4679,6 +4683,12 @@ impl Visualizable for VisualizationData {
             // out, which those columns show; b keeps its heap
             // allocation, freed at its scope end (#898).
             (State::FullPrivilege{..}, Event::Move{is: ResourceTy::Deref(ResourceAccessPoint::Struct(Struct { is_box: true, .. })), ..}) =>
+                (*previous_state).clone(),
+            // `[c, _] => …` on an array that keeps its other elements
+            // (`Owner::elems_left`): one element moves out, and the array
+            // still holds the rest until its scope end, where they are
+            // dropped (#1285).
+            (State::FullPrivilege{..}, Event::Move{is: ResourceTy::Index(r, place, _), ..}) if !place.starts_with('*') && r.elems_left().is_some() =>
                 (*previous_state).clone(),
             // The current RAP's resource is moved
             (State::FullPrivilege{..}, Event::Move{to: to_ro,..}) =>

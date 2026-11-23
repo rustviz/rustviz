@@ -1811,6 +1811,32 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           }
         }
       }
+      // `[p, _]: [String; 2]`: the elements a `_` or `..` leaves stay in
+      // the parameter too (#1285).
+      PatKind::Slice(before, mid, after) => {
+        let rustc_middle::ty::TyKind::Array(ety, len) = ty.kind() else { return };
+        let Some(len) = len.try_to_target_usize(self.tcx) else { return };
+        let (len, front, back) = (len as usize, before.len(), after.len());
+        if front + back > len {
+          return;
+        }
+        for i in 0..len {
+          let sub = if i < front {
+            before.get(i)
+          } else if i >= len - back {
+            after.get(i - (len - back))
+          } else {
+            // `..` leaves the middle; `rest @ ..` takes it.
+            mid.filter(|m| !matches!(m.kind, PatKind::Wild))
+          };
+          let elem = format!("{}[{}]", path, i);
+          match sub {
+            Some(p) if i < front || i >= len - back => self.unbound_param_parts(p, *ety, elem, owner, out),
+            Some(_) => {}
+            None => if self.needs_drop(*ety, owner) { out.push(elem) },
+          }
+        }
+      }
       // A binding takes its part (by value, or a `ref` borrows it, #698);
       // `&pat` matches the caller's data.
       _ => {}
@@ -12155,7 +12181,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.skip_raps.insert(name);
     } else {
       let rap = self.raps.get(&name).unwrap().rap.to_owned();
-      self.match_rhs(ResourceTy::Value(rap), init, evt);
+      // `let [d, _] = duo;`: d is moved out of `duo[0]`, which leaves the
+      // rest in duo (#1285).
+      match self.slice_elem_source(hirid, &self.rap_or_field_through_ref(init)).filter(|_| matches!(evt, Evt::Move)) {
+        Some(elem) => self.add_ev(expr_to_line(init, &self.tcx), Evt::Move, ResourceTy::Value(rap), elem, false),
+        None => self.match_rhs(ResourceTy::Value(rap), init, evt),
+      }
       self.emit_holder_literal_borrows(&name, init);
       self.draw_kept_closure_borrows(&name, init);
     }
@@ -12905,7 +12936,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         PatKind::Binding(ann, ..) => matches!(ann.0, rustc_hir::ByRef::Yes(..)),
         _ => false,
       };
-      if not_by_value && self.move_into_literal(se, is_skipped).is_some() {
+      // Moved here, into the temporary or (when it has no column) into
+      // nothing: either way not again when the pattern's `_` is visited.
+      // With no column it used to be moved twice, which drew its
+      // fields' moves twice too (#1284).
+      let n_events = self.preprocessed_events.len();
+      if not_by_value && (self.move_into_literal(se, is_skipped).is_some() || self.preprocessed_events.len() > n_events) {
         self.premoved.insert(se.hir_id);
       }
     }

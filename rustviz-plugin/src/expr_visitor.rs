@@ -1976,6 +1976,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         ResourceTy::Index(..) => true,
         // `*slot = s` (#1168): s's fields go into the place slot points to.
         ResourceTy::Deref(_) | ResourceTy::DerefField(..) => true,
+        // `let (x, _) = (s, p);` with `p: P { a: i32 }`: the literal's
+        // temporary has no column when nothing the pattern leaves needs
+        // drop (#1163), so p moves to no column; its fields go with it
+        // all the same (#1284).
+        ResourceTy::Anonymous => true,
         _ => false,
       };
       if to_struct.is_none() && !pass_through {
@@ -6668,10 +6673,79 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         res.extend(sub.into_iter().map(|(r, e, ty)| {
           let partial = (copies_from_inside(&e, ty, parent_ty, parent)
             && !self.pointee_copies.contains_key(r.hash())).then_some(true);
-          (r, e, parent.clone(), partial)
+          let from = self.slice_elem_from(pat, &r, &e, parent);
+          (r, e, from, partial)
         }));
       }
     }
+  }
+
+  /// `[c, _] => …` on `match pair`, with pair an array of which some
+  /// elements stay (`Owner::elems_left`): c is moved out of `pair[0]`,
+  /// not out of all of pair (#1285). The move's source is that element,
+  /// `ResourceTy::Index(pair, "pair[0]")`, so pair's dot says only the
+  /// element is moved and its column goes on, holding the rest. `from`
+  /// otherwise.
+  pub fn slice_elem_from(&self, pat: &'tcx Pat<'tcx>, r: &ResourceAccessPoint, e: &Evt, from: &ResourceTy) -> ResourceTy {
+    if !matches!(e, Evt::Move) {
+      return from.clone();
+    }
+    let mut hirid = None;
+    pat.each_binding(|_, id, _, _| {
+      if hirid.is_none() && binding_name(&self.tcx, id) == *r.name() {
+        hirid = Some(id);
+      }
+    });
+    hirid.and_then(|id| self.slice_elem_source(id, from)).unwrap_or_else(|| from.clone())
+  }
+
+  /// The element place (`pair[0]`, or `three[1..3]` for a `rest @ ..`)
+  /// that the by-value binding `hirid` takes out of the array `from`
+  /// through a slice pattern, when `from` is an array some of whose
+  /// elements are left in it (`Owner::elems_left`, #1144, #1166). A name
+  /// bound inside an element's pattern (`[Some(a), _]`) takes from that
+  /// element. None for anything else.
+  pub fn slice_elem_source(&self, hirid: rustc_hir::HirId, from: &ResourceTy) -> Option<ResourceTy> {
+    use rustc_hir::Node;
+    let ResourceTy::Value(arr) = from else { return None };
+    let elems = arr.elems_left()?;
+    let typeck = self.tcx.typeck(hirid.owner);
+    if matches!(typeck.pat_binding_modes().get(hirid).map(|m| m.0), Some(rustc_hir::ByRef::Yes(..))) {
+      return None;
+    }
+    let len = (elems.moved.len() + elems.left.len()) as u64;
+    let mut child = hirid;
+    let mut place = None;
+    for (_, node) in self.tcx.hir_parent_iter(hirid) {
+      match node {
+        Node::Pat(p) => {
+          if let PatKind::Slice(before, mid, after) = p.kind {
+            // Only the outermost slice pattern matches the array itself.
+            if place.is_some() {
+              return None;
+            }
+            let rustc_middle::ty::TyKind::Array(_, n) = typeck.node_type(p.hir_id).kind() else { return None };
+            if n.try_to_target_usize(self.tcx)? != len {
+              return None;
+            }
+            let after_start = len.checked_sub(after.len() as u64)?;
+            place = if let Some(k) = before.iter().position(|q| q.hir_id == child) {
+              Some(format!("{}[{}]", arr.name(), k))
+            } else if let Some(k) = after.iter().position(|q| q.hir_id == child) {
+              Some(format!("{}[{}]", arr.name(), after_start + k as u64))
+            } else if mid.is_some_and(|q| q.hir_id == child) {
+              Some(format!("{}[{}..{}]", arr.name(), before.len(), after_start))
+            } else {
+              return None;
+            };
+          }
+          child = p.hir_id;
+        }
+        Node::PatField(_) => {}
+        _ => break,
+      }
+    }
+    Some(ResourceTy::Index(arr.clone(), place?, PlaceWrite::Update))
   }
 
   /// The reference `name` was just bound by copying (or, for `&mut`,
@@ -7888,16 +7962,15 @@ pub fn in_scrutinee_tuple(vars: &[ResourceAccessPoint], place: &ResourceAccessPo
 /// for a struct or tuple variable each of its part columns (#627). The
 /// literal moves `var` whole, so it's listed even when the pattern took
 /// some of its parts (`u` and `u.1` when `(p, (x, _))` moved `u.0` out
-/// of `(s, u)`). Copy parts, which have nothing to move, are left out.
+/// of `(s, u)`). Copy parts go too: `var` can't be used after it, nor
+/// can its `i32` fields (#1284).
 pub fn tuple_scrutinee_unbound(&self, var: &ResourceAccessPoint, taken: &[ResourceTy]) -> Vec<ResourceAccessPoint> {
     if taken.contains(&ResourceTy::Value(var.clone())) {
         return Vec::new();
     }
     let mut out = vec![var.clone()];
     for c in self.struct_children(var.name()) {
-        if !c.never_drops() {
-            out.extend(self.tuple_scrutinee_unbound(&c, taken));
-        }
+        out.extend(self.tuple_scrutinee_unbound(&c, taken));
     }
     out
 }

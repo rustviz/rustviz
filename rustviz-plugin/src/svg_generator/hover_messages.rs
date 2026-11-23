@@ -394,14 +394,14 @@ pub fn param_rest_dropped(fn_name: &str, parts: &[String]) -> String {
         .map(|p| if p.starts_with(|c: char| c.is_ascii_digit()) { format!(".{}", p) } else { p.clone() })
         .map(|p| styled_name_html(&p))
         .collect();
-    let (list, verb) = match names.as_slice() {
-        [one] => (one.clone(), "is"),
-        [init @ .., last] => (format!("{} and {}", init.join(", "), last), "are"),
-        [] => (String::new(), "is"),
+    let (list, stays, verb) = match names.as_slice() {
+        [one] => (one.clone(), "it stays", "is"),
+        [init @ .., last] => (format!("{} and {}", init.join(", "), last), "they stay", "are"),
+        [] => (String::new(), "it stays", "is"),
     };
     format!(
-        "The pattern doesn't bind the argument's {0}, so it stays in the parameter and {1} dropped when {2} returns",
-        list, verb, styled_name_html(fn_name)
+        "The pattern doesn't bind the argument's {0}, so {1} in the parameter and {2} dropped when {3} returns",
+        list, stays, verb, styled_name_html(fn_name)
     )
 }
 
@@ -3125,6 +3125,29 @@ pub fn state_partly_moved(my_name: &String, moved: &[String], maybe: bool) -> St
     )
 }
 
+// The line of an array a slice pattern moved some elements out of
+// (`[c, _] => …`, #1285): the elements `left` stay in it, and are dropped
+// at its scope end, but it can't be used as a whole any more. `maybe`:
+// moved on some paths through a conditional above only.
+pub fn state_elems_moved(my_name: &String, moved: &[String], left: &[String], maybe: bool) -> String {
+    fn list(names: &[String]) -> String {
+        let fmt: Vec<String> = names.iter().map(|m| styled_name_html(m)).collect();
+        match fmt.as_slice() {
+            [init @ .., last] if !init.is_empty() => format!("{} and {}", init.join(", "), last),
+            _ => fmt.concat(),
+        }
+    }
+    let verb = match (moved.len() > 1, maybe) {
+        (_, true) => "may have been",
+        (true, false) => "were",
+        (false, false) => "was",
+    };
+    format!(
+        "{0} is partially moved: {1} {2} moved out, so {0} can't be used as a whole; {3} {4} still in it",
+        styled_name_html(my_name), list(moved), verb, list(left), if left.len() > 1 { "are" } else { "is" }
+    )
+}
+
 pub fn state_full_privilege_value(my_name: &String) -> String {
     format!("{0} holds a value", styled_name_html(my_name))
 }
@@ -3594,6 +3617,23 @@ pub fn event_dot_branch_merge_moved(my_name: &String) -> String {
     format!(
         "{0} may have been moved (consumed in at least one branch above)",
         my_name_fmt
+    )
+}
+
+/// The join after branches some of which took elements out of the array
+/// with a slice pattern (`[a, _, _] => …`, #1285): the array can't be used
+/// as a whole after it, but the elements no pattern takes stay in it.
+pub fn event_dot_branch_merge_elems_moved(my_name: &String, moved: &[String], left: &[String]) -> String {
+    let list = |names: &[String]| {
+        let fmt: Vec<String> = names.iter().map(|m| styled_name_html(m)).collect();
+        match fmt.as_slice() {
+            [init @ .., last] if !init.is_empty() => format!("{} and {}", init.join(", "), last),
+            _ => fmt.concat(),
+        }
+    };
+    format!(
+        "{1} may have been moved out of {0} in a branch above, so {0} can't be used as a whole; {2} {3} still in it",
+        styled_name_html(my_name), list(moved), list(left), if left.len() > 1 { "are" } else { "is" }
     )
 }
 

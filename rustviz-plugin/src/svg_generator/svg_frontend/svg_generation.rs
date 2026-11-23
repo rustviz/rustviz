@@ -189,6 +189,28 @@ fn writes_part_of_lender_ended_on_line(e: &ExternalEvent, group: &[ExternalEvent
         .any(|g| ResourceAccessPoint_extract(g).1.extract_rap().is_some_and(|l| l.hash() == owner.hash()))
 }
 
+/// Whether `d`, a move (or copy) of a struct's field that names no
+/// destination column (`propagate_struct_transfer`), goes with the move
+/// of the whole struct that the line's arrow `e` draws: `*r = t;` moves
+/// `t.name` with `t`. It belongs on the row of that arrow. Appended in
+/// the line's order, after its stacked arrows, it landed on the row
+/// below (where `r`'s borrow ends), so `t.name` was still drawn owned
+/// after `t` was moved as a whole (#1283).
+fn part_moves_with_whole(d: &ExternalEvent, e: &ExternalEvent) -> bool {
+    let transfer = |x: &ExternalEvent| matches!(x, ExternalEvent::Move { is_partial: false, .. } | ExternalEvent::Copy { is_partial: false, .. });
+    if !transfer(d) || !transfer(e) || matches!(d, ExternalEvent::Move { .. }) != matches!(e, ExternalEvent::Move { .. }) {
+        return false;
+    }
+    let (ResourceTy::Value(part), to) = ResourceAccessPoint_extract(d) else { return false };
+    if !matches!(to, ResourceTy::Anonymous | ResourceTy::Caller) {
+        return false;
+    }
+    let ResourceTy::Value(whole @ ResourceAccessPoint::Struct(_)) = ResourceAccessPoint_extract(e).0 else { return false };
+    part.is_member()
+        && part.name().starts_with(&format!("{}.", whole.name()))
+        && (part.get_owner() == *whole.hash() || (whole.is_member() && part.get_owner() == whole.get_owner()))
+}
+
 /// Whether `e`, an event of a line that draws no arrow, binds a variable
 /// that one of the line's stacked arrows (`group`) copies or moves out
 /// of: `let k = { let t = m * 2; t };` binds `t` and copies it into `k`
@@ -562,7 +584,8 @@ pub fn mutate_branch_lines(
                             .map(|(_, p_e)| p_e.clone())
                             .collect();
                         let own_row: HashSet<usize> = rest.iter()
-                            .filter(|p_e| binds_source_of_line(p_e, &ev) || follows_arrival_on_line(p_e, &ev, &rest))
+                            .filter(|p_e| binds_source_of_line(p_e, &ev) || follows_arrival_on_line(p_e, &ev, &rest)
+                                || front.iter().any(|g| part_moves_with_whole(p_e, g)))
                             .map(|p_e| p_e.get_id())
                             .collect();
                         for (l, p_e) in b_data.e_data[i + 1..].iter_mut() {
@@ -1027,6 +1050,13 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                     && !from_fn;
                 let into_unmodelled_place = matches!(to, ResourceTy::Anonymous | ResourceTy::Temporary { .. })
                     && !matches!(from, ResourceTy::Anonymous);
+                // A pattern's binding of a literal's element (`n` in `(s,
+                // n) => …` on `match (&t, 1)`): an arrow from nowhere,
+                // which gives the variable its value. Left out, n's
+                // column never got one (#1281).
+                let bound_from_literal = is_transfer
+                    && matches!(from, ResourceTy::Anonymous)
+                    && matches!(to, ResourceTy::Value(r) if !r.is_fn() && !r.is_closure());
                 let is_borrow = matches!(event, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. });
                 let borrow_of_temporary = is_borrow
                     && matches!(from, ResourceTy::Anonymous)
@@ -1076,6 +1106,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                     }
                 }
                 if (is_transfer && (from_fn || into_fn || matches!(to, ResourceTy::Caller) || into_unmodelled_place))
+                    || bound_from_literal
                     || borrow_of_temporary
                     || kept_by_returned_closure
                     || ref_param_ends
@@ -1137,6 +1168,12 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                             visualization_data.append_processed_external_event(e.clone(), row);
                         }
                         skippable_ev.insert(e.get_id()); // they all become skippable
+                        // The struct's fields move with it, on its row (#1283).
+                        for d in rest_of_line.iter().filter(|d| part_moves_with_whole(d, e)) {
+                            if skippable_ev.insert(d.get_id()) {
+                                visualization_data.append_processed_external_event(d.clone(), row);
+                            }
+                        }
                     }
                     // What later uses or ends a variable an arrow moved
                     // into shares the arrival's dot (#1223).
