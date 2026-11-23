@@ -3498,21 +3498,22 @@ fn deep_lend_title(event: &Event, visualization_data: &VisualizationData) -> Opt
     // (Also a call in a conditional's arm.)
     let deep = all_external_events(visualization_data).into_iter().find_map(|(_, ev)| match ev {
         ExternalEvent::PassByStaticReference { id: i, deep: Some(d), .. }
-        | ExternalEvent::PassByMutableReference { id: i, deep: Some(d), .. } if *i == id => Some(*d),
+        | ExternalEvent::PassByMutableReference { id: i, deep: Some(d), .. } if *i == id => Some(d.clone()),
         _ => None,
     })?;
     // (Or a Box holding a reference, `k.push('!')` with `k: Box<&mut
     // String>`, #1282: the reference `*k` it holds says what the call
-    // can do through k.)
+    // can do through k. Or an array element holding one, `k[0]`, #1319.)
     let r = match is {
         ResourceTy::Value(r) if r.is_ref() || deep.held_mut.is_some() => r,
         _ => return None,
     };
     let borrower = other.name();
+    let pointer = deep.pointer(r.name());
     Some(if end {
-        hover_messages::event_dot_reacquire_deep(r.name(), deep.derefs, &borrower, deep.holds_value)
+        hover_messages::event_dot_reacquire_deep(&pointer, &borrower, deep.holds_value)
     } else {
-        hover_messages::event_dot_lend_deep(r.name(), deep.derefs, &borrower, mutable, deep.held_mut.unwrap_or(r.is_mutref()), deep.holds_value)
+        hover_messages::event_dot_lend_deep(r.name(), &pointer, &deep.via(r.name()), &borrower, mutable, deep.held_mut.unwrap_or(r.is_mutref()), deep.holds_value)
     })
 }
 
@@ -7620,6 +7621,21 @@ fn render_branches(
             let end_state = branch.states.last()
                 .map(|s| s.2.clone())
                 .unwrap_or(State::OutOfScope);
+            // A reference whose borrow ended in every arm of a conditional
+            // that ends this arm (`else if let … && bump(r) { … } else { …
+            // }`, a `match` or an `if` / `else` nested in an `else`, each
+            // arm ending r's borrow, #1326): that conditional's join dot
+            // says so, and the rest of this arm, down to its own join, is
+            // the dashed "borrow has ended" rest, as on an arm that ended
+            // the borrow itself. Left out, the nested join had no leg on.
+            let end_state = match (&end_state, branch.e_data.last()) {
+                (State::OutOfScope, Some((_, Event::Branch { branch_history: inner, ty: inner_ty, .. })))
+                    if rap.is_ref() && !branch.diverges
+                        && all_paths_present(inner_ty, inner.len())
+                        && inner.iter().all(|b| ends_borrow(&b.e_data)) =>
+                    State::FullPrivilege { s: LineState::Uninit },
+                _ => end_state,
+            };
 
             // Build segments. Empty-classified states drop out so
             // a Move (anywhere) ends the visible run there.

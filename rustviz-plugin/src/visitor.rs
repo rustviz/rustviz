@@ -1451,7 +1451,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // `k.push('!')` with `k: Box<&mut String>` reborrows through the
     // reference k's Box holds (`&mut **k`), as `r.push('!')` does
     // through r: k itself isn't borrowed, nor need it be `mut` (#1282).
-    let through_held_ref = deep.is_some_and(|d| d.held_mut.is_some());
+    let through_held_ref = deep.as_ref().is_some_and(|d| d.held_mut.is_some());
     let autoref = if is_method_autoref(rcvr, self.tcx.typeck(rcvr.hir_id.owner)) && !through_held_ref {
       ImplicitRef::Autoref
     } else {
@@ -1493,7 +1493,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                     _ => is_implicit_mut_reborrow(rcvr, typeck) || is_explicit_reborrow(rcvr, typeck),
                   };
                   let result_has_lifetime = call_result_has_lifetime(expr, typeck);
-                  self.add_pass_by_mref_ev_deep(line_num, ResourceTy::Value(fn_rap.clone()), ResourceTy::Value(rcvr_rap.clone()), is_reborrow, result_has_lifetime, autoref, of_ref_var, deep);
+                  self.add_pass_by_mref_ev_deep(line_num, ResourceTy::Value(fn_rap.clone()), ResourceTy::Value(rcvr_rap.clone()), is_reborrow, result_has_lifetime, autoref, of_ref_var, deep.clone());
                 },
                 AutoBorrowMutability::Not => {
                   let refcell_borrow_mut = self.is_refcell_borrow_mut_call(expr);
@@ -1502,7 +1502,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                   let rcvr_ty = self.tcx.typeck(rcvr.hir_id.owner).node_type(rcvr.hir_id);
                   let pointee_interior_mut = rcvr_rap.is_ref() && !of_ref_var && matches!(rcvr_rty, ResourceTy::Value(_))
                     && rcvr_ty.builtin_deref(true).is_some_and(|t| self.ty_has_interior_mut(t, rcvr.hir_id.owner) == InteriorMut::Yes);
-                  self.add_pass_by_sref_ev_full(line_num, ResourceTy::Value(fn_rap.clone()), rcvr_rty.clone(), autoref, refcell_borrow_mut, pointee_interior_mut, of_ref_var, deep);
+                  self.add_pass_by_sref_ev_full(line_num, ResourceTy::Value(fn_rap.clone()), rcvr_rty.clone(), autoref, refcell_borrow_mut, pointee_interior_mut, of_ref_var, deep.clone());
                 }
                 _ => {}
               }
