@@ -4550,6 +4550,23 @@ pub struct StructsInfo {
     pub structs: Vec<(i64, i64, i64, i64, i64)>,
 }
 
+/// A field's borrows from, or borrow ends to, several lenders on one row
+/// (`let d = two(&s1, &s2);` with `Two<'a> { a: &'a str, b: &'a str }`,
+/// or the end of a field a conditional's arms pointed at different
+/// lenders): a field holds one reference, so it points into one of them,
+/// and the borrow checker keeps all of them borrowed while it is in use.
+/// One arrow is drawn per field (#1354), from or to the first lender in
+/// source order, and its tooltip names all of them.
+#[derive(Clone, Debug)]
+pub struct FieldLenders {
+    /// Every lender, in source order.
+    pub lenders: Vec<String>,
+    /// This event's arrow is the one drawn (the others are left out).
+    pub drawn: bool,
+    /// The group is the field's borrow ending, not starting.
+    pub end: bool,
+}
+
 // VisualizationData supplies all the information we need in the frontend,
 // from rendering a PNG to px roducing an interactive HTML guide.
 // The internal data is simple: a map from variable hash to its Timeline.
@@ -4600,6 +4617,12 @@ pub struct VisualizationData {
     /// `struct_write_tracks`); the renderer draws a line's tracks half a
     /// row apart instead of a whole row per arrow.
     pub arrow_tracks: HashMap<usize, usize>,
+
+    /// The borrows into, and ends out of, a reference field that may
+    /// point into any of several lenders (#1354): event id -> the
+    /// lenders and whether that event's arrow is the one drawn. Filled
+    /// in by `render_svg` (`timeline_panel::field_lender_groups`).
+    pub field_lenders: HashMap<usize, FieldLenders>,
 
     /// Notes on dots saying what is simplified (`ApproxNote`), in the
     /// order the plugin found them.

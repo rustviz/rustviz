@@ -1826,6 +1826,7 @@ pub fn render_svg(
     let svg_code_template = CODE_PANEL_TEMPLATE;
     let svg_timeline_template = TIMELINE_PANEL_TEMPLATE;
     visualization_data.compute_states();
+    visualization_data.field_lenders = timeline_panel::field_lender_groups(visualization_data);
 
     // println!("timelines {:#?}", visualization_data.timelines);
     

@@ -47,6 +47,7 @@ impl Rustviz {
       binding_columns,
       moves_out_first: moves_out_first.into_iter().collect(),
       arrow_tracks: HashMap::new(),
+      field_lenders: HashMap::new(),
       approx_notes,
       row_lines: Vec::new(),
       raised_headers: HashSet::new(),
