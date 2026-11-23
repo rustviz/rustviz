@@ -3136,20 +3136,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// `**r`, not `*r` (#952).
   ///
   /// Also a local `Box` holding a reference that rustc derefs through
-  /// (`k.push('!')` with `k: Box<&mut String>` borrows `**k`, #1282).
+  /// (`k.push('!')` with `k: Box<&mut String>` borrows `**k`, #1282),
+  /// and an element of a local array holding one (`k[0].push('!')` with
+  /// `k: [&mut String; 1]` borrows `*k[0]`, #1319).
   pub fn deep_place(&self, e: &'tcx Expr<'tcx>) -> Option<DeepPlace> {
     let typeck = self.tcx.typeck(e.hir_id.owner);
     let owner = e.hir_id.owner;
     let holds_value = |place_ty: Ty<'tcx>| matches!(place_ty.kind(), TyKind::Str)
       || self.ty_is_copy(place_ty, owner) || self.ty_is_plain(place_ty, owner);
     if let Some((derefs, place_ty, held_mut)) = boxed_ref_deref_depth(e, typeck) {
-      return Some(DeepPlace { derefs: derefs - 1, holds_value: holds_value(place_ty), held_mut: Some(held_mut) });
+      return Some(DeepPlace { derefs: derefs - 1, holds_value: holds_value(place_ty), held_mut: Some(held_mut), elem: None });
+    }
+    if let Some((elem, derefs, place_ty, held_mut)) = array_elem_ref_deref_depth(e, typeck) {
+      let text = self.tcx.sess.source_map().span_to_snippet(elem.span).ok()?;
+      return Some(DeepPlace { derefs, holds_value: holds_value(place_ty), held_mut: Some(held_mut), elem: Some(text) });
     }
     let (derefs, place_ty) = borrowed_deref_depth(e, typeck)?;
     if derefs < 2 {
       return None;
     }
-    Some(DeepPlace { derefs: derefs - 1, holds_value: holds_value(place_ty), held_mut: None })
+    Some(DeepPlace { derefs: derefs - 1, holds_value: holds_value(place_ty), held_mut: None, elem: None })
   }
 
   /// After a call `callee(args)`: if `callee` names a local closure
@@ -5101,6 +5107,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // `show_str(r)` with `r: &&String` and `show_str(s: &String)`
       // borrows `**r` (#952).
       let deep = if of_ref_var { None } else { self.deep_place(arg) };
+      // `takes(&mut *k[0])` with k an array of references (#1319): drawn
+      // on k's column as a reborrow through k[0], not as a borrow of `*k`.
+      let from_ro = match (&from_ro, &deep) {
+        (ResourceTy::Deref(r), Some(DeepPlace { elem: Some(_), .. })) => ResourceTy::Value(r.clone()),
+        _ => from_ro,
+      };
       match arg_ty.ref_mutability().unwrap() {
         Mutability::Not => {
           // `bump(rc)` with `rc: &Cell<i32>` (#1149): bump can change

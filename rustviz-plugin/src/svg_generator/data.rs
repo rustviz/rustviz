@@ -1381,11 +1381,30 @@ impl StoredIn {
 /// call borrows what the reference `*k` points to, through k, not k's
 /// Box (#1282). `held_mut` is then that reference's mutability; `None`
 /// for a receiver that is itself a reference.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Or an element of a local array that holds a reference (`k[0].push('!')`
+/// with `k: [&mut String; 1]`, #1319): `elem` is that element as written
+/// (`k[0]`), `derefs` counts the derefs past it, and `held_mut` is set as
+/// for a Box.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeepPlace {
     pub derefs: usize,
     pub holds_value: bool,
     pub held_mut: Option<bool>,
+    pub elem: Option<String>,
+}
+
+impl DeepPlace {
+    /// The reference pointing to what the call borrows (`*r`, `*k`,
+    /// `k[0]`), for the column of variable `name`.
+    pub fn pointer(&self, name: &str) -> String {
+        format!("{}{}", "*".repeat(self.derefs), self.via(name))
+    }
+
+    /// What the call borrows through: the element (`k[0]`), else the
+    /// variable `name` itself.
+    pub fn via(&self, name: &str) -> String {
+        self.elem.clone().unwrap_or_else(|| name.to_owned())
+    }
 }
 /// Where a value an `FnOnce` closure captured by value ends up when
 /// the closure is called, from the closure body's MIR (#271).

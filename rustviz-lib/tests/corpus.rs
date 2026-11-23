@@ -23884,6 +23884,33 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from i6.p to n6",
         ],
     },
+    TooltipExpect {
+        name: "array_elem_mut_ref_1319",
+        // #1319: `k[0].push('!')` with `k: [&mut String; 1]` reborrows the
+        // String through the reference in k[0] (k needn't be `mut`); k's
+        // own value isn't borrowed. main said "k's value is mutably
+        // borrowed by push", and "*k's resource" for `takes(&mut *k[0])`.
+        must_contain: &[
+            "the resource k[0] points to is mutably borrowed by push through k[0]; k can't be used while the borrow is live",
+            "push reads and writes through k[0] (mutable reborrow — k can't be used until push returns)",
+            "push no longer borrows the resource k[0] points to",
+            "the resource k[0] points to is mutably borrowed by takes through k[0]; k can't be used while the borrow is live",
+            "takes reads and writes through k[0] (mutable reborrow — k can't be used until takes returns)",
+            "the resource k[0] points to is immutably borrowed by len through k[0]; k is read-only while the borrow is live",
+            "len reads from k[0]",
+            // `[s]` with s a `&String`: a read through the shared reference.
+            "the resource k[0] points to is immutably borrowed by len",
+        ],
+        must_not_contain: &[
+            "k's value is mutably borrowed by push",
+            "k's value is mutably borrowed by takes",
+            "k's value is immutably borrowed by len",
+            "=push reads and writes through k (mutable reborrow — k can't be used until push returns)",
+            "k's value is no longer mutably borrowed",
+            "*k's resource",
+            "*k can't be used",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -32954,6 +32981,40 @@ fn a_reference_declared_in_a_one_line_arm_ends_its_borrow_there() {
         assert_eq!(at.len(), 1, "{:?}: {:?}", text, at);
         let end = dots_listing_tooltip(&tl, &format!("{}'s immutable borrow ends", r));
         assert_eq!(at[0].1, end[0].1, "{:?} on {}'s end's row", text, r);
+    }
+}
+
+/// #1326: a reference whose borrow ended in every arm of an `else if`
+/// (or of an `if` / `match` ending the outer `else`): from that inner
+/// join a leg runs on, down towards the outer join, dashed ("borrow has
+/// ended on this path"). main drew the inner join with nothing leaving it.
+#[test]
+fn ended_borrow_inner_join_has_a_leg_on() {
+    let tl = run_with_local_backend("edition2024/else_if_ended_borrow_join_1326").timeline_panel_string();
+    let dot = |id: &str| -> (f64, f64) {
+        let t = start_tags(&tl, "circle").into_iter().find(|t| attr(t, "data-rv-id") == Some(id))
+            .unwrap_or_else(|| panic!("no dot {}", id));
+        (attr(t, "cx").unwrap().parse().unwrap(), attr(t, "cy").unwrap().parse().unwrap())
+    };
+    let near = |p: (f64, f64), q: (f64, f64)| (p.0 - q.0).abs() < 3.0 && (p.1 - q.1).abs() < 3.0;
+    for (var, inner, outer) in [
+        ("r6", "r6@L19:dot:branch_join", "r6@L19:dot:branch_join#2"),
+        ("r", "r@L33:dot:branch_join", "r@L33:dot:branch_join#2"),
+        ("r", "r@L47:dot:branch_join", "r@L47:dot:branch_join#2"),
+        ("r", "r@L62:dot:branch_join", "r@L64:dot:branch_join"),
+        ("r", "r@L78:dot:branch_join", "r@L79:dot:branch_join"),
+    ] {
+        let (i, o) = (dot(inner), dot(outer));
+        assert!(i.1 < o.1 && i.0 > o.0, "{}: inner join {:?} right of and above the outer {:?}", inner, i, o);
+        let leaves = start_tags(&tl, "line").into_iter().any(|t| {
+            if attr(t, "data-rv-var") != Some(var) || attr(t, "data-rv-kind") != Some("branch_line") {
+                return false;
+            }
+            let n = |a: &str| attr(t, a).and_then(|v| v.parse::<f64>().ok()).unwrap_or(f64::NAN);
+            let (a, b) = ((n("x1"), n("y1")), (n("x2"), n("y2")));
+            (near(a, i) && b.1 > i.1 + 1.0) || (near(b, i) && a.1 > i.1 + 1.0)
+        });
+        assert!(leaves, "{}: no leg leaves the inner join downwards", inner);
     }
 }
 

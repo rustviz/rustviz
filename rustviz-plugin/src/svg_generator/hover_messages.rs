@@ -1719,25 +1719,31 @@ pub fn event_dot_reacquire_through_ref(ref_name: &String, borrower: Option<&Stri
 // reference `*r` that r points to (#952). `derefs`: how many `*` name
 // the reference that points to the borrowed place (1 for `**r`).
 // Otherwise as event_dot_lend_through_ref.
-pub fn event_dot_lend_deep(ref_name: &String, derefs: usize, target_name: &String, mutable: bool, ref_is_mut: bool, holds_value: bool) -> String {
+// `pointer`: the reference pointing to what's borrowed (`*r`, `*k`, or
+// an array element `k[0]`, #1319); `via`: what the call borrows through
+// (r, k, k[0]); `ref_name`: the column's variable, which can't be used
+// meanwhile (for `k[0]`, rustc's borrow checker counts any use of k's
+// elements as a conflict).
+pub fn event_dot_lend_deep(ref_name: &String, pointer: &str, via: &str, target_name: &String, mutable: bool, ref_is_mut: bool, holds_value: bool) -> String {
     let r = styled_name_html(ref_name);
-    let place = styled_name_html(&format!("{}{}", "*".repeat(derefs), ref_name));
+    let place = styled_name_html(pointer);
+    let via = styled_name_html(via);
     let t = styled_name_html(target_name);
     let noun = held(holds_value);
     match (mutable, ref_is_mut) {
         (true, _) => format!(
-            "the {3} {0} points to is mutably borrowed by {1} through {2}; {2} can't be used while the borrow is live",
-            place, t, r, noun),
+            "the {3} {0} points to is mutably borrowed by {1} through {4}; {2} can't be used while the borrow is live",
+            place, t, r, noun, via),
         (false, true) => format!(
-            "the {3} {0} points to is immutably borrowed by {1} through {2}; {2} is read-only while the borrow is live",
-            place, t, r, noun),
+            "the {3} {0} points to is immutably borrowed by {1} through {4}; {2} is read-only while the borrow is live",
+            place, t, r, noun, via),
         (false, false) => format!("the {2} {0} points to is immutably borrowed by {1}", place, t, noun),
     }
 }
 
 // Where the borrow of event_dot_lend_deep ends.
-pub fn event_dot_reacquire_deep(ref_name: &String, derefs: usize, borrower: &String, holds_value: bool) -> String {
-    let place = styled_name_html(&format!("{}{}", "*".repeat(derefs), ref_name));
+pub fn event_dot_reacquire_deep(pointer: &str, borrower: &String, holds_value: bool) -> String {
+    let place = styled_name_html(pointer);
     format!("{1} no longer borrows the {2} {0} points to", place, styled_name_html(borrower), held(holds_value))
 }
 
@@ -5481,7 +5487,7 @@ pub fn event_dot_closure_go_out_of_scope_maybe_moved(my_name: &String, by_cond: 
  * geometry; the words live here, so every message can be checked
  * against Rust's semantics in one file. */
 
-use crate::svg_generator::data::{ExternalEvent, Function, LoopHead, ImplicitRef, ResourceTy, StoredIn, holds_copy_value, rc_call_of, returned_closure};
+use crate::svg_generator::data::{DeepPlace, ExternalEvent, Function, LoopHead, ImplicitRef, ResourceTy, StoredIn, holds_copy_value, rc_call_of, returned_closure};
 
 // set style for code string
 static SPAN_BEGIN : &'static str = "&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;";
@@ -5677,6 +5683,14 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
 pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, from_variable: &ResourceTy) -> String {
     let styled_fn_name = styled_name_html(&function.name);
     let styled_from_name = styled_name_html(&from_variable.name());
+    // `k[0].push('!')` with k an array of `&mut String` (#1319): push
+    // writes through the reference in k[0], not through k's value.
+    let styled_via = match external_event {
+        ExternalEvent::PassByMutableReference { deep: Some(d @ DeepPlace { elem: Some(_), .. }), .. }
+        | ExternalEvent::PassByStaticReference { deep: Some(d @ DeepPlace { elem: Some(_), .. }), .. } =>
+            styled_name_html(&d.via(&from_variable.name())),
+        _ => styled_from_name.clone(),
+    };
 
         let title_fn = match external_event {
             ExternalEvent::PassByStaticReference { .. } => " reads from ",
@@ -5835,7 +5849,7 @@ pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, fro
                 matches!(external_event, ExternalEvent::PassByStaticReference { refcell_borrow_mut: true, .. }));
             alt.map_or(msg.clone(), |a| with_break_alt_lend(&msg, a)) + &stored_suffix
         } else {
-            format!("{}{}{}{}{}{}{}", styled_fn_name, title_fn, styled_from_name, alt_suffix, implicit_suffix, reborrow_suffix, stored_suffix)
+            format!("{}{}{}{}{}{}{}", styled_fn_name, title_fn, styled_via, alt_suffix, implicit_suffix, reborrow_suffix, stored_suffix)
         }
 }
 

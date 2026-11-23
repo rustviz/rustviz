@@ -1321,6 +1321,53 @@ pub fn boxed_ref_deref_depth<'tcx>(e: &Expr<'tcx>, typeck: &TypeckResults<'tcx>)
   (n >= 2).then_some((n, ty, held_mut))
 }
 
+/// `borrowed_deref_depth` for an element of a local array that holds a
+/// reference, which rustc derefs through before borrowing:
+/// `k[0].push('!')` / `takes(k[0])` with `k: [&mut String; 1]` borrow
+/// `*k[0]`, the String the reference `k[0]` points to, not k (#1319).
+/// Array indexing is built in, so only that element is borrowed through,
+/// and k needn't be `mut`. `Some((the indexed element expression, derefs
+/// past it, the borrowed place's type, whether the reference just before
+/// it is a `&mut`))`. Not a `Vec` (its `IndexMut` borrows the Vec
+/// itself) or a slice reached through a reference. Also a written
+/// reborrow, `takes(&mut *k[0])`.
+pub fn array_elem_ref_deref_depth<'tcx, 'a>(e: &'a Expr<'tcx>, typeck: &TypeckResults<'tcx>) -> Option<(&'a Expr<'tcx>, usize, Ty<'tcx>, bool)> {
+  let (mut elem, written_borrow) = match e.kind {
+    ExprKind::AddrOf(rustc_hir::BorrowKind::Ref, _, operand) => (operand, true),
+    _ => (e, false),
+  };
+  let mut written = 0;
+  while let ExprKind::Unary(UnOp::Deref, inner) = elem.kind {
+    elem = inner;
+    written += 1;
+  }
+  let ExprKind::Index(coll, ..) = elem.kind else { return None };
+  if typeck.is_method_call(elem)
+    || !matches!(coll.kind, ExprKind::Path(QPath::Resolved(_, Path { res: Res::Local(_), .. })))
+    || !matches!(typeck.expr_ty(coll).kind(), rustc_middle::ty::TyKind::Array(..))
+  {
+    return None;
+  }
+  let adjs = typeck.expr_adjustments(e);
+  let auto = if written_borrow {
+    0
+  } else if matches!(adjs.last().map(|a| &a.kind), Some(Adjust::Borrow(AutoBorrow::Ref(..)))) {
+    adjs.iter().take_while(|a| matches!(a.kind, Adjust::Deref(DerefAdjustKind::Builtin))).count()
+  } else {
+    return None;
+  };
+  let mut ty = typeck.expr_ty(elem);
+  let mut n = 0;
+  let mut last_ref = None;
+  while n < written + auto {
+    let rustc_middle::ty::TyKind::Ref(_, t, m) = ty.kind() else { return None };
+    last_ref = Some(m.is_mut());
+    ty = *t;
+    n += 1;
+  }
+  Some((elem, n - 1, ty, last_ref?))
+}
+
 /// True iff the method receiver `rcvr` hands the callee a reference to
 /// the local reference variable r itself, not to what r points to:
 /// `r.show()` autoref'd (`fn show(&self)` with Self = `&String`), or
