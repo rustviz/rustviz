@@ -1187,8 +1187,8 @@ fn render_branch_dots(
                 dot_x: timeline_data.x_val,
                 dot_y: if collapsed {
                     get_y_axis_pos(*split_point) - COLLAPSED_APEX
-                } else if CollapsedApexes::of(history).raised_splits.contains(split_point) {
-                    get_y_axis_pos(*split_point) - PATTERN_SPLIT_RISE
+                } else if let Some(rise) = CollapsedApexes::of(history).raised_splits.get(split_point) {
+                    get_y_axis_pos(*split_point) - rise
                 } else {
                     get_y_axis_pos(*line_number)
                 },
@@ -1289,7 +1289,11 @@ fn render_branch_dots(
             )
         });
         let cx = timeline_data.x_val;
-        let cy = get_y_axis_pos(*merge_point) + if collapsed { COLLAPSED_APEX } else { 0 };
+        let cy = get_y_axis_pos(*merge_point) + if collapsed {
+            COLLAPSED_APEX
+        } else {
+            -join_rise(visualization_data, hash, history, *split_point, *merge_point)
+        };
         // A reference declared before the conditional whose
         // borrow ended in every arm (`end_outer_borrows_in_arms`).
         let borrow_ended_in_every_arm = is.extract_rap().is_some_and(|r| r.is_ref())
@@ -1367,11 +1371,19 @@ fn render_branch_dots(
             // and the scope end or next assignment says what's dropped.
             let entry_maybe_init = history.iter().position(|(_, e)| std::ptr::eq(e, event))
                 .is_some_and(|k| matches!(init_after(None, &history[..k]), Some(InitJoin::Maybe { .. } | InitJoin::Loop)));
-            (unassigned_everywhere && !entry_maybe_init).then(|| {
-                let mut leavers = Vec::new();
-                assigned_by_leavers(branch_history, &mut leavers);
-                hover_messages::event_dot_branch_merge_still_unassigned(&is.real_name(), &leavers)
-            })
+            let mut leavers = Vec::new();
+            assigned_by_leavers(branch_history, &mut leavers);
+            if unassigned_everywhere && !entry_maybe_init {
+                Some(hover_messages::event_dot_branch_merge_still_unassigned(&is.real_name(), &leavers))
+            } else if unassigned_everywhere && !leavers.is_empty() {
+                // The arms that get here draw it as maybe holding no
+                // value, and their lines reach the join (#1293): what's
+                // dropped is still for the scope end or next assignment
+                // to say.
+                Some(hover_messages::event_dot_branch_merge_maybe_still_unassigned(&is.real_name(), &leavers))
+            } else {
+                None
+            }
         } else if mixed_moved {
             // Mixed: at least one branch moved, at least
             // one didn't (counting the implicit untouched
@@ -1487,8 +1499,14 @@ fn render_branch_dots(
         // its own join, a reference's borrow ended in every arm),
         // the dot would float: its text goes on the column's next
         // dot instead, the scope end or the next event (#702).
+        // An arm still mutably lent out at the join (`r = &mut s` in it)
+        // reaches it with a dotted line. Where the column goes on after
+        // the join, so does that line (#722), and the text goes on the
+        // column's next dot; where it doesn't (another arm moved s),
+        // the line ends at the join, and the dot is drawn (#1297).
         let join_has_line = branch_history.iter().any(|b| {
-            !b.diverges && line_drawn(rap, &b.states.last().map_or(State::OutOfScope, |s| s.2.clone()))
+            let end = b.states.last().map_or(State::OutOfScope, |s| s.2.clone());
+            !b.diverges && (line_drawn(rap, &end) || (mixed_moved && seg_drawn(rap, &end)))
         });
         match title {
             Some(title) if join_has_line => {
@@ -2581,7 +2599,7 @@ fn ends_several_loans_title(event: &Event, history: &[(usize, Event)], line: usi
 // arm's events), looking into conditionals nested in it.
 fn first_borrow_end(history: &[(usize, Event)]) -> Option<usize> {
     history.iter().filter_map(|(l, e)| match e {
-        Event::StaticDie { .. } | Event::MutableDie { .. } => Some(*l),
+        Event::StaticDie { .. } | Event::MutableDie { .. } | Event::OrAltBorrow { end: true, .. } => Some(*l),
         Event::Branch { branch_history, .. } => branch_history.iter().filter_map(|b| first_borrow_end(&b.e_data)).min(),
         _ => None,
     }).min()
@@ -2591,7 +2609,9 @@ fn first_borrow_end(history: &[(usize, Event)]) -> Option<usize> {
 // possibly in every arm of a conditional nested in it.
 fn ends_borrow(history: &[(usize, Event)]) -> bool {
     history.iter().any(|(_, e)| match e {
-        Event::StaticDie { .. } | Event::MutableDie { .. } => true,
+        // (`OrAltBorrow`'s end: a let-chain's arm, where the reference
+        // may point at either place, #603.)
+        Event::StaticDie { .. } | Event::MutableDie { .. } | Event::OrAltBorrow { end: true, .. } => true,
         Event::Branch { branch_history, .. } => branch_history.iter().all(|b| ends_borrow(&b.e_data)),
         _ => false,
     })
@@ -6265,12 +6285,21 @@ fn render_branches(
         // An `if let` whose pattern binds from this column (#382): the
         // arms fork from half a row above the split row and start on
         // it, the `if` arm with the binding's dot.
-        let raised = CollapsedApexes::of(history).raised_splits.contains(split_point);
-        let (split_y, column_top_y) = if raised {
-            ((get_y_axis_pos(*split_point) - PATTERN_SPLIT_RISE) as f64, get_y_axis_pos(*split_point) as f64)
+        let raised_rise = CollapsedApexes::of(history).raised_splits.get(split_point).copied();
+        let raised = raised_rise.is_some();
+        let (split_y, column_top_y) = if let Some(rise) = raised_rise {
+            ((get_y_axis_pos(*split_point) - rise) as f64, get_y_axis_pos(*split_point) as f64)
         } else {
             (split_y, column_top_y)
         };
+        // An `else if` (#1294): this join may sit above the merge row,
+        // and an arm's leg starts at the join of the one nested in it.
+        let merge_y = merge_y - join_rise(visualization_data, hash, history, *split_point, *merge_point) as f64;
+        // The first arm starts with a one-line conditional on the split
+        // line (#1287): its leg ends at that conditional's fork.
+        let first_arm_fork_y = arm_starts_with_collapsed(branch_history, *split_point)
+            .filter(|_| raised)
+            .map(|s| (get_y_axis_pos(s) - COLLAPSED_APEX) as f64);
 
         // Parent's state at the split. The active arm uses this
         // directly; passive arms Gray-convert it so their leading
@@ -6317,17 +6346,20 @@ fn render_branches(
             // a Move (anywhere) ends the visible run there.
             let mut segs: Vec<BranchSeg> = Vec::new();
             let apexes = CollapsedApexes::of(&branch.e_data);
-            // The arm's own first row starts a conditional whose fork is
-            // raised half a row above it (`else if d { g } else { h }` on
-            // one line with its arms on rows of their own, #1264): the
+            // The first arm starts with a one-line conditional on the
+            // split line (#1287): its leg ends at that conditional's fork.
+            // Otherwise the arm's own first row may start a conditional
+            // whose fork is raised above it (`else if d { g } else { h }`
+            // on one line with its arms on rows of their own, #1264): the
             // leg into the arm ends at that fork's dot. Run on to the
             // row, it ended in mid-air below the fork.
-            let leg_end_y = if !raised && !branch_is_collapsed(*split_point, *merge_point)
-                && apexes.raised_splits.contains(&(*split_point + 1))
-            {
-                column_top_y - PATTERN_SPLIT_RISE as f64
-            } else {
-                column_top_y
+            let inner_rise = (!raised && !branch_is_collapsed(*split_point, *merge_point))
+                .then(|| apexes.raised_splits.get(&(*split_point + 1)).copied())
+                .flatten();
+            let leg_end_y = match (first_arm_fork_y.filter(|_| i == 0), inner_rise) {
+                (Some(y), _) => y,
+                (None, Some(rise)) => column_top_y - rise as f64,
+                (None, None) => column_top_y,
             };
             push_seg_if_renderable(
                 &mut segs, rap,
@@ -6345,7 +6377,7 @@ fn render_branches(
             if raised {
                 let first_row = branch.states.iter().find(|(top, bot, _)| top <= bot).map(|s| s.0);
                 if let Some(first_row) = first_row.filter(|r| r > split_point) {
-                    let rise = if apexes.raised_splits.contains(&first_row) { PATTERN_SPLIT_RISE } else { 0 };
+                    let rise = apexes.raised_splits.get(&first_row).copied().unwrap_or(0);
                     push_seg_if_renderable(
                         &mut segs, rap,
                         (branch_x, column_top_y), (branch_x, (get_y_axis_pos(first_row) - rise) as f64),
@@ -6402,10 +6434,18 @@ fn render_branches(
             let mut stop_at: Option<(f64, f64)> = None;
             match stop_line {
                 None => {
+                    // From the join of an `else if` nested in this arm,
+                    // which ends on the same row (#1294).
+                    let leg_top_y = branch.e_data.iter().rev().find_map(|(_, e)| match e {
+                        Event::Branch { split_point: s, merge_point: m, .. }
+                            if *m == *merge_point && !branch_is_collapsed(*s, *m) && !branch_is_collapsed(*split_point, *merge_point) =>
+                            Some((get_y_axis_pos(*m) - join_rise(visualization_data, hash, history, *s, *m)) as f64),
+                        _ => None,
+                    }).unwrap_or(column_bot_y);
                     let n = segs.len();
                     push_seg_if_renderable(
                         &mut segs, rap,
-                        (branch_x, column_bot_y), (parent_x, merge_y),
+                        (branch_x, leg_top_y), (parent_x, merge_y),
                         end_state, visualization_data, &arm_label, Leg::Join, *merge_point, *merge_point, &arm_path,
                     );
                     if segs.len() > n { ended_title(&mut segs, *merge_point); }
@@ -7145,6 +7185,79 @@ fn binds_at_split(history: &[(usize, Event)], i: usize) -> bool {
         && branch_history.first().is_some_and(|arm| arm.e_data.iter().any(|(l, _)| l == split_point))
 }
 
+/// The conditional on the split line that the first arm of `branch_history`
+/// (a conditional splitting on `split_point`) starts with, when it's one
+/// whose arms share that line: the one-line `if` in a let-chain's block
+/// (`if let Some(a) = y && { if a > 2 { take(s); } … } {`, #1287). Its
+/// fork is drawn a row above the line (`COLLAPSED_APEX`), so the outer
+/// fork goes above that, and the first arm's leg ends at it.
+fn arm_starts_with_collapsed(branch_history: &[BranchData], split_point: usize) -> Option<usize> {
+    match branch_history.first()?.e_data.first()? {
+        (l, Event::Branch { split_point: s, merge_point: m, .. })
+            if *l == split_point && *s == split_point && branch_is_collapsed(*s, *m) => Some(*s),
+        _ => None,
+    }
+}
+
+/// How far above its row the split dot of the conditional `history[i]` is
+/// raised (`binds_at_split`): `PATTERN_SPLIT_RISE`, or that above the
+/// fork of a one-line conditional its first arm starts with
+/// (`arm_starts_with_collapsed`).
+fn split_rise(history: &[(usize, Event)], i: usize) -> i64 {
+    match &history[i].1 {
+        Event::Branch { branch_history, split_point, .. }
+            if arm_starts_with_collapsed(branch_history, *split_point).is_some() => COLLAPSED_APEX + PATTERN_SPLIT_RISE,
+        _ => PATTERN_SPLIT_RISE,
+    }
+}
+
+/// How far above its merge row each conditional's join dot sits on a
+/// column, by (split, merge) line (#1294). An `else if` is a conditional
+/// nested in the outer one's `else` arm that ends on the same `}` row:
+/// the two joins would share that row, and the outer arm's leg, drawn
+/// from the row above, would start in mid-air beside the inner join. A
+/// chain of n conditionals ending on one row (`if … else if … else if …
+/// else`) spreads their joins over the row above it instead: the k-th
+/// from the outside sits k/n of a row up, and each `else` arm's leg runs
+/// from the join of the conditional nested in it. Conditionals whose arms
+/// share lines (`branch_is_collapsed`) keep their own joins.
+fn shared_merge_rises(history: &[(usize, Event)]) -> BTreeMap<(usize, usize), i64> {
+    type Info = BTreeMap<(usize, usize), (usize, (usize, usize))>;
+    fn walk(h: &[(usize, Event)], parent: Option<(usize, usize, (usize, usize))>, info: &mut Info) {
+        for (_, ev) in h {
+            let Event::Branch { branch_history, split_point, merge_point, .. } = ev else { continue };
+            let key = (*split_point, *merge_point);
+            let collapsed = branch_is_collapsed(*split_point, *merge_point);
+            let (depth, root) = match parent {
+                Some((m, d, root)) if !collapsed && m == *merge_point => (d + 1, root),
+                _ => (0, key),
+            };
+            info.insert(key, (depth, root));
+            for b in branch_history {
+                walk(&b.e_data, (!collapsed).then_some((*merge_point, depth, root)), info);
+            }
+        }
+    }
+    let mut info = Info::new();
+    walk(history, None, &mut info);
+    let mut len: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+    for (depth, root) in info.values() {
+        let n = len.entry(*root).or_insert(1);
+        *n = (*n).max(depth + 1);
+    }
+    info.iter()
+        .filter(|(_, (depth, _))| *depth > 0)
+        .map(|(key, (depth, root))| (*key, LINE_SPACE * *depth as i64 / len[root] as i64))
+        .collect()
+}
+
+/// `shared_merge_rises` of the conditional (split, merge) on `hash`'s
+/// column (`history`: where the caller found it, if the column has none).
+fn join_rise(vd: &VisualizationData, hash: &u64, history: &[(usize, Event)], split: usize, merge: usize) -> i64 {
+    let full = vd.timelines.get(hash).map_or(history, |t| &t.history);
+    shared_merge_rises(full).get(&(split, merge)).copied().unwrap_or(0)
+}
+
 /// Lines where a column stops for, or resumes after, a conditional
 /// whose branches share lines. The column has to stop at the diamond's
 /// top corner (half a row above the line), not run on into it. Also
@@ -7153,7 +7266,8 @@ fn binds_at_split(history: &[(usize, Event)], i: usize) -> bool {
 struct CollapsedApexes {
     splits: BTreeSet<usize>,
     merges: BTreeSet<usize>,
-    raised_splits: BTreeSet<usize>,
+    /// Split line → how far above its row the split dot is (`split_rise`).
+    raised_splits: BTreeMap<usize, i64>,
 }
 
 impl CollapsedApexes {
@@ -7161,7 +7275,7 @@ impl CollapsedApexes {
         let mut apexes = CollapsedApexes {
             splits: BTreeSet::new(),
             merges: BTreeSet::new(),
-            raised_splits: BTreeSet::new(),
+            raised_splits: BTreeMap::new(),
         };
         for (i, (_, ev)) in history.iter().enumerate() {
             if let Event::Branch { split_point, merge_point, .. } = ev {
@@ -7169,7 +7283,7 @@ impl CollapsedApexes {
                     apexes.splits.insert(*split_point);
                     apexes.merges.insert(*merge_point);
                 } else if binds_at_split(history, i) {
-                    apexes.raised_splits.insert(*split_point);
+                    apexes.raised_splits.insert(*split_point, split_rise(history, i));
                 }
             }
         }
@@ -7183,12 +7297,13 @@ impl CollapsedApexes {
             return None;
         }
         let (after_join, before_split) = (self.merges.contains(&top), self.splits.contains(&bot));
-        let before_raised_split = self.raised_splits.contains(&bot);
+        let raised_rise = self.raised_splits.get(&bot).copied();
+        let before_raised_split = raised_rise.is_some();
         let y1 = get_y_axis_pos(top) + if after_join { COLLAPSED_APEX } else { 0 };
         let y2 = get_y_axis_pos(bot) - if before_split {
             COLLAPSED_APEX
-        } else if before_raised_split {
-            PATTERN_SPLIT_RISE
+        } else if let Some(rise) = raised_rise {
+            rise
         } else {
             0
         };
@@ -7219,15 +7334,16 @@ fn event_dot_y(history: &[(usize, Event)], i: usize) -> i64 {
     let mut same_line_after = history[i + 1..].iter().enumerate()
         .take_while(|(_, (l, _))| *l == line);
     let before_split = same_line_after.clone().any(|(_, (_, ev))| collapsed(ev, |split, _| split));
-    let before_raised_split = same_line_after
-        .any(|(j, (_, ev))| matches!(ev, Event::Branch { split_point, .. } if *split_point == line)
-            && binds_at_split(history, i + 1 + j));
+    let raised_rise = same_line_after
+        .find(|(j, (_, ev))| matches!(ev, Event::Branch { split_point, .. } if *split_point == line)
+            && binds_at_split(history, i + 1 + j))
+        .map(|(j, _)| split_rise(history, i + 1 + j));
     let after_join = history[..i].iter().rev()
         .any(|(_, ev)| collapsed(ev, |_, merge| merge));
     get_y_axis_pos(line) + if before_split {
         -COLLAPSED_APEX
-    } else if before_raised_split {
-        -PATTERN_SPLIT_RISE
+    } else if let Some(rise) = raised_rise {
+        -rise
     } else if after_join {
         COLLAPSED_APEX
     } else {

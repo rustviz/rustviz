@@ -5071,9 +5071,18 @@ impl Visualizable for VisualizationData {
             return previous_state;
         }
 
-        // Render opaque line if branch does not begin at split point
-        if begin != branch_start {
-            states.push((branch_start, begin, branch_state_converter(&previous_state)));
+        // Render opaque line if branch does not begin at split point.
+        // Up to the arm's first event if that comes first: an event on
+        // a row above the arm's body (the `else` of an `if let` chain
+        // whose condition moved the value, `loop_exit_move`; a one-line
+        // `if` in the chain's block on the split line, #1298) happens
+        // before those rows, so they get the state it leaves.
+        let lead_end = match history.first() {
+            Some((l, _)) if *l < begin => (*l).max(branch_start),
+            _ => begin,
+        };
+        if lead_end != branch_start {
+            states.push((branch_start, lead_end, branch_state_converter(&previous_state)));
         }
 
         let is_ref = self.is_ref(hash);
@@ -5081,7 +5090,7 @@ impl Visualizable for VisualizationData {
             old_borrow_ends_first(history);
         }
         let kept = ends_kept_alive(is_ref, history);
-        let mut previous_line = begin;
+        let mut previous_line = lead_end;
         for (i, (l, e)) in history.iter_mut().enumerate() {
             // For let-as-rhs (`let s = if … { … } else { … };`) the
             // parent's pre-branch state is OOS — the variable
@@ -5201,6 +5210,26 @@ impl Visualizable for VisualizationData {
         // Render opaque line if branch does not end at merge point
         if end < branch_end {
             states.push((end, branch_end, branch_state_converter(&previous_state)));
+        }
+
+        // The rows between an event above the arm's body and the body are
+        // still another arm's code: drawn dashed like the leading stretch,
+        // in the state that event left (nothing, if it moved the value).
+        if lead_end < begin {
+            let inactive = |st: &State| match st {
+                State::FullPrivilege { s: LineState::Uninit } => st.clone(),
+                State::FullPrivilege { .. } | State::PartialPrivilege { .. } => branch_state_converter(st),
+                _ => st.clone(),
+            };
+            *states = states.drain(..).flat_map(|(top, bot, st)| {
+                if top > bot || top >= begin {
+                    vec![(top, bot, st)]
+                } else if bot <= begin {
+                    vec![(top, bot, inactive(&st))]
+                } else {
+                    vec![(top, begin, inactive(&st)), (begin, bot, st)]
+                }
+            }).collect();
         }
 
         *states = clean_states(&states);
