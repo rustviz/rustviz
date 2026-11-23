@@ -7512,6 +7512,9 @@ pub fn pattern_ref_copy_borrow(
   evt: &Evt,
   scrutinee: &'tcx Expr<'tcx>,
 ) -> Vec<ExternalEvent> {
+  if matches!(evt, Evt::SBorrow | Evt::MBorrow) {
+    return self.pattern_call_ref_borrows(binding, scrutinee);
+  }
   if !matches!(evt, Evt::Copy | Evt::Move) {
     return Vec::new();
   }
@@ -7521,7 +7524,7 @@ pub fn pattern_ref_copy_borrow(
   }
   let moved = matches!(evt, Evt::Move);
   if binding.is_ref() {
-    return self.pattern_ref_borrows(binding, binding.name(), &[], moved, false, scrutinee);
+    return self.pattern_ref_borrows(binding, binding.name(), &[], moved, false, false, scrutinee);
   }
   if !matches!(binding, ResourceAccessPoint::Struct(Struct { is_member: false, .. })) {
     return Vec::new();
@@ -7534,7 +7537,7 @@ pub fn pattern_ref_copy_borrow(
     }
     let path = member.name()[bound.len() + 1..].to_owned();
     let fields: Vec<&str> = path.split('.').collect();
-    let evs = self.pattern_ref_borrows(&member, &bound, &fields, moved, true, scrutinee);
+    let evs = self.pattern_ref_borrows(&member, &bound, &fields, moved, true, false, scrutinee);
     if !evs.is_empty() {
       // The arrow says where the field's reference came from, in
       // place of the dot that couldn't name a lender (#352).
@@ -7549,9 +7552,31 @@ pub fn pattern_ref_copy_borrow(
   out
 }
 
+/// A binding by reference into what the reference a call returned
+/// points to (`Some(s)` on `pick(&a, &b)`, `fn pick<'a>(a: &'a
+/// Option<String>, b: &'a Option<String>) -> &'a Option<String>`), when
+/// the call's signature ties that reference to several arguments: s may
+/// point into any of them, and all of them stay borrowed while s is in
+/// use, as for `let r = pick(&a, &b);` (#1368). With one,
+/// `call_result_lender` names it (#1222).
+fn pattern_call_ref_borrows(&mut self, binding: &ResourceAccessPoint, scrutinee: &'tcx Expr<'tcx>) -> Vec<ExternalEvent> {
+  let mut call = scrutinee;
+  while let ExprKind::DropTemps(inner) = call.kind {
+    call = inner;
+  }
+  if !binding.is_ref() || !matches!(call.kind, ExprKind::Call(..) | ExprKind::MethodCall(..))
+    || !self.tcx.typeck(call.hir_id.owner).expr_ty(call).is_ref() || self.call_lenders(call).len() < 2 {
+    return Vec::new();
+  }
+  self.pattern_ref_borrows(binding, binding.name(), &[], false, false, true, call)
+}
+
 /// `pattern_ref_copy_borrow` for one reference: the binding itself
 /// (`fields` empty) or a reference field `bound.f` of a struct binding
-/// (`in_field`).
+/// (`in_field`). With `by_ref`, the binding isn't copied out of the
+/// value but bound by reference into what the reference `scrutinee`
+/// returned points to (`pattern_call_ref_borrows`).
+#[allow(clippy::too_many_arguments)]
 fn pattern_ref_borrows(
   &mut self,
   reference: &ResourceAccessPoint,
@@ -7559,6 +7584,7 @@ fn pattern_ref_borrows(
   fields: &[&str],
   moved: bool,
   in_field: bool,
+  by_ref: bool,
   scrutinee: &'tcx Expr<'tcx>,
 ) -> Vec<ExternalEvent> {
   let name = reference.name().to_owned();
@@ -7661,7 +7687,7 @@ fn pattern_ref_borrows(
     lenders: lenders.iter().map(|l| l.name()).collect(),
     also_unnamed: one_lifetime && self.call_lenders_full(scrutinee).1,
     tie: if one_lifetime { self.call_arg_tie(scrutinee, None) } else { ArgTie::default() },
-    carrier: ViaCarrier::PatternBinding { from_call, moved, field_of: in_field },
+    carrier: if by_ref { ViaCarrier::PatternRef } else { ViaCarrier::PatternBinding { from_call, moved, field_of: in_field } },
     passed_on: Vec::new(),
   };
   let to = ResourceTy::Value(reference.clone());
@@ -12340,7 +12366,7 @@ fn binds_scrutinee_borrow(arm: &ExtBranchData, lender: &ResourceAccessPoint) -> 
   arm.e_data.iter().any(|(_, e)| match e {
     ExternalEvent::StaticBorrow { from: ResourceTy::Value(l), to: ResourceTy::Value(r), via: Some(via), .. }
     | ExternalEvent::MutableBorrow { from: ResourceTy::Value(l), to: ResourceTy::Value(r), via: Some(via), .. } =>
-      l == lender && arm.decl_vars.contains(r) && matches!(via.carrier, ViaCarrier::PatternBinding { from_call: true, .. }),
+      l == lender && arm.decl_vars.contains(r) && matches!(via.carrier, ViaCarrier::PatternBinding { from_call: true, .. } | ViaCarrier::PatternRef),
     _ => false,
   })
 }

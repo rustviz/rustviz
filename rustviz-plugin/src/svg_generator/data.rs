@@ -1526,6 +1526,10 @@ pub enum ViaCarrier {
     /// (`x.part` for `Some(x)` on `o: Option<Part>`; #692), and `moved`
     /// says how that struct was bound.
     PatternBinding { from_call: bool, moved: bool, field_of: bool },
+    /// The borrower is a binding by reference into what the reference a
+    /// call returned points to (`Some(s)` on `pick(&a, &b)` returning
+    /// `&Option<String>`; #1368). `func` names the call.
+    PatternRef,
     /// The borrower is a closure variable bound to the closure a call
     /// returned (`let g = keep(|| s.len());`; #686), which holds the
     /// reference its capture made. `func` names the call; `through_ref`

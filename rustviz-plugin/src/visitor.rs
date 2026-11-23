@@ -8455,15 +8455,27 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // => … }`, `arm_part_borrow`): that one loan ends at the last use
       // of any of the arm's bindings into it (#1215).
       let whole_loan = self.borrow_map.get(&name).and_then(|rd| rd.borrow_span);
+      // A binding by reference into what a call's returned reference
+      // points to, tied to several arguments (`Some(t)` on `pick(&a,
+      // &b)`), was given its lenders after the pattern was read
+      // (`pattern_call_ref_borrows`, #1368): it gives the borrow back
+      // to each of them.
+      let lenders: Vec<ResourceTy> = match (&to, self.borrow_map.get(&name)) {
+        (ResourceTy::Anonymous, Some(rd)) if matches!(rd.lender, ResourceTy::Value(_) | ResourceTy::Deref(_)) => rd.all_lenders(),
+        _ => vec![to.clone()],
+      };
       // The borrow ends where the borrow checker ends it, at
       // the binding's last use (#599): the end of the region
       // of the loan MIR issues for the binding on the pattern's
       // lines. A binding that reborrows through a shared
       // reference (`(x, _)` on `o: &(String, String)`) has no
       // loan of its own; its borrow lasts as long as it is
-      // live.
+      // live. Not the loan of the binding itself that a guard takes
+      // (`Some(t) if t.len() > 1`: the guard sees t through a reference
+      // to it, also named t), which ends with the guard.
       let region_end = mir_b_data.iter()
-        .filter(|m| (m.assigned_place.as_deref() == Some(name.as_str()) && (pat_line..=pat_end).contains(&m.region.0))
+        .filter(|m| (m.assigned_place.as_deref() == Some(name.as_str()) && m.borrowed_place.as_deref() != Some(name.as_str())
+            && (pat_line..=pat_end).contains(&m.region.0))
           || whole_loan == Some(m.span))
         .map(|m| m.region.1)
         .max();
@@ -8486,15 +8498,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let floor = self.borrow_floor.entry(to.real_name()).or_insert(ends_at);
         *floor = (*floor).max(ends_at);
       }
-      let id = *self.unique_id;
-      *self.unique_id += 1;
-      let ext_ev = self.ext_ev_of_evt(e, to, from, id, false);
-      if inline {
-        self.add_external_event(ends_at, ext_ev);
-      } else {
-        // After the arm's events up to that line.
-        let at = branch_e_data.iter().rposition(|(l, _)| *l <= ends_at).map_or(0, |i| i + 1);
-        branch_e_data.insert(at, (ends_at, ext_ev));
+      for to in lenders {
+        let id = *self.unique_id;
+        *self.unique_id += 1;
+        let ext_ev = self.ext_ev_of_evt(e.clone(), to, from.clone(), id, false);
+        if inline {
+          self.add_external_event(ends_at, ext_ev);
+        } else {
+          // After the arm's events up to that line.
+          let at = branch_e_data.iter().rposition(|(l, _)| *l <= ends_at).map_or(0, |i| i + 1);
+          branch_e_data.insert(at, (ends_at, ext_ev));
+        }
       }
     }
   }

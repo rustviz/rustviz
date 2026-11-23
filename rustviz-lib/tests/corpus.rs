@@ -21542,7 +21542,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // (#1239).
         // #1222: a binding by reference into a call's returned reference
         // borrows what the call borrowed (`o`, `m`), not the function.
-        // `pick(&a, &b)` may point into either: no lender is named.
+        // `pick(&a, &b)` may point into either: pq borrows from both, and
+        // both stay borrowed while pq is in use (#1368).
         must_contain: &[
             "n, immutable. A different variable from the n declared on line 18 (separate scopes, so only one exists at a time)",
             "n, immutable. A different variable from the n declared on line 17 (separate scopes, so only one exists at a time)",
@@ -21555,9 +21556,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from z to o",
             "Partial Mutable borrow from m to mx",
             "Return mutably borrowed resource from mx to m",
-            "pq's immutable borrow ends (what it borrows from isn't shown)",
+            "Return immutably borrowed resource from pq to a",
+            "Return immutably borrowed resource from pq to b",
         ],
         must_not_contain: &[
+            // #1368: no lender was named, and a and b were drawn freed at
+            // the call.
+            "pq's immutable borrow ends (what it borrows from isn't shown)",
             "=n, immutable",
             "borrow from get to",
             "to get",
@@ -24061,6 +24066,62 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from w1 to z1",
         ],
     },
+    TooltipExpect {
+        name: "coerced_reborrow_end_1369",
+        // `let s1: &String = &gx1;` (gx1: `&String`) reborrows `*gx1`; its
+        // borrow lasts to s1's last use, not to the `let` (#1369). The rows
+        // are pinned by `coerced_and_pattern_borrows_end_at_last_use`.
+        must_contain: &[
+            "Immutable reborrow from gx1 to s1",
+            "Return immutably borrowed resource from s1 to *gx1",
+            "Return immutably borrowed resource from s2 to *gx2",
+            "Return immutably borrowed resource from s3 to *gx3",
+            "Return immutably borrowed resource from h4.r to *gx4",
+            "Return immutably borrowed resource from o5 to gx5",
+            "Return immutably borrowed resource from s6 to *gx6",
+            "Return immutably borrowed resource from s6 to *gy6",
+            "Return immutably borrowed resource from v7 to gx7",
+            // gx8 is repointed while s8 is live: s8 borrows c8.
+            "Return immutably borrowed resource from s8 to c8",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "pattern_ref_into_call_lenders_1368",
+        // `Some(s1)` on `pick2(&a1, &b1)`: s1 may point into either, and
+        // both stay borrowed while s1 is in use (#1368).
+        must_contain: &[
+            "Immutable borrow from a1 to s1: s1 points into what the reference pick2 returned points to; pick2's signature gives that reference the same lifetime as both arguments, so it may point into either, and both stay borrowed while s1 is in use",
+            "Immutable borrow from b1 to s1: s1 points into what the reference pick2 returned points to; pick2's signature gives that reference the same lifetime as both arguments, so it may point into either, and both stay borrowed while s1 is in use",
+            "a1's resource is immutably borrowed by s1; a1 is read-only while the borrow is live",
+            "b1's resource is immutably borrowed by s1; b1 is read-only while the borrow is live",
+            "Return immutably borrowed resource from s1 to a1",
+            "Return immutably borrowed resource from s1 to b1",
+            "Immutable borrow from a2 to s2: s2 points into what the reference pick2 returned points to; pick2's signature gives that reference the same lifetime as both arguments, so it may point into either, and both stay borrowed while s2 is in use",
+            "Return immutably borrowed resource from s2 to a2",
+            "Return immutably borrowed resource from s2 to b2",
+            "Return immutably borrowed resource from s3 to a3",
+            "Return immutably borrowed resource from s3 to b3",
+            "Immutable borrow from b4 to s4: s4 points into what the reference pick_p returned points to; pick_p's signature gives that reference the same lifetime as both arguments, so it may point into either, and both stay borrowed while s4 is in use",
+            "Return immutably borrowed resource from s4 to a4",
+            "Return immutably borrowed resource from s4 to b4",
+            "Return immutably borrowed resource from s5 to a5",
+            "Return immutably borrowed resource from s5 to b5",
+            "Mutable borrow from a6 to s6: s6 points into what the reference pick_mut returned points to; pick_mut's signature gives that reference the same lifetime as both arguments, so it may point into either, and both stay borrowed while s6 is in use",
+            "Return mutably borrowed resource from s6 to a6",
+            "Return mutably borrowed resource from s6 to b6",
+        ],
+        must_not_contain: &[
+            // The binding's lenders used to be left out, and the call's
+            // arguments drawn freed at the call.
+            "s1's immutable borrow ends (what it borrows from isn't shown)",
+            "s2's immutable borrow ends (what it borrows from isn't shown)",
+            "s3's immutable borrow ends (what it borrows from isn't shown)",
+            "s4's immutable borrow ends (what it borrows from isn't shown)",
+            "s5's immutable borrow ends (what it borrows from isn't shown)",
+            "s6's mutable borrow ends (what it borrows from isn't shown)",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -25980,6 +26041,43 @@ fn pattern_bound_references_keep_their_lenders_borrowed() {
     let used = code_row_y(&code, "println!(\"{}\", x);");
     let ends = dots_listing_tooltip(&timeline, "x's mutable borrow ends");
     assert!(ends.len() == 1 && (ends[0].1 - used).abs() < 1.0, "x's borrow doesn't end on its println! row (y={used}): {ends:?}");
+}
+
+/// A reference's borrow ends at its last use, not where it is made:
+/// `let s1: &String = &gx1;` (gx1: `&String`) reborrows `*gx1` through a
+/// loan of gx1 that ends at once (#1369), and a binding by reference
+/// into what `pick2(&a1, &b1)` returns keeps both arguments borrowed
+/// (#1368), also when a guard reads it first.
+#[test]
+fn coerced_and_pattern_borrows_end_at_last_use() {
+    let check = |fixture: &str, cases: &[(&str, &str, &str)]| {
+        let rv = run_with_local_backend(fixture);
+        let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+        for (end, used, made) in cases {
+            let (used_y, made_y) = (code_row_y(&code, used), code_row_y(&code, made));
+            let ends = dots_listing_tooltip(&timeline, end);
+            assert!(ends.iter().any(|d| (d.1 - used_y).abs() < 1.0), "{fixture}: {end:?} isn't on the row of {used:?} (y={used_y}): {ends:?}");
+            assert!(!ends.iter().any(|d| (d.1 - made_y).abs() < 1.0), "{fixture}: {end:?} is on the row of {made:?} (y={made_y}): {ends:?}");
+        }
+    };
+    check("coerced_reborrow_end_1369", &[
+        ("s1's immutable borrow ends", "println!(\"{}\", s1);", "let s1: &String = &gx1;"),
+        ("s1 no longer borrows the resource gx1 points to", "println!(\"{}\", s1);", "let s1: &String = &gx1;"),
+        ("s2's immutable borrow ends", "println!(\"{}\", s2);", "let s2: &str = &gx2;"),
+        ("s3's immutable borrow ends", "println!(\"{}\", s3);", "s3 = &gx3;"),
+        ("h4.r's immutable borrow ends", "println!(\"{}\", h4.r);", "let h4 = Holder { r: &gx4 };"),
+        ("o5's immutable borrow ends", "println!(\"{:?}\", o5);", "let o5: Option<&String> = Some(&gx5);"),
+        ("s6's immutable borrow ends", "println!(\"{}\", s6);", "let s6: &String = if b { &gx6 } else { &gy6 };"),
+        ("v7's immutable borrow ends", "println!(\"{:?}\", v7);", "v7.push(&gx7);"),
+        ("s8's immutable borrow ends", "println!(\"{} {}\", s8, gx8);", "let s8: &String = &gx8;"),
+    ]);
+    check("pattern_ref_into_call_lenders_1368", &[
+        ("a1's resource is no longer immutably borrowed", "println!(\"{}\", s1);", "if let Some(s1) = pick2(&a1, &b1) {"),
+        ("b1's resource is no longer immutably borrowed", "println!(\"{}\", s1);", "if let Some(s1) = pick2(&a1, &b1) {"),
+        ("s3's immutable borrow ends", "println!(\"{}\", s3);", "Some(s3) if s3.len() > 1 => {"),
+        ("a3's resource is no longer immutably borrowed", "println!(\"{}\", s3);", "Some(s3) if s3.len() > 1 => {"),
+        ("a6's resource is no longer mutably borrowed", "s6.push('!');", "if let Some(s6) = pick_mut(&mut a6, &mut b6) {"),
+    ]);
 }
 
 /// The timeline y of the code-panel row showing source line `src`
