@@ -1428,17 +1428,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let adjustment_map = self.tcx.typeck(name_and_generic_args.hir_id.owner).adjustments();
     // `s.len()` borrows `s` without a written `&` (rustc inserts
     // it); `r.len()` with `r: &String` and `(&s).len()` don't.
-    let autoref = if is_method_autoref(rcvr, self.tcx.typeck(rcvr.hir_id.owner)) {
-      ImplicitRef::Autoref
-    } else {
-      ImplicitRef::No
-    };
     // `x.show()` / `(&x).show()` with x a reference variable and
     // `show(&self)` on Self = `&String`: the call borrows x itself (#938).
     let of_ref_var = ref_var_receiver_borrow(rcvr, self.tcx.typeck(rcvr.hir_id.owner));
     // `r.len()` with `r: &&String` borrows `**r`, not what r points to
     // (#952).
     let deep = if of_ref_var { None } else { self.deep_place(rcvr) };
+    // `k.push('!')` with `k: Box<&mut String>` reborrows through the
+    // reference k's Box holds (`&mut **k`), as `r.push('!')` does
+    // through r: k itself isn't borrowed, nor need it be `mut` (#1282).
+    let through_held_ref = deep.is_some_and(|d| d.held_mut.is_some());
+    let autoref = if is_method_autoref(rcvr, self.tcx.typeck(rcvr.hir_id.owner)) && !through_held_ref {
+      ImplicitRef::Autoref
+    } else {
+      ImplicitRef::No
+    };
     match adjustment_map.get(rcvr.hir_id) {
       Some(adj_vec) => { 
         for a in adj_vec.iter() {
@@ -1469,7 +1473,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                   // `rv[0].push(..)` / `p.name.push(..)` with rv / p
                   // a `&mut`: the autoref'd place is reached through
                   // the reference, so this reborrows it too (#407).
-                  let is_reborrow = match rcvr.kind {
+                  let is_reborrow = through_held_ref || match rcvr.kind {
                     ExprKind::AddrOf(_, _, operand) => is_explicit_reborrow(operand, typeck)
                       || is_coerced_ref_var_reborrow(rcvr, typeck),
                     _ => is_implicit_mut_reborrow(rcvr, typeck) || is_explicit_reborrow(rcvr, typeck),

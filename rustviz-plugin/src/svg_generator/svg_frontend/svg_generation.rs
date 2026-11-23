@@ -679,6 +679,23 @@ impl OneLineArmGaps {
 /// pattern binds (`} else if let Some(a) = &x && … {`);
 /// `binding_columns` collects the pattern bindings drawn side by side
 /// there (`side_by_side_bindings`).
+/// Ids of the arrows listed in the line map of an arm of a conditional
+/// among `events` (or nested in one).
+fn arm_listed_arrows(events: &[(usize, ExternalEvent)]) -> HashSet<usize> {
+    let mut out = HashSet::new();
+    for (_, e) in events {
+        if let ExternalEvent::Branch { branches, .. } = e {
+            for b in branches {
+                for evs in b.line_map.values() {
+                    out.extend(evs.iter().map(|x| x.get_id()));
+                }
+                out.extend(arm_listed_arrows(&b.e_data));
+            }
+        }
+    }
+    out
+}
+
 pub fn mutate_branch_lines(
     b_data: & mut ExtBranchData,
     l_map: & mut HashMap<usize, usize>,
@@ -814,6 +831,13 @@ pub fn mutate_branch_lines(
                         if is_param_value_line(&ev) {
                             ev_len = 0;
                         }
+                        // (Not an arrow a conditional nested in this arm
+                        // holds: that arm draws it, #1279.)
+                        let nested_drawn = arm_listed_arrows(&b_data.e_data);
+                        let here = |e: &ExternalEvent| !nested_drawn.contains(&e.get_id())
+                            || b_data.e_data.iter().any(|(_, p_e)| p_e.get_id() == e.get_id());
+                        let front: Vec<ExternalEvent> = front.into_iter().filter(|e| here(e)).collect();
+                        let back: Vec<ExternalEvent> = back.into_iter().filter(|e| here(e)).collect();
                         // A stack that ends the borrow of a reference the arm
                         // declares (`let x = ra; (x.to_string(), h)`, #1277):
                         // the rest of the line went on the stack's last row,
@@ -1159,6 +1183,12 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
         }
     }
     let mut skippable_ev: HashSet<usize> = HashSet::new();
+    // Arrows of the top level's line map that an arm holds and lists in
+    // its own line map, so the arm draws them (a borrow end moved into
+    // the arm a let-chain's later parts are drawn in, #1279): by id.
+    let top_level_ids: HashSet<usize> = visualization_data.preprocess_external_events.iter().map(|(_, e)| e.get_id()).collect();
+    let arm_drawn: HashSet<usize> = arm_listed_arrows(&visualization_data.preprocess_external_events)
+        .into_iter().filter(|id| !top_level_ids.contains(id)).collect();
     let mut line_insertion_map: HashMap<usize, usize> = HashMap::new();
     // The let-chain bindings the plugin found (before the arms' own are
     // added below).
@@ -1395,6 +1425,14 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                             visualization_data.append_processed_external_event(d.clone(), row);
                             skippable_ev.insert(d.get_id());
                         }
+                        // An arrow of the line map that an arm holds (a
+                        // borrow end moved into the arm a let-chain's
+                        // later parts are drawn in, #1279) is drawn
+                        // there, on this row of the stack; not here too.
+                        if arm_drawn.contains(&e.get_id()) {
+                            skippable_ev.insert(e.get_id());
+                            continue;
+                        }
                         // append all the events in the line map on the same line
                         if ends_after_line_uses(e, &ev, &rest_of_line) {
                             deferred_ends.push((line_num, e.clone(), row));
@@ -1437,6 +1475,9 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                         .take_while(|l| l.trim().is_empty())
                         .count();
                     let to_insert = needed.saturating_sub(trailing_blanks);
+                    // (Not the arm's arrows: the arm draws them.)
+                    let front: Vec<ExternalEvent> = front.into_iter().filter(|e| !arm_drawn.contains(&e.get_id())).collect();
+                    let back: Vec<ExternalEvent> = back.into_iter().filter(|e| !arm_drawn.contains(&e.get_id())).collect();
                     if !back.is_empty() {
                         same_line_row = Some((line_num, back_row));
                         event_line_map_replace.insert(back_row, back);

@@ -3420,20 +3420,24 @@ fn deep_lend_title(event: &Event, visualization_data: &VisualizationData) -> Opt
         Event::MutableReacquire { from, is, id, .. } => (from, is, *id, true, true),
         _ => return None,
     };
-    let deep = visualization_data.external_events.iter().find_map(|(_, ev)| match ev {
+    // (Also a call in a conditional's arm.)
+    let deep = all_external_events(visualization_data).into_iter().find_map(|(_, ev)| match ev {
         ExternalEvent::PassByStaticReference { id: i, deep: Some(d), .. }
         | ExternalEvent::PassByMutableReference { id: i, deep: Some(d), .. } if *i == id => Some(*d),
         _ => None,
     })?;
+    // (Or a Box holding a reference, `k.push('!')` with `k: Box<&mut
+    // String>`, #1282: the reference `*k` it holds says what the call
+    // can do through k.)
     let r = match is {
-        ResourceTy::Value(r) if r.is_ref() => r,
+        ResourceTy::Value(r) if r.is_ref() || deep.held_mut.is_some() => r,
         _ => return None,
     };
     let borrower = other.name();
     Some(if end {
         hover_messages::event_dot_reacquire_deep(r.name(), deep.derefs, &borrower, deep.holds_value)
     } else {
-        hover_messages::event_dot_lend_deep(r.name(), deep.derefs, &borrower, mutable, r.is_mutref(), deep.holds_value)
+        hover_messages::event_dot_lend_deep(r.name(), deep.derefs, &borrower, mutable, deep.held_mut.unwrap_or(r.is_mutref()), deep.holds_value)
     })
 }
 
@@ -3613,8 +3617,13 @@ fn holder_starts_empty(visualization_data: &VisualizationData, rap: &ResourceAcc
 // A holder that never receives a borrow we can draw (`map.entry(word)`
 // where `word`'s lender has no column; #392): drawn as a plain owner.
 fn holder_never_borrows(visualization_data: &VisualizationData, rap: &ResourceAccessPoint) -> bool {
+    // (`let k2 = k;` takes over the borrow k's value holds, #1282.)
     visualization_data.timelines.get(rap.hash()).is_none_or(|t| {
-        !t.history.iter().any(|(_, e)| matches!(e, Event::StaticBorrow { .. } | Event::MutableBorrow { .. }))
+        !t.history.iter().any(|(_, e)| match e {
+            Event::StaticBorrow { .. } | Event::MutableBorrow { .. } => true,
+            Event::Acquire { from: ResourceTy::Value(f), .. } => !f.is_ref() && f.holds_borrow(),
+            _ => false,
+        })
     })
 }
 

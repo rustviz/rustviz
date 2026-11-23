@@ -1332,10 +1332,16 @@ impl StoredIn {
 /// `r.len()` with `r: &&String` is `str::len(&***r)` and borrows the
 /// String `**r`, which `*r` points to (#952). `holds_value`: that place
 /// is a "value" (Copy or nothing to drop, #484), not a resource.
+/// The receiver can also be a `Box` holding a reference (`k.push('!')`
+/// with `k: Box<&mut String>` is `String::push(&mut **k, '!')`): the
+/// call borrows what the reference `*k` points to, through k, not k's
+/// Box (#1282). `held_mut` is then that reference's mutability; `None`
+/// for a receiver that is itself a reference.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeepPlace {
     pub derefs: usize,
     pub holds_value: bool,
+    pub held_mut: Option<bool>,
 }
 /// Where a value an `FnOnce` closure captured by value ends up when
 /// the closure is called, from the closure body's MIR (#271).
@@ -4441,6 +4447,21 @@ pub struct VisualizationData {
 }
 
 impl VisualizationData {
+    /// Whether `event` is the lend of a call that reborrows through a
+    /// `&mut` the column's value holds (`k.push('!')` with `k: Box<&mut
+    /// String>`; `DeepPlace::held_mut`, #1282): k needn't be `mut`.
+    fn lends_through_held_ref(&self, event: &Event) -> bool {
+        fn find(events: &[(usize, ExternalEvent)], id: usize) -> bool {
+            events.iter().any(|(_, e)| match e {
+                ExternalEvent::PassByMutableReference { id: i, deep: Some(DeepPlace { held_mut: Some(true), .. }), .. } => *i == id,
+                ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| find(&b.e_data, id)),
+                _ => false,
+            })
+        }
+        let Event::MutableLend { id, .. } = event else { return false };
+        find(&self.external_events, *id)
+    }
+
     /// Whether a DeadLoanNote on column `hash` is shown: the column is
     /// drawn borrowed at the write (`state`, its state there). A struct
     /// field's column doesn't draw its parent's borrows, so the note on
@@ -4857,7 +4878,9 @@ impl Visualizable for VisualizationData {
             // Assumption: variables can lend mutably if
             // 1) variable instance is mutable or 2) variable is a mutable reference
             // Use cases: 'mutable_borrow' & 'nll_lexical_scope_different'
-                if self.is_mut(hash) | self.is_mutref(hash) {
+            // 3) or it holds a `&mut` the call reborrows through: `k.push('!')`
+            // with `k: Box<&mut String>`, k not `mut` (#1282).
+                if self.is_mut(hash) | self.is_mutref(hash) | holder | self.lends_through_held_ref(event) {
                     State::RevokedPrivilege{ to: ResourceTy::Anonymous, borrow_to: to_ro.to_owned(), prev_state: Box::from(previous_state.to_owned()) }
                 } else {
                     State::Invalid

@@ -45,10 +45,6 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("ctor_literals_768", "field-outlives-moved-struct", 1127),
     // One line's events stacked out of order.
     ("edition2024/whole_value_moved_by_chain_953", "event-on-dead-column", 1200),
-    // A let-chain condition's last use of a reference: borrow end off the column.
-    ("edition2024/value_not_resource_chain_1163", "event-on-dead-column", 1279),
-    // `Box::new(r)` with r a `&mut`.
-    ("mut_ref_moved_into_result_1128", "invalid-state", 1282),
 ];
 
 /// The invariants, by the name the failure list and messages use.

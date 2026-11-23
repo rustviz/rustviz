@@ -1277,6 +1277,50 @@ pub fn borrowed_deref_depth<'tcx>(e: &Expr<'tcx>, typeck: &TypeckResults<'tcx>) 
   Some((n, ty))
 }
 
+/// `borrowed_deref_depth` for a local `Box` (not a reference) that
+/// rustc derefs through the Box(es) and then through a reference it
+/// holds before borrowing: `k.push('!')` / `k.len()` / `(*k).push('!')`
+/// with `k: Box<&mut String>` borrow `**k`, the String the reference
+/// `*k` points to (#1282). `Some((derefs, borrowed place's type, whether
+/// the reference just before it is a `&mut`))`, only when the borrowed
+/// place sits directly behind a reference.
+pub fn boxed_ref_deref_depth<'tcx>(e: &Expr<'tcx>, typeck: &TypeckResults<'tcx>) -> Option<(usize, Ty<'tcx>, bool)> {
+  let mut base = e;
+  let mut written = 0;
+  while let ExprKind::Unary(UnOp::Deref, inner) = base.kind {
+    base = inner;
+    written += 1;
+  }
+  if !matches!(base.kind, ExprKind::Path(QPath::Resolved(_, Path { res: Res::Local(_), .. }))) {
+    return None;
+  }
+  let mut ty = typeck.expr_ty(base);
+  if !ty.is_box() {
+    return None;
+  }
+  let adjs = typeck.expr_adjustments(e);
+  if !matches!(adjs.last().map(|a| &a.kind), Some(Adjust::Borrow(AutoBorrow::Ref(..)))) {
+    return None;
+  }
+  let auto = adjs.iter().take_while(|a| matches!(a.kind, Adjust::Deref(DerefAdjustKind::Builtin))).count();
+  let mut n = 0;
+  let mut last_ref: Option<bool> = None;
+  while n < written + auto {
+    if ty.is_box() {
+      ty = ty.boxed_ty()?;
+      last_ref = None;
+    } else if let rustc_middle::ty::TyKind::Ref(_, t, m) = ty.kind() {
+      last_ref = Some(m.is_mut());
+      ty = *t;
+    } else {
+      return None;
+    }
+    n += 1;
+  }
+  let held_mut = last_ref?;
+  (n >= 2).then_some((n, ty, held_mut))
+}
+
 /// True iff the method receiver `rcvr` hands the callee a reference to
 /// the local reference variable r itself, not to what r points to:
 /// `r.show()` autoref'd (`fn show(&self)` with Self = `&String`), or
