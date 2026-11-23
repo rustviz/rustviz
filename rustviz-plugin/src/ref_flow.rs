@@ -388,6 +388,30 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     (ls, unnamed, is_mut)
   }
 
+  /// The 'static data (see `static_lender_of`) that the reference in
+  /// field `field` of `call`'s result points to, when every argument
+  /// the signature ties to that field is such data: `part("a")` with
+  /// `part(c: &'a str) -> Part<'a>` (#1356). None otherwise.
+  pub fn call_field_static_lender(&self, call: &'tcx Expr<'tcx>, field: &str) -> Option<StaticLender> {
+    // (`opart("e")` returning `Option<(&'a str, i32)>`, then unwrapped:
+    // with one lifetime in the result, the field has the result's.)
+    let flows = self.call_arg_flows_into(call, FlowTarget::Field(field))
+      .or_else(|| self.call_result_has_one_lifetime(call).then(|| self.call_arg_flows_into(call, FlowTarget::Result)).flatten())?;
+    let mut found: Option<StaticLender> = None;
+    for f in flows {
+      // (`opart("e").unwrap()`: what `opart`'s result holds.)
+      let l = match f.arg.kind {
+        ExprKind::Call(..) | ExprKind::MethodCall(..) => self.call_field_static_lender(f.arg, field),
+        _ => self.static_lender_of(f.arg),
+      }?;
+      match &found {
+        Some(x) if *x != l => return None,
+        _ => found = Some(l),
+      }
+    }
+    found
+  }
+
   /// Whether `call` is a `&mut self` method whose signature lets it
   /// store a borrow carried by another argument into the receiver:
   /// `push(&mut self, value: T)` on a `Vec<&String>` (#392). Decided
@@ -897,7 +921,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         args.iter().all(|x| self.collect_lender_muts(x, out))
       }
       ExprKind::AddrOf(_, m, inner) => {
-        add(self.place_lenders(inner), m.is_mut());
+        // (A temporary the `let` extends has its own column, #1357.)
+        let ls = match self.nested_ext_temps.get(&e.hir_id) {
+          Some(tmp) => vec![ResourceTy::Value(tmp.clone())],
+          None => self.place_lenders(inner),
+        };
+        add(ls, m.is_mut());
         true
       }
       ExprKind::Path(QPath::Resolved(..)) | ExprKind::Field(..) => {
@@ -1109,7 +1138,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           None => Vec::new(),
         }
       }
-      ExprKind::AddrOf(_, _, inner) => self.place_lenders(inner),
+      // `&String::from("b")` / `&make_user().name` in `let t =
+      // Some(..)` / `[..]`: a temporary the `let` extends, with a
+      // column of its own (#856, #1357).
+      ExprKind::AddrOf(_, _, inner) => match self.nested_ext_temps.get(&e.hir_id) {
+        Some(tmp) => vec![ResourceTy::Value(tmp.clone())],
+        None => self.place_lenders(inner),
+      },
       ExprKind::Call(..) | ExprKind::MethodCall(..) => self.call_lenders(e),
       ExprKind::Block(b, _) => b.expr.map(|x| self.value_lenders(x)).unwrap_or_default(),
       ExprKind::DropTemps(inner) => self.value_lenders(inner),
@@ -1190,7 +1225,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         _ => Vec::new(),
       },
       ExprKind::Unary(UnOp::Deref, inner) => {
-        if typeck.expr_ty(inner).is_ref() {
+        // `*r` with r a local `&mut`: a borrow of this place (`&*r`
+        // passed to `f(x: &T)`, the receiver of `(*r).as_str()`)
+        // reborrows through r, as `&*r` does in a `let` (#1332).
+        if let Some(r) = self.local_mut_ref(inner) {
+          vec![ResourceTy::Deref(r)]
+        } else if typeck.expr_ty(inner).is_ref() {
           self.value_lenders(inner)
         } else {
           // `*b` with b a `Box`: the place is inside b's own data.
@@ -1213,7 +1253,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// through references (`r.x` with `r: &P`, `s[..]` with `s: &str`).
   fn base_place_lenders(&self, base: &'tcx Expr<'tcx>) -> Vec<ResourceTy> {
     let typeck = self.tcx.typeck(base.hir_id.owner);
-    if typeck.expr_ty(base).is_ref() {
+    // `r.name` / `r[..1]` with r a local `&mut`: the place is reached
+    // through r, so a borrow of it reborrows through r (#1332).
+    if let Some(r) = self.local_mut_ref(base) {
+      vec![ResourceTy::Deref(r)]
+    } else if typeck.expr_ty(base).is_ref() {
       self.value_lenders(base)
     } else {
       self.place_lenders(base)

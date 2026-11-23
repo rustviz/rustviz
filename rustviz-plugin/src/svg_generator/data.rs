@@ -4776,6 +4776,12 @@ impl Visualizable for VisualizationData {
             | (State::PartialPrivilege { .. }, Event::MutableDie { .. })
             | (State::PartialPrivilege { .. }, Event::RefDie { .. }) if holder =>
                 (*previous_state).clone(),
+            // A borrow stored into the holder through the `&mut` it is
+            // lent to (`*el = &t1` with `el = &mut refs[0]`, #1361): it
+            // stays lent until that borrow ends.
+            (State::RevokedPrivilege { .. }, Event::StaticBorrow { .. })
+            | (State::RevokedPrivilege { .. }, Event::MutableBorrow { .. }) if holder =>
+                (*previous_state).clone(),
 
             // A `&mut` moved into a call (`take(x)`) has its borrow's
             // end drawn on it, on the same dot (#200): it stays moved.

@@ -4792,10 +4792,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // say "y's resource ... stored in a place that isn't drawn",
         // and end on the same line). A field of a call's result
         // (`hs.last_mut().unwrap().r = &z`) can't be named.
+        // Since #1361 v and w, which hold borrows, take the stored one
+        // as `v.push(&u)` would: an arrow into v / w and back.
         must_contain: &[
-            "u's resource is immutably borrowed by v[0]; u is read-only while the borrow is live",
+            "u's resource is immutably borrowed by v; u is read-only while the borrow is live",
+            "Immutable borrow from u to v",
+            "Return immutably borrowed resource from v to u",
             "u's resource is no longer immutably borrowed",
-            "c's resource is mutably borrowed by w[0]; c can't be used while the borrow is live",
+            "c's resource is mutably borrowed by w; c can't be used while the borrow is live",
+            "Mutable borrow from c to w",
+            "Return mutably borrowed resource from w to c",
             "c's resource is no longer mutably borrowed",
             "c goes out of scope. Its resource is dropped.",
             "the resource y points to is immutably borrowed by h.r",
@@ -16024,9 +16030,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // as the place written: main ended `a`'s loan at `*p = &t` (refs
         // still holds it), and said v and x now borrowed a string literal.
         // `*p = &t` keeps t borrowed until refs' last use, as
-        // `refs[0] = &t` does. (A reference stored in an element isn't
-        // drawn on the collection's column, as for `words[1] = "x"`; a
-        // `Vec<i32>` element written through get_mut is, #861.)
+        // `refs[0] = &t` does. (Since #1361, t's borrow is drawn into
+        // refs, which holds borrows, and returned from it; a reference
+        // stored in an element of a collection that holds none, `words[1]
+        // = "x"`, isn't drawn on its column; a `Vec<i32>` element written
+        // through get_mut is, #861.)
         must_contain: &[
             "r is a mutable borrow from the caller",
             "*r is assigned a new value",
@@ -16039,9 +16047,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "*e is assigned a new value",
             "Return mutably borrowed resource from e to names",
             "names's resource is no longer mutably borrowed",
-            "Immutable borrow from t to *p",
-            "t's resource is immutably borrowed by *p; t is read-only while the borrow is live",
-            "*p immutably borrows a resource",
+            "Immutable borrow from t to refs",
+            "t's resource is immutably borrowed by refs; t is read-only while the borrow is live",
+            "Return immutably borrowed resource from refs to t",
             "t's resource is no longer immutably borrowed",
             "Return immutably borrowed resource from refs to a",
             "a's resource is no longer immutably borrowed",
@@ -16630,9 +16638,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "o immutably borrows a resource",
             "p's mutable borrow ends",
             "Return immutably borrowed resource from o to e",
-            // element: no variable to re-point (#897).
-            "Immutable borrow from t1 to *el",
-            "*el immutably borrows a resource",
+            // element: no variable to re-point (#897); refs, which holds
+            // borrows, takes t1's (#1361).
+            "Immutable borrow from t1 to refs",
+            "Return immutably borrowed resource from refs to t1",
             "el's mutable borrow ends",
         ],
         must_not_contain: &[
@@ -24393,6 +24402,139 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the resource b points to is modified through y when y points into it (y points into the resource a or b points to)",
             "b's mutable borrow ends",
             "Return mutably borrowed resource from b to w",
+        ],
+    },
+    TooltipExpect {
+        name: "reborrow_explicit_deref_into_call_1332",
+        // #1332: `first_shared(&*r)`, `(*r).as_str()`, `first_mut(&mut
+        // *r)`, `r.name.as_str()`, `first_shared(&r.name)` with r a local
+        // `&mut` borrow through r, as `first_shared(r)` does (#1329). They
+        // drew the result borrowing r's lender directly while r's `&mut`
+        // was live, and s's / u's column reached State::Invalid (so u's
+        // String was said to drop nothing).
+        must_contain: &[
+            "Immutable reborrow from r to w: first_shared's signature gives the reference it returns the same lifetime as its argument",
+            "Immutable reborrow from r to w: as_str's signature gives the reference it returns the same lifetime as the value it was called on",
+            "Mutable reborrow from r to w: first_mut's signature gives the reference it returns the same lifetime as its argument",
+            "Immutable reborrow from r to o: Some's signature gives the value it returns the same lifetime as its argument; o isn't a reference, but its value holds one",
+            "the resource r points to is immutably borrowed by w through r; r is read-only while the borrow is live",
+            "the resource r points to is mutably borrowed by w through r; r can't be used while the borrow is live",
+            "w no longer borrows the resource r points to",
+            "Return immutably borrowed resource from w to *r",
+            "u goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Immutable borrow from s to w",
+            "Mutable borrow from s to w",
+            "Immutable borrow from u to w",
+            "Immutable borrow from s to o",
+            "s's resource is immutably borrowed by w",
+            "s's resource is mutably borrowed by w",
+            "u's resource is immutably borrowed by w",
+            "u goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_field_from_literal_arg_1356",
+        // #1356: a reference field of a struct or tuple a call returns,
+        // borrowing a string literal argument (`part("a")`, `pair("b")`,
+        // through `?`, in a nested struct, in both arms of an `if` /
+        // `match`), is given its value on the `let` line, as in `Part {
+        // text: "a" }`. It had no event there, its read reached
+        // State::Invalid (checked by `corpus_invariants_hold`), and its
+        // end said what it borrows wasn't shown. (`opart("e").unwrap()`
+        // still says that: honest, the literal isn't traced through
+        // `unwrap`. So does `part(get())`, which is right.)
+        must_contain: &[
+            "p.text is bound to an immutable reference",
+            "p.text's borrow of the string literal ends (string literals live for the whole program)",
+            "q.0 is bound to an immutable reference",
+            "q.0's borrow of the string literal ends (string literals live for the whole program)",
+            "t.a's borrow of the string literal ends (string literals live for the whole program)",
+            "t.b's borrow of the string literal ends (string literals live for the whole program)",
+            "u.0 is bound to an immutable reference",
+            "v.0's borrow of the string literal ends (string literals live for the whole program)",
+            "o.inner.text is bound to an immutable reference",
+            "o.inner.text's borrow of the string literal ends (string literals live for the whole program)",
+            "w.1's borrow of the string literal ends (string literals live for the whole program)",
+            "m.text is bound to an immutable reference (in all branches above)",
+            "m.text's borrow of the string literal ends (string literals live for the whole program)",
+        ],
+        must_not_contain: &[
+            "q.0's immutable borrow ends (what it borrows from isn't shown)",
+            "t.a's immutable borrow ends (what it borrows from isn't shown)",
+            "t.b's immutable borrow ends (what it borrows from isn't shown)",
+            "v.0's immutable borrow ends (what it borrows from isn't shown)",
+            "w.1's immutable borrow ends (what it borrows from isn't shown)",
+            "o.inner.text's immutable borrow ends (what it borrows from isn't shown)",
+            "m.text's immutable borrow ends (what it borrows from isn't shown)",
+        ],
+    },
+    TooltipExpect {
+        name: "ext_temp_in_some_or_array_1357",
+        // #1357: `Some(&String::from("b"))`, `Some(&make_user().name)`,
+        // `[&make_user().name]`, `Ok(&..)`, `Some(Some(&..))`, `Some(&mut
+        // make_user().age)` hold a borrow of the temporary the `let`
+        // extends, drawn as for `Some(&s)`; a pattern or `unwrap` taking
+        // the reference out borrows the temporary too. No borrow was
+        // drawn, and the holders were "initialized with a Some value".
+        must_contain: &[
+            "Immutable borrow from (temporary) to t: Some's signature gives the value it returns the same lifetime as its argument; t isn't a reference, but its value holds one",
+            "Immutable borrow from (temporary 2).name to u: Some's signature gives the value it returns the same lifetime as its argument; u isn't a reference, but its value holds one",
+            "Immutable borrow from (temporary 3).name to a",
+            "Return immutably borrowed resource from t to (temporary)",
+            "Return immutably borrowed resource from u to (temporary 2).name",
+            "Return immutably borrowed resource from a to (temporary 3).name",
+            "Immutable borrow from (temporary) to r: Ok's signature gives the value it returns the same lifetime as its argument; r isn't a reference, but its value holds one",
+            "Mutable borrow from (temporary).age to m: Some's signature gives the value it returns the same lifetime as its argument; m isn't a reference, but its value holds one",
+            "Return mutably borrowed value from m to (temporary).age",
+            "Immutable borrow from (temporary) to x: x is a reference copied out of m",
+            "Mutable borrow from (temporary) to x: x is a reference moved out of m",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "t is initialized with a Some value",
+            "u is initialized with a Some value",
+            "r is initialized with an Ok value",
+            "m is initialized with a Some value",
+            "x's immutable borrow ends (what it borrows from isn't shown)",
+            "x's mutable borrow ends (what it borrows from isn't shown)",
+            "y's immutable borrow ends (what it borrows from isn't shown)",
+            // A borrowed field isn't moved out of the temporary.
+            "was moved out earlier",
+            "(temporary) goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "ref_write_through_local_mut_ref_1361",
+        // #1361: `rh.r = &t` / `(*rh).r = &t` / `ri.r = &b` / `rh.r = tr`
+        // through a local `&mut` to a struct with field columns are drawn
+        // as `hold.r = &t;` is (#531); `*el = &t1` (el = &mut refs[0]),
+        // `refs[0] = &t1` store t1's borrow in refs, as `refs.push(&t1)`
+        // does. No borrow went into hold.r / refs, and the only return at
+        // their last use went to the old lender.
+        must_contain: &[
+            "Immutable borrow from t to hold.r",
+            "Return immutably borrowed resource from hold.r to t",
+            "Copy from tr to hold.r",
+            "hold.r is assigned a copy of tr's reference",
+            "Immutable borrow from b to o.inner.r",
+            "Return immutably borrowed resource from o.inner.r to b",
+            "Immutable borrow from t1 to refs",
+            "Return immutably borrowed resource from refs to t1",
+            "t1's resource is immutably borrowed by refs; t1 is read-only while the borrow is live",
+            "refs holds a value that immutably borrows t1's resource (refs isn't a reference itself)",
+            "Mutable borrow from t1 to refs",
+            "Return mutably borrowed resource from refs to t1",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from hold.r to s",
+            "Return immutably borrowed resource from o.inner.r to a",
+            "Immutable borrow from t1 to *el",
+            "Mutable borrow from t1 to *el",
+            "t1's resource is immutably borrowed by *el",
+            "t1's resource is immutably borrowed by refs[0]",
+            "*el immutably borrows a resource",
         ],
     },
 ];
@@ -33800,4 +33942,38 @@ fn one_line_diamonds_end_brackets_at_forks_and_return_outward() {
         }
     }
     assert_eq!(bad, Vec::<String>::new());
+}
+
+/// #1337: `let k = [a, b, c];` with `a` a moved `&mut` parameter and b, c
+/// reborrowed: at k's last use its borrow ends on one dot, the one its
+/// returns to b and c leave from. The end of the caller's loan k took from
+/// a was a second "k's mutable borrow ends" dot on the row below the
+/// stacked returns.
+#[test]
+fn array_of_moved_mut_params_ends_on_one_dot() {
+    let tl = run_with_local_backend("array_moved_mut_params_one_end_1337").timeline_panel_string();
+    let ids: Vec<&str> = tl.split("data-rv-id=\"").skip(1).filter_map(|c| c.split('"').next()).collect();
+    for line in [8, 12, 17] {
+        let dots: Vec<&&str> = ids.iter().filter(|id| id.starts_with(&format!("k@L{line}:dot:")) && id.contains("mutable_die")).collect();
+        assert_eq!(dots.len(), 1, "k's borrow should end on one dot on line {line}: {dots:?}");
+    }
+}
+
+/// #1355: a struct (or tuple) a call returns, borrowing through a
+/// reference parameter, gives every field's borrow back at its last use,
+/// whichever field that use reads, not at the end of the function: the
+/// field never read too (it has no `Drop` impl). Already right on main
+/// when this was added (40f626f); 9c56c2a ended d8.b's borrow at the
+/// function's end.
+#[test]
+fn unread_field_of_call_result_returns_at_last_use() {
+    let tl = run_with_local_backend("struct_from_call_unread_field_1355").timeline_panel_string();
+    for id in [
+        "d8.a>s1@L12:arrow:static_die", "d8.b>s1@L12:arrow:static_die",
+        "d9.0>s1@L18:arrow:static_die", "d9.1>s1@L18:arrow:static_die",
+        "e1.a>s1@L23:arrow:static_die", "e1.b>s1@L23:arrow:static_die",
+        "e2.a>s1@L28:arrow:static_die", "e2.b>s1@L28:arrow:static_die",
+    ] {
+        assert!(tl.contains(&format!("data-rv-id=\"{id}\"")), "missing return {id}");
+    }
 }
