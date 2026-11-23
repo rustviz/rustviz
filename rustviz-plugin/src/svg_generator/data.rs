@@ -4532,6 +4532,13 @@ pub struct VisualizationData {
     /// on rows it adds), set by `render_svg` before the timeline is
     /// drawn: approximation notes are placed by source line.
     pub row_lines: Vec<Option<usize>>,
+
+    /// Columns (rap.hash()) of fns whose column headers go two rows above
+    /// the signature instead of one, set by `render_svg`: a conditional
+    /// whose arms share the signature's line (`fn pick(x, y) -> &str { if
+    /// … { x } else { y } }`) forks a row above it, on the row the headers
+    /// sit on (#1342).
+    pub raised_headers: HashSet<u64>,
 }
 
 impl VisualizationData {

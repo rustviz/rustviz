@@ -47,6 +47,7 @@ impl Rustviz {
       arrow_tracks: HashMap::new(),
       approx_notes,
       row_lines: Vec::new(),
+      raised_headers: HashSet::new(),
     };
     /* ******************************************
             --- Render SVG images ---

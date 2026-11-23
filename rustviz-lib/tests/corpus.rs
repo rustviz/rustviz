@@ -25496,8 +25496,9 @@ fn branches_that_diverge_stop_short() {
         // `b` lives on past the inner `continue`; `c` is dropped there.
         ("exit_break_continue_drops", &["b"][..]),
         ("exit_continue_in_match", &["n"][..]),
-        // `s` and `u` are dropped at their `return`s.
-        ("exit_return_borrowed_value", &["v"][..]),
+        // `s` and `u` are dropped at their `return`s; `v` is moved out
+        // on its `return`'s row, which ends its column (#1375).
+        ("exit_return_borrowed_value", &[][..]),
         ("exit_return_after_nested_if", &[][..]),
         // `pick`'s `s` has no value on the `_ => return 0` path: a bar,
         // not a drop. `f`'s `t` is dropped at its `return`; `g`'s `m`
@@ -25508,8 +25509,9 @@ fn branches_that_diverge_stop_short() {
         // return n,` arm, on one row, ends n's leg at the dot where n is
         // copied out, not in a bar, #1295.)
         ("exit_temporary_drops", &["n"][..]),
-        // early_return: r is dropped at each `return`; r₂ moves out.
-        ("shadow_matrix_scopes", &["r₂"][..]),
+        // early_return: r is dropped at each `return`; r₂ moves out on
+        // its `return`'s row, which ends its column (#1375).
+        ("shadow_matrix_scopes", &[][..]),
         // #429: an `if` without `else` whose body exits ends its column
         // in the drops there, not in a bar.
         ("exit_if_no_else_return", &[][..]),
@@ -33975,5 +33977,127 @@ fn unread_field_of_call_result_returns_at_last_use() {
         "e2.a>s1@L28:arrow:static_die", "e2.b>s1@L28:arrow:static_die",
     ] {
         assert!(tl.contains(&format!("data-rv-id=\"{id}\"")), "missing return {id}");
+    }
+}
+
+/// Centres of the `<circle>`s (event dots) and anchors of the function
+/// logos (`f`) of a timeline panel, and its column headers' anchors.
+fn marks_and_headers(timeline: &str) -> (Vec<(f64, f64, String)>, Vec<(f64, f64)>, Vec<(f64, f64, String)>) {
+    let doc = roxmltree::Document::parse(timeline).expect("timeline svg parses");
+    let xy = |n: roxmltree::Node, x: &str, y: &str| -> Option<(f64, f64)> {
+        Some((n.attribute(x)?.parse().ok()?, n.attribute(y)?.parse().ok()?))
+    };
+    let id = |n: roxmltree::Node| n.ancestors().find_map(|a| a.attribute("data-rv-id")).unwrap_or("").to_owned();
+    let dots = doc.descendants().filter(|n| n.has_tag_name("circle"))
+        .filter_map(|n| xy(n, "cx", "cy").map(|(x, y)| (x, y, id(n)))).collect();
+    let class_has = |n: &roxmltree::Node, c: &str| n.attribute("class").is_some_and(|k| k.split(' ').any(|w| w == c));
+    let logos = doc.descendants().filter(|n| n.has_tag_name("text") && class_has(n, "functionLogo"))
+        .filter_map(|n| xy(n, "x", "y")).collect();
+    let headers = doc.descendants().filter(|n| n.has_tag_name("text") && class_has(n, "label"))
+        .filter_map(|n| xy(n, "x", "y").map(|(x, y)| (x, y, id(n)))).collect();
+    (dots, logos, headers)
+}
+
+/// #1342: a one-line conditional on its fn's signature line forks a row
+/// above the signature, where the fn's column headers were drawn: the
+/// fork dots and the condition's call logo sat on the headers (`fn pick(x,
+/// y) -> &str { if x.len() > 3 { x } else { y } }`; also a one-line
+/// `match`, `if` without `else`, `if let`, `let x = if …`, a struct's
+/// fields, and the join of one one-line fn on the next one's headers).
+/// The headers go a row higher, so no dot or logo is drawn on a header.
+#[test]
+fn one_line_conditionals_keep_off_the_column_headers() {
+    let mut bad = Vec::new();
+    for name in ["one_line_if_on_header_row_1342", "outlives_bound_1125", "one_line_diamond_1306_1308_1309"] {
+        let (dots, logos, headers) = marks_and_headers(&run_with_local_backend(name).timeline_panel_string());
+        // A header's text runs about a row's half-height above its
+        // baseline and some 20px either side of its anchor.
+        let on = |(hx, hy): (f64, f64), (x, y): (f64, f64)| (x - hx).abs() < 20.0 && y > hy - 18.0 && y < hy + 8.0;
+        for (hx, hy, h) in &headers {
+            for (x, y, d) in &dots {
+                if on((*hx, *hy), (*x, *y)) {
+                    bad.push(format!("{name}: dot {d} at ({x}, {y}) on header {h} at ({hx}, {hy})"));
+                }
+            }
+            for (x, y) in &logos {
+                if on((*hx, *hy), (*x, *y)) {
+                    bad.push(format!("{name}: a call's logo at ({x}, {y}) on header {h} at ({hx}, {hy})"));
+                }
+            }
+        }
+    }
+    assert_eq!(bad, Vec::<String>::new());
+}
+
+/// #1374: an arm written on the conditional's last line (`} else {
+/// take(s); }`, a `match`'s last arm before its `}`, `} else if d {
+/// take(s); }`, the `else` of a `let n = if …`) has its dots on that
+/// line's row. The join used to sit there too, beside the arm's dot,
+/// with the arm's arrow to `take`'s logo running through it and the logo
+/// on top of it (and a lender's join beside the dot a borrow's end
+/// returns to, the arrow hopping over it). The join is now a row below.
+#[test]
+fn joins_sit_below_their_arms_dots() {
+    let mut bad = Vec::new();
+    for name in [
+        "join_below_arm_on_closing_row_1374", "else_on_join_line", "fmt_macro_args_824",
+        "reborrow_through_local_mut_ref_1152", "if_let_holder_end_row_712", "mut_ref_moved_into_result_1128",
+    ] {
+        let (dots, logos, _) = marks_and_headers(&run_with_local_backend(name).timeline_panel_string());
+        for (jx, jy, j) in dots.iter().filter(|(_, _, id)| id.contains(":dot:branch_join")) {
+            let var = j.split('@').next().unwrap_or("");
+            for (x, y, d) in &dots {
+                if d != j && d.starts_with(&format!("{var}@")) && (y - jy).abs() < 1.0 && (x - jx).abs() < 30.0 {
+                    bad.push(format!("{name}: {j} at ({jx}, {jy}) level with {d} at ({x}, {y})"));
+                }
+            }
+            for (x, y) in &logos {
+                if (x - jx).abs() < 14.0 && (y - jy).abs() < 14.0 {
+                    bad.push(format!("{name}: a call's logo at ({x}, {y}) on {j} at ({jx}, {jy})"));
+                }
+            }
+        }
+    }
+    assert_eq!(bad, Vec::<String>::new());
+}
+
+/// #1375: a diverging arm's stop bar ("This branch stops here") was
+/// drawn centred on the arm's last dot when that dot was on the arm's
+/// last row (`return take(q);`, `return q + "!";`), so the dot covered
+/// it but for a 1px nub. Where the dot ends the column (a move, a drop,
+/// a borrow's end) the column ends at the dot, with no bar, as a one-row
+/// arm's does (#1295); where the column is still live there (`s.push(..);
+/// break;`, a panic with a value that isn't dropped) the bar goes a
+/// little below the dot. No stop bar in the corpus is under a dot.
+#[test]
+fn stop_bars_are_not_under_dots() {
+    let mut names = all_fixtures();
+    let skipped: Vec<&str> = SKIP_WELL_FORMED.iter().map(|(n, _)| *n).collect();
+    names.retain(|n| !skipped.contains(&n.as_str()));
+    prerender(names.iter().map(|n| n.as_str()));
+    let mut bad = Vec::new();
+    for name in &names {
+        let Ok(rv) = render_cell(name) else { continue };
+        let tl = rv.timeline_panel_string();
+        let doc = roxmltree::Document::parse(&tl).expect("timeline svg parses");
+        let dots: Vec<(f64, f64)> = doc.descendants().filter(|n| n.has_tag_name("circle"))
+            .filter_map(|c| Some((c.attribute("cx")?.parse().ok()?, c.attribute("cy")?.parse().ok()?)))
+            .collect();
+        for bar in doc.descendants().filter(|n| n.has_tag_name("line") && n.attribute("data-rv-id").is_some_and(|i| i.ends_with(":stop_bar"))) {
+            let num = |a: &str| bar.attribute(a).and_then(|v| v.parse::<f64>().ok()).unwrap_or(f64::NAN);
+            let (x, y) = ((num("x1") + num("x2")) / 2.0, num("y1"));
+            if dots.iter().any(|(cx, cy)| (cx - x).abs() < 1.0 && (cy - y).abs() < 6.0) {
+                bad.push(format!("{name}: {} at ({x}, {y}) is under a dot", bar.attribute("data-rv-id").unwrap_or("")));
+            }
+        }
+    }
+    assert_eq!(bad, Vec::<String>::new());
+    // The live columns' bars are there, below their dots.
+    let tl = run_with_local_backend("stop_bar_under_dot_1375").timeline_panel_string();
+    for id in ["s@L33:stop_bar"] {
+        assert!(tl.contains(&format!("data-rv-id=\"{id}\"")), "stop_bar_under_dot_1375: no {id}");
+    }
+    for id in ["q@L7:stop_bar", "q@L15:stop_bar", "q@L22:stop_bar"] {
+        assert!(!tl.contains(&format!("data-rv-id=\"{id}\"")), "stop_bar_under_dot_1375: {id} under q's move");
     }
 }

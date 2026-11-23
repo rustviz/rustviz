@@ -671,6 +671,19 @@ struct OneLineArmGaps {
     gap_before: Vec<bool>,
     /// The last arm with events ends on the join's line.
     ends_on_merge: bool,
+    /// A conditional over several lines whose arm has events on the
+    /// join's line (`} else { take(s); }`): the join goes on a row of its
+    /// own below that line. On the line's row it sat beside the arm's
+    /// dot, and the arm's arrow to a call's logo ran through it, the logo
+    /// on top of it (#1374).
+    join_below: bool,
+    /// One of those events is a one-line conditional nested in the arm
+    /// (`} else if d { take(s); }`), which joins on the row below the
+    /// line (`branch_is_collapsed`): the join goes a row below that one,
+    /// onto the blank row below the line (`insert_blank_rows`). Level with
+    /// it, or above it on the line's row, the two joins looked like one
+    /// conditional's.
+    join_past_inner: bool,
 }
 
 impl OneLineArmGaps {
@@ -679,6 +692,7 @@ impl OneLineArmGaps {
         branch_type: &crate::svg_generator::data::BranchType,
         merge_point: usize,
         line_num: usize,
+        live_vars: &HashSet<ResourceAccessPoint>,
         l_map: &HashMap<usize, usize>,
         binding_columns: &[(u64, u64)],
         arrow_tracks: &HashMap<usize, usize>,
@@ -725,13 +739,34 @@ impl OneLineArmGaps {
                 || (nests && own_row(j))
                 || (shares_row(j) && arms_arrows_overlap(branches, j, spans[j].0, binding_columns)))
             .collect();
+        // (Only events drawn on a column that joins there: not a scope
+        // end of a variable the arm declares, or the arm's value copied
+        // out to the caller, on a fn's last line.)
+        let joins = |r: &ResourceTy| r.extract_rap().is_some_and(|r| live_vars.contains(r));
+        // Nor a move into the temporary tuple a scrutinee builds, dropped
+        // at the closing `}` (`if let (Some(a), _) = (p, q) {`): its drop
+        // is drawn under each arm, which ends there.
+        #[expect(clippy::disallowed_methods, reason = "any() makes order irrelevant")]
+        let on_joined_column = |e: &ExternalEvent| match e {
+            ExternalEvent::Branch { live_vars: inner, .. } => inner.iter().any(|r| live_vars.contains(r)),
+            ExternalEvent::Move { to: ResourceTy::Temporary { tuple: Some(_), .. }, .. } => false,
+            // A borrow's end: its arrow lands on the lender's column. (The
+            // reference's own column ends at its dot and joins a row below
+            // anyway.)
+            ExternalEvent::StaticDie { to, .. } | ExternalEvent::MutableDie { to, .. } => joins(to),
+            e => { let (from, to) = ResourceAccessPoint_extract(e); joins(from) || joins(to) }
+        };
+        let join_below = !branch_is_collapsed(line_num, merge_point)
+            && branches.iter().any(|b| b.e_data.iter().any(|(l, e)| *l == merge_point && on_joined_column(e)));
+        let join_past_inner = join_below && branches.iter().any(|b| b.e_data.iter().any(|(l, e)| *l == merge_point
+            && matches!(e, ExternalEvent::Branch { split_point, merge_point: m, .. } if *m == merge_point && branch_is_collapsed(*split_point, *m))));
         if !gap_before.iter().any(|&s| s) {
-            return OneLineArmGaps { gap_before, ends_on_merge: false };
+            return OneLineArmGaps { gap_before, ends_on_merge: false, join_below, join_past_inner };
         }
         let ends_on_merge = branches.iter().zip(&spans).rev()
             .find(|(b, _)| !b.e_data.is_empty())
             .is_some_and(|(b, &(_, end))| end == merge_point && on_line(b, end));
-        OneLineArmGaps { gap_before, ends_on_merge }
+        OneLineArmGaps { gap_before, ends_on_merge, join_below, join_past_inner }
     }
 
     /// Whether any arm got a row of its own: a one-line conditional
@@ -748,7 +783,7 @@ impl OneLineArmGaps {
     /// given rows of their own (the conditional is no longer drawn as a
     /// one-row diamond, whose join sits half a row below it).
     fn before_merge(&self) -> bool {
-        self.ends_on_merge && self.gap_before.iter().any(|&g| g)
+        (self.ends_on_merge && self.gap_before.iter().any(|&g| g)) || self.join_below
     }
 }
 
@@ -815,9 +850,9 @@ pub fn mutate_branch_lines(
             _ => *l += extra_lines, // update starting line of event
         }
         match e {
-            ExternalEvent::Branch {branches, split_point, merge_point, branch_type, .. } => {
+            ExternalEvent::Branch {branches, split_point, merge_point, branch_type, live_vars, .. } => {
                 *split_point = *l; // update split point
-                let gaps = OneLineArmGaps::of(branches, branch_type, *merge_point, line_num, l_map, binding_columns, arrow_tracks, in_spread_arm);
+                let gaps = OneLineArmGaps::of(branches, branch_type, *merge_point, line_num, live_vars, l_map, binding_columns, arrow_tracks, in_spread_arm);
                 for (j, branch) in branches.iter_mut().enumerate(){ // mutate branches
                     let (start, end) = branch_type.get_mut_start_end(j);
                     if gaps.before_arm(j) {
@@ -834,7 +869,7 @@ pub fn mutate_branch_lines(
                     *l_map.entry(*merge_point + extra_lines).or_insert(0) += 1;
                     extra_lines += 1;
                 }
-                *merge_point += extra_lines;
+                *merge_point += extra_lines + usize::from(gaps.join_past_inner);
             }
             _ => {
                 // add extra lines if we need to
@@ -1137,7 +1172,7 @@ fn insert_blank_rows(annotated_src_str: &str, source_rs_str: &str, visualization
         collect_collapsed_branches(ev, &mut collapsed);
     }
     let is_blank = |line: usize| a_lines_orig.get(line.wrapping_sub(1)).map_or(true, |s| s.trim().is_empty());
-    for (split, merge) in collapsed {
+    for &(split, merge) in &collapsed {
         if split >= 2 && !is_blank(split - 1) {
             needs_blank_at.push(split);
         }
@@ -1147,6 +1182,37 @@ fn insert_blank_rows(annotated_src_str: &str, source_rs_str: &str, visualization
     }
     needs_blank_at.sort();
     needs_blank_at.dedup();
+    // One whose split is on a fn's signature line (a one-line fn, `fn
+    // pick(x, y) -> &str { if … { x } else { y } }`) forks on the row
+    // above the signature, where the fn's column headers are drawn: the
+    // fork dots and the condition's call logo sat on the headers (#1342).
+    // The headers go a row higher (`raised_headers`). And one whose join
+    // is on the last line before a fn joins on the row below that line,
+    // where the next fn's headers are drawn. So a fn gets a blank row for
+    // its headers, one for its fork, and one for the join above it (the
+    // first fn, only one for its fork: its headers may sit above the first
+    // line or on a line outside any fn, as they do anyway).
+    for for_split in sorted_fn_starts.iter().copied().filter(|&f| f >= 1) {
+        let first = sorted_fn_starts.first() == Some(&for_split);
+        let raised = collapsed.iter().any(|(split, _)| *split == for_split);
+        let blank_above = (1..for_split).rev().take_while(|&l| is_blank(l)).count();
+        let above = for_split - 1 - blank_above;
+        let join_above = above >= 1 && collapsed.iter().any(|(_, merge)| *merge == above);
+        let rows = if first { usize::from(raised) } else { 1 + usize::from(raised) + usize::from(join_above) };
+        if raised {
+            #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "collects into a set")]
+            for (hash, line) in visualization_data.fn_start_lines.iter() {
+                if *line == for_split {
+                    visualization_data.raised_headers.insert(*hash);
+                }
+            }
+        }
+        // Up to that many blank rows above the line (the ones pushed
+        // above count towards them); listed once per row.
+        let have = blank_above + usize::from(needs_blank_at.contains(&for_split));
+        needs_blank_at.extend(std::iter::repeat_n(for_split, rows.saturating_sub(have)));
+    }
+    needs_blank_at.sort();
 
     let new_a_str: String;
     let new_s_str: String;
@@ -1165,15 +1231,15 @@ fn insert_blank_rows(annotated_src_str: &str, source_rs_str: &str, visualization
         new_a_str = annotated_src_str.to_string();
         new_s_str = source_rs_str.to_string();
     } else {
-        let needs_set: HashSet<usize> = needs_blank_at.iter().copied().collect();
+        let blanks_at = |line: usize| needs_blank_at.iter().filter(|&&l| l == line).count();
         let mut new_a: Vec<String> = Vec::with_capacity(a_lines_orig.len() + needs_blank_at.len());
         let mut new_s: Vec<String> = Vec::with_capacity(s_lines_orig.len() + needs_blank_at.len());
         for (i, line) in a_lines_orig.iter().enumerate() {
-            if needs_set.contains(&(i + 1)) { new_a.push(String::new()); }
+            new_a.extend(std::iter::repeat_n(String::new(), blanks_at(i + 1)));
             new_a.push((*line).to_string());
         }
         for (i, line) in s_lines_orig.iter().enumerate() {
-            if needs_set.contains(&(i + 1)) { new_s.push(String::new()); }
+            new_s.extend(std::iter::repeat_n(String::new(), blanks_at(i + 1)));
             new_s.push((*line).to_string());
         }
         new_a_str = new_a.join("\n");
@@ -1316,10 +1382,10 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
         // println!("line {} event {:#?}", line_num, event);
         match event {
             // need to mutate line numbers of events inside the branch
-            ExternalEvent::Branch { branches, split_point, merge_point, branch_type, .. } => {
+            ExternalEvent::Branch { branches, split_point, merge_point, branch_type, live_vars, .. } => {
                 *split_point += extra_lines;
                 branch_line = *line_num + extra_lines;
-                let gaps = OneLineArmGaps::of(branches, branch_type, *merge_point, *line_num, &line_insertion_map, &visualization_data.binding_columns, &visualization_data.arrow_tracks, false);
+                let gaps = OneLineArmGaps::of(branches, branch_type, *merge_point, *line_num, live_vars, &line_insertion_map, &visualization_data.binding_columns, &visualization_data.arrow_tracks, false);
                 let extra_before = extra_lines;
                 for (j, branch) in branches.iter_mut().enumerate() {
                     let (start, end) = branch_type.get_mut_start_end(j);
@@ -1338,7 +1404,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                     *line_insertion_map.entry(*merge_point + extra_lines).or_insert(0) += 1;
                     extra_lines += 1;
                 }
-                *merge_point += extra_lines;
+                *merge_point += extra_lines + usize::from(gaps.join_past_inner);
                 if extra_lines > extra_before {
                     branch_extras.push((*line_num, extra_lines - extra_before));
                 }
