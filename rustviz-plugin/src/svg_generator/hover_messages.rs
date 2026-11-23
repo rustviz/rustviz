@@ -2701,6 +2701,21 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
             None => String::new(),
         };
     }
+    if carrier == ViaCarrier::PatternRef {
+        // `Some(s)` on `pick(&a, &b)` (#1368): s points into the value
+        // the returned reference points to, so it may point into
+        // whatever that reference may.
+        let head = format!(": {0} points into what the reference {1} returned points to", to_fmt, func_fmt);
+        let names: Vec<String> = lenders.iter().map(|n| styled_name_html(n)).collect();
+        return if !tie.tied.is_empty() {
+            format!("{}; {}", head, signature_tie(&func_fmt, "that reference", "point into", to_name, &names, also_unnamed, tie))
+        } else if names.len() >= 2 {
+            format!("{}, so it may point into {}, and {} while {} is in use",
+                head, either_word(names.len()), kept_words(&names, false), to_fmt)
+        } else {
+            head
+        };
+    }
     if let ViaCarrier::PatternBinding { from_call, moved, field_of } = carrier {
         // `Some(x)` on `third` / on `v.get(2)` (#391): x is the
         // reference stored in that value (copied, or moved for `&mut`).
@@ -2740,7 +2755,7 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
         ViaCarrier::Value => ("value", format!("; {0} isn't a reference, but its value holds one", to_fmt)),
         ViaCarrier::StructField => ("struct", String::new()),
         ViaCarrier::TupleField => ("tuple", String::new()),
-        ViaCarrier::Element | ViaCarrier::StoredBy | ViaCarrier::PatternBinding { .. } | ViaCarrier::ReturnedClosure { .. } | ViaCarrier::Part => unreachable!(),
+        ViaCarrier::Element | ViaCarrier::StoredBy | ViaCarrier::PatternBinding { .. } | ViaCarrier::PatternRef | ViaCarrier::ReturnedClosure { .. } | ViaCarrier::Part => unreachable!(),
     };
     // A value can hold borrows of several of them at once (`map` over
     // `v.iter()` with a closure that borrows `extra`).

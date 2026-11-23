@@ -153,7 +153,52 @@ impl<'tcx> Visitor<'tcx> for ArrayElemMoves {
     }
 }
 
+/// Whether the temporary `local` is used only to reborrow through it
+/// what the reference it points to points to (`&(*(*_4))`, a place
+/// starting with two derefs), apart from being assigned.
+struct OnlyReborrowedThrough { local: Local, reborrowed: bool, other: bool }
+
+impl<'tcx> Visitor<'tcx> for OnlyReborrowedThrough {
+    fn visit_rvalue(&mut self, rv: &Rvalue<'tcx>, loc: Location) {
+        if let Rvalue::Ref(_, _, place) = rv {
+            if place.local == self.local && matches!(place.projection.as_slice(), [ProjectionElem::Deref, ProjectionElem::Deref, ..]) {
+                self.reborrowed = true;
+                return;
+            }
+        }
+        self.super_rvalue(rv, loc);
+    }
+    fn visit_local(&mut self, local: Local, ctx: PlaceContext, _loc: Location) {
+        use rustc_middle::mir::visit::MutatingUseContext;
+        if local == self.local && !matches!(ctx, PlaceContext::NonUse(_) | PlaceContext::MutatingUse(MutatingUseContext::Store)) {
+            self.other = true;
+        }
+    }
+}
+
 impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
+    /// Whether the loan `b` is the borrow of a shared reference variable
+    /// x that `&x` coerced to `&T` (x: `&T`) makes only to reborrow `*x`
+    /// through it (`&**(&x)`, #939): `_4 = &x; _3 = &(*(*_4));`. That
+    /// reborrow goes through a shared reference, so rustc tracks no loan
+    /// for it, and the loan of x can end at once; what the result
+    /// borrows is what x points to, as with the written `&*x`, and the
+    /// result lives to its own last use (#1369). So it is no loan a
+    /// reference holds. (Through a `&mut` x, the loan of x does last as
+    /// long as the result, and is kept.)
+    fn is_shared_autoref_loan(&self, b: &rustc_borrowck::consumers::BorrowData<'tcx>, body: &rustc_middle::mir::Body<'tcx>) -> bool {
+        let (bp, ap) = (b.borrowed_place(), b.assigned_place());
+        if !bp.projection.is_empty() || !ap.projection.is_empty()
+            || !matches!(body.local_decls[bp.local].ty.kind(), TyKind::Ref(_, _, rustc_middle::mir::Mutability::Not))
+            || body.local_decls[ap.local].is_user_variable()
+        {
+            return false;
+        }
+        let mut v = OnlyReborrowedThrough { local: ap.local, reborrowed: false, other: false };
+        v.visit_body(body);
+        v.reborrowed && !v.other
+    }
+
     /// For `name`, an array `[T; N]` whose `T` needs drop, from which
     /// patterns move some elements out but leave others (`let [a, _] =
     /// arr;`, `[first, ..] =>`): which elements are moved and which are
@@ -723,6 +768,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
             let location = body_with_facts.location_table.as_ref().unwrap().to_location(*location_idx);
             let assignment_line = self.location_to_line(location, &body_with_facts);
             match body_with_facts.borrow_set.location_map().get(&location) {
+              Some(b_data) if self.is_shared_autoref_loan(b_data, &body_with_facts.body) => {}
               Some(b_data) => {
                 // Where rustc's borrow checker ends the loan (#644);
                 // Polonius' end only for a loan NLL never has in scope
