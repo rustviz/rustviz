@@ -26,6 +26,10 @@
 //! entries (and may move the repro from `known_bugs/` into the corpus with
 //! `EXPECTED_TOOLTIPS` entries in `corpus.rs`).
 //!
+//! `geometry.rs` adds checks of the drawing itself (a column that starts
+//! or ends in mid-air, a segment drawn past a fork dot, two arrows along
+//! one stretch, ...); they share this file's list and test.
+//!
 //! The test is `corpus_invariants_hold` in `corpus.rs` (it reuses that
 //! binary's renders). `RV_INVARIANTS_ONLY=a,b` checks only the snippets
 //! whose name starts with one of the prefixes (`book/c4`, `known_bugs/`);
@@ -45,6 +49,37 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("ctor_literals_768", "field-outlives-moved-struct", 1127),
     // One line's events stacked out of order.
     ("edition2024/whole_value_moved_by_chain_953", "event-on-dead-column", 1200),
+    // Geometric (`geometry.rs`), from here on.
+    // Tuple column goes on after its fields were moved out.
+    ("edition2024/if_let_chain_irrefutable_move", "line-ends-nowhere", 1157),
+    // A one-line `if let` whose arm's borrow ends on the join row: the join leg starts mid-way down the lent stretch.
+    ("mut_ref_moved_into_result_1128", "line-starts-nowhere", 1321),
+    // Arrowheads or logos on another arrow after #1317's arrow tracks (#1316's groups).
+    // A literal's borrow end meeting an arrow into its column head to head.
+    ("edition2024/chain_assigns_ref_from_literal_1068", "heads-or-logos-overlap", 1316),
+    ("outlives_bound_1125", "heads-or-logos-overlap", 1316),
+    ("ref_static_lender", "heads-or-logos-overlap", 1316),
+    // Several arrows meeting at one dot from the same side.
+    ("borrow_struct_overwrite_whole", "heads-or-logos-overlap", 1316),
+    ("closure_field_capture_through_ref_1093", "heads-or-logos-overlap", 1316),
+    ("holder_closure_capture", "heads-or-logos-overlap", 1316),
+    ("lifetime_inside_arg_1084", "heads-or-logos-overlap", 1316),
+    ("one_line_arm_ref_end_1277", "heads-or-logos-overlap", 1316),
+    ("ref_copy_value_wording", "heads-or-logos-overlap", 1316),
+    ("refs_array_literal", "heads-or-logos-overlap", 1316),
+    ("refs_index_untracked", "heads-or-logos-overlap", 1316),
+    ("two_field_borrow_through_ref_1080", "heads-or-logos-overlap", 1316),
+    // A diagonal arrow (ends on different heights) not given a track.
+    ("edition2024/chain_block_if_1287", "heads-or-logos-overlap", 1316),
+    ("if_let_copy_and_move_out_of_scrutinee", "heads-or-logos-overlap", 1316),
+    ("iflet_tuple_pattern", "heads-or-logos-overlap", 1316),
+    ("loop_break_several_locals", "heads-or-logos-overlap", 1316),
+    ("one_line_arm_events_1200_1223", "heads-or-logos-overlap", 1316),
+    // A one-line function's parameter moved into a call: its head and logo on the return L.
+    ("box_holds_mut_ref_1282", "heads-or-logos-overlap", 1316),
+    ("holder_moved", "heads-or-logos-overlap", 1316),
+    // A half-row track crossing the next row's return-to-caller L.
+    ("break_field_out_1280", "heads-or-logos-overlap", 1320),
 ];
 
 /// The invariants, by the name the failure list and messages use.
@@ -81,6 +116,27 @@ pub const INVARIANTS: &[(&str, &str)] = &[
     ("column-ends-without-scope-end",
      "an owner's column ends on a dot that neither moves it nor ends its scope, so its drop \
       (or that nothing is dropped) is never stated"),
+    // Geometric: where things are drawn (`geometry.rs`).
+    ("line-starts-nowhere",
+     "a column's segment starts where none of its dots, other segments or (for a struct) its fields' \
+      dots are: the column appears out of nowhere"),
+    ("line-ends-nowhere",
+     "a column's segment ends where none of its dots, other segments, stop bars or (for a struct) its \
+      fields' dots are: it stops in mid-air"),
+    ("line-through-fork",
+     "a column's segment runs through a fork or join dot and on past it, so it reads as one more arm"),
+    ("arrows-overlap",
+     "two arrows with different tooltips run along the same stretch, so only the one on top can be hovered"),
+    ("marks-on-one-spot",
+     "two dots of one column, or two function logos, drawn on the same spot with different tooltips: \
+      only one can be hovered"),
+    ("arrow-misses-target",
+     "an arrow to a column ends at none of that column's dots"),
+    ("outside-figure",
+     "an element is drawn outside the timeline's width or height"),
+    ("heads-or-logos-overlap",
+     "an arrow's head lies on another arrow's shaft or head, or a function logo lies on an arrow not its \
+      own or on another logo: the marks under it can't be told apart or hovered"),
 ];
 
 // ─── Reading a timeline ─────────────────────────────────────────────
@@ -157,6 +213,8 @@ pub struct Fig {
     /// Hashes of reference columns (they have a bracket).
     ref_hashes: HashSet<String>,
     invalid: String,
+    /// Where things are drawn, for the geometric invariants.
+    geo: super::geometry::Geo,
 }
 
 /// Tooltip text without its markup: `<br>` becomes " / ".
@@ -191,6 +249,7 @@ pub fn parse(svg: &str) -> Fig {
     let doc = roxmltree::Document::parse(svg).expect("well-formed timeline SVG");
     let mut fig = Fig {
         invalid: doc.root_element().attribute("data-rv-invalid").unwrap_or("").to_owned(),
+        geo: super::geometry::parse(&doc),
         ..Default::default()
     };
     for n in doc.descendants().filter(|n| n.attribute("data-rv-id").is_some()) {
@@ -357,7 +416,7 @@ fn is_for_head(src: &str, line: u32) -> bool {
 
 /// Every violation in one timeline: (invariant, what and where).
 pub fn check(fig: &Fig, src: &str) -> Vec<(&'static str, String)> {
-    let mut out: Vec<(&'static str, String)> = Vec::new();
+    let mut out: Vec<(&'static str, String)> = super::geometry::check(&fig.geo);
     if !fig.invalid.is_empty() {
         out.push(("invalid-state", fig.invalid.clone()));
     }
@@ -610,8 +669,12 @@ mod unit {
     fn header(var: &str, hash: u32) -> String {
         format!("<text x=\"70\" y=\"35\" data-hash=\"{hash}\" data-rv-id=\"hdr:{var}\" data-rv-kind=\"header\" data-rv-var=\"{var}\">{var}</text>")
     }
+    /// The ownership invariants a hand-written timeline violates (these
+    /// pictures leave out what doesn't matter to them, so their geometry,
+    /// tested in `geometry.rs`, is incomplete).
     fn invs(body: &str) -> Vec<&'static str> {
-        check(&parse(&svg(body, "")), "").into_iter().map(|(i, _)| i).collect()
+        check(&parse(&svg(body, "")), "").into_iter().map(|(i, _)| i)
+            .filter(|i| !super::super::geometry::INVARIANTS.contains(i)).collect()
     }
 
     #[test]

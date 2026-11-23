@@ -1,0 +1,595 @@
+//! Geometric invariants: properties of the drawing itself, checked on
+//! every snippet alongside the ownership invariants in `invariants.rs`
+//! (they share its `KNOWN_INVARIANT_FAILURES` list and its test,
+//! `corpus_invariants_hold`).
+//!
+//! The ownership checks read what the picture says; these read where it
+//! is drawn. A segment that runs past a fork dot, a column that starts or
+//! stops in mid-air, two arrows along one stretch, two dots on one spot:
+//! the text of every tooltip can be right and the picture still wrong,
+//! and no tooltip assertion notices (#1278's `else if` stub was found by
+//! eye).
+//!
+//! A column is its `data-hash`. Its segments are the `line` and
+//! `branch_line` elements, each reduced to its centre line: a hollow
+//! segment's two sides (`side1` / `side2`, or a main column's two
+//! `<line>`s) are averaged, the bevels and hover polygons ignored.
+//! Positions are compared to `TOL` px: the plugin computes every shared
+//! point with the same arithmetic, so a real joint matches far closer.
+
+use std::collections::BTreeMap;
+
+/// The geometric invariants' names (described in `invariants::INVARIANTS`).
+pub const INVARIANTS: &[&str] = &[
+    "line-starts-nowhere", "line-ends-nowhere", "line-through-fork", "arrows-overlap",
+    "marks-on-one-spot", "arrow-misses-target", "outside-figure", "heads-or-logos-overlap",
+];
+
+/// How far apart two points the drawing means to be one may be.
+const TOL: f64 = 1.0;
+/// Two arrows may share this much of a straight stretch: where a short
+/// arrow's elbow meets another at a column (a one-line function's
+/// parameter coming in and its result going out) they touch for up to
+/// 10 px. An arrow head is 12.75 px long.
+const OVERLAP_PX: f64 = 12.0;
+/// An arrow's head stops this close to the target dot's centre (8.2 px
+/// for a diagonal one).
+const HEAD_REACH: f64 = 10.0;
+
+#[derive(Debug, Clone)]
+struct Seg {
+    id: String,
+    var: String,
+    hash: String,
+    /// A main column's `line` (not a conditional's arm).
+    main: bool,
+    a: (f64, f64),
+    b: (f64, f64),
+}
+
+#[derive(Debug, Clone)]
+struct Dot {
+    id: String,
+    var: String,
+    hash: String,
+    x: f64,
+    y: f64,
+    events: Vec<String>,
+    tip: String,
+}
+
+#[derive(Debug, Clone)]
+struct Arrow {
+    id: String,
+    var: String,
+    to: String,
+    line: String,
+    tip: String,
+    /// The shaft's straight pieces (a hop's arc left out).
+    pieces: Vec<((f64, f64), (f64, f64))>,
+    head: Option<(f64, f64)>,
+    /// The head's triangle.
+    tri: Vec<(f64, f64)>,
+}
+
+/// A function logo (`fn`).
+#[derive(Debug, Clone)]
+struct Logo {
+    id: String,
+    var: String,
+    to: String,
+    line: String,
+    x: f64,
+    y: f64,
+    tip: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Geo {
+    segs: Vec<Seg>,
+    dots: Vec<Dot>,
+    arrows: Vec<Arrow>,
+    logos: Vec<Logo>,
+    /// Stop bars, by column: (hash, centre).
+    stops: Vec<(String, (f64, f64))>,
+    headers: Vec<String>,
+    /// The `<svg>`'s width and height.
+    size: (f64, f64),
+    /// Every coordinate a hoverable element is drawn at: (id, x or y, value).
+    coords: Vec<(String, char, f64)>,
+}
+
+fn num(n: roxmltree::Node, a: &str) -> f64 {
+    n.attribute(a).and_then(|v| v.trim_end_matches("px").parse().ok()).unwrap_or(f64::NAN)
+}
+
+fn ends(n: roxmltree::Node) -> ((f64, f64), (f64, f64)) {
+    ((num(n, "x1"), num(n, "y1")), (num(n, "x2"), num(n, "y2")))
+}
+
+fn mid(p: (f64, f64), q: (f64, f64)) -> (f64, f64) {
+    ((p.0 + q.0) / 2.0, (p.1 + q.1) / 2.0)
+}
+
+/// The points of `points="x y x y"` (or `x,y x,y`).
+fn points(s: &str) -> Vec<(f64, f64)> {
+    let n: Vec<f64> = s.split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|t| !t.is_empty()).filter_map(|t| t.parse().ok()).collect();
+    n.chunks_exact(2).map(|c| (c[0], c[1])).collect()
+}
+
+/// The straight pieces of a hop arrow's `d` (`M x y L x y A rx ry r l s x y
+/// L x y …`, absolute commands only): the arcs hop over a column and are
+/// left out.
+fn path_pieces(d: &str) -> Vec<((f64, f64), (f64, f64))> {
+    let toks: Vec<&str> = d.split(|c: char| c == ',' || c.is_whitespace()).filter(|t| !t.is_empty()).collect();
+    let f = |i: usize| toks.get(i).and_then(|t| t.parse::<f64>().ok());
+    let mut out = Vec::new();
+    let mut at: Option<(f64, f64)> = None;
+    let mut i = 0;
+    while i < toks.len() {
+        let (n, to) = match toks[i] {
+            "M" | "L" => (3, f(i + 1).zip(f(i + 2))),
+            "A" => (8, f(i + 6).zip(f(i + 7))),
+            _ => break,
+        };
+        let Some(to) = to else { break };
+        if toks[i] == "L" {
+            if let Some(from) = at {
+                out.push((from, to));
+            }
+        }
+        at = Some(to);
+        i += n;
+    }
+    out
+}
+
+pub fn parse(doc: &roxmltree::Document) -> Geo {
+    let root = doc.root_element();
+    let mut g = Geo { size: (num(root, "width"), num(root, "height")), ..Default::default() };
+    // A conditional arm's segment: its parts, by element id.
+    let mut arms: BTreeMap<String, (usize, Seg, BTreeMap<String, ((f64, f64), (f64, f64))>)> = BTreeMap::new();
+    for n in doc.descendants().filter(|n| n.attribute("data-rv-id").is_some()) {
+        let a = |k: &str| n.attribute(k).unwrap_or("").to_owned();
+        let id = a("data-rv-id");
+        let base = id.split('/').next().unwrap_or("").to_owned();
+        let hash = n.attribute("data-hash")
+            .or_else(|| n.descendants().find_map(|c| c.attribute("data-hash"))).unwrap_or("").to_owned();
+        for c in n.descendants() {
+            for (k, axis) in [("x", 'x'), ("cx", 'x'), ("x1", 'x'), ("x2", 'x'), ("y", 'y'), ("cy", 'y'), ("y1", 'y'), ("y2", 'y')] {
+                if let Some(v) = c.attribute(k).and_then(|v| v.parse::<f64>().ok()) {
+                    g.coords.push((id.clone(), axis, v));
+                }
+            }
+        }
+        match n.attribute("data-rv-kind").unwrap_or("") {
+            "dot" => {
+                let Some(c) = n.descendants().find(|c| c.has_tag_name("circle")) else { continue };
+                g.dots.push(Dot {
+                    id, var: a("data-rv-var"), hash, x: num(c, "cx"), y: num(c, "cy"),
+                    events: a("data-rv-event").split(' ').filter(|e| !e.is_empty()).map(str::to_owned).collect(),
+                    tip: a("data-tooltip-text"),
+                });
+            }
+            "line" => {
+                let ls: Vec<_> = n.descendants().filter(|c| c.has_tag_name("line")).map(ends).collect();
+                let (p, q) = match ls.as_slice() {
+                    [l] => *l,
+                    [l, m] => (mid(l.0, m.0), mid(l.1, m.1)),
+                    _ => continue,
+                };
+                g.segs.push(Seg { id, var: a("data-rv-var"), hash, main: true, a: p, b: q });
+            }
+            "branch_line" => {
+                let Some(part @ ("line" | "side1" | "side2")) = n.attribute("data-rv-part") else { continue };
+                let order = arms.len();
+                let e = arms.entry(base.clone()).or_insert_with(|| (order, Seg {
+                    id: base, var: a("data-rv-var"), hash, main: false, a: (0.0, 0.0), b: (0.0, 0.0),
+                }, BTreeMap::new()));
+                e.2.insert(part.to_owned(), ends(n));
+            }
+            "stop_bar" if n.attribute("data-rv-part").is_none() => {
+                let ((x1, y1), (x2, y2)) = ends(n);
+                g.stops.push((hash, mid((x1, y1), (x2, y2))));
+            }
+            "arrow" => {
+                let mut pieces = Vec::new();
+                for c in n.descendants().filter(|c| c.attribute("class").is_some_and(|k| k.split(' ').any(|k| k == "arrow-shaft"))) {
+                    if c.has_tag_name("polyline") {
+                        let p = points(c.attribute("points").unwrap_or(""));
+                        pieces.extend(p.windows(2).map(|w| (w[0], w[1])));
+                    } else {
+                        pieces.extend(path_pieces(c.attribute("d").unwrap_or("")));
+                    }
+                }
+                let tri = n.descendants()
+                    .find(|c| c.attribute("class").is_some_and(|k| k.split(' ').any(|k| k == "arrow-head")))
+                    .map(|c| points(c.attribute("points").unwrap_or(""))).unwrap_or_default();
+                let head = tri.get(1).copied();
+                g.arrows.push(Arrow {
+                    id, var: a("data-rv-var"), to: a("data-rv-to"), line: a("data-rv-line"),
+                    tip: a("data-tooltip-text"), pieces, head, tri,
+                });
+            }
+            "fn" => g.logos.push(Logo {
+                id, var: a("data-rv-var"), to: a("data-rv-to"), line: a("data-rv-line"),
+                x: num(n, "x"), y: num(n, "y"), tip: a("data-tooltip-text"),
+            }),
+            "header" => g.headers.push(a("data-rv-var")),
+            _ => {}
+        }
+    }
+    let mut arms: Vec<_> = arms.into_values().collect();
+    arms.sort_by_key(|(order, _, _)| *order);
+    for (_, mut seg, parts) in arms {
+        let (p, q) = match (parts.get("line"), parts.get("side1"), parts.get("side2")) {
+            (Some(l), _, _) => *l,
+            (None, Some(s), Some(t)) => (mid(s.0, t.0), mid(s.1, t.1)),
+            _ => continue,
+        };
+        seg.a = p;
+        seg.b = q;
+        g.segs.push(seg);
+    }
+    g
+}
+
+fn near(p: (f64, f64), q: (f64, f64)) -> bool {
+    (p.0 - q.0).abs() <= TOL && (p.1 - q.1).abs() <= TOL
+}
+
+fn len(a: (f64, f64), b: (f64, f64)) -> f64 {
+    (b.0 - a.0).hypot(b.1 - a.1)
+}
+
+/// Where `p` lies along the segment a–b, in px from a, if it's within
+/// `tol` of the segment's line.
+fn along(p: (f64, f64), a: (f64, f64), b: (f64, f64), tol: f64) -> Option<f64> {
+    let l = len(a, b);
+    if l < 1e-9 {
+        return None;
+    }
+    let (dx, dy) = ((b.0 - a.0) / l, (b.1 - a.1) / l);
+    let off = ((p.0 - a.0) * dy - (p.1 - a.1) * dx).abs();
+    (off <= tol).then(|| (p.0 - a.0) * dx + (p.1 - a.1) * dy)
+}
+
+/// Whether the segment a–b lies within the segment c–d (a stretch drawn
+/// twice, like an arm's own row over the rest of its column, #845).
+fn within(a: (f64, f64), b: (f64, f64), c: (f64, f64), d: (f64, f64)) -> bool {
+    let l = len(c, d);
+    [a, b].iter().all(|&p| along(p, c, d, TOL).is_some_and(|t| t >= -TOL && t <= l + TOL))
+}
+
+fn is_fork_or_join(d: &Dot) -> bool {
+    d.events.iter().any(|e| e == "branch" || e == "branch_join")
+}
+
+/// A field's column and its struct's (`p` and `p.name`, `p.name` and
+/// `p.name.0`).
+fn family(a: &str, b: &str) -> bool {
+    a != b && (a.strip_prefix(b).is_some_and(|r| r.starts_with('.')) || b.strip_prefix(a).is_some_and(|r| r.starts_with('.')))
+}
+
+/// Every geometric violation in one timeline: (invariant, what and where).
+pub fn check(g: &Geo) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    let fmt = |p: (f64, f64)| format!("({:.1}, {:.1})", p.0, p.1);
+
+    for s in &g.segs {
+        if len(s.a, s.b) < TOL {
+            continue;
+        }
+        let col = || g.segs.iter().filter(|o| o.hash == s.hash);
+        // Drawn twice: the longer segment's ends are checked.
+        if col().any(|o| !std::ptr::eq(o, s) && len(o.a, o.b) > len(s.a, s.b) + TOL && within(s.a, s.b, o.a, o.b)) {
+            continue;
+        }
+        let (top, bottom) = if s.a.1 <= s.b.1 { (s.a, s.b) } else { (s.b, s.a) };
+        for (end, inv) in [(top, "line-starts-nowhere"), (bottom, "line-ends-nowhere")] {
+            let anchored = g.dots.iter().any(|d| d.hash == s.hash && near(end, (d.x, d.y)))
+                || col().any(|o| !std::ptr::eq(o, s) && (near(end, o.a) || near(end, o.b)))
+                || g.stops.iter().any(|(h, p)| *h == s.hash && near(end, *p))
+                // A struct's column stops on the row its field is moved out
+                // (and starts again where the field gets a value back): the
+                // event is on the field's dot.
+                || (s.main && g.dots.iter().any(|d| (d.y - end.1).abs() <= TOL && family(&d.var, &s.var)));
+            if !anchored {
+                out.push((inv, format!("{} at {}: no dot or other segment of {} there", s.id, fmt(end), s.var)));
+            }
+        }
+    }
+
+    // A segment that runs through a fork or join dot and on past it, instead
+    // of ending there (#1278's `else if` stub).
+    for d in g.dots.iter().filter(|d| is_fork_or_join(d)) {
+        for s in g.segs.iter().filter(|s| s.hash == d.hash) {
+            let l = len(s.a, s.b);
+            if let Some(t) = along((d.x, d.y), s.a, s.b, TOL) {
+                if t > 2.0 && t < l - 2.0 {
+                    out.push(("line-through-fork",
+                        format!("{} runs from {} to {}, through {} at {}", s.id, fmt(s.a), fmt(s.b), d.id, fmt((d.x, d.y)))));
+                }
+            }
+        }
+    }
+
+    // Two arrows along one stretch: the pointer reaches only the one drawn
+    // on top (#1264, #1187).
+    for (i, a) in g.arrows.iter().enumerate() {
+        for b in &g.arrows[i + 1..] {
+            if a.tip == b.tip {
+                continue;
+            }
+            let mut most: f64 = 0.0;
+            for &(p, q) in &a.pieces {
+                let l = len(p, q);
+                for &(r, s) in &b.pieces {
+                    if let (Some(t1), Some(t2)) = (along(r, p, q, TOL), along(s, p, q, TOL)) {
+                        let shared = t1.max(t2).min(l) - t1.min(t2).max(0.0);
+                        most = most.max(shared);
+                    }
+                }
+            }
+            if most > OVERLAP_PX {
+                out.push(("arrows-overlap", format!("{} and {} share {:.0} px", a.id, b.id, most)));
+            }
+        }
+    }
+
+    // Two marks on one spot with different tooltips: only one can be hovered.
+    for (i, d) in g.dots.iter().enumerate() {
+        for e in &g.dots[i + 1..] {
+            if d.hash == e.hash && (d.x - e.x).abs() < 2.0 && (d.y - e.y).abs() < 2.0 && d.tip != e.tip {
+                out.push(("marks-on-one-spot", format!("{} and {} at {}", d.id, e.id, fmt((d.x, d.y)))));
+            }
+        }
+    }
+    for (i, f) in g.logos.iter().enumerate() {
+        for e in &g.logos[i + 1..] {
+            if (f.x - e.x).abs() < 2.0 && (f.y - e.y).abs() < 2.0 && f.tip != e.tip {
+                out.push(("marks-on-one-spot", format!("{} and {} at {}", f.id, e.id, fmt((f.x, f.y)))));
+            }
+        }
+    }
+
+    // An arrow to a column ends at one of its dots. (Not an arrow to a
+    // function's logo, nor one to a static or literal drawn beside its own
+    // column, `s>s`.)
+    for a in &g.arrows {
+        let Some(h) = a.head else { continue };
+        if a.var == a.to || !g.headers.contains(&a.to)
+            || g.logos.iter().any(|l| l.var == a.var && l.to == a.to && l.line == a.line) {
+            continue;
+        }
+        if !g.dots.iter().any(|d| d.var == a.to && len(h, (d.x, d.y)) <= HEAD_REACH) {
+            out.push(("arrow-misses-target", format!("{} ends at {}, at no dot of {}", a.id, fmt(h), a.to)));
+        }
+    }
+
+    // An arrow's head on another arrow (its shaft or head), or a logo on
+    // an arrow other than its own or on another logo (#1307): under
+    // `OVERLAP_PX` of shared shaft, so `arrows-overlap` misses them.
+    let samples = |pieces: &[((f64, f64), (f64, f64))]| -> Vec<(f64, f64)> {
+        let mut v = Vec::new();
+        for &(p, q) in pieces {
+            let n = (len(p, q).ceil() as usize).max(1);
+            for k in 0..=n {
+                let t = k as f64 / n as f64;
+                v.push((p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t));
+            }
+        }
+        v
+    };
+    let tri_edges = |t: &[(f64, f64)]| -> Vec<((f64, f64), (f64, f64))> {
+        if t.len() < 3 { return Vec::new() }
+        vec![(t[0], t[1]), (t[1], t[2]), (t[2], t[0])]
+    };
+    // Signed distance of p inside triangle t (positive inside).
+    let inside = |t: &[(f64, f64)], p: (f64, f64)| -> f64 {
+        if t.len() < 3 { return f64::NEG_INFINITY }
+        let area = (t[1].0 - t[0].0) * (t[2].1 - t[0].1) - (t[2].0 - t[0].0) * (t[1].1 - t[0].1);
+        let s = area.signum();
+        tri_edges(t).iter().map(|&(a, b)| {
+            let l = len(a, b).max(1e-9);
+            s * ((b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0)) / l
+        }).fold(f64::INFINITY, f64::min)
+    };
+    // A logo's box: the italic `f` at 20px, from its text anchor.
+    let logo_box = |l: &Logo| (l.x - 1.0, l.y - 15.0, l.x + 11.0, l.y + 3.0);
+    let in_box = |b: (f64, f64, f64, f64), p: (f64, f64), m: f64| p.0 > b.0 - m && p.0 < b.2 + m && p.1 > b.1 - m && p.1 < b.3 + m;
+    let mut hl: Vec<String> = Vec::new();
+    for a in &g.arrows {
+        for b in &g.arrows {
+            // A one-line function's parameter arriving and its value
+            // returned share the stub right of its dot by design.
+            let elbow = (a.var == "caller" && b.to == "caller" && a.to == b.var)
+                || (b.var == "caller" && a.to == "caller" && b.to == a.var);
+            if std::ptr::eq(a, b) || a.tip == b.tip || a.tri.len() < 3 || (elbow && a.line == b.line) {
+                continue;
+            }
+            // b's shaft (2.5 px either side of its centre line) or head in a's head.
+            let shaft = samples(&b.pieces).into_iter().any(|p| inside(&a.tri, p) > -1.5);
+            let head = b.tri.len() == 3 && std::ptr::addr_of!(*a) < std::ptr::addr_of!(*b)
+                && samples(&tri_edges(&b.tri)).into_iter().any(|p| inside(&a.tri, p) > 1.0);
+            if shaft || head {
+                hl.push(format!("head of {} on {} of {}", a.id, if shaft { "the shaft" } else { "the head" }, b.id));
+            }
+        }
+    }
+    for (i, l) in g.logos.iter().enumerate() {
+        let bx = logo_box(l);
+        for b in &g.arrows {
+            if b.var == l.var && b.to == l.to && b.line == l.line {
+                continue;
+            }
+            if samples(&b.pieces).into_iter().any(|p| in_box(bx, p, 1.5))
+                || samples(&tri_edges(&b.tri)).into_iter().any(|p| in_box(bx, p, -1.0)) {
+                hl.push(format!("logo {} on {}", l.id, b.id));
+            }
+        }
+        for m in &g.logos[i + 1..] {
+            let c = logo_box(m);
+            if l.tip != m.tip && bx.0.max(c.0) < bx.2.min(c.2) - 1.0 && bx.1.max(c.1) < bx.3.min(c.3) - 1.0 {
+                hl.push(format!("logo {} on logo {}", l.id, m.id));
+            }
+        }
+    }
+    out.extend(hl.into_iter().map(|w| ("heads-or-logos-overlap", w)));
+
+    // Inside the figure.
+    let (w, ht) = g.size;
+    if w.is_finite() && ht.is_finite() {
+        for (id, axis, v) in &g.coords {
+            let lim = if *axis == 'x' { w } else { ht };
+            if *v < -0.5 || *v > lim + 0.5 {
+                out.push(("outside-figure", format!("{id}: {axis} = {v} outside 0..{lim}")));
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod unit {
+    use super::*;
+
+    fn invs(body: &str) -> Vec<&'static str> {
+        let svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"500px\" height=\"500px\">{body}</svg>");
+        let doc = roxmltree::Document::parse(&svg).unwrap();
+        let mut v: Vec<_> = check(&parse(&doc)).into_iter().map(|(i, _)| i).collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+    fn dot(var: &str, x: f64, y: f64, ev: &str) -> String {
+        format!("<circle cx=\"{x}\" cy=\"{y}\" r=\"5\" data-hash=\"{var}\" data-tooltip-text=\"{ev} {x} {y}\" \
+                 data-rv-id=\"{var}@{x},{y}:dot:{ev}\" data-rv-kind=\"dot\" data-rv-event=\"{ev}\" data-rv-var=\"{var}\"/>")
+    }
+    /// A main column's hollow segment (two side lines).
+    fn line(var: &str, x: f64, y1: f64, y2: f64) -> String {
+        format!("<g data-rv-id=\"{var}@{y1}:line\" data-rv-kind=\"line\" data-rv-var=\"{var}\">\
+                 <line data-hash=\"{var}\" x1=\"{}\" y1=\"{y1}\" x2=\"{}\" y2=\"{y2}\"/>\
+                 <line data-hash=\"{var}\" x1=\"{}\" y1=\"{y1}\" x2=\"{}\" y2=\"{y2}\"/></g>",
+                x - 1.75, x - 1.75, x + 1.75, x + 1.75)
+    }
+    /// A conditional arm's segment: hollow sides 1.75 px either side of
+    /// the centre line, plus its hover polygon.
+    fn arm(var: &str, n: u32, a: (f64, f64), b: (f64, f64)) -> String {
+        let l = len(a, b);
+        let (px, py) = (-(b.1 - a.1) / l * 1.75, (b.0 - a.0) / l * 1.75);
+        let id = format!("{var}@L1:branch_line:full_privilege#{n}");
+        let side = |s: f64, part: &str| format!(
+            "<line data-hash=\"{var}\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-rv-id=\"{id}/{part}\" \
+             data-rv-kind=\"branch_line\" data-rv-part=\"{part}\" data-rv-var=\"{var}\"/>",
+            a.0 + s * px, a.1 + s * py, b.0 + s * px, b.1 + s * py);
+        format!("{}{}<polygon data-hash=\"{var}\" points=\"0,0 1,1 2,2\" data-rv-id=\"{id}\" data-rv-kind=\"branch_line\" data-rv-var=\"{var}\"/>",
+                side(1.0, "side1"), side(-1.0, "side2"))
+    }
+    fn arrow(id: &str, var: &str, to: &str, pts: &str, head: &str) -> String {
+        format!("<g data-rv-id=\"{id}\" data-rv-kind=\"arrow\" data-rv-var=\"{var}\" data-rv-to=\"{to}\" \
+                 data-rv-line=\"1\" data-tooltip-text=\"{id}\"><polyline class=\"arrow-shaft\" points=\"{pts}\"/>\
+                 <polygon class=\"arrow-head\" points=\"{head}\"/></g>")
+    }
+    fn header(var: &str) -> String {
+        format!("<text x=\"10\" y=\"10\" data-rv-id=\"hdr:{var}\" data-rv-kind=\"header\" data-rv-var=\"{var}\">{var}</text>")
+    }
+
+    /// `let a = if c { f } else if d { g } else { h };` (#1278): an `else`
+    /// arm whose column forks again. Drawn right, the outer arm's leg ends
+    /// at the inner fork and the inner join's leg goes on to the outer join.
+    fn else_if(stub: bool) -> String {
+        let mut s = [
+            dot("a", 100.0, 100.0, "branch"), dot("a", 150.0, 130.0, "branch"),
+            dot("a", 125.0, 160.0, "acquire"), dot("a", 175.0, 160.0, "acquire"),
+            dot("a", 150.0, 190.0, "branch_join"), dot("a", 100.0, 220.0, "branch_join"),
+            dot("a", 75.0, 160.0, "acquire"),
+            arm("a", 1, (100.0, 100.0), (75.0, 130.0)), arm("a", 2, (75.0, 130.0), (75.0, 190.0)),
+            arm("a", 3, (75.0, 190.0), (100.0, 220.0)),
+            arm("a", 4, (100.0, 100.0), (150.0, 115.0)),
+            arm("a", 5, (150.0, 130.0), (125.0, 160.0)), arm("a", 6, (150.0, 130.0), (175.0, 160.0)),
+            arm("a", 7, (125.0, 160.0), (150.0, 190.0)), arm("a", 8, (175.0, 160.0), (150.0, 190.0)),
+            arm("a", 9, (150.0, 190.0), (100.0, 220.0)),
+        ].concat();
+        // The outer arm's column, down to the inner fork, or past it.
+        s.push_str(&arm("a", 10, (150.0, 115.0), (150.0, if stub { 145.0 } else { 130.0 })));
+        s
+    }
+
+    #[test]
+    fn a_column_drawn_past_a_fork_is_caught() {
+        assert_eq!(invs(&else_if(false)), Vec::<&str>::new());
+        assert_eq!(invs(&else_if(true)), vec!["line-ends-nowhere", "line-through-fork"]);
+    }
+
+    #[test]
+    fn columns_start_and_end_at_dots_or_joints() {
+        let ok = [dot("s", 70.0, 95.0, "acquire"), line("s", 70.0, 95.0, 125.0), line("s", 70.0, 125.0, 155.0),
+                  dot("s", 70.0, 155.0, "owner_go_out_of_scope")].concat();
+        assert_eq!(invs(&ok), Vec::<&str>::new());
+        // A gap: the column stops on row 125 and starts again on row 140.
+        let gap = ok.replace("y1=\"125\"", "y1=\"140\"");
+        assert_eq!(invs(&gap), vec!["line-ends-nowhere", "line-starts-nowhere"]);
+        // A struct's column stops on the row its field is moved out.
+        let partial = [dot("p", 70.0, 95.0, "acquire"), line("p", 70.0, 95.0, 125.0),
+                       dot("p.name", 170.0, 125.0, "move")].concat();
+        assert_eq!(invs(&partial), Vec::<&str>::new());
+        assert_eq!(invs(&partial.replace("p.name", "q")), vec!["line-ends-nowhere"]);
+        // A stretch drawn twice (an arm's own row over its column) is fine.
+        let twice = [ok.clone(), line("s", 70.0, 100.0, 110.0)].concat();
+        assert_eq!(invs(&twice), Vec::<&str>::new());
+        // A diverging arm's column ends in a stop bar.
+        let stop = [dot("s", 70.0, 95.0, "acquire"), line("s", 70.0, 95.0, 125.0),
+                    "<line data-hash=\"s\" x1=\"64\" y1=\"125\" x2=\"76\" y2=\"125\" data-rv-id=\"s@L2:stop_bar\" data-rv-kind=\"stop_bar\"/>".into()].concat();
+        assert_eq!(invs(&stop), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn arrows_along_one_stretch_are_caught() {
+        let f = arrow("f>a", "f", "a", "75 135 300 135", "300,129 312.75,135 300,141");
+        let h = arrow("h>a", "h", "a", "195 135 300 135", "300,129 312.75,135 300,141");
+        let k = arrow("k>b", "k", "b", "75 165 300 165", "300,159 312.75,165 300,171");
+        assert_eq!(invs(&[f.clone(), k.clone()].concat()), Vec::<&str>::new());
+        // (Their heads lie on one spot too.)
+        assert_eq!(invs(&[f.clone(), h].concat()), vec!["arrows-overlap", "heads-or-logos-overlap"]);
+        // A one-line function's parameter in and result out touch at the elbow.
+        let p = arrow("caller>s", "caller", "s", "98 117 98 125 88 125", "88,131 75.25,125 88,119");
+        let r = arrow("s>caller", "s", "caller", "75.25 125 98 125 98 120", "92,120 98,107.25 104,120");
+        assert_eq!(invs(&[p, r].concat()), Vec::<&str>::new());
+        // A hop arrow's straight pieces count, its arc doesn't.
+        assert_eq!(path_pieces("M 145.25 335 L 300 335 A 10 10 0 0 1 320 335 L 362 335"),
+                   vec![((145.25, 335.0), (300.0, 335.0)), ((320.0, 335.0), (362.0, 335.0))]);
+    }
+
+    #[test]
+    fn heads_and_logos_on_other_arrows_are_caught() {
+        // g runs level along row 135; h comes up to it from below.
+        let g = arrow("g>a", "g", "a", "75 135 300 135", "300,129 312.75,135 300,141");
+        let clear = arrow("h>b", "h", "b", "200 200 200 160", "194,160 200,147.25 206,160");
+        assert_eq!(invs(&[g.clone(), clear].concat()), Vec::<&str>::new());
+        // h's head ends on g's shaft: under `OVERLAP_PX` of shared stretch.
+        let onto = arrow("h>b", "h", "b", "200 200 200 141", "194,141 200,128.25 206,141");
+        assert_eq!(invs(&[g.clone(), onto].concat()), vec!["heads-or-logos-overlap"]);
+        // A call's logo on an arrow not its own.
+        let logo = "<text x=\"150\" y=\"140\" data-rv-id=\"q>caller@L5:fn:move\" data-rv-kind=\"fn\" \
+                    data-rv-var=\"q\" data-rv-to=\"caller\" data-tooltip-text=\"q\">f</text>".to_string();
+        assert_eq!(invs(&[g, logo].concat()), vec!["heads-or-logos-overlap"]);
+    }
+
+    #[test]
+    fn hidden_marks_and_stray_arrows_are_caught() {
+        let two = [dot("p", 70.0, 95.0, "acquire"), dot("p", 70.0, 95.0, "mutable_reacquire")].concat();
+        assert_eq!(invs(&two), vec!["marks-on-one-spot"]);
+        let logo = |f: &str| format!("<text x=\"14\" y=\"190\" data-rv-id=\"{f}>caller@L5:fn:move\" data-rv-kind=\"fn\" \
+                                      data-rv-var=\"{f}\" data-rv-to=\"caller\" data-tooltip-text=\"{f}\">f</text>");
+        assert_eq!(invs(&[logo("make"), logo("make")].concat()), Vec::<&str>::new());
+        assert_eq!(invs(&[logo("make"), logo("String::from")].concat()), vec!["heads-or-logos-overlap", "marks-on-one-spot"]);
+        let to_a = [header("a"), dot("a", 70.0, 95.0, "acquire")].concat();
+        let hit = arrow("f>a", "f", "a", "200 95 88 95", "88,101 75.25,95 88,89");
+        assert_eq!(invs(&[to_a.clone(), hit].concat()), Vec::<&str>::new());
+        let miss = arrow("f>a", "f", "a", "200 125 88 125", "88,131 75.25,125 88,119");
+        assert_eq!(invs(&[to_a, miss].concat()), vec!["arrow-misses-target"]);
+        assert_eq!(invs(&dot("s", 70.0, 520.0, "acquire")), vec!["outside-figure"]);
+    }
+}
