@@ -25090,14 +25090,91 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from s2 to d.a",
             "Return immutably borrowed resource from d.a to s1 or s2 (d.a may point into either; its borrow of both ends here)",
             "Return immutably borrowed resource from d.b to s2 or s1 (d.b may point into either; its borrow of both ends here)",
-            "Return mutably borrowed resource from t.0 to s1 or s2 (t.0 may point into either; its borrow of both ends here)",
             "Return mutably borrowed resource from t.1 to s2 or s1 (t.1 may point into either; its borrow of both ends here)",
         ],
         must_not_contain: &[
             "=Return immutably borrowed resource from d.a to s2",
             "=Return immutably borrowed resource from d.b to s1",
-            "=Return mutably borrowed resource from t.0 to s2",
             "=Return mutably borrowed resource from t.1 to s1",
+            // (#1402: t.0's end gives nothing back. t.1, used after it,
+            // may point into s1 or s2, so both stay borrowed until then.)
+            "Return mutably borrowed resource from t.0",
+        ],
+    },
+    TooltipExpect {
+        name: "field_arms_lenders_1402",
+        // #1402: after `if c { One { a: &s1 } } else { One { a: &s2 } }`
+        // d.a may point into s1 or s2; both stay borrowed until its last
+        // use, where both get their borrow back. s1 used to have no
+        // borrow end at all (drawn borrowed to its scope end), and the
+        // visitor ended only the last arm's loan.
+        must_contain: &[
+            "Immutable borrow from s1 to d.a",
+            "Immutable borrow from s2 to d.a",
+            "Return immutably borrowed resource from d.a to s1 or s2 (d.a may point into either; its borrow of both ends here)",
+            "s1's resource is no longer immutably borrowed",
+            "s2's resource is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            "=Return immutably borrowed resource from d.a to s2",
+        ],
+    },
+    TooltipExpect {
+        name: "field_arms_lenders_siblings_1402",
+        // #1402's siblings: every lender a reference part may point into
+        // after the conditional gets its borrow back at the part's last
+        // use; only the last arm's used to.
+        must_contain: &[
+            "Return immutably borrowed resource from d.a to a1, a2 or a3 (d.a may point into any of them; its borrow of all of them ends here)",
+            "a1's resource is no longer immutably borrowed",
+            "a2's resource is no longer immutably borrowed",
+            "Return immutably borrowed resource from e.a to b1, b2 or b3 (e.a may point into any of them; its borrow of all of them ends here)",
+            "b1's resource is no longer immutably borrowed",
+            "b2's resource is no longer immutably borrowed",
+            "Return immutably borrowed resource from t.0 to c1 or c2 (t.0 may point into either; its borrow of both ends here)",
+            "c1's resource is no longer immutably borrowed",
+            "Return mutably borrowed resource from m.a to m1 or m2 (m.a may point into either; its borrow of both ends here)",
+            "m1's resource is no longer mutably borrowed",
+            "Return immutably borrowed resource from o.inner.a to n1 or n2 (o.inner.a may point into either; its borrow of both ends here)",
+            "n1's resource is no longer immutably borrowed",
+            // (The other arm's string literal needs nothing back.)
+            "Return immutably borrowed resource from f.a to l1",
+            "l1's resource is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            "=Return immutably borrowed resource from d.a to a3",
+            "=Return immutably borrowed resource from e.a to b3",
+            "=Return immutably borrowed resource from t.0 to c2",
+            "=Return mutably borrowed resource from m.a to m2",
+            "=Return immutably borrowed resource from o.inner.a to n2",
+            "f.a's borrow of the string literal ends",
+        ],
+    },
+    TooltipExpect {
+        name: "field_arms_lenders_assign_1402",
+        // #1402's siblings: a conditional assigned to the struct or to a
+        // field, `let e: One;` assigned in each arm, an arm whose value
+        // names a variable it declares (paired after the arm), an arm
+        // whose value is a call's result.
+        must_contain: &[
+            "Return immutably borrowed resource from d.a to r1 or r2 (d.a may point into either; its borrow of both ends here)",
+            "r1's resource is no longer immutably borrowed",
+            "Return immutably borrowed resource from o.inner.a to f1 or f2 (o.inner.a may point into either; its borrow of both ends here)",
+            "f1's resource is no longer immutably borrowed",
+            "Return immutably borrowed resource from e.a to g1 or g2 (e.a may point into either; its borrow of both ends here)",
+            "g1's resource is no longer immutably borrowed",
+            "Return immutably borrowed resource from f.a to h2 or h1 (f.a may point into either; its borrow of both ends here)",
+            "h2's resource is no longer immutably borrowed",
+            "Immutable borrow from k1 to g.a: mk's signature gives the struct it returns the same lifetime as its argument",
+            "k1's resource is immutably borrowed by g.a; k1 is read-only while the borrow is live",
+            "Return immutably borrowed resource from g.a to k1 or k2 (g.a may point into either; its borrow of both ends here)",
+        ],
+        must_not_contain: &[
+            "=Return immutably borrowed resource from d.a to r2",
+            "=Return immutably borrowed resource from o.inner.a to f2",
+            "=Return immutably borrowed resource from e.a to g2",
+            "=Return immutably borrowed resource from f.a to h1",
+            "=Return immutably borrowed resource from g.a to k2",
         ],
     },
 ];
