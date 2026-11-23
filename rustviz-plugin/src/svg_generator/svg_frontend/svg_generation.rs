@@ -655,6 +655,51 @@ fn ends_before_scope_ends(history: &mut Vec<(usize, Event)>) {
     }
 }
 
+/// Whether `e`, an event of an arm, is drawn on a column that joins
+/// after the conditional (`live_vars`). Not a scope end of a variable
+/// the arm declares, or the arm's value copied out to the caller, on a
+/// fn's last line.
+#[expect(clippy::disallowed_methods, reason = "any() makes order irrelevant")]
+fn on_joined_column(e: &ExternalEvent, live_vars: &HashSet<ResourceAccessPoint>) -> bool {
+    let joins = |r: &ResourceTy| r.extract_rap().is_some_and(|r| live_vars.contains(r));
+    match e {
+        ExternalEvent::Branch { live_vars: inner, .. } => inner.iter().any(|r| live_vars.contains(r)),
+        // Nor a move into the temporary tuple a scrutinee builds, dropped
+        // at the closing `}` (`if let (Some(a), _) = (p, q) {`): its drop
+        // is drawn under each arm, which ends there.
+        ExternalEvent::Move { to: ResourceTy::Temporary { tuple: Some(_), .. }, .. } => false,
+        // A borrow's end: its arrow lands on the lender's column. (The
+        // reference's own column ends at its dot and joins a row below
+        // anyway.)
+        ExternalEvent::StaticDie { to, .. } | ExternalEvent::MutableDie { to, .. } => joins(to),
+        e => { let (from, to) = ResourceAccessPoint_extract(e); joins(from) || joins(to) }
+    }
+}
+
+/// A conditional written on one line (`if let Some(x) = k { x.push('!');
+/// }`) whose arm stacked its arrows on rows below the line: the join's
+/// row was the last of those, and an arm's last dot on a joining column
+/// (s's "no longer mutably borrowed") sat level with the join dot,
+/// reached by a short horizontal stretch (#1392). The join goes a row
+/// lower. `merge_row` is the join's row after the arms' rows were added;
+/// the events of `branches` are already on their rows.
+fn one_line_join_below(
+    branches: &[ExtBranchData],
+    live_vars: &HashSet<ResourceAccessPoint>,
+    split_line: usize,
+    merge_line: usize,
+    split_row: usize,
+    merge_row: usize,
+) -> bool {
+    branch_is_collapsed(split_line, merge_line)
+        && !branch_is_collapsed(split_row, merge_row)
+        && branches.iter().any(|b| b.e_data.iter().any(|(l, e)| on_joined_column(e, live_vars) && match e {
+            // A conditional nested in the arm joins on that row.
+            ExternalEvent::Branch { merge_point, .. } => *merge_point == merge_row,
+            _ => *l == merge_row,
+        }))
+}
+
 /// Rows to add around the arms of a conditional written on one line
 /// whose arms stack arrows (`let (a, b) = if c { (f, g) } else { (h,
 /// k) };`, #1187). Each arm's stacked arrows run on rows inserted below
@@ -751,23 +796,7 @@ impl OneLineArmGaps {
                 || (nests && own_row(j))
                 || (shares_row(j) && arms_arrows_overlap(branches, j, spans[j].0, binding_columns)))
             .collect();
-        // (Only events drawn on a column that joins there: not a scope
-        // end of a variable the arm declares, or the arm's value copied
-        // out to the caller, on a fn's last line.)
-        let joins = |r: &ResourceTy| r.extract_rap().is_some_and(|r| live_vars.contains(r));
-        // Nor a move into the temporary tuple a scrutinee builds, dropped
-        // at the closing `}` (`if let (Some(a), _) = (p, q) {`): its drop
-        // is drawn under each arm, which ends there.
-        #[expect(clippy::disallowed_methods, reason = "any() makes order irrelevant")]
-        let on_joined_column = |e: &ExternalEvent| match e {
-            ExternalEvent::Branch { live_vars: inner, .. } => inner.iter().any(|r| live_vars.contains(r)),
-            ExternalEvent::Move { to: ResourceTy::Temporary { tuple: Some(_), .. }, .. } => false,
-            // A borrow's end: its arrow lands on the lender's column. (The
-            // reference's own column ends at its dot and joins a row below
-            // anyway.)
-            ExternalEvent::StaticDie { to, .. } | ExternalEvent::MutableDie { to, .. } => joins(to),
-            e => { let (from, to) = ResourceAccessPoint_extract(e); joins(from) || joins(to) }
-        };
+        let on_joined_column = |e: &ExternalEvent| on_joined_column(e, live_vars);
         let join_below = !branch_is_collapsed(line_num, merge_point)
             && branches.iter().any(|b| b.e_data.iter().any(|(l, e)| *l == merge_point && on_joined_column(e)));
         let join_past_inner = join_below && branches.iter().any(|b| b.e_data.iter().any(|(l, e)| *l == merge_point
@@ -797,6 +826,18 @@ impl OneLineArmGaps {
     fn before_merge(&self) -> bool {
         (self.ends_on_merge && self.gap_before.iter().any(|&g| g)) || self.join_below
     }
+}
+
+/// How far an arm's first row moves (`start`, the line it starts on, of a
+/// conditional that splits on `split_line`): by the rows inserted above
+/// it, `extra_lines`. An arm given a row of its own below a later line
+/// it starts on (`} else if look(r) {`, sharing its row with the end of
+/// the arm before it, #1278) still starts on that line, its condition's:
+/// the stretch beside it is that arm's, not dashed as code "not part of
+/// that branch" (#1380). Only its events go on the new row. A one-line
+/// conditional's arm starts on its new row (#1264).
+fn arm_start_shift(start: usize, split_line: usize, before_gap: usize, extra_lines: usize) -> usize {
+    if start == split_line { extra_lines } else { before_gap }
 }
 
 /// Shifts the lines of the arm `b_data` by the rows inserted above it
@@ -867,17 +908,20 @@ pub fn mutate_branch_lines(
                 let gaps = OneLineArmGaps::of(branches, branch_type, *merge_point, line_num, live_vars, l_map, binding_columns, arrow_tracks, in_spread_arm);
                 for (j, branch) in branches.iter_mut().enumerate(){ // mutate branches
                     let (start, end) = branch_type.get_mut_start_end(j);
+                    let before_gap = extra_lines;
                     if gaps.before_arm(j) {
                         *l_map.entry(*start + extra_lines).or_insert(0) += 1;
                         extra_lines += 1;
                     }
                     let pattern_lines = (line_num, *start);
-                    *start += extra_lines;
+                    *start += arm_start_shift(*start, line_num, before_gap, extra_lines);
                     let b = mutate_branch_lines(branch, l_map, extra_lines, pattern_lines, binding_columns, arrow_tracks, gaps.spread());
                     extra_lines += b;
                     *end += extra_lines;
                 }
-                if gaps.before_merge() {
+                if gaps.before_merge()
+                    || one_line_join_below(branches, live_vars, line_num, *merge_point, *split_point, *merge_point + extra_lines)
+                {
                     *l_map.entry(*merge_point + extra_lines).or_insert(0) += 1;
                     extra_lines += 1;
                 }
@@ -1401,18 +1445,21 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                 let extra_before = extra_lines;
                 for (j, branch) in branches.iter_mut().enumerate() {
                     let (start, end) = branch_type.get_mut_start_end(j);
+                    let before_gap = extra_lines;
                     if gaps.before_arm(j) {
                         *line_insertion_map.entry(*start + extra_lines).or_insert(0) += 1;
                         extra_lines += 1;
                     }
                     let pattern_lines = (*line_num, *start);
-                    *start += extra_lines;
+                    *start += arm_start_shift(*start, *line_num, before_gap, extra_lines);
                     // recurse into the branch
                     let b = mutate_branch_lines(branch, &mut line_insertion_map, extra_lines, pattern_lines, &mut visualization_data.binding_columns, &mut visualization_data.arrow_tracks, gaps.spread());
                     extra_lines += b;
                     *end += extra_lines;
                 }
-                if gaps.before_merge() {
+                if gaps.before_merge()
+                    || one_line_join_below(branches, live_vars, *line_num, *merge_point, *split_point, *merge_point + extra_lines)
+                {
                     *line_insertion_map.entry(*merge_point + extra_lines).or_insert(0) += 1;
                     extra_lines += 1;
                 }
