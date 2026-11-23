@@ -32842,6 +32842,44 @@ fn one_line_diamonds_end_brackets_at_forks_and_return_outward() {
             bad.push(format!("{fixture}: {id} goes {}", if left { "right, into the diamond" } else { "left" }));
         }
     }
+    // A left arm's L and a call's result to the caller in the gutter on
+    // one row (`if c { *b } else { String::new() }`): their heads apart.
+    let tip_x = |id: &str| -> f64 {
+        let doc = roxmltree::Document::parse(&tl).expect("timeline svg parses");
+        let g = doc.descendants().find(|n| n.attribute("data-rv-id") == Some(id))
+            .unwrap_or_else(|| panic!("no arrow {id}"));
+        let p: Vec<f64> = g.descendants().find(|n| n.has_tag_name("polygon")).and_then(|n| n.attribute("points"))
+            .unwrap_or("").split([' ', ',']).filter_map(|w| w.parse().ok()).collect();
+        p[2]
+    };
+    let (b, new) = (tip_x("b>caller@L66:arrow:move"), tip_x("String::new>caller@L66:arrow:move"));
+    if (b - new).abs() < 16.0 {
+        bad.push(format!("{fixture}: the heads of b's and String::new's returns are {}px apart", (b - new).abs()));
+    }
+    // A call's logo on an arm's diagonal (or the bend below the fork)
+    // goes on the arm's outer side, not into the diamond on the other
+    // arm's leg: (logo, the arm's column, is the arm left of its fork).
+    let doc = roxmltree::Document::parse(&tl).expect("timeline svg parses");
+    for (logo, var, left) in [
+        ("s>take@L69:fn:move", "s", true), ("t>take@L69:fn:move", "t", false),
+        ("String::new>x@L72:fn:move", "x", true), ("String::new>b@L76:fn:move", "b", true),
+        ("String::from>s@L82:fn:move", "s", true),
+    ] {
+        let n = doc.descendants().find(|n| n.attribute("data-rv-id") == Some(logo))
+            .unwrap_or_else(|| panic!("no logo {logo}"));
+        let (lx, ly): (f64, f64) = (n.attribute("x").unwrap().parse().unwrap(), n.attribute("y").unwrap().parse().unwrap());
+        let line = &logo[logo.find('@').unwrap()..logo.find(":fn").unwrap()];
+        // The arm's dot: on the logo's row, nearest to it.
+        let dot = doc.descendants().filter(|c| c.has_tag_name("circle"))
+            .filter(|c| c.attribute("data-rv-id").is_some_and(|id| id.starts_with(&format!("{var}{line}:dot:"))))
+            .filter_map(|c| Some((c.attribute("cx")?.parse::<f64>().ok()?, c.attribute("cy")?.parse::<f64>().ok()?)))
+            .filter(|&(_, cy)| (cy + 5.0 - ly).abs() < 0.5)
+            .min_by(|a, b| (a.0 - lx).abs().total_cmp(&(b.0 - lx).abs()))
+            .unwrap_or_else(|| panic!("no dot of {var} on {logo}'s row"));
+        if (lx < dot.0) != left {
+            bad.push(format!("{fixture}: {logo} is {} its dot, inside the diamond", if left { "right of" } else { "left of" }));
+        }
+    }
     let book = run_with_local_backend("book/c10_06_longest").timeline_panel_string();
     if !leftward(&book, "x>caller@L2:arrow:copy") || leftward(&book, "y>caller@L2:arrow:copy") {
         bad.push("book/c10_06_longest: x's return should go left, y's right".into());

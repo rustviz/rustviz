@@ -58,6 +58,33 @@ fn if_let_bracket(o: &Option<String>) {
         println!("{}", s);
     }
 }
+// #1309, from the stage-2 audit: a left arm's return L going left met a
+// call's result to the caller in the gutter (heads 2px apart), and a
+// call's logo on an arm's diagonal sat inside the diamond, on the other
+// arm's leg.
+fn unbox_or_new(b: Box<String>, c: bool) -> String {
+    if c { *b } else { String::new() }
+}
+fn take_each(c: bool, s: String, t: String) {
+    if c { take(s) } else { take(t) }
+}
+fn made_or_kept(c: bool, s: String) -> String {
+    let x = if c { String::new() } else { s };
+    x
+}
+fn pair_made(c: bool, f: String, h: String, k: String) {
+    let (a, b) = if c { (f, String::new()) } else { (h, k) };
+    println!("{} {}", a, b);
+}
+fn deferred(c: bool) {
+    let s;
+    if c {
+        s = String::from("yes");
+    } else {
+        s = String::from("no");
+    }
+    println!("{}", s);
+}
 fn main() {
     let s1 = String::from("abcd");
     let r = longest(s1.as_str(), "xyz");
@@ -75,4 +102,8 @@ fn main() {
     chain_apart(true, false, String::new(), String::new(), String::new(), String::new(), String::new(), String::new());
     in_loop(Vec::new(), true, false);
     if_let_bracket(&Some(String::new()));
+    println!("{} {}", unbox_or_new(Box::new(String::new()), true), made_or_kept(true, String::new()));
+    take_each(true, String::new(), String::new());
+    pair_made(true, String::new(), String::new(), String::new());
+    deferred(true);
 }

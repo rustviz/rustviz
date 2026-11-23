@@ -4881,15 +4881,37 @@ fn traverse_timeline2<'a> (t: &'a TimelineColumnData, history: & 'a Vec<(usize, 
 /// variable's own column, or the arm of an enclosing conditional. `None`
 /// when the event is on the variable's own column, in no arm.
 fn arm_parent_x(hash: &u64, vd: &VisualizationData, ro_layout: &BTreeMap<u64, TimelineColumnData>, id: usize) -> Option<i64> {
-    fn walk(parent: &TimelineColumnData, history: &[(usize, Event)], id: usize) -> Option<Option<i64>> {
-        history.iter().find_map(|(_, e)| match e {
-            Event::Branch { branch_history, .. } => branch_history.iter().find_map(|b|
-                walk(&b.t_data, &b.e_data, id).map(|inner| inner.or(Some(parent.x_val)))),
-            _ if e.get_id() == id => Some(None),
+    arm_parent(hash, vd, ro_layout, id).map(|(x, _)| x)
+}
+
+/// `arm_parent_x`, and whether the event's dot is on the arm's diagonal
+/// leg or at its bend: in a one-row diamond (`branch_is_collapsed`), or
+/// on the fork's line or the next (`if c { take(s); } else { take(t);`
+/// on two lines, an arm on #1187's rows). The other arm's leg then runs
+/// close by on the dot's inner side.
+fn arm_parent(hash: &u64, vd: &VisualizationData, ro_layout: &BTreeMap<u64, TimelineColumnData>, id: usize) -> Option<(i64, bool)> {
+    // `Err(line)`: the event is in `history` itself, on `line`.
+    fn walk(parent: &TimelineColumnData, history: &[(usize, Event)], id: usize) -> Option<Result<(i64, bool), usize>> {
+        history.iter().find_map(|(line, e)| match e {
+            Event::Branch { branch_history, split_point, merge_point, .. } => branch_history.iter().find_map(|b|
+                walk(&b.t_data, &b.e_data, id).map(|inner| inner.or_else(|l|
+                    Ok((parent.x_val, branch_is_collapsed(*split_point, *merge_point) || l <= *split_point + 1))))),
+            _ if e.get_id() == id => Some(Err(*line)),
             _ => None,
         })
     }
-    walk(&ro_layout[hash], &vd.timelines.get(hash)?.history, id).flatten()
+    walk(&ro_layout[hash], &vd.timelines.get(hash)?.history, id)?.ok()
+}
+
+/// Which side of its dot a call's logo goes on by default, for an event
+/// on an arm's diagonal leg or its bend (`arm_parent`): the arm's outer
+/// side (left of a left arm, right of a right arm). The inner side lies
+/// on, or against, the other arm's dashed leg (#1309). `None` elsewhere.
+fn diamond_arm_outer_left(hash: &u64, vd: &VisualizationData, ro_layout: &BTreeMap<u64, TimelineColumnData>, id: usize, x: i64) -> Option<bool> {
+    match arm_parent(hash, vd, ro_layout, id)? {
+        (parent_x, true) if x != parent_x => Some(x < parent_x),
+        _ => None,
+    }
 }
 
 fn fetch_timeline<'a>(hash: &u64, vd: &'a VisualizationData, ro_layout: & 'a BTreeMap<u64, TimelineColumnData>, id: usize) -> & 'a TimelineColumnData {
@@ -5106,6 +5128,8 @@ enum LaneKind {
     Logo { alt: (f64, f64) },
     /// A call's result handed to the caller (the logo in the gutter).
     FnResult,
+    /// A column's L to the caller (`render_return_to_caller_arrow`).
+    CallerL,
     /// Anything else (an L to or from the caller): stays where it is.
     Fixed,
 }
@@ -5128,6 +5152,9 @@ struct ArrowLanes {
     flipped: std::collections::HashSet<(usize, usize)>,
     /// A result to the caller's place in the gutter, after the row's first.
     slot: HashMap<(usize, usize), i64>,
+    /// A result to the caller in the gutter and a left arm's L to the
+    /// caller on the same row, both drawn narrower (`GUTTER_SQUEEZED_*`).
+    squeezed: std::collections::HashSet<(usize, usize)>,
     /// How far along the row a dipping arrow's leg runs from its head's
     /// (`true`) or tail's dot, where it isn't the usual 20 px.
     leg_dx: HashMap<((usize, usize), bool), i64>,
@@ -5147,6 +5174,13 @@ const FN_RESULT_LOGO_X: f64 = 14.0;
 const FN_RESULT_BEND_X: f64 = 44.0;
 const FN_RESULT_SLOT_DX: f64 = 14.0;
 const FN_RESULT_SLOT_LOGO_DX: f64 = 12.0;
+/// A result to the caller whose gutter spot lies on a left arm's L to
+/// the caller (`if c { *b } else { String::new() }`, b the first column,
+/// #1309): its L bends here, its logo `FN_RESULT_SLOT_LOGO_DX` farther
+/// left, and the arm's L bends no farther left than
+/// `GUTTER_SQUEEZED_ARM_BEND_X`, so the two heads are apart.
+const GUTTER_SQUEEZED_BEND_X: f64 = 28.0;
+const GUTTER_SQUEEZED_ARM_BEND_X: f64 = 48.0;
 
 fn stretches_overlap(a: (f64, f64), b: (f64, f64)) -> bool {
     a.0.max(b.0) < a.1.min(b.1) - LANE_OVERLAP
@@ -5219,6 +5253,25 @@ impl ArrowLanes {
                 }
             }
             *k += 1;
+        }
+        // #1309: the row's first result to the caller and a left arm's L
+        // to the caller reaching into the gutter: both narrower.
+        for i in 0..items.len() {
+            if !matches!(items[i].kind, LaneKind::FnResult) || self.slot.contains_key(&items[i].key) {
+                continue;
+            }
+            let ls: Vec<usize> = (0..items.len()).filter(|&j| matches!(items[j].kind, LaneKind::CallerL)
+                && items[j].y == items[i].y && stretches_overlap((items[i].lo, items[i].hi), (items[j].lo, items[j].hi))).collect();
+            if ls.is_empty() {
+                continue;
+            }
+            self.squeezed.insert(items[i].key);
+            items[i].lo = FN_RESULT_LOGO_X - FN_RESULT_SLOT_LOGO_DX - 2.0;
+            items[i].hi = GUTTER_SQUEEZED_BEND_X + 6.0;
+            for j in ls {
+                self.squeezed.insert(items[j].key);
+                items[j].lo = items[j].lo.max(GUTTER_SQUEEZED_ARM_BEND_X - 6.0);
+            }
         }
 
         // #1307: a logo on another arrow or logo goes to its dot's other
@@ -5630,13 +5683,16 @@ fn render_generic_arrow(
             };
             // The logo goes right of the dot, or left of it where the
             // right lies on another arrow of the row (#1307,
-            // `ArrowLanes`).
+            // `ArrowLanes`). On a left arm's diagonal it goes left
+            // first: on the right it sat inside the diamond, on the other
+            // arm's leg (#1309, `diamond_arm_outer_left`).
             let key = (external_event.get_id(), *line_number);
             let right = (x1 as f64 + 5.0, (x1 + arrow_length + clearance + 15) as f64);
             let left = (x1 as f64 - (arrow_length + 15) as f64, x1 as f64 - 5.0);
-            let flip = dots.lanes.flipped.contains(&key);
-            let (span, alt) = if flip { (left, right) } else { (right, left) };
-            dots.lanes.record(key, y1, span.0, span.1, LaneKind::Logo { alt });
+            let prefer_left = diamond_arm_outer_left(to_variable.hash(), visualization_data, resource_owners_layout, external_event.get_id(), x1) == Some(true);
+            let (preferred, other) = if prefer_left { (left, right) } else { (right, left) };
+            dots.lanes.record(key, y1, preferred.0, preferred.1, LaneKind::Logo { alt: other });
+            let flip = dots.lanes.flipped.contains(&key) != prefer_left;
             let (x2, logo_x) = if flip {
                 (x1 - arrow_length, x1 - arrow_length - 12)
             } else {
@@ -5702,14 +5758,17 @@ fn render_generic_arrow(
             let y2 = y1;
             // The logo goes left of the dot, or right of it where the
             // left lies on another arrow or logo of the row (#1307,
-            // `ArrowLanes`).
+            // `ArrowLanes`). On a right arm's diagonal it goes right
+            // first: on the left it sat inside the diamond, on the other
+            // arm's leg (#1309, `diamond_arm_outer_left`).
             let cx = from_timeline.x_val;
             let key = (external_event.get_id(), *line_number);
             let left = ((cx - 5 - arrow_length - 12) as f64, cx as f64 - 5.0);
             let right = (cx as f64 + 5.0, (cx + 5 + arrow_length + 15) as f64);
-            let flip = dots.lanes.flipped.contains(&key);
-            let (span, alt) = if flip { (right, left) } else { (left, right) };
-            dots.lanes.record(key, y1, span.0, span.1, LaneKind::Logo { alt });
+            let prefer_right = diamond_arm_outer_left(from_variable.hash(), visualization_data, resource_owners_layout, external_event.get_id(), cx) == Some(false);
+            let (preferred, other) = if prefer_right { (right, left) } else { (left, right) };
+            dots.lanes.record(key, y1, preferred.0, preferred.1, LaneKind::Logo { alt: other });
+            let flip = dots.lanes.flipped.contains(&key) != prefer_right;
             let (x1, x2, logo_x) = if flip {
                 (cx + 5 + arrow_length, cx + 5, cx + 5 + arrow_length + 5)
             } else {
@@ -5854,9 +5913,10 @@ fn render_function_result_arrow(line_number: &usize, external_event: &ExternalEv
         let slot = dots.lanes.slot.get(&key).copied().unwrap_or(0);
         let y = row_y + (slot * LANE_STEP) as f64;
         // Its logo also a little left of the one above, clear of it.
-        let logo_x = FN_RESULT_LOGO_X - if slot % 2 == 1 { FN_RESULT_SLOT_LOGO_DX } else { 0.0 };
+        let squeezed = dots.lanes.squeezed.contains(&key);
+        let logo_x = FN_RESULT_LOGO_X - if slot % 2 == 1 || squeezed { FN_RESULT_SLOT_LOGO_DX } else { 0.0 };
         let source_x = logo_x + 16.0;
-        let bend_x = FN_RESULT_BEND_X + slot as f64 * FN_RESULT_SLOT_DX;
+        let bend_x = if squeezed { GUTTER_SQUEEZED_BEND_X } else { FN_RESULT_BEND_X + slot as f64 * FN_RESULT_SLOT_DX };
         let head_end_y = row_y - 5.0;
         let tip: f64 = 12.75;
         let styled_fn = styled_name_html(&f.name);
@@ -5914,10 +5974,16 @@ fn render_return_to_caller_arrow(line_number: &usize, external_event: &ExternalE
             _ => 1.0,
         };
         let source_x = cx + side * 5.25;
-        let bend_x = cx + side * (head_offset + leg);
+        let mut bend_x = cx + side * (head_offset + leg);
+        // Going left into the gutter where a call's result goes to the
+        // caller on the same row, it bends nearer its dot, and the
+        // result's L farther left (`ArrowLanes::squeezed`).
+        if dots.lanes.squeezed.contains(&(*id, *line_number)) {
+            bend_x = bend_x.max(GUTTER_SQUEEZED_ARM_BEND_X);
+        }
         let vertical_line: f64 = leg / 2.0;
         let head_end_y = cy - vertical_line;
-        dots.lanes.record((*id, *line_number), cy as i64, source_x, bend_x + 6.0, LaneKind::Fixed);
+        dots.lanes.record((*id, *line_number), cy as i64, source_x, bend_x + side * 6.0, LaneKind::CallerL);
 
         let polyline_pts = format!(
             "{} {} {} {} {} {}",
