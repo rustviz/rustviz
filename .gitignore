@@ -37,3 +37,7 @@ playground/frontend/src/prerendered.json
 
 # Scratch cargo registry caches used for PR previews.
 cargo-home-preview/
+
+# tools/progen (#1218): Python bytecode and default output dir
+__pycache__/
+progen-out/

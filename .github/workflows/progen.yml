@@ -1,0 +1,100 @@
+name: progen
+
+# Nightly property-based run (#1218): generate feature-combination
+# programs, keep the ones rustc accepts, run the corpus invariant and
+# geometry checks on them with the plugin built from main, shrink and
+# bucket the failures (tools/progen/README.md). Report only: findings
+# never fail the job; read the run page's summary or the artifact.
+#
+# On pull requests that touch the generator, only its own tests run.
+
+on:
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+    inputs:
+      count:
+        description: "programs to generate (the time box usually stops it first)"
+        default: "20000"
+      seed:
+        description: "seed (default: today's date, so each night tries new programs)"
+        default: ""
+  pull_request:
+    paths:
+      - "tools/progen/**"
+      - ".github/workflows/progen.yml"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup show
+      - name: Generator tests
+        run: python3 -m unittest discover -s tools/progen -v
+
+  batch:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup show
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: progen-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: progen-${{ runner.os }}-cargo-
+
+      - name: Install the plugin from this commit
+        run: cargo install --locked --path rustviz-plugin --root "$RUNNER_TEMP/rv"
+
+      - name: Build the corpus test binary
+        run: cargo test -p rustviz-lib --test corpus --locked --no-run
+
+      - name: Generate, check, shrink (20 minutes, report only)
+        continue-on-error: true
+        env:
+          PROGEN_PLUGIN_ROOT: ${{ runner.temp }}/rv
+          PROGEN_TIME_LIMIT: "1200"
+          COUNT: ${{ inputs.count || '20000' }}
+          SEED: ${{ inputs.seed }}
+        run: tools/progen/run.sh "$COUNT" "${SEED:-$(date -u +%Y%m%d)}" progen-out
+
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f progen-out/summary.md ]; then
+            cat progen-out/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "progen wrote no summary; see the step log." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload summary and buckets
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: progen-${{ github.run_id }}
+          path: |
+            progen-out/summary.md
+            progen-out/summary.json
+            progen-out/log.txt
+            progen-out/buckets/
+          if-no-files-found: warn
+          retention-days: 30
