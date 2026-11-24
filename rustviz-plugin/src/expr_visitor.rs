@@ -660,6 +660,10 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   //   destructure_ref_data: a reference destination's new lender,
   //     computed before any part of the statement is drawn.
   pub destructure_srcs: HashMap<rustc_hir::HirId, &'tcx Expr<'tcx>>,
+  /// `lhs` binding → the part column of the RHS place it takes, when the
+  /// RHS is a place whose parts have columns (`p.a` in `Pair { a: s, b: t
+  /// } = p;`, #1412): `s = p.a`, not `s = p`.
+  pub destructure_parts: HashMap<rustc_hir::HirId, String>,
   pub destructure_moved: HashSet<String>,
   /// The parts of an assignment's destination that its right-hand
   /// side moves out (`t.0`, `t.1` in `t = (t.1, t.0)`, #1138): their
@@ -1182,6 +1186,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       ctor_temps: HashMap::new(),
       let_ctor_literals: HashSet::new(),
       destructure_srcs: HashMap::new(),
+      destructure_parts: HashMap::new(),
       destructure_moved: HashSet::new(),
       rhs_self_moved: BTreeSet::new(),
       destructure_swapped: Vec::new(),
@@ -1951,6 +1956,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       self.late_old_ends.push((line_num, event));
       return;
     }
+    // A place moved into the new value of the place itself (`p.b` in
+    // `p = Pair { a: .., b: p.b };`, `t.1` in `t = (s, t.1);`): the
+    // right-hand side runs first, so the value moves out and then comes
+    // back with the new value. Its column draws the move before the
+    // acquire, as for a destructuring cycle (#1343, #1411).
+    if let ExternalEvent::Move { from: ResourceTy::Value(from), to: ResourceTy::Value(to), id, .. } = &event {
+      if from.hash() == to.hash() && !self.moves_out_first.contains(id) {
+        self.moves_out_first.push(*id);
+      }
+    }
 
     self.preprocessed_events.push((line_num, event.clone()));
     let resourceaccesspoint = ResourceAccessPoint_extract(&event);
@@ -2573,9 +2588,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       if assigned == 0 || untouched == 0 || assigned + untouched != ends.len() {
         continue;
       }
-      let drop_flag_assign = arms.iter().any(|a| a.iter().any(|(_, e)| matches!(e,
+      // (Not one whose drop flag is the arm's own doing: `if c { if d {
+      // drop(s); } s = …; }` may have moved s in that arm, above the
+      // assignment, which says nothing of where the conditional starts,
+      // #1413.)
+      // (The assignment's own events, its new value among them, are on
+      // its line, before the drop.)
+      let drop_flag_assign = arms.iter().any(|a| a.iter().enumerate().any(|(i, (line, e))| matches!(e,
         ExternalEvent::OwnerDropAtReassign { ro, maybe_moved, maybe_init, .. }
-          if ro.name() == name && (*maybe_moved || maybe_init.is_some()))));
+          if ro.name() == name && (*maybe_moved || maybe_init.is_some()))
+          && ownership_after(&a[..a[..i].iter().rposition(|(l, _)| l != line).map_or(0, |j| j + 1)], name, None).is_none()));
       if deferred || before(name) != Ownership::Held || drop_flag_assign {
         out.insert(r.clone());
       }
@@ -2981,14 +3003,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   /// Whether the value branch body `body` produces (its block's tail,
   /// not a nested `if` / `match`, whose own branches are looked at
-  /// one by one) uses a variable declared within `within`: one that
-  /// doesn't exist until the branch is visited (#994).
+  /// one by one) can only be paired once the branch has been visited:
+  /// it uses a variable declared within `within`, one that doesn't
+  /// exist until the branch is visited (#994), or a variable the
+  /// branch's statements use before it (`if c { println!("{}", s); s
+  /// }`, #1410), whose events there come before the value's.
   pub(crate) fn arm_value_uses_local_in(&self, body: &'tcx Expr<'tcx>, within: rustc_span::Span) -> bool {
     let mut e = body;
+    let mut stmts: Vec<&'tcx rustc_hir::Stmt<'tcx>> = Vec::new();
     loop {
       match e.kind {
         ExprKind::Block(b, _) => match b.expr {
-          Some(t) => e = t,
+          Some(t) => {
+            stmts.extend(b.stmts.iter());
+            e = t;
+          }
           None => return false,
         },
         ExprKind::DropTemps(t) => e = t,
@@ -2996,21 +3025,29 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         _ => break,
       }
     }
-    struct Locals<'tcx> { tcx: TyCtxt<'tcx>, within: rustc_span::Span, found: bool }
-    impl<'tcx> rustc_hir::intravisit::Visitor<'tcx> for Locals<'tcx> {
+    struct Locals { hids: Vec<rustc_hir::HirId> }
+    impl<'tcx> rustc_hir::intravisit::Visitor<'tcx> for Locals {
       fn visit_path(&mut self, path: &rustc_hir::Path<'tcx>, _id: rustc_hir::HirId) {
         if let Res::Local(hid) = path.res {
-          if self.within.contains(self.tcx.hir_span(hid)) {
-            self.found = true;
-          }
+          self.hids.push(hid);
         }
         rustc_hir::intravisit::walk_path(self, path);
       }
     }
-    let mut v = Locals { tcx: self.tcx, within, found: false };
+    let mut v = Locals { hids: Vec::new() };
     rustc_hir::intravisit::Visitor::visit_expr(&mut v, e);
+    if v.hids.iter().any(|&hid| within.contains(self.tcx.hir_span(hid))) {
+      return true;
+    }
     // A temporary the value borrows and the branch makes (#1397).
-    v.found || self.makes_branch_temp(e)
+    if self.makes_branch_temp(e) {
+      return true;
+    }
+    let mut used = Locals { hids: Vec::new() };
+    for st in stmts {
+      rustc_hir::intravisit::Visitor::visit_stmt(&mut used, st);
+    }
+    v.hids.iter().any(|h| used.hids.contains(h))
   }
 
   /// Whether `e` contains a temporary that a `let` extends through a
@@ -8252,9 +8289,21 @@ pub fn emit_scope_end(&mut self, vars: HashSet<ResourceAccessPoint>, line: usize
       ResourceAccessPoint::Struct(st) if !st.is_member => Some(st.hash),
       _ => None,
     }).collect();
+    let mut group = owners.clone();
     for rd in self.raps.values() {
       if let ResourceAccessPoint::Struct(st) = &rd.rap {
         if st.is_member && owners.contains(&st.owner) && (!rd.is_global || rd.local_later) {
+          vars.push(rd.rap.clone());
+          group.insert(st.hash);
+        }
+      }
+    }
+    // So do its reference fields (`h2.r` of `let h2 = Holder { r: h.r };`
+    // in an arm, #1421), as at the function's end.
+    for rd in self.raps.values() {
+      if let ResourceAccessPoint::MutRef(MutRef { member_of: Some(m), .. })
+        | ResourceAccessPoint::StaticRef(StaticRef { member_of: Some(m), .. }) = &rd.rap {
+        if group.contains(m) && (!rd.is_global || rd.local_later) {
           vars.push(rd.rap.clone());
         }
       }
@@ -11379,15 +11428,19 @@ pub fn print_out_of_scope(&mut self){
         ExternalEvent::StaticDie { from: ResourceTy::Value(r), to, .. }
         | ExternalEvent::MutableDie { from: ResourceTy::Value(r), to, .. }
         | ExternalEvent::RefDie { from: ResourceTy::Value(r), to, .. } =>
-          to.extract_rap().and_then(|lender| arm_declaring(self.preprocessed_events, r, lender, *line)),
+          to.extract_rap().and_then(|lender| arm_declaring(self.preprocessed_events, r, lender, *line, false)
+            .map(|path| (path, Some(lender.clone())))),
         // An or-pattern reference's (#734), with each place it may
         // borrow.
         ExternalEvent::OrAltBorrow { ro, into, end: true, .. } =>
-          arm_declaring(self.preprocessed_events, into, ro, *line),
+          arm_declaring(self.preprocessed_events, into, ro, *line, false).map(|path| (path, Some(ro.clone()))),
         _ => None,
       };
       match path {
-        Some(mut path) => {
+        Some((mut path, lender)) => {
+          if let Some(lender) = lender {
+            draw_lender_along(self.preprocessed_events, &path, &lender);
+          }
           let ev = self.preprocessed_events.remove(i);
           if path[0].0 > i { path[0].0 -= 1; }
           // Arrows listed together on a line are drawn one below the
@@ -12353,7 +12406,7 @@ pub fn print_out_of_scope(&mut self){
       let (Some(bd), Some(brap)) = (self.borrow_map.get(b), self.raps.get(b)) else { continue };
       let lenders = bd.all_lenders();
       let Some(lrap) = lenders.iter().filter_map(|l| l.extract_rap()).find(|l| l.name() == lender) else { continue };
-      let Some(path) = arm_declaring(self.preprocessed_events, &brap.rap, lrap, bd.lifetime) else { continue };
+      let Some(path) = arm_declaring(self.preprocessed_events, &brap.rap, lrap, bd.lifetime, false) else { continue };
       let Some(ExternalEvent::Branch { live_vars, branches, .. }) = branch_on_path(self.preprocessed_events, &path) else { continue };
       let arm = &branches[path.last().map_or(0, |p| p.1)];
       #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "collected into a Vec and sorted below")]
@@ -13930,11 +13983,19 @@ fn ownership_after(events: &[(usize, ExternalEvent)], rap_name: &str, start: Opt
 /// several arms can declare `r` (`if let Some(x) = &a {..} else if let
 /// Some(x) = &b {..}`): the arms whose lines hold `line` are tried
 /// first, so the end lands in the arm where it happens (#916).
+///
+/// `outer`: the lender has a column in a conditional this one is nested
+/// in (the arm of an `else if`, or of an `if` inside an arm, #1421). The
+/// end then goes into the innermost arm that declares the reference, the
+/// lender being one of the variables that conditional draws
+/// (`nest_borrow_ends_in_arms` adds it): the reference doesn't exist
+/// after that arm.
 fn arm_declaring(
   events: &[(usize, ExternalEvent)],
   r: &ResourceAccessPoint,
   lender: &ResourceAccessPoint,
   line: usize,
+  outer: bool,
 ) -> Option<Vec<(usize, usize)>> {
   for (k, (_, ev)) in events.iter().enumerate() {
     let ExternalEvent::Branch { branches, live_vars, split_point, merge_point, branch_type, .. } = ev else { continue };
@@ -13945,16 +14006,31 @@ fn arm_declaring(
     order.sort_by_key(|&a| !holds_line(a));
     for a in order {
       let b = &branches[a];
-      if let Some(mut path) = arm_declaring(&b.e_data, r, lender, line) {
+      let has_lender = outer || live_vars.contains(lender) || b.decl_vars.contains(lender);
+      if let Some(mut path) = arm_declaring(&b.e_data, r, lender, line, has_lender) {
         path.insert(0, (k, a));
         return Some(path);
       }
-      if b.decl_vars.contains(r) && (live_vars.contains(lender) || b.decl_vars.contains(lender)) {
+      if b.decl_vars.contains(r) && has_lender {
         return Some(vec![(k, a)]);
       }
     }
   }
   None
+}
+
+/// Make `lender` one of the variables drawn by each conditional along
+/// `path` (see `arm_declaring`'s `outer`) that doesn't draw it yet and
+/// whose arm doesn't declare it: the borrow's end is drawn on its
+/// column in the arm.
+fn draw_lender_along(events: &mut [(usize, ExternalEvent)], path: &[(usize, usize)], lender: &ResourceAccessPoint) {
+  let Some(((k, a), rest)) = path.split_first() else { return };
+  let ExternalEvent::Branch { branches, live_vars, .. } = &mut events[*k].1 else { return };
+  let declared = branches.iter().any(|b| b.decl_vars.contains(lender));
+  if !declared && !live_vars.contains(lender) {
+    live_vars.insert(lender.clone());
+  }
+  draw_lender_along(&mut branches[*a].e_data, rest, lender);
 }
 
 /// `if let Some(a) = x.as_mut() { … } else { … }` (and the `match`

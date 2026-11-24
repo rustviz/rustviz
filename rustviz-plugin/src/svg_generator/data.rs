@@ -3169,6 +3169,18 @@ impl State {
     }
 }
 
+/// A conditional after which the value may be held or not: a
+/// `maybe_held` join (#1034), or one with a branch that gets to the join
+/// after such a conditional of its own (#1413).
+pub(crate) fn leaves_maybe_held(e: &Event) -> bool {
+    match e {
+        Event::Branch { maybe_held: true, .. } => true,
+        Event::Branch { branch_history, .. } => branch_history.iter()
+            .any(|b| !b.diverges && b.e_data.last().is_some_and(|(_, e)| leaves_maybe_held(e))),
+        _ => false,
+    }
+}
+
 impl PartialOrd for State {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
@@ -4142,6 +4154,12 @@ impl Event {
                     hover_messages::event_dot_move_to(place, is_plain(is))
                 }
             }
+            // `p.b` in `p = Pair { a: .., b: p.b };` (#1411): moved out
+            // by the right-hand side, back with the new value (the
+            // acquire on the same dot).
+            Event::Move{ to: ResourceTy::Value(t), is, ..} if is.extract_rap().is_some_and(|r| r.hash() == t.hash()) => {
+                hover_messages::event_dot_move_out_for_new_value(&self.deref_name(my_name), is_plain(is))
+            }
             Event::Move{ to, is, ..} => {
                 let v = is_plain(is);
                 match to {
@@ -4262,6 +4280,9 @@ impl Event {
             Event::Acquire{ from: ResourceTy::Value(from), is, loop_head: LoopHead::Part { path, copy, .. }, ..} => {
                 let is_ref = is.extract_rap().is_some_and(|r| r.is_ref());
                 hover_messages::event_dot_acquire_loop_element_part(&self.deref_name(my_name), &from.name(), path, *copy, is_ref)
+            }
+            Event::Acquire{ from: ResourceTy::Value(f), is, ..} if is.extract_rap().is_some_and(|r| r.hash() == f.hash()) => {
+                hover_messages::event_dot_back_with_new_value(&self.deref_name(my_name), is_plain(is))
             }
             Event::Acquire{ from, is, ..} => {
                 if is.is_closure() && from.extract_rap().is_some() {
@@ -5531,6 +5552,15 @@ impl Visualizable for VisualizationData {
                     // there, #1437.)
                     if unassigned_on_some_path {
                         previous_state = State::FullPrivilege { s: LineState::Uninit };
+                    }
+                    // In a branch, a value that may be held or not after
+                    // this conditional (`if c { take(p); if d { p = … } }`,
+                    // #1413) is drawn as after a move: nothing for the rest
+                    // of the branch (not "no value yet"), and the
+                    // conditional the branch is in joins as one that may
+                    // have moved it.
+                    if *maybe_held {
+                        previous_state = State::ResourceMoved { move_to: ResourceTy::Anonymous, move_at_line: *merge_point, dropped_by_hand: false };
                     }
                     // Every branch leaves the function (#515): nothing
                     // follows the conditional, and the column ends in
