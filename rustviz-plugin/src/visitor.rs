@@ -6241,9 +6241,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// loan ends, and q takes what the other branches' values borrow
   /// (`reassign_holder`), before the branches are visited; the other
   /// branches are paired after it, as before (`nest_arm_pairings`).
-  /// Only for a holder of a Copy type (`Option<&T>`), which has no old
-  /// value to drop where the new one arrives. False, doing nothing,
-  /// unless some branch's value is such.
+  /// Also for a holder that isn't Copy (`v = if c { let r = &a; vec![r]
+  /// } else { let r = &b; vec![r] };`, `Option<&mut T>`, #1477): its old
+  /// value's drop is drawn where the assignment starts, as before. False,
+  /// doing nothing, unless some branch's value is such.
   fn pair_holder_arms_in_branch(&mut self, expr: &'tcx Expr<'tcx>, lhs_expr: &'tcx Expr<'tcx>, rhs_expr: &'tcx Expr<'tcx>) -> bool {
     if !matches!(expr.kind, ExprKind::Assign(..)) || expr.span.from_expansion() {
       return false;
@@ -6251,9 +6252,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let Some(cond) = self.conditional_value(rhs_expr) else { return false };
     let owner = lhs_expr.hir_id.owner;
     let lhs_ty = self.tcx.typeck(owner).node_type(lhs_expr.hir_id);
-    if lhs_ty.is_ref() || !self.ty_is_copy(lhs_ty, owner) {
+    if lhs_ty.is_ref() {
       return false;
     }
+    // (A Copy holder is copied into, any other moved into: `Some(r)`
+    // with r a `&mut` moves r's reference into q.)
+    let evt = if self.ty_is_copy(lhs_ty, owner) { Evt::Copy } else { Evt::Move };
     let Some(ResourceTy::Value(rap)) = self.resource_of_lhs(lhs_expr) else { return false };
     if rap.is_ref() || !rap.holds_borrow() || rap.is_union() {
       return false;
@@ -6267,7 +6271,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.reassign_holder(&rap, cond, lhs_ty, expr_to_line(lhs_expr, &self.tcx));
     for b in bodies {
       self.deferred_arm_binds.entry(b.hir_id).or_insert_with(|| (b, Vec::new())).1
-        .push(ArmBind::Rhs(ResourceTy::Value(rap.clone()), Evt::Copy));
+        .push(ArmBind::Rhs(ResourceTy::Value(rap.clone()), evt.clone()));
       self.arms_paired_in_branch.insert(b.hir_id);
     }
     true

@@ -11563,6 +11563,48 @@ pub fn print_out_of_scope(&mut self){
         (!lines.is_empty()).then(|| (n.clone(), lines))
       })
       .collect();
+    // A holder given a reference variable's value in a branch that
+    // declared it (`let y = if c { let r = &mut s1; Some(r) } else { ..
+    // };`, `Some(if c { let r = &s1; r } else { .. })`, #1475) holds that
+    // reference's loan, issued on the line above, not one of its own:
+    // rustc says which loans y's type holds. Once r is gone, y is all
+    // that keeps the loan, so y holds it until rustc ends it: after a
+    // move into an `if let`'s binding, where that binding's use ends it,
+    // and on the path that didn't match, there (as for #1464's).
+    #[expect(clippy::disallowed_methods, reason = "collected into a map, each entry on its own")]
+    let held_kills: HashMap<String, usize> = self.borrow_map.iter()
+      .filter(|(_, d)| d.borrow_span.is_none() && d.loan_line.is_none())
+      .filter(|(n, _)| self.raps.get(*n).is_some_and(|r| !r.rap.is_ref() && r.rap.holds_borrow()))
+      .filter_map(|(n, d)| {
+        let hash = *self.raps.get(n)?.rap.hash();
+        let mut lines = Vec::new();
+        borrow_lines_into(self.preprocessed_events, hash, &mut lines);
+        let last = lines.iter().map(|(l, _)| *l).max()?;
+        let lenders: Vec<String> = d.all_lenders().iter()
+          .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)))
+          .map(|l| l.real_name())
+          .collect();
+        let candidates: Vec<&crate::mir_data::MIRBorrowData> = mir_b_data.iter()
+          .filter(|m| m.region.0 <= last)
+          .filter(|m| lenders.iter().any(|lender| m.borrowed_place.as_deref()
+            .is_some_and(|p| lender == p || lender.strip_prefix(p).is_some_and(|rest| rest.starts_with('.')))))
+          // The loan of a reference variable (declared where the loan is
+          // issued) gone before y's last use.
+          .filter(|m| m.assigned_place.as_deref().and_then(|r| self.raps.get(r))
+            .is_some_and(|r| r.rap.is_ref() && gos_line_from(self.preprocessed_events, &r.rap, m.region.0).is_some_and(|g| g < d.lifetime)))
+          .collect();
+        if candidates.is_empty() {
+          return None;
+        }
+        // (Polonius is asked only now: it's run once per holder.)
+        let held = self.loan_indices_held_by(n)?;
+        candidates.into_iter()
+          .filter(|m| held.contains(&m.borrow_idx))
+          .map(|m| m.region.1)
+          .max()
+          .map(|k| (n.clone(), k))
+      })
+      .collect();
     #[expect(clippy::disallowed_methods, reason = "each entry is refined on its own from the mir_b_data Vec")]
     for (name, data) in self.borrow_map.iter_mut().chain(self.arm_loans.iter_mut().map(|(k, d)| (&*k, d))) {
       if data.borrow_span.is_some_and(|sp| mir_b_data.iter().any(|m| m.span == sp)) {
@@ -11580,7 +11622,8 @@ pub fn print_out_of_scope(&mut self){
               .is_some_and(|p| lender == p || lender.strip_prefix(p).is_some_and(|rest| rest.starts_with('.'))))
             .map(|m| m.region.1)
             .max())
-          .max();
+          .max()
+          .or_else(|| held_kills.get(name).copied());
         if let Some(kill) = arm_kill {
           data.lifetime = kill;
           continue;
