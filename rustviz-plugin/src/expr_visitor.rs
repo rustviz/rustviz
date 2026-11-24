@@ -211,6 +211,13 @@ pub struct RefData {
   /// borrowed mutably. Empty for every other reference, whose lenders
   /// all share `ref_mutability`.
   pub lender_muts: Vec<(ResourceTy, bool)>,
+  /// For a holder (`let it = refs.iter_mut();`, refs: `Vec<&String>`):
+  /// the variables its value reaches only through the ones it borrows
+  /// (a1, through refs's elements; see `loans_split_by`, #1399). Not
+  /// lent to it: no arrow, no return. A reference taken out of it may
+  /// still be one of those (`it.copied().next()` copies out a1's
+  /// `&String`), so `value_lenders` names them for what flows out.
+  pub through: Vec<ResourceTy>,
 }
 
 /// The loan a reference holds, as `emit_borrow_ends` finds it in MIR's
@@ -237,6 +244,18 @@ impl RefData {
   pub fn all_lenders(&self) -> Vec<ResourceTy> {
     let mut v = vec![self.lender.clone()];
     v.extend(self.co_lenders.iter().cloned());
+    v
+  }
+
+  /// `all_lenders`, then the ones the value reaches only through them
+  /// (`through`): what a reference taken out of it may borrow.
+  pub fn reached_lenders(&self) -> Vec<ResourceTy> {
+    let mut v = self.all_lenders();
+    for l in &self.through {
+      if !v.contains(l) {
+        v.push(l.clone());
+      }
+    }
     v
   }
 }
@@ -1681,7 +1700,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       return;
     }
     self.retire_loan(&name, line_num);
-    self.borrow_map.insert(name.clone(), RefData { lender: lender.clone(), assigned_at: line_num, lifetime: line_num, ref_mutability: ref_mutability, aliasing: alia, static_lender: None, borrow_span: None, loan_line: None, co_lenders: Vec::new(), lender_muts: Vec::new() });
+    self.borrow_map.insert(name.clone(), RefData { lender: lender.clone(), assigned_at: line_num, lifetime: line_num, ref_mutability: ref_mutability, aliasing: alia, static_lender: None, borrow_span: None, loan_line: None, co_lenders: Vec::new(), lender_muts: Vec::new(), through: Vec::new() });
   }
   /// A variable named `name` declared on `line` takes over the column
   /// of an earlier one of that name, which is out of scope by now
@@ -2692,8 +2711,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// Whether reference `name` has gone out of scope in the events drawn
   /// so far (its block or arm ended).
   pub fn went_out_of_scope(&self, name: &str) -> bool {
+    let from = self.borrow_map.get(name).map_or(0, |d| d.assigned_at);
     self.raps.get(name).is_some_and(|rd| rd.rap.is_ref()
-      && gos_line_of(self.preprocessed_events, &rd.rap).is_some())
+      && gos_line_from(self.preprocessed_events, &rd.rap, from).is_some())
   }
 
   pub fn ref_handed_off(&self, name: &str) -> bool {
@@ -3180,6 +3200,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             loan_line: None,
             co_lenders: Vec::new(),
             lender_muts: Vec::new(),
+            through: Vec::new(),
           });
         }
       }
@@ -6714,6 +6735,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         }
         self.note_loan_kinds(&name, expr);
         self.note_ref_carrier(&name, src_loan);
+        self.narrow_ref_call_lenders(&name, expr, ty);
       }
     }
     else if matches!(ty.kind(), TyKind::Tuple(_)) && self.has_member_columns(ty) {
@@ -6915,7 +6937,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         continue;
       }
       let (mut lenders, _, is_mut) = self.call_field_lenders(init, &field_name);
-      if holder && self.narrow_holder_lenders(&fname, init, &mut lenders, &mut Vec::new()) && lenders.is_empty() {
+      let mut through = Vec::new();
+      if holder && self.narrow_holder_lenders(&fname, init, &mut lenders, &mut Vec::new(), &mut through) && lenders.is_empty() {
         self.mark_holder(&fname);
         continue;
       }
@@ -6938,6 +6961,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           loan_line: None,
           co_lenders: lenders,
           lender_muts: Vec::new(),
+          through,
         });
       } else if let Some(rd) = self.borrow_map.get_mut(&fname) {
         rd.lender = lender;
@@ -6974,7 +6998,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
     let (mut lenders, is_mut) = self.holder_lenders(rhs, ty);
     let mut lender_muts = self.holder_lender_muts(rhs);
-    self.narrow_holder_lenders(&name, rhs, &mut lenders, &mut lender_muts);
+    let mut through = Vec::new();
+    self.narrow_holder_lenders(&name, rhs, &mut lenders, &mut lender_muts, &mut through);
     if lenders.is_empty() {
       return;
     }
@@ -6991,6 +7016,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       loan_line: None,
       co_lenders: lenders,
       lender_muts,
+      through,
     });
   }
 
@@ -7192,7 +7218,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // `let w: Vec<&String> = v.iter().copied().collect();` holds the
     // references stored in v, not a borrow of v (#1094): a holder of
     // borrows whose own lenders all went is still one.
-    if self.narrow_holder_lenders(name, init, &mut lenders, &mut lender_muts) && lenders.is_empty() {
+    let mut through = Vec::new();
+    if self.narrow_holder_lenders(name, init, &mut lenders, &mut lender_muts, &mut through) && lenders.is_empty() {
       self.mark_holder(name);
       return;
     }
@@ -7221,6 +7248,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // no longer holds it (a Copy holder like an `Option<&T>` is
     // copied, and both hold it).
     if let ExprKind::Path(..) = init.kind {
+      // (And what it reaches through them, #1399.)
+      if let Some(src) = expr_to_rap_name(init, &self.tcx).and_then(|n| self.borrow_map.get(&n)) {
+        through.extend(src.through.iter().cloned());
+      }
       if !self.ty_is_copy(ty, init.hir_id.owner) {
         if let Some(src) = expr_to_rap_name(init, &self.tcx) {
           self.borrow_map.remove(&src);
@@ -7248,6 +7279,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       loan_line: None,
       co_lenders: lenders,
       lender_muts,
+      through,
     });
   }
 
@@ -7323,12 +7355,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// (`narrow_call_result_lenders`, #756). A lender with no loan in
   /// this body (a reference, a place behind one, a variable of another
   /// body) stays. Returns whether a lender was dropped (#1094).
+  /// The lenders the value reaches only through another one
+  /// (`split_through_lenders`) go to `through`.
   fn narrow_holder_lenders(
     &self,
     name: &str,
     init: &'tcx Expr<'tcx>,
     lenders: &mut Vec<ResourceTy>,
     lender_muts: &mut Vec<(ResourceTy, bool)>,
+    through: &mut Vec<ResourceTy>,
   ) -> bool {
     if lenders.is_empty() || !matches!(init.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) {
       return false;
@@ -7347,7 +7382,94 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let before = lenders.len();
     lenders.retain(|l| kept(l));
     lender_muts.retain(|(l, _)| kept(l));
-    lenders.len() != before
+    let dropped = lenders.len() != before;
+    through.extend(self.split_through_lenders(name, lenders, lender_muts));
+    dropped
+  }
+
+  /// `let r = call;` with r a reference that the callee's signature
+  /// ties to several lenders: keep the ones rustc's borrow checker puts
+  /// in r's lifetimes (`narrow_holder_lenders`), and only those r
+  /// doesn't reach through another one (`split_through_lenders`).
+  /// `let el = it.next().unwrap();` with `it = refs.iter_mut()` points
+  /// into refs, not at a1 (#1399); `let r = it.copied().next()
+  /// .unwrap();` with `it = refs.iter()` is the `&String` copied out of
+  /// refs, which borrows a1, not refs.
+  /// (Only when r is bound to the whole value: a binding in a pattern,
+  /// `let (x, y) = two(&c, &d);`, is `narrow_call_result_lenders`'.)
+  fn narrow_ref_call_lenders(&mut self, name: &str, init: &'tcx Expr<'tcx>, ty: Ty<'tcx>) {
+    let erase = |t: Ty<'tcx>| self.tcx.erase_and_anonymize_regions(t);
+    if erase(self.tcx.typeck(init.hir_id.owner).expr_ty_adjusted(init)) != erase(ty) {
+      return;
+    }
+    let init = try_operand(init).unwrap_or(init);
+    if !matches!(init.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) || init.span.from_expansion() {
+      return;
+    }
+    let Some(rd) = self.borrow_map.get(name) else { return };
+    if rd.co_lenders.is_empty() {
+      return;
+    }
+    let before = rd.all_lenders();
+    let mut lenders = before.clone();
+    let mut muts = rd.lender_muts.clone();
+    let mut through = Vec::new();
+    self.narrow_holder_lenders(name, init, &mut lenders, &mut muts, &mut through);
+    // (Not when rustc puts none of them in r's lifetimes.)
+    if lenders == before || lenders.is_empty() {
+      return;
+    }
+    let aliasing = get_aliasing_data(&lenders[0], &self.borrow_map);
+    if let Some(rd) = self.borrow_map.get_mut(name) {
+      rd.lender = lenders[0].clone();
+      rd.co_lenders = lenders[1..].to_vec();
+      rd.lender_muts = muts;
+      rd.aliasing = aliasing;
+      rd.through = through;
+    }
+  }
+
+  /// Moves out of `lenders` the variables that `name`'s value (a
+  /// reference, or a value holding one) reaches only through another
+  /// lender, and returns them: `let el = refs.iter_mut().next()
+  /// .unwrap();` / `let it = refs.iter_mut();` on a `Vec<&String>`
+  /// point into refs; the `&String` in refs borrows a1, but a1 isn't
+  /// lent to el or it, as for `&mut refs[0]` (#1382, #1399). rustc's
+  /// borrow checker says which loans are in which part of the type
+  /// (`loans_split_by`), so this holds through any chain of calls
+  /// (`refs.iter_mut().rev().next()`, `it.next()` on a local iterator).
+  /// Only a variable of this body, with a loan only there, and only
+  /// when another lender stays.
+  pub fn split_through_lenders(
+    &self,
+    name: &str,
+    lenders: &mut Vec<ResourceTy>,
+    lender_muts: &mut Vec<(ResourceTy, bool)>,
+  ) -> Vec<ResourceTy> {
+    if lenders.len() < 2 {
+      return Vec::new();
+    }
+    let mut parts = name.split('.');
+    let base = parts.next().unwrap_or_default();
+    let fields: Vec<&str> = parts.collect();
+    let Some((own, through)) = self.loans_split_by(base, &fields) else { return Vec::new() };
+    let only_through = |l: &ResourceTy| match l {
+      ResourceTy::Value(r) if !r.is_ref() => {
+        let lb = r.name().split('.').next().unwrap_or_default();
+        through.contains(lb) && !own.contains_key(lb) && self.is_body_local(lb)
+      }
+      _ => false,
+    };
+    let (gone, kept): (Vec<ResourceTy>, Vec<ResourceTy>) = lenders.iter().cloned().partition(|l| only_through(l));
+    if gone.is_empty() || kept.is_empty() {
+      return Vec::new();
+    }
+    *lenders = kept;
+    lender_muts.retain(|(l, _)| !gone.contains(l));
+    if lender_muts.iter().all(|(_, m)| *m) || lender_muts.iter().all(|(_, m)| !*m) {
+      lender_muts.clear();
+    }
+    gone
   }
 
   /// Marks `name`'s column as a borrow holder: an owner, or a struct
@@ -7555,6 +7677,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           loan_line: None,
           co_lenders: lenders[1..].to_vec(),
           lender_muts: Vec::new(),
+          through: Vec::new(),
         });
       }
     }
@@ -7640,6 +7763,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           loan_line: None,
           co_lenders: Vec::new(),
           lender_muts: Vec::new(),
+          through: Vec::new(),
         });
       } else {
         let field_is_copy = self.ty_is_copy(field_ty, owner_id);
@@ -8487,6 +8611,10 @@ fn pattern_ref_borrows(
   if lenders.is_empty() {
     return Vec::new();
   }
+  // `if let Some(el) = it.next()` with `it = refs.iter_mut()`: el points
+  // into refs; a1 is reached through it (#1399).
+  let full: Vec<&str> = std::iter::once(bound).chain(fields.iter().copied()).collect();
+  self.split_through_lenders(&full.join("."), &mut lenders, &mut Vec::new());
   // `if let Some(x) = self.items.first_mut()`: only the field (#1073),
   // or fields (#1080).
   if let Some(fields) = self.field_call_lenders(scrutinee, &lenders) {
@@ -11747,10 +11875,11 @@ pub fn print_out_of_scope(&mut self){
       // (`raps` outlives one fn: match the column, not just the name.)
       // A variable declared in a branch (`x` in `Some(x) => x`, #1327)
       // goes out of scope in that branch's events.
-      let gos_line = gos_line_of;
+      let gos_line = gos_line_from;
       let scope_end = |name: &str| {
         let rd = self.raps.get(name).filter(|rd| rd.rap.is_ref() && rd.extra_scopes.is_empty())?;
-        gos_line(&self.preprocessed_events, &rd.rap).or(rd.is_global.then_some(rd.scope))
+        let from = self.borrow_map.get(name).map_or(0, |d| d.assigned_at);
+        gos_line(&self.preprocessed_events, &rd.rap, from).or(rd.is_global.then_some(rd.scope))
       };
       #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "each (ref, lender) pair is decided on its own")]
       for (lender, refs) in lender_to_refs.iter() {
@@ -11782,7 +11911,8 @@ pub fn print_out_of_scope(&mut self){
     // (`loans_carried_on`, #1335): it ends with its scope.
     for name in std::mem::take(&mut self.loans_carried_on) {
       let Some(rd) = self.raps.get(&name).filter(|rd| rd.rap.is_ref()) else { continue };
-      let Some(end) = gos_line_of(self.preprocessed_events, &rd.rap) else { continue };
+      let from = self.borrow_map.get(&name).map_or(0, |d| d.assigned_at);
+      let Some(end) = gos_line_from(self.preprocessed_events, &rd.rap, from) else { continue };
       if let Some(d) = self.borrow_map.get(&name) {
         ultimate_refs.remove(&(name.clone(), d.lender.real_name()));
         outlived.insert(name, end);
@@ -13555,7 +13685,10 @@ fn end_borrows_at_exits_in(
       let Some((r, to)) = borrow_end_of(&tail[j].1).map(|(r, to)| (r.clone(), to.clone())) else {
         continue;
       };
-      if tail[..j].iter().any(|(_, e)| touches(e, &r)) || branches.is_empty() {
+      // (`events` aren't in line order yet: an end before the
+      // conditional is the end of an earlier variable of the same name,
+      // whose column a binding in the arms took over, #1400.)
+      if tail[..j].iter().any(|(_, e)| touches(e, &r)) || branches.is_empty() || tail[j].0 < *split_point {
         continue;
       }
       if declared.contains(&r) {
@@ -14241,13 +14374,16 @@ fn borrow_lines_into(evs: &[(usize, ExternalEvent)], hash: u64, out: &mut Vec<(u
   }
 }
 
-/// The line where `rap` goes out of scope in `evs` (a variable declared
-/// in a branch, `x` in `Some(x) => x`, goes out of scope in that
-/// branch's events, #1327).
-pub fn gos_line_of(evs: &[(usize, ExternalEvent)], rap: &ResourceAccessPoint) -> Option<usize> {
+/// The line where the variable of `rap`'s column declared on line
+/// `from` goes out of scope in `evs` (a variable declared in a branch,
+/// `x` in `Some(x) => x`, goes out of scope in that branch's events,
+/// #1327). Two variables of one name in sibling scopes share a column
+/// (two `if let Some(e) = ..`, #903): the earlier one's scope end isn't
+/// the later one's (#1400).
+pub fn gos_line_from(evs: &[(usize, ExternalEvent)], rap: &ResourceAccessPoint, from: usize) -> Option<usize> {
   evs.iter().find_map(|(l, e)| match e {
-    ExternalEvent::GoOutOfScope { ro, .. } if ro.hash() == rap.hash() => Some(*l),
-    ExternalEvent::Branch { branches, .. } => branches.iter().find_map(|b| gos_line_of(&b.e_data, rap)),
+    ExternalEvent::GoOutOfScope { ro, .. } if ro.hash() == rap.hash() && *l >= from => Some(*l),
+    ExternalEvent::Branch { branches, .. } => branches.iter().find_map(|b| gos_line_from(&b.e_data, rap, from)),
     _ => None,
   })
 }

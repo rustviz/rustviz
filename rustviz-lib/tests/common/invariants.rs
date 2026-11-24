@@ -50,6 +50,8 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // Geometric (`geometry.rs`), from here on.
     // Tuple column goes on after its fields were moved out.
     ("edition2024/if_let_chain_irrefutable_move", "line-ends-nowhere", 1157),
+    // `it2.copied()`: it2's borrow end drawn after it was moved.
+    ("iter_holder_copied_1399", "event-on-dead-column", 1448),
 ];
 
 /// The invariants, by the name the failure list and messages use.

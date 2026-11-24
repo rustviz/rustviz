@@ -51,8 +51,8 @@ fn f4() {
     println!("{} {:?}", x, refs);
 }
 
-// Kept in an `Option` (also `last_mut`'s, #1382). (A second binding
-// named `e` here would hit #1400.)
+// Kept in an `Option` (also `last_mut`'s, #1382), the same binding
+// name in both (#1400).
 fn f5() {
     let a1 = String::from("a1");
     let t1 = String::from("t1");
@@ -62,8 +62,8 @@ fn f5() {
         *e = &t1;
     }
     let p = refs.last_mut();
-    if let Some(f) = p {
-        *f = &a1;
+    if let Some(e) = p {
+        *e = &a1;
     }
     println!("{:?}", refs);
 }

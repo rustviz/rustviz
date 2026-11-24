@@ -1647,6 +1647,198 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         Some(out)
     }
 
+    /// `loans_held_by`, split by where in `name`'s type the loans are
+    /// (#1399). `own`: the variables (with whether a loan is mutable)
+    /// whose loans are in a lifetime of the value itself, and not only
+    /// there because they are in a lifetime of something it reaches
+    /// through a borrow. `through`: the variables whose loans are only
+    /// in what it reaches that way. `let el = refs.iter_mut().next()
+    /// .unwrap();` (refs: `Vec<&String>`) gives el the type `&'e mut
+    /// &'x String`: its own lifetime `'e` holds the mutable loan of refs,
+    /// and the loan of a1 that is in `'x` (the `&String` el points to,
+    /// in refs) too, since `'x` outlives `'e`. a1 is only reached through
+    /// el: `own` is `{refs: mut}`, `through` is `{a1}`. Likewise for the
+    /// `IterMut<'r, &'x String>` that `refs.iter_mut()` returns, whose
+    /// `T` the iterator reaches only through its `'r` (see
+    /// `params_behind_borrows`). `None` when `loans_held_by` is.
+    pub fn loans_split_by(&self, name: &str, fields: &[&str]) -> Option<(BTreeMap<String, bool>, BTreeSet<String>)> {
+        let bwf = self.bwf;
+        let body = &bwf.body;
+        let names = self.mir_local_names(bwf);
+        #[expect(clippy::disallowed_methods, reason = "only collects the locals named `name`; order doesn't matter")]
+        let locals: Vec<Local> = names.iter().filter(|(_, n)| n.as_str() == name).map(|(l, _)| *l).collect();
+        if locals.is_empty() {
+            return None;
+        }
+        let mut own: BTreeSet<RegionVid> = BTreeSet::new();
+        let mut through: BTreeSet<RegionVid> = BTreeSet::new();
+        for local in locals {
+            let mut ty = body.local_decls[local].ty;
+            for f in fields {
+                ty = self.field_ty_named(ty, f)?;
+            }
+            self.split_regions(ty, false, &mut own, &mut through, 0);
+        }
+        let facts = bwf.input_facts.as_ref()?;
+        let p_output = Output::compute(facts, Algorithm::Naive, true);
+        let mut own_loans: BTreeSet<Loan> = BTreeSet::new();
+        let mut through_loans: BTreeSet<Loan> = BTreeSet::new();
+        #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "collected into BTreeSets")]
+        for origins in p_output.origin_contains_loan_at.values() {
+            for (origin, loans) in origins.iter() {
+                let r = RegionVid::from(*origin);
+                if own.contains(&r) {
+                    own_loans.extend(loans.iter().copied());
+                }
+                if through.contains(&r) {
+                    through_loans.extend(loans.iter().copied());
+                }
+            }
+        }
+        let name_of = |loan: Loan| self.src_name_of_local(Some(bwf.borrow_set[loan].borrowed_place().local), &names);
+        let mut out_own: BTreeMap<String, bool> = BTreeMap::new();
+        for loan in own_loans.difference(&through_loans) {
+            if let Some(n) = name_of(*loan) {
+                *out_own.entry(n).or_insert(false) |= bwf.borrow_set[*loan].kind().mutability().is_mut();
+            }
+        }
+        let out_through: BTreeSet<String> = through_loans.iter()
+            .filter_map(|l| name_of(*l))
+            .filter(|n| !out_own.contains_key(n))
+            .collect();
+        Some((out_own, out_through))
+    }
+
+    /// Sorts the lifetimes in `ty` into those of the value itself
+    /// (`own`) and those of what it reaches through a borrow
+    /// (`through`): in `&'e mut &'x String`, `'e` is el's own and `'x`
+    /// is the `&String` it points to. A struct's type arguments are its
+    /// own (`Option<&'a String>` holds the reference), except the ones
+    /// it holds only behind one of its lifetimes (`T` in `IterMut<'a,
+    /// T>`, see `params_behind_borrows`).
+    fn split_regions(&self, ty: Ty<'tcx>, behind: bool, own: &mut BTreeSet<RegionVid>, through: &mut BTreeSet<RegionVid>, depth: usize) {
+        fn add(r: rustc_middle::ty::Region<'_>, behind: bool, own: &mut BTreeSet<RegionVid>, through: &mut BTreeSet<RegionVid>) {
+            if r.is_var() {
+                if behind { through.insert(r.as_var()); } else { own.insert(r.as_var()); }
+            }
+        }
+        if depth > 8 {
+            for g in ty.walk() {
+                if let GenericArgKind::Lifetime(r) = g.kind() { add(r, behind, own, through); }
+            }
+            return;
+        }
+        match ty.kind() {
+            TyKind::Ref(r, inner, _) => {
+                add(*r, behind, own, through);
+                self.split_regions(*inner, true, own, through, depth + 1);
+            }
+            TyKind::Adt(def, args) => {
+                let inside = self.params_behind_borrows(*def);
+                for (i, g) in args.iter().enumerate() {
+                    match g.kind() {
+                        GenericArgKind::Lifetime(r) => add(r, behind, own, through),
+                        GenericArgKind::Type(t) => {
+                            let b = behind || inside.get(i).copied().unwrap_or(false);
+                            self.split_regions(t, b, own, through, depth + 1);
+                        }
+                        GenericArgKind::Const(_) => {}
+                    }
+                }
+            }
+            TyKind::Tuple(tys) => {
+                for t in tys.iter() {
+                    self.split_regions(t, behind, own, through, depth + 1);
+                }
+            }
+            TyKind::Array(t, _) | TyKind::Slice(t) => self.split_regions(*t, behind, own, through, depth + 1),
+            _ => {
+                for g in ty.walk() {
+                    if let GenericArgKind::Lifetime(r) = g.kind() { add(r, behind, own, through); }
+                }
+            }
+        }
+    }
+
+    /// For each generic parameter of the struct or enum `def` (by
+    /// position): whether its values hold that parameter only behind a
+    /// borrow of one of their lifetimes. `slice::IterMut<'a, T>` holds
+    /// raw pointers to the `T`s and a `PhantomData<&'a mut T>`, so `T` is
+    /// behind `'a`; `Vec<T>` (`PhantomData<T>`), `Option<T>` and
+    /// `str::Split<'a, P>` hold theirs by value. Raw pointers say neither
+    /// (their `PhantomData` does); a type with no lifetime parameter holds
+    /// nothing behind one.
+    pub(crate) fn params_behind_borrows(&self, def: rustc_middle::ty::AdtDef<'tcx>) -> Vec<bool> {
+        let tcx = self.tcx;
+        let generics = tcx.generics_of(def.did());
+        let n = generics.count();
+        let has_lifetime = generics.own_params.iter()
+            .any(|p| matches!(p.kind, rustc_middle::ty::GenericParamDefKind::Lifetime));
+        if !has_lifetime {
+            return vec![false; n];
+        }
+        let mut by_value = vec![false; n];
+        let mut behind = vec![false; n];
+        let args = rustc_middle::ty::GenericArgs::identity_for_item(tcx, def.did());
+        let mut visiting = vec![def.did()];
+        for f in def.all_fields() {
+            self.param_uses(f.ty(tcx, args), false, &mut by_value, &mut behind, &mut visiting);
+        }
+        (0..n).map(|i| behind[i] && !by_value[i]).collect()
+    }
+
+    /// Records in `by_value` / `behind` (see `params_behind_borrows`)
+    /// how the type `ty` of a field (or of a part of one) holds the
+    /// parameters it mentions.
+    fn param_uses(&self, ty: Ty<'tcx>, under: bool, by_value: &mut Vec<bool>, behind: &mut Vec<bool>, visiting: &mut Vec<rustc_span::def_id::DefId>) {
+        let tcx = self.tcx;
+        let mark = |i: u32, under: bool, by_value: &mut Vec<bool>, behind: &mut Vec<bool>| {
+            let slot = if under { behind } else { by_value };
+            if let Some(x) = slot.get_mut(i as usize) { *x = true; }
+        };
+        match ty.kind() {
+            TyKind::Param(p) => mark(p.index, under, by_value, behind),
+            TyKind::Ref(_, inner, _) => self.param_uses(*inner, true, by_value, behind, visiting),
+            TyKind::RawPtr(..) => {}
+            // `pattern_type!(*const T is !null)` in `NonNull<T>`.
+            TyKind::Pat(base, _) => self.param_uses(*base, under, by_value, behind, visiting),
+            TyKind::Adt(d, a) if d.is_phantom_data() || d.is_box() => {
+                for t in a.types() {
+                    self.param_uses(t, under, by_value, behind, visiting);
+                }
+            }
+            TyKind::Adt(d, a) => {
+                if visiting.contains(&d.did()) || visiting.len() > 6 {
+                    // (A recursive type, or one nested too deep: as by value.)
+                    for g in ty.walk() {
+                        if let GenericArgKind::Type(t) = g.kind() {
+                            if let TyKind::Param(p) = t.kind() { mark(p.index, under, by_value, behind); }
+                        }
+                    }
+                    return;
+                }
+                visiting.push(d.did());
+                for f in d.all_fields() {
+                    self.param_uses(f.ty(tcx, a), under, by_value, behind, visiting);
+                }
+                visiting.pop();
+            }
+            TyKind::Tuple(tys) => {
+                for t in tys.iter() {
+                    self.param_uses(t, under, by_value, behind, visiting);
+                }
+            }
+            TyKind::Array(t, _) | TyKind::Slice(t) => self.param_uses(*t, under, by_value, behind, visiting),
+            _ => {
+                for g in ty.walk() {
+                    if let GenericArgKind::Type(t) = g.kind() {
+                        if let TyKind::Param(p) = t.kind() { mark(p.index, under, by_value, behind); }
+                    }
+                }
+            }
+        }
+    }
+
     /// Whether this body has a MIR local for the variable `name` (its
     /// RAP name, see `mir_local_names`): a borrow of it is one of
     /// rustc's loans here.
