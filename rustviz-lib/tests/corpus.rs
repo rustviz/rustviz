@@ -24857,6 +24857,114 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "(RustViz draws y taking its value straight from make_o",
         ],
     },
+    TooltipExpect {
+        name: "pointer_into_holder_1382",
+        // #1382: `refs.last_mut().unwrap()` / `refs.last().unwrap()` /
+        // `refs.get_mut(0).unwrap()` on `refs: Vec<&String>`, and
+        // `o.as_ref().unwrap()` on `o: Option<&String>`, point into refs /
+        // o, as `&mut refs[0]` does: the `&String` there borrows a1, but
+        // the result reaches a1 only through what it points to. They were
+        // drawn borrowing a1 too ("so it may point into either"), mutably
+        // for last_mut / get_mut, which sent a1's column to
+        // `State::Invalid`. `refs.last().copied().unwrap()` is the
+        // `&String` itself, copied out: it borrows a1, not refs (refs can
+        // be pushed to while x is in use).
+        must_contain: &[
+            "Mutable borrow from refs to el: last_mut's signature gives the value it returns the same lifetime as the value it was called on; unwrap passes the borrow on",
+            "Immutable borrow from refs to el: last's signature gives the value it returns the same lifetime as the value it was called on; unwrap passes the borrow on",
+            "Mutable borrow from refs to el: get_mut's signature gives the value it returns the same lifetime as the value it was called on; unwrap passes the borrow on",
+            "Immutable borrow from o to r: as_ref's signature gives the value it returns the same lifetime as the value it was called on; unwrap passes the borrow on",
+            "Immutable borrow from t1 to refs",
+            "Return immutably borrowed resource from refs to t1",
+            "Immutable borrow from a1 to x: x is a reference copied out of the value last returned",
+            "Return immutably borrowed resource from x to a1",
+        ],
+        must_not_contain: &[
+            "Mutable borrow from a1 to el",
+            "Immutable borrow from a1 to el",
+            "Immutable borrow from a1 to r:",
+            "a1's resource is mutably borrowed by el",
+            "Return mutably borrowed resource from el to a1",
+            "Immutable borrow from refs to x",
+            "refs's resource is immutably borrowed by x",
+            "so it may point into either",
+        ],
+    },
+    TooltipExpect {
+        name: "extended_temp_block_branch_1383",
+        // #1383: `let r = { &String::from("x") };` (and `{ Some(&..) }`, a
+        // block with statements first) extends the temporary to the end of
+        // the enclosing block, as `let r = &String::from("x");` does
+        // (#400): it gets a column, and r / t borrow it. One a branch of an
+        // `if` or a `match` arm borrows is made on that path only, and a
+        // drop flag drops it at the end of the block; it has no column,
+        // and a note on the binding's last dot says it is dropped there.
+        // Nothing said so; r's borrow ended with "what it borrows from
+        // isn't shown".
+        must_contain: &[
+            "Move from String::from to (temporary)",
+            "Immutable borrow from (temporary) to r",
+            "Return immutably borrowed resource from r to (temporary)",
+            "Immutable borrow from (temporary) to t: Some's signature gives the value it returns the same lifetime as its argument; t isn't a reference, but its value holds one",
+            "Return immutably borrowed resource from t to (temporary)",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+            "(If &String::from(\"x\") on line 9 ran, the temporary it borrows is dropped here: Rust keeps it alive until the end of this block because r holds a reference to it. RustViz doesn't draw a column for this temporary.)",
+            "(If &String::from(\"x\") on line 14 ran, the temporary it borrows is dropped here: Rust keeps it alive until the end of this block because t holds a reference to it. RustViz doesn't draw a column for this temporary.)",
+            "(If &String::from(\"x\") on line 40 ran, the temporary it borrows is dropped here: Rust keeps it alive until the end of this block because r holds a reference to it. RustViz doesn't draw a column for this temporary.)",
+            "(If &String::from(\"y\") on line 51 ran, the temporary it borrows is dropped here: Rust keeps it alive until the end of this block because r holds a reference to it. RustViz doesn't draw a column for this temporary.)",
+        ],
+        must_not_contain: &[
+            "r's immutable borrow ends (what it borrows from isn't shown)",
+        ],
+    },
+    TooltipExpect {
+        name: "ref_copy_into_holder_1384",
+        // #1384: `refs[0] = tr;`, `*el = tr;` (el = &mut refs[0]),
+        // `*refs.get_mut(0).unwrap() = &t1;`, `*refs.last_mut().unwrap() =
+        // tr;`: refs now holds t1's borrow, until its last use, as for
+        // `refs[0] = &t1` (#1361) and `refs.push(tr)`. No borrow went into
+        // refs; t1 stayed lent "to a place that isn't drawn" to the end of
+        // the function. A `&mut` tr is reborrowed (`refs[0] = tr` is a
+        // coercion site), not moved: tr is usable again once refs is done.
+        must_contain: &[
+            "Immutable borrow from t1 to refs",
+            "Return immutably borrowed resource from refs to t1",
+            "t1's resource is immutably borrowed by refs; t1 is read-only while the borrow is live",
+            "refs holds a value that immutably borrows t1's resource (refs isn't a reference itself)",
+            "Mutable reborrow from tr to refs",
+            "Return mutably borrowed resource from refs to tr",
+        ],
+        must_not_contain: &[
+            "t1's resource is immutably borrowed, and the reference is stored in a place that isn't drawn",
+            "tr's mutable reference is moved",
+        ],
+    },
+    TooltipExpect {
+        name: "destructure_assign_literal_temp_1387",
+        // #1387: `(a, _) = (make(), make());` is lowered to `{ let (lhs, _)
+        // = (make(), make()); a = lhs; }`: what `_` leaves stays in the
+        // literal's temporary, dropped once the assignment has taken it
+        // apart, before a gets its new value (as the `let` form, #483).
+        // Nothing said the second String was dropped. Also from a struct
+        // literal, over an old value, in each branch of an `if`, and with
+        // a variable the pattern leaves, which moves into the temporary.
+        must_contain: &[
+            // What make returns is moved into it, drawn as in the `let`
+            // form (#1376).
+            "Move from make to (temporary)",
+            "The temporary that the literal on the right of this destructuring assignment builds takes the value that make returns. Rust drops it, with whatever the pattern doesn't assign to a place, as soon as the assignment has taken it apart, before the places on the left get their new values",
+            "This temporary (String, String), built by the literal on the right of the destructuring assignment, is dropped as soon as the assignment has taken it apart (before the places on the left get their new values), and with it whatever the pattern didn't assign to a place. Its resource is dropped",
+            "This temporary P, built by the literal on the right of the destructuring assignment, is dropped as soon as the assignment has taken it apart (before the places on the left get their new values), and with it whatever the pattern didn't assign to a place. Its resource is dropped",
+            "Move from s to (temporary)",
+            "The temporary that the literal on the right of this destructuring assignment builds takes the value of s. Rust drops it, with that value, as soon as the assignment has taken it apart, before the places on the left get their new values",
+            "(temporary 2), immutable",
+        ],
+        must_not_contain: &[
+            "The literal on the right of this destructuring assignment builds a temporary",
+            "on the right of this let",
+            "on the right of the let",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop

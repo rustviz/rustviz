@@ -87,6 +87,19 @@ enum FlowTarget<'s> {
   Field(&'s str),
   /// The receiver of a `&mut self` method (`refs.push(&s)`).
   Receiver,
+  /// The reference the call returns (in an `Option` / `Result` or not),
+  /// as a pointer: only its own lifetime, not those of the references
+  /// stored in what it points to. `refs.last_mut()` on a `Vec<&String>`
+  /// returns `Option<&'a mut T>` with `T = &String`: the result points
+  /// into `refs`; the `&String` it points to borrows what refs's
+  /// element does, but that is reached through the pointee, not lent
+  /// to the result (#1382).
+  Pointer,
+  /// What the reference the call returns points to (in an `Option` /
+  /// `Result` or not): only the lifetimes inside it.
+  /// `refs.last().copied()` copies the `&String` out of the `&&String`
+  /// `last` returns: it borrows what refs's element does, not refs.
+  Pointee,
 }
 
 /// What an adjusted argument refers to, after rustc's auto-deref steps.
@@ -188,7 +201,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   fn call_arg_flows_into(&self, call: &'tcx Expr<'tcx>, target: FlowTarget<'_>) -> Option<Vec<ArgFlow<'tcx>>> {
     let (sig, gargs, args, def_id) = self.callee_sig(call)?;
     let output = match target {
-      FlowTarget::Result => sig.output(),
+      FlowTarget::Result | FlowTarget::Pointer | FlowTarget::Pointee => sig.output(),
       FlowTarget::Field(f) => match sig.output().kind() {
         ty::Adt(def, fargs) if def.is_struct() =>
           def.all_fields().find(|fd| fd.name.as_str() == f)?.ty(self.tcx, fargs),
@@ -218,7 +231,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     };
     let mut regions: Vec<ty::Region<'tcx>> = Vec::new();
     let mut params: Vec<u32> = Vec::new();
-    for g in output.walk() {
+    let parts: Vec<ty::GenericArg<'tcx>> = match target {
+      FlowTarget::Pointer => {
+        let mut out = Vec::new();
+        outside_pointees(output, &mut out, false);
+        out
+      }
+      FlowTarget::Pointee => {
+        let mut out = Vec::new();
+        outside_pointees(output, &mut out, true);
+        out
+      }
+      _ => output.walk().collect(),
+    };
+    for g in parts {
       match g.kind() {
         GenericArgKind::Lifetime(r) if !r.is_static() => regions.push(r),
         GenericArgKind::Type(t) => {
@@ -237,7 +263,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // iterator's items, so `B` carries whatever `Self` carries (#392).
     // Only for the result: a bound on an argument (`retain<F:
     // FnMut(&T) -> bool>(&mut self, f: F)`) doesn't store it.
-    if matches!(target, FlowTarget::Result) && !params.is_empty() {
+    if matches!(target, FlowTarget::Result | FlowTarget::Pointer | FlowTarget::Pointee) && !params.is_empty() {
       if let Some(def_id) = def_id {
         let bound: Vec<u32> = params.clone();
         for (clause, _) in self.tcx.predicates_of(def_id).predicates.iter() {
@@ -473,6 +499,71 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.loans_kept_after_call(call.span).into_iter().filter(|k| k.holder == name).collect()
   }
 
+  /// The variables the reference `call` returns (or a value holding
+  /// one) borrows, when that is fewer than `call_lenders` names, through
+  /// the calls that only pass the borrow on (`unwrap`, `copied`):
+  /// - `refs.last_mut().unwrap()` on `refs: Vec<&String>` (`last_mut`
+  ///   returns `Option<&'a mut T>` with `T = &String`) points into refs;
+  ///   the `&String` there borrows a1, but the result reaches a1 only
+  ///   through what it points to, as `&mut refs[0]` does (#1382);
+  /// - `refs.last().copied().unwrap()` is that `&String`, copied out:
+  ///   it borrows a1, not refs.
+  /// None otherwise.
+  pub fn pointer_lenders(&self, call: &'tcx Expr<'tcx>) -> Option<Vec<ResourceTy>> {
+    let (inner, target) = self.narrowed_target(call)?;
+    let (lenders, _) = self.lenders_of_flows(self.call_arg_flows_into(inner, target)?);
+    let all = self.call_lenders(call);
+    (!lenders.is_empty() && lenders.len() < all.len() && lenders.iter().all(|l| all.contains(l))).then_some(lenders)
+  }
+
+  /// `call_arg_tie` for the call `pointer_lenders` narrows through
+  /// (`last_mut` in `refs.last_mut().unwrap()`), when `borrower` is it
+  /// and `call`'s value is the reference it returns.
+  pub fn narrowed_tie(&self, call: &'tcx Expr<'tcx>, borrower: &'tcx Expr<'tcx>) -> Option<ArgTie> {
+    let (inner, target) = self.narrowed_target(call)?;
+    (inner.hir_id == borrower.hir_id && matches!(target, FlowTarget::Pointer) && self.pointer_lenders(call).is_some())
+      .then(|| self.call_arg_tie_to(inner, target))
+  }
+
+  /// The call whose result `call`'s value is copied out of, when that
+  /// value is the reference stored where the result points
+  /// (`refs.last().copied().unwrap()`: `last`; see `pointer_lenders`).
+  pub fn copied_out_of(&self, call: &'tcx Expr<'tcx>) -> Option<&'tcx Expr<'tcx>> {
+    let (inner, target) = self.narrowed_target(call)?;
+    (matches!(target, FlowTarget::Pointee) && self.pointer_lenders(call).is_some()).then_some(inner)
+  }
+
+  /// The call `call`'s value comes out of (see `passed_through_from`),
+  /// and which part of its result `call`'s value is (see
+  /// `pointer_lenders`): the reference it returns, or what that points
+  /// to. None for the whole result.
+  fn narrowed_target(&self, call: &'tcx Expr<'tcx>) -> Option<(&'tcx Expr<'tcx>, FlowTarget<'static>)> {
+    let typeck = self.tcx.typeck(call.hir_id.owner);
+    let peel = |t: Ty<'tcx>| -> Ty<'tcx> {
+      match t.kind() {
+        ty::Adt(def, args) if self.tcx.is_diagnostic_item(rustc_span::sym::Option, def.did())
+          || self.tcx.is_diagnostic_item(rustc_span::sym::Result, def.did()) => args.type_at(0),
+        _ => t,
+      }
+    };
+    let holds_ref = |t: Ty<'tcx>| t.walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_)));
+    let erase = |t: Ty<'tcx>| self.tcx.erase_and_anonymize_regions(t);
+    let outer = peel(typeck.expr_ty(call));
+    let inner = self.passed_through_from(call);
+    let from = peel(typeck.expr_ty(inner));
+    let ty::Ref(_, pointee, _) = from.kind() else { return None };
+    if !holds_ref(*pointee) {
+      return None;
+    }
+    if erase(from) == erase(outer) {
+      Some((inner, FlowTarget::Pointer))
+    } else if inner.hir_id != call.hir_id && erase(*pointee) == erase(outer) {
+      Some((inner, FlowTarget::Pointee))
+    } else {
+      None
+    }
+  }
+
   fn lenders_of_flows(&self, flows: Vec<ArgFlow<'tcx>>) -> (Vec<ResourceTy>, bool) {
     let mut out: Vec<ResourceTy> = Vec::new();
     let mut unnamed = false;
@@ -556,13 +647,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if field.is_none() && !self.ctor_mixed_muts(call).is_empty() {
       return ArgTie { total: 1, tied: vec![0], holds_all: true, ..ArgTie::default() };
     }
+    self.call_arg_tie_to(call, match field { Some(f) => FlowTarget::Field(f), None => FlowTarget::Result })
+  }
+
+  /// `call_arg_tie` for the part `target` of the result.
+  fn call_arg_tie_to(&self, call: &'tcx Expr<'tcx>, target: FlowTarget<'_>) -> ArgTie {
     let Some((_, _, args, _)) = self.callee_sig(call) else { return ArgTie::default() };
     let mut tie = ArgTie {
       receiver: matches!(call.kind, ExprKind::MethodCall(..)),
       total: args.len(),
       ..ArgTie::default()
     };
-    let target = match field { Some(f) => FlowTarget::Field(f), None => FlowTarget::Result };
     let mut holds_all_literal = false;
     for flow in self.call_arg_flows_into(call, target).unwrap_or_default() {
       holds_all_literal = matches!(flow.arg.kind,
@@ -830,6 +925,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   pub fn holder_lenders(&self, init: &'tcx Expr<'tcx>, ty: Ty<'tcx>) -> (Vec<ResourceTy>, bool) {
     if ty.is_ref() || !ty.walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_))) {
       return (Vec::new(), false);
+    }
+    // `let t = { Some(&String::from("x")) };` (#1383).
+    if let Some(tail) = plain_block_tail(init) {
+      return self.holder_lenders(tail, ty);
     }
     // `Some(W { a: &s, b: &mut t })`: each lender has its own kind (#708).
     let mixed = self.holder_lender_muts(init);
@@ -1372,4 +1471,36 @@ fn param_outside_refs<'tcx>(t: Ty<'tcx>, params: &[u32]) -> bool {
     }
   }
   false
+}
+
+/// The lifetimes and type parameters of `ty` outside what its
+/// references point to (`'a` and `U` in `Option<(&'a mut T, U)>`), for
+/// `FlowTarget::Pointer`; with `inside`, those inside what they point
+/// to instead (`T`'s), for `FlowTarget::Pointee`. A type this doesn't
+/// take apart (a trait object, a projection, a function pointer) gives
+/// everything in it either way.
+fn outside_pointees<'tcx>(ty: Ty<'tcx>, out: &mut Vec<ty::GenericArg<'tcx>>, inside: bool) {
+  match ty.kind() {
+    ty::Ref(r, pointee, _) => {
+      if inside {
+        out.extend(pointee.walk());
+      } else {
+        out.push((*r).into());
+      }
+    }
+    ty::Adt(_, args) => {
+      for a in args.iter() {
+        match a.kind() {
+          GenericArgKind::Type(t) => outside_pointees(t, out, inside),
+          GenericArgKind::Lifetime(_) if !inside => out.push(a),
+          _ => {}
+        }
+      }
+    }
+    ty::Tuple(tys) => tys.iter().for_each(|t| outside_pointees(t, out, inside)),
+    ty::Array(t, _) | ty::Slice(t) => outside_pointees(*t, out, inside),
+    ty::Param(_) if !inside => out.push(ty.into()),
+    ty::Param(_) => {}
+    _ => out.extend(ty.walk()),
+  }
 }

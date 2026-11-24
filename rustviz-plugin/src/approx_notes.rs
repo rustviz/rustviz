@@ -85,6 +85,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       self.raw_cast_note(l);
       self.closure_let_note(l);
+      self.branch_extended_temp_note(l);
     }
     self.scrutinee_mover_notes();
   }
@@ -167,6 +168,74 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       "lock" if is(rustc_span::sym::Mutex) => Some(hover_messages::approx_note_lock("Mutex", method, None)),
       "read" | "write" if is(rustc_span::sym::RwLock) => Some(hover_messages::approx_note_lock("RwLock", method, Some(method == "read"))),
       _ => None,
+    }
+  }
+
+  /// `let r = if c { &String::from("x") } else { &s };` (also a `match`
+  /// arm, `Some(&..)` in a branch, #1383): Rust extends the temporary a
+  /// branch borrows to the end of the `let`'s block, but only the path
+  /// through that branch makes it, so it is dropped there by a drop
+  /// flag. RustViz draws no column for it; the note on the first
+  /// binding's dot at the block's end says it is dropped there.
+  fn branch_extended_temp_note(&mut self, l: &'tcx LetStmt<'tcx>) {
+    let Some(init) = l.init else { return };
+    let mut temps = Vec::new();
+    self.branch_extended_temps(init, false, &mut temps);
+    if temps.is_empty() {
+      return;
+    }
+    let mut first = None;
+    l.pat.walk_always(|p| {
+      if first.is_none() && matches!(p.kind, PatKind::Binding(..)) && !p.span.from_expansion() {
+        first = Some(p.hir_id);
+      }
+    });
+    let Some((hash, name)) = first.and_then(|id| self.column_of_binding(id)) else { return };
+    let rustc_hir::Node::Stmt(stmt) = self.tcx.parent_hir_node(l.hir_id) else { return };
+    let rustc_hir::Node::Block(block) = self.tcx.parent_hir_node(stmt.hir_id) else { return };
+    let end = span_end_line(&block.span, &self.tcx);
+    for b in temps {
+      let line = span_to_line(&b.span, &self.tcx);
+      let code = self.snippet(b).filter(|t| t.chars().count() <= 32 && !t.contains('\n'));
+      let text = hover_messages::approx_note_branch_extended_temp(&name, code.as_deref(), line);
+      self.approx_notes.push(ApproxNote::At { hash, lines: (end, end), text });
+    }
+  }
+
+  /// The `&` borrows of temporaries inside a branch (`in_branch`) of
+  /// the extending expression `e` of a `let` initializer (the places
+  /// Rust's temporary lifetime extension reaches, see `walk_extending`,
+  /// and the branches of an `if` / `match`): temporaries whose type
+  /// needs drop.
+  fn branch_extended_temps(&self, e: &'tcx Expr<'tcx>, in_branch: bool, out: &mut Vec<&'tcx Expr<'tcx>>) {
+    if e.span.from_expansion() {
+      return;
+    }
+    let typeck = self.tcx.typeck(e.hir_id.owner);
+    match e.kind {
+      ExprKind::AddrOf(rustc_hir::BorrowKind::Ref, _, operand) => {
+        let Some(tmp) = crate::visitor::extended_temp_operand(operand) else { return };
+        self.branch_extended_temps(tmp, in_branch, out);
+        if in_branch && !matches!(tmp.kind, ExprKind::AddrOf(..)) && self.needs_drop(typeck.expr_ty(tmp), e.hir_id.owner) {
+          out.push(e);
+        }
+      }
+      ExprKind::Struct(_, fields, _) => fields.iter().for_each(|f| self.branch_extended_temps(f.expr, in_branch, out)),
+      ExprKind::Tup(es) | ExprKind::Array(es) => es.iter().for_each(|x| self.branch_extended_temps(x, in_branch, out)),
+      ExprKind::Call(callee, args) if crate::visitor::is_ctor_path(callee, typeck) =>
+        args.iter().for_each(|x| self.branch_extended_temps(x, in_branch, out)),
+      ExprKind::Cast(inner, _) => self.branch_extended_temps(inner, in_branch, out),
+      ExprKind::Block(b, None) => {
+        if let Some(t) = b.expr {
+          self.branch_extended_temps(t, in_branch, out);
+        }
+      }
+      ExprKind::If(_, then, Some(els)) => {
+        self.branch_extended_temps(then, true, out);
+        self.branch_extended_temps(els, true, out);
+      }
+      ExprKind::Match(_, arms, rustc_hir::MatchSource::Normal) => arms.iter().for_each(|a| self.branch_extended_temps(a.body, true, out)),
+      _ => {}
     }
   }
 
