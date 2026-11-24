@@ -2386,6 +2386,31 @@ pub fn breaks_to_id<'tcx>(loop_expr: &'tcx Expr<'tcx>, id: HirId) -> Vec<(&'tcx 
   f.out
 }
 
+/// Whether something in `loop_expr`'s body before `at` (a span in it)
+/// can leave the loop (#1467): a `break` to it or to something outside
+/// it, a `return`, a `?`. Not a `break` to a loop or labeled block
+/// inside it.
+pub fn exits_loop_before<'tcx>(loop_expr: &'tcx Expr<'tcx>, at: rustc_span::Span) -> bool {
+  use rustc_hir::intravisit::{self, Visitor};
+  struct Find { outer: HirId, inner: Vec<HirId>, at: rustc_span::Span, found: bool }
+  impl<'tcx> Visitor<'tcx> for Find {
+    fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+      match e.kind {
+        ExprKind::Loop(..) if e.hir_id != self.outer => self.inner.push(e.hir_id),
+        ExprKind::Block(b, Some(_)) => self.inner.push(b.hir_id),
+        ExprKind::Break(dest, _) if e.span.hi() <= self.at.lo()
+          && !dest.target_id.is_ok_and(|t| self.inner.contains(&t)) => self.found = true,
+        ExprKind::Ret(_) if e.span.hi() <= self.at.lo() => self.found = true,
+        _ => {}
+      }
+      intravisit::walk_expr(self, e);
+    }
+  }
+  let mut f = Find { outer: loop_expr.hir_id, inner: Vec::new(), at, found: false };
+  intravisit::walk_expr(&mut f, loop_expr);
+  f.found
+}
+
 /// What `locals_in` does with a closure it meets. A closure's body is a
 /// different function and is never walked; the question is whether the
 /// closure itself counts as mentioning the locals it captures.

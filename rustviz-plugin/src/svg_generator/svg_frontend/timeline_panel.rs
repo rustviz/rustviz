@@ -47,15 +47,16 @@ struct PendingDot {
 /// An approximation note on a dot, and whether it is a loop's.
 #[derive(Clone, PartialEq)]
 enum DotNote {
-    /// A loop's note; whether the loop declares variables.
-    Loop(bool),
+    /// A loop's note; whether the loop declares variables, and whether
+    /// it runs at most once (`ApproxNote::Loop`).
+    Loop(bool, bool),
     Other(String),
 }
 
 impl DotNote {
     fn text(&self) -> String {
         match self {
-            DotNote::Loop(declares) => hover_messages::approx_note_loop(*declares),
+            DotNote::Loop(declares, at_most_once) => hover_messages::approx_note_loop(*declares, *at_most_once),
             DotNote::Other(t) => t.clone(),
         }
     }
@@ -192,7 +193,7 @@ impl DotLayer {
         // would sit inside a nested loop, where "this loop" reads as the
         // nested one, whose own note already says it.
         for note in notes {
-            let ApproxNote::Loop { head, pass: (lo, hi), head_cols, locals, nested, declares } = note else { continue };
+            let ApproxNote::Loop { head, pass: (lo, hi), head_cols, locals, nested, declares, at_most_once } = note else { continue };
             let mut best: Option<(usize, i64, usize)> = None;
             for (hash, col) in &by_col {
                 if !locals.contains(hash) && !col.iter().any(|(l, _)| l < head) {
@@ -210,7 +211,7 @@ impl DotLayer {
                 }
             }
             if let Some((.., i)) = best {
-                add(&mut self.dots, vec![i], DotNote::Loop(*declares));
+                add(&mut self.dots, vec![i], DotNote::Loop(*declares, *at_most_once));
             }
         }
         for note in notes {
@@ -1525,8 +1526,10 @@ fn render_branch_dots(
             } else if reassigned_next {
                 // That assignment is in a loop's body (#1012), which
                 // may end before it runs: unless every `break` out of
-                // the loop comes after it (`LoopExitKept`).
-                let in_loop = matches!(next, Some(Event::OwnerDropAtReassign { maybe_init: Some(InitBy::EarlierIteration | InitBy::OuterLoop { .. } | InitBy::DropFlag), .. }))
+                // the loop comes after it (`LoopExitKept`). A loop that
+                // never comes back round may too (#1467).
+                let in_loop = matches!(next, Some(Event::OwnerDropAtReassign { maybe_init: Some(InitBy::FirstPass), .. }))
+                    || matches!(next, Some(Event::OwnerDropAtReassign { maybe_init: Some(InitBy::EarlierIteration | InitBy::OuterLoop { .. } | InitBy::DropFlag), .. }))
                     && !after.iter()
                         .find(|(_, e)| matches!(e, Event::LoopExitKept { .. } | Event::LoopMaybeInit { .. } | Event::LoopExitMove { .. }))
                         .is_some_and(|(_, e)| matches!(e, Event::LoopExitKept { reassigned: true }));
@@ -3047,6 +3050,9 @@ fn reassigned_after(after: &[&(usize, Event)]) -> Option<bool> {
                     .is_some_and(|(_, e)| matches!(e, Event::LoopExitKept { reassigned: true }));
                 return Some(kept && !in_branch);
             }
+            // In a loop that never comes back round and may end
+            // before it runs (#1467).
+            Event::OwnerDropAtReassign { maybe_init: Some(InitBy::FirstPass), .. } => return Some(false),
             Event::OwnerDropAtReassign { .. } => return Some(true),
             Event::Branch { .. } if assigns_on_every_path(e) => return Some(true),
             Event::Branch { .. } if assigns_in_branch(e) => in_branch = true,
@@ -3060,14 +3066,14 @@ fn reassigned_after(after: &[&(usize, Event)]) -> Option<bool> {
 // A conditional that gives the column a new value on every path that gets
 // to its join, also by conditionals nested in its arms (`if c { s = a; }
 // else { s = b; }`): the old value, if any, is dropped there whichever
-// arm runs. Not an assignment in a loop (whose body may not run).
+// arm runs. Not an assignment in a loop (whose body may not run, #1467).
 fn assigns_on_every_path(e: &Event) -> bool {
     let Event::Branch { branch_history, ty, .. } = e else { return false };
     all_paths_present(ty, branch_history.len())
         && branch_history.iter().any(|b| !b.diverges)
         && branch_history.iter().filter(|b| !b.diverges).all(|b| b.e_data.iter().any(|(_, e)|
             matches!(e, Event::OwnerDropAtReassign { maybe_init, .. }
-                    if !matches!(maybe_init, Some(InitBy::EarlierIteration | InitBy::OuterLoop { .. } | InitBy::DropFlag)))
+                    if !matches!(maybe_init, Some(InitBy::EarlierIteration | InitBy::OuterLoop { .. } | InitBy::DropFlag | InitBy::FirstPass)))
                 || assigns_on_every_path(e)))
 }
 

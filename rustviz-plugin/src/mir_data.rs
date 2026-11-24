@@ -1141,11 +1141,12 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     /// `round_states_loop` but on the edges into its head that aren't
     /// back edges. For a loop inside another, that's every run of it:
     /// the outer loop's later times round come in this way too. Empty
-    /// when the loop isn't in this body or never comes back round.
+    /// when the loop isn't in this body (not when it never comes back
+    /// round, #1467).
     pub fn entry_states_loop(&self, loop_span: Span) -> Vec<(String, Ownership)> {
         use rustc_mir_dataflow::impls::{MaybeInitializedPlaces, MaybeUninitializedPlaces};
         use rustc_mir_dataflow::move_paths::MoveData;
-        let Some((entry, _)) = self.loop_head_edges(loop_span) else { return Vec::new() };
+        let Some((entry, _)) = self.loop_head_edges_all(loop_span).filter(|(e, _)| !e.is_empty()) else { return Vec::new() };
         let body = &self.bwf.body;
         let move_data = MoveData::gather_moves(body, self.tcx, |_| true);
         let mut init = MaybeInitializedPlaces::new(self.tcx, body, &move_data)
@@ -1437,6 +1438,19 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     /// it from the body. `None` when the loop isn't in this body (a
     /// closure's) or either set is empty.
     fn loop_head_edges(&self, loop_span: Span) -> Option<(Vec<rustc_middle::mir::BasicBlock>, Vec<rustc_middle::mir::BasicBlock>)> {
+        self.loop_head_edges_all(loop_span).filter(|(entry, back)| !entry.is_empty() && !back.is_empty())
+    }
+
+    /// Whether the loop `loop_span` never comes back round to its start
+    /// (#1467): every pass through its body leaves it (a `break`, a
+    /// `return`), so it runs its body at most once. `None` when the
+    /// loop isn't in this body (a closure's).
+    pub fn loop_never_rounds(&self, loop_span: Span) -> Option<bool> {
+        self.loop_head_edges_all(loop_span).map(|(_, back)| back.is_empty())
+    }
+
+    /// `loop_head_edges`, also when either set is empty.
+    fn loop_head_edges_all(&self, loop_span: Span) -> Option<(Vec<rustc_middle::mir::BasicBlock>, Vec<rustc_middle::mir::BasicBlock>)> {
         use rustc_middle::mir::BasicBlock;
         let body = &self.bwf.body;
         let head = body.basic_blocks.iter_enumerated().find_map(|(bb, data)| {
@@ -1446,7 +1460,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let doms = body.basic_blocks.dominators();
         let (back, entry): (Vec<BasicBlock>, Vec<BasicBlock>) =
             body.basic_blocks.predecessors()[head].iter().partition(|&&p| doms.dominates(head, p));
-        (!back.is_empty() && !entry.is_empty()).then_some((entry, back))
+        Some((entry, back))
     }
 
     /// The move paths of `move_data` that are a user variable, or a

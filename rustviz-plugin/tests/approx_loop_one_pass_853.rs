@@ -1,10 +1,11 @@
 // #853: a loop is drawn as one pass through its body. Each loop gets one
 // note saying so, on its first dot drawn for a pass: `w` on the `for`
 // line, `stack`'s `pop` in the `while let` condition (checked on every
-// pass), `t` in the `loop`. No other dot gets one: not those outside the
-// loops, not `words` lent to the iterator on the `for` line (once) or
-// given back on the closing line, not `n`, bound once by the `break`,
-// and not a variable of an `if` block.
+// pass). Not the `loop`, which breaks on its first pass, so it runs its
+// body once, as drawn (#1467). No other dot gets one: not those outside
+// the loops, not `words` lent to the iterator on the `for` line (once)
+// or given back on the closing line, not `n`, bound once by the
+// `break`, and not a variable of an `if` block.
 fn main() {
     let mut total = 0;
     let words = vec![String::from("a"), String::from("b")];
