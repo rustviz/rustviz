@@ -1460,6 +1460,11 @@ fn render_branch_dots(
                 // dropped is still for the scope end or next assignment
                 // to say.
                 Some(hover_messages::event_dot_branch_merge_maybe_still_unassigned(&is.real_name(), &leavers))
+            } else if unassigned_everywhere && branch_history.iter().any(|b| b.diverges) {
+                // A conditional whose branches that get here leave it as
+                // it was, and another drops it as it leaves (`if d {
+                // return; }`, #1436): their lines reach the join.
+                Some(hover_messages::event_dot_branch_merge_maybe_init_unchanged(&is.real_name(), is_branch_temp_col(rap)))
             } else {
                 None
             }
@@ -1878,7 +1883,13 @@ fn render_scope_end_dot(
             };
             append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
             return true;
-        } else if let (false, Some(InitJoin::Maybe { moved })) = (ro.holds_value(), init_at_end(history)) {
+        } else if let (false, Some(InitJoin::Maybe { moved })) = (ro.holds_value(), match exit {
+            // An exit's drop in a branch, after a conditional above the
+            // branch's that assigned it in some branches only (#1436).
+            Some(_) => history_path(&visualization_data.timelines[hash].history, history, history.len())
+                .and_then(|path| init_at_end(&path)),
+            None => init_at_end(history),
+        }) {
             // Assigned in some branches of a conditional but
             // not others (#244): the drop flag decides here.
             // Whether it holds a value isn't only up to the branch
@@ -2194,8 +2205,11 @@ fn render_dot(
         let moved_at_event = moved_out;
         let mut held_at_event = held;
         if let Event::Acquire { break_alt: Some(_), .. } | Event::Copy { break_alt: Some(_), .. } = event {
+            // (On the source line, not the row: a `break [&s]`'s borrow
+            // arrow may push the next `break`'s value a row down, #1435.)
+            let src = |r: usize| rv_attrs::line_of(r, &visualization_data.row_lines).unwrap_or(r);
             match before_breaks {
-                Some((line, before)) if line == *line_number => held_at_event = before,
+                Some((line, before)) if src(line) == src(*line_number) => held_at_event = before,
                 _ => before_breaks = Some((*line_number, held)),
             }
         }
@@ -2417,6 +2431,13 @@ fn render_dot(
                         } else {
                             hover_messages::event_dot_owner_drop_at_reassign_maybe_moved(&name, &note, *by_cond)
                         }
+                    } else if let (Event::TemporaryDrop { ty: None, when, .. }, Some(made_at)) = (event, branch_temp_maybe_made(visualization_data, hash, history, i)) {
+                        // A temporary a `let` extends through a branch,
+                        // dropped by an exit after the join (#1436): only
+                        // if the branch that made it ran.
+                        hover_messages::event_dot_extended_temporary_drop_made(&name, when, made_at)
+                    } else if let (Event::OwnerDropIfTryReturns, Some(made_at)) = (event, branch_temp_maybe_made(visualization_data, hash, history, i)) {
+                        hover_messages::event_dot_temp_drop_if_try_returns_made(&name, made_at)
                     } else if let Some(split) = matches!(event, Event::OwnerDropIfTryReturns)
                         .then(|| try_partial_move_split(visualization_data, *hash as u64, *line_number)).flatten() {
                         // A struct some fields of which were moved out
@@ -2430,6 +2451,13 @@ fn render_dot(
                         let boxed = matches!(visualization_data.timelines[hash].resource_access_point, ResourceAccessPoint::Struct(Struct { is_box: true, .. }));
                         let scope_end = hover_messages::event_dot_struct_partial_go_out_of_scope(&name, &split.moved, &split.maybe_moved, &split.dropped, false, split.by_cond, false, boxed);
                         hover_messages::event_dot_owner_drop_if_try_returns_partial(&name, &scope_end)
+                    } else if let (Event::OwnerDropIfTryReturns, Some(InitJoin::Maybe { moved })) = (event,
+                        history_path(&visualization_data.timelines[hash].history, history, i)
+                            .filter(|path| !init_by_maybe_held(path.iter()))
+                            .and_then(|path| init_at_end(&path))) {
+                        // A `let s;` local only some branches above
+                        // assigned (#1436).
+                        hover_messages::event_dot_owner_drop_if_try_returns_maybe_init(&name, &note, moved)
                     } else if matches!(event, Event::OwnerDropIfTryReturns)
                         && history_path(&visualization_data.timelines[hash].history, history, i)
                             .is_some_and(|path| maybe_moved_at_end(&path)
@@ -2611,6 +2639,16 @@ fn render_dot(
                                 data.title = hover_messages::with_break_alt_lend(&data.title, &alt);
                             }
                         }
+                        // A value that holds a borrow one of the `break`s
+                        // gave it (`break Some(&s)`, #1435): only if that
+                        // `break` ended the loop.
+                        Event::StaticBorrow { id, .. } | Event::MutableBorrow { id, .. }
+                            if visualization_data.timelines[hash].resource_access_point.holds_borrow()
+                                && !visualization_data.timelines[hash].resource_access_point.is_ref() => {
+                            if let Some(alt) = borrow_break_alt(*id, visualization_data) {
+                                data.title.push_str(&hover_messages::break_alt_if_suffix(alt));
+                            }
+                        }
                         Event::Acquire { is, break_alt: Some(alt), .. } | Event::Copy { is, break_alt: Some(alt), .. } => {
                             // Which `break` ran isn't known here, so
                             // name no source: what a literal would say.
@@ -2677,7 +2715,7 @@ enum BranchJoin {
     BoundHere,
 }
 
-fn analyze_branch_for_join(events: &[(usize, Event)]) -> (bool, bool) {
+fn analyze_branch_for_join(events: &[(usize, Event)], holder: bool) -> (bool, bool) {
     let mut moved = false;
     let mut acquired = false;
     for (_, e) in events {
@@ -2689,11 +2727,14 @@ fn analyze_branch_for_join(events: &[(usize, Event)]) -> (bool, bool) {
             // (A copy in, `Ok(num) => num` with num an i32, gives it
             // its value too, #994.)
             Event::Acquire { .. } | Event::Copy { .. } | Event::LoopExitKept { .. } => { moved = false; acquired = true; }
+            // A value that holds a borrow gets its value by the borrow
+            // (`let t = if c { Some(&s) } else { None };`, #1435).
+            Event::StaticBorrow { .. } | Event::MutableBorrow { .. } if holder => { moved = false; acquired = true; }
             Event::Branch { branch_history, ty, .. } => {
                 let mut nested_any_moved = false;
                 let mut nested_all_acquired = branch_history.iter().any(|nb| !nb.diverges);
                 for nb in branch_history.iter().filter(|nb| !nb.diverges) {
-                    let (m, a) = analyze_branch_for_join(&nb.e_data);
+                    let (m, a) = analyze_branch_for_join(&nb.e_data, holder);
                     if m { nested_any_moved = true; }
                     if !a { nested_all_acquired = false; }
                 }
@@ -2889,12 +2930,7 @@ fn maybe_moved_at_end(history: &[(usize, Event)]) -> bool {
             // A conditional none of whose branches gives it a value or
             // takes it (an exit's drop in one arm, `_ => {}` in the
             // other, #1194) leaves it as it was.
-            Event::Branch { branch_history, maybe_held: false, .. }
-                if branch_history.iter().all(|b| b.e_data.iter().all(|(_, e)| !matches!(e,
-                    Event::Move { .. } | Event::Acquire { .. } | Event::Copy { .. } | Event::Branch { .. }
-                    | Event::LoopExitMove { .. } | Event::LoopExitKept { .. } | Event::LoopMaybeInit { .. }
-                    | Event::OrAltMove { .. } | Event::ClosureCall { .. } | Event::InitRefParam { .. })
-                    && !(matches!(e, Event::OwnerGoOutOfScope { .. }) && !b.diverges))) => {}
+            Event::Branch { branch_history, maybe_held: false, .. } if leaves_value_as_it_was(branch_history) => {}
             // Maybe held nothing as it started, assigned in some
             // branches only (#1034).
             Event::Branch { maybe_held: true, .. } => maybe = true,
@@ -3053,6 +3089,19 @@ fn is_branch_temp_col(rap: &ResourceAccessPoint) -> bool {
     rap.is_temporary() || hover_messages::is_temporary_name(rap.name().split('.').next().unwrap_or(""))
 }
 
+// For a temporary a `let` extends through a branch (#1397) that only may
+// exist at `history[i]` (after the join of the conditional whose branch
+// made it): the line that branch made it on (#1436).
+fn branch_temp_maybe_made(vd: &VisualizationData, hash: &u64, history: &[(usize, Event)], i: usize) -> Option<Option<usize>> {
+    let timeline = &vd.timelines[hash];
+    if !is_branch_temp_col(&timeline.resource_access_point) {
+        return None;
+    }
+    let path = history_path(&timeline.history, history, i)?;
+    matches!(init_at_end(&path), Some(InitJoin::Maybe { .. }))
+        .then(|| made_on_line(&timeline.history, &vd.row_lines))
+}
+
 // The source line a column first gets a value on, looking into the
 // branches of its conditionals: where a branch makes a temporary that a
 // `let` extends (#1397). (`history` is by row; `row_lines` maps rows to
@@ -3115,12 +3164,28 @@ fn init_by_maybe_held<'a>(history: impl IntoIterator<Item = &'a (usize, Event)>)
     held
 }
 
+// Whether none of the branches of a conditional (`branch_history`) gives
+// the column a value or takes it: an exit's drop in one arm, `_ => {}`
+// in the other (#1194). It leaves what the column holds as it was.
+fn leaves_value_as_it_was(branch_history: &[BranchData]) -> bool {
+    branch_history.iter().all(|b| b.e_data.iter().all(|(_, e)| !matches!(e,
+        Event::Move { .. } | Event::Acquire { .. } | Event::Copy { .. } | Event::Branch { .. }
+        | Event::LoopExitMove { .. } | Event::LoopExitKept { .. } | Event::LoopMaybeInit { .. }
+        | Event::OrAltMove { .. } | Event::ClosureCall { .. } | Event::InitRefParam { .. })
+        && !(matches!(e, Event::OwnerGoOutOfScope { .. }) && !b.diverges)))
+}
+
 // `init_at_end` for events that follow a point where the column was in
 // state `start`.
 fn init_after(start: Option<InitJoin>, history: &[(usize, Event)]) -> Option<InitJoin> {
     let mut init = start;
     for (_, e) in history {
         match e {
+            // A `let s;` local only some branches above assigned, which a
+            // later `if d { return; }` drops if it holds a value (#1436):
+            // still assigned in only some of them after it.
+            Event::Branch { branch_history, maybe_held: false, .. }
+                if init.is_some() && leaves_value_as_it_was(branch_history) => {}
             Event::Branch { branch_history, maybe_init, .. } => {
                 init = branches_init_join(*maybe_init, branch_history);
             }
@@ -3281,7 +3346,7 @@ fn all_paths_present(ty: &BranchType, n_branches: usize) -> bool {
     }
 }
 
-fn compute_branch_join(branch_history: &[BranchData], ty: &BranchType) -> BranchJoin {
+fn compute_branch_join(branch_history: &[BranchData], ty: &BranchType, holder: bool) -> BranchJoin {
     let mut any_moved = false;
     // Only branches that reach the merge count; a diverging one
     // (`_ => unreachable!()`) produces no value and moves nothing
@@ -3290,7 +3355,7 @@ fn compute_branch_join(branch_history: &[BranchData], ty: &BranchType) -> Branch
     // one that gets here.
     let mut all_acquired = branch_history.iter().any(|b| !b.diverges);
     for b in branch_history.iter().filter(|b| !b.diverges) {
-        let (m, a) = analyze_branch_for_join(&b.e_data);
+        let (m, a) = analyze_branch_for_join(&b.e_data, holder);
         if m { any_moved = true; }
         if !a { all_acquired = false; }
     }
@@ -3334,7 +3399,8 @@ fn branch_join_message(branch_history: &[BranchData], ty: &BranchType, is: &Reso
             return hover_messages::event_dot_branch_merge_elems_moved(var_name, &moved, &left.left);
         }
     }
-    match compute_branch_join(branch_history, ty) {
+    let holder = is.extract_rap().is_some_and(|r| !r.is_ref() && r.holds_borrow());
+    match compute_branch_join(branch_history, ty, holder) {
         BranchJoin::MovedAfter => hover_messages::event_dot_branch_merge_moved(var_name),
         // A reference bound in every arm (`let msg = match n { .. => "a", .. }`)
         // holds a borrow, not ownership.

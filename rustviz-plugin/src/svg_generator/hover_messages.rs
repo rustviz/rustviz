@@ -930,6 +930,26 @@ pub fn event_dot_extended_temporary_drop(my_name: &String, when: &String) -> Str
     )
 }
 
+// The same for a temporary a `let` extends through a branch, which only
+// that branch made (#1397, #1436): a drop flag decides.
+pub fn event_dot_extended_temporary_drop_made(my_name: &String, when: &String, made_at: Option<usize>) -> String {
+    format!(
+        "{0} goes out of scope {1}: a let borrowed it, so it lived past its statement. Its resource \
+         is dropped only if {2} (Rust tracks this with a runtime drop flag).",
+        styled_name_html(my_name), when, temp_made_in(made_at)
+    )
+}
+
+// Its drop at a `?` (#1436).
+pub fn event_dot_temp_drop_if_try_returns_made(my_name: &String, made_at: Option<usize>) -> String {
+    format!(
+        "Only if the `?` here returns early (on an `Err` or `None`): the function returns and {0}'s \
+         resource is dropped if {1} (Rust tracks this with a runtime drop flag). If the `?` succeeds, \
+         nothing happens to {0} here.",
+        styled_name_html(my_name), temp_made_in(made_at)
+    )
+}
+
 pub fn event_dot_temporary_drop(ty: &String, when: &String, literal: bool, assign: bool) -> String {
     if literal && assign {
         // `(a, _) = (m, n);` (#1387): rustc lowers it to `{ let (lhs, _)
@@ -1211,6 +1231,19 @@ pub fn event_dot_owner_drop_if_try_returns_maybe(my_name: &String, note: &str) -
          resource{1} is dropped{2} if {0} still holds it (Rust tracks this with a runtime drop flag). \
          If the `?` succeeds, nothing happens to {0} here.",
         my_name_fmt, holds, rest
+    )
+}
+
+// The same for a `let s;` local that only some branches above assigned
+// (#244, #1436).
+pub fn event_dot_owner_drop_if_try_returns_maybe_init(my_name: &String, note: &str, moved: bool) -> String {
+    let my_name_fmt = styled_name_html(my_name);
+    let (holds, rest) = split_drop_note(note);
+    format!(
+        "Only if the `?` here returns early (on an `Err` or `None`): the function returns and {0}'s \
+         resource{1} is dropped{2} if the branch that ran {3} (Rust tracks this with a runtime drop \
+         flag). If the `?` succeeds, nothing happens to {0} here.",
+        my_name_fmt, holds, rest, assigned_in_branch_that_ran(moved)
     )
 }
 
@@ -4869,6 +4902,19 @@ pub fn event_dot_branch_merge_maybe_still_unassigned(my_name: &String, leavers: 
         "{} may still have no value here: {}",
         name, leavers_never_got_here("assigned", &name, leavers)
     )
+}
+
+// The same where the branches that leave drop it instead (`if d {
+// return; }` after the conditional that assigned it in some branches
+// only, #1436). `temp`: a temporary a `let` extends through a branch
+// (#1397), which a branch makes rather than assigns.
+pub fn event_dot_branch_merge_maybe_init_unchanged(my_name: &String, temp: bool) -> String {
+    let name = styled_name_html(my_name);
+    if temp {
+        format!("{} may not exist here, as before the branches: none of the branches that get here makes it", name)
+    } else {
+        format!("{} may have no value here, as before the branches: none of the branches that get here assigns it", name)
+    }
 }
 
 // At the end of a loop, for a variable declared outside it that a
