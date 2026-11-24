@@ -1049,7 +1049,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ExprKind::AddrOf(_, m, _) => m.is_mut(),
       ExprKind::Call(..) | ExprKind::MethodCall(..) => self.call_borrow_is_mut(e),
       ExprKind::Closure(closure) => self.closure_ref_captures(closure.def_id).iter().any(|(_, m)| *m),
-      ExprKind::Array(elems) => elems.iter().any(|x| self.value_borrow_is_mut(x)),
+      ExprKind::Array(elems) | ExprKind::Tup(elems) => elems.iter().any(|x| self.value_borrow_is_mut(x)),
       ExprKind::Repeat(x, _) => self.value_borrow_is_mut(x),
       // `Holder { r: &mut z }` (#692).
       ExprKind::Struct(_, fields, tail) => fields.iter().any(|f| self.value_borrow_is_mut(f.expr))
@@ -1116,7 +1116,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // (`r.other.iter_mut().zip(r.items.iter())`, #1080).
     let ctor = matches!(init.kind, ExprKind::Call(f, _) if matches!(f.kind, ExprKind::Path(QPath::Resolved(_, p))
       if matches!(p.res, rustc_hir::def::Res::Def(rustc_hir::def::DefKind::Ctor(..), _))));
-    if matches!(init.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) && !ctor {
+    // `vec![(&mut f, &g)]` (#1433): what the elements the user wrote hold.
+    if let Some(elems) = vec_macro_elems(init) {
+      if !elems.iter().all(|x| self.collect_lender_muts(x, &mut out)) {
+        return Vec::new();
+      }
+    } else if matches!(init.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) && !ctor {
       if let Some(fields) = self.field_call_lenders(init, &self.call_lenders(init)) {
         out = fields;
       }
@@ -1416,17 +1421,25 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ExprKind::Repeat(e, _) => self.value_lenders(e),
       // A struct literal holds its fields' borrows (`Some(Part { part:
       // &s })` holds `s`'s; #692), and those of the fields it takes
-      // from the base of a struct update.
+      // from the base of a struct update; a tuple literal, its elements'
+      // (`vec![(&f, &g)]`, #1433).
       // A holder records one kind of borrow, so a literal mixing `&s`
-      // and `&mut k` is left untracked.
-      ExprKind::Struct(_, fields, tail) => {
+      // and `&mut k` is left untracked here (`holder_lender_muts` has
+      // each lender's kind).
+      ExprKind::Struct(..) | ExprKind::Tup(..) => {
         let mut out: Vec<ResourceTy> = Vec::new();
-        let base = match tail {
-          rustc_hir::StructTailExpr::Base(b) => Some(b),
-          _ => None,
+        let parts: Vec<&'tcx Expr<'tcx>> = match e.kind {
+          ExprKind::Struct(_, fields, tail) => fields.iter().map(|f| f.expr)
+            .chain(match tail {
+              rustc_hir::StructTailExpr::Base(b) => Some(b),
+              _ => None,
+            })
+            .collect(),
+          ExprKind::Tup(elems) => elems.iter().collect(),
+          _ => Vec::new(),
         };
         let mut kinds: Vec<bool> = Vec::new();
-        for e in fields.iter().map(|f| f.expr).chain(base) {
+        for e in parts {
           let ls = self.value_lenders(e);
           if !ls.is_empty() {
             kinds.push(self.value_borrow_is_mut(e));

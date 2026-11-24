@@ -25560,6 +25560,144 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `ref_arm_copy_before_scope_end`. r has a value all along.)
         must_not_contain: &["r has no value yet"],
     },
+    TooltipExpect {
+        name: "assign_branch_ref_arms_1393",
+        // #1432: r's loan from line 16 (a through y, v through `first`, b)
+        // ends at r's last use, line 17, with each lender given back, and
+        // y's borrow ends with its scope. y gave a back on line 17, after it
+        // had gone out of scope, and v was never given back (o, made after
+        // that end, counted as another borrower of a).
+        must_contain: &[
+            "Return immutably borrowed resource from r to a",
+            "Return immutably borrowed resource from r to v",
+            "v's resource is no longer immutably borrowed",
+        ],
+        must_not_contain: &["Return immutably borrowed resource from y to a"],
+    },
+    TooltipExpect {
+        name: "assign_branch_mut_ref_arms_1393",
+        // #1431: `m = if c { let w = &mut s; w } else { &mut t };` reborrows
+        // through w (`&mut *w`, a coercion): m borrows s, and gives s and t
+        // back at its last use (line 10). w's borrow ends with its scope.
+        // (`branch_ref_borrow_ends` checks the lines.)
+        must_contain: &[
+            "Mutable reborrow from w to m",
+            "Return mutably borrowed resource from m to s",
+            "Return mutably borrowed resource from m to t",
+        ],
+        must_not_contain: &[
+            "Return mutably borrowed resource from m to *w",
+            "Return mutably borrowed resource from w to s",
+            "m no longer borrows the resource w points to",
+        ],
+    },
+    TooltipExpect {
+        name: "assign_branch_keeps_ref_1430",
+        // #1430: `best = if c { &b } else { best };`: the branch giving best
+        // back its own value draws nothing, and best's old loan of a lives
+        // on to its last use with the new one (rustc keeps both). It drew
+        // "Copy from best to best" (and "Mutable reborrow from m to m" for
+        // `m = if c { &mut t } else { m }`), with the old loan ended before
+        // the conditional and a given back twice.
+        must_contain: &[
+            "Immutable borrow from b to best",
+            "Immutable borrow from e to best",
+            "Return immutably borrowed resource from best to a",
+            "Return immutably borrowed resource from best to b",
+            "Return immutably borrowed resource from best to e",
+            "Mutable borrow from t to m",
+            "Return mutably borrowed resource from m to s",
+            "Return mutably borrowed resource from m to t",
+        ],
+        must_not_contain: &[
+            "Copy from best to best",
+            "best is assigned a copy of best's reference",
+            "Mutable reborrow from m to m",
+            "mutably borrowed by m through m",
+            "m's mutable borrow ends (what it borrows from isn't shown)",
+        ],
+    },
+    TooltipExpect {
+        name: "assign_branch_reborrow_arm_1431",
+        // #1431: a `&mut` a branch declares, reborrowed into a reference
+        // declared outside (`let m: &mut String = if c { let w = &mut s; w }
+        // ..`, `n = if c { let w2 = &mut t; &mut *w2 } ..`, `n = match
+        // o.take() { Some(x) => x, .. }`): the reference borrows what w
+        // borrowed until its last use, and w's borrow ends with its scope.
+        // It gave its borrow back "to *w", and w gave s back after it had
+        // gone out of scope.
+        must_contain: &[
+            "Return mutably borrowed resource from m to s",
+            "Return mutably borrowed resource from m to t",
+            "Return mutably borrowed resource from n to t",
+            "Return mutably borrowed resource from n to s",
+            "w's mutable borrow ends",
+            "w goes out of scope",
+        ],
+        must_not_contain: &[
+            "Return mutably borrowed resource from m to *w",
+            "Return mutably borrowed resource from n to *w2",
+            "Return mutably borrowed resource from n to *x",
+            "Return mutably borrowed resource from w to s",
+            "Return mutably borrowed resource from w2 to t",
+            "Return mutably borrowed resource from x to s",
+            "no longer borrows the resource w points to",
+        ],
+    },
+    TooltipExpect {
+        name: "ref_reassign_co_lenders_1432",
+        // #1432: r borrows a or b; z borrows a too. When r is given a new
+        // value, its old loan ends at its last use: b is given back there,
+        // a stays borrowed by z. b used to stay borrowed to the end.
+        // (`branch_ref_borrow_ends` checks the lines.)
+        must_contain: &[
+            "Return immutably borrowed resource from r to b",
+            "b's resource is no longer immutably borrowed",
+            "Return immutably borrowed resource from z to a",
+        ],
+        must_not_contain: &["Return immutably borrowed resource from r to a"],
+    },
+    TooltipExpect {
+        name: "literal_holds_refs_1433",
+        // #1433: a tuple in `vec![..]` holds its references' borrows, and a
+        // `for` loop over a literal of references borrows what they borrow
+        // until the loop ends. None of it was drawn.
+        must_contain: &[
+            "Mutable borrow from f to pairs",
+            "Immutable borrow from g to pairs",
+            "Return mutably borrowed resource from pairs to f",
+            "Return immutably borrowed resource from pairs to g",
+            "pairs holds a value that mutably borrows f's resource (pairs isn't a reference itself)",
+            "Immutable borrow from g to shared",
+            "Immutable borrow from e to r",
+            "Immutable borrow from g to r",
+            "Return immutably borrowed resource from r to e",
+            "Return immutably borrowed resource from r to g",
+            "Mutable borrow from f to m",
+            "Return mutably borrowed resource from m to f",
+            "Immutable borrow from e to x",
+            "Immutable borrow from g to y",
+        ],
+        must_not_contain: &[
+            "what it borrows from isn't shown",
+            "=pairs is the owner of the resource",
+        ],
+    },
+    TooltipExpect {
+        name: "for_pattern_rest_drop_1434",
+        // #1434: what a `for` pattern leaves of each element is dropped at
+        // the end of each pass; stated on the loop's iterator (or the
+        // iterator variable), where the body ends. Nothing said so.
+        // (`for (c, _) in &cp` borrows the elements and `(n, _)` over
+        // `(i32, i32)` leaves nothing that needs drop: no note.)
+        must_contain: &[
+            "At the end of each pass, the `.1` of that pass's element is dropped: the pattern doesn't move it out",
+            "At the end of each pass, the element that pass took is dropped: the pattern `_` doesn't bind it",
+            "At the end of each pass, the `.0` and `.2` of that pass's element are dropped: the pattern doesn't move them out",
+            "At the end of each pass, the `.tag` of that pass's element is dropped: the pattern doesn't move it out",
+        ],
+        must_not_contain: &["`.n` of that pass's element"],
+    },
 ];
 
 /// #1440: on the line where two loans of v end, the first end's dot (with
@@ -35307,6 +35445,41 @@ fn box_write_in_condition_drop_marks() {
 /// copies y into r in y's branch, before y goes out of scope: y's dot
 /// that says its reference is copied comes before its scope end on that
 /// row (it came after: the copy was drawn after the conditional).
+/// #1431, #1432: where a reference given a new value by a conditional
+/// gives its lenders back. `(snippet, data-rv-id prefixes that must be
+/// there, prefixes that must not)`.
+#[test]
+fn branch_ref_borrow_ends() {
+    for (snippet, present, absent) in [
+        // t (else branch) and s (through w) are borrowed by m until its
+        // last use, line 10; w has nothing after its scope end on line 9.
+        ("assign_branch_mut_ref_arms_1393",
+         &["t@L10:dot:mutable_reacquire", "s@L10:dot:mutable_reacquire"][..],
+         &["t@L9:dot:branch_join+mutable_reacquire", "w@L10:"][..]),
+        ("assign_branch_reborrow_arm_1431",
+         &["s@L12:dot:mutable_reacquire", "t@L12:dot:mutable_reacquire", "t@L17:dot:mutable_reacquire"][..],
+         &["w@L12:", "w2@L17:"][..]),
+        // r's loan of line 16 ends on line 17 (v, b and a given back); y
+        // has nothing after its scope end on line 16.
+        ("assign_branch_ref_arms_1393",
+         &["v@L17:dot:static_reacquire", "b@L17:dot:static_reacquire", "a@L17:dot:static_reacquire"][..],
+         &["y@L17:"][..]),
+        // b given back at r's last use (12), a at z's (13); r's old
+        // borrow doesn't end at the write (14).
+        ("ref_reassign_co_lenders_1432",
+         &["b@L12:dot:static_reacquire", "a@L13:dot:static_reacquire"][..],
+         &["r@L14:dot:static_die"][..]),
+    ] {
+        let tl = run_with_local_backend(snippet).timeline_panel_string();
+        for id in present {
+            assert!(tl.contains(&format!("data-rv-id=\"{}", id)), "{}: no {}", snippet, id);
+        }
+        for id in absent {
+            assert!(!tl.contains(&format!("data-rv-id=\"{}", id)), "{}: unexpected {}", snippet, id);
+        }
+    }
+}
+
 #[test]
 fn ref_arm_copy_before_scope_end() {
     for (snippet, refs) in [
