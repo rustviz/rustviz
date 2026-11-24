@@ -106,13 +106,34 @@ fn split_same_line_borrow_ends(group: &[ExternalEvent]) -> (Vec<ExternalEvent>, 
         .filter(|e| matches!(e, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }))
         .filter_map(|e| ends(e))
         .collect();
-    group.iter().cloned().partition(|e| {
-        let is_end = matches!(e, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. });
-        let ends_a_borrow_here = is_end && ends(e).map_or(false, |(f, t)| {
-            f != t && borrows.iter().any(|&(bf, bt)| (bf, bt) == (f, t) || (bf, bt) == (t, f))
-        });
-        !ends_a_borrow_here
-    })
+    let is_end = |e: &ExternalEvent| matches!(e, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. });
+    let mut moved: Vec<bool> = group.iter().map(|e| is_end(e) && ends(e).map_or(false, |(f, t)| {
+        f != t && borrows.iter().any(|&(bf, bt)| (bf, bt) == (f, t) || (bf, bt) == (t, f))
+    })).collect();
+    // The end of a reference that one of those ends gives its loan back
+    // to (`let m2 = &mut *m; let r2 = &*m2;`, both ending on that line):
+    // it comes after r2's end, on the same row, not on the line's first
+    // row, above the end that gives it its loan back (#1415).
+    loop {
+        let lenders: Vec<u64> = group.iter().zip(&moved).filter(|(_, m)| **m)
+            .filter_map(|(e, _)| ends(e)).map(|(_, t)| t).collect();
+        let mut changed = false;
+        for (e, m) in group.iter().zip(moved.iter_mut()) {
+            if !*m && is_end(e) && ends(e).is_some_and(|(f, t)| f != t && lenders.contains(&f)) {
+                *m = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut front = Vec::new();
+    let mut back = Vec::new();
+    for (e, m) in group.iter().zip(moved) {
+        if m { back.push(e.clone()) } else { front.push(e.clone()) }
+    }
+    (front, back)
 }
 
 /// Whether `e`, one of a line's stacked arrows (`group`), ends the

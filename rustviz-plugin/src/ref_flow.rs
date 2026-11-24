@@ -1305,7 +1305,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
   /// `e` names a local `&mut` reference variable that borrows a
   /// variable with a column (not a parameter, whose column already
-  /// stands for the caller's data, #393).
+  /// stands for the caller's data, #393), or reborrows through another
+  /// reference (`let m2 = &mut *m;`): a call given `&*m2` borrows
+  /// through m2, not through m, which m2 still holds (#1415).
   fn local_mut_ref(&self, e: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
     if !matches!(e.kind, ExprKind::Path(QPath::Resolved(None, _))) {
       return None;
@@ -1313,7 +1315,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let name = expr_to_rap_name(e, &self.tcx)?;
     let r = self.raps.get(&name)?.rap.to_owned();
     let rd = self.borrow_map.get(&name)?;
-    (r.is_mutref() && matches!(&rd.lender, ResourceTy::Value(l) if !l.is_ref() && !l.is_fn())).then_some(r)
+    let lends = match &rd.lender {
+      ResourceTy::Value(l) => !l.is_ref() && !l.is_fn(),
+      ResourceTy::Deref(l) => l.is_ref() && l != &r,
+      _ => false,
+    };
+    (r.is_mutref() && lends).then_some(r)
   }
 
   /// What the reference(s) held by the *value* of `e` borrow from.

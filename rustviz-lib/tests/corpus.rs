@@ -25230,6 +25230,102 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[],
     },
+    TooltipExpect {
+        name: "cond_last_use_ends_borrow_1409",
+        // #1409: a borrow last used in an `if` / `match` condition ends at
+        // the fork, before either arm (geometry: `line-through-fork` and
+        // `invalid-state` on main). main drew the lender's arm legs still
+        // lent ("s's resource is mutably borrowed; s can't be used until
+        // the borrow ends", with `println!("{}", s)` in the arm), and its
+        // column took the loan back after the fork, running on beside them.
+        must_contain: &[
+            "s's resource is no longer immutably borrowed",
+            "s's resource is no longer mutably borrowed",
+            "s is live in a conditional expression ",
+            "v's resource is no longer immutably borrowed",
+            "o's resource is no longer mutably borrowed",
+            "s is the owner of the resource",
+        ],
+        must_not_contain: &[
+            "=s's resource is mutably borrowed; s can't be used until the borrow ends",
+            "=o's resource is mutably borrowed; o can't be used until the borrow ends",
+            "r's borrow of s is already over here; s stays borrowed only on the other paths",
+        ],
+    },
+    TooltipExpect {
+        name: "reborrow_chain_ends_1415",
+        // #1415: `m2 = &mut *m;` then `&*m2` given to a call, a struct, a
+        // `Some(..)`, a method: the result borrows through m2, which still
+        // holds m's loan, and gives m2 its loan back before m2's own
+        // borrow ends (geometry: `event-on-dead-column`, `invalid-state` on
+        // main, which made them borrow through m and ended m2 first).
+        must_contain: &[
+            "Immutable borrow from *m2 to h.r: holder's signature gives the struct it returns the same lifetime as its argument",
+            "Immutable reborrow from m2 to r: id's signature gives the reference it returns the same lifetime as its argument",
+            "Immutable reborrow from m2 to r: as_str's signature gives the reference it returns the same lifetime as the value it was called on",
+            "h.r no longer borrows the resource m2 points to",
+            "_r2 no longer borrows the resource m2 points to",
+            "_h.r no longer borrows the resource m2 points to",
+            "r no longer borrows the resource m3 points to",
+            "m2's mutable borrow ends",
+            "m2 no longer borrows the resource m points to",
+        ],
+        must_not_contain: &[
+            "Immutable borrow from *m to h.r",
+            "Immutable reborrow from m to r",
+            "Immutable reborrow from m to o",
+            "the resource m points to is immutably borrowed by h.r through m",
+            "h.r no longer borrows the resource m points to",
+            "o no longer borrows the resource m points to",
+        ],
+    },
+    TooltipExpect {
+        name: "downgrade_ends_1414",
+        // #1414: the loan `downgrade(&mut s)` takes is mutable wherever its
+        // result goes, and ends (giving s back) before s is used again,
+        // also on the same line (geometry: `invalid-state` on main). main
+        // said "r2's immutable borrow ends" with no return in an arm, kept
+        // a tuple's element "immutably" borrowing s, and read s on the line
+        // where the borrow ends while it was still mutably borrowed.
+        must_contain: &[
+            "h.r's mutable borrow ends",
+            "r2's mutable borrow ends",
+            "Return mutably borrowed resource from r2 to s",
+            "Mutable borrow from s to t.0: downgrade's signature gives the reference it returns the same lifetime as its argument",
+            "t.0's mutable borrow ends",
+            "r's mutable borrow ends",
+            "Return mutably borrowed resource from r2 to s3",
+            "Return immutably borrowed resource from h2.r to s3",
+            "s3's resource is no longer mutably borrowed",
+        ],
+        must_not_contain: &[
+            "=r2's immutable borrow ends",
+            "=r's immutable borrow ends",
+            "t.0 immutably borrows a resource",
+            "Immutable borrow from s to t.0",
+            "still immutably borrowed by t.0",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/closure_keeps_param_borrow_1419",
+        // #1419: a closure reborrowing through (or copying) a reference
+        // parameter keeps its borrow live to the closure's last use. main
+        // ended r's borrow in the let-chain ("r's borrow ended in each
+        // branch above") and then drew the capture on a dead column
+        // (`invalid-state`, `event-on-dead-column`).
+        must_contain: &[
+            "the resource r points to is captured by closure c (an immutable reborrow through r)",
+            "r's reference is captured (copied) by closure c; the data it points to is not copied",
+            "r isn't moved in any of the branches above",
+            "r's immutable borrow ends",
+            "c no longer borrows the resource r points to",
+        ],
+        must_not_contain: &[
+            "r's borrow ended in each branch above",
+            "r's borrow has ended on this path",
+            "r has no value yet",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
