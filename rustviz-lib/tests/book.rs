@@ -632,6 +632,8 @@ const BOOK: &[Snippet] = &[
             "L5 third₂ is initialized with a copy of a value inside third",
             "L5 a value inside third is copied",
             "L5 Immutable borrow from v to third₂: third₂ is a reference copied out of third",
+            // One line for the end and the copy's borrow (#1450).
+            "L5 v's resource is no longer borrowed by third, but is still immutably borrowed by third₂; v is read-only while the borrow is live",
             "v goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
@@ -644,6 +646,8 @@ const BOOK: &[Snippet] = &[
             "L5 third goes out of scope. No resource is dropped.",
             "L8 third goes out of scope. No resource is dropped.",
             "L5 third₂'s immutable borrow ends (what it borrows from isn't shown)",
+            // The lend repeated the end's "still immutably borrowed by third₂" (#1450).
+            "L5 v's resource is immutably borrowed by third₂",
         ],
         ..E
     },
