@@ -25177,6 +25177,29 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Return immutably borrowed resource from g.a to k2",
         ],
     },
+    TooltipExpect {
+        name: "else_if_condition_row_1380",
+        // #1380: the `else if` arm's leg beside `} else if look(r) {` is
+        // the arm's own (geometry in `else_if_arm_starts_on_its_condition_row`).
+        // main dashed it as code "not part of that branch": it's the
+        // arm's condition.
+        must_contain: &[
+            "r holds an immutable reference; it can read the borrowed value",
+            "e's value is being shared by one or more variables",
+            "the value r points to is immutably borrowed by look",
+        ],
+        must_not_contain: &["This segment is for the else branch. The underlined code is not part of that branch."],
+    },
+    TooltipExpect {
+        name: "one_line_join_below_1392",
+        // #1392: the join a row below the arm's last dot (geometry in
+        // `joins_sit_below_their_arms_dots`); the texts are unchanged.
+        must_contain: &[
+            "s isn't moved in any of the branches above",
+            "s's resource is no longer mutably borrowed",
+        ],
+        must_not_contain: &["s has no value yet"],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
@@ -34686,6 +34709,7 @@ fn joins_sit_below_their_arms_dots() {
     for name in [
         "join_below_arm_on_closing_row_1374", "else_on_join_line", "fmt_macro_args_824",
         "reborrow_through_local_mut_ref_1152", "if_let_holder_end_row_712", "mut_ref_moved_into_result_1128",
+        "one_line_join_below_1392",
     ] {
         let (dots, logos, _) = marks_and_headers(&run_with_local_backend(name).timeline_panel_string());
         for (jx, jy, j) in dots.iter().filter(|(_, _, id)| id.contains(":dot:branch_join")) {
@@ -34702,17 +34726,30 @@ fn joins_sit_below_their_arms_dots() {
             }
         }
     }
-    // Known wrong, pinned until #1392 is fixed: a one-line `if let` on a
-    // lent column joins level with the arm's last dot (on main too; this
-    // check matched it once #1381 drew the split dot on its own, #1371).
-    // When it's fixed, this entry fails the second assert: delete it.
-    const KNOWN: &[&str] = &[
-        "mut_ref_moved_into_result_1128: s@L13:dot:branch_join+mutable_reacquire at (95, 605) level with s@L13:dot:mutable_reacquire at (70, 605)",
-    ];
-    let stale: Vec<&&str> = KNOWN.iter().filter(|k| !bad.iter().any(|b| b == *k)).collect();
-    bad.retain(|b| !KNOWN.contains(&b.as_str()));
+    // #1392: a one-line conditional whose arm stacks arrows on rows below
+    // its line (`if let Some(x) = k2 { x.push('!'); }`, also a one-line
+    // `match`, `} else { }`, in a loop, nested in an arm, two in a row)
+    // joins a row below the arm's last dot; it sat level with s's "no
+    // longer mutably borrowed" dot.
     assert_eq!(bad, Vec::<String>::new());
-    assert!(stale.is_empty(), "fixed (#1392)? delete from KNOWN: {stale:?}");
+}
+
+/// #1380: an `else if` arm given a row of its own below its `} else if
+/// look(r) {` line (that row's arrows overlapped the end of the arm
+/// before) still starts on that line: the leg beside it is the arm's own
+/// (r holds its reference there), not dashed "This segment is for the
+/// else branch. The underlined code is not part of that branch." (also
+/// `else if let`, a third arm, a conditional nested in an arm).
+#[test]
+fn else_if_arm_starts_on_its_condition_row() {
+    let tl = run_with_local_backend("else_if_condition_row_1380").timeline_panel_string();
+    for line in [11, 20, 30, 40] {
+        for v in ["e", "r"] {
+            let id = format!("{v}@L{line}:branch_line:partial_privilege");
+            assert!(tl.contains(&format!("data-rv-id=\"{id}\"")), "no {id}");
+            assert!(!tl.contains(&format!("data-rv-id=\"{id}_gray\"")), "{id}_gray beside the arm's own condition");
+        }
+    }
 }
 
 /// #1375: a diverging arm's stop bar ("This branch stops here") was
