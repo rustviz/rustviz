@@ -12063,10 +12063,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
   /// Whether `pat` takes a value of `init`'s type apart into
   /// variables that each own (or copy) their part: tuples, tuple
-  /// structs, structs and slices of by-value bindings and `_`, with no
+  /// structs, structs and arrays of by-value bindings and `_`, with no
   /// `ref`, `@` or or-pattern, and `init` not a reference (whose parts
   /// would be bound as references). `let (a, b) = if …` with such a
-  /// pattern is bound branch by branch (#1007).
+  /// pattern is bound branch by branch (#1007). A part that is itself a
+  /// reference (`let One { a } = if c { One { a: &s1 } } else { .. };`)
+  /// is copied (or moved) out like any other, and borrows what the
+  /// branch's value gives it (#1405).
   fn destructures_by_value(&self, pat: &'tcx Pat<'tcx>, init: &'tcx Expr<'tcx>) -> bool {
     fn simple(p: &Pat<'_>) -> bool {
       match p.kind {
@@ -12074,10 +12077,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         PatKind::Binding(ann, _, _, None) => matches!(ann.0, rustc_hir::ByRef::No),
         PatKind::Tuple(ps, _) | PatKind::TupleStruct(_, ps, _) => ps.iter().all(simple),
         PatKind::Struct(_, fs, _) => fs.iter().all(|f| simple(f.pat)),
+        // `let [a, b] = if …` (no `..` binding the rest).
+        PatKind::Slice(before, mid, after) => before.iter().chain(after.iter()).all(simple)
+          && mid.is_none_or(|m| matches!(m.kind, PatKind::Wild)),
         _ => false,
       }
     }
-    if !matches!(pat.kind, PatKind::Tuple(..) | PatKind::TupleStruct(..) | PatKind::Struct(..)) || !simple(pat) {
+    if !matches!(pat.kind, PatKind::Tuple(..) | PatKind::TupleStruct(..) | PatKind::Struct(..) | PatKind::Slice(..)) || !simple(pat) {
       return false;
     }
     if init.span.from_expansion() || matches!(init.kind, ExprKind::Match(_, _, src) if src != rustc_hir::MatchSource::Normal) {
@@ -12090,7 +12096,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let mut ok = true;
     pat.walk_always(|p| {
       if let PatKind::Binding(_, hirid, _, _) = p.kind {
-        if self.own_ref_binding(hirid).is_some() || typeck.node_type(hirid).is_ref() {
+        if self.own_ref_binding(hirid).is_some() {
           ok = false;
         }
       }
@@ -13519,7 +13525,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     } else {
       Evt::Move
     };
+    // A binding of a pattern that takes a branch's value apart (`let
+    // One { a } = if c { One { a: &s1 } } else { .. };`, #1405), declared
+    // before the branches: it may hold what any branch gives it.
+    let in_branch_value = self.bind_existing && self.raps.contains_key(&name);
     self.define_lhs(name.clone(), bool_of_mut(annotation.1), init, lhs_ty);
+    if in_branch_value && !is_skipped {
+      self.add_value_lenders(&name, init);
+    }
     if is_skipped {
       self.skip_raps.insert(name);
     } else {
@@ -13527,10 +13540,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // `let [d, _] = duo;`: d is moved out of `duo[0]`, which leaves the
       // rest in duo (#1285).
       match self.slice_elem_source(hirid, &self.rap_or_field_through_ref(init)).filter(|_| matches!(evt, Evt::Move)) {
-        Some(elem) => self.add_ev(expr_to_line(init, &self.tcx), Evt::Move, ResourceTy::Value(rap), elem, false),
-        None => self.match_rhs(ResourceTy::Value(rap), init, evt),
+        Some(elem) => self.add_ev(expr_to_line(init, &self.tcx), Evt::Move, ResourceTy::Value(rap.clone()), elem, false),
+        None => self.match_rhs(ResourceTy::Value(rap.clone()), init, evt),
       }
-      self.emit_holder_literal_borrows(&name, init);
+      if in_branch_value {
+        // (Only this branch's own lenders.)
+        self.emit_arm_holder_literal_borrows(&ResourceTy::Value(rap), init);
+      } else {
+        self.emit_holder_literal_borrows(&name, init);
+      }
       self.draw_kept_closure_borrows(&name, init);
     }
   }

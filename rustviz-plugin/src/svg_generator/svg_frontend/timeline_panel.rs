@@ -3910,17 +3910,21 @@ fn holder_starts_empty(visualization_data: &VisualizationData, rap: &ResourceAcc
 // where `word`'s lender has no column; #392): drawn as a plain owner.
 fn holder_never_borrows(visualization_data: &VisualizationData, rap: &ResourceAccessPoint) -> bool {
     // (`let k2 = k;` takes over the borrow k's value holds, #1282.)
-    visualization_data.timelines.get(rap.hash()).is_none_or(|t| {
-        // (Or that took the reference a `&mut` moved into it held:
-        // `vec![r]` with r a parameter, #1289.)
-        !t.history.iter().any(|(_, e)| match e {
+    // (Or that took the reference a `&mut` moved into it held:
+    // `vec![r]` with r a parameter, #1289.)
+    // (Or borrowed in a branch of the conditional it is bound to:
+    // `let v = if c { vec![&a] } else { vec![&b] };`, #1404.)
+    fn borrows(history: &[(usize, Event)]) -> bool {
+        history.iter().any(|(_, e)| match e {
             Event::StaticBorrow { .. } | Event::MutableBorrow { .. } => true,
             Event::Acquire { from: ResourceTy::Value(f), .. } => {
                 (!f.is_ref() && f.holds_borrow()) || f.is_mutref()
             }
+            Event::Branch { branch_history, .. } => branch_history.iter().any(|b| borrows(&b.e_data)),
             _ => false,
         })
-    })
+    }
+    visualization_data.timelines.get(rap.hash()).is_none_or(|t| !borrows(&t.history))
 }
 
 // Title for a vertical timeline segment. Routes around the generic

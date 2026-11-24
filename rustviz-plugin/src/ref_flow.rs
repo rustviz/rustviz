@@ -1073,6 +1073,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if let Some(tail) = plain_block_tail(init) {
       return self.holder_lenders(tail, ty);
     }
+    // A branch of `let k = Some(if c { &s } else { &u });` (#1225's
+    // constructor around a conditional, paired with k branch by branch,
+    // #1457): the reference it gives is what k's value holds, so k
+    // borrows what that reference borrows. (A temporary the branch
+    // makes, `&String::from("x")`, has no lender until the branch is
+    // visited: `add_arm_holder_lenders`.)
+    if let Some(rty) = self.tcx.typeck(init.hir_id.owner).expr_ty_opt(init).filter(|t| t.is_ref()) {
+      let (lender, _, co) = self.get_ref_data_co(init);
+      let found: Vec<ResourceTy> = std::iter::once(lender).chain(co)
+        .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)))
+        .collect();
+      return (found, rty.ref_mutability().is_some_and(|m| m.is_mut()));
+    }
     // `let t = if c { Some(&s) } else { None };`, `let a = match .. {
     // .. => [&s], .. => [&u] };` (#1435): t may hold what any branch's
     // value holds, as rustc sees it (`s.push('x')` while t is live is
