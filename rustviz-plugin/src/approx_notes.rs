@@ -11,7 +11,7 @@
 use crate::expr_visitor::ExprVisitor;
 use crate::expr_visitor_utils::{binding_name, span_end_line, span_to_line};
 #[allow(non_snake_case)]
-use crate::svg_generator::data::{ApproxNote, ExternalEvent, ResourceAccessPoint_extract};
+use crate::svg_generator::data::ApproxNote;
 use crate::svg_generator::hover_messages;
 use rustc_hir::def::Res;
 use rustc_hir::intravisit::{self, Visitor};
@@ -86,32 +86,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.raw_cast_note(l);
       self.closure_let_note(l);
       self.branch_extended_temp_note(l);
-    }
-    self.scrutinee_mover_notes();
-  }
-
-  /// A binding that a pattern moves its value into out of a scrutinee
-  /// temporary (`s` in `if let P { a: Some(s), .. } = (P { a: x, ..
-  /// })`, #1362): an arm can't draw a move out of the temporary, whose
-  /// column isn't split into the arms. When nothing else is drawn moving
-  /// a value into the binding either, its first dot says where it came
-  /// from.
-  fn scrutinee_mover_notes(&mut self) {
-    // The temporary's note names the call the bindings are drawn taking
-    // the value from only when every one of them is.
-    for (hash, line, movers, ids, drawn_from) in std::mem::take(&mut self.scrut_temp_notes) {
-      let drawn_from = drawn_from.filter(|f| ids.iter().all(|id| {
-        self.column_of_binding(*id).is_some_and(|(h, _)| arrow_sources(self.preprocessed_events, h).contains(f))
-      }));
-      let text = hover_messages::approx_note_scrutinee_temporary_moves(&movers, drawn_from.as_ref());
-      self.approx_notes.push(ApproxNote::At { hash, lines: (line, line), text });
-    }
-    for (id, line, tmp) in std::mem::take(&mut self.scrut_movers) {
-      let Some((hash, name)) = self.column_of_binding(id) else { continue };
-      if !arrow_sources(self.preprocessed_events, hash).is_empty() {
-        continue;
-      }
-      self.approx_notes.push(ApproxNote::At { hash, lines: (line, line), text: hover_messages::approx_note_moved_out_of_temporary(&name, &tmp) });
     }
   }
 
@@ -405,23 +379,4 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.approx_notes.push(ApproxNote::Loop { head, pass, head_cols, locals, nested, declares, at_most_once });
     }
   }
-}
-
-/// The names of the columns (not nothing) that an arrow ending at
-/// column `hash` comes from, among `events`, also inside branches.
-fn arrow_sources(events: &[(usize, ExternalEvent)], hash: u64) -> Vec<String> {
-  let mut out = Vec::new();
-  for (_, e) in events {
-    match e {
-      ExternalEvent::Branch { branches, .. } => branches.iter().for_each(|b| out.extend(arrow_sources(&b.e_data, hash))),
-      _ if e.is_arrow_ev() => {
-        let (from, to) = ResourceAccessPoint_extract(e);
-        if let (Some(f), true) = (from.extract_rap(), to.extract_rap().is_some_and(|r| *r.hash() == hash)) {
-          out.push(f.name().to_owned());
-        }
-      }
-      _ => {}
-    }
-  }
-  out
 }

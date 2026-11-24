@@ -310,10 +310,6 @@ pub struct Owner {
     /// by value): what examines it ("`match`") and when it is dropped,
     /// for the tooltip of what moved into it.
     pub scrutinee: Option<(String, String)>,
-    /// For a scrutinee temporary that a pattern's bindings can empty
-    /// (`m` in `if let (Some(c), m) = (z, make())`, #1367): see
-    /// `TakenTemp`.
-    pub taken: Option<TakenTemp>,
     /// Set only on the copy a write event carries (see `PlaceWrite`).
     pub write: PlaceWrite,
     /// True iff this owner isn't a reference but its value holds a
@@ -382,31 +378,6 @@ pub enum TempPart {
     /// the temporary tuple (the literal's text) before any pattern is
     /// matched; the pattern takes it, if at all, from the tuple (#1350).
     TupleField(String, String),
-}
-
-/// A `match` / `if let` / `while let` / let-chain scrutinee temporary
-/// whose pattern can move everything in it that needs drop into its
-/// bindings (`m` in `if let (Some(c), m) = (z, make())`, `r` in `match
-/// Some(make()) { Some(r) if g => .., _ => .. }`; #1367). The bindings
-/// are drawn taking the value straight from where it came from (`make`),
-/// since an arm can't draw a move out of a column that isn't split into
-/// the arms. So that the value isn't drawn owned (and dropped) twice, the
-/// temporary is drawn as one dot that owns nothing; its tooltip says
-/// what happens to it on each path, including its drop when no binding
-/// takes the value.
-#[derive(Clone, Hash, PartialEq, Eq, Debug, Default)]
-pub struct TakenTemp {
-    /// What made the value: a call (`make`), a literal (`(..)`, `P { ..
-    /// }`), or for a constructor (`ctor`), the call that made its
-    /// payload, if any.
-    pub made_by: Option<String>,
-    /// True iff the temporary is a constructor's value (`Some(make())`).
-    pub ctor: bool,
-    /// When the temporary is dropped, as `TemporaryDrop::when` says it.
-    pub when: String,
-    /// The by-value bindings of each pattern that takes the value (one
-    /// group per pattern), in pattern order.
-    pub takers: Vec<Vec<String>>,
 }
 
 /// Which reference-counted pointer an `Owner` is (found by the std
@@ -970,6 +941,19 @@ impl ResourceAccessPoint {
 
     pub fn is_unbound_temporary(&self) -> bool {
         matches!(self, ResourceAccessPoint::Owner(Owner { unbound_temp: true, .. }))
+    }
+
+    /// True iff this RAP is the temporary of a `match` / `if let` /
+    /// `while let` / let-chain scrutinee that a pattern can move
+    /// something out of: its column forks into the arms (#1386).
+    /// So is one nothing is moved out of, which a `ref` binding may
+    /// borrow from.
+    pub fn is_split_scrutinee_temporary(&self) -> bool {
+        matches!(self, ResourceAccessPoint::Owner(Owner {
+            unbound_temp: true,
+            temp_part: Some(TempPart::Match(_) | TempPart::IfLet(_) | TempPart::WhileLet(_) | TempPart::LetChain(_)),
+            ..
+        }) | ResourceAccessPoint::Owner(Owner { unbound_temp: true, temp_part: None, scrutinee: Some(_), .. }))
     }
 
     /// True iff this RAP is the temporary a literal on the right of a
@@ -2764,6 +2748,9 @@ pub enum Event {
         id: usize,
         break_alt: Option<BreakAlt>,
         break_out: bool,
+        // A move out of a split scrutinee temporary that leaves nothing
+        // that needs drop in it (`temp_emptying_moves`, #1386).
+        empties_temp: bool,
     },
 
     // Mirrors the ExternalEvent Branch
@@ -4156,8 +4143,8 @@ impl Event {
             }
             // A field or a pattern's binding moved out of an unbound
             // temporary, which keeps the rest (#469).
-            Event::Move{ to, is: ResourceTy::Value(ResourceAccessPoint::Owner(Owner { temp_part: Some(part), .. })), ..} => {
-                hover_messages::event_dot_move_out_of_temporary(&self.deref_name(my_name), &to.name(), part)
+            Event::Move{ to, is: ResourceTy::Value(ResourceAccessPoint::Owner(Owner { temp_part: Some(part), .. })), empties_temp, ..} => {
+                hover_messages::event_dot_move_out_of_temporary(&self.deref_name(my_name), &to.name(), part, *empties_temp)
             }
             // `[c, _] => …`: only the element `pair[0]` moves out (#1285).
             Event::Move{ is: is @ ResourceTy::Index(r, place, _), ..} if r.elems_left().is_some() => {
@@ -4395,10 +4382,6 @@ impl Event {
                     let ends_with_statement = matches!(is, ResourceTy::Value(rap) if rap.is_unbound_temporary());
                     let assign = matches!(is, ResourceTy::Value(rap) if rap.is_assign_literal_temporary());
                     hover_messages::event_dot_literal_temporary_takes_result(&from.name(), ends_with_statement, assign)
-                } else if let ResourceTy::Value(ResourceAccessPoint::Owner(Owner { unbound_temp: true, taken: Some(taken), temp_part: Some(part), .. })) = is {
-                    // `if let (Some(c), m) = (z, make())`: the pattern
-                    // can take all of it (#1367).
-                    hover_messages::event_dot_taken_scrutinee_temporary(taken, part)
                 } else if let ResourceTy::Value(ResourceAccessPoint::Owner(Owner { unbound_temp: true, ctor_temp: true, temp_part: Some(part), .. })) = is {
                     // `match Some(make()) { Some(s) if .. => .., _ => .. }`:
                     // a constructor a pattern takes apart (#807).
@@ -4681,6 +4664,12 @@ pub struct VisualizationData {
     /// the plugin's re-acquire `Bind`s for those places, which aren't
     /// drawn.
     pub moves_out_first: HashSet<usize>,
+
+    /// Ids of the moves out of a split scrutinee temporary that leave
+    /// nothing in it that needs drop: its leg in that arm ends there
+    /// (#1386). Other moves out of an unbound temporary leave it
+    /// holding the rest.
+    pub temp_emptying_moves: HashSet<usize>,
 
     /// Arrows of a struct write that share a track (#624): event id ->
     /// the id of its track's first arrow. Filled in by `render_svg` (see
@@ -5093,7 +5082,7 @@ impl Visualizable for VisualizationData {
 
             // A field or a pattern's binding moved out of an unbound
             // temporary: it still holds the rest, until its drop (#469).
-            (State::FullPrivilege{..}, Event::Move{is: ResourceTy::Value(r), ..}) if r.temp_part().is_some() =>
+            (State::FullPrivilege{..}, Event::Move{is: ResourceTy::Value(r), empties_temp: false, ..}) if r.temp_part().is_some() =>
                 (*previous_state).clone(),
             // `x => …` on `match *b` / `let x = *b;`, with b a Box
             // drawn as its payload's part columns: the payload moves
@@ -5884,7 +5873,7 @@ impl Visualizable for VisualizationData {
           // A destructuring `for` head borrowed by the loop: a value
           // inside it is copied (#1390).
           else if matches!(loop_head, LoopHead::Part { moved: false, .. }) { vec![(line_num, Event::Duplicate{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: false, of: CopyOf::Inside, id: *id, break_alt: break_alt.clone()})] }
-          else { vec![(line_num, Event::Move{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: *into_closure, loop_head: loop_head.clone(), via_try: *via_try, id: *id, break_alt: break_alt.clone(), break_out: *break_out})] }
+          else { vec![(line_num, Event::Move{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: *into_closure, loop_head: loop_head.clone(), via_try: *via_try, id: *id, break_alt: break_alt.clone(), break_out: *break_out, empties_temp: self.temp_emptying_moves.contains(id)})] }
         },
         ExternalEvent::StaticBorrow{from: from_ro, to: to_ro, id, of_ref_var, ..} => {
           if to_o { vec![(line_num,  Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id, of_ref_var: *of_ref_var})] }
@@ -6252,7 +6241,7 @@ impl Visualizable for VisualizationData {
                 if matches!(loop_head, LoopHead::Part { moved: false, .. }) {
                     maybe_append_event(self, &from_ro.clone(), Event::Duplicate{to : to_ro.to_owned(), is: from_ro, into_closure: false, of: CopyOf::Inside, id: id, break_alt}, line_number);
                 } else {
-                    maybe_append_event(self, &from_ro.clone(), Event::Move{to : to_ro.to_owned(), is: from_ro, into_closure, loop_head, via_try, id: id, break_alt, break_out}, line_number);
+                    maybe_append_event(self, &from_ro.clone(), Event::Move{to : to_ro.to_owned(), is: from_ro, into_closure, loop_head, via_try, id: id, break_alt, break_out, empties_temp: self.temp_emptying_moves.contains(&id)}, line_number);
                 }
                 // A destructuring assignment's cycle (#1343): the source's
                 // move goes before the new value it got on this line.

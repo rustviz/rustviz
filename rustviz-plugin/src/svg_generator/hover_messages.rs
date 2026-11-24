@@ -1,4 +1,4 @@
-use crate::svg_generator::data::{BranchExit, EarlyReturns, LoopExits, LoopLeft, ResourceAccessPoint, TakenTemp, TempPart, IF_LET_ARM};
+use crate::svg_generator::data::{BranchExit, EarlyReturns, LoopExits, LoopLeft, ResourceAccessPoint, TempPart, IF_LET_ARM};
 
 
 /* Event Dot messages: shows up when someone hovers over a dot */
@@ -753,92 +753,6 @@ fn temporary_part_acquire(source: String, part: &TempPart) -> String {
     }
 }
 
-// The one dot of a scrutinee temporary that a pattern's bindings can
-// empty (`m` in `if let (Some(c), m) = (z, make())`, `r` in `match
-// Some(make()) { Some(r) if g => .., _ => .. }`; #1367). The bindings
-// are drawn taking the value straight from the call, and the temporary
-// owns nothing in the figure, so this says what it holds on each path,
-// and when that is dropped if no binding takes it.
-pub fn event_dot_taken_scrutinee_temporary(t: &TakenTemp, part: &TempPart) -> String {
-    let source = match &t.made_by {
-        Some(f) if t.ctor => format!("is built from what {}", temporary_source(f)),
-        Some(f) => temporary_source(f),
-        None => "the constructor builds".to_owned(),
-    };
-    // "c and m" for one pattern's bindings; "r or e" for several patterns.
-    let groups: Vec<String> = t.takers.iter().map(|g| and_list(g)).collect();
-    let takers = groups.join(" or ");
-    match part {
-        TempPart::Match(_) => {
-            let arm = if groups.len() == 1 {
-                format!("If the arm that binds {0} runs, its pattern moves what the temporary holds into {0}", takers)
-            } else {
-                format!("If an arm that binds {} runs, its pattern moves what the temporary holds into its bindings", takers)
-            };
-            format!(
-                "A temporary holds the value that {0}, for the match to inspect. {1}; if another arm runs, what the temporary holds is dropped with it {2}",
-                source, arm, t.when
-            )
-        }
-        _ if matches!(part, TempPart::WhileLet(_)) || t.when.contains("`while let` loop") => format!(
-            "A temporary holds the value that {0}, for the {1} to match against on each pass. If the pattern matches, it moves what the temporary holds into {2}; if not, the loop ends, and what the temporary holds is dropped with it",
-            source, let_kind(part), takers
-        ),
-        _ => {
-            // When an `if let` / let chain that doesn't match drops it: as
-            // its drop's `when` says (edition 2024 with an `else`, or an
-            // `else if let`), else before the code after the `if`.
-            let fail = if t.when.starts_with("before the `else` block") {
-                "before the `else` block runs".to_owned()
-            } else if t.when.contains("(before the code after the `if` runs)") {
-                "before the code after the `if` runs".to_owned()
-            } else {
-                t.when.clone()
-            };
-            format!(
-                "A temporary holds the value that {0}, for the {1} to match against. If the pattern matches, it moves what the temporary holds into {2}; if not, what the temporary holds is dropped with it {3}",
-                source, let_kind(part), takers, fail
-            )
-        }
-    }
-}
-
-// "a", "a and b", "a, b and c", styled.
-fn and_list(names: &[String]) -> String {
-    let names: Vec<String> = names.iter().map(|n| styled_name_html(n)).collect();
-    match names.as_slice() {
-        [one] => one.clone(),
-        [rest @ .., last] => format!("{} and {}", rest.join(", "), last),
-        [] => String::new(),
-    }
-}
-
-// The approximation note on the first dot of a scrutinee temporary that
-// a pattern moves something out of by value (#1367, #1362): an arm
-// can't draw a move out of a column that isn't split into the arms, so
-// that move isn't drawn. `drawn_from`: the column the bindings are drawn
-// taking the value from instead (`make`), if any.
-pub fn approx_note_scrutinee_temporary_moves(movers: &[String], drawn_from: Option<&String>) -> String {
-    let n = movers.len();
-    let movers = and_list(movers);
-    match drawn_from {
-        Some(f) => format!(
-            "(RustViz draws {} taking {} straight from {}; it doesn't draw the move out of this temporary.)",
-            movers, if n > 1 { "their values" } else { "its value" }, styled_name_html(f)
-        ),
-        None => format!("(RustViz doesn't draw the move out of this temporary into {}.)", movers),
-    }
-}
-
-// On the first dot of such a binding when no arrow is drawn into it
-// (`s` in `if let P { a: Some(s), .. } = (P { a: x, .. })`, #1362).
-pub fn approx_note_moved_out_of_temporary(name: &str, tmp: &str) -> String {
-    format!(
-        "({0}'s value is moved out of {1}; RustViz doesn't draw that move.)",
-        styled_name_html(name), styled_name_html(tmp)
-    )
-}
-
 // On the first dot of a `ref` / `ref mut` binding into a tuple
 // scrutinee's element (`a` in `(Some(ref a), _)` on `(x, y)`, #1363): it
 // borrows the part of the temporary tuple that holds x's value, not x,
@@ -872,7 +786,9 @@ fn its_fields(fs: &[String]) -> String {
 }
 
 // The move out of such a temporary, on its column.
-pub fn event_dot_move_out_of_temporary(my_name: &String, to_name: &String, part: &TempPart) -> String {
+// `empties`: a pattern's bindings took everything in it that needs drop
+// (this move is the last of them, #1386).
+pub fn event_dot_move_out_of_temporary(my_name: &String, to_name: &String, part: &TempPart, empties: bool) -> String {
     match part {
         TempPart::Field(f) => format!("{0}'s field {1} is moved to {2}", styled_name_html(my_name), styled_name_html(f), styled_name_html(to_name)),
         // `let q = P { n: 1, ..make_p() };`: a field of the base goes to
@@ -881,6 +797,16 @@ pub fn event_dot_move_out_of_temporary(my_name: &String, to_name: &String, part:
             let f = to_name.rsplit('.').next().unwrap_or(to_name).to_owned();
             format!("The struct update `..` moves {0}'s field {1} to {2}", styled_name_html(my_name), styled_name_html(&f), styled_name_html(to_name))
         }
+        _ if empties => format!(
+            "The pattern moves what {0} holds into {1}; nothing that needs dropping is left in {0}",
+            styled_name_html(my_name), styled_name_html(to_name)
+        ),
+        TempPart::Match(_) | TempPart::IfLet(_) | TempPart::WhileLet(_) | TempPart::LetChain(_) =>
+            format!("The pattern moves part of {0}'s value into {1}; {0} keeps the rest", styled_name_html(my_name), styled_name_html(to_name)),
+        // A destructuring assignment's (`(m, _) = pair();`, #625) or a
+        // `let` / `let`-`else` pattern's temporary isn't split
+        // (`temp_emptying_moves` doesn't look at it).
+        TempPart::Assign(_) => format!("The assignment moves part of {0}'s value to {1}", styled_name_html(my_name), styled_name_html(to_name)),
         _ => format!("The pattern moves {0}'s value, or part of it, into {1}", styled_name_html(my_name), styled_name_html(to_name)),
     }
 }
@@ -1014,14 +940,31 @@ pub fn event_dot_temporary_part_drop(ty: &String, when: &String, part: &TempPart
             "This temporary {0} is dropped {1}, and with it everything in it but what the pattern moved out of its field {2}",
             styled_name_html(ty), when, styled_name_html(f)
         ),
-        TempPart::IfLet(None) | TempPart::WhileLet(None) | TempPart::LetElse(None) | TempPart::LetChain(None) => format!(
-            "This temporary {0} is dropped {1}, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
+        // One path of a temporary forked at an `if let` (#1360, #1386):
+        // the matched block's end, where the pattern did match.
+        TempPart::IfLet(_) | TempPart::LetChain(_) if when.contains("(its pattern matched)") || when.contains("the block its let chain matched ends") => {
+            format!("This temporary {0} is dropped {1}, and with it {2}", styled_name_html(ty), when, what_pattern_left(part))
+        }
+        // The other: a lone `if let` whose pattern didn't match moved
+        // nothing out of it.
+        TempPart::IfLet(_) if !when.contains(", or ") && (when.starts_with("before the `else` block") || when.starts_with("when the pattern of this `if let` doesn't match")) => format!(
+            "This temporary {0} is dropped {1}, and with it everything in it: the pattern didn't match, so it moved nothing out",
             styled_name_html(ty), when
         ),
-        TempPart::IfLet(Some(f)) | TempPart::WhileLet(Some(f)) | TempPart::LetElse(Some(f)) | TempPart::LetChain(Some(f)) => format!(
-            "This temporary {0} is dropped {1}, and with it everything in it but what the pattern moved out of its field {2} (all of it, if the pattern didn't match)",
-            styled_name_html(ty), when, styled_name_html(f)
+        TempPart::IfLet(_) | TempPart::WhileLet(_) | TempPart::LetElse(_) | TempPart::LetChain(_) => format!(
+            "This temporary {0} is dropped {1}, and with it {2} (all of it, if the pattern didn't match)",
+            styled_name_html(ty), when, what_pattern_left(part)
         ),
+    }
+}
+
+// What a pattern that matched leaves in the temporary of an `if let` /
+// `while let` / `let`-`else` / let-chain scrutinee (`part`).
+fn what_pattern_left(part: &TempPart) -> String {
+    match part {
+        TempPart::IfLet(Some(f)) | TempPart::WhileLet(Some(f)) | TempPart::LetElse(Some(f)) | TempPart::LetChain(Some(f)) =>
+            format!("everything in it but what the pattern moved out of its field {}", styled_name_html(f)),
+        _ => "whatever the pattern didn't move out of it".to_owned(),
     }
 }
 
@@ -3364,6 +3307,15 @@ pub fn state_uninitialized(my_name: &String) -> String {
     )
 }
 
+// Dashed segment of a let chain's scrutinee temporary before the `let`
+// that makes it (`if k && let Ok(s) = make()`, #1386).
+pub fn state_chain_temp_unmade(my_name: &String) -> String {
+    format!(
+        "{} hasn't been made yet: the let chain makes it only if its parts before the `let` match",
+        styled_name_html(my_name)
+    )
+}
+
 // `state_uninitialized` in a conditional that comes after one that
 // assigned s in only some of its branches (#244): on the rows of an arm
 // that hasn't assigned s, s holds a value on some paths only.
@@ -3963,6 +3915,16 @@ pub fn event_dot_branch_merge_moved(my_name: &String) -> String {
     format!(
         "{0} may have been moved (consumed in at least one branch above)",
         my_name_fmt
+    )
+}
+
+/// The join of a scrutinee temporary that the pattern of some branches
+/// moved its value, or part of it, out of (#1386). What is still in it
+/// is dropped with it, which its drop says.
+pub fn event_dot_branch_merge_temp_moved_out(my_name: &String) -> String {
+    format!(
+        "The pattern of the branch that ran may have moved {0}'s value, or part of it, into its bindings",
+        styled_name_html(my_name)
     )
 }
 

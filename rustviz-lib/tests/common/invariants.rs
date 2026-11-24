@@ -357,6 +357,12 @@ fn elems_moved(d: &Dot) -> bool {
     d.tip.trim_start_matches("• ").starts_with(&format!("{}[", d.var))
 }
 
+/// A pattern's move of part of a scrutinee temporary's value, which keeps
+/// the rest (#1386): its line goes on to its drop.
+fn temp_keeps_rest(d: &Dot) -> bool {
+    d.tip.contains("'s value into ") && d.tip.contains(" keeps the rest")
+}
+
 fn says_maybe_moved(d: &Dot) -> bool {
     MAYBE_PHRASES.iter().any(|p| d.tip.contains(p))
 }
@@ -495,7 +501,7 @@ pub fn check(fig: &Fig, src: &str) -> Vec<(&'static str, String)> {
             }
         }
         if continues && !inits && d.has_any(END) && !split_or_join && !contents_moved(d) && !elems_moved(d)
-            && !block_local_break_move(d) {
+            && !block_local_break_move(d) && !temp_keeps_rest(d) {
             out.push(("line-after-column-ends", d.describe()));
         }
         if d.has("branch_join") && says_maybe_moved(d) && continues && !inits && !elems_moved(d) {

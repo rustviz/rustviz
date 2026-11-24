@@ -1547,7 +1547,12 @@ fn render_branch_dots(
             // for "can't be used after the if / match".
             let by_cond = chain_condition_moved_here(branch_history)
                 .then_some(if matches!(ty, BranchType::Match(..)) { "match" } else { "if" });
-            Some(if rap.box_contents_moved() && moves_only_box_contents(branch_history) {
+            Some(if rap.is_split_scrutinee_temporary() {
+                // A scrutinee temporary an arm's pattern moved (part of)
+                // its value out of (#1386): its drop, on this dot or
+                // below, says what is dropped.
+                hover_messages::event_dot_branch_merge_temp_moved_out(&is.real_name())
+            } else if rap.box_contents_moved() && moves_only_box_contents(branch_history) {
                 // Only a Box's contents were moved (`let w = *e;`,
                 // #921): e keeps its heap allocation on every path.
                 // Its old contents, if still there, are dropped by the
@@ -3547,6 +3552,8 @@ fn branch_join_message(branch_history: &[BranchData], ty: &BranchType, is: &Reso
     }
     let holder = is.extract_rap().is_some_and(|r| !r.is_ref() && r.holds_borrow());
     match compute_branch_join(branch_history, ty, holder) {
+        BranchJoin::MovedAfter if is.extract_rap().is_some_and(|r| r.is_split_scrutinee_temporary()) =>
+            hover_messages::event_dot_branch_merge_temp_moved_out(var_name),
         BranchJoin::MovedAfter => hover_messages::event_dot_branch_merge_moved(var_name),
         // A reference bound in every arm (`let msg = match n { .. => "a", .. }`)
         // holds a borrow, not ownership.
@@ -8701,6 +8708,16 @@ fn render_branches(
                 let no_value = hover_messages::state_uninitialized(rap.name());
                 for seg in segs.iter_mut().filter(|seg| seg.title == no_value) {
                     seg.title = hover_messages::state_ref_borrow_ended(rap.name());
+                }
+            }
+            // A let chain's scrutinee temporary that a later part of the
+            // chain makes (`if k && let Ok(s) = make()`, #1386) isn't one a
+            // branch borrows (#1397): it exists only if the parts before
+            // its `let` matched.
+            if rap.is_split_scrutinee_temporary() {
+                let no_value = hover_messages::state_uninitialized(rap.name());
+                for seg in segs.iter_mut().filter(|seg| seg.title == no_value) {
+                    seg.title = hover_messages::state_chain_temp_unmade(rap.name());
                 }
             }
             // After a conditional inside this arm that leaves the column

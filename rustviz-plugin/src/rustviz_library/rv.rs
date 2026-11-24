@@ -30,6 +30,7 @@ impl Rustviz {
     shadow_notes: HashMap<u64, ShadowNote>,
     binding_columns: Vec<(u64, u64)>,
     moves_out_first: Vec<usize>,
+    temp_emptying_moves: Vec<usize>,
     hidden_source_lines: HashSet<usize>,
     approx_notes: Vec<ApproxNote>,
   ) -> Result<Rustviz>{
@@ -46,6 +47,7 @@ impl Rustviz {
       shadow_notes,
       binding_columns,
       moves_out_first: moves_out_first.into_iter().collect(),
+      temp_emptying_moves: temp_emptying_moves.into_iter().collect(),
       arrow_tracks: HashMap::new(),
       field_lenders: HashMap::new(),
       approx_notes,

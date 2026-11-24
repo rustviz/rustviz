@@ -2588,11 +2588,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let t = tuples.pop().unwrap();
         self.drop_tuple_on_exit(&t, line);
       }
-      // A scrutinee temporary drawn owning nothing (#1367): inside the
-      // body its pattern matched, a binding took what it held.
-      if matches!(&rap, ResourceAccessPoint::Owner(Owner { taken: Some(_), .. })) {
-        continue;
-      }
       let id = *self.unique_id;
       *self.unique_id += 1;
       self.exit_drops.insert(id);
@@ -3668,6 +3663,149 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
+  /// The id of the move among `events` (one arm's, not inside a
+  /// conditional nested in it) that leaves nothing that needs drop in
+  /// the split scrutinee temporary `t`: the last of the moves out of it
+  /// into the bindings of a pattern that takes all of it
+  /// (`temp_emptiers`, #1386). None when the arm leaves something in it.
+  fn emptying_move(&self, events: &[(usize, ExternalEvent)], t: &ResourceAccessPoint) -> Option<usize> {
+    let groups = self.temp_emptiers.get(t.hash())?;
+    let moves: Vec<(String, usize)> = events.iter().filter_map(|(_, e)| match e {
+      ExternalEvent::Move { from: ResourceTy::Value(f), to, id, .. } if f == t => to.extract_rap().map(|r| (r.name().to_owned(), *id)),
+      _ => None,
+    }).collect();
+    groups.iter()
+      .filter(|g| g.iter().all(|n| moves.iter().any(|(m, _)| m == n)))
+      .filter_map(|g| moves.iter().filter(|(m, _)| g.contains(m)).map(|(_, id)| *id).max())
+      .max()
+  }
+
+  /// Every arm's move that empties a split scrutinee temporary
+  /// (`emptying_move`), into `temp_emptying_moves`: the temporary's leg
+  /// in that arm ends there (#1386). When every arm that reaches the
+  /// join emptied it (the others leave the conditional), nothing is left
+  /// to drop where the conditional ends: that drop goes (it would be a
+  /// dot on no line).
+  pub fn mark_temp_emptying_moves(&mut self, from: usize) {
+    fn walk(this: &ExprVisitor<'_, '_>, events: &[(usize, ExternalEvent)], temps: &[ResourceAccessPoint], out: &mut Vec<usize>, dead: &mut HashSet<usize>) {
+      for (_, e) in events {
+        let ExternalEvent::Branch { branches, live_vars, merge_point, .. } = e else { continue };
+        for t in temps {
+          let mut all = branches.iter().any(|b| !b.diverges) && live_vars.contains(t);
+          for b in branches {
+            let m = this.emptying_move(&b.e_data, t);
+            out.extend(m);
+            all &= b.diverges || m.is_some();
+          }
+          if all {
+            // (The drop was recorded with the temporary, before the arms.)
+            if let Some((_, ExternalEvent::TemporaryDrop { id, .. })) = events.iter()
+              .find(|(l, x)| *l >= *merge_point && matches!(x, ExternalEvent::TemporaryDrop { ro, id, .. } if ro == t && !this.exit_drops.contains(id))) {
+              dead.insert(*id);
+            }
+          }
+        }
+        for b in branches {
+          walk(this, &b.e_data, temps, out, dead);
+        }
+      }
+    }
+    fn prune(events: &mut Vec<(usize, ExternalEvent)>, dead: &HashSet<usize>) {
+      events.retain(|(_, e)| !(matches!(e, ExternalEvent::TemporaryDrop { .. }) && dead.contains(&e.get_id())));
+      for (_, e) in events.iter_mut() {
+        if let ExternalEvent::Branch { branches, .. } = e {
+          for b in branches.iter_mut() {
+            prune(&mut b.e_data, dead);
+          }
+        }
+      }
+    }
+    // A split temporary's drop is recorded with it, before its arms: in
+    // an arm's own events (`Some(r) => match make() {`), the drop would
+    // come before the fork and end the column there. It goes after.
+    // (Also: a split temporary needs drop, so its type isn't Copy, and
+    // what a pattern copies out of it is a part of it: `n` in `((a, n),
+    // b)` on `((make(), 1), make())`.)
+    fn order_drops(events: &mut Vec<(usize, ExternalEvent)>) {
+      events.iter_mut().for_each(|(_, e)| part_copy(e));
+      let mut i = 0;
+      while i < events.len() {
+        let moved = match &events[i].1 {
+          ExternalEvent::TemporaryDrop { ro, .. } if ro.is_split_scrutinee_temporary() => {
+            let line = events[i].0;
+            events.iter().enumerate().skip(i + 1).filter(|(_, (_, e))| matches!(e,
+              ExternalEvent::Branch { live_vars, merge_point, .. } if live_vars.contains(ro) && *merge_point <= line))
+              .map(|(j, _)| j).last()
+          }
+          _ => None,
+        };
+        match moved {
+          Some(j) => {
+            let ev = events.remove(i);
+            events.insert(j, ev);
+          }
+          None => i += 1,
+        }
+      }
+      for (_, e) in events.iter_mut() {
+        if let ExternalEvent::Branch { branches, .. } = e {
+          for b in branches.iter_mut() {
+            order_drops(&mut b.e_data);
+            b.line_map.values_mut().flatten().for_each(part_copy);
+          }
+        }
+      }
+    }
+    fn part_copy(e: &mut ExternalEvent) {
+      if let ExternalEvent::Copy { from: ResourceTy::Value(f), is_partial, .. } = e {
+        if f.is_split_scrutinee_temporary() {
+          *is_partial = true;
+        }
+      }
+    }
+    for (_, e) in self.preprocessed_events[from..].iter_mut() {
+      match e {
+        ExternalEvent::Branch { branches, .. } => {
+          for b in branches.iter_mut() {
+            order_drops(&mut b.e_data);
+            b.line_map.values_mut().flatten().for_each(part_copy);
+          }
+        }
+        e => part_copy(e),
+      }
+    }
+    self.event_line_map.values_mut().flatten().for_each(part_copy);
+    if self.temp_emptiers.is_empty() {
+      return;
+    }
+    #[expect(clippy::disallowed_methods, reason = "sorted by hash below")]
+    let mut temps: Vec<ResourceAccessPoint> = self.raps.values()
+      .map(|rd| rd.rap.clone())
+      .filter(|r| self.temp_emptiers.contains_key(r.hash()))
+      .collect();
+    temps.sort_by_key(|r| *r.hash());
+    let mut out = Vec::new();
+    // A `while let` body (also a `while` let chain's) is drawn inline, one
+    // pass, on which the pattern matched (#382): its moves are on the
+    // function's own timeline.
+    for t in &temps {
+      out.extend(self.emptying_move(&self.preprocessed_events[from..], t));
+    }
+    let mut dead = HashSet::new();
+    walk(self, &self.preprocessed_events[from..], &temps, &mut out, &mut dead);
+    out.sort_unstable();
+    out.dedup();
+    self.temp_emptying_moves.extend(out);
+    if !dead.is_empty() {
+      let mut tail = self.preprocessed_events.split_off(from);
+      prune(&mut tail, &dead);
+      self.preprocessed_events.extend(tail);
+      for evs in self.event_line_map.values_mut() {
+        evs.retain(|e| !(matches!(e, ExternalEvent::TemporaryDrop { .. }) && dead.contains(&e.get_id())));
+      }
+    }
+  }
+
   /// The scrutinee temporaries (`temps`) of an edition-2024 `if let` /
   /// let chain drawn as a branch that an exit in its matched block drops
   /// (`if_ev` holds that drop, or a nested conditional of it does), or
@@ -3701,6 +3839,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     let mut exited = HashSet::new();
     exits_in(if_ev, &self.exit_drops, &mut exited);
+    // So does one its pattern moves something out of, or borrows from
+    // (#1386): the matched block takes it from the temporary's leg.
+    #[expect(clippy::iter_over_hash_type, reason = "filtering into a set; order is irrelevant")]
+    for t in temps {
+      if t.is_split_scrutinee_temporary() && takes_from(if_ev, t) {
+        exited.insert(t.clone());
+      }
+    }
     let forked: HashSet<ResourceAccessPoint> = &exited & temps;
     if forked.is_empty() {
       return forked;
@@ -3724,8 +3870,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         Some((e, _)) => (e.to_owned(), "when the block of this `if let` ends (its pattern matched)".to_owned()),
         None => (when.clone(), when.clone()),
       };
+      // Made by a later part of a let chain (`if k && let Ok(s) =
+      // make()`): on the else path it exists only if the parts before
+      // got as far as its `let` (#1386).
+      let made_in_if = if_ev.iter().any(|(_, e)| matches!(e,
+        ExternalEvent::Move { to: ResourceTy::Value(t), .. } | ExternalEvent::Bind { to: ResourceTy::Value(t), .. } if *t == ro));
+      let else_when = if made_in_if { format!("{}, if the let chain got as far as the `let` that makes it", else_when) } else { else_when };
       else_front.push((line, ExternalEvent::TemporaryDrop { ro: ro.clone(), ty: ty.clone(), when: else_when, literal, early: false, part: part.clone(), id }));
-      if !if_diverges {
+      // (Not when the matched block's pattern took all of it: that
+      // leg ends at the move, #1386.)
+      if !if_diverges && self.emptying_move(if_ev, &ro).is_none() {
         if_ev.push((line, ExternalEvent::TemporaryDrop { ro, ty, when: then_when, literal, early: false, part, id: *self.unique_id }));
         *self.unique_id += 1;
       }
@@ -8318,8 +8472,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // borrow checker still treats a `let x;` it assigns as maybe
         // unassigned after the `if`, but at run time the body always
         // assigned it, and nothing is dropped with a drop flag.)
+        // A scrutinee temporary its pattern moves something out of (or
+        // borrows from) forks (#1386).
+        #[expect(clippy::disallowed_methods, reason = "any(): order is irrelevant")]
+        let takes_temp = scrutinee_temps.iter().any(|t| t.is_split_scrutinee_temporary() && takes_from(&body_ev, t));
         let drawn_as_branch = !always_matches
           && (events_move_out_of_outer(&body_ev, &if_scope) || exit_branch
+            || takes_temp
             || assigns_maybe_init || assigns_then_exits || assigns_maybe_held
             || (self.expr_diverges(if_expr) && {
               let sm = self.tcx.sess.source_map();
@@ -11278,7 +11437,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // (#400): the label doesn't say which kind it is, the tooltips do.
     self.temp_count += 1;
     let tmp_name = temporary_label(self.temp_count);
-    self.add_owner(tmp_name.clone(), false, false, false, InteriorMut::No, end_line, !self.inside_branch);
+    // A `ref mut` binding borrows a scrutinee temporary mutably (#1386).
+    let ref_mut = scrutinee.is_some() || matches!(part, Some(TempPart::Match(_) | TempPart::IfLet(_) | TempPart::WhileLet(_) | TempPart::LetChain(_)));
+    let ref_mut = ref_mut && self.scrutinee_temp_pats(expr).is_some_and(|(path, pats, _)| {
+      let typeck = self.tcx.typeck(expr.hir_id.owner);
+      let mut found = false;
+      for p in pats {
+        if let Some(sub) = self.pat_at_path(p, &path, typeck) {
+          sub.walk_always(|b| found |= matches!(typeck.pat_binding_modes().get(b.hir_id).map(|m| m.0),
+            Some(rustc_hir::ByRef::Yes(_, Mutability::Mut))));
+        }
+      }
+      found
+    });
+    self.add_owner(tmp_name.clone(), ref_mut, false, false, InteriorMut::No, end_line, !self.inside_branch);
     if let Some(ResourceAccessPoint::Owner(o)) = self.raps.get_mut(&tmp_name).map(|rd| &mut rd.rap) {
       o.unbound_temp = true;
       o.temp_part = part.clone();
@@ -11297,37 +11469,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if matches!(&tmp, ResourceAccessPoint::Owner(Owner { ctor_temp: true, temp_part: None, .. })) {
       self.ctor_temps.insert(expr.hir_id, (tmp.clone(), *self.unique_id));
     }
-    // A pattern moves something out of it by value (#1367, #1362): an
-    // arm can't draw that move out of the temporary, whose column isn't
-    // split into the arms, so the bindings are drawn taking it straight
-    // from the call that made it (or from nothing), and a note says so.
-    // When a pattern can take everything in it that needs drop, the
-    // temporary is one dot that owns nothing (no arrow into it, no line,
-    // no drop), so the value isn't drawn owned and dropped twice; its
-    // tooltip says what happens to it on each path.
-    if let Some(moves) = self.scrutinee_temp_moves(expr, part.as_ref()) {
-      let literal = matches!(expr.kind, ExprKind::Tup(_) | ExprKind::Struct(..) | ExprKind::Array(_));
-      let drawn_from = if literal { None } else { source.as_ref().map(|f| f.name().to_owned()) };
-      let ids = moves.mover_ids.iter().map(|(id, _)| *id).collect();
-      self.scrut_temp_notes.push((*tmp.hash(), line, moves.movers.clone(), ids, drawn_from));
-      for (id, l) in &moves.mover_ids {
-        self.scrut_movers.push((*id, *l, tmp_name.clone()));
-      }
-      if !moves.takers.is_empty() && into.is_empty() {
-        let taken = TakenTemp {
-          made_by: if ctor_literal { source.as_ref().map(|f| f.name().to_owned()) } else { Some(fn_name.clone()) },
-          ctor: ctor_literal,
-          when: when.to_owned(),
-          takers: moves.takers,
-        };
-        if let Some(ResourceAccessPoint::Owner(o)) = self.raps.get_mut(&tmp_name).map(|rd| &mut rd.rap) {
-          o.taken = Some(taken);
-        }
-        let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();
-        self.add_ev(line, Evt::Bind, ResourceTy::Value(tmp.clone()), ResourceTy::Anonymous, false);
-        return Some(tmp);
-      }
-    }
     match source {
       Some(fn_rap) => self.add_ev(line, Evt::Move, ResourceTy::Value(tmp.clone()), ResourceTy::Value(fn_rap), false),
       None => self.add_ev(line, Evt::Bind, ResourceTy::Value(tmp.clone()), ResourceTy::Anonymous, false),
@@ -11344,6 +11485,43 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // move out of a column that isn't its own (the temporary isn't split
     // into the arms).
     if matches!(part, Some(TempPart::Field(_) | TempPart::UpdateBase(_))) {
+      self.temp_cols.insert(expr.hir_id, tmp.clone());
+    }
+    // So is what a `let` / `let`-`else` pattern or a destructuring
+    // assignment takes out of a call's result (`let (d, _) = pair();`,
+    // `let Ok(s) = res() else { .. }`): it is the temporary's, not the
+    // call's, which no longer has it (#1386).
+    // (Not a `let`-`else` whose `else` block takes more lines, #1481: its
+    // bindings are drawn after that block, below the temporary's drop.)
+    let one_line_let_else = || match self.tcx.parent_hir_node(self.field_top(expr).hir_id) {
+      rustc_hir::Node::LetStmt(l) => span_to_line(&l.span, &self.tcx) == span_end_line(&l.span, &self.tcx),
+      _ => false,
+    };
+    if (matches!(part, Some(TempPart::Let(_) | TempPart::Assign(_)))
+        || (matches!(part, Some(TempPart::LetElse(_))) && one_line_let_else()))
+      && matches!(expr.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) && !ctor_literal {
+      self.temp_cols.insert(expr.hir_id, tmp.clone());
+    }
+    // A `match` / `if let` / `while let` / let-chain scrutinee: its column
+    // forks into the arms, and what a pattern binds by value out of it is
+    // drawn moving out of it, what it binds by reference borrowing from
+    // it (#1386).
+    if tmp.is_split_scrutinee_temporary() {
+      let emptiers = self.scrutinee_temp_emptiers(expr);
+      if !emptiers.is_empty() {
+        self.temp_emptiers.insert(*tmp.hash(), emptiers);
+      }
+      // A tuple literal or a constructor a pattern takes apart element
+      // by element (`literal_pat_parents`): each element it is built
+      // from (`make()` in `((make(), 1), make())`, `Some(make())`).
+      if self.literal_elems(expr).is_some() {
+        let mut leaves = Vec::new();
+        self.literal_leaves(expr, &mut leaves);
+        // (A variable in it is drawn moving into the temporary: `into`.)
+        for l in leaves.into_iter().filter(|l| !is_place_expr(l)) {
+          self.temp_cols.insert(l.hir_id, tmp.clone());
+        }
+      }
       self.temp_cols.insert(expr.hir_id, tmp.clone());
     }
     // Plain text: `hover_messages::styled_name_html` escapes it for the tooltip.
@@ -11513,20 +11691,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
-  /// For the temporary of `expr`, a `match` / `if let` / `while let` /
-  /// let-chain scrutinee (`part`): what its patterns move out of it by
-  /// value (#1367, #1362). None when they move nothing out of it.
-  fn scrutinee_temp_moves(&self, expr: &'tcx Expr<'tcx>, part: Option<&TempPart>) -> Option<ScrutTempMoves> {
+  /// The patterns matched against the scrutinee temporary of `expr` (a
+  /// `match`'s arms, an `if let`'s / `while let`'s one), the place of
+  /// the temporary in what they match, and whether a field beside the one
+  /// matched needs drop (`match make_p().name { .. }` with another
+  /// `String` field: the temporary always keeps it).
+  fn scrutinee_temp_pats(&self, expr: &'tcx Expr<'tcx>) -> Option<(Vec<String>, Vec<&'tcx Pat<'tcx>>, bool)> {
     use rustc_hir::Node;
-    if !matches!(part, Some(TempPart::Match(_) | TempPart::IfLet(_) | TempPart::WhileLet(_) | TempPart::LetChain(_))) {
-      return None;
-    }
     let typeck = self.tcx.typeck(expr.hir_id.owner);
     let env = typing_env(self.tcx, expr.hir_id.owner);
-    // The patterns, the place of the temporary in what they match, and
-    // whether a field beside the one matched needs drop (`match
-    // make_p().name { .. }` with another `String` field: the temporary
-    // always keeps it).
     let (path, pats, kept) = match self.tuple_scrutinee_elem(expr) {
       Some((path, pats, _)) => (path, pats, false),
       None => {
@@ -11550,39 +11723,43 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         (Vec::new(), pats, kept)
       }
     };
-    let mut out = ScrutTempMoves::default();
-    let mut by_ref = false;
+    Some((path, pats, kept))
+  }
+
+  /// For the temporary of `expr`, a `match` / `if let` / `while let` /
+  /// let-chain scrutinee: the by-value bindings of each of its patterns
+  /// that, when it matches, takes everything in it that needs drop (one
+  /// group per pattern; #1386). The last of a group's moves out of it ends
+  /// the temporary's leg in that arm (`temp_emptying_moves`).
+  fn scrutinee_temp_emptiers(&self, expr: &'tcx Expr<'tcx>) -> Vec<Vec<String>> {
+    let Some((path, pats, kept)) = self.scrutinee_temp_pats(expr) else { return Vec::new() };
+    let typeck = self.tcx.typeck(expr.hir_id.owner);
+    let env = typing_env(self.tcx, expr.hir_id.owner);
+    if kept {
+      return Vec::new();
+    }
+    let mut out = Vec::new();
     for p in &pats {
       let Some(sub) = self.pat_at_path(p, &path, typeck) else { continue };
-      let mut names = Vec::new();
+      // Moves out everything that needs drop.
+      if self.path_left(p, &path, typeck, env).is_some() {
+        continue;
+      }
+      let mut names: Vec<String> = Vec::new();
       sub.walk_always(|b| {
         if let PatKind::Binding(_, _, ident, _) = b.kind {
-          match typeck.pat_binding_modes().get(b.hir_id).map(|m| m.0) {
-            Some(rustc_hir::ByRef::Yes(..)) => by_ref = true,
-            _ if !self.ty_is_copy(typeck.node_type(b.hir_id), b.hir_id.owner) => names.push((ident.to_string(), b.hir_id, span_to_line(&b.span, &self.tcx))),
-            _ => {}
+          let by_ref = matches!(typeck.pat_binding_modes().get(b.hir_id).map(|m| m.0), Some(rustc_hir::ByRef::Yes(..)));
+          let name = ident.to_string();
+          if !by_ref && !self.ty_is_copy(typeck.node_type(b.hir_id), b.hir_id.owner) && !names.contains(&name) {
+            names.push(name);
           }
         }
       });
-      match self.path_left(p, &path, typeck, env) {
-        // Moves nothing out.
-        Some(false) => continue,
-        // Moves everything that needs drop out.
-        None if !kept => out.takers.push(names.iter().map(|n| n.0.clone()).collect()),
-        _ => {}
-      }
-      for (n, id, l) in names {
-        if !out.movers.contains(&n) {
-          out.movers.push(n);
-        }
-        out.mover_ids.push((id, l));
+      if !names.is_empty() {
+        out.push(names);
       }
     }
-    // A `ref` binding borrows from the temporary: it keeps its column.
-    if by_ref {
-      out.takers.clear();
-    }
-    (!out.movers.is_empty()).then_some(out)
+    out
   }
 
   /// True iff `elem` is a `tuple_scrutinee_elem` that no pattern binds
@@ -16243,18 +16420,16 @@ fn head_call_taking<'tcx>(head: &'tcx Expr<'tcx>, is_var: &dyn Fn(&'tcx Expr<'tc
   }
 }
 
-/// What the patterns of a scrutinee temporary move out of it by value
-/// (`scrutinee_temp_moves`, #1367).
-#[derive(Default)]
-struct ScrutTempMoves {
-  /// The by-value bindings that move something out of it, in pattern
-  /// order.
-  movers: Vec<String>,
-  /// For each pattern that, when it matches, leaves nothing that needs
-  /// drop in it, its by-value bindings.
-  takers: Vec<Vec<String>>,
-  /// The movers' bindings, each with its line.
-  mover_ids: Vec<(HirId, usize)>,
+/// True iff an event among `events` (also in a conditional nested in
+/// them) moves something out of `t` or borrows from it.
+fn takes_from(events: &[(usize, ExternalEvent)], t: &ResourceAccessPoint) -> bool {
+  events.iter().any(|(_, e)| match e {
+    ExternalEvent::Move { from: ResourceTy::Value(f), .. }
+    | ExternalEvent::StaticBorrow { from: ResourceTy::Value(f), .. }
+    | ExternalEvent::MutableBorrow { from: ResourceTy::Value(f), .. } => f == t,
+    ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| takes_from(&b.e_data, t)),
+    _ => false,
+  })
 }
 
 /// The branch bodies of the conditional `cond`, whose `Branch` event is
