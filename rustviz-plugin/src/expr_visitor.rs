@@ -435,6 +435,10 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// to the other branches' (`match_rhs_arms`, #1402), with each one's
   /// loan before the conditional.
   pub arm_union_parts: HashMap<rustc_hir::HirId, Vec<(String, Option<RefData>)>>,
+  /// The branch bodies of the conditional assigned to a holder that
+  /// were paired with it in their branch (`deferred_arm_binds`, #1472):
+  /// `match_rhs_arm` leaves them alone when the rest are paired.
+  pub arms_paired_in_branch: HashSet<rustc_hir::HirId>,
   // While a branch's value is matched against the variables of a
   // pattern that were declared ahead of the conditional (`let (a, b) =
   // if …`, #1007): `define_lhs` leaves an existing variable alone.
@@ -1114,6 +1118,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       literal_parts: None,
       deferred_arm_binds: HashMap::new(),
       arm_union_parts: HashMap::new(),
+      arms_paired_in_branch: HashSet::new(),
       bind_existing: false,
       reassign_arms: None,
       branch_value_owner: None,
@@ -2828,7 +2833,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// them borrowed until its last use (#1402): it borrows the union,
   /// as a reference bound to the conditional does (`get_ref_data_co`).
   /// Pairing a branch sets the field's lender to that branch's, so each
-  /// branch's lenders are collected after it is paired.
+  /// branch's lenders are collected after it is paired. (So does a part
+  /// that holds a borrow, and a pattern that takes `lhs` apart later
+  /// borrows them all too: `let W { r } = km;`, `adopt_part_borrow`,
+  /// #1471.)
   fn match_rhs_arms(&mut self, lhs: ResourceTy, bodies: &[&'tcx Expr<'tcx>], evt: Evt) {
     let parts = self.ref_parts_of(&lhs);
     let before: Vec<Option<RefData>> = parts.iter().map(|n| self.borrow_map.get(n).cloned()).collect();
@@ -2854,15 +2862,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
-  /// The reference columns inside `lhs` (`d.a`, `t.0`, `o.inner.a`) that
-  /// hold a loan, for `match_rhs_arms`.
+  /// The columns inside `lhs` that hold a loan, for `match_rhs_arms`:
+  /// references (`d.a`, `t.0`, `o.inner.a`) and parts that hold a borrow
+  /// (`km.r` an `Option<&mut String>`, `t.0` in `let t = match .. { .. =>
+  /// (Some(&s1), 1), .. }`, #1471).
   fn ref_parts_of(&self, lhs: &ResourceTy) -> Vec<String> {
     match lhs {
-      ResourceTy::Value(rap) if !rap.is_ref() => self.struct_members_deep(rap.name()).into_iter()
-        .filter(|m| m.is_ref())
-        .map(|m| m.name().clone())
-        .filter(|n| self.borrow_map.contains_key(n))
-        .collect(),
+      ResourceTy::Value(rap) if !rap.is_ref() => {
+        let prefix = format!("{}.", rap.name());
+        #[expect(clippy::disallowed_methods, reason = "sorted on the next line")]
+        let mut v: Vec<String> = self.raps.iter()
+          .filter(|(n, rd)| n.starts_with(&prefix) && (rd.rap.is_ref() || rd.rap.holds_borrow()))
+          .map(|(n, _)| n.clone())
+          .filter(|n| self.borrow_map.contains_key(n))
+          .collect();
+        v.sort();
+        v
+      }
       _ => Vec::new(),
     }
   }
@@ -2917,6 +2933,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         return;
       }
     }
+    if self.arms_paired_in_branch.contains(&body.hir_id) {
+      return;
+    }
     // `v = if …` reassigning v (#1010): each branch is paired after it
     // is visited, when what it did to v is known. (A nested
     // conditional pairs each of its own branches.)
@@ -2939,7 +2958,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// not a nested `if` / `match`, whose own branches are looked at
   /// one by one) uses a variable declared within `within`: one that
   /// doesn't exist until the branch is visited (#994).
-  fn arm_value_uses_local_in(&self, body: &'tcx Expr<'tcx>, within: rustc_span::Span) -> bool {
+  pub(crate) fn arm_value_uses_local_in(&self, body: &'tcx Expr<'tcx>, within: rustc_span::Span) -> bool {
     let mut e = body;
     loop {
       match e.kind {
@@ -9955,6 +9974,9 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
           continue;
         }
         let e = elem_evt(self, elem);
+        // (The element's type is the whole element's, `Option<&String>`
+        // for `Some(if c { &a } else { &b })`, #1470.)
+        let elem_ty = typeck.node_type(elem.hir_id);
         // `(Some(if c { d } else { e }), 1)` (#1267): the constructor
         // takes nothing itself; the element gets each branch's value.
         let elem = if only == Some(true) { cond.unwrap_or(elem) } else { elem };
@@ -9963,20 +9985,24 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
             // An element drawn as one column whose value holds a borrow
             // (`(Some(&s1), 1)`, `(if c { Some(&a) } else { .. }, 1)`)
             // holds it, as a struct literal's field does (#1454).
-            let elem_ty = typeck.node_type(elem.hir_id);
+            // `(Some(if c { &a } else { &b }), 1)` (#1470): such an
+            // element gets each branch's value, and its borrow, as `(if c
+            // { Some(&a) } else { .. }, 1)` does.
+            let holder_value = cond.unwrap_or(elem);
             let member = if !elem_ty.is_ref() && !self.has_member_columns(elem_ty)
               && matches!(member, ResourceAccessPoint::Struct(_)) {
               let name = member.name().to_owned();
-              self.register_holder(&name, elem, elem_ty);
+              self.register_holder(&name, holder_value, elem_ty);
               self.raps.get(&name).map_or(member, |rd| rd.rap.to_owned())
             } else {
               member
             };
+            let elem = if member.holds_borrow() && !member.is_ref() { holder_value } else { elem };
             // A reference element: resolve its lender from the
             // element expression, as the Struct arm does for
             // reference fields, and the kind of the loan it holds
             // (`(downgrade(&mut s), 1)` holds a mutable one, #1414).
-            if typeck.node_type(elem.hir_id).is_ref() {
+            if elem_ty.is_ref() {
               let (lender, aliasing) = self.get_ref_data(elem);
               if let Some(rd) = self.borrow_map.get_mut(member.name()) {
                 rd.lender = lender;
@@ -10413,6 +10439,9 @@ pub fn match_rhs_path(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
         self.move_or_copy_closure(line_num, evt, lhs, rhs_rap);
         return;
       }
+      if self.ref_into_holder_value(&lhs, &rhs_rap, rhs, line_num) {
+        return;
+      }
       self.add_ev(line_num, evt, lhs, ResourceTy::Value(rhs_rap), false);
     }
     None => {
@@ -10423,6 +10452,45 @@ pub fn match_rhs_path(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
       self.add_ev(line_num, Evt::Bind, lhs, ResourceTy::Anonymous, false);
     }
   }
+}
+
+/// `lhs`, a value that holds a borrow (not a reference itself), gets
+/// the reference in the variable `r` as part of its value: a branch of
+/// `let y = Some(if c { let r = &s1; r } else { .. });` (#1225's
+/// constructor around a conditional, paired branch by branch) or of `q =
+/// Some(if c { r } else { &b });` (#1470). y isn't a copy of r: its
+/// value holds a copy of r's reference (or, for a `&mut`, r's reference
+/// moved into it), so y borrows what r borrows. Drawn as `let y =
+/// Some(r);` and `let y = [r];` are (#1472): a borrow arrow from each of
+/// r's lenders into y, and for a `&mut` the move of r's reference into y
+/// first. False, drawing nothing, for any other pairing.
+fn ref_into_holder_value(&mut self, lhs: &ResourceTy, r: &ResourceAccessPoint, rhs: &'tcx Expr<'tcx>, line_num: usize) -> bool {
+  let ResourceTy::Value(h) = lhs else { return false };
+  if h.is_ref() || !h.holds_borrow() || !r.is_ref() {
+    return false;
+  }
+  let Some(ty) = self.tcx.typeck(rhs.hir_id.owner).expr_ty_opt(rhs).filter(|t| t.is_ref()) else { return false };
+  let (lender, _, co) = self.get_ref_data_co(rhs);
+  let lenders: Vec<ResourceTy> = std::iter::once(lender).chain(co)
+    .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)))
+    .collect();
+  if lenders.is_empty() {
+    return false;
+  }
+  let is_mut = ty.ref_mutability().is_some_and(|m| m.is_mut());
+  if is_mut {
+    self.add_ev(line_num, Evt::Move, lhs.clone(), ResourceTy::Value(r.clone()), false);
+  }
+  let evt = if is_mut { Evt::MBorrow } else { Evt::SBorrow };
+  for l in lenders {
+    match l {
+      // r reborrows through another reference (`&mut *p`): drawn from
+      // that reference's column, as `[r]` draws it (#1330).
+      ResourceTy::Deref(p) => self.add_borrow_ev(line_num, evt.clone(), lhs.clone(), ResourceTy::Value(p), true),
+      l => self.add_ev(line_num, evt.clone(), lhs.clone(), l, false),
+    }
+  }
+  true
 }
 
 /// `let w = <rhs>;` with rhs a call, a method call, an index or a
@@ -10743,6 +10811,14 @@ pub fn move_base_rest(&mut self, to: ResourceTy, base: &'tcx Expr<'tcx>, written
 /// #1197) going into the struct `lhs`, which has per-field columns:
 /// `lhs.f` gets expr's value (moved or copied), or the borrow it holds.
 pub fn match_struct_field(&mut self, lhs: &ResourceTy, field_name: &str, expr: &'tcx Expr<'tcx>) {
+  let ty = self.tcx.typeck(expr.hir_id.owner).node_type(expr.hir_id);
+  self.match_struct_field_of(lhs, field_name, expr, ty);
+}
+
+/// `match_struct_field` for a field of type `field_ty` given the value
+/// of `expr`: the field's own initializer, or, for `W { o: Some(if c {
+/// &a } else { &b }) }` (#1267), the conditional inside it.
+pub fn match_struct_field_of(&mut self, lhs: &ResourceTy, field_name: &str, expr: &'tcx Expr<'tcx>, field_ty: Ty<'tcx>) {
   let new_lhs_name = format!("{}.{}", lhs.name(), field_name);
   // Skip fields whose RAP we never registered. The most
   // common case is a struct field whose type is itself a
@@ -10753,12 +10829,18 @@ pub fn match_struct_field(&mut self, lhs: &ResourceTy, field_name: &str, expr: &
   if !self.raps.contains_key(&new_lhs_name) {
     return;
   }
-  let field_ty = self.tcx.typeck(expr.hir_id.owner).node_type(expr.hir_id);
   // A field drawn as one column whose value holds a borrow
   // (`items: vec![w.as_str()]`, `it: v.iter()`) holds it like
   // `let items = vec![w.as_str()];` would (#1088).
-  if !field_ty.is_ref() && !self.has_member_columns(field_ty)
-    && matches!(self.raps.get(&new_lhs_name).map(|rd| &rd.rap), Some(ResourceAccessPoint::Struct(_))) {
+  let holder = !field_ty.is_ref() && !self.has_member_columns(field_ty)
+    && matches!(self.raps.get(&new_lhs_name).map(|rd| &rd.rap), Some(ResourceAccessPoint::Struct(_)));
+  // `o: Some(if c { &a } else { &b })` (#1470): it gets each branch's
+  // value, and its borrow, as `o: if c { Some(&a) } else { .. }` does.
+  let expr = match self.conditional_value(expr) {
+    Some(c) if holder => c,
+    _ => expr,
+  };
+  if holder {
     self.register_holder(&new_lhs_name, expr, field_ty);
   }
   let field_rap = self.raps.get(&new_lhs_name).unwrap().rap.to_owned();
@@ -10835,7 +10917,10 @@ pub fn match_rhs_struct(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, _qpat
       if only.is_some_and(|c| c != cond.is_some()) {
         continue;
       }
-      // `W { s: Some(if …) }` (#1267): as for a tuple element.
+      // `W { s: Some(if …) }` (#1267): as for a tuple element. (The
+      // field's type is the whole initializer's, `Option<&String>` for
+      // `Some(if c { &a } else { &b })`, #1470.)
+      let field_ty = self.tcx.typeck(field.expr.hir_id.owner).node_type(field.expr.hir_id);
       let field = &rustc_hir::ExprField { expr: if only == Some(true) { cond.unwrap_or(field.expr) } else { field.expr }, ..*field };
       // Struct literal that isn't bound to a struct RAP: the
       // value is returned (`User { email, .. }` as a fn's tail
@@ -10858,7 +10943,7 @@ pub fn match_rhs_struct(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, _qpat
         }
         continue;
       }
-      self.match_struct_field(&lhs, field.ident.as_str(), field.expr);
+      self.match_struct_field_of(&lhs, field.ident.as_str(), field.expr, field_ty);
   }
   // Struct update syntax `S { a: e, ..base }`: every field not
   // written explicitly comes from `base`, moved if its type isn't

@@ -6191,6 +6191,47 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     true
   }
 
+  /// `q = Some(if c { let r = &a; r } else { let r = &b; r });`, `q = if
+  /// c { let r = &a; Some(r) } else { .. };` with q a holder (#1472,
+  /// #1463): a branch whose value names a variable the branch declares
+  /// is paired with q at the branch's end (`deferred_arm_binds`), as a
+  /// `let` pairs it (#994), while that variable is still the branch's
+  /// own: after the conditional, `r` names the last branch's. q's old
+  /// loan ends, and q takes what the other branches' values borrow
+  /// (`reassign_holder`), before the branches are visited; the other
+  /// branches are paired after it, as before (`nest_arm_pairings`).
+  /// Only for a holder of a Copy type (`Option<&T>`), which has no old
+  /// value to drop where the new one arrives. False, doing nothing,
+  /// unless some branch's value is such.
+  fn pair_holder_arms_in_branch(&mut self, expr: &'tcx Expr<'tcx>, lhs_expr: &'tcx Expr<'tcx>, rhs_expr: &'tcx Expr<'tcx>) -> bool {
+    if !matches!(expr.kind, ExprKind::Assign(..)) || expr.span.from_expansion() {
+      return false;
+    }
+    let Some(cond) = self.conditional_value(rhs_expr) else { return false };
+    let owner = lhs_expr.hir_id.owner;
+    let lhs_ty = self.tcx.typeck(owner).node_type(lhs_expr.hir_id);
+    if lhs_ty.is_ref() || !self.ty_is_copy(lhs_ty, owner) {
+      return false;
+    }
+    let Some(ResourceTy::Value(rap)) = self.resource_of_lhs(lhs_expr) else { return false };
+    if rap.is_ref() || !rap.holds_borrow() || rap.is_union() {
+      return false;
+    }
+    let mut bodies = Vec::new();
+    conditional_branch_bodies(cond, &mut bodies);
+    bodies.retain(|b| self.arm_value_uses_local_in(b, cond.span));
+    if bodies.is_empty() {
+      return false;
+    }
+    self.reassign_holder(&rap, cond, lhs_ty, expr_to_line(lhs_expr, &self.tcx));
+    for b in bodies {
+      self.deferred_arm_binds.entry(b.hir_id).or_insert_with(|| (b, Vec::new())).1
+        .push(ArmBind::Rhs(ResourceTy::Value(rap.clone()), Evt::Copy));
+      self.arms_paired_in_branch.insert(b.hir_id);
+    }
+    true
+  }
+
   /// `q = if c { let r = &a; Some(r) } else { Some(&b) };` (#1463): an
   /// assignment drawn as such pairs each branch's value with q after the
   /// conditional `cond` was visited (event ids `rhs_ids`) and its events
@@ -6433,6 +6474,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // A branch gives r back its own value (#1430): r's old loan lives on
     // along that path, so the write ends none of it.
     let keeps_old_loan = ref_arms_keep == Some(true);
+    let paired_in_branch = destructure_hid.is_none() && self.pair_holder_arms_in_branch(expr, lhs_expr, rhs_expr);
     let rhs_lo = *self.unique_id;
     if destructure_hid.is_none() && !ref_arms {
       self.visit_expr(rhs_expr);
@@ -7215,11 +7257,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
     }
 
-    // `it = b.iter();` where `it` holds a borrow (#336).
-    if let ResourceTy::Value(rap) = &lhs_rty {
+    // `q = Some(if c { &a } else { &b });` with q holding borrows
+    // (#1470): as for `let q = Some(if ..)` (#1225), the constructor takes
+    // nothing itself, and q gets each branch's value (and its borrow) in
+    // that branch: q is paired with the conditional, as for `q = if c {
+    // Some(&a) } else { .. }` (#1463).
+    let pair_rhs = match &lhs_rty {
+      ResourceTy::Value(rap) if rap.holds_borrow() && !rap.is_ref() && is_assign && destructure_hid.is_none() && !lhs_is_union_field =>
+        self.conditional_value(rhs_expr).unwrap_or(rhs_expr),
+      _ => rhs_expr,
+    };
+    // `it = b.iter();` where `it` holds a borrow (#336). (Done before
+    // the branches were visited when they pair it themselves.)
+    if let (ResourceTy::Value(rap), false) = (&lhs_rty, paired_in_branch) {
       if rap.holds_borrow() && !lhs_is_union_field && matches!(expr.kind, ExprKind::Assign(..)) {
         let rap = rap.clone();
-        self.reassign_holder(&rap, rhs_expr, lhs_ty, line_num);
+        self.reassign_holder(&rap, pair_rhs, lhs_ty, line_num);
       }
     }
     // `hold = H { r: &t };` overwrites a whole struct whose
@@ -7313,7 +7366,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.resolve_branch_lenders(&r_name, kept);
         self.mark_branch_results_kept(&lhs_rty.real_name(), rhs_expr);
       } else {
-        self.match_rhs(lhs_rty.clone(), rhs_expr, e);
+        self.match_rhs(lhs_rty.clone(), pair_rhs, e);
+        self.arms_paired_in_branch.clear();
         // Only for a value that holds borrows (or has parts that do): their
         // lenders may be split by the branches. (A reference is paired in
         // its branches above, `ref_arms`, #1393.)

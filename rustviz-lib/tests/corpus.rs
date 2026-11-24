@@ -26152,6 +26152,106 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[],
     },
+    TooltipExpect {
+        name: "ctor_cond_assign_holder_1470",
+        // #1470: a holder given `Some(if c { &a } else { &b })` by an
+        // assignment borrows a and b, in their branches, and gives both back
+        // at its last use. main drew only "q is assigned a new value": no
+        // borrow, nothing given back. As a tuple element / struct field
+        // bound by `let`, main called u.0 / x.o (not references) borrowers of
+        // a resource and never gave a or b back.
+        must_contain: &[
+            "q holds a value that immutably borrows a's resource (q isn't a reference itself)",
+            "Return immutably borrowed resource from q to a",
+            "Return immutably borrowed resource from q to b",
+            "Return immutably borrowed resource from q2 to a",
+            "Return immutably borrowed resource from q2 to b",
+            "Return immutably borrowed resource from m to a",
+            "Return immutably borrowed resource from m to b",
+            "Return mutably borrowed resource from mq to a",
+            "Return mutably borrowed resource from mq to b",
+            "Return immutably borrowed resource from h to a",
+            "Return immutably borrowed resource from h to b",
+            "Return immutably borrowed resource from h to d",
+            "Return immutably borrowed resource from g to a",
+            "Return immutably borrowed resource from g to b",
+            "Return immutably borrowed resource from t.0 to a",
+            "Return immutably borrowed resource from t.0 to b",
+            "u.0 holds a value that immutably borrows a's resource (u.0 isn't a reference itself)",
+            "Return immutably borrowed resource from u.0 to a",
+            "Return immutably borrowed resource from u.0 to b",
+            "Return immutably borrowed resource from w.o to a",
+            "Return immutably borrowed resource from w.o to b",
+            "x.o holds a value that immutably borrows b's resource (x.o isn't a reference itself)",
+            "Return immutably borrowed resource from x.o to a",
+            "Return immutably borrowed resource from x.o to b",
+            "Return immutably borrowed resource from y.o to a",
+            "Return immutably borrowed resource from y.o to b",
+        ],
+        must_not_contain: &[
+            "u.0 immutably borrows a resource",
+            "x.o immutably borrows a resource",
+            "Return immutably borrowed resource from r2 to a",
+        ],
+    },
+    TooltipExpect {
+        name: "destructure_cond_struct_1471",
+        // #1471: a reference taken out of a struct / tuple whose reference
+        // part each branch points at a different lender gives both lenders
+        // back. main gave back only the last branch's (m2, n2, ..); m1 went
+        // State::Invalid (no text to forbid; the invariant check pins it).
+        must_contain: &[
+            "Return mutably borrowed resource from r to m1",
+            "Return mutably borrowed resource from r to m2",
+            "Return immutably borrowed resource from rs to n1",
+            "Return immutably borrowed resource from rs to n2",
+            "Return mutably borrowed resource from rt to t1",
+            "Return mutably borrowed resource from rt to t2",
+            "Return mutably borrowed resource from ra to a1",
+            "Return mutably borrowed resource from ra to a2",
+            "Return mutably borrowed resource from ri to i1",
+            "Return mutably borrowed resource from ri to i2",
+            "Return mutably borrowed resource from rf to f1",
+            "Return mutably borrowed resource from rf to f2",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "ctor_cond_ref_value_1472",
+        // #1472: `Some(if c { let r = &s1; r } else { .. })` gives y a value
+        // holding a copy of r's reference: y borrows s1 (as for `let y =
+        // Some(r);`). main said "y is initialized with a copy of r", as if y
+        // were a reference. Assigned (`ya = Some(if ..)`, `q = if c { let rq
+        // = &s1; Some(rq) } ..`) with branch references of the same name,
+        // main drew both branches borrowing s2 and gave s1 back from the
+        // first branch's reference after its scope.
+        must_contain: &[
+            "Immutable borrow from s1 to y",
+            "Immutable borrow from s2 to y",
+            "y holds a value that immutably borrows s1's resource (y isn't a reference itself)",
+            "y0 holds a value that immutably borrows s1's resource (y0 isn't a reference itself)",
+            "ym holds a value that immutably borrows s1's resource (ym isn't a reference itself)",
+            "Mutable borrow from s1 to yu",
+            "the reference ru held is moved into yu's value, so yu now holds its borrow",
+            "Return mutably borrowed resource from yu to s1",
+            "Return mutably borrowed resource from yu to s2",
+            "ya holds a value that immutably borrows s1's resource (ya isn't a reference itself)",
+            "Return immutably borrowed resource from ya to s1",
+            "Return immutably borrowed resource from ya to s2",
+            "Return immutably borrowed resource from q to s1",
+            "Return immutably borrowed resource from q to s2",
+        ],
+        must_not_contain: &[
+            "y is initialized with a copy of r",
+            "y0 is initialized with a copy of r0",
+            "ym is initialized with a copy of rm",
+            "=Copy from r to y",
+            "=Copy from r0 to y0",
+            "=Copy from rm to ym",
+            "Return immutably borrowed resource from ra to s1",
+            "Return immutably borrowed resource from rq to s1",
+        ],
+    },
 ];
 
 /// #1440: on the line where two loans of v end, the first end's dot (with
