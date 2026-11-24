@@ -2635,8 +2635,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // column doesn't end in this dot, whose drop happens on some paths
     // only (#697).
     let mut seen: HashSet<&str> = HashSet::new();
-    let maybe_dropped: Vec<ResourceAccessPoint> = self.in_scope[from..end].iter().rev()
-      .filter(|n| seen.insert(n.as_str()))
+    let maybe_dropped: Vec<ResourceAccessPoint> = self.scope_names(from, end).into_iter().rev()
+      .map(|(_, n)| n)
+      .filter(|n| seen.insert(n))
       .filter(|n| moved_some.iter().any(|m| place_within(n, m)))
       .filter_map(|n| self.raps.get(n))
       .filter(|rd| !rd.rap.never_drops() && !rd.rap.is_fn() && !rd.rap.is_ref() && !self.skip_raps.contains(&rd.rap.name().to_string()))
@@ -2675,6 +2676,25 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     len
   }
 
+  /// `in_scope[from..end]`'s names, each with its index, in order. The
+  /// slot a `let x;` local (or a branch-extended temporary) holds from
+  /// its `let` (`deferred_slot`) stands for the columns its assignment
+  /// registered (`deferred_slots`), once it has been assigned: an exit
+  /// after the branch that assigned it, whose end took its own entry out
+  /// of `in_scope`, drops it if it holds a value (#1436). Not yet
+  /// assigned, it stands for nothing.
+  fn scope_names(&self, from: usize, end: usize) -> Vec<(usize, &str)> {
+    let mut out = Vec::new();
+    for (i, n) in self.in_scope.iter().enumerate().take(end).skip(from) {
+      if !is_deferred_slot(n) {
+        out.push((i, n.as_str()));
+      } else if let Some(names) = self.deferred_slots.get(n) {
+        out.extend(names.iter().map(|m| (i, m.as_str())));
+      }
+    }
+    out
+  }
+
   /// The locals in `in_scope[from..end]` that own a value to drop at
   /// an exit, in the order Rust drops them: reverse declaration order,
   /// a name declared twice (shadowing) once. `moved` are the ones the
@@ -2688,8 +2708,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     let mut seen: HashSet<&str> = HashSet::new();
     let mut out = Vec::new();
-    for (idx, name) in self.in_scope[from..end].iter().enumerate().rev()
-      .map(|(i, n)| (from + i, n)).filter(|(_, n)| seen.insert(n.as_str())) {
+    for (idx, name) in self.scope_names(from, end).into_iter().rev().filter(|(_, n)| seen.insert(n)) {
       let Some(rd) = self.raps.get(name) else { continue };
       if rd.rap.never_drops() || rd.rap.is_fn() || (!refs && rd.rap.is_ref())
         || moved.iter().any(|m| place_within(name, m)) || self.skip_raps.contains(name) {
@@ -2754,7 +2773,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.note_try_loop_iterators(line);
       // What it leaves in scope if it returns early, for the scope ends
       // said to happen at a later `return` (#1044).
-      let vars = self.in_scope.iter().filter_map(|name| self.raps.get(name))
+      let vars = self.scope_names(0, self.in_scope.len()).into_iter().filter_map(|(_, name)| self.raps.get(name))
         .filter(|rd| !rd.rap.is_fn() && !(rd.rap.is_temporary() && rd.scope < line))
         .map(|rd| *rd.rap.hash()).collect();
       self.fn_tries.push((line, vars));
@@ -2875,8 +2894,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let line = expr_to_line(ret, &self.tcx);
     let mut seen: HashSet<&str> = HashSet::new();
     let mut vars = Vec::new();
-    for (idx, name) in self.in_scope.iter().enumerate().rev() {
-      if !seen.insert(name.as_str()) {
+    for (idx, name) in self.scope_names(0, self.in_scope.len()).into_iter().rev() {
+      if !seen.insert(name) {
         continue;
       }
       let Some(rd) = self.raps.get(name) else { continue };
@@ -5727,6 +5746,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       let (scope, inside_branch, frames_at) = (self.current_scope, self.inside_branch, self.exit_frames.len());
       local.pat.each_binding(|annotation, hir_id, _, _| {
         self.uninit_locals.insert(hir_id, DeferredLet { annotation, scope, inside_branch, is_skipped, frames_at });
+        // Its place among the locals an exit drops (#1436).
+        self.in_scope.push(deferred_slot(hir_id));
       });
     }
 
@@ -12241,8 +12262,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       names.push(name);
       let annotation = BindingMode(rustc_hir::ByRef::No, borrow_mut);
       self.uninit_locals.insert(tmp.hir_id, DeferredLet { annotation, scope, inside_branch, is_skipped: false, frames_at });
+      self.in_scope.push(deferred_slot(tmp.hir_id));
     }
     names
+  }
+
+  /// The `let x;` local (or branch temporary) `id` was just given its
+  /// column, which registered `in_scope[names_at..]`: its slot
+  /// (`deferred_slot`) now stands for those names (#1436).
+  fn fill_deferred_slot(&mut self, id: HirId, names_at: usize) {
+    let names: Vec<String> = self.in_scope[names_at.min(self.in_scope.len())..].to_vec();
+    if !names.is_empty() {
+      self.deferred_slots.insert(deferred_slot(id), names);
+    }
   }
 
   /// `&temp` (the `AddrOf` `addr`, its operand visited) in the branch
@@ -12260,7 +12292,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let saved = (self.current_scope, self.inside_branch);
     (self.current_scope, self.inside_branch) = (decl.scope, decl.inside_branch);
     self.deferred_decl_at.insert(name.clone(), decl.frames_at);
+    let names_at = self.in_scope.len();
     self.define_lhs(name.clone(), bool_of_mut(decl.annotation.1), tmp, tmp_ty);
+    self.fill_deferred_slot(tmp.hir_id, names_at);
     (self.current_scope, self.inside_branch) = saved;
     let rap = self.raps.get(&name).unwrap().rap.to_owned();
     let field_prefix = format!("{}.", name);
@@ -14159,7 +14193,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let saved = (self.current_scope, self.inside_branch);
     (self.current_scope, self.inside_branch) = (decl.scope, decl.inside_branch);
     self.deferred_decl_at.insert(name.clone(), decl.frames_at);
+    let names_at = self.in_scope.len();
     self.define_lhs(name.clone(), bool_of_mut(decl.annotation.1), rhs, lhs_ty);
+    self.fill_deferred_slot(hirid, names_at);
     (self.current_scope, self.inside_branch) = saved;
     if decl.is_skipped {
       self.skip_raps.insert(name);
@@ -15073,7 +15109,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.inside_branch = loop_inside;
     } else if let Some((_, lhs, evt)) = self.break_binds.iter().rev().find(|(id, ..)| *id == target).cloned() {
       self.inherit_break_lenders(&lhs, target);
-      self.match_rhs(lhs, value, evt);
+      // A value that holds a borrow (`break Some(&u)`, #1435) holds what
+      // this `break`'s value borrows.
+      if let ResourceTy::Value(r) = &lhs {
+        if !r.is_ref() {
+          self.add_arm_holder_lenders(r.name(), value);
+        }
+      }
+      self.match_rhs(lhs.clone(), value, evt);
+      self.emit_arm_holder_literal_borrows(&lhs, value);
     } else {
       self.loop_breaks.push((target, value, brk));
     }
@@ -15394,7 +15438,7 @@ pub(crate) fn is_literal_value<'tcx>(e: &Expr<'tcx>, typeck: &rustc_middle::ty::
 
 /// The branch bodies of the `if` / `else` or `match` `e` whose values
 /// it yields, through nested ones (`else if`), in source order.
-fn conditional_branch_bodies<'tcx>(e: &'tcx Expr<'tcx>, out: &mut Vec<&'tcx Expr<'tcx>>) {
+pub(crate) fn conditional_branch_bodies<'tcx>(e: &'tcx Expr<'tcx>, out: &mut Vec<&'tcx Expr<'tcx>>) {
   let mut push = |b: &'tcx Expr<'tcx>, out: &mut Vec<&'tcx Expr<'tcx>>| match branch_value_expr(b) {
     Some(v) if !v.span.from_expansion() && matches!(v.kind, ExprKind::If(_, _, Some(_)) | ExprKind::Match(_, _, rustc_hir::MatchSource::Normal)) =>
       conditional_branch_bodies(v, out),

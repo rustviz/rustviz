@@ -397,6 +397,13 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // (#786): it joins `in_scope` where it's first assigned, maybe inside
   // a loop, but belongs to the scope of its `let`.
   pub deferred_decl_at: HashMap<String, usize>,
+  // A `let x;` local (or a temporary a `let` extends through a branch,
+  // #1397) has a slot in `in_scope` from its `let` (`deferred_slot`),
+  // keyed here, once assigned, to the names its assignment registered:
+  // its column joins `in_scope` where it is first assigned, often in a
+  // branch, whose locals leave `in_scope` at the branch's end. An exit
+  // after the branch drops it from the slot (#1436).
+  pub deferred_slots: HashMap<String, Vec<String>>,
 
   // For `let x = if … { a } else { b };` (and `match`), the events that
   // pair each branch's value with `x` are emitted before the branches
@@ -1094,6 +1101,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       loop_entry_uninit: Vec::new(),
       break_uninit: Vec::new(),
       deferred_decl_at: HashMap::new(),
+      deferred_slots: HashMap::new(),
       rhs_arm_ids: HashMap::new(),
       defer_arm_binds: None,
       literal_parts: None,
@@ -2881,7 +2889,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
     let lo = *self.unique_id;
     self.register_arm_call_lenders(&lhs, body);
-    self.match_rhs(lhs, body, evt);
+    self.match_rhs(lhs.clone(), body, evt);
+    self.emit_arm_holder_literal_borrows(&lhs, body);
     self.rhs_arm_ids.insert(body.hir_id, (lo, *self.unique_id));
   }
 
@@ -2962,7 +2971,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             v
           }).collect();
           self.register_arm_call_lenders(&lhs, body);
-          self.match_rhs(lhs, body, evt);
+          self.match_rhs(lhs.clone(), body, evt);
+          self.emit_arm_holder_literal_borrows(&lhs, body);
           for ((n, _), mut lenders) in union.iter().zip(earlier) {
             if let Some(rd) = self.borrow_map.get(n) {
               add_lenders(&mut lenders, rd);
@@ -2988,7 +2998,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// hold either branch's reference.
   fn add_arm_lenders(&mut self, lhs: &ResourceTy, body: &'tcx Expr<'tcx>) {
     let ResourceTy::Value(r) = lhs else { return };
-    if !r.is_ref() || self.holder_shadowed(r.name()) {
+    if !r.is_ref() {
+      self.add_arm_holder_lenders(r.name(), body);
+      return;
+    }
+    if self.holder_shadowed(r.name()) {
       return;
     }
     let Some(value) = branch_value_expr(body) else { return };
@@ -3008,6 +3022,53 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         rd.lender = l;
         rd.aliasing = aliasing;
         rd.static_lender = None;
+      }
+    }
+  }
+
+  /// `add_arm_lenders` for a value that holds a borrow (#1435): `let t =
+  /// if c { Some(&String::from("x")) } else { None };`, `let t = match o
+  /// { Some(n) => { let y = &s; Some(y) } _ => None };`. t was marked a
+  /// holder when declared (`register_holder`); now that the branch has
+  /// been visited, t also holds what that branch's value borrows.
+  pub(crate) fn add_arm_holder_lenders(&mut self, name: &str, body: &'tcx Expr<'tcx>) {
+    if !self.raps.get(name).is_some_and(|rd| rd.rap.holds_borrow()) {
+      return;
+    }
+    let Some(value) = branch_value_expr(body) else { return };
+    let Some(ty) = self.tcx.typeck(value.hir_id.owner).expr_ty_opt(value) else { return };
+    let (found, is_mut) = self.holder_lenders(value, ty);
+    let line = expr_to_line(value, &self.tcx);
+    for l in found.into_iter().filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_))) {
+      let aliasing = get_aliasing_data(&l, &self.borrow_map);
+      match self.borrow_map.get_mut(name) {
+        Some(rd) if rd.all_lenders().contains(&l) => {}
+        Some(rd) if matches!(rd.lender, ResourceTy::Value(_) | ResourceTy::Deref(_)) => rd.co_lenders.push(l),
+        Some(rd) => {
+          rd.lender = l;
+          rd.aliasing = aliasing;
+          rd.static_lender = None;
+        }
+        None => {
+          // A borrow of a temporary the branch made is found by its `&`
+          // (#1357).
+          let borrow_span = match &l {
+            ResourceTy::Value(t) => self.ext_temp_borrow_span(t),
+            _ => None,
+          };
+          self.borrow_map.insert(name.to_owned(), RefData {
+            lender: l,
+            assigned_at: line,
+            lifetime: line,
+            ref_mutability: is_mut,
+            aliasing,
+            static_lender: None,
+            borrow_span,
+            loan_line: None,
+            co_lenders: Vec::new(),
+            lender_muts: Vec::new(),
+          });
+        }
       }
     }
   }
@@ -6945,6 +7006,34 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
+  /// `emit_holder_literal_borrows` for the value of one branch (`body`)
+  /// of the `if` / `match` the holder `lhs` is bound from (`let a = if c
+  /// { [&s] } else { [&u] };`, #1435): a borrow arrow from each lender
+  /// that value holds, in that branch.
+  pub(crate) fn emit_arm_holder_literal_borrows(&mut self, lhs: &ResourceTy, body: &'tcx Expr<'tcx>) {
+    let ResourceTy::Value(h) = lhs else { return };
+    let Some(v) = branch_value_expr(body) else { return };
+    if !(v.span.from_expansion() || matches!(v.kind, ExprKind::Array(..) | ExprKind::Repeat(..))) {
+      return;
+    }
+    let Some(rap) = self.raps.get(h.name()).map(|rd| rd.rap.to_owned()) else { return };
+    if rap.is_ref() || !rap.holds_borrow() {
+      return;
+    }
+    let Some(rd) = self.borrow_map.get(h.name()).cloned() else { return };
+    let Some(ty) = self.tcx.typeck(v.hir_id.owner).expr_ty_opt(v) else { return };
+    let own = self.holder_lenders(v, ty).0;
+    let line = expr_to_line(&v, &self.tcx);
+    let to = ResourceTy::Value(rap);
+    for l in rd.all_lenders().into_iter().filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)) && own.contains(l)) {
+      let evt = if rd.mut_of(&l) { Evt::MBorrow } else { Evt::SBorrow };
+      match l {
+        ResourceTy::Deref(r) => self.add_borrow_ev(line, evt, to.clone(), ResourceTy::Value(r), true),
+        l => self.add_ev(line, evt, to.clone(), l, false),
+      }
+    }
+  }
+
   /// `name` was just registered as an owner bound to `init`. If its
   /// value holds a borrow of variables we draw (`let it = v.iter();`,
   /// `let third = v.get(2);`; see `holder_lenders`), mark it as a
@@ -6974,7 +7063,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // `let mut refs = Vec::new();` that a later `refs.push(&s)`
       // fills with borrows (#392): a holder from the start, with no
       // borrow yet; `record_receiver_store` adds each one.
-      if self.filled_with_borrows_later(init, ty) {
+      // So is a value a branch builds around a borrow that isn't known
+      // until the branch is visited (`add_arm_holder_lenders`, #1435).
+      if self.filled_with_borrows_later(init, ty) || self.holder_lenders_in_branch(init, ty) {
         self.mark_holder(name);
       }
       return;
@@ -7014,6 +7105,27 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       co_lenders: lenders,
       lender_muts,
     });
+  }
+
+  /// Whether a branch of the `if` / `match` `init` that a `let` binds a
+  /// value of type `ty` from gives it a value that borrows something
+  /// known only once the branch is visited: a temporary the branch makes
+  /// (`Some(&String::from("x"))`, #1397), or a variable it declares
+  /// (`{ let y = &s; Some(y) }`, #994). Such a branch is paired with the
+  /// `let` after it is visited (`match_rhs_arm`), when
+  /// `add_arm_holder_lenders` adds its lenders (#1435). So does each
+  /// `break` of a `loop` initializer (`let l = loop { .. break
+  /// Some(&u); }`), as it is visited (`pair_break_value`).
+  fn holder_lenders_in_branch(&self, init: &'tcx Expr<'tcx>, ty: Ty<'tcx>) -> bool {
+    if ty.is_ref() || !ty.walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_))) {
+      return false;
+    }
+    if matches!(init.kind, ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _)) && !init.span.from_expansion() {
+      return breaks_to(init).iter().any(|(_, value)| value.is_some());
+    }
+    let Some(within) = self.defer_arm_binds else { return false };
+    crate::ref_flow::holder_branch_bodies(init)
+      .is_some_and(|bodies| bodies.iter().any(|b| self.arm_value_uses_local_in(b, within)))
   }
 
   /// The span of the `&` that borrows the `let`-extended temporary

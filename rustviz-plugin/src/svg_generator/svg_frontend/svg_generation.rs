@@ -388,9 +388,19 @@ fn binds_borrower_of_line(e: &ExternalEvent, front: &[ExternalEvent]) -> bool {
 /// of: `let k = { let t = m * 2; t };` binds `t` and copies it into `k`
 /// on one line. The binding comes first, so its dot belongs on the line's
 /// own row, before the arrow's dot, not on a row inserted below for the
-/// stack (#731).
+/// stack (#731). So does a value moved or copied in from a call, which
+/// draws no arrow between two columns, before an arrow moves, copies or
+/// borrows it on: `Some(n) if n > 0 => { let y = String::from("y"); y }`
+/// (the line's arrows are `o -> n` and `y -> r`) and `Some(n) if n > 0
+/// => &String::from("pos"),` (a temporary `r` borrows, #1397). Left on
+/// the row below the stack, y got its value after it was moved (#1441).
 fn binds_source_of_line(e: &ExternalEvent, group: &[ExternalEvent]) -> bool {
-    if !matches!(e, ExternalEvent::Bind { .. }) {
+    let arrival = match e {
+        ExternalEvent::Bind { .. } => true,
+        ExternalEvent::Move { .. } | ExternalEvent::Copy { .. } => !e.is_var_arrow_ev(),
+        _ => false,
+    };
+    if !arrival {
         return false;
     }
     let ResourceTy::Value(t) = ResourceAccessPoint_extract(e).1 else { return false };
@@ -413,7 +423,8 @@ fn binds_source_of_line(e: &ExternalEvent, group: &[ExternalEvent]) -> bool {
     // Only an arrow that comes after the binding: `n = n + 1;` copies `n`
     // first and is assigned after.
     group.iter().any(|o| o.get_id() > e.get_id()
-        && matches!(o, ExternalEvent::Copy { .. } | ExternalEvent::Move { .. })
+        && matches!(o, ExternalEvent::Copy { .. } | ExternalEvent::Move { .. }
+            | ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. })
         && matches!(ResourceAccessPoint_extract(o).0, ResourceTy::Value(f) if *f.hash() == t))
 }
 

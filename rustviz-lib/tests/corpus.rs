@@ -25719,11 +25719,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // #1437: a `let x;` assigned in a nested `if`: the outer join said
         // "none of the branches above assigned it", and the outer arm's rows
         // below the inner join "s has no value yet".
-        // Known gaps pinned elsewhere: t / a aren't drawn borrowing the
-        // temporary (#1435); the `return` in early_return doesn't state the
-        // temporary's drop (#1436); a one-line guarded arm draws the borrow a
-        // row above the acquire (#1441, known_bugs/1441_guard_arm_pairing_row).
+        // #1435: t / a are drawn borrowing the temporary. #1436: the `return`
+        // in early_return states the temporary's drop.
         must_contain: &[
+            "Immutable borrow from (temporary) to t: Some's signature gives the value it returns the same lifetime as its argument; t isn't a reference, but its value holds one",
+            "Immutable borrow from (temporary) to a",
+            "(temporary) goes out of scope here, where `return` leaves early: a let borrowed it, so it lived past its statement. Its resource is dropped only if the branch that made it (line 189) ran (Rust tracks this with a runtime drop flag).",
             "Move from String::from to (temporary)",
             "Move from String::from to (temporary 2)",
             "Move from make_u to (temporary)",
@@ -25790,6 +25791,120 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the branch that assigned (temporary)",
             "(temporary).name was assigned a value",
         ],
+    },
+    TooltipExpect {
+        name: "branch_holder_1435",
+        // #1435: a value that holds a borrow (`Option<&T>`, an array or a Vec
+        // of references) bound from an `if` / `match` (else if, nested, a
+        // variable the branch declares, an assignment, a struct field's
+        // value, `if let`, a guard) or from a `loop`'s `break`s: each branch
+        // draws its own borrow, as `let t = Some(&s);` does, and the borrow
+        // ends at the holder's last use. Main drew no borrow ("t is
+        // initialized with a Some value") and the lenders were never
+        // borrowed.
+        must_contain: &[
+            "Immutable borrow from s to t: Some's signature gives the value it returns the same lifetime as its argument; t isn't a reference, but its value holds one",
+            "t holds a value that immutably borrows s's resource (t isn't a reference itself)",
+            "Return immutably borrowed resource from t to s",
+            "t's immutable borrow ends",
+            "t is bound to a value (in all branches above)",
+            "Immutable borrow from s to a",
+            "Immutable borrow from u to a",
+            "Return immutably borrowed resource from a to s",
+            "Return immutably borrowed resource from a to u",
+            "a holds a value that immutably borrows s's resource (a isn't a reference itself)",
+            "a holds a value that immutably borrows u's resource (a isn't a reference itself)",
+            "a's immutable borrow ends",
+            "Immutable borrow from s to v",
+            "Immutable borrow from u to v",
+            "Return immutably borrowed resource from v to s",
+            "Return immutably borrowed resource from v to u",
+            "v holds a value that immutably borrows s's resource (v isn't a reference itself)",
+            "v's immutable borrow ends",
+            "Immutable borrow from s to m: Some's signature gives the value it returns the same lifetime as its argument; m isn't a reference, but its value holds one",
+            "Immutable borrow from u to m: Some's signature gives the value it returns the same lifetime as its argument; m isn't a reference, but its value holds one",
+            "Return immutably borrowed resource from m to s",
+            "Return immutably borrowed resource from m to u",
+            "Immutable borrow from s to e: Some's signature gives the value it returns the same lifetime as its argument; e isn't a reference, but its value holds one",
+            "Immutable borrow from u to e: Some's signature gives the value it returns the same lifetime as its argument; e isn't a reference, but its value holds one",
+            "Return immutably borrowed resource from e to s",
+            "Return immutably borrowed resource from e to u",
+            "Immutable borrow from s to n: Some's signature gives the value it returns the same lifetime as its argument; n isn't a reference, but its value holds one",
+            "Immutable borrow from u to n: Some's signature gives the value it returns the same lifetime as its argument; n isn't a reference, but its value holds one",
+            "Return immutably borrowed resource from n to s",
+            "Return immutably borrowed resource from n to u",
+            "Immutable borrow from s to q: Some's signature gives the value it returns the same lifetime as its argument; q isn't a reference, but its value holds one",
+            "Return immutably borrowed resource from q to s",
+            "q holds a value that immutably borrows s's resource (q isn't a reference itself)",
+            "h.o holds a value that immutably borrows s's resource (h.o isn't a reference itself)",
+            "Return immutably borrowed resource from h.o to s",
+            "h.o's immutable borrow ends",
+            "Immutable borrow from s to g: Some's signature gives the value it returns the same lifetime as its argument; g isn't a reference, but its value holds one",
+            "Return immutably borrowed resource from g to s",
+            "Immutable borrow from s to w: Some's signature gives the value it returns the same lifetime as its argument; w isn't a reference, but its value holds one",
+            "Return immutably borrowed resource from w to s",
+            "Immutable borrow from u to l: Some's signature gives the value it returns the same lifetime as its argument; l isn't a reference, but its value holds one",
+            "Return immutably borrowed resource from l to u",
+            "l holds a value that immutably borrows u's resource (l isn't a reference itself)",
+            "Immutable borrow from s to k, if the loop ended with break Some(&s): Some's signature gives the value it returns the same lifetime as its argument; k isn't a reference, but its value holds one",
+            "Immutable borrow from u to k, if the loop ended with break Some(&u): Some's signature gives the value it returns the same lifetime as its argument; k isn't a reference, but its value holds one",
+            "k holds a value that immutably borrows s's resource (k isn't a reference itself), if the loop ended with break Some(&s)",
+            "Return immutably borrowed resource from k to s",
+            "Return immutably borrowed resource from k to u",
+        ],
+        must_not_contain: &[
+            "t is initialized with a Some value",
+            "m is initialized with a Some value",
+            "e is initialized with a Some value",
+            "n is initialized with a Some value",
+            "g is initialized with a Some value",
+            "w is initialized with a Some value",
+            "l is initialized with a Some value",
+            "h.o is initialized with a Some value",
+            "k is bound to a copyable value (from whichever break ended the loop)",
+        ],
+    },
+    TooltipExpect {
+        name: "exit_maybe_init_1436",
+        // #1436: a `let x;` local only some branches above assigned (and a
+        // temporary a `let` extends through a branch) is dropped by a later
+        // exit if it has a value: a `return`, `?`, `break`, `continue`,
+        // panic. Main stated that drop nowhere (no dot at the exit; every
+        // drop must be stated), nor the exit's drop of a local every branch
+        // assigned. The scope end at the fn's `}` keeps its drop-flag text.
+        must_contain: &[
+            "s goes out of scope. Its resource is dropped here only if s was assigned in the branch that ran (Rust tracks this with a runtime drop flag).",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and s's resource is dropped if the branch that ran assigned it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to s here.",
+            "p goes out of scope. Its resource is dropped here only if p was assigned in the branch that ran (Rust tracks this with a runtime drop flag).",
+            "p.name goes out of scope. Its resource is dropped here only if p.name was assigned in the branch that ran (Rust tracks this with a runtime drop flag).",
+            "s goes out of scope. Its resource is dropped.",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and (temporary)'s resource is dropped if the branch that made it (line 108) ran (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to (temporary) here.",
+            "(temporary 2) goes out of scope here, where `break` leaves early: a let borrowed it, so it lived past its statement. Its resource is dropped only if the branch that made it (line 117) ran (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "s goes out of scope. No resource is dropped.",
+            "(temporary) goes out of scope. No resource is dropped",
+            "(temporary 2) goes out of scope. No resource is dropped",
+            "if s still holds it",
+            "only if s still holds it",
+            "=(temporary 2) goes out of scope here, where `break` leaves early: a let borrowed it, so it lived past its statement. Its resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "guard_arm_pairing_row_1441",
+        // #1441: in a one-line arm with several arrows (a guard reading the
+        // pattern's binding, a use of it), the value a call gives the arm's
+        // variable (`let y = String::from("y"); y`) went on a row below the
+        // arrow that moves y into r: y was moved before it had a value
+        // (`corpus_invariants_hold`: event-on-dead-column). It is now on
+        // the line's own row, on the move's dot.
+        must_contain: &[
+            "y acquires ownership of a resource",
+            "y's resource is moved",
+            "y goes out of scope. No resource is dropped.",
+            "Immutable borrow from (temporary) to r",
+        ],
+        must_not_contain: &[],
     },
 ];
 
@@ -35507,6 +35622,51 @@ fn destructure_cycle_one_dot_per_target() {
             assert!(ids[0].ends_with("move+acquire") && !ids[0].contains("acquire+move"), "{} on line {}: {}", v, line, ids[0]);
         }
     }
+}
+
+/// #1441: in a one-line arm with several arrows on its line, the value a
+/// call gives the arm's variable (`{ let y = String::from("y"); y }`) or
+/// temporary (`&String::from("pos")`) arrives on the dot where it is moved
+/// or lent on to the `let`, not on a row below it.
+#[test]
+fn one_line_arm_value_arrives_before_it_moves_1441() {
+    let rv = run_with_local_backend("guard_arm_pairing_row_1441");
+    let dots = tooltip_lines(&rv.timeline_panel_string());
+    let on_dot = |leaves: &str, arrives: &str| {
+        let found: Vec<&Vec<String>> = dots.iter().filter(|d| d.iter().any(|t| t.starts_with(leaves))).collect();
+        assert!(!found.is_empty(), "no dot says {leaves:?}");
+        for d in found {
+            assert!(d.iter().any(|t| t.starts_with(arrives)), "the dot saying {leaves:?} doesn't say {arrives:?}: {d:?}");
+        }
+    };
+    on_dot("y's resource is moved", "y acquires ownership of a resource");
+    on_dot("(temporary)'s resource is immutably borrowed by r", "(temporary) acquires ownership of a resource");
+}
+
+/// #1436: an exit after the conditional that assigned a `let x;` local in
+/// some branches only states the drop of its value if it has one, on the
+/// exit's row: `return`, `break` and `continue` out of the loop it is
+/// declared in, a panic (a `?` and a branch temporary's exits are pinned
+/// in `EXPECTED_TOOLTIPS`). So does an exit after a conditional that
+/// assigned it in every branch.
+#[test]
+fn exits_state_maybe_init_drops_1436() {
+    let rv = run_with_local_backend("exit_maybe_init_1436");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let flag = |n: &str| format!("{n} goes out of scope. Its resource is dropped here only if {n} was assigned in the branch that ran (Rust tracks this with a runtime drop flag).");
+    let at = |text: &str, src: &str, y: f64| {
+        let dots = dots_listing_tooltip(&timeline, text);
+        assert!(dots.iter().any(|&(_, dy)| dy == y), "no dot saying {text:?} at {src:?} (y={y}): {dots:?}");
+    };
+    let returns = code_rows_y(&code, "return;");
+    assert_eq!(returns.len(), 4, "return; rows: {returns:?}");
+    at(&flag("s"), "at_return: return;", returns[0]);
+    at(&flag("s"), "after_match: return;", returns[1]);
+    at(&flag("p"), "whole_struct: return;", returns[2]);
+    at("s goes out of scope. Its resource is dropped.", "every_branch: return;", returns[3]);
+    at(&flag("s"), "in_loop: break;", code_rows_y(&code, "break;")[0]);
+    at(&flag("s"), "in_loop: continue;", code_row_y(&code, "continue;"));
+    at(&flag("s"), "at_panic", code_row_y(&code, "panic!(\"no\");"));
 }
 
 /// #1391: `*b = ..` on a Box in a condition (plain `if`, match guard,

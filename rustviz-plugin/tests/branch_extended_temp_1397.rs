@@ -6,13 +6,13 @@
 // and is dropped by a drop flag at the end of the `let`'s block.
 // (Checked with rustc: a plain assignment `r = if ..`, a call's argument
 // and `loop { break &.. }` don't extend it, E0716.)
-// Known gaps, filed separately: `t` / `a` below aren't drawn borrowing
-// the temporary (#1435: a holder bound from a branch value borrows
-// nothing, also for `Some(&s)`), and `early_return`'s `return` doesn't
-// state the drop of the temporary it may hold (#1436, also for a `let
-// x;` local). A one-line guarded arm (`Some(n) if n > 0 =>
-// &String::from("pos"),`) draws the borrow a row above the acquire
-// (#1441, `known_bugs/1441_guard_arm_pairing_row.rs`).
+// `t` / `a` below are drawn borrowing the temporary (#1435: a holder
+// bound from a branch value borrowed nothing, also for `Some(&s)`), and
+// `early_return`'s `return` states the drop of the temporary it may hold
+// (#1436, also for a `let x;` local). A one-line guarded arm
+// (`Some(n) if n > 0 => &String::from("pos"),`) draws the temporary's
+// value on the borrow's dot (#1441, `guard_arm_pairing_row_1441.rs`).
+//
 struct W<'a> {
     r: &'a String,
 }

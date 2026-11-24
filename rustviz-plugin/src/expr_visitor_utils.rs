@@ -2434,3 +2434,15 @@ pub fn plain_block_tail<'a, 'tcx>(e: &'a Expr<'tcx>) -> Option<&'a Expr<'tcx>> {
     _ => None,
   }
 }
+
+/// The `in_scope` entry a `let x;` local (or a temporary a `let` extends
+/// through a branch), `id`, holds from its `let` until its block ends
+/// (`ExprVisitor::deferred_slots`, #1436). Never a column's name.
+pub fn deferred_slot(id: HirId) -> String {
+  format!("\u{0}let {}.{}", id.owner.def_id.local_def_index.as_u32(), id.local_id.as_u32())
+}
+
+/// Whether the `in_scope` entry `n` is a `deferred_slot`.
+pub fn is_deferred_slot(n: &str) -> bool {
+  n.starts_with('\u{0}')
+}

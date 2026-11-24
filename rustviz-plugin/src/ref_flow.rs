@@ -1073,6 +1073,30 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if let Some(tail) = plain_block_tail(init) {
       return self.holder_lenders(tail, ty);
     }
+    // `let t = if c { Some(&s) } else { None };`, `let a = match .. {
+    // .. => [&s], .. => [&u] };` (#1435): t may hold what any branch's
+    // value holds, as rustc sees it (`s.push('x')` while t is live is
+    // E0502). (Each branch draws its own borrows, `match_rhs`.) A value
+    // made from a variable the branch declares, or a temporary it makes,
+    // isn't known until the branch is visited: `add_arm_lenders`.
+    if let Some(bodies) = holder_branch_bodies(init) {
+      let typeck = self.tcx.typeck(init.hir_id.owner);
+      let mut out: Vec<ResourceTy> = Vec::new();
+      let mut is_mut = false;
+      for v in bodies.into_iter().filter_map(branch_value_expr) {
+        if typeck.expr_ty_opt(v).is_none_or(|t| t.is_never()) {
+          continue;
+        }
+        let (ls, m) = self.holder_lenders(v, ty);
+        is_mut |= m && !ls.is_empty();
+        for l in ls {
+          if !out.contains(&l) {
+            out.push(l);
+          }
+        }
+      }
+      return (out, is_mut);
+    }
     // `Some(W { a: &s, b: &mut t })`: each lender has its own kind (#708).
     let mixed = self.holder_lender_muts(init);
     if !mixed.is_empty() {
@@ -1669,4 +1693,16 @@ fn outside_pointees<'tcx>(ty: Ty<'tcx>, out: &mut Vec<ty::GenericArg<'tcx>>, ins
     ty::Param(_) => {}
     _ => out.extend(ty.walk()),
   }
+}
+
+/// The branch bodies of the `if` / `else` or `match` `init` (through
+/// nested ones), when it is one a `let` holder is bound from (#1435).
+pub fn holder_branch_bodies<'tcx>(init: &'tcx Expr<'tcx>) -> Option<Vec<&'tcx Expr<'tcx>>> {
+  if init.span.from_expansion()
+    || !matches!(init.kind, ExprKind::If(_, _, Some(_)) | ExprKind::Match(_, _, rustc_hir::MatchSource::Normal)) {
+    return None;
+  }
+  let mut bodies = Vec::new();
+  crate::visitor::conditional_branch_bodies(init, &mut bodies);
+  Some(bodies)
 }
