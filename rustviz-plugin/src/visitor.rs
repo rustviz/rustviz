@@ -13086,7 +13086,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             let evt = self.bind_evt(lhs_ty, hirid);
             let line = span_to_line(&init.span, &self.tcx);
             self.narrow_call_result_lenders(&name, &rap, init);
-            for b in self.pattern_ref_copy_borrow(&rap, &evt, init) {
+            // `let Some(f) = p else { return };` with `p = v.first()`:
+            // the copy out of p (`match_rhs`) gave f p's lender, with
+            // no arrow saying so, and `pattern_ref_borrows` only draws
+            // a lender not set yet. Draw it as for `if let Some(f) = p`:
+            // f borrows v (#1446).
+            let held = self.unset_lender_copied_from_holder(&rap, init);
+            let borrows = self.pattern_ref_copy_borrow(&rap, &evt, init);
+            if let (Some(old), true) = (held, borrows.is_empty()) {
+              self.borrow_map.insert(name.clone(), old);
+            }
+            for b in borrows {
               self.add_external_event(line, b);
             }
           }
@@ -13132,6 +13142,37 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       | PatKind::Expr(_)
       | PatKind::Range(..) => {}
     }
+  }
+
+  /// For `unset_lender_copied_from_holder`'s caller (`bind_walk_in`):
+  /// `reference`, bound inside a pattern of a `let` whose value is a
+  /// variable holding a borrow with no columns for its parts (`p:
+  /// Option<&String>`, an iterator), was given that variable's lender
+  /// by the copy (or move) out of it. Unset it, so
+  /// `pattern_ref_copy_borrow` draws the borrow; returns the old loan,
+  /// to put back if it draws none.
+  fn unset_lender_copied_from_holder(&mut self, reference: &ResourceAccessPoint, init: &'tcx Expr<'tcx>) -> Option<RefData> {
+    if !reference.is_ref() {
+      return None;
+    }
+    let mut e = init;
+    while let ExprKind::DropTemps(inner) = e.kind {
+      e = inner;
+    }
+    let ExprKind::Path(..) = e.kind else { return None };
+    let src = expr_to_rap_name(e, &self.tcx)?;
+    let holder = self.raps.get(&src).is_some_and(|rd| matches!(rd.rap, ResourceAccessPoint::Owner(_))
+      && rd.rap.holds_borrow());
+    let src_lender = self.borrow_map.get(&src).map(|d| d.lender.clone())?;
+    let rd = self.borrow_map.get_mut(reference.name())?;
+    if !holder || rd.lender != src_lender || matches!(rd.lender, ResourceTy::Anonymous) {
+      return None;
+    }
+    let old = rd.clone();
+    rd.lender = ResourceTy::Anonymous;
+    rd.co_lenders.clear();
+    rd.lender_muts.clear();
+    Some(old)
   }
 
   /// `match &mut t { (a, b) => … }` (#1215): like `let (a, b) = &mut t;`

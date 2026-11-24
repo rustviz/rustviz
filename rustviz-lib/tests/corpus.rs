@@ -26345,6 +26345,79 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
         ],
     },
+    TooltipExpect {
+        name: "let_else_holder_1446",
+        // #1446: `let Some(f) = p else { .. };` with p a value holding a
+        // borrow (`v.first()`, `v.last_mut()`): f got p's lender from the
+        // copy / move out of p with no arrow into f ("f is initialized with
+        // a copy of a value inside p" alone), yet f gave v back. As for `if
+        // let Some(f) = p`, f borrows v. (The `return` path of the `&mut`
+        // case still drops v while it's drawn lent: #1458.)
+        must_contain: &[
+            "Immutable borrow from v to f: f is a reference copied out of p",
+            "Mutable borrow from v to f: f is a reference moved out of p",
+            "f immutably borrows a resource",
+            "f mutably borrows a resource",
+            "v's resource is immutably borrowed by f; v is read-only while the borrow is live",
+            "v's resource is mutably borrowed by f; v can't be used while the borrow is live",
+            "Return immutably borrowed resource from f to v",
+            "Return mutably borrowed resource from f to v",
+        ],
+        must_not_contain: &[
+        ],
+    },
+    TooltipExpect {
+        name: "holder_scrutinee_1447",
+        // #1447: a holder (an iterator, an `Option<&mut String>`) whose
+        // scrutinee a pattern takes a reference out of. The binding gives
+        // v back in its arm; the holder's own end gave it back again,
+        // beside the arms on v's column (`match it.next()`), or at the join
+        // (`match o { .. }` on one line). Now the iterator's borrow ends
+        // on its column with no arrow, and the arms that bind nothing get
+        // v back where they start (from o when o is drawn there).
+        // `corpus_invariants_hold` pins the drawing (an event on v's dead
+        // column, v's line through the join dot).
+        must_contain: &[
+            "Return mutably borrowed resource from e to v",
+            "Return immutably borrowed resource from e to v",
+            "Return mutably borrowed resource from o to v",
+            "it's mutable borrow ends",
+            "it's immutable borrow ends",
+            // `used_after`: it2 still holds v after e's end (#575).
+            "v's resource is no longer borrowed by e, but is still mutably borrowed by it2",
+            "Return mutably borrowed resource from it2 to v",
+        ],
+        must_not_contain: &[
+            "Return mutably borrowed resource from it to v",
+            "Return immutably borrowed resource from it to v",
+        ],
+    },
+    TooltipExpect {
+        name: "holder_moved_into_call_1448",
+        // #1448: a holder moved into a call whose result a variable keeps
+        // (`it2.map(..).next().unwrap()`, `o.unwrap()`) hands it its loan:
+        // c / e give v back, and it2 / o no longer end a borrow after
+        // they were moved. One whose result keeps none of it (`it.copied()`
+        // on a `Vec<&String>`) ends nothing after the move either; one
+        // consumed by the call (`it3.count()`) still gives v back there.
+        must_contain: &[
+            "Move from it2 to map",
+            "Return immutably borrowed resource from c to v",
+            "Move from o to unwrap",
+            "Return mutably borrowed resource from e to v",
+            "Move from it to copied",
+            "Immutable borrow from a1 to c: next's signature gives the value it returns the same lifetime as the references stored in the value it was called on; unwrap passes the borrow on",
+            "Return immutably borrowed resource from it3 to v",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from it2 to v",
+            "it2's immutable borrow ends",
+            "Return mutably borrowed resource from o to v",
+            "o's mutable borrow ends",
+            "=it's immutable borrow ends",
+            "Return immutably borrowed resource from it to refs",
+        ],
+    },
 ];
 
 /// #1440: on the line where two loans of v end, the first end's dot (with
