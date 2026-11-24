@@ -26794,6 +26794,84 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "On this path rb",
         ],
     },
+    TooltipExpect {
+        name: "assign_branch_reborrow_holder_1482",
+        // #1482: a holder assigned a conditional whose branch gives it a
+        // `&mut` the branch declares (`v = if c { let r = &mut a; vec![r] }
+        // ..`): rustc reborrows r (v's type is known), and once r is out of
+        // scope v holds r's loan of a until v's last use. main drew v
+        // borrowing "*r", ended v's borrow at the join and r's after r's
+        // scope; and for y (`Option<&mut String>`), the `match` (w), the
+        // conditional inside `Some(..)`, a tuple's part, a struct's holder
+        // field and a `let` with its type written out (v2), the same, with x
+        // "reborrowing from r".
+        must_contain: &[
+            "Return mutably borrowed resource from v to a",
+            "Return mutably borrowed resource from v to b",
+            "Return mutably borrowed resource from y to s2",
+            "Mutable borrow from s2 to x: x is a reference moved out of y; y borrows from s1 and s2, so it may point into either, and both stay borrowed while x is in use",
+            "Return mutably borrowed resource from w to a",
+            "Return mutably borrowed resource from y to a",
+            "Return mutably borrowed resource from y to b",
+            "Return mutably borrowed resource from t.0 to a or b (t.0 may point into either; its borrow of both ends here)",
+            "Return mutably borrowed resource from w.o to a",
+            "Return mutably borrowed resource from w.o to b",
+            "Return mutably borrowed resource from v2 to a",
+            "Return mutably borrowed resource from v2 to b",
+        ],
+        must_not_contain: &[
+            "Return mutably borrowed resource from v to *r",
+            "Return mutably borrowed resource from r to a",
+            "Return mutably borrowed resource from r to b",
+            "v no longer borrows the resource r points to",
+            "Return mutably borrowed resource from y to *r",
+            "Return mutably borrowed resource from r2 to s2",
+            "y borrows from s1 and *r2",
+            "Return mutably borrowed resource from w to *q",
+            "Return mutably borrowed resource from q to a",
+            "Return mutably borrowed resource from t.0 to *r",
+            "Return mutably borrowed resource from x to *r",
+            "Mutable reborrow from r to x",
+            "Mutable reborrow from r2 to x",
+            "what it borrows from isn't shown",
+        ],
+    },
+    TooltipExpect {
+        name: "assign_branch_struct_fields_1483",
+        // #1483: a struct drawn with a column for its reference field, given
+        // a value its branch builds from a reference the branch declares (`h
+        // = if c { let r = &a; H(r) } ..`): h.0 borrows a or b, and keeps the
+        // loan until its last use, or h's drop when `impl Drop` reads it;
+        // each r's own borrow ends with its scope. main drew h.0 borrowing b
+        // only, "Copy from r to H" next to "Copy from r to h.0", and r's
+        // borrow ending (with return arrows) after r was out of scope; for a
+        // `&mut` field (m.0) it said "r's value is copied" and returned to
+        // "*r". Also for `let`, without `impl Drop`, a named field with a
+        // `match`, and a Copy struct.
+        must_contain: &[
+            "Return immutably borrowed resource from h.0 to a or b (h.0 may point into either; its borrow of both ends here)",
+            "Return immutably borrowed resource from h.0 to b",
+            "Return immutably borrowed resource from h2.0 to a or b (h2.0 may point into either; its borrow of both ends here)",
+            "Return immutably borrowed resource from g.0 to a or b (g.0 may point into either; its borrow of both ends here)",
+            "Return immutably borrowed resource from k.p to a or b (k.p may point into either; its borrow of both ends here)",
+            "Return immutably borrowed resource from k.p to b",
+            "Return mutably borrowed resource from m.0 to a or b (m.0 may point into either; its borrow of both ends here)",
+            "Return immutably borrowed resource from q.0 to a or b (q.0 may point into either; its borrow of both ends here)",
+        ],
+        must_not_contain: &[
+            "Copy from r to H",
+            "Copy from r to G",
+            "Copy from r to M",
+            "Copy from r to K",
+            "Return immutably borrowed resource from r to a",
+            "Return immutably borrowed resource from r to b",
+            "Return immutably borrowed resource from p to a",
+            "Return immutably borrowed resource from q to b",
+            "Return mutably borrowed resource from r to a",
+            "Return mutably borrowed resource from m.0 to *r",
+            "r's value is copied",
+        ],
+    },
 ];
 
 /// #1440: on the line where two loans of v end, the first end's dot (with
@@ -36706,6 +36784,40 @@ fn holder_local_ref_borrow_ends() {
         ("assign_branch_vec_holder_1477",
          &["b@L12:dot:static_reacquire", "a@L15:dot:static_lend", "b@L28:dot:static_lend"][..],
          &["b@L15:dot:static_lend", "r@L20:"][..]),
+    ] {
+        let tl = run_with_local_backend(snippet).timeline_panel_string();
+        for id in present {
+            assert!(tl.contains(&format!("data-rv-id=\"{}", id)), "{}: no {}", snippet, id);
+        }
+        for id in absent {
+            assert!(!tl.contains(&format!("data-rv-id=\"{}", id)), "{}: unexpected {}", snippet, id);
+        }
+    }
+}
+
+/// #1482, #1483: a reference a branch declares, whose loan a holder (or a
+/// struct's field) assigned the branch's value keeps, has nothing after
+/// its scope end: its borrow ends there, and the holder's at its last use
+/// (or drop). `(snippet, data-rv-id prefixes that must be there, prefixes
+/// that must not)`.
+#[test]
+fn branch_local_ref_ends_with_scope() {
+    for (snippet, present, absent) in [
+        // v is used on line 23: its borrow doesn't end at the join (22).
+        ("assign_branch_reborrow_holder_1482",
+         &["r@L19:dot:mutable_die+ref_go_out_of_scope", "r@L22:dot:mutable_die+ref_go_out_of_scope",
+           "v@L22:dot:branch_join\"", "r2@L43:dot:mutable_die+ref_go_out_of_scope",
+           "q@L60:dot:mutable_die+ref_go_out_of_scope", "y@L85:dot:mutable_die", "t.0@L104:dot:mutable_die"][..],
+         &["v@L22:dot:branch_join+mutable_die", "r@L23:", "r2@L44:", "r2@L45:", "r2@L46:", "q@L63:",
+           "r@L83:", "r@L84:", "r@L85:", "r@L104:", "r@L128:", "r@L129:", "r@L130:",
+           "v2@L146:dot:branch_join+mutable_die", "r@L147:"][..]),
+        // h's old loan of b ends where the old value is dropped (24); the
+        // new one at h's drop (37).
+        ("assign_branch_struct_fields_1483",
+         &["r@L30:dot:static_die+ref_go_out_of_scope", "h.0@L24:dot:static_die+branch",
+           "h.0@L37:dot:static_die+ref_go_out_of_scope", "h2.0@L52:dot:static_die+ref_go_out_of_scope",
+           "r@L117:dot:mutable_die+ref_go_out_of_scope"][..],
+         &["r@L37:", "r@L52:", "r@L70:", "p@L99:", "q@L99:", "r@L118:", "r@L138:"][..]),
     ] {
         let tl = run_with_local_backend(snippet).timeline_panel_string();
         for id in present {

@@ -6243,38 +6243,64 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// branches are paired after it, as before (`nest_arm_pairings`).
   /// Also for a holder that isn't Copy (`v = if c { let r = &a; vec![r]
   /// } else { let r = &b; vec![r] };`, `Option<&mut T>`, #1477): its old
-  /// value's drop is drawn where the assignment starts, as before. False,
-  /// doing nothing, unless some branch's value is such.
-  fn pair_holder_arms_in_branch(&mut self, expr: &'tcx Expr<'tcx>, lhs_expr: &'tcx Expr<'tcx>, rhs_expr: &'tcx Expr<'tcx>) -> bool {
+  /// value's drop is drawn where the assignment starts, as before. And
+  /// for a struct drawn with columns for its reference fields (`h = if c
+  /// { let r = &a; H(r) } else { .. };`, #1483): its fields' old loans
+  /// end where the assignment starts, as for `h = H(&a);`. Some(the
+  /// struct field ends left to draw: none) when paired; None, doing
+  /// nothing, unless some branch's value is such.
+  fn pair_holder_arms_in_branch(&mut self, expr: &'tcx Expr<'tcx>, lhs_expr: &'tcx Expr<'tcx>, rhs_expr: &'tcx Expr<'tcx>) -> Option<Vec<(usize, Vec<ResourceTy>, ResourceTy, bool)>> {
     if !matches!(expr.kind, ExprKind::Assign(..)) || expr.span.from_expansion() {
-      return false;
+      return None;
     }
-    let Some(cond) = self.conditional_value(rhs_expr) else { return false };
+    let cond = self.conditional_value(rhs_expr)?;
     let owner = lhs_expr.hir_id.owner;
     let lhs_ty = self.tcx.typeck(owner).node_type(lhs_expr.hir_id);
     if lhs_ty.is_ref() {
-      return false;
+      return None;
     }
     // (A Copy holder is copied into, any other moved into: `Some(r)`
     // with r a `&mut` moves r's reference into q.)
     let evt = if self.ty_is_copy(lhs_ty, owner) { Evt::Copy } else { Evt::Move };
-    let Some(ResourceTy::Value(rap)) = self.resource_of_lhs(lhs_expr) else { return false };
-    if rap.is_ref() || !rap.holds_borrow() || rap.is_union() {
-      return false;
+    let Some(ResourceTy::Value(rap)) = self.resource_of_lhs(lhs_expr) else { return None };
+    let fields = matches!(rap, ResourceAccessPoint::Struct(Struct { is_member: false, .. }))
+      && self.struct_members_deep(rap.name()).iter().any(|m| m.is_ref() || m.holds_borrow());
+    if rap.is_ref() || !(rap.holds_borrow() || fields) || rap.is_union() {
+      return None;
     }
     let mut bodies = Vec::new();
     conditional_branch_bodies(cond, &mut bodies);
     bodies.retain(|b| self.arm_value_uses_local_in(b, cond.span));
     if bodies.is_empty() {
-      return false;
+      return None;
     }
-    self.reassign_holder(&rap, cond, lhs_ty, expr_to_line(lhs_expr, &self.tcx));
+    let line = expr_to_line(lhs_expr, &self.tcx);
+    let ends = if rap.holds_borrow() {
+      self.reassign_holder(&rap, cond, lhs_ty, line);
+      Vec::new()
+    } else {
+      let ends = self.struct_field_borrow_ends(&rap, line);
+      self.reassign_struct_field_lenders(&rap, cond, lhs_ty, line);
+      // A field holding a borrow (`o: Option<&mut String>`) has none until
+      // a branch gives it one, as for `let w = if ..`: no loan with no
+      // lender is left to end ("what it borrows from isn't shown").
+      for m in self.struct_members_deep(rap.name()) {
+        if !m.is_ref() {
+          self.borrow_map.remove(m.name());
+        }
+      }
+      // Drawn now, before the conditional's fork on this row, as a
+      // holder's old loan is (`reassign_holder`): a branch's new borrow of
+      // an old lender is a loan of its own.
+      self.draw_struct_field_borrow_ends(ends, true);
+      Vec::new()
+    };
     for b in bodies {
       self.deferred_arm_binds.entry(b.hir_id).or_insert_with(|| (b, Vec::new())).1
         .push(ArmBind::Rhs(ResourceTy::Value(rap.clone()), evt.clone()));
       self.arms_paired_in_branch.insert(b.hir_id);
     }
-    true
+    Some(ends)
   }
 
   /// `q = if c { let r = &a; Some(r) } else { Some(&b) };` (#1463): an
@@ -6432,12 +6458,49 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// lender (`m` in `m = if c { &mut t } else { m }`, reborrowed through
   /// m, #1430); `kept`, r's old lenders, are added.
   pub(crate) fn resolve_branch_lenders(&mut self, r_name: &str, kept: Vec<ResourceTy>) {
+    let gone: BTreeSet<String> = self.borrow_map.get(r_name).into_iter()
+      .flat_map(|rd| rd.all_lenders().into_iter().chain(kept.iter().cloned()))
+      .filter_map(|l| match l {
+        ResourceTy::Deref(x) if self.went_out_of_scope(x.name()) => Some(x.name().to_owned()),
+        _ => None,
+      })
+      .collect();
+    self.replace_lenders_through(r_name, kept, &gone);
+  }
+
+  /// `v = if c { let r = &mut a; vec![r] } else { .. };`, `y = if c {
+  /// Some(&mut s1) } else { let r2 = &mut s2; Some(r2) };` (#1482): v's
+  /// type is known, so rustc reborrows r (`&mut *r`) where `let v = if
+  /// ..` moves it. r goes out of scope at its branch's end, and the loan
+  /// v holds from then on, until v's last use, is the one r made, of a:
+  /// once branch body `body` was paired with v (`name`, or one of its
+  /// parts), v's lenders reached through a reference `body` declares are
+  /// what that reference borrows, as `resolve_branch_lenders` does for a
+  /// reference left-hand side (#1431). r's own borrow ends with its scope.
+  pub(crate) fn resolve_arm_local_lenders(&mut self, name: &str, body: &'tcx Expr<'tcx>) {
+    struct Decls<'tcx> { tcx: rustc_middle::ty::TyCtxt<'tcx>, names: BTreeSet<String> }
+    impl<'tcx> Visitor<'tcx> for Decls<'tcx> {
+      fn visit_pat(&mut self, p: &'tcx Pat<'tcx>) {
+        if let PatKind::Binding(..) = p.kind {
+          self.names.insert(binding_name(&self.tcx, p.hir_id));
+        }
+        intravisit::walk_pat(self, p);
+      }
+    }
+    let mut d = Decls { tcx: self.tcx, names: BTreeSet::new() };
+    d.visit_expr(body);
+    self.replace_lenders_through(name, Vec::new(), &d.names);
+  }
+
+  /// `r_name`'s lenders (and `kept`), each `Deref(x)` of a reference x
+  /// in `gone` replaced by what x borrows.
+  fn replace_lenders_through(&mut self, r_name: &str, kept: Vec<ResourceTy>, gone: &BTreeSet<String>) {
     let Some(rd) = self.borrow_map.get(r_name) else { return };
     let before = rd.all_lenders();
     let mut all: Vec<ResourceTy> = Vec::new();
     for l in before.iter().cloned().chain(kept) {
       let through = match &l {
-        ResourceTy::Deref(x) if x.is_ref() && x.name() != r_name && self.went_out_of_scope(x.name()) =>
+        ResourceTy::Deref(x) if x.is_ref() && x.name() != r_name && gone.contains(x.name()) =>
           self.borrow_map.get(x.name()).map(|d| d.all_lenders()),
         _ => None,
       };
@@ -6519,7 +6582,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // A branch gives r back its own value (#1430): r's old loan lives on
     // along that path, so the write ends none of it.
     let keeps_old_loan = ref_arms_keep == Some(true);
-    let paired_in_branch = destructure_hid.is_none() && self.pair_holder_arms_in_branch(expr, lhs_expr, rhs_expr);
+    let branch_field_ends = if destructure_hid.is_none() { self.pair_holder_arms_in_branch(expr, lhs_expr, rhs_expr) } else { None };
+    let paired_in_branch = branch_field_ends.is_some();
     let rhs_lo = *self.unique_id;
     if destructure_hid.is_none() && !ref_arms {
       self.visit_expr(rhs_expr);
@@ -7343,7 +7407,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // new value's borrows the same way (a variable's go with it,
     // `transfer_ref_fields`), while its old loans last until
     // hold's last use (#531; see `struct_field_borrow_ends`).
+    // (Read before the branches that pair the struct in them were visited,
+    // #1483.)
     let struct_field_ends = match (&lhs_rty, expr.kind) {
+      _ if branch_field_ends.is_some() => branch_field_ends.clone().unwrap_or_default(),
       (ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)), ExprKind::Assign(..))
         if !lhs_is_union_field && matches!(rhs_expr.kind, ExprKind::Struct(..)) => {
         let rap = rap.clone();
@@ -7491,7 +7558,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // holds tr's borrow (#1384).
         self.store_ref_copy_into_holder(lhs_expr, rhs_expr, n_events);
       }
-      self.draw_struct_field_borrow_ends(struct_field_ends);
+      self.draw_struct_field_borrow_ends(struct_field_ends, false);
       // `v[1] = v[2]`: match_rhs has nothing to say about some
       // RHS shapes (an index read, a field of a call, …), but the
       // element is still overwritten.

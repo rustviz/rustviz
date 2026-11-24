@@ -3102,6 +3102,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           // Each branch gives it its value, and with it its loans (its
           // parts' too: `(Some(r), 1)`), which the arms' loans are merged
           // into (`arm_borrows_end`, #1453).
+          let mut bound: Vec<String> = Vec::new();
           if let ResourceTy::Value(r) = &lhs {
             let prefix = format!("{}.", r.name());
             #[expect(clippy::disallowed_methods, reason = "collected into a set")]
@@ -3110,6 +3111,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
               .filter(|(_, rd)| rd.rap.is_ref() || rd.rap.holds_borrow())
               .map(|(n, _)| n.clone())
               .collect();
+            if !r.is_ref() {
+              bound = names.clone();
+            }
             self.arm_value_binds.extend(names);
           }
           self.emit_arm_holder_literal_borrows(&lhs, body);
@@ -3118,6 +3122,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
               add_lenders(&mut lenders, rd);
             }
             self.set_part_lenders(n, lenders);
+          }
+          // What a holder (or its part) reborrows through a reference
+          // the branch declares is that reference's loan once the branch
+          // is over (#1482).
+          bound.sort();
+          for n in &bound {
+            self.resolve_arm_local_lenders(n, body);
           }
         }
         ArmBind::Pat(pat) => self.pair_pat_with_value(pat, body),
@@ -7181,9 +7192,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// is in place. A lender the field's new value borrows too
   /// (`hold = make(hold.r)`, `hold = H { r: hold.r }`) stays borrowed by
   /// it: no end is drawn there, only where the new borrow ends.
-  pub fn draw_struct_field_borrow_ends(&mut self, ends: Vec<(usize, Vec<ResourceTy>, ResourceTy, bool)>) {
+  /// (`all_new`: every borrow of the new value is a new loan.)
+  pub fn draw_struct_field_borrow_ends(&mut self, ends: Vec<(usize, Vec<ResourceTy>, ResourceTy, bool)>, all_new: bool) {
     for (end, lenders, holder, is_mut) in ends {
       let now = holder.extract_rap()
+        .filter(|_| !all_new)
         .and_then(|h| self.borrow_map.get(h.name()))
         .map(|rd| rd.all_lenders())
         .unwrap_or_default();
@@ -11698,7 +11711,7 @@ pub fn print_out_of_scope(&mut self){
     // that drop may use the borrow (an `impl Drop`). A struct never
     // used again gives it back at the literal (#1310).
     let mut member_ends: Vec<(String, usize)> = Vec::new();
-    #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "collected into a Vec, each entry lowered on its own")]
+    #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "collected into a Vec, each entry set on its own")]
     for (name, rd) in self.borrow_map.iter() {
       if !self.raps.get(name).is_some_and(|r| r.rap.is_ref() && r.rap.is_member())
         || matches!(rd.lender, ResourceTy::Caller | ResourceTy::Anonymous)
@@ -11709,7 +11722,12 @@ pub fn print_out_of_scope(&mut self){
       let Some((root, _)) = name.split_once('.') else { continue };
       let live = self.last_live_line(root, (rd.assigned_at, usize::MAX)).unwrap_or(rd.assigned_at)
         .max(self.last_drop_use_line(root).unwrap_or(rd.assigned_at));
-      if live < rd.lifetime {
+      // (Also raised: a branch's `H(r)` in `let h = if c { let r = &a;
+      // H(r) } else { .. };` copies r, whose end rustc puts at h's drop
+      // (`impl Drop for H`), into h.0, whose end was its last read: h.0
+      // keeps r's loan to h's drop, and r's own borrow ends with its
+      // scope, #1483.)
+      if live != rd.lifetime {
         member_ends.push((name.clone(), live.max(rd.assigned_at)));
       }
     }

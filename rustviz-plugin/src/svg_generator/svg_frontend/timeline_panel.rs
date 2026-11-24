@@ -7517,7 +7517,10 @@ fn field_lender_walk(
                 // A new assignment replaces what it pointed into (the
                 // other lenders of its own row are alternatives).
                 list.retain(|(_, r)| r == row);
-                if !list.iter().any(|(n, _)| *n == name) {
+                // A reborrow through a reference (`M(r)`, `r: &mut String`)
+                // points into what that reference borrows: the field's end
+                // names those, not the reference (#1482).
+                if !lender.is_ref() && !list.iter().any(|(n, _)| *n == name) {
                     list.push((name.clone(), *row));
                 }
                 let key = (*field.hash(), *row, matches!(ev, ExternalEvent::MutableBorrow { .. }));
