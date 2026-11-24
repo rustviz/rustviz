@@ -2,8 +2,9 @@
 // reference the branch declares (`let r2 = &a; Some(r2)`). q may hold
 // r2's reference (into a) or one into b, so both stay borrowed until
 // q's last use. The copy of r2 into `Some` is the holder's borrow, not
-// a copy into the constructor. (Known wrong: the then-branch's borrow of
-// a is drawn on a's main column between its branch legs, #1463.)
+// a copy into the constructor. Each branch's value goes to q in that
+// branch, so the then-branch's borrow of a is drawn on a's leg there
+// (#1463).
 fn main() {
     let a = String::from("a");
     let b = String::from("b");

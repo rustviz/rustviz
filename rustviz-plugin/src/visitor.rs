@@ -6191,6 +6191,42 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     true
   }
 
+  /// `q = if c { let r = &a; Some(r) } else { Some(&b) };` (#1463): an
+  /// assignment drawn as such pairs each branch's value with q after the
+  /// conditional `cond` was visited (event ids `rhs_ids`) and its events
+  /// were put in its `Branch` event, so the pairing's events
+  /// (`rhs_arm_ids`) were added on the function's own column, where a
+  /// lender the branches split has no line. Each goes into its branch,
+  /// as a `let`'s do (`take_branch_events`), and what it touches from
+  /// outside the branch is live in it.
+  fn nest_arm_pairings(&mut self, cond: &'tcx Expr<'tcx>, rhs_ids: std::ops::Range<usize>) {
+    let Some(k) = self.preprocessed_events.iter()
+      .rposition(|(_, e)| matches!(e, ExternalEvent::Branch { .. }) && rhs_ids.contains(&e.get_id())) else { return };
+    let mut arms: Vec<(Vec<(usize, usize)>, &'tcx Expr<'tcx>)> = Vec::new();
+    arm_value_paths(cond, &self.preprocessed_events, k, Vec::new(), &mut arms);
+    for (path, body) in arms {
+      let Some((lo, hi)) = self.rhs_arm_ids.get(&body.hir_id).copied() else { continue };
+      let mut taken: Vec<(usize, ExternalEvent)> = Vec::new();
+      self.preprocessed_events.retain(|(l, e)| {
+        let mine = (lo..hi).contains(&e.get_id()) && !matches!(e, ExternalEvent::Branch { .. });
+        if mine {
+          taken.push((*l, e.clone()));
+        }
+        !mine
+      });
+      if taken.is_empty() {
+        continue;
+      }
+      let ids: HashSet<usize> = taken.iter().map(|(_, e)| e.get_id()).collect();
+      for evs in self.event_line_map.values_mut() {
+        evs.retain(|e| !ids.contains(&e.get_id()));
+      }
+      let mut touched: HashSet<ResourceAccessPoint> = HashSet::new();
+      collect_event_live_vars(&taken, &mut touched);
+      nest_in_arm(&mut self.preprocessed_events, &path, taken, &touched);
+    }
+  }
+
   /// `v = if c { f } else { g };` (or a `match`) where v may hold a
   /// value already (#1010): drawn like `if c { v = f; } else { v = g;
   /// }`. Each branch's value is paired with v once the branch has been
@@ -6397,9 +6433,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // A branch gives r back its own value (#1430): r's old loan lives on
     // along that path, so the write ends none of it.
     let keeps_old_loan = ref_arms_keep == Some(true);
+    let rhs_lo = *self.unique_id;
     if destructure_hid.is_none() && !ref_arms {
       self.visit_expr(rhs_expr);
     }
+    let rhs_ids = rhs_lo..*self.unique_id;
 
     // `x = rhs` where x came from `let x;` and is still
     // uninitialized here: this initializes x (#234). If only some
@@ -7276,6 +7314,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.mark_branch_results_kept(&lhs_rty.real_name(), rhs_expr);
       } else {
         self.match_rhs(lhs_rty.clone(), rhs_expr, e);
+        // Only for a value that holds borrows (or has parts that do): their
+        // lenders may be split by the branches. (A reference is paired in
+        // its branches above, `ref_arms`, #1393.)
+        let holds = match &lhs_rty {
+          ResourceTy::Value(rap) => {
+            let prefix = format!("{}.", rap.name());
+            #[expect(clippy::disallowed_methods, reason = "`any` over the map: order never observed")]
+            let part_holds = self.raps.iter().any(|(n, rd)| n.starts_with(&prefix) && (rd.rap.is_ref() || rd.rap.holds_borrow()));
+            rap.holds_borrow() || part_holds
+          }
+          _ => false,
+        };
+        if let (true, Some(cond)) = (holds && is_assign && destructure_hid.is_none() && !lhs_ty.is_ref(), self.conditional_value(rhs_expr)) {
+          self.nest_arm_pairings(cond, rhs_ids.clone());
+        }
       }
       // A field the right-hand side moved out after it was given its
       // new value (`t.0` in `t = (t.1, t.0)`, whose move into t.1 is
@@ -12055,10 +12108,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let mut left: Vec<&'tcx Expr<'tcx>> = self.deferred_arm_binds.values()
       .map(|(body, _)| *body).filter(|b| init.span.contains(b.span)).collect();
     left.sort_by_key(|b| b.span.lo());
+    // (The conditional's arms were merged already: an enclosing one's
+    // mustn't merge these, #1453.)
+    let binds = self.arm_value_binds.clone();
     for body in left {
       warn!("bind_left_arms: branch value at {:?} wasn't paired when its branch was visited", body.span);
       self.bind_deferred_arm(body);
     }
+    self.arm_value_binds = binds;
   }
 
   /// Whether `pat` takes a value of `init`'s type apart into
@@ -15507,4 +15564,69 @@ struct ScrutTempMoves {
   takers: Vec<Vec<String>>,
   /// The movers' bindings, each with its line.
   mover_ids: Vec<(HirId, usize)>,
+}
+
+/// The branch bodies of the conditional `cond`, whose `Branch` event is
+/// `events[k]`, each with its path of (Branch event id, arm index) pairs
+/// down through the nested `Branch` events of an `else if` (or of a
+/// branch whose value is another conditional) (#1463). Nothing for a
+/// `Branch` whose arms aren't `cond`'s one for one.
+fn arm_value_paths<'tcx>(
+  cond: &'tcx Expr<'tcx>,
+  events: &[(usize, ExternalEvent)],
+  k: usize,
+  prefix: Vec<(usize, usize)>,
+  out: &mut Vec<(Vec<(usize, usize)>, &'tcx Expr<'tcx>)>,
+) {
+  let ExternalEvent::Branch { branches, id, .. } = &events[k].1 else { return };
+  let bodies: Vec<&'tcx Expr<'tcx>> = match cond.kind {
+    ExprKind::If(_, then, Some(els)) => vec![then, els],
+    ExprKind::Match(_, arms, rustc_hir::MatchSource::Normal) => arms.iter().map(|a| a.body).collect(),
+    _ => return,
+  };
+  if bodies.len() != branches.len() {
+    return;
+  }
+  for (a, body) in bodies.into_iter().enumerate() {
+    let mut path = prefix.clone();
+    path.push((*id, a));
+    match branch_value_expr(body) {
+      Some(v) if !v.span.from_expansion()
+        && matches!(v.kind, ExprKind::If(_, _, Some(_)) | ExprKind::Match(_, _, rustc_hir::MatchSource::Normal)) => {
+        let inner = &branches[a].e_data;
+        if let Some(j) = inner.iter().rposition(|(_, e)| matches!(e, ExternalEvent::Branch { .. })) {
+          arm_value_paths(v, inner, j, path, out);
+        }
+      }
+      _ => out.push((path, body)),
+    }
+  }
+}
+
+/// Puts `taken` into the arm `path` (see `arm_value_paths`) leads to,
+/// each after that arm's events on its line or earlier, and makes the
+/// variables in `touched` that the arms on the way don't declare live
+/// in each `Branch` on it (#1463).
+fn nest_in_arm(
+  events: &mut [(usize, ExternalEvent)],
+  path: &[(usize, usize)],
+  taken: Vec<(usize, ExternalEvent)>,
+  touched: &HashSet<ResourceAccessPoint>,
+) {
+  let Some(((bid, a), rest)) = path.split_first() else { return };
+  let Some((_, ExternalEvent::Branch { branches, live_vars, .. })) = events.iter_mut()
+    .find(|(_, e)| matches!(e, ExternalEvent::Branch { .. }) && e.get_id() == *bid) else { return };
+  let Some(arm) = branches.get_mut(*a) else { return };
+  #[expect(clippy::disallowed_methods, reason = "collected into a set")]
+  let outside: HashSet<ResourceAccessPoint> = touched.iter().filter(|v| !arm.decl_vars.contains(*v)).cloned().collect();
+  #[expect(clippy::disallowed_methods, reason = "added to a set")]
+  live_vars.extend(outside.iter().cloned());
+  if !rest.is_empty() {
+    return nest_in_arm(&mut arm.e_data, rest, taken, &outside);
+  }
+  for ev in taken {
+    let at = arm.e_data.iter().rposition(|(l, _)| *l <= ev.0).map_or(0, |i| i + 1);
+    arm.e_data.insert(at, ev);
+  }
+  arm.line_map = create_line_map(&arm.e_data);
 }
