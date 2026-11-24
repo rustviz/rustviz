@@ -2152,6 +2152,30 @@ pub fn event_dot_acquire_loop_element_ref(my_name: &String, collection: &String)
     )
 }
 
+// `for (s, k) in names` (#1390): "the `.0` of each element of names",
+// or "each element of v" for the whole element (`for &y in &v`).
+pub fn element_part(element: &str, path: &str, collection: &str) -> String {
+    if path.is_empty() {
+        format!("{} of {}", element, collection)
+    } else {
+        format!("the `{}` of {} of {}", path, element, collection)
+    }
+}
+
+// A binding of a destructuring `for` head (`for (s, k) in names`,
+// `for &(a, b) in &pairs`; #1390): what it gets from each element.
+pub fn event_dot_acquire_loop_element_part(my_name: &String, collection: &String, path: &str, copy: bool, is_ref: bool) -> String {
+    let part = element_part("an element", path, &styled_name_html(collection));
+    let name = styled_name_html(my_name);
+    if copy {
+        format!("{} is bound to a copy of {}", name, part)
+    } else if is_ref {
+        format!("{} is bound to a mutable reference moved out of {}", name, part)
+    } else {
+        format!("{} takes ownership of {}", name, part)
+    }
+}
+
 pub fn event_dot_acquire(my_name: &String) -> String {
     // update styling
     let my_name_fmt = styled_name_html(my_name);
@@ -4719,7 +4743,8 @@ pub fn event_dot_branch_merge_after_break(my_name: &String, breaking: usize) -> 
 }
 
 // Dashed rest of an `if` / `match` arm after the borrow held by a
-// reference declared before the conditional has ended in that arm.
+// reference declared before the conditional has ended in that arm (or
+// before the conditional, until an arm gives it a new one, #1393).
 pub fn state_ref_borrow_ended(my_name: &String) -> String {
     format!("{0}'s borrow has ended on this path", styled_name_html(my_name))
 }
@@ -5840,6 +5865,12 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
     // `for y in ys` with Copy elements: each is copied (#1372).
     if let ExternalEvent::Move { loop_head: LoopHead::CollectionCopy, .. } = external_event {
         title = format!("Copy of each element of {} to {}", styled_from_string, styled_to_string);
+    }
+    // `for (s, k) in names`: one arrow per binding, for the part of each
+    // element it gets (#1390).
+    if let ExternalEvent::Move { loop_head: LoopHead::Part { path, copy, .. }, .. } = external_event {
+        let what = if *copy { "Copy" } else { "Move" };
+        title = format!("{} of {} to {}", what, element_part("each element", path, &styled_from_string), styled_to_string);
     }
     // A Copy-typed value a call returns (`let n = v.len();`): the
     // source is the call's result, not a variable (or anything)

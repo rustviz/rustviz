@@ -15745,14 +15745,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "marks's resource is no longer immutably borrowed",
             "w's resource is mutably borrowed by the `for` loop's iterator; w can't be used until the loop ends",
             "w's resource is no longer mutably borrowed",
-            // Each loop variable is a copy of an element, not a borrow.
-            "y is bound to a copyable value",
+            // Each loop variable is a copy of an element, not a borrow,
+            // drawn as an arrow from the collection (#1390). (`for &n in
+            // nums.iter()` has no place to draw it from.)
+            "y is bound to a copy of an element of v",
+            "Copy of each element of v to y",
             "y holds a copyable value",
             "y goes out of scope",
-            "a is bound to a copyable value",
-            "b is bound to a copyable value",
+            "a is bound to a copy of the `.0` of an element of pairs",
+            "b is bound to a copy of the `.1` of an element of pairs",
             "n is bound to a copyable value",
-            "x is bound to a copyable value",
+            "x is bound to a copy of an element of w",
         ],
         must_not_contain: &[
             "y is bound to an immutable reference",
@@ -15780,17 +15783,19 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "words's resource is immutably borrowed by the `for` loop's iterator; words is read-only until the loop ends",
             "words's resource is no longer immutably borrowed",
-            "w is bound to an immutable reference",
+            // (A copy of the `&str` in each element, #1390.)
+            "w is bound to a copy of an element of words",
+            "Copy of each element of words to w",
             "w's immutable borrow ends (what it borrows from isn't shown)",
             "pairs's resource is immutably borrowed by the `for` loop's iterator; pairs is read-only until the loop ends",
-            "k is bound to an immutable reference",
+            "k is bound to a copy of the `.0` of an element of pairs",
             "k's immutable borrow ends (what it borrows from isn't shown)",
-            "n is bound to a copyable value",
+            "n is bound to a copy of the `.1` of an element of pairs",
             "tags's resource is mutably borrowed by the `for` loop's iterator; tags can't be used until the loop ends",
             "tags's resource is no longer mutably borrowed",
             "tags goes out of scope. Its resource is dropped.",
             // `&mut t` copies a shared `&str` out of `&mut &str`.
-            "t is bound to an immutable reference",
+            "t is bound to a copy of an element of tags",
             "t's immutable borrow ends (what it borrows from isn't shown)",
             // `&ref s` borrows the String inside names: still drawn.
             "names's resource is immutably borrowed by s; names is read-only while the borrow is live",
@@ -21007,8 +21012,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s4.name's resource is moved",
             "s4.name goes out of scope. No resource is dropped.",
             "s5.name's resource is moved",
+            // set_if's implicit else arm, after slot's borrow ended (#1438).
+            "slot's borrow has ended on this path",
         ],
         must_not_contain: &[
+            "slot has no value yet",
             "q2.s goes out of scope. Its resource is dropped.",
             "q3.s goes out of scope. Its resource is dropped.",
             "q4.s goes out of scope. Its resource is dropped.",
@@ -24549,18 +24557,22 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // #1372: `for y in ys` with Copy elements moves ys into the
         // loop's iterator and copies each element into y: an arrow out
         // of ys says so (nothing left ys). The `&mut` elements of `refs`
-        // are references moved out, which own nothing (r's lender is
-        // #1389).
+        // are references moved out, which own nothing; r borrows what
+        // they borrow, a and b, and gives them back where the loop ends
+        // (#1389), not to refs.
         must_contain: &[
             "ys's resource is moved into the `for` loop's iterator",
             "Copy of each element of ys to y",
             "y is bound to a copy of an element of ys",
             "Move of each element of refs to r",
             "r is bound to a mutable reference moved out of refs",
+            "Return mutably borrowed resource from r to a",
+            "Return mutably borrowed resource from r to b",
         ],
         must_not_contain: &[
             "y is bound to a copyable value",
             "r takes ownership of an element of refs",
+            "Return mutably borrowed resource from r to refs",
         ],
     },
     TooltipExpect {
@@ -25453,6 +25465,100 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "v's resource is immutably borrowed by third₂",
         ],
+    },
+    TooltipExpect {
+        name: "for_ref_holder_1389",
+        // #1389: `for r in refs` (refs: Vec<&mut String>) moves refs into
+        // the loop's iterator; each r is one of the references refs held,
+        // so r borrows a or b and gives them back where the loop ends. It
+        // gave its borrow back to refs, which the loop had moved (and a, b
+        // were never given back). The same for `Vec<&String>` and for a
+        // `more.into_iter()` head (drawn as "Mutable borrow from more to m").
+        must_contain: &[
+            "Move of each element of refs to r",
+            "r is bound to a mutable reference moved out of refs",
+            "Return mutably borrowed resource from r to a",
+            "Return mutably borrowed resource from r to b",
+            "a's resource is no longer mutably borrowed",
+            "b's resource is no longer mutably borrowed",
+            "Copy of each element of shared to s",
+            "Return immutably borrowed resource from s to c",
+            "Return immutably borrowed resource from s to d",
+            "d's resource is no longer immutably borrowed",
+            "Return mutably borrowed resource from m to e",
+            "e's resource is no longer mutably borrowed",
+        ],
+        must_not_contain: &[
+            "Return mutably borrowed resource from r to refs",
+            "refs's resource is no longer mutably borrowed",
+            "Return immutably borrowed resource from s to shared",
+            "shared's resource is no longer immutably borrowed",
+            "Mutable borrow from more to m",
+            "more's resource is mutably borrowed by m",
+            "Return mutably borrowed resource from m to more",
+            "Return mutably borrowed resource from more to e",
+        ],
+    },
+    TooltipExpect {
+        name: "for_destructure_1390",
+        // #1390: a destructuring `for` head draws an arrow from the
+        // collection to each binding, as `let (s, k) = pair;` draws one
+        // from each field. "names is moved into the loop's iterator" had
+        // no arrow leaving names, and s, k said "acquires ownership of a
+        // resource" / "is bound to a copyable value" with nothing drawn
+        // into them.
+        must_contain: &[
+            "names's resource is moved into the `for` loop's iterator",
+            "Move of the `.0` of each element of names to s",
+            "Copy of the `.1` of each element of names to k",
+            "s takes ownership of the `.0` of an element of names",
+            "k is bound to a copy of the `.1` of an element of names",
+            "Copy of the `.0` of each element of pairs to p",
+            "Copy of the `.1` of each element of pairs to q",
+            "Move of the `.name` of each element of ps to name",
+            "Copy of the `.n` of each element of ps to n",
+            "Move of the `.0.0` of each element of nest to u",
+            "Copy of the `.0.1` of each element of nest to w",
+            "Move of the `.1` of each element of nest to z",
+            "Move of the `.0` of each element of firsts to f",
+            // `&(x, y)` copies out of each element the loop's iterator
+            // borrows.
+            "kept's resource is immutably borrowed by the `for` loop's iterator; kept is read-only until the loop ends",
+            "a value inside kept is copied",
+            "Copy of the `.0` of each element of kept to x",
+            "x is bound to a copy of the `.0` of an element of kept",
+        ],
+        must_not_contain: &[
+            "=s acquires ownership of a resource",
+            "k is bound to a copyable value",
+            "p is bound to a copyable value",
+            "=name acquires ownership of a resource",
+            "=z acquires ownership of a resource",
+            "x is bound to a copyable value",
+        ],
+    },
+    TooltipExpect {
+        name: "assign_branch_ref_arms_1393",
+        // #1393: `r = if c { let y = &a; y } else if .. { first(&v) } else {
+        // &b };` with r holding a reference already: each branch's value
+        // goes into r in that branch, before the branch's variables go out
+        // of scope (`ref_arm_copy_before_scope_end` checks the order). x's
+        // dot said "x goes out of scope / x's reference is copied".
+        must_contain: &[
+            "Copy from y to r",
+            "Immutable borrow from v to r: first's signature gives the reference it returns the same lifetime as its argument",
+            "Copy from x to r",
+            "x's reference is copied (not the resource it points to)",
+            "y's reference is copied (not the resource it points to)",
+            "r is assigned a copy of y's reference",
+            "r is assigned a copy of x's reference",
+            // r's dashed legs before each branch gives it its reference.
+            "r's borrow has ended on this path",
+        ],
+        // (The false picture was the order of x's dots, "x goes out of
+        // scope" before "x's reference is copied": checked in
+        // `ref_arm_copy_before_scope_end`. r has a value all along.)
+        must_not_contain: &["r has no value yet"],
     },
 ];
 
@@ -30975,10 +31081,15 @@ fn reads_of_the_old_reference_come_before_its_end_and_the_swap_ends_on_its_row()
     let timeline = run_with_local_backend("ref_reassign_reads_rhs_first").timeline_panel_string();
     let at = |l: &[String], t: &str| l.iter().position(|x| x == t);
     let (read, end, start) = ("*r's value is copied", "r's immutable borrow ends", "r immutably borrows a value");
-    let ordered = dots_where(&timeline, |l| matches!((at(l, read), at(l, end), at(l, start)), (Some(a), Some(b), Some(c)) if a < b && b < c));
+    let ordered = dots_where(&timeline, |l| matches!((at(l, read), at(l, end)), (Some(a), Some(b)) if a < b));
     let listed = dots_where(&timeline, |l| at(l, read).is_some());
     assert!(!ordered.is_empty() && ordered == listed,
-        "want one dot listing {:?}, {:?}, {:?} in that order (got {:?}, dots listing the read: {:?})", read, end, start, ordered, listed);
+        "want one dot listing {:?}, {:?} in that order (got {:?}, dots listing the read: {:?})", read, end, ordered, listed);
+    // The new borrow is made in each branch (`r = if *r > 0 { &b } else
+    // { &c };`, #1393), after that dot.
+    let starts: Vec<(f64, f64)> = dots_listing_tooltip(&timeline, start).into_iter().filter(|d| d.1 > ordered[0].1).collect();
+    assert!(starts.len() == 2,
+        "want {:?} in each branch, after the read and the end at {:?} (got {:?})", start, ordered[0], starts);
 
     let rv = run_with_local_backend("ref_swap_keeps_borrow");
     let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
@@ -35163,6 +35274,54 @@ fn destructure_cycle_one_dot_per_target() {
             assert_eq!(ids.len(), 1, "{} has dots {:?} on line {}", v, ids, line);
             // Its value moves out, then the new one arrives.
             assert!(ids[0].ends_with("move+acquire") && !ids[0].contains("acquire+move"), "{} on line {}: {}", v, line, ids[0]);
+        }
+    }
+}
+
+/// #1391: `*b = ..` on a Box in a condition (plain `if`, match guard,
+/// `while let` chain, `if let` chain) has the drop mark on the write's
+/// dot, as outside a condition (#1345); it had none, or a dot of its own
+/// after the condition's later events (after `let c = b;` moved b).
+#[test]
+fn box_write_in_condition_drop_marks() {
+    let dots_of = |tl: &str, id: &str| -> Vec<String> {
+        tl.match_indices(&format!("data-rv-id=\"{}:dot:", id))
+            .map(|(i, _)| { let rest = &tl[i + 12..]; rest[..rest.find('"').unwrap()].to_owned() })
+            .collect()
+    };
+    let tl = run_with_local_backend("edition2024/box_write_in_condition_1391").timeline_panel_string();
+    for id in ["b@L8", "b@L13", "b@L17", "b@L21"] {
+        let dots = dots_of(&tl, id);
+        assert!(dots.iter().any(|d| d.starts_with(&format!("{}:dot:acquire+owner_drop_at_reassign", id))), "{}'s dots: {:?}", id, dots);
+        assert!(!dots.iter().any(|d| d.contains(":dot:owner_drop_at_reassign")), "{}'s drop on a dot of its own: {:?}", id, dots);
+    }
+    let tl = run_with_local_backend("edition2024/chain_write_then_move_603").timeline_panel_string();
+    let dots = dots_of(&tl, "b@L4");
+    assert!(dots.iter().any(|d| d == "b@L4:dot:acquire+owner_drop_at_reassign+move"), "b's dots: {:?}", dots);
+    let tl = run_with_local_backend("edition2024/if_let_chain_box_write").timeline_panel_string();
+    let dots = dots_of(&tl, "b@L7");
+    assert!(dots.iter().any(|d| d == "b@L7:dot:acquire+owner_drop_at_reassign"), "b's dots: {:?}", dots);
+}
+
+/// #1393: `r = if c { let y = &a; y } else { &b };` with r a reference
+/// copies y into r in y's branch, before y goes out of scope: y's dot
+/// that says its reference is copied comes before its scope end on that
+/// row (it came after: the copy was drawn after the conditional).
+#[test]
+fn ref_arm_copy_before_scope_end() {
+    for (snippet, refs) in [
+        ("assign_branch_ref_1335", &[("y", 9), ("z", 13)][..]),
+        ("assign_branch_ref_arms_1393", &[("y", 16), ("x", 19)][..]),
+        ("assign_branch_mut_ref_arms_1393", &[("w", 9)][..]),
+    ] {
+        let tl = run_with_local_backend(snippet).timeline_panel_string();
+        for (v, line) in refs {
+            let ids: Vec<&str> = tl.match_indices(&format!("data-rv-id=\"{}@L{}:dot:", v, line))
+                .map(|(i, _)| { let rest = &tl[i + 12..]; &rest[..rest.find('"').unwrap()] })
+                .collect();
+            let copied = ids.iter().position(|d| d.contains("duplicate") || d.contains("mutable_lend") || d.contains("move"));
+            let gone = ids.iter().position(|d| d.contains("go_out_of_scope"));
+            assert!(matches!((copied, gone), (Some(c), Some(g)) if c < g), "{}: {}'s dots on line {}: {:?}", snippet, v, line, ids);
         }
     }
 }
