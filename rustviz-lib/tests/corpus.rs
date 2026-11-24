@@ -26351,8 +26351,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // borrow (`v.first()`, `v.last_mut()`): f got p's lender from the
         // copy / move out of p with no arrow into f ("f is initialized with
         // a copy of a value inside p" alone), yet f gave v back. As for `if
-        // let Some(f) = p`, f borrows v. (The `return` path of the `&mut`
-        // case still drops v while it's drawn lent: #1458.)
+        // let Some(f) = p`, f borrows v. (On the `return` path of the `&mut`
+        // case p gives v back before the drop, #1458.)
         must_contain: &[
             "Immutable borrow from v to f: f is a reference copied out of p",
             "Mutable borrow from v to f: f is a reference moved out of p",
@@ -26416,6 +26416,73 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "o's mutable borrow ends",
             "=it's immutable borrow ends",
             "Return immutably borrowed resource from it to refs",
+        ],
+    },
+    TooltipExpect {
+        name: "let_else_holder_return_1458",
+        // #1458: `let Some(f) = p else { return };` with p an `Option<&mut
+        // String>` (or a `Result`, or a `zip` of two) that the pattern
+        // moves f out of. On the `else` path p wasn't moved and its loan
+        // has ended, but nothing gave v back there: the exit dropped v
+        // while it was drawn lent and said "No resource is dropped", which
+        // is false (v owns a Vec of Strings). p now gives v back first,
+        // after the block's last use of p if it reads p. Matched directly
+        // (`let Some(k) = s.first_mut() else`), the call's result ended
+        // the loan: s gets it back with no arrow.
+        // `let_else_exit_gives_back_before_drop` pins the dots.
+        must_contain: &[
+            "Return mutably borrowed resource from p to v",
+            "p's mutable borrow ends",
+            "Return mutably borrowed resource from q to w",
+            "Return mutably borrowed resource from o to u",
+            "o's mutable borrow ends",
+            "Return mutably borrowed resource from pr to a",
+            "Return mutably borrowed resource from pr to b",
+            "v goes out of scope. Its resource is dropped (including every String it holds).",
+            "s goes out of scope. Its resource is dropped (including every String it holds).",
+        ],
+        must_not_contain: &[
+            "=v goes out of scope. No resource is dropped.",
+            "=w goes out of scope. No resource is dropped.",
+            "=u goes out of scope. No resource is dropped.",
+            "=a goes out of scope. No resource is dropped.",
+            "=b goes out of scope. No resource is dropped.",
+            "=s goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "holder_tuple_literal_1459",
+        // #1459: a tuple literal of references inside a value (`Some((&a,
+        // &b))`, `Ok(..)`, `vec![(&a, &b)]`) was looked through by
+        // nothing: pair borrowed nothing, and the references a pattern
+        // copied out of it gave their borrow back "to pair" (let-else) or
+        // to nothing shown (`if let`). pair borrows a and b, as `Some(&a)`
+        // does; x (the `&a` in it) borrows a only: rustc keeps a tuple's
+        // elements' lifetimes apart.
+        must_contain: &[
+            "Immutable borrow from a to pair: pair holds the borrows its argument holds: a and b, and both stay borrowed while pair is in use; pair isn't a reference, but its value holds one",
+            "Immutable borrow from a to x: x is a reference copied out of pair",
+            "Immutable borrow from b to y: y is a reference copied out of pair",
+            "Return immutably borrowed resource from x to a",
+            "Return immutably borrowed resource from y to b",
+            "Immutable borrow from c to x1: x1 is a reference copied out of cd",
+            "Return immutably borrowed resource from x1 to c",
+            "Immutable borrow from e to r: r holds the borrows its argument holds: e and g, and both stay borrowed while r is in use; r isn't a reference, but its value holds one",
+            "Return immutably borrowed resource from y2 to g",
+            "Mutable borrow from h to hk: hk holds the borrows its argument holds: h and k, and both stay borrowed while hk is in use; hk isn't a reference, but its value holds one",
+            "Return mutably borrowed resource from hk to h",
+            "Mutable borrow from k to y3: y3 is a reference moved out of hk",
+            "Immutable borrow from m to mn",
+            "Return immutably borrowed resource from mn to n",
+        ],
+        must_not_contain: &[
+            "borrowed value from x to pair",
+            "borrowed value from y to pair",
+            "borrowed value from x2 to r",
+            "borrowed value from y3 to hk",
+            "(what it borrows from isn't shown)",
+            "Immutable borrow from b to x",
+            "Immutable borrow from a to y",
         ],
     },
 ];
@@ -30984,6 +31051,24 @@ fn reference_bracket_starts_below_the_branch_diamond() {
          diamond ends at y={})",
         y, join, join + 30.0
     );
+}
+
+/// #1458: on the `else` path of `let Some(f) = p else { return };` (and of
+/// `let Some(k) = s.first_mut() else`), the lender gets its value back
+/// before the exit drops it, on the drop's own dot: the loan ended where
+/// the pattern didn't match. Before, the drop came with nothing given back
+/// (v drawn lent, or shared, while it was dropped).
+#[test]
+fn let_else_exit_gives_back_before_drop() {
+    let rv = run_with_local_backend("let_else_holder_return_1458");
+    let dots = tooltip_lines(&rv.timeline_panel_string());
+    for (name, kind) in [("v", "mutably"), ("w", "mutably"), ("a", "mutably"), ("b", "mutably"), ("s", "mutably"), ("t", "immutably")] {
+        let want = vec![
+            format!("{name}'s resource is no longer {kind} borrowed"),
+            format!("{name} goes out of scope. Its resource is dropped (including every String it holds)."),
+        ];
+        assert!(dots.contains(&want), "no dot of {name} that gets its value back and is dropped: {want:?}");
+    }
 }
 
 /// #506: the dot of `s = String::from("b")` says the new resource is

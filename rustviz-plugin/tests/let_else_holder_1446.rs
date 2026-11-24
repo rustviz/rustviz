@@ -10,8 +10,8 @@ fn copied() {
     println!("{} {:?}", f, v);
 }
 
-// `&mut`, moved out of p. (On the `return` path v is still drawn lent
-// when it's dropped there: #1458.)
+// `&mut`, moved out of p. (On the `return` path p gives v back before
+// the `return` drops it, #1458.)
 fn moved() {
     let mut v = vec![String::from("a")];
     let p = v.last_mut();

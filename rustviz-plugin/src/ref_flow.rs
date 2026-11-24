@@ -1086,6 +1086,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ExprKind::AddrOf(_, m, _) => m.is_mut(),
       ExprKind::Call(..) | ExprKind::MethodCall(..) => self.call_borrow_is_mut(e),
       ExprKind::Closure(closure) => self.closure_ref_captures(closure.def_id).iter().any(|(_, m)| *m),
+      // (A tuple literal, `Some((&mut a, &mut b))`, #1459.)
       ExprKind::Array(elems) | ExprKind::Tup(elems) => elems.iter().any(|x| self.value_borrow_is_mut(x)),
       ExprKind::Repeat(x, _) => self.value_borrow_is_mut(x),
       // `Holder { r: &mut z }` (#692).
@@ -1497,8 +1498,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ExprKind::Repeat(e, _) => self.value_lenders(e),
       // A struct literal holds its fields' borrows (`Some(Part { part:
       // &s })` holds `s`'s; #692), and those of the fields it takes
-      // from the base of a struct update; a tuple literal, its elements'
-      // (`vec![(&f, &g)]`, #1433).
+      // from the base of a struct update; a tuple literal inside a value,
+      // its elements' (`vec![(&f, &g)]`, #1433; `Some((&a, &b))`, #1459).
+      // (A tuple bound by `let` is drawn as its fields' columns instead.)
       // A holder records one kind of borrow, so a literal mixing `&s`
       // and `&mut k` is left untracked here (`holder_lender_muts` has
       // each lender's kind).
