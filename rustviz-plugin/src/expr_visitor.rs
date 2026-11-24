@@ -586,6 +586,22 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // initializer and extended with it (`let w = W { r: &String::new() };`,
   // #856), by the `&` expression that borrows it.
   pub nested_ext_temps: HashMap<rustc_hir::HirId, ResourceAccessPoint>,
+  // A temporary that a `let` extends through an `if` / `else` branch or
+  // a `match` arm (`let r = if c { &String::from("x") } else { &s };`,
+  // #1397), by the temporary's expression (`String::from("x")`): its
+  // `(temporary N)` column's name. Only the path through that branch
+  // makes it, so it is tracked like a `let x;` local assigned in that
+  // branch: `uninit_locals` until the branch makes it, then
+  // maybe-initialized after the join, dropped by a drop flag at the end
+  // of the `let`'s block. `uninit_locals` / `maybe_init_locals` key it
+  // by this expression's HirId; `deferred_name` names it.
+  pub branch_temp_names: HashMap<rustc_hir::HirId, String>,
+  // The columns (hashes) of those temporaries, once made, and of their
+  // field columns. After the join a temporary may or may not exist, so,
+  // as for a `let x;` local, nothing is drawn on its column until its
+  // scope ends: the end of a borrow of it (at the borrower's last use,
+  // always after the join) isn't drawn.
+  pub branch_temp_cols: HashSet<u64>,
   // The `(temporary N)` column of a tuple / struct / array literal that
   // is a `let`-`else`'s initializer (`let (Some(a), _) = (x, make())
   // else { .. }`), by the literal and by each variable moved into it
@@ -1117,6 +1133,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       fn_tries: Vec::new(),
       temp_cols: HashMap::new(),
       nested_ext_temps: HashMap::new(),
+      branch_temp_names: HashMap::new(),
+      branch_temp_cols: HashSet::new(),
       let_else_literal_temps: HashMap::new(),
       ctor_temps: HashMap::new(),
       let_ctor_literals: HashSet::new(),
@@ -1876,6 +1894,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // first event, a RAP with zero events never gets a column.
     if self.event_touches_skipped(&event) {
       return;
+    }
+    // A borrow of a temporary a `let` extends through a branch ends
+    // where it may not exist (#1397): see `branch_temp_cols`.
+    if let ExternalEvent::StaticDie { to: ResourceTy::Value(l), .. } | ExternalEvent::MutableDie { to: ResourceTy::Value(l), .. } = &event {
+      if self.branch_temp_cols.contains(l.hash()) {
+        return;
+      }
     }
     if self.defer_old_ends {
       self.late_old_ends.push((line_num, event));
@@ -2890,6 +2915,28 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
     let mut v = Locals { tcx: self.tcx, within, found: false };
     rustc_hir::intravisit::Visitor::visit_expr(&mut v, e);
+    // A temporary the value borrows and the branch makes (#1397).
+    v.found || self.makes_branch_temp(e)
+  }
+
+  /// Whether `e` contains a temporary that a `let` extends through a
+  /// branch (`branch_temp_names`, #1397): it gets its column only as the
+  /// branch is visited.
+  pub fn makes_branch_temp(&self, e: &'tcx Expr<'tcx>) -> bool {
+    if self.branch_temp_names.is_empty() {
+      return false;
+    }
+    struct Temps<'b> { names: &'b HashMap<rustc_hir::HirId, String>, found: bool }
+    impl<'tcx> rustc_hir::intravisit::Visitor<'tcx> for Temps<'_> {
+      fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+        if self.names.contains_key(&e.hir_id) {
+          self.found = true;
+        }
+        rustc_hir::intravisit::walk_expr(self, e);
+      }
+    }
+    let mut v = Temps { names: &self.branch_temp_names, found: false };
+    rustc_hir::intravisit::Visitor::visit_expr(&mut v, e);
     v.found
   }
 
@@ -3149,6 +3196,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     self.arm_frames.iter().any(|&(split, merge, lo, hi)| split < line && line < merge && !(lo <= line && line <= hi))
   }
 
+  /// The column name of a deferred local (a key of `uninit_locals` /
+  /// `maybe_init_locals`): a `let x;` binding's (numbered) name, or a
+  /// branch temporary's `(temporary N)` (#1397).
+  pub fn deferred_name(&self, id: rustc_hir::HirId) -> String {
+    self.branch_temp_names.get(&id).cloned().unwrap_or_else(|| binding_name(&self.tcx, id))
+  }
+
+  /// `deferred_name`, with a `let x;` binding named by its identifier.
+  pub fn deferred_ident(&self, id: rustc_hir::HirId) -> String {
+    self.branch_temp_names.get(&id).cloned().unwrap_or_else(|| self.tcx.hir_name(id).to_string())
+  }
+
   /// Called when an `if` / `match` begins: the loans its arms start from.
   pub fn arm_borrows_begin(&self) -> ArmBorrows {
     // A `let r;` local may be registered when it's first assigned:
@@ -3157,7 +3216,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let unlent: HashSet<String> = self.raps.iter()
       .filter(|(_, rd)| (*rd.rap.hash() as usize) < self.rap_hashes)
       .map(|(n, _)| n.clone())
-      .chain(self.uninit_locals.keys().chain(self.maybe_init_locals.iter()).map(|h| self.tcx.hir_name(*h).to_string()))
+      .chain(self.uninit_locals.keys().chain(self.maybe_init_locals.iter()).map(|h| self.deferred_ident(*h)))
       .filter(|n| !self.borrow_map.contains_key(n))
       .collect();
     ArmBorrows { before: self.borrow_map.clone(), unlent, done: Vec::new(), last_use: std::collections::BTreeMap::new() }

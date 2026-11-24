@@ -24921,10 +24921,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the enclosing block, as `let r = &String::from("x");` does
         // (#400): it gets a column, and r / t borrow it. One a branch of an
         // `if` or a `match` arm borrows is made on that path only, and a
-        // drop flag drops it at the end of the block; it has no column,
-        // and a note on the binding's last dot says it is dropped there.
-        // Nothing said so; r's borrow ended with "what it borrows from
-        // isn't shown".
+        // drop flag drops it at the end of the block: its column starts in
+        // the branch (#1397, which replaced #1383's note on the binding's
+        // last dot). Nothing said so; r's borrow ended with "what it
+        // borrows from isn't shown".
         must_contain: &[
             "Move from String::from to (temporary)",
             "Immutable borrow from (temporary) to r",
@@ -24932,13 +24932,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from (temporary) to t: Some's signature gives the value it returns the same lifetime as its argument; t isn't a reference, but its value holds one",
             "Return immutably borrowed resource from t to (temporary)",
             "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
-            "(If &String::from(\"x\") on line 9 ran, the temporary it borrows is dropped here: Rust keeps it alive until the end of this block because r holds a reference to it. RustViz doesn't draw a column for this temporary.)",
-            "(If &String::from(\"x\") on line 14 ran, the temporary it borrows is dropped here: Rust keeps it alive until the end of this block because t holds a reference to it. RustViz doesn't draw a column for this temporary.)",
-            "(If &String::from(\"x\") on line 40 ran, the temporary it borrows is dropped here: Rust keeps it alive until the end of this block because r holds a reference to it. RustViz doesn't draw a column for this temporary.)",
-            "(If &String::from(\"y\") on line 51 ran, the temporary it borrows is dropped here: Rust keeps it alive until the end of this block because r holds a reference to it. RustViz doesn't draw a column for this temporary.)",
+            "(temporary) exists after the branches only if the branch that made it (line 9) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
+            "(temporary) exists after the branches only if the branch that made it (line 14) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
+            "(temporary) exists after the branches only if the branch that made it (line 40) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
+            "(temporary) exists after the branches only if the branch that made it (line 51) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 9) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 14) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 40) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 51) ran (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             "r's immutable borrow ends (what it borrows from isn't shown)",
+            "RustViz doesn't draw a column for this temporary",
         ],
     },
     TooltipExpect {
@@ -25697,6 +25702,94 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "At the end of each pass, the `.tag` of that pass's element is dropped: the pattern doesn't move it out",
         ],
         must_not_contain: &["`.n` of that pass's element"],
+    },
+    TooltipExpect {
+        name: "branch_extended_temp_1397",
+        // #1397: a temporary a `let` extends through an `if` / `else` branch,
+        // an `else if`, a `match` arm (guarded too), `Some(&..)` / `[&..]` / a
+        // struct field / a tuple element in one, a nested `if`, an `if let`,
+        // `&make_u().name`, `&mut`, a coercion to `&str`, a loop body: made on
+        // that path only, so it gets a `(temporary)` column that starts in
+        // the branch, maybe exists after the join (like a `let x;` assigned
+        // in one branch) and is dropped by a drop flag at the end of the
+        // block. It had no column; a note on the binding's last dot stated
+        // the drop (#1383's interim). A borrow of it ends where it may not
+        // exist, so that end isn't drawn (as for a `let x;`, nothing is
+        // drawn on the column between the join and the drop).
+        // #1437: a `let x;` assigned in a nested `if`: the outer join said
+        // "none of the branches above assigned it", and the outer arm's rows
+        // below the inner join "s has no value yet".
+        // Known gaps pinned elsewhere: t / a aren't drawn borrowing the
+        // temporary (#1435); the `return` in early_return doesn't state the
+        // temporary's drop (#1436); a one-line guarded arm draws the borrow a
+        // row above the acquire (#1441, known_bugs/1441_guard_arm_pairing_row).
+        must_contain: &[
+            "Move from String::from to (temporary)",
+            "Move from String::from to (temporary 2)",
+            "Move from make_u to (temporary)",
+            "Move from String::new to (temporary)",
+            "Immutable borrow from (temporary) to r",
+            "Immutable borrow from (temporary 2) to r",
+            "Mutable borrow from (temporary) to r",
+            "Immutable borrow from (temporary).name to r",
+            "Immutable borrow from (temporary) to t.0",
+            "Immutable borrow from (temporary) to o",
+            "Immutable borrow from (temporary) to w.r",
+            "(temporary) hasn't been made yet: only the branch that borrows it makes it",
+            "(temporary) may not exist here: only some of the branches above make it",
+            "s may have no value here: it was assigned in only some of the branches above",
+            "(temporary) exists after the branches only if the branch that made it (line 30) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 30) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) exists after the branches only if the branch that made it (line 37) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 37) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) exists after the branches only if the branch that made it (line 49) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 49) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) exists after the branches only if the branch that made it (line 59) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 59) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) exists after the branches only if the branch that made it (line 68) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 68) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) exists after the branches only if the branch that made it (line 78) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 78) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) exists after the branches only if the branch that made it (line 88) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 88) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) exists after the branches only if the branch that made it (line 99) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 99) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) exists after the branches only if the branch that made it (line 111) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 111) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary 2) exists after the branches only if the branch that made it (line 113) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
+            "(temporary 2) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 113) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) exists after the branches only if the branch that made it (line 123) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 123) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) exists after the branches only if the branch that made it (line 133) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 133) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) exists after the branches only if the branch that made it (line 142) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 142) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) exists after the branches only if the branch that made it (line 148) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 148) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) exists after the branches only if the branch that made it (line 155) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 155) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary).name exists after the branches only if the branch that made it (line 155) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
+            "(temporary).name goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 155) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) exists after the branches only if the branch that made it (line 165) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 165) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) exists after the branches only if the branch that made it (line 177) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 177) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) exists after the branches only if the branch that made it (line 189) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 189) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) exists after the branches only if the branch that made it (line 201) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 201) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) exists after the branches only if the branch that made it (line 212) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 212) ran (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "RustViz doesn't draw a column for this temporary",
+            "none of the branches above assigned it",
+            "(temporary) goes out of scope. No resource is dropped",
+            "(temporary) has no value yet",
+            "(temporary) was assigned a value",
+            "the branch that assigned (temporary)",
+            "(temporary).name was assigned a value",
+        ],
     },
 ];
 

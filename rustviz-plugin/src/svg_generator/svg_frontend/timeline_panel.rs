@@ -1357,7 +1357,7 @@ fn render_branch_dots(
         // branch that assigned s moved it away. Otherwise (s
         // isn't assigned on any path that gets here) the dot
         // says s still has no value (#919).
-        let init = init_join(*maybe_init, reaching_end_states(branch_history));
+        let init = branches_init_join(*maybe_init, branch_history);
         let partly_initialized = branch_history.iter().filter(|b| !b.diverges).any(|b| {
             matches!(
                 b.states.last().map(|s| &s.2),
@@ -1401,7 +1401,10 @@ fn render_branch_dots(
             // time round assigns it again.
             let reassigned_later = after.iter().any(|(_, e)| reassigns_maybe_init(e))
                 || full.iter().any(|(_, e)| reassigns_in_loop(e));
-            Some(if reassigned_next {
+            Some(if is_branch_temp_col(rap) {
+                // A temporary a `let` extends through a branch (#1397).
+                hover_messages::event_dot_branch_merge_temp_made(&is.real_name(), made_on_line(full, &visualization_data.row_lines))
+            } else if reassigned_next {
                 hover_messages::event_dot_branch_merge_maybe_init_then_reassigned(&is.real_name(), false, moved)
             } else if reassigned_later {
                 hover_messages::event_dot_branch_merge_maybe_init_then_reassigned(&is.real_name(), true, moved)
@@ -1887,7 +1890,10 @@ fn render_scope_end_dot(
                 hash: *hash as u64,
                 dot_x: cx,
                 dot_y: cy,
-                title: if init_by_maybe_held(history) {
+                title: if is_branch_temp_col(ro) {
+                    // A temporary a `let` extends through a branch (#1397).
+                    hover_messages::event_dot_go_out_of_scope_temp_made(&name, made_on_line(history, &visualization_data.row_lines))
+                } else if init_by_maybe_held(history) {
                     hover_messages::event_dot_go_out_of_scope_maybe_kept(&name, &ro.drop_note())
                 } else {
                     hover_messages::event_dot_go_out_of_scope_maybe_init(&name, &ro.drop_note(), moved)
@@ -2894,7 +2900,7 @@ fn maybe_moved_at_end(history: &[(usize, Event)]) -> bool {
             Event::Branch { maybe_held: true, .. } => maybe = true,
             // Assigned in some branches only, not moved (#244).
             Event::Branch { branch_history, maybe_init, .. }
-                if init_join(*maybe_init, reaching_end_states(branch_history)).is_some() => maybe = false,
+                if branches_init_join(*maybe_init, branch_history).is_some() => maybe = false,
             // Or by a loop that may have ended before assigning it (#786).
             Event::LoopMaybeInit { .. } => maybe = false,
             Event::Branch { branch_history, ty, .. } => {
@@ -2945,7 +2951,7 @@ fn maybe_moved_by_kept_round<'a>(history: impl Iterator<Item = &'a (usize, Event
             // the old value, the new one or nothing.
             Event::Branch { maybe_held: true, .. } => kept = true,
             Event::Branch { branch_history, maybe_init, .. }
-                if init_join(*maybe_init, reaching_end_states(branch_history)).is_some() => kept = false,
+                if branches_init_join(*maybe_init, branch_history).is_some() => kept = false,
             Event::Branch { branch_history, ty, .. } => {
                 let (mixed, all_moved) = merge_move_kind(branch_history, ty);
                 if mixed || all_moved {
@@ -3040,6 +3046,49 @@ fn reaching_end_states(branch_history: &[BranchData]) -> impl Iterator<Item = &S
     branch_history.iter().filter(|b| !b.diverges).filter_map(|b| b.states.last().map(|s| &s.2))
 }
 
+// A maybe-initialized column (`InitJoin::Maybe`) that is a temporary,
+// or a field column of one: only a temporary that a `let` extends
+// through a branch can be one (#1397).
+fn is_branch_temp_col(rap: &ResourceAccessPoint) -> bool {
+    rap.is_temporary() || hover_messages::is_temporary_name(rap.name().split('.').next().unwrap_or(""))
+}
+
+// The source line a column first gets a value on, looking into the
+// branches of its conditionals: where a branch makes a temporary that a
+// `let` extends (#1397). (`history` is by row; `row_lines` maps rows to
+// source lines.)
+fn made_on_line(history: &[(usize, Event)], row_lines: &[Option<usize>]) -> Option<usize> {
+    fn made_on_row(history: &[(usize, Event)]) -> Option<usize> {
+        for (row, e) in history {
+            match e {
+                Event::Branch { branch_history, .. } => {
+                    if let Some(r) = branch_history.iter().find_map(|b| made_on_row(&b.e_data)) {
+                        return Some(r);
+                    }
+                }
+                e if holds_value_after(false, e) => return Some(*row),
+                _ => {}
+            }
+        }
+        None
+    }
+    made_on_row(history).and_then(|r| rv_attrs::line_of(r, row_lines))
+}
+
+// `init_join` for a conditional's branches: a branch whose own nested
+// conditional left the column maybe-initialized (`let x;` assigned, or
+// a temporary made, in a branch of an `if` inside one branch, #1397)
+// may hold a value at the join too.
+fn branches_init_join(maybe_init: bool, branch_history: &[BranchData]) -> Option<InitJoin> {
+    let join = init_join(maybe_init, reaching_end_states(branch_history));
+    if join.is_some() || !maybe_init {
+        return join;
+    }
+    branch_history.iter().filter(|b| !b.diverges)
+        .any(|b| matches!(init_at_end(&b.e_data), Some(InitJoin::Maybe { .. })))
+        .then_some(InitJoin::Maybe { moved: false })
+}
+
 // `Some` when the last thing that decided what this column holds was a
 // conditional that assigned it, a `let s;` local, in only some of the
 // branches that reach its join (#244): at scope end, Rust drops the
@@ -3073,7 +3122,7 @@ fn init_after(start: Option<InitJoin>, history: &[(usize, Event)]) -> Option<Ini
     for (_, e) in history {
         match e {
             Event::Branch { branch_history, maybe_init, .. } => {
-                init = init_join(*maybe_init, reaching_end_states(branch_history));
+                init = branches_init_join(*maybe_init, branch_history);
             }
             Event::LoopMaybeInit { .. } => init = Some(InitJoin::Loop),
             e if holds_value_after(false, e) => init = None,
@@ -8396,6 +8445,22 @@ fn render_branches(
                 let no_value = hover_messages::state_uninitialized(rap.name());
                 for seg in segs.iter_mut().filter(|seg| seg.title == no_value) {
                     seg.title = hover_messages::state_ref_borrow_ended(rap.name());
+                }
+            }
+            // After a conditional inside this arm that leaves the column
+            // maybe-initialized (a nested `if` that assigns a `let x;`
+            // local or makes a branch temporary in one of its branches,
+            // #1437, #1397), the arm's rows below its join may hold a
+            // value too.
+            let inner_maybe_from = branch.e_data.iter().filter_map(|(_, e)| match e {
+                Event::Branch { branch_history, maybe_init, merge_point, .. }
+                    if matches!(branches_init_join(*maybe_init, branch_history), Some(InitJoin::Maybe { .. })) => Some(*merge_point),
+                _ => None,
+            }).min();
+            if let Some(from) = inner_maybe_from.filter(|_| !entry_maybe_init) {
+                let no_value = hover_messages::state_uninitialized(rap.name());
+                for seg in segs.iter_mut().filter(|seg| seg.title == no_value && seg.rows.0 >= from) {
+                    seg.title = hover_messages::state_maybe_uninitialized(rap.name());
                 }
             }
             if entry_maybe_init {

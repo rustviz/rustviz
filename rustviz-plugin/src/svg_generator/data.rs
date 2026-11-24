@@ -5526,8 +5526,11 @@ impl Visualizable for VisualizationData {
 
                     ending_states.sort(); // partial order of the ending states
                     previous_state = convert_back(&ending_states.first().unwrap());
+                    // (Inside an arm, the arm's column goes on, dashed, to
+                    // the arm's end from that join: it may have no value
+                    // there, #1437.)
                     if unassigned_on_some_path {
-                        previous_state = State::OutOfScope;
+                        previous_state = State::FullPrivilege { s: LineState::Uninit };
                     }
                     // Every branch leaves the function (#515): nothing
                     // follows the conditional, and the column ends in

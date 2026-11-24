@@ -3307,6 +3307,10 @@ pub fn state_full_privilege(my_name: &String) -> String {
 // a `let s = if …` produces the value (#234).
 pub fn state_uninitialized(my_name: &String) -> String {
     let my_name_fmt = styled_name_html(my_name);
+    // A temporary a `let` extends through a branch (#1397).
+    if is_temporary_name(my_name.split('.').next().unwrap_or("")) {
+        return format!("{} hasn't been made yet: only the branch that borrows it makes it", my_name_fmt);
+    }
 
     format!(
         "{0} has no value yet",
@@ -3318,6 +3322,13 @@ pub fn state_uninitialized(my_name: &String) -> String {
 // assigned s in only some of its branches (#244): on the rows of an arm
 // that hasn't assigned s, s holds a value on some paths only.
 pub fn state_maybe_uninitialized(my_name: &String) -> String {
+    // A temporary a `let` extends through a branch (#1397).
+    if is_temporary_name(my_name.split('.').next().unwrap_or("")) {
+        return format!(
+            "{0} may not exist here: only some of the branches above make it",
+            styled_name_html(my_name)
+        );
+    }
     format!(
         "{0} may have no value here: it was assigned in only some of the branches above",
         styled_name_html(my_name)
@@ -4270,6 +4281,40 @@ pub fn event_dot_branch_merge_maybe_init(my_name: &String, value: bool, mutable:
         ));
     }
     out
+}
+
+// ── Temporaries a `let` extends through a branch (#1397) ─────────
+//
+// `let r = if c { &String::from("x") } else { &s };`: Rust extends the
+// String temporary the if branch borrows to the end of the enclosing
+// block (since 1.79), but only that path makes it, so a drop flag
+// decides whether it is dropped there. Drawn like a `let x;` assigned in
+// that branch only (#244). `made_at`: the line the branch makes it on.
+
+fn temp_made_in(made_at: Option<usize>) -> String {
+    match made_at {
+        Some(l) => format!("the branch that made it (line {}) ran", l),
+        None => "the branch that made it ran".to_owned(),
+    }
+}
+
+// The join.
+pub fn event_dot_branch_merge_temp_made(my_name: &String, made_at: Option<usize>) -> String {
+    format!(
+        "{0} exists after the branches only if {1}. If it did, it lives until the end of the \
+         enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
+        styled_name_html(my_name), temp_made_in(made_at)
+    )
+}
+
+// Its scope end, with the drop flag's drop.
+pub fn event_dot_go_out_of_scope_temp_made(my_name: &String, made_at: Option<usize>) -> String {
+    format!(
+        "{0} goes out of scope at the end of the block: a let borrowed it, so it was kept alive \
+         past the end of its statement. Its resource is dropped here only if {1} (Rust tracks \
+         this with a runtime drop flag).",
+        styled_name_html(my_name), temp_made_in(made_at)
+    )
 }
 
 // `event_dot_branch_merge_maybe_init` when s is assigned again before it
@@ -6503,6 +6548,11 @@ pub fn approx_note_async_fn(fn_name: &str) -> String {
         "({} is an async fn; RustViz doesn't draw its body, which runs when the future it returns is awaited.)",
         styled_name_html(fn_name)
     )
+}
+
+/// Whether `name` is a temporary's column label (`temporary_label`).
+pub fn is_temporary_name(name: &str) -> bool {
+    name == "(temporary)" || (name.starts_with("(temporary ") && name.ends_with(')'))
 }
 
 #[cfg(test)]

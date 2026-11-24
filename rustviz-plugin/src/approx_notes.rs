@@ -175,12 +175,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// arm, `Some(&..)` in a branch, #1383): Rust extends the temporary a
   /// branch borrows to the end of the `let`'s block, but only the path
   /// through that branch makes it, so it is dropped there by a drop
-  /// flag. RustViz draws no column for it; the note on the first
-  /// binding's dot at the block's end says it is dropped there.
+  /// flag. Such a temporary gets a column of its own that says so
+  /// (`declare_branch_temps`, #1397). One that got none (its branch
+  /// wasn't visited, or its `let` is on a hidden line) is stated by a
+  /// note on the first binding's dot at the block's end.
   fn branch_extended_temp_note(&mut self, l: &'tcx LetStmt<'tcx>) {
     let Some(init) = l.init else { return };
     let mut temps = Vec::new();
     self.branch_extended_temps(init, false, &mut temps);
+    temps.retain(|b| {
+      let ExprKind::AddrOf(_, _, place) = b.kind else { return true };
+      let Some(tmp) = crate::visitor::extended_temp_operand(place) else { return true };
+      !self.branch_temp_names.get(&tmp.hir_id).is_some_and(|n| self.raps.contains_key(n))
+    });
     if temps.is_empty() {
       return;
     }
@@ -207,7 +214,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// Rust's temporary lifetime extension reaches, see `walk_extending`,
   /// and the branches of an `if` / `match`): temporaries whose type
   /// needs drop.
-  fn branch_extended_temps(&self, e: &'tcx Expr<'tcx>, in_branch: bool, out: &mut Vec<&'tcx Expr<'tcx>>) {
+  pub(crate) fn branch_extended_temps(&self, e: &'tcx Expr<'tcx>, in_branch: bool, out: &mut Vec<&'tcx Expr<'tcx>>) {
     if e.span.from_expansion() {
       return;
     }

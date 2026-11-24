@@ -50,6 +50,11 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // Geometric (`geometry.rs`), from here on.
     // Tuple column goes on after its fields were moved out.
     ("edition2024/if_let_chain_irrefutable_move", "line-ends-nowhere", 1157),
+    // A one-line guarded match arm: the value paired with the `let` after
+    // the arm is visited (`{ let y = ..; y }`, a branch temporary) is
+    // moved / lent a row above its acquire.
+    ("known_bugs/1441_guard_arm_pairing_row", "event-on-dead-column", 1441),
+    ("known_bugs/1441_guard_arm_pairing_row", "line-after-column-ends", 1441),
 ];
 
 /// The invariants, by the name the failure list and messages use.
