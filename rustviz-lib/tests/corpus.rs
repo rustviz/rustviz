@@ -26619,6 +26619,30 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[],
     },
+    TooltipExpect {
+        name: "edition2024/let_chain_join_before_if_1460",
+        // #1460: a conditional that may move a value, then a later one that
+        // may assign it. The first join's text was on the later
+        // conditional's dots (rows in `maybe_moved_join_stays_on_its_row_1460`)
+        // and said the old value is dropped at the scope end when the later
+        // conditional is nested in an outer arm (o, e, p), though on the
+        // path that assigns it, it is dropped there (by a drop flag). Before
+        // an `if` / `else` that assigns b on both paths it said "(or, if it
+        // isn't, when it goes out of scope)": b is assigned on every path.
+        must_contain: &[
+            "o may have been moved above, so it can't be used after the if until it's assigned again. If nothing above moved it, its resource is dropped when o is assigned again (or, if it isn't, when it goes out of scope).",
+            "e may have been moved above, so it can't be used after the if until it's assigned again. If nothing above moved it, its resource is dropped when e is assigned again (or, if it isn't, when it goes out of scope).",
+            "p was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when p is assigned again (or, if it isn't, when it goes out of scope).",
+            "b may have been moved above, so it can't be used after the if until it's assigned again. If nothing above moved it, its resource is dropped when b is assigned again.",
+            "a may have been moved above, so it can't be used after the if until it's assigned again. If nothing above moved it, its resource is dropped when a is assigned again (or, if it isn't, when it goes out of scope).",
+            "g may have been moved above, so it can't be used after the match until it's assigned again. If nothing above moved it, its resource is dropped when g is assigned again (or, if it isn't, when it goes out of scope).",
+        ],
+        must_not_contain: &[
+            "If nothing above moved it, its resource (including the String it holds, if any) is dropped when o goes out of scope.",
+            "If nothing above moved it, its resource (including the String it holds, if any) is dropped when e goes out of scope.",
+            "=b may have been moved above, so it can't be used after the if until it's assigned again. If nothing above moved it, its resource is dropped when b is assigned again (or, if it isn't, when it goes out of scope).",
+        ],
+    },
 ];
 
 /// #1440: on the line where two loans of v end, the first end's dot (with
@@ -36369,6 +36393,30 @@ fn self_moves_and_nested_ends_in_order_1411_1421() {
     let tl = run_with_local_backend("else_if_holder_copy_1421").timeline_panel_string();
     for id in ["h2.r@L15:dot:copy+static_die", "g2.r@L26:dot:static_lend+static_reacquire+static_die", "k2.r@L37:dot:copy+static_die"] {
         assert!(tl.contains(&format!("data-rv-id=\"{id}")), "else_if_holder_copy_1421: no {id}");
+    }
+}
+
+/// #1460: the join of a conditional that may move a value (o, a, b, e:
+/// a let-chain `if`; g: a `match` guard) is a dot on its own row, also
+/// when the column's next event is a later conditional that may assign
+/// the value. With no line reaching it, its text went on that
+/// conditional's dots: the first dot of each arm and its join (o@L25 and
+/// o@L26 on main), as if about that conditional. p's join was drawn
+/// already (the `if` that moves p has an `else` path that keeps it).
+#[test]
+fn maybe_moved_join_stays_on_its_row_1460() {
+    let tl = run_with_local_backend("edition2024/let_chain_join_before_if_1460").timeline_panel_string();
+    let tips = tooltip_lines(&tl);
+    for (v, join, kw) in [("o", 23, "if"), ("a", 34, "if"), ("g", 51, "match"), ("b", 62, "if"), ("e", 94, "if"), ("p", 79, "branches")] {
+        assert!(tl.contains(&format!("data-rv-id=\"{v}@L{join}:dot:branch_join\"")), "{v}: no join dot of its own on line {join}");
+        let start = if kw == "branches" {
+            format!("{v} was moved in at least one branch above, so it can't be used after the branches until")
+        } else {
+            format!("{v} may have been moved above, so it can't be used after the {kw}")
+        };
+        let at: Vec<&Vec<String>> = tips.iter().filter(|t| t.iter().any(|l| l.starts_with(&start))).collect();
+        assert_eq!(at.len(), 1, "{v}: the join's text is on {} dots: {:?}", at.len(), at);
+        assert_eq!(at[0].len(), 1, "{v}: the join's dot says more than the join: {:?}", at[0]);
     }
 }
 
