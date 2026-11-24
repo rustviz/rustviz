@@ -2778,12 +2778,30 @@ fn ends_borrow(history: &[(usize, Event)]) -> bool {
 /// own whose every arm ended the borrow (#1326).
 fn arm_end_state(rap: &ResourceAccessPoint, branch: &BranchData, branch_history: &[BranchData], ty: &BranchType) -> State {
     let end = branch.states.last().map_or(State::OutOfScope, |s| s.2.clone());
-    if !matches!(end, State::OutOfScope) || !rap.is_ref() || branch.diverges {
+    if !rap.is_ref() || branch.diverges {
+        return end;
+    }
+    let ended = |s: Option<&State>| matches!(s, Some(State::OutOfScope) | Some(State::FullPrivilege { s: LineState::Uninit }));
+    // The join's test for its "r's borrow ended in each branch above"
+    // dot (`borrow_ended_in_every_arm`).
+    let every_arm_ended = all_paths_present(ty, branch_history.len())
+        && branch_history.iter().all(|b| ends_borrow(&b.e_data) && ended(b.states.last().map(|s| &s.2)));
+    // An arm beside one that moved r (`if c { take(m); }`, `Some(_) =>
+    // drop(m)`), where every other arm ended its borrow: the join has no
+    // dot (a reference whose borrow ended in only some arms gets none),
+    // so the arm's leg stops at its borrow end instead of running on,
+    // dashed, to nothing (#1416).
+    let reaching = || branch_history.iter().filter(|b| !b.diverges).map(|b| b.states.last().map(|s| &s.2));
+    if !every_arm_ended && !matches!(ty, BranchType::Loop(..)) && ended(Some(&end))
+        && reaching().any(|s| matches!(s, Some(State::ResourceMoved { .. })))
+        && reaching().all(|s| ended(s) || matches!(s, Some(State::ResourceMoved { .. }))) {
+        return State::OutOfScope;
+    }
+    if !matches!(end, State::OutOfScope) {
         return end;
     }
     let ended_here = !matches!(ty, BranchType::Loop(..))
-        && all_paths_present(ty, branch_history.len())
-        && branch_history.iter().all(|b| ends_borrow(&b.e_data))
+        && every_arm_ended
         && branch.e_data.iter().any(|(_, e)| matches!(e,
             Event::StaticDie { .. } | Event::MutableDie { .. } | Event::OrAltBorrow { end: true, .. }));
     let ended_in_nested = matches!(branch.e_data.last(), Some((_, Event::Branch { branch_history: inner, ty: inner_ty, .. }))
@@ -8121,12 +8139,19 @@ fn render_branches(
                 }
             };
             let mut stop_y: Option<f64> = None;
-            for (top, bot, state) in &branch.states {
+            // The dashed rest after the borrow ended, where the join has
+            // no dot for it to reach (another arm moved r, `arm_end_state`):
+            // the column stops at the dot where the borrow ended (#1416).
+            let no_rest = |k: usize| borrow_end.is_some_and(|e| branch.states[k].0 >= e)
+                && matches!(end_state, State::OutOfScope)
+                && branch.states[k..].iter().all(|s| matches!(s.2, State::OutOfScope | State::FullPrivilege { s: LineState::Uninit }));
+            for (k, (top, bot, state)) in branch.states.iter().enumerate() {
                 // The binding's dot is on the split row, above the row
                 // the arm's column would start on: the state up to it
                 // ran backwards, from that row up to the dot. A raised
                 // fork's arm starts on the split row itself.
                 if raised && top > bot { continue; }
+                if no_rest(k) { continue; }
                 let bot = match stop_line {
                     None => *bot,
                     Some(stop) if *top >= stop => continue,

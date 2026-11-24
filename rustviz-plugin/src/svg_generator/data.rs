@@ -5918,6 +5918,34 @@ impl Visualizable for VisualizationData {
                                         maybe_held: maybe_held.contains(rap),
                                         id: *id}));
                 }
+                // rap has no column in this conditional, but the end of
+                // a borrow of it may have moved into one of its arms,
+                // the one declaring the reference (`nest_arm_ref_ends`,
+                // #1277): `if let Some(_x) = v.first() { .. }` nested in
+                // an arm where v is live. It is rap's "no longer
+                // borrowed" on its column here, as for a conditional at
+                // the top level (`append_processed_external_event`);
+                // without it the end's arrow had no dot on rap (#1418).
+                else {
+                    fn ends_of(branches: &[ExtBranchData], rap: &ResourceAccessPoint, out: &mut Vec<(usize, ExternalEvent)>) {
+                        for b in branches {
+                            for (l, e) in &b.e_data {
+                                match e {
+                                    ExternalEvent::Branch { branches, .. } => ends_of(branches, rap, out),
+                                    ExternalEvent::StaticDie { to: ResourceTy::Value(lender), .. }
+                                    | ExternalEvent::MutableDie { to: ResourceTy::Value(lender), .. }
+                                        if lender == rap && !b.decl_vars.contains(rap) => out.push((*l, e.clone())),
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    let mut ends = Vec::new();
+                    ends_of(branches, rap, &mut ends);
+                    for (l, e) in ends {
+                        b_history.extend(self.event_of_external_event(l, &e, true));
+                    }
+                }
             }
             ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::TupleTempDrop { ro, .. } | ExternalEvent::OrAltMove { ro, .. } | ExternalEvent::LoopIteratorDrop { ro, .. }
             | ExternalEvent::LoopMaybeInit { ro, .. } | ExternalEvent::LoopExitKept { ro, .. }

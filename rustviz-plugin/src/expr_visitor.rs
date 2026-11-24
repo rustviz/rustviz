@@ -10780,7 +10780,24 @@ pub fn print_out_of_scope(&mut self){
           // row beside arm-only arrows the top level never counted, e.g.
           // a pattern's own copy (Book `c8_03_vec_get_match`).
           let stacked = self.event_line_map.get(&ev.0).is_some_and(|evs| evs.len() > 1);
-          insert_in_arm(self.preprocessed_events, &path, ev, stacked);
+          // A conditional nested in that arm, live for the reference,
+          // whose arm holds the end's line (`if m.len() > 2 {} else {
+          // println!("{}", m); }` after `let m = &mut s2;` in the arm):
+          // the end goes into that arm, and the others end the borrow
+          // too, as `end_outer_borrows_in_arms` does at the top level
+          // (#1417). It was drawn on the lender's arm column between
+          // the nested arms' legs.
+          let split = match &ev.1 {
+            ExternalEvent::StaticDie { from: ResourceTy::Value(r), to, .. }
+            | ExternalEvent::MutableDie { from: ResourceTy::Value(r), to, .. } => Some((r.clone(), to.extract_rap().filter(|l| *l != r).cloned())),
+            ExternalEvent::RefDie { from: ResourceTy::Value(r), .. } => Some((r.clone(), None)),
+            _ => None,
+          };
+          let split = split.map(|(r, lender)| {
+            let made = self.borrow_map.get(r.name()).filter(|d| ends_current_loan(&ev.1, d)).map(|d| d.assigned_at);
+            NestedEnd { r, lender, made, unique_id: &mut *self.unique_id, moved_into_result: &self.moved_into_result, holders: borrow_holders(&self.borrow_map) }
+          });
+          insert_in_arm(self.preprocessed_events, &path, ev, stacked, split);
         }
         None => i += 1,
       }
@@ -11602,19 +11619,7 @@ pub fn print_out_of_scope(&mut self){
     // What holds a borrow from where it's assigned: a reference or a
     // value holding one, or a struct one of whose reference fields does
     // (`x` for `x.part`).
-    let holders: HashSet<String> = {
-      let mut h = HashSet::new();
-      #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "collected into a set")]
-      for k in self.borrow_map.keys() {
-        let mut n = k.as_str();
-        h.insert(n.to_owned());
-        while let Some((p, _)) = n.rsplit_once('.') {
-          h.insert(p.to_owned());
-          n = p;
-        }
-      }
-      h
-    };
+    let holders = borrow_holders(&self.borrow_map);
     let mut i = 0;
     while i < self.preprocessed_events.len() {
       let (line, ev) = &self.preprocessed_events[i];
@@ -11628,7 +11633,7 @@ pub fn print_out_of_scope(&mut self){
         _ => { i += 1; continue; }
       };
       // A function's column isn't drawn in a conditional's arms.
-      let Some((k, a)) = branch_ending_borrow(self.preprocessed_events, r, *line).filter(|_| !lender.is_some_and(|l| l.is_fn())) else {
+      let Some((k, a)) = branch_ending_borrow(self.preprocessed_events, r, lender, *line).filter(|_| !lender.is_some_and(|l| l.is_fn())) else {
         i += 1;
         continue;
       };
@@ -12291,13 +12296,21 @@ fn loan_made_in(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint, lend
 
 /// The `if` / `match` among `events` that `r` is live in (declared
 /// before it) and whose arm `a` holds `line`: (its index, a).
-fn branch_ending_borrow(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint, line: usize) -> Option<(usize, usize)> {
+fn branch_ending_borrow(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint, lender: Option<&ResourceAccessPoint>, line: usize) -> Option<(usize, usize)> {
   events.iter().enumerate().find_map(|(k, (if_line, ev))| {
     let ExternalEvent::Branch { branches, live_vars, split_point, merge_point, branch_type, .. } = ev else { return None };
     // Declared before the conditional: a `let` inside an arm is in that
     // arm's `decl_vars` (and, for a `match`, also in `live_vars`; #425).
+    // Not live in it either, but holding a loan of a variable that is,
+    // and given back on a line of an arm (a closure called there, `c()`;
+    // the loan of `rest` in `[x, rest @ ..]` that x's use there keeps
+    // alive; one MIR ends as an arm starts): on the lender's column the
+    // end landed between the arms' legs, on neither (#1417). It ends in
+    // the arms as a live one's does, and r gets a column in the
+    // conditional for it (`end_borrow_in_arms`).
+    let lends_live = || lender.is_some_and(|l| live_vars.contains(l)) && !r.is_temporary() && !r.is_fn();
     if matches!(branch_type, BranchType::Loop(..))
-      || !live_vars.contains(r)
+      || !(live_vars.contains(r) || lends_live())
       || branches.iter().any(|b| b.decl_vars.contains(r))
     {
       return None;
@@ -12405,7 +12418,7 @@ fn end_borrow_in_arms(
   moved_into_result: &HashSet<usize>,
   holders: &HashSet<String>,
 ) {
-  let Some((k, a)) = branch_ending_borrow(events, r, ev.0) else {
+  let Some((k, a)) = branch_ending_borrow(events, r, lender, ev.0) else {
     // Right after r's last use on or before its line, ahead of other
     // events on that line: in `Some(x) => ..` on `third`, third's
     // borrow ends once x is copied out of it, before x borrows v.
@@ -12426,10 +12439,11 @@ fn end_borrow_in_arms(
   let made_in_arm = made.is_some_and(|m| *split_point < m && m <= ev.0 && m < *merge_point)
     || ev_lender.is_some_and(|l| branches.iter().any(|b| loan_made_in(&b.e_data, r, l, ev.0)));
   // The lender gets its value back in each arm, so it has a column in
-  // the conditional.
+  // the conditional, and so does r, which ends its borrow there.
   if let Some(l) = lender {
     live_vars.insert(l.clone());
   }
+  live_vars.insert(r.clone());
   for (b, arm) in branches.iter_mut().enumerate() {
     if b == a {
       // `let h2 = h;` in this arm moved r's reference on (a `&mut`, or
@@ -12438,7 +12452,7 @@ fn end_borrow_in_arms(
       if handed_off_in(&arm.e_data, r, moved_into_result, holders) {
         continue;
       }
-      let inner = branch_ending_borrow(&arm.e_data, r, ev.0);
+      let inner = branch_ending_borrow(&arm.e_data, r, lender, ev.0);
       // A let-chain nested here (`} else if let Some(x) = o && bump(r) {`,
       // #1279) whose split line has this arm's own arrows on it (the
       // pattern's copy): the end is listed with them, so a row is added
@@ -12960,11 +12974,41 @@ fn gives_back(events: &[(usize, ExternalEvent)], lender: &ResourceAccessPoint) -
 /// Insert `ev` into the arm `path` leads to (see `arm_declaring`),
 /// after that arm's events on its line or earlier, and into its line
 /// map if `in_line_map` (see `create_line_map`).
+/// What holds a borrow from where it's assigned: a reference or a value
+/// holding one, or a struct one of whose reference fields does (`x` for
+/// `x.part`). See `handed_off_in`.
+fn borrow_holders(borrow_map: &HashMap<String, RefData>) -> HashSet<String> {
+  let mut h = HashSet::new();
+  #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "collected into a set")]
+  for k in borrow_map.keys() {
+    let mut n = k.as_str();
+    h.insert(n.to_owned());
+    while let Some((p, _)) = n.rsplit_once('.') {
+      h.insert(p.to_owned());
+      n = p;
+    }
+  }
+  h
+}
+
+/// A borrow end `insert_in_arm` moves into the arm declaring its
+/// reference `r`, with what `end_borrow_in_arms` needs to end it in the
+/// arms of a conditional nested there.
+struct NestedEnd<'b> {
+  r: ResourceAccessPoint,
+  lender: Option<ResourceAccessPoint>,
+  made: Option<usize>,
+  unique_id: &'b mut usize,
+  moved_into_result: &'b HashSet<usize>,
+  holders: HashSet<String>,
+}
+
 fn insert_in_arm(
   events: &mut [(usize, ExternalEvent)],
   path: &[(usize, usize)],
   ev: (usize, ExternalEvent),
   in_line_map: bool,
+  nested: Option<NestedEnd<'_>>,
 ) {
   let Some(((k, a), rest)) = path.split_first() else { return };
   let ExternalEvent::Branch { branches, .. } = &mut events[*k].1 else {
@@ -12972,7 +13016,10 @@ fn insert_in_arm(
   };
   let arm = &mut branches[*a];
   if !rest.is_empty() {
-    return insert_in_arm(&mut arm.e_data, rest, ev, in_line_map);
+    return insert_in_arm(&mut arm.e_data, rest, ev, in_line_map, nested);
+  }
+  if let Some(n) = nested.filter(|n| branch_ending_borrow(&arm.e_data, &n.r, n.lender.as_ref(), ev.0).is_some()) {
+    return end_borrow_in_arms(&mut arm.e_data, ev, &n.r, n.lender.as_ref(), n.made, in_line_map, n.unique_id, n.moved_into_result, &n.holders);
   }
   let mut at = arm.e_data.iter().rposition(|(l, _)| *l <= ev.0).map_or(0, |i| i + 1);
   // An exit on the borrow's last line (`return r.len();`, a panic)
