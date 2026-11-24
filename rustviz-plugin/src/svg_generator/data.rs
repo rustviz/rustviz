@@ -1874,7 +1874,7 @@ pub enum LoopLeft {
 
 /// What a `for` loop does with a head it moves (`for s in v`, `for s
 /// in it`), when the loop's iterator has drop glue (#482).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub enum LoopHead {
     /// Not a `for` loop's head (or its iterator has nothing to drop).
     #[default]
@@ -1886,6 +1886,16 @@ pub enum LoopHead {
     /// moved into the iterator like `Collection`; each element the loop
     /// variable gets is a copy (#1372).
     CollectionCopy,
+    /// One binding of a destructuring pattern in the head (`for (s, k)
+    /// in names`, `for &(a, b) in &pairs`, #1390), drawn like `let (s, k)
+    /// = pair;`: an arrow from the collection per binding. `path` is the
+    /// part of each element the binding gets (`.0`, `.name`, `.0.1`;
+    /// empty for the whole element, `for &y in &v`), `copy` whether it is
+    /// a copy. `moved`: the collection is moved into the loop's iterator
+    /// (each binding's event says so on its column, once); else it is
+    /// borrowed by it (`&pairs`, its loan drawn on its own), and each
+    /// binding copies a value inside it.
+    Part { path: String, copy: bool, moved: bool },
     /// Already an iterator (`it: vec::IntoIter<String>`):
     /// `into_iter` returns it unchanged, so it becomes the loop's
     /// iterator, dropped when the loop ends (`LoopIteratorDrop`).
@@ -4043,7 +4053,7 @@ impl Event {
                 };
                 hover_messages::event_dot_copy_through_deref_field(r.name(), place, &target, r.points_to_copy())
             }
-            Event::Move{ loop_head: LoopHead::Collection | LoopHead::CollectionCopy, ..} => {
+            Event::Move{ loop_head: LoopHead::Collection | LoopHead::CollectionCopy | LoopHead::Part { .. }, ..} => {
                 hover_messages::event_dot_move_into_loop_iterator(&self.deref_name(my_name))
             }
             Event::Move{ loop_head: LoopHead::Iterator, ..} => {
@@ -4226,6 +4236,12 @@ impl Event {
             // each y is a copy of an element (#1372).
             Event::Acquire{ from: ResourceTy::Value(from), loop_head: LoopHead::CollectionCopy, ..} => {
                 hover_messages::event_dot_acquire_loop_element_copy(&self.deref_name(my_name), &from.name())
+            }
+            // `for (s, k) in names`: s gets the `.0` of each element, k a
+            // copy of the `.1` (#1390).
+            Event::Acquire{ from: ResourceTy::Value(from), is, loop_head: LoopHead::Part { path, copy, .. }, ..} => {
+                let is_ref = is.extract_rap().is_some_and(|r| r.is_ref());
+                hover_messages::event_dot_acquire_loop_element_part(&self.deref_name(my_name), &from.name(), path, *copy, is_ref)
             }
             Event::Acquire{ from, is, ..} => {
                 if is.is_closure() && from.extract_rap().is_some() {
@@ -5739,8 +5755,11 @@ impl Visualizable for VisualizationData {
           else { vec![(line_num, Event::Duplicate{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: *into_closure, of: source_copy_of(of), id: *id, break_alt: break_alt.clone()})] }
         },
         ExternalEvent::Move{from: from_ro, to: to_ro, id, into_closure, loop_head, break_alt, break_out, via_try, ..} => {
-          if to_o { vec![(line_num,  Event::Acquire{from : from_ro.to_owned(), is: to_ro.clone(), via_try: *via_try, id: *id, break_alt: break_alt.clone(), loop_head: *loop_head})] }
-          else { vec![(line_num, Event::Move{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: *into_closure, loop_head: *loop_head, via_try: *via_try, id: *id, break_alt: break_alt.clone(), break_out: *break_out})] }
+          if to_o { vec![(line_num,  Event::Acquire{from : from_ro.to_owned(), is: to_ro.clone(), via_try: *via_try, id: *id, break_alt: break_alt.clone(), loop_head: loop_head.clone()})] }
+          // A destructuring `for` head borrowed by the loop: a value
+          // inside it is copied (#1390).
+          else if matches!(loop_head, LoopHead::Part { moved: false, .. }) { vec![(line_num, Event::Duplicate{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: false, of: CopyOf::Inside, id: *id, break_alt: break_alt.clone()})] }
+          else { vec![(line_num, Event::Move{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: *into_closure, loop_head: loop_head.clone(), via_try: *via_try, id: *id, break_alt: break_alt.clone(), break_out: *break_out})] }
         },
         ExternalEvent::StaticBorrow{from: from_ro, to: to_ro, id, of_ref_var, ..} => {
           if to_o { vec![(line_num,  Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id, of_ref_var: *of_ref_var})] }
@@ -6083,10 +6102,16 @@ impl Visualizable for VisualizationData {
         match event {
             // eg let ro_to = String::from("");
             ExternalEvent::Move{from: from_ro, to: to_ro, id, into_closure, loop_head, break_alt, break_out, via_try, ..} => {
-                maybe_append_event(self, &to_ro.clone(), Event::Acquire{from : from_ro.to_owned(), is: to_ro.clone(), via_try, id: id, break_alt: break_alt.clone(), loop_head}, line_number);
+                maybe_append_event(self, &to_ro.clone(), Event::Acquire{from : from_ro.to_owned(), is: to_ro.clone(), via_try, id: id, break_alt: break_alt.clone(), loop_head: loop_head.clone()}, line_number);
                 let out_first = self.moves_out_first.contains(&id);
                 let source = from_ro.extract_rap().map(|r| *r.hash());
-                maybe_append_event(self, &from_ro.clone(), Event::Move{to : to_ro.to_owned(), is: from_ro, into_closure, loop_head, via_try, id: id, break_alt, break_out}, line_number);
+                // A destructuring `for` head borrowed by the loop: a value
+                // inside it is copied (#1390).
+                if matches!(loop_head, LoopHead::Part { moved: false, .. }) {
+                    maybe_append_event(self, &from_ro.clone(), Event::Duplicate{to : to_ro.to_owned(), is: from_ro, into_closure: false, of: CopyOf::Inside, id: id, break_alt}, line_number);
+                } else {
+                    maybe_append_event(self, &from_ro.clone(), Event::Move{to : to_ro.to_owned(), is: from_ro, into_closure, loop_head, via_try, id: id, break_alt, break_out}, line_number);
+                }
                 // A destructuring assignment's cycle (#1343): the source's
                 // move goes before the new value it got on this line.
                 if let (true, Some(h)) = (out_first, source) {

@@ -66,6 +66,27 @@ pub struct MemberSite {
 
 /// The loans every reference held when an `if` / `match` began, for the
 /// arms to start from (see `ExprVisitor::arm_borrows_next`).
+/// The head of `for (s, k) in names` (moved in) or `for &(a, b) in
+/// &pairs` (borrowed), while its pattern is registered (#1390): each
+/// binding that gets (a copy of) a part of an element draws an arrow from
+/// the head, as `let (s, k) = pair;` draws one from each field.
+#[derive(Debug, Clone)]
+pub struct PatternElem {
+  pub head: ResourceTy,
+  /// The head is moved into the loop's iterator (else borrowed by it).
+  pub moved: bool,
+  /// No binding has drawn an arrow from the head yet (the head's move
+  /// is then drawn on its own).
+  pub source_pending: bool,
+  /// A head holding references (`Vec<(&mut String, i32)>`, #1389): its
+  /// name and what its references borrow, which a reference binding
+  /// moved out of it borrows.
+  pub holder: Option<(String, Vec<ResourceTy>)>,
+  /// The copies out of a borrowed head, drawn after its loan (line,
+  /// binding, part).
+  pub deferred: Vec<(usize, ResourceTy, LoopHead)>,
+}
+
 pub struct ArmBorrows {
   before: HashMap<String, RefData>,
   /// Variables declared before the conditional that held no loan when
@@ -508,6 +529,9 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // While the pattern of `for (a, b) in &v` is registered: the borrow
   // of the head that each reference binding is (#576).
   pub pattern_lender: Option<(Evt, ResourceTy)>,
+  // While the pattern of `for (s, k) in names` / `for &(a, b) in &pairs`
+  // is registered: where each binding's value comes from (#1390).
+  pub pattern_elem: Option<PatternElem>,
   // Temporaries given a column of their own in this fn body because a
   // `let` borrows them (`let r = &String::from("a");`, #400); numbers
   // the next one's label.
@@ -1075,6 +1099,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       pointee_copies: HashMap::new(),
       deref_ref_pats: HashSet::new(),
       pattern_lender: None,
+      pattern_elem: None,
       temp_count: 0,
       param_value_count: 0,
       pending_param_borrows: Vec::new(),

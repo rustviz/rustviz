@@ -8384,6 +8384,20 @@ fn render_branches(
                 }
             }
 
+            // A reference whose borrow ended before the conditional (`r = if
+            // c { let y = &a; y } else { &b };` after r's last use, #1393:
+            // the legs before each branch gives it a new one), or in an
+            // arm: it isn't a variable with no value yet.
+            // (r was given a value before the outermost conditional: not
+            // `let r = if ..`, whose legs before a value say it has none.)
+            let had_value = visualization_data.timelines.get(hash).and_then(|t| t.history.first())
+                .is_some_and(|(l, e)| !matches!(e, Event::Branch { .. }) && *l < *split_point);
+            if rap.is_ref() && had_value && !entry_maybe_init {
+                let no_value = hover_messages::state_uninitialized(rap.name());
+                for seg in segs.iter_mut().filter(|seg| seg.title == no_value) {
+                    seg.title = hover_messages::state_ref_borrow_ended(rap.name());
+                }
+            }
             if entry_maybe_init {
                 let no_value = hover_messages::state_uninitialized(rap.name());
                 for seg in segs.iter_mut().filter(|seg| seg.title == no_value) {

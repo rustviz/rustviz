@@ -1146,6 +1146,25 @@ pub fn mutate_branch_lines(
                                 *l = new_line_num;
                             }
                         }
+                        // As in the top-level loop: the old value's drop at
+                        // a reassignment goes with the new value's arrival,
+                        // on its dot (`*b = a` in a let-chain's condition,
+                        // whose events are drawn in its arm, #1391). It was
+                        // drawn after the line's later events (a move of b
+                        // after it).
+                        for g in front.iter() {
+                            let Some(at) = b_data.e_data.iter().position(|(_, p_e)| p_e.get_id() == g.get_id()) else { continue };
+                            let row = b_data.e_data[at].0;
+                            let drops: Vec<usize> = (at + 1..size)
+                                .filter(|&k| b_data.e_data[k].0 == line_num && drop_at_arrival(&b_data.e_data[k].1, g)
+                                    && !skippable_ev.contains(&b_data.e_data[k].1.get_id()))
+                                .collect();
+                            for (n, k) in drops.into_iter().enumerate() {
+                                let (_, d) = b_data.e_data.remove(k);
+                                skippable_ev.insert(d.get_id());
+                                b_data.e_data.insert(at + 1 + n, (row, d));
+                            }
+                        }
                         let mut ev_len = if back.is_empty() { stacked_arrow_rows(&front, false) } else { ev.len() - 1 };
                         if let Some((tracks, n)) = struct_write_tracks(&front).filter(|_| back.is_empty()) {
                             arrow_tracks.extend(tracks);
@@ -1694,6 +1713,13 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                 let borrow_of_temporary = is_borrow
                     && matches!(from, ResourceTy::Anonymous)
                     && matches!(to, ResourceTy::Value(_) | ResourceTy::Deref(_));
+                // A borrow by something with no column (the loop's
+                // iterator's `&pairs` in `for &(a, b) in &pairs`, #885) is
+                // no arrow: drawn on the lender's column alone. It was
+                // lost when its line had arrows (#1390's copies).
+                let lend_to_unmodelled = is_borrow
+                    && matches!(to, ResourceTy::Anonymous)
+                    && matches!(from, ResourceTy::Value(r) if !r.is_fn());
                 // A reference parameter's borrow ending (`r`'s last use
                 // in `fn f(r: &mut T)` returns the borrow to the
                 // caller) shares its line with the write through `r`
@@ -1741,6 +1767,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                 if (is_transfer && (from_fn || into_fn || matches!(to, ResourceTy::Caller) || into_unmodelled_place))
                     || bound_from_literal
                     || borrow_of_temporary
+                    || lend_to_unmodelled
                     || kept_by_returned_closure
                     || ref_param_ends
                     || place_borrow
