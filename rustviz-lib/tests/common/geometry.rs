@@ -287,6 +287,38 @@ fn off_piece(c: (f64, f64), p: (f64, f64), q: (f64, f64)) -> f64 {
     len(c, (p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t))
 }
 
+type Pt = (f64, f64);
+
+/// How long a stretch of the piece p–q has the piece r–s's centre line
+/// within `SHAFT_HALF` of its own (and alongside r–s, not past its ends):
+/// the two 5 px strokes lie at least half on each other there. Two pieces
+/// on one track share their common stretch; two crossing at an angle
+/// share 5 px / sin(angle) or less (12 px at 25 degrees).
+fn shared_stretch((p, q): (Pt, Pt), (r, s): (Pt, Pt)) -> f64 {
+    let (lp, lr) = (len(p, q), len(r, s));
+    if lp < TOL || lr < TOL {
+        return 0.0;
+    }
+    // A point p + t (q - p) / lp: its signed distance off r–s's line and
+    // its place along r–s are both linear in t.
+    let (dx, dy) = ((q.0 - p.0) / lp, (q.1 - p.1) / lp);
+    let (ex, ey) = ((s.0 - r.0) / lr, (s.1 - r.1) / lr);
+    let (wx, wy) = (p.0 - r.0, p.1 - r.1);
+    let off = (wx * ey - wy * ex, dx * ey - dy * ex);
+    let at = (wx * ex + wy * ey, dx * ex + dy * ey);
+    // The t where a + b t lies in lo..=hi.
+    let between = |(a, b): (f64, f64), lo: f64, hi: f64| -> (f64, f64) {
+        if b.abs() < 1e-12 {
+            return if a >= lo && a <= hi { (f64::NEG_INFINITY, f64::INFINITY) } else { (1.0, 0.0) };
+        }
+        let (t1, t2) = ((lo - a) / b, (hi - a) / b);
+        (t1.min(t2), t1.max(t2))
+    };
+    let (o1, o2) = between(off, -SHAFT_HALF, SHAFT_HALF);
+    let (a1, a2) = between(at, 0.0, lr);
+    (o2.min(a2).min(lp) - o1.max(a1).max(0.0)).max(0.0)
+}
+
 fn is_fork_or_join(d: &Dot) -> bool {
     d.events.iter().any(|e| e == "branch" || e == "branch_join")
 }
@@ -372,7 +404,11 @@ pub fn check(g: &Geo) -> Vec<(&'static str, String)> {
     }
 
     // Two arrows along one stretch: the pointer reaches only the one drawn
-    // on top (#1264, #1187).
+    // on top (#1264, #1187). On one track, or one slanting across the
+    // other's track at a shallow angle, their centre lines within half a
+    // stroke of each other (#1468: a level return and a binding arrow
+    // rising 28 px over 330 px lay on each other for 47 px; two returns
+    // leaving one dot 6 degrees apart, for 19 px).
     for (i, a) in g.arrows.iter().enumerate() {
         for b in &g.arrows[i + 1..] {
             if a.tip == b.tip {
@@ -380,12 +416,8 @@ pub fn check(g: &Geo) -> Vec<(&'static str, String)> {
             }
             let mut most: f64 = 0.0;
             for &(p, q) in &a.pieces {
-                let l = len(p, q);
                 for &(r, s) in &b.pieces {
-                    if let (Some(t1), Some(t2)) = (along(r, p, q, TOL), along(s, p, q, TOL)) {
-                        let shared = t1.max(t2).min(l) - t1.min(t2).max(0.0);
-                        most = most.max(shared);
-                    }
+                    most = most.max(shared_stretch((p, q), (r, s)));
                 }
             }
             if most > OVERLAP_PX {
@@ -682,6 +714,18 @@ mod unit {
         let p = arrow("caller>s", "caller", "s", "98 117 98 125 88 125", "88,131 75.25,125 88,119");
         let r = arrow("s>caller", "s", "caller", "75.25 125 98 125 98 120", "92,120 98,107.25 104,120");
         assert_eq!(invs(&[p, r].concat()), Vec::<&str>::new());
+        // #1468: a level return on the track half a row below, and a
+        // binding arrow rising across that track at under 5 degrees: their
+        // strokes lie on each other for 47 px.
+        let ret = arrow("pair>a", "pair", "a", "305.8 218.15 290 230 90 230 84.4 225.8", "80.8,230.6 74.2,218.15 88,221");
+        let slant = arrow("a>x", "a", "x", "100.23 244.56 432.06 216.52", "431.56,210.54 444.77,215.44 432.57,222.49");
+        assert_eq!(invs(&[ret.clone(), slant].concat()), vec!["arrows-overlap"]);
+        // Crossing it at 45 or 30 degrees, it touches the track for 7 or
+        // 10 px.
+        let steep = arrow("a>x", "a", "x", "150 280 250 180", "245.76,175.76 259.02,170.98 254.24,184.24");
+        let shallow = arrow("a>x", "a", "x", "150 260 300 173.4", "297,168.2 311,167 303,178.6");
+        assert_eq!(invs(&[ret.clone(), steep].concat()), Vec::<&str>::new());
+        assert_eq!(invs(&[ret, shallow].concat()), Vec::<&str>::new());
         // A hop arrow's straight pieces count, its arc doesn't.
         assert_eq!(path_pieces("M 145.25 335 L 300 335 A 10 10 0 0 1 320 335 L 362 335"),
                    vec![((145.25, 335.0), (300.0, 335.0)), ((320.0, 335.0), (362.0, 335.0))]);
