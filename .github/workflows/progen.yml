@@ -1,6 +1,7 @@
 name: progen
 
-# Nightly property-based run (#1218): generate feature-combination
+# Property-based run (#1218), started by hand ("Run workflow" below;
+# there is no schedule): generate feature-combination
 # programs, keep the ones rustc accepts, run the corpus invariant and
 # geometry checks on them with the plugin built from main, shrink and
 # bucket the failures (tools/progen/README.md). Report only: findings
@@ -9,15 +10,13 @@ name: progen
 # On pull requests that touch the generator, only its own tests run.
 
 on:
-  schedule:
-    - cron: "23 6 * * *"
   workflow_dispatch:
     inputs:
       count:
         description: "programs to generate (the time box usually stops it first)"
         default: "20000"
       seed:
-        description: "seed (default: today's date, so each night tries new programs)"
+        description: "seed (default: today's date)"
         default: ""
   pull_request:
     paths:

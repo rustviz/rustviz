@@ -145,9 +145,11 @@ don't paper over it here.
 
 ## CI
 
-`.github/workflows/progen.yml` runs nightly (and on demand): it installs
-the plugin from `main`, runs a 20-minute batch with that day's date as the
-seed, shows `summary.md` on the run page and uploads it with
+The batch is run by hand, not on a schedule: the Actions "Run workflow"
+button on `.github/workflows/progen.yml` (inputs `count` and `seed`), or
+`tools/progen/run.sh N SEED` locally. The workflow installs the plugin from
+the commit, runs a 20-minute batch (the date as the seed unless one is
+given), shows `summary.md` on the run page and uploads it with
 `summary.json`, `log.txt` and `buckets/` as the `progen-<seed>` artifact.
 Findings never fail the job. On pull requests that touch `tools/progen/`
 it only runs the generator's own tests:
