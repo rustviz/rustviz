@@ -96,6 +96,9 @@ pub struct ArmBorrows {
   unlent: HashSet<String>,
   /// The loans earlier arms gave a reference, in arm order.
   done: Vec<(String, RefData)>,
+  /// `arm_value_binds` as it was when the conditional began (an outer
+  /// conditional's), put back when it ends.
+  outer_value_binds: HashSet<String>,
   /// The last use of a loan held from before in an arm that used it,
   /// over the arms so far.
   last_use: std::collections::BTreeMap<String, usize>,
@@ -699,6 +702,10 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// replace the earlier one's, whose borrow then never ended.
   /// `emit_borrow_ends` ends each one like the loans `borrow_map` holds.
   pub retired_loans: Vec<RetiredLoan>,
+  /// The references and holders (and their part columns) the branches
+  /// of the conditional being visited each give their value to after the
+  /// branch was visited (`ArmBind::Rhs`, #1453): see `arm_borrows_end`.
+  pub arm_value_binds: HashSet<String>,
   /// References gone out of scope whose loan another reference took a
   /// copy of and has since ended, at its own reassignment (`y` in `r =
   /// if c { let y = &a; y } else { &b }; … r = &t;`): y gives nothing
@@ -1159,6 +1166,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       loan_end_overrides: Vec::new(),
       arm_loans: Vec::new(),
       retired_loans: Vec::new(),
+      arm_value_binds: HashSet::new(),
       loans_carried_on: Vec::new(),
       repointed_ends: Vec::new(),
       retired_until: HashMap::new(),
@@ -3005,6 +3013,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           }).collect();
           self.register_arm_call_lenders(&lhs, body);
           self.match_rhs(lhs.clone(), body, evt);
+          // Each branch gives it its value, and with it its loans (its
+          // parts' too: `(Some(r), 1)`), which the arms' loans are merged
+          // into (`arm_borrows_end`, #1453).
+          if let ResourceTy::Value(r) = &lhs {
+            let prefix = format!("{}.", r.name());
+            #[expect(clippy::disallowed_methods, reason = "collected into a set")]
+            let names: Vec<String> = self.raps.iter()
+              .filter(|(n, _)| *n == r.name() || n.starts_with(&prefix))
+              .filter(|(_, rd)| rd.rap.is_ref() || rd.rap.holds_borrow())
+              .map(|(n, _)| n.clone())
+              .collect();
+            self.arm_value_binds.extend(names);
+          }
           self.emit_arm_holder_literal_borrows(&lhs, body);
           for ((n, _), mut lenders) in union.iter().zip(earlier) {
             if let Some(rd) = self.borrow_map.get(n) {
@@ -3102,7 +3123,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
     let Some(value) = branch_value_expr(body) else { return };
     let Some(ty) = self.tcx.typeck(value.hir_id.owner).expr_ty_opt(value) else { return };
-    let (found, is_mut) = self.holder_lenders(value, ty);
+    // A branch of `let k = Some(if c { let r = &s1; r } else { .. });`
+    // gives a reference the branch declared (#1453): k's value holds it,
+    // so k borrows what it borrows, now that the branch has made it.
+    let (found, is_mut) = if ty.is_ref() {
+      let (lender, _, co) = self.get_ref_data_co(value);
+      (std::iter::once(lender).chain(co).collect(), ty.ref_mutability().is_some_and(|m| m.is_mut()))
+    } else {
+      self.holder_lenders(value, ty)
+    };
     let line = expr_to_line(value, &self.tcx);
     for l in found.into_iter().filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_))) {
       let aliasing = get_aliasing_data(&l, &self.borrow_map);
@@ -3335,7 +3364,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   }
 
   /// Called when an `if` / `match` begins: the loans its arms start from.
-  pub fn arm_borrows_begin(&self) -> ArmBorrows {
+  pub fn arm_borrows_begin(&mut self) -> ArmBorrows {
+    let outer_value_binds = std::mem::take(&mut self.arm_value_binds);
     // A `let r;` local may be registered when it's first assigned:
     // name it from `uninit_locals` / `maybe_init_locals` too.
     #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
@@ -3345,7 +3375,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       .chain(self.uninit_locals.keys().chain(self.maybe_init_locals.iter()).map(|h| self.deferred_ident(*h)))
       .filter(|n| !self.borrow_map.contains_key(n))
       .collect();
-    ArmBorrows { before: self.borrow_map.clone(), unlent, done: Vec::new(), last_use: std::collections::BTreeMap::new() }
+    ArmBorrows { before: self.borrow_map.clone(), unlent, done: Vec::new(), outer_value_binds, last_use: std::collections::BTreeMap::new() }
   }
 
   /// Called before each arm but the first is visited. The arms are
@@ -3406,6 +3436,36 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// source order.
   pub fn arm_borrows_end(&mut self, mut ab: ArmBorrows) {
     let mut done = std::mem::take(&mut ab.done);
+    // A reference (or holder) the branches give their values to (`let y
+    // = match n { 0 => { let r = &s1; r } _ => { let r = &s2; r } };`,
+    // #1453) may hold any branch's loan after the conditional: it borrows
+    // what each arm gave it, and none of those loans ends at the join.
+    #[expect(clippy::disallowed_methods, reason = "sorted on the next line")]
+    let mut bound: Vec<String> = self.arm_value_binds.iter()
+      .filter(|k| ab.before.contains_key(*k) || ab.unlent.contains(*k))
+      .cloned().collect();
+    bound.sort();
+    self.arm_value_binds = std::mem::take(&mut ab.outer_value_binds);
+    for k in bound {
+      let arms: Vec<RefData> = done.iter().filter(|(n, _)| *n == k).map(|(_, d)| d.clone()).collect();
+      let Some(mut merged) = self.borrow_map.get(&k).cloned().or_else(|| arms.last().cloned()) else { continue };
+      for d in arms.iter().chain(ab.before.get(&k)) {
+        for l in d.all_lenders() {
+          if !matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)) || merged.all_lenders().contains(&l) {
+            continue;
+          }
+          if matches!(merged.lender, ResourceTy::Value(_) | ResourceTy::Deref(_)) {
+            merged.co_lenders.push(l);
+          } else {
+            merged.lender = l;
+            merged.static_lender = None;
+          }
+        }
+        merged.lifetime = merged.lifetime.max(d.lifetime);
+      }
+      done.retain(|(n, _)| *n != k);
+      self.borrow_map.insert(k, merged);
+    }
     let mut keep: Vec<usize> = Vec::new();
     #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "`keep` is sorted before use; the inserts are independent")]
     for (k, old) in ab.before.iter() {
@@ -9900,6 +9960,18 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
         let elem = if only == Some(true) { cond.unwrap_or(elem) } else { elem };
         match members.as_ref().and_then(|m| m[i].clone()) {
           Some(member) => {
+            // An element drawn as one column whose value holds a borrow
+            // (`(Some(&s1), 1)`, `(if c { Some(&a) } else { .. }, 1)`)
+            // holds it, as a struct literal's field does (#1454).
+            let elem_ty = typeck.node_type(elem.hir_id);
+            let member = if !elem_ty.is_ref() && !self.has_member_columns(elem_ty)
+              && matches!(member, ResourceAccessPoint::Struct(_)) {
+              let name = member.name().to_owned();
+              self.register_holder(&name, elem, elem_ty);
+              self.raps.get(&name).map_or(member, |rd| rd.rap.to_owned())
+            } else {
+              member
+            };
             // A reference element: resolve its lender from the
             // element expression, as the Struct arm does for
             // reference fields, and the kind of the loan it holds
@@ -11199,10 +11271,42 @@ pub fn print_out_of_scope(&mut self){
         by_span.insert(m_data.borrow_idx);
       }
     }
+    // The lines of the borrows drawn into each variable after the line
+    // it's bound on: a branch's `&mut m1` in `let km = match n { 0 =>
+    // Some(&mut m1), .. };` is issued on the arm's line (#1464).
+    #[expect(clippy::disallowed_methods, reason = "collected into a map, each entry on its own")]
+    let arm_lines: HashMap<String, Vec<(usize, String)>> = self.borrow_map.iter()
+      .filter(|(_, d)| d.borrow_span.is_none() && d.loan_line.is_none())
+      .filter_map(|(n, d)| {
+        let hash = *self.raps.get(n)?.rap.hash();
+        let mut lines = Vec::new();
+        borrow_lines_into(self.preprocessed_events, hash, &mut lines);
+        lines.retain(|(l, _)| *l > d.assigned_at);
+        (!lines.is_empty()).then(|| (n.clone(), lines))
+      })
+      .collect();
     #[expect(clippy::disallowed_methods, reason = "each entry is refined on its own from the mir_b_data Vec")]
-    for data in self.borrow_map.values_mut().chain(self.arm_loans.iter_mut().map(|(_, d)| d)) {
+    for (name, data) in self.borrow_map.iter_mut().chain(self.arm_loans.iter_mut().map(|(k, d)| (&*k, d))) {
       if data.borrow_span.is_some_and(|sp| mir_b_data.iter().any(|m| m.span == sp)) {
         continue; // refined above
+      }
+      // A value bound from a conditional whose branches borrow (#1464):
+      // its loans are the ones its branches issued, on their lines, and
+      // it holds them until the last of them ends (where rustc ends
+      // them: a move into an `if let`'s binding hands them on, and on
+      // the path that didn't match they end there too).
+      if !mir_b_data.iter().any(|m| ExprVisitor::borrow_match(data, m).is_some()) {
+        let arm_kill = arm_lines.get(name).into_iter().flatten()
+          .filter_map(|(line, lender)| mir_b_data.iter()
+            .filter(|m| !by_span.contains(&m.borrow_idx) && m.region.0 == *line && m.borrowed_place.as_deref()
+              .is_some_and(|p| lender == p || lender.strip_prefix(p).is_some_and(|rest| rest.starts_with('.'))))
+            .map(|m| m.region.1)
+            .max())
+          .max();
+        if let Some(kill) = arm_kill {
+          data.lifetime = kill;
+          continue;
+        }
       }
       // Several loans of the same lender can be issued on the
       // reference's line (`if t.len() > 1 { first_word(&t) } else
@@ -11289,6 +11393,26 @@ pub fn print_out_of_scope(&mut self){
       }
     }
     for (name, end) in member_ends {
+      if let Some(rd) = self.borrow_map.get_mut(&name) {
+        rd.lifetime = end;
+      }
+    }
+    // A struct's field (or a tuple's element) drawn as one column that
+    // holds a borrow (`W { o: Some(r) }`, `(Some(r), 1)`) holds it while
+    // the struct is live: its uses are the struct's (#1454). (One that
+    // holds a loan issued on its line has its end from rustc above.)
+    let mut holder_member_ends: Vec<(String, usize)> = Vec::new();
+    #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "collected into a Vec, each entry raised on its own")]
+    for (name, rd) in self.borrow_map.iter() {
+      if !self.raps.get(name).is_some_and(|r| !r.rap.is_ref() && r.rap.holds_borrow() && r.rap.is_member()) {
+        continue;
+      }
+      let Some((root, _)) = name.split_once('.') else { continue };
+      if let Some(live) = self.last_live_line(root, (rd.assigned_at, usize::MAX)).filter(|l| *l > rd.lifetime) {
+        holder_member_ends.push((name.clone(), live));
+      }
+    }
+    for (name, end) in holder_member_ends {
       if let Some(rd) = self.borrow_map.get_mut(&name) {
         rd.lifetime = end;
       }
@@ -14009,6 +14133,27 @@ pub(crate) fn copies_from_inside<'tcx>(evt: &Evt, ty: Ty<'tcx>, parent_ty: Ty<'t
 
 fn is_by_value_binding(pat: &Pat<'_>) -> bool {
   matches!(pat.kind, PatKind::Binding(ann, _, _, None) if matches!(ann.0, rustc_hir::ByRef::No))
+}
+
+/// The lines of the borrows drawn into the column `hash` (through
+/// nested branches), each with its lender's name (#1464).
+fn borrow_lines_into(evs: &[(usize, ExternalEvent)], hash: u64, out: &mut Vec<(usize, String)>) {
+  for (l, e) in evs {
+    match e {
+      ExternalEvent::StaticBorrow { from, to: ResourceTy::Value(to), .. }
+      | ExternalEvent::MutableBorrow { from, to: ResourceTy::Value(to), .. } if *to.hash() == hash => {
+        if from.extract_rap().is_some() {
+          out.push((*l, from.real_name()));
+        }
+      }
+      ExternalEvent::Branch { branches, .. } => {
+        for b in branches {
+          borrow_lines_into(&b.e_data, hash, out);
+        }
+      }
+      _ => {}
+    }
+  }
 }
 
 /// The line where `rap` goes out of scope in `evs` (a variable declared

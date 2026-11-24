@@ -9,9 +9,8 @@ fn main() {
     let k = Some(if c { &s } else { &u });
     println!("{:?}", k);
 
-    // (Known wrong: on the path where `if let` doesn't match, km's
-    // borrow never ends, so m1 / m2 go `State::Invalid` at the
-    // `println!`: #1464.)
+    // km moved into `if let`: r takes the borrow where the pattern
+    // matches; on the other path km's borrow ends there (#1464).
     let mut m1 = String::from("m");
     let mut m2 = String::from("n");
     let km = Some(match s.len() {

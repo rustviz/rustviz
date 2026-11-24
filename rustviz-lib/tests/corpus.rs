@@ -25116,14 +25116,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from d.a to s1 or s2 (d.a may point into either; its borrow of both ends here)",
             "Return immutably borrowed resource from d.b to s2 or s1 (d.b may point into either; its borrow of both ends here)",
             "Return mutably borrowed resource from t.1 to s2 or s1 (t.1 may point into either; its borrow of both ends here)",
+            // t is one local: both its loans live until its last use,
+            // t.1's on line 28, where t.0's borrow ends too (#1473; it
+            // used to end at t.0's own last use, line 27, giving nothing
+            // back while t.1 still borrowed s1 or s2).
+            "Return mutably borrowed resource from t.0 to s1 or s2 (t.0 may point into either; its borrow of both ends here)",
         ],
         must_not_contain: &[
             "=Return immutably borrowed resource from d.a to s2",
             "=Return immutably borrowed resource from d.b to s1",
             "=Return mutably borrowed resource from t.1 to s1",
-            // (#1402: t.0's end gives nothing back. t.1, used after it,
-            // may point into s1 or s2, so both stay borrowed until then.)
-            "Return mutably borrowed resource from t.0",
+            "=Return mutably borrowed resource from t.0 to s1",
+            "=Return mutably borrowed resource from t.0 to s2",
         ],
     },
     TooltipExpect {
@@ -26020,6 +26024,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "km holds a value that mutably borrows m2's resource (km isn't a reference itself)",
             "Return immutably borrowed resource from kr to s",
             "Return immutably borrowed resource from kr to u",
+            // #1464: on the path where `if let` doesn't match, km's borrow
+            // ends there (before: never, and m1 / m2 went State::Invalid).
+            "km's mutable borrow ends",
+            "Return mutably borrowed resource from km to m1",
+            "Return mutably borrowed resource from km to m2",
         ],
         must_not_contain: &[
             "=k immutably borrows a resource",
@@ -26041,11 +26050,107 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from q to a",
             "Return immutably borrowed resource from v to a",
             "Copy from k to n",
+            // #1463: q gets each branch's value in that branch.
+            "q is live in a conditional expression ",
+            "v is live in a conditional expression ",
         ],
         must_not_contain: &[
             "to Some",
             "=Return immutably borrowed resource from r to a",
         ],
+    },
+    TooltipExpect {
+        name: "branch_local_ref_value_1453",
+        // #1453: each branch hands over a reference it declares; the
+        // variable bound from the conditional may hold either, and rustc
+        // keeps s1 and s2 borrowed until its last use, where it gives both
+        // back. main gave s1 back from the first branch's reference, after
+        // that one's scope (and y never gave it back); with a holder, a
+        // constructor around the conditional or a `let x;` the same.
+        must_contain: &[
+            "Return immutably borrowed resource from y to s1",
+            "Return immutably borrowed resource from y to s2",
+            "Return immutably borrowed resource from w to s1",
+            "Return immutably borrowed resource from w to s2",
+            "Return immutably borrowed resource from h to s1",
+            "Return immutably borrowed resource from h to s2",
+            "Return immutably borrowed resource from k to s1",
+            "Return immutably borrowed resource from k to s2",
+            "Return immutably borrowed resource from x to s1",
+            "Return immutably borrowed resource from x to s2",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from r to s1",
+            "Return immutably borrowed resource from r1 to s1",
+            "Return immutably borrowed resource from p to s1",
+            "Return immutably borrowed resource from q to s1",
+            "Return immutably borrowed resource from q to s2",
+            "Return immutably borrowed resource from t to s1",
+        ],
+    },
+    TooltipExpect {
+        name: "tuple_elem_holder_1454",
+        // #1454: a tuple element whose value holds a borrow holds it (as a
+        // struct field does), until the tuple's last use. main drew t.0 as
+        // "initialized with a Some value", borrowing nothing. A copy of a
+        // reference variable (`(Some(r), 3)`, `W { o: Some(r) }`) is held
+        // while the tuple / struct is in use, not only where it's built.
+        must_contain: &[
+            "Immutable borrow from s1 to t.0: Some's signature gives the value it returns the same lifetime as its argument; t.0 isn't a reference, but its value holds one",
+            "Return immutably borrowed resource from t.0 to s1",
+            "Return immutably borrowed resource from u.0 to s1",
+            "Return immutably borrowed resource from u.0 to s2",
+            "Return immutably borrowed resource from a.0 to s2",
+            "Return immutably borrowed resource from e.0 to s2",
+            "Return immutably borrowed resource from w.o to s2",
+            "Return immutably borrowed resource from k.0 to s1",
+            "Return immutably borrowed resource from k.0 to s2",
+        ],
+        must_not_contain: &[
+            "t.0 is initialized with a Some value",
+            "u.0 is initialized with a Some value",
+            "=t.0 holds a copyable value",
+            "e.0 was moved out earlier",
+            "Return immutably borrowed resource from p to s1",
+        ],
+    },
+    TooltipExpect {
+        name: "assign_branch_split_1463",
+        // #1463: a holder assigned a conditional gets each branch's value
+        // in that branch, as `let` does, so a lender the branches split is
+        // lent on its leg (the geometric check covers where). main drew
+        // `w = if c { let r3 = &a; W { o: Some(r3) } } ..`'s w.o as ending
+        // its borrow where it got it, with r3 giving a back after its scope.
+        must_contain: &[
+            "q is live in a conditional expression ",
+            "m is live in a conditional expression ",
+            "Return immutably borrowed resource from q to a",
+            "Return immutably borrowed resource from m to a",
+            "Return immutably borrowed resource from w.o to a",
+            "Return immutably borrowed resource from w.o to b",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from r3 to a",
+            "Return immutably borrowed resource from r2 to a",
+        ],
+    },
+    TooltipExpect {
+        name: "cond_holder_moved_1464",
+        // #1464: a holder whose branches borrow on lines of their own,
+        // moved into `if let`: on the path that doesn't match, its borrow
+        // ends there. main never ended it: m1 and m2 reached the
+        // `println!` still lent and went State::Invalid (no text to forbid;
+        // the invariant check pins that).
+        must_contain: &[
+            "Return mutably borrowed resource from km to m1",
+            "Return mutably borrowed resource from km to m2",
+            "Return mutably borrowed resource from kc to m1",
+            "Return mutably borrowed resource from kc to m2",
+            "Return mutably borrowed resource from ki to m1",
+            "Return mutably borrowed resource from ki to m2",
+            "km's mutable borrow ends",
+        ],
+        must_not_contain: &[],
     },
 ];
 
