@@ -1028,6 +1028,11 @@ pub struct MaybeEntry {
   /// round" isn't only after the branch above. `moves`: whether the
   /// outermost such loop ever moves something out of `ro`.
   pub nested: Option<bool>,
+  /// Whether the loop ever comes back round to its start: false when
+  /// every pass through its body leaves it (#1467), so that there is
+  /// no later time round (`round` is then `Held`, as if it kept what it
+  /// had).
+  pub rounds: bool,
 }
 
 /// A `return` directly in a loop body (#1020), not in an `if` / `match`

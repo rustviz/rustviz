@@ -26643,6 +26643,79 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=b may have been moved above, so it can't be used after the if until it's assigned again. If nothing above moved it, its resource is dropped when b is assigned again (or, if it isn't, when it goes out of scope).",
         ],
     },
+    TooltipExpect {
+        name: "edition2024/loop_always_breaks_1467",
+        // #1467: a loop whose body leaves it on every pass never comes back
+        // round, but a `while` / `for` may not run its body, and a `break`
+        // or `?` before the assignment may skip it. The join of a
+        // conditional that may move the value said it is dropped "when it
+        // is assigned again" (now: "or, if it isn't, when it goes out of
+        // scope"); after the loop there was no "may have no value after
+        // the loop" dot, and b's scope end (after a let-chain) and u's
+        // next assignment (moved before the loop) said the old value is
+        // dropped unconditionally. A bare `loop` that reaches the
+        // assignment first runs it (c, k: unchanged). m's assignment said
+        // a later iteration drops an earlier one's value; there is none.
+        // p.name (a field) and q (a struct) were said to be dropped at
+        // their scope ends unconditionally. Each loop's note said it "may
+        // run many times".
+        must_contain: &[
+            "a was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when a is assigned again (or, if it isn't, when it goes out of scope).",
+            "d was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when d is assigned again (or, if it isn't, when it goes out of scope).",
+            "e was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when e is assigned again (or, if it isn't, when it goes out of scope).",
+            "f was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when f is assigned again (or, if it isn't, when it goes out of scope).",
+            "g was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when g is assigned again (or, if it isn't, when it goes out of scope).",
+            "h was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when h is assigned again (or, if it isn't, when it goes out of scope).",
+            "w was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when w is assigned again (or, if it isn't, when it goes out of scope).",
+            "x was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when x is assigned again (or, if it isn't, when it goes out of scope).",
+            "b may have been moved above, so it can't be used after the if until it's assigned again. If nothing above moved it, its resource is dropped when b is assigned again (or, if it isn't, when it goes out of scope).",
+            "a may have no value after the loop: a branch above may have moved it, and the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it or no branch above moved it, its resource is dropped when a goes out of scope.",
+            "a goes out of scope. Its resource (including the String it holds, if any) is dropped here only if the loop above assigned a or no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "f may have no value after the loop: a branch above may have moved it, and the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it or no branch above moved it, its resource is dropped when f goes out of scope.",
+            "f goes out of scope. Its resource (including the String it holds, if any) is dropped here only if the loop above assigned f or no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "g may have no value after the loop: a branch above may have moved it, and the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it or no branch above moved it, its resource is dropped when g goes out of scope.",
+            "g goes out of scope. Its resource (including the String it holds, if any) is dropped here only if the loop above assigned g or no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "h may have no value after the loop: a branch above may have moved it, and the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it or no branch above moved it, its resource is dropped when h goes out of scope.",
+            "h goes out of scope. Its resource (including the String it holds, if any) is dropped here only if the loop above assigned h or no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "x may have no value after the loop: a branch above may have moved it, and the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it or no branch above moved it, its resource is dropped when x goes out of scope.",
+            "x goes out of scope. Its resource (including the String it holds, if any) is dropped here only if the loop above assigned x or no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "b may have no value after the loop: something above may have moved it, and the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it or nothing above moved it, its resource is dropped when b goes out of scope.",
+            "b goes out of scope. Its resource (including the String it holds, if any) is dropped here only if the loop above assigned b or nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "c was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when c is assigned again.",
+            "k was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when k is assigned again.",
+            "d goes out of scope. Its resource (including the String it holds, if any) is dropped here only if the loop above assigned d or no branch above moved it (Rust tracks this with a runtime drop flag). If the `return` on line 53 runs first, this happens there instead.",
+            "e acquires ownership of a new resource. Its previous resource (including the String it holds, if any) is dropped here only if e still holds it (Rust tracks this with a runtime drop flag): it does unless a branch above moved it and e hasn't been assigned since.",
+            "u may have no value after the loop: the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it, its resource is dropped when u is assigned again.",
+            "u acquires ownership of a new resource. Its previous resource is dropped here only if the loop above assigned u (Rust tracks this with a runtime drop flag).",
+            "(RustViz draws one pass through this loop, which may not run at all.)",
+            "p.name was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when p.name is assigned again (or, if it isn't, when it goes out of scope).",
+            "p.name may have no value after the loop: a branch above may have moved it, and the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it or no branch above moved it, its resource is dropped when p.name goes out of scope.",
+            "p.name goes out of scope. Its resource is dropped here only if the loop above assigned p.name or no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "q was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when q is assigned again (or, if it isn't, when it goes out of scope).",
+            "q may have no value after the loop: a branch above may have moved it, and the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it or no branch above moved it, its resource is dropped when q goes out of scope.",
+            "q goes out of scope. Its resource is dropped here only if the loop above assigned q or no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "=p.name goes out of scope. Its resource is dropped.",
+            "=q goes out of scope. Its resource is dropped.",
+            "=a was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when a is assigned again.",
+            "=d was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when d is assigned again.",
+            "=e was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when e is assigned again.",
+            "=f was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when f is assigned again.",
+            "=g was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when g is assigned again.",
+            "=h was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when h is assigned again.",
+            "=w was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when w is assigned again.",
+            "=x was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when x is assigned again.",
+            "=b may have been moved above, so it can't be used after the if until it's assigned again. If nothing above moved it, its resource is dropped when b is assigned again.",
+            "=b goes out of scope. Its resource is dropped (including the String it holds, if any).",
+            "c was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when c is assigned again (or, if it isn't, when it goes out of scope).",
+            "k was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when k is assigned again (or, if it isn't, when it goes out of scope).",
+            "u acquires ownership of a new resource; its previous resource is dropped",
+            "the resource an earlier iteration gave m is dropped here first",
+            "a later time round",
+            "which may run many times",
+        ],
+    },
 ];
 
 /// #1440: on the line where two loans of v end, the first end's dot (with
@@ -34614,8 +34687,9 @@ fn a_boxed_closure_borrowing_through_a_reference_keeps_it_until_dropped() {
 /// order, then leftmost), and there is no other note: not on `total`'s
 /// binding before the loops, not on the `for` line where `words` is lent
 /// to the iterator once, not on the closing line where it's given back,
-/// not on `n`, bound once by the `break`, not in the `if` block, and not
-/// on the other variables' first dots in a loop. An outer loop whose
+/// not on `n`, bound once by the `break`, not in the `if` block, not
+/// on the other variables' first dots in a loop, and not in the `loop`
+/// that breaks on its first pass (#1467). An outer loop whose
 /// dots are all in a loop nested in it (`loop { while let … }`) gets no
 /// note: only the `while let`'s is there (the first version also put the
 /// `loop`'s on s's dot, on the same row).
@@ -34625,7 +34699,8 @@ fn loop_notes_sit_on_each_loops_first_dot() {
     let declares = "(RustViz draws one pass through this loop, which may run many times; the variables declared inside it are new on each pass.)";
     let cases: &[(&str, &[(&str, &[&str])])] = &[
         ("approx_loop_one_pass_853", &[
-            (declares, &["for w in words.iter() {", "while let Some(top) = stack.pop() {", "let t = String::from(\"t\");"]),
+            // (Not the `loop`: it breaks on its first pass, #1467.)
+            (declares, &["for w in words.iter() {", "while let Some(top) = stack.pop() {"]),
         ]),
         ("approx_loop_nested_853", &[
             (plain, &["while total < 100 {", "total += 1;"]),

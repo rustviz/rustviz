@@ -3986,6 +3986,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       names.push(name);
       names.extend(members.iter().map(|m| m.name().clone()));
     }
+    // A loop that never comes back round (#1467): what its body assigns
+    // may be given a value by its one time round, which may not happen
+    // (a `while` / `for`, a `break` before the assignment). There is no
+    // earlier time round for an assignment in it to drop the value of
+    // (`given_by_loop_now`).
+    let rounds_back = self.loop_never_rounds(loop_expr.span) != Some(true);
+    let once_assigned: Vec<String> = if rounds_back {
+      Vec::new()
+    } else {
+      let assigned = assigned_names(&self.tcx, loop_expr);
+      #[expect(clippy::disallowed_methods, reason = "sorted below")]
+      let names: Vec<String> = self.raps.keys()
+        .filter(|n| assigned.iter().any(|a| *a == **n || n.starts_with(&format!("{}.", a))))
+        .cloned().collect();
+      names
+    };
+    names.extend(once_assigned.iter().cloned());
     names.sort();
     names.dedup();
     #[expect(clippy::disallowed_methods, reason = "only tested for membership")]
@@ -4027,6 +4044,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       rounds.push((name, round));
       rounds.extend(members.iter().map(|m| (m.name().clone(), round)));
     }
+    // One that never comes back round (#1467, `while c { s = …;
+    // break; }`): a `while` / `for` may still not run its body, and a
+    // `break` may come before the assignment. As if each one it assigns
+    // kept what it had where it would come back round
+    // (`MaybeEntry::rounds`).
+    let mut once_assigned = once_assigned;
+    once_assigned.sort();
+    rounds.extend(once_assigned.into_iter().map(|n| (n, Ownership::Held)));
     let mut maybe_entry: Vec<MaybeEntry> = Vec::new();
     for (name, round) in rounds {
       let root = name.split('.').next().unwrap_or("");
@@ -4066,7 +4091,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
       };
       let by_cond = self.moved_by_chain_condition(&ro) || self.maybe_moved_by_let_now(&name);
-      maybe_entry.push(MaybeEntry { ro, round, by_cond, nested });
+      maybe_entry.push(MaybeEntry { ro, round, by_cond, nested, rounds: rounds_back });
     }
     self.loop_given.push((loop_expr.hir_id, given));
     self.loop_maybe_entry.push((loop_expr.hir_id, maybe_entry));
@@ -4078,17 +4103,32 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// #1012): the first time round, the assignment drops the old value
   /// only if no branch above moved it; a later time round, only if the
   /// time round before left it holding one. Only the innermost loop
-  /// here. `Some(nested)` (`MaybeEntry::nested`) if so: in a loop inside
-  /// another that `rap` was declared before, "the first time round"
-  /// would be each run of the inner loop (#1019).
-  fn maybe_entry_untouched_now(&self, rap: &ResourceAccessPoint) -> Option<Option<bool>> {
+  /// here. `Some((nested, rounds))` (`MaybeEntry::nested`, `::rounds`)
+  /// if so: in a loop inside another that `rap` was declared before,
+  /// "the first time round" would be each run of the inner loop
+  /// (#1019); a loop that never comes back round has no later time
+  /// round (#1467).
+  fn maybe_entry_untouched_now(&self, rap: &ResourceAccessPoint) -> Option<(Option<bool>, bool)> {
     let loop_at = self.exit_frames.iter().rposition(|f| matches!(f, ExitFrame::Loop { .. }))?;
     let ExitFrame::Loop { id: innermost, .. } = self.exit_frames[loop_at] else { return None };
-    let nested = self.loop_maybe_entry.iter()
-      .find_map(|(id, entry)| if *id == innermost { entry.iter().find(|m| m.ro == *rap).map(|m| m.nested) } else { None })?;
+    let entry = self.loop_maybe_entry.iter()
+      .find_map(|(id, entry)| if *id == innermost { entry.iter().find(|m| m.ro == *rap).map(|m| (m.nested, m.rounds)) } else { None })?;
     let (events, hide) = self.loop_path_events(loop_at);
     (path_own(&events, rap, &hide, PathOwn::Yes) == PathOwn::Yes
-      && path_own(&events, rap, &hide, PathOwn::No) == PathOwn::No).then_some(nested)
+      && path_own(&events, rap, &hide, PathOwn::No) == PathOwn::No).then_some(entry)
+  }
+
+  /// Whether the innermost loop here may end, on its first time round,
+  /// before `at` (#1467): a `while` / `for` loop (its condition fails,
+  /// its iterator is empty), or something in its body before `at` that
+  /// leaves it (`exits_loop_before`).
+  fn loop_may_end_before(&self, at: rustc_span::Span) -> bool {
+    let Some(ExitFrame::Loop { id, .. }) = self.exit_frames.iter().rev().find(|f| matches!(f, ExitFrame::Loop { .. })) else { return false };
+    let rustc_hir::Node::Expr(loop_expr) = self.tcx.hir_node(*id) else { return true };
+    match loop_expr.kind {
+      ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _) => exits_loop_before(loop_expr, at),
+      _ => true,
+    }
   }
 
   /// Of `live`, the variables (and field columns) that a loop this is
@@ -4127,7 +4167,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// loop's body moved it or gave it a value.
   fn given_by_loop_now(&self, rap: &ResourceAccessPoint) -> bool {
     self.loop_given.iter().rev().any(|(id, given)| {
-      given.contains(rap) && self.exit_frames.iter()
+      // (Not one that never comes back round, #1467.)
+      given.contains(rap) && self.loop_never_rounds(self.tcx.hir_span(*id)) != Some(true) && self.exit_frames.iter()
         .rposition(|f| matches!(f, ExitFrame::Loop { id: l, .. } if l == id))
         .is_some_and(|loop_at| {
           let (events, hide) = self.loop_path_events(loop_at);
@@ -4300,7 +4341,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ExitFrame::Loop { events_at, .. } => Some(*events_at),
       ExitFrame::Branch { .. } => None,
     });
-    for MaybeEntry { ro, round, by_cond, nested } in maybe_entry {
+    for MaybeEntry { ro, round, by_cond, nested, .. } in maybe_entry {
       if broke_moved.contains(&ro) || !current(self, &ro) || kept.iter().any(|(k, _)| *k == ro) {
         continue;
       }
@@ -7231,14 +7272,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // this loop may have given s a value too (#1019): `OuterLoop`.
       if drop_target.as_ref() == Some(rap) && maybe_init.is_none()
         && maybe_moved.iter().all(|m| *m) && loop_head.iter().all(|l| !*l) {
-        let entries: Option<Vec<Option<bool>>> = drop_target.iter().chain(field_drop_targets.iter())
+        let entries: Option<Vec<(Option<bool>, bool)>> = drop_target.iter().chain(field_drop_targets.iter())
           .map(|r| self.maybe_entry_untouched_now(r)).collect();
         if let Some(entries) = entries {
-          maybe_init = Some(if entries.iter().any(|n| n.is_some()) {
-            InitBy::OuterLoop { moves: entries.iter().any(|n| *n != Some(false)) }
+          maybe_init = if entries.iter().any(|(n, _)| n.is_some()) {
+            Some(InitBy::OuterLoop { moves: entries.iter().any(|(n, _)| *n != Some(false)) })
+          } else if entries.iter().all(|(_, rounds)| !rounds) {
+            // A loop that never comes back round (#1467): there is no
+            // later time round. The loop may end before this runs (a
+            // `while` / `for`, or something before it leaves the loop):
+            // then the old value, if any, is still there after it. Or
+            // not (a bare `loop` gets here first): as if there were no
+            // loop.
+            self.loop_may_end_before(expr.span).then_some(InitBy::FirstPass)
           } else {
-            InitBy::EarlierIteration
-          });
+            Some(InitBy::EarlierIteration)
+          };
         }
       }
       // `s = …` in a loop's body that the drawing reaches with s
@@ -14403,7 +14452,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// assigned, if x still holds it. Drawn as a drop on the assignment,
   /// whose text says so.
   fn drop_earlier_iteration(&mut self, hirid: HirId, lhs_expr: &'tcx Expr<'tcx>) {
-    if !self.loop_entry_uninit.iter().any(|(_, s)| s.contains(&hirid)) {
+    // (A loop that never comes back round has no later time round,
+    // #1467.)
+    if !self.loop_entry_uninit.iter().any(|(id, s)| s.contains(&hirid)
+      && self.loop_never_rounds(self.tcx.hir_span(*id)) != Some(true)) {
       return;
     }
     let ty = self.tcx.typeck(hirid.owner).node_type(hirid);

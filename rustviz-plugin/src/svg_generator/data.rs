@@ -3282,6 +3282,13 @@ pub enum InitBy {
     /// for … { while … { s = …; } s = …; }`), drawn as a `LoopMaybeInit`
     /// with `nested` at that loop's end (#1032). Only a drop flag knows.
     DropFlag,
+    /// As `EarlierIteration` with `maybe_moved`, in a loop that never
+    /// comes back round (every pass leaves it, #1467): the old value is
+    /// dropped only if no branch above moved it, and the loop may end
+    /// before the assignment runs (a `while` / `for` whose body doesn't
+    /// run, a `break` before it): then the old value, if any, is still
+    /// there after the loop (a `LoopMaybeInit` at its end says so).
+    FirstPass,
 }
 
 /// What a variable holds where it goes out of scope at the `}` of its
@@ -4745,6 +4752,10 @@ pub enum ApproxNote {
     /// temporary. Dots on the lines of a loop inside it (`nested`) don't
     /// count: a loop with no other dot gets no note. `declares`: whether the loop declares
     /// any variable (the note then says each pass has its own).
+    /// `at_most_once`: a `while` / `for` loop that never comes back
+    /// round (every pass leaves it, #1467), so it runs its body once or
+    /// not at all. (A bare `loop` that never comes back round runs it
+    /// once and gets no note.)
     Loop {
         head: usize,
         pass: (usize, usize),
@@ -4752,6 +4763,7 @@ pub enum ApproxNote {
         locals: Vec<u64>,
         nested: Vec<(usize, usize)>,
         declares: bool,
+        at_most_once: bool,
     },
 }
 

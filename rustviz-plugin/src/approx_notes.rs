@@ -365,6 +365,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     for &(l, head, end) in &found {
       let ExprKind::Loop(block, _, source, _) = l.kind else { continue };
+      // One that never comes back round (#1467): a bare `loop` runs its
+      // body once, as drawn; a `while` / `for` once or not at all.
+      let at_most_once = self.loop_never_rounds(l.span) == Some(true);
+      if at_most_once && matches!(source, LoopSource::Loop) {
+        continue;
+      }
       // The lines that run on every pass: the body's, but not its
       // first line where a `for` loop's iterator is made or a `loop`'s
       // value is bound (`let n = loop {`), nor its last, where what
@@ -396,7 +402,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         .filter(|(o, ..)| o.hir_id != l.hir_id && l.span.contains(o.span))
         .map(|&(_, h, e)| (h, e))
         .collect();
-      self.approx_notes.push(ApproxNote::Loop { head, pass, head_cols, locals, nested, declares });
+      self.approx_notes.push(ApproxNote::Loop { head, pass, head_cols, locals, nested, declares, at_most_once });
     }
   }
 }

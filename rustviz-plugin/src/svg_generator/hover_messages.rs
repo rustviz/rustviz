@@ -6505,9 +6505,12 @@ pub fn event_dot_process_exit(name: &String, owns: Option<bool>, call: &str) -> 
 // (also none, or once before a `break`), so this says no more than that.
 // `declares`: the loop declares variables (its pattern, a `let` in its
 // body, a `while let` binding), which every pass that gets there
-// makes anew.
-pub fn approx_note_loop(declares: bool) -> String {
-    if declares {
+// makes anew. `at_most_once`: every pass leaves the loop (#1467), so it
+// never runs more than once, but a `while` / `for` may not run at all.
+pub fn approx_note_loop(declares: bool, at_most_once: bool) -> String {
+    if at_most_once {
+        "(RustViz draws one pass through this loop, which may not run at all.)".to_owned()
+    } else if declares {
         "(RustViz draws one pass through this loop, which may run many times; the variables declared inside it are new on each pass.)".to_owned()
     } else {
         "(RustViz draws one pass through this loop, which may run many times.)".to_owned()
