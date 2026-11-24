@@ -12139,6 +12139,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let labels = vec!["Else".to_owned(), pat_text];
     self.note_exit_scope(init);
     let loop_assigned = self.loop_assigned_now(&liveness);
+    // What the pattern takes its borrows out of, for the `else` path's
+    // end of them (`end_let_else_scrutinee_borrows`, #1458).
+    let holder = match init.kind {
+      ExprKind::Path(QPath::Resolved(..)) => expr_to_rap_name(init, &self.tcx)
+        .and_then(|n| self.raps.get(&n))
+        .map(|rd| rd.rap.to_owned())
+        .filter(|r| !r.is_ref() && r.holds_borrow()),
+      _ => None,
+    };
+    let mut bound = Vec::new();
+    pat.each_binding(|_, hid, _, _| bound.push(binding_name(&self.tcx, hid)));
+    self.let_else_scrutinees.insert(*self.unique_id, (holder, bound));
     self.add_external_event(split, ExternalEvent::Branch {
       live_vars: liveness,
       branches,

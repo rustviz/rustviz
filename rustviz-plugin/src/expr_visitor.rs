@@ -811,6 +811,10 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // The loop owns what they held from there, so the end of that borrow
   // is not drawn on their (moved-out) columns (#767).
   pub for_moved_holders: HashSet<String>,
+  // `let pat = init else { .. };` drawn as a branch (#1458): the Branch
+  // event's id → the holder `init` names (`let Some(f) = p else`), if
+  // it is one, and the names the pattern binds.
+  pub let_else_scrutinees: HashMap<usize, (Option<ResourceAccessPoint>, Vec<String>)>,
   // A `for` loop's pattern bindings whose borrow is the loop
   // iterator's loan: a `continue` doesn't end it, since `next()` uses
   // the iterator again (#872).
@@ -1208,6 +1212,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       dead_code: HashSet::new(),
       borrow_floor: HashMap::new(),
       for_moved_holders: HashSet::new(),
+      let_else_scrutinees: HashMap::new(),
       for_loop_loans: HashSet::new(),
       for_loop_iter_loans: Vec::new(),
       in_scope: Vec::new(),
@@ -12108,6 +12113,7 @@ pub fn print_out_of_scope(&mut self){
     ends_in_condition_before_split(self.preprocessed_events);
     ends_before_lender_use(self.preprocessed_events);
     self.end_borrows_at_exits();
+    end_let_else_scrutinee_borrows(self.preprocessed_events, &self.let_else_scrutinees, self.unique_id);
     note_later_borrowers_in_arms(self.preprocessed_events, false);
     self.note_sharers_across_calls();
   }
@@ -14068,6 +14074,109 @@ fn end_scrutinee_borrows_in_other_arms(events: &mut Vec<(usize, ExternalEvent)>,
         evs.retain(|e| !moved_ends.contains(&e.get_id()));
         had == evs.len() || !evs.is_empty()
       });
+    }
+  }
+}
+
+/// `let Some(f) = p else { return };` (p = `v.first_mut()`) and
+/// `let Some(f) = v.first_mut() else { .. };` (#1458): the pattern's
+/// bindings take their borrow of v out of the scrutinee where the
+/// branches join, on the path that matched. On the `else` path nothing
+/// was bound: p wasn't moved, and isn't used again (or only in the
+/// block), so rustc ends its loan there; a call's result was `None`,
+/// and its loan ended with it. Nothing ended it on that path, so v
+/// reached the block's exit still drawn lent, and the exit's drop of v
+/// said it dropped nothing. End it at the start of the `else` arm, or
+/// after the block's last use of p: given back by p (which gets a
+/// column in the branch), or with no arrow for a call's result, as
+/// `end_scrutinee_borrows_in_other_arms` does for `if let` / `match`.
+/// Not where the arm already gives v back (p's later end, copied into
+/// the arm by `end_borrows_at_exits`, when p is a copied
+/// `Option<&T>`).
+fn end_let_else_scrutinee_borrows(
+  events: &mut Vec<(usize, ExternalEvent)>,
+  info: &HashMap<usize, (Option<ResourceAccessPoint>, Vec<String>)>,
+  unique_id: &mut usize,
+) {
+  for k in 0..events.len() {
+    let (before, rest) = events.split_at_mut(k);
+    let (cur, after) = rest.split_at_mut(1);
+    let branch_id = cur[0].1.get_id();
+    let ExternalEvent::Branch { branches, live_vars, branch_type, merge_point, .. } = &mut cur[0].1 else { continue };
+    for arm in branches.iter_mut() {
+      end_let_else_scrutinee_borrows(&mut arm.e_data, info, unique_id);
+    }
+    let Some((holder, binds)) = info.get(&branch_id) else { continue };
+    // The lenders the bindings borrow out of the scrutinee, where the
+    // branches join, and how.
+    let mut lenders: Vec<(ResourceAccessPoint, bool)> = Vec::new();
+    for (line, e) in after.iter() {
+      if *line != *merge_point {
+        continue;
+      }
+      let (l, x, via, mutable) = match e {
+        ExternalEvent::StaticBorrow { from: ResourceTy::Value(l), to: ResourceTy::Value(x), via, .. } => (l, x, via, false),
+        ExternalEvent::MutableBorrow { from: ResourceTy::Value(l), to: ResourceTy::Value(x), via, .. } => (l, x, via, true),
+        _ => continue,
+      };
+      if !binds.iter().any(|b| b == x.name()) || !live_vars.contains(l) || lenders.iter().any(|(m, _)| m == l) {
+        continue;
+      }
+      // Out of the holder: the binding is a reference the pattern
+      // copied or moved out of it.
+      if let Some(h) = holder {
+        let out_of_holder = via.as_ref().is_some_and(|v| v.func == *h.name()
+          && matches!(v.carrier, ViaCarrier::PatternBinding { from_call: false, .. }));
+        if !out_of_holder {
+          continue;
+        }
+      }
+      lenders.push((l.clone(), mutable));
+    }
+    let Some(arm) = branches.first_mut() else { continue };
+    let start = branch_type.get_start_end(0).0;
+    let mut added = false;
+    for (lender, mutable) in lenders {
+      if gives_back(&arm.e_data, &lender) {
+        continue;
+      }
+      let (from, at_line, at) = match holder {
+        Some(h) => {
+          let last = arm.e_data.iter().rposition(|(_, ev)|
+            !matches!(ev, ExternalEvent::GoOutOfScope { ro, .. } if ro == h) && touches(ev, h));
+          let (at_line, at) = match last {
+            Some(i) => (match &arm.e_data[i].1 {
+              ExternalEvent::Branch { merge_point, .. } => *merge_point,
+              _ => arm.e_data[i].0,
+            }, i + 1),
+            None => (start, arm.e_data.iter().position(|(l, _)| *l >= start).unwrap_or(arm.e_data.len())),
+          };
+          (ResourceTy::Value(h.clone()), at_line, at)
+        }
+        // The scrutinee's call lent it, and its result kept the borrow.
+        None => {
+          let lent_by_call = matches!(before.iter().rev().find(|(_, e)| touches(e, &lender)),
+            Some((_, ExternalEvent::PassByMutableReference { from: ResourceTy::Value(l), result_keeps_borrow: true, .. }
+              | ExternalEvent::PassByStaticReference { from: ResourceTy::Value(l), result_keeps_borrow: true, .. })) if *l == lender);
+          if !lent_by_call {
+            continue;
+          }
+          (ResourceTy::Anonymous, start, arm.e_data.iter().position(|(l, _)| *l >= start).unwrap_or(arm.e_data.len()))
+        }
+      };
+      let id = *unique_id;
+      *unique_id += 1;
+      let to = ResourceTy::Value(lender.clone());
+      let ev = if mutable {
+        ExternalEvent::MutableDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false }
+      } else {
+        ExternalEvent::StaticDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false }
+      };
+      arm.e_data.insert(at, (at_line, ev));
+      added = true;
+    }
+    if let (true, Some(h)) = (added, holder) {
+      live_vars.insert(h.clone());
     }
   }
 }
