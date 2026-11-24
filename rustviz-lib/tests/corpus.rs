@@ -25326,6 +25326,34 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "r has no value yet",
         ],
     },
+    TooltipExpect {
+        name: "ref_end_on_other_path_1425",
+        // #1425, #1428: a borrow made and ended in one arm while an outer
+        // reference's last use is in another arm. On the arm's path the
+        // outer reference's borrow ended as the arm started, so the arm's
+        // reference gives the lender back where it ends (NLL). Before, its
+        // end gave nothing back: the lender stayed "mutably borrowed by m1"
+        // through the join, `State::Invalid` after it (geometry and
+        // invariants: `invalid-state`, `drop-without-value`,
+        // `event-on-dead-column`).
+        must_contain: &[
+            "Return mutably borrowed resource from m1 to s1",
+            "s1's resource is no longer mutably borrowed",
+            "Return mutably borrowed resource from m2 to s2",
+            "s2's resource is no longer mutably borrowed",
+            "s3's resource is no longer mutably borrowed",
+            "Return immutably borrowed resource from m4 to s4",
+            "s5's resource is no longer mutably borrowed",
+            "s6's resource is no longer mutably borrowed",
+            "Return mutably borrowed resource from m7 to o7",
+            "s8's resource is no longer mutably borrowed",
+        ],
+        must_not_contain: &[
+            "s1's resource is mutably borrowed by m1; s1 can't be used until the borrow ends",
+            "o7's resource is mutably borrowed by m7; o7 can't be used until the borrow ends",
+            "s8's resource is mutably borrowed by m8; s8 can't be used until the borrow ends",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop

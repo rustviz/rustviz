@@ -9083,8 +9083,13 @@ const PATTERN_SPLIT_RISE: i64 = 15;
 /// between the arms (#509).
 fn binds_at_split(history: &[(usize, Event)], i: usize) -> bool {
     let Event::Branch { branch_history, split_point, merge_point, .. } = &history[i].1 else { return false };
+    // (Or a later arm of a one-line conditional whose arms got rows of
+    // their own, `if n > 2 { } else if let Some(x) = v.first() { let r =
+    // x; }`: that arm's column starts on the split row too, #1426. Its
+    // leg forked from the split dot on that row, a row above the dot
+    // where it arrived, and the arm's events were drawn above its leg.)
     !branch_is_collapsed(*split_point, *merge_point)
-        && branch_history.first().is_some_and(|arm| arm.e_data.iter().any(|(l, _)| l == split_point))
+        && branch_history.iter().any(|arm| arm.e_data.iter().any(|(l, _)| l == split_point))
 }
 
 /// How far above the split line the fork of the conditional that the
