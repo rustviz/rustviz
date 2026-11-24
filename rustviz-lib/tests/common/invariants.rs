@@ -48,6 +48,13 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // Geometric (`geometry.rs`), from here on.
     // Tuple column goes on after its fields were moved out.
     ("edition2024/if_let_chain_irrefutable_move", "line-ends-nowhere", 1157),
+    // A borrow arrow leaving an arm's dot along the fork leg, its track
+    // crossing other columns' legs at ~22 degrees; a copy leaving a dot
+    // beside the leg into it.
+    ("arm_binding_value_1327", "arrow-along-leg", 1489),
+    ("assign_branch_ref_arms_1393", "arrow-along-leg", 1489),
+    ("repoint_if_chain_806", "arrow-along-leg", 1489),
+    ("repoint_if_chain_read_middle_806", "arrow-along-leg", 1489),
 ];
 
 /// The invariants, by the name the failure list and messages use.
@@ -115,6 +122,10 @@ pub const INVARIANTS: &[(&str, &str)] = &[
     ("arrows-end-to-end",
      "one arrow leaves the dot another points at straight on in the same direction: the two read as \
       one arrow through the dot"),
+    ("arrow-along-leg",
+     "an arrow's head or shaft lies along a column's slanted leg into or out of a conditional's arm \
+      (the head coming into a dot at about the leg's angle, or the shaft leaving one along it): \
+      the arrow hides that stretch of the leg"),
 ];
 
 // ─── Reading a timeline ─────────────────────────────────────────────

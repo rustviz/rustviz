@@ -84,6 +84,19 @@ struct DotLayer {
     /// The centres of the columns' stop bars (`render_branches`): an arrow
     /// drawn along one hides it (#1344).
     bars: Vec<(f64, f64)>,
+    /// The columns' slanted legs into and out of a conditional's arms
+    /// (`render_branches`): an arrow's head lying along one hides the end
+    /// of the leg (#1476).
+    legs: Vec<Piece>,
+}
+
+/// What `render_branches` drew that the arrows must keep clear of: the
+/// centres of the stop bars and the slanted legs (`DotLayer::bars`,
+/// `DotLayer::legs`).
+#[derive(Default)]
+struct ColumnMarks {
+    bars: Vec<(f64, f64)>,
+    legs: Vec<Piece>,
 }
 
 impl DotLayer {
@@ -598,14 +611,15 @@ pub fn render_timeline_panel(visualization_data : & mut VisualizationData) -> (S
     // Note: key {-1} = non-struct timelines
     
     // render resource owner labels
-    let mut bars = Vec::new();
-    render_timelines(&mut output, visualization_data, &resource_owners_layout, &registry, &mut bars); // vertical bars
+    let mut marks = ColumnMarks::default();
+    render_timelines(&mut output, visualization_data, &resource_owners_layout, &registry, &mut marks); // vertical bars
     render_labels_string(&mut output, &resource_owners_layout, &visualization_data.fn_start_lines, &visualization_data.raised_headers, &registry); // headers
     // Dots are drawn before arrows, and the arrow pass needs to know
     // where they landed: a straight arrow hops over any dot between
     // its two ends (see `render_hopping_arrow`).
     let mut dots = render_dots_string(visualization_data, &resource_owners_layout); // dot events
-    dots.bars = bars;
+    dots.bars = marks.bars;
+    dots.legs = marks.legs;
     render_ref_line(&mut output, visualization_data, &resource_owners_layout, &registry); // reference lines
     render_arrows_string_external_events_version(&mut output, visualization_data, &resource_owners_layout, &mut dots, &registry); // arrows
     // Written last: a call icon (`f`) added by the arrow pass shares
@@ -6225,8 +6239,12 @@ fn along_piece(p: (f64, f64), a: (f64, f64), b: (f64, f64), tol: f64) -> Option<
 /// / sin(angle) or less (12 px at 25 degrees), so a slanted shaft rising
 /// across a level track at 5 degrees shares 40 px or more of it (#1468).
 /// (`shared_stretch` in `rustviz-lib/tests/common/geometry.rs`.)
-fn shared_stretch((p, q): Piece, (r, s): Piece) -> f64 {
-    const HALF: f64 = 2.5;
+fn shared_stretch(a: Piece, b: Piece) -> f64 {
+    stretch_within(a, b, 2.5)
+}
+
+/// `shared_stretch` with the centre lines within `half` px.
+fn stretch_within((p, q): Piece, (r, s): Piece, half: f64) -> f64 {
     let (lp, lr) = (dist(p, q), dist(r, s));
     if lp < 1.0 || lr < 1.0 {
         return 0.0;
@@ -6246,9 +6264,25 @@ fn shared_stretch((p, q): Piece, (r, s): Piece) -> f64 {
         let (t1, t2) = ((lo - a) / b, (hi - a) / b);
         (t1.min(t2), t1.max(t2))
     };
-    let (o1, o2) = between(off, -HALF, HALF);
+    let (o1, o2) = between(off, -half, half);
     let (a1, a2) = between(at, 0.0, lr);
     (o2.min(a2).min(lp) - o1.max(a1).max(0.0)).max(0.0)
+}
+
+/// A shaft's piece lying on a column's slanted leg (`on_legs`): the
+/// centre lines within 2.5 px for more than 12 px, as two arrows' shafts
+/// (`shared_stretch`); or, leaving (or reaching) the dot the leg ends at
+/// less than 30 degrees off it, the 5 px stroke on the leg's (~5 px) for
+/// more than 8 px (a borrow leaving a join dot steeply beside the leg
+/// that comes into it, #1476).
+fn shaft_on_leg(piece: Piece, leg: Piece) -> bool {
+    let (lp, ll) = (dist(piece.0, piece.1), dist(leg.0, leg.1));
+    if lp < 1.0 || ll < 1.0 {
+        return false;
+    }
+    let sin = (((piece.1 .0 - piece.0 .0) * (leg.1 .1 - leg.0 .1) - (piece.1 .1 - piece.0 .1) * (leg.1 .0 - leg.0 .0)) / (lp * ll)).abs();
+    let at_its_dot = [piece.0, piece.1].iter().any(|&e| [leg.0, leg.1].iter().any(|&f| dist(e, f) < 8.0));
+    shared_stretch(piece, leg) > 12.0 || (at_its_dot && sin < 0.5 && stretch_within(piece, leg, 4.5) > 8.0)
 }
 
 /// The marks that lie on others, the way the geometric checks
@@ -6372,6 +6406,35 @@ fn through_marks(drawn: &[Drawn], dots: &DotPositions, bars: &[(f64, f64)]) -> V
     out
 }
 
+/// The arrows whose head or shaft lies along a column's slanted leg, one
+/// entry per leg (#1476: a return coming down into a lender's `else`
+/// drop dot at about the angle of that lender's own `else` leg hid the
+/// leg's last 10 px under its head). A head: the leg's centre line within
+/// 1 px of its triangle for more than 6 px (a leg that merely ends at the
+/// dot the head points at, or crosses the head, passes under it for a
+/// few px). A shaft: `shaft_on_leg`. The
+/// `arrow-along-leg` check in `rustviz-lib/tests/common/geometry.rs`.
+fn on_legs(drawn: &[Drawn], legs: &[Piece]) -> Vec<usize> {
+    let mut out = Vec::new();
+    for (i, d) in drawn.iter().enumerate().filter(|(_, d)| d.logo.is_none()) {
+        let pts = d.pieces.iter().flat_map(|&(p, q)| [p, q]).chain(d.tri.iter().copied());
+        let (lo_x, lo_y, hi_x, hi_y) = pts.fold((f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+            |b, p| (b.0.min(p.0), b.1.min(p.1), b.2.max(p.0), b.3.max(p.1)));
+        for &(p, q) in legs {
+            if p.0.max(q.0) < lo_x - 3.0 || p.0.min(q.0) > hi_x + 3.0 || p.1.max(q.1) < lo_y - 3.0 || p.1.min(q.1) > hi_y + 3.0 {
+                continue;
+            }
+            let head = d.tri.len() == 3
+                && samples(&[(p, q)]).into_iter().filter(|&c| inside_tri(&d.tri, c) > -1.0).count() > 6;
+            let shaft = d.pieces.iter().any(|&piece| shaft_on_leg(piece, (p, q)));
+            if head || shaft {
+                out.push(i);
+            }
+        }
+    }
+    out
+}
+
 /// Two arrows between columns end to end on one line: the first's head
 /// points at a dot and the second leaves that dot straight on in the same
 /// direction, so they read as one arrow through the dot (#1349, as #577's
@@ -6413,6 +6476,7 @@ fn end_to_end(drawn: &[Drawn], ends: &HashMap<(usize, usize), ((i64, i64), (i64,
 fn defects(drawn: &[Drawn], dots: &DotLayer) -> Vec<(usize, usize)> {
     let mut out = marks_on_others(drawn);
     out.extend(through_marks(drawn, &dots.positions, &dots.bars).into_iter().map(|i| (i, i)));
+    out.extend(on_legs(drawn, &dots.legs).into_iter().map(|i| (i, i)));
     out.extend((0..drawn.len()).filter(|&i| drawn[i].track_hops > 0).map(|i| (i, i)));
     out.extend(end_to_end(drawn, &dots.lanes.ends));
     out
@@ -6474,7 +6538,7 @@ fn untangle_cost(drawn: &[Drawn], dots: &DotLayer) -> (usize, usize) {
     let on_arcs = arrows.iter().filter(|a| a.tri.len() == 3 && arrows.iter()
         .any(|b| b.tip != a.tip && b.arcs.iter().any(|&p| inside_tri(&a.tri, p) > -1.5))).count();
     let hops: usize = drawn.iter().map(|d| d.track_hops).sum();
-    (marks_on_others(drawn).len() + on_arcs + hops + 10 * (through + touching + stacked), crossings)
+    (marks_on_others(drawn).len() + on_legs(drawn, &dots.legs).len() + on_arcs + hops + 10 * (through + touching + stacked), crossings)
 }
 
 /// One of a field's arrows from or to several lenders other than the one
@@ -8299,7 +8363,7 @@ fn render_branches(
     timeline_data: &TimelineColumnData,
     maybe_init: bool,
     path: &[(usize, usize)],
-    bars: &mut Vec<(f64, f64)>,
+    bars: &mut ColumnMarks,
 ) {
     if rap.is_fn() { return; }
     for (k, (_, ev)) in history.iter().enumerate() {
@@ -8600,7 +8664,7 @@ fn render_branches(
                     // underlines nothing (#369), like the dashed columns.
                     if let Some(stop_y) = stop_y.filter(|y| !dropped_at_stop && segs.last().is_some_and(|seg| seg.p2 == (branch_x, *y))) {
                         stop_at = Some((branch_x, stop_y));
-                        bars.push((branch_x, stop_y));
+                        bars.bars.push((branch_x, stop_y));
                         let title = hover_messages::branch_never_reaches_merge();
                         let rv = Rv::new(rv_attrs::STOP_BAR).var(rap.name()).row(stop)
                             .at(format!("stop {} {}", branch_x, stop_y));
@@ -8771,6 +8835,9 @@ fn render_branches(
                 }
             }
             let runs = split_centerline_runs(&segs);
+            // Its slanted legs (into a split's arm, out to a join), for
+            // `untangle`: an arrow's head along one hides it (#1476).
+            bars.legs.extend(segs.iter().filter(|seg| (seg.p1.0 - seg.p2.0).abs() > 0.5).map(|seg| (seg.p1, seg.p2)));
 
             // `data-arm-rows`: the first and last row of those lines (the
             // corpus tests check hover against it).
@@ -9156,7 +9223,7 @@ fn render_timeline(
     visualization_data: &VisualizationData,
     timeline_data: &TimelineColumnData,
     registry: &Handlebars,
-    bars: &mut Vec<(f64, f64)>,
+    bars: &mut ColumnMarks,
 ) {
     if rap.is_fn() { return; } // functions have no timelines
     // Branch columns + convergences render as polylines via
@@ -9672,7 +9739,7 @@ fn render_timelines(
     visualization_data: &VisualizationData,
     resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
     registry: &Handlebars,
-    bars: &mut Vec<(f64, f64)>,
+    bars: &mut ColumnMarks,
 ){
     let timelines = &visualization_data.timelines;
     for (hash, timeline) in timelines {
