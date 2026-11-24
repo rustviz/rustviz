@@ -1391,8 +1391,8 @@ fn render_branch_dots(
             // if there is one, or else at the scope end. That
             // assignment may be in a later conditional's
             // branch, on some paths only.
+            let after = events_after(visualization_data, hash, history, event, *merge_point);
             let full = visualization_data.timelines.get(hash).map_or(history, |t| &t.history);
-            let after: Vec<&(usize, Event)> = full.iter().filter(|(l, _)| *l > *merge_point).collect();
             // (An assignment on every path: it comes before
             // the scope end.)
             let reassigned_next = after.iter()
@@ -1421,8 +1421,7 @@ fn render_branch_dots(
             // It may have held nothing as the conditional started,
             // and only some branches assign it (#1034): it may hold
             // the new value, the old one, or nothing.
-            let full = visualization_data.timelines.get(hash).map_or(history, |t| &t.history);
-            let reassigned = match reassigned_after(full, *merge_point) {
+            let reassigned = match reassigned_after(&events_after(visualization_data, hash, history, event, *merge_point)) {
                 None if matches!(event, Event::Branch { loop_assigned: true, .. }) => Some(false),
                 r => r,
             };
@@ -1480,15 +1479,13 @@ fn render_branch_dots(
             // shown, conditionally, on the scope-end dot.
             // If the variable is assigned again before that,
             // the drop flag is checked there instead (#335).
-            // Looked up in the column's whole history: a merge
-            // nested in an outer branch only has that branch's
-            // events in `history`.
-            let full = visualization_data.timelines.get(hash).map_or(history, |t| &t.history);
-            // (The rest of an outer branch this merge is nested in comes
-            // first: `if c { if d { drop(s); } s = …; }` assigns s again
-            // in that branch, #1413. Its events are in `history` only.)
-            let next = history.iter().chain(full.iter())
-                .filter(|(l, _)| *l > *merge_point)
+            // Looked up in what runs after the join (`events_after`):
+            // the rest of each outer branch this merge is nested in
+            // comes first (`if c { if d { drop(s); } s = …; }` assigns
+            // s again in that branch, #1413; so can a later conditional
+            // in it, #1460), then the column's whole history.
+            let after = events_after(visualization_data, hash, history, event, *merge_point);
+            let next = after.iter()
                 .find(|(_, e)| matches!(e, Event::OwnerDropAtReassign { .. } | Event::Branch { .. }))
                 .map(|(_, e)| e);
             let reassigned_next = matches!(next, Some(Event::OwnerDropAtReassign { maybe_moved: true, .. }));
@@ -1503,8 +1500,7 @@ fn render_branch_dots(
                 // #921): e keeps its heap allocation on every path.
                 // Its old contents, if still there, are dropped by the
                 // next `*e = …` or `e = …`, or else at its scope end.
-                let next_write = full.iter()
-                    .filter(|(l, _)| *l > *merge_point)
+                let next_write = after.iter()
                     .find(|(_, e)| matches!(e,
                         Event::OwnerDropAtReassign { .. } | Event::Branch { .. }
                         | Event::Acquire { is: ResourceTy::Deref(_), .. }
@@ -1531,13 +1527,12 @@ fn render_branch_dots(
                 // may end before it runs: unless every `break` out of
                 // the loop comes after it (`LoopExitKept`).
                 let in_loop = matches!(next, Some(Event::OwnerDropAtReassign { maybe_init: Some(InitBy::EarlierIteration | InitBy::OuterLoop { .. } | InitBy::DropFlag), .. }))
-                    && !full.iter()
-                        .filter(|(l, _)| *l > *merge_point)
+                    && !after.iter()
                         .find(|(_, e)| matches!(e, Event::LoopExitKept { .. } | Event::LoopMaybeInit { .. } | Event::LoopExitMove { .. }))
                         .is_some_and(|(_, e)| matches!(e, Event::LoopExitKept { reassigned: true }));
                 hover_messages::event_dot_branch_merge_moved_then_reassigned(&is.real_name(), by_cond, in_loop)
             } else if let Some(Some(every_path)) = matches!(next, Some(e @ Event::Branch { .. }) if assigns_in_branch(e))
-                .then(|| reassigned_after(full, *merge_point)) {
+                .then(|| reassigned_after(&after)) {
                 // The next assignment is in a branch of a later
                 // conditional (#1034): unless another one follows on
                 // every path, the scope end drops it on the others.
@@ -1614,8 +1609,18 @@ fn render_branch_dots(
             let end = arm_end_state(rap, b, branch_history, ty);
             !b.diverges && seg_drawn(rap, &end)
         });
+        // Unless the column's next event is a later conditional, which
+        // draws no split dot either (none of its lines reach it): the
+        // text would go on the first dot of each of its arms, and on its
+        // join for an arm with none, as if about that conditional
+        // (`if let Some(x) = o && x.len() > 1 {} if c { o = …; }`,
+        // #1460). The join dot stays on its own row, bare, as the
+        // later dots of a maybe-moved column are.
+        let next_is_conditional = !join_has_line && matches!(
+            events_after(visualization_data, hash, history, event, *merge_point).first(),
+            Some((_, Event::Branch { .. })));
         match title {
-            Some(title) if join_has_line => {
+            Some(title) if join_has_line || next_is_conditional => {
                 let m_data = EventDotData {
                     hash: *hash as u64,
                     dot_x: cx,
@@ -3021,34 +3026,87 @@ fn assigns_in_branch(e: &Event) -> bool {
     }
 }
 
-// After a conditional's join at `merge_point` that may leave the
-// column holding a value (#1034), what drops that value, as for
-// `event_dot_loop_maybe_init`'s `reassigned`: the next assignment, on
-// every path (`Some(true)`); one that may not run, in a branch of a
-// later conditional or in a loop that may end before it
-// (`Some(false)`); or the scope end (`None`). Later conditionals that
-// assign it in some branches only are looked past, for an assignment
-// on every path after them. `history` is the column's whole history.
-fn reassigned_after(history: &[(usize, Event)], merge_point: usize) -> Option<bool> {
-    let after = || history.iter().filter(|(l, _)| *l > merge_point);
+// After a conditional's join that may leave the column holding a value
+// (#1034), what drops that value, as for `event_dot_loop_maybe_init`'s
+// `reassigned`: the next assignment, on every path (`Some(true)`); one
+// that may not run, in a branch of a later conditional or in a loop that
+// may end before it (`Some(false)`); or the scope end (`None`). Later
+// conditionals that assign it in some branches only are looked past, for
+// an assignment on every path after them; one that assigns it on every
+// path is one (`if c { s = a; } else { s = b; }`, #1460). `after`: the
+// column's events after the join (`events_after`).
+fn reassigned_after(after: &[&(usize, Event)]) -> Option<bool> {
     let mut in_branch = false;
-    for (_, e) in after() {
+    for (i, (_, e)) in after.iter().enumerate() {
         match e {
             Event::OwnerDropAtReassign { maybe_init: Some(InitBy::EarlierIteration | InitBy::OuterLoop { .. } | InitBy::DropFlag), .. } => {
                 // In a loop's body, which may end before it runs, unless
                 // every `break` out of it comes after it.
-                let kept = after()
+                let kept = after[i..].iter()
                     .find(|(_, e)| matches!(e, Event::LoopExitKept { .. } | Event::LoopMaybeInit { .. } | Event::LoopExitMove { .. }))
                     .is_some_and(|(_, e)| matches!(e, Event::LoopExitKept { reassigned: true }));
                 return Some(kept && !in_branch);
             }
             Event::OwnerDropAtReassign { .. } => return Some(true),
+            Event::Branch { .. } if assigns_on_every_path(e) => return Some(true),
             Event::Branch { .. } if assigns_in_branch(e) => in_branch = true,
             Event::Branch { .. } => break,
             _ => {}
         }
     }
     in_branch.then_some(false)
+}
+
+// A conditional that gives the column a new value on every path that gets
+// to its join, also by conditionals nested in its arms (`if c { s = a; }
+// else { s = b; }`): the old value, if any, is dropped there whichever
+// arm runs. Not an assignment in a loop (whose body may not run).
+fn assigns_on_every_path(e: &Event) -> bool {
+    let Event::Branch { branch_history, ty, .. } = e else { return false };
+    all_paths_present(ty, branch_history.len())
+        && branch_history.iter().any(|b| !b.diverges)
+        && branch_history.iter().filter(|b| !b.diverges).all(|b| b.e_data.iter().any(|(_, e)|
+            matches!(e, Event::OwnerDropAtReassign { maybe_init, .. }
+                    if !matches!(maybe_init, Some(InitBy::EarlierIteration | InitBy::OuterLoop { .. } | InitBy::DropFlag)))
+                || assigns_on_every_path(e)))
+}
+
+// The events on column `hash` after the conditional `event` (found in
+// `history`) joins at `merge_point`, in the order they run: the rest of
+// each arm it is nested in, innermost first, then what follows on the
+// column's whole history (#1413, #1460). Not past an arm that returns or
+// panics: that code doesn't run after it. A nested conditional only has
+// its arm's events in `history`.
+fn events_after<'a>(vd: &'a VisualizationData, hash: &u64, history: &'a [(usize, Event)], event: &Event, merge_point: usize) -> Vec<&'a (usize, Event)> {
+    fn find<'a>(h: &'a [(usize, Event)], event: &Event, out: &mut Vec<&'a (usize, Event)>) -> bool {
+        for (i, item) in h.iter().enumerate() {
+            if std::ptr::eq(&item.1, event) {
+                out.extend(&h[i + 1..]);
+                return true;
+            }
+            if let Event::Branch { branch_history, .. } = &item.1 {
+                for b in branch_history {
+                    if find(&b.e_data, event, out) {
+                        if !b.diverges {
+                            out.extend(&h[i + 1..]);
+                        }
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+    let mut out = Vec::new();
+    if let Some(t) = vd.timelines.get(hash) {
+        if find(&t.history, event, &mut out) {
+            return out;
+        }
+    }
+    // (Not on the column's history: the rest of `history`.)
+    out.clear();
+    out.extend(history.iter().filter(|(l, _)| *l > merge_point));
+    out
 }
 
 // The `before_loop` of the last `LoopMaybeInit` in `history` (#1012).
