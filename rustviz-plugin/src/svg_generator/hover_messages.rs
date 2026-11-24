@@ -1439,6 +1439,19 @@ pub fn event_dot_move_to(my_name: &String, holds_value: bool) -> String {
     format!("{0}'s {1} is moved", styled_name_html(my_name), held(holds_value))
 }
 
+// `p = Pair { a: .., b: p.b };` / `t = (s, t.1);` (#1411): the
+// right-hand side runs first and moves p.b into the new value, which
+// the assignment then puts into p, so p.b holds the same resource again.
+pub fn event_dot_move_out_for_new_value(my_name: &String, holds_value: bool) -> String {
+    format!("{0}'s {1} is moved into the new value the right-hand side builds (it runs before the assignment)",
+        styled_name_html(my_name), held(holds_value))
+}
+
+pub fn event_dot_back_with_new_value(my_name: &String, holds_value: bool) -> String {
+    format!("{0} gets the same {1} back, as part of the new value assigned here",
+        styled_name_html(my_name), held(holds_value))
+}
+
 // `let [_, b] = arr;` after `let [a, _] = arr;` (#1302): the move of the
 // last element(s) still in the array; nothing is left in it.
 pub fn event_dot_move_last_elems(place: &String, arr: &String, holds_value: bool) -> String {
@@ -4778,6 +4791,12 @@ pub const DEAD_LOAN_NOTE_START: &str = "On this path";
 // to be an empty tooltip).
 pub fn event_dot_branch_merge_unchanged(my_name: &String) -> String {
     format!("{0} isn't moved in any of the branches above", styled_name_html(my_name))
+}
+// Merge dot for a variable that a branch above moved and then gave a new
+// value (`if c { drop(s); s = String::new(); }`, #1413): it holds a value
+// after the branches on every path, though it isn't the one it had.
+pub fn event_dot_branch_merge_reassigned_after_move(my_name: &String) -> String {
+    format!("{0} holds a value after the branches: each branch above that moved it gave it a new one", styled_name_html(my_name))
 }
 // Extra text for a column label: for a subscript (`s₂`), a variable
 // that shadows an earlier one of the same name (`let s` while the first

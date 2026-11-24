@@ -2,7 +2,7 @@
 use std::{cmp::max, collections::{HashMap, HashSet, VecDeque}};
 use log::warn;
 use rustc_hir::Mutability;
-use crate::svg_generator::data::{ShadowNote, ExternalEvent, RcCall, RcKind, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy};
+use crate::svg_generator::data::{ShadowNote, ExternalEvent, RcCall, RcKind, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, MutRef, StaticRef};
 use rustc_middle::ty::{Ty, TyCtxt, TypeckResults};
 use rustc_middle::ty::adjustment::{Adjust, AutoBorrow, AutoBorrowMutability, DerefAdjustKind};
 use rustc_span::Span;
@@ -739,11 +739,21 @@ pub fn collect_pat_bindings(
         out.insert(rd.rap.to_owned());
         // A struct's field columns (`p.x`) are declared with it and go
         // out of scope with it (#730).
+        // So are its reference fields (`h.r`, #1421).
         if let ResourceAccessPoint::Struct(st) = &rd.rap {
           if !st.is_member {
+            let mut group: HashSet<u64> = HashSet::from([st.hash]);
             #[expect(clippy::iter_over_hash_type, clippy::disallowed_methods, reason = "collected into a set")]
             for f in raps.values() {
               if matches!(&f.rap, ResourceAccessPoint::Struct(m) if m.is_member && m.owner == st.hash) {
+                out.insert(f.rap.to_owned());
+                group.insert(*f.rap.hash());
+              }
+            }
+            #[expect(clippy::iter_over_hash_type, clippy::disallowed_methods, reason = "collected into a set")]
+            for f in raps.values() {
+              if matches!(&f.rap, ResourceAccessPoint::MutRef(MutRef { member_of: Some(m), .. })
+                | ResourceAccessPoint::StaticRef(StaticRef { member_of: Some(m), .. }) if group.contains(m)) {
                 out.insert(f.rap.to_owned());
               }
             }

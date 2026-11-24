@@ -7366,7 +7366,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.resolve_branch_lenders(&r_name, kept);
         self.mark_branch_results_kept(&lhs_rty.real_name(), rhs_expr);
       } else {
-        self.match_rhs(lhs_rty.clone(), pair_rhs, e);
+        // `s = p.a` of `Pair { a: s, b: t } = p;` (#1412).
+        match destructure_hid.and_then(|h| self.destructure_parts.get(&h))
+          .and_then(|n| self.raps.get(n)).map(|rd| rd.rap.to_owned()) {
+          Some(part) => {
+            self.update_rap(&part, line_num);
+            self.add_ev(span_to_line(&rhs_expr.span, &self.tcx), e.clone(), lhs_rty.clone(), ResourceTy::Value(part), false);
+          }
+          None => self.match_rhs(lhs_rty.clone(), pair_rhs, e),
+        }
         self.arms_paired_in_branch.clear();
         // Only for a value that holds borrows (or has parts that do): their
         // lenders may be split by the branches. (A reference is paired in
@@ -11556,6 +11564,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       discarded.clear();
     }
     let src_of: HashMap<HirId, &'tcx Expr<'tcx>> = pairs.iter().cloned().collect();
+    // `Pair { a: s, b: t } = p;` / `(s, n) = t;`: each part of the place
+    // goes to its own destination, as in `let Pair { a, b } = p;` (#1412).
+    let parts: HashMap<HirId, (String, bool)> = self.destructure_member_parts(local.pat, init)
+      .unwrap_or_default().into_iter().collect();
 
     // Places whose value this statement moves out (a non-Copy RHS
     // part that names a variable, `b` in `(a, b) = (b, a)`).
@@ -11574,8 +11586,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       this.raps.contains_key(&name).then_some(name)
     };
     let mut moved: HashSet<String> = HashSet::new();
-    for (_, e) in &pairs {
-      if let Some(n) = moved_name(self, e) { moved.insert(n); }
+    for (hid, e) in &pairs {
+      match parts.get(hid) {
+        Some((part, true)) => { moved.insert(part.clone()); }
+        Some((_, false)) => {}
+        None => if let Some(n) = moved_name(self, e) { moved.insert(n); },
+      }
     }
     for e in &discarded {
       if let Some(n) = moved_name(self, e) { moved.insert(n); }
@@ -11587,7 +11603,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let dest_name: Vec<Option<String>> = assigns.iter()
       .map(|(_, place, _)| expr_to_rap_name(place, &self.tcx)).collect();
     let src_moved: Vec<Option<String>> = assigns.iter()
-      .map(|(_, _, hid)| src_of.get(hid).and_then(|e| moved_name(self, e))).collect();
+      .map(|(_, _, hid)| match parts.get(hid) {
+        Some((part, moves)) => moves.then(|| part.clone()),
+        None => src_of.get(hid).and_then(|e| moved_name(self, e)),
+      }).collect();
     let n = assigns.len();
     let mut order: Vec<usize> = Vec::with_capacity(n);
     let mut done = vec![false; n];
@@ -11618,7 +11637,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let ty = self.tcx.typeck(place.hir_id.owner).node_type(place.hir_id);
       if ty.is_ref() {
         if let Some(src) = src_of.get(hid) {
-          ref_data.insert(*hid, self.get_ref_data_full(src));
+          // A reference part of the place (`h.r` in `Holder { r: x, .. } =
+          // h;`, #1412) lends what it borrows.
+          let data = match parts.get(hid).and_then(|(n, _)| self.borrow_map.get(n)) {
+            Some(rd) => (rd.lender.clone(), get_aliasing_data(&rd.lender, &self.borrow_map), rd.static_lender.clone(), rd.co_lenders.clone()),
+            None => self.get_ref_data_full(src),
+          };
+          ref_data.insert(*hid, data);
+          if parts.contains_key(hid) {
+            continue;
+          }
           if let Some((n, sp)) = self.source_ref_loan(src) {
             let now = dest_name.contains(&Some(n.clone()));
             ref_src.insert(*hid, (n, sp, now));
@@ -11637,6 +11665,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
     }
     self.destructure_srcs = src_of;
+    self.destructure_parts = parts.into_iter().map(|(h, (n, _))| (h, n)).collect();
     self.destructure_moved = moved;
     self.destructure_ref_data = ref_data;
     self.destructure_ref_src = ref_src;
@@ -11730,6 +11759,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
     }
     self.destructure_srcs.clear();
+    self.destructure_parts.clear();
     self.destructure_moved.clear();
     self.destructure_ref_data.clear();
     self.destructure_ref_src.clear();
@@ -11827,6 +11857,42 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
       });
     }
+  }
+
+  /// `Pair { a: s, b: t } = p;`, `(s, n) = t;`, `(s, _) = t;`: with the
+  /// right-hand side a place whose parts have columns (`member_place_name`),
+  /// each binding of the desugared pattern (an `lhs`) with the part it
+  /// takes, and whether that moves it (else it's a copy), as `let` binds
+  /// them (`bind_pat_from_member`, #1412). A part the pattern leaves
+  /// (`_`, `..`) stays where it is. `None` (the whole place is assigned
+  /// from, as before) unless every binding takes a part of its own that
+  /// isn't a reference.
+  fn destructure_member_parts(&self, pat: &'tcx Pat<'tcx>, src: &'tcx Expr<'tcx>) -> Option<Vec<(HirId, (String, bool))>> {
+    if !matches!(pat.kind, PatKind::Tuple(..) | PatKind::TupleStruct(..) | PatKind::Struct(..)) {
+      return None;
+    }
+    let place = self.member_place_name(src)?;
+    let ty = self.tcx.typeck(src.hir_id.owner).node_type(src.hir_id);
+    let parent = ResourceTy::Value(self.raps.get(&place)?.rap.to_owned());
+    let mut out = Vec::new();
+    self.member_parts_of(pat, &parent, ty, src.hir_id.owner, &mut out)?;
+    (!out.is_empty()).then_some(out)
+  }
+
+  fn member_parts_of(&self, pat: &'tcx Pat<'tcx>, parent: &ResourceTy, ty: rustc_middle::ty::Ty<'tcx>,
+                     owner: rustc_hir::OwnerId, out: &mut Vec<(HirId, (String, bool))>) -> Option<()> {
+    for (sp, part) in self.pat_parts(pat, parent, ty)? {
+      match (sp.kind, part) {
+        (PatKind::Wild, _) => {}
+        (PatKind::Binding(ann, hid, _, None), Some((ResourceTy::Value(r), part_ty)))
+          if matches!(ann.0, rustc_hir::ByRef::No) =>
+          out.push((hid, (r.name().clone(), !self.ty_is_copy(part_ty, owner)))),
+        (PatKind::Tuple(..) | PatKind::TupleStruct(..) | PatKind::Struct(..), Some((p @ ResourceTy::Value(_), part_ty))) =>
+          self.member_parts_of(sp, &p, part_ty, owner, out)?,
+        _ => return None,
+      }
+    }
+    Some(())
   }
 
   /// Entry point for handling `let pat = init [else { … }];`.

@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{AltEnd, FieldLenders, ApproxNote, ElemsLeft, place_elem_names, breaks_out_only, is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier};
+use crate::svg_generator::data::{AltEnd, FieldLenders, ApproxNote, ElemsLeft, place_elem_names, breaks_out_only, is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier, leaves_maybe_held};
 use crate::svg_generator::hover_messages::{self, styled_name_html};
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use crate::svg_generator::svg_frontend::rv_attrs::{self, Rv};
@@ -1484,7 +1484,10 @@ fn render_branch_dots(
             // nested in an outer branch only has that branch's
             // events in `history`.
             let full = visualization_data.timelines.get(hash).map_or(history, |t| &t.history);
-            let next = full.iter()
+            // (The rest of an outer branch this merge is nested in comes
+            // first: `if c { if d { drop(s); } s = …; }` assigns s again
+            // in that branch, #1413. Its events are in `history` only.)
+            let next = history.iter().chain(full.iter())
                 .filter(|(l, _)| *l > *merge_point)
                 .find(|(_, e)| matches!(e, Event::OwnerDropAtReassign { .. } | Event::Branch { .. }))
                 .map(|(_, e)| e);
@@ -2932,8 +2935,9 @@ fn maybe_moved_at_end(history: &[(usize, Event)]) -> bool {
             // other, #1194) leaves it as it was.
             Event::Branch { branch_history, maybe_held: false, .. } if leaves_value_as_it_was(branch_history) => {}
             // Maybe held nothing as it started, assigned in some
-            // branches only (#1034).
-            Event::Branch { maybe_held: true, .. } => maybe = true,
+            // branches only (#1034), also in a branch of this one
+            // (#1413).
+            e if leaves_maybe_held(e) => maybe = true,
             // Assigned in some branches only, not moved (#244).
             Event::Branch { branch_history, maybe_init, .. }
                 if branches_init_join(*maybe_init, branch_history).is_some() => maybe = false,
@@ -2984,8 +2988,9 @@ fn maybe_moved_by_kept_round<'a>(history: impl Iterator<Item = &'a (usize, Event
             Event::LoopExitMove { definite: false, at: MaybeMovedAt::LoopRound { kept: k } | MaybeMovedAt::Loop { kept: k, .. } } => kept = *k,
             // A conditional that assigns it in some branches only,
             // where it may have held nothing as it started (#1034):
-            // the old value, the new one or nothing.
-            Event::Branch { maybe_held: true, .. } => kept = true,
+            // the old value, the new one or nothing. (Also in a branch
+            // of this one, #1413.)
+            e if leaves_maybe_held(e) => kept = true,
             Event::Branch { branch_history, maybe_init, .. }
                 if branches_init_join(*maybe_init, branch_history).is_some() => kept = false,
             Event::Branch { branch_history, ty, .. } => {
@@ -3419,7 +3424,12 @@ fn branch_join_message(branch_history: &[BranchData], ty: &BranchType, is: &Reso
         BranchJoin::Unchanged => {
             let mut leavers = Vec::new();
             moved_by_leavers(branch_history, &mut leavers);
-            if leavers.is_empty() {
+            if leavers.is_empty() && branch_history.iter().any(|b| !b.diverges && moves_somewhere(&b.e_data)) {
+                // A branch that moved it gave it a new value after
+                // (`if c { drop(s); s = …; }`, #1413): it holds one on
+                // every path, but it was moved.
+                hover_messages::event_dot_branch_merge_reassigned_after_move(var_name)
+            } else if leavers.is_empty() {
                 // #179: this used to be an empty tooltip.
                 hover_messages::event_dot_branch_merge_unchanged(var_name)
             } else {
@@ -7564,6 +7574,10 @@ fn render_all_arrows(
             // events that should be skipped (we don't render arrows for them)
             ExternalEvent::Bind {..} | ExternalEvent::GoOutOfScope {..}
             | ExternalEvent::RefDie {..} | ExternalEvent::ClosureCall {..} => {}
+            // A place moved out and back into the same place (`p.b` in
+            // `p = Pair { a: .., b: p.b };`, #1411): its dot says both;
+            // an arrow from the column to itself would read as a stub.
+            ExternalEvent::Move { from: ResourceTy::Value(f), to: ResourceTy::Value(t), .. } if f.hash() == t.hash() => {}
             // InitRefParam falls into render_arrow because owned-param
             // initializations get an L-shaped "ownership from caller"
             // arrow there. Ref params are filtered out inside

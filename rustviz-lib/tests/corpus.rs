@@ -26485,6 +26485,140 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from a to y",
         ],
     },
+    TooltipExpect {
+        name: "value_if_arm_reads_then_yields_1410",
+        // #1410: a branch that uses a variable and then yields it is paired
+        // with the binding after it's visited, so the use comes first. On
+        // main the arm's column went State::Invalid from the use on (the
+        // invariant test catches that) and the join fell back to the
+        // short "may have been moved" text.
+        must_contain: &[
+            "a was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when a goes out of scope.",
+            "b was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when b goes out of scope.",
+            "d was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when d goes out of scope.",
+            "e was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when e goes out of scope.",
+            "f was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when f goes out of scope.",
+            "g was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped when g goes out of scope.",
+            "h was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when h goes out of scope.",
+            "a goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "=a may have been moved (consumed in at least one branch above)",
+            "=b may have been moved (consumed in at least one branch above)",
+            "=d may have been moved (consumed in at least one branch above)",
+            "=e may have been moved (consumed in at least one branch above)",
+            "=f may have been moved (consumed in at least one branch above)",
+            "=g may have been moved (consumed in at least one branch above)",
+            "=h may have been moved (consumed in at least one branch above)",
+        ],
+    },
+    TooltipExpect {
+        name: "self_field_reassign_1411",
+        // #1411: `p = Pair { a: .., b: p.b }` moves p.b into the new value
+        // and back (its dot: the move, then the acquire; order checked in
+        // `self_moves_and_nested_ends_in_order_1411_1421`). q's fields hold
+        // their Strings after `q = Pair { a: q.a, b: q.b }`, so they're
+        // dropped at q's scope end (main: "moved out earlier, so no
+        // resource is dropped"), and no arrow goes from a column to itself.
+        must_contain: &[
+            "p.b's resource is moved into the new value the right-hand side builds (it runs before the assignment)",
+            "p.b gets the same resource back, as part of the new value assigned here",
+            "q.a gets the same resource back, as part of the new value assigned here",
+            "q.b gets the same resource back, as part of the new value assigned here",
+            "t.1 gets the same resource back, as part of the new value assigned here",
+            "q goes out of scope. Its resource is dropped.",
+            "q.a goes out of scope. Its resource is dropped.",
+            "q.b goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "q goes out of scope. q.a and q.b were moved out earlier, so no resource is dropped.",
+            "=q.a goes out of scope. No resource is dropped.",
+            "=q.b goes out of scope. No resource is dropped.",
+            "=Move from p.b to p.b",
+            "=Move from q.a to q.a",
+            "=Move from t.1 to t.1",
+        ],
+    },
+    TooltipExpect {
+        name: "destructure_assign_parts_1412",
+        // #1412: `Pair { a: s, b: t } = p;` moves p.a into s and p.b into
+        // t, as `let Pair { a, b } = p;` does; main moved "p" into each and
+        // said p.a and p.b were dropped at p's scope end. A part the
+        // pattern leaves stays (`..`, `_`), a Copy part is copied.
+        must_contain: &[
+            "Move from p.a to s",
+            "Move from p.b to t",
+            "p goes out of scope. p.a and p.b were moved out earlier, so no resource is dropped.",
+            "p.a goes out of scope. No resource is dropped.",
+            "Move from q.a to u",
+            "q goes out of scope. q.a was moved out earlier, so only q.b is dropped.",
+            "Move from tp.1 to v",
+            "tp goes out of scope. tp.1 was moved out earlier, so only tp.0 is dropped.",
+            "Move from w.0 to w0",
+            "Copy from w.1 to n",
+            "n is assigned a copy of w.1",
+            "Move from r.a to x",
+            "r goes out of scope. r.a and r.b were moved out in some of the branches above; each is dropped here only if no branch above moved it (Rust tracks this with runtime drop flags).",
+            "x is assigned a copy of hold.r's reference",
+            "Move from hold.n to m",
+            "hold goes out of scope. hold.n was moved out earlier, so no resource is dropped.",
+            "Return immutably borrowed resource from x to bb",
+        ],
+        must_not_contain: &[
+            "=p.a goes out of scope. Its resource is dropped.",
+            "=p.b goes out of scope. Its resource is dropped.",
+            "=q.a goes out of scope. Its resource is dropped.",
+            "=tp.1 goes out of scope. Its resource is dropped.",
+            "=w.0 goes out of scope. Its resource is dropped.",
+            "=r.a goes out of scope. Its resource is dropped.",
+            "=Move from p to s",
+            "=Move from tp to v",
+            "=Copy from w to n",
+            "=hold.n goes out of scope. Its resource is dropped.",
+            "x is initialized with a copy of hold",
+            "hold's resource is no longer immutably borrowed",
+        ],
+    },
+    TooltipExpect {
+        name: "nested_move_reassign_1413",
+        // #1413: s, moved in a nested `if` and assigned again in the same
+        // branch, holds a value after the outer `if` (main: "may have had
+        // none where they start", then State::Invalid at `s.push`). The
+        // inner join drops the old value where s is assigned again. m and
+        // p, moved and then only maybe given a new value, can't be used
+        // after the outer `if` (main drew their lines on; a drop flag
+        // decides their drop).
+        must_contain: &[
+            "s was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when s is assigned again.",
+            "s holds a value after the branches: each branch above that moved it gave it a new one",
+            "m was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped when m goes out of scope.",
+            "m goes out of scope. Its resource is dropped here only if m still holds it (Rust tracks this with a runtime drop flag).",
+            "p goes out of scope. Its resource is dropped here only if p still holds it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "s may have no value after the branches",
+            "=s isn't moved in any of the branches above",
+            "If the branch that ran didn't move it, its resource is dropped when s goes out of scope.",
+            "=p goes out of scope. Its resource is dropped.",
+            "=p may have been moved (consumed in at least one branch above)",
+        ],
+    },
+    TooltipExpect {
+        name: "else_if_holder_copy_1421",
+        // #1421: a holder declared in a nested branch copying another's
+        // reference: its field is initialized, then its borrow ends (order
+        // checked in `self_moves_and_nested_ends_in_order_1411_1421`), and
+        // it goes out of scope with the struct (main: no scope end).
+        must_contain: &[
+            "h2.r is initialized with a copy of h.r",
+            "h2.r goes out of scope",
+            "g2.r goes out of scope",
+            "k2.r goes out of scope",
+            "j2.r goes out of scope",
+            "Return immutably borrowed resource from h2.r to s",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 /// #1440: on the line where two loans of v end, the first end's dot (with
@@ -36218,6 +36352,23 @@ fn destructure_cycle_one_dot_per_target() {
             // Its value moves out, then the new one arrives.
             assert!(ids[0].ends_with("move+acquire") && !ids[0].contains("acquire+move"), "{} on line {}: {}", v, line, ids[0]);
         }
+    }
+}
+
+/// #1411, #1421: the order of the events on one dot. `p.b` in `p = Pair {
+/// a: .., b: p.b }` is moved out before it gets its value back (main:
+/// acquire, then move, and its column ended). A holder in a nested branch
+/// is initialized before its borrow ends (main: the end first), also
+/// after a use on the same line.
+#[test]
+fn self_moves_and_nested_ends_in_order_1411_1421() {
+    let tl = run_with_local_backend("self_field_reassign_1411").timeline_panel_string();
+    for id in ["p.b@L15:dot:move+acquire", "q.a@L22:dot:move+acquire", "q.b@L22:dot:move+acquire", "t.1@L28:dot:move+acquire"] {
+        assert!(tl.contains(&format!("data-rv-id=\"{id}\"")), "self_field_reassign_1411: no {id}");
+    }
+    let tl = run_with_local_backend("else_if_holder_copy_1421").timeline_panel_string();
+    for id in ["h2.r@L15:dot:copy+static_die", "g2.r@L26:dot:static_lend+static_reacquire+static_die", "k2.r@L37:dot:copy+static_die"] {
+        assert!(tl.contains(&format!("data-rv-id=\"{id}")), "else_if_holder_copy_1421: no {id}");
     }
 }
 
