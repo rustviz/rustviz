@@ -107,9 +107,21 @@ fn split_same_line_borrow_ends(group: &[ExternalEvent]) -> (Vec<ExternalEvent>, 
         .filter_map(|e| ends(e))
         .collect();
     let is_end = |e: &ExternalEvent| matches!(e, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. });
-    let mut moved: Vec<bool> = group.iter().map(|e| is_end(e) && ends(e).map_or(false, |(f, t)| {
+    let ends_a_borrow_here = |e: &ExternalEvent| is_end(e) && ends(e).map_or(false, |(f, t)| {
         f != t && borrows.iter().any(|&(bf, bt)| (bf, bt) == (f, t) || (bf, bt) == (t, f))
-    })).collect();
+    });
+    // When the stack does split, the end of a reference the line gives
+    // that borrow to (`let r = x;` after `Some(x) = v.first()` on one
+    // line) goes below it too: drawn on the first rows, it came before r
+    // got its value (#1426).
+    let split = group.iter().any(ends_a_borrow_here);
+    let received: Vec<u64> = group.iter()
+        .filter(|e| matches!(e, ExternalEvent::Copy { .. } | ExternalEvent::Move { .. }))
+        .filter_map(|e| ResourceAccessPoint_extract(e).1.extract_rap().filter(|r| r.is_ref()).map(|r| *r.hash()))
+        .collect();
+    let ends_a_received_borrow = |e: &ExternalEvent| split && is_end(e)
+        && ends(e).is_some_and(|(f, t)| f != t && received.contains(&f));
+    let mut moved: Vec<bool> = group.iter().map(|e| ends_a_borrow_here(e) || ends_a_received_borrow(e)).collect();
     // The end of a reference that one of those ends gives its loan back
     // to (`let m2 = &mut *m; let r2 = &*m2;`, both ending on that line):
     // it comes after r2's end, on the same row, not on the line's first
@@ -134,6 +146,22 @@ fn split_same_line_borrow_ends(group: &[ExternalEvent]) -> (Vec<ExternalEvent>, 
         if m { back.push(e.clone()) } else { front.push(e.clone()) }
     }
     (front, back)
+}
+
+/// Whether `o`, an event of a line after its stacked arrows' first one,
+/// is a use (a call reading or writing through it) of a reference whose
+/// borrow an arrow of the stack's first rows (`front`) ends, while the
+/// stack also has ends below it (`back`): the line's later events go on
+/// the row below the stack, but this one belongs on the line's own row,
+/// before the end (#587). In `if let Some(_y) = v.first() && x.is_empty()
+/// {}` the read through x was drawn two rows below x's end (#1424).
+fn uses_ref_ended_in_front(o: &ExternalEvent, front: &[ExternalEvent], back: &[ExternalEvent]) -> bool {
+    if back.is_empty() || matches!(o, ExternalEvent::GoOutOfScope { .. }) {
+        return false;
+    }
+    let (from, to) = ResourceAccessPoint_extract(o);
+    let other_is_fn = |r: u64| [from, to].iter().all(|x| x.extract_rap().is_none_or(|p| *p.hash() == r || p.is_fn()));
+    front.iter().any(|e| ended_ref(e).is_some_and(|r| uses_rap(o, r) && other_is_fn(r) && !new_borrow_into(o, r, e.get_id())))
 }
 
 /// Whether `e`, one of a line's stacked arrows (`group`), ends the
@@ -563,6 +591,26 @@ fn arms_arrows_overlap(branches: &[ExtBranchData], j: usize, line: usize, bindin
 fn arm_declares(branches: &[ExtBranchData], r: &ResourceAccessPoint) -> bool {
     branches.iter().any(|arm| arm.decl_vars.contains(r) || arm.e_data.iter().any(|(_, e)|
         matches!(e, ExternalEvent::Branch { branches, .. } if arm_declares(branches, r))))
+}
+
+/// The borrow ends among `events` (a line's events after its first
+/// stacked arrow) that `nest_arm_ref_ends` will move into an arm of the
+/// first conditional on `line` among them, not yet laid out (`skip`):
+/// ends of references its arms declare, after it on the line (#1262).
+fn nested_later_ends(events: &[(usize, ExternalEvent)], line: usize, skip: &HashSet<usize>) -> HashSet<usize> {
+    events.iter()
+        .position(|(l, e)| *l == line && matches!(e, ExternalEvent::Branch { .. }) && !skip.contains(&e.get_id()))
+        .map(|b| {
+            let ExternalEvent::Branch { branches, .. } = &events[b].1 else { unreachable!() };
+            events[b + 1..].iter()
+                .filter(|(l, e)| *l == line && matches!(e,
+                    ExternalEvent::StaticDie { from: ResourceTy::Value(r), .. }
+                    | ExternalEvent::MutableDie { from: ResourceTy::Value(r), .. }
+                    | ExternalEvent::RefDie { from: ResourceTy::Value(r), .. } if arm_declares(branches, r)))
+                .map(|(_, e)| e.get_id())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Puts the borrow end `end` of `r` into the arm declaring `r` (see
@@ -1003,8 +1051,20 @@ pub fn mutate_branch_lines(
                     Some(ev) => { // if there are multiple arrow events on this line
                         let (front, back) = split_same_line_borrow_ends(&ev);
                         let back_line = new_line_num + front.len();
+                        // As in `place_external_events`: the end of a
+                        // reference a conditional nested later on this line
+                        // declares (`if let Some(x) = v.first() { let r = x; }
+                        // else { }` on one line, in an arm) keeps its row in
+                        // the stack, but is left for `nest_arm_ref_ends` to
+                        // move into its arm. Laid out here, it was drawn in
+                        // this arm, beside the nested one, r's end above r's
+                        // binding (#1426).
+                        let nested_later = nested_later_ends(&b_data.e_data[i + 1..], line_num, &skippable_ev);
                         for (e, row) in front.iter().map(|e| (e, new_line_num))
                             .chain(back.iter().map(|e| (e, back_line))) {
+                            if nested_later.contains(&e.get_id()) {
+                                continue;
+                            }
                             skippable_ev.insert(e.get_id()); // they all become skippable
                             let mut j = i;
                             while j < size { // need to mutate all their line numbers
@@ -1030,6 +1090,7 @@ pub fn mutate_branch_lines(
                             .collect();
                         let own_row: HashSet<usize> = rest.iter()
                             .filter(|p_e| binds_source_of_line(p_e, &ev) || binds_borrower_of_line(p_e, &front)
+                                || uses_ref_ended_in_front(p_e, &front, &back)
                                 || follows_arrival_on_line(p_e, &ev, &rest)
                                 || front.iter().any(|g| part_moves_with_whole(p_e, g)))
                             .map(|p_e| p_e.get_id())
@@ -1663,19 +1724,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
             // arm's events, and `nest_arm_ref_ends` moves it into that arm
             // when the conditional's turn comes. It keeps its row in the
             // stack here, but isn't drawn on it, before wr is bound.
-            let nested_later: HashSet<usize> = visualization_data.preprocess_external_events[i + 1..].iter()
-                .position(|(l, e)| *l == line_num && matches!(e, ExternalEvent::Branch { .. }) && !skippable_ev.contains(&e.get_id()))
-                .map(|b| {
-                    let ExternalEvent::Branch { branches, .. } = &visualization_data.preprocess_external_events[i + 1 + b].1 else { unreachable!() };
-                    visualization_data.preprocess_external_events[i + 2 + b..].iter()
-                        .filter(|(l, e)| *l == line_num && matches!(e,
-                            ExternalEvent::StaticDie { from: ResourceTy::Value(r), .. }
-                            | ExternalEvent::MutableDie { from: ResourceTy::Value(r), .. }
-                            | ExternalEvent::RefDie { from: ResourceTy::Value(r), .. } if arm_declares(branches, r)))
-                        .map(|(_, e)| e.get_id())
-                        .collect()
-                })
-                .unwrap_or_default();
+            let nested_later = nested_later_ends(&visualization_data.preprocess_external_events[i + 1..], line_num, &skippable_ev);
             let ex = match res {
                 Some(ev) if chain_bindings_side_by_side(&ev, &chain_pairs) => {
                     // A let-chain's bindings (#584): all on the line's
@@ -1700,7 +1749,13 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                     // of by one of its arrows is bound first: its binding
                     // goes on the line's own row, before the arrow's dot
                     // (#731).
-                    for e in rest_of_line.iter().filter(|e| binds_source_of_line(e, &ev) || binds_borrower_of_line(e, &front)) {
+                    // (And a use of a reference whose end the stack's first
+                    // rows draw, before that end, #1424.)
+                    let use_first: Vec<&ExternalEvent> = rest_of_line.iter()
+                        .filter(|e| !skippable_ev.contains(&e.get_id()) && uses_ref_ended_in_front(e, &front, &back))
+                        .collect();
+                    for e in rest_of_line.iter().filter(|e| binds_source_of_line(e, &ev) || binds_borrower_of_line(e, &front)
+                        || use_first.iter().any(|u| u.get_id() == e.get_id())) {
                         visualization_data.append_processed_external_event(e.clone(), final_line_num);
                         skippable_ev.insert(e.get_id());
                     }

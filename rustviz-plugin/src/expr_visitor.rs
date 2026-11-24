@@ -11205,7 +11205,17 @@ pub fn print_out_of_scope(&mut self){
                 _ => false,
               }
           });
-          if rd.lifetime == max_lifetime || only_loan || alone_on_path() {
+          let lifetime = rd.lifetime;
+          // A reference whose last use is in one arm of an `if` /
+          // `match` is the last borrower on that arm's path when every
+          // later end in its region is in another arm of it: those
+          // references' borrows end as this arm starts (`if c { let m =
+          // &mut s; } else { use(x2); }`, #1425).
+          let last_on_its_path = || region.iter().all(|o| {
+            let l = self.borrow_map.get(*o).unwrap().lifetime;
+            l <= lifetime || on_other_paths(self.preprocessed_events, lifetime, l)
+          });
+          if lifetime == max_lifetime || only_loan || alone_on_path() || last_on_its_path() {
             ultimate_refs.insert((r.to_string(), lender.to_owned()));
           }
         }
@@ -11410,8 +11420,11 @@ pub fn print_out_of_scope(&mut self){
       // Another reference that borrows the same lender and outlives
       // this loan keeps it borrowed: this one's end gives nothing back.
       #[expect(clippy::disallowed_methods, reason = "`any` over the map: order never observed")]
+      // (Not one whose last use is in another arm of a conditional
+      // this loan ends in: its borrow ends as this arm starts, #1425.)
       let outlived = !matches!(rd.lender, ResourceTy::Anonymous)
-        && self.borrow_map.iter().any(|(n, d)| *n != k && d.lender == rd.lender && d.lifetime > rd.lifetime);
+        && self.borrow_map.iter().any(|(n, d)| *n != k && d.lender == rd.lender && d.lifetime > rd.lifetime
+          && !on_other_paths(self.preprocessed_events, rd.lifetime, d.lifetime));
       if outlived {
         self.add_external_event(rd.lifetime, ExternalEvent::RefDie {
           from: ResourceTy::Value(from_ro.clone()), to: to_ro,
@@ -12359,6 +12372,27 @@ fn end_stored_borrow_in_arms(events: &mut Vec<(usize, ExternalEvent)>, die_id: u
   events.iter_mut().any(|(_, e)| match e {
     ExternalEvent::Branch { branches, .. } => branches.iter_mut().any(|b| end_stored_borrow_in_arms(&mut b.e_data, die_id, holders, unique_id)),
     _ => false,
+  })
+}
+
+/// Whether lines `a` and `b` are in different arms of one `if` /
+/// `match` among `events` (or of one nested in an arm both are in): no
+/// path runs through both. A line two arms share (`} else {`, a one-line
+/// conditional) is in neither alone, so it is on every path.
+fn on_other_paths(events: &[(usize, ExternalEvent)], a: usize, b: usize) -> bool {
+  events.iter().any(|(_, e)| {
+    let ExternalEvent::Branch { branches, branch_type, .. } = e else { return false };
+    if matches!(branch_type, BranchType::Loop(..)) {
+      return false;
+    }
+    let holding = |line: usize| -> Vec<usize> {
+      (0..branches.len()).filter(|&i| { let (s, t) = branch_type.get_start_end(i); s <= line && line <= t }).collect()
+    };
+    match (holding(a).as_slice(), holding(b).as_slice()) {
+      ([i], [j]) if i != j => true,
+      ([i], [_]) => on_other_paths(&branches[*i].e_data, a, b),
+      _ => false,
+    }
   })
 }
 
