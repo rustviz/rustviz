@@ -6252,31 +6252,66 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// `r = if c { .. } else { .. };` (or a `match`) where r is a local
   /// reference variable with a column that holds a value already
   /// (#1393): drawn like `let r = if ..`, each branch's value paired
-  /// with r in its branch.
-  fn reassigns_ref_from_branches(&self, expr: &'tcx Expr<'tcx>, lhs_expr: &'tcx Expr<'tcx>, rhs_expr: &'tcx Expr<'tcx>) -> bool {
+  /// with r in its branch. `Some(keeps_old)`: whether a branch gives r
+  /// back its own value (`best = if c { &b } else { best };`, #1430).
+  /// On that path r keeps its old loan, so the write ends none: the old
+  /// lenders stay borrowed with the new ones until r's last use (rustc
+  /// keeps both, as for `if c { best = &b; }`), and that branch draws
+  /// nothing.
+  fn reassigns_ref_from_branches(&self, expr: &'tcx Expr<'tcx>, lhs_expr: &'tcx Expr<'tcx>, rhs_expr: &'tcx Expr<'tcx>) -> Option<bool> {
     if !matches!(expr.kind, ExprKind::Assign(..)) || expr.span.from_expansion() || rhs_expr.span.from_expansion() {
-      return false;
+      return None;
     }
     if !matches!(rhs_expr.kind, ExprKind::If(..) | ExprKind::Match(_, _, rustc_hir::MatchSource::Normal)) {
-      return false;
+      return None;
     }
-    let Some(hirid) = local_of_path(lhs_expr) else { return false };
+    let hirid = local_of_path(lhs_expr)?;
     if self.uninit_locals.contains_key(&hirid) || self.maybe_init_locals.contains(&hirid) {
-      return false;
+      return None;
     }
     if !self.tcx.typeck(lhs_expr.hir_id.owner).node_type(lhs_expr.hir_id).is_ref() {
-      return false;
+      return None;
     }
-    // Not when a branch gives r back its own value (`best = if c { &b }
-    // else { best };`): on that path r keeps its old loan, which the
-    // write doesn't end (drawn as before; #1430).
-    match branch_tails(rhs_expr) {
-      Some(tails) if !tails.iter().any(|t| local_of_path(t) == local_of_path(lhs_expr)) => {}
-      _ => return false,
+    let keeps_old = branch_tails(rhs_expr)?.iter().any(|t| local_of_path(t) == Some(hirid));
+    let name = expr_to_rap_name(lhs_expr, &self.tcx)?;
+    (self.raps.get(&name).is_some_and(|r| r.rap.is_ref() && !r.rap.is_static())
+      && self.borrow_map.contains_key(&name)).then_some(keeps_old)
+  }
+
+  /// After `r = if ..` / `let r = if ..` (r a reference) was visited:
+  /// r's lenders, as rustc sees them. A reference a branch declared,
+  /// gone now, that r reborrows through (`w` in `m = if c { let w =
+  /// &mut s; w } else { &mut t };`, an implicit `&mut *w`, #1431) is
+  /// replaced by what it borrowed (s): that stays borrowed until r's
+  /// last use, and w's own borrow ends with its scope. r itself is no
+  /// lender (`m` in `m = if c { &mut t } else { m }`, reborrowed through
+  /// m, #1430); `kept`, r's old lenders, are added.
+  pub(crate) fn resolve_branch_lenders(&mut self, r_name: &str, kept: Vec<ResourceTy>) {
+    let Some(rd) = self.borrow_map.get(r_name) else { return };
+    let before = rd.all_lenders();
+    let mut all: Vec<ResourceTy> = Vec::new();
+    for l in before.iter().cloned().chain(kept) {
+      let through = match &l {
+        ResourceTy::Deref(x) if x.is_ref() && x.name() != r_name && self.went_out_of_scope(x.name()) =>
+          self.borrow_map.get(x.name()).map(|d| d.all_lenders()),
+        _ => None,
+      };
+      for m in through.unwrap_or_else(|| vec![l]) {
+        if matches!(m, ResourceTy::Value(_) | ResourceTy::Deref(_))
+          && m.extract_rap().is_none_or(|x| x.name() != r_name) && !all.contains(&m) {
+          all.push(m);
+        }
+      }
     }
-    let Some(name) = expr_to_rap_name(lhs_expr, &self.tcx) else { return false };
-    self.raps.get(&name).is_some_and(|r| r.rap.is_ref() && !r.rap.is_static())
-      && self.borrow_map.contains_key(&name)
+    if all.is_empty() || all == before {
+      return;
+    }
+    let aliasing = get_aliasing_data(&all[0], &self.borrow_map);
+    if let Some(rd) = self.borrow_map.get_mut(r_name) {
+      rd.lender = all.remove(0);
+      rd.co_lenders = all;
+      rd.aliasing = aliasing;
+    }
   }
 
   /// Whether `e` is inside the condition of an `if` (a let-chain part
@@ -6334,7 +6369,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // that branch, before its variables go out of scope, as for `let r =
     // if ..` (#1327). The old loan is ended first (below), then the
     // conditional is visited (`ref_arms_assign`).
-    let ref_arms = destructure_hid.is_none() && self.reassigns_ref_from_branches(expr, lhs_expr, rhs_expr);
+    let ref_arms_keep = if destructure_hid.is_none() { self.reassigns_ref_from_branches(expr, lhs_expr, rhs_expr) } else { None };
+    let ref_arms = ref_arms_keep.is_some();
+    // A branch gives r back its own value (#1430): r's old loan lives on
+    // along that path, so the write ends none of it.
+    let keeps_old_loan = ref_arms_keep == Some(true);
     if destructure_hid.is_none() && !ref_arms {
       self.visit_expr(rhs_expr);
     }
@@ -6548,8 +6587,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // old loan gives the lender back (#1439). It used to count as
           // still borrowing, so r's end gave nothing back and, when it
           // ended in another arm, wasn't drawn at all.
+          // Nor one whose loan was made after r's old loan ended (`o` in
+          // `println!("{}", r); let o = Some(&a); r = match o { .. };`,
+          // #1432), or had ended before it: it doesn't keep the lender
+          // borrowed at that end.
           let me = lhs_rty.real_name();
-          let old_end = self.old_loan_end(&ref_data, &ref_data.lender, line_num, write_span);
+          let old_end = self.loan_end(&ref_data).filter(|&end| end < line_num && end >= ref_data.assigned_at)
+            .or_else(|| self.old_loan_end(&ref_data, &ref_data.lender, line_num, write_span));
           if let Some(old_end) = old_end {
             #[expect(clippy::disallowed_methods, reason = "filtered into a sorted Vec")]
             let mut over: Vec<String> = borrowers.iter()
@@ -6561,6 +6605,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             for o in &over {
               borrowers.remove(o);
             }
+            borrowers.retain(|b| *b == me || self.borrow_map.get(b).is_none_or(|rd| rd.assigned_at <= old_end
+              && self.loan_end(rd).unwrap_or(rd.lifetime).max(rd.lifetime) >= old_end));
           }
           // In a destructuring assignment, another destination may
           // take this borrow over in the same statement: in
@@ -6578,10 +6624,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           #[expect(clippy::disallowed_methods, reason = "`all` over the set: order never observed")]
           let only_loan = ref_data.co_lenders.is_empty()
             && crate::expr_visitor::mutable_loan_alone(lhs_rap.name(), &ref_data.lender.real_name(), &self.borrow_map, borrowers.iter());
-          if !self.ref_handed_off(lhs_rap.name()) && !((borrowers.len() > 1 && !only_loan) || taken_over) {
-            self.loans_carried_on.extend(gone);
+          // (Also when another reference keeps the lender borrowed: y
+          // is gone all the same, #1432.)
+          if !self.ref_handed_off(lhs_rap.name()) && !taken_over {
+            self.loans_carried_on.extend(gone.iter().cloned());
           }
-          if self.ref_handed_off(lhs_rap.name()) {
+          if self.ref_handed_off(lhs_rap.name()) || keeps_old_loan {
           }
           else if (borrowers.len() > 1 && !only_loan) || taken_over { // there is another active reference at this point, the resource cannot be returned
             // The shared loan lives on in another arm (`r = &t;` in one
@@ -6602,8 +6650,29 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               self.add_borrow_end_ev(end, to_ro, lhs_rty.clone(), &ref_data, others);
               self.defer_old_ends = false;
             } else {
-              self.add_external_event(line_num, ExternalEvent::RefDie { from: lhs_rty.clone(), to: to_ro, num_curr_borrowers: borrowers.len() - 1, id: *self.unique_id });
+              // (Where the old loan ends, its last use, when that is
+              // before the write, #1432.)
+              let die_line = if taken_over { line_num } else { old_end.unwrap_or(line_num) };
+              self.add_external_event(die_line, ExternalEvent::RefDie { from: lhs_rty.clone(), to: to_ro, num_curr_borrowers: borrowers.len() - 1, id: *self.unique_id });
               *self.unique_id += 1;
+              // r's other lenders (`b` in `r = if c { &a } else { &b };`
+              // with a also borrowed by z) are given back where the old
+              // loan ends, unless another reference still borrows them
+              // (#1432).
+              if !taken_over {
+                let r_name = lhs_rty.real_name();
+                for co in ref_data.co_lenders.iter().filter(|c| matches!(c, ResourceTy::Value(_))) {
+                  #[expect(clippy::disallowed_methods, reason = "`any` over the map: order never observed")]
+                  let shared = self.borrow_map.iter().any(|(k, rd)| *k != r_name && !gone.contains(k)
+                    && rd.all_lenders().contains(co) && old_end.is_none_or(|e| rd.assigned_at <= e
+                      && self.loan_end(rd).unwrap_or(rd.lifetime).max(rd.lifetime) >= e));
+                  if shared {
+                    continue;
+                  }
+                  let evt = if ref_data.mut_of(co) { Evt::MDie } else { Evt::SDie };
+                  self.add_ev(die_line, evt, co.clone(), lhs_rty.clone(), false);
+                }
+              }
             }
           }
           else if let Some(end_line) = self.field_write_loan_end(lhs_expr, &lhs_rap, &ref_data, line_num) {
@@ -6716,6 +6785,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           r.borrow_span = borrow_span_of(rhs_expr);
           r.loan_line = call_loan_line(rhs_expr, line_num);
           r.co_lenders = new_co_lenders;
+          // (#1430) The old lenders, still borrowed on the path that
+          // keeps r's old value.
+          if keeps_old_loan {
+            let mut all: Vec<ResourceTy> = Vec::new();
+            for l in r.all_lenders().into_iter().chain(ref_data.all_lenders()) {
+              if matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_))
+                && l.extract_rap().is_none_or(|x| x.name() != lhs_rap.name()) && !all.contains(&l) {
+                all.push(l);
+              }
+            }
+            if !all.is_empty() {
+              r.lender = all.remove(0);
+              r.co_lenders = all;
+            }
+          }
           self.note_loan_kinds(lhs_rap.name(), rhs_expr);
           if taken_over_now {
             self.note_ref_carrier(lhs_rap.name(), None);
@@ -7155,9 +7239,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // r's lenders, now that the branches' variables are known (`a`
         // through `y`): as when the conditional was visited first.
         let (lender, aliasing, static_lender, co_lenders) = self.get_ref_data_full(rhs_expr);
-        if let Some(rd) = self.borrow_map.get_mut(&lhs_rty.real_name()) {
+        let r_name = lhs_rty.real_name();
+        let mut kept: Vec<ResourceTy> = Vec::new();
+        if let Some(rd) = self.borrow_map.get_mut(&r_name) {
+          // (#1430: with the old lenders, which the branch keeping r's
+          // value names through r itself.)
+          if keeps_old_loan {
+            kept = rd.all_lenders();
+          }
           (rd.lender, rd.aliasing, rd.static_lender, rd.co_lenders) = (lender, aliasing, static_lender, co_lenders);
         }
+        self.resolve_branch_lenders(&r_name, kept);
         self.mark_branch_results_kept(&lhs_rty.real_name(), rhs_expr);
       } else {
         self.match_rhs(lhs_rty.clone(), rhs_expr, e);
@@ -8942,7 +9034,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         })
       {
         let head_from = self.in_scope.len();
-        self.note_for_head_temporary(head_arg, guard_expr, expr);
+        let head_temp = self.note_for_head_temporary(head_arg, guard_expr, expr);
         // Iterand event: shape of head_arg dictates the arrow.
         //   &v       ⇒ SBorrow from v
         //   &mut v   ⇒ MBorrow from v
@@ -9082,6 +9174,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // `for x in v.iter_mut()`: the variable that lends x (v), and
         // whether mutably (#1347).
         let mut call_lender: Option<(ResourceTy, Evt)> = None;
+        // `for r in [&e, &g]`: what the literal's references borrow (#1433).
+        let mut literal_lenders: Option<Vec<ResourceTy>> = None;
         if let PatKind::Binding(_, pat_hirid, pat_ident, None) = user_pat.kind {
           let pat_name = binding_name(&self.tcx, pat_hirid);
           let pat_ty = self.tcx.typeck(user_pat.hir_id.owner)
@@ -9137,6 +9231,27 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             if let Some(rd) = self.borrow_map.get(&holder) {
               self.loop_moved_refs.insert(holder, rd.assigned_at);
             }
+          } else if let Some(lenders) = pat_ty.is_ref().then(|| self.literal_head_lenders(head_arg)).flatten() {
+            // `for r in [&e, &g]` / `vec![&e, &g]` (#1433): each r is one
+            // of the literal's references, which the loop's iterator
+            // holds until the loop ends. r borrows what they borrow, as
+            // for `for r in refs` (#1389), drawn from each lender.
+            let (first, rest) = lenders.split_first().map(|(f, r)| (f.clone(), r.to_vec())).unwrap();
+            self.add_ref(
+              pat_name.clone(),
+              bool_of_mut(pat_ty.ref_mutability().unwrap()),
+              false,
+              for_line,
+              first,
+              std::collections::VecDeque::new(),
+              self.current_scope,
+              false,
+              pointee_copy,
+            );
+            if let Some(rd) = self.borrow_map.get_mut(&pat_name) {
+              rd.co_lenders = rest;
+            }
+            literal_lenders = Some(lenders);
           } else if pat_ty.is_ref() {
             // `for x in v.iter_mut()`: the loan came from `v`;
             // `iter_mut` is the method that lent it, not the
@@ -9240,6 +9355,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             } else {
               self.add_ev(for_line, e, to_rty, head_rty, false);
             }
+          } else if let Some(lenders) = literal_lenders.take() {
+            let evt = if pat_ty.ref_mutability() == Some(Mutability::Mut) { Evt::MBorrow } else { Evt::SBorrow };
+            for l in lenders {
+              match l {
+                // `[&mut *w]` / `[w]` with w a local `&mut`: a reborrow
+                // through w, drawn from w's column (#1330).
+                ResourceTy::Deref(r) => self.add_borrow_ev(for_line, evt.clone(), to_rty.clone(), ResourceTy::Value(r), true),
+                l => self.add_ev(for_line, evt.clone(), to_rty.clone(), l, false),
+              }
+            }
           } else if let Some((lender, evt)) = call_lender.take() {
             // `for x in v.iter_mut()` / `v.iter()`: each x is a
             // reference into v, which v lends (through the iterator
@@ -9289,8 +9414,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           if matches!(iterand_evt, Some(Evt::SBorrow) | Some(Evt::MBorrow)) {
             self.pattern_lender = iterand_evt.clone().map(|e| (e, head_rty.clone()));
           }
+          // `for (x, y) in [(&e, &g)]`: x and y copy the literal's
+          // references (#1433).
+          if iterand_evt.is_none() {
+            self.pattern_literal = match head_arg.kind {
+              ExprKind::Array(elems) if !head_arg.span.from_expansion() => Some(elems),
+              _ => vec_macro_elems(head_arg),
+            };
+          }
           self.register_pattern_bindings_anon(user_pat, for_line);
           self.pattern_lender = None;
+          self.pattern_literal = None;
           let pattern_elem = self.pattern_elem.take();
           let head_move_pending = pattern_elem.as_ref().is_none_or(|p| p.source_pending);
           if matches!(iterand_evt, Some(Evt::Move)) && head_move_pending {
@@ -9467,6 +9601,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           .filter_map(|d| self.borrow_map.get(d.name()))
           .flat_map(|rd| rd.all_lenders())
           .collect();
+        // What the pattern leaves of each element (`.1` in `for (f, _)
+        // in v`, all of it in `for _ in v`) is dropped at the end of each
+        // pass (#1434): stated on the loop's iterator, which hands the
+        // elements out, else on a binding of the pattern.
+        if let Some(parts) = self.for_pattern_left_parts(user_pat) {
+          #[expect(clippy::disallowed_methods, reason = "the first binding in source order is picked below")]
+          let mut bindings: Vec<ResourceAccessPoint> = pat_decls.iter().cloned().collect();
+          bindings.sort_by_key(|r| *r.hash());
+          let on = head_temp.clone().or_else(|| iterator_head.clone()).or_else(|| bindings.into_iter().next());
+          if let Some(ro) = on {
+            let id = *self.unique_id;
+            *self.unique_id += 1;
+            self.add_external_event(body_end, ExternalEvent::PassRestDrop { ro, parts, id });
+          }
+        }
         self.emit_scope_end(loop_decls, body_end);
         // The loan of a reference it moved in lasts until the loop ends (#1076):
         // its lender (a variable with a column) is borrowed by the loop's
@@ -9545,6 +9694,166 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 }
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
+  /// The parts of each element a `for` loop's pattern leaves unbound
+  /// that need drop (`.1` in `for (f, _) in v` over `(String, String)`;
+  /// `[""]`, the whole element, for `for _ in v`), which Rust drops at
+  /// the end of each pass (#1434). None when there are none, the element
+  /// is a reference (nothing of it is owned), or the pattern's shape
+  /// isn't one this follows.
+  fn for_pattern_left_parts(&self, pat: &'tcx Pat<'tcx>) -> Option<Vec<String>> {
+    let typeck = self.tcx.typeck(pat.hir_id.owner);
+    let ty = typeck.pat_ty(pat);
+    if ty.is_ref() || !self.needs_drop(ty, pat.hir_id.owner) {
+      return None;
+    }
+    let mut out = Vec::new();
+    if !self.left_parts_below(pat, String::new(), &mut out) || out.is_empty() {
+      return None;
+    }
+    if out == [""] {
+      out.clear();
+    }
+    Some(out)
+  }
+
+  /// `for_pattern_left_parts` below `pat`, at `path` in the element;
+  /// false for a shape it doesn't follow.
+  fn left_parts_below(&self, pat: &'tcx Pat<'tcx>, path: String, out: &mut Vec<String>) -> bool {
+    let typeck = self.tcx.typeck(pat.hir_id.owner);
+    let owner = pat.hir_id.owner;
+    // Matched through a reference (default binding modes): nothing
+    // there is owned by the element.
+    if typeck.pat_adjustments().get(pat.hir_id).is_some_and(|a| !a.is_empty()) {
+      return true;
+    }
+    let ty = typeck.pat_ty(pat);
+    let leave = |p: String, t: rustc_middle::ty::Ty<'tcx>, out: &mut Vec<String>| {
+      if self.needs_drop(t, owner) {
+        out.push(p);
+      }
+    };
+    match pat.kind {
+      PatKind::Wild => {
+        leave(path, ty, out);
+        true
+      }
+      PatKind::Binding(_, hirid, _, _) => {
+        // By value, the binding takes its part; `ref x` leaves it in
+        // the element.
+        // (`ty` is the binding's, a reference to the part.)
+        if matches!(typeck.pat_binding_modes().get(hirid).map(|m| m.0), Some(rustc_hir::ByRef::Yes(..))) {
+          if let rustc_middle::ty::TyKind::Ref(_, part, _) = ty.kind() {
+            leave(path, *part, out);
+          }
+        }
+        true
+      }
+      // `&x`: a copy out of a reference, which owns nothing.
+      PatKind::Ref(..) => true,
+      PatKind::Tuple(ps, dd) => {
+        let rustc_middle::ty::TyKind::Tuple(tys) = ty.kind() else { return false };
+        let n = tys.len();
+        let d = dd.as_opt_usize();
+        let idx = |i: usize| match d { Some(d) if i >= d => i + n - ps.len(), _ => i };
+        // (In the element's order.)
+        tys.iter().enumerate().all(|(k, t)| match (0..ps.len()).find(|&i| idx(i) == k) {
+          Some(i) => self.left_parts_below(&ps[i], format!("{}.{}", path, k), out),
+          None => {
+            leave(format!("{}.{}", path, k), t, out);
+            true
+          }
+        })
+      }
+      PatKind::TupleStruct(ref qpath, ps, dd) => {
+        let (Some(adt), rustc_middle::ty::TyKind::Adt(_, args)) = (ty.ty_adt_def(), ty.kind()) else { return false };
+        let res = typeck.qpath_res(qpath, pat.hir_id);
+        if adt.is_enum() || matches!(res, Res::Err) {
+          return false;
+        }
+        let fields = &adt.variant_of_res(res).fields;
+        let n = fields.len();
+        let d = dd.as_opt_usize();
+        let idx = |i: usize| match d { Some(d) if i >= d => i + n - ps.len(), _ => i };
+        fields.iter().enumerate().all(|(k, f)| match (0..ps.len()).find(|&i| idx(i) == k) {
+          Some(i) => self.left_parts_below(&ps[i], format!("{}.{}", path, k), out),
+          None => {
+            leave(format!("{}.{}", path, k), f.ty(self.tcx, args), out);
+            true
+          }
+        })
+      }
+      PatKind::Struct(ref qpath, fs, _) => {
+        let (Some(adt), rustc_middle::ty::TyKind::Adt(_, args)) = (ty.ty_adt_def(), ty.kind()) else { return false };
+        let res = typeck.qpath_res(qpath, pat.hir_id);
+        if adt.is_enum() || matches!(res, Res::Err) {
+          return false;
+        }
+        adt.variant_of_res(res).fields.iter().all(|f| match fs.iter().find(|pf| pf.ident.name == f.name) {
+          Some(pf) => self.left_parts_below(pf.pat, format!("{}.{}", path, f.name), out),
+          None => {
+            leave(format!("{}.{}", path, f.name), f.ty(self.tcx, args), out);
+            true
+          }
+        })
+      }
+      _ => false,
+    }
+  }
+
+  /// A `for` loop's head that is an array literal or `vec![..]` of
+  /// references (`[&e, &g]`, `vec![&mut a]`, #1433): the variables they
+  /// borrow (drawn columns only). None for any other head, or when none
+  /// is drawn.
+  fn literal_head_lenders(&self, head: &'tcx Expr<'tcx>) -> Option<Vec<ResourceTy>> {
+    let literal = matches!(head.kind, ExprKind::Array(..) | ExprKind::Repeat(..)) && !head.span.from_expansion()
+      || vec_macro_elems(head).is_some();
+    if !literal {
+      return None;
+    }
+    let lenders: Vec<ResourceTy> = self.value_lenders(head).into_iter()
+      .filter(|l| match l {
+        ResourceTy::Value(r) => !r.is_fn(),
+        ResourceTy::Deref(_) => true,
+        _ => false,
+      })
+      .collect();
+    (!lenders.is_empty()).then_some(lenders)
+  }
+
+  /// The variables borrowed by the references in the part `path` (`.0`,
+  /// `.1.name`; the whole element when None) of each element of a
+  /// literal `for` head (`[(&e, &g)]`, #1433). A part that isn't itself
+  /// written as a literal counts the whole element's.
+  fn literal_part_lenders(&self, elems: &'tcx [Expr<'tcx>], path: Option<&str>) -> Vec<ResourceTy> {
+    let mut out: Vec<ResourceTy> = Vec::new();
+    for elem in elems {
+      let mut e = elem;
+      for seg in path.unwrap_or("").split('.').filter(|s| !s.is_empty()) {
+        let next = match (e.kind, seg.parse::<usize>()) {
+          (ExprKind::Tup(es), Ok(i)) => es.get(i),
+          (ExprKind::Call(f, args), Ok(i)) if is_ctor_path(f, self.tcx.typeck(e.hir_id.owner)) => args.get(i),
+          (ExprKind::Struct(_, fields, _), _) => fields.iter().find(|f| f.ident.as_str() == seg).map(|f| f.expr),
+          _ => None,
+        };
+        match next {
+          Some(n) => e = n,
+          None => break,
+        }
+      }
+      for l in self.value_lenders(e) {
+        let drawn = match &l {
+          ResourceTy::Value(r) => !r.is_fn(),
+          ResourceTy::Deref(_) => true,
+          _ => false,
+        };
+        if drawn && !out.contains(&l) {
+          out.push(l);
+        }
+      }
+    }
+    out
+  }
+
   /// A `for` loop's head that moves a value holding references into the
   /// loop's iterator, whose items are those references (`for r in refs`,
   /// `for r in refs.into_iter()` with `refs: Vec<&mut String>`, #1389):
@@ -10449,11 +10758,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// say so on one like a call's result. Nothing is stated for a head
   /// that is a reference or whose iterator owns nothing (`&v`, `0..n`,
   /// `v.iter()`, `s.chars()`).
-  fn note_for_head_temporary(&mut self, head: &'tcx Expr<'tcx>, iter_call: &'tcx Expr<'tcx>, for_expr: &'tcx Expr<'tcx>) {
+  fn note_for_head_temporary(&mut self, head: &'tcx Expr<'tcx>, iter_call: &'tcx Expr<'tcx>, for_expr: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
     let typeck = self.tcx.typeck(iter_call.hir_id.owner);
     let ty = typeck.expr_ty(iter_call);
     if ty.is_ref() || !self.needs_drop(ty, iter_call.hir_id.owner) || self.temp_drops_noted.contains(&head.hir_id) {
-      return;
+      return None;
     }
     // `for s in it` with `it` an iterator already: `into_iter` hands
     // `it`'s value back unchanged, so no new value is built. It's moved
@@ -10461,14 +10770,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if matches!(head.kind, ExprKind::Path(QPath::Resolved(_, p)) if matches!(p.res, Res::Local(_)))
       && typeck.expr_ty(head) == ty
     {
-      return;
+      return None;
     }
     let end_line = span_end_line(&for_expr.span, &self.tcx);
     // An adapter chain's type (`Map<IntoIter<String>, {closure@..}>`)
     // isn't something a student wrote.
     let shown = strip_module_paths(&ty.to_string());
     let shown = if shown.contains('{') { "iterator".to_owned() } else { shown };
-    self.record_temporary_drop(head, shown, "into_iter".to_owned(), "when the `for` loop ends", end_line, None, Vec::new(), None);
+    self.record_temporary_drop(head, shown, "into_iter".to_owned(), "when the `for` loop ends", end_line, None, Vec::new(), None)
   }
 
   /// True iff `expr` sits inside an `if` / `match` that starts and ends
@@ -11511,7 +11820,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // A reference returned by a call in a branch keeps that call's
       // borrow (#337).
       if let PatKind::Binding(_, hir_id, _, None) = pat.kind {
-        self.mark_branch_results_kept(&binding_name(&self.tcx, hir_id), cond);
+        let name = binding_name(&self.tcx, hir_id);
+        // (`let m: &mut String = if c { let w = &mut s; w } else { .. }`
+        // reborrows through w, gone now, #1431.)
+        if matches!(init.kind, ExprKind::If(..) | ExprKind::Match(..)) && self.raps.get(&name).is_some_and(|r| r.rap.is_ref()) {
+          self.resolve_branch_lenders(&name, Vec::new());
+        }
+        self.mark_branch_results_kept(&name, cond);
       }
       self.break_pats.retain(|(id, ..)| *id != init.hir_id);
       self.break_binds.retain(|(id, ..)| *id != init.hir_id);
@@ -12988,6 +13303,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             }
             if let Some(pe) = self.pattern_elem.as_mut() {
               pe.source_pending = false;
+            }
+          }
+          // `x` in `for (x, y) in [(&e, &g)]` (#1433): a copy of the
+          // reference the literal holds in that part of each element.
+          (None, None) if pat_ty.is_ref() && !by_ref && derefs == 0 && self.pattern_literal.is_some() => {
+            let lenders = self.literal_part_lenders(self.pattern_literal.unwrap_or_default(), path.as_deref());
+            if lenders.is_empty() {
+              self.add_ev(line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
+            } else {
+              if let Some(rd) = self.borrow_map.get_mut(&name) {
+                rd.lender = lenders[0].clone();
+                rd.co_lenders = lenders[1..].to_vec();
+              }
+              let evt = if pat_ty.ref_mutability() == Some(Mutability::Mut) { Evt::MBorrow } else { Evt::SBorrow };
+              for l in lenders {
+                match l {
+                  ResourceTy::Deref(r) => self.add_borrow_ev(line, evt.clone(), to_rty.clone(), ResourceTy::Value(r), true),
+                  l => self.add_ev(line, evt.clone(), to_rty.clone(), l, false),
+                }
+              }
             }
           }
           (None, None) => self.add_ev(line, Evt::Bind, to_rty, ResourceTy::Anonymous, false),

@@ -4656,6 +4656,22 @@ pub fn event_dot_dead_else_note(my_name: &String) -> String {
     )
 }
 
+/// A `for` loop's pattern leaves `parts` of each element unbound (`.1`
+/// in `for (f, _) in v`; empty: the whole element, `for _ in v`, #1434):
+/// Rust drops them at the end of each pass, with what is left of that
+/// pass's element.
+pub fn event_dot_pass_rest_drop(parts: &[String]) -> String {
+    if parts.is_empty() {
+        return "At the end of each pass, the element that pass took is dropped: the pattern `_` doesn't bind it".to_owned();
+    }
+    let shown: Vec<String> = parts.iter().map(|p| format!("`{}`", p)).collect();
+    let (list, verb, pron) = match shown.len() {
+        1 => (shown[0].clone(), "is", "it"),
+        n => (format!("{} and {}", shown[..n - 1].join(", "), shown[n - 1]), "are", "them"),
+    };
+    format!("At the end of each pass, the {0} of that pass's element {1} dropped: the pattern doesn't move {2} out", list, verb, pron)
+}
+
 /// A write to `lender` drawn inside its borrow by `borrower`, on a path
 /// where that loan is already dead (#796): `let mut c = &x; if cond { x
 /// = 2; c = &y; } println!("{}", c);`. The diagram gives a loan one end,

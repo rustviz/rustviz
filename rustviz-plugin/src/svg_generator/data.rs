@@ -2441,6 +2441,17 @@ pub enum ExternalEvent {
         ro: ResourceAccessPoint,
         id: usize
     },
+    // A `for` loop whose pattern leaves parts of each element unbound
+    // (`for (f, _) in v`, `for _ in v`, #1434): at the end of each pass
+    // those parts are dropped with the rest of the element. Stated on
+    // `ro`, the loop's iterator (or a binding of the pattern) where the
+    // body ends; the state is unchanged. `parts`: their paths in the
+    // element (`.1`), empty for the whole element.
+    PassRestDrop {
+        ro: ResourceAccessPoint,
+        parts: Vec<String>,
+        id: usize
+    },
     // A write to `ro` (or the variable `lender` it is part of) on a path
     // where `borrower`'s loan of `lender` is already dead, though the
     // borrow checker keeps it in scope on another path past the write
@@ -2591,6 +2602,7 @@ impl ExternalEvent {
             &ExternalEvent::TiedParamNote { id, .. } |
             &ExternalEvent::ReslicedInPlace { id, .. } |
             &ExternalEvent::DeadElseNote { id, .. } |
+            &ExternalEvent::PassRestDrop { id, .. } |
             &ExternalEvent::DeadLoanNote { id, .. } |
             &ExternalEvent::RefDie { id, .. } | &ExternalEvent::Bind { id, .. } |
             &ExternalEvent::PassByStaticReference { id, .. } | &ExternalEvent::PassByMutableReference {id, .. } |
@@ -2894,6 +2906,8 @@ pub enum Event {
     ReslicedInPlace { lender: String, mutable: bool, part: bool },
     // See ExternalEvent::DeadElseNote.
     DeadElseNote,
+    // See ExternalEvent::PassRestDrop.
+    PassRestDrop { parts: Vec<String> },
     // A struct's field while the struct is borrowed as a whole by a call
     // on this row (`c.reset()`, `inc(&mut c)`, `show(&c)`; #1311): the
     // field is borrowed with it, and the borrow ends on the row. Added to
@@ -3689,6 +3703,9 @@ impl Display for Event {
             Event::DeadElseNote => {
                 write!(f, "This else branch never runs")
             },
+            Event::PassRestDrop { .. } => {
+                write!(f, "What the pattern leaves of each element is dropped")
+            },
             Event::LentWithParent { parent, .. } => {
                 write!(f, "Borrowed along with {}", parent)
             },
@@ -3909,6 +3926,9 @@ impl Event {
             }
             Event::DeadElseNote => {
                 hover_messages::event_dot_dead_else_note(my_name)
+            }
+            Event::PassRestDrop { parts } => {
+                hover_messages::event_dot_pass_rest_drop(parts)
             }
             Event::LentWithParent { parent, to, mutable } => {
                 hover_messages::event_dot_lent_with_parent(my_name, parent, to, *mutable)
@@ -5345,6 +5365,7 @@ impl Visualizable for VisualizationData {
             (_, Event::TiedParamNote { .. }) => (*previous_state).clone(),
             (_, Event::ReslicedInPlace { .. }) => (*previous_state).clone(),
             (_, Event::DeadElseNote) => (*previous_state).clone(),
+            (_, Event::PassRestDrop { .. }) => (*previous_state).clone(),
             (_, Event::LentWithParent { .. }) => (*previous_state).clone(),
             (_, Event::DeadLoanNote { .. }) => (*previous_state).clone(),
 
@@ -5882,6 +5903,9 @@ impl Visualizable for VisualizationData {
         ExternalEvent::DeadElseNote{ .. } => {
           vec![(line_num, Event::DeadElseNote)]
         },
+        ExternalEvent::PassRestDrop{ parts, .. } => {
+          vec![(line_num, Event::PassRestDrop { parts: parts.clone() })]
+        },
         ExternalEvent::TiedParamNote{ lifetime, .. } => {
           vec![(line_num, Event::TiedParamNote { lifetime: lifetime.clone() })]
         },
@@ -5970,7 +5994,8 @@ impl Visualizable for VisualizationData {
             | ExternalEvent::LoopMaybeInit { ro, .. } | ExternalEvent::LoopExitKept { ro, .. }
             | ExternalEvent::ChainFailAssign { ro, .. } | ExternalEvent::ChainFailUse { ro, .. } | ExternalEvent::TiedParamNote { ro, .. }
             | ExternalEvent::ReslicedInPlace { ro, .. }
-            | ExternalEvent::DeadElseNote { ro, .. } | ExternalEvent::DeadLoanNote { ro, .. } => {
+            | ExternalEvent::DeadElseNote { ro, .. } | ExternalEvent::DeadLoanNote { ro, .. }
+            | ExternalEvent::PassRestDrop { ro, .. } => {
                 if ro == rap {
                     b_history.extend(self.event_of_external_event(line_number, event, true));
                 }
@@ -6375,6 +6400,9 @@ impl Visualizable for VisualizationData {
             },
             ExternalEvent::DeadElseNote{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::DeadElseNote, line_number);
+            },
+            ExternalEvent::PassRestDrop{ro, parts, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::PassRestDrop { parts }, line_number);
             },
             ExternalEvent::DeadLoanNote{ro, lender, borrower, repoint, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::DeadLoanNote { lender, borrower, repoint, shown: false }, line_number);

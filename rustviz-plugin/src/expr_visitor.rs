@@ -532,6 +532,10 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // While the pattern of `for (s, k) in names` / `for &(a, b) in &pairs`
   // is registered: where each binding's value comes from (#1390).
   pub pattern_elem: Option<PatternElem>,
+  // While the pattern of `for (x, y) in [(&e, &g)]` is registered: the
+  // elements of the literal head, whose references a reference binding
+  // copies (#1433).
+  pub pattern_literal: Option<&'tcx [Expr<'tcx>]>,
   // Temporaries given a column of their own in this fn body because a
   // `let` borrows them (`let r = &String::from("a");`, #400); numbers
   // the next one's label.
@@ -1100,6 +1104,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       deref_ref_pats: HashSet::new(),
       pattern_lender: None,
       pattern_elem: None,
+      pattern_literal: None,
       temp_count: 0,
       param_value_count: 0,
       pending_param_borrows: Vec::new(),
@@ -1819,6 +1824,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       | ExternalEvent::TiedParamNote { ro, .. }
       | ExternalEvent::ReslicedInPlace { ro, .. }
       | ExternalEvent::DeadElseNote { ro, .. }
+      | ExternalEvent::PassRestDrop { ro, .. }
       | ExternalEvent::DeadLoanNote { ro, .. }
       | ExternalEvent::OwnerDropAtReassign { ro, .. }
       | ExternalEvent::OwnerDropIfTryReturns { ro, .. }
@@ -2827,6 +2833,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// `match_rhs` for one branch of an `if` / `match` whose value is
   /// bound to `lhs`, recording the event ids it used (`rhs_arm_ids`).
   fn match_rhs_arm(&mut self, lhs: ResourceTy, body: &'tcx Expr<'tcx>, evt: Evt) {
+    // `best = if c { &b } else { best };` (#1430): the branch giving the
+    // reference back its own value changes nothing on that path.
+    if let ResourceTy::Value(r) = &lhs {
+      if r.is_ref() && branch_value_expr(body).is_some_and(|v| matches!(v.kind, ExprKind::Path(QPath::Resolved(None, _)))
+        && expr_to_rap_name(v, &self.tcx).as_deref() == Some(r.name())) {
+        let lo = *self.unique_id;
+        self.rhs_arm_ids.insert(body.hir_id, (lo, lo));
+        return;
+      }
+    }
     // `v = if …` reassigning v (#1010): each branch is paired after it
     // is visited, when what it did to v is known. (A nested
     // conditional pairs each of its own branches.)

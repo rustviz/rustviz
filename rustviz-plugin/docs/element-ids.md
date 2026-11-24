@@ -151,7 +151,7 @@ On dots (`Event`):
 | `branch_join` | the join of that conditional (not an enum variant: the join dot of `branch`) |
 | `or_alt_move` / `or_alt_lend` / `or_alt_borrow` | one of several places an or-pattern (`A(x) \| B(x)`) may bind from |
 | `chain_fail_assign` / `chain_fail_use` | what a let-chain condition did before it failed |
-| `tied_param_note` / `dead_else_note` / `dead_loan_note` / `resliced_in_place` | notes: nothing about ownership changes |
+| `tied_param_note` / `dead_else_note` / `dead_loan_note` / `resliced_in_place` / `pass_rest_drop` | notes: nothing about ownership changes (`pass_rest_drop`: what a `for` pattern leaves of each element is dropped at the end of each pass) |
 | `init_ref_param` | a function parameter gets its value from the caller |
 | `closure_call` | an `FnOnce` closure is moved into its call |
 

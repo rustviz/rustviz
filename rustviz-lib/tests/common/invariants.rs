@@ -50,12 +50,6 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // Geometric (`geometry.rs`), from here on.
     // Tuple column goes on after its fields were moved out.
     ("edition2024/if_let_chain_irrefutable_move", "line-ends-nowhere", 1157),
-    // `r = if .. { let y = &a; y } else if .. { first(&v) } else { &b }`:
-    // y's borrow ends after its scope when r has several lenders.
-    ("assign_branch_ref_arms_1393", "event-on-dead-column", 1432),
-    // `m = if c { let w = &mut s; w } else { &mut t }`: w's reborrow
-    // ends after its scope, t given back at the join.
-    ("assign_branch_mut_ref_arms_1393", "event-on-dead-column", 1431),
 ];
 
 /// The invariants, by the name the failure list and messages use.
