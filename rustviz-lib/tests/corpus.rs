@@ -25906,6 +25906,147 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[],
     },
+    TooltipExpect {
+        name: "branch_holder_lenders_1404",
+        // #1404: an Option / Vec / array / iterator bound to an `if` or
+        // `match` whose branches borrow different variables may hold
+        // either branch's borrow; rustc keeps both lenders borrowed
+        // until its last use (E0502 on `s1.push(..)` or `s2.push(..)`
+        // before it). Each branch draws its own borrow, and both lenders
+        // get it back at the last use. main drew no borrow at all ("o is
+        // initialized with a Some value"), and s1/s2 never lent. (#1456
+        // draws the borrows; with it, only v's scope end still said its
+        // resource is dropped with no word about what it borrowed.)
+        must_contain: &[
+            "Immutable borrow from s1 to o: Some's signature gives the value it returns the same lifetime as its argument; o isn't a reference, but its value holds one",
+            "Immutable borrow from s2 to o: Some's signature gives the value it returns the same lifetime as its argument; o isn't a reference, but its value holds one",
+            "o holds a value that immutably borrows s1's resource (o isn't a reference itself)",
+            "o holds a value that immutably borrows s2's resource (o isn't a reference itself)",
+            "Return immutably borrowed resource from o to s1",
+            "Return immutably borrowed resource from o to s2",
+            "Immutable borrow from t1 to v",
+            "Immutable borrow from t2 to v",
+            "Return immutably borrowed resource from v to t1",
+            "Return immutably borrowed resource from v to t2",
+            // (A Vec of references frees its buffer, not what it points to.)
+            "v goes out of scope. Its resource is dropped, but not the data it borrowed.",
+            "Immutable borrow from a1 to arr",
+            "Immutable borrow from a2 to arr",
+            "Return immutably borrowed resource from arr to a1",
+            "Return immutably borrowed resource from arr to a2",
+            // A reference copied out of such a value later borrows what
+            // it holds.
+            "Immutable borrow from m1 to x: x is a reference copied out of m",
+            "Return immutably borrowed resource from d.a to s2 or m1 (d.a may point into either; its borrow of both ends here)",
+            "Immutable borrow from v1 to it: iter's signature gives the value it returns the same lifetime as the value it was called on; it isn't a reference, but its value holds one",
+            "Immutable borrow from v2 to it: iter's signature gives the value it returns the same lifetime as the value it was called on; it isn't a reference, but its value holds one",
+            "Return immutably borrowed resource from it to v1",
+            "Return immutably borrowed resource from it to v2",
+            // A branch whose value names a variable it declares (`let r =
+            // &w1; Some(r)`): w holds r's borrow, which outlives r.
+            "Immutable borrow from w1 to w: Some's signature gives the value it returns the same lifetime as its argument; w isn't a reference, but its value holds one",
+            "Immutable borrow from w2 to w: Some's signature gives the value it returns the same lifetime as its argument; w isn't a reference, but its value holds one",
+            "Return immutably borrowed resource from w to w1",
+            "Return immutably borrowed resource from w to w2",
+            "Mutable borrow from p1 to pm: Some's signature gives the value it returns the same lifetime as its argument; pm isn't a reference, but its value holds one",
+            "Mutable borrow from p2 to pm: Some's signature gives the value it returns the same lifetime as its argument; pm isn't a reference, but its value holds one",
+            "Mutable borrow from p1 to r: r is a reference moved out of pm; pm borrows from p1 and p2, so it may point into either, and both stay borrowed while r is in use",
+            "Immutable borrow from f1 to hold.o: Some's signature gives the value it returns the same lifetime as its argument; hold.o isn't a reference, but its value holds one",
+            "Return immutably borrowed resource from hold.o to f1",
+        ],
+        must_not_contain: &[
+            "o is initialized with a Some value",
+            "=v goes out of scope. Its resource is dropped.",
+            "x's immutable borrow ends (what it borrows from isn't shown)",
+            "r's mutable borrow ends (what it borrows from isn't shown)",
+            "=Return immutably borrowed resource from r to w1",
+            "=Return immutably borrowed resource from d.a to s2",
+            "hold.o is initialized with a Some value",
+        ],
+    },
+    TooltipExpect {
+        name: "branch_destructure_lenders_1405",
+        // #1405: a pattern that takes apart an `if` / `match` value
+        // (`let One { a } = if c { One { a: &s1 } } else { One { a: &s2 }
+        // };`) binds each reference to what its branch's value borrows:
+        // a may point into s1 or s2, and rustc keeps both borrowed until
+        // a's last use. main drew no borrow ("a is bound to an immutable
+        // reference", "what it borrows from isn't shown").
+        must_contain: &[
+            "Immutable borrow from s1 to a",
+            "Immutable borrow from s2 to a",
+            "Return immutably borrowed resource from a to s1",
+            "Return immutably borrowed resource from a to s2",
+            "s1's resource is immutably borrowed by a; s1 is read-only while the borrow is live",
+            "s2's resource is immutably borrowed by a; s2 is read-only while the borrow is live",
+            "Immutable borrow from t1 to b",
+            "Immutable borrow from t2 to b",
+            "Return immutably borrowed resource from b to t1",
+            "Return immutably borrowed resource from b to t2",
+            "Immutable borrow from u1 to x",
+            "Immutable borrow from u2 to x",
+            "Return immutably borrowed resource from x to u1",
+            "Return immutably borrowed resource from x to u2",
+            "Immutable borrow from w1 to y",
+            "Immutable borrow from w2 to y",
+            "Immutable borrow from h1 to h: Some's signature gives the value it returns the same lifetime as its argument; h isn't a reference, but its value holds one",
+            "Immutable borrow from h2 to h: Some's signature gives the value it returns the same lifetime as its argument; h isn't a reference, but its value holds one",
+            "Return immutably borrowed resource from h to h1",
+            "Return immutably borrowed resource from h to h2",
+        ],
+        must_not_contain: &[
+            "what it borrows from isn't shown",
+            "=a is bound to an immutable reference",
+            "=x is bound to an immutable reference",
+            "h is initialized with a Some value",
+            // (y isn't what `Some` returns: it is the reference inside.)
+            "Immutable borrow from w1 to y: Some's signature",
+        ],
+    },
+    TooltipExpect {
+        name: "ctor_cond_holder_1457",
+        // #1457: `let k = Some(if c { &s } else { &u });` holds s's or u's
+        // reference; rustc ends both loans at k's last use (line 10).
+        // main drew the borrows in the branches ("k immutably borrows a
+        // resource", reference wording) and never ended them: s and u
+        // read as lent to k until their scope end.
+        must_contain: &[
+            "Return immutably borrowed resource from k to s",
+            "Return immutably borrowed resource from k to u",
+            "k holds a value that immutably borrows s's resource (k isn't a reference itself)",
+            "k holds a value that immutably borrows u's resource (k isn't a reference itself)",
+            "u's resource is no longer immutably borrowed",
+            "Mutable borrow from m1 to r: r is a reference moved out of km; km borrows from m1 and m2, so it may point into either, and both stay borrowed while r is in use",
+            "km holds a value that mutably borrows m2's resource (km isn't a reference itself)",
+            "Return immutably borrowed resource from kr to s",
+            "Return immutably borrowed resource from kr to u",
+        ],
+        must_not_contain: &[
+            "=k immutably borrows a resource",
+            "=km mutably borrows a resource",
+            "r's mutable borrow ends (what it borrows from isn't shown)",
+        ],
+    },
+    TooltipExpect {
+        name: "assign_branch_holder_1455",
+        // #1455: `q = if c { let r2 = &a; Some(r2) } else { Some(&b) };`.
+        // r2's reference goes into q's value, which holds it (drawn as
+        // q's borrow of a), so nothing is copied "into Some": main drew a
+        // stray "Copy from r2 to Some" (the copy was put in the branch
+        // before the branch's value was paired with q). The same for a
+        // copyable value (`Some(k)`), which goes into n.
+        must_contain: &[
+            "Immutable borrow from a to q: Some's signature gives the value it returns the same lifetime as its argument; q isn't a reference, but its value holds one",
+            "Immutable borrow from b to q: Some's signature gives the value it returns the same lifetime as its argument; q isn't a reference, but its value holds one",
+            "Return immutably borrowed resource from q to a",
+            "Return immutably borrowed resource from v to a",
+            "Copy from k to n",
+        ],
+        must_not_contain: &[
+            "to Some",
+            "=Return immutably borrowed resource from r to a",
+        ],
+    },
 ];
 
 /// #1440: on the line where two loans of v end, the first end's dot (with

@@ -2316,6 +2316,39 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       }
       self.add_external_event(l, e);
     }
+    // Those already put in a branch: `q = if c { let r = &a; Some(r) }
+    // else { .. };` pairs the branch's value with q after the branch
+    // was visited and its events were put in it (#1455). They come out
+    // of it, and are redrawn into `new_to` where q's value arrives (q's
+    // column isn't split for that conditional).
+    let mut nested = Vec::new();
+    for (_, e) in self.preprocessed_events.iter_mut() {
+      if let ExternalEvent::Branch { branches, .. } = e {
+        for b in branches.iter_mut() {
+          take_ctor_arg_events_in(&mut b.e_data, lo..hi, &mut nested);
+        }
+      }
+    }
+    let any = any || !nested.is_empty();
+    for (l, mut e) in nested {
+      let keep = matches!(new_to, ResourceTy::Caller) || match &e {
+        ExternalEvent::Move { from, .. } => !from.extract_rap().is_some_and(|r| r.is_ref() && !r.is_mutref()),
+        ExternalEvent::Copy { from, .. } => !from.extract_rap().is_some_and(|r| r.is_ref()),
+        _ => true,
+      };
+      if !keep {
+        continue;
+      }
+      match &mut e {
+        ExternalEvent::Copy { to, into_ctor, .. } => {
+          *into_ctor = Some(to.name());
+          *to = new_to.clone();
+        }
+        ExternalEvent::Move { to, .. } => *to = new_to.clone(),
+        _ => {}
+      }
+      self.add_external_event(l, e);
+    }
     any
   }
 
@@ -3002,17 +3035,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       self.add_arm_holder_lenders(r.name(), body);
       return;
     }
-    if self.holder_shadowed(r.name()) {
+    let Some(value) = branch_value_expr(body) else { return };
+    self.add_ref_value_lenders(r.name(), value);
+  }
+
+  /// Reference `name`, declared before the conditional whose branch
+  /// gives it `value`, may hold `value`'s reference: it also borrows
+  /// what `value` borrows (`add_arm_lenders`).
+  fn add_ref_value_lenders(&mut self, name: &String, value: &'tcx Expr<'tcx>) {
+    if self.holder_shadowed(name) {
       return;
     }
-    let Some(value) = branch_value_expr(body) else { return };
     let (lender, _, co) = self.get_ref_data_co(value);
     let found: Vec<ResourceTy> = std::iter::once(lender).chain(co)
       .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)))
       .collect();
     for l in found {
       let aliasing = get_aliasing_data(&l, &self.borrow_map);
-      let Some(rd) = self.borrow_map.get_mut(r.name()) else { return };
+      let Some(rd) = self.borrow_map.get_mut(name) else { return };
       if rd.all_lenders().contains(&l) {
         continue;
       }
@@ -3024,6 +3064,31 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         rd.static_lender = None;
       }
     }
+  }
+
+  /// A binding of a pattern that takes a branch's value apart (`let One
+  /// { a } = if c { One { a: &s1 } } else { One { a: &s2 } };`, `let (h,
+  /// n) = if c { (Some(&s1), 1) } else { .. };`, #1405), declared before
+  /// the branches (`declare_pat_bindings`), gets `value`, its part of
+  /// one branch's value: it may hold what any branch gives it, so rustc
+  /// keeps every branch's lender borrowed while it is in use. A
+  /// reference adds `value`'s lenders; a value that holds a borrow is
+  /// made a holder (its declaration saw only the whole conditional) and
+  /// adds what `value` holds (`add_arm_holder_lenders`).
+  pub fn add_value_lenders(&mut self, name: &String, value: &'tcx Expr<'tcx>) {
+    let Some(rap) = self.raps.get(name).map(|rd| rd.rap.to_owned()) else { return };
+    let Some(ty) = self.tcx.typeck(value.hir_id.owner).expr_ty_opt(value) else { return };
+    if ty.is_never() {
+      return;
+    }
+    if rap.is_ref() {
+      self.add_ref_value_lenders(name, value);
+      return;
+    }
+    if !rap.holds_borrow() && (self.holder_lenders(value, ty).0.is_empty() || !self.mark_holder(name)) {
+      return;
+    }
+    self.add_arm_holder_lenders(name, value);
   }
 
   /// `add_arm_lenders` for a value that holds a borrow (#1435): `let t =
@@ -7209,7 +7274,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// Marks `name`'s column as a borrow holder: an owner, or a struct
   /// member drawn as one column (`shelf.items` with `items: Vec<&'a
   /// str>`, #1088). False for any other column.
-  fn mark_holder(&mut self, name: &str) -> bool {
+  pub fn mark_holder(&mut self, name: &str) -> bool {
     let Some(rd) = self.raps.get_mut(name) else { return true };
     match &mut rd.rap {
       ResourceAccessPoint::Owner(o) => o.holds_borrow = true,
@@ -13955,4 +14020,30 @@ pub fn gos_line_of(evs: &[(usize, ExternalEvent)], rap: &ResourceAccessPoint) ->
     ExternalEvent::Branch { branches, .. } => branches.iter().find_map(|b| gos_line_of(&b.e_data, rap)),
     _ => None,
   })
+}
+
+/// Takes out of `events` (through nested branches), into `out`, the
+/// moves and copies into a constructor among the events `ids` of its
+/// arguments (`retarget_ctor_arg_events`, #1455).
+fn take_ctor_arg_events_in(events: &mut Vec<(usize, ExternalEvent)>, ids: std::ops::Range<usize>, out: &mut Vec<(usize, ExternalEvent)>) {
+  let is_ctor_fn = |t: &ResourceTy| matches!(t,
+    ResourceTy::Value(ResourceAccessPoint::Function(f))
+      if f.name.rsplit("::").next().is_some_and(|l| l.starts_with(|c: char| c.is_uppercase())));
+  events.retain_mut(|(l, e)| {
+    if let ExternalEvent::Branch { branches, .. } = e {
+      for b in branches.iter_mut() {
+        take_ctor_arg_events_in(&mut b.e_data, ids.clone(), out);
+      }
+      return true;
+    }
+    let hit = ids.contains(&e.get_id()) && match e {
+      ExternalEvent::Move { from, to, .. } | ExternalEvent::Copy { from, to, .. } =>
+        is_ctor_fn(to) && from.extract_rap().is_some(),
+      _ => false,
+    };
+    if hit {
+      out.push((*l, e.clone()));
+    }
+    !hit
+  });
 }

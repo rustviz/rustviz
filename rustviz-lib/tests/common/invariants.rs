@@ -50,6 +50,14 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // Geometric (`geometry.rs`), from here on.
     // Tuple column goes on after its fields were moved out.
     ("edition2024/if_let_chain_irrefutable_move", "line-ends-nowhere", 1157),
+    // `q = if c { let r2 = &a; Some(r2) } else { .. };`: the borrow paired
+    // after the branch was visited is drawn on a's main column, between
+    // its branch legs.
+    ("assign_branch_holder_1455", "event-on-dead-column", 1463),
+    // `Some(match .. { 0 => &mut m1, _ => &mut m2 })` moved into `if let
+    // Some(r)`: the other path never ends km's borrow.
+    ("ctor_cond_holder_1457", "drop-without-value", 1464),
+    ("ctor_cond_holder_1457", "invalid-state", 1464),
 ];
 
 /// The invariants, by the name the failure list and messages use.
