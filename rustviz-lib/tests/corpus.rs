@@ -25200,6 +25200,36 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &["s has no value yet"],
     },
+    TooltipExpect {
+        name: "nested_arm_lender_end_1418",
+        // #1418: main panicked ("no layout column for the timeline of
+        // event N"). The borrow `_x` holds ends on the `if let` line, in
+        // the inner arm; v gets it back on its arm column.
+        must_contain: &[
+            "v's resource is immutably borrowed by _x; v is read-only while the borrow is live",
+            "v's resource is no longer immutably borrowed",
+            "_x's immutable borrow ends",
+            "t's resource is moved into drop, which drops it",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "loan_returned_in_one_arm_1417",
+        // #1417: the closure c, called in one arm only, gets a column in
+        // the conditional: its borrow of b ends where the arm calls it,
+        // and at the start of the arms that don't (NLL: c is never used
+        // again on those paths). On main c had no fork and b's "no longer
+        // borrowed" sat between b's arm legs (geometry: `event-on-dead-column`).
+        must_contain: &[
+            "c is live in a conditional expression ",
+            "c isn't moved in any of the branches above",
+            "c's immutable borrow ends",
+            "c's mutable borrow ends",
+            "b's resource is no longer immutably borrowed",
+            "b's resource is no longer mutably borrowed",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop

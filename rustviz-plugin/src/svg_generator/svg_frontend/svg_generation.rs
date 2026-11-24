@@ -276,6 +276,20 @@ fn part_moves_with_whole(d: &ExternalEvent, e: &ExternalEvent) -> bool {
 }
 
 /// Whether `e`, an event of a line that draws no arrow, binds a variable
+/// that one of the borrows the line's stacked arrows draw first (`front`)
+/// lends to: a closure's captures, `let c = || v.len();` on a line with
+/// other arrows (`if let Some(x) = v.first() { let c = || v.len(); }`).
+/// The binding goes on the row the capture's arrow ends on; on the row
+/// below the stack, with c's scope end, the arrow pointed at no dot of c
+/// and c's column started there in mid-air (#1420).
+fn binds_borrower_of_line(e: &ExternalEvent, front: &[ExternalEvent]) -> bool {
+    let ExternalEvent::Bind { to: ResourceTy::Value(t), .. } = e else { return false };
+    front.iter().any(|o| o.get_id() > e.get_id()
+        && matches!(o, ExternalEvent::StaticBorrow { to: ResourceTy::Value(b), .. }
+            | ExternalEvent::MutableBorrow { to: ResourceTy::Value(b), .. } if b.hash() == t.hash()))
+}
+
+/// Whether `e`, an event of a line that draws no arrow, binds a variable
 /// that one of the line's stacked arrows (`group`) copies or moves out
 /// of: `let k = { let t = m * 2; t };` binds `t` and copies it into `k`
 /// on one line. The binding comes first, so its dot belongs on the line's
@@ -883,6 +897,9 @@ pub fn mutate_branch_lines(
     // Rows inserted below each (pre-shift) source line for stacked
     // arrows; see the ClosureCall case below.
     let mut extras_at_line: HashMap<usize, usize> = HashMap::new();
+    // As in `place_external_events`: the split line of a conditional over
+    // several lines nested here, and the rows inserted before it (#1417).
+    let mut split_rows: Option<(usize, usize)> = None;
 
     // mutate actual events
     let mut i: usize = 0;
@@ -893,17 +910,22 @@ pub fn mutate_branch_lines(
         }
         let (l, e) = b_data.e_data.get_mut(i).unwrap();
         let line_num = *l;
-        let new_line_num = *l + extra_lines;
+        let extra_lines_here = match split_rows {
+            Some((src, extra)) if src == line_num && !matches!(e, ExternalEvent::Branch { .. }) => extra,
+            _ => extra_lines,
+        };
+        let new_line_num = *l + extra_lines_here;
         if skippable_ev.contains(&e.get_id()) {
             i = i + 1;
             continue;
         }
         match same_line_shift {
             Some((src, shift)) if src == line_num && !matches!(e, ExternalEvent::Branch { .. }) => *l += shift,
-            _ => *l += extra_lines, // update starting line of event
+            _ => *l += extra_lines_here, // update starting line of event
         }
         match e {
             ExternalEvent::Branch {branches, split_point, merge_point, branch_type, live_vars, .. } => {
+                split_rows = (*merge_point > line_num).then_some((line_num, extra_lines));
                 *split_point = *l; // update split point
                 let gaps = OneLineArmGaps::of(branches, branch_type, *merge_point, line_num, live_vars, l_map, binding_columns, arrow_tracks, in_spread_arm);
                 for (j, branch) in branches.iter_mut().enumerate(){ // mutate branches
@@ -977,7 +999,8 @@ pub fn mutate_branch_lines(
                         // line that an arrow moves out of is bound on the
                         // line's own row, before the arrow's dot (#731;
                         // `Some(pr) => pr,` binds pr.0 and moves it into
-                        // m, #1200), and the uses and scope ends of a
+                        // m, #1200), as is a closure whose captures it
+                        // borrows (#1420), and the uses and scope ends of a
                         // variable an arrow moves into share the arrival's
                         // dot (#1223).
                         let rest: Vec<ExternalEvent> = b_data.e_data[i + 1..].iter()
@@ -985,7 +1008,8 @@ pub fn mutate_branch_lines(
                             .map(|(_, p_e)| p_e.clone())
                             .collect();
                         let own_row: HashSet<usize> = rest.iter()
-                            .filter(|p_e| binds_source_of_line(p_e, &ev) || follows_arrival_on_line(p_e, &ev, &rest)
+                            .filter(|p_e| binds_source_of_line(p_e, &ev) || binds_borrower_of_line(p_e, &front)
+                                || follows_arrival_on_line(p_e, &ev, &rest)
                                 || front.iter().any(|g| part_moves_with_whole(p_e, g)))
                             .map(|p_e| p_e.get_id())
                             .collect();
@@ -1403,6 +1427,12 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
     let mut deferred_ends: Vec<(usize, ExternalEvent, usize)> = Vec::new();
     let mut first_lines: HashMap<u64, usize> = HashMap::new();
     first_event_lines(&visualization_data.preprocess_external_events, &mut first_lines);
+    // The source line a conditional over several lines splits on, and the
+    // rows inserted before it: an event listed after it on that line (a
+    // borrow whose last use is the condition, `if r.is_empty() {`) is on
+    // the split row, above the rows its arms inserted, not that many rows
+    // further down, inside an arm (#1417).
+    let mut split_rows: Option<(usize, usize)> = None;
     while i < size {
         // Append each held-back borrow end once its line has no event
         // left that uses the reference (so before the reference's own
@@ -1439,6 +1469,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
         match event {
             // need to mutate line numbers of events inside the branch
             ExternalEvent::Branch { branches, split_point, merge_point, branch_type, live_vars, .. } => {
+                split_rows = (*merge_point > *split_point).then_some((*split_point, extra_lines));
                 *split_point += extra_lines;
                 branch_line = *line_num + extra_lines;
                 let gaps = OneLineArmGaps::of(branches, branch_type, *merge_point, *line_num, live_vars, &line_insertion_map, &visualization_data.binding_columns, &visualization_data.arrow_tracks, false);
@@ -1476,7 +1507,10 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
         let final_line_num = match same_line_row {
             _ if branch_line != 0 => branch_line,
             Some((src, row)) if src == line_num => row,
-            _ => line_num + extra_lines,
+            _ => match split_rows {
+                Some((src, extra)) if src == line_num => line_num + extra,
+                _ => line_num + extra_lines,
+            },
         };
 
         // append event
@@ -1645,7 +1679,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                     // of by one of its arrows is bound first: its binding
                     // goes on the line's own row, before the arrow's dot
                     // (#731).
-                    for e in rest_of_line.iter().filter(|e| binds_source_of_line(e, &ev)) {
+                    for e in rest_of_line.iter().filter(|e| binds_source_of_line(e, &ev) || binds_borrower_of_line(e, &front)) {
                         visualization_data.append_processed_external_event(e.clone(), final_line_num);
                         skippable_ev.insert(e.get_id());
                     }

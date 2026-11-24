@@ -11345,6 +11345,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if let Some(l) = saved_line {
         self.line_override = l;
       }
+      // A let-else drawn as a branch binds on the join row (above), so
+      // a borrow its pattern binds starts there: it can't be drawn
+      // ending before, on the `let` row where MIR ends an unused
+      // binding's loan (`let Some(_x) = &o else { .. };`, #1408).
+      if let Some(join) = joined_at {
+        pat.each_binding(|_, hid, _, _| {
+          let floor = self.borrow_floor.entry(binding_name(&self.tcx, hid)).or_insert(join);
+          *floor = (*floor).max(join);
+        });
+      }
       // The temporaries the initializer keeps alive are declared with
       // the pattern's bindings (#856).
       if !nested_temps.is_empty() {
