@@ -145,7 +145,52 @@ fn split_same_line_borrow_ends(group: &[ExternalEvent]) -> (Vec<ExternalEvent>, 
     for (e, m) in group.iter().zip(moved) {
         if m { back.push(e.clone()) } else { front.push(e.clone()) }
     }
+    note_still_borrowed_below(&mut front, &back);
     (front, back)
+}
+
+/// A borrow end in a split stack's first rows (`front`) that gives its
+/// lender back while another reference's borrow of it ends only on the
+/// row below the stack (`back`): the lender stays borrowed by that one in
+/// between. In `if let Some(_y) = v.first() && x.is_empty() {}`, x's end
+/// said "v's resource is no longer immutably borrowed" a row above _y's
+/// (#1440). Only ends of the same kind (two shared loans; two mutable
+/// ones can't overlap), each from another reference.
+fn note_still_borrowed_below(front: &mut [ExternalEvent], back: &[ExternalEvent]) {
+    let end_of = |e: &ExternalEvent| match e {
+        ExternalEvent::StaticDie { from: ResourceTy::Value(r), to: ResourceTy::Value(l), .. } => Some((false, r.clone(), *l.hash())),
+        ExternalEvent::MutableDie { from: ResourceTy::Value(r), to: ResourceTy::Value(l), .. } => Some((true, r.clone(), *l.hash())),
+        _ => None,
+    };
+    for e in front.iter_mut() {
+        let Some((mutable, r, lender)) = end_of(e) else { continue };
+        let holders: Vec<String> = back.iter()
+            .filter_map(end_of)
+            .filter(|(m, o, l)| *m == mutable && *l == lender && o.hash() != r.hash())
+            .map(|(_, o, _)| o.name().to_owned())
+            .collect();
+        if let ExternalEvent::StaticDie { still_borrowed_by, .. } | ExternalEvent::MutableDie { still_borrowed_by, .. } = e {
+            for name in holders {
+                if !still_borrowed_by.contains(&name) {
+                    still_borrowed_by.push(name);
+                }
+            }
+        }
+    }
+}
+
+/// `split_same_line_borrow_ends` names, on a copy of `e`, what keeps the
+/// lender borrowed after its end (`note_still_borrowed_below`): the same
+/// on the event itself, which an arm's layout moves by id.
+fn copy_still_borrowed(e: &mut ExternalEvent, from: &ExternalEvent) {
+    if let (ExternalEvent::StaticDie { still_borrowed_by, .. } | ExternalEvent::MutableDie { still_borrowed_by, .. },
+            ExternalEvent::StaticDie { still_borrowed_by: names, .. } | ExternalEvent::MutableDie { still_borrowed_by: names, .. }) = (e, from) {
+        for n in names {
+            if !still_borrowed_by.contains(n) {
+                still_borrowed_by.push(n.clone());
+            }
+        }
+    }
 }
 
 /// Whether `o`, an event of a line after its stacked arrows' first one,
@@ -1071,6 +1116,7 @@ pub fn mutate_branch_lines(
                                 let (l, p_e) = b_data.e_data.get_mut(j).unwrap();
                                 if p_e.get_id() == e.get_id(){
                                     *l = row;
+                                    copy_still_borrowed(p_e, e);
                                     break;
                                 }
                                 j += 1;

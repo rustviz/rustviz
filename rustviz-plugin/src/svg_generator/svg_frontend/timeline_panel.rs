@@ -271,6 +271,14 @@ fn merged_dot_title(lines: &[(Option<usize>, String)]) -> String {
         texts[i] = merged;
         texts.remove(j);
     }
+    // An end that says the lender "is still borrowed by x" and the lend
+    // to x on the same dot say one thing (#1450).
+    while let Some((i, j, merged)) = (0..texts.len()).find_map(|i| (0..texts.len())
+        .filter(|&j| j != i)
+        .find_map(|j| hover_messages::still_borrowed_with_lend(&texts[i], &texts[j]).map(|m| (i, j, m)))) {
+        texts[i] = merged;
+        texts.remove(j);
+    }
     // `s = f()?;` (#1151): the assignment runs only if the `?` succeeds.
     if let Some((i, j, merged)) = (0..texts.len()).find_map(|i| (0..texts.len())
         .filter(|&j| j != i)

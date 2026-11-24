@@ -3228,11 +3228,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x is initialized with a copy of a value inside third",
             "Partial copy from third to x",
             "Return immutably borrowed resource from x to v",
+            // x takes over third's loan on one dot: said once (#1450).
+            "v's resource is no longer borrowed by third, but is still immutably borrowed by x; v is read-only while the borrow is live",
         ],
         must_not_contain: &[
             "Return immutably borrowed resource from x to *x",
             "Return immutably borrowed resource from x to third",
             "third's resource is no longer immutably borrowed",
+            // The lend repeated the end's "still immutably borrowed by x" (#1450).
+            "v's resource is immutably borrowed by x",
             // #866: a copy of the value inside, not of the whole.
             "x is initialized with a copy of third",
         ],
@@ -8135,12 +8139,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from v to x: x is a reference copied out of third",
             "Return immutably borrowed resource from x to v",
             "Return immutably borrowed resource from third to v",
+            // x takes over third's loan on one dot: said once (#1450).
+            "v's resource is no longer borrowed by third, but is still immutably borrowed by x; v is read-only while the borrow is live",
         ],
         must_not_contain: &[
             ", through the reference copied out of",
             ", through the reference moved out of",
             "Return immutably borrowed resource from x to *x",
             "Return immutably borrowed resource from x to third",
+            // The lend repeated the end's "still immutably borrowed by x" (#1450).
+            "v's resource is immutably borrowed by x",
         ],
     },
     TooltipExpect {
@@ -25354,7 +25362,136 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s8's resource is mutably borrowed by m8; s8 can't be used until the borrow ends",
         ],
     },
+    TooltipExpect {
+        name: "edition2024/two_ends_one_line_still_borrowed_1440",
+        // #1440: two shared loans of one lender end on one line, the end of
+        // the one made on that line on a row below the other's. The first
+        // end said the lender was "no longer immutably borrowed" while the
+        // other reference still borrowed it; it now names that reference
+        // (let-chain, in an arm, in an `else if`, a block in a `let`). And
+        // x5's end, copied to the start of the `else` arm, comes before
+        // r5's end there: s5 stays borrowed by r5 (#1442 said "no longer
+        // immutably borrowed"). The false line is also the correct text of
+        // the second end's dot, so `two_ends_one_line_first_names_other_1440`
+        // checks it per dot.
+        // The end and the lend to the reference it names share a dot: one
+        // line, not the end plus "v1's resource is immutably borrowed by
+        // _y1" (#1450).
+        must_contain: &[
+            "v1's resource is no longer borrowed by x1, but is still immutably borrowed by _y1; v1 is read-only while the borrow is live",
+            "v2's resource is no longer borrowed by x2, but is still immutably borrowed by _y2; v2 is read-only while the borrow is live",
+            "v3's resource is no longer borrowed by x3, but is still immutably borrowed by _y3; v3 is read-only while the borrow is live",
+            "v4's resource is no longer borrowed by x4, but is still immutably borrowed by y4; v4 is read-only while the borrow is live",
+            "s5's resource is no longer borrowed by x5, but is still immutably borrowed by r5",
+        ],
+        must_not_contain: &[
+            "v1's resource is immutably borrowed by _y1",
+            "v2's resource is immutably borrowed by _y2",
+            "v3's resource is immutably borrowed by _y3",
+            "v4's resource is immutably borrowed by y4",
+        ],
+    },
+    TooltipExpect {
+        name: "ref_reassigned_other_ref_dead_1439",
+        // #1439: `r = &t;` while another reference to the same lender, x,
+        // is already done on the paths to the write. x used to count as
+        // still borrowing: r's old loan then gave nothing back, so in an
+        // `if` / `match` r's other arm had no end and r's legs joined with
+        // no dot (fork-without-dot), and in straight-line code (also
+        // through `*w`, a destructuring assignment, a loop) x's earlier end
+        // said "no longer immutably borrowed" while r still borrowed the
+        // lender.
+        must_contain: &[
+            "r1's borrow ended in each branch above",
+            "Return immutably borrowed resource from r1 to s1",
+            "r2's borrow ended in each branch above",
+            "Return immutably borrowed resource from r2 to s2",
+            "Return immutably borrowed resource from r3 to s3",
+            "r4's borrow ended in each branch above",
+            "Return immutably borrowed resource from r4 to s4",
+            "r5's borrow ended in each branch above",
+            "s5's resource is no longer borrowed by r5, but is still immutably borrowed by x5",
+            "Return immutably borrowed resource from q7 to s7",
+            "Return immutably borrowed resource from r8 to s8",
+            "r9's borrow ended in each branch above",
+            "s9's resource is no longer borrowed by x9, but is still immutably borrowed by r9",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from x2 to s2",
+            "Return immutably borrowed resource from x3 to s3",
+            "Return immutably borrowed resource from x6 to s6",
+            "Return immutably borrowed resource from x7 to s7",
+            "Return immutably borrowed resource from x8 to s8",
+        ],
+    },
+    TooltipExpect {
+        name: "dead_loan_note_row_1443",
+        // #1443: the dead-loan note took the write's event id, so laying out
+        // the arm skipped it and left it on its source line, a row too high
+        // once rows were inserted above (an earlier fn's, or this fn's): a
+        // dot of its own above the inner fork, with a "mutably borrowed"
+        // stretch drawn up to it. `dead_loan_note_on_write_row_1443` checks
+        // it's on the write's dot.
+        must_contain: &[
+            "On this path r8 isn't used again, so r8's borrow of s8 is already over here; s8 stays borrowed only on the other paths",
+            "On this path r9 isn't used again, so r9's borrow of s9 is already over here; s9 stays borrowed only on the other paths",
+        ],
+        must_not_contain: &[
+            "s8's resource is mutably borrowed; s8 can't be used until the borrow ends",
+            "s9's resource is mutably borrowed; s9 can't be used until the borrow ends",
+        ],
+    },
+    TooltipExpect {
+        name: "arrow_tracks_1300",
+        // #1450: on `Some(third) =>` third's end and third₂'s borrow of the
+        // same element share v's dot. The end already says v is still
+        // borrowed by third₂; the lend's "is immutably borrowed by third₂"
+        // repeated it, so the two are one line.
+        must_contain: &[
+            "v's resource is no longer borrowed by third, but is still immutably borrowed by third₂; v is read-only while the borrow is live",
+        ],
+        must_not_contain: &[
+            "v's resource is immutably borrowed by third₂",
+        ],
+    },
 ];
+
+/// #1440: on the line where two loans of v end, the first end's dot (with
+/// the line's other arrows, the borrow by the later one among them) names
+/// the reference that still borrows v; it said "no longer immutably
+/// borrowed", the text of the second end's dot, a row below. The lend to
+/// that reference is folded into the end's line (#1450).
+#[test]
+fn two_ends_one_line_first_names_other_1440() {
+    let rv = run_with_local_backend("edition2024/two_ends_one_line_still_borrowed_1440");
+    let timeline = rv.timeline_panel_string();
+    for (v, x, y) in [("v1", "x1", "_y1"), ("v2", "x2", "_y2"), ("v3", "x3", "_y3"), ("v4", "x4", "y4")] {
+        let lend = format!("{v}'s resource is no longer borrowed by {x}, but is still immutably borrowed by {y}; {v} is read-only while the borrow is live");
+        let gone = format!("{v}'s resource is no longer immutably borrowed");
+        let first = dots_listing_tooltip(&timeline, &lend);
+        assert_eq!(first.len(), 1, "{v}: one dot lends to {y}: {:?}", first);
+        let wrong = dots_where(&timeline, |lines| lines.iter().any(|l| *l == lend) && lines.iter().any(|l| *l == gone));
+        assert!(wrong.is_empty(), "{v}: the dot lending to {y} says {gone:?}");
+        let second = dots_with_tooltip(&timeline, &gone);
+        assert!(second.iter().any(|d| d.1 > first[0].1), "{v}: no {gone:?} dot below the first end: {:?}", second);
+    }
+}
+
+/// #1443: the dead-loan note is on the dot of the write it explains
+/// (`let m8 = &mut s8;`), not a dot of its own on a row above it.
+#[test]
+fn dead_loan_note_on_write_row_1443() {
+    let rv = run_with_local_backend("dead_loan_note_row_1443");
+    let timeline = rv.timeline_panel_string();
+    for (r, s, m) in [("r8", "s8", "m8"), ("r9", "s9", "m9")] {
+        let note = format!("On this path {r} isn't used again, so {r}'s borrow of {s} is already over here; {s} stays borrowed only on the other paths");
+        let lend = format!("{s}'s resource is mutably borrowed by {m}; {s} can't be used while the borrow is live");
+        let at_note = dots_listing_tooltip(&timeline, &note);
+        let at_write = dots_listing_tooltip(&timeline, &lend);
+        assert_eq!(at_note.len(), 1, "{s}: one dot with the note: {:?}", at_note);
+        assert_eq!(at_note, at_write, "{s}: the note isn't on the dot of `let {m} = &mut {s};`");
+    }
+}
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop
 /// dot (a `<g>` with a triangle): the dead `else`'s note.

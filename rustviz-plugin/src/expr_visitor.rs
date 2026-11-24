@@ -653,6 +653,13 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// if c { let y = &a; y } else { &b }; … r = &t;`): y gives nothing
   /// back; its borrow ends with its scope (#1335).
   pub loans_carried_on: Vec<String>,
+  /// The old loans reassignments ended and gave back (`r = &t;` after
+  /// `let mut r = &s;`): (lender, where the loan was made, the line its
+  /// end is drawn on). `borrow_map` holds the new loan by then, so
+  /// `emit_borrow_ends` sees another reference to s, ended earlier, as
+  /// s's last borrower, and its end said s was no longer borrowed while
+  /// r still was (#1439).
+  pub repointed_ends: Vec<(String, usize, usize)>,
   /// While `emit_borrow_ends` runs: for each retired loan's key
   /// (`retired_key`), the line from which events are the later
   /// variable's.
@@ -1097,6 +1104,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       arm_loans: Vec::new(),
       retired_loans: Vec::new(),
       loans_carried_on: Vec::new(),
+      repointed_ends: Vec::new(),
       retired_until: HashMap::new(),
       arm_frames: Vec::new(),
       defer_old_ends: false,
@@ -1913,6 +1921,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
     let lender = r.name().split('.').next().unwrap_or(r.name()).to_owned();
     let Some(dead) = self.dead_loan_at_write(&lender, line) else { return };
+    // Keep ids unique, as in `propagate_struct_transfer`: most callers
+    // bump unique_id after handing us the event, so the note took the
+    // write's own id. Placement then treated the note as the write,
+    // already laid out, and left it on its source line, a row off when
+    // rows were inserted above it, such as by an earlier fn (#1443).
+    if *self.unique_id <= event.get_id() {
+      *self.unique_id = event.get_id() + 1;
+    }
     let id = *self.unique_id;
     *self.unique_id += 1;
     self.add_external_event(line, ExternalEvent::DeadLoanNote {
@@ -11206,6 +11222,15 @@ pub fn print_out_of_scope(&mut self){
               }
           });
           let lifetime = rd.lifetime;
+          // An old loan of the lender that a reassignment gave back
+          // later on this path (`x2.len(); r.len(); r = &t;`): it isn't
+          // in `borrow_map` any more, but the lender stays borrowed by
+          // it, and its end gives the lender back (#1439).
+          let assigned_at = rd.assigned_at;
+          if self.repointed_ends.iter().any(|(l, at, end)| l == lender && *at <= lifetime && *end > lifetime
+            && assigned_at <= *end && !on_other_paths(self.preprocessed_events, lifetime, *end)) {
+            continue;
+          }
           // A reference whose last use is in one arm of an `if` /
           // `match` is the last borrower on that arm's path when every
           // later end in its region is in another arm of it: those
@@ -11454,6 +11479,7 @@ pub fn print_out_of_scope(&mut self){
     ends_in_condition_before_split(self.preprocessed_events);
     ends_before_lender_use(self.preprocessed_events);
     self.end_borrows_at_exits();
+    note_later_borrowers_in_arms(self.preprocessed_events, false);
     self.note_sharers_across_calls();
   }
 
@@ -12469,6 +12495,62 @@ fn set_stored_moved_to(events: &mut [(usize, ExternalEvent)], id: usize, holders
         stored_in.set_holders(holders);
       }
       _ => {}
+    }
+  }
+}
+
+/// In an arm of an `if` / `match`, the end of one reference's shared
+/// loan of a lender, before the end of another's that held a loan of it
+/// already: the lender stays borrowed by that one in between. The end of
+/// `x2`'s borrow copied to the start of the `else` arm in `if c {
+/// use(x2); } else { use(r); }` (#1425) said s was no longer borrowed
+/// while r still was, until its end in the arm (#1440).
+fn note_later_borrowers_in_arms(events: &mut [(usize, ExternalEvent)], in_arm: bool) {
+  if in_arm {
+    note_later_borrowers(events);
+  }
+  for (_, e) in events.iter_mut() {
+    let ExternalEvent::Branch { branches, branch_type, .. } = e else { continue };
+    if matches!(branch_type, BranchType::Loop(..)) {
+      continue;
+    }
+    for b in branches.iter_mut() {
+      note_later_borrowers_in_arms(&mut b.e_data, true);
+    }
+  }
+}
+
+/// `note_later_borrowers_in_arms` on one arm's events.
+fn note_later_borrowers(events: &mut [(usize, ExternalEvent)]) {
+  let end = |e: &ExternalEvent| match e {
+    ExternalEvent::StaticDie { from: ResourceTy::Value(r), to: ResourceTy::Value(l), .. } if r != l => Some((r.clone(), *l.hash())),
+    _ => None,
+  };
+  let borrows = |e: &ExternalEvent, l: u64, b: &ResourceAccessPoint| matches!(e,
+    ExternalEvent::StaticBorrow { from, to: ResourceTy::Value(t), .. }
+    | ExternalEvent::MutableBorrow { from, to: ResourceTy::Value(t), .. }
+      if t.hash() == b.hash() && from.extract_rap().is_some_and(|f| *f.hash() == l));
+  let mut notes: Vec<(usize, Vec<String>)> = Vec::new();
+  for (i, (line, e)) in events.iter().enumerate() {
+    let Some((a, l)) = end(e) else { continue };
+    if matches!(e, ExternalEvent::StaticDie { still_borrowed_by, .. } if !still_borrowed_by.is_empty()) {
+      continue;
+    }
+    let mut names: Vec<String> = Vec::new();
+    for (j, (later, o)) in events.iter().enumerate().skip(i + 1) {
+      let Some((b, lb)) = end(o) else { continue };
+      if *later > *line && lb == l && b.hash() != a.hash() && !names.contains(b.name())
+        && !events[i + 1..j].iter().any(|(_, m)| borrows(m, l, &b)) {
+        names.push(b.name().to_owned());
+      }
+    }
+    if !names.is_empty() {
+      notes.push((i, names));
+    }
+  }
+  for (i, names) in notes {
+    if let ExternalEvent::StaticDie { still_borrowed_by, .. } = &mut events[i].1 {
+      *still_borrowed_by = names;
     }
   }
 }

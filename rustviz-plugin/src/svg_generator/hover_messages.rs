@@ -1918,6 +1918,43 @@ pub fn event_dot_reacquire_still_borrowed(my_name: &String, from_name: &String, 
     )
 }
 
+/// A dot where one reference's borrow ends and a copy of it takes the
+/// loan over (`Some(third) => ..` on `third: Option<&i32>`): the end
+/// (`event_dot_reacquire_still_borrowed`, "v's resource is no longer
+/// borrowed by third, but is still immutably borrowed by third₂") already
+/// names the new borrower, so the lend's "v's resource is immutably
+/// borrowed by third₂; v is read-only while the borrow is live" says it
+/// twice (#1450). One line: the end, with the lend's restriction clause.
+/// `None` unless `lend` lends the same subject, the same way, to one of
+/// the holders `still` names.
+pub fn still_borrowed_with_lend<'a>(still: &'a str, lend: &'a str) -> Option<String> {
+    let (subject, rest) = still.split_once(" is no longer borrowed by ")?;
+    let (_, kind_holders) = rest.split_once(", but is still ")?;
+    let (kind, holders) = kind_holders.split_once(" borrowed by ")?;
+    // The clause after "; " starts with the lender's styled name (a bare
+    // "; " also ends the escaped `&gt;` of every name).
+    let split_clause = |s: &'a str| -> (&'a str, Option<&'a str>) {
+        match s.find(&format!("; {}", SPAN_BEGIN)) {
+            Some(i) => (&s[..i], Some(&s[i + 2..])),
+            None => (s, None),
+        }
+    };
+    // Already merged with one lend's clause (two holders, both lent here).
+    let (holders, own_tail) = split_clause(holders);
+    let lent_to = lend.strip_prefix(subject)?
+        .strip_prefix(" is ")?
+        .strip_prefix(kind)?
+        .strip_prefix(" borrowed by ")?;
+    let (holder, tail) = split_clause(lent_to);
+    if !holders.split(" and ").any(|h| h == holder) {
+        return None;
+    }
+    Some(match tail {
+        Some(t) if own_tail != Some(t) => format!("{still}; {t}"),
+        _ => still.to_owned(),
+    })
+}
+
 // Source-side dot of a borrow stored somewhere RustViz draws no column
 // for and can't name (`v.last_mut().unwrap().r = &x`; #282). The
 // restriction on X is the same as for event_dot_static_lend /
@@ -6419,4 +6456,32 @@ pub fn approx_note_async_fn(fn_name: &str) -> String {
         "({} is an async fn; RustViz doesn't draw its body, which runs when the future it returns is awaited.)",
         styled_name_html(fn_name)
     )
+}
+
+#[cfg(test)]
+mod still_borrowed_with_lend_tests {
+    use super::*;
+
+    fn n(s: &str) -> String { s.to_owned() }
+
+    #[test]
+    fn the_lend_to_a_named_holder_folds_into_the_end() {
+        let still = event_dot_reacquire_still_borrowed(&n("v"), &n("third"), &[n("x")], false, false, false);
+        let lend = event_dot_static_lend(&n("v"), &n("x"), false, false);
+        let merged = still_borrowed_with_lend(&still, &lend).unwrap();
+        assert_eq!(merged, format!("{still}; {} is read-only while the borrow is live", styled_name_html("v")));
+        // Two holders, both lent on the dot: one line, the clause once.
+        let still2 = event_dot_reacquire_still_borrowed(&n("v"), &n("third"), &[n("x"), n("y")], false, false, false);
+        let once = still_borrowed_with_lend(&still2, &lend).unwrap();
+        let twice = still_borrowed_with_lend(&once, &event_dot_static_lend(&n("v"), &n("y"), false, false)).unwrap();
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn a_lend_to_someone_else_or_of_another_kind_stays() {
+        let still = event_dot_reacquire_still_borrowed(&n("v"), &n("third"), &[n("x")], false, false, false);
+        assert!(still_borrowed_with_lend(&still, &event_dot_static_lend(&n("v"), &n("z"), false, false)).is_none());
+        assert!(still_borrowed_with_lend(&still, &event_dot_mut_lend(&n("v"), &n("x"), false)).is_none());
+        assert!(still_borrowed_with_lend(&still, &event_dot_static_lend(&n("w"), &n("x"), false, false)).is_none());
+    }
 }
