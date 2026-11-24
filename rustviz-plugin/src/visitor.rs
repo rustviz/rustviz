@@ -6509,12 +6509,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           let taken_over = matches!(ref_data.lender, ResourceTy::Value(_))
             && destructure_hid.is_some_and(|me| self.destructure_ref_data.iter()
               .any(|(h, (lender, _, _, _))| *h != me && *lender == ref_data.lender));
-          if !self.ref_handed_off(lhs_rap.name()) && !(borrowers.len() > 1 || taken_over) {
+          // A mutable loan is the only live loan of its lender: a shared
+          // one made before it (`vr` from `vec![s2.as_str()]`, used before
+          // `r = downgrade(&mut s2)`) is over. Its end gives the lender
+          // back (#1414).
+          #[expect(clippy::disallowed_methods, reason = "`all` over the set: order never observed")]
+          let only_loan = ref_data.co_lenders.is_empty()
+            && crate::expr_visitor::mutable_loan_alone(lhs_rap.name(), &ref_data.lender.real_name(), &self.borrow_map, borrowers.iter());
+          if !self.ref_handed_off(lhs_rap.name()) && !((borrowers.len() > 1 && !only_loan) || taken_over) {
             self.loans_carried_on.extend(gone);
           }
           if self.ref_handed_off(lhs_rap.name()) {
           }
-          else if borrowers.len() > 1 || taken_over { // there is another active reference at this point, the resource cannot be returned
+          else if (borrowers.len() > 1 && !only_loan) || taken_over { // there is another active reference at this point, the resource cannot be returned
             self.add_external_event(line_num, ExternalEvent::RefDie { from: lhs_rty.clone(), to: to_ro, num_curr_borrowers: borrowers.len() - 1, id: *self.unique_id });
             *self.unique_id += 1;
           }
