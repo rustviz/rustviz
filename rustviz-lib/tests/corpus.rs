@@ -12177,7 +12177,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s4's resource is no longer immutably borrowed",
         ],
         must_not_contain: &[
-            "Return immutably borrowed resource from o.inner.r to s",
+            // (No arrow back to s. The one return, to t, names s too,
+            // #1354: if the `if` didn't run, o.inner.r still points to s.)
+            "=Return immutably borrowed resource from o.inner.r to s",
         ],
     },
     TooltipExpect {
@@ -22641,7 +22643,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from t2 to r2: pick's signature lets the reference it returns point into both arguments (a lifetime bound like `'a: 'b` lets a longer-lived reference stand in for a shorter one), so it may point into either, and both stay borrowed while r2 is in use",
             "Return immutably borrowed resource from r2 to t2",
             "Return immutably borrowed resource from r3 to s3",
-            "Return immutably borrowed resource from p4.text to s4",
+            // (A field holds one reference: one return names both, #1354.)
+            "Return immutably borrowed resource from p4.text to s4 or t4 (p4.text may point into either; its borrow of both ends here)",
         ],
         must_not_contain: &[
             "shorten's signature gives the reference it returns the same lifetime as its second argument",
@@ -23709,7 +23712,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from r6 to a6",
             "Return immutably borrowed resource from r6 to b6",
             "Copy from x7 to h7.r",
-            "Return immutably borrowed resource from h7.r to s7",
+            // (A field holds one reference: one return names both, #1354.)
+            "Return immutably borrowed resource from h7.r to t7 or s7 (h7.r may point into either; its borrow of both ends here)",
             "Copy from x8 to r8",
         ],
         must_not_contain: &[
@@ -25025,6 +25029,75 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "holds a value that mutably borrows a1's resource",
             "so it may point into",
             "so it may borrow from",
+        ],
+    },
+    TooltipExpect {
+        name: "field_two_lenders_1354",
+        // #1354: each field holds one reference, which may point into s1
+        // or s2. One arrow into each field (from s1) and one back out of
+        // it, naming both lenders; the field's own dots name them too. A
+        // borrow and a return per lender per field used to overlap.
+        must_contain: &[
+            "Immutable borrow from s1 or s2 to d.a: two's signature gives the struct it returns the same lifetime as both arguments, so it may point into either, and both stay borrowed while d.a is in use",
+            "Immutable borrow from s1 or s2 to d.b: two's signature gives the struct it returns the same lifetime as both arguments, so it may point into either, and both stay borrowed while d.b is in use",
+            "Return immutably borrowed resource from d.a to s1 or s2 (d.a may point into either; its borrow of both ends here)",
+            "Return immutably borrowed resource from d.b to s1 or s2 (d.b may point into either; its borrow of both ends here)",
+            "d.a immutably borrows s1 or s2: it may point into either, so both stay borrowed while d.a is in use",
+            "s2's resource is immutably borrowed by d.a; s2 is read-only while the borrow is live",
+        ],
+        must_not_contain: &[
+            "Immutable borrow from s1 to d.a",
+            "Immutable borrow from s2 to d.a",
+            "Immutable borrow from s2 to d.b",
+            "=Return immutably borrowed resource from d.a to s1",
+            "=Return immutably borrowed resource from d.a to s2",
+            "=Return immutably borrowed resource from d.b to s2",
+            "=d.a immutably borrows a value",
+            "d.a's immutable borrow ends",
+        ],
+    },
+    TooltipExpect {
+        name: "field_two_lenders_siblings_1354",
+        // #1354's siblings: a tuple of `&mut`s, three fields from three
+        // lenders, a field assigned a call's result.
+        must_contain: &[
+            "Mutable borrow from s1 or s2 to t.0: pair's signature gives the tuple it returns the same lifetime as both arguments, so it may point into either, and both stay borrowed while t.0 is in use",
+            "Return mutably borrowed resource from t.1 to s1 or s2 (t.1 may point into either; its borrow of both ends here)",
+            "t.0 mutably borrows s1 or s2: it may point into either, so both stay borrowed while t.0 is in use",
+            "t.0's mutable borrow of s1 or s2 ends",
+            "Immutable borrow from s1, s2 or s3 to d.c: three's signature gives the struct it returns the same lifetime as all three arguments, so it may point into any of them, and all of them stay borrowed while d.c is in use",
+            "Return immutably borrowed resource from d.b to s1, s2 or s3 (d.b may point into any of them; its borrow of all of them ends here)",
+            "Immutable borrow from s1 or s2 to o.a: pick's signature gives the reference it returns the same lifetime as both arguments, so it may point into either, and both stay borrowed while o.a is in use",
+            "Return immutably borrowed resource from o.a to s1 or s2 (o.a may point into either; its borrow of both ends here)",
+        ],
+        must_not_contain: &[
+            "Mutable borrow from s2 to t.0",
+            "=Return mutably borrowed resource from t.1 to s2",
+            "Immutable borrow from s3 to d.c",
+            "=Return immutably borrowed resource from d.b to s3",
+            "Immutable borrow from s2 to o.a",
+            "=Return immutably borrowed resource from o.a to s2",
+            "=t.0's mutable borrow ends",
+        ],
+    },
+    TooltipExpect {
+        name: "field_two_lenders_arms_1354",
+        // #1354: the arms of a conditional point a field at different
+        // lenders; after the join it may point into either, so its one
+        // return names both. It used to name only the last arm's lender.
+        must_contain: &[
+            "Immutable borrow from s1 to d.a",
+            "Immutable borrow from s2 to d.a",
+            "Return immutably borrowed resource from d.a to s1 or s2 (d.a may point into either; its borrow of both ends here)",
+            "Return immutably borrowed resource from d.b to s2 or s1 (d.b may point into either; its borrow of both ends here)",
+            "Return mutably borrowed resource from t.0 to s1 or s2 (t.0 may point into either; its borrow of both ends here)",
+            "Return mutably borrowed resource from t.1 to s2 or s1 (t.1 may point into either; its borrow of both ends here)",
+        ],
+        must_not_contain: &[
+            "=Return immutably borrowed resource from d.a to s2",
+            "=Return immutably borrowed resource from d.b to s1",
+            "=Return mutably borrowed resource from t.0 to s2",
+            "=Return mutably borrowed resource from t.1 to s1",
         ],
     },
 ];

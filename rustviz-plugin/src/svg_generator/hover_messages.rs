@@ -5872,6 +5872,49 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
     title
 }
 
+/// The one arrow drawn for a reference field's borrows from, or borrow
+/// ends to, several lenders on one row (#1354, `FieldLenders`): the
+/// field holds one reference, which may point into any of `lenders`,
+/// and the borrow checker keeps all of them borrowed while it is in use.
+/// "Immutable borrow from s1 or s2 to d.a: …" / "Return immutably
+/// borrowed resource from d.a to s1 or s2 (d.a may point into either;
+/// its borrow of both ends here)".
+pub fn arrow_field_lenders_title(external_event: &ExternalEvent, from: &ResourceTy, to: &ResourceTy, lenders: &[String], end: bool) -> String {
+    let title = arrow_full_title(external_event, from, to);
+    let (either, all) = if lenders.len() == 2 { ("either", "both") } else { ("any of them", "all of them") };
+    if end {
+        let field = styled_name_html(&from.name());
+        let title = title.replacen(&format!(" to {}", styled_name_html(&to.name())), &format!(" to {}", or_list(lenders)), 1);
+        format!("{} ({} may point into {}; its borrow of {} ends here)", title, field, either, all)
+    } else {
+        let field = styled_name_html(&to.name());
+        let title = title.replacen(&format!(" from {}", styled_name_html(&from.name())), &format!(" from {}", or_list(lenders)), 1);
+        // A call's result says why already (`arrow_borrow_via_call_suffix`).
+        if matches!(external_event, ExternalEvent::StaticBorrow { via: Some(_), .. } | ExternalEvent::MutableBorrow { via: Some(_), .. }) {
+            title
+        } else {
+            format!("{}: {} may point into {}, and {} stay borrowed while {} is in use", title, field, either, all, field)
+        }
+    }
+}
+
+/// The field's own dot where those borrows start (`arrow_field_lenders_title`).
+pub fn event_dot_field_lenders_borrow(my_name: &String, lenders: &[String], mutable: bool) -> String {
+    let (either, all) = if lenders.len() == 2 { ("either", "both") } else { ("any of them", "all of them") };
+    format!(
+        "{0} {1} borrows {2}: it may point into {3}, so {4} stay borrowed while {0} is in use",
+        styled_name_html(my_name), if mutable { "mutably" } else { "immutably" }, or_list(lenders), either, all
+    )
+}
+
+/// The field's own dot where they end.
+pub fn event_dot_field_lenders_end(my_name: &String, lenders: &[String], mutable: bool) -> String {
+    format!(
+        "{0}'s {1} borrow of {2} ends",
+        styled_name_html(my_name), if mutable { "mutable" } else { "immutable" }, or_list(lenders)
+    )
+}
+
 /// The title of the call icon on the dot of an argument passed by
 /// reference (`f(&s)`, `f(&mut s)`): `from_variable` is lent to
 /// `function`.

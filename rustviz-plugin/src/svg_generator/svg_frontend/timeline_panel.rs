@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{AltEnd, ApproxNote, ElemsLeft, place_elem_names, breaks_out_only, is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier};
+use crate::svg_generator::data::{AltEnd, FieldLenders, ApproxNote, ElemsLeft, place_elem_names, breaks_out_only, is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier};
 use crate::svg_generator::hover_messages::{self, styled_name_html};
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use crate::svg_generator::svg_frontend::rv_attrs::{self, Rv};
@@ -2549,6 +2549,8 @@ fn render_dot(
                         }
                     } else if let Some(title) = reborrow_kept_mut_loan_title(event, &history[..i], &name, rap) {
                         data.title = title;
+                    } else if let Some(title) = field_lenders_dot_title(event, &name, visualization_data) {
+                        data.title = title;
                     } else if let Some(title) = ends_several_loans_title(event, history, *line_number, &mut name) {
                         data.title = title;
                     } else if let Some(title) = part_lend_title(event, visualization_data) {
@@ -2693,6 +2695,25 @@ fn analyze_branch_for_join(events: &[(usize, Event)]) -> (bool, bool) {
         }
     }
     (moved, acquired)
+}
+
+/// A reference field's own dot where its borrows from several lenders
+/// start or end (#1354, `field_lender_groups`): it names them all, as the
+/// one arrow drawn for them does.
+fn field_lenders_dot_title(event: &Event, name: &String, vd: &VisualizationData) -> Option<String> {
+    let (id, mutable, end) = match event {
+        Event::StaticBorrow { id, .. } => (id, false, false),
+        Event::MutableBorrow { id, .. } => (id, true, false),
+        Event::StaticDie { id, .. } => (id, false, true),
+        Event::MutableDie { id, .. } => (id, true, true),
+        _ => return None,
+    };
+    let f = vd.field_lenders.get(id).filter(|f| f.end == end)?;
+    Some(if end {
+        hover_messages::event_dot_field_lenders_end(name, &f.lenders, mutable)
+    } else {
+        hover_messages::event_dot_field_lenders_borrow(name, &f.lenders, mutable)
+    })
 }
 
 // A borrow's end on a line where the same reference's borrow of another
@@ -6125,14 +6146,21 @@ fn untangle_cost(drawn: &[Drawn], dots: &DotLayer) -> (usize, usize) {
     (marks_on_others(drawn).len() + on_arcs + hops + 10 * (through + touching + stacked), crossings)
 }
 
+/// One of a field's arrows from or to several lenders other than the one
+/// drawn for them all (#1354, `field_lender_groups`).
+fn arrow_left_out(vd: &VisualizationData, ev: &ExternalEvent) -> bool {
+    vd.field_lenders.get(&ev.get_id()).is_some_and(|f| !f.drawn)
+}
+
 /// How many rows below its line an arrow is stacked: its place among the
 /// arrows its line map lists for `row`. An arrow the map doesn't list (a
 /// borrow's end moved into an arm, see `nest_borrow_ends_in_arms`) is drawn
 /// first on its line, and so is a return from a reference to itself.
 fn arrow_order_of(vd: &VisualizationData, row: usize, ev: &ExternalEvent) -> i64 {
     let line_map = fetch_line_map(vd, ev.get_id());
+    // (Not counting the arrows left out, `arrow_left_out`.)
     let order = line_map.get(&row)
-        .and_then(|evs| evs.iter().position(|x| x == ev))
+        .and_then(|evs| evs.iter().filter(|x| !arrow_left_out(vd, x)).position(|x| x == ev))
         .unwrap_or(0) as i64;
     match ev {
         ExternalEvent::StaticDie { from, to, .. } | ExternalEvent::MutableDie { from, to, .. }
@@ -6183,6 +6211,7 @@ fn returns_chain_on_row(vd: &VisualizationData, row: usize, ev: &ExternalEvent) 
         let (Some(of_rap), Some(ot_rap)) = (of.extract_rap(), ot.extract_rap()) else { return false };
         let id = other.get_id();
         l == row
+            && !arrow_left_out(vd, other)
             && id != ev.get_id()
             && !of.is_same_underlying(ot)
             && ot_rap.hash() == src.hash()
@@ -6205,6 +6234,7 @@ fn return_overlaps_borrow_on_row(vd: &VisualizationData, row: usize, ev: &Extern
         let (ExternalEvent::StaticBorrow { from: of, to: ot, .. } | ExternalEvent::MutableBorrow { from: of, to: ot, .. }) = other else { return false };
         let (Some(of_rap), Some(ot_rap)) = (of.extract_rap(), ot.extract_rap()) else { return false };
         l == row
+            && !arrow_left_out(vd, other)
             && of_rap.hash() == dst.hash()
             && ot_rap.hash() == src.hash()
             && arrow_dip_of(vd, l, other) == 0
@@ -6298,10 +6328,13 @@ fn render_generic_arrow(
 ) {
     // get the resource owners involved in the event
     let (from, to) = ResourceAccessPoint_extract(external_event);
-    if arrow_is_undrawn(external_event, from, to) {
+    if arrow_is_undrawn(external_event, from, to) || arrow_left_out(visualization_data, external_event) {
         return;
     }
-    let title = hover_messages::arrow_full_title(external_event, from, to);
+    let title = match visualization_data.field_lenders.get(&external_event.get_id()) {
+        Some(f) => hover_messages::arrow_field_lenders_title(external_event, from, to, &f.lenders, f.end),
+        None => hover_messages::arrow_full_title(external_event, from, to),
+    };
 
     // order of points is to -> from
     let mut data = ArrowData {
@@ -7141,6 +7174,172 @@ fn arrows_with_rows<'a>(events: &'a [(usize, ExternalEvent)], out: &mut Vec<(usi
                 }
             }
             _ => out.push((*l, e)),
+        }
+    }
+}
+
+/// A reference field's column (`d.a` with `a: &'p str`): it holds one
+/// reference, so it points into one place at a time.
+fn ref_field(ty: &ResourceTy) -> Option<&ResourceAccessPoint> {
+    match ty {
+        ResourceTy::Value(r) if r.is_member() && r.is_ref() => Some(r),
+        _ => None,
+    }
+}
+
+/// A lender with a column of its own.
+fn column_lender(ty: &ResourceTy) -> Option<&ResourceAccessPoint> {
+    match ty {
+        ResourceTy::Value(r) if !r.is_fn() => Some(r),
+        _ => None,
+    }
+}
+
+/// The borrows into, and ends out of, a reference field that may point
+/// into any of several lenders, one arrow drawn per field (#1354; see
+/// `FieldLenders`):
+/// * borrows of several lenders into one field on one row of one arm
+///   (`two(&s1, &s2)` returning `Two<'a>`): the first lender's arrow is
+///   drawn (in the call's argument order, else the events'), naming all;
+/// * the field's borrow ends on one row of one arm: the lenders are
+///   those it ends and the ones it may point into there, that is, the
+///   ones its last assignment on each path to the row borrowed (the
+///   arms of a conditional, `if c { Two { a: &s1, .. } } else { Two {
+///   a: &s2, .. } }`). A later assignment (`hold.r = &t;`) replaces the
+///   lenders before it; a borrow on the end's own row is a new loan the
+///   end doesn't give back. The end to the first of them is drawn, or
+///   the only one there is.
+/// Only groups of two or more lenders are listed.
+pub fn field_lender_groups(vd: &VisualizationData) -> HashMap<usize, FieldLenders> {
+    let mut pending = FieldPending::new();
+    let mut out = HashMap::new();
+    field_lender_walk(&vd.external_events, &mut pending, &mut out);
+    out
+}
+
+/// Per field column: the lenders it may point into here, with the row
+/// each lent on, in source order.
+type FieldPending = BTreeMap<u64, Vec<(String, usize)>>;
+
+fn field_lender_walk(
+    events: &[(usize, ExternalEvent)],
+    pending: &mut FieldPending,
+    out: &mut HashMap<usize, FieldLenders>,
+) {
+    // (field, row, mutable) -> (id, lender, place in the call's arguments)
+    let mut borrows: Vec<((u64, usize, bool), Vec<(usize, String, usize)>)> = Vec::new();
+    // (field, row, mutable) -> (lenders before the row, [(id, lender)])
+    let mut ends: Vec<((u64, usize, bool), Vec<String>, Vec<(usize, String)>)> = Vec::new();
+    for (row, ev) in events {
+        match ev {
+            ExternalEvent::Branch { branches, .. } => {
+                // After the conditional: what any arm that reaches the
+                // join left (an arm that doesn't assign the field leaves
+                // what it had before).
+                let before = pending.clone();
+                let mut merged = FieldPending::new();
+                let mut any = false;
+                for b in branches {
+                    let mut p = before.clone();
+                    field_lender_walk(&b.e_data, &mut p, out);
+                    if b.diverges {
+                        continue;
+                    }
+                    any = true;
+                    for (field, list) in p {
+                        let m = merged.entry(field).or_default();
+                        for (n, r) in list {
+                            if !m.iter().any(|(x, _)| *x == n) {
+                                m.push((n, r));
+                            }
+                        }
+                    }
+                }
+                if any {
+                    for list in merged.values_mut() {
+                        list.sort_by_key(|(_, r)| *r);
+                    }
+                    *pending = merged;
+                }
+            }
+            ExternalEvent::StaticBorrow { from, to, id, via, is_partial: false, .. }
+            | ExternalEvent::MutableBorrow { from, to, id, via, is_partial: false, .. } => {
+                let (Some(field), Some(lender)) = (ref_field(to), column_lender(from)) else { continue };
+                let name = from.name();
+                let list = pending.entry(*field.hash()).or_default();
+                // A new assignment replaces what it pointed into (the
+                // other lenders of its own row are alternatives).
+                list.retain(|(_, r)| r == row);
+                if !list.iter().any(|(n, _)| *n == name) {
+                    list.push((name.clone(), *row));
+                }
+                let key = (*field.hash(), *row, matches!(ev, ExternalEvent::MutableBorrow { .. }));
+                let order = via.as_ref().and_then(|v| v.lenders.iter().position(|l| l == lender.name())).unwrap_or(usize::MAX);
+                match borrows.iter_mut().find(|(k, _)| *k == key) {
+                    Some((_, g)) => g.push((*id, name, order)),
+                    None => borrows.push((key, vec![(*id, name, order)])),
+                }
+            }
+            // A reference moved or copied into it (`o.inner = other;`,
+            // `hold.r = tr;`) replaces what it pointed into too.
+            ExternalEvent::Move { to, .. } | ExternalEvent::Copy { to, .. } => {
+                if let Some(list) = ref_field(to).and_then(|f| pending.get_mut(f.hash())) {
+                    list.retain(|(_, r)| r == row);
+                }
+            }
+            ExternalEvent::StaticDie { from, to, id, .. } | ExternalEvent::MutableDie { from, to, id, .. } => {
+                let (Some(field), Some(_)) = (ref_field(from), column_lender(to)) else { continue };
+                if from.is_same_underlying(to) {
+                    continue;
+                }
+                let key = (*field.hash(), *row, matches!(ev, ExternalEvent::MutableDie { .. }));
+                let before: Vec<String> = pending.get(field.hash()).into_iter().flatten()
+                    .filter(|(_, r)| r != row).map(|(n, _)| n.clone()).collect();
+                match ends.iter_mut().find(|(k, ..)| *k == key) {
+                    Some((_, _, g)) => g.push((*id, to.name())),
+                    None => ends.push((key, before, vec![(*id, to.name())])),
+                }
+                // What it borrowed before this row is given back here;
+                // what it borrows on this row is a new loan, still held.
+                if let Some(list) = pending.get_mut(field.hash()) {
+                    list.retain(|(_, r)| r == row);
+                }
+            }
+            _ => {}
+        }
+    }
+    for (_, mut g) in borrows {
+        // (A stable sort: lenders the call doesn't list stay in the
+        // events' order.)
+        g.sort_by_key(|(_, _, order)| *order);
+        let mut lenders: Vec<String> = Vec::new();
+        for (_, n, _) in &g {
+            if !lenders.contains(n) {
+                lenders.push(n.clone());
+            }
+        }
+        if lenders.len() < 2 {
+            continue;
+        }
+        for (k, (id, _, _)) in g.iter().enumerate() {
+            out.insert(*id, FieldLenders { lenders: lenders.clone(), drawn: k == 0, end: false });
+        }
+    }
+    for (_, before, g) in ends {
+        let mut lenders = before;
+        for (_, n) in &g {
+            if !lenders.contains(n) {
+                lenders.push(n.clone());
+            }
+        }
+        if lenders.len() < 2 {
+            continue;
+        }
+        let first = g.iter().enumerate()
+            .min_by_key(|(_, (_, n))| lenders.iter().position(|l| l == n).unwrap_or(usize::MAX))
+            .map(|(k, _)| k).unwrap_or(0);
+        for (k, (id, _)) in g.iter().enumerate() {
+            out.insert(*id, FieldLenders { lenders: lenders.clone(), drawn: k == first, end: true });
         }
     }
 }

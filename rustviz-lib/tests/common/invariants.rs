@@ -50,11 +50,6 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // Geometric (`geometry.rs`), from here on.
     // Tuple column goes on after its fields were moved out.
     ("edition2024/if_let_chain_irrefutable_move", "line-ends-nowhere", 1157),
-    // Both fields may borrow from either of two lenders: four borrows on
-    // one row and four returns on the next, more than the free tracks
-    // between the rows hold.
-    ("field_two_lenders_1354", "arrows-overlap", 1354),
-    ("field_two_lenders_1354", "heads-or-logos-overlap", 1354),
     // `for r in refs` over a Vec of references: r's borrow given back
     // to refs, which the loop moved.
     ("for_copy_elems_1372", "drop-without-value", 1389),
