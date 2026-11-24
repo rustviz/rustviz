@@ -657,9 +657,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           self.call_arg_flows_into(flow.arg, FlowTarget::Args(*def, at)),
         _ => None,
       };
-      let (ls, u) = match sub {
-        Some(sub) => self.narrowed_lenders_of_flows(sub),
-        None => self.lenders_of_flows(vec![flow]),
+      let part = match &flow.shared_args {
+        Some((def, at)) if !flow.place && !at.is_empty() => self.holder_part_lenders(flow.arg, *def, at),
+        _ => None,
+      };
+      let (ls, u) = match (sub, part) {
+        (Some(sub), _) => self.narrowed_lenders_of_flows(sub),
+        (None, Some(ls)) => (ls, false),
+        (None, None) => self.lenders_of_flows(vec![flow]),
       };
       unnamed |= u;
       for l in ls {
@@ -669,6 +674,38 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
     }
     (out, unnamed)
+  }
+
+  /// For a local holder `arg` of the type `def` (`it`, an `Iter<'a,
+  /// T>` from `refs.iter()` on a `Vec<&String>`), what the generic
+  /// arguments at positions `at` of its type borrow: its own lenders
+  /// for its lifetimes (`'a`: refs), and what it reaches through them
+  /// (`RefData::through`) for the type parameters it holds behind them
+  /// (`T`: a1). So `it.next().unwrap()` points into refs, and
+  /// `it.next().copied().unwrap()` is a1's `&String` (#1399). None for
+  /// a mix of both, or anything else.
+  fn holder_part_lenders(&self, arg: &'tcx Expr<'tcx>, def: DefId, at: &[usize]) -> Option<Vec<ResourceTy>> {
+    if !matches!(arg.kind, ExprKind::Path(QPath::Resolved(None, _))) || arg.span.from_expansion() {
+      return None;
+    }
+    let name = expr_to_rap_name(arg, &self.tcx)?;
+    if !self.raps.get(&name).is_some_and(|rd| rd.rap.holds_borrow()) {
+      return None;
+    }
+    let rd = self.borrow_map.get(&name)?;
+    if rd.through.is_empty() {
+      return None;
+    }
+    let ty::Adt(adt, args) = self.tcx.typeck(arg.hir_id.owner).expr_ty(arg).kind() else { return None };
+    if adt.did() != def {
+      return None;
+    }
+    let is_lifetime = |i: &usize| args.get(*i).is_some_and(|g| matches!(g.kind(), GenericArgKind::Lifetime(_)));
+    if at.iter().all(is_lifetime) {
+      return Some(rd.all_lenders());
+    }
+    let behind = self.params_behind_borrows(*adt);
+    at.iter().all(|i| behind.get(*i).copied().unwrap_or(false)).then(|| rd.through.clone())
   }
 
   /// `ty` (a trait method's signature type, seen from the impl `def_id`
@@ -1426,7 +1463,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               _ => rd.all_lenders(),
             }
           }
-          Some(rd) => rd.all_lenders(),
+          // (A holder's lenders, and what it reaches through them:
+          // `it.copied()` on `it = refs.iter()` holds a1's borrow, #1399.)
+          Some(rd) => rd.reached_lenders(),
           // A non-reference variable (`opt: Option<&T>`, an iterator)
           // whose borrow we don't track (holders are in borrow_map).
           None => Vec::new(),
@@ -1632,7 +1671,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// fields borrow (only those named in `fields`, when given).
   fn rap_content_lenders(&self, rap: &ResourceAccessPoint, fields: Option<&[String]>) -> Vec<ResourceTy> {
     let lenders_of = |name: &str| -> Vec<ResourceTy> {
-      self.borrow_map.get(name).map(|rd| rd.all_lenders()).unwrap_or_default()
+      self.borrow_map.get(name).map(|rd| rd.reached_lenders()).unwrap_or_default()
     };
     if rap.holds_borrow() {
       return lenders_of(rap.name());

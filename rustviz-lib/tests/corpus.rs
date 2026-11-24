@@ -26252,6 +26252,99 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from rq to s1",
         ],
     },
+    TooltipExpect {
+        name: "iter_mut_holder_1399",
+        // #1399: an `IterMut<'a, &String>` from `refs.iter_mut()` kept in
+        // a local (also moved, in an `Option`, through `rev` / `skip` /
+        // `take` / `enumerate` / `peekable` / `by_ref`, `nth`, `if let`,
+        // `while let`, `match`, `let else`, a call argument, an array, a
+        // `Vec<&mut String>`) borrows refs for `'a`; the `&String`s in
+        // refs borrow a1, which it and the references taken out of it
+        // reach only through refs (rustc puts a1's loan only in the `&String`
+        // part of their types). They were drawn borrowing a1 too, mutably
+        // ("so it may borrow from either"), and a1 / t1 went
+        // `State::Invalid`.
+        must_contain: &[
+            "Mutable borrow from refs to it: iter_mut's signature gives the value it returns the same lifetime as the value it was called on; it isn't a reference, but its value holds one",
+            "Mutable borrow from refs to el: next's signature gives the value it returns the same lifetime as the references stored in it; unwrap passes the borrow on",
+            "Mutable borrow from refs to el: next's signature gives the value it returns the same lifetime as the references stored in the value it was called on; unwrap passes the borrow on",
+            "Mutable borrow from refs to it: iter_mut's signature gives the value it returns the same lifetime as the value it was called on; skip, take, and rev pass the borrow on; it isn't a reference, but its value holds one",
+            "Mutable borrow from refs to el: el is a reference moved out of the value next returned",
+            "Mutable borrow from refs to e4: next's signature gives the reference it returns the same lifetime as the references stored in it4",
+            "Mutable borrow from refs to e2: e2 is a reference moved out of o",
+            "Mutable borrow from refs to e3: nth's signature gives the value it returns the same lifetime as the references stored in it4; unwrap passes the borrow on",
+            "Mutable borrow from refs to e5: e5 is a reference moved out of the value unwrap returned",
+            "Mutable borrow from refs to it8: into_iter's signature gives the value it returns the same lifetime as the value it was called on; it8 isn't a reference, but its value holds one",
+            "Mutable borrow from arr to el: next's signature gives the value it returns the same lifetime as the references stored in it3; unwrap passes the borrow on",
+            "Mutable borrow from muts to e2: next's signature gives the value it returns the same lifetime as the references stored in it4; unwrap passes the borrow on",
+            "Return mutably borrowed resource from it to refs",
+        ],
+        must_not_contain: &[
+            "Mutable borrow from a1 to it",
+            "Mutable borrow from a1 to el",
+            "Mutable borrow from a1 to e",
+            "Mutable borrow from t1 to",
+            "Mutable borrow from a2 to",
+            "a1's resource is mutably borrowed by it",
+            "a1's resource is mutably borrowed by e",
+            "t1's resource is mutably borrowed",
+            "it holds a value that mutably borrows a1's resource",
+            "Return mutably borrowed resource from it to a1",
+            "so it may borrow from",
+            "so it may point into",
+        ],
+    },
+    TooltipExpect {
+        name: "iter_holder_copied_1399",
+        // #1399, by reference: `it = refs.iter()` on a `Vec<&String>`
+        // borrows refs; `it.next().unwrap()` (a `&&String`) points into
+        // refs; `it.copied().next()`, `it.next().copied()` and
+        // `refs.iter().copied()`'s items are the `&String`s stored in refs,
+        // which borrow a1, not refs. All were drawn borrowing both ("so it
+        // may borrow from either").
+        must_contain: &[
+            "Immutable borrow from refs to it: iter's signature gives the value it returns the same lifetime as the value it was called on; it isn't a reference, but its value holds one",
+            "Immutable borrow from refs to r: next's signature gives the value it returns the same lifetime as the references stored in it; unwrap passes the borrow on",
+            "Immutable borrow from a1 to c: next's signature gives the value it returns the same lifetime as the references stored in the value it was called on; unwrap passes the borrow on",
+            "Immutable borrow from a1 to d: d is a reference copied out of the value next returned",
+            "Immutable borrow from a1 to q: next's signature gives the value it returns the same lifetime as the references stored in it4; unwrap passes the borrow on",
+            "Return immutably borrowed resource from d to a1",
+            "Return immutably borrowed resource from it to refs",
+        ],
+        must_not_contain: &[
+            "Immutable borrow from a1 to it",
+            "Immutable borrow from a1 to r:",
+            "Immutable borrow from refs to c",
+            "Immutable borrow from refs to d",
+            "Immutable borrow from refs to q",
+            "Return immutably borrowed resource from c to refs",
+            "Return immutably borrowed resource from d to refs",
+            "Return immutably borrowed resource from it to a1",
+            "so it may borrow from",
+            "so it may point into",
+        ],
+    },
+    TooltipExpect {
+        name: "same_name_bindings_1400",
+        // #1400: two `if let Some(e) = holder` with the same name `e`
+        // share one column. The later `e`'s scope end was taken from the
+        // earlier one's, so it never gave v back, and v went
+        // `State::Invalid` at the `println!` (`corpus_invariants_hold`
+        // pins that). Once that was right, an earlier `for e`'s borrow end
+        // was taken for one the later `e`'s `if let` makes redundant (the
+        // events aren't in line order yet), and gave nothing back. Also
+        // `match`, a third one with an `else`, shared borrows, a different
+        // lender (w), a block, `while let`.
+        must_contain: &[
+            "Mutable borrow from w to e: e is a reference moved out of p",
+            "Return mutably borrowed resource from e to w",
+            "Return mutably borrowed resource from e to v",
+            "Return immutably borrowed resource from e to v",
+            "Mutable borrow from v to e: e is a reference moved out of q",
+        ],
+        must_not_contain: &[
+        ],
+    },
 ];
 
 /// #1440: on the line where two loans of v end, the first end's dot (with

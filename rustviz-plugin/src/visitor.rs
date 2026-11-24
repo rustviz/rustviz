@@ -13397,9 +13397,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     let lenders = rd.all_lenders();
     let Some(held) = self.loans_held_by(name, &[]) else { return };
+    // (Nor the ones x reaches only through another: `let (i, el) =
+    // it.next().unwrap();` with `it = refs.iter_mut().enumerate()`, #1399.)
+    let through = self.split_through_lenders(name, &mut lenders.clone(), &mut Vec::new());
     let kept = |l: &ResourceTy| match l {
       ResourceTy::Value(r) if !r.is_ref() => {
-        held.contains_key(r.name().split('.').next().unwrap_or_default())
+        held.contains_key(r.name().split('.').next().unwrap_or_default()) && !through.contains(l)
       }
       _ => true,
     };
