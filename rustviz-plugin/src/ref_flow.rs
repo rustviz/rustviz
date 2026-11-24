@@ -31,7 +31,7 @@
 //! local yields no lender: an honest "unknown" rather than a guess.
 
 use rustc_hir::{Expr, ExprKind, QPath, UnOp};
-use rustc_middle::ty::{self, GenericArgKind, GenericArgsRef, Ty};
+use rustc_middle::ty::{self, GenericArgKind, GenericArgsRef, Ty, TypeFoldable};
 use rustc_middle::ty::adjustment::{Adjust, DerefAdjustKind};
 use rustc_span::def_id::DefId;
 use crate::expr_visitor::*;
@@ -76,6 +76,13 @@ struct ArgFlow<'tcx> {
   /// Shelf<'a>`): the fields whose types carry what the result does
   /// (`items: Vec<&'a str>`). `None` for any other type.
   fields: Option<Vec<String>>,
+  /// For content flow out of a value of a generic type (`&mut self`
+  /// with `Self = IterMut<'a, T>`): the type, and the positions of its
+  /// generic arguments that carry what the result does (`'a`, not `T`,
+  /// for `next`'s `&'a mut T`). When the argument is itself a call's
+  /// result (`refs.iter_mut()`), what those arguments of its type
+  /// borrow can be told apart (#1395). `None` for any other type.
+  shared_args: Option<(DefId, Vec<usize>)>,
 }
 
 /// Which type a call's arguments may flow into.
@@ -100,6 +107,11 @@ enum FlowTarget<'s> {
   /// `refs.last().copied()` copies the `&String` out of the `&&String`
   /// `last` returns: it borrows what refs's element does, not refs.
   Pointee,
+  /// Some generic arguments (by position) of the struct or enum the
+  /// call returns, of this type: `'a` in the `IterMut<'a, T>` that
+  /// `refs.iter_mut()` returns, which borrows refs; `T = &String` holds
+  /// what refs's elements borrow (#1395).
+  Args(DefId, &'s [usize]),
 }
 
 /// What an adjusted argument refers to, after rustc's auto-deref steps.
@@ -201,7 +213,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   fn call_arg_flows_into(&self, call: &'tcx Expr<'tcx>, target: FlowTarget<'_>) -> Option<Vec<ArgFlow<'tcx>>> {
     let (sig, gargs, args, def_id) = self.callee_sig(call)?;
     let output = match target {
-      FlowTarget::Result | FlowTarget::Pointer | FlowTarget::Pointee => sig.output(),
+      FlowTarget::Result => sig.output(),
+      // `Option<Self::Item>` in `next`'s signature, as the impl sets it
+      // (`Option<&'a mut T>` for `IterMut<'a, T>`), to tell its parts
+      // apart (#1395).
+      FlowTarget::Pointer | FlowTarget::Pointee => self.impl_assoc_types(sig.output(), def_id),
+      FlowTarget::Args(want, _) => {
+        let out = self.impl_assoc_types(sig.output(), def_id);
+        match out.kind() {
+          ty::Adt(d, _) if d.did() == want => out,
+          _ => return None,
+        }
+      }
       FlowTarget::Field(f) => match sig.output().kind() {
         ty::Adt(def, fargs) if def.is_struct() =>
           def.all_fields().find(|fd| fd.name.as_str() == f)?.ty(self.tcx, fargs),
@@ -242,6 +265,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         outside_pointees(output, &mut out, true);
         out
       }
+      FlowTarget::Args(_, at) => match output.kind() {
+        ty::Adt(_, a) => at.iter().filter_map(|i| a.get(*i)).flat_map(|g| g.walk()).collect(),
+        _ => return None,
+      },
       _ => output.walk().collect(),
     };
     for g in parts {
@@ -263,7 +290,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // iterator's items, so `B` carries whatever `Self` carries (#392).
     // Only for the result: a bound on an argument (`retain<F:
     // FnMut(&T) -> bool>(&mut self, f: F)`) doesn't store it.
-    if matches!(target, FlowTarget::Result | FlowTarget::Pointer | FlowTarget::Pointee) && !params.is_empty() {
+    if matches!(target, FlowTarget::Result | FlowTarget::Pointer | FlowTarget::Pointee | FlowTarget::Args(..)) && !params.is_empty() {
       if let Some(def_id) = def_id {
         let bound: Vec<u32> = params.clone();
         for (clause, _) in self.tcx.predicates_of(def_id).predicates.iter() {
@@ -363,8 +390,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           },
           _ => false,
         };
+        let held = match input.kind() { ty::Ref(_, inner, _) => *inner, _ => *input };
+        let shared_args = match held.kind() {
+          ty::Adt(def, hargs) if content => Some((def.did(), hargs.iter().enumerate()
+            .filter(|(_, g)| match g.kind() {
+              GenericArgKind::Lifetime(r) => regions.contains(&r),
+              GenericArgKind::Type(t) => shares(t),
+              GenericArgKind::Const(_) => false,
+            })
+            .map(|(i, _)| i)
+            .collect())),
+          _ => None,
+        };
         let fields = content.then(|| {
-          let held = match input.kind() { ty::Ref(_, inner, _) => *inner, _ => *input };
           match held.kind() {
             ty::Adt(def, fargs) if def.is_struct() => Some(def.all_fields()
               .filter(|fd| shares(fd.ty(self.tcx, fargs)))
@@ -377,7 +415,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             _ => None,
           }
         }).flatten();
-        flows.push(ArgFlow { index, arg, place, content, place_mut: place && place_mut, by_value, via_outlives, referent_is_ref, fields });
+        flows.push(ArgFlow { index, arg, place, content, place_mut: place && place_mut, by_value, via_outlives, referent_is_ref, fields, shared_args });
       }
     }
     Some(flows)
@@ -507,11 +545,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   ///   the `&String` there borrows a1, but the result reaches a1 only
   ///   through what it points to, as `&mut refs[0]` does (#1382);
   /// - `refs.last().copied().unwrap()` is that `&String`, copied out:
-  ///   it borrows a1, not refs.
+  ///   it borrows a1, not refs;
+  /// - `refs.iter_mut().next().unwrap()` points into refs as well:
+  ///   `next` returns `Option<&'a mut T>` for the `IterMut<'a, T>`
+  ///   that `iter_mut` returns, whose `'a` borrows refs (#1395).
   /// None otherwise.
   pub fn pointer_lenders(&self, call: &'tcx Expr<'tcx>) -> Option<Vec<ResourceTy>> {
     let (inner, target) = self.narrowed_target(call)?;
-    let (lenders, _) = self.lenders_of_flows(self.call_arg_flows_into(inner, target)?);
+    let (lenders, _) = self.narrowed_lenders_of_flows(self.call_arg_flows_into(inner, target)?);
     let all = self.call_lenders(call);
     (!lenders.is_empty() && lenders.len() < all.len() && lenders.iter().all(|l| all.contains(l))).then_some(lenders)
   }
@@ -520,9 +561,44 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// (`last_mut` in `refs.last_mut().unwrap()`), when `borrower` is it
   /// and `call`'s value is the reference it returns.
   pub fn narrowed_tie(&self, call: &'tcx Expr<'tcx>, borrower: &'tcx Expr<'tcx>) -> Option<ArgTie> {
+    if let Some((origin, _, def, at)) = self.narrowed_origin_parts(call) {
+      return (origin.hir_id == borrower.hir_id).then(|| self.call_arg_tie_to(origin, FlowTarget::Args(def, &at)));
+    }
     let (inner, target) = self.narrowed_target(call)?;
     (inner.hir_id == borrower.hir_id && matches!(target, FlowTarget::Pointer) && self.pointer_lenders(call).is_some())
       .then(|| self.call_arg_tie_to(inner, target))
+  }
+
+  /// The call a reference `pointer_lenders` narrows comes from when that
+  /// is the receiver of the call returning it, and the methods that
+  /// pass it on, innermost first: `iter_mut` and `[next, unwrap]` for
+  /// `refs.iter_mut().next().unwrap()` (#1395). The borrow of refs is
+  /// made by `iter_mut`; `next` hands on the iterator's `'a`.
+  pub fn narrowed_origin(&self, call: &'tcx Expr<'tcx>) -> Option<(&'tcx Expr<'tcx>, Vec<String>)> {
+    self.narrowed_origin_parts(call).map(|(origin, passed, ..)| (origin, passed))
+  }
+
+  /// `narrowed_origin`, plus the type and the positions of its generic
+  /// arguments that `FlowTarget::Args` narrows the origin's result to.
+  fn narrowed_origin_parts(&self, call: &'tcx Expr<'tcx>) -> Option<(&'tcx Expr<'tcx>, Vec<String>, DefId, Vec<usize>)> {
+    let (inner, target) = self.narrowed_target(call)?;
+    let ExprKind::MethodCall(seg, recv, ..) = inner.kind else { return None };
+    if !matches!(target, FlowTarget::Pointer) || self.pointer_lenders(call).is_none()
+      || recv.span.from_expansion() || !matches!(recv.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) {
+      return None;
+    }
+    let flows = self.call_arg_flows_into(inner, target)?;
+    let [flow] = flows.as_slice() else { return None };
+    let Some((def, at)) = &flow.shared_args else { return None };
+    if flow.index != 0 || flow.place || at.is_empty() {
+      return None;
+    }
+    let (end, mut passed) = self.pass_through_chain(call);
+    if end.hir_id != inner.hir_id {
+      return None;
+    }
+    passed.insert(0, seg.ident.to_string());
+    Some((recv, passed, *def, at.clone()))
   }
 
   /// The call whose result `call`'s value is copied out of, when that
@@ -533,10 +609,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     (matches!(target, FlowTarget::Pointee) && self.pointer_lenders(call).is_some()).then_some(inner)
   }
 
-  /// The call `call`'s value comes out of (see `passed_through_from`),
-  /// and which part of its result `call`'s value is (see
-  /// `pointer_lenders`): the reference it returns, or what that points
-  /// to. None for the whole result.
+  /// The call `call`'s value comes out of (see `passed_through_from`;
+  /// the innermost one on the way that returns a reference, `next` in
+  /// `refs.iter_mut().next().unwrap()`), and which part of its result
+  /// `call`'s value is (see `pointer_lenders`): the reference it
+  /// returns, or what that points to. None for the whole result.
   fn narrowed_target(&self, call: &'tcx Expr<'tcx>) -> Option<(&'tcx Expr<'tcx>, FlowTarget<'static>)> {
     let typeck = self.tcx.typeck(call.hir_id.owner);
     let peel = |t: Ty<'tcx>| -> Ty<'tcx> {
@@ -549,19 +626,75 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let holds_ref = |t: Ty<'tcx>| t.walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_)));
     let erase = |t: Ty<'tcx>| self.tcx.erase_and_anonymize_regions(t);
     let outer = peel(typeck.expr_ty(call));
-    let inner = self.passed_through_from(call);
-    let from = peel(typeck.expr_ty(inner));
-    let ty::Ref(_, pointee, _) = from.kind() else { return None };
-    if !holds_ref(*pointee) {
-      return None;
+    let mut steps = self.pass_through_steps(call);
+    steps.reverse();
+    steps.into_iter().find_map(|inner| {
+      let from = peel(typeck.expr_ty(inner));
+      let ty::Ref(_, pointee, _) = from.kind() else { return None };
+      if !holds_ref(*pointee) {
+        None
+      } else if erase(from) == erase(outer) {
+        Some((inner, FlowTarget::Pointer))
+      } else if inner.hir_id != call.hir_id && erase(*pointee) == erase(outer) {
+        Some((inner, FlowTarget::Pointee))
+      } else {
+        None
+      }
+    })
+  }
+
+  /// `lenders_of_flows`, where an argument that is a call's result
+  /// (`refs.iter_mut()`) and reaches the result only through some of its
+  /// type's generic arguments (`'a` in `IterMut<'a, T>`) lends only what
+  /// those borrow (refs, not what refs's elements borrow, #1395).
+  fn narrowed_lenders_of_flows(&self, flows: Vec<ArgFlow<'tcx>>) -> (Vec<ResourceTy>, bool) {
+    let mut out: Vec<ResourceTy> = Vec::new();
+    let mut unnamed = false;
+    for flow in flows {
+      let sub = match &flow.shared_args {
+        Some((def, at)) if !flow.place && !at.is_empty() && !flow.arg.span.from_expansion()
+          && matches!(flow.arg.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) =>
+          self.call_arg_flows_into(flow.arg, FlowTarget::Args(*def, at)),
+        _ => None,
+      };
+      let (ls, u) = match sub {
+        Some(sub) => self.narrowed_lenders_of_flows(sub),
+        None => self.lenders_of_flows(vec![flow]),
+      };
+      unnamed |= u;
+      for l in ls {
+        if !out.contains(&l) {
+          out.push(l);
+        }
+      }
     }
-    if erase(from) == erase(outer) {
-      Some((inner, FlowTarget::Pointer))
-    } else if inner.hir_id != call.hir_id && erase(*pointee) == erase(outer) {
-      Some((inner, FlowTarget::Pointee))
-    } else {
-      None
-    }
+    (out, unnamed)
+  }
+
+  /// `ty` (a trait method's signature type, seen from the impl `def_id`
+  /// belongs to, see `impl_view_sig`) with that impl's associated types
+  /// put in: `Option<<IterMut<'a, T> as Iterator>::Item>` is
+  /// `Option<&'a mut T>`. Unchanged for any other method.
+  fn impl_assoc_types(&self, ty: Ty<'tcx>, def_id: Option<DefId>) -> Ty<'tcx> {
+    let tcx = self.tcx;
+    let Some(impl_id) = def_id.and_then(|d| tcx.trait_impl_of_assoc(d)) else { return ty };
+    let trait_ref = tcx.impl_trait_ref(impl_id).instantiate_identity().skip_norm_wip();
+    let items = tcx.impl_item_implementor_ids(impl_id);
+    ty.fold_with(&mut ty::BottomUpFolder {
+      tcx,
+      ty_op: |t: Ty<'tcx>| match t.kind() {
+        ty::Alias(alias) => match alias.kind {
+          ty::AliasTyKind::Projection { def_id: assoc }
+            if tcx.parent(assoc) == trait_ref.def_id && alias.args == trait_ref.args
+              && tcx.generics_of(assoc).own_params.is_empty() =>
+            items.get(&assoc).map_or(t, |item| tcx.type_of(*item).instantiate_identity().skip_norm_wip()),
+          _ => t,
+        },
+        _ => t,
+      },
+      lt_op: |r| r,
+      ct_op: |c| c,
+    })
   }
 
   fn lenders_of_flows(&self, flows: Vec<ArgFlow<'tcx>>) -> (Vec<ResourceTy>, bool) {
@@ -623,9 +756,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// innermost first (`["unwrap"]`). Unlike `borrowing_call`, the inner
   /// call may be a function call (`opart(&s).unwrap()`).
   pub fn pass_through_chain(&self, call: &'tcx Expr<'tcx>) -> (&'tcx Expr<'tcx>, Vec<String>) {
+    let steps = self.pass_through_steps(call);
+    let mut passed: Vec<String> = steps[..steps.len() - 1].iter()
+      .filter_map(|c| match c.kind { ExprKind::MethodCall(seg, ..) => Some(seg.ident.to_string()), _ => None })
+      .collect();
+    passed.reverse();
+    (steps[steps.len() - 1], passed)
+  }
+
+  /// The calls `pass_through_chain` goes through, outermost (`call`)
+  /// first: `[unwrap, opart(&s)]` for `opart(&s).unwrap()`.
+  fn pass_through_steps(&self, call: &'tcx Expr<'tcx>) -> Vec<&'tcx Expr<'tcx>> {
+    let mut steps = vec![call];
     let mut c = call;
-    let mut passed: Vec<String> = Vec::new();
-    while let ExprKind::MethodCall(seg, recv, ..) = c.kind {
+    while let ExprKind::MethodCall(_, recv, ..) = c.kind {
       if c.span.from_expansion() || recv.span.from_expansion()
         || !matches!(recv.kind, ExprKind::MethodCall(..) | ExprKind::Call(..)) {
         break;
@@ -634,11 +778,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if !(tie.receiver && tie.tied == [0] && tie.stored_in.is_empty() && tie.unnamed == 0) {
         break;
       }
-      passed.push(seg.ident.to_string());
       c = recv;
+      steps.push(c);
     }
-    passed.reverse();
-    (c, passed)
+    steps
   }
 
   /// Which of `call`'s arguments its signature ties the result to,
@@ -937,7 +1080,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     match init.kind {
       ExprKind::Call(..) | ExprKind::MethodCall(..) => {
-        let lenders = self.call_lenders(init);
+        // `let el = refs.last_mut();` / `refs.iter_mut().next()` on a
+        // `Vec<&String>`: an `Option` of a reference into refs (#1382,
+        // #1395), not of what refs's elements borrow.
+        let lenders = self.pointer_lenders(init).unwrap_or_else(|| self.call_lenders(init));
         // `let it = self.items.iter().chain(self.other.iter());`: only
         // those fields of what self points to (#1080).
         match self.field_call_lenders(init, &lenders) {

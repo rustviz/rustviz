@@ -5517,7 +5517,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
                 let before = self.rap_names();
                 self.inside_branch = true;
                 // The body may run no times or many (#786).
-                let inits = self.enter_loop_inits();
+                let inits = self.enter_loop_inits(expr.hir_id);
                 self.visit_expr(then_body);
                 self.leave_loop_inits(expr, expr.hir_id, inits, true);
                 self.inside_branch = prev;
@@ -5576,7 +5576,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             self.note_loop_head_given(expr, entry_len, None);
             self.inside_branch = true;
             // Left only by a `break` (#786).
-            let inits = self.enter_loop_inits();
+            let inits = self.enter_loop_inits(expr.hir_id);
             self.visit_block(block);
             self.leave_loop_inits(expr, expr.hir_id, inits, false);
             self.inside_branch = prev;
@@ -5625,15 +5625,6 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           self.note_labeled_break_path(target);
         }
         intravisit::walk_expr(self, expr);
-        // What `let x;` locals have no value where this `break` leaves
-        // its loop (#786).
-        if let Ok(target) = dest.target_id {
-          if !self.uninit_locals.is_empty() || !self.maybe_init_locals.is_empty() {
-            #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
-            let uninit = self.uninit_locals.keys().copied().collect();
-            self.break_uninit.push((target, uninit, self.maybe_init_locals.clone()));
-          }
-        }
         // `let r = loop { break k; }`: `r` gets `k` (#431).
         if let (Ok(target), Some(value)) = (dest.target_id, value) {
           let has_receiver = self.break_pats.iter().any(|(id, ..)| *id == target)
@@ -5656,6 +5647,16 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             self.deferred_breaks.push((target, value, text));
           } else {
             self.pair_break_value(target, value, text);
+          }
+        }
+        // What `let x;` locals have no value where this `break` leaves
+        // its loop (#786). After its value is paired: `(a, n) = loop {
+        // break (s, 1); }` assigns a and n on this way out (#1396).
+        if let Ok(target) = dest.target_id {
+          if !self.uninit_locals.is_empty() || !self.maybe_init_locals.is_empty() {
+            #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
+            let uninit = self.uninit_locals.keys().copied().collect();
+            self.break_uninit.push((target, uninit, self.maybe_init_locals.clone()));
           }
         }
         if let Ok(target) = dest.target_id {
@@ -9217,7 +9218,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           None => Vec::new(),
         };
         // The body may run no times or many (#786).
-        let inits = self.enter_loop_inits();
+        let inits = self.enter_loop_inits(arms.first().map_or(body_expr.hir_id, |a| a.body.hir_id));
         self.visit_expr(body_expr);
         for (name, prev) in loop_ref_prev.into_iter().rev() {
           match prev {
@@ -13333,11 +13334,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
   /// A loop's body is about to be visited (#786): remember which `let
   /// x;` locals have no value as it starts. Returns the state to hand
-  /// to `leave_loop_inits`.
-  fn enter_loop_inits(&mut self) -> (HashMap<HirId, DeferredLet>, HashSet<HirId>) {
+  /// to `leave_loop_inits`. `target`: the loop its `break`s name.
+  fn enter_loop_inits(&mut self, target: HirId) -> (HashMap<HirId, DeferredLet>, HashSet<HirId>) {
     #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
     let entry = self.uninit_locals.keys().copied().collect();
-    self.loop_entry_uninit.push(entry);
+    self.loop_entry_uninit.push((target, entry));
     (self.uninit_locals.clone(), self.maybe_init_locals.clone())
   }
 
@@ -13409,7 +13410,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// assigned, if x still holds it. Drawn as a drop on the assignment,
   /// whose text says so.
   fn drop_earlier_iteration(&mut self, hirid: HirId, lhs_expr: &'tcx Expr<'tcx>) {
-    if !self.loop_entry_uninit.iter().any(|s| s.contains(&hirid)) {
+    if !self.loop_entry_uninit.iter().any(|(_, s)| s.contains(&hirid)) {
       return;
     }
     let ty = self.tcx.typeck(hirid.owner).node_type(hirid);
@@ -14348,7 +14349,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// `brk`: the `break` as written, kept for a receiver paired later.
   fn pair_break_value(&mut self, target: HirId, value: &'tcx Expr<'tcx>, brk: Option<String>) {
     if let Some((_, block)) = self.break_assigns.iter().rev().find(|(id, _)| *id == target).copied() {
+      // Assigned once the `break` has left the loop (and those inside
+      // it), which don't come round again to assign them twice: no
+      // "a later iteration drops what an earlier one assigned" (#1396).
+      let inner = self.loop_entry_uninit.iter().rposition(|(id, _)| *id == target)
+        .map(|at| self.loop_entry_uninit.split_off(at));
       self.assign_value(block, value);
+      self.loop_entry_uninit.extend(inner.unwrap_or_default());
     } else if let Some((_, pat, scope, inside)) = self.break_pats.iter().rev().find(|(id, ..)| *id == target).cloned() {
       // The bindings live in the `let`'s scope, not the loop's.
       let loop_scope = std::mem::replace(&mut self.current_scope, scope);

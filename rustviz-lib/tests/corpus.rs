@@ -24965,6 +24965,68 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "on the right of the let",
         ],
     },
+    TooltipExpect {
+        name: "loop_break_destructure_init_1396",
+        // #1396: `(a, n) = loop { break (make(), 1); };` with `let a; let
+        // n;` assigns them on the loop's only way out (rustc accepts the
+        // uses after it). They were drawn "may have no value after the
+        // loop", and `let mut x;` got "On a later iteration of the loop ...
+        // dropped here first", though the `break` leaves the loop right
+        // after assigning. Also from a `break 'outer` in an inner loop, a
+        // struct / array pattern, `_`, a moved variable, a `while` inside
+        // the loop, and inside another loop.
+        must_contain: &[
+            "a acquires ownership of a resource",
+            "n is bound to a copyable value",
+            "Move from s to h",
+            "x acquires ownership of a resource",
+            "x acquires ownership of a new resource; its previous resource is dropped",
+        ],
+        must_not_contain: &[
+            "may have no value after the loop",
+            "On a later iteration of the loop",
+            "dropped here only if the loop above assigned",
+        ],
+    },
+    TooltipExpect {
+        name: "iter_next_into_holder_1395",
+        // #1395: `refs.iter_mut().next().unwrap()` on `refs: Vec<&String>`
+        // points into refs, as `refs.last_mut().unwrap()` does (#1382): the
+        // `IterMut<'a, T>` that `iter_mut` returns borrows refs for `'a`,
+        // and `next` returns `&'a mut T`; the `&String` there borrows a1,
+        // but el reaches a1 only through refs. el (and `nth`, `last`,
+        // `iter`, `into_iter` on `&refs` / `&mut refs`, an array, an
+        // `Option` holder, and `last_mut` into one) was drawn borrowing a1
+        // too, mutably for `iter_mut`, though a1 is only lent immutably, to
+        // refs. `refs.iter().next().copied().unwrap()` is the `&String`
+        // copied out: it borrows a1, not refs (refs is pushed to while x is
+        // in use).
+        must_contain: &[
+            "Mutable borrow from refs to el: iter_mut's signature gives the value it returns the same lifetime as the value it was called on; next and unwrap pass the borrow on",
+            "Mutable borrow from refs to el: iter_mut's signature gives the value it returns the same lifetime as the value it was called on; nth and expect pass the borrow on",
+            "Mutable borrow from refs to el2: iter_mut's signature gives the value it returns the same lifetime as the value it was called on; last and unwrap pass the borrow on",
+            "Immutable borrow from refs to r1: iter's signature gives the value it returns the same lifetime as the value it was called on; next and unwrap pass the borrow on",
+            "Immutable borrow from refs to r2: into_iter's signature gives the value it returns the same lifetime as the value it was called on; nth and unwrap pass the borrow on",
+            "Mutable borrow from refs to r3: into_iter's signature gives the value it returns the same lifetime as the value it was called on; next and unwrap pass the borrow on",
+            "Immutable borrow from a1 to x: x is a reference copied out of the value next returned",
+            "Return immutably borrowed resource from x to a1",
+            "Mutable borrow from refs to o: iter_mut's signature gives the value it returns the same lifetime as the value it was called on; next passes the borrow on; o isn't a reference, but its value holds one",
+            "Mutable borrow from refs to p: last_mut's signature gives the value it returns the same lifetime as the value it was called on; p isn't a reference, but its value holds one",
+            "Mutable borrow from arr to el: iter_mut's signature gives the value it returns the same lifetime as the value it was called on; next and unwrap pass the borrow on",
+        ],
+        must_not_contain: &[
+            "Mutable borrow from a1 to",
+            "Mutable borrow from t1 to",
+            "a1's resource is mutably borrowed",
+            "t1's resource is mutably borrowed",
+            "Immutable borrow from a1 to r1",
+            "Immutable borrow from a1 to r2",
+            "Immutable borrow from refs to x",
+            "holds a value that mutably borrows a1's resource",
+            "so it may point into",
+            "so it may borrow from",
+        ],
+    },
 ];
 
 /// #987: a dot that says nothing is dropped is a plain dot, not a drop

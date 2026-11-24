@@ -356,8 +356,9 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // For each loop being visited, innermost last: the `let x;` locals
   // with no value as it starts (#786). An assignment to one in its body
   // initializes it the first time round, and later times round drops
-  // what an earlier iteration assigned.
-  pub loop_entry_uninit: Vec<HashSet<rustc_hir::HirId>>,
+  // what an earlier iteration assigned. Keyed by the loop (what its
+  // `break`s name).
+  pub loop_entry_uninit: Vec<(rustc_hir::HirId, HashSet<rustc_hir::HirId>)>,
   // At each `break` visited so far: the loop (or block) it leaves, and
   // the definitely and maybe uninitialized `let x;` locals there
   // (#786). The loop joins them where it ends.
@@ -8109,7 +8110,9 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
   }
   // `w.last_mut().unwrap()` (#1266): the borrow comes from `last_mut`;
   // `unwrap` only passes it on.
-  let (borrower, mut passed_on) = self.borrowing_call(call);
+  // `refs.iter_mut().next().unwrap()` (#1395): from `iter_mut`; `next`
+  // and `unwrap` pass it on.
+  let (borrower, mut passed_on) = self.narrowed_origin(call).unwrap_or_else(|| self.borrowing_call(call));
   let func = match borrower.kind {
     ExprKind::MethodCall(seg, ..) if !passed_on.is_empty() => seg.ident.to_string(),
     _ => func,
