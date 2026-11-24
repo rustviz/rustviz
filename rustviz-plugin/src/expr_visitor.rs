@@ -104,6 +104,15 @@ fn retired_key(name: &str, i: usize) -> String {
 }
 
 /// Whether `a` and `b` are the same loan of the same reference.
+/// Adds the lenders `rd` borrows (those with a column) to `out`, once.
+fn add_lenders(out: &mut Vec<ResourceTy>, rd: &RefData) {
+  for l in rd.all_lenders() {
+    if matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)) && !out.contains(&l) {
+      out.push(l);
+    }
+  }
+}
+
 fn same_loan(a: &RefData, b: &RefData) -> bool {
   a.lender == b.lender && a.assigned_at == b.assigned_at && a.loan_line == b.loan_line
     && a.borrow_span == b.borrow_span && a.co_lenders == b.co_lenders
@@ -390,6 +399,11 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// as a call passes its arguments once they're visited.
   pub literal_parts: Option<bool>,
   pub deferred_arm_binds: HashMap<rustc_hir::HirId, (&'tcx Expr<'tcx>, Vec<ArmBind<'tcx>>)>,
+  /// For a branch body whose pairing `deferred_arm_binds` put off: the
+  /// reference parts of the value it is bound to whose lenders it adds
+  /// to the other branches' (`match_rhs_arms`, #1402), with each one's
+  /// loan before the conditional.
+  pub arm_union_parts: HashMap<rustc_hir::HirId, Vec<(String, Option<RefData>)>>,
   // While a branch's value is matched against the variables of a
   // pattern that were declared ahead of the conditional (`let (a, b) =
   // if …`, #1007): `define_lhs` leaves an existing variable alone.
@@ -1033,6 +1047,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       defer_arm_binds: None,
       literal_parts: None,
       deferred_arm_binds: HashMap::new(),
+      arm_union_parts: HashMap::new(),
       bind_existing: false,
       reassign_arms: None,
       branch_value_owner: None,
@@ -2684,6 +2699,90 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
+  /// Pairs each branch body of a conditional (`if` / `match`) with
+  /// `lhs` (`match_rhs_arm`). A reference field (or tuple element) of
+  /// `lhs` that the branches point at different lenders (`let d = if c {
+  /// One { a: &s1 } } else { One { a: &s2 } };`) may point into any of
+  /// them after the conditional, and the borrow checker keeps all of
+  /// them borrowed until its last use (#1402): it borrows the union,
+  /// as a reference bound to the conditional does (`get_ref_data_co`).
+  /// Pairing a branch sets the field's lender to that branch's, so each
+  /// branch's lenders are collected after it is paired.
+  fn match_rhs_arms(&mut self, lhs: ResourceTy, bodies: &[&'tcx Expr<'tcx>], evt: Evt) {
+    let parts = self.ref_parts_of(&lhs);
+    let before: Vec<Option<RefData>> = parts.iter().map(|n| self.borrow_map.get(n).cloned()).collect();
+    let mut found: Vec<Vec<ResourceTy>> = vec![Vec::new(); parts.len()];
+    for body in bodies {
+      self.match_rhs_arm(lhs.clone(), body, evt.clone());
+      // One paired once it has been visited (`bind_deferred_arm`)
+      // adds its lenders then.
+      if !parts.is_empty() && self.deferred_arm_binds.contains_key(&body.hir_id) {
+        self.arm_union_parts.insert(body.hir_id, parts.iter().cloned().zip(before.iter().cloned()).collect());
+      }
+      for (i, n) in parts.iter().enumerate() {
+        let Some(rd) = self.borrow_map.get(n) else { continue };
+        // (Not one this branch left as it was before the conditional.)
+        if before[i].as_ref().is_some_and(|b| same_loan(b, rd)) {
+          continue;
+        }
+        add_lenders(&mut found[i], rd);
+      }
+    }
+    for (n, lenders) in parts.iter().zip(found) {
+      self.set_part_lenders(n, lenders);
+    }
+  }
+
+  /// The reference columns inside `lhs` (`d.a`, `t.0`, `o.inner.a`) that
+  /// hold a loan, for `match_rhs_arms`.
+  fn ref_parts_of(&self, lhs: &ResourceTy) -> Vec<String> {
+    match lhs {
+      ResourceTy::Value(rap) if !rap.is_ref() => self.struct_members_deep(rap.name()).into_iter()
+        .filter(|m| m.is_ref())
+        .map(|m| m.name().clone())
+        .filter(|n| self.borrow_map.contains_key(n))
+        .collect(),
+      _ => Vec::new(),
+    }
+  }
+
+  /// Reference part `n` may point into any of `lenders`, what the
+  /// branches pointed it at: it borrows all of them (`match_rhs_arms`).
+  /// (Also when the last branch's value borrows nothing with a column,
+  /// `One { a: "x" }`: the others' lenders stay borrowed.)
+  fn set_part_lenders(&mut self, n: &str, mut lenders: Vec<ResourceTy>) {
+    let mut cur = Vec::new();
+    if let Some(rd) = self.borrow_map.get(n) {
+      add_lenders(&mut cur, rd);
+    }
+    if lenders.is_empty() || lenders == cur {
+      return;
+    }
+    let lender = lenders.remove(0);
+    let aliasing = get_aliasing_data(&lender, &self.borrow_map);
+    if let Some(rd) = self.borrow_map.get_mut(n) {
+      rd.lender = lender;
+      rd.aliasing = aliasing;
+      rd.static_lender = None;
+      rd.co_lenders = lenders;
+    }
+  }
+
+  /// A branch's value made by a call (`if c { mk(&s1) } else { .. }`):
+  /// the reference fields of struct `lhs` borrow what the callee's
+  /// signature ties them to, as for `let d = mk(&s1);` (#1402), where
+  /// `define_lhs` finds them from the `let`'s initialiser.
+  fn register_arm_call_lenders(&mut self, lhs: &ResourceTy, body: &'tcx Expr<'tcx>) {
+    let ResourceTy::Value(ResourceAccessPoint::Struct(st)) = lhs else { return };
+    let Some(value) = branch_value_expr(body) else { return };
+    if value.span.from_expansion() {
+      return;
+    }
+    let Some(ty) = self.tcx.typeck(value.hir_id.owner).expr_ty_opt(value) else { return };
+    let name = st.name.clone();
+    self.register_struct_field_lenders(&name, value, ty);
+  }
+
   /// `match_rhs` for one branch of an `if` / `match` whose value is
   /// bound to `lhs`, recording the event ids it used (`rhs_arm_ids`).
   fn match_rhs_arm(&mut self, lhs: ResourceTy, body: &'tcx Expr<'tcx>, evt: Evt) {
@@ -2699,6 +2798,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       return;
     }
     let lo = *self.unique_id;
+    self.register_arm_call_lenders(&lhs, body);
     self.match_rhs(lhs, body, evt);
     self.rhs_arm_ids.insert(body.hir_id, (lo, *self.unique_id));
   }
@@ -2747,7 +2847,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       match bind {
         ArmBind::Rhs(lhs, evt) => {
           self.add_arm_lenders(&lhs, body);
-          self.match_rhs(lhs, body, evt)
+          // What the branches paired before this one pointed its
+          // reference parts at stays among their lenders (#1402).
+          let union = self.arm_union_parts.remove(&body.hir_id).unwrap_or_default();
+          let earlier: Vec<Vec<ResourceTy>> = union.iter().map(|(n, before)| {
+            let mut v = Vec::new();
+            if let Some(rd) = self.borrow_map.get(n).filter(|rd| !before.as_ref().is_some_and(|b| same_loan(b, rd))) {
+              add_lenders(&mut v, rd);
+            }
+            v
+          }).collect();
+          self.register_arm_call_lenders(&lhs, body);
+          self.match_rhs(lhs, body, evt);
+          for ((n, _), mut lenders) in union.iter().zip(earlier) {
+            if let Some(rd) = self.borrow_map.get(n) {
+              add_lenders(&mut lenders, rd);
+            }
+            self.set_part_lenders(n, lenders);
+          }
         }
         ArmBind::Pat(pat) => self.pair_pat_with_value(pat, body),
         ArmBind::Reassign(lhs, evt, old, drops) => self.reassign_from_arm(lhs, body, evt, old, drops),
@@ -3014,14 +3131,29 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       self.borrow_map.insert(k.clone(), old.clone());
     }
     // One that held no loan before starts the next arm holding none.
-    #[expect(clippy::disallowed_methods, reason = "sorted below")]
-    let mut unlent: Vec<&String> = ab.unlent.iter().collect();
-    unlent.sort();
+    #[expect(clippy::disallowed_methods, reason = "unlent_keys sorts what it returns")]
+    let unlent = self.unlent_keys(ab, self.borrow_map.keys());
     for k in unlent {
-      if let Some(cur) = self.borrow_map.remove(k) {
-        ab.done.push((k.clone(), cur));
+      if let Some(cur) = self.borrow_map.remove(&k) {
+        ab.done.push((k, cur));
       }
     }
+  }
+
+  /// `ab.unlent`, and the reference fields among `names` of a struct in
+  /// it (`d.a` of `let d: One;`, which its first assignment registers:
+  /// `if c { d = One { a: &s1 }; } else { d = One { a: &s2 }; }`, #1402),
+  /// sorted.
+  fn unlent_keys<'n>(&self, ab: &ArmBorrows, names: impl Iterator<Item = &'n String>) -> Vec<String> {
+    #[expect(clippy::disallowed_methods, reason = "sorted below")]
+    let mut keys: Vec<String> = ab.unlent.iter().cloned()
+      .chain(names.filter(|n| !ab.before.contains_key(*n)
+        && n.split_once('.').is_some_and(|(root, _)| ab.unlent.contains(root))
+        && self.raps.get(*n).is_some_and(|rd| rd.rap.is_member() && rd.rap.is_ref())).cloned())
+      .collect();
+    keys.sort();
+    keys.dedup();
+    keys
   }
 
   /// Called after the last arm. A reference that only an earlier arm
@@ -3030,8 +3162,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// loans; the other arms' loans are ended by `emit_borrow_ends`
   /// (`arm_loans`). A loan held from before keeps the last use seen in
   /// source order.
-  pub fn arm_borrows_end(&mut self, ab: ArmBorrows) {
-    let mut done = ab.done;
+  pub fn arm_borrows_end(&mut self, mut ab: ArmBorrows) {
+    let mut done = std::mem::take(&mut ab.done);
     let mut keep: Vec<usize> = Vec::new();
     #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "`keep` is sorted before use; the inserts are independent")]
     for (k, old) in ab.before.iter() {
@@ -3050,14 +3182,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
     // One that held no loan before and that the last arm left without
     // one keeps the latest earlier arm's (#1069).
-    #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "`keep` is sorted before use; the inserts are independent")]
-    for k in ab.unlent.iter() {
-      if self.borrow_map.contains_key(k) {
+    for k in self.unlent_keys(&ab, done.iter().map(|(n, _)| n)) {
+      if self.borrow_map.contains_key(&k) {
         continue;
       }
-      if let Some(i) = done.iter().rposition(|(n, _)| n == k) {
+      if let Some(i) = done.iter().rposition(|(n, _)| *n == k) {
         keep.push(i);
-        self.borrow_map.insert(k.clone(), done[i].1.clone());
+        self.borrow_map.insert(k, done[i].1.clone());
       }
     }
     keep.sort_unstable();
@@ -8492,10 +8623,22 @@ fn call_names(&self, e: &'tcx Expr<'tcx>, out: &mut Vec<String>) {
 /// kept by `x` (#337). `match_rhs` runs before the branches are
 /// visited for such an initializer (see `process_let_binding`), so
 /// `emit_call_result_borrows` can't mark them itself.
+/// A struct's reference fields keep theirs the same way (`let d = if c
+/// { mk(&s1) } else { .. };`, #1402).
 pub fn mark_branch_results_kept(&mut self, name: &str, init: &'tcx Expr<'tcx>) {
   let Some(tails) = branch_tails(init) else { return };
-  let Some(lenders) = self.borrow_map.get(name).map(|rd| rd.all_lenders()) else { return };
-  if !self.raps.get(name).is_some_and(|rd| rd.rap.is_ref()) {
+  let Some(rap) = self.raps.get(name).map(|rd| rd.rap.clone()) else { return };
+  let lenders: Vec<ResourceTy> = if rap.is_ref() {
+    let Some(rd) = self.borrow_map.get(name) else { return };
+    rd.all_lenders()
+  } else {
+    let mut v = Vec::new();
+    for part in self.ref_parts_of(&ResourceTy::Value(rap)) {
+      add_lenders(&mut v, &self.borrow_map[&part]);
+    }
+    v
+  };
+  if lenders.is_empty() {
     return;
   }
   for tail in tails {
@@ -9624,11 +9767,8 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     // their inner side-effects when visit_expr walked them earlier;
     // this arm is purely about pairing the branch result with `lhs`.
     ExprKind::If(_, if_block, else_block) => {
-      self.match_rhs_arm(lhs.clone(), &if_block, evt.clone());
-      match else_block {
-        Some(e) => self.match_rhs_arm(lhs, &e, evt),
-        None => {}
-      }
+      let bodies: Vec<&'tcx Expr<'tcx>> = std::iter::once(if_block).chain(else_block).collect();
+      self.match_rhs_arms(lhs, &bodies, evt);
     }
     // `let x = match scrutinee { … };` — same shape as If above.
     // Each arm's body becomes the value bound to `lhs` on the path
@@ -9704,9 +9844,8 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
         }
         return;
       }
-      for arm in arms.iter() {
-        self.match_rhs_arm(lhs.clone(), arm.body, evt.clone());
-      }
+      let bodies: Vec<&'tcx Expr<'tcx>> = arms.iter().map(|a| a.body).collect();
+      self.match_rhs_arms(lhs, &bodies, evt);
     }
     // `let r = loop { … break k; };`: `r` gets what `break` carries
     // out (#431). A `break` is visited with the loop body, which
