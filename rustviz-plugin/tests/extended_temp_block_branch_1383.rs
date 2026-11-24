@@ -2,8 +2,8 @@
 // an `if` / `else` branch or a `match` arm of a `let` initializer to the
 // end of the enclosing block, as it does for `let r = &String::from("x");`.
 // A block's gets a `(temporary)` column; one made in a branch is made on
-// that path only (a drop flag decides its drop), which isn't drawn: a
-// note says where it is dropped.
+// that path only (a drop flag decides its drop): its column starts in the
+// branch and may or may not exist after the join (#1397).
 fn e1(c: bool) {
     let s = String::from("s");
     let r = if c { &String::from("x") } else { &s };

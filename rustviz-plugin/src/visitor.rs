@@ -3971,7 +3971,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     names.dedup();
     #[expect(clippy::disallowed_methods, reason = "only tested for membership")]
     let deferred: HashSet<String> = self.uninit_locals.keys().chain(self.maybe_init_locals.iter())
-      .map(|id| binding_name(&self.tcx, *id)).collect();
+      .map(|id| self.deferred_name(*id)).collect();
     let outer = &self.in_scope[..len.min(self.in_scope.len())];
     names.retain(|n| {
       let root = n.split('.').next().unwrap_or("");
@@ -5165,6 +5165,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
 
       ExprKind::AddrOf(_, _, exp) => {
         self.visit_expr(exp);
+        // A temporary a `let` extends through a branch (#1397).
+        self.make_branch_temp(expr);
       }
 
       // Compound assignment `a op= b` (#260). It doesn't store `b` in
@@ -11750,6 +11752,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       return;
     }
+    // `let r = if c { &String::from("x") } else { &s };` (#1397).
+    let branch_temps = if is_skipped { Vec::new() } else { self.declare_branch_temps(init) };
     // `let x = Some(if c { a } else { b });` (#1225): a constructor
     // takes nothing itself (#768), so x is bound from each branch's
     // value in its branch, as for `let x = if …`.
@@ -11895,6 +11899,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if !is_skipped && !matches!(pat.kind, PatKind::Binding(..) | PatKind::Wild) {
         if let Some((r, pointee_ty)) = self.deref_place_target(init) {
           self.mark_copy_deref(pat, &r, pointee_ty, first_id);
+        }
+      }
+    }
+    // The temporaries its branches made go out of scope with the
+    // pattern's bindings, as #856's do.
+    let made: Vec<String> = branch_temps.into_iter().filter(|n| self.raps.contains_key(n)).collect();
+    if !made.is_empty() {
+      let mut names = Vec::new();
+      pat.each_binding(|_, hid, _, _| names.push(binding_name(&self.tcx, hid)));
+      for n in names {
+        if let Some(rd) = self.raps.get_mut(&n) {
+          rd.extended_temp.extend(made.iter().cloned());
         }
       }
     }
@@ -12192,6 +12208,75 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let mut out = Vec::new();
     self.walk_extending(init, &mut out);
     out
+  }
+
+  /// `let r = if c { &String::from("x") } else { &s };` (also `else
+  /// if`, a `match` arm, `Some(&..)` / `[&..]` / a struct field in a
+  /// branch, nested conditionals, #1397): Rust extends the temporary a
+  /// branch borrows to the end of the `let`'s block (since 1.79), but
+  /// only the path through that branch makes it, and a drop flag drops
+  /// it there. (A plain assignment `r = if ..`, a call's argument or a
+  /// `loop { break &.. }` doesn't extend it: E0716.) Each such
+  /// temporary is declared here, before `init` is visited, as a `let
+  /// tmp;` with no value yet would be (`uninit_locals`, keyed by the
+  /// temporary's expression, named in `branch_temp_names`): the branch
+  /// that makes it initializes it (`make_branch_temp`), and the
+  /// conditional's join leaves it maybe-initialized, as for a `let x;`
+  /// assigned in one branch (#244), with its drop-flag drop at the end
+  /// of the block.
+  fn declare_branch_temps(&mut self, init: &'tcx Expr<'tcx>) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut borrows = Vec::new();
+    self.branch_extended_temps(init, false, &mut borrows);
+    let (scope, inside_branch, frames_at) = (self.current_scope, self.inside_branch, self.exit_frames.len());
+    for b in borrows {
+      let ExprKind::AddrOf(_, borrow_mut, operand) = b.kind else { continue };
+      let Some(tmp) = extended_temp_operand(operand) else { continue };
+      if self.branch_temp_names.contains_key(&tmp.hir_id) {
+        continue;
+      }
+      self.temp_count += 1;
+      let name = temporary_label(self.temp_count);
+      self.branch_temp_names.insert(tmp.hir_id, name.clone());
+      names.push(name);
+      let annotation = BindingMode(rustc_hir::ByRef::No, borrow_mut);
+      self.uninit_locals.insert(tmp.hir_id, DeferredLet { annotation, scope, inside_branch, is_skipped: false, frames_at });
+    }
+    names
+  }
+
+  /// `&temp` (the `AddrOf` `addr`, its operand visited) in the branch
+  /// that makes a temporary `declare_branch_temps` declared: the
+  /// temporary gets its value here, in this branch, as a `let x;` local
+  /// does at its first assignment, and the `&` borrows its column
+  /// (`nested_ext_temps`). The `let`'s binding is paired with the
+  /// branch's value after the branch is visited (`arm_value_uses_local_in`).
+  fn make_branch_temp(&mut self, addr: &'tcx Expr<'tcx>) {
+    let ExprKind::AddrOf(_, _, place) = addr.kind else { return };
+    let Some(tmp) = extended_temp_operand(place) else { return };
+    let Some(name) = self.branch_temp_names.get(&tmp.hir_id).cloned() else { return };
+    let Some(decl) = self.uninit_locals.remove(&tmp.hir_id) else { return };
+    let tmp_ty = self.tcx.typeck(tmp.hir_id.owner).expr_ty(tmp);
+    let saved = (self.current_scope, self.inside_branch);
+    (self.current_scope, self.inside_branch) = (decl.scope, decl.inside_branch);
+    self.deferred_decl_at.insert(name.clone(), decl.frames_at);
+    self.define_lhs(name.clone(), bool_of_mut(decl.annotation.1), tmp, tmp_ty);
+    (self.current_scope, self.inside_branch) = saved;
+    let rap = self.raps.get(&name).unwrap().rap.to_owned();
+    let field_prefix = format!("{}.", name);
+    #[expect(clippy::disallowed_methods, reason = "inserted into a set; order is lost")]
+    let cols: Vec<u64> = self.raps.iter()
+      .filter(|(n, _)| **n == name || n.starts_with(&field_prefix))
+      .map(|(_, rd)| *rd.rap.hash()).collect();
+    self.branch_temp_cols.extend(cols);
+    let n_events = self.preprocessed_events.len();
+    self.match_rhs(ResourceTy::Value(rap.clone()), tmp, Evt::Move);
+    if self.preprocessed_events.len() == n_events {
+      self.add_ev(expr_to_line(tmp, &self.tcx), Evt::Bind, ResourceTy::Value(rap.clone()), ResourceTy::Anonymous, false);
+    }
+    // `&make_user().name`: the borrow is of the temporary's field column.
+    let col = self.temp_field_column(&rap, place, tmp).unwrap_or(rap);
+    self.nested_ext_temps.insert(addr.hir_id, col);
   }
 
   /// `bind_nested_extended_temps`'s walk over the extending expression `e`.
@@ -13447,7 +13532,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     uninit: &HashMap<HirId, DeferredLet>,
   ) -> HashSet<ResourceAccessPoint> {
     #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
-    let deferred: HashSet<String> = uninit.keys().map(|h| self.tcx.hir_name(*h).to_string()).collect();
+    let deferred: HashSet<String> = uninit.keys().map(|h| self.deferred_ident(*h)).collect();
     #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
     let declared = self.raps.values()
       .map(|rd| &rd.rap)
@@ -13939,7 +14024,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.maybe_init_by_loop.retain(|id| reaching.iter().all(|(_, s)| s.contains(id)));
     #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
     let cols = maybe.iter()
-      .filter_map(|id| self.raps.get(&binding_name(&self.tcx, *id)).map(|rd| rd.rap.clone()))
+      .filter_map(|id| self.raps.get(&self.deferred_name(*id)).map(|rd| rd.rap.clone()))
       .collect();
     self.maybe_init_locals = maybe;
     // A struct's field columns (`p.name`) got their values with it.
@@ -13950,7 +14035,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   fn deferred_cols(&self, ids: &HashSet<HirId>) -> HashSet<ResourceAccessPoint> {
     #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
     let cols = ids.iter()
-      .filter_map(|id| self.raps.get(&binding_name(&self.tcx, *id)).map(|rd| rd.rap.clone()))
+      .filter_map(|id| self.raps.get(&self.deferred_name(*id)).map(|rd| rd.rap.clone()))
       .collect();
     self.with_struct_members(&cols)
   }
@@ -14011,13 +14096,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // Newly maybe-initialized: no value before the loop.
     #[expect(clippy::disallowed_methods, reason = "sorted by name below")]
     let mut newly: Vec<HirId> = maybe.iter().filter(|id| uninit_before.contains_key(id)).copied().collect();
-    newly.sort_by_key(|id| binding_name(&self.tcx, *id));
+    newly.sort_by_key(|id| self.deferred_name(*id));
     self.uninit_locals = definite;
     self.maybe_init_locals = maybe;
     let line = span_end_line(&loop_expr.span, &self.tcx);
     for id in newly {
       self.maybe_init_by_loop.insert(id);
-      let Some(rd) = self.raps.get(&binding_name(&self.tcx, id)) else { continue };
+      let Some(rd) = self.raps.get(&self.deferred_name(id)) else { continue };
       let ro = rd.rap.clone();
       if self.skip_raps.contains(ro.name()) || ro.is_ref() {
         continue;
