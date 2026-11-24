@@ -6060,6 +6060,39 @@ fn along_piece(p: (f64, f64), a: (f64, f64), b: (f64, f64), tol: f64) -> Option<
     (off <= tol).then(|| (p.0 - a.0) * dx + (p.1 - a.1) * dy)
 }
 
+/// How long a stretch of the piece p–q has the piece r–s's centre line
+/// within 2.5 px (half a shaft's stroke) of its own, alongside r–s: the
+/// two strokes lie at least half on each other there. Two pieces on one
+/// track share their common stretch; two crossing at an angle share 5 px
+/// / sin(angle) or less (12 px at 25 degrees), so a slanted shaft rising
+/// across a level track at 5 degrees shares 40 px or more of it (#1468).
+/// (`shared_stretch` in `rustviz-lib/tests/common/geometry.rs`.)
+fn shared_stretch((p, q): Piece, (r, s): Piece) -> f64 {
+    const HALF: f64 = 2.5;
+    let (lp, lr) = (dist(p, q), dist(r, s));
+    if lp < 1.0 || lr < 1.0 {
+        return 0.0;
+    }
+    // A point p + t (q - p) / lp: its signed distance off r–s's line and
+    // its place along r–s are both linear in t.
+    let (dx, dy) = ((q.0 - p.0) / lp, (q.1 - p.1) / lp);
+    let (ex, ey) = ((s.0 - r.0) / lr, (s.1 - r.1) / lr);
+    let (wx, wy) = (p.0 - r.0, p.1 - r.1);
+    let off = (wx * ey - wy * ex, dx * ey - dy * ex);
+    let at = (wx * ex + wy * ey, dx * ex + dy * ey);
+    // The t where a + b t lies in lo..=hi.
+    let between = |(a, b): (f64, f64), lo: f64, hi: f64| -> (f64, f64) {
+        if b.abs() < 1e-12 {
+            return if a >= lo && a <= hi { (f64::NEG_INFINITY, f64::INFINITY) } else { (1.0, 0.0) };
+        }
+        let (t1, t2) = ((lo - a) / b, (hi - a) / b);
+        (t1.min(t2), t1.max(t2))
+    };
+    let (o1, o2) = between(off, -HALF, HALF);
+    let (a1, a2) = between(at, 0.0, lr);
+    (o2.min(a2).min(lp) - o1.max(a1).max(0.0)).max(0.0)
+}
+
 /// The marks that lie on others, the way the geometric checks
 /// (`rustviz-lib/tests/common/geometry.rs`, `arrows-overlap` and
 /// `heads-or-logos-overlap`) find them: pairs of indices into `drawn`,
@@ -6080,22 +6113,17 @@ fn marks_on_others(drawn: &[Drawn]) -> Vec<(usize, usize)> {
         let (a, b) = (boxes[i], boxes[j]);
         a.0 <= b.2 && b.0 <= a.2 && a.1 <= b.3 && b.1 <= a.3
     };
-    // Two arrows along one stretch (more than 12 px).
+    // Two arrows along one stretch (more than 12 px): on one track, or
+    // one slanting across the other's track at a shallow angle (#1468).
     for (n, &i) in arrows.iter().enumerate() {
         for &j in &arrows[n + 1..] {
             let (a, b) = (&drawn[i], &drawn[j]);
             if a.tip == b.tip || !meet(i, j) {
                 continue;
             }
-            let mut most: f64 = 0.0;
-            for &(p, q) in &a.pieces {
-                let l = dist(p, q);
-                for &(r, s) in &b.pieces {
-                    if let (Some(t1), Some(t2)) = (along_piece(r, p, q, 1.0), along_piece(s, p, q, 1.0)) {
-                        most = most.max(t1.max(t2).min(l) - t1.min(t2).max(0.0));
-                    }
-                }
-            }
+            let most = a.pieces.iter()
+                .flat_map(|&p| b.pieces.iter().map(move |&q| shared_stretch(p, q)))
+                .fold(0.0, f64::max);
             if most > 12.0 {
                 out.push((i, j));
             }
@@ -9682,6 +9710,29 @@ mod tests {
 
     fn leaves(n: usize) -> Vec<(usize, Event)> {
         branch((0..n).map(|_| arm(Vec::new())).collect())
+    }
+
+    /// #1468: a level return on the track half a row below its dots, and
+    /// a binding arrow rising across that track at under 5 degrees: their
+    /// strokes lie on each other for 47 px, a mark `untangle` redraws.
+    /// Crossing it at 30 degrees, they touch for 10 px: no mark.
+    #[test]
+    fn shafts_on_each_other_at_a_shallow_angle_are_marks() {
+        let arrow = |tip: &str, pts: &[(f64, f64)]| Drawn {
+            tip: tip.into(),
+            pieces: pts.windows(2).map(|w| (w[0], w[1])).collect(),
+            ..Default::default()
+        };
+        let ret = arrow("pair>a", &[(305.8, 218.15), (290.0, 230.0), (90.0, 230.0), (84.4, 225.8)]);
+        let slant = arrow("a>x", &[(100.23, 244.56), (432.06, 216.52)]);
+        let steep = arrow("a>x", &[(150.0, 260.0), (300.0, 173.4)]);
+        let shared = shared_stretch(ret.pieces[1], slant.pieces[0]);
+        assert!((shared - 47.0).abs() < 1.0, "{shared}");
+        assert_eq!(marks_on_others(&[ret.clone(), slant]), vec![(0, 1)]);
+        assert!(marks_on_others(&[ret.clone(), steep]).is_empty());
+        // On one track, the common stretch.
+        let along = arrow("b>c", &[(150.0, 230.0), (400.0, 230.0)]);
+        assert_eq!(shared_stretch(ret.pieces[1], along.pieces[0]), 140.0);
     }
 
     #[test]

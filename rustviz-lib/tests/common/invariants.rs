@@ -96,7 +96,8 @@ pub const INVARIANTS: &[(&str, &str)] = &[
     ("line-through-fork",
      "a column's segment runs through a fork or join dot and on past it, so it reads as one more arm"),
     ("arrows-overlap",
-     "two arrows with different tooltips run along the same stretch, so only the one on top can be hovered"),
+     "two arrows with different tooltips run along the same stretch (on one track, or one slanting across \
+      the other's at a shallow angle), so only the one on top can be hovered"),
     ("marks-on-one-spot",
      "two dots of one column, or two function logos, drawn on the same spot with different tooltips: \
       only one can be hovered"),
