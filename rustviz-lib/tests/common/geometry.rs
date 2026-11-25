@@ -412,6 +412,14 @@ pub fn check(g: &Geo) -> Vec<(&'static str, String)> {
         }
     }
 
+    // Two marks with one tooltip are one arrow (an arrow and its call's
+    // logo, a call's results to the caller), except two arrows between
+    // columns on different lines: the same return drawn on two rows of an
+    // arm's lines, along one track, reads as one arrow with two heads
+    // (#1559).
+    let on_columns = |a: &Arrow| a.var != a.to && g.headers.contains(&a.var) && g.headers.contains(&a.to);
+    let one_arrow = |a: &Arrow, b: &Arrow| a.tip == b.tip && (a.line == b.line || !on_columns(a) || !on_columns(b));
+
     // Two arrows along one stretch: the pointer reaches only the one drawn
     // on top (#1264, #1187). On one track, or one slanting across the
     // other's track at a shallow angle, their centre lines within half a
@@ -420,7 +428,7 @@ pub fn check(g: &Geo) -> Vec<(&'static str, String)> {
     // leaving one dot 6 degrees apart, for 19 px).
     for (i, a) in g.arrows.iter().enumerate() {
         for b in &g.arrows[i + 1..] {
-            if a.tip == b.tip {
+            if one_arrow(a, b) {
                 continue;
             }
             let mut most: f64 = 0.0;
@@ -512,7 +520,7 @@ pub fn check(g: &Geo) -> Vec<(&'static str, String)> {
             // returned share the stub right of its dot by design.
             let elbow = (a.var == "caller" && b.to == "caller" && a.to == b.var)
                 || (b.var == "caller" && a.to == "caller" && b.to == a.var);
-            if std::ptr::eq(a, b) || a.tip == b.tip || a.tri.len() < 3 || (elbow && a.line == b.line) {
+            if std::ptr::eq(a, b) || one_arrow(a, b) || a.tri.len() < 3 || (elbow && a.line == b.line) {
                 continue;
             }
             // b's shaft (2.5 px either side of its centre line) or head in a's head.
@@ -713,6 +721,22 @@ mod unit {
         // The outer arm's column, down to the inner fork, or past it.
         s.push_str(&arm("a", 10, (150.0, 115.0), (150.0, if stub { 145.0 } else { 130.0 })));
         s
+    }
+
+    #[test]
+    fn one_return_on_two_lines_along_one_track_is_caught() {
+        // #1559: the same return (one tooltip) drawn on two lines of an
+        // arm, both along the track between the rows, reads as one arrow
+        // with two heads. On one line, one tooltip is one arrow.
+        let ret = |line: u32, y: f64| format!(
+            "<g data-rv-id=\"r>s@L{line}\" data-rv-kind=\"arrow\" data-rv-var=\"r\" data-rv-to=\"s\" \
+             data-rv-line=\"{line}\" data-tooltip-text=\"Return from r to s\"><polyline class=\"arrow-shaft\" \
+             points=\"400 {y} 390 137 120 137 110 {y}\"/><polygon class=\"arrow-head\" points=\"0,0 1,1 2,2\"/></g>");
+        let cols = [header("r"), header("s")].concat();
+        // (The heads are stubs: only the shafts matter here.)
+        assert!(invs(&[cols.clone(), ret(1, 125.0), ret(2, 150.0)].concat()).contains(&"arrows-overlap"));
+        let same_line = ret(1, 150.0).replace("r>s@L1", "r>s@L1#2");
+        assert!(!invs(&[cols, ret(1, 125.0), same_line].concat()).contains(&"arrows-overlap"));
     }
 
     #[test]

@@ -13040,7 +13040,23 @@ fn nested_arm_ends(events: &mut [(usize, ExternalEvent)], borrow_map: &HashMap<S
         let (r, lender) = (r.clone(), lender.cloned());
         let ev = arm.e_data.remove(i);
         let made = borrow_map.get(r.name()).filter(|d| ends_current_loan(&ev.1, d)).map(|d| d.assigned_at);
-        end_borrow_in_arms(&mut arm.e_data, ev, &r, lender.as_ref(), made, false, unique_id, moved_into_result, holders);
+        // An end this arm's line map lists (stacked with other arrows on
+        // its line at the top level, `end_outer_borrows_in_arms`, before
+        // its reference was live in the nested conditional) is listed in
+        // the nested arm's instead, as it would have been had it gone
+        // there directly: the row the stack adds belongs to that arm
+        // (#1559: `h.r`'s and `r`'s ends on an `else if` arm's line, the
+        // second one given no row and drawn along the next line's).
+        let id = ev.1.get_id();
+        let listed = arm.line_map.get_mut(&ev.0).is_some_and(|evs| {
+          let n = evs.len();
+          evs.retain(|x| x.get_id() != id);
+          evs.len() < n
+        });
+        if arm.line_map.get(&ev.0).is_some_and(|evs| evs.is_empty()) {
+          arm.line_map.remove(&ev.0);
+        }
+        end_borrow_in_arms(&mut arm.e_data, ev, &r, lender.as_ref(), made, listed, unique_id, moved_into_result, holders);
       }
       nested_arm_ends(&mut arm.e_data, borrow_map, unique_id, moved_into_result, holders);
     }
