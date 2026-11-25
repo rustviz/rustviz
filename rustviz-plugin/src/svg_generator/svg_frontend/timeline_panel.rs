@@ -10239,7 +10239,13 @@ fn render_ref_line(
                                 bracket = Rv::new(rv_attrs::BRACKET).state(state).var(&resource_owners_layout[hash].name);
 
                                 let styled = styled_name_html(&visualization_data.get_name_from_hash(hash).unwrap());
-                                data.title = hover_messages::ref_line_holds_immutable_reference(&styled);
+                                // A `&mut` whose referent is shared for now
+                                // (resumed after a join) is still a mutable
+                                // reference (#1591).
+                                data.title = match ro {
+                                    ResourceAccessPoint::MutRef(_) => hover_messages::ref_line_holds_reference(&styled, true),
+                                    _ => hover_messages::ref_line_holds_immutable_reference(&styled),
+                                };
                                 data.line_class = String::from("solid");
                                 alive = true;
                             }
