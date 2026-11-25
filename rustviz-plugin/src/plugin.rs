@@ -272,16 +272,19 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
               continue;
             }
 
-            let from = pre_events.len();
+            // Each body's events in a Vec of their own: the passes after the
+            // visit (`emit_borrow_ends`) walk the whole Vec, and on the shared
+            // one they moved an earlier fn's events about (#1532).
+            let mut fn_events: Vec<(usize, ExternalEvent)> = Vec::new();
             let mut visitor = ExprVisitor::new(
               tcx, body, hir_body, bwf, fn_start_line,
-              &mut line_map2, &mut pre_events, rap_hash_num, &a_map,
+              &mut line_map2, &mut fn_events, rap_hash_num, &a_map,
               &mut a_line_map, &mut owner_to_hash, &mut ids, output, &skip_lines,
             );
             visitor.visit_body(hir_body);
             visitor.emit_borrow_ends();
             visitor.print_out_of_scope();
-            visitor.fill_scope_end_holds(from);
+            visitor.fill_scope_end_holds(0);
             visitor.collect_approx_notes(hir_body);
             approx_notes.append(&mut visitor.approx_notes);
             rap_hash_num = visitor.rap_hashes;
@@ -289,6 +292,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
             moves_out_first.append(&mut visitor.moves_out_first);
             merge_visitor_raps(&mut rap_map, visitor.raps, fn_start_line);
             collect_shadow_notes(&tcx, impl_item.owner_id, fn_start_line, &mut shadow_notes_by_fq);
+            pre_events.append(&mut fn_events);
           }
         }
       }
@@ -337,16 +341,19 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
           continue;
         }
 
-        let from = pre_events.len();
+        // Each body's events in a Vec of their own: the passes after the
+        // visit (`emit_borrow_ends`) walk the whole Vec, and on the shared
+        // one they moved an earlier fn's events about (#1532).
+        let mut fn_events: Vec<(usize, ExternalEvent)> = Vec::new();
         let mut visitor = ExprVisitor::new(
           tcx, body, hir_body, bwf, fn_start_line,
-          &mut line_map2, &mut pre_events, rap_hash_num, &a_map,
+          &mut line_map2, &mut fn_events, rap_hash_num, &a_map,
           &mut a_line_map, &mut owner_to_hash, &mut ids, output, &skip_lines,
         );
         visitor.visit_body(hir_body);
         visitor.emit_borrow_ends();
         visitor.print_out_of_scope();
-        visitor.fill_scope_end_holds(from);
+        visitor.fill_scope_end_holds(0);
         visitor.collect_approx_notes(hir_body);
         approx_notes.append(&mut visitor.approx_notes);
         rap_hash_num = visitor.rap_hashes;
@@ -354,6 +361,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
         moves_out_first.append(&mut visitor.moves_out_first);
         merge_visitor_raps(&mut rap_map, visitor.raps, fn_start_line);
         collect_shadow_notes(&tcx, item.owner_id, fn_start_line, &mut shadow_notes_by_fq);
+        pre_events.append(&mut fn_events);
       },
       _ => {}
     }

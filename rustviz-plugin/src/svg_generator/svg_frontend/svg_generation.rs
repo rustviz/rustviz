@@ -127,7 +127,8 @@ fn stacked_arrow_rows(evs: &[ExternalEvent], top_level: bool) -> usize {
 /// the borrow (#371). Without that, a match arm `Some(s) =>
 /// println!("{}", s),` on `&opt` drew `s`'s borrow ending on the
 /// first row, above the row where `println!` reads through `s`.
-fn split_same_line_borrow_ends(group: &[ExternalEvent]) -> (Vec<ExternalEvent>, Vec<ExternalEvent>) {
+/// `in_arm`: the group is an arm's line map.
+fn split_same_line_borrow_ends(group: &[ExternalEvent], in_arm: bool) -> (Vec<ExternalEvent>, Vec<ExternalEvent>) {
     let rap_hash = |r: &ResourceTy| r.extract_rap().map(|r| *r.hash());
     let ends = |e: &ExternalEvent| -> Option<(u64, u64)> {
         let (from, to) = ResourceAccessPoint_extract(e);
@@ -177,7 +178,12 @@ fn split_same_line_borrow_ends(group: &[ExternalEvent]) -> (Vec<ExternalEvent>, 
             .filter_map(|(e, _)| ends(e)).map(|(_, t)| t).collect();
         let mut changed = false;
         for (e, m) in group.iter().zip(moved.iter_mut()) {
-            if !*m && is_end(e) && ends(e).is_some_and(|(f, t)| f != t && lenders.contains(&f)) {
+            // (In an arm, also a reference parameter's end, its loan the
+            // caller's, `vr.push(r)` with vr holding a loan of s too,
+            // #1512; the top level holds it back, `deferred_ends`.)
+            let (from, to) = ResourceAccessPoint_extract(e);
+            let caller_end = in_arm && rap_hash(to).is_none();
+            if !*m && is_end(e) && rap_hash(from).is_some_and(|f| (caller_end || rap_hash(to).is_some_and(|t| t != f)) && lenders.contains(&f)) {
                 *m = true;
                 changed = true;
             }
@@ -1180,7 +1186,7 @@ pub fn mutate_branch_lines(
                         0
                     }
                     Some(ev) => { // if there are multiple arrow events on this line
-                        let (front, back) = split_same_line_borrow_ends(&ev);
+                        let (front, back) = split_same_line_borrow_ends(&ev, true);
                         let back_line = new_line_num + front.len();
                         // As in `place_external_events`: the end of a
                         // reference a conditional nested later on this line
@@ -1843,7 +1849,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                 // that gives the borrow back.
                 if let (true, Some(line_ev)) = (ref_param_ends, line_ev) {
                     if let Some(r) = ended_ref(&event).filter(|r| line_ev.iter().any(|o| !skippable_ev.contains(&o.get_id()) && returns_to(o, *r))) {
-                        let (front, back) = split_same_line_borrow_ends(line_ev);
+                        let (front, back) = split_same_line_borrow_ends(line_ev, false);
                         let row = if back.iter().any(|o| returns_to(o, r)) { final_line_num + front.len() } else { final_line_num };
                         deferred_ends.push((line_num, event.clone(), row));
                         i += 1;
@@ -1897,7 +1903,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                     0
                 }
                 Some(ev) => { // if there are multiple arrow events on this line
-                    let (front, back) = split_same_line_borrow_ends(&ev);
+                    let (front, back) = split_same_line_borrow_ends(&ev, false);
                     let back_row = final_line_num + front.len();
                     let rest_of_line: Vec<ExternalEvent> = visualization_data.preprocess_external_events[i + 1..]
                         .iter()

@@ -6050,7 +6050,12 @@ impl Visualizable for VisualizationData {
                 // without it the end's arrow had no dot on rap (#1418).
                 else {
                     fn ends_of(branches: &[ExtBranchData], rap: &ResourceAccessPoint, out: &mut Vec<(usize, ExternalEvent)>) {
-                        for b in branches {
+                        // (Not in an arm that declares rap, nor in the
+                        // conditionals nested there: rap's own column in
+                        // that arm draws them, `append_decl_branch_events`.
+                        // Collected here too, they were drawn a second
+                        // time, ahead of rap's declaration, #1522.)
+                        for b in branches.iter().filter(|b| !b.decl_vars.contains(rap)) {
                             for (l, e) in &b.e_data {
                                 match e {
                                     ExternalEvent::Branch { branches, .. } => ends_of(branches, rap, out),
