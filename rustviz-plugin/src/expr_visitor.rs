@@ -11497,13 +11497,19 @@ pub fn print_out_of_scope(&mut self){
       let path = match ev {
         ExternalEvent::StaticDie { from: ResourceTy::Value(r), to, .. }
         | ExternalEvent::MutableDie { from: ResourceTy::Value(r), to, .. }
-        | ExternalEvent::RefDie { from: ResourceTy::Value(r), to, .. } =>
-          to.extract_rap().and_then(|lender| arm_declaring(self.preprocessed_events, r, lender, *line, false)
-            .map(|path| (path, Some(lender.clone())))),
+        | ExternalEvent::RefDie { from: ResourceTy::Value(r), to, .. } => match to.extract_rap() {
+          Some(lender) => arm_declaring(self.preprocessed_events, r, Some(lender), *line, false)
+            .map(|path| (path, Some(lender.clone()))),
+          // A borrow from the caller (`let m2 = m;` in an arm, m a `&mut`
+          // parameter) has no lender column: it ends in the arm that
+          // declares its reference (#1502). Left at the top level, it was
+          // drawn on a row of a later arm, after the reference's scope end.
+          None => arm_declaring(self.preprocessed_events, r, None, *line, false).map(|path| (path, None)),
+        },
         // An or-pattern reference's (#734), with each place it may
         // borrow.
         ExternalEvent::OrAltBorrow { ro, into, end: true, .. } =>
-          arm_declaring(self.preprocessed_events, into, ro, *line, false).map(|path| (path, Some(ro.clone()))),
+          arm_declaring(self.preprocessed_events, into, Some(ro), *line, false).map(|path| (path, Some(ro.clone()))),
         _ => None,
       };
       match path {
@@ -12545,7 +12551,7 @@ pub fn print_out_of_scope(&mut self){
       let (Some(bd), Some(brap)) = (self.borrow_map.get(b), self.raps.get(b)) else { continue };
       let lenders = bd.all_lenders();
       let Some(lrap) = lenders.iter().filter_map(|l| l.extract_rap()).find(|l| l.name() == lender) else { continue };
-      let Some(path) = arm_declaring(self.preprocessed_events, &brap.rap, lrap, bd.lifetime, false) else { continue };
+      let Some(path) = arm_declaring(self.preprocessed_events, &brap.rap, Some(lrap), bd.lifetime, false) else { continue };
       let Some(ExternalEvent::Branch { live_vars, branches, .. }) = branch_on_path(self.preprocessed_events, &path) else { continue };
       let arm = &branches[path.last().map_or(0, |p| p.1)];
       #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "collected into a Vec and sorted below")]
@@ -13903,8 +13909,12 @@ pub(crate) fn end_borrow_in_arms(
   let made_in_arm = made.is_some_and(|m| *split_point < m && m <= ev.0 && m < *merge_point)
     || ev_lender.is_some_and(|l| branches.iter().any(|b| loan_made_in(&b.e_data, r, l, ev.0)));
   // The lender gets its value back in each arm, so it has a column in
-  // the conditional, and so does r, which ends its borrow there.
-  if let Some(l) = lender {
+  // the conditional, and so does r, which ends its borrow there. (Not a
+  // lender an arm declares, `Some(x2) => vr.push(x2.as_str())`: it exists
+  // only in that arm, which ends the borrow. Made live, it was drawn
+  // forking at the `match` before it existed, its events twice, and
+  // joining "still has no value", #1498.)
+  if let Some(l) = lender.filter(|l| !branches.iter().any(|b| b.decl_vars.contains(l))) {
     live_vars.insert(l.clone());
   }
   live_vars.insert(r.clone());
@@ -14381,7 +14391,8 @@ fn ownership_after(events: &[(usize, ExternalEvent)], rap_name: &str, start: Opt
 /// declared in that arm too): the path of (event index, arm index)
 /// pairs from `events` down through nested Branch events. Otherwise
 /// the lender is drawn on one column throughout the conditional, and
-/// its borrow's end stays where it is.
+/// its borrow's end stays where it is. With no `lender` (the caller's
+/// data, which has no column), the arm that declares `r`.
 ///
 /// Variables of the same name in different arms share a column, so
 /// several arms can declare `r` (`if let Some(x) = &a {..} else if let
@@ -14397,7 +14408,7 @@ fn ownership_after(events: &[(usize, ExternalEvent)], rap_name: &str, start: Opt
 fn arm_declaring(
   events: &[(usize, ExternalEvent)],
   r: &ResourceAccessPoint,
-  lender: &ResourceAccessPoint,
+  lender: Option<&ResourceAccessPoint>,
   line: usize,
   outer: bool,
 ) -> Option<Vec<(usize, usize)>> {
@@ -14410,7 +14421,7 @@ fn arm_declaring(
     order.sort_by_key(|&a| !holds_line(a));
     for a in order {
       let b = &branches[a];
-      let has_lender = outer || live_vars.contains(lender) || b.decl_vars.contains(lender);
+      let has_lender = outer || lender.is_none_or(|l| live_vars.contains(l) || b.decl_vars.contains(l));
       if let Some(mut path) = arm_declaring(&b.e_data, r, lender, line, has_lender) {
         path.insert(0, (k, a));
         return Some(path);

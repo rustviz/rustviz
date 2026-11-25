@@ -192,6 +192,23 @@ fn split_same_line_borrow_ends(group: &[ExternalEvent], in_arm: bool) -> (Vec<Ex
             break;
         }
     }
+    // An arrow out of a lender listed after the end that gives it back
+    // (`drop(arr)` in `let r = &arr; drop(arr);`, or a one-line arm
+    // `[x, ..] => drop(arr)` on `match &arr` whose x is never used, #1503)
+    // happens after the borrow is over: it goes below with the end. Drawn
+    // on the first row, it moved arr on the dot that lends it, and the
+    // borrow came back to it after the move.
+    if split {
+        for j in 0..group.len() {
+            if moved[j] || is_end(&group[j]) {
+                continue;
+            }
+            let Some(src) = rap_hash(ResourceAccessPoint_extract(&group[j]).0) else { continue };
+            if (0..j).any(|i| moved[i] && is_end(&group[i]) && ends(&group[i]).is_some_and(|(_, t)| t == src)) {
+                moved[j] = true;
+            }
+        }
+    }
     let mut front = Vec::new();
     let mut back = Vec::new();
     for (e, m) in group.iter().zip(moved) {
@@ -456,12 +473,19 @@ fn part_moves_with_whole(d: &ExternalEvent, e: &ExternalEvent) -> bool {
 /// other arrows (`if let Some(x) = v.first() { let c = || v.len(); }`).
 /// The binding goes on the row the capture's arrow ends on; on the row
 /// below the stack, with c's scope end, the arrow pointed at no dot of c
-/// and c's column started there in mid-air (#1420).
+/// and c's column started there in mid-air (#1420). Also a `move`
+/// closure's captures, moved or copied into it (`let f = move || s;`
+/// beside two pattern bindings' borrows, #1536).
 fn binds_borrower_of_line(e: &ExternalEvent, front: &[ExternalEvent]) -> bool {
     let ExternalEvent::Bind { to: ResourceTy::Value(t), .. } = e else { return false };
     front.iter().any(|o| o.get_id() > e.get_id()
-        && matches!(o, ExternalEvent::StaticBorrow { to: ResourceTy::Value(b), .. }
-            | ExternalEvent::MutableBorrow { to: ResourceTy::Value(b), .. } if b.hash() == t.hash()))
+        && match o {
+            ExternalEvent::StaticBorrow { to: ResourceTy::Value(b), .. }
+            | ExternalEvent::MutableBorrow { to: ResourceTy::Value(b), .. } => b.hash() == t.hash(),
+            ExternalEvent::Move { to: ResourceTy::Value(b), .. }
+            | ExternalEvent::Copy { to: ResourceTy::Value(b), .. } => b.hash() == t.hash() && t.is_closure(),
+            _ => false,
+        })
 }
 
 /// Whether `e`, an event of a line that draws no arrow, binds a variable
@@ -1968,7 +1992,13 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                             continue;
                         }
                         // append all the events in the line map on the same line
-                        if ends_after_line_uses(e, &ev, &rest_of_line) {
+                        // (An arrow out of a lender that the split put below
+                        // an end giving it back, which is held back, follows
+                        // it: the borrow is over before it, #1503.)
+                        let after_held_end = row == back_row && ended_ref(e).is_none()
+                            && ResourceAccessPoint_extract(e).0.extract_rap().is_some_and(|src| deferred_ends.iter()
+                                .any(|(l, d, w)| *l == line_num && *w == row && ResourceAccessPoint_extract(d).1.extract_rap().is_some_and(|t| t.hash() == src.hash())));
+                        if after_held_end || ends_after_line_uses(e, &ev, &rest_of_line) {
                             deferred_ends.push((line_num, e.clone(), row));
                         } else {
                             visualization_data.append_processed_external_event(e.clone(), row);

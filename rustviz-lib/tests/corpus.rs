@@ -27040,6 +27040,43 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &["c2 isn't moved in any of the branches above"],
         must_not_contain: &[],
     },
+    TooltipExpect {
+        name: "arm_local_lender_outer_holder_1498",
+        // A pattern binding or arm `let` lent to a holder declared outside
+        // the conditional exists only in its arm: no fork, no join, its
+        // events once (#1498).
+        must_contain: &[
+            "x2 goes out of scope. Its resource is dropped.",
+            "s4 goes out of scope. Its resource is dropped.",
+            "x2's resource is immutably borrowed by vr; x2 is read-only while the borrow is live",
+            "s4's resource is immutably borrowed by vr; s4 is read-only while the borrow is live",
+        ],
+        must_not_contain: &[
+            "x2 still has no value here",
+            "s4 still has no value here",
+            "x2 is live in a conditional expression",
+            "s4 is live in a conditional expression",
+            "x2 has no value yet",
+            "s4 has no value yet",
+        ],
+    },
+    TooltipExpect {
+        name: "one_line_move_closure_bindings_1536",
+        // A `move` closure on a one-line arm with two pattern bindings is
+        // bound on the row its capture arrow ends on, its own dot, not on
+        // the row below with its scope end (#1536). (Main's one dot for both,
+        // "Closure f is bound" / "f goes out of scope", was where the arrow
+        // didn't end; `corpus_invariants_hold` pins the arrow's end.)
+        must_contain: &[
+            "Closure f captures: s (moved)",
+            "Closure c captures: s (moved)",
+            "Closure f captures: n (copied)",
+        ],
+        must_not_contain: &[
+            "=Closure f is bound",
+            "=Closure c is bound",
+        ],
+    },
 ];
 
 /// #1440: on the line where two loans of v end, the first end's dot (with

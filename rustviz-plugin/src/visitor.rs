@@ -8584,6 +8584,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // The ends of a new reference's borrows a guard made (#603), put
       // among the arm's events after its body.
       let mut fail_ends: Vec<(usize, ExternalEvent)> = Vec::new();
+      let pat_id_lo = *self.unique_id;
       for (fail, path) in failed_guards.clone() {
         let (evs, ends) = self.chain_fail_events(fail, path, Some(arm.span), expr.span, pat_line);
         for ev in evs {
@@ -8752,7 +8753,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         all_pat_decls = &all_pat_decls | &arm_scoped;
       }
 
-      self.match_arm_borrow_ends(cx, arm, or_end_events, callback_events, &mut branch_e_data);
+      self.match_arm_borrow_ends(cx, arm, or_end_events, (callback_events, pat_id_lo..body_lo), &mut branch_e_data);
       for (line, ev) in fail_ends {
         if inline {
           self.add_external_event(line, ev);
@@ -9110,7 +9111,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
   /// The end of the borrows an arm's pattern takes: an or-pattern's
   /// references (#565) and the bindings that borrow from the scrutinee.
-  fn match_arm_borrow_ends(&mut self, cx: MatchArmCtx<'_, 'tcx>, arm: &'tcx rustc_hir::Arm<'tcx>, or_end_events: Vec<(usize, ExternalEvent)>, callback_events: Vec<(ResourceTy, ResourceTy, Evt)>, branch_e_data: &mut Vec<(usize, ExternalEvent)>) {
+  /// `pat_ids`: the ids of the events the arm's pattern and guard made.
+  fn match_arm_borrow_ends(&mut self, cx: MatchArmCtx<'_, 'tcx>, arm: &'tcx rustc_hir::Arm<'tcx>, or_end_events: Vec<(usize, ExternalEvent)>, (callback_events, pat_ids): (Vec<(ResourceTy, ResourceTy, Evt)>, std::ops::Range<usize>), branch_e_data: &mut Vec<(usize, ExternalEvent)>) {
     let MatchArmCtx { pat_line, end, inline, .. } = cx;
     // The end of an or-pattern reference's possible borrows
     // (#565), where the borrow checker ends them: at the
@@ -9139,6 +9141,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let value_uses_binding = branch_value_expr(arm.body).is_some_and(|v|
       self.tcx.typeck(v.hir_id.owner).expr_ty_opt(v).is_some_and(|t| t.is_ref())
         && self.mentions_local_declared_in(v, arm.pat.span));
+    // The early ends placed so far: the next one follows them, so they
+    // keep the pattern's order.
+    let mut early: Vec<usize> = Vec::new();
     for (to, from, e) in callback_events {
       let name = from.real_name();
       // A part of a whole the scrutinee borrows (`match &mut t { (a, b)
@@ -9177,10 +9182,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         continue;
       }
       self.borrow_map.remove(&name);
-      let ends_at = region_end
-        .or_else(|| self.last_live_line(&name, (pat_line, end)))
+      // A binding the arm never uses (`Some(x) => drop(o)` on `match
+      // &o`) is live nowhere: rustc's borrow through it ends where the
+      // pattern binds it, which is why the arm may move `o` (#1503). Its
+      // end goes right after the pattern's events, before the body's on
+      // a one-line arm. (A name MIR doesn't know keeps the arm's end, as
+      // does a value holding the borrow, `z => {}` binding a tuple with a
+      // `&mut` in it: its column goes on to its drop.)
+      let live_end = region_end.or_else(|| self.last_live_line(&name, (pat_line, end)));
+      let unused = live_end.is_none() && from.extract_rap().is_some_and(|r| r.is_ref()) && self.is_body_local(&name);
+      let ends_at = live_end
         .filter(|l| (pat_line..=end).contains(l))
-        .unwrap_or(end);
+        .unwrap_or(if unused { pat_end } else { end });
       // When the scrutinee is itself a reference (`match o`,
       // `o: &Option<String>`), the binding reborrows through
       // it, so `o`'s borrow lasts at least until here (#372).
@@ -9192,12 +9205,32 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let id = *self.unique_id;
         *self.unique_id += 1;
         let ext_ev = self.ext_ev_of_evt(e.clone(), to, from.clone(), id, false);
+        // An unused binding's end follows the pattern's (and guard's)
+        // events, before the body's on the same line.
+        let placed = |i: usize| pat_ids.contains(&i) || early.contains(&i);
+        let after_pat = |evs: &[(usize, ExternalEvent)]| evs.iter().rposition(|(l, e)| *l == ends_at && placed(e.get_id())).map(|i| i + 1);
         if inline {
           self.add_external_event(ends_at, ext_ev);
+          let at = if unused { after_pat(self.preprocessed_events) } else { None };
+          if let Some(at) = at.filter(|_| self.preprocessed_events.last().is_some_and(|(_, e)| e.get_id() == id)) {
+            let ev = self.preprocessed_events.pop().expect("just added");
+            self.preprocessed_events.insert(at, ev);
+            // And among the arrows stacked on its line.
+            if let Some(evs) = self.event_line_map.get_mut(&ends_at) {
+              if let (Some(k), Some(lo)) = (evs.iter().position(|e| e.get_id() == id), evs.iter().rposition(|e| placed(e.get_id()))) {
+                let e = evs.remove(k);
+                evs.insert((lo + 1).min(evs.len()), e);
+              }
+            }
+          }
         } else {
           // After the arm's events up to that line.
-          let at = branch_e_data.iter().rposition(|(l, _)| *l <= ends_at).map_or(0, |i| i + 1);
+          let at = if unused { after_pat(branch_e_data) } else { None }
+            .unwrap_or_else(|| branch_e_data.iter().rposition(|(l, _)| *l <= ends_at).map_or(0, |i| i + 1));
           branch_e_data.insert(at, (ends_at, ext_ev));
+        }
+        if unused {
+          early.push(id);
         }
       }
     }
