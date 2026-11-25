@@ -26962,6 +26962,84 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "r's value is copied",
         ],
     },
+    // #1513: a reference whose borrow lasts to a reborrow's (or a copy's)
+    // last use in one arm ends in each arm; its join says so. Main drew
+    // its end on its column between the arms' legs, and the join said
+    // it wasn't moved, as for a column the arms don't touch.
+    TooltipExpect {
+        name: "reborrow_last_used_in_one_arm_1513",
+        must_contain: &[
+            "m2 no longer borrows the resource m points to",
+            "m's borrow ended in each branch above",
+            "r's borrow ended in each branch above",
+            "a's borrow ended in each branch above",
+        ],
+        must_not_contain: &[
+            "=m isn't moved in any of the branches above",
+            "=r isn't moved in any of the branches above",
+            "=a isn't moved in any of the branches above",
+        ],
+    },
+    // #1513: a match arm's reference binding last used in one arm of a
+    // conditional nested in the arm.
+    TooltipExpect {
+        name: "match_binding_end_in_nested_arm_1513",
+        must_contain: &[
+            "x's borrow ended in each branch above",
+            "h.r's borrow ended in each branch above",
+            "m's borrow ended in each branch above",
+        ],
+        must_not_contain: &[
+            "=x isn't moved in any of the branches above",
+            "=m isn't moved in any of the branches above",
+        ],
+    },
+    // #1522: a local declared in a nested arm (an `else if` arm, the
+    // `else` after it) and borrowed in a conditional nested there. Main
+    // drew it as if it existed before the outer `if` (no lines, a second
+    // "no longer borrowed" on its column, State::Invalid), and said the
+    // arm-local struct / String dropped nothing.
+    TooltipExpect {
+        name: "nested_arm_local_borrowed_1522",
+        must_contain: &[
+            "p goes out of scope. Its resource is dropped.",
+            "p.b goes out of scope. Its resource is dropped.",
+            "s4 goes out of scope. Its resource is dropped.",
+            "v is the owner of the resource",
+            "s5 is the owner of the resource",
+        ],
+        must_not_contain: &[
+            "p.b was moved out earlier",
+            "=p.b goes out of scope. No resource is dropped.",
+            "=s4 goes out of scope. No resource is dropped.",
+        ],
+    },
+    // #1520: m (`&mut a`) used in both outer arms; on the inner path that
+    // reads a, m's loan is over as that arm starts (the join says so).
+    TooltipExpect {
+        name: "nested_arm_reads_lender_1520",
+        must_contain: &["m's borrow ended in each branch above"],
+        must_not_contain: &["=m isn't moved in any of the branches above"],
+    },
+    // #1525: a borrow last used in an `if` condition, in a fn with an
+    // early exit: the lender owns its String in both arms, and a
+    // `return` in one drops it.
+    TooltipExpect {
+        name: "borrow_ends_at_condition_exit_1525",
+        must_contain: &["s goes out of scope. Its resource is dropped."],
+        must_not_contain: &[
+            "=s goes out of scope. No resource is dropped.",
+            "=s's resource is mutably borrowed; s can't be used until the borrow ends",
+        ],
+    },
+    // #1528: the closure's loan of s ends on each path of the nested
+    // `if` (as its arm starts on the path that assigns s), so c2 is
+    // drawn in the nested conditional.
+    TooltipExpect {
+        name: "closure_in_arm_nested_if_1528",
+        must_contain: &["c2 isn't moved in any of the branches above"],
+        must_not_contain: &[],
+    },
 ];
 
 /// #1440: on the line where two loans of v end, the first end's dot (with
@@ -36936,6 +37014,44 @@ fn ref_arm_copy_before_scope_end() {
             assert!(matches!((copied, gone), (Some(c), Some(g)) if c < g), "{}: {}'s dots on line {}: {:?}", snippet, v, line, ids);
         }
     }
+}
+
+/// Some dot of `name`'s timeline lists `want` in this order, as
+/// consecutive lines.
+fn assert_dot_lines_in_order(name: &str, want: &[&str]) {
+    let rv = run_with_local_backend(name);
+    let dots = tooltip_lines(&rv.timeline_panel_string());
+    assert!(dots.iter().any(|d| d.windows(want.len()).any(|w| w.iter().zip(want).all(|(a, b)| a == b))),
+        "{name}: no dot lists {want:#?}; dots: {dots:#?}");
+}
+
+/// Borrow ends moved into an arm keep the borrow checker's order: a
+/// reference's reborrows give it back before its own borrow ends (#1513,
+/// #1512), and a reborrow not used on the path into an arm ends before
+/// that arm moves the reference (#1537).
+#[test]
+fn arm_borrow_ends_in_order_1512_1513_1537() {
+    assert_dot_lines_in_order("match_binding_end_in_nested_arm_1513", &[
+        "h.r no longer borrows the resource m points to",
+        "r no longer borrows the resource m points to",
+        "m's mutable borrow ends",
+    ]);
+    assert_dot_lines_in_order("param_pushed_into_vec_in_arm_1512", &[
+        "vr no longer borrows the resource r points to",
+        "r's immutable borrow ends",
+    ]);
+    for name in ["move_in_diverging_arm_reborrow_1537", "let_move_in_diverging_arm_reborrow_1537"] {
+        assert_dot_lines_in_order(name, &[
+            "r no longer borrows the resource m points to",
+            "m's mutable reference is moved (not the resource it points to)",
+            "m's mutable borrow ends",
+        ]);
+    }
+    assert_dot_lines_in_order("let_else_move_reborrowed_param_1537", &[
+        "r2 no longer borrows the resource m points to",
+        "m's mutable reference is moved (not the resource it points to)",
+        "m's mutable borrow ends",
+    ]);
 }
 
 /// #1529, #1516: a loan ends before the use of its lender that it can't
