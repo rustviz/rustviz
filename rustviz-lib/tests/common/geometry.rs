@@ -559,17 +559,24 @@ pub fn check(g: &Geo) -> Vec<(&'static str, String)> {
     // leg's centre line within 1 px of the triangle for more than
     // `HEAD_ON_LEG_PX` (a leg merely ending at the dot the head points at,
     // or crossing the head, is covered for a few px at most). A shaft:
-    // see below. (Not a
-    // vertical stretch of a column: a head coming up into a dot from a
-    // track below lies on the column under the dot, as it does on main in
-    // 100-odd snippets, #1488.)
+    // see below. A head also lying along a column's vertical stretch
+    // (#1488: a copy dipping two rows came back up into its target's
+    // first dot at about 70 degrees, its head over the column under the
+    // dot); a shaft there is other checks' business.
     for a in &g.arrows {
-        for s in g.segs.iter().filter(|s| (s.a.0 - s.b.0).abs() > TOL) {
+        for s in &g.segs {
             let covered = if a.tri.len() == 3 {
                 samples(&[(s.a, s.b)]).into_iter().filter(|&p| inside(&a.tri, p) > -1.0).count()
             } else {
                 0
             };
+            // A column's vertical stretch: its head only (#1488).
+            if (s.a.0 - s.b.0).abs() <= TOL {
+                if covered as f64 > HEAD_ON_LEG_PX {
+                    out.push(("arrow-along-leg", format!("head of {} lies along {} for {} px", a.id, s.id, covered)));
+                }
+                continue;
+            }
             // A shaft: centre lines within half a stroke for more than
             // `OVERLAP_PX`, as two arrows'; or, leaving (or reaching) the
             // dot the leg ends at less than 30 degrees off it, the 5 px
@@ -853,6 +860,22 @@ mod unit {
         // Nor a call's short arrow on to its logo (`opt>s` then `s>show`).
         let call = arrow("r>show", "r", "show", "294.75 335 270 335", "270,329 257.25,335 270,341");
         assert_eq!(invs(&[cols, a_r, call].concat()), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn a_head_along_a_column_is_caught() {
+        // `let z = *c;` (basic_deref2, #1488): the copy dips two rows and
+        // comes back up into z's first dot.
+        let cols = [header("c"), header("z"), dot("c", 250.0, 185.0, "copy"), dot("z", 320.0, 185.0, "copy"),
+                    dot("z", 320.0, 275.0, "owner_go_out_of_scope"), line("z", 320.0, 185.0, 275.0)].concat();
+        // At 72 degrees its head lies along z's column for 10 px.
+        let steep = arrow("c>z", "c", "z", "251.66 189.98 270 245 300 245 314.31 202.08",
+                          "308.62,200.18 318.34,189.98 320,203.97");
+        assert_eq!(invs(&[cols.clone(), steep].concat()), vec!["arrow-along-leg"]);
+        // At 56 degrees (its last leg 40 px long), clear of it.
+        let clear = arrow("c>z", "c", "z", "251.66 189.98 270 245 280 245 310.02 199.98",
+                          "305.02,196.65 317.09,189.37 315.01,203.31");
+        assert_eq!(invs(&[cols, clear].concat()), Vec::<&str>::new());
     }
 
     #[test]
