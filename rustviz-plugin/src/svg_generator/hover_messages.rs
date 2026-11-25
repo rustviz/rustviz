@@ -4940,12 +4940,20 @@ pub fn event_dot_branch_merge_maybe_init_unchanged(my_name: &String, temp: bool)
 // branch inside moved before a `break` out of the loop. `definite`:
 // every way out of the loop is such a `break`.
 // `labeled_block`: the same at the end of a labeled block (`'a: { …
-// break 'a; … }`).
-pub fn event_dot_loop_exit_move(my_name: &String, definite: bool, labeled_block: bool) -> String {
+// break 'a; … }`). `carried`: a `break` before the move moves it itself
+// (`break s`, #1504).
+pub fn event_dot_loop_exit_move(my_name: &String, definite: bool, labeled_block: bool, carried: bool) -> String {
     let name = styled_name_html(my_name);
     let brk = styled_name_html(&"break".to_owned());
     let what = if labeled_block { "block" } else { "loop" };
-    if definite && labeled_block {
+    if definite && carried {
+        let end = if labeled_block { format!(", and its end comes after {} is moved", name) } else { String::new() };
+        format!(
+            "{0} is moved by the time the {2} ends: each {1} out of it either comes after {0} is moved or moves {0} itself{3}, \
+             so {0} can't be used after the {2}",
+            name, brk, what, end
+        )
+    } else if definite && labeled_block {
         // A labeled block also ends by reaching its end (#1286).
         format!(
             "{0} was moved before the block ended: every {1} out of the block comes after {0} is moved, \

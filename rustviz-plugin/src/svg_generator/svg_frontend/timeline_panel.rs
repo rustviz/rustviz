@@ -3357,7 +3357,7 @@ fn chain_move_lasts(mut lasts: bool, events: &[(usize, Event)]) -> bool {
         match e {
             Event::LoopExitMove { at: MaybeMovedAt::ChainFail { .. } | MaybeMovedAt::WhileCondFail { .. }
                 | MaybeMovedAt::Loop { nothing_above: true, .. } | MaybeMovedAt::LoopHead | MaybeMovedAt::LoopRound { .. }
-                | MaybeMovedAt::LabeledBlock { skipped: true }, .. } => lasts = true,
+                | MaybeMovedAt::LabeledBlock { skipped: true, .. }, .. } => lasts = true,
             e if gives_new_value(e) => lasts = false,
             Event::Branch { branch_history, .. } => {
                 lasts = branch_history.iter().any(|b| chain_move_lasts(lasts, &b.e_data));
