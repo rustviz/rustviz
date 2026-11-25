@@ -107,6 +107,19 @@ fn split_same_line_borrow_ends(group: &[ExternalEvent]) -> (Vec<ExternalEvent>, 
         .filter_map(|e| ends(e))
         .collect();
     let is_end = |e: &ExternalEvent| matches!(e, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. });
+    // An end that comes before a later borrow of the same lender on the
+    // line that its loan can't overlap (`let a = &mut s; let b = &mut s;`,
+    // `let r = &s; let m = &mut s;`: `ends_before_lender_use` ordered it
+    // so) stays between the two, in the first rows. Moved below the
+    // stack, s was borrowed by both at once (#1529).
+    let before_conflicting_borrow = |k: usize| {
+        let e = &group[k];
+        let Some((h, l)) = ends(e).filter(|_| is_end(e)) else { return false };
+        let mutable = matches!(e, ExternalEvent::MutableDie { .. });
+        group[k + 1..].iter().any(|b| matches!(b, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. })
+            && (mutable || matches!(b, ExternalEvent::MutableBorrow { .. }))
+            && ends(b).is_some_and(|(bf, bt)| bf == l && bt != h))
+    };
     let ends_a_borrow_here = |e: &ExternalEvent| is_end(e) && ends(e).map_or(false, |(f, t)| {
         f != t && borrows.iter().any(|&(bf, bt)| (bf, bt) == (f, t) || (bf, bt) == (t, f))
     });
@@ -121,7 +134,9 @@ fn split_same_line_borrow_ends(group: &[ExternalEvent]) -> (Vec<ExternalEvent>, 
         .collect();
     let ends_a_received_borrow = |e: &ExternalEvent| split && is_end(e)
         && ends(e).is_some_and(|(f, t)| f != t && received.contains(&f));
-    let mut moved: Vec<bool> = group.iter().map(|e| ends_a_borrow_here(e) || ends_a_received_borrow(e)).collect();
+    let mut moved: Vec<bool> = group.iter().enumerate()
+        .map(|(k, e)| (ends_a_borrow_here(e) || ends_a_received_borrow(e)) && !before_conflicting_borrow(k))
+        .collect();
     // The end of a reference that one of those ends gives its loan back
     // to (`let m2 = &mut *m; let r2 = &*m2;`, both ending on that line):
     // it comes after r2's end, on the same row, not on the line's first
@@ -162,13 +177,22 @@ fn note_still_borrowed_below(front: &mut [ExternalEvent], back: &[ExternalEvent]
         ExternalEvent::MutableDie { from: ResourceTy::Value(r), to: ResourceTy::Value(l), .. } => Some((true, r.clone(), *l.hash())),
         _ => None,
     };
-    for e in front.iter_mut() {
-        let Some((mutable, r, lender)) = end_of(e) else { continue };
+    // (Not a holder whose borrow of the lender the first rows draw after
+    // the end: `let r = &s; let m = &mut s;` on one line gives r's loan
+    // back before m borrows s, #1529.)
+    let borrows_after = |later: &[ExternalEvent], o: &ResourceAccessPoint, lender: u64| later.iter().any(|b| matches!(b,
+        ExternalEvent::StaticBorrow { from: ResourceTy::Value(l), to: ResourceTy::Value(t), .. }
+        | ExternalEvent::MutableBorrow { from: ResourceTy::Value(l), to: ResourceTy::Value(t), .. }
+            if *l.hash() == lender && t.hash() == o.hash()));
+    for k in 0..front.len() {
+        let Some((mutable, r, lender)) = end_of(&front[k]) else { continue };
+        let later = &front[k + 1..];
         let holders: Vec<String> = back.iter()
             .filter_map(end_of)
-            .filter(|(m, o, l)| *m == mutable && *l == lender && o.hash() != r.hash())
+            .filter(|(m, o, l)| *m == mutable && *l == lender && o.hash() != r.hash() && !borrows_after(later, o, lender))
             .map(|(_, o, _)| o.name().to_owned())
             .collect();
+        let e = &mut front[k];
         if let ExternalEvent::StaticDie { still_borrowed_by, .. } | ExternalEvent::MutableDie { still_borrowed_by, .. } = e {
             for name in holders {
                 if !still_borrowed_by.contains(&name) {
@@ -221,11 +245,31 @@ fn uses_ref_ended_in_front(o: &ExternalEvent, front: &[ExternalEvent], back: &[E
 /// items: vec![w.as_str()] };` ends s2.items's borrow of v, then gives
 /// it w's) is its new borrow, not a use of the one that ends: the end
 /// stays first (#1097).
+///
+/// Nor is the borrow that gave the reference this loan, ahead of the end
+/// among the line's arrows (`let r = &s; let m = &mut s;` on one line):
+/// it is appended before the end anyway, and deferred, the end came
+/// after m's borrow of s, which it must precede (#1529).
 fn ends_after_line_uses(e: &ExternalEvent, group: &[ExternalEvent], rest: &[ExternalEvent]) -> bool {
     let Some(r) = ended_ref(e) else { return false };
-    group.iter().chain(rest)
+    let at = group.iter().position(|o| o.get_id() == e.get_id());
+    let own_borrow = |k: usize, o: &ExternalEvent| at.is_some_and(|at| k < at)
+        && matches!(o, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. })
+        && ResourceAccessPoint_extract(o).1.extract_rap().is_some_and(|t| *t.hash() == r);
+    group.iter().enumerate().filter(|(k, o)| !own_borrow(*k, o)).map(|(_, o)| o).chain(rest)
         .filter(|o| o.get_id() != e.get_id() && !new_borrow_into(o, r, e.get_id()))
         .any(|o| uses_rap(o, r))
+}
+
+/// Whether `p` is a call lending (`PassByStaticReference` /
+/// `PassByMutableReference`) the variable that the borrow `b` borrows
+/// from, recorded before it: the call whose result b's reference gets.
+fn lends_for_borrow(p: &ExternalEvent, b: &ExternalEvent) -> bool {
+    let (ExternalEvent::StaticBorrow { from: ResourceTy::Value(l), .. } | ExternalEvent::MutableBorrow { from: ResourceTy::Value(l), .. }) = b else { return false };
+    matches!(p, ExternalEvent::PassByStaticReference { from: ResourceTy::Value(f), to: ResourceTy::Value(t), .. }
+        | ExternalEvent::PassByMutableReference { from: ResourceTy::Value(f), to: ResourceTy::Value(t), .. }
+        if f.hash() == l.hash() && t.is_fn())
+        && p.get_id() < b.get_id()
 }
 
 /// Whether `o` is a borrow into the column `r` recorded after the event
@@ -1845,6 +1889,23 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                     }
                     for (e, row) in front.iter().map(|e| (e, final_line_num))
                         .chain(back.iter().map(|e| (e, back_row))) {
+                        // The call whose result a borrow of the stack's
+                        // first rows comes from (`let m2 =
+                        // v.last_mut().unwrap();` after `if let Some(x2) =
+                        // v.get(0) {` on one line) lends the lender first,
+                        // on the borrow's row. Left in the line's sequence,
+                        // it was appended on the row below the stack, after
+                        // m2's borrow had ended (#1529).
+                        if row == final_line_num && !back.is_empty() {
+                            let pos = |id: usize| visualization_data.preprocess_external_events.iter().position(|(_, x)| x.get_id() == id);
+                            let at = pos(e.get_id());
+                            let lends: Vec<&ExternalEvent> = rest_of_line.iter().filter(|p| lends_for_borrow(p, e) && pos(p.get_id()) < at).collect();
+                            for p in lends {
+                                if skippable_ev.insert(p.get_id()) {
+                                    visualization_data.append_processed_external_event(p.clone(), row);
+                                }
+                            }
+                        }
                         // A reference this arrow gives a new value, whose
                         // old borrow ends on this line (`r2` in `(r1, r2)
                         // = (r2, r1);`, #751): the end comes before the

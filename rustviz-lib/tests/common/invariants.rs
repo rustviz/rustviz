@@ -524,12 +524,38 @@ pub fn check(fig: &Fig, src: &str) -> Vec<(&'static str, String)> {
                 && fig.arrows.iter().any(|re| re.var == lend.to && re.to == d.var && re.line <= d.line
                     && matches!(re.event.as_str(), "static_borrow" | "mutable_borrow"))))
     };
+    // A reference re-pointed by a copy of another one (`r = r2;`) holds
+    // that one's loan from then on, of its kind (#1521): the kinds of the
+    // borrows the source's column last drew, at or before the copy.
+    let last_borrow_kinds = |var: &str, line: u32| -> BTreeSet<&'static str> {
+        let mut ds: Vec<&Dot> = fig.dots.iter().filter(|d| d.var == var && d.line <= line).collect();
+        ds.sort_by(|a, b| a.y.total_cmp(&b.y));
+        ds.iter().rev()
+            .find(|d| d.has_any(&["static_borrow", "mutable_borrow"]))
+            .map(|d| d.events.iter().filter_map(|e| match e.as_str() {
+                "static_borrow" => Some("static"),
+                "mutable_borrow" => Some("mutable"),
+                _ => None,
+            }).collect())
+            .unwrap_or_default()
+    };
     for ds in dots_of.values() {
         let (mut borrows, mut lends) = (BTreeSet::new(), BTreeSet::new());
         for d in ds {
             for e in &d.events {
                 let kind = e.split('_').next().unwrap_or("");
                 match e.as_str() {
+                    // (Only a copy of another column's reference into the
+                    // reference itself: a call's result copied in keeps the
+                    // borrow its own arrow drew, and `*r = y` writes through r.)
+                    "copy" if fig.ref_hashes.contains(&d.hash) => {
+                        let from: Vec<&Arrow> = fig.arrows.iter()
+                            .filter(|a| repoints(a, &d.var, &fig.header_vars) && a.line == d.line)
+                            .collect();
+                        if !from.is_empty() {
+                            borrows = from.iter().flat_map(|a| last_borrow_kinds(&a.var, d.line)).collect();
+                        }
+                    }
                     "static_borrow" | "mutable_borrow" => { borrows.insert(kind); }
                     "static_lend" | "mutable_lend" => { lends.insert(kind); }
                     "static_die" | "mutable_die" if !borrows.is_empty() && !borrows.contains(kind) && !via_reborrow(d, e) =>
@@ -577,7 +603,9 @@ pub fn check(fig: &Fig, src: &str) -> Vec<(&'static str, String)> {
             .filter(|b| is_borrow(&b.event) && &b.var == lender && &b.to == holder && b.line <= a.line)
             .collect();
         let shared = a.event == "static_die";
-        if !lent.is_empty() && !lent.iter().any(|b| (b.event == "static_borrow") == shared) {
+        // (The loans it holds since it was last re-pointed by a copy.)
+        let kinds = loan_kinds_into(&arrows, &fig.header_vars, holder, lender, a.line, 0);
+        if !kinds.is_empty() && !kinds.contains(if shared { "static" } else { "mutable" }) {
             out.push(("borrow-kind-mismatch", format!("{}: {}", a.id, a.tip)));
         }
         if !shared && lent.is_empty() && holder != lender && fig.header_vars.contains(lender) {
@@ -606,6 +634,36 @@ pub fn check(fig: &Fig, src: &str) -> Vec<(&'static str, String)> {
         }
     }
     out
+}
+
+/// Whether the arrow `c` re-points the reference `holder` by a copy of
+/// another column's value (`Copy from r2 to r`), not a copy written
+/// through it (`Copy from y to *r`) or a call's result copied in.
+fn repoints(c: &Arrow, holder: &str, headers: &HashSet<String>) -> bool {
+    c.event == "copy" && c.to == holder && headers.contains(&c.var) && c.tip.ends_with(&format!(" to {holder}"))
+}
+
+/// The kinds (`static` / `mutable`) of `lender`'s loans that `holder`
+/// holds at `line`: those of the borrow arrows from `lender` into it after
+/// it was last re-pointed by a copy (`r = r2;`), or else, of that copy's
+/// source then (#1521). Empty when none is drawn.
+fn loan_kinds_into(arrows: &[&Arrow], headers: &HashSet<String>, holder: &str, lender: &str, line: u32, depth: u32) -> BTreeSet<&'static str> {
+    let repoint = arrows.iter()
+        .filter(|c| repoints(c, holder, headers) && c.var != lender && c.line <= line)
+        .map(|c| c.line)
+        .max();
+    let kinds: BTreeSet<&'static str> = arrows.iter()
+        .filter(|b| matches!(b.event.as_str(), "static_borrow" | "mutable_borrow")
+            && b.var == lender && b.to == holder && b.line <= line && repoint.is_none_or(|r| b.line >= r))
+        .map(|b| if b.event == "static_borrow" { "static" } else { "mutable" })
+        .collect();
+    match repoint {
+        Some(r) if kinds.is_empty() && depth < 8 => arrows.iter()
+            .filter(|c| repoints(c, holder, headers) && c.line == r)
+            .flat_map(|c| loan_kinds_into(arrows, headers, &c.var, lender, r, depth + 1))
+            .collect(),
+        _ => kinds,
+    }
 }
 
 // ─── Comparing with the known list ──────────────────────────────────
@@ -702,6 +760,45 @@ mod unit {
         let r = [header("r", 2), line("r", 2, 95, 155, "full_privilege"),
                  dot("r", 2, 95, "mutable_borrow", false, "b"), dot("r", 2, 155, "static_die ref_go_out_of_scope", false, "e")].concat();
         assert_eq!(invs(&r), vec!["borrow-kind-mismatch"]);
+    }
+
+    fn arrow(from: &str, to: &str, ev: &str, line: u32) -> String {
+        let tip = if ev == "copy" { format!("Copy from {from} to {to}") } else { ev.to_owned() };
+        format!("<g data-rv-id=\"{from}>{to}@L{line}:arrow:{ev}\" data-rv-kind=\"arrow\" data-rv-var=\"{from}\" \
+                 data-rv-to=\"{to}\" data-rv-event=\"{ev}\" data-rv-line=\"{line}\" data-tooltip-text=\"{tip}\"/>")
+    }
+    fn bracket(var: &str, hash: u32) -> String {
+        format!("<path data-hash=\"{hash}\" data-rv-id=\"{var}:bracket\" data-rv-kind=\"bracket\" data-rv-var=\"{var}\"/>")
+    }
+
+    /// `let mut r = downgrade(&mut s); let r2 = &s; r = r2;` (#1521): r's
+    /// mutable loan ends, then r holds a copy of r2's shared one, which
+    /// ends as a shared one. A copy of a reference holding a mutable loan
+    /// that ends as a shared one is still caught.
+    #[test]
+    fn a_reference_repointed_by_a_copy_has_the_copied_loans_kind() {
+        // (Dots with their source line, which the copy's arrow names.)
+        let dot = |var: &str, hash: u32, y: u32, ev: &str, line: u32|
+            dot(var, hash, y, ev, false, "t").replace("/>", &format!(" data-rv-line=\"{line}\"/>"));
+        let body = |kind2: &str, end: &str| [
+            header("s", 1), header("r", 2), header("r2", 3), bracket("r", 2), bracket("r2", 3),
+            line("r", 2, 95, 125, "partial_privilege"), line("r2", 3, 155, 185, "partial_privilege"),
+            dot("r", 2, 95, "mutable_borrow", 1), dot("r", 2, 125, "mutable_die", 1),
+            dot("r2", 3, 155, &format!("{kind2}_borrow"), 2),
+            dot("r2", 3, 185, &format!("duplicate {kind2}_die"), 3),
+            dot("r", 2, 185, &format!("copy {end}_die"), 3),
+            arrow("s", "r", "mutable_borrow", 1), arrow("r", "s", "mutable_die", 1),
+            arrow("s", "r2", &format!("{kind2}_borrow"), 2), arrow("r2", "r", "copy", 3),
+            arrow("r2", "s", &format!("{kind2}_die"), 3), arrow("r", "s", &format!("{end}_die"), 3),
+        ].concat();
+        assert_eq!(invs(&body("static", "static")), Vec::<&str>::new());
+        assert_eq!(invs(&body("static", "mutable")), vec!["borrow-kind-mismatch", "borrow-kind-mismatch"]);
+        assert_eq!(invs(&body("mutable", "static")), vec!["borrow-kind-mismatch", "borrow-kind-mismatch"]);
+        // A copy written through r (`*r = *r2;`, "Copy from r2 to *r")
+        // doesn't re-point it: its mutable loan ending as a shared one is
+        // still caught.
+        let through = body("static", "static").replace("data-tooltip-text=\"Copy from r2 to r\"", "data-tooltip-text=\"Copy from r2 to *r\"");
+        assert_eq!(invs(&through), vec!["borrow-kind-mismatch", "borrow-kind-mismatch"]);
     }
 
     #[test]

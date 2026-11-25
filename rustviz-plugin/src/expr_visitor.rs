@@ -6931,16 +6931,62 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         expr_to_rap_name(src, &self.tcx).and_then(|n| self.borrow_map.get(&n)).cloned(),
       _ => None,
     };
+    // A loan issued here through another reference (`id(r)` reborrows
+    // `*r`, with r from `downgrade(&mut s)` or `let r: &String = &mut
+    // s;`): the lender reached through r stays borrowed by r's own loan,
+    // of its kind. r2 = id(r) keeps s mutably borrowed, not shared (#1510).
+    // (A shared reborrow of `*r` with r a `&T` is no loan to rustc, so
+    // the references passed to a call count too.)
+    let mut via: Vec<String> = held.iter().flat_map(|h| h.keys().cloned()).collect();
+    self.ref_args_of(init, &mut via);
+    let through_ref = |l: &ResourceTy| -> Option<bool> {
+      let kinds: Vec<bool> = via.iter()
+        .filter(|k| k.as_str() != base)
+        .filter_map(|k| self.borrow_map.get(k))
+        .filter(|d| d.all_lenders().contains(l))
+        .map(|d| d.mut_of(l))
+        .collect();
+      (!kinds.is_empty()).then(|| kinds.into_iter().any(|m| m))
+    };
     let muts: Vec<(ResourceTy, bool)> = lenders.into_iter().map(|l| {
       let base = l.real_name().split('.').next().unwrap_or_default().to_owned();
       let m = held.as_ref().and_then(|h| h.get(&base).copied())
         .or_else(|| copied.as_ref().filter(|c| c.all_lenders().contains(&l)).map(|c| c.mut_of(&l)))
+        .or_else(|| through_ref(&l))
         .unwrap_or(own);
       (l, m)
     }).collect();
     let muts = if muts.iter().all(|(_, m)| *m == own) { Vec::new() } else { muts };
     if let Some(rd) = self.borrow_map.get_mut(name) {
       rd.lender_muts = muts;
+    }
+  }
+
+  /// The variables passed to `e`'s calls (and their receivers) as they
+  /// are, or reborrowed (`&*r`, `&mut *r`): the references a call's
+  /// result may keep a loan of.
+  fn ref_args_of(&self, e: &'tcx Expr<'tcx>, out: &mut Vec<String>) {
+    let mut e = e;
+    loop {
+      match e.kind {
+        ExprKind::DropTemps(inner) | ExprKind::AddrOf(_, _, inner) | ExprKind::Unary(rustc_hir::UnOp::Deref, inner) => e = inner,
+        _ => break,
+      }
+    }
+    match e.kind {
+      ExprKind::Call(_, args) => args.iter().for_each(|a| self.ref_args_of(a, out)),
+      ExprKind::MethodCall(_, recv, args, _) => {
+        self.ref_args_of(recv, out);
+        args.iter().for_each(|a| self.ref_args_of(a, out));
+      }
+      ExprKind::Path(QPath::Resolved(..)) | ExprKind::Field(..) => {
+        if let Some(n) = expr_to_rap_name(e, &self.tcx) {
+          if !out.contains(&n) {
+            out.push(n);
+          }
+        }
+      }
+      _ => {}
     }
   }
 
@@ -11980,7 +12026,13 @@ pub fn print_out_of_scope(&mut self){
             let l = self.borrow_map.get(*o).unwrap().lifetime;
             l <= lifetime || on_other_paths(self.preprocessed_events, lifetime, l)
           });
-          if lifetime == max_lifetime || only_loan || alone_on_path() || last_on_its_path() {
+          // A shared loan whose last use is on the line a mutable loan of
+          // the lender is made on, after it (`let x = &s; let m = &mut s;`
+          // on one line, m used later): the two can't overlap, so x's loan
+          // ends before m's starts, and its end gives s back (#1529).
+          let hash_of = |n: &str| self.raps.get(n).map(|d| *d.rap.hash());
+          let before_mutable = || shared_loan_ends_before_mutable(r, lender, &self.borrow_map, region.iter().copied(), self.preprocessed_events, &hash_of);
+          if lifetime == max_lifetime || only_loan || alone_on_path() || last_on_its_path() || before_mutable() {
             ultimate_refs.insert((r.to_string(), lender.to_owned()));
           }
         }
@@ -12230,7 +12282,7 @@ pub fn print_out_of_scope(&mut self){
     // to h2 in the arm, and h2's end belongs there (#637).
     self.nest_borrow_ends_in_arms();
     ends_in_condition_before_split(self.preprocessed_events);
-    ends_before_lender_use(self.preprocessed_events);
+    ends_before_lender_use(self.preprocessed_events, self.event_line_map);
     self.end_borrows_at_exits();
     end_let_else_scrutinee_borrows(self.preprocessed_events, &self.let_else_scrutinees, self.unique_id);
     note_later_borrowers_in_arms(self.preprocessed_events, false);
@@ -12720,6 +12772,54 @@ pub fn mutable_loan_alone<'a>(r: &str, lender: &str, borrow_map: &HashMap<String
     || (d.assigned_at < rd.assigned_at && of(d).is_none_or(|l| !d.mut_of(&l)))))
 }
 
+/// Whether `r`'s loan of `lender` is a shared one that every other loan
+/// of `lender` among `others` still live after r's last use starts after
+/// it, on that line, as a mutable loan of `lender` (`let x = &s; let m =
+/// &mut s;`): rustc ends r's loan before that one starts, so r is the last
+/// to borrow `lender` before it.
+pub fn shared_loan_ends_before_mutable<'a>(r: &str, lender: &str, borrow_map: &HashMap<String, RefData>,
+  others: impl Iterator<Item = &'a String>, events: &[(usize, ExternalEvent)], hash_of: &dyn Fn(&str) -> Option<u64>) -> bool {
+  let Some(rd) = borrow_map.get(r) else { return false };
+  let of = |d: &RefData| d.all_lenders().into_iter().find(|l| l.real_name() == lender);
+  if !of(rd).is_some_and(|l| !rd.mut_of(&l) && lends_column(&l)) {
+    return false;
+  }
+  // (By column: the events are every fn's so far, and names repeat.)
+  let borrowed_at = |name: &str| hash_of(name).and_then(|h| first_borrow_into(events, h));
+  let Some(start) = borrowed_at(r) else { return false };
+  let mut later = false;
+  let all = others.into_iter().all(|o| {
+    let Some(d) = borrow_map.get(o).filter(|_| o != r) else { return true };
+    if d.lifetime <= rd.lifetime || d.assigned_at > rd.lifetime {
+      return true;
+    }
+    let after = d.assigned_at == rd.lifetime
+      && of(d).is_some_and(|l| d.mut_of(&l))
+      && borrowed_at(o).is_some_and(|at| at > start);
+    later |= after;
+    after
+  });
+  all && later
+}
+
+/// The id of the first borrow event (recorded order) into the column
+/// with hash `hash`, in `events` and their arms.
+fn first_borrow_into(events: &[(usize, ExternalEvent)], hash: u64) -> Option<usize> {
+  let mut best: Option<usize> = None;
+  for (_, e) in events {
+    let id = match e {
+      ExternalEvent::Branch { branches, .. } => branches.iter().filter_map(|b| first_borrow_into(&b.e_data, hash)).min(),
+      ExternalEvent::StaticBorrow { to: ResourceTy::Value(t), id, .. }
+      | ExternalEvent::MutableBorrow { to: ResourceTy::Value(t), id, .. } if *t.hash() == hash => Some(*id),
+      _ => None,
+    };
+    if let Some(id) = id {
+      best = Some(best.map_or(id, |b| b.min(id)));
+    }
+  }
+  best
+}
+
 /// Whether `l` is a variable (or a place in one) that a loan borrows,
 /// not the caller's data or a value with no column.
 fn lends_column(l: &ResourceTy) -> bool {
@@ -12734,13 +12834,22 @@ fn lends_column(l: &ResourceTy) -> bool {
 /// other events, so s was read while still mutably borrowed
 /// (`State::Invalid`, no column from there). Move each end before the
 /// first later use of its lender on its line that the loan forbids (any
-/// use for a mutable loan, a write or move for a shared one), when the
-/// borrower isn't used after that. Arms too.
-fn ends_before_lender_use(events: &mut [(usize, ExternalEvent)]) {
+/// use for a mutable loan, a write or move for a shared one) that comes
+/// after the borrower's last use on the line. Arms too.
+///
+/// That use can be another borrow of the lender (`let a = &mut s; let b =
+/// &mut s;`, or `let r = &s; let m = &mut s;`, on one line): the first
+/// loan ends before the second starts, since the two can't overlap. The
+/// reference's own borrow on the line isn't a use after which to look
+/// for the conflict: the borrow that conflicts comes after it (#1529).
+/// The line's arrows (`line_map`) get the same order: the renderer
+/// appends them in it, so `s` was "mutably borrowed by m" before r gave
+/// its shared loan back.
+fn ends_before_lender_use(events: &mut [(usize, ExternalEvent)], line_map: &mut BTreeMap<usize, Vec<ExternalEvent>>) {
   for (_, ev) in events.iter_mut() {
     if let ExternalEvent::Branch { branches, .. } = ev {
       for b in branches.iter_mut() {
-        ends_before_lender_use(&mut b.e_data);
+        ends_before_lender_use(&mut b.e_data, &mut b.line_map);
       }
     }
   }
@@ -12748,9 +12857,11 @@ fn ends_before_lender_use(events: &mut [(usize, ExternalEvent)]) {
   while j < events.len() {
     let (line, ev) = &events[j];
     let line = *line;
-    let (holder, lender, mutable) = match ev {
-      ExternalEvent::MutableDie { from: ResourceTy::Value(h), to: ResourceTy::Value(l) | ResourceTy::Deref(l), .. } => (h.clone(), l.clone(), true),
-      ExternalEvent::StaticDie { from: ResourceTy::Value(h), to: ResourceTy::Value(l) | ResourceTy::Deref(l), .. } => (h.clone(), l.clone(), false),
+    // (`field`: a shared loan of a field through a reference, `&m.a`.)
+    let (holder, lender, mutable, field) = match ev {
+      ExternalEvent::MutableDie { from: ResourceTy::Value(h), to: ResourceTy::Value(l) | ResourceTy::Deref(l), .. } => (h.clone(), l.clone(), true, None),
+      ExternalEvent::StaticDie { from: ResourceTy::Value(h), to: ResourceTy::Value(l) | ResourceTy::Deref(l), .. } => (h.clone(), l.clone(), false, None),
+      ExternalEvent::StaticDie { from: ResourceTy::Value(h), to: ResourceTy::DerefField(l, place, ..), .. } => (h.clone(), l.clone(), false, Some(place.clone())),
       _ => { j += 1; continue; }
     };
     if holder.hash() == lender.hash() {
@@ -12771,23 +12882,63 @@ fn ends_before_lender_use(events: &mut [(usize, ExternalEvent)]) {
       }
       let (f, t) = ResourceAccessPoint_extract(e);
       if mutable {
+        // (A borrow drawn into the lender is the new value the holder
+        // writes into it: `*w = &d;` with `w = &mut o` gives o its new
+        // reference through w, before w's end.)
+        if matches!(e, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }) && is(t, &lender) {
+          return false;
+        }
         return is(f, &lender) || is(t, &lender);
       }
+      // A shared loan forbids a write through the lender as well (`*m =
+      // format!("{}!", r);` with `r = &*m`, drawn on m's column as `*m`
+      // getting a new value): r's last use, in the right-hand side, comes
+      // first, then its end, then the write (#1516). (The holder of a
+      // shared loan can't write through itself, so the write is the
+      // lender's.)
+      let is_or_through = |r: &ResourceTy| (field.is_none() && is(r, &lender))
+        || matches!(r, ResourceTy::Deref(y) if y.hash() == lender.hash())
+        || matches!(r, ResourceTy::DerefField(y, p, ..) if y.hash() == lender.hash() && field.as_ref() == Some(p));
       match e {
-        ExternalEvent::PassByMutableReference { from, .. } | ExternalEvent::MutableBorrow { from, .. } | ExternalEvent::Move { from, .. } => is(from, &lender),
-        ExternalEvent::Bind { to, .. } | ExternalEvent::Copy { to, .. } => is(to, &lender),
+        ExternalEvent::Move { from, to, .. } => is_or_through(from) || is_or_through(to),
+        ExternalEvent::PassByMutableReference { from, .. } | ExternalEvent::MutableBorrow { from, .. } => is_or_through(from),
+        ExternalEvent::Bind { to, .. } | ExternalEvent::Copy { to, .. } => is_or_through(to),
         _ => false,
       }
     };
-    let Some(i) = (0..j).find(|&i| events[i].0 == line && conflicts(&events[i].1)) else { j += 1; continue };
-    let used_after = (i..j).any(|k| events[k].0 == line && {
-      let (f, t) = ResourceAccessPoint_extract(&events[k].1);
+    let uses_holder = |e: &ExternalEvent| {
+      let (f, t) = ResourceAccessPoint_extract(e);
       of_holder(f) || of_holder(t)
-    });
-    if !used_after {
-      events[i..=j].rotate_right(1);
+    };
+    let after_last_use = (0..j).rev().find(|&k| events[k].0 == line && uses_holder(&events[k].1)).map_or(0, |k| k + 1);
+    // (Nor, for a mutable loan, a borrow the result of a call that the
+    // holder was passed to on the line holds: `let _x = it.next();` hands
+    // it's loan on to _x, it doesn't conflict with it.)
+    let passed_at = (0..j).find(|&k| events[k].0 == line && matches!(&events[k].1,
+      ExternalEvent::PassByStaticReference { from, .. } | ExternalEvent::PassByMutableReference { from, .. } if of_holder(from)));
+    let handed_on = |i: usize| mutable && passed_at.is_some_and(|k| k < i) && matches!(&events[i].1,
+      ExternalEvent::StaticBorrow { via: Some(_), .. } | ExternalEvent::MutableBorrow { via: Some(_), .. });
+    let Some(i) = (after_last_use..j).find(|&i| events[i].0 == line && conflicts(&events[i].1) && !handed_on(i)) else { j += 1; continue };
+    let (end_id, before_id) = (events[j].1.get_id(), events[i].1.get_id());
+    events[i..=j].rotate_right(1);
+    if let Some(arrows) = line_map.get_mut(&line) {
+      end_before_in_line_map(arrows, end_id, before_id, events);
     }
     j += 1;
+  }
+}
+
+/// Puts the arrow with id `end_id` in a line's arrows (`arrows`) before
+/// the first of them that `events` (the line's events, in order) has
+/// after it, the event with id `before_id` or a later one.
+fn end_before_in_line_map(arrows: &mut Vec<ExternalEvent>, end_id: usize, before_id: usize, events: &[(usize, ExternalEvent)]) {
+  let Some(from) = arrows.iter().position(|e| e.get_id() == end_id) else { return };
+  let order = |id: usize| events.iter().position(|(_, e)| e.get_id() == id);
+  let Some(at) = order(before_id) else { return };
+  let Some(to) = arrows.iter().position(|e| order(e.get_id()).is_some_and(|k| k >= at)) else { return };
+  if to < from {
+    let e = arrows.remove(from);
+    arrows.insert(to, e);
   }
 }
 

@@ -26715,6 +26715,96 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "a later time round",
             "which may run many times",
         ],
+    },    TooltipExpect {
+        name: "same_line_borrows_1529",
+        // #1529: two borrows of one variable on one line, the first unused.
+        // Its loan ends before the second starts, so its end gives s back
+        // (x's end in `let x = &s; let m = &mut s;` with m used later had
+        // no arrow on main). The order on each dot is checked in
+        // `loan_ends_before_conflicting_use_1529_1516`.
+        must_contain: &[
+            "Return immutably borrowed resource from x to s",
+            "Return mutably borrowed resource from a to s",
+            "Return immutably borrowed resource from x2 to v",
+            "a's mutable borrow ends",
+            "x's immutable borrow ends",
+        ],
+        must_not_contain: &[
+            "but is still mutably borrowed by",
+        ],
+    },
+    TooltipExpect {
+        name: "downgrade_through_call_1510",
+        // #1510: a `&String` holding a mutable loan of s (`&mut s` coerced,
+        // or `downgrade(&mut s)`) passed to a call returning a borrow of
+        // it: the result reborrows through r and keeps s mutably borrowed.
+        // Main drew a new immutable loan of s while s was mutably borrowed.
+        must_contain: &[
+            "Mutable borrow from s to r2: id's signature gives the reference it returns the same lifetime as its argument",
+            "Mutable borrow from s to h.r: holder's signature gives the struct it returns the same lifetime as its argument",
+            "Return mutably borrowed resource from r2 to s",
+            "Return mutably borrowed resource from h.r to s",
+            "s's resource is mutably borrowed by r2; s can't be used while the borrow is live",
+            "r2's mutable borrow ends",
+            "h.r's mutable borrow ends",
+            "Mutable borrow from s to r3: as_str's signature gives the reference it returns the same lifetime as the value it was called on",
+        ],
+        must_not_contain: &[
+            "Immutable borrow from s to r3",
+            "Immutable borrow from s to r2",
+            "Immutable borrow from s to h.r",
+            "Return immutably borrowed resource from r2 to s",
+            "Return immutably borrowed resource from h.r to s",
+            "s's resource is immutably borrowed by r2",
+            "s's resource is immutably borrowed by h.r",
+            "r2's immutable borrow ends",
+        ],
+    },
+    TooltipExpect {
+        name: "write_after_reborrow_1516",
+        // #1516: `*m = f(r)` with `r = &*m`: r's end comes before the
+        // write (order checked in `loan_ends_before_conflicting_use_1529_1516`;
+        // on main m's column was State::Invalid from the write on).
+        must_contain: &[
+            "r no longer borrows the resource m points to",
+            "*m acquires ownership of a new resource; its previous resource is dropped",
+            "m.a's resource is no longer immutably borrowed",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "box_deref_call_lender_1505",
+        // #1505: `f(&b)` with `b: Box<String>` borrows the String in b
+        // (deref coercion); the result keeps b borrowed. Main drew no
+        // lender, and b fully owned while h read it.
+        must_contain: &[
+            "Immutable borrow from b to h: id's signature gives the reference it returns the same lifetime as its argument",
+            "Immutable borrow from b to f: first's signature gives the reference it returns the same lifetime as its argument",
+            "Immutable borrow from b to h2.r: holder's signature gives the struct it returns the same lifetime as its argument",
+            "Immutable borrow from b to h.r: holder's signature gives the struct it returns the same lifetime as its argument",
+            "Return immutably borrowed resource from h to b",
+            "Return immutably borrowed resource from h.r to b",
+            "b's resource is immutably borrowed by h; b is read-only while the borrow is live",
+        ],
+        must_not_contain: &[
+            "what it borrows from isn't shown",
+            "Copy of the value id() returns to h",
+            "h is initialized with the value id() returns",
+            "h.r is bound to an immutable reference",
+        ],
+    },
+    TooltipExpect {
+        name: "repoint_copy_kind_1521",
+        // #1521: r's mutable loan ends, then `r = r2;` gives it r2's shared
+        // one, which ends as a shared one. (The checker's false positive
+        // is covered by `corpus_invariants_hold` on this fixture.)
+        must_contain: &[
+            "Return mutably borrowed resource from r to s",
+            "r is assigned a copy of r2's reference",
+            "Return immutably borrowed resource from r to s",
+            "r's immutable borrow ends",
+        ],
+        must_not_contain: &[],
     },
     TooltipExpect {
         name: "cond_holder_local_ref_1475",
@@ -36845,5 +36935,68 @@ fn ref_arm_copy_before_scope_end() {
             let gone = ids.iter().position(|d| d.contains("go_out_of_scope"));
             assert!(matches!((copied, gone), (Some(c), Some(g)) if c < g), "{}: {}'s dots on line {}: {:?}", snippet, v, line, ids);
         }
+    }
+}
+
+/// #1529, #1516: a loan ends before the use of its lender that it can't
+/// overlap, on the same dot. Two borrows of s on one line (`let a = &mut s;
+/// let b = &mut s;`): a's end comes between them; main listed both borrows
+/// on one dot, then both ends. `*m = format!("{}!", r)` with `r = &*m`:
+/// r's end comes before the write through m; main wrote first.
+#[test]
+fn loan_ends_before_conflicting_use_1529_1516() {
+    for (snippet, seqs) in [
+        ("same_line_borrows_1529", &[
+            &["s's resource is mutably borrowed by a; s can't be used while the borrow is live",
+              "s's resource is no longer mutably borrowed",
+              "s's resource is mutably borrowed by b; s can't be used while the borrow is live"][..],
+            &["s's resource is immutably borrowed by r; s is read-only while the borrow is live",
+              "s's resource is no longer immutably borrowed",
+              "s's resource is mutably borrowed by m; s can't be used while the borrow is live"][..],
+            &["s's resource is mutably borrowed by m; s can't be used while the borrow is live",
+              "s's resource is no longer mutably borrowed",
+              "s's resource is immutably borrowed by r; s is read-only while the borrow is live"][..],
+            &["s's resource is immutably borrowed by x; s is read-only while the borrow is live",
+              "s's resource is no longer immutably borrowed",
+              "s's resource is mutably borrowed by m; s can't be used while the borrow is live"][..],
+            &["s's resource is no longer immutably borrowed",
+              "s's resource is mutably borrowed by m; s can't be used while the borrow is live"][..],
+            &["v's resource is no longer immutably borrowed",
+              "v's resource is mutably borrowed by last_mut; v can't be used while the borrow is live",
+              "last_mut reads from/writes to v (implicitly mutably borrowed)",
+              "v's resource is mutably borrowed by m2; v can't be used while the borrow is live"][..],
+            &["v's resource is no longer immutably borrowed",
+              "v's resource is mutably borrowed by m; v can't be used while the borrow is live"][..],
+            &["a mutably borrows a resource", "a's mutable borrow ends"][..],
+        ][..]),
+        ("write_after_reborrow_1516", &[
+            &["r no longer borrows the resource m points to",
+              "*m acquires ownership of a new resource; its previous resource is dropped",
+              "m's mutable borrow ends"][..],
+            &["r no longer borrows the value m points to", "*m is assigned a new value"][..],
+            &["r2 no longer borrows the resource m points to",
+              "*m acquires ownership of a new resource; its previous resource is dropped"][..],
+            &["r3 no longer borrows the resource m points to",
+              "*m acquires ownership of a new resource; its previous resource is dropped"][..],
+            &["m.a's resource is no longer immutably borrowed",
+              "m.a acquires ownership of a new resource; its previous resource is dropped"][..],
+        ][..]),
+    ] {
+        let tips = tooltip_lines(&run_with_local_backend(snippet).timeline_panel_string());
+        for seq in seqs {
+            assert!(tips.iter().any(|t| t.windows(seq.len()).any(|w| w == *seq)),
+                "{snippet}: no dot says, in this order, {seq:#?}\ndots: {tips:#?}");
+        }
+    }
+    // Each borrow of the pair on its own: no dot lists both before an end.
+    let tips = tooltip_lines(&run_with_local_backend("same_line_borrows_1529").timeline_panel_string());
+    for (a, b) in [("a", "b"), ("r", "m"), ("m", "r"), ("x", "m")] {
+        let both = tips.iter().any(|t| t.windows(2).any(|w| w[0].starts_with(&format!("s's resource is mutably borrowed by {a};"))
+            && w[1].starts_with(&format!("s's resource is mutably borrowed by {b};"))
+            || w[0].starts_with(&format!("s's resource is immutably borrowed by {a};"))
+            && w[1].starts_with(&format!("s's resource is mutably borrowed by {b};"))
+            || w[0].starts_with(&format!("s's resource is mutably borrowed by {a};"))
+            && w[1].starts_with(&format!("s's resource is immutably borrowed by {b};"))));
+        assert!(!both, "same_line_borrows_1529: s borrowed by {a} and {b} at once: {tips:#?}");
     }
 }
