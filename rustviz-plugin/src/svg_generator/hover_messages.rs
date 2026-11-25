@@ -3440,6 +3440,29 @@ pub fn state_partly_moved(my_name: &String, moved: &[String], maybe: bool) -> St
     )
 }
 
+// The line of a struct every field of which was moved out, some of them
+// on some paths through a conditional above only (`let s2 = p.b; if c {
+// drop(p.a); }`, #1583): on the other paths it still holds those, and
+// drops them at its scope end, but neither it nor any field of it can
+// be used (E0382).
+pub fn state_fields_maybe_all_moved(my_name: &String, surely: &[String], maybe: &[String]) -> String {
+    fn list(names: &[String]) -> String {
+        let fmt: Vec<String> = names.iter().map(|m| styled_name_html(m)).collect();
+        match fmt.as_slice() {
+            [init @ .., last] if !init.is_empty() => format!("{} and {}", init.join(", "), last),
+            _ => fmt.concat(),
+        }
+    }
+    let moved = match surely.len() {
+        0 => format!("{} may have been moved out", list(maybe)),
+        n => format!("{} {} moved out and {} may have been", list(surely), if n > 1 { "were" } else { "was" }, list(maybe)),
+    };
+    format!(
+        "{0} is partially moved: {1}, so neither {0} nor any of its fields can be used; what is left in {0} is dropped when it goes out of scope",
+        styled_name_html(my_name), moved
+    )
+}
+
 // The line of an array a slice pattern moved some elements out of
 // (`[c, _] => …`, #1285): the elements `left` stay in it, and are dropped
 // at its scope end, but it can't be used as a whole any more. `maybe`:

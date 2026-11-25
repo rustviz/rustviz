@@ -27935,6 +27935,80 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[],
     },
+    TooltipExpect {
+        name: "downgraded_ref_into_holder_1570",
+        // #1570: a `&String` holding a mutable loan of s, stored in a value
+        // that holds references (`vr.push(r)`, `vec![r.as_str()]`,
+        // `Some(r)`): the value keeps that loan, so s stays mutably
+        // borrowed. Main drew a new immutable loan of s while s was
+        // mutably borrowed (and s's column State::Invalid).
+        must_contain: &[
+            "Mutable borrow from s to vr, stored in vr by push; vr isn't a reference, but its value now holds one",
+            "s's resource is mutably borrowed by vr; s can't be used while the borrow is live",
+            "Return mutably borrowed resource from vr to s",
+            "Mutable borrow from s1 to vs, stored in vs by push; vs isn't a reference, but its value now holds one",
+            "s1's resource is mutably borrowed by vs; s1 can't be used while the borrow is live",
+            "Mutable borrow from s2 to v2",
+            "s2's resource is mutably borrowed by v2; s2 can't be used while the borrow is live",
+            "Mutable borrow from s3 to v3, stored in v3 by insert; v3 isn't a reference, but its value now holds one",
+            "Mutable borrow from s4 to o4: Some's signature gives the value it returns the same lifetime as its argument; o4 isn't a reference, but its value holds one",
+            "s5's resource is mutably borrowed by o5; s5 can't be used while the borrow is live",
+            "vr's mutable borrow ends",
+        ],
+        must_not_contain: &[
+            "Immutable borrow from s to vr",
+            "Immutable borrow from s1 to vs",
+            "Immutable borrow from s2 to v2",
+            "Immutable borrow from s3 to v3",
+            "Immutable borrow from s4 to o4",
+            "Immutable borrow from s5 to o5",
+            "immutably borrowed by vr",
+            "immutably borrowed by vs",
+            "immutably borrowed by v2",
+            "immutably borrowed by v3",
+            "immutably borrowed by o4",
+            "immutably borrowed by o5",
+            "=s's resource is no longer immutably borrowed",
+            "=s1's resource is no longer immutably borrowed",
+            "=s2's resource is no longer immutably borrowed",
+            "=s3's resource is no longer immutably borrowed",
+            "=s4's resource is no longer immutably borrowed",
+            "=s5's resource is no longer immutably borrowed",
+            "holds a value that immutably borrows",
+        ],
+    },
+    TooltipExpect {
+        name: "downgraded_ref_unused_end_1571",
+        // #1571: an unused shared reference holding a mutable loan,
+        // declared in an arm (`let r3 = downgrade(&mut s2);`, or a copy
+        // `let r = r0;` in a loop there): its end is a mutable borrow's,
+        // as the dot above says. Main said "immutable borrow ends".
+        must_contain: &[
+            "r3's mutable borrow ends",
+            "r's mutable borrow ends",
+        ],
+        must_not_contain: &[
+            "=r3's immutable borrow ends",
+            "=r's immutable borrow ends",
+        ],
+    },
+    TooltipExpect {
+        name: "fields_maybe_all_moved_1583",
+        // #1583: the struct's last fields moved in some arms only (an `if`
+        // / `else if` chain with no final `else`, an empty `else`, an `if`
+        // nested in the `else`): the struct still holds them on the other
+        // paths, so its line goes on to its scope end (main stopped it at
+        // the join; `struct_lines_after_maybe_moves_1568_1583` checks the
+        // rows). Moved in every arm (u), it stops where they split (#1541).
+        must_contain: &[
+            "p is partially moved: p.b was moved out and p.a may have been, so neither p nor any of its fields can be used; what is left in p is dropped when it goes out of scope",
+            "x is partially moved: x.a and x.b may have been moved out, so neither x nor any of its fields can be used; what is left in x is dropped when it goes out of scope",
+            "y is partially moved: y.a and y.b may have been moved out, so neither y nor any of its fields can be used; what is left in y is dropped when it goes out of scope",
+        ],
+        must_not_contain: &[
+            "what is left in u",
+        ],
+    },
 ];
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws
@@ -38124,6 +38198,34 @@ fn loan_ends_before_conflicting_use_1529_1516() {
             && w[1].starts_with(&format!("s's resource is immutably borrowed by {b};"))));
         assert!(!both, "same_line_borrows_1529: s borrowed by {a} and {b} at once: {tips:#?}");
     }
+}
+
+/// #1568: a struct's reference field holding a copy of another reference
+/// ends where the struct is moved (`drop(h)`), in a loop's body or before
+/// the copied-from field is re-pointed, and a field copied from a
+/// reference parameter in a loop ends by its scope end: on main the end
+/// came after the column (h.r's line ran on to its scope end, c2.r and g2.r
+/// ended with their scope, k.r's end was a row below its column).
+/// #1583: a struct whose last fields were moved in some arms only still
+/// holds them on the other paths: its line goes on after the join (main
+/// stopped it there and its scope-end dot had no line into it).
+#[test]
+fn struct_lines_after_maybe_moves_1568_1583() {
+    let svg = run_with_local_backend("copied_ref_field_end_1568").timeline_panel_string();
+    assert_eq!(line_state_at(&svg, "h.r", 19).as_deref(), Some("partial_privilege"));
+    assert_eq!(line_state_at(&svg, "h.r", 20), None, "h.r's line runs past h's move");
+    assert_eq!(line_state_at(&svg, "c2.r", 31), None, "c2.r's line runs past c2's move");
+    assert_eq!(line_state_at(&svg, "g2.r", 56), None, "g2.r's line runs past g2's move");
+    for id in ["c2.r@L31:dot:static_die\"", "k.r@L41:dot:static_die"] {
+        assert!(svg.contains(&format!("data-rv-id=\"{}", id)), "copied_ref_field_end_1568: no element {}", id);
+    }
+    assert!(!svg.contains("data-rv-id=\"k.r@L42:"), "k.r's end is drawn below its column");
+    let svg = run_with_local_backend("fields_maybe_all_moved_1583").timeline_panel_string();
+    for (var, row) in [("p", 17), ("q", 28), ("w", 38), ("x", 49), ("y", 57), ("z", 64)] {
+        assert_eq!(line_state_at(&svg, var, row).as_deref(), Some("full_privilege"), "{}'s line stops at the join on row {}", var, row);
+    }
+    // Moved in both arms: nothing is left after the join (#1541).
+    assert_eq!(line_state_at(&svg, "u", 73), None);
 }
 
 /// #1486, #1556, #1557, #1553, #1548, #1562: where loans and scopes end (and
