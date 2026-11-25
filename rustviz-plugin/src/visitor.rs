@@ -7159,7 +7159,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // doesn't record for r, dead before the conditional whose arm
           // re-points it (r never read again): its old loan ends there
           // on every path, at its last use (#1524).
-          let dead_before_arms = (ref_data.loan().is_none() && !matches!(ref_data.lender, ResourceTy::Anonymous))
+          // A write to a field (`h.r = &t;`) uses its struct: the
+          // borrow checker keeps the loans h holds live up to it (an
+          // assignment to a part of h isn't one to all of h), so the old
+          // loan never ends before the write, even unread since. Ended
+          // at its last use before, it was drawn before the `if` whose
+          // arm re-points h.r, with its lenders free in that arm, and a
+          // co-lender ended twice (#1588).
+          let field_write = matches!(lhs_expr.kind, ExprKind::Field(..));
+          let dead_before_arms = (ref_data.loan().is_none() && !matches!(ref_data.lender, ResourceTy::Anonymous) && !field_write)
             .then(|| self.last_live_line(&me, (ref_data.assigned_at, line_num.saturating_sub(1))).unwrap_or(ref_data.assigned_at))
             .filter(|&l| l >= ref_data.assigned_at && self.arm_frames.last().is_some_and(|&(split, _, _, _)| l < split));
           // A let-else binding drawn as a branch is bound on the join row
@@ -7168,9 +7176,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // join, so the loan is given back there (#1579).
           let floor = self.borrow_floor.get(&me).copied();
           let lift = |e: usize| floor.map_or(e, |f| e.max(f).min(line_num));
-          let old_end = self.loan_end_of(&me, &ref_data).filter(|&end| end < line_num && end >= ref_data.assigned_at)
-            .or_else(|| self.old_loan_end(&me, &ref_data, &ref_data.lender, line_num, write_span))
-            .map(lift);
+          let old_end = if field_write { None } else {
+            self.loan_end_of(&me, &ref_data).filter(|&end| end < line_num && end >= ref_data.assigned_at)
+              .or_else(|| self.old_loan_end(&me, &ref_data, &ref_data.lender, line_num, write_span))
+          }.map(lift);
           if let Some(old_end) = old_end {
             #[expect(clippy::disallowed_methods, reason = "filtered into a sorted Vec")]
             let mut over: Vec<String> = borrowers.iter()
@@ -7207,8 +7216,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // still in use when r got it. An arm-local `let m2 = &mut s;`
           // used up before `let mut r3 = &s;` gives s back itself, #1515.)
           if !self.ref_handed_off(lhs_rap.name()) && !taken_over {
+            // (Nor one made after r's old loan had ended: `let m3 = &mut
+            // s;` in an `if` after r's unread `&s`, #1575. Counted as a
+            // copy r took, its end was put off to its scope end and gave
+            // nothing back.)
             let carried: Vec<String> = gone.iter()
-              .filter(|g| self.borrow_map.get(*g).is_none_or(|d| d.lifetime >= ref_data.assigned_at))
+              .filter(|g| self.borrow_map.get(*g).is_none_or(|d| d.lifetime >= ref_data.assigned_at
+                && old_end.is_none_or(|e| d.assigned_at <= e)))
               .cloned().collect();
             self.loans_carried_on.extend(carried);
           }
@@ -7240,11 +7254,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // saying the lender stays borrowed by the others. A RefDie at
             // the write alone left the other arm's leg of r holding a
             // reference down to the join, which had no dot (#1439).
-            let sibling_end = self.loan_end(&ref_data)
-              .filter(|&e| e > line_num && self.in_sibling_arm(e) && !taken_over && !ref_data.ref_mutability);
+            // (A copied reference, `let mut r = x;`, has no loan of its
+            // own: its borrow ends at its last use in another arm, where
+            // x's loan, which it carries, ends too. Ended at the write
+            // only, the other arm's read of r ended nothing, and its leg
+            // held a reference past the join, which had no dot, #1589.)
+            let copied = ref_data.loan().is_none() && matches!(ref_data.lender, ResourceTy::Value(_));
+            let sibling_end = self.loan_end(&ref_data).filter(|&e| e > line_num)
+              .or_else(|| copied.then(|| self.read_in_sibling_arms(&me)).flatten())
+              .filter(|&e| self.in_sibling_arm(e) && !taken_over && !ref_data.ref_mutability);
             if let Some(end) = sibling_end {
               #[expect(clippy::disallowed_methods, reason = "sorted below")]
-              let mut others: Vec<String> = borrowers.iter().filter(|b| **b != me).cloned().collect();
+              let mut others: Vec<String> = borrowers.iter().filter(|b| **b != me && !copied).cloned().collect();
               others.sort();
               self.defer_old_ends = true;
               self.add_borrow_end_ev(end, to_ro, lhs_rty.clone(), &ref_data, others);
@@ -7275,6 +7296,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               }
             }
           }
+          else if let Some(end_line) = self.field_write_loan_end(lhs_expr, &lhs_rap, &ref_data, line_num)
+            .filter(|&e| self.in_sibling_arm(e)) {
+            // The loan's last use is in another arm (`if c { h.r = &s; }
+            // else { use(h.r) }`): there h.r still points to the lender,
+            // and its own borrow ends at that use; on this path the old
+            // loan ends at the write. `end_outer_borrows_in_arms` puts the
+            // end in that arm and ends it in this one, as for a variable
+            // (#806). Drawn on the lender's column only, it gave the
+            // lender back between the arms' legs, and h.r's leg in that
+            // arm held a reference down to the join (#1576).
+            self.defer_old_ends = true;
+            self.add_borrow_end_ev(end_line, to_ro.clone(), lhs_rty.clone(), &ref_data, Vec::new());
+            self.defer_old_ends = false;
+          }
           else if let Some(end_line) = self.field_write_loan_end(lhs_expr, &lhs_rap, &ref_data, line_num) {
             // `hold.r = &t;` where `hold` held `&s`: the field no
             // longer points to s, but `hold`'s type has one lifetime
@@ -7283,7 +7318,30 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // the lender's column only, like #512's stored borrows.
             let place = ResourceTy::Index(lhs_rap.clone(), lhs_rap.name().to_owned(), PlaceWrite::Update);
             let die = if ref_data.ref_mutability { Evt::MDie } else { Evt::SDie };
-            self.add_ev(end_line, die, to_ro, place, false);
+            self.add_ev(end_line, die, to_ro.clone(), place.clone(), false);
+            // Its other lenders stay borrowed as long (`Holder { r:
+            // longest(&s, &t) }`, #1588).
+            for co in ref_data.co_lenders.iter().filter(|c| matches!(c, ResourceTy::Value(_))) {
+              let die = if ref_data.mut_of(co) { Evt::MDie } else { Evt::SDie };
+              self.add_ev(end_line, die, co.clone(), place.clone(), false);
+            }
+            // The write and that use in one arm of a conditional the loan
+            // was made before: on the other arms' paths the field still
+            // holds it, and it ends there (#1588).
+            if self.arm_frames.iter().any(|&(split, _, lo, hi)| ref_data.assigned_at < split && lo <= end_line && end_line <= hi) {
+              self.field_end_ids.extend(ends_lo..*self.unique_id);
+              for l in ref_data.all_lenders().into_iter().filter(|l| matches!(l, ResourceTy::Value(_))) {
+                let id = *self.unique_id;
+                *self.unique_id += 1;
+                let (from, to) = (lhs_rty.clone(), l.clone());
+                let ev = if ref_data.mut_of(&l) {
+                  ExternalEvent::MutableDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false }
+                } else {
+                  ExternalEvent::StaticDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false }
+                };
+                self.other_arm_ends.push((ref_data.assigned_at, (end_line, ev)));
+              }
+            }
           }
           else {
             // `o = &q;` ends the old loan where the borrow checker
@@ -7297,8 +7355,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // with `r` read after the `if`), and for each lender
             // of a reference that borrows from either of two
             // (#770). (`write_span`: see above.)
-            let end_of = |this: &Self, lender: &ResourceTy| lift(this.old_loan_end(&me, &ref_data, lender, line_num, write_span).unwrap_or(line_num));
-            let end_line = lift(match self.loan_end_of(&me, &ref_data).filter(|&end| end < line_num && end >= ref_data.assigned_at) {
+            let end_of = |this: &Self, lender: &ResourceTy| lift(this.old_loan_end(&me, &ref_data, lender, line_num, write_span)
+              .filter(|&e| !field_write || e > line_num).unwrap_or(line_num));
+            let end_line = lift(match self.loan_end_of(&me, &ref_data).filter(|&end| end < line_num && end >= ref_data.assigned_at && !field_write) {
               Some(end) => end,
               None => match end_of(self, &ref_data.lender) {
                 e if e == line_num => dead_before_arms.unwrap_or(e),
@@ -7317,7 +7376,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             };
             // An end past the write (#778) is added once the whole
             // body is visited, at the top level (`late_old_ends`).
-            self.defer_old_ends = end_line > line_num;
+            // So is one before the write in an arm (of this conditional
+            // or one around it) of a loan made before that `if` /
+            // `match` (`let r2 = r; r = &t;` in one arm of `if
+            // r.is_empty()`, or `if a { if r.is_empty() { .. } else { r =
+            // &t; } }`): on its other arms' paths it ends too, at their
+            // last use of r or as they start, and
+            // `end_outer_borrows_in_arms` ends it in each of them. Added
+            // here, in this arm only, it never ended on the other paths,
+            // nor in an `else if` chain's arms (#1580).
+            // (A field write's, at the write itself, too.)
+            let in_this_arm = (end_line < line_num || (field_write && end_line == line_num)) && self.arm_frames.iter()
+              .any(|&(split, _, lo, hi)| ref_data.assigned_at < split && split < end_line && lo <= end_line && end_line <= hi);
+            self.defer_old_ends = end_line > line_num || in_this_arm;
             self.add_borrow_end_ev(end_line, to_ro.clone(), lhs_rty.clone(), &ref_data, Vec::new());
             self.defer_old_ends = false;
             if let ResourceTy::Value(l) = &to_ro {
@@ -7353,7 +7424,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 }
                 continue;
               }
-              self.defer_old_ends = co_end > line_num;
+              self.defer_old_ends = co_end > line_num || (in_this_arm && co_end == end_line);
               self.add_ev(co_end, evt, co.clone(), lhs_rty.clone(), false);
               self.defer_old_ends = false;
             }

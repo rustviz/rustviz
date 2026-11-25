@@ -28009,6 +28009,94 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "what is left in u",
         ],
     },
+    TooltipExpect {
+        name: "repoint_nested_arm_dead_loan_1580",
+        // #1580: r's old loan ended before the outer `if`; an arm of a
+        // conditional nested in one of its arms re-points r. Both joins say
+        // so; on main the inner join said r had never been assigned (false:
+        // it held a reference since its `let`), and the outer one had no dot.
+        must_contain: &[
+            "r's borrow ended before the branches above, and each borrow a branch gave r ended in that branch",
+            "r's borrow ended in each branch above",
+        ],
+        must_not_contain: &[
+            "r still has no value here",
+        ],
+    },
+    TooltipExpect {
+        name: "repoint_nested_arm_live_loan_1580",
+        // #1580 (second shape and siblings): the old loan, live into the arm
+        // that re-points r, ends in the other arms too (the outer `else`
+        // arm's own end). r2's new loan of s2 in `shared_line_use` gives s2
+        // back: r3's last use is on the `else if` line, on the other path.
+        // Main ended neither, and their legs met with no join dot.
+        must_contain: &[
+            "r's immutable borrow ends",
+            "Return immutably borrowed resource from r2 to s2",
+            "r2's borrow ended before the branches above, and each borrow a branch gave r2 ended in that branch",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "repoint_copied_ref_other_arm_1589",
+        // #1589: a copied reference re-pointed in one arm and read in
+        // another ends its borrow at that read; main ended nothing there and
+        // drew r holding a reference past a dotless join.
+        must_contain: &[
+            "r's borrow ended in each branch above",
+            "x's borrow ended in each branch above",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "field_repoint_read_other_arm_1576",
+        // #1576: h.r re-pointed in one arm, read in the other: its borrow
+        // ends at that read, in that arm (main gave s back between the
+        // legs, and h.r's join had no dot).
+        must_contain: &[
+            "h.r's borrow ended in each branch above",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "match_scrutinee_ref_repointed_1578",
+        // #1578: r's loan ends at the scrutinee, before any arm runs; main
+        // ended it in the re-pointing arm only (s was used, and moved, while
+        // drawn borrowed in the `_` arm).
+        must_contain: &[
+            "r's borrow ended in each branch above",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "dead_loan_then_mut_borrow_1575",
+        // #1575: m3's loan ends at its last use and gives s back; main put
+        // the end off to m3's scope end with no return arrow.
+        must_contain: &[
+            "Return mutably borrowed resource from m3 to s",
+            "s's resource is no longer mutably borrowed",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "field_repoint_in_arm_1588",
+        // #1588: a field write uses its struct, so the old loan lives up to
+        // `h.r = &t;` (rustc: "immutable borrow later used here" at the
+        // write) and ends there for each lender, and as the other arms
+        // start. Main ended a one-lender field's old loan before the `if`
+        // (false) and left t borrowed to the fn's end on the `else` path.
+        // `copied_in_final_else`: the old loan of s and the unread new one
+        // of t end on one row, each naming its own lender.
+        must_contain: &[
+            "h.r's borrow ended in each branch above",
+            "h.r's immutable borrow of s ends",
+            "h.r's immutable borrow of t ends",
+        ],
+        must_not_contain: &[
+            "h.r's borrow ended before the branches above",
+            "h.r still has no value here",
+        ],
+    },
 ];
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws

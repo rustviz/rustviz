@@ -1444,14 +1444,22 @@ fn render_branch_dots(
                 let started = before.iter().rposition(|(_, e)| is_start(e));
                 died.is_some_and(|d| started.is_none_or(|s| d > s))
                     || history[k + 1..].iter().take_while(|(l, _)| *l == *split_point).any(|(_, e)| is_die(e))
+                    // A conditional nested in an arm (`else if`, `else {
+                    // if .. }`): `history` is that arm's, which needn't
+                    // hold the end; the borrow ended before it if the
+                    // column reaches it holding none, after holding one
+                    // (not `let r;`, never assigned yet) (#1580).
+                    || (branch_history.first().and_then(|b| b.entry_state.as_ref()).is_some_and(|s| matches!(s,
+                        State::OutOfScope | State::FullPrivilege { s: LineState::Uninit }))
+                        && visualization_data.timelines.get(hash).is_some_and(|t| started_before(&t.history, *split_point)))
             })
             && all_paths_present(ty, branch_history.len())
-            && branch_history.iter().any(|b| !b.diverges && ends_borrow(&b.e_data))
+            && branch_history.iter().any(|b| !b.diverges && ends_some_borrow(&b.e_data))
             && branch_history.iter().filter(|b| !b.diverges).all(|b| {
                 matches!(
                     b.states.last().map(|s| &s.2),
                     Some(State::OutOfScope) | Some(State::FullPrivilege { s: LineState::Uninit })
-                ) && (b.e_data.is_empty() || ends_borrow(&b.e_data))
+                ) && holds_no_new_borrow(&b.e_data)
             });
         // `None`: no join dot at all (the all-moved case below).
         let title = if borrow_ended_in_every_arm {
@@ -2938,6 +2946,35 @@ fn ends_borrow(history: &[(usize, Event)]) -> bool {
     })
 }
 
+// Whether a reference's column, `history`, is given a borrow before
+// `line`, in a conditional's arms too.
+fn started_before(history: &[(usize, Event)], line: usize) -> bool {
+    history.iter().any(|(l, e)| match e {
+        Event::Branch { branch_history, .. } => branch_history.iter().any(|b| started_before(&b.e_data, line)),
+        Event::StaticBorrow { .. } | Event::MutableBorrow { .. } | Event::Copy { .. } | Event::Acquire { .. } => *l < line,
+        _ => false,
+    })
+}
+
+// Whether a borrow ends somewhere in `history` (one arm's events),
+// maybe in only some arms of a conditional nested in it (#1580).
+fn ends_some_borrow(history: &[(usize, Event)]) -> bool {
+    history.iter().any(|(_, e)| match e {
+        Event::StaticDie { .. } | Event::MutableDie { .. } | Event::OrAltBorrow { end: true, .. } => true,
+        Event::Branch { branch_history, .. } => branch_history.iter().any(|b| ends_some_borrow(&b.e_data)),
+        _ => false,
+    })
+}
+
+// Whether a reference that came into an arm holding no borrow leaves it
+// holding none: the arm gives it no borrow, or ends the one it gives,
+// or is a conditional each of whose arms does (an `else if` chain with
+// a re-point in one arm, #1580).
+fn holds_no_new_borrow(history: &[(usize, Event)]) -> bool {
+    ends_borrow(history) || history.iter().all(|(_, e)| matches!(e,
+        Event::Branch { branch_history, .. } if branch_history.iter().all(|b| holds_no_new_borrow(&b.e_data))))
+}
+
 /// The state an arm reaches its conditional's join in, for drawing: the
 /// arm's last state, except for a reference whose borrow ended in the arm
 /// (`end_outer_borrows_in_arms`), which reaches the join with the dashed
@@ -2965,9 +3002,9 @@ fn arm_end_state(rap: &ResourceAccessPoint, branch: &BranchData, branch_history:
     // new one ended that (#1524): the join's "r's borrow ended before the
     // branches above" dot. The arms that do nothing hold no borrow.
     let every_arm_ended = every_arm_ended || (all_paths_present(ty, branch_history.len())
-        && branch_history.iter().any(|b| !b.diverges && ends_borrow(&b.e_data))
+        && branch_history.iter().any(|b| !b.diverges && ends_some_borrow(&b.e_data))
         && branch_history.iter().filter(|b| !b.diverges).all(|b| ended(b.states.last().map(|s| &s.2))
-            && (ends_borrow(&b.e_data) || b.e_data.is_empty())));
+            && holds_no_new_borrow(&b.e_data)));
     // An arm beside one that moved r (`if c { take(m); }`, `Some(_) =>
     // drop(m)`), where every other arm ended its borrow: the join has no
     // dot (a reference whose borrow ended in only some arms gets none),
@@ -7895,8 +7932,14 @@ fn field_lender_walk(
 ) {
     // (field, row, mutable) -> (id, lender, place in the call's arguments)
     let mut borrows: Vec<((u64, usize, bool), Vec<(usize, String, usize)>)> = Vec::new();
-    // (field, row, mutable) -> (lenders before the row, [(id, lender)])
-    let mut ends: Vec<((u64, usize, bool), Vec<String>, Vec<(usize, String)>)> = Vec::new();
+    // (field, row, mutable, assignments to the field on the row before
+    // the end) -> (lenders before the row, [(id, lender)])
+    let mut ends: Vec<((u64, usize, bool, usize), Vec<String>, Vec<(usize, String)>)> = Vec::new();
+    // Ends on a row before an assignment to the field on it, and ends
+    // after, are of different loans: the old value's and the new one's
+    // (`h.r = r;` re-pointing h.r from s to t, where the new loan is
+    // never used, #1580). Not one end that may give back either.
+    let mut assigned: BTreeMap<(u64, usize), usize> = BTreeMap::new();
     for (row, ev) in events {
         match ev {
             ExternalEvent::Branch { branches, .. } => {
@@ -7943,6 +7986,9 @@ fn field_lender_walk(
                 if !lender.is_ref() && !list.iter().any(|(n, _)| *n == name) {
                     list.push((name.clone(), *row));
                 }
+                if ends.iter().any(|(k, ..)| k.0 == *field.hash() && k.1 == *row) {
+                    *assigned.entry((*field.hash(), *row)).or_default() += 1;
+                }
                 let key = (*field.hash(), *row, matches!(ev, ExternalEvent::MutableBorrow { .. }));
                 let order = via.as_ref().and_then(|v| v.lenders.iter().position(|l| l == lender.name())).unwrap_or(usize::MAX);
                 match borrows.iter_mut().find(|(k, _)| *k == key) {
@@ -7953,6 +7999,11 @@ fn field_lender_walk(
             // A reference moved or copied into it (`o.inner = other;`,
             // `hold.r = tr;`) replaces what it pointed into too.
             ExternalEvent::Move { to, .. } | ExternalEvent::Copy { to, .. } => {
+                if let Some(field) = ref_field(to) {
+                    if ends.iter().any(|(k, ..)| k.0 == *field.hash() && k.1 == *row) {
+                        *assigned.entry((*field.hash(), *row)).or_default() += 1;
+                    }
+                }
                 if let Some(list) = ref_field(to).and_then(|f| pending.get_mut(f.hash())) {
                     list.retain(|(_, r)| r == row);
                 }
@@ -7962,7 +8013,8 @@ fn field_lender_walk(
                 if from.is_same_underlying(to) {
                     continue;
                 }
-                let key = (*field.hash(), *row, matches!(ev, ExternalEvent::MutableDie { .. }));
+                let key = (*field.hash(), *row, matches!(ev, ExternalEvent::MutableDie { .. }),
+                    assigned.get(&(*field.hash(), *row)).copied().unwrap_or(0));
                 let before: Vec<String> = pending.get(field.hash()).into_iter().flatten()
                     .filter(|(_, r)| r != row).map(|(n, _)| n.clone()).collect();
                 match ends.iter_mut().find(|(k, ..)| *k == key) {

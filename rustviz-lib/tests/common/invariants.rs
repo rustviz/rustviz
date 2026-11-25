@@ -55,6 +55,9 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("assign_branch_ref_arms_1393", "arrow-along-leg", 1489),
     ("repoint_if_chain_806", "arrow-along-leg", 1489),
     ("repoint_if_chain_read_middle_806", "arrow-along-leg", 1489),
+    // (Its `shared_line_use`: three arrows on the arm's first row, r3's
+    // end along the leg into the arm.)
+    ("repoint_nested_arm_live_loan_1580", "arrow-along-leg", 1489),
     // Arrows fanned into one dot from below (#1312): one head still comes
     // in at 70-85 degrees along the column under the dot.
     ("assign_branch_reborrow_holder_1482", "arrow-along-leg", 1542),
