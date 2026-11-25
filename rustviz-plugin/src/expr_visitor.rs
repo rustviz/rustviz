@@ -765,6 +765,11 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// while the arm was visited ahead of the rows before them; put in
   /// line order once it is (`in_line_order`).
   pub field_end_ids: Vec<usize>,
+  /// Ids of old-loan ends a re-pointing write in an arm deferred to the
+  /// top level so the other arms end the loan too (#1580): listed with
+  /// the arm's arrows on their line again, each on a row of its own, as
+  /// when added straight into the arm.
+  pub in_arm_end_ids: Vec<usize>,
   /// References whose borrow lasts at least until a line, whatever the
   /// MIR loan matched to them says: one a re-pointed reborrow gave back
   /// to (m in `h.r = r;` after `h = Holder { r: &*m }`, #1538), and one
@@ -1248,6 +1253,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       repointed_loans: Vec::new(),
       other_arm_ends: Vec::new(),
       field_end_ids: Vec::new(),
+      in_arm_end_ids: Vec::new(),
       min_lifetimes: Vec::new(),
       pre_split_end_ids: Vec::new(),
       retired_until: HashMap::new(),
@@ -12567,7 +12573,16 @@ pub fn print_out_of_scope(&mut self){
       }
     }
     for (line, ev) in std::mem::take(&mut self.late_old_ends) {
+      let id = ev.get_id();
       self.add_external_event(line, ev);
+      // (An arm's own end, `in_arm_end_ids`: not one of the top level's
+      // arrows on its line, which other ends moved into the arm count to
+      // decide whether they take a row of their own.)
+      if self.in_arm_end_ids.contains(&id) {
+        if let Some(evs) = self.event_line_map.get_mut(&line) {
+          evs.retain(|e| e.get_id() != id);
+        }
+      }
     }
     for (line, ev) in std::mem::take(&mut self.or_ref_ends) {
       self.add_external_event(line, ev);
@@ -13064,7 +13079,8 @@ pub fn print_out_of_scope(&mut self){
       // there would add a row the top level didn't have; list it only
       // if it was stacked with other arrows at the top level. An arrow
       // its line map doesn't list is drawn first on its line.
-      let stacked = at_split || self.event_line_map.get(&ev.0).is_some_and(|evs| evs.len() > 1);
+      let stacked = at_split || self.event_line_map.get(&ev.0).is_some_and(|evs| evs.len() > 1)
+        || self.in_arm_end_ids.contains(&ev.1.get_id());
       // The line the reference's current loan was made on, if `ev` ends
       // that loan. An end of an earlier loan (`c = &y;` ends c's loan of
       // x, made before the conditional; #778, #801) isn't described by it.

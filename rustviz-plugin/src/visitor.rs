@@ -7389,7 +7389,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             let in_this_arm = (end_line < line_num || (field_write && end_line == line_num)) && self.arm_frames.iter()
               .any(|&(split, _, lo, hi)| ref_data.assigned_at < split && split < end_line && lo <= end_line && end_line <= hi);
             self.defer_old_ends = end_line > line_num || in_this_arm;
+            let in_arm_lo = *self.unique_id;
             self.add_borrow_end_ev(end_line, to_ro.clone(), lhs_rty.clone(), &ref_data, Vec::new());
+            if in_this_arm {
+              self.in_arm_end_ids.extend(in_arm_lo..*self.unique_id);
+            }
             self.defer_old_ends = false;
             if let ResourceTy::Value(l) = &to_ro {
               self.repointed_ends.push((l.name().to_owned(), ref_data.assigned_at, end_line));
@@ -7425,7 +7429,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 continue;
               }
               self.defer_old_ends = co_end > line_num || (in_this_arm && co_end == end_line);
+              let co_lo = *self.unique_id;
               self.add_ev(co_end, evt, co.clone(), lhs_rty.clone(), false);
+              if in_this_arm && co_end == end_line {
+                self.in_arm_end_ids.extend(co_lo..*self.unique_id);
+              }
               self.defer_old_ends = false;
             }
           }
