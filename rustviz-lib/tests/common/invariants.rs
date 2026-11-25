@@ -55,6 +55,15 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("assign_branch_ref_arms_1393", "arrow-along-leg", 1489),
     ("repoint_if_chain_806", "arrow-along-leg", 1489),
     ("repoint_if_chain_read_middle_806", "arrow-along-leg", 1489),
+    // Arrows fanned into one dot from below (#1312): one head still comes
+    // in at 75-85 degrees along the column under the dot.
+    ("array_moved_mut_params_one_end_1337", "arrow-along-leg", 1542),
+    ("field_lenders_1354", "arrow-along-leg", 1542),
+    ("iter_holder_copied_1399", "arrow-along-leg", 1542),
+    ("iter_mut_holder_1399", "arrow-along-leg", 1542),
+    ("let_pattern_literal_unbound_moves", "arrow-along-leg", 1542),
+    ("refs_array_literal", "arrow-along-leg", 1542),
+    ("tuple_scrutinee_nested", "arrow-along-leg", 1542),
 ];
 
 /// The invariants, by the name the failure list and messages use.
@@ -124,8 +133,9 @@ pub const INVARIANTS: &[(&str, &str)] = &[
       one arrow through the dot"),
     ("arrow-along-leg",
      "an arrow's head or shaft lies along a column's slanted leg into or out of a conditional's arm \
-      (the head coming into a dot at about the leg's angle, or the shaft leaving one along it): \
-      the arrow hides that stretch of the leg"),
+      (the head coming into a dot at about the leg's angle, or the shaft leaving one along it), or \
+      its head along a column's vertical line (coming steeply up or down into a dot): the arrow \
+      hides that stretch of the column"),
 ];
 
 // ─── Reading a timeline ─────────────────────────────────────────────
