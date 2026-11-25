@@ -8103,8 +8103,9 @@ fn untangle_search(
             }
             let (c, d) = eval(dots, &s, &mut budget);
             let cc = col_cost(c, &d, dots);
-            // (No new mark of any other kind.)
-            if c.0 <= cost.0 && cc.0 < now_cost.0 && best.as_ref().is_none_or(|b| cc < b.0) && heads_touching(&d) <= heads_touching(&drawn) && inside(&d)
+            // (No new mark of any other kind, and no new crossing of two
+            // arrows.)
+            if c.0 <= cost.0 && c.1 <= cost.1 && cc.0 < now_cost.0 && best.as_ref().is_none_or(|b| cc < b.0) && heads_touching(&d) <= heads_touching(&drawn) && inside(&d)
                 && brackets_hit(&d) <= brackets_hit(&drawn) {
                 best = Some((cc, s, d));
             }

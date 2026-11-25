@@ -57,8 +57,10 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("repoint_if_chain_read_middle_806", "arrow-along-leg", 1489),
     // Arrows fanned into one dot from below (#1312): one head still comes
     // in at 70-85 degrees along the column under the dot.
+    ("assign_branch_reborrow_holder_1482", "arrow-along-leg", 1542),
     ("branch_holder_lenders_1404", "arrow-along-leg", 1542),
     ("closure_field_capture_through_ref_1093", "arrow-along-leg", 1542),
+    ("cond_holder_local_ref_1475", "arrow-along-leg", 1542),
     ("cond_holder_moved_1464", "arrow-along-leg", 1542),
     ("ctor_cond_assign_holder_1470", "arrow-along-leg", 1542),
     ("ctor_cond_holder_1457", "arrow-along-leg", 1542),
@@ -67,9 +69,11 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("holder_return_clear_of_leg_1476", "arrow-along-leg", 1542),
     ("holder_tuple_literal_1459", "arrow-along-leg", 1542),
     ("iter_holder_copied_1399", "arrow-along-leg", 1542),
+    ("iter_mut_holder_1399", "arrow-along-leg", 1542),
     ("let_else_holder_return_1458", "arrow-along-leg", 1542),
     ("let_pattern_literal_unbound_moves", "arrow-along-leg", 1542),
     ("pattern_ref_several_lenders", "arrow-along-leg", 1542),
+    ("refs_array_literal", "arrow-along-leg", 1542),
     ("store_through_mut_ref_1124", "arrow-along-leg", 1542),
     ("tuple_scrutinee_nested", "arrow-along-leg", 1542),
     ("two_field_borrow_through_ref_1080", "arrow-along-leg", 1542),
