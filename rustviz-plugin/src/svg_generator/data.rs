@@ -3171,12 +3171,14 @@ impl State {
 
 /// A conditional after which the value may be held or not: a
 /// `maybe_held` join (#1034), or one with a branch that gets to the join
-/// after such a conditional of its own (#1413).
+/// after such a conditional of its own (#1413), or after a loop that may
+/// have ended before assigning it (#1495).
 pub(crate) fn leaves_maybe_held(e: &Event) -> bool {
     match e {
         Event::Branch { maybe_held: true, .. } => true,
         Event::Branch { branch_history, .. } => branch_history.iter()
-            .any(|b| !b.diverges && b.e_data.last().is_some_and(|(_, e)| leaves_maybe_held(e))),
+            .any(|b| !b.diverges && b.e_data.last().is_some_and(|(_, e)|
+                leaves_maybe_held(e) || matches!(e, Event::LoopMaybeInit { .. }))),
         _ => false,
     }
 }
@@ -5528,6 +5530,7 @@ impl Visualizable for VisualizationData {
             states.push((previous_line, *l, pre_event_state));
             match e {
                 Event::Branch { branch_history, ty, split_point, merge_point, maybe_init, maybe_held, .. } => {
+                    let entry_state = previous_state.clone();
                     // Timeline is empty in the middle during a branch
                     states.push((*split_point, *merge_point, State::OutOfScope));
                     // State of each branch that reaches the merge; a
@@ -5585,6 +5588,15 @@ impl Visualizable for VisualizationData {
                     if unassigned_on_some_path {
                         previous_state = State::FullPrivilege { s: LineState::Uninit };
                     }
+                    // So does it from a join where no branch that gets there
+                    // assigned it, when it had no value (or maybe none) as the
+                    // conditional started (`if c { return; }` in the arm,
+                    // #1533): the arm's line goes on from the join, not a
+                    // row below it.
+                    let no_value = |s: &State| matches!(s, State::OutOfScope | State::FullPrivilege { s: LineState::Uninit });
+                    if matches!(previous_state, State::OutOfScope) && no_value(&entry_state) && ending_states.iter().all(no_value) {
+                        previous_state = State::FullPrivilege { s: LineState::Uninit };
+                    }
                     // In a branch, a value that may be held or not after
                     // this conditional (`if c { take(p); if d { p = … } }`,
                     // #1413) is drawn as after a move: nothing for the rest
@@ -5615,6 +5627,15 @@ impl Visualizable for VisualizationData {
                     // resuming a row later leaves a visible gap
                     // between the join and the post-merge state.
                     previous_line = *merge_point;
+                }
+                // A loop in this branch may have ended before assigning
+                // it (#1495): as for a value a nested conditional may have
+                // left with none (#1413), nothing is drawn for the rest of
+                // the branch (not "no value yet", and no gap before that),
+                // and the conditional joins as one that may have moved it.
+                Event::LoopMaybeInit { .. } => {
+                    previous_state = State::ResourceMoved { move_to: ResourceTy::Anonymous, move_at_line: *l, dropped_by_hand: false };
+                    previous_line = *l;
                 }
                 _ => {
                     if line_start.0 != *l {

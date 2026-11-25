@@ -27077,6 +27077,122 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Closure c is bound",
         ],
     },
+    // #1511: a `for` loop's `&mut` binding moved into a call ends its borrow
+    // at the move; the loop's iterator keeps the lender borrowed to the
+    // loop's end (main drew the binding's borrow end on its dead column at
+    // the loop's end, and the lender "borrowed by e" all the way there).
+    TooltipExpect {
+        name: "for_moved_mut_binding_1511",
+        must_contain: &[
+            "e's mutable reference is moved (not the resource it points to)",
+            "v's resource is no longer borrowed by e, but is still mutably borrowed by the `for` loop's iterator",
+            "w's resource is no longer borrowed by f, but is still mutably borrowed by the `for` loop's iterator",
+            "u's resource is no longer borrowed by g, but is still mutably borrowed by the `for` loop's iterator",
+            "a's resource is no longer borrowed by h, but is still mutably borrowed by the `for` loop's iterator",
+            "b's resource is no longer borrowed by h, but is still mutably borrowed by the `for` loop's iterator",
+            "v's resource is mutably borrowed by the `for` loop's iterator; v can't be used until the loop ends",
+            "a's resource is mutably borrowed by the `for` loop's iterator; a can't be used until the loop ends",
+        ],
+        must_not_contain: &[
+            "=v's resource is mutably borrowed by e; v can't be used until the borrow ends",
+            "=w's resource is mutably borrowed by f; w can't be used until the borrow ends",
+            "=u's resource is mutably borrowed by g; u can't be used until the borrow ends",
+            "=a's resource is mutably borrowed by h; a can't be used until the borrow ends",
+            "=b's resource is mutably borrowed by h; b can't be used until the borrow ends",
+        ],
+    },
+    // #1519: `for e in v` / `v.into_iter()` over `Vec<&str>`, or over a
+    // `[&str; 2]`: each e is a reference v stored, not a borrow of v, which
+    // was moved (or copied) into the loop: nothing is returned to it.
+    TooltipExpect {
+        name: "for_consumed_ref_elems_1519",
+        must_contain: &[
+            "e is bound to a copy of an element of v",
+            "f is bound to an immutable reference",
+            "g is bound to an immutable reference",
+            "e's immutable borrow ends",
+            "Return immutably borrowed resource from h to words",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from e to v",
+            "Return immutably borrowed resource from f to w",
+            "Return immutably borrowed value from g to arr",
+            "v's resource is no longer immutably borrowed",
+            "w's resource is immutably borrowed by f",
+            "arr's value is no longer immutably borrowed",
+        ],
+    },
+    // #1535: the iterator temporary of a `for` loop in an arm exists on both
+    // paths through the body's early-exit `if`.
+    TooltipExpect {
+        name: "for_head_temp_in_arm_1535",
+        must_contain: &[
+            "(temporary) isn't moved in any of the branches above",
+            "This temporary IntoIter<i32> is dropped here, where `break` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary IntoIter<i32> is dropped here, where `return` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
+        ],
+        must_not_contain: &[
+            "(temporary) hasn't been made yet",
+            "(temporary) still has no value here",
+        ],
+    },
+    // #1495: after a loop in an arm that may have assigned the variable, the
+    // arm's line stops at the loop's dot; it doesn't go on as "no value yet".
+    TooltipExpect {
+        name: "loop_maybe_init_in_arm_1495",
+        must_contain: &[
+            "s may have no value after the loop: the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it, its resource is dropped when s goes out of scope.",
+            "s may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when s goes out of scope.",
+            "t was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped when t goes out of scope.",
+            "t goes out of scope. Its resource is dropped here only if t still holds it (Rust tracks this with a runtime drop flag).",
+            "u may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when u goes out of scope.",
+            "w was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped when w goes out of scope.",
+        ],
+        must_not_contain: &[
+            "s has no value yet",
+            "t has no value yet",
+            "u has no value yet",
+            "w has no value yet",
+        ],
+    },
+    // #1514: a variable a loop may have left unassigned, assigned in a
+    // conditional nested in one arm: the outer join says it may have no
+    // value (main drew no dot there, and t "the owner" after a `match`
+    // whose arm assigns it on both inner paths).
+    TooltipExpect {
+        name: "loop_maybe_init_nested_assign_1514",
+        must_contain: &[
+            "s may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when s goes out of scope.",
+            "t may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when t goes out of scope.",
+            "t goes out of scope. Its resource is dropped here only if t still holds it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "=t goes out of scope. Its resource is dropped.",
+        ],
+    },
+    // #1533: after a conditional that may have left s holding a value, a
+    // later one that assigns nothing leaves it maybe-held: not "no value
+    // yet" / "none of the branches above assigned it".
+    TooltipExpect {
+        name: "maybe_held_then_exit_1533",
+        must_contain: &[
+            "s may have no value here: it was assigned in only some of the branches above",
+            "s may have no value here, as before the branches: none of the branches that get here assigns it",
+            "s goes out of scope. Its resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
+            "t may have no value here, as before the branches: none of the branches that get here assigns it",
+            "u may have no value here, as before the branches: none of the branches that get here assigns it",
+            "u goes out of scope. Its resource is dropped here only if u still holds it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "s has no value yet",
+            "u has no value yet",
+            "s still has no value here",
+            "t still has no value here",
+            "u still has no value here",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it",
+            "u goes out of scope. Its resource is dropped here only if no branch above moved it",
+        ],
+    },
 ];
 
 /// #1440: on the line where two loans of v end, the first end's dot (with
