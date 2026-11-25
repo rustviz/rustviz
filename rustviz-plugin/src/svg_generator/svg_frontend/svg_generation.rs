@@ -257,6 +257,66 @@ fn note_still_borrowed_below(front: &mut [ExternalEvent], back: &[ExternalEvent]
     }
 }
 
+/// Sorts each run of consecutive borrow ends (`StaticDie` / `MutableDie`)
+/// of one source line (`src_line`, by event id) in `e_data` by row.
+fn sort_line_ends_by_row(e_data: &mut [(usize, ExternalEvent)], src_line: &HashMap<usize, usize>) {
+    let is_end = |e: &ExternalEvent| matches!(e, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. });
+    let line_of = |e: &ExternalEvent| src_line.get(&e.get_id()).copied();
+    let mut i = 0;
+    while i < e_data.len() {
+        if !is_end(&e_data[i].1) || line_of(&e_data[i].1).is_none() {
+            i += 1;
+            continue;
+        }
+        let line = line_of(&e_data[i].1);
+        let mut j = i + 1;
+        while j < e_data.len() && is_end(&e_data[j].1) && line_of(&e_data[j].1) == line {
+            j += 1;
+        }
+        e_data[i..j].sort_by_key(|(row, _)| *row);
+        i = j;
+    }
+}
+
+/// An arm's borrow end that gives its lender back while another
+/// reference's borrow of it, ended on the same source line, is drawn on a
+/// row below (`end_outer_borrows_in_arms` puts the end of a reference
+/// declared before the conditional on a row of its own): the lender
+/// stays borrowed by that one in between, as `note_still_borrowed_below`
+/// says for a split stack. `let r2 = r;` in a `match` arm, r = &*m, both
+/// last used there: r2's end said nothing about r, and m's column read
+/// "can read and write" down to r's end (#1527). `src_line` is each
+/// event's source line by id, before the arm's rows were laid out.
+fn note_still_borrowed_on_later_rows(e_data: &mut [(usize, ExternalEvent)], src_line: &HashMap<usize, usize>) {
+    let lender_of = |l: &ResourceTy| match l {
+        ResourceTy::Value(l) => Some((false, *l.hash())),
+        ResourceTy::Deref(l) => Some((true, *l.hash())),
+        _ => None,
+    };
+    let end_of = |e: &ExternalEvent| match e {
+        ExternalEvent::StaticDie { from: ResourceTy::Value(r), to, .. } => Some((false, r.clone(), lender_of(to)?)),
+        ExternalEvent::MutableDie { from: ResourceTy::Value(r), to, .. } => Some((true, r.clone(), lender_of(to)?)),
+        _ => None,
+    };
+    for i in 0..e_data.len() {
+        let Some((mutable, r, lender)) = end_of(&e_data[i].1) else { continue };
+        let (row, line) = (e_data[i].0, src_line.get(&e_data[i].1.get_id()).copied());
+        let holders: Vec<String> = e_data.iter()
+            .filter(|(l, e)| *l > row && line.is_some() && src_line.get(&e.get_id()).copied() == line)
+            .filter_map(|(_, e)| end_of(e))
+            .filter(|(m, o, l)| *m == mutable && *l == lender && o.hash() != r.hash())
+            .map(|(_, o, _)| o.name().to_owned())
+            .collect();
+        if let ExternalEvent::StaticDie { still_borrowed_by, .. } | ExternalEvent::MutableDie { still_borrowed_by, .. } = &mut e_data[i].1 {
+            for name in holders {
+                if !still_borrowed_by.contains(&name) {
+                    still_borrowed_by.push(name);
+                }
+            }
+        }
+    }
+}
+
 /// `split_same_line_borrow_ends` names, on a copy of `e`, what keeps the
 /// lender borrowed after its end (`note_still_borrowed_below`): the same
 /// on the event itself, which an arm's layout moves by id.
@@ -971,6 +1031,30 @@ fn one_line_join_below(
         }))
 }
 
+/// Rows to add below a conditional written on one line (`split_line`,
+/// `merge_line`, in source lines) so that its join, on row `merge_row`,
+/// sits below the join of every one-row diamond nested in its arms: a
+/// one-line conditional whose arms got no rows of their own, drawn from a
+/// fork a row above its row to a join a row below (`COLLAPSED_APEX`).
+/// Level with the outer join (`if c { s.len(); } else { if s.is_empty() {
+/// return; } }`), or with the outer one a one-row diamond as well (`if c
+/// { if s.is_empty() { return; } } else { }`), the two diamonds' forks
+/// and joins sat on one row and their legs crossed (#1534).
+fn rows_below_nested_diamonds(branches: &[ExtBranchData], split_line: usize, merge_line: usize, merge_row: usize) -> usize {
+    if !branch_is_collapsed(split_line, merge_line) {
+        return 0;
+    }
+    branches.iter()
+        .flat_map(|b| b.e_data.iter())
+        .filter_map(|(_, e)| match e {
+            ExternalEvent::Branch { split_point, merge_point, .. } if branch_is_collapsed(*split_point, *merge_point) =>
+                Some((*merge_point + 2).saturating_sub(merge_row)),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 /// Rows to add around the arms of a conditional written on one line
 /// whose arms stack arrows (`let (a, b) = if c { (f, g) } else { (h,
 /// k) };`, #1187). Each arm's stacked arrows run on rows inserted below
@@ -1144,6 +1228,7 @@ pub fn mutate_branch_lines(
     in_spread_arm: bool,
 ) -> usize {
     let old_extra_lines = extra_lines;
+    let src_line: HashMap<usize, usize> = b_data.e_data.iter().map(|(l, e)| (e.get_id(), *l)).collect();
     let mut old_line_map = b_data.line_map.clone();
     let mut new_line_map: BTreeMap<usize, Vec<ExternalEvent>> = BTreeMap::new();
     let mut skippable_ev: HashSet<usize> = HashSet::new();
@@ -1201,6 +1286,10 @@ pub fn mutate_branch_lines(
                 if gaps.before_merge()
                     || one_line_join_below(branches, live_vars, line_num, *merge_point, *split_point, *merge_point + extra_lines)
                 {
+                    *l_map.entry(*merge_point + extra_lines).or_insert(0) += 1;
+                    extra_lines += 1;
+                }
+                for _ in 0..rows_below_nested_diamonds(branches, line_num, *merge_point, *merge_point + extra_lines) {
                     *l_map.entry(*merge_point + extra_lines).or_insert(0) += 1;
                     extra_lines += 1;
                 }
@@ -1371,6 +1460,17 @@ pub fn mutate_branch_lines(
 
     // replace line_map
     b_data.line_map = new_line_map;
+    // A line's borrow ends laid out over several rows keep their order in
+    // the line, so an end that stayed on the line's row (r2's, `let r2 =
+    // r;` with r = &*m) came after those moved below it (r's and m's), and
+    // the arm's states ran back up from the lower row: m's column stopped
+    // at its lower dot and its dashed rest began a row further down, in
+    // mid-air (#1527). The ends of one line go in row order. (Only ends
+    // among themselves: a write drawn below the end of the reference it
+    // writes through, `r.name = a` with r's last use, #1349, still comes
+    // first.)
+    sort_line_ends_by_row(&mut b_data.e_data, &src_line);
+    note_still_borrowed_on_later_rows(&mut b_data.e_data, &src_line);
     extra_lines - old_extra_lines
 
 }
@@ -1781,6 +1881,10 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                 if gaps.before_merge()
                     || one_line_join_below(branches, live_vars, *line_num, *merge_point, *split_point, *merge_point + extra_lines)
                 {
+                    *line_insertion_map.entry(*merge_point + extra_lines).or_insert(0) += 1;
+                    extra_lines += 1;
+                }
+                for _ in 0..rows_below_nested_diamonds(branches, *line_num, *merge_point, *merge_point + extra_lines) {
                     *line_insertion_map.entry(*merge_point + extra_lines).or_insert(0) += 1;
                     extra_lines += 1;
                 }

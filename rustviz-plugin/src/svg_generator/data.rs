@@ -4554,6 +4554,9 @@ impl Event {
                 // `look(&x)` with x a reference variable borrowed x
                 // itself (#938, #974).
                 let of_ref_var = *of_ref_var && ref_lender(is).is_some();
+                if let (false, Some(r)) = (of_ref_var, ref_lender(is)) {
+                    return hover_messages::event_dot_reacquire_through_ref_still_borrowed(r.name(), &from_name, still_borrowed_by, mutable, r.points_to_copy());
+                }
                 hover_messages::event_dot_reacquire_still_borrowed(&self.deref_name(my_name), &from_name, still_borrowed_by, mutable, holds_copy_value(is), of_ref_var)
             }
             Event::MutableReacquire{ is, of_ref_var: true, ..} if ref_lender(is).is_some() => {

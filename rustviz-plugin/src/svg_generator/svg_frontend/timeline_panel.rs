@@ -840,16 +840,41 @@ fn branch_centers(branch_history: &[BranchData]) -> Vec<i64> {
     } else {
         (0, 0, halfway, 1)
     };
+    // `width` reserves an arm's room on the side towards the parent, but
+    // a nested branch's arms fan out on both sides of the arm, and one
+    // that cascades towards the parent (an `else if` chain in a left
+    // arm) can reach past that room onto the other side's legs (#1539).
+    // So an arm also keeps its whole reach (`compute_extent`) clear of
+    // what is already placed nearer the parent: of the parent's centre
+    // line for the two arms next to it, of a middle arm's reach, and of
+    // the neighbouring arm's reach, by at least one unit. Where `width`
+    // already leaves that room (every layout without such a cascade)
+    // nothing moves.
+    let reach = |i: usize| compute_extent(&branch_history[i].e_data);
+    // How far left of the parent's centre the arms placed so far reach
+    // (left side), and how far right (right side).
+    let (mut left_edge, mut right_edge) = if n % 2 == 1 && n > 1 {
+        let (mid_left, mid_right) = compute_extent(&branch_history[halfway].e_data);
+        (-mid_left, mid_right)
+    } else {
+        (0, 0)
+    };
     for i in (0..halfway).rev() {
         let padding = if i + 1 == halfway { inner_pad } else { 0 };
         left_run -= branch_history[i].width as i64 + padding;
+        let (arm_left, arm_right) = reach(i);
+        left_run = left_run.min(left_edge - 1 - arm_right);
         centers[i] = left_run;
+        left_edge = left_run - arm_left;
         left_run -= 2;
     }
     for i in right_start..n {
         let padding = if i == right_start { inner_pad } else { 0 };
         right_run += branch_history[i].width as i64 + padding;
+        let (arm_left, arm_right) = reach(i);
+        right_run = right_run.max(right_edge + 1 + arm_left);
         centers[i] = right_run;
+        right_edge = right_run + arm_right;
         right_run += 2;
     }
     centers
@@ -7458,6 +7483,36 @@ fn plan_variable_arrow(line_number: &usize, external_event: &ExternalEvent, from
 
 /// The end of `render_arrow`'s generic case: pull the head back, add the
 /// arrowhead and file the finished arrow under its column.
+/// Room left between an arrowhead's base and the bend before it (px).
+const HEAD_BEND_CLEARANCE: f64 = 3.0;
+
+/// Moves the bend before an arrow's endpoint (`route[1]`, the route
+/// running head first) back along the leg before it (towards `route[2]`)
+/// until the last leg is `need` px long, if it is shorter. Not past
+/// `route[2]`.
+fn ensure_head_room(route: &mut [(f64, f64)], need: f64) {
+    if route.len() < 3 {
+        return;
+    }
+    let (c0, c1, c2) = (route[0], route[1], route[2]);
+    let last = ((c1.0 - c0.0).powi(2) + (c1.1 - c0.1).powi(2)).sqrt();
+    let prev = ((c2.0 - c1.0).powi(2) + (c2.1 - c1.1).powi(2)).sqrt();
+    if last >= need || prev < 0.5 {
+        return;
+    }
+    let u = ((c2.0 - c1.0) / prev, (c2.1 - c1.1) / prev);
+    let w = (c1.0 - c0.0, c1.1 - c0.1);
+    let wu = w.0 * u.0 + w.1 * u.1;
+    let disc = wu * wu - (w.0 * w.0 + w.1 * w.1) + need * need;
+    if disc < 0.0 {
+        return;
+    }
+    let t = (-wu + disc.sqrt()).min(prev);
+    if t > 0.0 {
+        route[1] = (c1.0 + t * u.0, c1.1 + t * u.1);
+    }
+}
+
 fn finish_arrow(mut data: ArrowData, mut head_offset: f64, from: &ResourceTy, output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>, resource_owners_layout: &BTreeMap<u64, TimelineColumnData>, dots: &mut DotLayer, registry: &Handlebars) {
     // draw arrow only if data.x1 is not default value
     if !data.coordinates.is_empty() {
@@ -7483,6 +7538,14 @@ fn finish_arrow(mut data: ArrowData, mut head_offset: f64, from: &ResourceTy, ou
                 data.coordinates[0].0 -= head_offset;
             }
         } else {
+            // The head is pulled back along the last leg by `head_offset`.
+            // A last leg shorter than that (a track a few px above its
+            // target dot, turning down into it) put the endpoint past the
+            // bend, and the head, drawn from the bend to the endpoint,
+            // pointed away from the dot (#1540). The bend moves back along
+            // the leg before it, far enough that the last leg comes into
+            // the dot at an angle and keeps the head clear of the bend.
+            ensure_head_room(&mut data.coordinates, head_offset + HEAD_BEND_CLEARANCE);
 
             if data.coordinates[0].0 < data.coordinates[last_index].0 {
                 let hypotenuse = (((data.coordinates[1].0 - data.coordinates[0].0) as f64).powi(2) + ((data.coordinates[1].1 - data.coordinates[0].1) as f64).powi(2)).sqrt();
@@ -8658,11 +8721,15 @@ fn render_branches(
             // line, its arms on rows of their own, #1264), the leg ends at
             // that fork's dot, half a row up: run on to the row, it went
             // past the dot between the inner arms' diagonals, like a third
-            // arm.
+            // arm. Likewise a one-row diamond's fork, a row up (`else { if
+            // s.is_empty() { return; } }` on the line, #1534): run on to
+            // the row, it hung below the fork in mid-air.
             if raised {
                 let first_row = branch.states.iter().find(|(top, bot, _)| top <= bot).map(|s| s.0);
                 if let Some(first_row) = first_row.filter(|r| r > split_point) {
-                    let rise = apexes.raised_splits.get(&first_row).copied().unwrap_or(0);
+                    let rise = apexes.raised_splits.get(&first_row).copied()
+                        .or_else(|| apexes.splits.contains(&first_row).then_some(COLLAPSED_APEX))
+                        .unwrap_or(0);
                     push_seg_if_renderable(
                         &mut segs, rap,
                         (branch_x, column_top_y), (branch_x, (get_y_axis_pos(first_row) - rise) as f64),
@@ -9712,8 +9779,18 @@ fn binds_at_split(history: &[(usize, Event)], i: usize) -> bool {
     // x; }`: that arm's column starts on the split row too, #1426. Its
     // leg forked from the split dot on that row, a row above the dot
     // where it arrived, and the arm's events were drawn above its leg.)
+    // (Or an arm that starts on the next row with a one-row diamond of
+    // its own, `else if b.len() > 5 { &b } else { best }` on the line of
+    // `if a.len() > 5 { &a }`, the outer join a row below the inner one,
+    // #1534: that diamond's fork, a row above its row, is level with the
+    // split row, and the arm's leg ran on past it into the diamond.)
+    let starts_with_diamond = |arm: &BranchData| {
+        let mut evs = arm.e_data.iter().skip_while(|(l, ev)| *l == *split_point + 1 && !matches!(ev, Event::Branch { .. }));
+        matches!(evs.next(), Some((l, Event::Branch { split_point: s, merge_point: m, .. }))
+            if *l == *split_point + 1 && *s == *l && branch_is_collapsed(*s, *m))
+    };
     !branch_is_collapsed(*split_point, *merge_point)
-        && branch_history.iter().any(|arm| arm.e_data.iter().any(|(l, _)| l == split_point))
+        && branch_history.iter().any(|arm| arm.e_data.iter().any(|(l, _)| l == split_point) || starts_with_diamond(arm))
 }
 
 /// How far above the split line the fork of the conditional that the
@@ -9726,14 +9803,21 @@ fn binds_at_split(history: &[(usize, Event)], i: usize) -> bool {
 /// inner `if` of `if c { if d { take(f) } else { take(g) } } else {
 /// take(h) }` with its arms on rows of their own (#1306), is half a row
 /// up. The outer fork goes above that, and the first arm's leg ends at it.
+/// Events of this column in the inner conditional's own condition (`if c {
+/// if s.is_empty() { return; } } else { … }`) come before it in the arm,
+/// on the split line: they are drawn on the inner fork (`event_dot_y`), so
+/// the arm still starts with that fork (#1534; counted as no fork, the
+/// outer one went half a row up, below the inner one).
 fn arm_first_fork_rise(branch_history: &[BranchData], split_point: usize) -> Option<i64> {
     let arm = branch_history.first()?;
-    match arm.e_data.first()? {
+    let k = arm.e_data.iter()
+        .position(|(l, ev)| *l != split_point || matches!(ev, Event::Branch { .. }))?;
+    match &arm.e_data[k] {
         (l, Event::Branch { split_point: s, merge_point: m, .. }) if *l == split_point && *s == split_point =>
             if branch_is_collapsed(*s, *m) {
                 Some(COLLAPSED_APEX)
             } else {
-                binds_at_split(&arm.e_data, 0).then(|| split_rise(&arm.e_data, 0))
+                binds_at_split(&arm.e_data, k).then(|| split_rise(&arm.e_data, k))
             },
         _ => None,
     }
