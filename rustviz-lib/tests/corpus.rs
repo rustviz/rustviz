@@ -28098,6 +28098,24 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "m5 isn't moved in any of the branches above",
         ],
     },
+    TooltipExpect {
+        name: "arm_ends_review_1602",
+        // Shapes from the independent review of #1602. On main r7 and the
+        // or-pattern's a8 were said to have "no value" after their borrow
+        // ended. Earlier heads of #1602 also said r1's borrow "ended in
+        // each branch above" before `r1.len()` read it again on that line,
+        // and r4's inside a loop whose next iteration reads it.
+        must_contain: &[
+            "r7's borrow ended in each branch above",
+            "r4 isn't moved in any of the branches above",
+        ],
+        must_not_contain: &[
+            "r7 still has no value here",
+            "a8 still has no value here",
+            "r1's borrow ended in each branch above",
+            "r4's borrow ended in each branch above",
+        ],
+    },
 ];
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws
@@ -38396,19 +38414,41 @@ fn ref_old_loan_and_never_fn_ids_1486_1556_1557_1553() {
 #[test]
 fn arm_borrow_ends_follow_their_last_use() {
     let tl = run_with_local_backend("arm_ref_copy_end_1566").timeline_panel_string();
-    for r in ["h", "r3", "hh.r"] {
+    for (r, from) in [("h", "r"), ("r3", "r2"), ("hh.r", "r4")] {
         let end = dots_listing_tooltip(&tl, &format!("{r}'s immutable borrow ends"));
+        let made = dots_listing_tooltip(&tl, &format!("{r} is initialized with a copy of {from}"));
         let gone = dots_listing_tooltip(&tl, &format!("{r} goes out of scope"));
         assert_eq!((end.len(), gone.len()), (1, 1), "{r}: ends {end:?}, scope ends {gone:?}");
+        // On its own `let` dot, in its arm, above its scope end.
+        assert_eq!(made, end, "{r}'s borrow ends on the dot of its `let`");
         assert!(end[0].1 < gone[0].1, "{r}'s borrow ends at {:?}, after its scope end at {:?}", end[0], gone[0]);
     }
     let tl = run_with_local_backend("match_on_reborrowed_param_1567").timeline_panel_string();
     for (p, r, kind) in [("p", "r", "immutable"), ("m", "r2", "mutable"), ("q", "r3", "immutable")] {
         let back = dots_listing_tooltip(&tl, &format!("{r} no longer borrows the resource {p} points to"));
         let ends = dots_listing_tooltip(&tl, &format!("{p}'s {kind} borrow ends"));
-        // (In the other arm r's end comes first, as it starts, and p's
-        // after p's own use.)
-        assert!(back.iter().any(|b| ends.contains(b)),
-            "{p}'s borrow should end on the dot where {r} gives it back in the arm reading {r}: {back:?}, {p}'s ends: {ends:?}");
+        // In the arm reading r: on the row of r's `len` and the dot where
+        // r gives it back. (In the other arm r's end comes first, as it
+        // starts, and p's after p's own use.)
+        let read = dots_listing_tooltip(&tl, &format!("len reads from {r}"));
+        assert_eq!(read.len(), 1, "{r}'s one read: {read:?}");
+        assert!(back.iter().any(|b| b.1 == read[0].1 && ends.contains(b)),
+            "{p}'s borrow should end on {r}'s give-back dot on its read's row {:?}: {back:?}, {p}'s ends: {ends:?}", read[0]);
     }
+}
+
+/// Review of #1602: the `None` path of an `if let` nested in an outer
+/// conditional that already draws v6 gives v6 back as it starts (main left
+/// it "being shared" there); and two
+/// references copied into each other on one line render (an earlier head
+/// reordered their ends forever).
+#[test]
+fn arm_ends_review_1602_lender_and_copy_cycle() {
+    let tl = run_with_local_backend("arm_ends_review_1602").timeline_panel_string();
+    let back = dots_listing_tooltip(&tl, "v6's resource is no longer immutably borrowed");
+    // Both nested arms, the None path, and after `v6.len()` in the other
+    // outer arm (main: 3, no give-back on the None path).
+    assert_eq!(back.len(), 4, "v6 given back in both nested arms, on the None path and after len: {back:?}");
+    assert!(!dots_listing_tooltip(&tl, "a5's immutable borrow ends").is_empty()
+        || !dots_listing_tooltip(&tl, "b5's immutable borrow ends").is_empty(), "copied_both_ways rendered");
 }

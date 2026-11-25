@@ -9591,7 +9591,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.borrow_map.remove(into.name());
       }
       if inline {
+        let id = ev.get_id();
         self.add_external_event(line, ev);
+        // In line order, as for an arm of its own: not after the body's
+        // later lines (a nested `if c { return; }`, #1585, #1602).
+        let evs = &mut *self.preprocessed_events;
+        if evs.last().is_some_and(|(_, e)| e.get_id() == id) {
+          let at = evs[..evs.len() - 1].iter().rposition(|(l, _)| *l <= line).map_or(0, |i| i + 1);
+          let e = evs.pop().expect("just added");
+          evs.insert(at, e);
+        }
       } else {
         let at = branch_e_data.iter().rposition(|(l, _)| *l <= line).map_or(0, |i| i + 1);
         branch_e_data.insert(at, (line, ev));
