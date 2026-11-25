@@ -1637,10 +1637,14 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     /// (Polonius' `origin_contains_loan_at`). A holder that got a
     /// reference variable's value (`y` in `let y = if c { let r = &mut
     /// s1; Some(r) } else { .. };`) holds r's loan though no loan was
-    /// issued for y itself (#1475). None when this body has no local
-    /// named `name`.
+    /// issued for y itself (#1475). A field's column (`w.o`) names the
+    /// field of its variable's type (#1482). None when this body has no
+    /// local named `name`.
     pub fn loan_indices_held_by(&self, name: &str) -> Option<BTreeSet<usize>> {
-        Some(self.loans_in_type_of(name, &[])?.into_iter().map(|l| l.index()).collect())
+        let mut parts = name.split('.');
+        let root = parts.next()?;
+        let fields: Vec<&str> = parts.collect();
+        Some(self.loans_in_type_of(root, &fields)?.into_iter().map(|l| l.index()).collect())
     }
 
     fn loans_in_type_of(&self, name: &str, fields: &[&str]) -> Option<BTreeSet<Loan>> {
