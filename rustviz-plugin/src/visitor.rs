@@ -9561,6 +9561,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               }
               _ => head_rty.clone(),
             };
+            // `for e in v` / `v.into_iter()` with `v: Vec<&str>` (or a
+            // `[&str; 2]` array, copied in): the loop takes v's elements by
+            // value, and each e is one of the references v stored. e
+            // doesn't borrow v, and gives nothing back to it (#1519). (One
+            // whose lenders are drawn is `moved_ref_holder`'s, above.)
+            let typeck = self.tcx.typeck(head_arg.hir_id.owner);
+            let by_value = |e: &'tcx Expr<'tcx>| !typeck.node_type(e.hir_id).is_ref()
+              && !typeck.expr_adjustments(e).iter().any(|a| matches!(a.kind, Adjust::Borrow(_)));
+            let consumed = match head_arg.kind {
+              ExprKind::Path(_) | ExprKind::Field(..) => place_head && by_value(head_arg),
+              ExprKind::MethodCall(_, recv, _, _) => matches!(recv.kind, ExprKind::Path(_) | ExprKind::Field(..))
+                && by_value(recv) && typeck.type_dependent_def_id(head_arg.hir_id)
+                  .is_some_and(|d| self.tcx.item_name(d).as_str() == "into_iter"),
+              _ => false,
+            };
             // `for x in v.iter().rev()`: the receiver of the last call
             // is the previous call's result, not a variable, and `x`
             // isn't a borrow of a method (it said "Return ... from x
@@ -9568,6 +9583,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // loop's own borrow of `v` is drawn on v (#868).
             let lender = match lender {
               ResourceTy::Value(r) if r.is_fn() => {
+                self.unlent_refs.insert(pat_name.clone());
+                ResourceTy::Anonymous
+              }
+              ResourceTy::Value(_) if consumed => {
                 self.unlent_refs.insert(pat_name.clone());
                 ResourceTy::Anonymous
               }
@@ -9814,6 +9833,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         };
         // The body may run no times or many (#786).
         let inits = self.enter_loop_inits(arms.first().map_or(body_expr.hir_id, |a| a.body.hir_id));
+        let body_events_at = self.preprocessed_events.len();
         self.visit_expr(body_expr);
         for (name, prev) in loop_ref_prev.into_iter().rev() {
           match prev {
@@ -9875,8 +9895,33 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let runs_to_the_end = (no_break && !body_returns(body_expr)) || reaches_end;
         let mut pat_decls = HashSet::new();
         collect_pat_bindings(user_pat, &self.tcx, &self.raps, &mut pat_decls);
+        // A `&mut` binding the body moves away (`drop(e)`, `take(e)` with a
+        // generic parameter: no reborrow) has nothing left after the move:
+        // its borrow ends there, and the loop's iterator holds the loan to
+        // the loop's end, as for a loop with no binding to name it (#1511).
+        // (A move on every path, into a call: one in a branch of the body
+        // is not, nor a move into a variable, which takes the loan on.)
+        let moved_in_body = |name: &str| self.preprocessed_events[body_events_at..].iter().find_map(|(line, ev)| match ev {
+          ExternalEvent::Move { from: ResourceTy::Value(r), to, .. } if r.name() == name && r.is_mutref()
+            && matches!(to, ResourceTy::Anonymous | ResourceTy::Value(ResourceAccessPoint::Function(_))) => Some(*line),
+          _ => None,
+        });
+        // (Nor one something borrows through: `let g = id(e);`.)
+        #[expect(clippy::disallowed_methods, reason = "`any` over the map: order never observed")]
+        let lends = |name: &str| self.borrow_map.values().any(|rd| rd.all_lenders().iter()
+          .any(|l| matches!(l, ResourceTy::Value(r) | ResourceTy::Deref(r) if r.name() == name)));
+        #[expect(clippy::disallowed_methods, reason = "collected into a sorted map")]
+        let moved_at: BTreeMap<String, usize> = pat_decls.iter()
+          .filter(|d| !lends(d.name()))
+          .filter(|d| self.borrow_map.get(d.name()).is_some_and(|rd| !matches!(rd.lender, ResourceTy::Anonymous)))
+          .filter_map(|d| moved_in_body(d.name()).map(|l| (d.name().to_owned(), l)))
+          .collect();
+        for (name, line) in moved_at.iter() {
+          self.for_loop_moved_bindings.push((name.clone(), *line, body_end));
+        }
+        let moved_decls: BTreeSet<String> = moved_at.into_keys().collect();
         #[expect(clippy::disallowed_methods, reason = "each binding's floor is raised on its own")]
-        for decl in pat_decls.iter().filter(|_| runs_to_the_end) {
+        for decl in pat_decls.iter().filter(|d| runs_to_the_end && !moved_decls.contains(d.name())) {
           let lent = self.borrow_map.get(decl.name())
             .is_some_and(|rd| !matches!(rd.lender, ResourceTy::Anonymous));
           if lent {
@@ -9889,6 +9934,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // the loop ends (`for a in v.iter()`: a returns it to v).
         #[expect(clippy::disallowed_methods, reason = "only tested for membership")]
         let carried: Vec<ResourceTy> = pat_decls.iter()
+          .filter(|d| !moved_decls.contains(d.name()))
           .filter_map(|d| self.borrow_map.get(d.name()))
           .flat_map(|rd| rd.all_lenders())
           .collect();
@@ -9931,11 +9977,37 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // E0502 even after the last use of the loop variable (#868).
         // The end says what held the borrow, so the lender's column
         // can say so in between (#871).
-        let loop_loans = loop_loans.into_iter()
+        let loop_loans: Vec<(ResourceTy, bool, StaticLender)> = loop_loans.into_iter()
           .filter(|(l, _, _)| !carried.contains(l))
           .map(|(l, m, call)| (l, m, StaticLender::LoopIterator { call }))
           .chain(head_loan.map(|(l, m, lend)| (l, m, StaticLender::LoopHeadBorrow { lend })))
-          .chain(moved_ref_loans);
+          .chain(moved_ref_loans)
+          .collect();
+        // A `&mut` binding moved away in the body (#1511) gave its loan to
+        // no one: the loop's iterator holds it to the loop's end (`for e in
+        // &mut v`, `for e in [&mut a, &mut b]`), as the borrow drawn on the
+        // `for` line says.
+        let mut moved_binding_loans: Vec<(ResourceTy, bool, StaticLender)> = Vec::new();
+        for name in moved_decls.iter() {
+          let (Some(rd), Some(to)) = (self.borrow_map.get(name), self.raps.get(name).map(|r| r.rap.to_owned())) else { continue };
+          for l in rd.all_lenders() {
+            let drawn = matches!(&l, ResourceTy::Value(x) if !x.is_fn() && self.raps.get(x.name()).is_some_and(|d| d.rap.hash() == x.hash()));
+            if !drawn || loop_loans.iter().chain(moved_binding_loans.iter()).any(|(o, _, _)| *o == l) {
+              continue;
+            }
+            let lend = self.preprocessed_events.iter().find_map(|(line, ev)| match ev {
+              ExternalEvent::MutableBorrow { from, to: ResourceTy::Value(t), id, .. }
+                if *line == for_line && *from == l && t.hash() == to.hash() => Some(*id),
+              _ => None,
+            });
+            let static_lender = match lend {
+              Some(lend) => StaticLender::LoopHeadBorrow { lend },
+              None => StaticLender::LoopIterator { call: "into_iter".to_owned() },
+            };
+            moved_binding_loans.push((l, true, static_lender));
+          }
+        }
+        let loop_loans = loop_loans.into_iter().chain(moved_binding_loans);
         for (lender, is_mut, static_lender) in loop_loans {
           if !is_mut {
             let head_call = matches!(static_lender, StaticLender::LoopIterator { .. });
@@ -9972,6 +10044,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
         if arms.first().is_some() {
           self.exit_frames.pop();
+        }
+        // The head temporary's drop where the loop ends was recorded with
+        // the head, ahead of the body's events: put it after them, so a
+        // conditional in the body comes first in an arm's events, which
+        // are taken in this order (#1535: in an arm, the temporary was
+        // drawn dropped before the body's `if`, then "not made yet" on
+        // that `if`'s legs). (No exit frame of this loop is left to
+        // index into the events; an enclosing one starts before it.)
+        if let Some(t) = &head_temp {
+          let at = self.preprocessed_events[..body_events_at].iter().rposition(|(_, ev)|
+            matches!(ev, ExternalEvent::TemporaryDrop { ro, early: false, .. } if ro == t));
+          if let Some(i) = at {
+            let ev = self.preprocessed_events.remove(i);
+            self.preprocessed_events.push(ev);
+          }
         }
         self.in_scope.truncate(entry_len);
         // The loop drops its iterator where it ends, however it

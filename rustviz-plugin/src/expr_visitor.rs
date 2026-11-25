@@ -830,6 +830,11 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // `&v`). A call on the lender in the body leaves it shared by the
   // iterator (#900).
   pub for_loop_iter_loans: Vec<(String, usize, usize, bool)>,
+  // A `for` loop's `&mut` binding its body moves away on every pass
+  // (`for e in v.iter_mut() { drop(e); }`, #1511): the binding, the line
+  // of the move, and the loop's closing line. Its borrow ends at the
+  // move; the loop's iterator holds the loan on to the loop's end.
+  pub for_loop_moved_bindings: Vec<(String, usize, usize)>,
   // `let r = loop { … break k; };` (#431): the loop's id, what its
   // `break` values go to (`r`) and how (move or copy). A `break` with a
   // value, in that loop, pairs the value with `r` the way `let r = k;`
@@ -1225,6 +1230,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let_else_scrutinees: HashMap::new(),
       for_loop_loans: HashSet::new(),
       for_loop_iter_loans: Vec::new(),
+      for_loop_moved_bindings: Vec::new(),
       in_scope: Vec::new(),
       exit_frames: Vec::new(),
       literal_temps: HashMap::new(),
@@ -2599,10 +2605,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // #1413.)
       // (The assignment's own events, its new value among them, are on
       // its line, before the drop.)
-      let drop_flag_assign = arms.iter().any(|a| a.iter().enumerate().any(|(i, (line, e))| matches!(e,
-        ExternalEvent::OwnerDropAtReassign { ro, maybe_moved, maybe_init, .. }
-          if ro.name() == name && (*maybe_moved || maybe_init.is_some()))
-          && ownership_after(&a[..a[..i].iter().rposition(|(l, _)| l != line).map_or(0, |j| j + 1)], name, None).is_none()));
+      // (Also one in a conditional in the arm, before which the arm
+      // didn't change it: `if c { if d { s = a } else { s = b } }` after
+      // a loop that may not have assigned s, #1514.)
+      fn drop_flag_assign_in(a: &[(usize, ExternalEvent)], name: &str) -> bool {
+        a.iter().enumerate().any(|(i, (line, e))| match e {
+          ExternalEvent::OwnerDropAtReassign { ro, maybe_moved, maybe_init, .. }
+            if ro.name() == name && (*maybe_moved || maybe_init.is_some()) =>
+              ownership_after(&a[..a[..i].iter().rposition(|(l, _)| l != line).map_or(0, |j| j + 1)], name, None).is_none(),
+          ExternalEvent::Branch { branches, .. } => ownership_after(&a[..i], name, None).is_none()
+            && branches.iter().any(|b| drop_flag_assign_in(&b.e_data, name)),
+          _ => false,
+        })
+      }
+      let drop_flag_assign = arms.iter().any(|a| drop_flag_assign_in(a, name));
       if deferred || before(name) != Ownership::Held || drop_flag_assign {
         out.insert(r.clone());
       }
@@ -11855,6 +11871,14 @@ pub fn print_out_of_scope(&mut self){
         rd.lifetime = rd.lifetime.max(*floor);
       }
     }
+    // A `for` loop's `&mut` binding moved away in the body has no
+    // borrow left after the move (#1511): rustc's region for it spans
+    // the loop, since the iterator's loan does.
+    for (name, line, _) in self.for_loop_moved_bindings.iter() {
+      if let Some(rd) = self.borrow_map.get_mut(name).filter(|rd| rd.assigned_at <= *line) {
+        rd.lifetime = *line;
+      }
+    }
     // A struct's reference field goes with the struct when the struct is
     // moved into a call (`drop(e)`, `consume(e)`): `e.part` can't be
     // used after that, so its borrow ends there, even when a copy of it
@@ -12314,6 +12338,44 @@ pub fn print_out_of_scope(&mut self){
     end_let_else_scrutinee_borrows(self.preprocessed_events, &self.let_else_scrutinees, self.unique_id);
     note_later_borrowers_in_arms(self.preprocessed_events, false);
     self.note_sharers_across_calls();
+    self.note_loop_iterator_keeps_moved();
+  }
+
+  /// The end of a moved `for` binding's borrow (#1511) gives nothing back
+  /// to its lender: the loop's iterator still holds the loan, until the
+  /// loop ends. Say so on the end, which leaves the lender borrowed.
+  fn note_loop_iterator_keeps_moved(&mut self) {
+    fn note(events: &mut [(usize, ExternalEvent)], name: &str, line: usize, ids: &mut Vec<usize>) {
+      for (l, ev) in events.iter_mut() {
+        match ev {
+          ExternalEvent::MutableDie { from: ResourceTy::Value(r), to: ResourceTy::Value(_), still_borrowed_by, id, .. }
+            if *l == line && r.name() == name && still_borrowed_by.is_empty() =>
+          {
+            *still_borrowed_by = vec![crate::svg_generator::hover_messages::LOOP_ITERATOR_HOLDER.to_owned()];
+            ids.push(*id);
+          }
+          ExternalEvent::Branch { branches, .. } => {
+            for b in branches.iter_mut() {
+              note(&mut b.e_data, name, line, ids);
+            }
+          }
+          _ => {}
+        }
+      }
+    }
+    let mut ids = Vec::new();
+    for (name, line, _) in self.for_loop_moved_bindings.iter() {
+      note(self.preprocessed_events, name, *line, &mut ids);
+    }
+    for evs in self.event_line_map.values_mut() {
+      for e in evs.iter_mut() {
+        if let ExternalEvent::MutableDie { id, still_borrowed_by, .. } = e {
+          if ids.contains(id) {
+            *still_borrowed_by = vec![crate::svg_generator::hover_messages::LOOP_ITERATOR_HOLDER.to_owned()];
+          }
+        }
+      }
+    }
   }
 
   /// A call that borrows a variable already shared by a reference or a
