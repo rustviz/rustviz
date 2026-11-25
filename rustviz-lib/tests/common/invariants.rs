@@ -51,35 +51,13 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // Geometric (`geometry.rs`), from here on.
     // Tuple column goes on after its fields were moved out.
     ("edition2024/if_let_chain_irrefutable_move", "line-ends-nowhere", 1157),
-    // A borrow arrow leaving an arm's dot along the fork leg, its track
-    // crossing other columns' legs at ~22 degrees; a copy leaving a dot
-    // beside the leg into it.
+    // A one-line conditional's arms spread over rows inserted under its
+    // line: the arm's leg is 12-17 degrees off level, and the row added
+    // below an arrow left on a solid leg (#1560's rule) gives it no clean
+    // track there; the arrow into the arm's binding comes up steeply along
+    // its column instead.
     ("arm_binding_value_1327", "arrow-along-leg", 1489),
     ("assign_branch_ref_arms_1393", "arrow-along-leg", 1489),
-    ("repoint_if_chain_806", "arrow-along-leg", 1489),
-    ("repoint_if_chain_read_middle_806", "arrow-along-leg", 1489),
-    // Arrows fanned into one dot from below (#1312): one head still comes
-    // in at 70-85 degrees along the column under the dot.
-    ("assign_branch_reborrow_holder_1482", "arrow-along-leg", 1542),
-    ("branch_holder_lenders_1404", "arrow-along-leg", 1542),
-    ("closure_field_capture_through_ref_1093", "arrow-along-leg", 1542),
-    ("cond_holder_local_ref_1475", "arrow-along-leg", 1542),
-    ("cond_holder_moved_1464", "arrow-along-leg", 1542),
-    ("ctor_cond_assign_holder_1470", "arrow-along-leg", 1542),
-    ("ctor_cond_holder_1457", "arrow-along-leg", 1542),
-    ("field_lenders_1354", "arrow-along-leg", 1542),
-    ("fn_ret_ref_arg_lists", "arrow-along-leg", 1542),
-    ("holder_return_clear_of_leg_1476", "arrow-along-leg", 1542),
-    ("holder_tuple_literal_1459", "arrow-along-leg", 1542),
-    ("iter_holder_copied_1399", "arrow-along-leg", 1542),
-    ("iter_mut_holder_1399", "arrow-along-leg", 1542),
-    ("let_else_holder_return_1458", "arrow-along-leg", 1542),
-    ("let_pattern_literal_unbound_moves", "arrow-along-leg", 1542),
-    ("pattern_ref_several_lenders", "arrow-along-leg", 1542),
-    ("refs_array_literal", "arrow-along-leg", 1542),
-    ("store_through_mut_ref_1124", "arrow-along-leg", 1542),
-    ("tuple_scrutinee_nested", "arrow-along-leg", 1542),
-    ("two_field_borrow_through_ref_1080", "arrow-along-leg", 1542),
 ];
 
 /// The invariants, by the name the failure list and messages use.

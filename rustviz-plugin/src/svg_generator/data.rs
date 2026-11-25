@@ -4660,7 +4660,7 @@ pub struct FieldLenders {
 // VisualizationData supplies all the information we need in the frontend,
 // from rendering a PNG to px roducing an interactive HTML guide.
 // The internal data is simple: a map from variable hash to its Timeline.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct VisualizationData {
     // When displaying all timelines in the frontend of choice, one should
     // consider picking a hash function that gives the BTreeMap a sensible order.

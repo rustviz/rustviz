@@ -43,6 +43,9 @@ const HEAD_REACH: f64 = 10.0;
 /// centre line (`arrow-along-leg`): a leg ending at the dot the head
 /// points at, or crossing the head, passes under it for a few px.
 const HEAD_ON_LEG_PX: f64 = 6.0;
+/// The sine of 3 degrees: an arrow's piece that close to a dashed leg's
+/// direction and along it lies on top of it (crossing one is fine, #1489).
+const DASHED_LEG_SIN: f64 = 0.05;
 
 #[derive(Debug, Clone)]
 struct Seg {
@@ -51,6 +54,9 @@ struct Seg {
     hash: String,
     /// A main column's `line` (not a conditional's arm).
     main: bool,
+    /// Drawn dashed (`stroke-dasharray`): an arm not running on these
+    /// rows, or a column with no value yet.
+    dashed: bool,
     a: (f64, f64),
     b: (f64, f64),
 }
@@ -198,14 +204,16 @@ pub fn parse(doc: &roxmltree::Document) -> Geo {
                     [l, m] => (mid(l.0, m.0), mid(l.1, m.1)),
                     _ => continue,
                 };
-                g.segs.push(Seg { id, var: a("data-rv-var"), hash, main: true, a: p, b: q });
+                let dashed = n.descendants().filter(|c| c.has_tag_name("line")).any(dashed_stroke);
+                g.segs.push(Seg { id, var: a("data-rv-var"), hash, main: true, dashed, a: p, b: q });
             }
             "branch_line" => {
                 let Some(part @ ("line" | "side1" | "side2")) = n.attribute("data-rv-part") else { continue };
                 let order = arms.len();
                 let e = arms.entry(base.clone()).or_insert_with(|| (order, Seg {
-                    id: base, var: a("data-rv-var"), hash, main: false, a: (0.0, 0.0), b: (0.0, 0.0),
+                    id: base, var: a("data-rv-var"), hash, main: false, dashed: false, a: (0.0, 0.0), b: (0.0, 0.0),
                 }, BTreeMap::new()));
+                e.1.dashed |= dashed_stroke(n);
                 e.2.insert(part.to_owned(), ends(n));
             }
             "stop_bar" if n.attribute("data-rv-part").is_none() => {
@@ -255,6 +263,13 @@ pub fn parse(doc: &roxmltree::Document) -> Geo {
         g.segs.push(seg);
     }
     g
+}
+
+/// An element drawn dashed: a `stroke-dasharray` other than `none` in
+/// its style.
+fn dashed_stroke(n: roxmltree::Node) -> bool {
+    n.attribute("style").and_then(|s| s.split(';').find_map(|d| d.trim().strip_prefix("stroke-dasharray:")))
+        .is_some_and(|v| v.trim() != "none")
 }
 
 fn near(p: (f64, f64), q: (f64, f64)) -> bool {
@@ -593,6 +608,17 @@ pub fn check(g: &Geo) -> Vec<(&'static str, String)> {
             let sin = |(p, q): (Pt, Pt)| ((q.0 - p.0) * (s.b.1 - s.a.1) - (q.1 - p.1) * (s.b.0 - s.a.0)).abs()
                 / (len(p, q) * len(s.a, s.b)).max(1e-9);
             let at_its_dot = |(p, q): (Pt, Pt)| [p, q].iter().any(|&e| len(e, s.a) < 8.0 || len(e, s.b) < 8.0);
+            // A dashed slanted leg (an arm not running on those rows) is
+            // background (#1489): an arrow may cross it at any angle, so
+            // only a piece drawn on top of it, within 3 degrees of its
+            // direction, counts; a head over it doesn't.
+            if s.dashed {
+                if a.pieces.iter().any(|&p| len(p.0, p.1) >= TOL && sin(p) < DASHED_LEG_SIN
+                    && shared_stretch(p, (s.a, s.b)) > OVERLAP_PX) {
+                    out.push(("arrow-along-leg", format!("{} lies on dashed {}", a.id, s.id)));
+                }
+                continue;
+            }
             let along = a.pieces.iter().map(|&p| shared_stretch(p, (s.a, s.b))).fold(0.0, f64::max);
             let beside = a.pieces.iter().filter(|&&p| len(p.0, p.1) >= TOL && sin(p) < 0.5 && at_its_dot(p))
                 .map(|&p| stretch_within(p, (s.a, s.b), 4.5)).fold(0.0, f64::max);
@@ -900,6 +926,25 @@ mod unit {
         let clear = arrow("c>z", "c", "z", "251.66 189.98 270 245 280 245 310.02 199.98",
                           "305.02,196.65 317.09,189.37 315.01,203.31");
         assert_eq!(invs(&[cols, clear].concat()), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn crossing_a_dashed_leg_is_not_along_it() {
+        // A level return into o's `if let` dot (95, 125) whose `else` leg
+        // runs from the fork (75, 115) to (150, 130), 11 degrees off level:
+        // the head and shaft lie along it for 20 px.
+        // (Only this check: the leg's ends have no dots here.)
+        let along = |s: &str| invs(s).into_iter().filter(|&i| i == "arrow-along-leg").collect::<Vec<_>>();
+        let cols = [header("o"), header("x"), dot("o", 95.0, 125.0, "static_reacquire"), dot("x", 300.0, 125.0, "static_die")].concat();
+        let leg = arm("o", 1, (75.0, 115.0), (150.0, 130.0));
+        let ret = arrow("x>o", "x", "o", "294.75 125 113 125", "113,131 100.25,125 113,119");
+        assert_eq!(along(&[cols.clone(), leg.clone(), ret.clone()].concat()), vec!["arrow-along-leg"]);
+        // Dashed (the arm isn't running there): background, crossed freely.
+        let dashed = leg.replace("<line ", "<line style=\"stroke-dasharray: 4 4;\" ");
+        assert_eq!(along(&[cols.clone(), dashed.clone(), ret].concat()), Vec::<&str>::new());
+        // But not drawn on top of it.
+        let on_top = arrow("x>o", "x", "o", "150 130 80 116", "93,118.6 100.25,120 90.5,124.5");
+        assert_eq!(along(&[cols, dashed, on_top].concat()), vec!["arrow-along-leg"]);
     }
 
     #[test]

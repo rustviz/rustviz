@@ -1614,7 +1614,7 @@ fn hide_source_lines(annotated_src_str: &str, source_rs_str: &str, visualization
 /// have one, and around a conditional whose branches share lines. Returns
 /// the padded annotated and plain sources and the visual rows of the blanks
 /// inserted.
-fn insert_blank_rows(annotated_src_str: &str, source_rs_str: &str, visualization_data: &mut VisualizationData) -> (String, String, HashSet<usize>) {
+fn insert_blank_rows(annotated_src_str: &str, source_rs_str: &str, visualization_data: &mut VisualizationData, extra: &[usize]) -> (String, String, HashSet<usize>) {
     // Force a blank source line before each non-first fn that doesn't
     // already have one. Without this, per-fn labels (which are placed
     // one row above the fn signature) land on top of the previous
@@ -1691,6 +1691,8 @@ fn insert_blank_rows(annotated_src_str: &str, source_rs_str: &str, visualization
         let have = blank_above + usize::from(needs_blank_at.contains(&for_split));
         needs_blank_at.extend(std::iter::repeat_n(for_split, rows.saturating_sub(have)));
     }
+    // A row of its own below each line in `extra` (`render_svg`).
+    needs_blank_at.extend(extra.iter().map(|&l| l + 1).filter(|&l| l <= a_lines_orig.len()));
     needs_blank_at.sort();
 
     let new_a_str: String;
@@ -2333,7 +2335,62 @@ pub fn render_svg(
     let annotated_src_str: &str = post_hide_a.as_str();
     let source_rs_str: &str = post_hide_s.as_str();
 
-    let (new_a_str, new_s_str, synthetic_blank_rows) = insert_blank_rows(annotated_src_str, source_rs_str, visualization_data);
+    // An arrow `untangle` couldn't keep off a solid leg or a column gets
+    // a row of its own below its line, for a level track below the fork
+    // (#1559, #1560, #1542, #1489): the figure is drawn again with a
+    // blank row there. Kept only where that leaves fewer such arrows and
+    // no more other marks (`untangle_cost`); one row per line, unless the
+    // line's stacked arrows took the blank row for themselves (they use
+    // the blank lines below their line), which changes nothing.
+    let start = visualization_data.clone();
+    let mut extra: Vec<usize> = Vec::new();
+    let mut best: Option<(usize, usize, usize, (String, String, i32))> = None;
+    for _ in 0..4 {
+        let mut vd = start.clone();
+        let (out, left, rows) = render_pass(annotated_src_str, source_rs_str, &mut vd, &extra);
+        // (Fewer arrows on legs or columns, and no more other marks.)
+        let improves = best.as_ref().is_none_or(|b| left.count < b.0 && left.others <= b.1);
+        let same_rows = best.as_ref().is_some_and(|b| b.2 == rows);
+        if improves {
+            *visualization_data = vd;
+            best = Some((left.count, left.others, rows, out));
+        } else if !same_rows {
+            break;
+        }
+        if left.count == 0 {
+            break;
+        }
+        // (One row per line: another only where the last one was taken
+        // by the line's stacked arrows.)
+        let new: Vec<usize> = left.lines.into_iter().filter(|l| same_rows || !extra.contains(l)).collect();
+        if new.is_empty() {
+            break;
+        }
+        extra.extend(new);
+        extra.sort_unstable();
+    }
+    best.map(|b| b.3).unwrap_or_default()
+}
+
+/// What a pass of `render_svg` leaves on solid legs or columns: how many
+/// arrows (`count`), and the (post-hide) source lines they are drawn on,
+/// a blank row wanted after each (`lines`).
+struct LeftOn {
+    count: usize,
+    lines: Vec<usize>,
+    /// The other marks the arrows make (`timeline_panel::ArrowsLeftOn`).
+    others: usize,
+}
+
+/// One pass of `render_svg`, with a blank row added before the line after
+/// each of `extra` (a source line, once per blank row).
+fn render_pass(
+    annotated_src_str: &str,
+    source_rs_str: &str,
+    visualization_data: &mut VisualizationData,
+    extra: &[usize],
+) -> ((String, String, i32), LeftOn, usize) {
+    let (new_a_str, new_s_str, synthetic_blank_rows) = insert_blank_rows(annotated_src_str, source_rs_str, visualization_data, extra);
     let annotated_src_str: &str = new_a_str.as_str();
     let source_rs_str: &str = new_s_str.as_str();
 
@@ -2374,7 +2431,15 @@ pub fn render_svg(
 
     // data for tl panel
     visualization_data.row_lines = row_lines.clone();
-    let (timeline_panel_string, max_width) = timeline_panel::render_timeline_panel(visualization_data);
+    let timeline_panel::TimelinePanel { svg: timeline_panel_string, width: max_width, rows_wanted } =
+        timeline_panel::render_timeline_panel(visualization_data, !extra.is_empty());
+    // The source line of each row (a row added below a line belongs to it).
+    let mut lines: Vec<usize> = rows_wanted.rows.iter()
+        .filter_map(|&r| row_lines.get(..=r)?.iter().rev().find_map(|l| *l))
+        .collect();
+    lines.dedup();
+    let left = LeftOn { count: rows_wanted.count, lines, others: rows_wanted.others };
+    let rows = row_lines.len();
     // Each element's `data-rv-id`, and its rows as code-panel lines.
     let timeline_panel_string = rv_attrs::finalize(&timeline_panel_string, &row_lines);
     let tl_rv = rv_attrs::invalid_states_attr(visualization_data, &row_lines);
@@ -2416,9 +2481,9 @@ pub fn render_svg(
 
     // Prose in tooltips may quote `&&` / `<` (#1049): make every
     // attribute value valid XML before the SVG leaves the plugin.
-    (
+    ((
         escape_tooltip_attrs(&final_code_svg_content),
         escape_tooltip_attrs(&final_timeline_svg_content),
         svg_data.height,
-    )
+    ), left, rows)
 }
