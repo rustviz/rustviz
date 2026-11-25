@@ -12302,22 +12302,30 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `match make() { Some(t) => .., None => .. }` on an
         // `Option<String>` can't leave anything that needs dropping: no
         // column. The bindings are still drawn from the call.
-        // #1367: where a binding can take everything in the temporary
-        // (`Some(s)` with a guard, `Ok(u)`, `Ok(w)`), the temporary is one
-        // dot that owns nothing (its tooltip states the drop on the other
-        // paths): drawn with an arrow from the call and a line to a drop,
-        // the String was drawn owned, and dropped, twice.
+        // #1386: the bindings take their values out of the temporary
+        // ("Move from (temporary 3) to u", not from the call, which drew
+        // the String owned by both, #1367); its column forks into the
+        // arms, and where a pattern takes all of it (`Some(s)` with a
+        // guard, `Ok(u)`, `Ok(w)`) its leg ends at that move.
         must_contain: &[
             "Move from pair to (temporary)",
             "A temporary holds the value that pair returns, for the match to inspect. The pattern of the arm that runs can move parts of it into its bindings; what is left in it is dropped with the temporary after the match",
-            "(RustViz draws a taking its value straight from pair; it doesn't draw the move out of this temporary.)",
+            "Partial move from (temporary) to a",
+            "The pattern moves part of (temporary)'s value into a; (temporary) keeps the rest",
             "This temporary (String, String) is dropped when the match ends, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
-            "A temporary holds the value that make returns, for the match to inspect. If the arm that binds s runs, its pattern moves what the temporary holds into s; if another arm runs, what the temporary holds is dropped with it when the match ends",
-            "A temporary holds the value that res returns, for the `if let` to match against. If the pattern matches, it moves what the temporary holds into u; if not, what the temporary holds is dropped with it before the `else` block runs",
-            "(RustViz draws u taking its value straight from res; it doesn't draw the move out of this temporary.)",
-            "A temporary holds the value that res returns, for the `while let` to match against on each pass. If the pattern matches, it moves what the temporary holds into w; if not, the loop ends, and what the temporary holds is dropped with it",
-            "Partial move from pair to a",
-            "Move from res to u",
+            "Move from make to (temporary 2)",
+            "Partial move from (temporary 2) to s",
+            "The pattern moves what (temporary 2) holds into s; nothing that needs dropping is left in (temporary 2)",
+            "The pattern of the branch that ran may have moved (temporary 2)'s value, or part of it, into its bindings",
+            "This temporary Option<String> is dropped when the match ends, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
+            "Move from res to (temporary 3)",
+            "Move from (temporary 3) to u",
+            "The pattern moves what (temporary 3) holds into u; nothing that needs dropping is left in (temporary 3)",
+            "This temporary Result<String, String> is dropped before the `else` block of this `if let` runs, and with it everything in it: the pattern didn't match, so it moved nothing out",
+            "Move from res to (temporary 4)",
+            "Move from (temporary 4) to w",
+            "The pattern moves what (temporary 4) holds into w; nothing that needs dropping is left in (temporary 4)",
+            "This temporary Result<String, String> is dropped at the end of each iteration of this `while let` loop, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
             "u goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
@@ -12325,13 +12333,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "nothing bound it to a variable or moved it on",
             "Nothing binds it to a variable or moves it on",
             "(temporary 5)",
-            // #1367: the value drawn moved into the temporary and into the
-            // binding, and dropped by both.
-            "Move from make to (temporary 2)",
-            "This temporary Option<String> is dropped",
-            "Move from res to (temporary 3)",
-            "Move from res to (temporary 4)",
-            "This temporary Result<String, String> is dropped",
+            // #1367 / #1386: the bindings drawn taking the value straight
+            // from the call, which the temporary holds.
+            "Partial move from pair to a",
+            "Partial move from make to s",
+            "Move from res to u",
+            "Move from res to w",
+            "taking its value straight from",
+            "doesn't draw the move out of this temporary",
+            // `Ok(u)` takes all of it.
+            "The pattern moves part of (temporary 3)'s value into u",
             // The `break` in the `while let` body: a binding took what the
             // temporary held (it isn't a `let`-extended temporary either).
             "(temporary 4) goes out of scope",
@@ -12396,7 +12407,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "A temporary holds the value that make_p returns, for the match to inspect its field name. The pattern of the arm that runs can move that field, or parts of it, into its bindings; what is left in the temporary is dropped with it after the match",
             "This temporary P is dropped when the match ends, after the arm that ran, and with it everything in it but what that arm's pattern moved out of its field name",
             "Move from make_o to (temporary 7)",
-            "This temporary O is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), or when the block it matched ends, and with it everything in it but what the pattern moved out of its field opt (all of it, if the pattern didn't match)",
+            // The `if let`'s temporary forks (#1386): one drop on each path.
+            "This temporary O is dropped when the block of this `if let` ends (its pattern matched), and with it everything in it but what the pattern moved out of its field opt",
+            "This temporary O is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), and with it everything in it: the pattern didn't match, so it moved nothing out",
             "q.tag goes out of scope. Its resource is dropped.",
             "Move from make_w to (temporary 8)",
             "A temporary holds the value that make_w returns, for the `let` pattern to take its field pair apart. The pattern moves parts of that field into its bindings; nothing takes the rest, so Rust drops the temporary, and what is left in it, at the end of the statement",
@@ -12435,23 +12448,34 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // before the `else` runs or when the matched block ends; in a
         // `while`, at the end of each iteration (checked with a
         // Drop-printing program, edition 2024).
-        // #1367: `Ok(u)` / `Ok(w)` can take everything in the temporary,
-        // which is then one dot that owns nothing; its tooltip states
-        // the drop when the pattern doesn't match.
+        // #1386: u, a and w take their values out of the temporary, whose
+        // column forks at the `if` (#1367 drew them from the call, with
+        // the temporary one dot that owned nothing). `res()` in `n > 0 &&
+        // let Ok(u) = res()` is only made if `n > 0`: its drop on the
+        // else path says so.
         must_contain: &[
-            "A temporary holds the value that res returns, for the `let` in this let chain to match against. If the pattern matches, it moves what the temporary holds into u; if not, what the temporary holds is dropped with it before the `else` block runs",
+            "Move from res to (temporary)",
+            "Move from (temporary) to u",
+            "The pattern moves what (temporary) holds into u; nothing that needs dropping is left in (temporary)",
+            "This temporary Result<String, String> is dropped before the `else` block of this `if` runs, if the let chain got as far as the `let` that makes it, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
             "Move from pair to (temporary 2)",
-            "This temporary (String, String) is dropped when the condition of this `if` fails (before the code after the `if` runs), or when the block its let chain matched ends, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
-            "A temporary holds the value that res returns, for the `let` in this let chain to match against on each pass. If the pattern matches, it moves what the temporary holds into w; if not, the loop ends, and what the temporary holds is dropped with it",
+            "Move from (temporary 2) to a",
+            "The pattern moves part of (temporary 2)'s value into a; (temporary 2) keeps the rest",
+            "This temporary (String, String) is dropped when the block its let chain matched ends, and with it whatever the pattern didn't move out of it",
+            "This temporary (String, String) is dropped when the condition of this `if` fails (before the code after the `if` runs), and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
+            "Move from res to (temporary 3)",
+            "Move from (temporary 3) to w",
+            "The pattern moves what (temporary 3) holds into w; nothing that needs dropping is left in (temporary 3)",
         ],
         must_not_contain: &[
             "at the end of this `&&` / `||` operand",
             "nothing bound it to a variable or moved it on",
             "(temporary 4)",
-            // #1367: drawn owned (and dropped) by the temporary and u / w.
-            "Move from res to (temporary)",
-            "Move from res to (temporary 3)",
-            "This temporary Result<String, String> is dropped",
+            // #1367: drawn taken straight from the call.
+            "Move from res to u",
+            "Move from res to w",
+            "Move from pair to a",
+            "taking its value straight from",
         ],
     },
     TooltipExpect {
@@ -12469,11 +12493,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "This temporary (String, String) is dropped as soon as the assignment has taken it apart (before the places on the left get their new values), and with it whatever the assignment didn't move out of it",
             "Move from make_w to (temporary 2)",
             "This temporary W is dropped as soon as the assignment has taken it apart (before the places on the left get their new values), and with it everything in it but what the assignment moved out of its field pair",
+            // #1386: m and n take their parts out of the temporary, not
+            // out of the call (which no longer has them).
+            "Partial move from (temporary) to m",
+            "The assignment moves part of (temporary)'s value to m",
+            "Partial move from (temporary 2) to n",
         ],
         must_not_contain: &[
             "its field pair, which was moved out of it",
             "'s field pair is moved to n",
             "(temporary 3)",
+            "Move from make_w to n",
         ],
     },
     TooltipExpect {
@@ -16500,27 +16530,31 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the wording `if let Some(s) = make_vec().first()` already gets.
         // When a pattern binds it (`m`, `(None, n)`), only what is left
         // is dropped: the "nothing bound it" wording would be false.
-        // #1367: m and n are drawn taking the String straight from make
-        // (an arm can't draw a move out of the temporary), so the
-        // temporary is one dot that owns nothing, whose tooltip states
-        // the drop on the other path; an arrow into it and a line to a
-        // drop drew the String owned and dropped twice.
+        // #1386: m and n take the String out of make()'s temporary,
+        // whose column forks into the arms; their legs end at that move,
+        // and the other path drops it. (#1367 drew them taking it
+        // straight from make, with the temporary one dot owning nothing;
+        // before that, both owned it.)
         must_contain: &[
             "Move from make to (temporary)",
             "This temporary String is dropped before the `else` block of this `if let` runs, or when the block it matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
             "Move from make to (temporary 2)",
             "This temporary String is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "A temporary holds the value that make returns, for the `if let` to match against. If the pattern matches, it moves what the temporary holds into m; if not, what the temporary holds is dropped with it before the code after the `if` runs",
-            "(RustViz draws m taking its value straight from make; it doesn't draw the move out of this temporary.)",
-            "A temporary holds the value that make returns, for the match to inspect. If the arm that binds n runs, its pattern moves what the temporary holds into n; if another arm runs, what the temporary holds is dropped with it at the end of the block's final expression",
-            "Move from make to m",
-            "Move from make to n",
+            "Move from make to (temporary 3)",
+            "Move from (temporary 3) to m",
+            "The pattern moves what (temporary 3) holds into m; nothing that needs dropping is left in (temporary 3)",
+            "This temporary String is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), and with it everything in it: the pattern didn't match, so it moved nothing out",
+            "Move from make to (temporary 4)",
+            "Move from (temporary 4) to n",
+            "The pattern of the branch that ran may have moved (temporary 4)'s value, or part of it, into its bindings",
+            "This temporary String is dropped at the end of the block's final expression, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
         ],
         must_not_contain: &[
-            "Move from make to (temporary 3)",
-            "Move from make to (temporary 4)",
-            "This temporary String is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), or when the block it matched ends, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
-            "This temporary String is dropped at the end of the block's final expression, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
+            "Move from make to m",
+            "Move from make to n",
+            "taking its value straight from",
+            // m takes all of it: nothing is left on the matched path.
+            "This temporary String is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), or when the block it matched ends",
             "=This temporary String is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), or when the block it matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
             "=This temporary String is dropped at the end of the block's final expression: nothing bound it to a variable or moved it on. Its resource is dropped",
         ],
@@ -16898,7 +16932,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "x's resource is moved into a temporary that this `if let` examines; the temporary is dropped before the `else` block of this `if let` runs, or when the block it matched ends",
             "This temporary takes the value of x, which is moved into it",
-            "This temporary P is dropped before the `else` block of this `if let` runs, or when the block it matched ends, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
+            // #1386: s takes x's String out of the literal's temporary,
+            // whose column forks: one drop on each path.
+            "Move from (temporary) to s",
+            "The pattern moves part of (temporary)'s value into s; (temporary) keeps the rest",
+            "This temporary P is dropped when the block of this `if let` ends (its pattern matched), and with it whatever the pattern didn't move out of it",
+            "This temporary P is dropped before the `else` block of this `if let` runs, and with it everything in it: the pattern didn't match, so it moved nothing out",
             "A temporary holds the value that make_q returns. Its field name is moved out of it, into the temporary tuple (y, make_q().name); nothing takes the rest, which is dropped with the temporary",
             "This temporary Q is dropped before the `else` block of this `if let` runs, or when the block it matched ends, and with it everything in it but its field name, which was moved into the temporary tuple (y, make_q().name): if no pattern takes name out of the tuple, it is dropped with the tuple, at the same time",
             "A temporary holds the value that make_q returns. Its field name is moved out of it, into the temporary tuple (w, make_q().name); nothing takes the rest, which is dropped with the temporary",
@@ -16915,6 +16954,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "everything in it but its field name, which was moved out of it",
             "v's resource is moved into a temporary that is dropped at the end of this statement",
             "Move from v to a",
+            "RustViz doesn't draw",
             // #1350: the pattern never sees the temporary Q, only the tuple.
             "A temporary holds the value that make_q returns, for the `if let` to match its field name against",
             "A temporary holds the value that make_q returns, for the match to inspect its field name",
@@ -17800,12 +17840,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from String::from to c",
             "Move from g to k",
             "The temporary value Some(g) is dropped after this arm, when the match ends, and with it g's resource",
-            "Move from make to r",
-            // #1367: r is drawn taking the String straight from make, so
-            // the guarded constructor's temporary is one dot that owns
-            // nothing (no `Move from make to (temporary)` too).
-            "A temporary holds the value that is built from what make returns, for the match to inspect. If the arm that binds r runs, its pattern moves what the temporary holds into r; if another arm runs, what the temporary holds is dropped with it when the match ends",
-            "(RustViz draws r taking its value straight from make; it doesn't draw the move out of this temporary.)",
+            // #1386: r takes the String out of the guarded constructor's
+            // temporary, whose column forks into the arms (#1367 drew it
+            // from make, the temporary one dot owning nothing).
+            "Move from make to (temporary)",
+            "Move from (temporary) to r",
+            "The pattern moves what (temporary) holds into r; nothing that needs dropping is left in (temporary)",
+            "This temporary Option<String> is dropped when the match ends, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
             "Move from w to v",
             "w goes out of scope. No resource is dropped.",
             "Move from a to p",
@@ -17815,9 +17856,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "The temporary tuple (Some(b), n) is dropped after this arm, when the match ends, and with it b's resource",
         ],
         must_not_contain: &[
-            // #1367: make's String drawn moved into the temporary and r.
-            "Move from make to (temporary)",
-            "This temporary Option<String> is dropped when the match ends, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
+            // #1367: make's String drawn moved into the temporary and,
+            // from make, into r.
+            "Move from make to r",
+            "taking its value straight from",
             "The pattern didn't match, so the temporary value Some(h)",
             "Move from f to Some",
             "Move from h to Some",
@@ -24751,68 +24793,80 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "scrutinee_temp_taken_1367",
-        // #1367: a binding that takes the value out of a scrutinee
-        // temporary is drawn taking it straight from the call (an arm
-        // can't draw a move out of the temporary, whose column isn't split
-        // into the arms). When a pattern can take everything in the
-        // temporary that needs drop, the temporary is one dot that owns
-        // nothing, so the String isn't drawn owned and dropped twice; its
-        // tooltip states the drop on the other paths. A temporary that
-        // keeps a part on every path (`P { name, .. }`) keeps its line.
+        // #1386 (was #1367's interim): a binding that takes the value out of
+        // a scrutinee temporary takes it from the temporary's column, which
+        // forks into the arms. Where the pattern takes everything in it
+        // that needs drop, that arm's leg ends at the move; the other paths
+        // keep it to its drop. (#1367 drew the bindings straight from the
+        // call and the temporary as one dot owning nothing, with notes;
+        // before that the String was drawn owned and dropped by both.)
         // Checked with rustc: the `make()` String stays in the tuple when
         // `z` is None and is dropped with it; a failed guard leaves it in
         // `Some(..)`, dropped when the match ends.
         must_contain: &[
-            "A temporary holds the value that make returns, for the `if let` to match against. If the pattern matches, it moves what the temporary holds into m; if not, what the temporary holds is dropped with it before the code after the `if` runs",
-            "(RustViz draws m taking its value straight from make; it doesn't draw the move out of this temporary.)",
-            "A temporary holds the value that make returns, for the match to inspect. If the arm that binds m runs, its pattern moves what the temporary holds into m; if another arm runs, what the temporary holds is dropped with it at the end of the block's final expression",
-            "A temporary holds the value that is built from what make returns, for the match to inspect. If the arm that binds r runs, its pattern moves what the temporary holds into r; if another arm runs, what the temporary holds is dropped with it when the match ends",
-            "A temporary holds the value that make_opt returns, for the match to inspect. If the arm that binds r runs, its pattern moves what the temporary holds into r; if another arm runs, what the temporary holds is dropped with it when the match ends",
-            "(RustViz draws r taking its value straight from make_opt; it doesn't draw the move out of this temporary.)",
-            "(RustViz draws name taking its value straight from make_p; it doesn't draw the move out of this temporary.)",
+            "Move from make to (temporary)",
+            "Move from (temporary) to m",
+            "The pattern moves what (temporary) holds into m; nothing that needs dropping is left in (temporary)",
+            "This temporary String is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), and with it everything in it: the pattern didn't match, so it moved nothing out",
+            "This temporary String is dropped at the end of the block's final expression, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
+            "Move from (temporary) to r",
+            "The pattern moves what (temporary) holds into r; nothing that needs dropping is left in (temporary)",
+            "This temporary Option<String> is dropped when the match ends, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
+            "Move from make_opt to (temporary)",
+            "Partial move from (temporary) to r",
+            "This temporary Result<String, String> is dropped when the match ends, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
+            "The pattern of the branch that ran may have moved (temporary)'s value, or part of it, into its bindings",
+            "Move from make_p to (temporary)",
+            "Move from (temporary) to name",
+            "The pattern moves part of (temporary)'s value into name; (temporary) keeps the rest",
+            "This temporary P is dropped when the block of this `if let` ends (its pattern matched), and with it whatever the pattern didn't move out of it",
+        ],
+        must_not_contain: &[
             "Move from make to m",
             "Move from make to r",
             "Partial move from make_opt to r",
-            "Move from make_p to (temporary)",
-        ],
-        must_not_contain: &[
-            "Move from make to (temporary)",
-            "Move from make_opt to (temporary)",
-            "This temporary String is dropped",
-            "This temporary Option<String> is dropped",
-            "This temporary Result<String, String> is dropped",
+            "Move from make_p to name",
+            "taking its value straight from",
+            "doesn't draw the move out of this temporary",
             // `Err(e)` can't match `Ok(make())`: e takes nothing.
-            "into r or e",
+            "Move from (temporary) to e",
+            // m takes all of it: no drop after the matched block.
+            "This temporary String is dropped when the block of this `if let` ends",
         ],
     },
     TooltipExpect {
         name: "edition2024/scrutinee_temp_taken_chain_1367",
-        // #1367 in a let chain: as for `if let`.
+        // #1367 / #1386 in a let chain: as for `if let`. The temporary is
+        // made only if `k` is true: its drop on the else path says so.
         must_contain: &[
-            "A temporary holds the value that make returns, for the `if let` to match against. If the pattern matches, it moves what the temporary holds into m; if not, what the temporary holds is dropped with it before the code after the `if` runs",
-            "(RustViz draws m taking its value straight from make; it doesn't draw the move out of this temporary.)",
-            "Move from make to m",
+            "Move from make to (temporary)",
+            "Move from (temporary) to m",
+            "The pattern moves what (temporary) holds into m; nothing that needs dropping is left in (temporary)",
+            "This temporary String is dropped when the condition of this `if` fails (before the code after the `if` runs), if the let chain got as far as the `let` that makes it, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
         ],
         must_not_contain: &[
-            "Move from make to (temporary)",
-            "This temporary String is dropped",
+            "Move from make to m",
+            "taking its value straight from",
         ],
     },
     TooltipExpect {
         name: "scrutinee_literal_move_1362",
-        // #1362: `if let` / `match` on a struct literal: s and t take x's
-        // and y's values out of the literal's temporary. That move isn't
-        // drawn (the temporary's column isn't split into the arms, as for
-        // #1367), so both the temporary and the binding say so. The
-        // `let`-`else` form draws the move (u is outside any branch).
+        // #1362 / #1386: `if let` / `match` on a struct literal: s and t
+        // take x's and y's values out of the literal's temporary, drawn as
+        // a partial move out of its column, which forks into the arms and
+        // keeps b. The `let`-`else` form draws the same move. (#1388 drew
+        // no arrow, with notes.)
         must_contain: &[
-            "(RustViz doesn't draw the move out of this temporary into s.)",
-            "(s's value is moved out of (temporary); RustViz doesn't draw that move.)",
-            "(RustViz doesn't draw the move out of this temporary into t.)",
-            "(t's value is moved out of (temporary 2); RustViz doesn't draw that move.)",
+            "Move from (temporary) to s",
+            "The pattern moves part of (temporary)'s value into s; (temporary) keeps the rest",
+            "Move from (temporary 2) to t",
+            "The pattern moves part of (temporary 2)'s value into t; (temporary 2) keeps the rest",
             "Partial move from (temporary 3) to u",
+            "This temporary P is dropped when the block of this `if let` ends (its pattern matched), and with it whatever the pattern didn't move out of it",
+            "This temporary P is dropped when the match ends, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
         ],
         must_not_contain: &[
+            "RustViz doesn't draw",
             "(u's value is moved out of",
             "Move from x to s",
             "Move from y to t",
@@ -24866,19 +24920,37 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "temporary_let_else_update_matched_field",
-        // #1367 / #1362: n and y take a field's value out of the call's
+        // #1386: n and y take a field's value out of the call's
         // temporary (`match make_p().name`, `if let Some(y) =
-        // make_o().opt`) and are drawn with no arrow: the notes say the
-        // move isn't drawn, and don't claim it's drawn from the call.
+        // make_o().opt`), drawn as a move out of its column, which forks
+        // into the arms (#1362 / #1367 drew no arrow, with a note). So do
+        // what a `let` / `let`-`else` pattern takes out of a call's
+        // temporary (`let Ok(s) = res() else`, `let (d, _) = pair();`):
+        // drawn from the call, it was owned by both.
         must_contain: &[
-            "(RustViz doesn't draw the move out of this temporary into n.)",
-            "(n's value is moved out of (temporary 6); RustViz doesn't draw that move.)",
-            "(RustViz doesn't draw the move out of this temporary into y.)",
-            "(y's value is moved out of (temporary 7); RustViz doesn't draw that move.)",
+            "Move from (temporary 6) to n",
+            "The pattern moves part of (temporary 6)'s value into n; (temporary 6) keeps the rest",
+            "Move from (temporary 7) to y",
+            "The pattern moves part of (temporary 7)'s value into y; (temporary 7) keeps the rest",
+            "Partial move from (temporary) to s",
+            // (Not b: its `let`-`else` takes more lines, and its bindings
+            // are drawn after the `else` block, below the temporary's
+            // drop; b is still drawn taken from opt_pair, #1481.)
+            "Partial move from (temporary 3) to x",
+            "Partial move from (temporary 8) to c",
+            "Partial move from (temporary 9) to d",
+            "Partial move from (temporary 10) to e",
+            "Move from trio to f",
         ],
         must_not_contain: &[
+            "RustViz doesn't draw",
             "(RustViz draws n taking its value straight from make_p",
             "(RustViz draws y taking its value straight from make_o",
+            "Move from res to s",
+            "Move from make_o to x",
+            "Move from make_w to c",
+            "Move from pair to d",
+            "Move from trio to e",
         ],
     },
     TooltipExpect {
@@ -27532,6 +27604,98 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "m3's mutable borrow ends",
         ],
         must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "scrutinee_temp_split_1386",
+        // #1386: a scrutinee that isn't a plain variable is held in a
+        // temporary whose column forks into the arms. A by-value binding
+        // takes its value out of it (main drew it straight from the call,
+        // with a note that the move out of the temporary wasn't drawn);
+        // where the pattern takes everything in it that needs drop, the
+        // leg ends at the move; a `ref` / `ref mut` binding borrows from it
+        // (main: from the call, `make_res`, or the constructor, `Some`,
+        // which sent r's and s's columns to `State::Invalid`). Drop timings
+        // checked with rustc and a Drop-printing type (edition 2024): after
+        // a failed guard, when the match ends; before an `if let`'s
+        // `else` block; at the end of the block it matched, with what the
+        // pattern left.
+        must_contain: &[
+            "Move from make_opt to (temporary)",
+            "Partial move from (temporary) to r",
+            "The pattern moves what (temporary) holds into r; nothing that needs dropping is left in (temporary)",
+            "The pattern of the branch that ran may have moved (temporary)'s value, or part of it, into its bindings",
+            "This temporary Option<String> is dropped when the match ends, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
+            "Move from make to (temporary)",
+            "Move from (temporary) to r",
+            "Move from make_res to (temporary)",
+            "Move from (temporary) to s",
+            "The pattern moves what (temporary) holds into s; nothing that needs dropping is left in (temporary)",
+            "This temporary Result<String, String> is dropped before the `else` block of this `if let` runs, and with it everything in it: the pattern didn't match, so it moved nothing out",
+            "This temporary Result<String, String> is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), and with it everything in it: the pattern didn't match, so it moved nothing out",
+            "The pattern moves part of (temporary)'s value into s; (temporary) keeps the rest",
+            "This temporary P is dropped when the block of this `if let` ends (its pattern matched), and with it whatever the pattern didn't move out of it",
+            "Move from make_q to (temporary)",
+            "Move from (temporary) to tag",
+            "The pattern moves what (temporary) holds into tag; nothing that needs dropping is left in (temporary)",
+            "Move from (..) to (temporary)",
+            "Move from (temporary) to a",
+            "Move from (temporary) to b",
+            "Partial copy from (temporary) to n",
+            "n is initialized with a copy of a value inside (temporary)",
+            "Immutable borrow from (temporary) to s",
+            "(temporary)'s resource is immutably borrowed by s; (temporary) is read-only while the borrow is live",
+            "Partial Mutable borrow from (temporary) to r",
+            "(temporary)'s resource is mutably borrowed by r; (temporary) can't be used while the borrow is live",
+            "This temporary Result<String, String> is dropped here, where `break` leaves early, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
+            "Move from make_res to (temporary 2)",
+            "The pattern moves what (temporary 2) holds into s; nothing that needs dropping is left in (temporary 2)",
+            "This temporary Result<String, String> is dropped at the end of each iteration of this `while let` loop, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
+        ],
+        must_not_contain: &[
+            "Partial move from make_opt to r",
+            "Move from make to r",
+            "Move from make_res to s",
+            "Partial move from make_res to s",
+            "Move from make_q to s",
+            "Move from make_q to tag",
+            "Move from make to a",
+            "Move from make to b",
+            "Immutable borrow from make_res to s",
+            "Mutable borrow from Some to r",
+            "taking its value straight from",
+            "taking their values straight from",
+            "RustViz doesn't draw",
+            "(temporary) has no value yet",
+            "(temporary 2) has no value yet",
+            // A Copy part, not all of it.
+            "n is initialized with a copy of (temporary)",
+            // `match make_res() { Ok(s) => .., Err(_) => break }` in a
+            // loop: every arm that reaches the end of the match took or
+            // dropped everything, so nothing is dropped there.
+            "This temporary Result<String, String> is dropped when the match ends",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/scrutinee_temp_split_chain_1386",
+        // #1386 in let chains: s takes make_res's String out of the `let`'s
+        // temporary. Made by a later part (`k && let ..`), the temporary
+        // exists on the else path only if `k` was true (rustc: no drop
+        // when `k` is false).
+        must_contain: &[
+            "Move from make_res to (temporary)",
+            "Move from (temporary) to s",
+            "The pattern moves what (temporary) holds into s; nothing that needs dropping is left in (temporary)",
+            "This temporary Result<String, String> is dropped before the `else` block of this `if` runs, if the let chain got as far as the `let` that makes it, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
+            "This temporary Result<String, String> is dropped before the `else` block of this `if` runs, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
+            "(temporary) hasn't been made yet: the let chain makes it only if its parts before the `let` match",
+        ],
+        must_not_contain: &[
+            "Move from make_res to s",
+            "taking its value straight from",
+            // Before `k` is tested it isn't a branch temporary (#1397)
+            // that some branch borrows.
+            "only the branch that borrows it makes it",
+        ],
     },
 ];
 

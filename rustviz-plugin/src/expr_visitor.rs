@@ -937,15 +937,12 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // pass, #853); handed to the renderer's
   // `VisualizationData::approx_notes`.
   pub approx_notes: Vec<ApproxNote>,
-  // The by-value bindings that a pattern moves out of a scrutinee
-  // temporary (#1362), with the line of the pattern and the
-  // temporary's name: a binding drawn with no arrow into it gets an
-  // approximation note saying where its value came from.
-  pub scrut_movers: Vec<(rustc_hir::HirId, usize, String)>,
-  // The approximation notes of those temporaries (`hash`, line, the
-  // movers' names and bindings, the call they're drawn from if they all
-  // are), made once the events are known (#1367).
-  pub scrut_temp_notes: Vec<(u64, usize, Vec<String>, Vec<rustc_hir::HirId>, Option<String>)>,
+  // For each split scrutinee temporary (by hash), the by-value
+  // bindings of each pattern that takes everything in it that needs drop
+  // (#1386): the last of their moves out of it ends its leg in the arm.
+  pub temp_emptiers: HashMap<u64, Vec<Vec<String>>>,
+  // The ids of those moves (`VisualizationData::temp_emptying_moves`).
+  pub temp_emptying_moves: Vec<usize>,
 
   // `r?` with `r` a non-`Copy` place moves `r` (#652). Set while
   // `match_rhs` draws that move into the variable `r?` is bound to;
@@ -1263,8 +1260,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       binding_columns: Vec::new(),
       moves_out_first: Vec::new(),
       approx_notes: Vec::new(),
-      scrut_movers: Vec::new(),
-      scrut_temp_notes: Vec::new(),
+      temp_emptiers: HashMap::new(),
+      temp_emptying_moves: Vec::new(),
       break_binds: Vec::new(),
       deferred_breaks: Vec::new(),
       line_override: None,
@@ -9919,7 +9916,7 @@ pub fn literal_pat_pairs(&self, pat: &'tcx Pat<'tcx>, e: &'tcx Expr<'tcx>, out: 
 /// The elements of the literal `e` (`literal_elems`), through nested
 /// literals: `b` and `c` for `(b, c)` or `Some((b, c))`. A name bound
 /// from the whole of it is bound from each of them.
-fn literal_leaves(&self, e: &'tcx Expr<'tcx>, out: &mut Vec<&'tcx Expr<'tcx>>) {
+pub(crate) fn literal_leaves(&self, e: &'tcx Expr<'tcx>, out: &mut Vec<&'tcx Expr<'tcx>>) {
   match self.literal_elems(e) {
     Some(elems) => for el in elems { self.literal_leaves(el, out) },
     None => out.push(e),
@@ -10910,6 +10907,17 @@ fn note_derived(&mut self, lhs: &ResourceTy, rhs: &'tcx Expr<'tcx>) {
 /// The `ExprKind::Call` case of `match_rhs`: `let lhs = f(args);`.
 pub fn match_rhs_call(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Evt, fn_expr: &'tcx Expr<'tcx>) {
   let line_num = span_to_line(&fn_expr.span, &self.tcx);
+  // `let (d, _) = pair();`, `let Ok(s) = res() else { .. }`: the call's
+  // result is a temporary the pattern takes a part of, with a column of
+  // its own (`record_temporary_drop`); the binding takes that part out
+  // of the temporary, not out of the call (#1386).
+  if let Some(tmp) = self.temp_cols.get(&rhs.hir_id).cloned()
+    .filter(|t| matches!(t.temp_part(), Some(TempPart::Let(_) | TempPart::LetElse(_) | TempPart::Assign(_)))) {
+    if matches!(evt, Evt::Move | Evt::Copy) {
+      self.add_ev(line_num, evt, lhs, ResourceTy::Value(tmp), true);
+      return;
+    }
+  }
   // `let o = Some(5);`: a constructor of literals is a value of the
   // type, like `let x = 5;`. Nothing is copied from the
   // constructor (#768).

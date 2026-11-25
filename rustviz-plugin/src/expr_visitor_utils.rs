@@ -1110,7 +1110,7 @@ pub fn collect_event_live_vars(
                     match rty {
                         ResourceTy::Value(rap) | ResourceTy::Deref(rap)
                         | ResourceTy::DerefField(rap, _, _, _) => {
-                            if !rap.is_fn() && !rap.is_unbound_temporary() {
+                            if !rap.is_fn() && (!rap.is_unbound_temporary() || rap.is_split_scrutinee_temporary()) {
                                 out.insert(rap.clone());
                             }
                         }
