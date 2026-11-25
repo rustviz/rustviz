@@ -5711,6 +5711,11 @@ struct ArrowLanes {
     far: std::collections::HashSet<(usize, usize)>,
     /// A column's arrow to itself drawn right of its dot (#1316).
     self_right: std::collections::HashSet<(usize, usize)>,
+    /// Arrows on a track whose head comes into its dot level along the
+    /// dot's row, or at a few degrees off it (the value), from the side
+    /// `far` says (#1499): the leg from the track turns `LEVEL_IN_DX` px
+    /// before the dot.
+    level_in: HashMap<(usize, usize), i64>,
     /// Every arrow between two columns' dots, by the first pass: its
     /// head's dot, its tail's dot and its line's row.
     ends: HashMap<(usize, usize), ((i64, i64), (i64, i64), i64)>,
@@ -6054,6 +6059,7 @@ impl ArrowLanes {
         LaneSettings {
             lane_y: self.lane_y.clone(), flipped: self.flipped.clone(), slot: self.slot.clone(),
             leg_dx: self.leg_dx.clone(), far: self.far.clone(), self_right: self.self_right.clone(),
+            level_in: self.level_in.clone(),
         }
     }
 
@@ -6064,6 +6070,7 @@ impl ArrowLanes {
         self.leg_dx = s.leg_dx;
         self.far = s.far;
         self.self_right = s.self_right;
+        self.level_in = s.level_in;
     }
 
     /// The other ways `untangle` may draw the arrow or logo `key`, given
@@ -6074,7 +6081,8 @@ impl ArrowLanes {
     /// and, where it runs on a track, with its legs at other angles. With
     /// `far` (a last resort) also: its track running on past its head's
     /// dot, a logo off its dot's row, a result to the caller half a row
-    /// lower.
+    /// lower, and, for an arrow whose head lies on another's shaft, its
+    /// head coming in level or nearly, from either side (`level_in_ways`).
     fn alternatives(&self, key: (usize, usize), drawn: &[Drawn], ys: (i64, i64), far: bool) -> Vec<LaneSettings> {
         let now = self.settings();
         let mut out = Vec::new();
@@ -6089,6 +6097,11 @@ impl ArrowLanes {
                 return out;
             }
             let width = (tx - fx).abs();
+            // (A head coming in level, or nearly, is a last resort for a
+            // head on another arrow's shaft, #1499: elsewhere it loops
+            // round its dot for less.)
+            let boxed = far && mine.iter().filter(|a| a.logo.is_none()).any(|a| drawn.iter()
+                .any(|b| b.logo.is_none() && !same_arrow(a, b, &self.ends) && b.var != "caller" && b.to != "caller" && head_on_shaft(a, b)));
             // The track it runs on now, if any: a trapezoid's middle piece.
             let track = mine.iter().find(|d| d.logo.is_none() && d.pieces.len() == 3)
                 .map(|d| d.pieces[1].0 .1.round() as i64);
@@ -6152,7 +6165,31 @@ impl ArrowLanes {
                 s.leg_dx.remove(&(key, true));
                 s.leg_dx.remove(&(key, false));
                 s.far.remove(&key);
-                out.push(s);
+                s.level_in.remove(&key);
+                out.push(s.clone());
+                // (A last resort: the head coming in level along its dot's
+                // row, or nearly, from either side, #1499.)
+                if boxed && y != ty {
+                    for (past, angle) in level_in_ways() {
+                        let mut s = s.clone();
+                        s.level_in.insert(key, angle);
+                        if past { s.far.insert(key); }
+                        out.push(s);
+                    }
+                }
+            }
+            // (Its current track, the head coming in level.)
+            if boxed && track.is_some() {
+                for (past, angle) in level_in_ways() {
+                    let mut s = now.clone();
+                    s.leg_dx.remove(&(key, true));
+                    s.leg_dx.remove(&(key, false));
+                    s.level_in.insert(key, angle);
+                    if past { s.far.insert(key); } else { s.far.remove(&key); }
+                    if s.level_in != now.level_in || s.far != now.far {
+                        out.push(s);
+                    }
+                }
             }
         }
         for d in &mine {
@@ -6194,6 +6231,16 @@ impl ArrowLanes {
     }
 }
 
+/// The ways `ArrowLanes::alternatives` brings a head in level (#1499):
+/// on the tail's side or past its dot (`far`), level or at
+/// `LEVEL_IN_SLANT` degrees. (Coming in level from past its dot, it can
+/// read as one arrow with another leaving the dot straight on, #1349; at
+/// that slant it doesn't, and its head still keeps clear of a track half
+/// a row off the dot.)
+fn level_in_ways() -> [(bool, i64); 4] {
+    [(false, 0), (true, 0), (false, LEVEL_IN_SLANT), (true, LEVEL_IN_SLANT)]
+}
+
 /// The settings of `ArrowLanes` that `untangle` changes.
 #[derive(Clone)]
 struct LaneSettings {
@@ -6203,6 +6250,7 @@ struct LaneSettings {
     leg_dx: HashMap<((usize, usize), bool), i64>,
     far: std::collections::HashSet<(usize, usize)>,
     self_right: std::collections::HashSet<(usize, usize)>,
+    level_in: HashMap<(usize, usize), i64>,
 }
 
 fn dist(a: (f64, f64), b: (f64, f64)) -> f64 {
@@ -6319,12 +6367,40 @@ fn shaft_on_leg(piece: Piece, leg: Piece) -> bool {
     shared_stretch(piece, leg) > 12.0 || (at_its_dot && sin < 0.5 && stretch_within(piece, leg, 4.5) > 8.0)
 }
 
+/// The arrows between two columns' dots, by key (`ArrowLanes::ends`).
+type Ends = HashMap<(usize, usize), ((i64, i64), (i64, i64), i64)>;
+
+/// Two drawn marks that are one arrow (an arrow and its call's logo, or a
+/// call's results to the caller): one tooltip. Not two arrows between
+/// columns on different lines, the same return drawn on two rows (an end
+/// copied to an arm's lines): along one track they read as one arrow with
+/// two heads (#1559).
+fn same_arrow(a: &Drawn, b: &Drawn, ends: &Ends) -> bool {
+    let between = |d: &Drawn| d.logo.is_none() && ends.get(&d.key).is_some_and(|(t, f, _)| t != f);
+    a.tip == b.tip && (a.key.1 == b.key.1 || !between(a) || !between(b))
+}
+
+/// Whether `a`'s head lies on `b`'s shaft. A shaft passing by a head may
+/// not touch it (its 5 px stroke within 1 px of the triangle); one that
+/// starts or ends at the head's column, or hops over the dot it points
+/// at, may. (A hop's 13 arc points run from one side of the dot to the
+/// other: their chord's midpoint is its centre.)
+fn head_on_shaft(a: &Drawn, b: &Drawn) -> bool {
+    if a.tri.len() < 3 {
+        return false;
+    }
+    let related = b.var == a.to || b.to == a.to
+        || b.arcs.chunks(13).any(|c| dist(((c[0].0 + c[c.len() - 1].0) / 2.0, (c[0].1 + c[c.len() - 1].1) / 2.0), a.tri[1]) < 8.0);
+    samples(&b.pieces).into_iter()
+        .any(|p| inside_tri(&a.tri, p) > -1.5 || (!related && off_tri(&a.tri, p) < 3.5))
+}
+
 /// The marks that lie on others, the way the geometric checks
 /// (`rustviz-lib/tests/common/geometry.rs`, `arrows-overlap` and
 /// `heads-or-logos-overlap`) find them: pairs of indices into `drawn`,
 /// the first one's head or logo on the second, or the two along one
 /// stretch.
-fn marks_on_others(drawn: &[Drawn]) -> Vec<(usize, usize)> {
+fn marks_on_others(drawn: &[Drawn], ends: &Ends) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let arrows: Vec<usize> = (0..drawn.len()).filter(|&i| drawn[i].logo.is_none()).collect();
     // What each covers, a little wider: two whose boxes don't meet can't
@@ -6344,7 +6420,7 @@ fn marks_on_others(drawn: &[Drawn]) -> Vec<(usize, usize)> {
     for (n, &i) in arrows.iter().enumerate() {
         for &j in &arrows[n + 1..] {
             let (a, b) = (&drawn[i], &drawn[j]);
-            if a.tip == b.tip || !meet(i, j) {
+            if same_arrow(a, b, ends) || !meet(i, j) {
                 continue;
             }
             let most = a.pieces.iter()
@@ -6361,18 +6437,10 @@ fn marks_on_others(drawn: &[Drawn]) -> Vec<(usize, usize)> {
             let (a, b) = (&drawn[i], &drawn[j]);
             let elbow = (a.var == "caller" && b.to == "caller" && a.to == b.var)
                 || (b.var == "caller" && a.to == "caller" && b.to == a.var);
-            if i == j || a.tip == b.tip || a.tri.len() < 3 || (elbow && a.key.1 == b.key.1) || !meet(i, j) {
+            if i == j || same_arrow(a, b, ends) || a.tri.len() < 3 || (elbow && a.key.1 == b.key.1) || !meet(i, j) {
                 continue;
             }
-            // A shaft passing by a head may not touch it (its 5 px stroke
-            // within 1 px of the triangle); one that starts or ends at the
-            // head's column, or hops over the dot it points at, may.
-            // (A hop's 13 arc points run from one side of the dot to the
-            // other: their chord's midpoint is its centre.)
-            let related = b.var == a.to || b.to == a.to
-                || b.arcs.chunks(13).any(|c| dist(((c[0].0 + c[c.len() - 1].0) / 2.0, (c[0].1 + c[c.len() - 1].1) / 2.0), a.tri[1]) < 8.0);
-            let shaft = samples(&b.pieces).into_iter()
-                .any(|p| inside_tri(&a.tri, p) > -1.5 || (!related && off_tri(&a.tri, p) < 3.5));
+            let shaft = head_on_shaft(a, b);
             let head = b.tri.len() == 3 && i < j
                 && samples(&tri_edges(&b.tri)).into_iter().any(|p| inside_tri(&a.tri, p) > 1.0);
             if shaft || head {
@@ -6563,7 +6631,7 @@ fn end_to_end(drawn: &[Drawn], ends: &HashMap<(usize, usize), ((i64, i64), (i64,
 /// `(i, i)`), the tracks hopping dots (`track_hops`; another track that
 /// passes none is better) and the arrows end to end (`end_to_end`).
 fn defects(drawn: &[Drawn], dots: &DotLayer) -> Vec<(usize, usize)> {
-    let mut out = marks_on_others(drawn);
+    let mut out = marks_on_others(drawn, &dots.lanes.ends);
     out.extend(through_marks(drawn, &dots.positions, &dots.bars).into_iter().map(|i| (i, i)));
     out.extend(on_legs(drawn, &dots.legs).into_iter().map(|i| (i, i)));
     out.extend((0..drawn.len()).filter(|&i| drawn[i].track_hops > 0).map(|i| (i, i)));
@@ -6612,7 +6680,7 @@ fn untangle_cost(drawn: &[Drawn], dots: &DotLayer) -> (usize, usize) {
     let mut touching = 0;
     for (n, a) in arrows.iter().enumerate() {
         for b in &arrows[n + 1..] {
-            if a.tip != b.tip && a.pieces.iter().any(|&p| b.pieces.iter().any(|&q| in_line(p, q))) {
+            if !same_arrow(a, b, &dots.lanes.ends) && a.pieces.iter().any(|&p| b.pieces.iter().any(|&q| in_line(p, q))) {
                 touching += 1;
             }
         }
@@ -6627,7 +6695,7 @@ fn untangle_cost(drawn: &[Drawn], dots: &DotLayer) -> (usize, usize) {
     let on_arcs = arrows.iter().filter(|a| a.tri.len() == 3 && arrows.iter()
         .any(|b| b.tip != a.tip && b.arcs.iter().any(|&p| inside_tri(&a.tri, p) > -1.5))).count();
     let hops: usize = drawn.iter().map(|d| d.track_hops).sum();
-    (marks_on_others(drawn).len() + on_legs(drawn, &dots.legs).len() + on_arcs + hops + 10 * (through + touching + stacked), crossings)
+    (marks_on_others(drawn, &dots.lanes.ends).len() + on_legs(drawn, &dots.legs).len() + on_arcs + hops + 10 * (through + touching + stacked), crossings)
 }
 
 /// One of a field's arrows from or to several lenders other than the one
@@ -7432,6 +7500,16 @@ fn plan_variable_arrow(line_number: &usize, external_event: &ExternalEvent, from
                 }
             });
             let (x3, x4) = if x2 <= x1 { (x2 + d_from, x1 - far * d_to) } else { (x2 - d_from, x1 + far * d_to) };
+            // The head coming in level along its dot's row, or nearly
+            // (#1499): from the track, the leg turns `LEVEL_IN_DX` px
+            // before the dot, on the tail's side or (`far`) the other one.
+            if let Some(bend) = level_in_bend(dots.lanes.level_in.get(&key).copied(), far, (x1, y1), (x2, y2), y_row, d_from) {
+                data.coordinates.push((x1 as f64, y1 as f64));
+                data.coordinates.extend(bend.iter().map(|&(x, y)| (x as f64, y as f64)));
+                data.coordinates.push((x3 as f64, y_row as f64));
+                data.coordinates.push((x2 as f64, y2 as f64));
+                return false;
+            }
             data.coordinates.push((x1 as f64, y1 as f64));
             data.coordinates.push((x4 as f64, y_row as f64));
             data.coordinates.push((x3 as f64, y_row as f64));
@@ -7479,6 +7557,41 @@ fn plan_variable_arrow(line_number: &usize, external_event: &ExternalEvent, from
             data.coordinates.push((x2 as f64, y2 as f64));
         }
     false
+}
+
+/// How far before its dot an arrow whose head comes in level
+/// (`ArrowLanes::level_in`) turns level: the head (18 px) and room before
+/// it.
+const LEVEL_IN_DX: i64 = 26;
+/// The slant, in degrees, of a head coming in nearly level
+/// (`level_in_ways`).
+const LEVEL_IN_SLANT: i64 = 14;
+
+/// The two bends of an arrow whose head comes into its dot (`head`) level,
+/// or `angle` degrees off level towards its track at `y_row`
+/// (`ArrowLanes::level_in`, #1499), head first: where its last leg starts,
+/// `LEVEL_IN_DX` px before the dot on the tail's side (`far` 1) or the
+/// other (`far` -1), and where the leg before it leaves the track, at
+/// about 56 degrees. `None` where it isn't asked for, the track is the
+/// dot's row, the legs wouldn't fit between the dot and the tail's leg,
+/// or they would run out of the figure on the left.
+fn level_in_bend(angle: Option<i64>, far: i64, head: (i64, i64), tail: (i64, i64), y_row: i64, d_from: i64) -> Option<[(i64, i64); 2]> {
+    let ((x1, y1), (x2, _)) = (head, tail);
+    let angle = angle?;
+    if y_row == y1 || x1 == x2 {
+        return None;
+    }
+    let dir = (x2 - x1).signum() * far;
+    let a = (angle as f64).to_radians();
+    let (dx, dy) = ((LEVEL_IN_DX as f64 * a.cos()).round() as i64, (LEVEL_IN_DX as f64 * a.sin()).round() as i64);
+    let by = y1 + (y_row - y1).signum() * dy;
+    if (y_row - by).abs() < 4 {
+        return None;
+    }
+    let rise = ((y_row - by).abs() * 2 / 3).max(8);
+    let (bx, lx) = (x1 + dir * dx, x1 + dir * (dx + rise));
+    let fits = far == -1 || (lx - x1).abs() + d_from + 4 <= (x2 - x1).abs();
+    (fits && bx.min(lx) >= 12).then_some([(bx, by), (lx, y_row)])
 }
 
 /// The end of `render_arrow`'s generic case: pull the head back, add the
@@ -8161,7 +8274,8 @@ fn untangle_search(
         }
         cands.extend(dots.lanes.alternatives(key, &drawn, ys, true));
         for s in cands {
-            if s.lane_y.get(&key) != now.lane_y.get(&key) || s.slot != now.slot || s.flipped != now.flipped || s.self_right != now.self_right {
+            if s.lane_y.get(&key) != now.lane_y.get(&key) || s.slot != now.slot || s.flipped != now.flipped || s.self_right != now.self_right
+                || s.level_in != now.level_in {
                 continue;
             }
             let (c, d) = eval(dots, &s, &mut budget);
@@ -10260,8 +10374,8 @@ mod tests {
         let steep = arrow("a>x", &[(150.0, 260.0), (300.0, 173.4)]);
         let shared = shared_stretch(ret.pieces[1], slant.pieces[0]);
         assert!((shared - 47.0).abs() < 1.0, "{shared}");
-        assert_eq!(marks_on_others(&[ret.clone(), slant]), vec![(0, 1)]);
-        assert!(marks_on_others(&[ret.clone(), steep]).is_empty());
+        assert_eq!(marks_on_others(&[ret.clone(), slant], &HashMap::new()), vec![(0, 1)]);
+        assert!(marks_on_others(&[ret.clone(), steep], &HashMap::new()).is_empty());
         // On one track, the common stretch.
         let along = arrow("b>c", &[(150.0, 230.0), (400.0, 230.0)]);
         assert_eq!(shared_stretch(ret.pieces[1], along.pieces[0]), 140.0);
@@ -10287,6 +10401,18 @@ mod tests {
         let events = branch(vec![arm(Vec::new()), arm(leaves(2)), arm(Vec::new())]);
         assert_eq!(centers_of(&events), vec![-3, 0, 3]);
         assert_eq!(compute_extent(&events), (3, 3));
+    }
+
+    #[test]
+    fn level_in_bends() {
+        // Head at (340, 1115), tail right of it at (960, 1115), track a
+        // row below: from past the dot, level, then 14 degrees off level.
+        assert_eq!(level_in_bend(Some(0), -1, (340, 1115), (960, 1115), 1145, 20), Some([(314, 1115), (294, 1145)]));
+        assert_eq!(level_in_bend(Some(14), -1, (340, 1115), (960, 1115), 1145, 20), Some([(315, 1121), (299, 1145)]));
+        // On the tail's side; not asked for; out of the figure.
+        assert_eq!(level_in_bend(Some(0), 1, (340, 1115), (960, 1115), 1145, 20), Some([(366, 1115), (386, 1145)]));
+        assert_eq!(level_in_bend(None, 1, (340, 1115), (960, 1115), 1145, 20), None);
+        assert_eq!(level_in_bend(Some(0), -1, (30, 1115), (960, 1115), 1145, 20), None);
     }
 
     // The state after `ManuallyDrop::drop(&mut md)` isn't drawn (like
