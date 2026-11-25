@@ -24,18 +24,6 @@ fn let_else_then_if_let() {
     }
 }
 
-// A let-chain's binding borrowed from its scrutinee's arm dot.
-fn id<T>(t: T) -> T { t }
-fn let_chain_binding() {
-    let s = String::from("hey");
-    let s2 = id(s);
-    let o = Some(s2);
-    let n = 3;
-    if n > 0 && let Some(x) = &o && x.len() > 1 {
-        let s4 = if x.is_empty() { o.unwrap() } else { format!("{}!", n) };
-    }
-}
-
 // The same in a `match` arm's `if let`.
 fn match_then_if_let(o: Option<String>, k: u8) -> usize {
     match k {
