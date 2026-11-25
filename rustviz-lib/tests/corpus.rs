@@ -38338,3 +38338,111 @@ fn try_block_drops_on_the_residual_target_1656() {
         assert_eq!(owners, [variable], "conditional drops at {statement}");
     }
 }
+
+/// The y of the dot whose `data-rv-id` is `id` (a plain `<circle>`).
+fn dot_cy(svg: &str, id: &str) -> Option<f64> {
+    start_tags(svg, "circle").into_iter()
+        .find(|t| t.contains(&format!("data-rv-id=\"{}\"", id)))
+        .and_then(|t| attr(t, "cy")?.parse().ok())
+}
+
+/// #1594: a one-line let-else drawn as a branch binds its pattern where
+/// the branches join, a row below its line, not on the `else` path's
+/// sub-row above the join (and the scrutinee's dot for the binding goes
+/// there too). #1598: in an `else if let` with no `else` whose join is
+/// raised above the `}` row it shares with the outer `if`, the end of m's
+/// borrow in the implicit `else` is on the raised join's level, beside it.
+/// Pairs of dots that must be level, `(snippet, a, b)`.
+#[test]
+fn let_else_bindings_and_implicit_else_ends_sit_at_their_join_1594_1598() {
+    for (snippet, a, b) in [
+        ("let_else_one_line_binds_at_join_1594", "x@L9:dot:copy", "s@L9:dot:branch_join"),
+        ("let_else_one_line_binds_at_join_1594", "o@L9:dot:duplicate", "s@L9:dot:branch_join"),
+        ("let_else_one_line_binds_at_join_1594", "x@L15:dot:acquire", "s@L15:dot:branch_join"),
+        ("let_else_one_line_binds_at_join_1594", "x@L21:dot:static_borrow", "s@L21:dot:branch_join"),
+        ("let_else_one_line_binds_at_join_1594", "x@L27:dot:static_borrow", "s@L27:dot:branch_join"),
+        ("let_else_one_line_binds_at_join_1594", "x@L33:dot:acquire", "s@L33:dot:branch_join"),
+        ("let_else_one_line_binds_at_join_1594", "a@L39:dot:acquire", "s@L39:dot:branch_join"),
+        ("let_else_one_line_binds_at_join_1594", "n@L39:dot:copy", "s@L39:dot:branch_join"),
+        ("let_else_one_line_binds_at_join_1594", "x@L46:dot:copy", "s@L46:dot:branch_join"),
+        ("let_else_one_line_binds_at_join_1594", "o@L46:dot:duplicate", "s@L46:dot:branch_join"),
+        ("let_else_one_line_binds_at_join_1594", "y@L54:dot:copy", "s@L54:dot:branch_join"),
+        ("let_else_one_line_binds_at_join_1594", "x@L63:dot:copy", "s@L63:dot:branch_join"),
+        ("let_else_one_line_binds_at_join_1594", "o@L63:dot:duplicate", "s@L63:dot:branch_join"),
+        ("let_else_one_line_binds_at_join_1594", "x@L84:dot:copy", "s@L84:dot:branch_join"),
+        ("let_else_one_line_binds_at_join_1594", "n@L94:dot:copy", "s@L94:dot:branch_join"),
+        ("or_pattern_let_else_ref_different_places", "x@L3:dot:or_alt_borrow", "t@L3:dot:branch_join"),
+        ("else_if_let_implicit_else_join_1598", "m@L11:dot:mutable_die", "m@L11:dot:branch_join"),
+    ] {
+        let tl = run_with_local_backend(snippet).timeline_panel_string();
+        let (ya, yb) = (dot_cy(&tl, a), dot_cy(&tl, b));
+        assert!(ya.is_some() && yb.is_some(), "{snippet}: no dot {a} or {b}");
+        assert_eq!(ya, yb, "{snippet}: {a} isn't level with {b}");
+    }
+    // #1598: the inner join is raised above the outer one, and the implicit
+    // `else`'s dashed leg runs level from m's end dot into it.
+    let tl = run_with_local_backend("else_if_let_implicit_else_join_1598").timeline_panel_string();
+    let circle = |id: &str| start_tags(&tl, "circle").into_iter()
+        .find(|t| t.contains(&format!("data-rv-id=\"{}\"", id)))
+        .and_then(|t| Some((attr(t, "cx")?.parse::<f64>().ok()?, attr(t, "cy")?.parse::<f64>().ok()?)))
+        .unwrap_or_else(|| panic!("no dot {id}"));
+    let (end, inner, outer) = (circle("m@L11:dot:mutable_die"), circle("m@L11:dot:branch_join"), circle("m@L11:dot:branch_join#2"));
+    assert!(inner.1 < outer.1, "the inner join isn't raised: {inner:?} vs {outer:?}");
+    let level_leg = start_tags(&tl, "line").into_iter()
+        .filter(|t| t.contains("data-rv-id=\"m@L11:branch_line:"))
+        .filter_map(|t| Some((attr(t, "x1")?.parse::<f64>().ok()?, attr(t, "y1")?.parse::<f64>().ok()?,
+            attr(t, "x2")?.parse::<f64>().ok()?, attr(t, "y2")?.parse::<f64>().ok()?)))
+        .any(|(x1, y1, x2, y2)| (y1 - end.1).abs() < 3.0 && (y2 - inner.1).abs() < 3.0
+            && (x1 - end.0).abs() < 3.0 && (x2 - inner.0).abs() < 3.0);
+    assert!(level_leg, "no leg from m's end dot {end:?} into the inner join {inner:?}");
+    // What happens on the line before the let-else stays on its row: k is
+    // bound there, and a block's local dropped as the block closes is
+    // dropped there.
+    let tl = run_with_local_backend("let_else_one_line_binds_at_join_1594").timeline_panel_string();
+    let k = dot_cy(&tl, "k@L76:dot:acquire+duplicate");
+    assert!(k.is_some() && k < dot_cy(&tl, "s@L76:dot:branch_join"), "k is bound at the join: {k:?}");
+    // n's "no value yet" leg in the arm ends at its dot at the join.
+    let n = dot_cy(&tl, "n@L94:dot:copy").expect("n's dot");
+    let leg_end = start_tags(&tl, "line").into_iter()
+        .filter(|t| t.contains("data-rv-id=\"n@L93-94:branch_line:full_privilege_uninit"))
+        .filter_map(|t| attr(t, "y2")?.parse::<f64>().ok()).fold(f64::NAN, f64::max);
+    assert_eq!(leg_end, n, "n's leg doesn't end at its dot");
+    let drop_y = start_tags(&tl, "g").into_iter().find(|t| t.contains("data-rv-id=\"t@L84:dot:"))
+        .and_then(|_| tl.split("data-rv-id=\"t@L84:dot:").nth(1))
+        .and_then(|rest| start_tags(rest, "circle").first().and_then(|c| attr(c, "cy")?.parse::<f64>().ok()));
+    assert!(drop_y.is_some() && drop_y < dot_cy(&tl, "s@L84:dot:branch_join"), "t's drop isn't on the line's row: {drop_y:?}");
+}
+
+/// #1597: on one row, a call's use of a reference comes after the borrow
+/// that gave it its loan and before the loan's end, and a lender's loan
+/// to it ends before a later mutable borrow of the lender. `(snippet,
+/// earlier line, later line)` of one dot's tooltip.
+#[test]
+fn one_row_use_between_borrow_and_end_1597() {
+    // The tooltip lines of the dot whose `data-rv-id` starts with `id`.
+    fn dot_lines(svg: &str, id: &str) -> Vec<String> {
+        let key = format!("data-rv-id=\"{}", id);
+        let at = svg.find(&key).unwrap_or_else(|| panic!("no dot {id}"));
+        let start = svg[..at].rfind('<').unwrap();
+        let tag = &svg[start..start + svg[start..].find('>').unwrap() + 1];
+        tooltip_lines(tag).into_iter().next().unwrap_or_default()
+    }
+    let snippet = "edition2024/chain_call_use_before_end_1597";
+    let tl = run_with_local_backend(snippet).timeline_panel_string();
+    for (id, order) in [
+        ("x@L7:dot:static_borrow", &["x immutably borrows a resource", "len reads from x", "x's immutable borrow ends"][..]),
+        ("o@L7:dot:static_lend", &["o's resource is immutably borrowed by x; o is read-only while the borrow is live",
+            "o's resource is no longer immutably borrowed",
+            "o's resource is mutably borrowed by as_mut; o can't be used while the borrow is live",
+            "o's resource is mutably borrowed by m; o can't be used while the borrow is live"][..]),
+        ("r@L14:dot:static_borrow", &["r immutably borrows a resource", "len reads from r", "r's immutable borrow ends"][..]),
+        ("s@L14:dot:static_lend", &["s's resource is immutably borrowed by r; s is read-only while the borrow is live",
+            "s's resource is no longer immutably borrowed",
+            "s's resource is mutably borrowed by m; s can't be used while the borrow is live"][..]),
+    ] {
+        let lines = dot_lines(&tl, id);
+        let pos: Vec<Option<usize>> = order.iter().map(|t| lines.iter().position(|l| l == t)).collect();
+        assert!(pos.iter().all(|p| p.is_some()) && pos.windows(2).all(|w| w[0] < w[1]),
+            "{snippet}: {id} doesn't list {order:?} in that order: {lines:?}");
+    }
+}

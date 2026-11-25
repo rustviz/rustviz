@@ -339,12 +339,22 @@ fn copy_still_borrowed(e: &mut ExternalEvent, from: &ExternalEvent) {
 /// before the end (#587). In `if let Some(_y) = v.first() && x.is_empty()
 /// {}` the read through x was drawn two rows below x's end (#1424).
 fn uses_ref_ended_in_front(o: &ExternalEvent, front: &[ExternalEvent], back: &[ExternalEvent]) -> bool {
-    if back.is_empty() || matches!(o, ExternalEvent::GoOutOfScope { .. }) {
+    if back.is_empty() {
+        return false;
+    }
+    front.iter().any(|e| ended_ref(e).is_some_and(|r| call_use_of_ref(o, r, e.get_id())))
+}
+
+/// Whether `o` is a call's use of the reference `r` (reading or writing
+/// through it), not its scope end or a new borrow into it recorded after
+/// the event `end`.
+fn call_use_of_ref(o: &ExternalEvent, r: u64, end: usize) -> bool {
+    if matches!(o, ExternalEvent::GoOutOfScope { .. }) {
         return false;
     }
     let (from, to) = ResourceAccessPoint_extract(o);
-    let other_is_fn = |r: u64| [from, to].iter().all(|x| x.extract_rap().is_none_or(|p| *p.hash() == r || p.is_fn()));
-    front.iter().any(|e| ended_ref(e).is_some_and(|r| uses_rap(o, r) && other_is_fn(r) && !new_borrow_into(o, r, e.get_id())))
+    let other_is_fn = [from, to].iter().all(|x| x.extract_rap().is_none_or(|p| *p.hash() == r || p.is_fn()));
+    uses_rap(o, r) && other_is_fn && !new_borrow_into(o, r, end)
 }
 
 /// Whether `e`, one of a line's stacked arrows (`group`), ends the
@@ -2092,13 +2102,47 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                     let use_first: Vec<&ExternalEvent> = rest_of_line.iter()
                         .filter(|e| !skippable_ev.contains(&e.get_id()) && uses_ref_ended_in_front(e, &front, &back))
                         .collect();
+                    // A reference the line gives a new loan after one of its
+                    // loans ends there (`r.len(); r = &t; r.capacity();`):
+                    // which of its loans a call uses isn't known here, so
+                    // the whole line keeps main's order (#1616 review).
+                    let line_pos = |id: usize| visualization_data.preprocess_external_events.iter().position(|(_, x)| x.get_id() == id);
+                    let main_order = ev.iter().filter_map(|d| ended_ref(d).map(|r| (r, line_pos(d.get_id())))).any(|(r, at)|
+                        ev.iter().chain(rest_of_line.iter()).any(|o| matches!(o, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. })
+                            && ResourceAccessPoint_extract(o).1.extract_rap().is_some_and(|t| *t.hash() == r)
+                            && line_pos(o.get_id()) > at));
                     for e in rest_of_line.iter().filter(|e| binds_source_of_line(e, &ev) || binds_borrower_of_line(e, &front)
-                        || use_first.iter().any(|u| u.get_id() == e.get_id())) {
+                        || main_order && use_first.iter().any(|u| u.get_id() == e.get_id())) {
                         visualization_data.append_processed_external_event(e.clone(), final_line_num);
                         skippable_ev.insert(e.get_id());
                     }
                     for (e, row) in front.iter().map(|e| (e, final_line_num))
                         .chain(back.iter().map(|e| (e, back_row))) {
+                        // Those uses (#1424) go just before the end they
+                        // precede, on its row: after the arrows before it,
+                        // among them the borrow that gave the reference its
+                        // loan. Appended ahead of the whole stack, `x.len()`
+                        // in `if let Some(x) = &o && x.len() > 1 { … }` on one
+                        // line came before x's borrow (#1597).
+                        // So does any other call's use of the reference
+                        // recorded before an end on the line's own row
+                        // (`let r = &s; let n = r.len(); let m = &mut s;`):
+                        // held back until after the whole line, the end
+                        // came after m's borrow on s's dot.
+                        // (Not on a line that keeps main's order, `main_order`.)
+                        if let Some(r) = ended_ref(e).filter(|_| !main_order) {
+                            let pos = |id: usize| visualization_data.preprocess_external_events.iter().position(|(_, x)| x.get_id() == id);
+                            let at = pos(e.get_id());
+                            let uses: Vec<ExternalEvent> = rest_of_line.iter()
+                                .filter(|u| !skippable_ev.contains(&u.get_id()))
+                                .filter(|u| use_first.iter().any(|f| f.get_id() == u.get_id()) && uses_rap(u, r)
+                                    || row == final_line_num && call_use_of_ref(u, r, e.get_id()) && pos(u.get_id()) < at)
+                                .cloned().collect();
+                            for u in uses {
+                                skippable_ev.insert(u.get_id());
+                                visualization_data.append_processed_external_event(u, row);
+                            }
+                        }
                         // The call whose result a borrow of the stack's
                         // first rows comes from (`let m2 =
                         // v.last_mut().unwrap();` after `if let Some(x2) =
@@ -2147,7 +2191,11 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                         let after_held_end = row == back_row && ended_ref(e).is_none()
                             && ResourceAccessPoint_extract(e).0.extract_rap().is_some_and(|src| deferred_ends.iter()
                                 .any(|(l, d, w)| *l == line_num && *w == row && ResourceAccessPoint_extract(d).1.extract_rap().is_some_and(|t| t.hash() == src.hash())));
-                        if after_held_end || ends_after_line_uses(e, &ev, &rest_of_line) {
+                        // (Uses of the line already appended come before
+                        // the end anyway.)
+                        let rest_not_appended: Vec<ExternalEvent> = rest_of_line.iter()
+                            .filter(|o| !skippable_ev.contains(&o.get_id()) || main_order).cloned().collect();
+                        if after_held_end || ends_after_line_uses(e, &ev, &rest_not_appended) {
                             deferred_ends.push((line_num, e.clone(), row));
                         } else {
                             visualization_data.append_processed_external_event(e.clone(), row);
@@ -2163,6 +2211,12 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                             if skippable_ev.insert(d.get_id()) {
                                 visualization_data.append_processed_external_event(d.clone(), row);
                             }
+                        }
+                    }
+                    // (Any use whose end the loop didn't reach, as before.)
+                    for u in &use_first {
+                        if skippable_ev.insert(u.get_id()) {
+                            visualization_data.append_processed_external_event((*u).clone(), final_line_num);
                         }
                     }
                     // What later uses or ends a variable an arrow moved

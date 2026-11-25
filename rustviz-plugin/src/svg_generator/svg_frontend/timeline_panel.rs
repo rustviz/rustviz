@@ -2316,7 +2316,7 @@ fn render_dot(
                 _ => before_breaks = Some((*line_number, held)),
             }
         }
-        let event_y = event_dot_y(history, i);
+        let event_y = arm_event_dot_y(visualization_data, hash, history, i);
         held = holds_value_after(held, event);
         moved_out = match event {
             e if e.is_box_payload_move() => moved_out && !held,
@@ -8779,7 +8779,9 @@ fn render_branches(
             // Build segments. Empty-classified states drop out so
             // a Move (anywhere) ends the visible run there.
             let mut segs: Vec<BranchSeg> = Vec::new();
-            let apexes = CollapsedApexes::of(&branch.e_data);
+            let mut apexes = CollapsedApexes::of(&branch.e_data);
+            // (A one-line let-else in the arm on another column, #1594.)
+            (apexes.passes, apexes.pass_starts) = let_else_passes(visualization_data, &branch.e_data);
             // The first arm starts with a one-line conditional on the
             // split line (#1287): its leg ends at that conditional's fork.
             // Otherwise the arm's own first row may start a conditional
@@ -8900,6 +8902,20 @@ fn render_branches(
                     state, visualization_data, &arm_label, Leg::Column, *top, bot, &arm_path,
                 );
                 if segs.len() > n { ended_title(&mut segs, bot); }
+            }
+            // A join raised above the merge row (#1294): the arm's column
+            // stops on the join's level, where its dots on the merge line
+            // go (`arm_event_dot_y`, #1598), and its leg to the join
+            // starts there.
+            if stop_line.is_none() && !branch_is_collapsed(*split_point, *merge_point)
+                && merge_y < get_y_axis_pos(*merge_point) as f64 {
+                segs.retain_mut(|seg| {
+                    let column = seg.p1.0 == branch_x && seg.p2.0 == branch_x;
+                    if !column || seg.p2.1 <= merge_y { return true; }
+                    if seg.p1.1 >= merge_y { return false; }
+                    seg.p2.1 = merge_y;
+                    true
+                });
             }
             // A diverging arm on one row (`0 => return s,`, a one-line
             // `if c { break a; } else { break b; }`) has no rows of its
@@ -9558,7 +9574,8 @@ fn render_timeline(
     // as nothing).
     render_branches(hash, rap, history, states, output, visualization_data, timeline_data, false, &[], bars);
 
-    let apexes = CollapsedApexes::of(history);
+    let mut apexes = CollapsedApexes::of(history);
+    (apexes.passes, apexes.pass_starts) = let_else_passes(visualization_data, history);
     let mut cuts = field_borrow_rows(rap, history, visualization_data);
     // A struct's line changes text where a field is moved out of it,
     // and stops once every field is (#1157).
@@ -10001,6 +10018,15 @@ struct CollapsedApexes {
     merges: BTreeSet<usize>,
     /// Split line → how far above its row the split dot is (`split_rise`).
     raised_splits: BTreeMap<usize, i64>,
+    /// Lines of one-line let-elses drawn as a branch on another column
+    /// that this one passes without a fork of its own, with an event
+    /// after the `else` there (`let_else_passes`, #1594): its dots of
+    /// the pattern's bindings are on the join's level, and so is where
+    /// its line stops and starts there.
+    passes: BTreeSet<usize>,
+    /// The lines of `passes` where the column has no dot before the
+    /// let-else: its line starts at the join's level there.
+    pass_starts: BTreeSet<usize>,
 }
 
 impl CollapsedApexes {
@@ -10009,6 +10035,8 @@ impl CollapsedApexes {
             splits: BTreeSet::new(),
             merges: BTreeSet::new(),
             raised_splits: BTreeMap::new(),
+            passes: BTreeSet::new(),
+            pass_starts: BTreeSet::new(),
         };
         for (i, (_, ev)) in history.iter().enumerate() {
             if let Event::Branch { split_point, merge_point, .. } = ev {
@@ -10029,7 +10057,7 @@ impl CollapsedApexes {
         if top == bot {
             return None;
         }
-        let (after_join, before_split) = (self.merges.contains(&top), self.splits.contains(&bot));
+        let (after_join, before_split) = (self.merges.contains(&top) || self.pass_starts.contains(&top), self.splits.contains(&bot));
         let raised_rise = self.raised_splits.get(&bot).copied();
         let before_raised_split = raised_rise.is_some();
         let y1 = get_y_axis_pos(top) + if after_join { COLLAPSED_APEX } else { 0 };
@@ -10037,6 +10065,8 @@ impl CollapsedApexes {
             COLLAPSED_APEX
         } else if let Some(rise) = raised_rise {
             rise
+        } else if self.passes.contains(&bot) {
+            -COLLAPSED_APEX
         } else {
             0
         };
@@ -10084,20 +10114,173 @@ fn event_dot_y(history: &[(usize, Event)], i: usize) -> i64 {
     }
 }
 
+/// Where the join of the conditional that has `arm` (an arm's events, on
+/// `hash`'s column) as an arm is raised above its merge row
+/// (`shared_merge_rises`, an `else if` whose join shares its `}` row
+/// with the outer one's, #1294): that join's y. An event of the arm on
+/// the merge line (the borrow of a reference ending in an implicit
+/// `else`, which has no lines of its own, #1598) goes on the join's
+/// level, beside the join, as it does where the join isn't raised; on
+/// the merge row, below the join, the leg to the join left the arm's
+/// column above that dot, from a point with no dot.
+fn raised_join_y(vd: &VisualizationData, hash: &u64, arm: &[(usize, Event)]) -> Option<(usize, i64)> {
+    fn find(h: &[(usize, Event)], arm: &[(usize, Event)]) -> Option<(usize, usize)> {
+        h.iter().find_map(|(_, ev)| match ev {
+            Event::Branch { branch_history, split_point, merge_point, .. } => {
+                if let Some(b) = branch_history.iter().find(|b| std::ptr::eq(b.e_data.as_slice(), arm)) {
+                    // (Not an arm that returns or breaks: its events on
+                    // the `}` line, the drops at its exit, never reach the
+                    // join, and happen before the outer scope's.)
+                    (!b.diverges).then_some((*split_point, *merge_point))
+                } else {
+                    branch_history.iter().find_map(|b| find(&b.e_data, arm))
+                }
+            }
+            _ => None,
+        })
+    }
+    let full = &vd.timelines.get(hash)?.history;
+    let (split, merge) = find(full, arm)?;
+    if branch_is_collapsed(split, merge) { return None; }
+    let rise = shared_merge_rises(full).get(&(split, merge)).copied().unwrap_or(0);
+    (rise > 0).then(|| (merge, get_y_axis_pos(merge) - rise))
+}
+
+/// `event_dot_y`, on the level of a raised join for an event of the
+/// arm on its merge line (`raised_join_y`), and on the join's for an
+/// event after a one-line let-else drawn as a branch on another column
+/// (`let_else_joins`, #1594).
+fn arm_event_dot_y(vd: &VisualizationData, hash: &u64, history: &[(usize, Event)], i: usize) -> i64 {
+    match raised_join_y(vd, hash, history) {
+        Some((merge, y)) if history[i].0 == merge => y,
+        _ => {
+            let line = history[i].0;
+            let y = event_dot_y(history, i);
+            if y == get_y_axis_pos(line) && let_else_shifts(vd, line, history) {
+                y + COLLAPSED_APEX
+            } else {
+                y
+            }
+        }
+    }
+}
+
+/// The one-line let-elses (`let Some(x) = o else { return };`) drawn as
+/// a branch on some column (#1573): (line, the branch's event id). The
+/// pattern binds after the `else` block, on the path that skipped it:
+/// what the line does after the branch (its events recorded after it) is
+/// drawn where the branches join, a row below the line (#1594). On the
+/// line's row, between the fork and the join, the binding started on the
+/// `else` sub-row, above the join. (Also inside `match` arms and loops.)
+fn let_else_joins(vd: &VisualizationData) -> Vec<(usize, usize)> {
+    fn walk(h: &[(usize, Event)], out: &mut Vec<(usize, usize)>) {
+        for (_, ev) in h {
+            if let Event::Branch { branch_history, ty, split_point, merge_point, id, .. } = ev {
+                if let BranchType::If(labels, _) = ty {
+                    if branch_is_collapsed(*split_point, *merge_point) && labels.len() == 2 && labels[0] == "Else" {
+                        out.push((*merge_point, *id));
+                    }
+                }
+                for b in branch_history {
+                    walk(&b.e_data, out);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for t in vd.timelines.values() {
+        walk(&t.history, &mut out);
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Whether `history` is an arm of a one-line let-else drawn as a branch
+/// on `line` (its `else` path's drops at the `return` stay on it).
+fn is_let_else_arm(vd: &VisualizationData, line: usize, history: &[(usize, Event)]) -> bool {
+    fn walk(h: &[(usize, Event)], line: usize, arm: &[(usize, Event)]) -> bool {
+        h.iter().any(|(_, ev)| match ev {
+            Event::Branch { branch_history, merge_point, split_point, ty: BranchType::If(labels, _), .. }
+                if *merge_point == line && branch_is_collapsed(*split_point, *merge_point)
+                    && labels.len() == 2 && labels[0] == "Else"
+                    && branch_history.iter().any(|b| std::ptr::eq(b.e_data.as_slice(), arm)) => true,
+            Event::Branch { branch_history, .. } => branch_history.iter().any(|b| walk(&b.e_data, line, arm)),
+            _ => false,
+        })
+    }
+    vd.timelines.values().any(|t| walk(&t.history, line, history))
+}
+
+/// An event id the visitor gave in the order it visited the code (not
+/// `Event::get_id`'s stand-in for events that carry none, such as scope
+/// ends; nor a borrow's end, whose id is given after the whole body is
+/// visited and which may be moved, #1616 review).
+fn real_event_id(ev: &Event) -> Option<usize> {
+    let id = ev.get_id();
+    (!matches!(ev, Event::Branch { .. } | Event::StaticDie { .. } | Event::MutableDie { .. }
+        | Event::StaticReacquire { .. } | Event::MutableReacquire { .. } | Event::RefDie { .. })
+        && id != 1000000000).then_some(id)
+}
+
+/// Whether `history[i]`, on `line`, comes after a one-line let-else drawn
+/// as a branch there (`let_else_joins`): it was recorded after the
+/// let-else's branch. An event with no id of its own goes by the nearest
+/// one on the line in `history` that has one, before it, else after it (the
+/// drop of a block's local that closes on the line before the let-else
+/// stays before it); with none, an or-pattern's binding (`OrAlt*`) is the
+/// pattern's, after it.
+fn after_let_else_join(vd: &VisualizationData, line: usize, history: &[(usize, Event)], i: usize) -> bool {
+    if matches!(history[i].1, Event::Branch { .. }) {
+        return false;
+    }
+    // (One let-else on the line: with two, which one an event follows
+    // isn't known here, and the line is drawn as before, #1712.)
+    let joins: Vec<usize> = let_else_joins(vd).into_iter().filter(|(l, _)| *l == line).map(|(_, id)| id).collect();
+    let [branch_id] = joins[..] else { return false };
+    let decided = |e: &Event| real_event_id(e).map(|id| id > branch_id);
+    history[..=i].iter().rev().take_while(|(l, _)| *l == line).find_map(|(_, e)| decided(e))
+        .or_else(|| history[i + 1..].iter().take_while(|(l, _)| *l == line).find_map(|(_, e)| decided(e)))
+        .unwrap_or_else(|| matches!(history[i].1, Event::OrAltMove { .. } | Event::OrAltLend { .. } | Event::OrAltBorrow { .. }))
+}
+
+/// The lines of `let_else_joins` where `history` (a column's own, or an
+/// arm's) has its events moved to the join (`let_else_shifts`): its line
+/// stops and starts at the join's level there.
+fn let_else_passes(vd: &VisualizationData, history: &[(usize, Event)]) -> (BTreeSet<usize>, BTreeSet<usize>) {
+    let passes: BTreeSet<usize> = history.iter().map(|(l, _)| *l)
+        .filter(|l| let_else_shifts(vd, *l, history))
+        .collect();
+    (passes.clone(), passes)
+}
+
+/// Whether `history`'s events on `line` go to the join of the one-line
+/// let-else there: all of them come after it (`after_let_else_join`), and
+/// `history` has no fork of its own on the line and isn't one of the
+/// let-else's arms. A column with dots on the line both before and after
+/// the let-else keeps them all on the line's row, as before (#1767).
+fn let_else_shifts(vd: &VisualizationData, line: usize, history: &[(usize, Event)]) -> bool {
+    let on_line: Vec<usize> = (0..history.len()).filter(|&i| history[i].0 == line).collect();
+    !on_line.is_empty()
+        && !on_line.iter().any(|&i| matches!(history[i].1, Event::Branch { .. }))
+        && on_line.iter().all(|&i| after_let_else_join(vd, line, history, i))
+        && !is_let_else_arm(vd, line, history)
+}
+
 /// `event_dot_y` of the event `id` on `hash`'s column (or in one of its
 /// branches), for the arrows and call icons that meet that event's dot.
 /// The line's row when the column has no such event.
 fn column_event_y(vd: &VisualizationData, hash: &u64, id: usize, line: usize) -> i64 {
-    fn find(history: &[(usize, Event)], id: usize) -> Option<i64> {
+    fn find(vd: &VisualizationData, hash: &u64, history: &[(usize, Event)], id: usize) -> Option<i64> {
         history.iter().enumerate().find_map(|(i, (_, ev))| match ev {
             Event::Branch { branch_history, .. } =>
-                branch_history.iter().find_map(|b| find(&b.e_data, id)),
-            _ if ev.get_id() == id => Some(event_dot_y(history, i)),
+                branch_history.iter().find_map(|b| find(vd, hash, &b.e_data, id)),
+            _ if ev.get_id() == id => Some(arm_event_dot_y(vd, hash, history, i)),
             _ => None,
         })
     }
     vd.timelines.get(hash)
-        .and_then(|t| find(&t.history, id))
+        .and_then(|t| find(vd, hash, &t.history, id))
         .unwrap_or_else(|| get_y_axis_pos(line))
 }
 
@@ -10146,10 +10329,13 @@ fn render_ref_line(
                 // join below the diamond has produced it, so its bracket
                 // starts at the join, clear of the arms (#489).
                 let apexes = CollapsedApexes::of(&timeline.history);
+                let (passes, pass_starts) = let_else_passes(visualization_data, &timeline.history);
                 let start_y = |line: usize| get_y_axis_pos(line)
-                    + if apexes.merges.contains(&line) { COLLAPSED_APEX } else { 0 };
+                    + if apexes.merges.contains(&line) || pass_starts.contains(&line) { COLLAPSED_APEX } else { 0 };
                 let end_y = |line: usize| get_y_axis_pos(line) - if apexes.splits.contains(&line) {
                     COLLAPSED_APEX
+                } else if passes.contains(&line) {
+                    -COLLAPSED_APEX
                 } else {
                     apexes.raised_splits.get(&line).copied().unwrap_or(0)
                 };
