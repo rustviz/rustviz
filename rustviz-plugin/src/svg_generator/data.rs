@@ -733,10 +733,18 @@ fn element_update_holds_value(r: &ResourceAccessPoint, place: &str, write: &Plac
 /// #1277): on the reference's column, as at the top level.
 /// `append_branch_event` leaves RefDies out (`ResourceAccessPoint_extract`
 /// names neither side of one).
+/// Its kind comes from the borrow recorded for it in this arm so far,
+/// which isn't on its column yet: a shared reference made from a
+/// mutable borrow (`let r3 = downgrade(&mut s2);`) ends a mutable one
+/// (#1571).
 fn append_decl_ref_die(vd: &VisualizationData, e: &ExternalEvent, line: usize, var: &ResourceAccessPoint, b_history: &mut Vec<(usize, Event)>) {
-    if let ExternalEvent::RefDie { from: ResourceTy::Value(r), .. } = e {
+    if let ExternalEvent::RefDie { from: from_ro @ ResourceTy::Value(r), id, .. } = e {
         if r == var {
-            b_history.extend(vd.event_of_external_event(line, e, false));
+            if !r.is_mutref() && history_holds_mut_borrow(vd, b_history, r, line, 4) {
+                b_history.push((line, Event::MutableDie { to: ResourceTy::Anonymous, is: from_ro.clone(), id: *id }));
+            } else {
+                b_history.extend(vd.event_of_external_event(line, e, false));
+            }
         }
     }
 }
@@ -6581,12 +6589,20 @@ fn holds_mut_borrow(vd: &VisualizationData, ro: &ResourceAccessPoint) -> bool {
 /// bounds the walk along copies.
 fn holds_mut_borrow_by(vd: &VisualizationData, ro: &ResourceAccessPoint, by: usize, depth: usize) -> bool {
     let Some(t) = vd.timelines.get(ro.hash()) else { return false };
+    history_holds_mut_borrow(vd, &t.history, ro, by, depth)
+}
+
+/// `holds_mut_borrow_by` with `ro`'s events so far in `history`: a
+/// reference declared in an arm has its events collected there before
+/// they reach its column (`append_decl_branch_events`), so its end,
+/// collected with them, can't look at the column (#1571).
+fn history_holds_mut_borrow(vd: &VisualizationData, history: &[(usize, Event)], ro: &ResourceAccessPoint, by: usize, depth: usize) -> bool {
     if ro.is_ref() {
         // (A copy of another reference re-points it; a call's result
         // copied in, `n` in `if let Some(n) = Some(id(r))`, comes with the
         // borrow drawn into it.)
         let from_column = |f: &ResourceTy| f.extract_rap().is_some_and(|r| !r.is_fn());
-        return t.history.iter().rev()
+        return history.iter().rev()
             .filter(|(l, _)| *l <= by)
             .find(|(_, e)| match e {
                 Event::MutableBorrow { .. } | Event::StaticBorrow { .. } | Event::Acquire { .. } => true,
@@ -6600,5 +6616,5 @@ fn holds_mut_borrow_by(vd: &VisualizationData, ro: &ResourceAccessPoint, by: usi
                 _ => false,
             });
     }
-    ro.holds_borrow() && t.history.iter().any(|(_, e)| matches!(e, Event::MutableBorrow { .. }))
+    ro.holds_borrow() && history.iter().any(|(_, e)| matches!(e, Event::MutableBorrow { .. }))
 }

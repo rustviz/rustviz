@@ -1068,8 +1068,29 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// result itself only hands out shared references.
   pub fn call_borrow_is_mut(&self, call: &'tcx Expr<'tcx>) -> bool {
     self.call_arg_flows(call).unwrap_or_default().iter().any(|flow| {
-      flow.place_mut || (flow.content && self.value_borrow_is_mut(flow.arg))
+      flow.place_mut || (flow.content && self.value_borrow_is_mut(flow.arg)) || self.shared_ref_with_mut_loan(flow.arg)
     })
+  }
+
+  /// `r`, `*r` or `&*r` with r a shared reference holding a mutable
+  /// loan (`let r: &String = &mut s;`, `downgrade(&mut s)`): what a call
+  /// returns through it (`r.as_str()`) reborrows through r and keeps
+  /// that loan, so s stays mutably borrowed (#1570, as `id(r)` in
+  /// #1510).
+  fn shared_ref_with_mut_loan(&self, e: &'tcx Expr<'tcx>) -> bool {
+    let mut e = e;
+    loop {
+      match e.kind {
+        ExprKind::DropTemps(inner) | ExprKind::Unary(rustc_hir::UnOp::Deref, inner) => e = inner,
+        ExprKind::AddrOf(_, m, inner) if !m.is_mut() && matches!(inner.kind, ExprKind::Unary(rustc_hir::UnOp::Deref, _)) => e = inner,
+        _ => break,
+      }
+    }
+    matches!(e.kind, ExprKind::Path(QPath::Resolved(..)) | ExprKind::Field(..))
+      && expr_to_rap_name(e, &self.tcx)
+        .filter(|n| self.raps.get(n).is_some_and(|rd| rd.rap.is_ref()))
+        .and_then(|n| self.borrow_map.get(&n))
+        .is_some_and(|rd| !rd.ref_mutability && rd.lender_muts.iter().any(|(_, m)| *m))
   }
 
   /// Whether the borrow held by the value of `e` is a mutable one.
@@ -1077,11 +1098,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     match e.kind {
       // (`Some(r)` with r a `&mut` where an `Option<&T>` is expected
       // holds an immutable reborrow, `&*r`, #1329.)
+      // A shared reference holding a mutable loan (`let r: &String =
+      // &mut s;`, `downgrade(&mut s)`) passes that loan on: `vr.push(r)`
+      // keeps s mutably borrowed (#1570).
       ExprKind::Path(QPath::Resolved(..)) | ExprKind::Field(..) => {
         !is_implicit_shared_reborrow_of_mut(e, self.tcx.typeck(e.hir_id.owner))
           && expr_to_rap_name(e, &self.tcx)
             .and_then(|n| self.borrow_map.get(&n))
-            .is_some_and(|rd| rd.ref_mutability)
+            .is_some_and(|rd| rd.ref_mutability || rd.lender_muts.iter().any(|(_, m)| *m))
       }
       ExprKind::AddrOf(_, m, _) => m.is_mut(),
       ExprKind::Call(..) | ExprKind::MethodCall(..) => self.call_borrow_is_mut(e),

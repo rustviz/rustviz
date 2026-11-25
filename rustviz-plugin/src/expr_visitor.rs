@@ -7896,12 +7896,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
     match self.borrow_map.get_mut(&name) {
       Some(rd) => {
+        // Each lender keeps its own kind: `vr.push(r2.as_str())` with r2
+        // holding a mutable loan of s3 (#1570) leaves vr's shared loan of
+        // s2 (`vec![s2.as_str()]`) shared.
+        let mut muts: Vec<(ResourceTy, bool)> = rd.all_lenders().into_iter().map(|l| {
+          let m = rd.mut_of(&l);
+          (l, m)
+        }).collect();
         for l in lenders.iter() {
           if *l != rd.lender && !rd.co_lenders.contains(l) {
             rd.co_lenders.push(l.clone());
           }
+          match muts.iter_mut().find(|(x, _)| x == l) {
+            Some(entry) => entry.1 |= is_mut,
+            None => muts.push((l.clone(), is_mut)),
+          }
         }
         rd.ref_mutability |= is_mut;
+        rd.lender_muts = if muts.iter().all(|(_, m)| *m == rd.ref_mutability) { Vec::new() } else { muts };
       }
       None => {
         let aliasing = get_aliasing_data(&lenders[0], &self.borrow_map);
@@ -11657,7 +11669,17 @@ pub fn print_out_of_scope(&mut self){
         | ExternalEvent::MutableDie { from: ResourceTy::Value(r), to, .. }
         | ExternalEvent::RefDie { from: ResourceTy::Value(r), to, .. } => match to.extract_rap() {
           Some(lender) => arm_declaring(self.preprocessed_events, r, Some(lender), *line, false)
-            .map(|path| (path, Some(lender.clone()))),
+            .map(|path| (path, Some(lender.clone())))
+            // An end that gives nothing back (another reference still
+            // holds the loan: `Holder { r }` in an arm of a loop's body,
+            // with r used again next time round) needs no lender column
+            // in the conditional. Left at the top level, it came after
+            // the reference's scope end in the arm, and its column ran
+            // on past the struct's move (#1568).
+            .or_else(|| matches!(ev, ExternalEvent::RefDie { .. })
+              .then(|| arm_declaring(self.preprocessed_events, r, None, *line, false))
+              .flatten()
+              .map(|path| (path, None))),
           // A borrow from the caller (`let m2 = m;` in an arm, m a `&mut`
           // parameter) has no lender column: it ends in the arm that
           // declares its reference (#1502). Left at the top level, it was
@@ -12075,7 +12097,12 @@ pub fn print_out_of_scope(&mut self){
       while let Some((p, _)) = parent.rsplit_once('.') {
         parent = p;
         let Some(prap) = self.raps.get(parent).map(|r| *r.rap.hash()) else { continue };
-        for (line, ev) in self.preprocessed_events.iter() {
+        // (Or in the arm that declares the struct, the only path it
+        // exists on: `else { let h2 = Holder { n: 2, ..h }; drop(h2); }`
+        // in a loop's body, #1568.)
+        let mut in_decl_arm: Vec<(usize, ExternalEvent)> = Vec::new();
+        events_of_declaring_arm(self.preprocessed_events, prap, &mut in_decl_arm);
+        for (line, ev) in self.preprocessed_events.iter().chain(in_decl_arm.iter()) {
           if let ExternalEvent::Move { from: ResourceTy::Value(f), to, .. } = ev {
             // Or into a value that holds the borrow from then on (`let c =
             // Some(w);`, #1506): c is drawn borrowing the lender.
@@ -12327,6 +12354,9 @@ pub fn print_out_of_scope(&mut self){
       let Some(end) = gos_line_from(self.preprocessed_events, &rd.rap, from) else { continue };
       if let Some(d) = self.borrow_map.get(&name) {
         ultimate_refs.remove(&(name.clone(), d.lender.real_name()));
+        // (Or earlier, where its struct was moved: `let h2 = Holder {
+        // n: 2, ..h }; drop(h2);` before `h.r = &s;`, #1568.)
+        let end = end.min(d.lifetime.max(d.assigned_at));
         outlived.insert(name, end);
       }
     }
@@ -12399,6 +12429,15 @@ pub fn print_out_of_scope(&mut self){
         ResourceTy::Anonymous => ResourceTy::Deref(from_ro.clone()),
         _ => r_ty.clone()
       };
+      // An end that gives nothing back (no arrow, or a loan of the
+      // caller's data) comes by the reference's scope end at the latest:
+      // a struct's field copied from a reference in a loop's body (`loop
+      // { let h = Holder { r: r }; }`) got the loan's end after the
+      // loop, below its column (#1568).
+      let past_scope_end = |v: &Self, end: usize| v.raps.get(k)
+        .filter(|rd| rd.rap.is_ref() && rd.extra_scopes.is_empty())
+        .and_then(|_| gos_line_from(v.preprocessed_events, &from_ro, ref_data.assigned_at))
+        .filter(|s| *s < end);
       // A reference that borrows from several variables gives each of
       // them back at its last use (#171), and one that borrows several
       // fields through a reference each field (#1080).
@@ -12423,7 +12462,11 @@ pub fn print_out_of_scope(&mut self){
           self.add_borrow_end_ev(*lifetime, to_ro, ResourceTy::Value(from_ro), ref_data, holders);
           continue;
         }
-        let end = outlived.get(k).copied().unwrap_or(*lifetime);
+        let mut end = outlived.get(k).copied().unwrap_or(*lifetime);
+        let past_scope = past_scope_end(self, end);
+        if let Some(s) = past_scope {
+          end = s;
+        }
         // A value holding a borrow, moved into a call on the line its
         // loan ends (`it2.copied().next()`, the result holding none of
         // it): the loan went into the call with the value, and the
@@ -12439,13 +12482,8 @@ pub fn print_out_of_scope(&mut self){
         *self.unique_id += 1;
         // An end at the scope end (#913) goes before the scope end
         // already drawn there (a loop body's binding), not after it.
-        if outlived.contains_key(k) && self.preprocessed_events.last().is_some_and(|(_, e)| e.get_id() == id) {
-          let gos = self.preprocessed_events.iter().position(|(l, e)| *l == end
-            && matches!(e, ExternalEvent::GoOutOfScope { ro, .. } if ro.hash() == from_ro.hash()));
-          if let Some(i) = gos {
-            let ev = self.preprocessed_events.pop().unwrap();
-            self.preprocessed_events.insert(i, ev);
-          }
+        if outlived.contains_key(k) || past_scope.is_some() {
+          before_scope_end(self.preprocessed_events, id, end, &from_ro);
         }
       }
       else {
@@ -12456,10 +12494,18 @@ pub fn print_out_of_scope(&mut self){
         // A `&mut` a `move` closure captured (`move || r.push('!')`,
         // #1148) is held by the closure from then on: the closure ends
         // the borrow and gives the lender back, not r.
+        let end = match r_ty {
+          ResourceTy::Caller => past_scope_end(self, *lifetime),
+          _ => None,
+        };
         let end_from = if self.for_moved_holders.contains(k) { ResourceTy::Anonymous }
           else if let Some(c) = self.closure_moved_into(&from_ro) { ResourceTy::Value(c) }
-          else { ResourceTy::Value(from_ro) };
-        self.add_borrow_end_ev(*lifetime, to_ro, end_from, ref_data, Vec::new());
+          else { ResourceTy::Value(from_ro.clone()) };
+        let id = *self.unique_id;
+        self.add_borrow_end_ev(end.unwrap_or(*lifetime), to_ro, end_from, ref_data, Vec::new());
+        if let Some(end) = end {
+          before_scope_end(self.preprocessed_events, id, end, &from_ro);
+        }
       }
     }
     // The loans earlier arms gave a reference (#806): each ends on its
@@ -14460,6 +14506,24 @@ fn moves_in_arms(events: &[(usize, ExternalEvent)], hash: u64, out: &mut Vec<usi
   }
 }
 
+/// The events (not those of conditionals nested there) of the arms among
+/// `events` that declare the column `hash`, at any depth.
+fn events_of_declaring_arm(events: &[(usize, ExternalEvent)], hash: u64, out: &mut Vec<(usize, ExternalEvent)>) {
+  for (_, e) in events {
+    if let ExternalEvent::Branch { branches, .. } = e {
+      for b in branches {
+        #[expect(clippy::disallowed_methods, reason = "`any` over the set: order never observed")]
+        let declares = b.decl_vars.iter().any(|v| *v.hash() == hash);
+        if declares {
+          out.extend(b.e_data.iter().filter(|(_, e)| !matches!(e, ExternalEvent::Branch { .. })).cloned());
+        } else {
+          events_of_declaring_arm(&b.e_data, hash, out);
+        }
+      }
+    }
+  }
+}
+
 /// The reference `r` took its loan from by a move among `events` (then
 /// `after`), at the top level: `r` in `let r = q;`, or the field `h2.r`
 /// a struct's move or `..h` update handed `h.r`'s loan to.
@@ -15636,6 +15700,21 @@ fn borrow_lines_into(evs: &[(usize, ExternalEvent)], hash: u64, out: &mut Vec<(u
 /// #1327). Two variables of one name in sibling scopes share a column
 /// (two `if let Some(e) = ..`, #903): the earlier one's scope end isn't
 /// the later one's (#1400).
+/// The borrow end `id` just added (the last event) at `end`, the line of
+/// `r`'s scope end, goes before that scope end, not after it (#913,
+/// #1568).
+fn before_scope_end(events: &mut Vec<(usize, ExternalEvent)>, id: usize, end: usize, r: &ResourceAccessPoint) {
+  if !events.last().is_some_and(|(_, e)| e.get_id() == id) {
+    return;
+  }
+  let gos = events.iter().position(|(l, e)| *l == end
+    && matches!(e, ExternalEvent::GoOutOfScope { ro, .. } if ro.hash() == r.hash()));
+  if let Some(i) = gos {
+    let ev = events.pop().unwrap();
+    events.insert(i, ev);
+  }
+}
+
 pub fn gos_line_from(evs: &[(usize, ExternalEvent)], rap: &ResourceAccessPoint, from: usize) -> Option<usize> {
   evs.iter().find_map(|(l, e)| match e {
     ExternalEvent::GoOutOfScope { ro, .. } if ro.hash() == rap.hash() && *l >= from => Some(*l),
