@@ -6815,16 +6815,30 @@ fn through_bends(drawn: &[Drawn], ends: &Ends, lines: &[Piece]) -> Vec<usize> {
 }
 
 /// The arrows whose head lies on the head of another arrow into the same
-/// dot (their tips within a px), one entry per pair (the later one).
-fn heads_on_heads(drawn: &[Drawn]) -> Vec<usize> {
+/// dot (their tips within 8 px), one entry per pair (the later one); with
+/// `touching`, also where the two only touch and one comes down into the
+/// dot from above (#1605's review: 37 degrees down from a track above,
+/// beside a level head, read as one head; a fan from below with heads a
+/// few px apart is the usual fan-in, #1316).
+fn heads_on_heads(drawn: &[Drawn], touching: bool) -> Vec<usize> {
+    let down = |d: &Drawn| d.tri[1].1 - (d.tri[0].1 + d.tri[2].1) / 2.0 > 2.0;
     let mut out = Vec::new();
     for (i, a) in drawn.iter().enumerate().filter(|(_, d)| d.logo.is_none() && d.tri.len() == 3) {
-        if drawn[..i].iter().any(|b| b.logo.is_none() && b.tri.len() == 3 && b.tip != a.tip && dist(b.tri[1], a.tri[1]) < 8.0
-            && samples(&tri_edges(&b.tri)).into_iter().any(|p| inside_tri(&a.tri, p) > 1.0)) {
+        if drawn[..i].iter().any(|b| b.logo.is_none() && b.tri.len() == 3 && b.tip != a.tip && dist(b.tri[1], a.tri[1]) < 8.0 && {
+            let depth = if touching && (down(a) || down(b)) { -0.5 } else { 1.0 };
+            samples(&tri_edges(&b.tri)).into_iter().any(|p| inside_tri(&a.tri, p) > depth)
+        }) {
             out.push(i);
         }
     }
     out
+}
+
+/// The arrows between two columns that run off the figure's left edge (a
+/// piece within 8 px of it), where they are cut off.
+fn off_left(drawn: &[Drawn], ends: &Ends) -> Vec<usize> {
+    (0..drawn.len()).filter(|&i| drawn[i].logo.is_none() && ends.get(&drawn[i].key).is_some_and(|(t, f, _)| t != f)
+        && drawn[i].pieces.iter().any(|&(p, q)| p.0.min(q.0) < 8.0)).collect()
 }
 
 /// How many times a track (a level piece of an arrow off its ends' row)
@@ -6860,6 +6874,8 @@ fn defects(drawn: &[Drawn], dots: &DotLayer) -> Vec<(usize, usize)> {
     out.extend(on_dashed_legs(drawn, &dots.dashed_legs).into_iter().map(|i| (i, i)));
     out.extend(through_corners(drawn, &dots.corners, &dots.lanes.ends).into_iter().map(|i| (i, i)));
     out.extend(through_bends(drawn, &dots.lanes.ends, &dots.bend_lines).into_iter().map(|i| (i, i)));
+    out.extend(heads_on_heads(drawn, true).into_iter().map(|i| (i, i)));
+    out.extend(off_left(drawn, &dots.lanes.ends).into_iter().map(|i| (i, i)));
     out.extend((0..drawn.len()).filter(|&i| drawn[i].track_hops > 0).map(|i| (i, i)));
     out.extend(end_to_end(drawn, &dots.lanes.ends));
     out
@@ -6921,7 +6937,8 @@ fn untangle_cost(drawn: &[Drawn], dots: &DotLayer) -> (usize, usize) {
     let on_arcs = arrows.iter().filter(|a| a.tri.len() == 3 && arrows.iter()
         .any(|b| b.tip != a.tip && b.arcs.iter().any(|&p| inside_tri(&a.tri, p) > -1.5))).count();
     let hops: usize = drawn.iter().map(|d| d.track_hops).sum::<usize>() + through_corners(drawn, &dots.corners, &dots.lanes.ends).len()
-        + through_bends(drawn, &dots.lanes.ends, &dots.bend_lines).len();
+        + through_bends(drawn, &dots.lanes.ends, &dots.bend_lines).len() + heads_on_heads(drawn, true).len();
+    let through = through + off_left(drawn, &dots.lanes.ends).len();
     (marks_on_others(drawn, &dots.lanes.ends).len() + on_legs(drawn, &dots.legs).len()
         + on_dashed_legs(drawn, &dots.dashed_legs).len() + on_arcs + hops + 10 * (through + touching + stacked), crossings)
 }
@@ -8276,7 +8293,7 @@ fn render_arrows_string_external_events_version(
     let legs = on_legs(&drawn, &dots.legs);
     // (And two heads into one dot on each other, #1542: a fan with no side
     // left for one of its heads.)
-    let heads = heads_on_heads(&drawn);
+    let heads = heads_on_heads(&drawn, false);
     let others = untangle_cost(&drawn, dots).0.saturating_sub(legs.len() + heads.len());
     let left: Vec<usize> = legs.into_iter().chain(on_cols(&drawn, &dots.cols)).chain(heads).collect();
     let mut rows: Vec<usize> = left.iter().map(|&i| drawn[i].key.1).collect();
