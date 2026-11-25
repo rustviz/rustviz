@@ -3498,17 +3498,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
   /// Whether a borrow made before the `if` without `else` `if_expr`
   /// (on lines `split..=merge`, `if_decl` its own variables), whose
-  /// body always leaves by `break`, `return` or `continue`, may still
-  /// be live after the `if` but end on the body's way out: then the
-  /// `if` is drawn as a conditional on the borrowed columns, so that
-  /// the end in its arm (`end_borrows_at_exits_in`, as for an
-  /// `if`/`else`) has a place to go (#882). `for a in &v { ..; if c
-  /// { break; } }`: the loan v's iterator holds lasts to the loop's
-  /// end on the paths that go round again, but ends at the `break`.
-  fn borrow_may_end_at_exit(&self, if_expr: &'tcx Expr<'tcx>, split: usize, merge: usize, if_decl: &HashSet<ResourceAccessPoint>) -> bool {
-    let leaves = branch_leaves(self.tcx, BranchBody::Expr(if_expr));
-    if !leaves.exits.iter().all(|x| matches!(x, BranchExit::Return | BranchExit::Break | BranchExit::Continue))
-      || self.in_closure(if_expr)
+  /// body always leaves by `break`, `return`, `continue` or a panic
+  /// (#1573), may still be live after the `if` but end on the body's
+  /// way out: then the `if` is drawn as a conditional on the borrowed
+  /// columns, so that the end in its arm (`end_borrows_at_exits_in`,
+  /// as for an `if`/`else`) has a place to go (#882). `for a in &v {
+  /// ..; if c { break; } }`: the loan v's iterator holds lasts to the
+  /// loop's end on the paths that go round again, but ends at the
+  /// `break`.
+  /// The `else` block of a let-else likewise (#1573): `at` is the
+  /// expression the branch belongs to (the `if`, or the let-else's
+  /// initializer).
+  fn borrow_may_end_at_exit(&self, body: BranchBody<'tcx>, at: &'tcx Expr<'tcx>, split: usize, merge: usize, if_decl: &HashSet<ResourceAccessPoint>) -> bool {
+    let leaves = branch_leaves(self.tcx, body);
+    if !leaves.exits.iter().all(|x| matches!(x, BranchExit::Return | BranchExit::Panic | BranchExit::Break | BranchExit::Continue))
+      || self.in_closure(at)
     {
       return false;
     }
@@ -3527,7 +3531,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         && rd.lender.extract_rap().is_some_and(|l| !l.is_fn())
         // What each way out leaves (see `end_borrows_at_exits_in`).
         && leaves.exits.iter().all(|x| match x {
-          BranchExit::Return => true,
+          BranchExit::Return | BranchExit::Panic => true,
           BranchExit::Break => loop_lines.is_some() && !leaves.break_carries.iter().any(|c| c == *n),
           // Not a `for` loop's pattern binding, whose loan the loop's
           // iterator holds into the next iteration (#872).
@@ -7158,8 +7162,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           let dead_before_arms = (ref_data.loan().is_none() && !matches!(ref_data.lender, ResourceTy::Anonymous))
             .then(|| self.last_live_line(&me, (ref_data.assigned_at, line_num.saturating_sub(1))).unwrap_or(ref_data.assigned_at))
             .filter(|&l| l >= ref_data.assigned_at && self.arm_frames.last().is_some_and(|&(split, _, _, _)| l < split));
+          // A let-else binding drawn as a branch is bound on the join row
+          // (`borrow_floor`, #1408): rustc ends an unused binding's loan
+          // on the `let` row, above it, but its column only starts at the
+          // join, so the loan is given back there (#1579).
+          let floor = self.borrow_floor.get(&me).copied();
+          let lift = |e: usize| floor.map_or(e, |f| e.max(f).min(line_num));
           let old_end = self.loan_end_of(&me, &ref_data).filter(|&end| end < line_num && end >= ref_data.assigned_at)
-            .or_else(|| self.old_loan_end(&me, &ref_data, &ref_data.lender, line_num, write_span));
+            .or_else(|| self.old_loan_end(&me, &ref_data, &ref_data.lender, line_num, write_span))
+            .map(lift);
           if let Some(old_end) = old_end {
             #[expect(clippy::disallowed_methods, reason = "filtered into a sorted Vec")]
             let mut over: Vec<String> = borrowers.iter()
@@ -7286,14 +7297,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // with `r` read after the `if`), and for each lender
             // of a reference that borrows from either of two
             // (#770). (`write_span`: see above.)
-            let end_of = |this: &Self, lender: &ResourceTy| this.old_loan_end(&me, &ref_data, lender, line_num, write_span).unwrap_or(line_num);
-            let end_line = match self.loan_end_of(&me, &ref_data).filter(|&end| end < line_num && end >= ref_data.assigned_at) {
+            let end_of = |this: &Self, lender: &ResourceTy| lift(this.old_loan_end(&me, &ref_data, lender, line_num, write_span).unwrap_or(line_num));
+            let end_line = lift(match self.loan_end_of(&me, &ref_data).filter(|&end| end < line_num && end >= ref_data.assigned_at) {
               Some(end) => end,
               None => match end_of(self, &ref_data.lender) {
                 e if e == line_num => dead_before_arms.unwrap_or(e),
                 e => e,
               },
-            };
+            });
             // The loan lives on in another arm of an enclosing `if` /
             // `match` (`c = &y;` in one arm, a read of `c` in a later
             // one): on this path it ends at the write, on the other at
@@ -8557,7 +8568,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             || (self.expr_diverges(if_expr) && {
               let sm = self.tcx.sess.source_map();
               let (split, if_end) = (sm.lookup_char_pos(if_expr.span.lo()).line, sm.lookup_char_pos(if_expr.span.hi()).line);
-              self.borrow_may_end_at_exit(if_expr, split, if_end, &if_scope)
+              self.borrow_may_end_at_exit(BranchBody::Expr(if_expr), if_expr, split, if_end, &if_scope)
             }));
         // A tuple scrutinee's variables are moved whether or not the
         // body runs (#327), so that's a second path as well, unless
@@ -12832,7 +12843,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// Drawn as the body of `if no_match { return; }` is (#429): a branch
   /// whose column ends in those drops, beside the path on which the
   /// pattern matched (named after the pattern).
-  /// With no drop there it's drawn inline, as before.
+  /// With no drop there, no move out of an outer variable and no borrow
+  /// that ends there but lives on past it (#1573), it's drawn inline,
+  /// as before.
   ///
   /// `init_len`: the length `in_scope` had before `init` was visited.
   /// The unbound temporaries `init` made are dropped before the `else`
@@ -12874,10 +12887,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // sees: no drop at its exit, and no move out of a variable declared
     // before it (`else { drop(s); return; }`, #1133: drawn inline, s
     // read as moved on the matched path too).
+    // Nor a borrow made before it that is live after it, as for `if c
+    // { return; }` (#882): on the `else` path it ends as the block
+    // starts, so a lender the block reads is no longer borrowed there
+    // (#1573). (A one-line `else { return }` that draws nothing of its
+    // own stays inline: nothing in it can be drawn against the borrow,
+    // and a one-row fork binds the pattern a sub-row above its join,
+    // #1594.)
     let moves_outer = |e: &ExternalEvent| matches!(e, ExternalEvent::Move { from: ResourceTy::Value(r), .. }
       if !r.is_fn() && !r.is_temporary() && *r.hash() < hash_lo as u64);
+    let draws_something = self.preprocessed_events.iter().any(|(_, e)| ids.contains(&e.get_id()));
     if !self.preprocessed_events.iter().any(|(_, e)| ids.contains(&e.get_id())
-      && (self.exit_drops.contains(&e.get_id()) || moves_outer(e))) {
+      && (self.exit_drops.contains(&e.get_id()) || moves_outer(e)))
+      && !((draws_something || !branch_is_collapsed(split, merge))
+        && self.borrow_may_end_at_exit(BranchBody::LetElse(els), init, split, merge, &inner))
+    {
       return None;
     }
     let mut else_ev = self.take_branch_events(ids, None, &HashSet::new());

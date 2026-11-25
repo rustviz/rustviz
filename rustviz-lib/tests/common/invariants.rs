@@ -527,8 +527,11 @@ pub fn check(fig: &Fig, src: &str) -> Vec<(&'static str, String)> {
             }
             if d.drop && !d.has_any(TEMP_DROPS) {
                 let box_contents = earlier.iter().rev().find(|p| p.has("move")).is_some_and(|p| contents_moved(p));
+                // (Only a whole move the column gets no new value after:
+                // `drop(p); p = Pair { .. };` gives the fields back, #1577.)
                 let partial = states_partial_drop(d)
-                    && !earlier.iter().rev().find(|p| p.has_any(END)).is_some_and(|p| whole_move(p));
+                    && !earlier.iter().rev().find(|p| p.has_any(END) || p.has_any(INIT))
+                        .is_some_and(|p| whole_move(p) && !INIT.iter().any(|i| p.pos(i) > p.pos("move")));
                 if !maybe && !box_contents && !partial {
                     out.push(("drop-without-value", d.describe()));
                 }
@@ -863,6 +866,23 @@ mod unit {
         // A plain drop after a move is caught as before.
         let plain = moved.replace(flag, "s goes out of scope. Its resource is dropped.");
         assert_eq!(invs(&plain), vec!["drop-without-value"]);
+        // A whole move followed by a new value (`drop(s); s = S { .. };`,
+        // then fields moved in an arm, #1577): the drop flag is about the
+        // new value, so the stated partial drop is fine.
+        let refilled = [header("s", 1), line("s", 1, 95, 125, "full_privilege"), line("s", 1, 155, 185, "full_privilege"),
+                        dot("s", 1, 95, "acquire", false, "a"), dot("s", 1, 125, "move", false, "s's resource is moved into drop, which drops it"),
+                        dot("s", 1, 155, "acquire", false, "a"), dot("s", 1, 215, "owner_go_out_of_scope", true, flag)].concat();
+        assert_eq!(invs(&refilled), Vec::<&str>::new());
+        // ...but moved again after that new value, it is caught again.
+        let moved_again = [refilled.clone(), dot("s", 1, 185, "move", false, "s's resource is moved into drop, which drops it")].concat();
+        assert_eq!(invs(&moved_again), vec!["drop-without-value"]);
+        // A dot that moves the old value and then takes a new one
+        // (`s = f(s)`) refills it; one whose last event is the move
+        // doesn't.
+        let one_dot = |evs: &str| [header("s", 1), line("s", 1, 95, 155, "full_privilege"), dot("s", 1, 95, "acquire", false, "a"),
+                                    dot("s", 1, 125, evs, false, "t"), dot("s", 1, 215, "owner_go_out_of_scope", true, flag)].concat();
+        assert_eq!(invs(&one_dot("move acquire")), Vec::<&str>::new());
+        assert_eq!(invs(&one_dot("acquire move")), vec!["drop-without-value"]);
     }
 
     #[test]

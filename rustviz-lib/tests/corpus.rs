@@ -27882,6 +27882,59 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "n2 is assigned the result of Some",
         ],
     },
+    TooltipExpect {
+        name: "let_else_borrow_ends_in_else_1573",
+        // #1573: a let-else whose `else` block drops and moves nothing,
+        // with a borrow live across it, is drawn as a branch, so the
+        // borrow ends on the `else` path as it starts and the lender read
+        // there isn't drawn still borrowed. On main it was drawn inline
+        // and the lender's column went State::Invalid (which
+        // `corpus_invariants_hold` catches; the texts below only show
+        // that the forks are drawn). Also an `if` or let-else whose body
+        // panics, and (#1591) a `&mut`'s bracket resumed after the join
+        // while its referent is shared.
+        must_contain: &[
+            "m's mutable borrow ends",
+            "m no longer borrows the resource s points to",
+            "This branch stops here: it returns, panics, breaks or continues, so it never reaches the end of the conditional",
+            "o isn't moved in any of the branches above",
+            "t isn't moved in any of the branches above",
+            "total isn't moved in any of the branches above",
+            "s holds a mutable reference",
+        ],
+        must_not_contain: &[
+            // s is a `&mut String` throughout; only its referent is shared.
+            "=s holds an immutable reference",
+        ],
+    },
+    TooltipExpect {
+        name: "let_else_repoint_unused_1579",
+        // #1579: x's first loan is never used, so it ends where x is bound
+        // (the let-else's join row) and the lender is given back there.
+        // On main the end was drawn on the `let` row, above x's column,
+        // and the lender stayed borrowed to its scope end: rows aren't in
+        // the tooltips, so `corpus_invariants_hold` (event-on-dead-column)
+        // is what fails on main; these texts pin the ends themselves.
+        must_contain: &[
+            "x's immutable borrow ends",
+            "v's resource is no longer immutably borrowed",
+            "o's resource is no longer immutably borrowed",
+            "Return immutably borrowed resource from x to v",
+            "Return immutably borrowed resource from x to s2",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "struct_refilled_partial_drop_1577",
+        // #1577: drawn right on main; the fixture keeps the corpus
+        // checker's `drop-without-value` from flagging the scope end of a
+        // struct given a new value after a whole move.
+        must_contain: &[
+            "p goes out of scope. p.a and p.b were moved out in some of the branches above; each is dropped here only if no branch above moved it (Rust tracks this with runtime drop flags).",
+            "p's resource is moved into drop, which drops it",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws
