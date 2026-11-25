@@ -9679,12 +9679,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let after_pat = |evs: &[(usize, ExternalEvent)]| evs.iter().rposition(|(l, e)| *l == ends_at && placed(e.get_id())).map(|i| i + 1);
         if inline {
           self.add_external_event(ends_at, ext_ev);
-          let at = if unused { after_pat(self.preprocessed_events) } else { None };
+          // (Otherwise after the arm's events up to that line, as for an
+          // arm of its own below: not after the body's later lines, a
+          // nested `if c { return; }` or a `&mut p.a`, which then saw the
+          // lender still shared, #1585.)
+          let in_order = |evs: &[(usize, ExternalEvent)]| evs[..evs.len().saturating_sub(1)].iter()
+            .rposition(|(l, _)| *l <= ends_at).map_or(0, |i| i + 1);
+          let at = if unused { after_pat(self.preprocessed_events) } else { None }
+            .or_else(|| Some(in_order(self.preprocessed_events)));
           if let Some(at) = at.filter(|_| self.preprocessed_events.last().is_some_and(|(_, e)| e.get_id() == id)) {
             let ev = self.preprocessed_events.pop().expect("just added");
             self.preprocessed_events.insert(at, ev);
             // And among the arrows stacked on its line.
-            if let Some(evs) = self.event_line_map.get_mut(&ends_at) {
+            if let Some(evs) = self.event_line_map.get_mut(&ends_at).filter(|_| unused) {
               if let (Some(k), Some(lo)) = (evs.iter().position(|e| e.get_id() == id), evs.iter().rposition(|e| placed(e.get_id()))) {
                 let e = evs.remove(k);
                 evs.insert((lo + 1).min(evs.len()), e);

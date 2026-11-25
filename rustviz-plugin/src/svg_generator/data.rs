@@ -749,6 +749,23 @@ fn append_decl_ref_die(vd: &VisualizationData, e: &ExternalEvent, line: usize, v
     }
 }
 
+/// Whether arm `i` of a conditional (not a loop) draws an end with no
+/// arrow of `var` on `line` (`append_decl_ref_die`): on one of the arm's
+/// lines; for an arm with none (a let-else's fall-through path, an
+/// implicit `else`), on the line it starts on, where its ends are listed,
+/// unless another arm moves `var` (that join keeps saying it was moved in
+/// a branch, as on main); or on the split line, where a let-chain's later
+/// parts are drawn in the arm they lead into (#1581).
+fn draws_arm_ref_die(branches: &[ExtBranchData], i: usize, branch_type: &BranchType, split: usize, line: usize, var: &ResourceAccessPoint) -> bool {
+    if matches!(branch_type, BranchType::Loop(..)) {
+        return false;
+    }
+    let (lo, hi) = branch_type.get_start_end(i);
+    let moved_elsewhere = || branches.iter().enumerate().any(|(j, b)| j != i
+        && b.e_data.iter().any(|(_, e)| matches!(e, ExternalEvent::Move { from: ResourceTy::Value(f), .. } if f == var)));
+    (lo <= line && line <= hi) || (lo > hi && line == lo && !moved_elsewhere()) || line == split
+}
+
 fn push_history_event(history: &mut Vec<(usize, Event)>, line: usize, event: Event) {
     if let Event::Acquire { is: ResourceTy::Index(_, place, _), .. } = &event {
         let place = split_alternatives(place).0;
@@ -6064,10 +6081,18 @@ impl Visualizable for VisualizationData {
             ExternalEvent::Branch { live_vars, branches, branch_type, split_point, merge_point, maybe_init, loop_assigned, maybe_held, id } => {
                 if live_vars.contains(rap) {
                     let mut new_branches: Vec<BranchData> = Vec::new();
-                    for b in branches.iter() {
+                    for (i, b) in branches.iter().enumerate() {
                         let mut new_b_history: Vec<(usize, Event)> = Vec::new();
                         for (l, e) in b.e_data.iter() {
                             self.append_branch_event(e, *l, is, & mut new_b_history);
+                            // The end with no arrow of a reference declared
+                            // before this nested conditional, as at the top
+                            // level (`append_processed_external_event`): an
+                            // `else if`'s arm ending r2's borrow while r
+                            // still borrows the same lender (#1581).
+                            if draws_arm_ref_die(branches, i, branch_type, *split_point, *l, rap) {
+                                append_decl_ref_die(self, e, *l, rap, &mut new_b_history);
+                            }
                         }
                         new_branches.push(BranchData { t_data: TimelineColumnData { // produce some dummy timeline data for now
                             name: "".to_owned(),
@@ -6313,7 +6338,6 @@ impl Visualizable for VisualizationData {
                     let mut branch_history: Vec<BranchData> = Vec::new();
                     for (i, branch) in branches.iter().enumerate() { // for each branch
                         let mut b_history: Vec<(usize, Event)> = Vec::new();
-                        let (lo, hi) = branch_type.get_start_end(i);
                         for (l, ev) in branch.e_data.iter() { // for each event in each branch
                             self.append_branch_event(ev, *l, &is, & mut b_history);
                             // The end with no arrow of a reference declared
@@ -6324,7 +6348,7 @@ impl Visualizable for VisualizationData {
                             // conditionals only, not a loop's body; the plugin
                             // leaves out one whose reference is read after the
                             // conditional, `drop_arm_ref_ends_live_after`.)
-                            if lo <= *l && *l <= hi && !matches!(branch_type, BranchType::Loop(..)) {
+                            if draws_arm_ref_die(&branches, i, &branch_type, split_point, *l, var) {
                                 append_decl_ref_die(self, ev, *l, var, &mut b_history);
                             }
                         }
