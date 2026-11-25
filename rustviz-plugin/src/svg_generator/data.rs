@@ -6496,7 +6496,26 @@ impl Visualizable for VisualizationData {
 /// A value that holds a borrow without being a reference (`let it =
 /// r.iter_mut();`) whose borrow is a mutable one: its column drew a
 /// mutable borrow. Its end then says "mutable" too (#1152).
+///
+/// So does a shared reference whose value came last from a mutable
+/// borrow (`let r2 = id(r);` with `r = downgrade(&mut s)`, #1510): its
+/// column drew "made from a mutable borrow", and the end that gives
+/// nothing back (another reference still holds the loan) ended it as an
+/// immutable one.
 fn holds_mut_borrow(vd: &VisualizationData, ro: &ResourceAccessPoint) -> bool {
-    !ro.is_ref() && ro.holds_borrow() && vd.timelines.get(ro.hash())
-        .is_some_and(|t| t.history.iter().any(|(_, e)| matches!(e, Event::MutableBorrow { .. })))
+    let Some(t) = vd.timelines.get(ro.hash()) else { return false };
+    if ro.is_ref() {
+        // (A copy of another reference re-points it; a call's result
+        // copied in, `n` in `if let Some(n) = Some(id(r))`, comes with the
+        // borrow drawn into it.)
+        let from_column = |f: &ResourceTy| f.extract_rap().is_some_and(|r| !r.is_fn());
+        return t.history.iter().rev()
+            .find(|(_, e)| match e {
+                Event::MutableBorrow { .. } | Event::StaticBorrow { .. } | Event::Acquire { .. } => true,
+                Event::Copy { from, .. } => from_column(from),
+                _ => false,
+            })
+            .is_some_and(|(_, e)| matches!(e, Event::MutableBorrow { .. }));
+    }
+    ro.holds_borrow() && t.history.iter().any(|(_, e)| matches!(e, Event::MutableBorrow { .. }))
 }

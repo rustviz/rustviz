@@ -1314,8 +1314,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // The argument is re-borrowed (auto-ref): walk the deref steps
       // before the borrow to find the place being borrowed.
       let mut referent = Referent::Place(arg);
+      let mut ty = typeck.expr_ty(arg);
       for a in &adjs[..bpos] {
+        let from_ty = std::mem::replace(&mut ty, a.target);
         if let Adjust::Deref(kind) = a.kind {
+          // A `Box` is dereferenced by a built-in deref too (`f(&b)` with
+          // `b: Box<String>` and `f(&String)`): like an overloaded one, it
+          // stays inside the same owner's data, b's (#1505).
+          if from_ty.is_box() {
+            continue;
+          }
           referent = match (referent, kind) {
             (Referent::Place(e), DerefAdjustKind::Builtin) => match e.kind {
               ExprKind::AddrOf(_, _, inner) => Referent::Place(inner),
