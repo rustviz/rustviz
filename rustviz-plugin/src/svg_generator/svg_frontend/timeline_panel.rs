@@ -9220,9 +9220,23 @@ fn parts_moved_rows(rap: &ResourceAccessPoint, visualization_data: &Visualizatio
                 rows.push(*end);
             }
         }
+        rows.extend(moved_in_every_arm(t, 0).map(|(split, _)| split));
         rows.extend(parts_moved_rows(&t.resource_access_point, visualization_data));
     }
     rows
+}
+
+/// The (split, merge) rows of a conditional at the top level of
+/// `timeline` that moves its value in every arm reaching the join, and
+/// that row `line` is in (with `line` 0, the first such conditional):
+/// the field's arm legs carry it to their moves (#1541).
+fn moved_in_every_arm(timeline: &Timeline, line: usize) -> Option<(usize, usize)> {
+    timeline.history.iter().find_map(|(_, e)| match e {
+        Event::Branch { branch_history, ty, split_point, merge_point, .. }
+            if !matches!(ty, BranchType::Loop(..)) && (line == 0 || (*split_point <= line && line < *merge_point))
+                && merge_move_kind(branch_history, ty).1 => Some((*split_point, *merge_point)),
+        _ => None,
+    })
 }
 
 /// The fields of the struct column `rap` moved out of it by the row
@@ -9258,7 +9272,15 @@ fn parts_moved_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
     if moved.is_empty() {
         return None;
     }
-    let all = parts.iter().all(|t| moved.contains(t.resource_access_point.name()));
+    let mut all = parts.iter().all(|t| moved.contains(t.resource_access_point.name()));
+    // The fields still in it are moved in every arm of the conditional
+    // `line` is in (`let s3 = p.b; if c { drop(p.a) } else { drop(p.a) }`,
+    // #1541): their arm legs carry what's left of the struct, whose line
+    // stops where they split (it can't say its other fields still can be
+    // used there).
+    if !all && parts.iter().all(|t| moved.contains(t.resource_access_point.name()) || moved_in_every_arm(t, line).is_some()) {
+        all = true;
+    }
     Some(PartsMoved { moved, maybe, all })
 }
 

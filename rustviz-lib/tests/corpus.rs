@@ -27193,6 +27193,78 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "u goes out of scope. Its resource is dropped here only if no branch above moved it",
         ],
     },
+    // #1508, #1509: a struct (or tuple) assigned a value built from its old
+    // one. `p = Pair { a: p.a, .. }` in a branch gives p.a its value straight
+    // back, as outside a branch (#1411); `x = Pair { a: s2, b: x.into_a() }`
+    // moves all of the old x before the new fields arrive. Every field
+    // holds a value afterwards and is dropped at the scope end, no drop flag.
+    TooltipExpect {
+        name: "struct_reassign_from_self_1508",
+        must_contain: &[
+            "p.a gets the same resource back, as part of the new value assigned here",
+            "p.a holds a value after the branches: each branch above that moved it gave it a new one",
+            "p goes out of scope. Its resource is dropped.",
+            "w.a holds a value after the branches: each branch above that moved it gave it a new one",
+            "q.a acquired ownership of a resource (in all branches above)",
+            "q.b acquired ownership of a resource (in all branches above)",
+            "m.a holds a value after the branches: each branch above that moved it gave it a new one",
+            "t.0 holds a value after the branches: each branch above that moved it gave it a new one",
+            "x goes out of scope. Its resource is dropped.",
+            "x.a goes out of scope. Its resource is dropped.",
+            "y.a goes out of scope. Its resource is dropped.",
+            "z goes out of scope. Its resource is dropped.",
+            "z.a goes out of scope. Its resource is dropped.",
+            "u goes out of scope. Its resource is dropped.",
+            "u.0 goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "was moved in at least one branch above",
+            "may have been moved",
+            "dropped here only if no branch above moved it",
+            "runtime drop flag",
+            "x goes out of scope. x.a was moved out earlier",
+            "y goes out of scope. y.a was moved out earlier",
+            "z goes out of scope. z.a was moved out earlier",
+            "u goes out of scope. u.0 was moved out earlier",
+            "=x.a goes out of scope. No resource is dropped.",
+            "=y.a goes out of scope. No resource is dropped.",
+            "=z.a goes out of scope. No resource is dropped.",
+            "=u.0 goes out of scope. No resource is dropped.",
+            "x is partially moved",
+            "z is partially moved",
+            "u is partially moved",
+        ],
+    },
+    // #1506: `let c = Some(w);` hands w's borrow to c, which gives s back;
+    // w.r's borrow ends at the move (rows pinned in
+    // `struct_field_moves_and_ends`).
+    TooltipExpect {
+        name: "struct_ref_field_param_moved_1506",
+        must_contain: &["Return immutably borrowed resource from c to s"],
+        must_not_contain: &["Return immutably borrowed resource from w.r to s"],
+    },
+    // #1530: on the path through a `return` before `..h` / `let w2 = w;`,
+    // the old struct's field still holds the loan and ends it there; the
+    // new struct has nothing before it exists.
+    TooltipExpect {
+        name: "struct_update_after_return_1530",
+        must_contain: &[
+            "Return immutably borrowed resource from w.r to s",
+            "Return mutably borrowed resource from m.m to s",
+            "Return mutably borrowed resource from p to s",
+        ],
+        must_not_contain: &[
+            "h2.r is live in a conditional expression",
+            "h2.r still has no value here",
+            "k2.r is live in a conditional expression",
+            "k2.r still has no value here",
+            "w2.r is live in a conditional expression",
+            "w2.r still has no value here",
+            "m2.m is live in a conditional expression",
+            "m2.m still has no value here",
+            "g2.r is live in a conditional expression",
+        ],
+    },
 ];
 
 /// #1440: on the line where two loans of v end, the first end's dot (with
@@ -37165,6 +37237,50 @@ fn ref_arm_copy_before_scope_end() {
             let copied = ids.iter().position(|d| d.contains("duplicate") || d.contains("mutable_lend") || d.contains("move"));
             let gone = ids.iter().position(|d| d.contains("go_out_of_scope"));
             assert!(matches!((copied, gone), (Some(c), Some(g)) if c < g), "{}: {}'s dots on line {}: {:?}", snippet, v, line, ids);
+        }
+    }
+}
+
+/// #1506, #1509, #1530, #1541: rows of struct fields and their structs.
+/// `(snippet, data-rv-id prefixes that must be there, prefixes that must not)`.
+#[test]
+fn struct_field_moves_and_ends() {
+    for (snippet, present, absent) in [
+        // #1509 (and #1508's p.a): the field is moved out by the right-hand
+        // side before the new value's arrives, on one dot.
+        ("struct_reassign_from_self_1508",
+         &["p.a@L28:dot:move+acquire", "x.a@L74:dot:move+acquire", "y.a@L81:dot:move+acquire",
+           "z.a@L88:dot:move+acquire", "u.0@L95:dot:move+acquire"][..],
+         &["x.a@L74:dot:acquire+move", "y.a@L81:dot:acquire+move", "z.a@L88:dot:acquire+move",
+           "u.0@L95:dot:acquire+move"][..]),
+        // #1506: the reference field's borrow ends where its struct is moved
+        // (into `drop`, a call, a method, `Some(..)`, also in one arm only),
+        // not at the fn's end.
+        ("struct_ref_field_param_moved_1506",
+         &["h.r@L22:dot:static_die", "k.r@L28:dot:static_die", "g.r@L34:dot:static_die",
+           "m.r@L40:dot:static_die", "q.r@L46:dot:static_die", "w.r@L53:dot:static_die",
+           "c@L54:dot:move+static_die", "b.r@L62:dot:static_die"][..],
+         &["h.r@L24:dot:static_die", "k.r@L30:dot:static_die", "g.r@L36:dot:static_die",
+           "m.r@L42:dot:static_die", "q.r@L48:dot:static_die", "w.r@L54:", "b.r@L65:dot:static_die"][..]),
+        // #1530: the new struct's field has nothing before its `let`; the old
+        // one (or the moved reference p) ends its borrow at the `return`.
+        ("struct_update_after_return_1530",
+         &["w.r@L53:dot:static_die", "m.m@L63:dot:mutable_die", "p@L87:dot:mutable_die",
+           "s@L87:dot:mutable_reacquire", "s@L63:dot:mutable_reacquire", "a2.r@L45:dot:copy+static_die"][..],
+         &["h2.r@L23", "h2.r@L24", "k2.r@L33", "k2.r@L34", "w2.r@L52", "w2.r@L53", "m2.m@L62",
+           "m2.m@L63", "g2.r@L76", "g2.r@L77", "a2.r@L44", "s@L87:dot:owner_go_out_of_scope"][..]),
+        // #1541: the struct's line stops where its last fields fork into arms
+        // that all move them; u keeps u.c, so its line goes on.
+        ("struct_last_field_moved_in_arms_1541",
+         &["p@L17-18:line", "q@L27-28:line", "t@L36-37:line", "u@L50-55:line", "u@L55-57:line"][..],
+         &["p@L17-22:line", "q@L27-31:line", "t@L36-43:line"][..]),
+    ] {
+        let tl = run_with_local_backend(snippet).timeline_panel_string();
+        for id in present {
+            assert!(tl.contains(&format!("data-rv-id=\"{}", id)), "{}: no {}", snippet, id);
+        }
+        for id in absent {
+            assert!(!tl.contains(&format!("data-rv-id=\"{}", id)), "{}: unexpected {}", snippet, id);
         }
     }
 }
