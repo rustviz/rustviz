@@ -6785,7 +6785,7 @@ fn end_to_end(drawn: &[Drawn], ends: &HashMap<(usize, usize), ((i64, i64), (i64,
 /// entry (the passing arrow's index) per bend. Also an arrow whose bend
 /// lies on a column's line or leg (`lines`): the arrow seems to turn off
 /// the column (one entry, the arrow's, per bend).
-fn through_bends(drawn: &[Drawn], ends: &Ends, lines: &[Piece]) -> Vec<usize> {
+fn through_bends(drawn: &[Drawn], ends: &Ends, lines: &[Piece], wide: &dyn Fn(&(usize, usize)) -> bool) -> Vec<usize> {
     let bends: Vec<(usize, (f64, f64))> = drawn.iter().enumerate().filter(|(_, d)| d.logo.is_none())
         // (A polyline's pieces run from the head, a hop arrow's from the
         // tail: a bend is where one piece ends and the next starts, either
@@ -6799,7 +6799,12 @@ fn through_bends(drawn: &[Drawn], ends: &Ends, lines: &[Piece]) -> Vec<usize> {
         let t = if l < 1e-9 { 0.0 } else { (((v.0 - p.0) * (q.0 - p.0) + (v.1 - p.1) * (q.1 - p.1)) / (l * l)).clamp(0.0, 1.0) };
         dist(v, (p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t))
     };
-    let mut out: Vec<usize> = bends.iter().filter(|&&(_, v)| lines.iter().any(|&l| off(v, l) < 3.0)).map(|&(j, _)| j).collect();
+    // (An arrow coming back from past its dot or level into it, #1542,
+    // within 5.5 px: a column's hollow line is 3.5 px wide, a shaft 5, so
+    // the strokes overlap at the bend. Others within 3 px, as before.)
+    let mut out: Vec<usize> = bends.iter()
+        .filter(|&&(j, v)| { let reach = if wide(&drawn[j].key) { 5.5 } else { 3.0 }; lines.iter().any(|&l| off(v, l) < reach) })
+        .map(|&(j, _)| j).collect();
     for (i, a) in drawn.iter().enumerate().filter(|(_, d)| d.logo.is_none()) {
         let own: Vec<(f64, f64)> = a.pieces.iter().flat_map(|&(p, q)| [p, q]).collect();
         for &(j, v) in &bends {
@@ -6873,7 +6878,7 @@ fn defects(drawn: &[Drawn], dots: &DotLayer) -> Vec<(usize, usize)> {
     out.extend(on_legs(drawn, &dots.legs).into_iter().map(|i| (i, i)));
     out.extend(on_dashed_legs(drawn, &dots.dashed_legs).into_iter().map(|i| (i, i)));
     out.extend(through_corners(drawn, &dots.corners, &dots.lanes.ends).into_iter().map(|i| (i, i)));
-    out.extend(through_bends(drawn, &dots.lanes.ends, &dots.bend_lines).into_iter().map(|i| (i, i)));
+    out.extend(through_bends(drawn, &dots.lanes.ends, &dots.bend_lines, &|k| dots.lanes.far.contains(k) || dots.lanes.level_in.contains_key(k)).into_iter().map(|i| (i, i)));
     out.extend(heads_on_heads(drawn, true).into_iter().map(|i| (i, i)));
     out.extend(off_left(drawn, &dots.lanes.ends).into_iter().map(|i| (i, i)));
     out.extend((0..drawn.len()).filter(|&i| drawn[i].track_hops > 0).map(|i| (i, i)));
@@ -6937,7 +6942,7 @@ fn untangle_cost(drawn: &[Drawn], dots: &DotLayer) -> (usize, usize) {
     let on_arcs = arrows.iter().filter(|a| a.tri.len() == 3 && arrows.iter()
         .any(|b| b.tip != a.tip && b.arcs.iter().any(|&p| inside_tri(&a.tri, p) > -1.5))).count();
     let hops: usize = drawn.iter().map(|d| d.track_hops).sum::<usize>() + through_corners(drawn, &dots.corners, &dots.lanes.ends).len()
-        + through_bends(drawn, &dots.lanes.ends, &dots.bend_lines).len() + heads_on_heads(drawn, true).len();
+        + through_bends(drawn, &dots.lanes.ends, &dots.bend_lines, &|k| dots.lanes.far.contains(k) || dots.lanes.level_in.contains_key(k)).len() + heads_on_heads(drawn, true).len();
     let through = through + off_left(drawn, &dots.lanes.ends).len();
     (marks_on_others(drawn, &dots.lanes.ends).len() + on_legs(drawn, &dots.legs).len()
         + on_dashed_legs(drawn, &dots.dashed_legs).len() + on_arcs + hops + 10 * (through + touching + stacked), crossings)
