@@ -109,6 +109,9 @@ struct DotLayer {
     rows_added: bool,
     /// The ends of the slanted legs that no dot covers.
     corners: Vec<(f64, f64)>,
+    /// Every column's lines and legs (`cols`, `legs`, `dashed_legs`): an
+    /// arrow mustn't bend on one (`through_bends`).
+    bend_lines: Vec<Piece>,
 }
 
 /// The arrows `untangle` couldn't keep off a solid leg (`on_legs`) or a
@@ -667,6 +670,7 @@ pub fn render_timeline_panel(visualization_data : & mut VisualizationData, rows_
     dots.legs = marks.legs;
     dots.dashed_legs = marks.dashed_legs;
     dots.rows_added = rows_added;
+    dots.bend_lines = dots.cols.iter().chain(&dots.legs).chain(&dots.dashed_legs).copied().collect();
     if rows_added {
         let ends: Vec<(f64, f64)> = dots.legs.iter().chain(&dots.dashed_legs).flat_map(|&(p, q)| [p, q]).collect();
         let mut corners: Vec<(f64, f64)> = Vec::new();
@@ -5835,7 +5839,7 @@ impl ArrowLanes {
     }
 
     /// Picks every arrow's track from what the first pass recorded.
-    fn resolve(&mut self, dots: &DotPositions) {
+    fn resolve(&mut self, dots: &DotPositions, legs: &[Piece]) {
         let mut items = std::mem::take(&mut self.items);
 
         // #1312: the arrows dipping whole rows below one line take their
@@ -5970,7 +5974,7 @@ impl ArrowLanes {
             }
             placed.push(it);
         }
-        self.spread_legs(&placed);
+        self.spread_legs(&placed, legs);
         self.recording = false;
     }
 
@@ -5981,7 +5985,7 @@ impl ArrowLanes {
     /// dot). A head is about 36 degrees wide seen from the dot, so the
     /// legs go 42 and 84 degrees below (or above) a level arrow there,
     /// else 28 and 72 (20, 55 and 85 for three).
-    fn spread_legs(&mut self, placed: &[LaneItem]) {
+    fn spread_legs(&mut self, placed: &[LaneItem], col_legs: &[Piece]) {
         // (dot's y, its x, goes right) -> (item, is its head, depth).
         let mut at: BTreeMap<(i64, i64, bool), Vec<(usize, bool, i64)>> = BTreeMap::new();
         for (i, it) in placed.iter().enumerate() {
@@ -6015,7 +6019,14 @@ impl ArrowLanes {
                     let (dot_y, x) = (key.0, dot_x as f64);
                     // A side is taken by an arrow or logo on the row at the
                     // dot on that side, or an arrow running past the dot.
-                    let taken = |right: bool| placed.iter().any(|o| o.y == dot_y && !matches!(o.kind, LaneKind::FnResult)
+                    // (Columns' legs: `col_legs`, solid and dashed.)
+                    // So is one where a column's leg leaves the dot less
+                    // than 40 degrees off level: a level head would lie
+                    // beside it.
+                    let leg_on = |right: bool| col_legs.iter().any(|&(p, q)| [(p, q), (q, p)].iter().any(|&(a, b)|
+                        dist(a, (x, dot_y as f64)) < 1.0 && (b.0 > a.0) == right
+                            && (b.1 - a.1).abs() < (b.0 - a.0).abs() * 40f64.to_radians().tan()));
+                    let taken = |right: bool| leg_on(right) || placed.iter().any(|o| o.y == dot_y && !matches!(o.kind, LaneKind::FnResult)
                         && if right { o.hi > x + 2.0 && o.lo < x + LEVEL_IN_DX as f64 * 2.0 } else { o.lo < x - 2.0 && o.hi > x - LEVEL_IN_DX as f64 * 2.0 });
                     // (The tail's side first, then the far one.)
                     let mut free: Vec<bool> = [false, true].into_iter().filter(|&far| !taken(right != far)).collect();
@@ -6033,8 +6044,11 @@ impl ArrowLanes {
                             continue;
                         }
                         if free.is_empty() {
-                            if std::mem::take(&mut far_below) {
-                                self.leg_dx.insert((it.key, true), dip_leg(it, depth));
+                            // (Not off the figure's left edge.)
+                            let d = dip_leg(it, depth);
+                            let past_x = if right { x - d as f64 } else { x + d as f64 };
+                            if past_x >= 12.0 && std::mem::take(&mut far_below) {
+                                self.leg_dx.insert((it.key, true), d);
                                 self.far.insert(it.key);
                             } else {
                                 rest.push(&heads[k]);
@@ -6584,8 +6598,9 @@ fn through_marks(drawn: &[Drawn], dots: &DotPositions, bars: &[(f64, f64)]) -> V
         let ends: Vec<(f64, f64)> = d.pieces.iter().flat_map(|&(p, q)| [p, q]).chain(d.tri.get(1).copied()).collect();
         for &(x, y) in dots {
             let c = (x as f64, y as f64);
-            // Through its centre, or the 5 px stroke touching the dot's rim.
-            let reach = if ends.iter().any(|&e| dist(e, c) < 6.0) { 4.5 } else { 5.0 + 2.5 };
+            // Through its centre, or the 5 px stroke touching the dot's rim
+            // (or within half a px of it, #1605's review).
+            let reach = if ends.iter().any(|&e| dist(e, c) < 6.0) { 4.5 } else { 5.0 + 2.5 + 0.5 };
             if d.pieces.iter().any(|&p| off(c, p) < reach) {
                 out.push(i);
             }
@@ -6743,6 +6758,42 @@ fn end_to_end(drawn: &[Drawn], ends: &HashMap<(usize, usize), ((i64, i64), (i64,
     out
 }
 
+/// The arrows whose shaft passes through a bend of another arrow (within
+/// 3 px of the corner where two of its pieces meet): there the two read
+/// as one arrow forking or merging (#1605's review: a return rising to
+/// `a` through the corner where `w>b`'s track turned up to `b`). One
+/// entry (the passing arrow's index) per bend. Also an arrow whose bend
+/// lies on a column's line or leg (`lines`): the arrow seems to turn off
+/// the column (one entry, the arrow's, per bend).
+fn through_bends(drawn: &[Drawn], ends: &Ends, lines: &[Piece]) -> Vec<usize> {
+    let bends: Vec<(usize, (f64, f64))> = drawn.iter().enumerate().filter(|(_, d)| d.logo.is_none())
+        // (A polyline's pieces run from the head, a hop arrow's from the
+        // tail: a bend is where one piece ends and the next starts, either
+        // way round.)
+        .flat_map(|(j, d)| d.pieces.windows(2).filter_map(move |w| {
+            if dist(w[0].1, w[1].0) < 0.5 { Some((j, w[0].1)) } else if dist(w[0].0, w[1].1) < 0.5 { Some((j, w[0].0)) } else { None }
+        }))
+        .collect();
+    let off = |v: (f64, f64), (p, q): Piece| {
+        let l = dist(p, q);
+        let t = if l < 1e-9 { 0.0 } else { (((v.0 - p.0) * (q.0 - p.0) + (v.1 - p.1) * (q.1 - p.1)) / (l * l)).clamp(0.0, 1.0) };
+        dist(v, (p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t))
+    };
+    let mut out: Vec<usize> = bends.iter().filter(|&&(_, v)| lines.iter().any(|&l| off(v, l) < 3.0)).map(|&(j, _)| j).collect();
+    for (i, a) in drawn.iter().enumerate().filter(|(_, d)| d.logo.is_none()) {
+        let own: Vec<(f64, f64)> = a.pieces.iter().flat_map(|&(p, q)| [p, q]).collect();
+        for &(j, v) in &bends {
+            if i == j || same_arrow(a, &drawn[j], ends) || own.iter().any(|&e| dist(e, v) < 6.0) {
+                continue;
+            }
+            if a.pieces.iter().any(|&p| off(v, p) < 3.0) {
+                out.push(i);
+            }
+        }
+    }
+    out
+}
+
 /// How many times a track (a level piece of an arrow off its ends' row)
 /// runs through a joint where a leg meets its column with no dot there
 /// (`DotLayer::corners`, set only on a figure with rows added below
@@ -6775,6 +6826,7 @@ fn defects(drawn: &[Drawn], dots: &DotLayer) -> Vec<(usize, usize)> {
     out.extend(on_legs(drawn, &dots.legs).into_iter().map(|i| (i, i)));
     out.extend(on_dashed_legs(drawn, &dots.dashed_legs).into_iter().map(|i| (i, i)));
     out.extend(through_corners(drawn, &dots.corners, &dots.lanes.ends).into_iter().map(|i| (i, i)));
+    out.extend(through_bends(drawn, &dots.lanes.ends, &dots.bend_lines).into_iter().map(|i| (i, i)));
     out.extend((0..drawn.len()).filter(|&i| drawn[i].track_hops > 0).map(|i| (i, i)));
     out.extend(end_to_end(drawn, &dots.lanes.ends));
     out
@@ -6835,7 +6887,8 @@ fn untangle_cost(drawn: &[Drawn], dots: &DotLayer) -> (usize, usize) {
     // A head on another arrow's hop.
     let on_arcs = arrows.iter().filter(|a| a.tri.len() == 3 && arrows.iter()
         .any(|b| b.tip != a.tip && b.arcs.iter().any(|&p| inside_tri(&a.tri, p) > -1.5))).count();
-    let hops: usize = drawn.iter().map(|d| d.track_hops).sum::<usize>() + through_corners(drawn, &dots.corners, &dots.lanes.ends).len();
+    let hops: usize = drawn.iter().map(|d| d.track_hops).sum::<usize>() + through_corners(drawn, &dots.corners, &dots.lanes.ends).len()
+        + through_bends(drawn, &dots.lanes.ends, &dots.bend_lines).len();
     (marks_on_others(drawn, &dots.lanes.ends).len() + on_legs(drawn, &dots.legs).len()
         + on_dashed_legs(drawn, &dots.dashed_legs).len() + on_arcs + hops + 10 * (through + touching + stacked), crossings)
 }
@@ -8182,7 +8235,8 @@ fn render_arrows_string_external_events_version(
     dots.lanes = ArrowLanes { recording: true, deep: dots.rows_added, ..Default::default() };
     render_all_arrows(&mut scratch, visualization_data, resource_owners_layout, dots, registry);
     let positions = dots.positions.clone();
-    dots.lanes.resolve(&positions);
+    let legs: Vec<Piece> = dots.legs.iter().chain(&dots.dashed_legs).copied().collect();
+    dots.lanes.resolve(&positions, &legs);
     untangle(visualization_data, resource_owners_layout, dots, registry);
     // What is still on a solid leg or a column, for `render_svg`.
     let drawn = probe_arrows(visualization_data, resource_owners_layout, dots, registry);
