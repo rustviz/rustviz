@@ -58,6 +58,11 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // its column instead.
     ("arm_binding_value_1327", "arrow-along-leg", 1489),
     ("assign_branch_ref_arms_1393", "arrow-along-leg", 1489),
+    // Five returns into the first column's dot (q>a1@L19): level from the
+    // right, two fanned from below; the far side would run off the
+    // figure's left edge and the row added below gives no free side
+    // (#1606).
+    ("iter_holder_copied_1399", "arrow-along-leg", 1542),
 ];
 
 /// The invariants, by the name the failure list and messages use.
