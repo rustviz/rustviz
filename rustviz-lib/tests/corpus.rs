@@ -27408,6 +27408,27 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "If the `return` on line 9 runs first",
         ],
     },
+    TooltipExpect {
+        name: "panic_in_endless_loop_1545",
+        // #1545: a panic every path gets to (in a `loop` that never ends,
+        // also behind a labeled block or with an unreachable `break`
+        // after it) unwinds out of the function: what it owns is dropped
+        // there, once, and nothing after the loop runs.
+        must_contain: &[
+            "s goes out of scope. Its resource is dropped.",
+            "s2 goes out of scope. Its resource is dropped.",
+            "s3 goes out of scope. Its resource is dropped.",
+            "t3 goes out of scope. Its resource is dropped.",
+            "s4 goes out of scope. Its resource is dropped.",
+            "t4 goes out of scope. Its resource is dropped.",
+            "s5 goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "r2 is initialized with a copy of r",
+            "Return immutably borrowed resource from r2 to s2",
+            "=t4 goes out of scope. No resource is dropped.",
+        ],
+    },
 ];
 
 /// #1440: on the line where two loans of v end, the first end's dot (with

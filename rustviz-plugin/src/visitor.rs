@@ -2986,6 +2986,34 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     false
   }
 
+  /// Whether the panic `call` sits where every path that gets to it
+  /// leaves the function there: in no branch, through statements, plain
+  /// blocks, `let` values, labeled blocks nothing breaks out of and
+  /// `loop`s that never end, up to the function's body (#1545). Like
+  /// `returns_from_breakless_loop`, but also directly in the body
+  /// (where a `return` is `returns_before_body_end`'s), and through the
+  /// blocks the `panic!` macro expands to.
+  fn panic_leaves_every_path(&self, call: &'tcx Expr<'tcx>) -> bool {
+    use rustc_hir::Node;
+    if self.in_closure(call) || self.exit_frames.iter().any(|f| matches!(f, ExitFrame::Branch { .. })) {
+      return false;
+    }
+    let mut child = call.hir_id;
+    for (id, node) in self.tcx.hir_parent_iter(call.hir_id) {
+      let from = std::mem::replace(&mut child, id);
+      match node {
+        Node::Stmt(_) | Node::Block(_) => {}
+        Node::LetStmt(LetStmt { init: Some(init), .. }) if init.hir_id == from => {}
+        Node::Expr(Expr { kind: ExprKind::Block(_, None) | ExprKind::DropTemps(_), .. }) => {}
+        Node::Expr(e @ Expr { kind: ExprKind::Block(b, Some(_)), .. }) if breaks_to_id(e, b.hir_id).is_empty() => {}
+        Node::Expr(l) if self.loop_never_ends(l) => {}
+        Node::Item(_) | Node::ImplItem(_) | Node::TraitItem(_) => return true,
+        _ => return false,
+      }
+    }
+    false
+  }
+
   /// A `loop` that never ends (`loop_never_ends`): the closing braces
   /// after it on its own path are never reached: those of the blocks it
   /// is a statement (or the tail) of, and on up through plain blocks,
@@ -3845,6 +3873,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       return;
     }
     if let Some(line) = self.panic_line(call) {
+      // One every path that gets here reaches (directly in the
+      // function's body, or in a `loop` that never ends there): it
+      // drops what the function owns on its row, and nothing after it
+      // runs, as such a `return` does (#1545). Its drops were lost.
+      if self.panic_leaves_every_path(call) {
+        let lo = *self.unique_id;
+        self.exit_frames.push(ExitFrame::Branch { len: 0, hide: Vec::new(), binds: Vec::new(), binds_at: 0, fn_level: true });
+        self.drop_locals_on_exit(line, None, None, false, "panic");
+        self.exit_frames.pop();
+        self.keep_inline_exit_drops(lo..*self.unique_id, call);
+        return;
+      }
       self.drop_locals_on_exit(line, None, None, false, "panic");
       if !self.in_closure(call) && self.exit_frames.iter().any(|f| matches!(f, ExitFrame::Branch { .. })) {
         for (_, ro) in self.loop_iterators.clone() {
@@ -4633,7 +4673,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // A `break` out of a labelled block drops nothing drawn.
       ExprKind::Break(dest, _) => branch && dest.target_id.is_ok_and(|t|
         matches!(self.tcx.hir_node(t), Node::Expr(Expr { kind: ExprKind::Loop(..), .. }))),
-      ExprKind::Call(..) => branch && (self.panic_line(e).is_some() || self.process_exit_line(e).is_some()),
+      ExprKind::Call(..) => (branch && (self.panic_line(e).is_some() || self.process_exit_line(e).is_some()))
+        || (self.panic_line(e).is_some() && self.panic_leaves_every_path(e)),
       // A body drawn inline (an `if let` whose pattern always matches,
       // a lone match arm) is where the code around it is: its exits'
       // drops are drawn as they would be there (#1013).
@@ -5402,7 +5443,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             frames_at: self.exit_frames.len(), len: entry_len, paths: Vec::new(),
           });
         }
+        let exited_before = self.all_paths_exit;
         self.visit_live_stmts(block); // visit the statements in the block
+        // An exit in it that every path leaves the function at (a
+        // `return` or panic in a `loop` that never ends, #1545) dropped
+        // what it declares.
+        let exited_in = self.all_paths_exit && !exited_before;
         self.in_scope.truncate(entry_len);
           self.current_scope = prev_scope;
         // A bare block (`{ let u = …; }`) in a branch: its locals aren't
@@ -5415,7 +5461,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         if self.inside_branch
           && matches!(self.tcx.parent_hir_node(expr.hir_id), rustc_hir::Node::Stmt(_) | rustc_hir::Node::Block(_))
         {
-          let left = self.left_at_exits(self.inline_in_branch(expr) && self.ends_at_exits(expr, true),
+          let left = self.left_at_exits(exited_in || (self.inline_in_branch(expr) && self.ends_at_exits(expr, true)),
             &get_decl_of_block(block, &self.tcx, &self.raps));
           let decls: HashSet<ResourceAccessPoint> = get_decl_of_block(block, &self.tcx, &self.raps)
             .into_iter().filter(|v| needs_scope_end(v) && !left.contains(v)).collect();
