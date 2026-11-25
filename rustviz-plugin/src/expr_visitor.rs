@@ -13479,8 +13479,19 @@ fn ends_after_their_reborrows_in(events: &mut [(usize, ExternalEvent)], in_arm: 
       .filter(|&k| !events[j + 1..k].iter().any(|(_, e)| matches!(e,
         ExternalEvent::StaticBorrow { to: ResourceTy::Value(t), .. } | ExternalEvent::MutableBorrow { to: ResourceTy::Value(t), .. }
         | ExternalEvent::Move { to: ResourceTy::Value(t), .. } | ExternalEvent::Copy { to: ResourceTy::Value(t), .. } if *t == r)));
+    // (r's own scope end, passed on the way, `let w = rd; let z = w;` in
+    // a one-line arm, moves along after the end: listed before it, w's
+    // column was drawn holding its reference to its scope end, #1572.)
+    let after_own_scope_end = |events: &mut [(usize, ExternalEvent)], k: usize| {
+      if let Some(g) = (j..k).find(|&g| matches!(&events[g].1, ExternalEvent::GoOutOfScope { ro, .. } if *ro == r)) {
+        events[g..=k].rotate_left(1);
+      }
+    };
     match last {
-      Some(k) => events[j..=k].rotate_left(1),
+      Some(k) => {
+        events[j..=k].rotate_left(1);
+        after_own_scope_end(events, k);
+      }
       None => match later() {
         Some(k) => {
           events[j].0 = events[k].0;
