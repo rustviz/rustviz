@@ -12890,12 +12890,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // Nor a borrow made before it that is live after it, as for `if c
     // { return; }` (#882): on the `else` path it ends as the block
     // starts, so a lender the block reads is no longer borrowed there
-    // (#1573).
+    // (#1573). (A one-line `else { return }` that draws nothing of its
+    // own stays inline: nothing in it can be drawn against the borrow,
+    // and a one-row fork binds the pattern a sub-row above its join,
+    // #1594.)
     let moves_outer = |e: &ExternalEvent| matches!(e, ExternalEvent::Move { from: ResourceTy::Value(r), .. }
       if !r.is_fn() && !r.is_temporary() && *r.hash() < hash_lo as u64);
+    let draws_something = self.preprocessed_events.iter().any(|(_, e)| ids.contains(&e.get_id()));
     if !self.preprocessed_events.iter().any(|(_, e)| ids.contains(&e.get_id())
       && (self.exit_drops.contains(&e.get_id()) || moves_outer(e)))
-      && !self.borrow_may_end_at_exit(BranchBody::LetElse(els), init, split, merge, &inner)
+      && !((draws_something || !branch_is_collapsed(split, merge))
+        && self.borrow_may_end_at_exit(BranchBody::LetElse(els), init, split, merge, &inner))
     {
       return None;
     }

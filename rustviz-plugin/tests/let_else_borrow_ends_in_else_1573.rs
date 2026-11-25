@@ -96,6 +96,15 @@ fn if_returns_shared(o: Option<i32>, s: &mut String) {
     println!("{}", r);
 }
 
+// On one line. (A one-line `else { return }` that does nothing else
+// stays inline. Drawn as a branch, the binding x starts a sub-row above
+// the join, #1594.)
+fn one_line(o: Option<i32>, s: &mut String) {
+    let m = &mut *s;
+    let Some(x) = o else { println!("{}", s); return };
+    m.push_str(&x.to_string());
+}
+
 fn main() {
     let mut s = String::from("a");
     reborrow_return(Some(1), &mut s);
@@ -106,4 +115,5 @@ fn main() {
     panics_in_else(Some(1), &mut s);
     if_panics(Some(1), &mut s);
     if_returns_shared(Some(1), &mut s);
+    one_line(Some(1), &mut s);
 }
