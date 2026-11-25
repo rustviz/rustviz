@@ -13458,7 +13458,18 @@ fn ends_after_their_reborrows_in(events: &mut [(usize, ExternalEvent)], in_arm: 
     let (line, r) = (events[j].0, r.clone());
     let reborrow_end = |k: usize| matches!(&events[k].1, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. })
       && borrow_end_of(&events[k].1).is_some_and(|(f, to)| *f != r && to.extract_rap() == Some(&r));
-    let last = (j + 1..events.len()).rev().find(|&k| events[k].0 == line && reborrow_end(k));
+    // Or the end of a plain copy of the reference made in this arm (`let
+    // x = ra;`), which holds the same loan and gives it back to the same
+    // lender: the loan lasts until the copy's last use, so r's end follows
+    // the copy's on that line, and the lender is free only then (#1572;
+    // it was left on a one-line conditional's join row, #1277).
+    let lender = borrow_end_of(&events[j].1).and_then(|(_, to)| to.extract_rap()).cloned();
+    let copy_end = |k: usize| r.is_ref() && lender.is_some()
+      && matches!(&events[k].1, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. })
+      && borrow_end_of(&events[k].1).is_some_and(|(f, to)| *f != r && to.extract_rap() == lender.as_ref()
+        && events[..j].iter().any(|(_, e)| matches!(e,
+          ExternalEvent::Copy { from: ResourceTy::Value(c), to: ResourceTy::Value(t), .. } if *c == r && t == f)));
+    let last = (j + 1..events.len()).rev().find(|&k| events[k].0 == line && (reborrow_end(k) || copy_end(k)));
     // Or on a later line of the arm: r's end placed where the arm starts,
     // as the arm doesn't use r itself, while a reborrow of it (`let r =
     // &*p;` before a `match`, read in this arm) is last used further
@@ -14286,22 +14297,19 @@ pub(crate) fn branch_ending_borrow(events: &[(usize, ExternalEvent)], r: &Resour
       // arm that uses r on it holds r's last use, and so its end
       // (#1572). Left on the line beside the arms, it was drawn on the
       // fork or join dot, before the arm's own events.
-      // (Not an arm that copies r into a reference of its own, `let x =
-      // ra;`: r's end stays on the join row, after the copy's, as #1277
-      // draws it.)
-      // (Nor one that only gives r a new value, `r = if *r > 0 { &b }
+      // (Not one that only gives r a new value, `r = if *r > 0 { &b }
       // else { &c };`: the end of r's old loan isn't a use there. The new
-      // loan an arm made, `r2 = &mut s;`, does end in it.)
+      // loan an arm made, `r2 = &mut s;`, does end in it. An arm that
+      // copies r, `let x = ra;`, ends it too, after the copy's end:
+      // `ends_after_their_reborrows`.)
       if *merge_point == line {
-        let copies_r = |a: usize| branches[a].e_data.iter().any(|(_, e)| matches!(e,
-          ExternalEvent::Copy { from: ResourceTy::Value(f), to: ResourceTy::Value(t), .. } if f == r && t.is_ref()));
         let uses = |a: usize| branches[a].e_data.iter().any(|(l, e)| *l == line && touches(e, r) && match e {
           ExternalEvent::StaticBorrow { from, to: ResourceTy::Value(t), .. }
           | ExternalEvent::MutableBorrow { from, to: ResourceTy::Value(t), .. } if t == r => from.extract_rap() == lender,
           ExternalEvent::Move { to: ResourceTy::Value(t), .. } | ExternalEvent::Copy { to: ResourceTy::Value(t), .. } => t != r,
           _ => true,
         });
-        return (0..branches.len()).find(|&a| uses(a)).filter(|&a| !copies_r(a)).map(|a| (k, a));
+        return (0..branches.len()).find(|&a| uses(a)).map(|a| (k, a));
       }
       return chain_part(line).map(|a| (k, a));
     }
