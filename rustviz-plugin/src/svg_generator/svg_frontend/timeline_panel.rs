@@ -92,6 +92,9 @@ struct DotLayer {
     /// `render_branches`): an arrow's head coming steeply up (or down)
     /// into a dot lies along the column under (or over) it (#1488).
     cols: Vec<Piece>,
+    /// The slanted ends of the references' brackets (`render_ref_line`):
+    /// a head lengthened off a column (#1488) mustn't lie along one.
+    brackets: Vec<Piece>,
 }
 
 /// What the columns drew that the arrows must keep clear of: the
@@ -626,7 +629,7 @@ pub fn render_timeline_panel(visualization_data : & mut VisualizationData) -> (S
     dots.bars = marks.bars;
     dots.legs = marks.legs;
     dots.cols = marks.cols;
-    render_ref_line(&mut output, visualization_data, &resource_owners_layout, &registry); // reference lines
+    render_ref_line(&mut output, visualization_data, &resource_owners_layout, &registry, &mut dots.brackets); // reference lines
     render_arrows_string_external_events_version(&mut output, visualization_data, &resource_owners_layout, &mut dots, &registry); // arrows
     // Written last: a call icon (`f`) added by the arrow pass shares
     // the dot of the borrow it makes.
@@ -6466,6 +6469,36 @@ fn on_cols(drawn: &[Drawn], cols: &[Piece]) -> Vec<usize> {
     out
 }
 
+/// The head an arrow from `from` into the dot at `dot` is drawn with
+/// (its tip on the dot's edge, 12.75 px long, 12 px wide), and the
+/// middle of its base, where its shaft stops.
+fn head_triangle(from: (f64, f64), dot: (f64, f64)) -> (Vec<(f64, f64)>, (f64, f64)) {
+    let l = dist(from, dot).max(1e-9);
+    let (ux, uy) = ((dot.0 - from.0) / l, (dot.1 - from.1) / l);
+    let tip = (dot.0 - 5.25 * ux, dot.1 - 5.25 * uy);
+    let base = (tip.0 - 12.75 * ux, tip.1 - 12.75 * uy);
+    (vec![(base.0 - 6.0 * uy, base.1 + 6.0 * ux), tip, (base.0 + 6.0 * uy, base.1 - 6.0 * ux)], base)
+}
+
+/// Whether an arrow (its pieces, its head's triangle) lies along one of
+/// the references' brackets' slanted ends: its head over more than 6 px
+/// of it, or a piece within 4.5 px of it for more than 8 px at less than
+/// 30 degrees (`shaft_on_leg`'s second rule, wherever it is).
+fn on_bracket(pieces: &[Piece], tri: &[(f64, f64)], brackets: &[Piece]) -> bool {
+    brackets.iter().any(|&b| {
+        let lb = dist(b.0, b.1);
+        if lb < 1.0 {
+            return false;
+        }
+        let head = tri.len() == 3 && samples(&[b]).into_iter().filter(|&c| inside_tri(tri, c) > -1.0).count() > 6;
+        head || pieces.iter().any(|&p| {
+            let lp = dist(p.0, p.1);
+            lp >= 1.0 && (((p.1 .0 - p.0 .0) * (b.1 .1 - b.0 .1) - (p.1 .1 - p.0 .1) * (b.1 .0 - b.0 .0)) / (lp * lb)).abs() < 0.5
+                && stretch_within(p, b, 4.5) > 8.0
+        })
+    })
+}
+
 /// Two arrows between columns end to end on one line: the first's head
 /// points at a dot and the second leaves that dot straight on in the same
 /// direction, so they read as one arrow through the dot (#1349, as #577's
@@ -7360,7 +7393,15 @@ fn plan_variable_arrow(line_number: &usize, external_event: &ExternalEvent, from
                     // (Coming back from past the dot, `far`, the leg has
                     // the room.)
                     let room = if far == 1 { (hi - lo) as i64 - d_from - 4 } else { i64::MAX };
-                    (depth * 2 / 3).min(room).max(default)
+                    // (At 65 degrees where the 56-degree head would lie on
+                    // a reference's bracket leaving the dot on that side;
+                    // if that does too, as it was, for `untangle`.)
+                    let toward_x = if x2 <= x1 { -far } else { far };
+                    [depth * 2 / 3, depth * 7 / 15].into_iter().map(|d| d.min(room).max(default)).find(|&d| {
+                        let from = ((x1 + toward_x * d) as f64, y_row as f64);
+                        let (tri, base) = head_triangle(from, (hx, hy));
+                        !on_bracket(&[(from, base)], &tri, &dots.brackets)
+                    }).unwrap_or(default)
                 } else {
                     default
                 }
@@ -7936,10 +7977,89 @@ fn untangle_search(
         let d = probe_arrows(visualization_data, resource_owners_layout, dots, registry);
         (untangle_cost(&d, dots), d)
     };
-    // A head along a column (#1488): first the same track with its legs
-    // at other angles, or running on past the head's dot and coming back
-    // to it from the far side (#1316), so that the rows a dipping arrow
-    // was given aren't left empty by moving it to another track.
+    let keys_of = |d: &[Drawn], (i, j): (usize, usize)| {
+        let mut keys = vec![d[i].key, d[j].key];
+        keys.dedup();
+        keys
+    };
+    if tangled {
+        for _ in 0..24 {
+            let now = dots.lanes.settings();
+            let marks = defects(&drawn, dots);
+            // One arrow or logo drawn another way, for the first mark where
+            // that helps; else two, the second for a mark the first leaves;
+            // a track running on past its head's dot only where nothing else
+            // helps. Of the drawings with the fewest marks, the one with the
+            // fewest crossings.
+            let mut best: Option<((usize, usize), LaneSettings, Vec<Drawn>)> = None;
+            let better = |c: (usize, usize), best: &Option<((usize, usize), LaneSettings, Vec<Drawn>)>| {
+                c.0 < cost.0 && best.as_ref().is_none_or(|b| c < b.0)
+            };
+            for far in [false, true] {
+                'one: for &m in &marks {
+                    for key in keys_of(&drawn, m) {
+                        for s in dots.lanes.alternatives(key, &drawn, ys, far) {
+                            let (c, d) = eval(dots, &s, &mut budget);
+                            if better(c, &best) {
+                                best = Some((c, s, d));
+                            }
+                        }
+                        dots.lanes.set(now.clone());
+                    }
+                    if best.is_some() {
+                        break 'one;
+                    }
+                }
+                if best.is_some() {
+                    break;
+                }
+                'two: for &m in &marks {
+                    for key in keys_of(&drawn, m) {
+                        for s1 in dots.lanes.alternatives(key, &drawn, ys, far) {
+                            if budget == 0 {
+                                break 'two;
+                            }
+                            let (c1, d1) = eval(dots, &s1, &mut budget);
+                            if c1.0 > cost.0 + 12 {
+                                continue;
+                            }
+                            for m2 in defects(&d1, dots) {
+                                for key2 in keys_of(&d1, m2) {
+                                    dots.lanes.set(s1.clone());
+                                    for s2 in dots.lanes.alternatives(key2, &d1, ys, far) {
+                                        let (c, d) = eval(dots, &s2, &mut budget);
+                                        if better(c, &best) {
+                                            best = Some((c, s2, d));
+                                        }
+                                    }
+                                }
+                            }
+                            dots.lanes.set(now.clone());
+                        }
+                    }
+                    if best.is_some() {
+                        break 'two;
+                    }
+                }
+                if best.is_some() {
+                    break;
+                }
+            }
+            dots.lanes.set(now);
+            let Some((c, s, d)) = best else { break };
+            dots.lanes.set(s);
+            cost = c;
+            drawn = d;
+            if budget == 0 || defects(&drawn, dots).is_empty() {
+                break;
+            }
+        }
+    }
+    // Then a head still along a column (#1488): the same track with its
+    // legs at other angles, or running on past the head's dot and coming
+    // back to it from the far side (#1316), so that the rows a dipping
+    // arrow was given aren't left empty by moving it to another track.
+    // (After the search above, which runs as it did without the heads.)
     // (Never bringing its head nearer another's than it was: several
     // arrows into one dot from below fan out at set angles, #1312.)
     let heads_touching = |d: &[Drawn]| {
@@ -7947,6 +8067,15 @@ fn untangle_search(
         heads.iter().enumerate().map(|(n, a)| heads[n + 1..].iter()
             .filter(|b| samples(&tri_edges(&b.tri)).into_iter().any(|p| inside_tri(&a.tri, p) > -1.0)).count()).sum::<usize>()
     };
+    // (Nor running out of the figure on the left, where it would be cut
+    // off, or more than a leg's width past its right side.)
+    let hi_x = dots.positions.iter().map(|&(x, _)| x as f64)
+        .chain(drawn.iter().flat_map(|d| d.pieces.iter().flat_map(|&(p, q)| [p.0, q.0])))
+        .fold(f64::NEG_INFINITY, f64::max);
+    let inside = |d: &[Drawn]| d.iter().flat_map(|d| d.pieces.iter().flat_map(|&(p, q)| [p.0, q.0])).all(|x| x >= 10.0 && x <= hi_x + 45.0);
+    // (Nor along a reference's bracket, #1544's review.)
+    let brackets = dots.brackets.clone();
+    let brackets_hit = |d: &[Drawn]| d.iter().filter(|a| a.logo.is_none() && on_bracket(&a.pieces, &a.tri, &brackets)).count();
     let mut keys: Vec<(usize, usize)> = on_cols(&drawn, &dots.cols).into_iter().map(|i| drawn[i].key).collect();
     keys.dedup();
     let col_cost = |c: (usize, usize), d: &[Drawn], dots: &DotLayer| (c.0 + on_cols(d, &dots.cols).len(), c.1);
@@ -7975,7 +8104,8 @@ fn untangle_search(
             let (c, d) = eval(dots, &s, &mut budget);
             let cc = col_cost(c, &d, dots);
             // (No new mark of any other kind.)
-            if c.0 <= cost.0 && cc.0 < now_cost.0 && best.as_ref().is_none_or(|b| cc < b.0) && heads_touching(&d) <= heads_touching(&drawn) {
+            if c.0 <= cost.0 && cc.0 < now_cost.0 && best.as_ref().is_none_or(|b| cc < b.0) && heads_touching(&d) <= heads_touching(&drawn) && inside(&d)
+                && brackets_hit(&d) <= brackets_hit(&drawn) {
                 best = Some((cc, s, d));
             }
         }
@@ -7985,86 +8115,6 @@ fn untangle_search(
             now_cost = cc;
             cost = untangle_cost(&d, dots);
             drawn = d;
-        }
-    }
-    // (The search below only where it would have run without the heads.)
-    if !tangled || defects(&drawn, dots).is_empty() {
-        return;
-    }
-    let keys_of = |d: &[Drawn], (i, j): (usize, usize)| {
-        let mut keys = vec![d[i].key, d[j].key];
-        keys.dedup();
-        keys
-    };
-    for _ in 0..24 {
-        let now = dots.lanes.settings();
-        let marks = defects(&drawn, dots);
-        // One arrow or logo drawn another way, for the first mark where
-        // that helps; else two, the second for a mark the first leaves;
-        // a track running on past its head's dot only where nothing else
-        // helps. Of the drawings with the fewest marks, the one with the
-        // fewest crossings.
-        let mut best: Option<((usize, usize), LaneSettings, Vec<Drawn>)> = None;
-        let better = |c: (usize, usize), best: &Option<((usize, usize), LaneSettings, Vec<Drawn>)>| {
-            c.0 < cost.0 && best.as_ref().is_none_or(|b| c < b.0)
-        };
-        for far in [false, true] {
-            'one: for &m in &marks {
-                for key in keys_of(&drawn, m) {
-                    for s in dots.lanes.alternatives(key, &drawn, ys, far) {
-                        let (c, d) = eval(dots, &s, &mut budget);
-                        if better(c, &best) {
-                            best = Some((c, s, d));
-                        }
-                    }
-                    dots.lanes.set(now.clone());
-                }
-                if best.is_some() {
-                    break 'one;
-                }
-            }
-            if best.is_some() {
-                break;
-            }
-            'two: for &m in &marks {
-                for key in keys_of(&drawn, m) {
-                    for s1 in dots.lanes.alternatives(key, &drawn, ys, far) {
-                        if budget == 0 {
-                            break 'two;
-                        }
-                        let (c1, d1) = eval(dots, &s1, &mut budget);
-                        if c1.0 > cost.0 + 12 {
-                            continue;
-                        }
-                        for m2 in defects(&d1, dots) {
-                            for key2 in keys_of(&d1, m2) {
-                                dots.lanes.set(s1.clone());
-                                for s2 in dots.lanes.alternatives(key2, &d1, ys, far) {
-                                    let (c, d) = eval(dots, &s2, &mut budget);
-                                    if better(c, &best) {
-                                        best = Some((c, s2, d));
-                                    }
-                                }
-                            }
-                        }
-                        dots.lanes.set(now.clone());
-                    }
-                }
-                if best.is_some() {
-                    break 'two;
-                }
-            }
-            if best.is_some() {
-                break;
-            }
-        }
-        dots.lanes.set(now);
-        let Some((c, s, d)) = best else { break };
-        dots.lanes.set(s);
-        cost = c;
-        drawn = d;
-        if budget == 0 || defects(&drawn, dots).is_empty() {
-            break;
         }
     }
 }
@@ -9885,7 +9935,8 @@ fn render_ref_line(
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
     visualization_data: &VisualizationData,
     resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
-    registry: &Handlebars
+    registry: &Handlebars,
+    brackets: &mut Vec<Piece>,
 ){
     let timelines = &visualization_data.timelines;
 
@@ -9942,6 +9993,14 @@ fn render_ref_line(
                                 data.v = dv - 2*dv/5;
                                 data.dy = dv/5;
                                 data.rv = bracket.clone().rows(bracket_start, *line_start).attrs();
+                                // (`M x1 y1 l dx dy v v l -dx dy`: its two
+                                // slanted ends, for the arrows.)
+                                if matches!(ro, ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_)) {
+                                    let (x, y1, y2) = (data.x1 as f64, data.y1 as f64, data.y2 as f64);
+                                    let (dx, dy) = (data.dx as f64, data.dy as f64);
+                                    brackets.push(((x, y1), (x + dx, y1 + dy)));
+                                    brackets.push(((x + dx, y2 - dy), (x, y2)));
+                                }
 
                                 match ro {
                                     ResourceAccessPoint::MutRef(_) => {
