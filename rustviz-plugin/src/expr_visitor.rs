@@ -15470,6 +15470,17 @@ fn insert_in_arm(
       at = i;
     }
   }
+  // Nor after the reference's own scope end on that line, a one-line
+  // arm's `let x = ra; (x.to_string(), h)`: listed after it, x's column
+  // was drawn holding its reference down to a scope-end dot on a row
+  // below (#1572).
+  if let Some((r, _)) = borrow_end_of(&ev.1) {
+    if let Some(i) = arm.e_data[..at].iter().position(|(l, e)| *l == ev.0
+      && matches!(e, ExternalEvent::GoOutOfScope { ro, .. } if ro == r))
+    {
+      at = at.min(i);
+    }
+  }
   if in_line_map && ev.1.is_var_arrow_ev() {
     arm.line_map.entry(ev.0).or_default().push(ev.1.clone());
   }
