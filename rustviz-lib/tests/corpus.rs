@@ -37246,13 +37246,15 @@ fn ref_arm_copy_before_scope_end() {
 #[test]
 fn struct_field_moves_and_ends() {
     for (snippet, present, absent) in [
-        // #1509 (and #1508's p.a): the field is moved out by the right-hand
-        // side before the new value's arrives, on one dot.
+        // #1508: p.a moved into p's new value in a branch and back, on one
+        // dot. #1509, #1546: the right-hand side moves all of x first; each
+        // field's new value arrives on the row below, with x's.
         ("struct_reassign_from_self_1508",
-         &["p.a@L28:dot:move+acquire", "x.a@L74:dot:move+acquire", "y.a@L81:dot:move+acquire",
-           "z.a@L88:dot:move+acquire", "u.0@L95:dot:move+acquire"][..],
+         &["p.a@L28:dot:move+acquire", "x.a@L74:dot:move\"", "x.a@L74:dot:acquire\"", "x@L74:dot:acquire\"",
+           "y.a@L81:dot:move\"", "y.a@L81:dot:acquire\"", "z.a@L88:dot:move\"", "z.a@L88:dot:acquire\"",
+           "u.0@L95:dot:move\"", "u.0@L95:dot:acquire\""][..],
          &["x.a@L74:dot:acquire+move", "y.a@L81:dot:acquire+move", "z.a@L88:dot:acquire+move",
-           "u.0@L95:dot:acquire+move"][..]),
+           "u.0@L95:dot:acquire+move", "x.a@L74:dot:move+acquire", "u.0@L95:dot:move+acquire"][..]),
         // #1506: the reference field's borrow ends where its struct is moved
         // (into `drop`, a call, a method, `Some(..)`, also in one arm only),
         // not at the fn's end.
@@ -37264,11 +37266,17 @@ fn struct_field_moves_and_ends() {
            "m.r@L42:dot:static_die", "q.r@L48:dot:static_die", "w.r@L54:", "b.r@L65:dot:static_die"][..]),
         // #1530: the new struct's field has nothing before its `let`; the old
         // one (or the moved reference p) ends its borrow at the `return`.
+        // `let a2 = Holder { n: 2, ..a }; println!("{}", a2.n);`: a2.r's
+        // loan of x lives while a2 does, to the read of a2.n (rustc
+        // liveness is per variable: `x.push('a')` between the two lines is
+        // E0502, "immutable borrow later used here" at a2.n), so it ends at
+        // L46, not on its copy's dot.
         ("struct_update_after_return_1530",
          &["w.r@L53:dot:static_die", "m.m@L63:dot:mutable_die", "p@L87:dot:mutable_die",
-           "s@L87:dot:mutable_reacquire", "s@L63:dot:mutable_reacquire", "a2.r@L45:dot:copy+static_die"][..],
+           "s@L87:dot:mutable_reacquire", "s@L63:dot:mutable_reacquire", "a2.r@L46:dot:static_die"][..],
          &["h2.r@L23", "h2.r@L24", "k2.r@L33", "k2.r@L34", "w2.r@L52", "w2.r@L53", "m2.m@L62",
-           "m2.m@L63", "g2.r@L76", "g2.r@L77", "a2.r@L44", "s@L87:dot:owner_go_out_of_scope"][..]),
+           "m2.m@L63", "g2.r@L76", "g2.r@L77", "a2.r@L44", "a2.r@L45:dot:copy+static_die",
+           "s@L87:dot:owner_go_out_of_scope"][..]),
         // #1541: the struct's line stops where its last fields fork into arms
         // that all move them; u keeps u.c, so its line goes on.
         ("struct_last_field_moved_in_arms_1541",

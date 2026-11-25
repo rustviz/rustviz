@@ -45,14 +45,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 /// the ones in those directories. One entry covers every violation of
 /// that invariant in that snippet.
 pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
-    // A struct moved as a whole while a field column goes on: a field's
-    // borrow end drawn a row below the struct's move into a holder value
-    // (`let c = Some(w);`).
-    ("ctor_literals_768", "field-outlives-moved-struct", 1547),
-    ("struct_ref_field_param_moved_1506", "field-outlives-moved-struct", 1547),
-    // The fields' new values drawn on the row of the struct's whole move,
-    // a row above the struct's own (`x = Pair { a: s2, b: x.into_a() }`).
-    ("struct_reassign_from_self_1508", "field-outlives-moved-struct", 1546),
     // Geometric (`geometry.rs`), from here on.
     // Tuple column goes on after its fields were moved out.
     ("edition2024/if_let_chain_irrefutable_move", "line-ends-nowhere", 1157),
