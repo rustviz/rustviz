@@ -6133,6 +6133,14 @@ impl Visualizable for VisualizationData {
                 let from_elem = matches!(from, ResourceTy::Index(r, _, _) if r == rap);
                 if *from == *is || through_rap(from) || from_elem {
                     b_history.extend(self.event_of_external_event(line_number, event, false));
+                    // `p.a` in `p = Pair { a: p.a, .. }` (#1508): moved out
+                    // by the right-hand side and back with the new value,
+                    // as outside a branch (#1411).
+                    if *to == *is && matches!(event, ExternalEvent::Move { .. }) {
+                        for (l, e) in self.event_of_external_event(line_number, event, true) {
+                            push_history_event(b_history, l, e);
+                        }
+                    }
                 }
                 else if *to == *is || through_rap(to) || to_elem {
                     for (l, e) in self.event_of_external_event(line_number, event, true) {

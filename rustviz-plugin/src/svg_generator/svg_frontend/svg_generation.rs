@@ -424,6 +424,33 @@ fn uses_rap(e: &ExternalEvent, r: u64) -> bool {
     from.extract_rap().is_some_and(|f| *f.hash() == r) || to.extract_rap().is_some_and(|t| *t.hash() == r)
 }
 
+/// Whether `name` is a field (at any depth) of the place `of`.
+fn field_of(name: &str, of: &str) -> bool {
+    name.strip_prefix(of).is_some_and(|rest| rest.starts_with('.'))
+}
+
+/// Whether `e` ends the borrow of a struct's reference field whose struct
+/// one of the line's stacked arrows (`group`) moves away (`w.a`'s on `let
+/// c = Some(w);`, #1547): the field goes with the struct, so the end is on
+/// the struct's row, not on a row inserted below for the stack.
+fn field_end_with_struct_move(e: &ExternalEvent, group: &[ExternalEvent]) -> bool {
+    let (ExternalEvent::RefDie { from: ResourceTy::Value(f), .. }
+        | ExternalEvent::StaticDie { from: ResourceTy::Value(f), .. }
+        | ExternalEvent::MutableDie { from: ResourceTy::Value(f), .. }) = e else { return false };
+    group.iter().any(|g| matches!(g, ExternalEvent::Move { from: ResourceTy::Value(x), .. } if field_of(f.name(), x.name())))
+}
+
+/// Whether `e` gives a field of a struct its part of a new value on a line
+/// one of whose stacked arrows (`group`) moves that whole struct into a
+/// call (`x = Pair { a: s2, b: x.into_a() }`, #1546): the right-hand side
+/// runs first, so the new value arrives after the move. (Not a
+/// destructuring swap, `(p, q) = (q, p)`, drawn on one row, #1343.)
+fn arrives_after_whole_move(e: &ExternalEvent, group: &[ExternalEvent]) -> bool {
+    let (ExternalEvent::Move { to: ResourceTy::Value(t), .. } | ExternalEvent::Copy { to: ResourceTy::Value(t), .. }) = e else { return false };
+    group.iter().any(|g| matches!(g, ExternalEvent::Move { from: ResourceTy::Value(x), to: ResourceTy::Value(f), .. }
+        if field_of(t.name(), x.name()) && f.is_fn()))
+}
+
 /// Whether `e`, an event of a line that draws no arrow (the write in
 /// `*x += 1;`), uses a reference whose borrow one of the line's
 /// stacked arrows (`group`) ends. Its dot belongs on the line's own
@@ -1927,7 +1954,16 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                     0
                 }
                 Some(ev) => { // if there are multiple arrow events on this line
-                    let (front, back) = split_same_line_borrow_ends(&ev, false);
+                    let (mut front, mut back) = split_same_line_borrow_ends(&ev, false);
+                    // A field's part of a new value that arrives after the
+                    // line moves its whole struct away (`x = Pair { a: s2, b:
+                    // x.into_a() }`, #1546) goes below the move, with the
+                    // struct's own new value.
+                    if front.iter().any(|e| arrives_after_whole_move(e, &ev)) && front.iter().any(|e| !arrives_after_whole_move(e, &ev)) {
+                        let (late, early): (Vec<ExternalEvent>, Vec<ExternalEvent>) = front.into_iter().partition(|e| arrives_after_whole_move(e, &ev));
+                        front = early;
+                        back.splice(0..0, late);
+                    }
                     let back_row = final_line_num + front.len();
                     let rest_of_line: Vec<ExternalEvent> = visualization_data.preprocess_external_events[i + 1..]
                         .iter()
@@ -2086,7 +2122,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                 Some((src, _)) if src == line_num => 0,
                 _ if branch_line != 0 => 0,
                 _ if !visualization_data.event_line_map.get(&line_num)
-                    .is_some_and(|g| uses_ref_ended_on_line(&event, g)) => 0,
+                    .is_some_and(|g| uses_ref_ended_on_line(&event, g) || field_end_with_struct_move(&event, g)) => 0,
                 _ => extras_at_source_line.iter()
                     .filter(|(s, _)| *s == line_num)
                     .map(|(_, ex)| *ex)

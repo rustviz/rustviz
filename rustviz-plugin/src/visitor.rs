@@ -7162,11 +7162,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // `t = (t.1, t.0);`: the right-hand side is evaluated first and
     // moves t's fields out, so the old value they held isn't dropped
     // by the assignment (#1138). Seen by `reassign_parts` as moved.
+    // `p = Pair { a: s2, b: p.into_a() }` moves all of p, so each of
+    // its fields (#1509).
     self.rhs_self_moved = match (&lhs_rty, expr.kind) {
-      (ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)), ExprKind::Assign(..)) =>
-        locals_moved_by(self.tcx, rhs_expr).into_iter()
-          .filter(|m| m != rap.name() && place_within(m, rap.name()) && self.raps.contains_key(m))
-          .collect(),
+      (ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)), ExprKind::Assign(..)) => {
+        let moved = locals_moved_by(self.tcx, rhs_expr);
+        let whole = moved.contains(rap.name());
+        #[expect(clippy::disallowed_methods, reason = "collected into a BTreeSet")]
+        let parts: BTreeSet<String> = self.raps.keys()
+          .filter(|m| *m != rap.name() && place_within(m, rap.name()) && (whole || moved.contains(*m)))
+          .cloned()
+          .collect();
+        parts
+      }
       _ => BTreeSet::new(),
     };
     let drops_old = !lhs_ty.is_ref() && !is_copyable && !lhs_is_union_field && !union_without_drop && !lhs_is_manually_drop && self.needs_drop(lhs_ty, lhs_expr.hir_id.owner);
@@ -7516,6 +7524,27 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // new value (`t.0` in `t = (t.1, t.0)`, whose move into t.1 is
       // drawn after t.1's into t.0) owns its new value again, as for
       // a destructuring swap.
+      // A field moved with the whole of p by the right-hand side
+      // (`p = Pair { a: s2, b: p.into_a() }`, #1509): its move, recorded
+      // while the right-hand side was visited, goes before the new value
+      // the literal gives it on its column, as for a destructuring cycle.
+      for m in self.rhs_self_moved.iter() {
+        let Some(h) = self.raps.get(m).map(|rd| *rd.rap.hash()) else { continue };
+        let arrives = self.preprocessed_events[n_events..].iter().any(|(_, ev)| matches!(ev,
+          ExternalEvent::Move { to: ResourceTy::Value(t), .. } | ExternalEvent::Copy { to: ResourceTy::Value(t), .. }
+            if *t.hash() == h));
+        let moved_out = self.preprocessed_events[..n_events].iter().rev()
+          .take_while(|(l, _)| *l == line_num)
+          .find_map(|(_, ev)| match ev {
+            ExternalEvent::Move { from: ResourceTy::Value(f), id, .. } if *f.hash() == h => Some(*id),
+            _ => None,
+          });
+        if let (true, Some(id)) = (arrives, moved_out) {
+          if !self.moves_out_first.contains(&id) {
+            self.moves_out_first.push(id);
+          }
+        }
+      }
       for m in std::mem::take(&mut self.rhs_self_moved) {
         let Some(rap) = self.raps.get(&m).map(|rd| rd.rap.clone()) else { continue };
         if !rap.never_drops() && !rap.is_ref() && !self.rap_holds_resource_now(&m) {

@@ -2270,7 +2270,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       }
       let is_copy = is_copy || (partial && !child.is_mutref());
       let Some(dest) = self.raps.get(&format!("{}.{}", to_name, field)).map(|rd| rd.rap.clone()) else { continue };
-      if let Some(loan) = self.borrow_map.get(child.name()).cloned() {
+      if let Some(mut loan) = self.borrow_map.get(child.name()).cloned() {
+        // The field holds the loan from here on, not from where it was
+        // made: `..h` after `if c { return; }` (#1530) mustn't end a
+        // loan of h2.r's at that `return`, before h2 exists. The loan
+        // is still found in MIR by the line it was issued on.
+        if line_num > loan.assigned_at {
+          if loan.borrow_span.is_none() && loan.loan_line.is_none() {
+            loan.loan_line = Some(loan.assigned_at);
+          }
+          loan.assigned_at = line_num;
+          loan.lifetime = loan.lifetime.max(line_num);
+        }
         self.borrow_map.insert(dest.name().clone(), loan);
       }
       let ev_id = *self.unique_id;
@@ -11615,6 +11626,27 @@ pub fn print_out_of_scope(&mut self){
     }
   }
 
+  /// Whether a borrow with this lender borrows the caller's value: the
+  /// lender is the caller, or a reference (followed through copies and
+  /// reborrows) that does, such as a reference parameter.
+  fn lender_is_callers(&self, lender: &ResourceTy) -> bool {
+    let mut lender = lender.clone();
+    for _ in 0..16 {
+      match &lender {
+        ResourceTy::Caller => return true,
+        ResourceTy::Anonymous => return false,
+        _ => {}
+      }
+      let Some(rap) = lender.extract_rap() else { return false };
+      if !rap.is_ref() {
+        return false;
+      }
+      let Some(rd) = self.borrow_map.get(rap.name()) else { return false };
+      lender = rd.lender.clone();
+    }
+    false
+  }
+
   fn emit_borrow_ends_in_map(&mut self) {
     // An or-pattern reference's possible borrows (#734) are drawn by
     // their `OrAltBorrow` events, not by an end here.
@@ -11891,6 +11923,14 @@ pub fn print_out_of_scope(&mut self){
       if !self.raps.get(name).is_some_and(|r| r.rap.is_ref() && r.rap.is_member()) {
         continue;
       }
+      // A copy of a reference parameter (`Holder { r: r }`, #1506)
+      // borrows from the caller, which has no column whose end this
+      // field's would draw: it ends wherever the struct is moved to.
+      let callers = self.lender_is_callers(&rd.lender);
+      // Also a move in a branch (`if c { drop(h); }`): on the other paths
+      // the struct isn't used again either (it can't be, after a maybe-move),
+      // unless its drop may use the borrow (an `impl Drop`).
+      let in_arms = callers && name.split_once('.').is_some_and(|(root, _)| self.last_drop_use_line(root).is_none());
       let mut end: Option<usize> = None;
       let mut parent = name.as_str();
       while let Some((p, _)) = parent.rsplit_once('.') {
@@ -11898,10 +11938,21 @@ pub fn print_out_of_scope(&mut self){
         let Some(prap) = self.raps.get(parent).map(|r| *r.rap.hash()) else { continue };
         for (line, ev) in self.preprocessed_events.iter() {
           if let ExternalEvent::Move { from: ResourceTy::Value(f), to, .. } = ev {
-            let into_call = matches!(to, ResourceTy::Anonymous | ResourceTy::Value(ResourceAccessPoint::Function(_)));
+            // Or into a value that holds the borrow from then on (`let c =
+            // Some(w);`, #1506): c is drawn borrowing the lender.
+            let into_call = callers
+              || matches!(to, ResourceTy::Anonymous | ResourceTy::Value(ResourceAccessPoint::Function(_)))
+              || matches!(to, ResourceTy::Value(t) if !t.is_ref() && t.holds_borrow());
             if into_call && *f.hash() == prap && *line >= rd.assigned_at && *line < rd.lifetime {
               end = Some(end.map_or(*line, |e: usize| e.min(*line)));
             }
+          }
+        }
+        if in_arms {
+          let mut lines = Vec::new();
+          moves_in_arms(self.preprocessed_events, prap, &mut lines);
+          if let Some(l) = lines.into_iter().filter(|l| *l >= rd.assigned_at && *l < rd.lifetime).min() {
+            end = Some(end.map_or(l, |e: usize| e.min(l)));
           }
         }
       }
@@ -11909,7 +11960,7 @@ pub fn print_out_of_scope(&mut self){
       // the lender's borrow end stays where the borrow checker puts it.
       // (A struct moved into a value that keeps the loan, `v.push(e)`,
       // keeps it with nothing else drawn holding it.)
-      let carried = !matches!(rd.lender, ResourceTy::Anonymous) && self.borrow_map.iter()
+      let carried = callers || !matches!(rd.lender, ResourceTy::Anonymous) && self.borrow_map.iter()
         .any(|(n, d)| n != name && d.lender == rd.lender && d.lifetime >= rd.lifetime);
       if let (Some(end), true) = (end, carried) {
         moved_ends.push((name.clone(), end));
@@ -14102,6 +14153,33 @@ struct ExitCtx<'b> {
 
 /// `(r, lender)` if `e` ends the borrow the reference `r` holds;
 /// `lender` is what it gives the value back to (none for a `RefDie`).
+/// The lines of the moves of the column `hash` in the arms of the
+/// conditionals among `events`, at any depth.
+fn moves_in_arms(events: &[(usize, ExternalEvent)], hash: u64, out: &mut Vec<usize>) {
+  for (_, e) in events {
+    if let ExternalEvent::Branch { branches, .. } = e {
+      for b in branches {
+        for (line, ev) in &b.e_data {
+          if matches!(ev, ExternalEvent::Move { from: ResourceTy::Value(f), .. } if *f.hash() == hash) {
+            out.push(*line);
+          }
+        }
+        moves_in_arms(&b.e_data, hash, out);
+      }
+    }
+  }
+}
+
+/// The reference `r` took its loan from by a move among `events` (then
+/// `after`), at the top level: `r` in `let r = q;`, or the field `h2.r`
+/// a struct's move or `..h` update handed `h.r`'s loan to.
+fn handed_from<'e>(events: &'e [(usize, ExternalEvent)], after: &'e [(usize, ExternalEvent)], r: &ResourceAccessPoint) -> Option<&'e ResourceAccessPoint> {
+  events.iter().chain(after.iter()).find_map(|(_, e)| match e {
+    ExternalEvent::Move { from: ResourceTy::Value(f), to: ResourceTy::Value(t), .. } if t == r && f.is_ref() && f != r => Some(f),
+    _ => None,
+  })
+}
+
 fn borrow_end_of(e: &ExternalEvent) -> Option<(&ResourceAccessPoint, &ResourceTy)> {
   match e {
     ExternalEvent::StaticDie { from: ResourceTy::Value(r), to, .. }
@@ -14217,6 +14295,17 @@ fn end_borrows_at_exits_in(
           continue; // only the next end of this borrow
         }
         let Some(&made) = cx.assigned.get(r.name()) else { continue };
+        // A reference given its loan after the conditional by a move
+        // (`let r2 = r;`, `let h2 = h;` handing on h.r, #1530): on the
+        // arm's path the loan was still the one it was moved from, so
+        // that reference's borrow ends at the exit.
+        let (r, made) = match (made >= *split_point).then(|| handed_from(&tail, after, r)).flatten() {
+          Some(src) => match cx.assigned.get(src.name()) {
+            Some(&m) if m < *split_point => (src, m),
+            _ => (r, made),
+          },
+          None => (r, made),
+        };
         // An end on the conditional's own lines that wasn't put into
         // its arms (`end_outer_borrows_in_arms`) can't be told apart
         // from the conditional; leave it.
@@ -14244,9 +14333,10 @@ fn end_borrows_at_exits_in(
         };
         let mut copy = e.clone();
         match &mut copy {
-          ExternalEvent::StaticDie { id, .. } | ExternalEvent::MutableDie { id, .. } | ExternalEvent::RefDie { id, .. } => {
+          ExternalEvent::StaticDie { id, from, .. } | ExternalEvent::MutableDie { id, from, .. } | ExternalEvent::RefDie { id, from, .. } => {
             *id = *cx.unique_id;
             *cx.unique_id += 1;
+            *from = ResourceTy::Value(r.clone());
           }
           _ => unreachable!("borrow_end_of matched"),
         }
