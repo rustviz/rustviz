@@ -28065,6 +28065,19 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "h.r's borrow ended before the branches above",
             "h.r still has no value here",
         ],
+    },    TooltipExpect {
+        name: "dead_outer_mut_arm_borrow_1596",
+        // #1596: m is last used on the `if` path before `r3 = downgrade(&mut
+        // s2)` / `r3 = &mut s2`, so r3 is the only borrower of s2 there and
+        // its end gives s2 back. Main drew no return arrow, and s2 stayed
+        // mutably borrowed by r3 until m2 borrowed it again.
+        must_contain: &[
+            "Return mutably borrowed resource from r3 to s2",
+            "s2's resource is no longer mutably borrowed",
+        ],
+        must_not_contain: &[
+            "s2's resource is mutably borrowed by r3; s2 can't be used while the borrow is live. On this path m isn't used again",
+        ],
     },
     TooltipExpect {
         name: "repoint_later_use_1603",
@@ -38409,4 +38422,78 @@ fn ref_old_loan_and_never_fn_ids_1486_1556_1557_1553() {
             assert!(!tl.contains(&format!("data-rv-id=\"{}", id)), "{}: unexpected {}", snippet, id);
         }
     }
+}
+
+/// The tooltip lines of the dot with exactly this `data-rv-id`.
+fn dot_lines_by_id(timeline_svg: &str, id: &str) -> Vec<Vec<String>> {
+    let key = format!("data-rv-id=\"{}\"", id);
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(k) = timeline_svg[from..].find(&key) {
+        let at = from + k;
+        let start = timeline_svg[..at].rfind('<').unwrap_or(0);
+        let end = timeline_svg[at..].find('>').map_or(timeline_svg.len(), |e| at + e);
+        out.extend(tooltip_lines(&timeline_svg[start..end]));
+        from = at + key.len();
+    }
+    out
+}
+
+/// #1592, #1604: where a re-pointed reference's old loan ends.
+/// #1592: a reference with no loan of its own (a `match` arm's or `while
+/// let`'s binding copied out of the scrutinee, `let mut r = x;`), dead before
+/// the write, ends its old borrow at its last use or where it was bound;
+/// main ended it at the write, a row (or more) late, with its lender drawn
+/// borrowed down to there.
+/// #1604: a field that may point into s or t, re-pointed in straight-line
+/// code, ends its old loan once, on one dot, before the new loan starts;
+/// main drew a second end ("h.r's immutable borrow ends") with its own
+/// return arrow on the new loan's row.
+/// #1596: r3's borrow, made and ended in the `if` arm after m's last use
+/// there, gives s2 back on its own line (main didn't, while m's loan was
+/// still live on the `else` path).
+#[test]
+fn repoint_old_loan_rows_1592_1604_1596() {
+    let tl = run_with_local_backend("repoint_unread_arm_binding_1592").timeline_panel_string();
+    for id in ["x@L10:dot:static_die\"", "v@L10:dot:static_reacquire\"", "x@L23:dot:static_lend+static_reacquire+static_die",
+        "x@L36:dot:static_lend+static_reacquire+static_die", "x@L49:dot:static_die\"", "x@L61:dot:copy+static_borrow+static_die",
+        "r@L71:dot:copy+static_die", "x@L81:dot:static_die\""] {
+        assert!(tl.contains(&format!("data-rv-id=\"{}", id)), "#1592: no {}", id);
+    }
+    for id in ["x@L11:dot:static_die+static_borrow", "v@L11:dot:static_reacquire", "x@L25:dot:static_die+static_borrow",
+        "x@L37:dot:static_die+static_borrow", "x@L50:dot:static_die+static_borrow", "x@L62:dot:static_die+static_borrow",
+        "r@L73:dot:static_die+static_borrow"] {
+        assert!(!tl.contains(&format!("data-rv-id=\"{}", id)), "#1592: unexpected {}", id);
+    }
+    let tl = run_with_local_backend("field_two_lender_repoint_1604").timeline_panel_string();
+    let line = |s: &str| s.to_string();
+    for (field, row, lender) in [("h.r", 19, "t"), ("h.r", 26, "s"), ("h.0", 33, "t")] {
+        // The old loan's end and the new loan on one dot...
+        assert_eq!(dot_lines_by_id(&tl, &format!("{}@L{}:dot:static_die+static_borrow", field, row)),
+            vec![vec![line(&format!("{}'s immutable borrow of s or t ends", field)), line(&format!("{} immutably borrows a resource", field))]],
+            "#1604: {} on line {}", field, row);
+        // ...then the new loan's end on its own.
+        assert_eq!(dot_lines_by_id(&tl, &format!("{}@L{}:dot:static_die", field, row)),
+            vec![vec![line(&format!("{}'s immutable borrow ends", field))]], "#1604: {} on line {}", field, row);
+        // The lender gets the old loan back before it lends again, once.
+        assert_eq!(dot_lines_by_id(&tl, &format!("{}@L{}:dot:static_reacquire+static_lend", lender, row)),
+            vec![vec![line(&format!("{}'s resource is no longer immutably borrowed", lender)),
+                line(&format!("{}'s resource is immutably borrowed by {}; {} is read-only while the borrow is live", lender, field, lender))]],
+            "#1604: {} on line {}", lender, row);
+    }
+    // One return arrow per loan: the old one's to "s or t", the new one's
+    // (main drew a second one for the old loan, to the lender re-borrowed).
+    // `same_lender`'s two loans of s are two returns to s.
+    let tips = timeline_tooltips(&tl);
+    let returns = |from: &str, to: &str| tips.iter().filter(|t| **t == format!("Return immutably borrowed resource from {} to {}", from, to)).count();
+    assert_eq!(returns("h.r", "t"), 1, "#1604: returns from h.r to t");
+    assert_eq!(returns("h.r", "s"), 3, "#1604: returns from h.r to s");
+    assert_eq!(returns("h.0", "t"), 1, "#1604: returns from h.0 to t");
+    let tl = run_with_local_backend("dead_outer_mut_arm_borrow_1596").timeline_panel_string();
+    for id in ["s2@L15:dot:mutable_lend+dead_loan_note+mutable_reacquire+", "s2@L28:dot:mutable_lend+dead_loan_note+mutable_reacquire\"",
+        "s2@L29:dot:mutable_lend+dead_loan_note+mutable_reacquire\""] {
+        assert!(tl.contains(&format!("data-rv-id=\"{}", id)), "#1596: no {}", id);
+    }
+    assert_eq!(timeline_tooltips(&tl).iter().filter(|t| *t == "Return mutably borrowed resource from r3 to s2").count(), 3,
+        "#1596: one return from r3 to s2 per function");
 }

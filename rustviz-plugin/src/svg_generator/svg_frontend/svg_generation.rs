@@ -134,9 +134,14 @@ fn split_same_line_borrow_ends(group: &[ExternalEvent], in_arm: bool) -> (Vec<Ex
         let (from, to) = ResourceAccessPoint_extract(e);
         Some((rap_hash(from)?, rap_hash(to)?))
     };
-    let borrows: Vec<(u64, u64)> = group.iter()
-        .filter(|e| matches!(e, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }))
-        .filter_map(|e| ends(e))
+    // (With where each is listed: an end listed before every borrow it
+    // could end is an older loan's, given back before the line's new one
+    // is made, `h.r = &t;` re-pointing a field that may point into s or t.
+    // Moved below the stack with the new loan's end, it took a row of its
+    // own, apart from the end to s it is one loan with, #1604.)
+    let borrows: Vec<(usize, (u64, u64))> = group.iter().enumerate()
+        .filter(|(_, e)| matches!(e, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }))
+        .filter_map(|(k, e)| Some((k, ends(e)?)))
         .collect();
     let is_end = |e: &ExternalEvent| matches!(e, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. });
     // An end that comes before a later borrow of the same lender on the
@@ -152,14 +157,14 @@ fn split_same_line_borrow_ends(group: &[ExternalEvent], in_arm: bool) -> (Vec<Ex
             && (mutable || matches!(b, ExternalEvent::MutableBorrow { .. }))
             && ends(b).is_some_and(|(bf, bt)| bf == l && bt != h))
     };
-    let ends_a_borrow_here = |e: &ExternalEvent| is_end(e) && ends(e).map_or(false, |(f, t)| {
-        f != t && borrows.iter().any(|&(bf, bt)| (bf, bt) == (f, t) || (bf, bt) == (t, f))
+    let ends_a_borrow_here = |k: usize| is_end(&group[k]) && ends(&group[k]).map_or(false, |(f, t)| {
+        f != t && borrows.iter().any(|&(b, (bf, bt))| b < k && ((bf, bt) == (f, t) || (bf, bt) == (t, f)))
     });
     // When the stack does split, the end of a reference the line gives
     // that borrow to (`let r = x;` after `Some(x) = v.first()` on one
     // line) goes below it too: drawn on the first rows, it came before r
     // got its value (#1426).
-    let split = group.iter().any(ends_a_borrow_here);
+    let split = (0..group.len()).any(ends_a_borrow_here);
     let received: Vec<u64> = group.iter()
         .filter(|e| matches!(e, ExternalEvent::Copy { .. } | ExternalEvent::Move { .. }))
         .filter_map(|e| ResourceAccessPoint_extract(e).1.extract_rap().filter(|r| r.is_ref()).map(|r| *r.hash()))
@@ -167,7 +172,7 @@ fn split_same_line_borrow_ends(group: &[ExternalEvent], in_arm: bool) -> (Vec<Ex
     let ends_a_received_borrow = |e: &ExternalEvent| split && is_end(e)
         && ends(e).is_some_and(|(f, t)| f != t && received.contains(&f));
     let mut moved: Vec<bool> = group.iter().enumerate()
-        .map(|(k, e)| (ends_a_borrow_here(e) || ends_a_received_borrow(e)) && !before_conflicting_borrow(k))
+        .map(|(k, e)| (ends_a_borrow_here(k) || ends_a_received_borrow(e)) && !before_conflicting_borrow(k))
         .collect();
     // The end of a reference that one of those ends gives its loan back
     // to (`let m2 = &mut *m; let r2 = &*m2;`, both ending on that line):
@@ -372,6 +377,11 @@ fn ends_after_line_uses(e: &ExternalEvent, group: &[ExternalEvent], rest: &[Exte
         && ResourceAccessPoint_extract(o).1.extract_rap().is_some_and(|t| *t.hash() == r);
     group.iter().enumerate().filter(|(k, o)| !own_borrow(*k, o)).map(|(_, o)| o).chain(rest)
         .filter(|o| o.get_id() != e.get_id() && !new_borrow_into(o, r, e.get_id()))
+        // (Another end of the reference's borrow isn't a use of it: the
+        // end to t of a field that may point into s or t, `h.r = &t;`,
+        // is one loan with the end to s. Deferred for it, the end to s
+        // came after the new borrow of t on its row, #1604.)
+        .filter(|o| ended_ref(o) != Some(r))
         .any(|o| uses_rap(o, r))
 }
 

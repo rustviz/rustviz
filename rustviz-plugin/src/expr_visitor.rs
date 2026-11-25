@@ -12303,7 +12303,7 @@ pub fn print_out_of_scope(&mut self){
             let Some(d) = self.borrow_map.get(*o) else { return true };
             *o == *r || d.lifetime < rd.assigned_at || d.assigned_at > rd.lifetime
               || match (self.raps.get(*r), self.raps.get(*o)) {
-                (Some(a), Some(b)) => on_other_path(self.preprocessed_events, &a.rap, &b.rap, d.lifetime),
+                (Some(a), Some(b)) => on_other_path(self.preprocessed_events, &a.rap, &b.rap, d.lifetime, rd.assigned_at),
                 _ => false,
               }
           });
@@ -13322,9 +13322,13 @@ fn uses_beyond_drop(e: &ExternalEvent, r: &ResourceAccessPoint) -> bool {
 
 /// Whether `r` is declared in an arm of a conditional among `events`
 /// (looking into nested ones) that `o`, declared outside it, isn't used
-/// in, and whose lines don't hold `o_end`, the line o's loan ends on:
-/// o's borrow is used only on the other paths.
-fn on_other_path(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint, o: &ResourceAccessPoint, o_end: usize) -> bool {
+/// in from `r_from` (the line r's loan is made on), and whose lines don't
+/// hold `o_end`, the line o's loan ends on: o's borrow is used only on
+/// the other paths. (A use of o in the arm before r's loan is made, `let
+/// n = m.len();` before `let r3 = downgrade(&mut s2);`, ends o's loan on
+/// this path before r's starts. Counted, r3's end gave s2 nothing back,
+/// #1596.)
+fn on_other_path(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint, o: &ResourceAccessPoint, o_end: usize, r_from: usize) -> bool {
   #[expect(clippy::disallowed_methods, reason = "`any` over the set: order never observed")]
   let declares = |b: &ExtBranchData, x: &ResourceAccessPoint| b.decl_vars.iter()
     .any(|d| d.hash() == x.hash() || x.name().starts_with(&format!("{}.", d.name())));
@@ -13335,13 +13339,13 @@ fn on_other_path(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint, o: 
     }
     (0..branches.len()).any(|a| {
       if !declares(&branches[a], r) {
-        return on_other_path(&branches[a].e_data, r, o, o_end);
+        return on_other_path(&branches[a].e_data, r, o, o_end, r_from);
       }
       let (start, end) = branch_type.get_start_end(a);
       !branches.iter().any(|b| declares(b, o))
         && !(start <= o_end && o_end <= end)
-        && !branches[a].e_data.iter().any(|(_, x)| touches(x, o)
-          || ResourceAccessPoint_extract(x).0.extract_rap().is_some_and(|f| o.name().starts_with(&format!("{}.", f.name()))))
+        && !branches[a].e_data.iter().any(|(l, x)| *l >= r_from && (touches(x, o)
+          || ResourceAccessPoint_extract(x).0.extract_rap().is_some_and(|f| o.name().starts_with(&format!("{}.", f.name())))))
     })
   })
 }

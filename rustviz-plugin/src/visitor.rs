@@ -7170,6 +7170,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           let dead_before_arms = (ref_data.loan().is_none() && !matches!(ref_data.lender, ResourceTy::Anonymous) && !field_write)
             .then(|| self.last_live_line(&me, (ref_data.assigned_at, line_num.saturating_sub(1))).unwrap_or(ref_data.assigned_at))
             .filter(|&l| l >= ref_data.assigned_at && self.arm_frames.last().is_some_and(|&(split, _, _, _)| l < split));
+          // Such a reference dead before the write on the write's own path
+          // (never read since it was bound, or last read a few lines up)
+          // holds nothing there either: its old loan ends at that last use,
+          // as #745 ends a reference's own loan. A `match` arm's `Some(mut
+          // x) => { x = &s2; }` got its value from the scrutinee's loan, made
+          // on the `match` line, so no loan of its lender from where x was
+          // bound was found, and x's end was drawn at the write, a row late
+          // (#1592); likewise `let mut r = x;` and a `while let` binding.
+          // (Not a last use in another arm than the write's, which is on
+          // another path.)
+          let dead_since = (ref_data.loan().is_none() && matches!(ref_data.lender, ResourceTy::Value(_)) && !field_write)
+            .then(|| self.last_live_line(&me, (ref_data.assigned_at, line_num.saturating_sub(1))).unwrap_or(ref_data.assigned_at))
+            .filter(|&l| l >= ref_data.assigned_at && l < line_num
+              && self.arm_frames.iter().all(|&(split, _, lo, hi)| l < split || (lo <= l && l <= hi)));
           // A let-else binding drawn as a branch is bound on the join row
           // (`borrow_floor`, #1408): rustc ends an unused binding's loan
           // on the `let` row, above it, but its column only starts at the
@@ -7179,6 +7193,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           let old_end = if field_write { None } else {
             self.loan_end_of(&me, &ref_data).filter(|&end| end < line_num && end >= ref_data.assigned_at)
               .or_else(|| self.old_loan_end(&me, &ref_data, &ref_data.lender, line_num, write_span))
+              .or(dead_since)
           }.map(lift);
           if let Some(old_end) = old_end {
             #[expect(clippy::disallowed_methods, reason = "filtered into a sorted Vec")]
@@ -7356,7 +7371,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             let end_line = lift(match self.loan_end_of(&me, &ref_data).filter(|&end| end < line_num && end >= ref_data.assigned_at && !field_write) {
               Some(end) => end,
               None => match end_of(self, &ref_data.lender) {
-                e if e == line_num => dead_before_arms.unwrap_or(e),
+                e if e == line_num => dead_before_arms.or(dead_since).unwrap_or(e),
                 e => e,
               },
             });
