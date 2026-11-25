@@ -27750,6 +27750,24 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "only the branch that borrows it makes it",
         ],
     },
+    TooltipExpect {
+        name: "reborrow_copy_in_match_arm_1527",
+        // #1527: r2 (a copy of r = &*m) ends on the line's row, r on a row
+        // below it: between the two dots m is still shared with r, and r2's
+        // end says so. On main it said only that r2 no longer borrows, and
+        // the arm's states ran back up from r's row (m's dashed rest started
+        // a row below its dot).
+        must_contain: &[
+            "the resource m points to is no longer borrowed by _r2, but is still immutably borrowed by r",
+            "r no longer borrows the resource m points to",
+            "m's mutable borrow ends",
+            "m's immutable borrow ends",
+            "m's borrow has ended on this path",
+        ],
+        must_not_contain: &[
+            "=_r2 no longer borrows the resource m points to",
+        ],
+    },
 ];
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws
@@ -37762,6 +37780,29 @@ fn ref_arm_copy_before_scope_end() {
             let gone = ids.iter().position(|d| d.contains("go_out_of_scope"));
             assert!(matches!((copied, gone), (Some(c), Some(g)) if c < g), "{}: {}'s dots on line {}: {:?}", snippet, v, line, ids);
         }
+    }
+}
+
+/// #1527: in the `0` arm of each `match` of
+/// `reborrow_copy_in_match_arm_1527`, `let _r2 = r;` ends _r2's borrow on
+/// the line's row and r's (with m's own) on a row below. Between the two
+/// dots m is still shared with r, so its column there is not "can read and
+/// write" (full privilege), and its dashed "borrow has ended" rest starts at
+/// the lower dot (the invariants check it starts at a dot). (Main draws no
+/// column between the dots at all; this guards against the sorted arm
+/// drawing m writable there, as it did before r2's end named r.)
+#[test]
+fn reborrow_copy_in_match_arm_keeps_lender_shared() {
+    let tl = run_with_local_backend("reborrow_copy_in_match_arm_1527").timeline_panel_string();
+    let ids: Vec<String> = common::svg::rv_elements(&tl).into_iter().map(|e| e.id).collect();
+    for line in [17, 31, 45, 68] {
+        let between: Vec<&String> = ids.iter()
+            .filter(|id| id.starts_with(&format!("m@L{line}:branch_line:full_privilege")) && !id.contains("uninit"))
+            .collect();
+        assert!(between.is_empty(), "m is shown writable between _r2's and r's ends on line {line}: {between:?}");
+        assert!(ids.iter().any(|id| id.starts_with(&format!("m@L{line}:dot:static_reacquire"))
+                && !id.contains("mutable_die") && !id.contains("static_die")),
+            "no dot of its own for _r2's end on line {line}: {ids:?}");
     }
 }
 

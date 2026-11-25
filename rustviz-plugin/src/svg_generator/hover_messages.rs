@@ -1907,6 +1907,24 @@ pub fn event_dot_reacquire_still_borrowed(my_name: &String, from_name: &String, 
     )
 }
 
+/// `event_dot_reacquire_still_borrowed` on a reference's column, for a
+/// borrow of what it points to (`r = &*m; let r2 = r;`, r2's end on a row
+/// above r's in a `match` arm, #1527): "the resource m points to is no
+/// longer borrowed by r2, but is still immutably borrowed by r".
+pub fn event_dot_reacquire_through_ref_still_borrowed(ref_name: &String, from_name: &String, holders: &[String], mutable: bool, pointee_copy: bool) -> String {
+    let holders: Vec<String> = holders.iter()
+        .map(|n| if n == LOOP_ITERATOR_HOLDER { n.clone() } else { styled_name_html(n) })
+        .collect();
+    format!(
+        "the {0} {1} points to is no longer borrowed by {2}, but is still {3} borrowed by {4}",
+        held(pointee_copy),
+        styled_name_html(ref_name),
+        styled_name_html(from_name),
+        if mutable { "mutably" } else { "immutably" },
+        holders.join(" and "),
+    )
+}
+
 /// A dot where one reference's borrow ends and a copy of it takes the
 /// loan over (`Some(third) => ..` on `third: Option<&i32>`): the end
 /// (`event_dot_reacquire_still_borrowed`, "v's resource is no longer
