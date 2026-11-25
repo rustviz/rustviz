@@ -2925,7 +2925,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if !matches!(l.kind, ExprKind::Loop(_, _, LoopSource::Loop, _)) || l.span.from_expansion() {
       return false;
     }
-    struct Leaves<'tcx> { tcx: rustc_middle::ty::TyCtxt<'tcx>, l: HirId, found: bool }
+    struct Leaves<'tcx> { tcx: rustc_middle::ty::TyCtxt<'tcx>, typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>, l: HirId, found: bool }
     impl<'tcx> Visitor<'tcx> for Leaves<'tcx> {
       fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
         let inside = |t: HirId| self.tcx.hir_parent_iter(t).any(|(id, _)| id == self.l);
@@ -2936,8 +2936,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
         intravisit::walk_expr(self, e);
       }
+      // Not what comes after a statement that never completes (`loop {
+      // return; break; }`): it is never reached (#1518).
+      fn visit_block(&mut self, b: &'tcx rustc_hir::Block<'tcx>) {
+        for st in b.stmts {
+          self.visit_stmt(st);
+          if matches!(st.kind, StmtKind::Expr(x) | StmtKind::Semi(x) if self.typeck.expr_ty_opt(x).is_some_and(|t| t.is_never())) {
+            return;
+          }
+        }
+        if let Some(t) = b.expr {
+          self.visit_expr(t);
+        }
+      }
     }
-    let mut v = Leaves { tcx: self.tcx, l: l.hir_id, found: false };
+    let mut v = Leaves { tcx: self.tcx, typeck: self.tcx.typeck(l.hir_id.owner), l: l.hir_id, found: false };
     intravisit::walk_expr(&mut v, l);
     !v.found
   }
@@ -2967,6 +2980,34 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         Node::Expr(Expr { kind: ExprKind::Block(_, None) | ExprKind::DropTemps(_), .. }) => {}
         Node::Expr(l) if self.loop_never_ends(l) => in_loop = true,
         Node::Item(_) | Node::ImplItem(_) | Node::TraitItem(_) => return in_loop,
+        _ => return false,
+      }
+    }
+    false
+  }
+
+  /// Whether the panic `call` sits where every path that gets to it
+  /// leaves the function there: in no branch, through statements, plain
+  /// blocks, `let` values, labeled blocks nothing breaks out of and
+  /// `loop`s that never end, up to the function's body (#1545). Like
+  /// `returns_from_breakless_loop`, but also directly in the body
+  /// (where a `return` is `returns_before_body_end`'s), and through the
+  /// blocks the `panic!` macro expands to.
+  fn panic_leaves_every_path(&self, call: &'tcx Expr<'tcx>) -> bool {
+    use rustc_hir::Node;
+    if self.in_closure(call) || self.exit_frames.iter().any(|f| matches!(f, ExitFrame::Branch { .. })) {
+      return false;
+    }
+    let mut child = call.hir_id;
+    for (id, node) in self.tcx.hir_parent_iter(call.hir_id) {
+      let from = std::mem::replace(&mut child, id);
+      match node {
+        Node::Stmt(_) | Node::Block(_) => {}
+        Node::LetStmt(LetStmt { init: Some(init), .. }) if init.hir_id == from => {}
+        Node::Expr(Expr { kind: ExprKind::Block(_, None) | ExprKind::DropTemps(_), .. }) => {}
+        Node::Expr(e @ Expr { kind: ExprKind::Block(b, Some(_)), .. }) if breaks_to_id(e, b.hir_id).is_empty() => {}
+        Node::Expr(l) if self.loop_never_ends(l) => {}
+        Node::Item(_) | Node::ImplItem(_) | Node::TraitItem(_) => return true,
         _ => return false,
       }
     }
@@ -3426,6 +3467,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ExprKind::If(c, then, _) if self.always_matching_if_let(c) => self.expr_diverges(then),
       ExprKind::If(_, then, Some(els)) => self.expr_diverges(then) && self.expr_diverges(els),
       ExprKind::Match(_, arms, _) => !arms.is_empty() && arms.iter().all(|a| self.expr_diverges(a.body)),
+      // A `loop` whose only `break`s can't be reached (`loop { return;
+      // break; }`, typed `()`, #1518).
+      ExprKind::Loop(..) => self.loop_never_ends(e),
       ExprKind::Block(b, _) => {
         b.expr.is_some_and(|t| self.expr_diverges(t))
           || b.stmts.iter().any(|st| matches!(st.kind,
@@ -3829,6 +3873,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       return;
     }
     if let Some(line) = self.panic_line(call) {
+      // One every path that gets here reaches (directly in the
+      // function's body, or in a `loop` that never ends there): it
+      // drops what the function owns on its row, and nothing after it
+      // runs, as such a `return` does (#1545). Its drops were lost.
+      if self.panic_leaves_every_path(call) {
+        let lo = *self.unique_id;
+        self.exit_frames.push(ExitFrame::Branch { len: 0, hide: Vec::new(), binds: Vec::new(), binds_at: 0, fn_level: true });
+        self.drop_locals_on_exit(line, None, None, false, "panic");
+        self.exit_frames.pop();
+        self.keep_inline_exit_drops(lo..*self.unique_id, call);
+        return;
+      }
       self.drop_locals_on_exit(line, None, None, false, "panic");
       if !self.in_closure(call) && self.exit_frames.iter().any(|f| matches!(f, ExitFrame::Branch { .. })) {
         for (_, ro) in self.loop_iterators.clone() {
@@ -4442,13 +4498,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// moves (`branch_divergence`); this sees those made before it too
   /// (`loop { drop(s); if c { break; } s = …; }`, #980), and a value
   /// given back before the `break` (`drop(s); s = …; if c { break; }`).
-  fn note_break_path_moves(&mut self, target: HirId, brk: HirId) {
+  fn note_break_path_moves(&mut self, target: HirId, brk: HirId, value_moves: &BTreeSet<String>, call: bool) {
     let Some(loop_at) = self.exit_frames.iter()
       .rposition(|f| matches!(f, ExitFrame::Loop { id, .. } if *id == target)) else { return };
     let ExitFrame::Loop { len, .. } = self.exit_frames[loop_at] else { return };
     // Only what was in scope where the loop started: not a `for`
     // loop's pattern bindings, which an inner `for row in row` may move.
-    let outer = &self.in_scope[..len.min(self.in_scope.len())];
+    // (A `let s;` local assigned since stands for its columns, #1507.)
+    let outer: Vec<String> = self.scope_names(0, len.min(self.in_scope.len())).into_iter().map(|(_, n)| n.to_owned()).collect();
     let declared_before = |rap: &ResourceAccessPoint| {
       let root = rap.name().trim_start_matches('*').split('.').next().unwrap_or("");
       outer.iter().any(|n| n == root)
@@ -4456,14 +4513,33 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let (events, hide) = self.loop_path_events(loop_at);
     let mut candidates = Vec::new();
     moved_from(&events, &mut candidates);
+    let mut way_out = value_moves.clone();
     for rap in candidates.into_iter().filter(|r| declared_before(r)) {
       let definite = match path_own(&events, &rap, &hide, PathOwn::Yes) {
         PathOwn::Yes => continue,
         PathOwn::No => true,
         PathOwn::Maybe => false,
       };
+      if definite {
+        way_out.insert(rap.name().to_owned());
+      }
       self.break_moves.push(BreakMove { target, brk, rap, definite, on_path: true });
     }
+    // What a call in the `break`'s value moves (`break id(s)`, `break
+    // f()` consuming an `FnOnce` closure `f`) is moved on this way out
+    // too, as the `break` runs (#1526). (A value that is the variable
+    // itself, `break s`, is paired where the loop ends. With one
+    // `break`, the move is all there is to say.)
+    let several = matches!(self.tcx.hir_node(target), rustc_hir::Node::Expr(l) if breaks_to(l).len() > 1);
+    if call && several {
+      for n in value_moves {
+        let Some(rap) = self.raps.get(n).map(|rd| rd.rap.clone()) else { continue };
+        if declared_before(&rap) && !self.break_moves.iter().any(|m| m.brk == brk && m.rap == rap) {
+          self.break_moves.push(BreakMove { target, brk, rap, definite: true, on_path: true });
+        }
+      }
+    }
+    self.way_out_moves.push((target, Some(brk), way_out));
     // What the code after the loop gets from this `break` (#1000,
     // #1001): the variables declared before the loop that the path
     // gives a value to, and what the loop's `loop_given` ones hold
@@ -4497,10 +4573,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
   /// At a `break` out of the labeled block `target` (#1286): the path
   /// to it from the block's start, for `emit_block_break_skips`.
-  fn note_labeled_break_path(&mut self, target: HirId) {
+  fn note_labeled_break_path(&mut self, target: HirId, brk: HirId, value_moves: BTreeSet<String>) {
     let Some(i) = self.labeled_frames.iter().rposition(|f| f.id == target) else { return };
-    let path = self.path_events_since(self.labeled_frames[i].events_at, self.labeled_frames[i].frames_at);
-    self.labeled_frames[i].paths.push(path);
+    let (path, hide) = self.path_events_since(self.labeled_frames[i].events_at, self.labeled_frames[i].frames_at);
+    let mut way_out = value_moves.clone();
+    way_out.extend(moved_on_path(&path, &hide));
+    self.way_out_moves.push((target, Some(brk), way_out));
+    self.labeled_frames[i].paths.push((path, hide, value_moves));
   }
 
   /// At the end of the labeled block `expr` (#1286): a variable declared
@@ -4514,7 +4593,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       return;
     }
     let events = through;
-    let outer = &self.in_scope[..frame.len.min(self.in_scope.len())];
+    // (A `let s;` local assigned since stands for its columns, #1507.)
+    let outer: Vec<String> = self.scope_names(0, frame.len.min(self.in_scope.len())).into_iter().map(|(_, n)| n.to_owned()).collect();
     let mut candidates = Vec::new();
     moved_from(events, &mut candidates);
     let skipped: Vec<ResourceAccessPoint> = candidates.into_iter()
@@ -4523,12 +4603,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         outer.iter().any(|n| n == root) && !emitted.contains(r)
       })
       .filter(|r| path_own(events, r, &[], PathOwn::Yes) == PathOwn::No
-        && frame.paths.iter().any(|(path, hide)| path_own(path, r, hide, PathOwn::Yes) == PathOwn::Yes))
+        // (Not a `break` whose value moves it: `break 'a s` moves s
+        // on that path too, #1504.)
+        && frame.paths.iter().any(|(path, hide, value_moves)| !value_moves.contains(r.name())
+          && path_own(path, r, hide, PathOwn::Yes) == PathOwn::Yes))
       .collect();
     let line = span_end_line(&expr.span, &self.tcx);
     for ro in skipped {
       self.add_external_event(line, ExternalEvent::LoopExitMove {
-        ro, definite: false, at: MaybeMovedAt::LabeledBlock { skipped: true }, id: *self.unique_id,
+        ro, definite: false, at: MaybeMovedAt::LabeledBlock { skipped: true, carried: false }, id: *self.unique_id,
       });
       *self.unique_id += 1;
     }
@@ -4590,7 +4673,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // A `break` out of a labelled block drops nothing drawn.
       ExprKind::Break(dest, _) => branch && dest.target_id.is_ok_and(|t|
         matches!(self.tcx.hir_node(t), Node::Expr(Expr { kind: ExprKind::Loop(..), .. }))),
-      ExprKind::Call(..) => branch && (self.panic_line(e).is_some() || self.process_exit_line(e).is_some()),
+      ExprKind::Call(..) => (branch && (self.panic_line(e).is_some() || self.process_exit_line(e).is_some()))
+        || (self.panic_line(e).is_some() && self.panic_leaves_every_path(e)),
       // A body drawn inline (an `if let` whose pattern always matches,
       // a lone match arm) is where the code around it is: its exits'
       // drops are drawn as they would be there (#1013).
@@ -5359,7 +5443,12 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             frames_at: self.exit_frames.len(), len: entry_len, paths: Vec::new(),
           });
         }
+        let exited_before = self.all_paths_exit;
         self.visit_live_stmts(block); // visit the statements in the block
+        // An exit in it that every path leaves the function at (a
+        // `return` or panic in a `loop` that never ends, #1545) dropped
+        // what it declares.
+        let exited_in = self.all_paths_exit && !exited_before;
         self.in_scope.truncate(entry_len);
           self.current_scope = prev_scope;
         // A bare block (`{ let u = …; }`) in a branch: its locals aren't
@@ -5372,7 +5461,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         if self.inside_branch
           && matches!(self.tcx.parent_hir_node(expr.hir_id), rustc_hir::Node::Stmt(_) | rustc_hir::Node::Block(_))
         {
-          let left = self.left_at_exits(self.inline_in_branch(expr) && self.ends_at_exits(expr, true),
+          let left = self.left_at_exits(exited_in || (self.inline_in_branch(expr) && self.ends_at_exits(expr, true)),
             &get_decl_of_block(block, &self.tcx, &self.raps));
           let decls: HashSet<ResourceAccessPoint> = get_decl_of_block(block, &self.tcx, &self.raps)
             .into_iter().filter(|v| needs_scope_end(v) && !left.contains(v)).collect();
@@ -5385,6 +5474,15 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           let frame = self.labeled_frames.pop();
           let through = frame.as_ref().filter(|_| !self.block_diverges(block))
             .map(|f| self.preprocessed_events[f.events_at.min(self.preprocessed_events.len())..].to_vec());
+          // Its end is a way out too, moving what the way there and
+          // its last expression move (#1504).
+          if let Some(through) = &through {
+            let mut way_out = moved_on_path(through, &[]);
+            if let Some(tail) = block.expr {
+              way_out.extend(locals_moved_by(self.tcx, tail));
+            }
+            self.way_out_moves.push((block.hir_id, None, way_out));
+          }
           let emitted = self.emit_loop_exit_moves(expr, Some(block.hir_id), &before, true, through.as_deref());
           if let (Some(frame), Some(through)) = (frame, through) {
             self.emit_block_break_skips(expr, frame, &through, &emitted);
@@ -5683,8 +5781,10 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // What the iteration moved on the way to this `break`, before
         // its value (which a `break s` hands to the loop's receiver).
         if let Ok(target) = dest.target_id {
-          self.note_break_path_moves(target, expr.hir_id);
-          self.note_labeled_break_path(target);
+          let value_moves = value.map(|v| locals_moved_by(self.tcx, v)).unwrap_or_default();
+          let call = value.is_some_and(|v| matches!(v.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)));
+          self.note_break_path_moves(target, expr.hir_id, &value_moves, call);
+          self.note_labeled_break_path(target, expr.hir_id, value_moves);
         }
         intravisit::walk_expr(self, expr);
         // `let r = loop { break k; }`: `r` gets `k` (#431).
@@ -15776,6 +15876,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
         let in_loop = local_of_path(root)
           .is_some_and(|l| loop_expr.span.contains(self.tcx.hir_span(l)));
+        // A variable every other way out moves as well (`'a: { if c {
+        // break 'a s; } id(s) }`): moved whichever way ran, so this way
+        // only says where it went, as for one declared inside (#1504).
+        let in_loop = in_loop || local_of_path(root)
+          .is_some_and(|l| self.moved_on_other_ways_out(loop_expr, value, &binding_name(&self.tcx, l)));
         // A labeled block's value comes from a `break` or its last
         // expression (#1134).
         let end = match loop_expr.kind {
@@ -15790,6 +15895,30 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     self.line_override = line;
     self.break_out = saved_names;
+  }
+
+  /// Whether every way out of `loop_expr` (a `loop`, or a labeled
+  /// block) but the one `value` leaves by (a `break`'s value, or the
+  /// block's last expression) moves `name` (`way_out_moves`). A `while`
+  /// or `for` loop also ends by its condition or iterator: no.
+  fn moved_on_other_ways_out(&self, loop_expr: &'tcx Expr<'tcx>, value: &'tcx Expr<'tcx>, name: &str) -> bool {
+    let target = match loop_expr.kind {
+      ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _) => loop_expr.hir_id,
+      ExprKind::Block(b, Some(_)) => b.hir_id,
+      _ => return false,
+    };
+    let mine = match self.tcx.parent_hir_node(value.hir_id) {
+      rustc_hir::Node::Expr(e) if matches!(e.kind, ExprKind::Break(..)) => Some(e.hir_id),
+      _ => None,
+    };
+    let moves = |way: Option<HirId>| self.way_out_moves.iter()
+      .any(|(t, brk, moved)| *t == target && *brk == way && moved.contains(name));
+    // Each other `break` (one never seen, unrecorded, says no), and a
+    // labeled block's end if it is reached (recorded then).
+    let others: Vec<HirId> = breaks_to_id(loop_expr, target).into_iter()
+      .map(|(b, _)| b.hir_id).filter(|b| Some(*b) != mine).collect();
+    let end = mine.is_some() && self.way_out_moves.iter().any(|(t, brk, _)| *t == target && brk.is_none());
+    (!others.is_empty() || end) && others.iter().all(|b| moves(Some(*b))) && (!end || moves(None))
   }
 
   /// `brk` (a `break` expression) as written, for a tooltip: `None`
@@ -15822,10 +15951,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if mine.is_empty() {
       return emitted;
     }
-    let all_breaks = match block {
-      Some(id) => breaks_to_id(loop_expr, id).len(),
-      None => breaks_to(loop_expr).len(),
-    };
+    let breaks: Vec<HirId> = match block {
+      Some(id) => breaks_to_id(loop_expr, id),
+      None => breaks_to(loop_expr),
+    }.into_iter().map(|(b, _)| b.hir_id).collect();
     let line = span_end_line(&loop_expr.span, &self.tcx);
     let mut done: Vec<&ResourceAccessPoint> = Vec::new();
     let mut rounds: Option<Vec<(String, Ownership, bool)>> = None;
@@ -15851,7 +15980,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         Some(_) => through.is_some_and(|ev| path_own(ev, &m.rap, &[], PathOwn::Yes) != PathOwn::No),
         None => ends_otherwise,
       };
-      let definite = !ends_otherwise && definite_breaks.len() == all_breaks;
+      // (Or whose value moves it: `break 'a s`, #1504.)
+      let target = block.unwrap_or(loop_expr.hir_id);
+      let carries = |b: &HirId| !definite_breaks.contains(b)
+        && self.way_out_moves.iter().any(|(t, brk, moved)| *t == target && *brk == Some(*b) && moved.contains(m.rap.name()));
+      let carried = breaks.iter().any(carries);
+      let definite = !ends_otherwise && breaks.iter().all(|b| definite_breaks.contains(b) || carries(b));
       // Only seen on the path to a `break`, not in the branch that
       // breaks: the move may be in no branch (#980).
       let nothing_above = mine.iter().all(|o| o.rap != m.rap || o.on_path);
@@ -15864,7 +15998,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       };
       self.add_external_event(line, ExternalEvent::LoopExitMove {
         ro: m.rap.clone(), definite,
-        at: if block.is_some() { MaybeMovedAt::LabeledBlock { skipped: false } } else { MaybeMovedAt::Loop { nothing_above, kept } },
+        at: if block.is_some() { MaybeMovedAt::LabeledBlock { skipped: false, carried } } else { MaybeMovedAt::Loop { nothing_above, kept, carried } },
         id: *self.unique_id,
       });
       *self.unique_id += 1;
@@ -15880,6 +16014,8 @@ fn moved_from(events: &[(usize, ExternalEvent)], out: &mut Vec<ResourceAccessPoi
     let rap = match e {
       ExternalEvent::Move { from: ResourceTy::Value(r), .. } => r,
       ExternalEvent::OrAltMove { ro, tuple: None, .. } | ExternalEvent::LoopExitMove { ro, .. } => ro,
+      // An `FnOnce` closure its call consumes (#1526).
+      ExternalEvent::ClosureCall { closure: ResourceTy::Value(r), .. } => r,
       ExternalEvent::Branch { branches, .. } => {
         for b in branches {
           moved_from(&b.e_data, out);
@@ -15892,6 +16028,17 @@ fn moved_from(events: &[(usize, ExternalEvent)], out: &mut Vec<ResourceAccessPoi
       out.push(rap.clone());
     }
   }
+}
+
+/// The variables moved on every path through `events` (minus the
+/// event ids in `hide`) (#1504).
+fn moved_on_path(events: &[(usize, ExternalEvent)], hide: &[std::ops::Range<usize>]) -> BTreeSet<String> {
+  let mut candidates = Vec::new();
+  moved_from(events, &mut candidates);
+  candidates.into_iter()
+    .filter(|r| path_own(events, r, hide, PathOwn::Yes) == PathOwn::No)
+    .map(|r| r.name().to_owned())
+    .collect()
 }
 
 /// What a variable holds after a stretch of a path (see
@@ -15911,10 +16058,11 @@ fn path_own(events: &[(usize, ExternalEvent)], rap: &ResourceAccessPoint, hide: 
       ExternalEvent::Move { to, .. } | ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. }
         if is(to) => PathOwn::Yes,
       ExternalEvent::Move { from, .. } if is(from) => PathOwn::No,
+      ExternalEvent::ClosureCall { closure, .. } if is(closure) => PathOwn::No,
       ExternalEvent::OrAltMove { ro, tuple: None, .. } if ro == rap && own == PathOwn::Yes => PathOwn::Maybe,
       // A labeled block that may end through a `break` before the
       // move on the way to its end (#1286).
-      ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::LabeledBlock { skipped: true }, .. }
+      ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::LabeledBlock { skipped: true, .. }, .. }
         if ro == rap && own == PathOwn::No => PathOwn::Maybe,
       // An inner loop's `break` after a move, or a let-chain's
       // condition that moved it before failing.

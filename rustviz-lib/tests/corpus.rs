@@ -27265,6 +27265,170 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "g2.r is live in a conditional expression",
         ],
     },
+    TooltipExpect {
+        name: "let_else_nested_exit_1500",
+        // #1500: x, y and z are bound only where the `let`-`else` pattern
+        // matched. In the `else` block (which leaves from a nested `if`
+        // / `match`) they don't exist: no borrow of theirs ends there,
+        // and they get no column in its conditionals. The scrutinee is
+        // dropped at each exit.
+        must_contain: &[
+            "x immutably borrows a resource",
+            "y mutably borrows a resource",
+            "z immutably borrows a resource",
+            "o goes out of scope. Its resource is dropped (including the String it holds, if any).",
+            "p goes out of scope. Its resource is dropped (including the String it holds, if any).",
+            "q goes out of scope. Its resource is dropped (including the String it holds, if any).",
+        ],
+        must_not_contain: &[
+            "x is live in a conditional expression",
+            "x still has no value here",
+            "y is live in a conditional expression",
+            "y still has no value here",
+            "z is live in a conditional expression",
+            "z still has no value here",
+        ],
+    },
+    TooltipExpect {
+        name: "arm_value_after_early_exit_1501",
+        // #1501: the exit in the arm (`return`, a panic) comes before the
+        // arm's value moves s, so s still holds its String there and the
+        // exit drops it. (The `?` in `fourth` was already drawn so.)
+        must_contain: &[
+            "s goes out of scope. Its resource is dropped.",
+            "s isn't moved in any of the branches above",
+            "s2 goes out of scope. Its resource is dropped.",
+            "s2 isn't moved in any of the branches above",
+            "s3 goes out of scope. Its resource is dropped.",
+            "s3 isn't moved in any of the branches above",
+            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and s4's resource is dropped. If the `?` succeeds, nothing happens to s4 here.",
+        ],
+        must_not_contain: &[
+            "=s goes out of scope. No resource is dropped.",
+            "=s2 goes out of scope. No resource is dropped.",
+            "=s3 goes out of scope. No resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "block_break_and_tail_move_1504",
+        // #1504: every way out moves s (the `break` that carries it, and
+        // the way to the block's end), so s is moved after the block on
+        // every path; no `break` comes before s is moved.
+        must_contain: &[
+            "s's resource is moved to t if the block ended with break 'blk s",
+            "s2's resource is moved to t2 if the block ended with break 'blk s2",
+            "s3's resource is moved to t3 if the loop ended with break s3",
+            "s3 is moved by the time the loop ends: each break out of it either comes after s3 is moved or moves s3 itself, so s3 can't be used after the loop",
+            "s4 is moved by the time the block ends: each break out of it either comes after s4 is moved or moves s4 itself, and its end comes after s4 is moved, so s4 can't be used after the block",
+            "s4's resource is moved to t4 if the block ended with break 'blk s4",
+            "s goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &[
+            "a break that comes before s is moved",
+            "a break that comes before s2 is moved",
+            "s may have been moved",
+            "s2 may have been moved",
+            "s3 may have been moved",
+            "s4 may have been moved",
+        ],
+    },
+    TooltipExpect {
+        name: "let_x_block_break_skip_1507",
+        // #1507: a `let s;` local assigned in each branch, then moved
+        // after a `break` that skips the move: the block's (or loop's)
+        // end says it may have been moved, as for `let s = ..;`.
+        must_contain: &[
+            "s may have been moved: the block can end through a break that comes before s is moved, or by reaching its end after s is moved, so s can't be used after the block",
+            "s goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "s2 may have been moved: the block can end through a break that comes before s2 is moved, or by reaching its end after s2 is moved, so s2 can't be used after the block",
+            "s3 may have been moved: the loop can end through a break that comes after s3 is moved, so s3 can't be used after the loop",
+        ],
+        // (True, but it was drawn on a column with no line: the dot that
+        // ends the line where the block ends was missing.)
+        must_not_contain: &[
+            "=s goes out of scope. Its resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
+            "=s2 goes out of scope. Its resource is dropped here only if s2 still holds it (Rust tracks this with a runtime drop flag).",
+            "=s3 goes out of scope. Its resource is dropped here only if s3 still holds it (Rust tracks this with a runtime drop flag).",
+        ],
+    },
+    TooltipExpect {
+        name: "fnonce_call_value_tail_1526",
+        // #1526: the FnOnce call consumes the closure on the path that
+        // reaches it only. After the block / join the closure may have
+        // been moved, and its capture is dropped at its scope end only if
+        // it wasn't called. The call's result, not the closure, reaches
+        // the receiver where the block ends.
+        must_contain: &[
+            "c may have been moved: the block can end through a break that comes before c is moved, or by reaching its end after c is moved, so c can't be used after the block",
+            "c goes out of scope. Its captured resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "c2 was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when c2 goes out of scope.",
+            "c2 goes out of scope. Its captured resource is dropped here only if no branch above called or moved it (Rust tracks this with a runtime drop flag).",
+            "c3 goes out of scope. Its captured resource is dropped here only if no branch above called or moved it (Rust tracks this with a runtime drop flag).",
+            "c4 goes out of scope. Its captured resource is dropped here only if no branch above called or moved it (Rust tracks this with a runtime drop flag).",
+            "c5 may have been moved: the loop can end through a break that comes after c5 is moved, so c5 can't be used after the loop",
+        ],
+        must_not_contain: &[
+            "which moves c's resource to s4",
+            "which moves c5's resource to t5",
+            "c2 goes out of scope. Its 1 captured resource is dropped.",
+            "c3 goes out of scope. Its 1 captured resource is dropped.",
+            "c4 goes out of scope. Its 1 captured resource is dropped.",
+            "c2 may have been moved (consumed in at least one branch above)",
+        ],
+    },
+    TooltipExpect {
+        name: "closure_capture_arm_tail_1523",
+        // #1523: the closure's borrow is on the closure's line, the
+        // arm's value moves x on its own line after it; after the join x
+        // can't be used (moved, or maybe moved).
+        must_contain: &[
+            "s goes out of scope. No resource is dropped: s was moved or dropped in every branch above.",
+            "s4 was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when s4 goes out of scope.",
+            "s6 was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped when s6 goes out of scope.",
+            "s7 was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped when s7 goes out of scope.",
+        ],
+        must_not_contain: &[
+            "s was moved in at least one branch above",
+            "s4 may have been moved (consumed in at least one branch above)",
+            "s6 may have been moved (consumed in at least one branch above)",
+            "s7 may have been moved (consumed in at least one branch above)",
+        ],
+    },
+    TooltipExpect {
+        name: "loop_unreachable_break_1518",
+        // #1518: the `break` after the `return` is never reached: the
+        // loop never ends, nothing after it runs, and s is dropped at the
+        // `return`.
+        must_contain: &[
+            "s goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "r2 is initialized with a copy of r",
+            "Return immutably borrowed resource from r2 to s",
+            "If the `return` on line 9 runs first",
+        ],
+    },
+    TooltipExpect {
+        name: "panic_in_endless_loop_1545",
+        // #1545: a panic every path gets to (in a `loop` that never ends,
+        // also behind a labeled block or with an unreachable `break`
+        // after it) unwinds out of the function: what it owns is dropped
+        // there, once, and nothing after the loop runs.
+        must_contain: &[
+            "s goes out of scope. Its resource is dropped.",
+            "s2 goes out of scope. Its resource is dropped.",
+            "s3 goes out of scope. Its resource is dropped.",
+            "t3 goes out of scope. Its resource is dropped.",
+            "s4 goes out of scope. Its resource is dropped.",
+            "t4 goes out of scope. Its resource is dropped.",
+            "s5 goes out of scope. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "r2 is initialized with a copy of r",
+            "Return immutably borrowed resource from r2 to s2",
+            "=t4 goes out of scope. No resource is dropped.",
+        ],
+    },
 ];
 
 /// #1440: on the line where two loans of v end, the first end's dot (with

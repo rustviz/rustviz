@@ -389,7 +389,7 @@ fn states_partial_drop(d: &Dot) -> bool {
 /// out, drawn where the block ends (#1288: "k's resource is moved to r if
 /// the block ended with break 'blk k").
 fn break_out_move(d: &Dot) -> bool {
-    d.has("move") && (d.tip.contains("break that ends the loop") || block_local_break_move(d))
+    d.has("move") && (d.tip.contains("break that ends the loop") || block_local_break_move(d) || loop_break_alt_move(d))
 }
 
 /// A move of a labeled block's local by one of the block's ways out
@@ -397,6 +397,14 @@ fn break_out_move(d: &Dot) -> bool {
 /// still there, and dropped where the block ends, below.
 fn block_local_break_move(d: &Dot) -> bool {
     d.has("move") && d.tip.contains("if the block ended with")
+        && !d.tip.contains("may have been moved")
+}
+
+/// The move by one `break` of a variable every other way out of the
+/// `loop` moves too, on the way there (`loop { if c { break s; } break
+/// id(s); }`, #1504): drawn where the loop ends, after that move.
+fn loop_break_alt_move(d: &Dot) -> bool {
+    d.has("move") && d.tip.contains("if the loop ended with")
         && !d.tip.contains("may have been moved")
 }
 

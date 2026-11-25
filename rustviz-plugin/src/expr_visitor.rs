@@ -769,6 +769,11 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   pub break_moves: Vec<BreakMove>,
   // The labeled blocks being visited, innermost last (#1286).
   pub labeled_frames: Vec<LabeledFrame>,
+  // Each way out of a `loop` or labeled block seen so far: the HirId
+  // its `break`s target, the `break` (`None`: a labeled block's end,
+  // when reached) and the variables moved on every path that leaves
+  // that way, its value's moves included (#1504).
+  pub way_out_moves: Vec<(rustc_hir::HirId, Option<rustc_hir::HirId>, BTreeSet<String>)>,
   // The loops being visited (by the HirId their `break`s name) and
   // the variables declared before each that hold no value where it
   // starts but may where it comes back round (`given_round_loop`,
@@ -1005,8 +1010,9 @@ pub struct LabeledFrame {
   pub events_at: usize,
   pub frames_at: usize,
   pub len: usize,
-  /// The path to each `break` out of it (`path_events_since`).
-  pub paths: Vec<(Vec<(usize, ExternalEvent)>, Vec<std::ops::Range<usize>>)>,
+  /// The path to each `break` out of it (`path_events_since`), and
+  /// the variables its value moves (`break 'a s` moves s, #1504).
+  pub paths: Vec<(Vec<(usize, ExternalEvent)>, Vec<std::ops::Range<usize>>, BTreeSet<String>)>,
 }
 
 /// See `ExprVisitor::break_states`.
@@ -1247,6 +1253,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       deferred_lines: Vec::new(),
       break_out: Vec::new(),
       labeled_frames: Vec::new(),
+      way_out_moves: Vec::new(),
       break_alt: None,
       break_pats: Vec::new(),
       break_assigns: Vec::new(),
@@ -3057,16 +3064,32 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         _ => break,
       }
     }
-    struct Locals { hids: Vec<rustc_hir::HirId> }
-    impl<'tcx> rustc_hir::intravisit::Visitor<'tcx> for Locals {
+    // A call through a local (`f()`, an `FnOnce` closure the call
+    // consumes, #1526): the call's events, made as the branch is
+    // visited, come before the value's.
+    if matches!(e.kind, ExprKind::Call(callee, _) if local_of_path(callee).is_some()) {
+      return true;
+    }
+    // (What a closure captures counts as used where the closure is
+    // made: `let c = || s.len(); s`, #1523.)
+    struct Locals<'tcx> { tcx: TyCtxt<'tcx>, hids: Vec<rustc_hir::HirId> }
+    impl<'tcx> rustc_hir::intravisit::Visitor<'tcx> for Locals<'tcx> {
       fn visit_path(&mut self, path: &rustc_hir::Path<'tcx>, _id: rustc_hir::HirId) {
         if let Res::Local(hid) = path.res {
           self.hids.push(hid);
         }
         rustc_hir::intravisit::walk_path(self, path);
       }
+      fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+        if let ExprKind::Closure(c) = e.kind {
+          if let Some(upvars) = self.tcx.upvars_mentioned(c.def_id) {
+            self.hids.extend(upvars.keys().copied());
+          }
+        }
+        rustc_hir::intravisit::walk_expr(self, e);
+      }
     }
-    let mut v = Locals { hids: Vec::new() };
+    let mut v = Locals { tcx: self.tcx, hids: Vec::new() };
     rustc_hir::intravisit::Visitor::visit_expr(&mut v, e);
     if v.hids.iter().any(|&hid| within.contains(self.tcx.hir_span(hid))) {
       return true;
@@ -3075,11 +3098,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if self.makes_branch_temp(e) {
       return true;
     }
-    let mut used = Locals { hids: Vec::new() };
-    for st in stmts {
+    let mut used = Locals { tcx: self.tcx, hids: Vec::new() };
+    for st in stmts.iter() {
       rustc_hir::intravisit::Visitor::visit_stmt(&mut used, st);
     }
-    v.hids.iter().any(|h| used.hids.contains(h))
+    if v.hids.iter().any(|h| used.hids.contains(h)) {
+      return true;
+    }
+    // A branch whose statements can leave it early (`if c { if
+    // r.is_empty() { return 1; } s } ..`, #1501): the exit's drops come
+    // before the value is given, so `s` still holds its value there.
+    stmts.iter().any(|st| stmt_may_exit(self.tcx, st))
   }
 
   /// Whether `e` contains a temporary that a `let` extends through a
@@ -10968,8 +10997,12 @@ pub fn match_rhs_call(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
   let callee = match local_callee_result_key(rhs, &self.tcx) {
     // A Copy result (`let n = f();` with `f: FnOnce() -> i32`)
     // isn't a copy of anything `f` holds: it comes from the call
-    // (#271).
-    LocalCallee::Consumed if matches!(evt, Evt::Copy) => {
+    // (#271). Nor is the value of one of several ways out of a
+    // labeled block or loop (`'a: { if c { break 'a t; } f() }`,
+    // #1526): the call consumed `f` where it was made, on that way
+    // only (`ClosureCall`), and the result reaches the receiver where
+    // the block ends.
+    LocalCallee::Consumed if matches!(evt, Evt::Copy) || self.break_alt.is_some() => {
       match hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
         Some(n) => LocalCallee::Call(fn_key(&n)),
         None => LocalCallee::Consumed,
@@ -12619,7 +12652,7 @@ pub fn print_out_of_scope(&mut self){
     let assigned: HashMap<String, usize> = self.borrow_map.iter()
       .map(|(n, d)| (n.clone(), d.assigned_at))
       .collect();
-    let mut cx = ExitCtx { scopes: &self.exit_scopes, assigned: &assigned, loop_loans: &self.for_loop_loans, unique_id: self.unique_id, dropped: Vec::new(), refdied: Vec::new() };
+    let mut cx = ExitCtx { scopes: &self.exit_scopes, assigned: &assigned, loop_loans: &self.for_loop_loans, unique_id: self.unique_id, dropped: Vec::new(), refdied: Vec::new(), unbound: Vec::new() };
     end_borrows_at_exits_in(self.preprocessed_events, &[], &mut cx);
     // The ends the arms made redundant (#767) are no arrows either.
     let (dropped, refdied) = (cx.dropped, cx.refdied);
@@ -14149,6 +14182,11 @@ struct ExitCtx<'b> {
   dropped: Vec<usize>,
   /// Ids of the borrow ends that now give nothing back (a `RefDie`).
   refdied: Vec<usize>,
+  /// The references bound where an enclosing conditional splits, after
+  /// it (`let Some(x) = &o else { .. };`, `let r = if c { .. } ..`):
+  /// they don't exist in its arms, so an exit in a conditional nested
+  /// there ends no borrow of theirs (#1500).
+  unbound: Vec<String>,
 }
 
 /// `(r, lender)` if `e` ends the borrow the reference `r` holds;
@@ -14258,10 +14296,21 @@ fn end_borrows_at_exits_in(
       .flat_map(|b| b.decl_vars.iter().cloned())
       .collect();
     let mut added: HashSet<ResourceAccessPoint> = HashSet::new();
+    let split = *split_point;
     for (b, arm) in branches.iter_mut().enumerate() {
-      // Exits in conditionals nested in the arm first.
+      // Exits in conditionals nested in the arm first. (Not ending the
+      // borrows of what is bound on the split line, after the
+      // conditional, #1500.)
+      let outer = cx.unbound.len();
+      #[expect(clippy::disallowed_methods, reason = "collected into a list only searched")]
+      let unbound: Vec<String> = cx.assigned.iter()
+        .filter(|(n, made)| **made == split && !arm.decl_vars.iter().any(|v| v.name() == n.as_str()))
+        .map(|(n, _)| n.clone())
+        .collect();
+      cx.unbound.extend(unbound);
       added.extend(end_borrows_at_exits_in(&mut arm.e_data, &later, cx).into_iter()
         .filter(|v| !arm.decl_vars.contains(v)));
+      cx.unbound.truncate(outer);
       let Some(scope) = scope else { continue };
       if !arm.diverges || arm.exits.is_empty() || scope.in_closure || matches!(branch_type, BranchType::Loop(..)) {
         continue;
@@ -14309,7 +14358,7 @@ fn end_borrows_at_exits_in(
         // An end on the conditional's own lines that wasn't put into
         // its arms (`end_outer_borrows_in_arms`) can't be told apart
         // from the conditional; leave it.
-        if *line < *merge_point || declared.contains(r) || made >= *split_point || !leaves(*line, made, arm.break_carries.iter().any(|n| n == r.name()), cx.loop_loans.contains(r.name()))
+        if *line < *merge_point || declared.contains(r) || made >= *split_point || cx.unbound.iter().any(|n| n == r.name()) || !leaves(*line, made, arm.break_carries.iter().any(|n| n == r.name()), cx.loop_loans.contains(r.name()))
           || to.extract_rap().is_some_and(|l| l.is_fn())
           || ends_on_every_path(&arm.e_data, r, to)
         {
@@ -15367,4 +15416,35 @@ fn take_ctor_arg_events_in(events: &mut Vec<(usize, ExternalEvent)>, ids: std::o
     }
     !hit
   });
+}
+
+/// Whether statement `st` contains a `return`, `break`, `continue`, `?`
+/// or an expression of type `!` (a panic), outside closures: a way out
+/// of the branch it is in before the branch's value (#1501).
+fn stmt_may_exit<'tcx>(tcx: TyCtxt<'tcx>, st: &'tcx rustc_hir::Stmt<'tcx>) -> bool {
+  struct Exits<'tcx> { typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>, found: bool }
+  impl<'tcx> rustc_hir::intravisit::Visitor<'tcx> for Exits<'tcx> {
+    fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+      if self.found {
+        return;
+      }
+      match e.kind {
+        ExprKind::Closure(..) => return,
+        ExprKind::Ret(..) | ExprKind::Break(..) | ExprKind::Continue(..)
+        | ExprKind::Match(_, _, rustc_hir::MatchSource::TryDesugar(_)) => {
+          self.found = true;
+          return;
+        }
+        _ => {}
+      }
+      if self.typeck.expr_ty_opt(e).is_some_and(|t| t.is_never()) {
+        self.found = true;
+        return;
+      }
+      rustc_hir::intravisit::walk_expr(self, e);
+    }
+  }
+  let mut v = Exits { typeck: tcx.typeck(st.hir_id.owner), found: false };
+  rustc_hir::intravisit::Visitor::visit_stmt(&mut v, st);
+  v.found
 }

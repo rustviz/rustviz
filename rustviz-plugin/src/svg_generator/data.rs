@@ -1664,12 +1664,16 @@ pub enum MaybeMovedAt {
     /// loop isn't down to whether something above moved it: as
     /// `LoopRound { kept: true }`, a drop flag's text says "only if it
     /// still holds it" (#1029).
-    Loop { nothing_above: bool, kept: bool },
+    /// `carried`: a `break` that doesn't come after the move moves it
+    /// itself (`break s`, #1504): with `definite`, every way out moves
+    /// it, by then or by its value.
+    Loop { nothing_above: bool, kept: bool, carried: bool },
     /// The end of a labeled block (`'a: { … break 'a; … }`).
     /// `skipped`: the move is on the way to the block's end, and a
     /// `break` out of it before the move skips it (`'a: { if c { break
     /// 'a; } drop(s); }`, #1286); otherwise a `break` comes after it.
-    LabeledBlock { skipped: bool },
+    /// `carried`: as for `Loop`.
+    LabeledBlock { skipped: bool, carried: bool },
     /// The start of the `else` branch (`path`: or the implicit empty
     /// one) of an `if` whose let-chain condition moves the variable in
     /// a part that a part which can be false comes after
@@ -3872,14 +3876,14 @@ impl Event {
             Event::ManuallyDropByHand => {
                 hover_messages::event_dot_manually_drop_by_hand(my_name)
             }
-            Event::LoopExitMove { definite, at: MaybeMovedAt::Loop { .. } } => {
-                hover_messages::event_dot_loop_exit_move(my_name, *definite, false)
+            Event::LoopExitMove { definite, at: MaybeMovedAt::Loop { carried, .. } } => {
+                hover_messages::event_dot_loop_exit_move(my_name, *definite, false, *carried)
             }
-            Event::LoopExitMove { at: MaybeMovedAt::LabeledBlock { skipped: true }, .. } => {
+            Event::LoopExitMove { at: MaybeMovedAt::LabeledBlock { skipped: true, .. }, .. } => {
                 hover_messages::event_dot_block_break_skips_move(my_name)
             }
-            Event::LoopExitMove { definite, at: MaybeMovedAt::LabeledBlock { skipped: false } } => {
-                hover_messages::event_dot_loop_exit_move(my_name, *definite, true)
+            Event::LoopExitMove { definite, at: MaybeMovedAt::LabeledBlock { skipped: false, carried } } => {
+                hover_messages::event_dot_loop_exit_move(my_name, *definite, true, *carried)
             }
             Event::LoopExitMove { definite, at: MaybeMovedAt::ChainFail { to, dropped, path, how } } => {
                 hover_messages::event_dot_chain_fail_move(my_name, *definite, to, dropped, *path, how)
