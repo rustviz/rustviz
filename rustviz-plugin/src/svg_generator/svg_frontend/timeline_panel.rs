@@ -2404,11 +2404,11 @@ fn render_dot(
         };
         if let Some(mut name) = visualization_data.get_name_from_hash(hash) {
             match event {
-                Event::OwnerGoOutOfScope { early: Some(EarlyReturns { process_exit: Some(call), .. }), .. } => {
+                Event::OwnerGoOutOfScope { early: Some(EarlyReturns { process_exit: Some(exit), .. }), .. } => {
                     // At a `process::exit`: the process ends, no
                     // destructor runs (#1172). A plain dot.
                     let owns = loop_runs_on_owns(hash, history, resource_hold, visualization_data);
-                    data.title = hover_messages::event_dot_process_exit(&name, owns, call);
+                    data.title = hover_messages::event_dot_process_exit(&name, owns, exit);
                     append_dot(data, timeline_data, dots, None, rv_attrs::event_name(event), *line_number);
                     continue;
                 }

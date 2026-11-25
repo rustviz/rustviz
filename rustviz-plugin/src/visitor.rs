@@ -2448,6 +2448,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// so it is stated even where the locals' drops aren't drawn (the
   /// exit is in an `if` without `else`).
   fn drop_locals_on_exit(&mut self, line: usize, value: Option<&'tcx Expr<'tcx>>, loop_id: Option<HirId>, labeled: bool, how: &str) {
+    let no_drop_exit = self.no_drop_exit.take();
     let Some(branch_at) = self.exit_frames.iter()
       .rposition(|f| matches!(f, ExitFrame::Branch { .. })) else { return };
     let ExitFrame::Branch { len: branch_len, .. } = self.exit_frames[branch_at] else { return };
@@ -2553,11 +2554,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // local's column ends here with a dot that says so (#1172). (A
     // temporary or a tuple scrutinee isn't dropped either; they have
     // no column to end.)
-    let process_exit = match how {
-      "process::exit" => Some("process::exit"),
-      "process::abort" => Some("process::abort"),
+    // (So does a call to a function of the user's that never returns and
+    // doesn't always panic, `no_drop_exit`: it says how, #1553.)
+    let process_exit = no_drop_exit.or_else(|| match how {
+      "process::exit" | "process::abort" => Some(NoDropExit { call: how.to_owned(), how: NeverReturns::Exits }),
       _ => None,
-    };
+    });
     if process_exit.is_some() {
       for (_, rap) in droppable {
         if rap.is_temporary() {
@@ -2566,7 +2568,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let id = *self.unique_id;
         *self.unique_id += 1;
         self.exit_drops.insert(id);
-        let early = Some(EarlyReturns { process_exit, ..EarlyReturns::default() });
+        let early = Some(EarlyReturns { process_exit: process_exit.clone(), ..EarlyReturns::default() });
         self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, holds: None, id, early });
       }
       for rap in scoped {
@@ -2574,7 +2576,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         *self.unique_id += 1;
         self.exit_drops.insert(id);
         self.exit_scope_ended.insert(rap.name().to_string());
-        let early = Some(EarlyReturns { process_exit, ..EarlyReturns::default() });
+        let early = Some(EarlyReturns { process_exit: process_exit.clone(), ..EarlyReturns::default() });
         self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, holds: None, id, early });
       }
       return;
@@ -3113,7 +3115,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               ExprKind::Path(ref qp) => self.typeck.qpath_res(qp, f.hir_id).opt_def_id(),
               _ => None,
             };
-            let quits = callee.is_some_and(|d| matches!(self.tcx.def_path_str(d).as_str(), "std::process::exit" | "std::process::abort"));
+            // (Nor a function of the user's that never returns without
+            // panicking, or may not panic, #1553.)
+            let quits = callee.is_some_and(|d| std_exit_fn(self.tcx, d).is_some()
+              || matches!(never_fn_kind(self.tcx, d), Some(NeverFn::NoDrop(_))));
             if never && !quits {
               self.dropping = true;
             } else {
@@ -3413,39 +3418,39 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// `std::panic::panic_any` call), the line of the panic in the
   /// user's code. A panic unwinds the stack, dropping every local on
   /// the way (#410). `std::process::exit` also never returns, but
-  /// runs no destructors, so it isn't one.
+  /// runs no destructors, so it isn't one. Nor is every call to a
+  /// function of the user's that returns `!`: one is a panic when its
+  /// body always panics (`fn fail() -> ! { panic!("x") }`, #1553).
+  /// So is a call of a local closure whose body always panics (`let f =
+  /// || panic!("x"); f();`, #1562).
   fn panic_line(&self, call: &'tcx Expr<'tcx>) -> Option<usize> {
-    let ExprKind::Call(callee, _) = call.kind else { return None };
-    let ExprKind::Path(QPath::Resolved(_, path)) = callee.kind else { return None };
-    let Res::Def(DefKind::Fn, def_id) = path.res else { return None };
-    if !matches!(self.tcx.crate_name(def_id.krate).as_str(), "core" | "std") {
-      return None;
-    }
-    let def_path = self.tcx.def_path(def_id).to_string_no_crate_verbose();
-    let unwinds = (def_path.starts_with("::panicking::")
-        && !def_path.contains("nounwind") && !def_path.contains("cannot_unwind"))
-      || def_path.ends_with("::begin_panic")
-      || def_path == "::panic::panic_any"
-      || def_path == "::panic::resume_unwind";
+    let unwinds = match callee_def_id(self.tcx, call) {
+      Some(def_id) => std_panic_fn(self.tcx, def_id) || never_fn_kind(self.tcx, def_id) == Some(NeverFn::Panics),
+      None => closure_call_never_kind(self.tcx, call).is_some_and(|(k, _)| k == NeverFn::Panics),
+    };
     unwinds.then(|| span_to_line(&call.span.source_callsite(), &self.tcx))
   }
 
   /// If `call` is a call to `std::process::exit` or `abort`, which end
   /// the process without running any destructor (#1172), the line of
-  /// the call and how to name it.
-  fn process_exit_line(&self, call: &'tcx Expr<'tcx>) -> Option<(usize, &'static str)> {
-    let ExprKind::Call(callee, _) = call.kind else { return None };
-    let ExprKind::Path(QPath::Resolved(_, path)) = callee.kind else { return None };
-    let Res::Def(DefKind::Fn, def_id) = path.res else { return None };
-    if self.tcx.crate_name(def_id.krate).as_str() != "std" {
-      return None;
-    }
-    let name = match self.tcx.def_path(def_id).to_string_no_crate_verbose().as_str() {
-      "::process::exit" => "process::exit",
-      "::process::abort" => "process::abort",
-      _ => return None,
+  /// the call and how to name it. Or to a function of the user's that
+  /// never returns and doesn't always panic (#1553): it ends the
+  /// process, loops forever, or its body doesn't say which (it may
+  /// panic).
+  fn process_exit_line(&self, call: &'tcx Expr<'tcx>) -> Option<(usize, NoDropExit)> {
+    // A local closure's call (#1562).
+    let Some(def_id) = callee_def_id(self.tcx, call) else {
+      let (NeverFn::NoDrop(how), name) = closure_call_never_kind(self.tcx, call)? else { return None };
+      return Some((span_to_line(&call.span.source_callsite(), &self.tcx), NoDropExit { call: name, how }));
     };
-    Some((span_to_line(&call.span.source_callsite(), &self.tcx), name))
+    let exit = match std_exit_fn(self.tcx, def_id) {
+      Some(name) => NoDropExit { call: name.to_owned(), how: NeverReturns::Exits },
+      None => match never_fn_kind(self.tcx, def_id)? {
+        NeverFn::Panics => return None,
+        NeverFn::NoDrop(how) => NoDropExit { call: self.tcx.item_name(def_id).to_string(), how },
+      },
+    };
+    Some((span_to_line(&call.span.source_callsite(), &self.tcx), exit))
   }
 
   /// Whether `e` never completes normally: its type is `!` (`return`,
@@ -3458,6 +3463,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       return true;
     }
     match e.kind {
+      // A local closure whose body never completes (#1562): rustc may
+      // type the call `()` (before edition 2024 the closure's return type
+      // falls back to `()`).
+      ExprKind::Call(..) if closure_call_never_kind(self.tcx, e).is_some() => true,
       // An `if let` whose pattern always matches runs its body (#1013).
       ExprKind::If(c, then, _) if self.always_matching_if_let(c) => self.expr_diverges(then),
       ExprKind::If(_, then, Some(els)) => self.expr_diverges(then) && self.expr_diverges(els),
@@ -4011,18 +4020,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// without dropping it, in a branch or directly in the function's
   /// body (#1172).
   fn note_panic(&mut self, call: &'tcx Expr<'tcx>) {
-    if let Some((line, name)) = self.process_exit_line(call) {
+    if let Some((line, exit)) = self.process_exit_line(call) {
       if self.in_closure(call) {
         return;
       }
+      let name = exit.call.clone();
       if self.exit_frames.is_empty() && self.at_fn_level(call) {
         let lo = *self.unique_id;
         self.exit_frames.push(ExitFrame::Branch { len: 0, hide: Vec::new(), binds: Vec::new(), binds_at: 0, fn_level: true });
-        self.drop_locals_on_exit(line, None, None, false, name);
+        self.no_drop_exit = Some(exit);
+        self.drop_locals_on_exit(line, None, None, false, &name);
         self.exit_frames.pop();
         self.keep_inline_exit_drops(lo..*self.unique_id, call);
       } else {
-        self.drop_locals_on_exit(line, None, None, false, name);
+        self.no_drop_exit = Some(exit);
+        self.drop_locals_on_exit(line, None, None, false, &name);
       }
       return;
     }
@@ -4827,7 +4839,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // A `break` out of a labelled block drops nothing drawn.
       ExprKind::Break(dest, _) => branch && dest.target_id.is_ok_and(|t|
         matches!(self.tcx.hir_node(t), Node::Expr(Expr { kind: ExprKind::Loop(..), .. }))),
-      ExprKind::Call(..) => (branch && (self.panic_line(e).is_some() || self.process_exit_line(e).is_some()))
+      ExprKind::Call(..) | ExprKind::MethodCall(..) => (branch && (self.panic_line(e).is_some() || self.process_exit_line(e).is_some()))
         || (self.panic_line(e).is_some() && self.panic_leaves_every_path(e)),
       // A body drawn inline (an `if let` whose pattern always matches,
       // a lone match arm) is where the code around it is: its exits'
@@ -5403,6 +5415,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             self.record_receiver_store(expr, &rcvr_rap, line_num);
           }
         }
+        // A method of the user's that never returns (#1553).
+        self.note_panic(expr);
       }
       ExprKind::Binary(_, expra, exprb) => {
         self.visit_expr(expra);
@@ -6652,6 +6666,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if steps == 0 || local_of_path(place) != Some(lhs_hid) {
       return false;
     }
+    self.note_resliced_in_place(lhs_expr, indices)
+  }
+
+  /// The drawing of `reslice_in_place` for the reference `lhs_expr`
+  /// given a reborrow of what it points to (or of a part, through
+  /// `indices`). Also `r = r;` with r a `&mut`, which rustc reborrows
+  /// (`r = &mut *r;`, an assignment being a coercion site, #1556).
+  fn note_resliced_in_place(&mut self, lhs_expr: &'tcx Expr<'tcx>, indices: Vec<&'tcx Expr<'tcx>>) -> bool {
     if !self.tcx.typeck(lhs_expr.hir_id.owner).node_type(lhs_expr.hir_id).is_ref() {
       return false;
     }
@@ -6746,6 +6768,43 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.replace_lenders_through(name, Vec::new(), &d.names);
   }
 
+  /// `v = { let r = &mut a; vec![r] };`, `x = { let r = &mut a; r };`,
+  /// `let v: Vec<&mut String> = { .. };` (#1486): the block's value
+  /// reborrows (`&mut *r`) a reference the block declares, which goes out
+  /// of scope at the block's end. From then on the loan `name` (or a part
+  /// of it) holds is the one r made, of a, until name's last use, as for
+  /// a branch's value (`resolve_arm_local_lenders`, #1482); r's own
+  /// borrow ends with its scope.
+  pub(crate) fn resolve_block_local_lenders(&mut self, name: &str, rhs: &'tcx Expr<'tcx>) {
+    let mut e = rhs;
+    while let ExprKind::DropTemps(inner) = e.kind {
+      e = inner;
+    }
+    if e.span.from_expansion() || !matches!(e.kind, ExprKind::Block(b, _) if !b.stmts.is_empty()) {
+      return;
+    }
+    let prefix = format!("{}.", name);
+    #[expect(clippy::disallowed_methods, reason = "sorted on the next line")]
+    let mut names: Vec<String> = self.raps.iter()
+      .filter(|(n, rd)| (*n == name || n.starts_with(&prefix)) && (rd.rap.is_ref() || rd.rap.holds_borrow()))
+      .map(|(n, _)| n.clone())
+      .collect();
+    names.sort();
+    // (Made where the block's value is: the loan the borrow checker
+    // keeps for name is issued there, not on the statement's first line.)
+    let at = branch_value_expr(e).map(|v| expr_to_line(v, &self.tcx));
+    for n in &names {
+      let before = self.borrow_map.get(n).map(|d| d.all_lenders());
+      self.resolve_arm_local_lenders(n, e);
+      if let (Some(at), Some(rd)) = (at, self.borrow_map.get_mut(n)) {
+        if before.is_some_and(|b| b != rd.all_lenders()) && rd.assigned_at < at {
+          rd.assigned_at = at;
+          rd.lifetime = rd.lifetime.max(at);
+        }
+      }
+    }
+  }
+
   /// `r_name`'s lenders (and `kept`), each `Deref(x)` of a reference x
   /// in `gone` replaced by what x borrows.
   fn replace_lenders_through(&mut self, r_name: &str, kept: Vec<ResourceTy>, gone: &BTreeSet<String>) {
@@ -6803,12 +6862,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // { v } else { g };` (#1010). So is `r = r;` with r a shared
     // reference: r holds the same reference, with the same loan, after
     // (#1497); it used to end r's borrow there and draw a copy arrow from
-    // r to itself. (A Copy value is drawn as the copy it is; a `&mut`
-    // reassigned to itself keeps its reborrow drawing.)
+    // r to itself. (A Copy value is drawn as the copy it is.) With r a
+    // `&mut`, rustc reborrows (`r = &mut *r;`): r still points to what it
+    // did, with a loan derived from its old one, so its lender stays
+    // borrowed until r's last use. Drawn as `r = &mut *r;` is (a note on
+    // r's column), or as nothing for a place with no column of its own
+    // to note it on (`p.r = p.r;`); it used to draw r lending to itself
+    // (#1556).
     if destructure_hid.is_none() && matches!(expr.kind, ExprKind::Assign(..))
       && !expr.span.from_expansion() && same_place(lhs_expr, rhs_expr) {
       let owner = lhs_expr.hir_id.owner;
       let ty = self.tcx.typeck(owner).node_type(lhs_expr.hir_id);
+      if ty.ref_mutability() == Some(Mutability::Mut) {
+        if local_of_path(lhs_expr).is_none() || !self.note_resliced_in_place(lhs_expr, Vec::new()) {
+          self.visit_expr(lhs_expr);
+        }
+        return;
+      }
       if (!ty.is_ref() && !self.ty_is_copy(ty, owner)) || ty.ref_mutability() == Some(Mutability::Not) {
         self.visit_expr(lhs_expr);
         return;
@@ -7088,14 +7158,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           let dead_before_arms = (ref_data.loan().is_none() && !matches!(ref_data.lender, ResourceTy::Anonymous))
             .then(|| self.last_live_line(&me, (ref_data.assigned_at, line_num.saturating_sub(1))).unwrap_or(ref_data.assigned_at))
             .filter(|&l| l >= ref_data.assigned_at && self.arm_frames.last().is_some_and(|&(split, _, _, _)| l < split));
-          let old_end = self.loan_end(&ref_data).filter(|&end| end < line_num && end >= ref_data.assigned_at)
-            .or_else(|| self.old_loan_end(&ref_data, &ref_data.lender, line_num, write_span));
+          let old_end = self.loan_end_of(&me, &ref_data).filter(|&end| end < line_num && end >= ref_data.assigned_at)
+            .or_else(|| self.old_loan_end(&me, &ref_data, &ref_data.lender, line_num, write_span));
           if let Some(old_end) = old_end {
             #[expect(clippy::disallowed_methods, reason = "filtered into a sorted Vec")]
             let mut over: Vec<String> = borrowers.iter()
               .filter(|b| **b != me)
               .filter(|b| self.borrow_map.get(*b).is_some_and(|d| d.lender == ref_data.lender
-                && self.old_loan_end(d, &d.lender, line_num, write_span).is_some_and(|e| e <= old_end)))
+                && self.old_loan_end(b, d, &d.lender, line_num, write_span).is_some_and(|e| e <= old_end)))
               .cloned().collect();
             over.sort();
             for o in &over {
@@ -7216,8 +7286,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // with `r` read after the `if`), and for each lender
             // of a reference that borrows from either of two
             // (#770). (`write_span`: see above.)
-            let end_of = |this: &Self, lender: &ResourceTy| this.old_loan_end(&ref_data, lender, line_num, write_span).unwrap_or(line_num);
-            let end_line = match self.loan_end(&ref_data).filter(|&end| end < line_num && end >= ref_data.assigned_at) {
+            let end_of = |this: &Self, lender: &ResourceTy| this.old_loan_end(&me, &ref_data, lender, line_num, write_span).unwrap_or(line_num);
+            let end_line = match self.loan_end_of(&me, &ref_data).filter(|&end| end < line_num && end >= ref_data.assigned_at) {
               Some(end) => end,
               None => match end_of(self, &ref_data.lender) {
                 e if e == line_num => dead_before_arms.unwrap_or(e),
@@ -7410,7 +7480,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           let mut over: Vec<String> = borrowers.iter()
             .filter(|b| **b != modified_ref_name)
             .filter(|b| self.borrow_map.get(*b).is_some_and(|d| d.lender == modified_ref_data.lender
-              && self.old_loan_end(d, &d.lender, line_num, None).is_some_and(|e| e <= o_end)))
+              && self.old_loan_end(b, d, &d.lender, line_num, None).is_some_and(|e| e <= o_end)))
             .cloned().collect();
           over.sort();
           for o in &over {
@@ -8041,6 +8111,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     for (name, e) in late_holder_borrows {
       self.emit_holder_literal_borrows(&name, e);
+    }
+    if let (ResourceTy::Value(rap), ExprKind::Assign(..)) = (&lhs_rty, expr.kind) {
+      let name = rap.name().to_owned();
+      self.resolve_block_local_lenders(&name, rhs_expr);
     }
 }
 
@@ -14466,6 +14540,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.emit_arm_holder_literal_borrows(&ResourceTy::Value(rap), init);
       } else {
         self.emit_holder_literal_borrows(&name, init);
+        self.resolve_block_local_lenders(&name, init);
       }
       self.draw_kept_closure_borrows(&name, init);
     }
@@ -15811,8 +15886,17 @@ fn branch_leaves<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, body: BranchBody<'tc
                 if !def_id.is_local() && self.tcx.def_path_str(def_id).contains("panic") {
                   self.panics = true;
                 }
+                // A function of the user's that always panics (#1553).
+                if never_fn_kind(self.tcx, def_id) == Some(NeverFn::Panics) {
+                  self.panics = true;
+                }
               }
             }
+          }
+          // Or a local closure that does (#1562; rustc may type its call
+          // `()`).
+          if closure_call_never_kind(self.tcx, e).is_some_and(|(k, _)| k == NeverFn::Panics) {
+            self.panics = true;
           }
         }
         _ => {}
@@ -16539,4 +16623,234 @@ fn nest_in_arm(
     arm.e_data.insert(at, ev);
   }
   arm.line_map = create_line_map(&arm.e_data);
+}
+
+/// The function `e` calls: a path's (`fail()`, `Self::fail()`) or a
+/// method's.
+fn callee_def_id<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, e: &'tcx Expr<'tcx>) -> Option<rustc_span::def_id::DefId> {
+  let typeck = tcx.typeck(e.hir_id.owner);
+  match e.kind {
+    ExprKind::Call(f, _) => match f.kind {
+      ExprKind::Path(ref qp) => match typeck.qpath_res(qp, f.hir_id) {
+        Res::Def(DefKind::Fn | DefKind::AssocFn, d) => Some(d),
+        _ => None,
+      },
+      _ => None,
+    },
+    ExprKind::MethodCall(..) => typeck.type_dependent_def_id(e.hir_id),
+    _ => None,
+  }
+}
+
+/// Whether `d` is one of core's / std's panic functions (what `panic!()`,
+/// `unreachable!()`, `todo!()`, `unimplemented!()` and
+/// `std::panic::panic_any` call), which unwind (#410).
+fn std_panic_fn(tcx: rustc_middle::ty::TyCtxt<'_>, d: rustc_span::def_id::DefId) -> bool {
+  if !matches!(tcx.crate_name(d.krate).as_str(), "core" | "std") || tcx.def_kind(d) != DefKind::Fn {
+    return false;
+  }
+  let def_path = tcx.def_path(d).to_string_no_crate_verbose();
+  (def_path.starts_with("::panicking::") && !def_path.contains("nounwind") && !def_path.contains("cannot_unwind"))
+    || def_path.ends_with("::begin_panic")
+    || def_path == "::panic::panic_any"
+    || def_path == "::panic::resume_unwind"
+}
+
+/// `std::process::exit` / `abort`, which end the process without
+/// running any destructor (#1172): how to name it.
+fn std_exit_fn(tcx: rustc_middle::ty::TyCtxt<'_>, d: rustc_span::def_id::DefId) -> Option<&'static str> {
+  if tcx.crate_name(d.krate).as_str() != "std" || tcx.def_kind(d) != DefKind::Fn {
+    return None;
+  }
+  match tcx.def_path(d).to_string_no_crate_verbose().as_str() {
+    "::process::exit" => Some("process::exit"),
+    "::process::abort" => Some("process::abort"),
+    _ => None,
+  }
+}
+
+/// How a call to a function of the user's that returns `!` leaves
+/// (`never_fn_kind`, #1553).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum NeverFn {
+  /// Every path through its body panics: the call unwinds, dropping
+  /// what is in scope, as a `panic!()` there would.
+  Panics,
+  /// It ends the process, loops forever, or its body doesn't say which
+  /// (and it may panic): see `NeverReturns`.
+  NoDrop(NeverReturns),
+}
+
+/// For a function of this crate whose return type is `!`
+/// (`fn fail() -> ! { panic!("x") }`), how a call to it never returns,
+/// from its body (#1553): it always panics (and unwinds), always ends
+/// the process, loops forever doing nothing that could panic, or, when
+/// its paths differ or can't be told apart (a call of something else
+/// that never returns, a loop whose body could panic), unknown. None
+/// for any other function.
+pub(crate) fn never_fn_kind(tcx: rustc_middle::ty::TyCtxt<'_>, d: rustc_span::def_id::DefId) -> Option<NeverFn> {
+  never_fn_kind_in(tcx, d, &mut Vec::new())
+}
+
+fn never_fn_kind_in(tcx: rustc_middle::ty::TyCtxt<'_>, d: rustc_span::def_id::DefId, seen: &mut Vec<rustc_span::def_id::DefId>) -> Option<NeverFn> {
+  let local = d.as_local()?;
+  if !matches!(tcx.def_kind(d), DefKind::Fn | DefKind::AssocFn)
+    || !tcx.fn_sig(d).skip_binder().output().skip_binder().is_never() {
+    return None;
+  }
+  let body = tcx.hir_maybe_body_owned_by(local)?;
+  // (One that calls itself, directly or not, overflows the stack.)
+  if seen.contains(&d) {
+    return Some(NeverFn::NoDrop(NeverReturns::Unknown));
+  }
+  seen.push(d);
+  let how = never_how(tcx, body.value, seen);
+  seen.pop();
+  Some(how)
+}
+
+/// How `e`, which never completes, leaves (`never_fn_kind`).
+fn never_how<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, e: &'tcx Expr<'tcx>, seen: &mut Vec<rustc_span::def_id::DefId>) -> NeverFn {
+  let unknown = NeverFn::NoDrop(NeverReturns::Unknown);
+  let typeck = tcx.typeck(e.hir_id.owner);
+  let never = |x: &'tcx Expr<'tcx>| never_completes(tcx, typeck, x);
+  // What runs first in a block that never completes: its first
+  // statement (or `let` value) of type `!`, or its last expression.
+  let first_never = |b: &'tcx Block<'tcx>| -> Option<&'tcx Expr<'tcx>> {
+    b.stmts.iter().find_map(|st| match st.kind {
+      StmtKind::Expr(x) | StmtKind::Semi(x) if never(x) => Some(x),
+      StmtKind::Let(l) => l.init.filter(|i| never(i)),
+      _ => None,
+    }).or(b.expr.filter(|t| never(t)))
+  };
+  let both = |a: NeverFn, b: NeverFn| if a == b { a } else { unknown };
+  match e.kind {
+    ExprKind::Block(b, _) => first_never(b).map_or(unknown, |x| never_how(tcx, x, seen)),
+    ExprKind::DropTemps(x) | ExprKind::Ret(Some(x)) => never_how(tcx, x, seen),
+    ExprKind::Call(_, args) | ExprKind::MethodCall(_, _, args, _) => {
+      let operands: Vec<&'tcx Expr<'tcx>> = match e.kind {
+        ExprKind::Call(f, _) => std::iter::once(f).chain(args.iter()).collect(),
+        ExprKind::MethodCall(_, recv, _, _) => std::iter::once(recv).chain(args.iter()).collect(),
+        _ => Vec::new(),
+      };
+      if let Some(x) = operands.into_iter().find(|x| never(x)) {
+        return never_how(tcx, x, seen);
+      }
+      match callee_def_id(tcx, e) {
+        Some(d) if std_panic_fn(tcx, d) => NeverFn::Panics,
+        Some(d) if std_exit_fn(tcx, d).is_some() => NeverFn::NoDrop(NeverReturns::Exits),
+        Some(d) => never_fn_kind_in(tcx, d, seen).unwrap_or(unknown),
+        None => closure_call_never_kind(tcx, e).map_or(unknown, |(k, _)| k),
+      }
+    }
+    ExprKind::If(c, ..) | ExprKind::Match(c, ..) if never(c) => never_how(tcx, c, seen),
+    ExprKind::If(_, t, Some(el)) if never(t) && never(el) => {
+      let a = never_how(tcx, t, seen);
+      both(a, never_how(tcx, el, seen))
+    }
+    ExprKind::Match(_, arms, _) if !arms.is_empty() && arms.iter().all(|a| never(a.body)) => {
+      let mut how = never_how(tcx, arms[0].body, seen);
+      for a in &arms[1..] {
+        how = both(how, never_how(tcx, a.body, seen));
+      }
+      how
+    }
+    // A `loop` nothing breaks out of: one whose body never completes
+    // runs it once; any other loops forever, unless its body could
+    // panic or leave (`loop { n += 1; }` overflows), which it then may.
+    ExprKind::Loop(body, ..) if never(e) => match first_never(body) {
+      Some(x) => never_how(tcx, x, seen),
+      None if !may_panic_or_leave(body) => NeverFn::NoDrop(NeverReturns::Spins),
+      None => unknown,
+    },
+    _ => unknown,
+  }
+}
+
+/// A call of a local closure whose body never completes (`let f = ||
+/// panic!("x"); f();`, #1562): how the call leaves, from the closure's
+/// body as for a `!` function's (`never_fn_kind`), and the name it's
+/// called by. (Its own return type needn't be `!`: rustc may infer `()`.)
+pub(crate) fn closure_call_never_kind<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, call: &'tcx Expr<'tcx>) -> Option<(NeverFn, String)> {
+  let ExprKind::Call(f, _) = call.kind else { return None };
+  let c = local_closure_of(&tcx, f)?;
+  let ExprKind::Path(QPath::Resolved(None, path)) = f.kind else { return None };
+  let name = path.segments.last()?.ident.to_string();
+  let body = tcx.hir_body(c.body);
+  if !never_completes(tcx, tcx.typeck(body.value.hir_id.owner), body.value) {
+    return None;
+  }
+  Some((never_how(tcx, body.value, &mut Vec::new()), name))
+}
+
+/// Whether `e` never completes: its type is `!`, or it is an `if` / `match`
+/// all of whose branches don't, a block with a statement or value that
+/// doesn't, or a `loop` with no `break` out of it and no `return` (#1562).
+/// Before edition 2024 rustc types such an expression in a closure's body
+/// `()` (a diverging type's fallback), so the type alone misses
+/// `|k| if k > 3 { panic!() } else { loop {} }`.
+fn never_completes<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, typeck: &rustc_middle::ty::TypeckResults<'tcx>, e: &'tcx Expr<'tcx>) -> bool {
+  if typeck.expr_ty_opt(e).is_some_and(|t| t.is_never()) {
+    return true;
+  }
+  match e.kind {
+    ExprKind::DropTemps(x) => never_completes(tcx, typeck, x),
+    ExprKind::If(c, t, Some(el)) => never_completes(tcx, typeck, c)
+      || (never_completes(tcx, typeck, t) && never_completes(tcx, typeck, el)),
+    ExprKind::Match(x, arms, _) => never_completes(tcx, typeck, x)
+      || (!arms.is_empty() && arms.iter().all(|a| never_completes(tcx, typeck, a.body))),
+    ExprKind::Block(b, None) => b.expr.is_some_and(|t| never_completes(tcx, typeck, t))
+      || b.stmts.iter().any(|st| match st.kind {
+        StmtKind::Expr(x) | StmtKind::Semi(x) => never_completes(tcx, typeck, x),
+        StmtKind::Let(l) => l.init.is_some_and(|i| never_completes(tcx, typeck, i)),
+        _ => false,
+      }),
+    ExprKind::Loop(..) => {
+      struct Exits { id: HirId, found: bool }
+      impl<'tcx> Visitor<'tcx> for Exits {
+        fn visit_expr(&mut self, x: &'tcx Expr<'tcx>) {
+          match x.kind {
+            ExprKind::Closure(..) => return,
+            ExprKind::Ret(_) => self.found = true,
+            ExprKind::Break(dest, _) if dest.target_id == Ok(self.id) => self.found = true,
+            _ => {}
+          }
+          intravisit::walk_expr(self, x);
+        }
+      }
+      let mut v = Exits { id: e.hir_id, found: false };
+      intravisit::walk_expr(&mut v, e);
+      !v.found
+    }
+    _ => false,
+  }
+}
+
+/// Whether running `b` could panic or leave it: a call, an index, an
+/// arithmetic operation (which overflows in a debug build), a `return`,
+/// `break` or `continue` to somewhere else, a macro. (Closures' bodies
+/// don't run there.)
+fn may_panic_or_leave<'tcx>(b: &'tcx Block<'tcx>) -> bool {
+  struct V { found: bool }
+  impl<'tcx> Visitor<'tcx> for V {
+    fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+      use rustc_hir::BinOpKind::*;
+      if e.span.from_expansion() {
+        self.found = true;
+        return;
+      }
+      match e.kind {
+        ExprKind::Closure(..) => return,
+        ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::Index(..) | ExprKind::Ret(_)
+        | ExprKind::Break(..) | ExprKind::Continue(_) | ExprKind::Unary(UnOp::Neg, _) => self.found = true,
+        ExprKind::Binary(op, ..) if matches!(op.node, Add | Sub | Mul | Div | Rem | Shl | Shr) => self.found = true,
+        ExprKind::AssignOp(op, ..) if matches!(rustc_hir::BinOpKind::from(op.node), Add | Sub | Mul | Div | Rem | Shl | Shr) => self.found = true,
+        _ => {}
+      }
+      intravisit::walk_expr(self, e);
+    }
+  }
+  let mut v = V { found: false };
+  v.visit_block(b);
+  v.found
 }

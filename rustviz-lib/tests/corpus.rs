@@ -4311,16 +4311,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "diverging_call_arm",
         // `fail()` has type `!` (a call to a `-> !` function), so like
-        // `panic!()` that arm binds nothing and doesn't reach the merge.
-        // Whether `fail` panics or exits isn't looked at: the merge says
-        // only that the arm never finishes (#350).
+        // `panic!()` that arm binds nothing and doesn't reach the merge
+        // (#350). fail's body always panics, so the arm panicked (#1553;
+        // before, the merge said only that it never finishes).
         must_contain: &[
-            "s acquired ownership of a resource in every branch that reaches this point (the _ arm never finishes)",
+            "s acquired ownership of a resource in every branch that reaches this point (the _ arm panicked)",
         ],
         must_not_contain: &[
             "s acquired ownership of a resource (in all branches above)",
             "s acquired ownership of a resource (in all branches above that reach this point)",
-            "the _ arm panicked",
         ],
     },
     TooltipExpect {
@@ -27768,6 +27767,121 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=_r2 no longer borrows the resource m points to",
         ],
     },
+    TooltipExpect {
+        // #1486: a holder (or reference) given a block's value that
+        // reborrows a `&mut` the block declares holds that reference's loan
+        // once the block is over, until its own last use. main drew no
+        // borrow into v, had v give back "*r" and r give a back after r's
+        // scope; the same for a typed `let`, an `Option` holder and a
+        // reference.
+        name: "assign_block_reborrow_1486",
+        must_contain: &[
+            "Mutable reborrow from r to v",
+            "Return mutably borrowed resource from v to a",
+            "Mutable reborrow from r2 to v2",
+            "Return mutably borrowed resource from v2 to b",
+            "Return mutably borrowed resource from y to c",
+            "Return mutably borrowed resource from q to c",
+            "Return mutably borrowed resource from x to d",
+            "Return mutably borrowed resource from x2 to f",
+        ],
+        must_not_contain: &[
+            "Return mutably borrowed resource from v to *r",
+            "Return mutably borrowed resource from r to a",
+            "v no longer borrows the resource r points to",
+            "Return mutably borrowed resource from v2 to *r2",
+            "Return mutably borrowed resource from r2 to b",
+            "Return mutably borrowed resource from y to *r3",
+            "Return mutably borrowed resource from q to *r3",
+            "Return mutably borrowed resource from r3 to c",
+            "Return mutably borrowed resource from x to *r4",
+            "x no longer borrows the resource r4 points to",
+            "Return mutably borrowed resource from r4 to d",
+            "Return mutably borrowed resource from x2 to *r5",
+            "Return mutably borrowed resource from r5 to f",
+        ],
+    },
+    TooltipExpect {
+        // #1556: `r = r;` with r a `&mut` reborrows `*r` into r: drawn as
+        // `r = &mut *r;` is, not as r lending to itself. `p.r = p.r;`
+        // draws nothing, and p.r gives t back once.
+        name: "self_assign_mut_ref_1556",
+        must_contain: &[
+            "r now points to the same data again (a reborrow through r itself). It still borrows from s, so s stays mutably borrowed while r is in use",
+            "Return mutably borrowed resource from p.r to t",
+        ],
+        must_not_contain: &[
+            "Mutable reborrow from r to r",
+            "mutably borrowed by r through r",
+            "Mutable reborrow from p.r to p.r",
+            "mutably borrowed by p.r through p.r",
+            "what it borrows from isn't shown",
+        ],
+    },
+    TooltipExpect {
+        // #1557: where r's old loan of a ends is pinned by
+        // `ref_old_loan_and_never_fn_ids_1486_1556_1557_1553` (main ended it
+        // on the `let`'s row, at `a.len()`'s loan); these are the gives-back.
+        name: "repoint_ref_cond_call_loan_1557",
+        must_contain: &[
+            "Return immutably borrowed resource from r to a",
+            "Return immutably borrowed resource from r2 to a2",
+            "Return immutably borrowed resource from r3 to a3",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        // #1553: a call to a function of the user's that returns `!`: one
+        // that always ends the process or loops forever drops nothing; one
+        // whose body doesn't settle it says both outcomes. (One that always
+        // panics drops what is in scope: pinned by rv-id.) main drew none
+        // of these calls as leaving.
+        name: "never_fn_call_1553",
+        must_contain: &[
+            "`quit` ends the program here without running any destructor: s2's resource is never dropped",
+            "`spin` never returns: it loops forever, so the code after it never runs and s3's resource is never dropped",
+            "`maybe` never returns. If it panics, the unwinding drops s4's resource here; if it loops forever or ends the program instead, s4's resource is never dropped",
+            "`spin` never returns: it loops forever, so the code after it never runs and s7's resource is never dropped",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        // #1562: a call of a local closure whose body never completes is
+        // drawn as a `!` function's call is (#1553). (The drops at the
+        // panicking calls are pinned by rv-id.) main drew none of these
+        // calls as leaving.
+        name: "closure_never_call_1562",
+        must_contain: &[
+            "`q` ends the program here without running any destructor: s2's resource is never dropped",
+            "`w` never returns: it loops forever, so the code after it never runs and s3's resource is never dropped",
+            "`m` never returns. If it panics, the unwinding drops s5's resource here; if it loops forever or ends the program instead, s5's resource is never dropped",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        // #1548: an `if let` binding given its value out of a call's
+        // result (`Some(id(r))`) gets it and the borrow it holds on one
+        // row (pinned by rv-id). main drew the borrow a row above, and
+        // said n "is assigned the result of Some". #1563: the reference
+        // `id(r)` returns, copied into `Some(..)`, was named by its encoded
+        // place ("&\u{1e}id\u{1f}r", shown as "&idr"), whose separators
+        // made the SVG ill-formed XML.
+        name: "iflet_call_value_borrow_row_1548",
+        must_contain: &[
+            "Immutable borrow from s to n: n is a reference copied out of the value Some returned",
+            "Mutable borrow from t to n2: n2 is a reference copied out of the value Some returned",
+            "Copy from the reference id returns to Some",
+            "Copy from the reference trim returns to Some",
+        ],
+        must_not_contain: &[
+            "\u{1e}",
+            "\u{1f}",
+            "n is assigned the result of Some",
+            "m is assigned the result of Some",
+            "w is assigned the result of Some",
+            "n2 is assigned the result of Some",
+        ],
+    },
 ];
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws
@@ -37956,5 +38070,60 @@ fn loan_ends_before_conflicting_use_1529_1516() {
             || w[0].starts_with(&format!("s's resource is mutably borrowed by {a};"))
             && w[1].starts_with(&format!("s's resource is immutably borrowed by {b};"))));
         assert!(!both, "same_line_borrows_1529: s borrowed by {a} and {b} at once: {tips:#?}");
+    }
+}
+
+/// #1486, #1556, #1557, #1553, #1548, #1562: where loans and scopes end (and
+/// a binding's first dot), by
+/// `(snippet, data-rv-id prefixes that must be there, prefixes that must
+/// not)`.
+#[test]
+fn ref_old_loan_and_never_fn_ids_1486_1556_1557_1553() {
+    for (snippet, present, absent) in [
+        // A reference a block declares, reborrowed into its value, has its
+        // borrow end with its scope; nothing is drawn on it after.
+        ("assign_block_reborrow_1486",
+         &["r@L16:dot:mutable_die+ref_go_out_of_scope", "r2@L31:dot:mutable_die+ref_go_out_of_scope",
+           "r3@L44:dot:mutable_die+ref_go_out_of_scope", "r4@L61:dot:mutable_die+ref_go_out_of_scope",
+           "r5@L71:dot:mutable_die+ref_go_out_of_scope", "y@L47:dot:mutable_die"][..],
+         &["r@L17:", "r2@L32:", "r3@L45:", "r3@L46:", "r3@L47:", "r4@L62:", "r5@L72:",
+           "x@L61:dot:mutable_die", "x2@L71:dot:mutable_die"][..]),
+        ("self_assign_mut_ref_1556",
+         &["r@L13:dot:resliced_in_place"][..],
+         &["r@L13:dot:mutable_lend", "p.r@L24:dot:mutable_lend"][..]),
+        // r's old loan of a lasts to r's read on line 17 (the `_` arm) and
+        // to the re-point on line 14; not `a.len()`'s, which ends on line 10.
+        ("repoint_ref_cond_call_loan_1557",
+         &["a@L14:dot:static_reacquire\"", "a@L17:dot:static_reacquire\"", "a2@L31:dot:static_reacquire\"",
+           "a2@L34:dot:static_reacquire\"", "a3@L47:dot:static_reacquire\""][..],
+         &["a@L10:dot:static_reacquire\"", "r@L10:dot:static_die\"", "a2@L29:dot:static_reacquire\"",
+           "r2@L29:dot:static_die\"", "a3@L43:dot:branch_join+static_reacquire"][..]),
+        // `fail()` panics: s is dropped where it's called (as for a
+        // `panic!()` there); `maybe(2)` may not: s4 isn't dropped at the
+        // closing brace, which the code never reaches.
+        ("never_fn_call_1553",
+         &["s@L14:dot:owner_go_out_of_scope", "s1@L21:dot:owner_go_out_of_scope", "s2@L34:dot:owner_go_out_of_scope",
+           "s3@L46:dot:owner_go_out_of_scope", "s4@L57:dot:owner_go_out_of_scope", "s5@L72:dot:owner_go_out_of_scope",
+           "s6@L81:dot:owner_go_out_of_scope", "s7@L87:dot:owner_go_out_of_scope", "s8@L94:dot:owner_go_out_of_scope"][..],
+         &["s4@L58:"][..]),
+        // A local closure's call that panics drops what is in scope there;
+        // s4 and s5 aren't dropped at a closing brace the code never reaches.
+        ("closure_never_call_1562",
+         &["s@L11:dot:owner_go_out_of_scope", "s2@L24:dot:owner_go_out_of_scope", "s3@L32:dot:owner_go_out_of_scope",
+           "s4@L39:dot:owner_go_out_of_scope", "s5@L44:dot:owner_go_out_of_scope", "s6@L51:dot:owner_go_out_of_scope"][..],
+         &["s4@L40:", "s5@L45:"][..]),
+        // One dot per binding: its value and the borrow it holds.
+        ("iflet_call_value_borrow_row_1548",
+         &["n@L16:dot:copy+static_borrow\"", "m@L19:dot:copy+static_borrow\"", "w@L22:dot:copy+static_borrow\"",
+           "n2@L34:dot:copy+mutable_borrow\""][..],
+         &["n@L16:dot:static_borrow", "m@L19:dot:static_borrow", "w@L22:dot:static_borrow", "n2@L34:dot:mutable_borrow"][..]),
+    ] {
+        let tl = run_with_local_backend(snippet).timeline_panel_string();
+        for id in present {
+            assert!(tl.contains(&format!("data-rv-id=\"{}", id)), "{}: no {}", snippet, id);
+        }
+        for id in absent {
+            assert!(!tl.contains(&format!("data-rv-id=\"{}", id)), "{}: unexpected {}", snippet, id);
+        }
     }
 }

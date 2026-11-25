@@ -562,9 +562,18 @@ fn part_moves_with_whole(d: &ExternalEvent, e: &ExternalEvent) -> bool {
 /// below the stack, with c's scope end, the arrow pointed at no dot of c
 /// and c's column started there in mid-air (#1420). Also a `move`
 /// closure's captures, moved or copied into it (`let f = move || s;`
-/// beside two pattern bindings' borrows, #1536).
+/// beside two pattern bindings' borrows, #1536). And a binding given its
+/// value out of a call's result, which draws no arrow between two columns,
+/// before the borrow that value holds is drawn into it: `if let Some(n) =
+/// Some(id(r))`'s n, whose dot said it borrows s a row above the one that
+/// gave it its value (#1548).
 fn binds_borrower_of_line(e: &ExternalEvent, front: &[ExternalEvent]) -> bool {
-    let ExternalEvent::Bind { to: ResourceTy::Value(t), .. } = e else { return false };
+    let t = match e {
+        ExternalEvent::Bind { to: ResourceTy::Value(t), .. } => t,
+        ExternalEvent::Move { to: ResourceTy::Value(t), .. }
+        | ExternalEvent::Copy { to: ResourceTy::Value(t), .. } if !e.is_var_arrow_ev() && !t.is_closure() => t,
+        _ => return false,
+    };
     front.iter().any(|o| o.get_id() > e.get_id()
         && match o {
             ExternalEvent::StaticBorrow { to: ResourceTy::Value(b), .. }
