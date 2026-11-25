@@ -1381,9 +1381,35 @@ fn render_branch_dots(
                     Some(State::OutOfScope) | Some(State::FullPrivilege { s: LineState::Uninit })
                 ) && ends_borrow(&b.e_data)
             });
+        // One whose borrow ended before the conditional (never read
+        // again) that an arm gave a new loan, ended in that arm (`r =
+        // &t;` in one arm of `if c { r = &t; } else { }`, #1524): its legs
+        // reach the join with no borrow on any path.
+        // (Its last event before the conditional ends its borrow, or one
+        // on the split line after it does: a last use in the condition.)
+        let is_die = |e: &Event| matches!(e, Event::StaticDie { .. } | Event::MutableDie { .. } | Event::RefDie { .. });
+        let is_start = |e: &Event| matches!(e, Event::StaticBorrow { .. } | Event::MutableBorrow { .. } | Event::Copy { .. } | Event::Acquire { .. });
+        let ended_before = || is.extract_rap().is_some_and(|r| r.is_ref())
+            && history.iter().position(|(_, e)| std::ptr::eq(e, event)).is_some_and(|k| {
+                let before = &history[..k];
+                let died = before.iter().rposition(|(_, e)| is_die(e));
+                let started = before.iter().rposition(|(_, e)| is_start(e));
+                died.is_some_and(|d| started.is_none_or(|s| d > s))
+                    || history[k + 1..].iter().take_while(|(l, _)| *l == *split_point).any(|(_, e)| is_die(e))
+            })
+            && all_paths_present(ty, branch_history.len())
+            && branch_history.iter().any(|b| !b.diverges && ends_borrow(&b.e_data))
+            && branch_history.iter().filter(|b| !b.diverges).all(|b| {
+                matches!(
+                    b.states.last().map(|s| &s.2),
+                    Some(State::OutOfScope) | Some(State::FullPrivilege { s: LineState::Uninit })
+                ) && (b.e_data.is_empty() || ends_borrow(&b.e_data))
+            });
         // `None`: no join dot at all (the all-moved case below).
         let title = if borrow_ended_in_every_arm {
             Some(hover_messages::event_dot_branch_merge_borrow_ended(&is.real_name()))
+        } else if ended_before() {
+            Some(hover_messages::event_dot_branch_merge_borrow_ended_before(&is.real_name()))
         } else if let Some(InitJoin::AllMoved) = init {
             Some(hover_messages::event_dot_branch_merge_init_all_moved(&is.real_name(), rap.is_mut()))
         } else if let (Some(InitJoin::Maybe { moved }), false) = (init, matches!(event, Event::Branch { maybe_held: true, .. })) {
@@ -2882,6 +2908,13 @@ fn arm_end_state(rap: &ResourceAccessPoint, branch: &BranchData, branch_history:
     // dot (`borrow_ended_in_every_arm`).
     let every_arm_ended = all_paths_present(ty, branch_history.len())
         && branch_history.iter().all(|b| ends_borrow(&b.e_data) && ended(b.states.last().map(|s| &s.2)));
+    // Or its borrow ended before the conditional, and an arm that gave it a
+    // new one ended that (#1524): the join's "r's borrow ended before the
+    // branches above" dot. The arms that do nothing hold no borrow.
+    let every_arm_ended = every_arm_ended || (all_paths_present(ty, branch_history.len())
+        && branch_history.iter().any(|b| !b.diverges && ends_borrow(&b.e_data))
+        && branch_history.iter().filter(|b| !b.diverges).all(|b| ended(b.states.last().map(|s| &s.2))
+            && (ends_borrow(&b.e_data) || b.e_data.is_empty())));
     // An arm beside one that moved r (`if c { take(m); }`, `Some(_) =>
     // drop(m)`), where every other arm ended its borrow: the join has no
     // dot (a reference whose borrow ended in only some arms gets none),
