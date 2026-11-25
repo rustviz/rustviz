@@ -62,6 +62,36 @@ fn moves_into_fn(e: &ExternalEvent) -> bool {
         && ResourceAccessPoint_extract(e).1.extract_rap().map_or(false, |rap| rap.is_fn())
 }
 
+/// Puts each borrow end in a line's stacked arrows right after the borrow
+/// of the same reference from the same lender that the line also draws
+/// (`let a = &mut s; let b = &mut s;`: a's end comes between the two
+/// borrows, #1529). Sorted by column, the end (into s) was drawn first,
+/// level on the row, above the borrow it ends.
+fn ends_after_own_borrows(evs: &mut Vec<ExternalEvent>) {
+    let pair = |e: &ExternalEvent| {
+        let (f, t) = ResourceAccessPoint_extract(e);
+        Some((*f.extract_rap()?.hash(), *t.extract_rap()?.hash()))
+    };
+    let mut k = 0;
+    while k < evs.len() {
+        let is_end = matches!(evs[k], ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. });
+        let borrow = |b: &ExternalEvent| matches!(b, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. });
+        // (Only with another reference's borrow of the lender in the stack:
+        // a reference re-borrowing its own lender gives the old loan back
+        // first.)
+        let at = pair(&evs[k]).filter(|(h, l)| is_end && h != l
+            && evs.iter().any(|b| borrow(b) && pair(b).is_some_and(|(bl, bh)| bl == *l && bh != *h)))
+            .and_then(|(h, l)| evs.iter().rposition(|b| borrow(b) && pair(b) == Some((l, h))));
+        match at {
+            Some(b) if b > k => {
+                let e = evs.remove(k);
+                evs.insert(b, e);
+            }
+            _ => k += 1,
+        }
+    }
+}
+
 /// The rows a line's stacked arrows (`evs`, one line map entry) reach
 /// below the line's own row. Each arrow dips a row per arrow drawn before
 /// it (`timeline_panel::arrow_order_of`), except the end of a borrow whose
@@ -79,6 +109,7 @@ fn stacked_arrow_rows(evs: &[ExternalEvent], top_level: bool) -> usize {
     if top_level {
         drawn.sort_by(by_rap_hashes);
         drawn.sort_by_key(|e| !moves_into_fn(e));
+        ends_after_own_borrows(&mut drawn);
     }
     drawn.iter()
         .rposition(|e| !matches!(e,
@@ -2082,6 +2113,7 @@ fn sort_line_map_events(visualization_data: &mut VisualizationData) {
     // the line's other arrows (a borrow's return) stack below it (#200).
     for (_, event_vec) in &mut visualization_data.event_line_map {
         event_vec.sort_by_key(|e| !moves_into_fn(e));
+        ends_after_own_borrows(event_vec);
     }
     // sort all the line maps in the branch events
     for (_, e) in visualization_data.preprocess_external_events.iter_mut() {
