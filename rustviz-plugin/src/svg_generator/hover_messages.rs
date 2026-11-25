@@ -5898,7 +5898,7 @@ pub fn arrow_title(e: &ExternalEvent) -> String {
             format!("Return immutably borrowed {}", if *of_ref_var || holds_copy_value(to) { "value" } else { "resource" })
         },
         ExternalEvent::MutableBorrow{ is_partial, is_reborrow, to, via, .. } => {
-            if *is_partial { String::from("Partial Mutable borrow") }
+            if *is_partial { String::from("Partial mutable borrow") }
             else if to.is_closure() && *is_reborrow && !returned_closure(via) { String::from("Closure capture (mutable reborrow)") }
             else if to.is_closure() && !returned_closure(via) { String::from("Closure capture (mutable borrow)") }
             // Reborrow: `let r2 = &mut *r;` with r: `&mut T` borrows

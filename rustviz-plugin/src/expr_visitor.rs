@@ -10027,6 +10027,16 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     self.add_ev(line_num, evt, lhs, ResourceTy::Value(tmp), true);
     return;
   }
+  // `let Some((b, _)) = opt_pair() else { .. };`, `.. = w.first() else`:
+  // the call's result is a temporary the pattern takes a part of, with a
+  // column of its own (`record_temporary_drop`); the binding takes that
+  // part out of the temporary, not out of the call (#1481).
+  if let Some(tmp) = self.temp_cols.get(&rhs.hir_id).cloned()
+    .filter(|t| matches!(t.temp_part(), Some(TempPart::LetElse(None))) && matches!(evt, Evt::Move | Evt::Copy)) {
+    let line_num = span_to_line(&rhs.span, &self.tcx);
+    self.add_ev(line_num, evt, lhs, ResourceTy::Value(tmp), true);
+    return;
+  }
   // Macro-expanded RHS — `let v = vec![1, 2, 3]`, `let s = format!(...)`,
   // etc. — desugars into a `Call` whose function path was never registered
   // as a RAP (visit_expr's from_expansion guard skipped it). Treating
@@ -12429,7 +12439,7 @@ pub fn print_out_of_scope(&mut self){
     }
     hoist_ends_before_split(self.preprocessed_events, self.event_line_map, true, &self.pre_split_end_ids);
     hoist_ends_on_other_arms_lines(self.preprocessed_events);
-    dedupe_borrow_ends(self.preprocessed_events);
+    dedupe_borrow_ends(self.preprocessed_events, self.event_line_map);
     self.nest_borrow_ends_in_arms();
     end_scrutinee_borrows_in_other_arms(self.preprocessed_events, self.event_line_map, self.unique_id);
     self.end_outer_borrows_in_arms();
@@ -14028,17 +14038,27 @@ fn note_sharers_in(events: &mut [(usize, ExternalEvent)], sharers: &[Sharer], no
 /// each, but at the same line (that loan's last use on another path,
 /// #806): keep one at the top level, where `end_outer_borrows_in_arms`
 /// puts it in the arm that holds the line and a copy in each other arm.
-fn dedupe_borrow_ends(events: &mut Vec<(usize, ExternalEvent)>) {
+/// The copies go out of the line map too, which the renderer draws a
+/// line's arrows from: left there, each was drawn as another identical
+/// arrow (#1479).
+fn dedupe_borrow_ends(events: &mut Vec<(usize, ExternalEvent)>, line_map: &mut BTreeMap<usize, Vec<ExternalEvent>>) {
   let mut seen: Vec<(usize, std::mem::Discriminant<ExternalEvent>, ResourceAccessPoint, ResourceTy)> = Vec::new();
+  let mut dropped: HashSet<usize> = HashSet::new();
   events.retain(|(line, e)| {
     let Some((r, to)) = borrow_end_of(e) else { return true };
     let key = (*line, std::mem::discriminant(e), r.clone(), to.clone());
     if seen.contains(&key) {
+      dropped.insert(e.get_id());
       return false;
     }
     seen.push(key);
     true
   });
+  if !dropped.is_empty() {
+    for evs in line_map.values_mut() {
+      evs.retain(|e| !dropped.contains(&e.get_id()));
+    }
+  }
 }
 
 /// Whether `e`, the end of a borrow `d` describes the reference of,

@@ -24,7 +24,7 @@ pub const INVARIANTS: &[&str] = &[
     "line-starts-nowhere", "line-ends-nowhere", "line-through-fork", "arrows-overlap",
     "marks-on-one-spot", "arrow-misses-target", "outside-figure", "heads-or-logos-overlap",
     "shaft-through-mark", "arrows-end-to-end",
-    "fork-without-dot",
+    "fork-without-dot", "arrow-along-leg",
 ];
 
 /// How far apart two points the drawing means to be one may be.
@@ -39,6 +39,10 @@ const SHAFT_HALF: f64 = 2.5;
 /// An arrow's head stops this close to the target dot's centre (8.2 px
 /// for a diagonal one).
 const HEAD_REACH: f64 = 10.0;
+/// An arrow's head may lie over this much of a column's slanted leg's
+/// centre line (`arrow-along-leg`): a leg ending at the dot the head
+/// points at, or crossing the head, passes under it for a few px.
+const HEAD_ON_LEG_PX: f64 = 6.0;
 
 #[derive(Debug, Clone)]
 struct Seg {
@@ -294,7 +298,12 @@ type Pt = (f64, f64);
 /// the two 5 px strokes lie at least half on each other there. Two pieces
 /// on one track share their common stretch; two crossing at an angle
 /// share 5 px / sin(angle) or less (12 px at 25 degrees).
-fn shared_stretch((p, q): (Pt, Pt), (r, s): (Pt, Pt)) -> f64 {
+fn shared_stretch(a: (Pt, Pt), b: (Pt, Pt)) -> f64 {
+    stretch_within(a, b, SHAFT_HALF)
+}
+
+/// `shared_stretch` with the centre lines within `half` px.
+fn stretch_within((p, q): (Pt, Pt), (r, s): (Pt, Pt), half: f64) -> f64 {
     let (lp, lr) = (len(p, q), len(r, s));
     if lp < TOL || lr < TOL {
         return 0.0;
@@ -314,7 +323,7 @@ fn shared_stretch((p, q): (Pt, Pt), (r, s): (Pt, Pt)) -> f64 {
         let (t1, t2) = ((lo - a) / b, (hi - a) / b);
         (t1.min(t2), t1.max(t2))
     };
-    let (o1, o2) = between(off, -SHAFT_HALF, SHAFT_HALF);
+    let (o1, o2) = between(off, -half, half);
     let (a1, a2) = between(at, 0.0, lr);
     (o2.min(a2).min(lp) - o1.max(a1).max(0.0)).max(0.0)
 }
@@ -542,6 +551,43 @@ pub fn check(g: &Geo) -> Vec<(&'static str, String)> {
         }
     }
     out.extend(hl.into_iter().map(|w| ("heads-or-logos-overlap", w)));
+
+    // An arrow's head or shaft lying along a column's slanted leg, into
+    // or out of a conditional's arm (#1476: a return coming down into a
+    // lender's `else` drop dot at about the angle of the lender's own
+    // `else` leg hid the leg's last 10 px under its head). A head: the
+    // leg's centre line within 1 px of the triangle for more than
+    // `HEAD_ON_LEG_PX` (a leg merely ending at the dot the head points at,
+    // or crossing the head, is covered for a few px at most). A shaft:
+    // see below. (Not a
+    // vertical stretch of a column: a head coming up into a dot from a
+    // track below lies on the column under the dot, as it does on main in
+    // 100-odd snippets, #1488.)
+    for a in &g.arrows {
+        for s in g.segs.iter().filter(|s| (s.a.0 - s.b.0).abs() > TOL) {
+            let covered = if a.tri.len() == 3 {
+                samples(&[(s.a, s.b)]).into_iter().filter(|&p| inside(&a.tri, p) > -1.0).count()
+            } else {
+                0
+            };
+            // A shaft: centre lines within half a stroke for more than
+            // `OVERLAP_PX`, as two arrows'; or, leaving (or reaching) the
+            // dot the leg ends at less than 30 degrees off it, the 5 px
+            // stroke on the leg's (~5 px) for more than 8 px (a borrow
+            // leaving a join dot steeply beside the leg into it).
+            let sin = |(p, q): (Pt, Pt)| ((q.0 - p.0) * (s.b.1 - s.a.1) - (q.1 - p.1) * (s.b.0 - s.a.0)).abs()
+                / (len(p, q) * len(s.a, s.b)).max(1e-9);
+            let at_its_dot = |(p, q): (Pt, Pt)| [p, q].iter().any(|&e| len(e, s.a) < 8.0 || len(e, s.b) < 8.0);
+            let along = a.pieces.iter().map(|&p| shared_stretch(p, (s.a, s.b))).fold(0.0, f64::max);
+            let beside = a.pieces.iter().filter(|&&p| len(p.0, p.1) >= TOL && sin(p) < 0.5 && at_its_dot(p))
+                .map(|&p| stretch_within(p, (s.a, s.b), 4.5)).fold(0.0, f64::max);
+            if covered as f64 > HEAD_ON_LEG_PX {
+                out.push(("arrow-along-leg", format!("head of {} lies along {} for {} px", a.id, s.id, covered)));
+            } else if along > OVERLAP_PX || beside > 8.0 {
+                out.push(("arrow-along-leg", format!("{} runs along {} for {:.0} px", a.id, s.id, along.max(beside))));
+            }
+        }
+    }
 
     // A shaft through a dot's centre, or along a stop bar, with no hop
     // (#1344): the mark reads as part of the arrow (a column it doesn't

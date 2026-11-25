@@ -11490,15 +11490,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // So is what a `let` / `let`-`else` pattern or a destructuring
     // assignment takes out of a call's result (`let (d, _) = pair();`,
     // `let Ok(s) = res() else { .. }`): it is the temporary's, not the
-    // call's, which no longer has it (#1386).
-    // (Not a `let`-`else` whose `else` block takes more lines, #1481: its
-    // bindings are drawn after that block, below the temporary's drop.)
-    let one_line_let_else = || match self.tcx.parent_hir_node(self.field_top(expr).hir_id) {
-      rustc_hir::Node::LetStmt(l) => span_to_line(&l.span, &self.tcx) == span_end_line(&l.span, &self.tcx),
-      _ => false,
-    };
+    // call's, which no longer has it (#1386, #1481). A `let`-`else` drawn
+    // as a branch: the temporary's column forks with the `else` block
+    // (`visit_let_else`). (Not a `let`-`else` with a `ref` binding, which
+    // borrows from a temporary that lives to the end of the block.)
+    let by_value = matches!(self.tcx.parent_hir_node(self.field_top(expr).hir_id), rustc_hir::Node::LetStmt(l) if self.binds_by_value_only(l.pat));
     if (matches!(part, Some(TempPart::Let(_) | TempPart::Assign(_)))
-        || (matches!(part, Some(TempPart::LetElse(_))) && one_line_let_else()))
+        || (matches!(part, Some(TempPart::LetElse(_))) && by_value))
       && matches!(expr.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) && !ctor_literal {
       self.temp_cols.insert(expr.hir_id, tmp.clone());
     }
@@ -12816,10 +12814,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let mut liveness: HashSet<ResourceAccessPoint> = HashSet::new();
     collect_event_live_vars(&else_ev, &mut liveness);
     liveness.extend(self.keep_exit_drops(&mut else_ev, true));
+    let forked = self.fork_let_else_temporary(init, split, merge, &mut else_ev);
     let scoped = scoped_in_events(&else_ev, &self.exit_drops);
     let decl = get_decl_of_block(els, &self.tcx, &self.raps);
     let mut decl_vars = &(&decl | &inner) | &scoped;
     liveness = &liveness - &decl_vars;
+    // (The forked temporary's drop on the `else` path doesn't make it
+    // the block's own.)
+    if let Some(t) = forked {
+      decl_vars.remove(&t);
+      liveness.insert(t);
+    }
     let left = self.left_at_exits(self.block_ends_at_exits(els, true), &decl);
     for var in in_decl_order(&decl).into_iter().filter(|v| needs_scope_end(v) && !scoped.contains(v) && !left.contains(v)) {
       else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), holds: None, id: *self.unique_id, early: None }));
@@ -12871,6 +12876,45 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     });
     *self.unique_id += 1;
     Some(merge)
+  }
+
+  /// `let Some((b, _)) = opt_pair() else { return; };` drawn as a branch
+  /// (#1481): the pattern's bindings are drawn where the branches join,
+  /// on the path that skipped the `else` block, taking their part out of
+  /// the call's temporary (`match_rhs_call`). So that temporary's column
+  /// forks with the block: on the `else` path it is dropped as that path
+  /// starts (Rust drops it before the block runs), on the matched one
+  /// where the bindings take their part, which the rows of the `else`
+  /// block don't come between. Its drop moves from the `let` row to that
+  /// join row, and a copy of it ends the `else` path's leg. Returns the
+  /// temporary, which is live in the branch.
+  fn fork_let_else_temporary(
+    &mut self,
+    init: &'tcx Expr<'tcx>,
+    split: usize,
+    merge: usize,
+    else_ev: &mut Vec<(usize, ExternalEvent)>,
+  ) -> Option<ResourceAccessPoint> {
+    let tmp = self.temp_cols.get(&init.hir_id).cloned()
+      .filter(|t| matches!(t.temp_part(), Some(TempPart::LetElse(None))))?;
+    let k = self.preprocessed_events.iter()
+      .position(|(_, e)| matches!(e, ExternalEvent::TemporaryDrop { ro, .. } if *ro == tmp))?;
+    let (from, mut drop) = self.preprocessed_events[k].clone();
+    self.preprocessed_events[k].0 = merge;
+    if let Some(evs) = self.event_line_map.get_mut(&from) {
+      if let Some(j) = evs.iter().position(|e| e.get_id() == drop.get_id()) {
+        let e = evs.remove(j);
+        self.event_line_map.entry(merge).or_default().push(e);
+      }
+    }
+    if let ExternalEvent::TemporaryDrop { id, .. } = &mut drop {
+      *id = *self.unique_id;
+      *self.unique_id += 1;
+    }
+    // On the `else` block's first row (the `let` row, for a block on it).
+    let first = if branch_is_collapsed(split, merge) { split } else { split + 1 };
+    else_ev.insert(0, (first, drop));
+    Some(tmp)
   }
 
   /// After the conditional `init` has been visited: pairs the branch

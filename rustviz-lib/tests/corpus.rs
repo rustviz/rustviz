@@ -6067,11 +6067,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "match_arm_call_mut_ref_binding",
         must_contain: &[
-            "Partial Mutable borrow from opt to s",
+            "Partial mutable borrow from opt to s",
             "s's mutable borrow ends",
             "Return mutably borrowed resource from s to opt",
         ],
-        must_not_contain: &[],
+        // Lower-case, like "Partial immutable borrow".
+        must_not_contain: &["Partial Mutable borrow"],
     },
     TooltipExpect {
         name: "iflet_one_line_ref_binding",
@@ -8384,7 +8385,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "x, immutable. A different variable from the x declared on line 8 (separate scopes, so only one exists at a time)",
             "x, immutable. A different variable from the x declared on line 4 (separate scopes, so only one exists at a time)",
-            "Partial Mutable borrow from t.0 to x",
+            "Partial mutable borrow from t.0 to x",
             "Partial move from r to x",
             "x acquires ownership of a resource",
             "x goes out of scope. Its resource is dropped.",
@@ -8400,7 +8401,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "ref_binding_name_reused_mut",
         must_contain: &[
             "Partial immutable borrow from t.0 to x",
-            "Partial Mutable borrow from t.0 to x",
+            "Partial mutable borrow from t.0 to x",
             "the resource x points to is mutably borrowed by push_str through x; x can't be used while the borrow is live",
             "x, immutable. A different variable from the x declared on line 9 (separate scopes, so only one exists at a time)",
         ],
@@ -9750,7 +9751,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t.0's resource is immutably borrowed by println!; t.0 is read-only while the borrow is live",
         ],
         must_not_contain: &[
-            "Partial Mutable borrow from t.0 to x",
+            "Partial mutable borrow from t.0 to x",
             "Return mutably borrowed resource from x to t.0",
             "=t.0's resource is mutably borrowed by x; t.0 can't be used while the borrow is live",
         ],
@@ -9833,7 +9834,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "Move from u.0 to x",
-            "Partial Mutable borrow from w.0 to x",
+            "Partial mutable borrow from w.0 to x",
             "=w.0's resource is mutably borrowed by x; w.0 can't be used while the borrow is live",
             "=x mutably borrows a resource",
             "=u.1 goes out of scope. Its resource is dropped.",
@@ -21703,7 +21704,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from x to o",
             "Partial immutable borrow from o to z",
             "Return immutably borrowed resource from z to o",
-            "Partial Mutable borrow from m to mx",
+            "Partial mutable borrow from m to mx",
             "Return mutably borrowed resource from mx to m",
             "Return immutably borrowed resource from pq to a",
             "Return immutably borrowed resource from pq to b",
@@ -23082,7 +23083,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "t.0 is mutably borrowed by a, as part of a mutable borrow of all of t; t can't be used while the borrow is live",
             "t.1 is mutably borrowed by b, as part of a mutable borrow of all of t; t can't be used while the borrow is live",
-            "Partial Mutable borrow from t to a: a points to t.0, but the borrow is of all of t, which stays borrowed while a is in use",
+            "Partial mutable borrow from t to a: a points to t.0, but the borrow is of all of t, which stays borrowed while a is in use",
             "u.0 is immutably borrowed by c, as part of an immutable borrow of all of u; u is read-only while the borrow is live",
             "s.x is mutably borrowed by x, as part of a mutable borrow of all of s; s can't be used while the borrow is live",
             "Mutable borrow from s to y: y points to s.y, but the borrow is of all of s, which stays borrowed while y is in use",
@@ -24933,9 +24934,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from (temporary 7) to y",
             "The pattern moves part of (temporary 7)'s value into y; (temporary 7) keeps the rest",
             "Partial move from (temporary) to s",
-            // (Not b: its `let`-`else` takes more lines, and its bindings
-            // are drawn after the `else` block, below the temporary's
-            // drop; b is still drawn taken from opt_pair, #1481.)
+            // b's `let`-`else` takes more lines: drawn as a branch, its
+            // temporary forks with the `else` block, and b takes its part
+            // out of it where the paths join (#1481).
+            "Partial move from (temporary 2) to b",
             "Partial move from (temporary 3) to x",
             "Partial move from (temporary 8) to c",
             "Partial move from (temporary 9) to d",
@@ -24947,6 +24949,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "(RustViz draws n taking its value straight from make_p",
             "(RustViz draws y taking its value straight from make_o",
             "Move from res to s",
+            "Move from opt_pair to b",
             "Move from make_o to x",
             "Move from make_w to c",
             "Move from pair to d",
@@ -26556,6 +26559,56 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from b to x",
             "Immutable borrow from a to y",
         ],
+    },    TooltipExpect {
+        name: "holder_return_clear_of_leg_1476",
+        // #1476: drawing only (the router keeps pair's `else`-path return
+        // to a clear of a's `else` leg; `arrow-along-leg` in
+        // `corpus_invariants_hold` pins it). The text stays right.
+        must_contain: &[
+            "Return immutably borrowed resource from pair to a",
+            "Return immutably borrowed resource from pair to b",
+            "Return mutably borrowed resource from pair to a",
+            "Immutable borrow from a to x: x is a reference copied out of pair",
+        ],
+        must_not_contain: &[
+            "Immutable borrow from b to x",
+        ],
+    },
+    TooltipExpect {
+        name: "repoint_chain_one_return_1479",
+        // #1479: c's last use gives each lender back once (one arrow per
+        // lender: `each_lender_given_back_once_after_a_repointing_chain`).
+        must_contain: &[
+            "Return immutably borrowed value from c to x",
+            "Return immutably borrowed value from c to y",
+            "Return immutably borrowed value from c to z",
+            "Return mutably borrowed resource from c to x",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "let_else_temp_fork_1481",
+        // #1481: a `let`-`else` pattern takes its part out of the call's
+        // temporary, not out of the call (which no longer has it), on one
+        // line or several, from a function or a method call, in a loop or
+        // an arm. Drawn as a branch (something in scope is dropped at the
+        // `else` block's exit), the temporary's column forks with the
+        // block: dropped as the `else` path starts (Rust drops it before
+        // the block runs: checked with a Drop-printing program), and on
+        // the matched path where the bindings take their part. A `ref`
+        // binding borrows from the temporary, which then lives to the end
+        // of the block: unchanged.
+        must_contain: &[
+            "Partial move from (temporary) to v",
+            "Partial move from (temporary) to b",
+            "The pattern moves (temporary)'s value, or part of it, into b",
+            "This temporary Result<String, String> is dropped as soon as the pattern has been matched against it (before the `else` block runs, if it doesn't match), and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
+        ],
+        must_not_contain: &[
+            "Move from res to v",
+            "Move from opt_pair to b",
+            "Move from first to b",
+        ],
     },
     TooltipExpect {
         name: "value_if_arm_reads_then_yields_1410",
@@ -27644,7 +27697,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "n is initialized with a copy of a value inside (temporary)",
             "Immutable borrow from (temporary) to s",
             "(temporary)'s resource is immutably borrowed by s; (temporary) is read-only while the borrow is live",
-            "Partial Mutable borrow from (temporary) to r",
+            "Partial mutable borrow from (temporary) to r",
             "(temporary)'s resource is mutably borrowed by r; (temporary) can't be used while the borrow is live",
             "This temporary Result<String, String> is dropped here, where `break` leaves early, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
             "Move from make_res to (temporary 2)",
@@ -36695,6 +36748,27 @@ fn branch_legs_and_joins_meet_their_dots() {
     let tl = run_with_local_backend("edition2024/chain_block_if_1287").timeline_panel_string();
     let (outer, inner) = (dot(&tl, "s@L54:dot:branch"), dot(&tl, "s@L54:dot:branch#2"));
     assert!(outer.1 < inner.1, "s's forks: outer {:?}, inner {:?}", outer, inner);
+}
+
+/// #1479: a reference re-pointed in some arms of an `else if` chain (or
+/// a `match`) and still holding its first loan on the others gives that
+/// lender back once at its last use. The copy of the borrow's end that
+/// `dedupe_borrow_ends` dropped stayed in the line map and was drawn as a
+/// second, identical arrow (`c>x@L..:arrow:static_die#2`).
+#[test]
+fn each_lender_given_back_once_after_a_repointing_chain() {
+    let mut twice = Vec::new();
+    for name in ["repoint_chain_one_return_1479", "else_if_join_1294", "repoint_if_chain_806"] {
+        let tl = run_with_local_backend(name).timeline_panel_string();
+        // (An arrow's id holds a `>`: read the attribute, not the tag.)
+        for part in tl.split("data-rv-id=\"").skip(1) {
+            let id = &part[..part.find('"').unwrap_or(0)];
+            if (id.contains(":arrow:static_die") || id.contains(":arrow:mutable_die")) && id.contains('#') {
+                twice.push(format!("{}: {}", name, id));
+            }
+        }
+    }
+    assert_eq!(twice, Vec::<String>::new());
 }
 
 /// #1264 (`one_line_arm_overlap_1264`): a one-line conditional whose arms
