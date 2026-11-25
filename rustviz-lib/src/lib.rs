@@ -48,6 +48,7 @@ use std::{
     error::Error,
     fmt, fs,
     io::{Read, Write},
+    path::Path,
     process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -679,12 +680,7 @@ fn run_local(code_str: &str) -> Result<Vec<u8>, Box<dyn Error>> {
     fs::write(cwd.join("rust-toolchain.toml"), TOOLCHAIN)?;
     fs::write(cwd.join("src").join("lib.rs"), code_str)?;
 
-    let output = Command::new("cargo")
-        .arg("rv-plugin")
-        // Plain diagnostics: these end up in user-facing error cards, and
-        // CI (or a user's shell) may set CARGO_TERM_COLOR=always.
-        .env("CARGO_TERM_COLOR", "never")
-        .current_dir(cwd)
+    let output = plugin_command(&cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()?;
@@ -695,6 +691,22 @@ fn run_local(code_str: &str) -> Result<Vec<u8>, Box<dyn Error>> {
         ))));
     }
     Ok(output.stdout)
+}
+
+/// `cargo rv-plugin` in the temp crate `cwd`. The temp crate has its own
+/// `target/`; an inherited `CARGO_TARGET_DIR` would make every render share
+/// one target dir under the same crate name, so concurrent renders race and
+/// a crate cargo thinks is fresh never runs the driver (empty stdout, #1494).
+fn plugin_command(cwd: &Path) -> Command {
+    let mut cmd = Command::new("cargo");
+    cmd.arg("rv-plugin")
+        // Plain diagnostics: these end up in user-facing error cards, and
+        // CI (or a user's shell) may set CARGO_TERM_COLOR=always.
+        .env("CARGO_TERM_COLOR", "never")
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("CARGO_BUILD_TARGET_DIR")
+        .current_dir(cwd);
+    cmd
 }
 
 /// The plugin's stdout: one JSON object, written by `rustviz-plugin`'s
@@ -708,6 +720,13 @@ struct PluginOutput {
 }
 
 fn parse_output(stdout: &[u8]) -> Result<Rustviz, Box<dyn Error>> {
+    if stdout.iter().all(u8::is_ascii_whitespace) {
+        // Not a version mismatch (an old plugin prints something): cargo
+        // succeeded without the driver running, or the plugin printed nothing.
+        return Err(Box::new(RvError::PluginError(
+            "the plugin produced no output".to_string(),
+        )));
+    }
     let out: PluginOutput = serde_json::from_slice(stdout).map_err(|e| {
         RvError::PluginError(format!(
             "couldn't read the plugin's output ({e}); the installed rustviz plugin \
@@ -751,6 +770,25 @@ mod tests {
             .err()
             .expect("must not parse");
         assert!(err.to_string().contains("Reinstall"), "{err}");
+    }
+
+    /// An empty stdout is not a version mismatch (#1494): it must not send
+    /// the reader to reinstall the plugin.
+    #[test]
+    fn parse_output_empty_is_not_a_reinstall_hint() {
+        let err = parse_output(b"\n").err().expect("must not parse");
+        assert!(err.to_string().contains("no output"), "{err}");
+        assert!(!err.to_string().contains("Reinstall"), "{err}");
+    }
+
+    /// The child must not inherit a shared target dir (#1494).
+    #[test]
+    fn plugin_command_drops_shared_target_dir() {
+        let cmd = plugin_command(Path::new("."));
+        for k in ["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR"] {
+            let v = cmd.get_envs().find(|(n, _)| *n == k);
+            assert_eq!(v, Some((std::ffi::OsStr::new(k), None)), "{k} not removed");
+        }
     }
 
     /// Pin: the channel from `rust-toolchain.toml` parses as a
