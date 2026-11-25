@@ -6553,6 +6553,15 @@ impl Visualizable for VisualizationData {
 /// nothing back (another reference still holds the loan) ended it as an
 /// immutable one.
 fn holds_mut_borrow(vd: &VisualizationData, ro: &ResourceAccessPoint) -> bool {
+    holds_mut_borrow_by(vd, ro, usize::MAX, 4)
+}
+
+/// `holds_mut_borrow` for `ro`'s value as of line `by`. A copy of another
+/// reference (`h.r = r4;`, `let Holder { r: r4, .. } = h;` with h.r from
+/// `holder(downgrade(&mut s4))`) holds that reference's loan, so its kind
+/// is the source's as of the copy (the checker's rule, #1521); `depth`
+/// bounds the walk along copies.
+fn holds_mut_borrow_by(vd: &VisualizationData, ro: &ResourceAccessPoint, by: usize, depth: usize) -> bool {
     let Some(t) = vd.timelines.get(ro.hash()) else { return false };
     if ro.is_ref() {
         // (A copy of another reference re-points it; a call's result
@@ -6560,12 +6569,18 @@ fn holds_mut_borrow(vd: &VisualizationData, ro: &ResourceAccessPoint) -> bool {
         // borrow drawn into it.)
         let from_column = |f: &ResourceTy| f.extract_rap().is_some_and(|r| !r.is_fn());
         return t.history.iter().rev()
+            .filter(|(l, _)| *l <= by)
             .find(|(_, e)| match e {
                 Event::MutableBorrow { .. } | Event::StaticBorrow { .. } | Event::Acquire { .. } => true,
                 Event::Copy { from, .. } => from_column(from),
                 _ => false,
             })
-            .is_some_and(|(_, e)| matches!(e, Event::MutableBorrow { .. }));
+            .is_some_and(|(l, e)| match e {
+                Event::MutableBorrow { .. } => true,
+                Event::Copy { from, .. } => depth > 0 && from.extract_rap()
+                    .is_some_and(|src| src.hash() != ro.hash() && holds_mut_borrow_by(vd, src, *l, depth - 1)),
+                _ => false,
+            });
     }
     ro.holds_borrow() && t.history.iter().any(|(_, e)| matches!(e, Event::MutableBorrow { .. }))
 }

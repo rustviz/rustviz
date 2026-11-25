@@ -2908,6 +2908,13 @@ fn arm_end_state(rap: &ResourceAccessPoint, branch: &BranchData, branch_history:
     // dot (`borrow_ended_in_every_arm`).
     let every_arm_ended = all_paths_present(ty, branch_history.len())
         && branch_history.iter().all(|b| ends_borrow(&b.e_data) && ended(b.states.last().map(|s| &s.2)));
+    // Or its borrow ended before the conditional, and an arm that gave it a
+    // new one ended that (#1524): the join's "r's borrow ended before the
+    // branches above" dot. The arms that do nothing hold no borrow.
+    let every_arm_ended = every_arm_ended || (all_paths_present(ty, branch_history.len())
+        && branch_history.iter().any(|b| !b.diverges && ends_borrow(&b.e_data))
+        && branch_history.iter().filter(|b| !b.diverges).all(|b| ended(b.states.last().map(|s| &s.2))
+            && (ends_borrow(&b.e_data) || b.e_data.is_empty())));
     // An arm beside one that moved r (`if c { take(m); }`, `Some(_) =>
     // drop(m)`), where every other arm ended its borrow: the join has no
     // dot (a reference whose borrow ended in only some arms gets none),

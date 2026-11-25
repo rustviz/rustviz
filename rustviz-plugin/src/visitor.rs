@@ -6646,13 +6646,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // the value is moved out of the place and straight back in. Nothing
     // is dropped and the place owns the same value after, so nothing is
     // drawn, as for a branch giving v its own value back in `v = if c
-    // { v } else { g };` (#1010). (A Copy value is drawn as the copy it
-    // is; a reference reassigned to itself keeps its reborrow drawing.)
+    // { v } else { g };` (#1010). So is `r = r;` with r a shared
+    // reference: r holds the same reference, with the same loan, after
+    // (#1497); it used to end r's borrow there and draw a copy arrow from
+    // r to itself. (A Copy value is drawn as the copy it is; a `&mut`
+    // reassigned to itself keeps its reborrow drawing.)
     if destructure_hid.is_none() && matches!(expr.kind, ExprKind::Assign(..))
       && !expr.span.from_expansion() && same_place(lhs_expr, rhs_expr) {
       let owner = lhs_expr.hir_id.owner;
       let ty = self.tcx.typeck(owner).node_type(lhs_expr.hir_id);
-      if !ty.is_ref() && !self.ty_is_copy(ty, owner) {
+      if (!ty.is_ref() && !self.ty_is_copy(ty, owner)) || ty.ref_mutability() == Some(Mutability::Not) {
         self.visit_expr(lhs_expr);
         return;
       }

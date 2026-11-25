@@ -27498,11 +27498,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         // #1497, #1517: `r = r;` / `a = b;` (b a copy of a) gives r the
         // reference it already holds: no borrow ends at the write, and a
-        // loan made from a `&mut` is never called immutable. (How often s is
-        // given back is pinned by `same_loan_write_ends_nothing_1497`.)
+        // loan made from a `&mut` is never called immutable. `r = r;` on a
+        // shared reference draws nothing, like `v = v;` (#1021). (How often
+        // s is given back is pinned by `same_loan_write_ends_nothing_1497`.)
         name: "reassign_same_loan_1497_1517",
         must_contain: &[
-            "r is assigned a copy of r's reference",
             "a is assigned a copy of b's reference",
             "a's mutable borrow ends",
             "h.r is assigned a copy of r4's reference",
@@ -27511,6 +27511,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "a's immutable borrow ends",
             "h.r's immutable borrow ends",
+            // r4 is a copy of h.r, whose loan of s4 is mutable
+            // (`downgrade(&mut s4)`): its end gives nothing back (h.r
+            // holds the loan on) and is a mutable one too.
+            "r4's immutable borrow ends",
+            "Copy from r to r",
+            "Copy from r2 to r2",
         ],
     },
     TooltipExpect {
@@ -27529,9 +27535,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
 ];
 
-/// #1497: `r = r;` keeps r's loan: its write ends no borrow, and s is given
-/// back once, at r's last use. Main ended the borrow at the write too, so s
-/// was given back twice.
+/// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws
+/// nothing), and s is given back once, at r's last use. Main ended the
+/// borrow at the write too, so s was given back twice.
 #[test]
 fn same_loan_write_ends_nothing_1497() {
     let rv = run_with_local_backend("reassign_same_loan_1497_1517");

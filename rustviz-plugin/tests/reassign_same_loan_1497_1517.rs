@@ -1,8 +1,9 @@
 // A reference given back the reference it already holds (`r = r;`, or `a =
 // b;` with b a copy of a) keeps the same loan: the write ends none of it, and
-// the lender is given back once, at the last use (#1497, #1517). It used to
-// end the borrow at the write ("r's immutable borrow ends"), and for a
-// downgraded `&mut` say both "immutable" and "mutable borrow ends".
+// the lender is given back once, at the last use (#1497, #1517). `r = r;` on
+// a shared reference draws nothing, like `v = v;` (#1021). It used to end the
+// borrow at the write ("r's immutable borrow ends"), and for a downgraded
+// `&mut` say both "immutable" and "mutable borrow ends".
 
 fn self_assign() {
     let s = String::from("ab");
