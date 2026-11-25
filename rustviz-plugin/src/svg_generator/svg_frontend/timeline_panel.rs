@@ -6605,6 +6605,26 @@ fn through_marks(drawn: &[Drawn], dots: &DotPositions, bars: &[(f64, f64)]) -> V
                 out.push(i);
             }
         }
+        // A sharp bend's mitred corner reaches past the bend point: half the
+        // stroke over the sine of half the angle between its pieces (a
+        // track turning back up at 56 degrees stopped 9 px from n's dot,
+        // its corner on the dot's rim, #1605's review).
+        for w in d.pieces.windows(2) {
+            let (v, a, b) = if dist(w[0].1, w[1].0) < 0.5 { (w[0].1, w[0].0, w[1].1) }
+                else if dist(w[0].0, w[1].1) < 0.5 { (w[0].0, w[0].1, w[1].0) } else { continue };
+            let (la, lb) = (dist(v, a), dist(v, b));
+            if la < 1.0 || lb < 1.0 {
+                continue;
+            }
+            let cos = (((a.0 - v.0) * (b.0 - v.0) + (a.1 - v.1) * (b.1 - v.1)) / (la * lb)).clamp(-1.0, 1.0);
+            let miter = 2.5 / (cos.acos() / 2.0).sin().max(0.1);
+            for &(x, y) in dots {
+                let c = (x as f64, y as f64);
+                if !ends.iter().any(|&e| dist(e, c) < 6.0) && dist(v, c) < 5.5 + miter && dist(v, c) >= 5.0 + 2.5 + 0.5 {
+                    out.push(i);
+                }
+            }
+        }
         // Along a stop bar (12 px wide, level): its middle under the shaft.
         for &c in bars {
             if d.pieces.iter().any(|&p| off(c, p) < 4.5) {
