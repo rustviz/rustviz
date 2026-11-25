@@ -745,6 +745,21 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// s's last borrower, and its end said s was no longer borrowed while
   /// r still was (#1439).
   pub repointed_ends: Vec<(String, usize, usize)>,
+  /// The old loans of re-pointed references (`r = &t;` after `let mut r
+  /// = &b;`): (the reference, its shared lenders, where the loan was
+  /// made, its last line). `borrow_map` holds the new loan by then, so
+  /// `note_sharers_across_calls` didn't see r share b before the write:
+  /// a read of b in between said b was no longer borrowed (#1492).
+  pub repointed_loans: Vec<(String, Vec<String>, usize, usize)>,
+  /// References whose borrow lasts at least until a line, whatever the
+  /// MIR loan matched to them says: one a re-pointed reborrow gave back
+  /// to (m in `h.r = r;` after `h = Holder { r: &*m }`, #1538), and one
+  /// given its own reference back (`h.r = r;` after `let Holder { r, .. }
+  /// = h;`, #1517).
+  pub min_lifetimes: Vec<(String, usize)>,
+  /// The ids of the old-loan ends a reassignment in an arm added that end
+  /// in the conditional's condition, before any arm runs (#1524).
+  pub pre_split_end_ids: Vec<std::ops::Range<usize>>,
   /// While `emit_borrow_ends` runs: for each retired loan's key
   /// (`retired_key`), the line from which events are the later
   /// variable's.
@@ -1218,6 +1233,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       arm_value_binds: HashSet::new(),
       loans_carried_on: Vec::new(),
       repointed_ends: Vec::new(),
+      repointed_loans: Vec::new(),
+      min_lifetimes: Vec::new(),
+      pre_split_end_ids: Vec::new(),
       retired_until: HashMap::new(),
       arm_frames: Vec::new(),
       defer_old_ends: false,
@@ -11821,6 +11839,11 @@ pub fn print_out_of_scope(&mut self){
         data.lifetime = kill;
       }
     }
+    for (name, line) in self.min_lifetimes.iter() {
+      if let Some(data) = self.borrow_map.get_mut(name).filter(|d| d.lifetime < *line) {
+        data.lifetime = *line;
+      }
+    }
     for (id, lender, line) in self.loan_end_overrides.iter() {
       #[expect(clippy::disallowed_methods, reason = "each entry is set on its own")]
       for data in self.borrow_map.values_mut().chain(self.arm_loans.iter_mut().map(|(_, d)| d)) {
@@ -12396,6 +12419,7 @@ pub fn print_out_of_scope(&mut self){
     for (line, ev) in std::mem::take(&mut self.or_ref_ends) {
       self.add_external_event(line, ev);
     }
+    hoist_ends_before_split(self.preprocessed_events, self.event_line_map, true, &self.pre_split_end_ids);
     hoist_ends_on_other_arms_lines(self.preprocessed_events);
     dedupe_borrow_ends(self.preprocessed_events);
     self.nest_borrow_ends_in_arms();
@@ -12423,6 +12447,7 @@ pub fn print_out_of_scope(&mut self){
     note_later_borrowers_in_arms(self.preprocessed_events, false);
     self.note_sharers_across_calls();
     self.note_loop_iterator_keeps_moved();
+    self.drop_arm_ref_ends_live_after();
   }
 
   /// The end of a moved `for` binding's borrow (#1511) gives nothing back
@@ -12457,6 +12482,47 @@ pub fn print_out_of_scope(&mut self){
           if ids.contains(id) {
             *still_borrowed_by = vec![crate::svg_generator::hover_messages::LOOP_ITERATOR_HOLDER.to_owned()];
           }
+        }
+      }
+    }
+  }
+
+  /// The renderer draws the end with no arrow (`RefDie`) of a reference
+  /// declared before a top-level `if` / `match` that one of its arms
+  /// holds (#1524). Not one whose reference is still live after the
+  /// conditional (a loop body the conditional is in reads it the next
+  /// time round): that isn't where its borrow ends. Those are left out,
+  /// as they were before such ends were drawn.
+  fn drop_arm_ref_ends_live_after(&mut self) {
+    let mut checks: Vec<(usize, usize, String)> = Vec::new();
+    let mut in_loop: Vec<usize> = Vec::new();
+    for (k, (_, ev)) in self.preprocessed_events.iter().enumerate() {
+      let ExternalEvent::Branch { branches, merge_point, branch_type, id, .. } = ev else { continue };
+      if matches!(branch_type, BranchType::Loop(..)) {
+        continue;
+      }
+      if self.exit_scopes.get(id).is_some_and(|s| s.loop_lines.is_some()) {
+        in_loop.push(k);
+      }
+      for b in branches.iter() {
+        for (_, e) in b.e_data.iter() {
+          if let ExternalEvent::RefDie { from: ResourceTy::Value(r), .. } = e {
+            #[expect(clippy::disallowed_methods, reason = "`any` over the set: order never observed")]
+            let declared = branches.iter().any(|x| x.decl_vars.iter().any(|d| d.hash() == r.hash()));
+            if !declared && !checks.iter().any(|(i, _, n)| *i == k && n == r.name()) {
+              checks.push((k, *merge_point, r.name().to_owned()));
+            }
+          }
+        }
+      }
+    }
+    for (k, merge, name) in checks {
+      if !in_loop.contains(&k) && self.last_live_line(&name, (merge + 1, usize::MAX)).is_none() {
+        continue;
+      }
+      if let ExternalEvent::Branch { branches, .. } = &mut self.preprocessed_events[k].1 {
+        for b in branches.iter_mut() {
+          b.e_data.retain(|(_, e)| !matches!(e, ExternalEvent::RefDie { from: ResourceTy::Value(r), .. } if *r.name() == name));
         }
       }
     }
@@ -12503,6 +12569,15 @@ pub fn print_out_of_scope(&mut self){
         Some(Sharer { name: name.clone(), hash, from, to: rd.lifetime, moved, lenders, from_kept_call: false, stored: false, gaps: Vec::new() })
       })
       .collect();
+    // A re-pointed reference shares its old lenders until its old loan
+    // ends (#1492).
+    for (name, lenders, from, to) in self.repointed_loans.iter() {
+      let Some(rap) = self.raps.get(name).map(|r| &r.rap) else { continue };
+      sharers.push(Sharer {
+        name: name.clone(), hash: *rap.hash(), from: *from, to: *to, moved: None, lenders: lenders.clone(),
+        from_kept_call: false, stored: false, gaps: Vec::new(),
+      });
+    }
     // An arm whose path ends the reference's loan (it returns, or the
     // last use is in another arm) doesn't hold it after that end (#796).
     for s in sharers.iter_mut() {
@@ -13268,6 +13343,74 @@ fn hoist_ends_in(events: &mut [(usize, ExternalEvent)], outer: &HashSet<Resource
       inner.extend(br.decl_vars.iter().cloned());
       hoist_ends_in(&mut br.e_data, &inner, hoisted);
     }
+  }
+}
+
+/// The ends of a reference's old loan that an arm's reassignment added
+/// (`r = &t;` in an arm, after `let mut r = &s;`) where the old loan was
+/// dead before the `if` / `match` started (r never read again, or last
+/// read in its condition, and not read in another arm): their ids are in
+/// `ids`. The loan ends there on every path, but was drawn in the arm, on
+/// a row above the fork, and the lender's arm legs joined with no dot
+/// (#1524). Move them out of the arms, before the conditional, once
+/// (each arm that re-points r added its own). Nested conditionals too,
+/// innermost first; not out of a loop body.
+fn hoist_ends_before_split(
+  events: &mut Vec<(usize, ExternalEvent)>, line_map: &mut BTreeMap<usize, Vec<ExternalEvent>>, top: bool, ids: &[std::ops::Range<usize>],
+) {
+  let mut k = 0;
+  while k < events.len() {
+    let mut lifted: Vec<(usize, ExternalEvent, bool)> = Vec::new();
+    if let ExternalEvent::Branch { branches, split_point, branch_type, .. } = &mut events[k].1 {
+      let is_loop = matches!(branch_type, BranchType::Loop(..));
+      for b in branches.iter_mut() {
+        hoist_ends_before_split(&mut b.e_data, &mut b.line_map, false, ids);
+        if is_loop {
+          continue;
+        }
+        let mut take: Vec<usize> = Vec::new();
+        for (i, (line, e)) in b.e_data.iter().enumerate() {
+          let (ExternalEvent::StaticDie { from: ResourceTy::Value(r), .. }
+            | ExternalEvent::MutableDie { from: ResourceTy::Value(r), .. }
+            | ExternalEvent::RefDie { from: ResourceTy::Value(r), .. }) = e else { continue };
+          #[expect(clippy::disallowed_methods, reason = "`any` over the set: order never observed")]
+          let declared_in_arm = b.decl_vars.iter().any(|d| d.hash() == r.hash());
+          if *line <= *split_point && ids.iter().any(|r| r.contains(&e.get_id())) && !declared_in_arm {
+            take.push(i);
+          }
+        }
+        for &i in take.iter().rev() {
+          let (line, e) = b.e_data.remove(i);
+          let id = e.get_id();
+          // (Listed with the arrows of its line where it goes: the top
+          // level draws only those; an arm, those it listed.)
+          let mut listed = false;
+          for v in b.line_map.values_mut() {
+            let n = v.len();
+            v.retain(|x| x.get_id() != id);
+            listed |= v.len() < n;
+          }
+          let key = borrow_end_of(&e).map(|(r, to)| (line, std::mem::discriminant(&e), r.clone(), to.clone()));
+          if !lifted.iter().any(|(l, x, _)| borrow_end_of(x).map(|(r, to)| (*l, std::mem::discriminant(x), r.clone(), to.clone())) == key) {
+            lifted.push((line, e, listed));
+          }
+        }
+        b.line_map.retain(|_, v| !v.is_empty());
+      }
+    }
+    // (Among the events before the conditional, in line order.)
+    let n = lifted.len();
+    for (line, ev, listed) in lifted {
+      if listed || (top && ev.is_arrow_ev()) {
+        let at = line_map.entry(line).or_default();
+        if !at.iter().any(|x| x.get_id() == ev.get_id()) {
+          at.push(ev.clone());
+        }
+      }
+      let at = events[..k].iter().rposition(|(l, _)| *l <= line).map_or(0, |i| i + 1);
+      events.insert(at, (line, ev));
+    }
+    k += n + 1;
   }
 }
 

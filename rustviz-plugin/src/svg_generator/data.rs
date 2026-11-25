@@ -6285,10 +6285,22 @@ impl Visualizable for VisualizationData {
                 for var in in_decl_order(&live_vars) { // for all the live variables in the branch (declaration order, #211)
                     let is = ResourceTy::Value(var.clone());
                     let mut branch_history: Vec<BranchData> = Vec::new();
-                    for branch in branches.iter() { // for each branch
+                    for (i, branch) in branches.iter().enumerate() { // for each branch
                         let mut b_history: Vec<(usize, Event)> = Vec::new();
+                        let (lo, hi) = branch_type.get_start_end(i);
                         for (l, ev) in branch.e_data.iter() { // for each event in each branch
                             self.append_branch_event(ev, *l, &is, & mut b_history);
+                            // The end with no arrow of a reference declared
+                            // before the conditional, on a line of this arm
+                            // (its re-pointing's new loan, never read while
+                            // another reference holds the lender, #1524):
+                            // drawn as for one the arm declares. (Top-level
+                            // conditionals only, not a loop's body; the plugin
+                            // leaves out one whose reference is read after the
+                            // conditional, `drop_arm_ref_ends_live_after`.)
+                            if lo <= *l && *l <= hi && !matches!(branch_type, BranchType::Loop(..)) {
+                                append_decl_ref_die(self, ev, *l, var, &mut b_history);
+                            }
                         }
 
                         branch_history.push(BranchData { t_data: TimelineColumnData { // produce some dummy timeline data for now

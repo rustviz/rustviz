@@ -4844,6 +4844,12 @@ pub fn event_dot_branch_merge_borrow_ended(my_name: &String) -> String {
     format!("{0}'s borrow ended in each branch above", styled_name_html(my_name))
 }
 
+// Merge dot for a reference whose borrow ended before the conditional,
+// given a new one in some arms that ended there (#1524).
+pub fn event_dot_branch_merge_borrow_ended_before(my_name: &String) -> String {
+    format!("{0}'s borrow ended before the branches above, and each borrow a branch gave {0} ended in that branch", styled_name_html(my_name))
+}
+
 // Dot where a conditional ends whose branches all diverge, some by
 // `break`ing out of the loop around it (#1296): nothing gets here, but the
 // column goes on after the loop, from the branches that break.

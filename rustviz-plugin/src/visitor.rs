@@ -6864,6 +6864,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // a = &c (where c is &&i32)
         ResourceTy::Value(_) => {
           let ref_data = self.borrow_map.get(lhs_rap.name()).unwrap().clone();
+          // `r = r;`, or `a = b;` with `b` a copy of a's reference (`let
+          // b = a;`): r gets the reference it held back, with the same
+          // loan, so the write ends none of it (#1497, #1517). It used to
+          // end the borrow at the write, and once more at r's last use.
+          let same_value = destructure_hid.is_none() && !ref_arms && matches!(rhs_expr.kind, ExprKind::Path(..))
+            && expr_to_rap_name(rhs_expr, &self.tcx).is_some_and(|n| n == *lhs_rap.name()
+              || (self.borrow_map.get(&n).is_some_and(|d| d.lender == ref_data.lender && d.co_lenders == ref_data.co_lenders)
+                && ((ref_data.loan().is_some()
+                  && (self.ref_carriers.iter().any(|(c, src, l)| *c == n && src == lhs_rap.name() && Some(*l) == ref_data.loan())
+                    || self.borrow_map.get(&n).is_some_and(|d| d.loan() == ref_data.loan())))
+                  // (Or given its value by a copy of r since: `let Holder { r,
+                  // .. } = h;` before `h.r = r;`.)
+                  || self.borrow_map.get(&n).is_some_and(|d| d.assigned_at >= ref_data.assigned_at
+                    && self.preprocessed_events.iter().any(|(l, e)| *l == d.assigned_at && matches!(e,
+                      ExternalEvent::Copy { from: ResourceTy::Value(f), to: ResourceTy::Value(t), .. }
+                        if f.name() == lhs_rap.name() && *t.name() == n))))));
+          let keeps_old_loan = keeps_old_loan || same_value;
+          if same_value {
+            self.min_lifetimes.push((lhs_rap.name().to_owned(), line_num));
+          }
           self.hand_loan_to_carriers(lhs_rap.name(), &ref_data);
           self.hand_loan_to_reborrows(lhs_rap.name(), &ref_data, line_num);
           let to_ro = match ref_data.lender {
@@ -6904,6 +6924,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // #1432), or had ended before it: it doesn't keep the lender
           // borrowed at that end.
           let me = lhs_rty.real_name();
+          // A copied reference (`let mut r = x;`), whose loan rustc
+          // doesn't record for r, dead before the conditional whose arm
+          // re-points it (r never read again): its old loan ends there
+          // on every path, at its last use (#1524).
+          let dead_before_arms = (ref_data.loan().is_none() && !matches!(ref_data.lender, ResourceTy::Anonymous))
+            .then(|| self.last_live_line(&me, (ref_data.assigned_at, line_num.saturating_sub(1))).unwrap_or(ref_data.assigned_at))
+            .filter(|&l| l >= ref_data.assigned_at && self.arm_frames.last().is_some_and(|&(split, _, _, _)| l < split));
           let old_end = self.loan_end(&ref_data).filter(|&end| end < line_num && end >= ref_data.assigned_at)
             .or_else(|| self.old_loan_end(&ref_data, &ref_data.lender, line_num, write_span));
           if let Some(old_end) = old_end {
@@ -6938,9 +6965,32 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             && crate::expr_visitor::mutable_loan_alone(lhs_rap.name(), &ref_data.lender.real_name(), &self.borrow_map, borrowers.iter());
           // (Also when another reference keeps the lender borrowed: y
           // is gone all the same, #1432.)
+          // (Only one whose borrow r's old value could be a copy of: one
+          // still in use when r got it. An arm-local `let m2 = &mut s;`
+          // used up before `let mut r3 = &s;` gives s back itself, #1515.)
           if !self.ref_handed_off(lhs_rap.name()) && !taken_over {
-            self.loans_carried_on.extend(gone.iter().cloned());
+            let carried: Vec<String> = gone.iter()
+              .filter(|g| self.borrow_map.get(*g).is_none_or(|d| d.lifetime >= ref_data.assigned_at))
+              .cloned().collect();
+            self.loans_carried_on.extend(carried);
           }
+          // Reads of the old lenders before the old loan ends (`println!("{}",
+          // b);` between `let mut r = &b;` and `r = &t;`) leave them shared
+          // by r (#1492).
+          if !self.ref_handed_off(lhs_rap.name()) && !keeps_old_loan && !taken_over {
+            let lenders: Vec<String> = ref_data.all_lenders().iter()
+              .filter(|l| matches!(l, ResourceTy::Value(r) if !r.is_ref()) && !ref_data.mut_of(l))
+              .map(|l| l.real_name())
+              .collect();
+            let to = match self.loan_end(&ref_data) {
+              Some(e) if e >= ref_data.assigned_at => e,
+              _ => old_end.unwrap_or(line_num),
+            };
+            if !lenders.is_empty() {
+              self.repointed_loans.push((me.clone(), lenders, ref_data.assigned_at, to));
+            }
+          }
+          let ends_lo = *self.unique_id;
           if self.ref_handed_off(lhs_rap.name()) || keeps_old_loan {
           }
           else if (borrowers.len() > 1 && !only_loan) || taken_over { // there is another active reference at this point, the resource cannot be returned
@@ -6964,7 +7014,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             } else {
               // (Where the old loan ends, its last use, when that is
               // before the write, #1432.)
-              let die_line = if taken_over { line_num } else { old_end.unwrap_or(line_num) };
+              let die_line = if taken_over { line_num } else { old_end.or(dead_before_arms).unwrap_or(line_num) };
               self.add_external_event(die_line, ExternalEvent::RefDie { from: lhs_rty.clone(), to: to_ro, num_curr_borrowers: borrowers.len() - 1, id: *self.unique_id });
               *self.unique_id += 1;
               // r's other lenders (`b` in `r = if c { &a } else { &b };`
@@ -7012,7 +7062,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             let end_of = |this: &Self, lender: &ResourceTy| this.old_loan_end(&ref_data, lender, line_num, write_span).unwrap_or(line_num);
             let end_line = match self.loan_end(&ref_data).filter(|&end| end < line_num && end >= ref_data.assigned_at) {
               Some(end) => end,
-              None => end_of(self, &ref_data.lender),
+              None => match end_of(self, &ref_data.lender) {
+                e if e == line_num => dead_before_arms.unwrap_or(e),
+                e => e,
+              },
             };
             // The loan lives on in another arm of an enclosing `if` /
             // `match` (`c = &y;` in one arm, a read of `c` in a later
@@ -7032,16 +7085,55 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             if let ResourceTy::Value(l) = &to_ro {
               self.repointed_ends.push((l.name().to_owned(), ref_data.assigned_at, end_line));
             }
-            // ...and to each further lender (#171).
+            // A reborrow through a reference (`h.r` from `&*m`, m a `&mut`
+            // parameter) keeps that reference's borrow live until the
+            // reborrow ends here: m's own end comes after the give-back,
+            // not at its last use before it (#1538).
+            if let ResourceTy::Value(l) | ResourceTy::Deref(l) = &to_ro {
+              if l.is_ref() && self.borrow_map.contains_key(l.name()) {
+                self.min_lifetimes.push((l.name().to_owned(), end_line));
+              }
+            }
+            // ...and to each further lender (#171), unless another
+            // reference still borrows it there (`x = &b` with `r = if c {
+            // &a } else { &b };`, #1493), as in the branch above (#1432):
+            // then r's borrow just ends (on a line of its own, where the
+            // first lender's end isn't).
             for co in ref_data.co_lenders.iter() {
               let evt = if ref_data.mut_of(co) { Evt::MDie } else { Evt::SDie };
               let co_end = end_of(self, co);
+              #[expect(clippy::disallowed_methods, reason = "`any` over the map: order never observed")]
+              let shared = matches!(co, ResourceTy::Value(_)) && !ref_data.mut_of(co) && self.borrow_map.iter().any(|(k, rd)| *k != me
+                && !gone.contains(k) && rd.all_lenders().contains(co) && rd.assigned_at <= co_end
+                && self.loan_end(rd).unwrap_or(rd.lifetime).max(rd.lifetime) >= co_end);
+              if shared {
+                if co_end != end_line {
+                  self.defer_old_ends = co_end > line_num;
+                  self.add_external_event(co_end, ExternalEvent::RefDie { from: lhs_rty.clone(), to: co.clone(), num_curr_borrowers: 1, id: *self.unique_id });
+                  *self.unique_id += 1;
+                  self.defer_old_ends = false;
+                }
+                continue;
+              }
               self.defer_old_ends = co_end > line_num;
               self.add_ev(co_end, evt, co.clone(), lhs_rty.clone(), false);
               self.defer_old_ends = false;
             }
           }
 
+          // An old loan that ends before the `if` / `match` this write is
+          // in, or in its condition (`if r.is_empty() { r = &s2; }`), ends
+          // there on every path, before any arm runs:
+          // `hoist_ends_before_split` takes its ends out of the arm (#1524).
+          // (Not when r is still read in another arm: then that end isn't
+          // where the old loan ends on every path.)
+          let read_in_other_arms = |this: &Self, split: usize, merge: usize, lo: usize, hi: usize|
+            [(split + 1, lo.saturating_sub(1)), (hi + 1, merge.saturating_sub(1))]
+              .iter().any(|&(a, b)| a <= b && this.last_live_line(&me, (a, b)).is_some());
+          if self.arm_frames.last().is_some_and(|&(split, merge, lo, hi)| old_end.or(dead_before_arms).is_some_and(|e| e <= split && e < line_num)
+            && !read_in_other_arms(self, split, merge, lo, hi)) {
+            self.pre_split_end_ids.push(ends_lo..*self.unique_id);
+          }
           // Add event for possible lender if necessary
           // set possible lender to None
 

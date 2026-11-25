@@ -27429,7 +27429,123 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=t4 goes out of scope. No resource is dropped.",
         ],
     },
+    TooltipExpect {
+        // #1492: a reference re-pointed later still borrows its old lender
+        // until its old loan ends, so a read of the lender before that gives
+        // back only its own borrow. Main said the lender was no longer
+        // borrowed (and drew it as the owner), straight-line and with the
+        // re-point in an arm.
+        name: "reassign_lender_read_1492",
+        must_contain: &[
+            "b's resource is no longer borrowed by println!, but is still immutably borrowed by r",
+            "b2's resource is no longer borrowed by println!, but is still immutably borrowed by r2",
+            "b3's resource is no longer borrowed by len, but is still immutably borrowed by r3",
+            "b4's resource is no longer borrowed by len, but is still immutably borrowed by r4",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        // #1493: r's old loan of its second lender b ends while x still
+        // borrows b: r gives back only a (b stays shared until x's last use,
+        // which gives it back once). Main gave b back at r's end too.
+        name: "reassign_co_lender_shared_1493",
+        must_contain: &[
+            "Return immutably borrowed resource from r to a",
+            "Return immutably borrowed resource from x to b",
+            "Return immutably borrowed resource from x2 to b2",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from r to b",
+            "Return immutably borrowed resource from r2 to b2",
+        ],
+    },
+    TooltipExpect {
+        // #1524: an old loan dead before the conditional ends there, on the
+        // trunk, and r's legs meet at a dot saying so (the invariant checks
+        // pin where the ends are drawn). r3 copies x3; a mutable r7 ends
+        // before the `match`, so s7 isn't drawn mutably borrowed across it.
+        name: "reassign_dead_old_loan_1524",
+        must_contain: &[
+            "r's borrow ended before the branches above, and each borrow a branch gave r ended in that branch",
+            "r2's borrow ended before the branches above, and each borrow a branch gave r2 ended in that branch",
+            "r3's borrow ended before the branches above, and each borrow a branch gave r3 ended in that branch",
+            "r4's borrow ended before the branches above, and each borrow a branch gave r4 ended in that branch",
+            "r6's borrow ended before the branches above, and each borrow a branch gave r6 ended in that branch",
+            "r7's borrow ended before the branches above, and each borrow a branch gave r7 ended in that branch",
+            "r6's immutable borrow ends",
+            "r7's mutable borrow ends",
+        ],
+        must_not_contain: &[
+            "r3 holds an immutable reference; it can read the borrowed resource",
+            "s7's resource is mutably borrowed; s7 can't be used until the borrow ends",
+        ],
+    },
+    TooltipExpect {
+        // #1515: a `&mut` local to an arm gives its lender back at its last
+        // use, also when a later reference to the lender is re-pointed.
+        // Main never gave it back (and the lender's column then ended).
+        name: "reassign_after_arm_mut_1515",
+        must_contain: &[
+            "Return mutably borrowed resource from m2 to s",
+            "Return mutably borrowed resource from m4 to s2",
+            "Return mutably borrowed resource from _m6 to s3",
+            "s's resource is no longer mutably borrowed",
+            "s2's resource is no longer mutably borrowed",
+            "s3's resource is no longer mutably borrowed",
+        ],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        // #1497, #1517: `r = r;` / `a = b;` (b a copy of a) gives r the
+        // reference it already holds: no borrow ends at the write, and a
+        // loan made from a `&mut` is never called immutable. (How often s is
+        // given back is pinned by `same_loan_write_ends_nothing_1497`.)
+        name: "reassign_same_loan_1497_1517",
+        must_contain: &[
+            "r is assigned a copy of r's reference",
+            "a is assigned a copy of b's reference",
+            "a's mutable borrow ends",
+            "h.r is assigned a copy of r4's reference",
+            "h.r's mutable borrow ends",
+        ],
+        must_not_contain: &[
+            "a's immutable borrow ends",
+            "h.r's immutable borrow ends",
+        ],
+    },
+    TooltipExpect {
+        // #1538: m's own borrow ends where the reborrow through it is given
+        // back (the invariant checks pin that the give-back isn't on a dead
+        // column), not on the line it was made.
+        name: "field_reborrow_param_1538",
+        must_contain: &[
+            "the resource m points to is immutably borrowed by h.r through m; m is read-only while the borrow is live",
+            "m's mutable borrow ends",
+            "h.r no longer borrows the resource m points to",
+            "m2's mutable borrow ends",
+            "m3's mutable borrow ends",
+        ],
+        must_not_contain: &[],
+    },
 ];
+
+/// #1497: `r = r;` keeps r's loan: its write ends no borrow, and s is given
+/// back once, at r's last use. Main ended the borrow at the write too, so s
+/// was given back twice.
+#[test]
+fn same_loan_write_ends_nothing_1497() {
+    let rv = run_with_local_backend("reassign_same_loan_1497_1517");
+    let timeline = rv.timeline_panel_string();
+    let tips = timeline_tooltips(&timeline);
+    for (r, s) in [("r", "s"), ("r2", "s2")] {
+        let back = format!("Return immutably borrowed resource from {r} to {s}");
+        assert_eq!(tips.iter().filter(|t| **t == back).count(), 1, "{s} is given back once: {:?}", tips);
+        let copy = format!("{r} is assigned a copy of {r}'s reference");
+        let ends = format!("{r}'s immutable borrow ends");
+        let wrong = dots_where(&timeline, |lines| lines.iter().any(|l| *l == copy) && lines.iter().any(|l| *l == ends));
+        assert!(wrong.is_empty(), "{r}'s write ends its borrow: {:?}", wrong);
+    }
+}
 
 /// #1440: on the line where two loans of v end, the first end's dot (with
 /// the line's other arrows, the borrow by the later one among them) names
