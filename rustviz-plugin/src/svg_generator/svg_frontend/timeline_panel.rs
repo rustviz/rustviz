@@ -6794,6 +6794,19 @@ fn through_bends(drawn: &[Drawn], ends: &Ends, lines: &[Piece]) -> Vec<usize> {
     out
 }
 
+/// The arrows whose head lies on the head of another arrow into the same
+/// dot (their tips within a px), one entry per pair (the later one).
+fn heads_on_heads(drawn: &[Drawn]) -> Vec<usize> {
+    let mut out = Vec::new();
+    for (i, a) in drawn.iter().enumerate().filter(|(_, d)| d.logo.is_none() && d.tri.len() == 3) {
+        if drawn[..i].iter().any(|b| b.logo.is_none() && b.tri.len() == 3 && b.tip != a.tip && dist(b.tri[1], a.tri[1]) < 8.0
+            && samples(&tri_edges(&b.tri)).into_iter().any(|p| inside_tri(&a.tri, p) > 1.0)) {
+            out.push(i);
+        }
+    }
+    out
+}
+
 /// How many times a track (a level piece of an arrow off its ends' row)
 /// runs through a joint where a leg meets its column with no dot there
 /// (`DotLayer::corners`, set only on a figure with rows added below
@@ -8241,8 +8254,11 @@ fn render_arrows_string_external_events_version(
     // What is still on a solid leg or a column, for `render_svg`.
     let drawn = probe_arrows(visualization_data, resource_owners_layout, dots, registry);
     let legs = on_legs(&drawn, &dots.legs);
-    let others = untangle_cost(&drawn, dots).0 - legs.len();
-    let left: Vec<usize> = legs.into_iter().chain(on_cols(&drawn, &dots.cols)).collect();
+    // (And two heads into one dot on each other, #1542: a fan with no side
+    // left for one of its heads.)
+    let heads = heads_on_heads(&drawn);
+    let others = untangle_cost(&drawn, dots).0.saturating_sub(legs.len() + heads.len());
+    let left: Vec<usize> = legs.into_iter().chain(on_cols(&drawn, &dots.cols)).chain(heads).collect();
     let mut rows: Vec<usize> = left.iter().map(|&i| drawn[i].key.1).collect();
     rows.sort_unstable();
     rows.dedup();
