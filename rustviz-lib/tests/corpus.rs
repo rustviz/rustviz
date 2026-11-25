@@ -28097,6 +28097,20 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "h.r still has no value here",
         ],
     },
+    TooltipExpect {
+        name: "repoint_later_use_1603",
+        // Codex review of #1603: when x (whose loan the copy r carries) is
+        // read after the `if`, s stays borrowed by x where r's borrow ends;
+        // with the struct used again in the re-pointing arm, h.r's old loan
+        // ends at that use; both of longest's lenders end at the other
+        // arm's read. (The PR's first head said s was free at r's end.)
+        must_contain: &[
+            "s's resource is no longer borrowed by r, but is still immutably borrowed by x",
+            "Return immutably borrowed resource from h.r to s",
+            "h.r's immutable borrow of s or t ends",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws

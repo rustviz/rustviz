@@ -3543,9 +3543,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     self.arm_frames.iter().any(|&(split, merge, lo, hi)| split < line && line < merge && !(lo <= line && line <= hi))
   }
 
+  /// The last line after `line` in the arm being visited where the
+  /// struct whose field `field` is (`h` for `h.r`) is used.
+  pub fn struct_used_later_in_arm(&self, field: &ResourceAccessPoint, line: usize) -> Option<usize> {
+    let root = field.name().split('.').next()?;
+    let &(_, _, _, hi) = self.arm_frames.last()?;
+    self.last_live_line(root, (line + 1, hi))
+  }
+
   /// The last line `r` is used on in an arm of an enclosing `if` /
   /// `match` other than the one being visited.
+  /// None when r is also used after one of them (`println!("{}", r)`
+  /// after the `if`): on that arm's path its value lives on past the
+  /// arm, and that read in the arm isn't its last use (Codex on #1603).
   pub fn read_in_sibling_arms(&self, r: &str) -> Option<usize> {
+    if self.arm_frames.iter().any(|&(_, merge, _, _)| self.last_live_line(r, (merge, usize::MAX)).is_some()) {
+      return None;
+    }
     self.arm_frames.iter().flat_map(|&(split, merge, lo, hi)| [(split + 1, lo.saturating_sub(1)), (hi + 1, merge.saturating_sub(1))])
       .filter(|&(a, b)| a <= b)
       .filter_map(|range| self.last_live_line(r, range))
@@ -13242,19 +13256,45 @@ fn ends_in_condition_before_split(events: &mut Vec<(usize, ExternalEvent)>) {
 /// Whether `events` (an arm's, looking into conditionals nested in it) use
 /// the value `r` has as they start, before any gives r a new one.
 fn reads_before_new_value(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint) -> bool {
+  first_read_or_write(events, r) == Some(true)
+}
+
+/// Whether `events` first read r's incoming value (`Some(true)`) or give
+/// r a new value on every path first (`Some(false)`); None if neither.
+/// (A conditional each of whose paths gives r a new value, `if b { r =
+/// &t; } else { r = &u; }`, counts as a write: what follows reads the new
+/// one, Codex on #1603.)
+fn first_read_or_write(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint) -> Option<bool> {
   for (_, e) in events {
     match e {
-      ExternalEvent::Branch { branches, .. } => {
-        if branches.iter().any(|b| reads_before_new_value(&b.e_data, r)) {
-          return true;
+      ExternalEvent::Branch { branches, branch_type, .. } => {
+        let arms: Vec<Option<bool>> = branches.iter().filter(|b| !b.diverges).map(|b| first_read_or_write(&b.e_data, r)).collect();
+        if arms.iter().any(|a| *a == Some(true)) {
+          return Some(true);
+        }
+        let every_path = match branch_type {
+          BranchType::If(labels, _) => labels.len() >= 2 && branches.len() >= 2,
+          BranchType::Match(labels, _) => labels.len() == branches.len(),
+          BranchType::Loop(..) => false,
+        };
+        if every_path && !arms.is_empty() && arms.iter().all(|a| *a == Some(false)) {
+          return Some(false);
         }
       }
-      _ if gives_new_value(e, r) => return false,
-      _ if touches(e, r) => return true,
+      _ if gives_new_value(e, r) => return Some(false),
+      _ if touches(e, r) => return Some(true),
       _ => {}
     }
   }
-  false
+  None
+}
+
+/// Whether `new_value` borrows from what `end` gives back (`h.r = &s;`
+/// ending h.r's old loan of s).
+fn reborrows_lender(new_value: &ExternalEvent, end: &ExternalEvent) -> bool {
+  let Some(l) = borrow_end_of(end).and_then(|(_, to)| to.extract_rap()) else { return false };
+  matches!(new_value, ExternalEvent::StaticBorrow { from, .. } | ExternalEvent::MutableBorrow { from, .. }
+    if from.extract_rap() == Some(l))
 }
 
 /// Whether `e` gives the reference `r` a new value (`r = &s;`, `r = x;`).
@@ -14028,11 +14068,18 @@ fn on_other_paths(events: &[(usize, ExternalEvent)], a: usize, b: usize) -> bool
     let holding = |line: usize| -> Vec<usize> {
       (0..branches.len()).filter(|&i| { let (s, t) = branch_type.get_start_end(i); s <= line && line <= t }).collect()
     };
+    // On a line two arms share (`} else if r3.is_empty() {`), an arm
+    // with events on it: what is used there runs in that arm (#1580).
+    // Only if exactly one of them has (`use(r); } else if c {` puts it in
+    // the first, Codex on #1603).
+    let on_line = |v: &[usize], line: usize| -> Option<usize> {
+      let with: Vec<usize> = v.iter().copied().filter(|&k| branches[k].e_data.iter().any(|(l, _)| *l == line)).collect();
+      match with.as_slice() { [k] => Some(*k), _ => None }
+    };
     match (holding(a).as_slice(), holding(b).as_slice()) {
       ([i], [j]) if i != j => true,
-      // A line two arms share (`} else if r3.is_empty() {`): what is
-      // used on it runs on the way into the later one (#1580).
-      ([i], [_, .., j]) if i != j => true,
+      ([i], hb @ [_, _, ..]) => on_line(hb, b).is_some_and(|j| j != *i),
+      (ha @ [_, _, ..], [j]) => on_line(ha, a).is_some_and(|i| i != *j),
       ([i], [_]) => on_other_paths(&branches[*i].e_data, a, b),
       _ => false,
     }
@@ -14467,7 +14514,11 @@ pub(crate) fn end_borrow_in_arms(
     // given a new value (a field write, `h.r = &t;`, keeps h's loans live
     // up to it): before that, as the write gives the old one back first
     // (#1588).
+    // (After it, if it borrows from the same lender, `h.r = &s;`: Rust
+    // evaluates `&s` before the write ends the old loan, so s is never
+    // free in between, Codex on #1603.)
     let at = match events.iter().position(|(l, e)| *l == ev.0 && gives_new_value(e, r) && ev.1.get_id() < e.get_id()) {
+      Some(i) if reborrows_lender(&events[i].1, &ev.1) => i + 1,
       Some(i) => i.min(at),
       None => at,
     };
@@ -14511,6 +14562,7 @@ pub(crate) fn end_borrow_in_arms(
         // (An older loan's end before r's new value on its line, as in
         // the arm's events, #1588.)
         match evs.iter().position(|e| gives_new_value(e, r) && ev.1.get_id() < e.get_id()) {
+          Some(i) if reborrows_lender(&evs[i], &ev.1) => evs.insert(i + 1, ev.1.clone()),
           Some(i) => evs.insert(i, ev.1.clone()),
           None => evs.push(ev.1.clone()),
         }
@@ -14539,6 +14591,9 @@ pub(crate) fn end_borrow_in_arms(
       | ExternalEvent::Copy { to: ResourceTy::Value(t), .. } if t == r));
     if let Some(i) = new_value.filter(|_| last_use_in(&arm.e_data, r).is_some()) {
       let line = arm.e_data[i].0;
+      // (After a new borrow of the same lender, `r = &s;`: `&s` is taken
+      // before the write ends the old loan, Codex on #1603.)
+      let i = if reborrows_lender(&arm.e_data[i].1, &copy) { i + 1 } else { i };
       arm.e_data.insert(i, (line, copy));
       continue;
     }
@@ -14562,9 +14617,18 @@ fn in_line_order(events: &mut Vec<(usize, ExternalEvent)>, ids: &[usize]) {
       }
     }
   }
-  let moving: Vec<usize> = (0..events.len()).filter(|&i| ids.contains(&events[i].1.get_id())).collect();
-  for &i in moving.iter().rev() {
-    let ev = events.remove(i);
+  // (All taken out first, then each put back: indices saved before a
+  // move would point at the wrong events after it, Codex on #1603.)
+  let mut moving: Vec<(usize, ExternalEvent)> = Vec::new();
+  let mut i = 0;
+  while i < events.len() {
+    if ids.contains(&events[i].1.get_id()) {
+      moving.push(events.remove(i));
+    } else {
+      i += 1;
+    }
+  }
+  for ev in moving {
     let at = events.iter().position(|(l, _)| *l >= ev.0).unwrap_or(events.len());
     events.insert(at, ev);
   }
@@ -14594,7 +14658,9 @@ fn end_in_other_arms(events: &mut Vec<(usize, ExternalEvent)>, ev: &(usize, Exte
       end_in_other_arms(&mut arm.e_data, ev, made, unique_id, moved_into_result, holders);
       continue;
     }
-    if !before || arm.diverges || handed_off_in(&arm.e_data, &r, moved_into_result, holders) {
+    // (An arm that returns runs too, up to its `return`: the loan ends
+    // there as well, Codex on #1603.)
+    if !before || handed_off_in(&arm.e_data, &r, moved_into_result, holders) {
       continue;
     }
     let mut copy = ev.1.clone();

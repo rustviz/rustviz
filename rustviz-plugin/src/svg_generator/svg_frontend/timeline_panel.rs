@@ -2948,9 +2948,15 @@ fn ends_borrow(history: &[(usize, Event)]) -> bool {
 
 // Whether a reference's column, `history`, is given a borrow before
 // `line`, in a conditional's arms too.
+// (In a conditional around `line`, only the arm on its path: `let r; if a
+// { r = &s; } else { if b { .. } }` never gave r a borrow on the way into
+// the `else`, Codex on #1603.)
 fn started_before(history: &[(usize, Event)], line: usize) -> bool {
     history.iter().any(|(l, e)| match e {
-        Event::Branch { branch_history, .. } => branch_history.iter().any(|b| started_before(&b.e_data, line)),
+        Event::Branch { branch_history, ty, merge_point, .. } => branch_history.iter().enumerate().any(|(i, b)| {
+            let (start, end) = ty.get_start_end(i);
+            (*merge_point <= line || (start <= line && line <= end)) && started_before(&b.e_data, line)
+        }),
         Event::StaticBorrow { .. } | Event::MutableBorrow { .. } | Event::Copy { .. } | Event::Acquire { .. } => *l < line,
         _ => false,
     })
