@@ -1,4 +1,4 @@
-use crate::svg_generator::data::{BranchExit, EarlyReturns, LoopExits, LoopLeft, ResourceAccessPoint, TempPart, IF_LET_ARM};
+use crate::svg_generator::data::{BranchExit, EarlyReturns, LoopExits, LoopLeft, NeverReturns, NoDropExit, ResourceAccessPoint, TempPart, IF_LET_ARM};
 
 
 /* Event Dot messages: shows up when someone hovers over a dot */
@@ -2419,6 +2419,19 @@ pub fn reborrow_place_via_call(is_mut: bool, method: &str, into: &str) -> String
     format!("{}{REBORROW_VIA_CALL}{method}{REBORROW_THROUGH}{into}", if is_mut { "&mut " } else { "&" })
 }
 
+/// A place `reborrow_place_via_call` / `reborrow_place_through` made, as
+/// a tooltip names it: the reference a call returned (`Some(id(r))` in
+/// an `if let`'s scrutinee, `Some(x.trim())`) is "the reference id
+/// returns", not the encoded place, whose separators aren't even valid
+/// XML characters (#1563). Any other place is itself.
+pub fn displayed_place(place: &str) -> String {
+    if let Some((_, call)) = place.split_once(REBORROW_VIA_CALL) {
+        let method = call.split(REBORROW_THROUGH).next().unwrap_or(call);
+        return format!("the reference {} returns", method);
+    }
+    place.split(REBORROW_THROUGH).next().unwrap_or(place).to_owned()
+}
+
 /// `&v[0][1]` returned with `v[0]` a reference stored in what `v`
 /// points to: `place` (`&v[0][1]`, with its `&`) is reborrowed through
 /// `through` (`v[0]`), not through the column's own reference (#1078).
@@ -2451,6 +2464,7 @@ pub fn event_dot_copy_deref_to_caller(ref_name: &String, place: &String) -> Stri
 // doesn't own), so it's phrased like the write case above, including
 // "value" when p points to a Copy type (#312).
 pub fn event_dot_copy_through_deref_field(ref_name: &String, place: &String, target_name: &String, pointee_copy: bool) -> String {
+    let place = &displayed_place(place);
     format!(
         "the {3} {0} points to is read through {1} (copied to {2})",
         styled_name_html(ref_name),
@@ -6471,8 +6485,36 @@ mod escape_tooltip_attrs_tests {
 // the process ends there and runs no destructors. `owns`: whether it
 // holds a value that needs dropping (`Some(false)`: nothing to drop;
 // `None`: it may hold one, or only part of one).
-pub fn event_dot_process_exit(name: &String, owns: Option<bool>, call: &str) -> String {
-    let call = format!("`{}`", call);
+pub fn event_dot_process_exit(name: &String, owns: Option<bool>, exit: &NoDropExit) -> String {
+    let call = format!("`{}`", exit.call);
+    // A function of the user's that never returns (#1553).
+    match (exit.how, owns) {
+        (NeverReturns::Exits, _) => {}
+        (NeverReturns::Spins, Some(true)) => return format!(
+            "{0} never returns: it loops forever, so the code after it never runs and {1}'s resource is never dropped",
+            call, styled_name_html(name)
+        ),
+        (NeverReturns::Spins, None) => return format!(
+            "{0} never returns: it loops forever, so the code after it never runs and whatever {1} still holds is never dropped",
+            call, styled_name_html(name)
+        ),
+        (NeverReturns::Spins, Some(false)) => return format!(
+            "{0} never returns: it loops forever, so the code after it never runs. {1} holds no resource to drop",
+            call, styled_name_html(name)
+        ),
+        (NeverReturns::Unknown, Some(true)) => return format!(
+            "{0} never returns. If it panics, the unwinding drops {1}'s resource here; if it loops forever or ends the program instead, {1}'s resource is never dropped",
+            call, styled_name_html(name)
+        ),
+        (NeverReturns::Unknown, None) => return format!(
+            "{0} never returns. If it panics, the unwinding drops whatever {1} still holds here; if it loops forever or ends the program instead, that's never dropped",
+            call, styled_name_html(name)
+        ),
+        (NeverReturns::Unknown, Some(false)) => return format!(
+            "{0} never returns, so the code after it never runs. {1} holds no resource to drop",
+            call, styled_name_html(name)
+        ),
+    }
     match owns {
         Some(true) => format!(
             "{0} ends the program here without running any destructor: {1}'s resource is never dropped",

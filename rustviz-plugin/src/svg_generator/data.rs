@@ -569,7 +569,7 @@ impl ResourceTy {
             ResourceTy::Value(r) => r.name().to_owned(),
             ResourceTy::Deref(r) => format!("*{}", r.name()),
             ResourceTy::Index(_, place, _) => place.clone(),
-            ResourceTy::DerefField(_, place, _, _) => place.clone(),
+            ResourceTy::DerefField(_, place, _, _) => hover_messages::displayed_place(place),
             ResourceTy::Caller => "Caller".to_owned()
         }
     }
@@ -1815,8 +1815,34 @@ pub struct EarlyReturns {
     /// The scope end of a variable in scope at a call to
     /// `process::exit` (or `abort`), drawn at the call (#1172): the
     /// process ends there without running any destructor, so nothing is
-    /// dropped. Names the call.
-    pub process_exit: Option<&'static str>,
+    /// dropped. Names the call. Also at a call to a function of the
+    /// user's that never returns and doesn't (always) panic (#1553).
+    pub process_exit: Option<NoDropExit>,
+}
+
+/// A call that never returns and, unlike a panic, doesn't (or may not)
+/// drop what is in scope (#1172, #1553).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct NoDropExit {
+    /// The function called, as the tooltip names it (`process::exit`,
+    /// `spin`).
+    pub call: String,
+    pub how: NeverReturns,
+}
+
+/// How a call that never returns leaves (`NoDropExit`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NeverReturns {
+    /// It ends the process (`process::exit`, `abort`, or a function
+    /// of the user's every path of which calls one): no destructor runs.
+    Exits,
+    /// A function of the user's that loops forever (`loop {}`): the
+    /// code after it never runs, and nothing is dropped.
+    Spins,
+    /// A function of the user's whose body doesn't settle how it never
+    /// returns: it may panic (and unwind, dropping what is in scope),
+    /// run forever or end the process.
+    Unknown,
 }
 
 /// A variable still in scope while a `loop` that nothing breaks out of

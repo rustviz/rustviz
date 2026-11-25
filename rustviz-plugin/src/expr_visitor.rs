@@ -488,6 +488,9 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // doesn't), and are kept only in a branch that diverges: see
   // `keep_exit_drops`.
   pub exit_drops: std::collections::HashSet<usize>,
+  /// For the next `drop_locals_on_exit`: the exit is a call that never
+  /// returns and drops nothing (or may not, #1553), not a panic.
+  pub no_drop_exit: Option<NoDropExit>,
   /// Variables with nothing to drop (a Copy value, a reference) declared
   /// in a branch that an exit in it ended (#1348): like a value that is
   /// dropped there, their scope ends at the exit, not at the block's
@@ -1180,6 +1183,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       branch_temp_drops: Vec::new(),
       ctor_arg_ids: HashMap::new(),
       exit_drops: HashSet::new(),
+      no_drop_exit: None,
       exit_scope_ended: HashSet::new(),
       unlent_refs: HashSet::new(),
       loop_ref_into: HashMap::new(),
@@ -6632,6 +6636,49 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
+  /// `loan_end` for the reference `name`: of several loans of its lender
+  /// made on the line its loan is known by, the one rustc says it may
+  /// hold (a lifetime of its type contains it), not just the first
+  /// (`let mut r = if a.len() > 0 { &a } else { &b };` borrows a twice
+  /// on that line, and `a.len()`'s loan ends there, #1557). During the
+  /// visit, r's uses after a re-point aren't known yet, so `loan_end`'s
+  /// guard (#1335) can't tell them apart.
+  pub fn loan_end_of(&self, name: &str, rd: &RefData) -> Option<usize> {
+    if let (Some(LoanId::Line(l)), ResourceTy::Value(lender)) = (rd.loan(), &rd.lender) {
+      if !lender.is_fn() {
+        let root = lender.name().split('.').next().unwrap_or(lender.name()).to_owned();
+        let loans = self.gather_borrow_data(self.bwf);
+        let on_line: Vec<&crate::mir_data::MIRBorrowData> = loans.iter()
+          .filter(|b| b.region.0 == l && b.borrowed_place.as_deref() == Some(root.as_str()))
+          .collect();
+        if let Some(end) = self.held_loans(name, &on_line).iter().map(|b| b.region.1).max() {
+          return Some(end);
+        }
+      }
+    }
+    self.loan_end(rd)
+  }
+
+  /// Of `loans`, several candidates for the loan the reference `name`
+  /// holds, those a lifetime of its type contains (#1557). Empty when
+  /// there is at most one candidate, or that doesn't pick any.
+  fn held_loans<'b>(&self, name: &str, loans: &[&'b crate::mir_data::MIRBorrowData]) -> Vec<&'b crate::mir_data::MIRBorrowData> {
+    if loans.len() < 2 {
+      return Vec::new();
+    }
+    let Some(held) = self.loan_indices_held_by(name) else { return Vec::new() };
+    let mine: Vec<&crate::mir_data::MIRBorrowData> = loans.iter().copied().filter(|b| held.contains(&b.borrow_idx)).collect();
+    if mine.len() == loans.len() { Vec::new() } else { mine }
+  }
+
+  /// The first of `cands` (by line, then as rustc numbers them), or of
+  /// several on that line, the first `name` holds (`held_loans`).
+  fn first_held_loan<'b>(&self, name: &str, cands: Vec<&'b crate::mir_data::MIRBorrowData>) -> Option<&'b crate::mir_data::MIRBorrowData> {
+    let first = cands.iter().copied().min_by_key(|b| (b.region.0, b.borrow_idx))?;
+    let line: Vec<&crate::mir_data::MIRBorrowData> = cands.iter().copied().filter(|b| b.region.0 == first.region.0).collect();
+    self.held_loans(name, &line).into_iter().min_by_key(|b| b.borrow_idx).or(Some(first))
+  }
+
   /// The line rustc's borrow checker ends the loan `rd` holds on
   /// `lender` (`rd`'s lender or one of its co-lenders), for the write
   /// at `write_line` that gives the reference a new value: the loan's
@@ -6639,24 +6686,30 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// that reach the write (#770), as the loan can be live on another
   /// path, or past the write for a read of the old reference there is
   /// none; None when it is live up to the write.
-  pub fn old_loan_end(&self, rd: &RefData, lender: &ResourceTy, write_line: usize, write: Option<rustc_span::Span>) -> Option<usize> {
+  /// (`name`: the reference's own, whose loans rustc knows, to pick the
+  /// one it holds of several made on one line, #1557.)
+  pub fn old_loan_end(&self, name: &str, rd: &RefData, lender: &ResourceTy, write_line: usize, write: Option<rustc_span::Span>) -> Option<usize> {
     let ResourceTy::Value(lender_rap) = lender else { return None };
     if lender_rap.is_fn() {
       return None;
     }
     let root = lender_rap.name().split('.').next().unwrap_or(lender_rap.name()).to_owned();
     let loans = self.gather_borrow_data(self.bwf);
+    // Of several loans of the lender on the first line that has one, the
+    // ones the reference may hold (`a.len()`'s and `&a`'s in `let mut r =
+    // if a.len() > 0 { &a } else { &b };`: r holds `&a`'s, #1557).
+    let first_held = |cands| self.first_held_loan(name, cands);
     let own = match rd.loan() {
       Some(LoanId::Span(sp)) if *lender == rd.lender => loans.iter().find(|b| b.span == sp),
       Some(LoanId::Line(l)) if *lender == rd.lender =>
-        loans.iter().find(|b| b.region.0 == l && b.borrowed_place.as_deref() == Some(root.as_str())),
+        first_held(loans.iter().filter(|b| b.region.0 == l && b.borrowed_place.as_deref() == Some(root.as_str())).collect()),
       // A co-lender, or a reference with several lenders (#171): the
       // first loan of that lender made from where the reference was
       // given its value.
-      _ => loans.iter()
+      _ => first_held(loans.iter()
         .filter(|b| b.borrowed_place.as_deref() == Some(root.as_str())
           && b.region.0 >= rd.assigned_at && b.region.0 <= write_line)
-        .min_by_key(|b| (b.region.0, b.borrow_idx)),
+        .collect()),
     }?;
     // Not a loan that ends before a use of the reference: another loan
     // of the lender made on that line is the one it holds (a copy of
@@ -7331,6 +7384,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// as a plain bind) gets a borrow arrow from each lender (#349).
   /// Calls draw theirs in `match_rhs` (`emit_call_result_borrows`).
   pub fn emit_holder_literal_borrows(&mut self, name: &String, init: &'tcx Expr<'tcx>) {
+    // The value of a block (`v = { let r = &mut a; vec![r] };`, #1486),
+    // where it is.
+    let init = match init.kind {
+      ExprKind::Block(..) if !init.span.from_expansion() => match branch_value_expr(init) {
+        Some(v) => v,
+        None => return,
+      },
+      _ => init,
+    };
     let built = init.span.from_expansion() || matches!(init.kind, ExprKind::Array(..) | ExprKind::Repeat(..));
     if !built {
       return;
@@ -11782,9 +11844,12 @@ pub fn print_out_of_scope(&mut self){
           .filter(|m| lenders.iter().any(|lender| m.borrowed_place.as_deref()
             .is_some_and(|p| lender == p || lender.strip_prefix(p).is_some_and(|rest| rest.starts_with('.')))))
           // The loan of a reference variable (declared where the loan is
-          // issued) gone before y's last use.
+          // issued) gone before y's last use. (One a plain block declared,
+          // `y = { let r = &mut c; Some(r) };`, has its scope end drawn
+          // only later: its block's end, #1486.)
           .filter(|m| m.assigned_place.as_deref().and_then(|r| self.raps.get(r))
-            .is_some_and(|r| r.rap.is_ref() && gos_line_from(self.preprocessed_events, &r.rap, m.region.0).is_some_and(|g| g < d.lifetime)))
+            .is_some_and(|r| r.rap.is_ref() && gos_line_from(self.preprocessed_events, &r.rap, m.region.0)
+              .or(Some(r.scope).filter(|&s| s >= m.region.0)).is_some_and(|g| g < d.lifetime)))
           .collect();
         if candidates.is_empty() {
           return None;
