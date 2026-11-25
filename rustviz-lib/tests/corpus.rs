@@ -26716,6 +26716,84 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "which may run many times",
         ],
     },
+    TooltipExpect {
+        name: "cond_holder_local_ref_1475",
+        // #1475: a holder given a reference its branch declared (`let r =
+        // &mut s1; Some(r)`, `Some(if .. { let r = &mut s1; r } ..)`, a
+        // `match`'s arms) holds r's loan: moved into an `if let` / `match`,
+        // its borrow ends on the path that doesn't match. main never ended
+        // it there: s1 / s2 stayed lent to y1 / y2 at the `println!`
+        // (State::Invalid; `holder_local_ref_borrow_ends` pins the rows).
+        // y4 (shared) gives s1 / s2 back after x's last use, and y5 keeps
+        // them while `y5.take()` may still run (main: x gave them back
+        // inside the loop, and y5's borrow ended "immutably").
+        must_contain: &[
+            "Return mutably borrowed resource from y1 to s1",
+            "Return mutably borrowed resource from y1 to s2",
+            "Return mutably borrowed resource from y2 to s1",
+            "Return mutably borrowed resource from y2 to s2",
+            "y3's mutable borrow ends",
+            "Return immutably borrowed resource from y4 to s1",
+            "Return immutably borrowed resource from y4 to s2",
+            "Return mutably borrowed resource from y5 to s1",
+            "Return mutably borrowed resource from y5 to s2",
+            "y5's mutable borrow ends",
+        ],
+        must_not_contain: &[
+            "y5's immutable borrow ends",
+        ],
+    },
+    TooltipExpect {
+        name: "assign_branch_vec_holder_1477",
+        // #1477: `v = if c { let r = &a; vec![r] } else { let r = &b; vec![r]
+        // };` (v a Vec, which needs drop) gets each branch's value in that
+        // branch, as an `Option<&T>` holder does (#1472): v borrows a in the
+        // first. main paired the branches after the `if`, when `r` named the
+        // second branch's reference, so both borrowed b, and the first `r`
+        // gave a back after its scope. Also for a `match` (w) and an
+        // `Option<&mut String>` (y, not Copy), where main said y borrowed s2
+        // in the branch that borrows s1.
+        must_contain: &[
+            "Immutable borrow from a to v",
+            "v holds a value that immutably borrows a's resource (v isn't a reference itself)",
+            "Return immutably borrowed resource from v to a",
+            "Return immutably borrowed resource from v to b",
+            "Immutable borrow from b to w",
+            "Return immutably borrowed resource from w to a",
+            "Return immutably borrowed resource from w to b",
+            // v's old Vec is still dropped where the new one arrives.
+            "v acquires ownership of a new resource; its previous resource is dropped",
+            "w acquires ownership of a new resource; its previous resource is dropped",
+            "Mutable borrow from s1 to y: Some's signature gives the value it returns the same lifetime as its argument; y isn't a reference, but its value holds one",
+            "y holds a value that mutably borrows s1's resource (y isn't a reference itself)",
+            "Return mutably borrowed resource from y to s1",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from r to a",
+            "Return immutably borrowed resource from q to b",
+            "Mutable borrow from s2 to y",
+            "y holds a value that mutably borrows s2's resource",
+            "x's mutable borrow ends (what it borrows from isn't shown)",
+        ],
+    },
+    TooltipExpect {
+        name: "dead_loan_call_write_1452",
+        // #1452: a call that borrows s8 for itself (`s8.push(..)`,
+        // `take(&mut s8)`, `s8 += ..`) on a path where r8's loan is dead but
+        // lives on the other path gets the note `let m8 = &mut s8;` gets
+        // (#796). main left it off: the call gives s8 back on its own line,
+        // and the note was shown only while the column is drawn borrowed
+        // after the write. An assignment there (`s8 = ..`, rb) still gets
+        // none, as #796's near misses: its dot shows rb's loan ending.
+        must_contain: &[
+            "On this path r8 isn't used again, so r8's borrow of s8 is already over here; s8 stays borrowed only on the other paths",
+            "On this path r9 isn't used again, so r9's borrow of s8 is already over here; s8 stays borrowed only on the other paths",
+            "On this path ra isn't used again, so ra's borrow of s8 is already over here; s8 stays borrowed only on the other paths",
+        ],
+        must_not_contain: &[
+            "On this path rb",
+        ],
+    },
 ];
 
 /// #1440: on the line where two loans of v end, the first end's dot (with
@@ -36593,6 +36671,41 @@ fn branch_ref_borrow_ends() {
         ("ref_reassign_co_lenders_1432",
          &["b@L12:dot:static_reacquire", "a@L13:dot:static_reacquire"][..],
          &["r@L14:dot:static_die"][..]),
+    ] {
+        let tl = run_with_local_backend(snippet).timeline_panel_string();
+        for id in present {
+            assert!(tl.contains(&format!("data-rv-id=\"{}", id)), "{}: no {}", snippet, id);
+        }
+        for id in absent {
+            assert!(!tl.contains(&format!("data-rv-id=\"{}", id)), "{}: unexpected {}", snippet, id);
+        }
+    }
+}
+
+/// #1475, #1477: where a holder given a branch-local reference gives its
+/// lenders back. `(snippet, data-rv-id prefixes that must be there,
+/// prefixes that must not)`.
+#[test]
+fn holder_local_ref_borrow_ends() {
+    for (snippet, present, absent) in [
+        // y1 / y2 end on the `if let`'s other path (its `}` line, 19 / 31),
+        // where s1 and s2 are free again; main drew them lent to y1 up to
+        // the `println!`. y3's ends in the `None` arm (46), after the move
+        // into x in the `Some` arm (45; main drew both on the `match` line).
+        // y5 holds them until the `while let` loop is over (87), not just
+        // x's first use (86).
+        ("cond_holder_local_ref_1475",
+         &["y1@L19:dot:mutable_die", "s1@L19:dot:mutable_reacquire", "s2@L19:dot:mutable_reacquire",
+           "y2@L31:dot:mutable_die", "s1@L31:dot:mutable_reacquire", "s2@L31:dot:mutable_reacquire",
+           "y3@L45:dot:move", "y3@L46:dot:mutable_die",
+           "y5@L87:dot:mutable_die", "s1@L87:dot:mutable_reacquire"][..],
+         &["s1@L19-20:line:revoked_privilege", "s2@L19-20:line:revoked_privilege",
+           "y3@L44:dot:branch+mutable_die", "s1@L86:dot:mutable_reacquire"][..]),
+        // v's old loan of b ends at its last use (12); the first branch's
+        // value borrows a (15); r has nothing after its scope end.
+        ("assign_branch_vec_holder_1477",
+         &["b@L12:dot:static_reacquire", "a@L15:dot:static_lend", "b@L28:dot:static_lend"][..],
+         &["b@L15:dot:static_lend", "r@L20:"][..]),
     ] {
         let tl = run_with_local_backend(snippet).timeline_panel_string();
         for id in present {

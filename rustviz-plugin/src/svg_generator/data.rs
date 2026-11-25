@@ -4724,11 +4724,29 @@ impl VisualizationData {
     /// Whether a DeadLoanNote on column `hash` is shown: the column is
     /// drawn borrowed at the write (`state`, its state there). A struct
     /// field's column doesn't draw its parent's borrows, so the note on
-    /// a field write is always shown.
+    /// a field write is always shown. (See `call_lend_line` for a call
+    /// that borrows the column for itself.)
     fn dead_loan_note_shown(&self, state: &State, hash: &u64) -> bool {
         matches!(state, State::PartialPrivilege { .. } | State::RevokedPrivilege { .. })
             || matches!(self.timelines.get(hash).map(|t| &t.resource_access_point),
                 Some(ResourceAccessPoint::Struct(Struct { is_member: true, .. })))
+    }
+}
+
+/// A call that borrows a column mutably for itself only (`s.push('!')`,
+/// `take(&mut s)`, `s += ..`, #1452) lends and gives back on one line,
+/// with one id, so the column isn't drawn borrowed after those events,
+/// where a DeadLoanNote for that write comes. As for `let m = &mut s;`
+/// there, whose lend leaves the column borrowed, the note is shown when
+/// the column was drawn borrowed as the line began: the other loan is
+/// drawn ending at this dot. (An assignment `s = ..` there gets none: the
+/// dot shows the loan ending, #796's near misses.) Some(line) when `e`,
+/// at `line`, is such a call's reacquire right after its lend
+/// (`last_lend`).
+fn call_lend_line(last_lend: &Option<(usize, usize)>, e: &Event, line: usize) -> Option<usize> {
+    match e {
+        Event::MutableReacquire { id, .. } if *last_lend == Some((line, *id)) => Some(line),
+        _ => None,
     }
 }
 
@@ -5487,6 +5505,8 @@ impl Visualizable for VisualizationData {
         }
         let kept = ends_kept_alive(is_ref, history);
         let mut previous_line = lead_end;
+        let mut line_start: (usize, State) = (0, State::OutOfScope);
+        let (mut last_lend, mut call_lent): (Option<(usize, usize)>, Option<usize>) = (None, None);
         for (i, (l, e)) in history.iter_mut().enumerate() {
             // For let-as-rhs (`let s = if … { … } else { … };`) the
             // parent's pre-branch state is OOS — the variable
@@ -5597,9 +5617,15 @@ impl Visualizable for VisualizationData {
                     previous_line = *merge_point;
                 }
                 _ => {
-                    if let Event::DeadLoanNote { shown, .. } = e {
-                        *shown = self.dead_loan_note_shown(&previous_state, hash);
+                    if line_start.0 != *l {
+                        line_start = (*l, previous_state.clone());
                     }
+                    if let Event::DeadLoanNote { shown, .. } = e {
+                        *shown = self.dead_loan_note_shown(&previous_state, hash)
+                            || (call_lent == Some(*l) && self.dead_loan_note_shown(&line_start.1, hash));
+                    }
+                    call_lent = call_lend_line(&last_lend, e, *l);
+                    last_lend = match e { Event::MutableLend { id, .. } => Some((*l, *id)), _ => None };
                     // An end that leaves the reference column holding a
                     // reference (`ends_kept_alive`) doesn't end its line.
                     if !(kept[i] && holds_reference(&previous_state)) {
@@ -5659,6 +5685,8 @@ impl Visualizable for VisualizationData {
         let kept = ends_kept_alive(is_ref, history);
         let mut previous_line = 1;
         let mut previous_state = State::OutOfScope;
+        let mut line_start: (usize, State) = (0, State::OutOfScope);
+        let (mut last_lend, mut call_lent): (Option<(usize, usize)>, Option<usize>) = (None, None);
         for (i, (l, e)) in history.iter_mut().enumerate() {
             states.push((previous_line, *l, previous_state.clone()));
             match e {
@@ -5741,9 +5769,15 @@ impl Visualizable for VisualizationData {
 
                 }
                 _ => {
-                    if let Event::DeadLoanNote { shown, .. } = e {
-                        *shown = self.dead_loan_note_shown(&previous_state, hash);
+                    if line_start.0 != *l {
+                        line_start = (*l, previous_state.clone());
                     }
+                    if let Event::DeadLoanNote { shown, .. } = e {
+                        *shown = self.dead_loan_note_shown(&previous_state, hash)
+                            || (call_lent == Some(*l) && self.dead_loan_note_shown(&line_start.1, hash));
+                    }
+                    call_lent = call_lend_line(&last_lend, e, *l);
+                    last_lend = match e { Event::MutableLend { id, .. } => Some((*l, *id)), _ => None };
                     // An end that leaves the reference column holding a
                     // reference (`ends_kept_alive`) doesn't end its line.
                     if !(kept[i] && holds_reference(&previous_state)) {

@@ -1613,6 +1613,38 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
     fn loans_held_in(&self, name: &str, fields: &[&str], within: Option<Span>) -> Option<BTreeMap<String, bool>> {
         let bwf = self.bwf;
+        let names = self.mir_local_names(bwf);
+        let held = self.loans_in_type_of(name, fields)?;
+        let mut out: BTreeMap<String, bool> = BTreeMap::new();
+        for loan in held {
+            let b = &bwf.borrow_set[loan];
+            if let Some(w) = within {
+                let sp = self.location_to_span(b.reserve_location(), bwf);
+                if !w.contains(sp) {
+                    continue;
+                }
+            }
+            if let Some(n) = self.src_name_of_local(Some(b.borrowed_place().local), &names) {
+                *out.entry(n).or_insert(false) |= b.kind().mutability().is_mut();
+            }
+        }
+        Some(out)
+    }
+
+    /// The loans (indices into rustc's borrow set, as
+    /// `MIRBorrowData::borrow_idx`) the variable `name` (its part
+    /// `fields`) holds at some point: those in a lifetime of its type
+    /// (Polonius' `origin_contains_loan_at`). A holder that got a
+    /// reference variable's value (`y` in `let y = if c { let r = &mut
+    /// s1; Some(r) } else { .. };`) holds r's loan though no loan was
+    /// issued for y itself (#1475). None when this body has no local
+    /// named `name`.
+    pub fn loan_indices_held_by(&self, name: &str) -> Option<BTreeSet<usize>> {
+        Some(self.loans_in_type_of(name, &[])?.into_iter().map(|l| l.index()).collect())
+    }
+
+    fn loans_in_type_of(&self, name: &str, fields: &[&str]) -> Option<BTreeSet<Loan>> {
+        let bwf = self.bwf;
         let body = &bwf.body;
         let names = self.mir_local_names(bwf);
         #[expect(clippy::disallowed_methods, reason = "only collects the locals named `name`; order doesn't matter")]
@@ -1645,20 +1677,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 }
             }
         }
-        let mut out: BTreeMap<String, bool> = BTreeMap::new();
-        for loan in held {
-            let b = &bwf.borrow_set[loan];
-            if let Some(w) = within {
-                let sp = self.location_to_span(b.reserve_location(), bwf);
-                if !w.contains(sp) {
-                    continue;
-                }
-            }
-            if let Some(n) = self.src_name_of_local(Some(b.borrowed_place().local), &names) {
-                *out.entry(n).or_insert(false) |= b.kind().mutability().is_mut();
-            }
-        }
-        Some(out)
+        Some(held)
     }
 
     /// `loans_held_by`, split by where in `name`'s type the loans are
