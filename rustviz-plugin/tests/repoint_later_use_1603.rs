@@ -89,4 +89,13 @@ fn new_value_on_every_path(s: String, t: String, u: String, a: bool, b: bool) {
     }
 }
 
+// A field re-pointed at the same lender: `&s` is taken before the write
+// ends the old loan, so s is borrowed by h.r again before it is given
+// back, never free in between.
+fn same_lender_again(s: String) {
+    let mut h = Holder { r: &s };
+    let n = 1;
+    h.r = &s;
+}
+
 fn main() {}

@@ -770,6 +770,11 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// the arm's arrows on their line again, each on a row of its own, as
   /// when added straight into the arm.
   pub in_arm_end_ids: Vec<usize>,
+  /// Ids of old-loan ends drawn at the write that re-points the
+  /// reference: a new borrow of the same lender on that line goes before
+  /// them (`h.r = &s;`: `&s` is taken before the write ends the old
+  /// loan, so s is never free in between; `after_same_lender_borrow`).
+  pub at_write_end_ids: Vec<usize>,
   /// References whose borrow lasts at least until a line, whatever the
   /// MIR loan matched to them says: one a re-pointed reborrow gave back
   /// to (m in `h.r = r;` after `h = Holder { r: &*m }`, #1538), and one
@@ -1254,6 +1259,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       other_arm_ends: Vec::new(),
       field_end_ids: Vec::new(),
       in_arm_end_ids: Vec::new(),
+      at_write_end_ids: Vec::new(),
       min_lifetimes: Vec::new(),
       pre_split_end_ids: Vec::new(),
       retired_until: HashMap::new(),
@@ -12607,6 +12613,7 @@ pub fn print_out_of_scope(&mut self){
     self.nest_borrow_ends_in_arms();
     end_scrutinee_borrows_in_other_arms(self.preprocessed_events, self.event_line_map, self.unique_id);
     in_line_order(self.preprocessed_events, &std::mem::take(&mut self.field_end_ids));
+    after_same_lender_borrow(self.preprocessed_events, self.event_line_map, &std::mem::take(&mut self.at_write_end_ids));
     self.end_outer_borrows_in_arms();
     for (made, ev) in std::mem::take(&mut self.other_arm_ends) {
       let holders = borrow_holders(&self.borrow_map);
@@ -14631,6 +14638,51 @@ fn in_line_order(events: &mut Vec<(usize, ExternalEvent)>, ids: &[usize]) {
   for ev in moving {
     let at = events.iter().position(|(l, _)| *l >= ev.0).unwrap_or(events.len());
     events.insert(at, ev);
+  }
+}
+
+/// The old-loan ends among `events` (and their line map, `line_map`;
+/// conditionals' arms too) whose ids are in `ids`, each listed after a
+/// later-listed new borrow of the same lender into the same reference on
+/// its line: `&s` in `h.r = &s;` is taken before the write ends the old
+/// loan, so the lender is never free in between (Codex on #1603, #1610).
+fn after_same_lender_borrow(events: &mut Vec<(usize, ExternalEvent)>, line_map: &mut BTreeMap<usize, Vec<ExternalEvent>>, ids: &[usize]) {
+  if ids.is_empty() {
+    return;
+  }
+  for (_, e) in events.iter_mut() {
+    if let ExternalEvent::Branch { branches, .. } = e {
+      for b in branches.iter_mut() {
+        after_same_lender_borrow(&mut b.e_data, &mut b.line_map, ids);
+      }
+    }
+  }
+  let new_borrow = |end: &ExternalEvent, e: &ExternalEvent| borrow_end_of(end)
+    .is_some_and(|(r, _)| gives_new_value(e, r) && reborrows_lender(e, end));
+  let mut i = 0;
+  while i < events.len() {
+    if ids.contains(&events[i].1.get_id()) {
+      let line = events[i].0;
+      if let Some(j) = (i + 1..events.len()).find(|&j| events[j].0 == line && new_borrow(&events[i].1, &events[j].1)) {
+        let ev = events.remove(i);
+        events.insert(j, ev);
+        continue;
+      }
+    }
+    i += 1;
+  }
+  for evs in line_map.values_mut() {
+    let mut i = 0;
+    while i < evs.len() {
+      if ids.contains(&evs[i].get_id()) {
+        if let Some(j) = (i + 1..evs.len()).find(|&j| new_borrow(&evs[i], &evs[j])) {
+          let ev = evs.remove(i);
+          evs.insert(j, ev);
+          continue;
+        }
+      }
+      i += 1;
+    }
   }
 }
 

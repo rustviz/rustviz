@@ -7411,6 +7411,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             if in_this_arm {
               self.in_arm_end_ids.extend(in_arm_lo..*self.unique_id);
             }
+            if end_line == line_num {
+              self.at_write_end_ids.extend(in_arm_lo..*self.unique_id);
+            }
             self.defer_old_ends = false;
             if let ResourceTy::Value(l) = &to_ro {
               self.repointed_ends.push((l.name().to_owned(), ref_data.assigned_at, end_line));
@@ -7450,6 +7453,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               self.add_ev(co_end, evt, co.clone(), lhs_rty.clone(), false);
               if in_this_arm && co_end == end_line {
                 self.in_arm_end_ids.extend(co_lo..*self.unique_id);
+              }
+              if co_end == line_num {
+                self.at_write_end_ids.extend(co_lo..*self.unique_id);
               }
               self.defer_old_ends = false;
             }
