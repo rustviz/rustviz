@@ -290,6 +290,8 @@ const BOOK: &[Snippet] = &[
             "Move from p.name to n",
             "n goes out of scope. Its resource is dropped.",
             "p.name goes out of scope. No resource is dropped.",
+            // rustc says p.age still holds its value (#1595).
+            "p is partially moved: p.name was moved out, so p can't be used as a whole; p.age can still be used",
         ],
         ..E
     },
@@ -354,6 +356,8 @@ const BOOK: &[Snippet] = &[
             "user1.email goes out of scope. Its resource is dropped.",
             "user2.email goes out of scope. Its resource is dropped.",
             "user1 goes out of scope. user1.username was moved out earlier, so only user1.email is dropped.",
+            // `..user1` moved user1.username out (#1595).
+            "user1 is partially moved: user1.username was moved out, so user1 can't be used as a whole; user1.active and user1.email can still be used",
         ],
         must_not_contain: &[
             "user1.username goes out of scope. Its resource is dropped.",

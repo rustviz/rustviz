@@ -3398,6 +3398,18 @@ pub fn state_partly_moved(my_name: &String, moved: &[String], maybe: bool) -> St
     )
 }
 
+// `state_partly_moved` / `state_fields_maybe_moved` with the direct
+// fields rustc says surely hold a value, with all their own fields
+// (`usable`, #1595): "; p.b can still be used". Left out when none is.
+pub fn with_usable_fields(text: String, usable: &[String]) -> String {
+    let names: Vec<String> = usable.iter().map(|m| styled_name_html(m)).collect();
+    match names.as_slice() {
+        [] => text,
+        [one] => format!("{}; {} can still be used", text, one),
+        [init @ .., last] => format!("{}; {} and {} can still be used", text, init.join(", "), last),
+    }
+}
+
 // Fields moved on some paths only (#1583, #1595, #1619): which ones, and
 // what is left where, isn't claimed.
 pub fn state_fields_maybe_moved(my_name: &String) -> String {

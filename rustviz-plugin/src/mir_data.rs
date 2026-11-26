@@ -1509,7 +1509,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // lines, a conditional's join, counts on its last), or none for
         // what isn't code on a line: storage markers, drops (a scope's
         // cleanup, also on a `return`'s way out), and code from elsewhere.
-        let line_of = |loc: Location| -> Option<usize> {
+        let own_line = |loc: Location| -> Option<usize> {
             let data = &body.basic_blocks[loc.block];
             match data.statements.get(loc.statement_index) {
                 Some(st) if matches!(st.kind, StatementKind::StorageLive(_) | StatementKind::StorageDead(_)) => return None,
@@ -1525,6 +1525,31 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
             let pos = sm.lookup_char_pos(span.hi());
             (pos.file.name == file).then_some(pos.line)
         };
+        // A location's code runs after what came before it on a straight
+        // path (the same block, or a block's one forward predecessor): code
+        // whose span is on an earlier line (`let user2 = User { email: ..,
+        // ..user1 };`'s binding, on its first line, after the whole value)
+        // counts on the latest line before it.
+        let mut eff: BTreeMap<Location, Option<usize>> = BTreeMap::new();
+        let rpo: Vec<rustc_middle::mir::BasicBlock> = body.basic_blocks.reverse_postorder().to_vec();
+        let order: BTreeMap<rustc_middle::mir::BasicBlock, usize> = rpo.iter().enumerate().map(|(i, b)| (*b, i)).collect();
+        let preds0 = body.basic_blocks.predecessors();
+        for &bb in &rpo {
+            let data = &body.basic_blocks[bb];
+            let mut carried: Option<usize> = match preds0[bb].as_slice() {
+                [p] if order.get(p).is_some_and(|i| *i < order[&bb]) =>
+                    (0..=body.basic_blocks[*p].statements.len()).rev()
+                        .find_map(|i| eff.get(&Location { block: *p, statement_index: i }).copied().flatten()),
+                _ => None,
+            };
+            for i in 0..=data.statements.len() {
+                let loc = Location { block: bb, statement_index: i };
+                let line = own_line(loc).map(|l| carried.map_or(l, |c| l.max(c)));
+                if line.is_some() { carried = line; }
+                eff.insert(loc, line);
+            }
+        }
+        let line_of = |loc: Location| -> Option<usize> { eff.get(&loc).copied().flatten() };
         // The locations after which control leaves their line: the next
         // locations on a line (past those on none) are on another, or
         // there are none.

@@ -9891,14 +9891,21 @@ impl PartsMoved {
 /// surely moved are named; where any may be, no more than that some of
 /// its fields may have been (which, and on which paths, isn't said).
 fn mir_parts_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, certain: &[String], maybe: &[String]) -> String {
+    let parts = direct_parts(rap, visualization_data);
     // (Every field out on this path isn't "partially" moved: no more than
     // that some may be, as #1619 says it.)
-    let every = direct_parts(rap, visualization_data).iter()
-        .all(|t| certain.iter().any(|c| c == t.resource_access_point.name()));
-    if !maybe.is_empty() || certain.is_empty() || every {
-        return hover_messages::state_fields_maybe_moved(rap.name());
-    }
-    PartsMoved { moved: certain.to_vec(), maybe: false, all: false, maybe_moved: Vec::new(), none_usable: false }.title(rap)
+    let every = parts.iter().all(|t| certain.iter().any(|c| c == t.resource_access_point.name()));
+    // The direct fields rustc says surely hold a value here, with all
+    // their own fields: none of them, nor a field inside, may lack one.
+    let usable: Vec<String> = parts.iter().map(|t| t.resource_access_point.name().clone())
+        .filter(|f| !certain.iter().chain(maybe.iter()).any(|m| m == f || m.starts_with(&format!("{}.", f))))
+        .collect();
+    let text = if !maybe.is_empty() || certain.is_empty() || every {
+        hover_messages::state_fields_maybe_moved(rap.name())
+    } else {
+        PartsMoved { moved: certain.to_vec(), maybe: false, all: false, maybe_moved: Vec::new(), none_usable: false }.title(rap)
+    };
+    hover_messages::with_usable_fields(text, &usable)
 }
 
 /// rustc's facts on the fields of the struct column `rap` after the code
