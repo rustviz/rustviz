@@ -2752,6 +2752,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// (#653). It has no column: like at an exit, each variable whose
   /// value is still in it gets a dot that says so.
   fn note_try(&mut self, try_expr: &'tcx Expr<'tcx>) {
+    let site = try_site(self.tcx, try_expr.span);
     let line = span_end_line(&try_expr.span, &self.tcx);
     let moved = self.try_moved_place(try_expr);
     if let Some((rap, kind, operand)) = &moved {
@@ -2787,7 +2788,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       (0, 0, 0)
     };
     if !self.in_closure(try_expr) || block.is_some() {
-      self.note_try_loop_iterators(line, iterators_from);
+      self.note_try_loop_iterators(site, line, iterators_from);
     }
     if block.is_none() && !self.in_closure(try_expr) {
       // What it leaves in scope if it returns early, for the scope ends
@@ -2799,18 +2800,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     let end = self.in_scope.len();
     let mut tuples = self.live_tuples[tuples_from..].to_vec();
-    let tuple_dup = self.preprocessed_events.iter().any(|(l, e)| *l == line
-      && matches!(e, ExternalEvent::TupleTempDrop { at: TupleDropAt::TryReturns, .. }));
-    if tuple_dup {
-      tuples.clear();
-    }
     // An outer `let x;` first assigned inside the block also registered
     // a column inside it. Its declaration still owns its drop scope.
     let outer = self.scope_names(0, locals_from).into_iter().map(|(_, name)| name.to_owned()).collect();
     for (idx, rap) in self.droppable_locals_at(locals_from, end, &outer, false, line, true) {
       while tuples.last().is_some_and(|t| idx < t.len) {
         let t = tuples.pop().unwrap();
-        self.drop_tuple_if_try_returns(&t, line);
+        self.drop_tuple_if_try_returns(&t, site, line);
       }
       if moved.as_ref().is_some_and(|(r, _, _)| r.hash() == rap.hash()) {
         continue;
@@ -2820,25 +2816,30 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if rap.drops_nothing() {
         continue;
       }
-      let dup = self.preprocessed_events.iter().any(|(l, e)| *l == line
-        && matches!(e, ExternalEvent::OwnerDropIfTryReturns { ro, .. } if *ro == rap));
+      let dup = self.preprocessed_events.iter().any(|(_, e)|
+        matches!(e, ExternalEvent::OwnerDropIfTryReturns { ro, site: at, .. } if *at == site && *ro == rap));
       if dup {
         continue;
       }
       let id = *self.unique_id;
       *self.unique_id += 1;
-      self.add_external_event(line, ExternalEvent::OwnerDropIfTryReturns { ro: rap, id });
+      self.add_external_event(line, ExternalEvent::OwnerDropIfTryReturns { ro: rap, site, id });
     }
     while let Some(t) = tuples.pop() {
-      self.drop_tuple_if_try_returns(&t, line);
+      self.drop_tuple_if_try_returns(&t, site, line);
     }
   }
 
-  /// The drop of the live tuple scrutinee `t` if the `?` on `line`
-  /// returns early (#653).
-  fn drop_tuple_if_try_returns(&mut self, t: &LiveTuple<'tcx>, line: usize) {
-    for ev in self.tuple_drop_events(t.scrutinee, &t.tuple, Some(t.pat), TupleDropAt::TryReturns) {
-      self.add_external_event(line, ev);
+  /// The drop of the live tuple scrutinee `t` if this `?` returns early (#653).
+  fn drop_tuple_if_try_returns(&mut self, t: &LiveTuple<'tcx>, site: TrySite, line: usize) {
+    for ev in self.tuple_drop_events(t.scrutinee, &t.tuple, Some(t.pat), TupleDropAt::TryReturns(site)) {
+      let dup = self.preprocessed_events.iter().any(|(_, e)| matches!((e, &ev), (
+        ExternalEvent::TupleTempDrop { ro: r, tuple: old, at: TupleDropAt::TryReturns(at), .. },
+        ExternalEvent::TupleTempDrop { ro, tuple, .. },
+      ) if *at == site && r == ro && old == tuple));
+      if !dup {
+        self.add_external_event(line, ev);
+      }
     }
   }
 
@@ -3384,15 +3385,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
-  /// A `?` inside a `for` loop over an iterator variable returns early
-  /// on `Err` / `None`, dropping that iterator with the rest (#649).
+  /// If a `?` leaves a `for` loop early, it drops the iterator too (#649).
   /// Conditional, so it ends no column (like `note_try`'s dots).
-  fn note_try_loop_iterators(&mut self, line: usize, from: usize) {
+  fn note_try_loop_iterators(&mut self, site: TrySite, line: usize, from: usize) {
     for (_, ro) in self.loop_iterators[from..].to_vec() {
-      let dup = self.preprocessed_events.iter().any(|(l, e)| *l == line
-        && matches!(e, ExternalEvent::LoopIteratorDrop { ro: r, left: LoopLeft::Try, .. } if *r == ro));
+      let dup = self.preprocessed_events.iter().any(|(_, e)|
+        matches!(e, ExternalEvent::LoopIteratorDrop { ro: r, left: LoopLeft::Try(at), .. }
+          if *at == site && *r == ro));
       if !dup {
-        self.add_loop_iterator_drop(ro, line, LoopLeft::Try);
+        self.add_loop_iterator_drop(ro, line, LoopLeft::Try(site));
       }
     }
   }

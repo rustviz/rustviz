@@ -2,7 +2,7 @@
 use std::{cmp::max, collections::{HashMap, HashSet, VecDeque}};
 use log::warn;
 use rustc_hir::Mutability;
-use crate::svg_generator::data::{ShadowNote, ExternalEvent, RcCall, RcKind, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, MutRef, StaticRef};
+use crate::svg_generator::data::{ShadowNote, TrySite, ExternalEvent, RcCall, RcKind, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, MutRef, StaticRef};
 use rustc_middle::ty::{Ty, TyCtxt, TypeckResults};
 use rustc_middle::ty::adjustment::{Adjust, AutoBorrow, AutoBorrowMutability, DerefAdjustKind};
 use rustc_span::Span;
@@ -582,6 +582,13 @@ pub fn bool_of_mut (m: Mutability) -> bool {
 /// returned unchanged.
 pub fn span_to_line(span:&Span, tcx: &TyCtxt) -> usize{
   tcx.sess.source_map().lookup_char_pos(span.source_callsite().lo()).line
+}
+
+/// The desugared match's span ends immediately after the question mark.
+pub(crate) fn try_site(tcx: TyCtxt<'_>, span: Span) -> TrySite {
+  let end = span.hi();
+  let line = tcx.sess.source_map().lookup_char_pos(end).line;
+  TrySite { line, byte: end.0 }
 }
 
 /// Line (in the user's file) where `span` ends; see `span_to_line`.

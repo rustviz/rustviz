@@ -1,10 +1,10 @@
 use crate::svg_generator::{
-  data::{ApproxNote, ExternalEvent, ShadowNote, VisualizationData},
+  data::{ApproxNote, ExternalEvent, ShadowNote, TrySite, VisualizationData},
   svg_frontend::svg_generation
 };
 use anyhow::Result;
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// The rendered visualization. This is also the plugin's output format:
 /// it is printed to stdout as one JSON object and read back by
@@ -33,6 +33,7 @@ impl Rustviz {
     temp_emptying_moves: Vec<usize>,
     hidden_source_lines: HashSet<usize>,
     approx_notes: Vec<ApproxNote>,
+    try_sites: BTreeSet<TrySite>,
   ) -> Result<Rustviz>{
     /* ******************************************
             --- Build VisualizationData ---
@@ -51,6 +52,7 @@ impl Rustviz {
       arrow_tracks: HashMap::new(),
       field_lenders: HashMap::new(),
       approx_notes,
+      try_sites,
       row_lines: Vec::new(),
       raised_headers: HashSet::new(),
     };

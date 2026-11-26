@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{AltEnd, FieldLenders, ApproxNote, ElemsLeft, place_elem_names, breaks_out_only, is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier, leaves_maybe_held};
+use crate::svg_generator::data::{AltEnd, FieldLenders, ApproxNote, ElemsLeft, place_elem_names, breaks_out_only, is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier, leaves_maybe_held, TrySite, TupleDropAt, LoopLeft};
 use crate::svg_generator::hover_messages::{self, styled_name_html};
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use crate::svg_generator::svg_frontend::rv_attrs::{self, Rv};
@@ -271,16 +271,6 @@ fn merged_dot_title(lines: &[(Option<usize>, String)]) -> String {
         .filter(|t| !t.is_empty())
         .collect();
     texts.dedup();
-    // Two `?` on a line: the drop at the first `?` is not about the
-    // second `?`'s move of the same variable (#668).
-    let moves_into_try = texts.iter().any(|t| t.contains("is moved into the `?`."));
-    let rewritten: Vec<Option<String>> = texts.iter()
-        .map(|t| if moves_into_try { hover_messages::try_drop_before_own_try(t) } else { None })
-        .collect();
-    let texts_owned: Vec<String> = texts.iter().zip(&rewritten)
-        .map(|(t, r)| r.clone().unwrap_or_else(|| (*t).to_owned()))
-        .collect();
-    let mut texts: Vec<&str> = texts_owned.iter().map(String::as_str).collect();
     // `s = String::from(..)` says "acquires ownership of a new resource;
     // its previous resource is dropped": the plain "acquires ownership of
     // a resource" next to it adds nothing (#506, #519).
@@ -300,19 +290,6 @@ fn merged_dot_title(lines: &[(Option<usize>, String)]) -> String {
         .find_map(|j| hover_messages::still_borrowed_with_lend(&texts[i], &texts[j]).map(|m| (i, j, m)))) {
         texts[i] = merged;
         texts.remove(j);
-    }
-    // `s = f()?;` (#1151): the assignment runs only if the `?` succeeds.
-    if let Some((i, j, merged)) = (0..texts.len()).find_map(|i| (0..texts.len())
-        .filter(|&j| j != i)
-        .find_map(|j| hover_messages::try_drop_then_reassign(&texts[i], &texts[j]).map(|m| (i, j, m)))) {
-        texts[i] = merged;
-        texts.remove(j);
-    } else if texts.len() > 1 {
-        for t in texts.iter_mut() {
-            if let Some(r) = hover_messages::try_drop_with_other_events(t) {
-                *t = r;
-            }
-        }
     }
     // The note on a write drawn inside a borrow that is over on its
     // path (#796) goes last: after the write's own text as a second
@@ -1610,6 +1587,10 @@ fn render_branch_dots(
                     is.extract_rap().map_or(false, |r| r.drops_nothing()),
                     rap.is_mut(), reassigned_next,
                     &is.extract_rap().map_or(String::new(), |r| r.drop_note()))
+            } else if branch_history.iter().any(|b| has_or_alt_move(&b.e_data)) {
+                // Or-pattern moves in the history include alternatives
+                // that Rust checks even when they cannot match.
+                hover_messages::event_dot_branch_merge_or_pattern_move(&is.real_name(), rap.drops_nothing(), rap.is_mut())
             } else if reassigned_next {
                 // That assignment is in a loop's body (#1012), which
                 // may end before it runs: unless every `break` out of
@@ -1870,7 +1851,7 @@ fn render_scope_end_dot(
             // nothing, whether or not it was moved earlier.
             data.title = match struct_partial_move_split(visualization_data, *hash, exit) {
                 Some(split) if resource_hold =>
-                    hover_messages::event_dot_struct_partial_go_out_of_scope(&name, &split.moved, &split.maybe_moved, &[], true, split.by_cond, split.kept, false),
+                    hover_messages::event_dot_struct_partial_go_out_of_scope(&name, &split.moved, &split.maybe_moved, &[], true, split.by_cond, split.kept, split.by_or_pattern, false),
                 _ => event.print_message_with_name(&mut name),
             };
         } else if history.iter().any(|(l, e)| l == line_number && matches!(e, Event::Move { break_out: true, .. }))
@@ -2046,7 +2027,7 @@ fn render_scope_end_dot(
             let cy = event_y;
             let by_cond = !maybe.is_empty() && (moved_by_chain_condition(history) || maybe_moved_by_let(history));
             let title = hover_messages::event_dot_struct_partial_go_out_of_scope(
-                &name, &moved, &maybe, &left, false, by_cond, false, false);
+                &name, &moved, &maybe, &left, false, by_cond, false, has_or_alt_move(history), false);
             let drop_data = DropDotData {
                 hash: *hash as u64,
                 dot_x: cx,
@@ -2090,7 +2071,7 @@ fn render_scope_end_dot(
                 // A slice pattern moved some elements out on some paths
                 // (#1144): the others are dropped here on every path.
                 hover_messages::event_dot_struct_partial_go_out_of_scope(
-                    &name, &[], &el.moved, &el.left, false, by_cond, false, false)
+                    &name, &[], &el.moved, &el.left, false, by_cond, false, has_or_alt_move(history), false)
             } else {
                 hover_messages::event_dot_go_out_of_scope_maybe_moved(&name, &ro.drop_note(), by_cond)
             };
@@ -2110,7 +2091,7 @@ fn render_scope_end_dot(
             // to drop, so a plain dot.
             if el.left.is_empty() {
                 data.title = hover_messages::event_dot_struct_partial_go_out_of_scope(
-                    &name, &el.moved, &[], &[], false, false, false, false);
+                    &name, &el.moved, &[], &[], false, false, false, false, false);
                 return false;
             }
             // `let [a, _] = arr;` (#1166), `[first, ..] =>` (#1144): the
@@ -2123,7 +2104,7 @@ fn render_scope_end_dot(
                 dot_x: cx,
                 dot_y: cy,
                 title: hover_messages::event_dot_struct_partial_go_out_of_scope(
-                    &name, &el.moved, &[], &el.left, false, false, false, false),
+                    &name, &el.moved, &[], &el.left, false, false, false, false, false),
                 p1x: cx - 3, p1y: cy - 1,
                 p2x: cx + 3, p2y: cy - 1,
                 p3x: cx,     p3y: cy + 3,
@@ -2170,7 +2151,7 @@ fn render_scope_end_dot(
             // and those moved on some paths only maybe
             // (#395).
             let title = hover_messages::event_dot_struct_partial_go_out_of_scope(
-                &name, &split.moved, &split.maybe_moved, &split.dropped, false, split.by_cond, split.kept, is_box);
+                &name, &split.moved, &split.maybe_moved, &split.dropped, false, split.by_cond, split.kept, split.by_or_pattern, is_box);
             // A Box's allocation is freed whatever is left in it.
             if split.dropped.is_empty() && split.maybe_moved.is_empty() && !is_box {
                 data.title = title;
@@ -2437,12 +2418,12 @@ fn render_dot(
                     append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
                     continue;
                 },
-                Event::OwnerDropAtReassign { .. } | Event::OwnerDropIfTryReturns | Event::OwnerDropUnlessReturned | Event::TemporaryDrop { .. } | Event::TupleTempDrop { .. } | Event::LoopIteratorDrop { .. } => {
+                Event::OwnerDropAtReassign { .. } | Event::OwnerDropIfTryReturns { .. } | Event::OwnerDropUnlessReturned | Event::TemporaryDrop { .. } | Event::TupleTempDrop { .. } | Event::LoopIteratorDrop { .. } => {
                     let cx = timeline_data.x_val;
                     let cy = event_y;
                     // A reassignment, or the drop at a `?`'s early return,
                     // says what else goes with it (#373, #542).
-                    let note = if matches!(event, Event::OwnerDropAtReassign { parts: None, payload: false, .. } | Event::OwnerDropIfTryReturns | Event::OwnerDropUnlessReturned) {
+                    let note = if matches!(event, Event::OwnerDropAtReassign { parts: None, payload: false, .. } | Event::OwnerDropIfTryReturns { .. } | Event::OwnerDropUnlessReturned) {
                         visualization_data.timelines[hash].resource_access_point.drop_note()
                     } else { String::new() };
                     // `*b = …` drops the Box's old payload, not the Box
@@ -2538,10 +2519,12 @@ fn render_dot(
                         // dropped by an exit after the join (#1436): only
                         // if the branch that made it ran.
                         hover_messages::event_dot_extended_temporary_drop_made(&name, when, made_at)
-                    } else if let (Event::OwnerDropIfTryReturns, Some(made_at)) = (event, branch_temp_maybe_made(visualization_data, hash, history, i)) {
+                    } else if let (Event::OwnerDropIfTryReturns { .. }, Some(made_at)) = (event, branch_temp_maybe_made(visualization_data, hash, history, i)) {
                         hover_messages::event_dot_temp_drop_if_try_returns_made(&name, made_at)
-                    } else if let Some(split) = matches!(event, Event::OwnerDropIfTryReturns)
-                        .then(|| try_partial_move_split(visualization_data, *hash as u64, *line_number)).flatten() {
+                    } else if let Some(split) = match event {
+                        Event::OwnerDropIfTryReturns { site } => try_partial_move_split(visualization_data, *hash, *site),
+                        _ => None,
+                    } {
                         // A struct some fields of which were moved out
                         // before the `?` (#1184): only what is left of it
                         // is dropped if it returns early, and nothing
@@ -2551,19 +2534,19 @@ fn render_dot(
                             continue;
                         }
                         let boxed = matches!(visualization_data.timelines[hash].resource_access_point, ResourceAccessPoint::Struct(Struct { is_box: true, .. }));
-                        let scope_end = hover_messages::event_dot_struct_partial_go_out_of_scope(&name, &split.moved, &split.maybe_moved, &split.dropped, false, split.by_cond, false, boxed);
+                        let scope_end = hover_messages::event_dot_struct_partial_go_out_of_scope(&name, &split.moved, &split.maybe_moved, &split.dropped, false, split.by_cond, false, split.by_or_pattern, boxed);
                         hover_messages::event_dot_owner_drop_if_try_returns_partial(&name, &scope_end)
-                    } else if matches!(event, Event::OwnerDropIfTryReturns)
+                    } else if matches!(event, Event::OwnerDropIfTryReturns { .. })
                         && visualization_data.timelines[hash].resource_access_point.box_contents_moved() {
                         hover_messages::event_dot_box_drop_if_try_returns(&name)
-                    } else if let (Event::OwnerDropIfTryReturns, Some(InitJoin::Maybe { moved })) = (event,
+                    } else if let (Event::OwnerDropIfTryReturns { .. }, Some(InitJoin::Maybe { moved })) = (event,
                         history_path(&visualization_data.timelines[hash].history, history, i)
                             .filter(|path| !init_by_maybe_held(path.iter()))
                             .and_then(|path| init_at_end(&path))) {
                         // A `let s;` local only some branches above
                         // assigned (#1436).
                         hover_messages::event_dot_owner_drop_if_try_returns_maybe_init(&name, &note, moved)
-                    } else if matches!(event, Event::OwnerDropIfTryReturns)
+                    } else if matches!(event, Event::OwnerDropIfTryReturns { .. })
                         && history_path(&visualization_data.timelines[hash].history, history, i)
                             .is_some_and(|path| maybe_moved_at_end(&path)
                                 || matches!(init_at_end(&path), Some(InitJoin::Maybe { .. } | InitJoin::Loop))) {
@@ -2574,16 +2557,19 @@ fn render_dot(
                         // A ManuallyDrop has nothing to drop either (#1137).
                         let value = visualization_data.timelines[hash].resource_access_point.drops_nothing();
                         hover_messages::event_dot_owner_drop_unless_returned(&name, value, &note)
-                    } else if let Some(part) = matches!(event, Event::OwnerDropIfTryReturns).then(|| try_assigned_part(visualization_data, *hash as u64, *line_number)).flatten() {
-                        // `p.f = f()?;` (#1151): on success the assignment
-                        // gives a part of p, on its own column, a new value.
-                        hover_messages::event_dot_owner_drop_if_try_returns_part(&name, &note, &part)
                     } else if note.is_empty() {
                         event.print_message_with_name(&mut name)
-                    } else if matches!(event, Event::OwnerDropIfTryReturns) {
+                    } else if matches!(event, Event::OwnerDropIfTryReturns { .. }) {
                         hover_messages::event_dot_owner_drop_if_try_returns(&name, &note)
                     } else {
                         hover_messages::event_dot_owner_drop_at_reassign(&name, &note)
+                    };
+                    let title = match event {
+                        Event::OwnerDropIfTryReturns { site }
+                        | Event::TupleTempDrop { at: TupleDropAt::TryReturns(site), .. }
+                        | Event::LoopIteratorDrop { left: LoopLeft::Try(site), .. } =>
+                            try_drop_title(title, *site, &visualization_data.try_sites),
+                        _ => title,
                     };
                     // A struct whose parts were all moved out before it
                     // is overwritten drops nothing: a plain dot that says
@@ -3766,6 +3752,15 @@ fn assigned_by_leavers(branch_history: &[BranchData], out: &mut Vec<Vec<BranchEx
     }
 }
 
+// Only used to qualify wording about a move already in the model.
+fn has_or_alt_move(history: &[(usize, Event)]) -> bool {
+    history.iter().any(|(_, event)| match event {
+        Event::OrAltMove { tuple: None, .. } => true,
+        Event::Branch { branch_history, .. } => branch_history.iter().any(|b| has_or_alt_move(&b.e_data)),
+        _ => false,
+    })
+}
+
 // Whether the variable is moved anywhere in `events`, nested branches
 // included.
 fn moves_somewhere(events: &[(usize, Event)]) -> bool {
@@ -4143,6 +4138,11 @@ fn timeline_segment_title(
         if let Some(parts) = parts_moved_at(rap, visualization_data, line) {
             if parts.all {
                 return String::new();
+            }
+            if parts.by_or_pattern {
+                return hover_messages::state_or_pattern_partial_move(
+                    rap.name(), &parts.moved, &parts.maybe_moved, parts.none_usable, rap.drops_nothing(),
+                );
             }
             if parts.none_usable {
                 let surely: Vec<String> = parts.moved.iter().filter(|m| !parts.maybe_moved.contains(m)).cloned().collect();
@@ -5041,6 +5041,7 @@ struct PartialMoveSplit {
     // if nothing above moved it" would read as if the move above
     // settled it.
     kept: bool,
+    by_or_pattern: bool,
 }
 
 // For a struct column (or a struct-typed field column such as
@@ -5074,6 +5075,7 @@ fn struct_partial_move_split(
     let mut maybe_moved: Vec<String> = Vec::new();
     let mut dropped = Vec::new();
     let mut by_cond = false;
+    let mut by_or_pattern = false;
     let mut kept = false;
     for (timeline, name, is_copy) in &fields {
         // Fields of an already-listed moved-out field went with it.
@@ -5108,6 +5110,7 @@ fn struct_partial_move_split(
                     continue;
                 }
                 by_cond |= moved_by_chain_condition(&timeline.history) || maybe_moved_by_let(&timeline.history);
+                by_or_pattern |= has_or_alt_move(&timeline.history);
                 kept |= maybe_moved_by_kept_round(timeline.history.iter());
                 maybe_moved.push((*name).clone());
             } else {
@@ -5120,7 +5123,7 @@ fn struct_partial_move_split(
     if moved.is_empty() && maybe_moved.is_empty() {
         None
     } else {
-        Some(PartialMoveSplit { moved, maybe_moved, dropped, by_cond, kept })
+        Some(PartialMoveSplit { moved, maybe_moved, dropped, by_cond, kept, by_or_pattern })
     }
 }
 
@@ -5145,21 +5148,21 @@ fn history_path(top: &[(usize, Event)], history: &[(usize, Event)], upto: usize)
     None
 }
 
-// `struct_partial_move_split` at a `?` on `line` (#1184): which fields of
+// `struct_partial_move_split` at a specific `?` (#1184): which fields of
 // the struct column `hash` an early return there drops. A field that still
-// holds a value has a `?` dot of its own on that line (`note_try`), with
+// holds a value has a drop dot for that same `?` (`note_try`), with
 // the drop flag's wording when it holds one on some paths only; one with
 // none was moved out before. None when no field was.
-fn try_partial_move_split(visualization_data: &VisualizationData, hash: u64, line: usize) -> Option<PartialMoveSplit> {
-    // Whether `history` has a `?` dot on `line`, and if so, whether the
+fn try_partial_move_split(visualization_data: &VisualizationData, hash: u64, site: TrySite) -> Option<PartialMoveSplit> {
+    // Whether `history` has a drop at this `?`, and if so, whether the
     // column holds its value there on some paths only.
-    fn try_drop_at(top: &[(usize, Event)], history: &[(usize, Event)], line: usize) -> Option<bool> {
-        for (i, (l, e)) in history.iter().enumerate() {
+    fn try_drop_at(top: &[(usize, Event)], history: &[(usize, Event)], site: TrySite) -> Option<bool> {
+        for (i, (_, e)) in history.iter().enumerate() {
             match e {
-                Event::OwnerDropIfTryReturns if *l == line =>
+                Event::OwnerDropIfTryReturns { site: at } if *at == site =>
                     return Some(history_path(top, history, i).is_some_and(|path| maybe_moved_at_end(&path))),
                 Event::Branch { branch_history, .. } => {
-                    if let Some(m) = branch_history.iter().find_map(|b| try_drop_at(top, &b.e_data, line)) {
+                    if let Some(m) = branch_history.iter().find_map(|b| try_drop_at(top, &b.e_data, site)) {
                         return Some(m);
                     }
                 }
@@ -5187,16 +5190,18 @@ fn try_partial_move_split(visualization_data: &VisualizationData, hash: u64, lin
     let mut maybe_moved: Vec<String> = Vec::new();
     let mut dropped = Vec::new();
     let mut by_cond = false;
+    let mut by_or_pattern = false;
     for (timeline, name) in &fields {
         if moved.iter().any(|m| name.starts_with(&format!("{}.", m))) {
             continue;
         }
         let child_prefix = format!("{}.", name);
         let is_leaf = !fields.iter().any(|(_, n)| n.starts_with(&child_prefix));
-        match try_drop_at(&timeline.history, &timeline.history, line) {
+        match try_drop_at(&timeline.history, &timeline.history, site) {
             None => moved.push((*name).clone()),
             Some(true) if is_leaf => {
                 by_cond |= moved_by_chain_condition(&timeline.history) || maybe_moved_by_let(&timeline.history);
+                by_or_pattern |= has_or_alt_move(&timeline.history);
                 maybe_moved.push((*name).clone());
             }
             Some(false) if is_leaf => dropped.push((*name).clone()),
@@ -5206,7 +5211,7 @@ fn try_partial_move_split(visualization_data: &VisualizationData, hash: u64, lin
     if moved.is_empty() && maybe_moved.is_empty() {
         None
     } else {
-        Some(PartialMoveSplit { moved, maybe_moved, dropped, by_cond, kept: false })
+        Some(PartialMoveSplit { moved, maybe_moved, dropped, by_cond, kept: false, by_or_pattern })
     }
 }
 
@@ -9696,6 +9701,7 @@ fn parts_moved_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
     let parts = direct_parts(rap, visualization_data);
     let mut moved = Vec::new();
     let mut maybe = false;
+    let mut by_or_pattern = false;
     // The fields moved in some branches of a conditional above only.
     let mut maybe_moved: Vec<String> = Vec::new();
     for t in &parts {
@@ -9706,12 +9712,14 @@ fn parts_moved_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
             let before: Vec<(usize, Event)> = t.history.iter().filter(|(l, _)| *l <= line).cloned().collect();
             if maybe_moved_at_end(&before) {
                 maybe = true;
+                by_or_pattern |= has_or_alt_move(&before);
                 maybe_moved.push(r.name().clone());
             }
             continue;
         }
         if let Some(inner) = parts_moved_at(r, visualization_data, line) {
             maybe |= inner.maybe;
+            by_or_pattern |= inner.by_or_pattern;
             // (A field whose own fields are all moved, some on some paths
             // only, is maybe-moved as a whole: nothing in it can be used.)
             if inner.all || inner.none_usable {
@@ -9745,7 +9753,7 @@ fn parts_moved_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
     if !all && !none_usable && parts.iter().all(|t| moved.contains(t.resource_access_point.name()) || moved_in_every_arm(t, line).is_some()) {
         all = true;
     }
-    Some(PartsMoved { moved, maybe, all, maybe_moved, none_usable })
+    Some(PartsMoved { moved, maybe, all, maybe_moved, none_usable, by_or_pattern })
 }
 
 /// The elements (`pair[0]`) a slice pattern moved out of an array's
@@ -9820,6 +9828,7 @@ struct PartsMoved {
     maybe_moved: Vec<String>,
     /// Every field is moved, some on some paths only (#1583).
     none_usable: bool,
+    by_or_pattern: bool,
 }
 
 /// The rows where a borrow of a field of what the `&mut` reference
@@ -10296,15 +10305,24 @@ fn get_y_axis_pos(line_number : usize) -> i64 {
     FIRST_ROW_Y - 5 - LINE_SPACE + LINE_SPACE * line_number as i64
 }
 
-/// The part of `owner` (a member column, `p.f` of `p`) that is given a
-/// new value on `line`, where a `?` may return early first (#1151).
-fn try_assigned_part(visualization_data: &VisualizationData, owner: u64, line: usize) -> Option<String> {
-    visualization_data.timelines.values().find(|t| {
-        let rap = &t.resource_access_point;
-        rap.is_member() && rap.get_owner() == owner
-            && t.history.iter().any(|(l, e)| *l == line
-                && matches!(e, Event::Acquire { .. } | Event::Copy { .. } | Event::OwnerDropAtReassign { .. }))
-    }).map(|t| t.resource_access_point.name().clone())
+/// Name the operator when the source line contains more than one `?`.
+/// The ordinal is its position in the source, independent of how the
+/// timeline lays out branches on that line.
+fn try_drop_title(title: String, site: TrySite, sites: &BTreeSet<TrySite>) -> String {
+    let first = TrySite { line: site.line, byte: 0 };
+    let last = TrySite { line: site.line, byte: u32::MAX };
+    let mut on_line = sites.range(first..=last);
+    if on_line.clone().nth(1).is_none() {
+        return title;
+    }
+    let Some(index) = on_line.position(|at| *at == site) else { return title };
+    let ordinal = match index {
+        0 => "the first `?` on this line".to_owned(),
+        1 => "the second `?` on this line".to_owned(),
+        2 => "the third `?` on this line".to_owned(),
+        _ => format!("question mark {} on this line", index + 1),
+    };
+    title.replacen("the `?` here", &ordinal, 1)
 }
 
 #[cfg(test)]

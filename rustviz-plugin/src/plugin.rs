@@ -1,15 +1,17 @@
-use std::collections::{HashMap, BTreeMap, HashSet};
+use std::collections::{HashMap, BTreeMap, BTreeSet, HashSet};
 use simplelog::*;
 use std::fs::OpenOptions;
 use log::error;
-use rustc_hir::intravisit::Visitor;
-use rustc_hir::{ItemKind, FnRetTy};
+use rustc_hir::intravisit::{self, Visitor};
+use rustc_hir::{Expr, ExprKind, ItemKind, FnRetTy, MatchSource};
 use rustc_middle::ty::TyCtxt;
+use rustc_span::Span;
 use rustc_utils::mir::borrowck_facts;
 use crate::expr_visitor::{ExprVisitor, RapData};
+use crate::expr_visitor_utils::try_site;
 use crate::RVPluginArgs;
 use crate::utils::{RV1Helper, annotate_enum_variant, annotate_toplevel_fn, annotate_struct_field};
-use crate::svg_generator::data::{ApproxNote, ExternalEvent, ResourceAccessPoint, ShadowNote};
+use crate::svg_generator::data::{ApproxNote, ExternalEvent, ResourceAccessPoint, ShadowNote, TrySite};
 
 /// Drain a per-fn visitor's `raps` into a global rap_map.
 ///
@@ -80,6 +82,34 @@ fn find_compiled_file(tcx: TyCtxt, wanted: &str) -> Option<std::path::PathBuf> {
     }
     _ => None,
   })
+}
+
+// Count written question marks even in bodies the timeline doesn't trace,
+// such as a closure literal on the same line as a function's own `?`.
+fn source_try_sites<'tcx>(tcx: TyCtxt<'tcx>, in_target: impl Fn(Span) -> bool) -> BTreeSet<TrySite> {
+  struct Sites<'tcx, F> {
+    tcx: TyCtxt<'tcx>,
+    in_target: F,
+    positions: BTreeSet<TrySite>,
+  }
+  impl<'tcx, F: Fn(Span) -> bool> Visitor<'tcx> for Sites<'tcx, F> {
+    fn visit_expr(&mut self, expr: &'tcx Expr<'tcx>) {
+      if matches!(expr.kind, ExprKind::Match(_, _, MatchSource::TryDesugar(_)))
+        && (self.in_target)(expr.span)
+      {
+        let sm = self.tcx.sess.source_map();
+        if sm.span_to_snippet(sm.end_point(expr.span)).as_deref() == Ok("?") {
+          self.positions.insert(try_site(self.tcx, expr.span));
+        }
+      }
+      intravisit::walk_expr(self, expr);
+    }
+  }
+  let mut sites = Sites { tcx, in_target, positions: BTreeSet::new() };
+  for owner in tcx.hir_body_owners() {
+    sites.visit_body(tcx.hir_body_owned_by(owner));
+  }
+  sites.positions
 }
 
 // "The main function"
@@ -443,7 +473,8 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   let shadow_notes: HashMap<u64, ShadowNote> = note_pairs.into_iter().map(|(h, _, n)| (h, n)).collect();
 
   // Pass information to svg-generator
-  match testing_helper.generate_vis(line_map2, pre_events, & mut a_line_map, rap_map.len() + 1, fn_start_lines, shadow_notes, binding_columns, moves_out_first, temp_emptying_moves, hidden_source_lines, approx_notes, args.write_to_cwd) {
+  let try_sites = source_try_sites(tcx, in_target);
+  match testing_helper.generate_vis(line_map2, pre_events, & mut a_line_map, rap_map.len() + 1, fn_start_lines, shadow_notes, binding_columns, moves_out_first, temp_emptying_moves, hidden_source_lines, approx_notes, try_sites, args.write_to_cwd) {
     Ok(_) => {}
     Err(e) => {
       eprintln!("{}", e);

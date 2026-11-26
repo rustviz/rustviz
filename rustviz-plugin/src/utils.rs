@@ -1,8 +1,8 @@
 use anyhow::{Result, anyhow};
 use log::info;
 use rustc_middle::ty::TyCtxt;
-use crate::svg_generator::data::{ApproxNote, ExternalEvent, ShadowNote};
-use std::collections::{HashMap, BTreeMap, HashSet};
+use crate::svg_generator::data::{ApproxNote, ExternalEvent, ShadowNote, TrySite};
+use std::collections::{HashMap, BTreeMap, BTreeSet, HashSet};
 use std::{path::PathBuf, fs};
 use std::env::current_dir;
 use crate::rustviz_library::rv::Rustviz;
@@ -255,6 +255,7 @@ impl RV1Helper {
     temp_emptying_moves: Vec<usize>,
     hidden_source_lines: HashSet<usize>,
     approx_notes: Vec<ApproxNote>,
+    try_sites: BTreeSet<TrySite>,
     write_to_cwd: bool) -> Result<()> {
     let mut keys_to_remove: Vec<usize> = Vec::new();
     for (k, v) in line_map.iter() {
@@ -272,7 +273,7 @@ impl RV1Helper {
 
 
     // send stuff to RV1
-    let rv = Rustviz::new(&annotated_source_str, &self.source_str, p_events, line_map, num_raps, fn_start_lines, shadow_notes, binding_columns, moves_out_first, temp_emptying_moves, hidden_source_lines, approx_notes)?;
+    let rv = Rustviz::new(&annotated_source_str, &self.source_str, p_events, line_map, num_raps, fn_start_lines, shadow_notes, binding_columns, moves_out_first, temp_emptying_moves, hidden_source_lines, approx_notes, try_sites)?;
 
     if write_to_cwd { // write the SVG files
       self.source_path.pop(); // just write to inside cwd

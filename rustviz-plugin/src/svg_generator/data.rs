@@ -7,7 +7,7 @@
 //! we should use when rendering it's respective timeline in the frontend).
 
 
-use std::collections::{HashMap, HashSet, BTreeMap};
+use std::collections::{HashMap, HashSet, BTreeMap, BTreeSet};
 use std::vec::Vec;
 use std::fmt::{Formatter, Result, Display};
 use std::hash::{Hash, Hasher};
@@ -1583,6 +1583,16 @@ pub enum ViaCarrier {
     StoredThrough,
 }
 
+/// A question mark's position in the source, before rows are added for
+/// branches and arrows. The position identifies the same operator on
+/// every column it can drop.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct TrySite {
+    pub line: usize,
+    /// Byte offset in rustc's source map.
+    pub byte: u32,
+}
+
 /// Where the tuple an `if let` / `match` scrutinee `(x, y)` builds is
 /// dropped (#327), as its drop dot says. In edition 2024 an `if let`'s
 /// scrutinee temporaries are dropped at the end of the if branch, or,
@@ -1610,7 +1620,7 @@ pub enum TupleDropAt {
     MatchHere,
     /// Only if the `?` here, inside the arm or if branch, returns early
     /// (#653).
-    TryReturns,
+    TryReturns(TrySite),
 }
 
 /// What a reassignment of a struct or tuple whose parts were moved out
@@ -1627,6 +1637,9 @@ pub struct ReassignParts {
     /// Some of `maybe_moved` were moved by a `let` or-pattern (#597) or
     /// a let-chain's condition (#281), not a branch: "nothing above".
     pub by_cond: bool,
+    /// A maybe-moved field occurs as a source in an or-pattern. The
+    /// pattern's move checks cover alternatives that cannot match.
+    pub by_or_pattern: bool,
 }
 
 /// A variable whose value, or part of it (`rest`: the pattern moved
@@ -1887,7 +1900,7 @@ pub enum LoopLeft {
     /// At a `break` out of the loop, or to an outer loop, leaving this one.
     Break,
     /// At a `?` inside the loop, if it returns early (#649).
-    Try,
+    Try(TrySite),
     /// At a `panic!()` inside the loop, as it unwinds (#649).
     Panic,
     /// At a `continue` to an outer loop, leaving this one.
@@ -2318,12 +2331,13 @@ pub enum ExternalEvent {
         at: MaybeMovedAt,
         id: usize
     },
-    // The `?` operator returns early on `Err` / `None`, dropping what
-    // the function owns at that point (#430). Only on that path: the
+    // If the `?` operator returns early, it drops what the scopes it
+    // leaves still own (#430). Only on that path: the
     // owner stays alive here, so this is a dot on its column, like
     // `OwnerDropAtReassign`.
     OwnerDropIfTryReturns {
         ro: ResourceAccessPoint,
+        site: TrySite,
         id: usize
     },
     // `return if b { p } else { q };` in a branch: `p`, which only some
@@ -2901,7 +2915,7 @@ pub enum Event {
     LoopExitMove { definite: bool, at: MaybeMovedAt },
     // The owner's resource is dropped here only if the `?` returns
     // early (#430). The owner's state is unchanged.
-    OwnerDropIfTryReturns,
+    OwnerDropIfTryReturns { site: TrySite },
     // See ExternalEvent::OwnerDropUnlessReturned.
     OwnerDropUnlessReturned,
     // See ExternalEvent::TupleTempDrop.
@@ -3714,7 +3728,7 @@ impl Display for Event {
             Event::LoopExitMove { .. } => {
                 write!(f, "May have been moved when the loop ends")
             },
-            Event::OwnerDropIfTryReturns => {
+            Event::OwnerDropIfTryReturns { .. } => {
                 write!(f, "Resource is dropped if the `?` returns early")
             },
             Event::OwnerDropUnlessReturned => {
@@ -3997,7 +4011,7 @@ impl Event {
             Event::TemporaryDrop { ty: Some(ty), when, literal, part: None, assign, .. } => {
                 hover_messages::event_dot_temporary_drop(ty, when, *literal, *assign)
             }
-            Event::OwnerDropIfTryReturns => {
+            Event::OwnerDropIfTryReturns { .. } => {
                 hover_messages::event_dot_owner_drop_if_try_returns(my_name, "")
             }
             Event::OwnerDropUnlessReturned => {
@@ -4724,6 +4738,10 @@ pub struct VisualizationData {
     /// order the plugin found them.
     pub approx_notes: Vec<ApproxNote>,
 
+    /// The written question marks in source order, including those
+    /// whose bodies the timeline doesn't trace.
+    pub try_sites: BTreeSet<TrySite>,
+
     /// The source line the code panel shows on each visual row (`None`
     /// on rows it adds), set by `render_svg` before the timeline is
     /// drawn: approximation notes are placed by source line.
@@ -5405,7 +5423,7 @@ impl Visualizable for VisualizationData {
             (_, Event::TemporaryDrop { .. }) => State::OutOfScope,
             // Dropped only on the path that returns; the code after the
             // `?` runs on the other one.
-            (_, Event::OwnerDropIfTryReturns) => (*previous_state).clone(),
+            (_, Event::OwnerDropIfTryReturns { .. }) => (*previous_state).clone(),
             (_, Event::OwnerDropUnlessReturned) => (*previous_state).clone(),
             // A dot on a column whose value already went into the tuple:
             // no change.
@@ -6014,8 +6032,8 @@ impl Visualizable for VisualizationData {
         ExternalEvent::LoopExitMove{definite, at, ..} => {
           vec![(line_num, Event::LoopExitMove { definite: *definite, at: at.clone() })]
         },
-        ExternalEvent::OwnerDropIfTryReturns{..} => {
-          vec![(line_num, Event::OwnerDropIfTryReturns)]
+        ExternalEvent::OwnerDropIfTryReturns{site, ..} => {
+          vec![(line_num, Event::OwnerDropIfTryReturns { site: *site })]
         },
         ExternalEvent::OwnerDropUnlessReturned{..} => {
           vec![(line_num, Event::OwnerDropUnlessReturned)]
@@ -6523,8 +6541,8 @@ impl Visualizable for VisualizationData {
             ExternalEvent::LoopExitMove{ro, definite, at, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopExitMove { definite, at }, line_number);
             },
-            ExternalEvent::OwnerDropIfTryReturns{ro, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropIfTryReturns, line_number);
+            ExternalEvent::OwnerDropIfTryReturns{ro, site, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropIfTryReturns { site }, line_number);
             },
             ExternalEvent::OwnerDropUnlessReturned{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropUnlessReturned, line_number);

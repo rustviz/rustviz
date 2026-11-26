@@ -8498,36 +8498,35 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // before them, `n` and `opt` are `Copy`: no dot for those.
         must_contain: &[
             "If the `?` here returns early, b's \
-             resource is dropped. If the `?` succeeds, nothing happens to b here.",
+             resource is dropped. A successful `?` doesn't trigger this drop.",
             "If the `?` here returns early, c's \
-             resource is dropped. If the `?` succeeds, nothing happens to c here.",
+             resource is dropped. A successful `?` doesn't trigger this drop.",
         ],
         must_not_contain: &[
             "=If the `?` here returns early, a's \
-             resource is dropped. If the `?` succeeds, nothing happens to a here.",
+             resource is dropped. A successful `?` doesn't trigger this drop.",
             "=If the `?` here returns early, n's \
-             resource is dropped. If the `?` succeeds, nothing happens to n here.",
+             resource is dropped. A successful `?` doesn't trigger this drop.",
             "=If the `?` here returns early, opt's \
-             resource is dropped. If the `?` succeeds, nothing happens to opt here.",
+             resource is dropped. A successful `?` doesn't trigger this drop.",
         ],
     },
     TooltipExpect {
         name: "try_in_branch",
         must_contain: &[
             "If the `?` here returns early, t's \
-             resource is dropped. If the `?` succeeds, nothing happens to t here.",
+             resource is dropped. A successful `?` doesn't trigger this drop.",
             "If the `?` here returns early, u's \
-             resource is dropped. If the `?` succeeds, nothing happens to u here.",
+             resource is dropped. A successful `?` doesn't trigger this drop.",
             // `v` is a `Vec<String>`: its drop says what it holds (#542).
             "If the `?` here returns early, v's \
-             resource (including every String it holds) is dropped. If the `?` succeeds, v's \
-             resource isn't dropped here.", // (v's dot also has the borrow by first: #1151)
+             resource (including every String it holds) is dropped. A successful `?` doesn't trigger this drop.", // (v's dot also has the borrow by first: #1151)
         ],
         must_not_contain: &[
             "returns early, v's resource is dropped. If",
             // `s` is a reference.
             "=If the `?` here returns early, s's \
-             resource is dropped. If the `?` succeeds, nothing happens to s here.",
+             resource is dropped. A successful `?` doesn't trigger this drop.",
         ],
     },
     // The `?` dots go on the branch columns once the `if` is drawn with
@@ -8536,32 +8535,31 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "try_in_if_else_branch",
         must_contain: &[
             "If the `?` here returns early, t's \
-             resource is dropped. If the `?` succeeds, nothing happens to t here.",
+             resource is dropped. A successful `?` doesn't trigger this drop.",
             "If the `?` here returns early, u's \
-             resource is dropped. If the `?` succeeds, nothing happens to u here.",
+             resource is dropped. A successful `?` doesn't trigger this drop.",
             "If the `?` here returns early, v's \
-             resource (including every String it holds) is dropped. If the `?` succeeds, v's \
-             resource isn't dropped here.", // (v's dot also has the borrow by first: #1151)
+             resource (including every String it holds) is dropped. A successful `?` doesn't trigger this drop.", // (v's dot also has the borrow by first: #1151)
         ],
         must_not_contain: &[
             "=If the `?` here returns early, s's \
-             resource is dropped. If the `?` succeeds, nothing happens to s here.",
+             resource is dropped. A successful `?` doesn't trigger this drop.",
         ],
     },
     TooltipExpect {
         name: "try_in_loop_two_on_a_line",
         must_contain: &[
-            "If the `?` here returns early, label's \
-             resource is dropped. If the `?` succeeds, nothing happens to label here.",
-            "If the `?` here returns early, note's \
-             resource is dropped. If the `?` succeeds, nothing happens to note here.",
+            "If the first `?` on this line returns early, label's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "If the second `?` on this line returns early, label's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "If the first `?` on this line returns early, note's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "If the second `?` on this line returns early, note's resource is dropped. A successful `?` doesn't trigger this drop.",
         ],
         must_not_contain: &[
             // `total` is a `Copy`; `pair` and `items` are references.
             "=If the `?` here returns early, total's \
-             resource is dropped. If the `?` succeeds, nothing happens to total here.",
+             resource is dropped. A successful `?` doesn't trigger this drop.",
             "=If the `?` here returns early, pair's \
-             resource is dropped. If the `?` succeeds, nothing happens to pair here.",
+             resource is dropped. A successful `?` doesn't trigger this drop.",
             // chunks is a method, not a lender (#868).
             "Return immutably borrowed resource from pair to chunks",
         ],
@@ -8798,8 +8796,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "m goes out of scope. Its resource is dropped (including every key it holds).",
             "w goes out of scope. Its resource is dropped (including every String it holds).",
             "If the `?` here returns early, names's \
-             resource (including every String it holds) is dropped. If the `?` succeeds, nothing happens \
-             to names here.",
+             resource (including every String it holds) is dropped. A successful `?` doesn't trigger this drop.",
         ],
         must_not_contain: &[
             "resource is dropped (including every String it holds). If the `?`",
@@ -9372,12 +9369,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // refused the program; drawing a definite `Move from t.0 to x`
         // would say `t.1` is still dropped when `x` came from it.)
         must_contain: &[
-            "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.0, t.0's resource is moved into x here; otherwise t.0 still owns it (Rust tracks this with a runtime drop flag).",
-            "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1, t.1's resource is moved into x here; otherwise t.1 still owns it (Rust tracks this with a runtime drop flag).",
+            "The pattern has alternatives that bind x from t.0 or t.1. If the alternative that binds x from t.0 matches, t.0's resource is moved into x here. Rust drops whatever t.0 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
+            "The pattern has alternatives that bind x from t.0 or t.1. If the alternative that binds x from t.1 matches, t.1's resource is moved into x here. Rust drops whatever t.1 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
             "x acquires ownership of a resource",
             "t.0 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "t.1 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "t goes out of scope. t.0 and t.1 were moved out in some of the branches above; each is dropped here only if no branch above moved it (Rust tracks this with runtime drop flags).",
+            "t goes out of scope. Rust treats t.0 and t.1 as possibly moved out. Each field is dropped here only if it still holds its value. Rust can track this with runtime drop flags.",
         ],
         must_not_contain: &[
             "Move from t.0 to x",
@@ -9399,8 +9396,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // nothing moved them (a drop flag), which is false here.
         must_contain: &[
             "a's resource is moved into the temporary tuple (a, b)",
-            "x is bound from a or b, whichever alternative of the pattern matches. If it's the alternative that binds x from a, a's resource is moved out of the temporary tuple (a, b) into x here; otherwise it stays in the tuple",
-            "x is bound from a or b, whichever alternative of the pattern matches. If it's the alternative that binds x from b, b's resource is moved out of the temporary tuple (a, b) into x here; otherwise it stays in the tuple",
+            "The pattern has alternatives that bind x from a or b. If the alternative that binds x from a matches, a's resource is moved out of the temporary tuple (a, b) into x here. Whatever the pattern leaves in the tuple is dropped with it",
+            "The pattern has alternatives that bind x from a or b. If the alternative that binds x from b matches, b's resource is moved out of the temporary tuple (a, b) into x here. Whatever the pattern leaves in the tuple is dropped with it",
             "The temporary tuple (a, b) is dropped after this arm, when the match ends, and with it whatever of a's and b's resources x didn't take",
             // The `_` arm takes nothing out of the tuple.
             "The temporary tuple (a, b) is dropped after this arm, when the match ends, and with it a's and b's resources",
@@ -9441,11 +9438,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "or_pattern_different_fields",
         // `P { a: x, .. } | P { b: x, .. }`: `p.a` or `p.b`.
         must_contain: &[
-            "x is bound from p.a or p.b, whichever alternative of the pattern matches. If it's the alternative that binds x from p.a, p.a's resource is moved into x here; otherwise p.a still owns it (Rust tracks this with a runtime drop flag).",
-            "x is bound from p.a or p.b, whichever alternative of the pattern matches. If it's the alternative that binds x from p.b, p.b's resource is moved into x here; otherwise p.b still owns it (Rust tracks this with a runtime drop flag).",
+            "The pattern has alternatives that bind x from p.a or p.b. If the alternative that binds x from p.a matches, p.a's resource is moved into x here. Rust drops whatever p.a still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
+            "The pattern has alternatives that bind x from p.a or p.b. If the alternative that binds x from p.b matches, p.b's resource is moved into x here. Rust drops whatever p.b still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
             "p.a goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "p.b goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "p goes out of scope. p.a and p.b were moved out in some of the branches above; each is dropped here only if no branch above moved it (Rust tracks this with runtime drop flags).",
+            "p goes out of scope. Rust treats p.a and p.b as possibly moved out. Each field is dropped here only if it still holds its value. Rust can track this with runtime drop flags.",
         ],
         must_not_contain: &[
             "Move from p.a to x",
@@ -9457,8 +9454,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "or_pattern_three_places",
         // Three alternatives: all three places are listed.
         must_contain: &[
-            "x is bound from t.0, t.1 or t.2, whichever alternative of the pattern matches. If it's the alternative that binds x from t.0, t.0's resource is moved into x here; otherwise t.0 still owns it (Rust tracks this with a runtime drop flag).",
-            "x is bound from t.0, t.1 or t.2, whichever alternative of the pattern matches. If it's the alternative that binds x from t.2, t.2's resource is moved into x here; otherwise t.2 still owns it (Rust tracks this with a runtime drop flag).",
+            "The pattern has alternatives that bind x from t.0, t.1 or t.2. If the alternative that binds x from t.0 matches, t.0's resource is moved into x here. Rust drops whatever t.0 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
+            "The pattern has alternatives that bind x from t.0, t.1 or t.2. If the alternative that binds x from t.2 matches, t.2's resource is moved into x here. Rust drops whatever t.2 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
             "t.2 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &["Move from t.0 to x", "=t.2 goes out of scope. Its resource is dropped."],
@@ -9473,9 +9470,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // dropped at a's, b's or c's scope end, and no drop flag is
         // involved (#566 first said there was).
         must_contain: &[
-            "x is bound from a or b, whichever alternative of the pattern matches. If it's the alternative that binds x from a, a's resource is moved out of the temporary tuple (a, b) into x here; otherwise it stays in the tuple",
+            "The pattern has alternatives that bind x from a or b. If the alternative that binds x from a matches, a's resource is moved out of the temporary tuple (a, b) into x here. Whatever the pattern leaves in the tuple is dropped with it",
             "The temporary tuple (a, b) is dropped here, at the end of the match, and with it whatever of a's and b's resources x didn't take",
-            "x is bound from a or b, whichever alternative of the pattern matches. If it's the alternative that binds x from b, b's resource is moved out of the temporary tuple (a, b, c) into x here; otherwise it stays in the tuple",
+            "The pattern has alternatives that bind x from a or b. If the alternative that binds x from b matches, b's resource is moved out of the temporary tuple (a, b, c) into x here. Whatever the pattern leaves in the tuple is dropped with it",
             // c isn't bound by the arm: all of it goes with the tuple.
             "The temporary tuple (a, b, c) is dropped after this arm, when the match ends, and with it c's resource and whatever of a's and b's resources x didn't take",
             "The temporary tuple (a, b, c) is dropped after this arm, when the match ends, and with it a's, b's and c's resources",
@@ -9783,13 +9780,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // drop) struct moves a value, with no drop flag; a Copy tuple
         // is just copied.
         must_contain: &[
-            "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.0, t.0's resource is moved into x here; otherwise t.0 still owns it (Rust tracks this with a runtime drop flag).",
-            "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1, t.1.n's resource is moved into x.n here; otherwise t.1.n still owns it (Rust tracks this with a runtime drop flag).",
-            "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.0, t.0.k's value is moved into x.k here; otherwise t.0.k still holds it.",
+            "The pattern has alternatives that bind x from t.0 or t.1. If the alternative that binds x from t.0 matches, t.0's resource is moved into x here. Rust drops whatever t.0 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
+            "The pattern has alternatives that bind x from t.0 or t.1. If the alternative that binds x from t.1 matches, t.1.n's resource is moved into x.n here. Rust drops whatever t.1.n still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
+            "The pattern has alternatives that bind x from t.0 or t.1. If the alternative that binds x from t.0 matches, t.0.k's value is moved into x.k here. t.0.k keeps the value only if the matching alternative leaves it there.",
             "t.0.n goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "x.n acquires ownership of a resource",
             "x.k is bound to a copyable value",
-            "y is bound from u.0 or u.1, whichever alternative of the pattern matches. If it's the alternative that binds y from u.0, u.0's value is moved into y here; otherwise u.0 still holds it.",
+            "The pattern has alternatives that bind y from u.0 or u.1. If the alternative that binds y from u.0 matches, u.0's value is moved into y here. u.0 keeps the value only if the matching alternative leaves it there.",
             "z is bound to a copyable value",
             "z.0 is bound to a copyable value",
         ],
@@ -9806,7 +9803,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "or_pattern_tuple_different_places",
         // A tuple `x` bound from t.0 or t.1: each element moves with it.
         must_contain: &[
-            "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1, t.1.0's resource is moved into x.0 here; otherwise t.1.0 still owns it (Rust tracks this with a runtime drop flag).",
+            "The pattern has alternatives that bind x from t.0 or t.1. If the alternative that binds x from t.1 matches, t.1.0's resource is moved into x.0 here. Rust drops whatever t.1.0 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
             "t.1.1 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "x.0 acquires ownership of a resource",
             "x.1 acquires ownership of a resource",
@@ -9828,7 +9825,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // or-pattern borrow of the `ref mut x`, drawing it as a definite
         // borrow of w.0.)
         must_contain: &[
-            "x is bound from u.0 or u.1, whichever alternative of the pattern matches. If it's the alternative that binds x from u.1, u.1's resource is moved into x here; otherwise u.1 still owns it (Rust tracks this with a runtime drop flag).",
+            "The pattern has alternatives that bind x from u.0 or u.1. If the alternative that binds x from u.1 matches, u.1's resource is moved into x here. Rust drops whatever u.1 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
             "x mutably borrows w.0 or w.1, whichever alternative of the pattern matches",
             "u.1 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
         ],
@@ -10008,15 +10005,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "edition2024/if_let_chain_else_try",
         must_contain: &[
             "If the `?` here returns early, w's \
-             resource is dropped. If the `?` succeeds, nothing happens to w here.",
+             resource is dropped. A successful `?` doesn't trigger this drop.",
             "If the `?` here returns early, x's \
-             resource (including the String it holds, if any) is dropped. If the `?` succeeds, \
-             x's resource isn't dropped here.", // (with the borrow on x's dot: #1151)
+             resource (including the String it holds, if any) is dropped. A successful `?` doesn't trigger this drop.", // (with the borrow on x's dot: #1151)
         ],
         must_not_contain: &[
             // `a` is a reference.
             "=If the `?` here returns early, a's \
-             resource is dropped. If the `?` succeeds, nothing happens to a here.",
+             resource is dropped. A successful `?` doesn't trigger this drop.",
         ],
     },
     TooltipExpect {
@@ -10024,47 +10020,45 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `let Some(a) = x` moved the String into `a` before the `?`.
         must_contain: &[
             "If the `?` here returns early, w's \
-             resource is dropped. If the `?` succeeds, nothing happens to w here.",
+             resource is dropped. A successful `?` doesn't trigger this drop.",
             "If the `?` here returns early, a's \
-             resource is dropped. If the `?` succeeds, a's resource isn't dropped here.", // (#1151)
+             resource is dropped. A successful `?` doesn't trigger this drop.", // (#1151)
         ],
         must_not_contain: &[
             "=If the `?` here returns early, x's \
-             resource is dropped. If the `?` succeeds, nothing happens to x here.",
+             resource is dropped. A successful `?` doesn't trigger this drop.",
         ],
     },
     TooltipExpect {
         name: "try_in_if_else",
         must_contain: &[
             "If the `?` here returns early, t's \
-             resource is dropped. If the `?` succeeds, nothing happens to t here.",
+             resource is dropped. A successful `?` doesn't trigger this drop.",
             "If the `?` here returns early, u's \
-             resource is dropped. If the `?` succeeds, nothing happens to u here.",
+             resource is dropped. A successful `?` doesn't trigger this drop.",
             "If the `?` here returns early, v's \
-             resource (including every String it holds) is dropped. If the `?` succeeds, v's \
-             resource isn't dropped here.", // (v's dot also has the borrow by first: #1151)
+             resource (including every String it holds) is dropped. A successful `?` doesn't trigger this drop.", // (v's dot also has the borrow by first: #1151)
         ],
         must_not_contain: &[
             // `s` is a reference, bound after the `?`.
             "=If the `?` here returns early, s's \
-             resource is dropped. If the `?` succeeds, nothing happens to s here.",
+             resource is dropped. A successful `?` doesn't trigger this drop.",
         ],
     },
     TooltipExpect {
         name: "try_in_match_arm",
         must_contain: &[
             "If the `?` here returns early, s's \
-             resource is dropped. If the `?` succeeds, nothing happens to s here.",
+             resource is dropped. A successful `?` doesn't trigger this drop.",
             "If the `?` here returns early, t's \
-             resource is dropped. If the `?` succeeds, nothing happens to t here.",
+             resource is dropped. A successful `?` doesn't trigger this drop.",
             "If the `?` here returns early, v's \
-             resource (including every String it holds) is dropped. If the `?` succeeds, v's \
-             resource isn't dropped here.", // (v's dot also has the borrow by first: #1151)
+             resource (including every String it holds) is dropped. A successful `?` doesn't trigger this drop.", // (v's dot also has the borrow by first: #1151)
         ],
         must_not_contain: &[
             // The arm's pattern moved o's String into `s`.
             "=If the `?` here returns early, o's \
-             resource is dropped. If the `?` succeeds, nothing happens to o here.",
+             resource is dropped. A successful `?` doesn't trigger this drop.",
         ],
     },
     // #670: `*r` with r: &i32 is an i32, which is Copy: the caller gets a
@@ -10239,11 +10233,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "x acquires ownership of a resource",
             "x goes out of scope. Its resource is dropped.",
-            "x is bound from u.0 or u.1, whichever alternative of the pattern matches. If it's the alternative that binds x from u.0, u.0's resource is moved into x here; otherwise u.0 still owns it (Rust tracks this with a runtime drop flag).",
-            "x is bound from u.0 or u.1, whichever alternative of the pattern matches. If it's the alternative that binds x from u.1, u.1's resource is moved into x here; otherwise u.1 still owns it (Rust tracks this with a runtime drop flag).",
+            "The pattern has alternatives that bind x from u.0 or u.1. If the alternative that binds x from u.0 matches, u.0's resource is moved into x here. Rust drops whatever u.0 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
+            "The pattern has alternatives that bind x from u.0 or u.1. If the alternative that binds x from u.1 matches, u.1's resource is moved into x here. Rust drops whatever u.1 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
             "u.0 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "u.1 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "u goes out of scope. u.0 and u.1 were moved out in some of the branches above; each is dropped here only if no branch above moved it (Rust tracks this with runtime drop flags).",
+            "u goes out of scope. Rust treats u.0 and u.1 as possibly moved out. Each field is dropped here only if it still holds its value. Rust can track this with runtime drop flags.",
         ],
         must_not_contain: &[
             "Move from u.0 to x",
@@ -10259,8 +10253,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `if let (Some(x), _) | (_, Some(x)) = t { … } else { … }`.
         must_contain: &[
             "x acquires ownership of a resource",
-            "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.0, t.0's resource is moved into x here; otherwise t.0 still owns it (Rust tracks this with a runtime drop flag).",
-            "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1, t.1's resource is moved into x here; otherwise t.1 still owns it (Rust tracks this with a runtime drop flag).",
+            "The pattern has alternatives that bind x from t.0 or t.1. If the alternative that binds x from t.0 matches, t.0's resource is moved into x here. Rust drops whatever t.0 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
+            "The pattern has alternatives that bind x from t.0 or t.1. If the alternative that binds x from t.1 matches, t.1's resource is moved into x here. Rust drops whatever t.1 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
             "t.0 goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "t.1 goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
         ],
@@ -10277,7 +10271,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `while let (x, _) | (_, x) = u { …; break; }`.
         must_contain: &[
             "x acquires ownership of a resource",
-            "x is bound from u.0 or u.1, whichever alternative of the pattern matches. If it's the alternative that binds x from u.0, u.0's resource is moved into x here; otherwise u.0 still owns it (Rust tracks this with a runtime drop flag).",
+            "The pattern has alternatives that bind x from u.0 or u.1. If the alternative that binds x from u.0 matches, u.0's resource is moved into x here. Rust drops whatever u.0 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
             "u.1 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
@@ -10294,11 +10288,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "x acquires ownership of a resource",
             "x goes out of scope. Its resource is dropped.",
-            "x is bound from u.0 or u.1, whichever alternative of the pattern matches. If it's the alternative that binds x from u.0, u.0's resource is moved into x here; otherwise u.0 still owns it (Rust tracks this with a runtime drop flag).",
-            "x is bound from u.0 or u.1, whichever alternative of the pattern matches. If it's the alternative that binds x from u.1, u.1's resource is moved into x here; otherwise u.1 still owns it (Rust tracks this with a runtime drop flag).",
+            "The pattern has alternatives that bind x from u.0 or u.1. If the alternative that binds x from u.0 matches, u.0's resource is moved into x here. Rust drops whatever u.0 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
+            "The pattern has alternatives that bind x from u.0 or u.1. If the alternative that binds x from u.1 matches, u.1's resource is moved into x here. Rust drops whatever u.1 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
             "u.0 goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
             "u.1 goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
-            "u goes out of scope. u.0 and u.1 may have been moved out above, so each is dropped here only if nothing above moved it (Rust tracks this with runtime drop flags).",
+            "u goes out of scope. Rust treats u.0 and u.1 as possibly moved out. Each field is dropped here only if it still holds its value. Rust can track this with runtime drop flags.",
         ],
         must_not_contain: &[
             "Move from u to x",
@@ -10316,10 +10310,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the old `p.a`, if it's still there, is dropped at the
         // assignment; `p.b` at scope end, only if nothing moved it.
         must_contain: &[
-            "x is bound from p.a or p.b, whichever alternative of the pattern matches. If it's the alternative that binds x from p.b, p.b's resource is moved into x here; otherwise p.b still owns it (Rust tracks this with a runtime drop flag).",
+            "The pattern has alternatives that bind x from p.a or p.b. If the alternative that binds x from p.b matches, p.b's resource is moved into x here. Rust drops whatever p.b still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
             "p.a acquires ownership of a new resource. Its previous resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
             "p.b goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
-            "p goes out of scope. p.b may have been moved out above, so it's dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag). p.a is dropped.",
+            "p goes out of scope. Rust treats p.b as possibly moved out. The field is dropped here only if it still holds its value. Rust can track this with a runtime drop flag. p.a is dropped.",
         ],
         must_not_contain: &[
             "Move from p to x",
@@ -10350,8 +10344,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // so no drop flag on them.
         must_contain: &[
             "a's resource is moved into the temporary tuple (a, b)",
-            "x is bound from a or b, whichever alternative of the pattern matches. If it's the alternative that binds x from a, a's resource is moved out of the temporary tuple (a, b) into x here; otherwise it stays in the tuple",
-            "x is bound from a or b, whichever alternative of the pattern matches. If it's the alternative that binds x from b, b's resource is moved out of the temporary tuple (a, b) into x here; otherwise it stays in the tuple",
+            "The pattern has alternatives that bind x from a or b. If the alternative that binds x from a matches, a's resource is moved out of the temporary tuple (a, b) into x here. Whatever the pattern leaves in the tuple is dropped with it",
+            "The pattern has alternatives that bind x from a or b. If the alternative that binds x from b matches, b's resource is moved out of the temporary tuple (a, b) into x here. Whatever the pattern leaves in the tuple is dropped with it",
             "The temporary tuple (a, b) is dropped here, at the end of the if branch, and with it whatever of a's and b's resources x didn't take",
             "The pattern didn't match, so the temporary tuple (a, b) is dropped here, before the else branch runs, and with it a's and b's resources",
             "a goes out of scope. No resource is dropped: a was moved or dropped in every branch above.",
@@ -10375,8 +10369,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "or_pattern_let_shadowed_name",
         must_contain: &[
-            "x₂ is bound from u.0 or u.1, whichever alternative of the pattern matches. If it's the alternative that binds x₂ from u.0, u.0's resource is moved into x₂ here; otherwise u.0 still owns it (Rust tracks this with a runtime drop flag).",
-            "x₂ is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x₂ from t.1, t.1's resource is moved into x₂ here; otherwise t.1 still owns it (Rust tracks this with a runtime drop flag).",
+            "The pattern has alternatives that bind x₂ from u.0 or u.1. If the alternative that binds x₂ from u.0 matches, u.0's resource is moved into x₂ here. Rust drops whatever u.0 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
+            "The pattern has alternatives that bind x₂ from t.0 or t.1. If the alternative that binds x₂ from t.1 matches, t.1's resource is moved into x₂ here. Rust drops whatever t.1 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
             "t.0 goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
             "t.1 goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
             "u.1 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
@@ -10936,8 +10930,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the `?`'s drops of the function's values (#430). The `?` also
         // moves r / w (#652).
         must_contain: &[
-            "If the `?` here returns early, the temporary tuple (x, y) is dropped, and with it y's resource. If the `?` succeeds, nothing happens to the tuple here.",
-            "If the `?` here returns early, the temporary tuple (p, q) is dropped, and with it q's resource. If the `?` succeeds, nothing happens to the tuple here.",
+            "If the `?` here returns early, the temporary tuple (x, y) is dropped, and with it y's resource. A successful `?` doesn't trigger this drop.",
+            "If the `?` here returns early, the temporary tuple (p, q) is dropped, and with it q's resource. A successful `?` doesn't trigger this drop.",
             "The temporary tuple (x, y) is dropped after this arm, when the match ends, and with it y's resource",
             "The temporary tuple (p, q) is dropped when the if branch leaves early, and with it q's resource",
             "r's resource is moved into the `?`. If r is `Ok`, n gets the value inside it. Otherwise the `?` returns early.",
@@ -12113,7 +12107,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // "b's resource is moved into the `?`", which reads as a
         // contradiction (#668).
         must_contain: &[
-            "If an earlier `?` on this line returns early, b's resource (including the String it holds, if any) is dropped. If it succeeds, b is not dropped there; b's own `?` below moves it",
+            "If the first `?` on this line returns early, b's resource (including the String it holds, if any) is dropped. A successful `?` doesn't trigger this drop.",
             "b's resource is moved into the `?`. If b is `Ok`, `b?` gives the value inside it. Otherwise the `?` returns early.",
         ],
         must_not_contain: &[
@@ -12243,10 +12237,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the loop's iterator, with the elements it hasn't handed out,
         // is dropped there, on `it`'s column.
         must_contain: &[
-            "If the `?` here returns early, it's former resource, the loop's iterator, is dropped, along with whatever it still owns (such as elements it hasn't handed out yet). If the `?` succeeds, nothing happens to the iterator here.",
+            "If the `?` here returns early, it's former resource, the loop's iterator, is dropped, along with whatever it still owns (such as elements it hasn't handed out yet). A successful `?` doesn't trigger this drop.",
             "it's former resource, the `for` loop's iterator, is dropped here, as the panic unwinds out of the loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
             // `w`'s own drop at the `?` (#430).
-            "If the `?` here returns early, w's resource is dropped. If the `?` succeeds, w's resource isn't dropped here.", // (w is also borrowed on this dot: #1151)
+            "If the `?` here returns early, w's resource is dropped. A successful `?` doesn't trigger this drop.", // (w is also borrowed on this dot: #1151)
         ],
         must_not_contain: &[
             "the function returns from inside the loop",
@@ -12514,15 +12508,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // x))` would. The old plugin drew `Move from t.1 to x` and still
         // dropped both `t.1.0` and `t.1.1` at scope end.
         must_contain: &[
-            "x is bound from t.1.0 or t.1.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1.0, t.1.0's resource is moved into x here; otherwise t.1.0 still owns it (Rust tracks this with a runtime drop flag).",
-            "x is bound from t.1.0 or t.1.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1.1, t.1.1's resource is moved into x here; otherwise t.1.1 still owns it (Rust tracks this with a runtime drop flag).",
+            "The pattern has alternatives that bind x from t.1.0 or t.1.1. If the alternative that binds x from t.1.0 matches, t.1.0's resource is moved into x here. Rust drops whatever t.1.0 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
+            "The pattern has alternatives that bind x from t.1.0 or t.1.1. If the alternative that binds x from t.1.1 matches, t.1.1's resource is moved into x here. Rust drops whatever t.1.1 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
             "x acquires ownership of a resource",
             "a acquires ownership of a resource",
             "Move from t.0 to a",
             "t.1.0 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "t.1.1 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "t.1 goes out of scope. t.1.0 and t.1.1 were moved out in some of the branches above; each is dropped here only if no branch above moved it (Rust tracks this with runtime drop flags).",
-            "t goes out of scope. t.0 was moved out earlier. t.1.0 and t.1.1 were moved out in some of the branches above; each is dropped here only if no branch above moved it (Rust tracks this with runtime drop flags).",
+            "t.1 goes out of scope. Rust treats t.1.0 and t.1.1 as possibly moved out. Each field is dropped here only if it still holds its value. Rust can track this with runtime drop flags.",
+            "t goes out of scope. t.0 was moved out earlier. Rust treats t.1.0 and t.1.1 as possibly moved out. Each field is dropped here only if it still holds its value. Rust can track this with runtime drop flags.",
         ],
         must_not_contain: &[
             "Move from t.1 to x",
@@ -12538,14 +12532,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // above". The old plugin drew `Move from t to x` (the whole
         // tuple) and still dropped `t.1.0` and `t.1.1`.
         must_contain: &[
-            "x is bound from t.1.0 or t.1.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1.0, t.1.0's resource is moved into x here; otherwise t.1.0 still owns it (Rust tracks this with a runtime drop flag).",
-            "x is bound from t.1.0 or t.1.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1.1, t.1.1's resource is moved into x here; otherwise t.1.1 still owns it (Rust tracks this with a runtime drop flag).",
+            "The pattern has alternatives that bind x from t.1.0 or t.1.1. If the alternative that binds x from t.1.0 matches, t.1.0's resource is moved into x here. Rust drops whatever t.1.0 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
+            "The pattern has alternatives that bind x from t.1.0 or t.1.1. If the alternative that binds x from t.1.1 matches, t.1.1's resource is moved into x here. Rust drops whatever t.1.1 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
             "x acquires ownership of a resource",
             "Move from t.0 to a",
             "t.1.0 goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
             "t.1.1 goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
-            "t.1 goes out of scope. t.1.0 and t.1.1 may have been moved out above, so each is dropped here only if nothing above moved it (Rust tracks this with runtime drop flags).",
-            "t goes out of scope. t.0 was moved out earlier. t.1.0 and t.1.1 may have been moved out above, so each is dropped here only if nothing above moved it (Rust tracks this with runtime drop flags).",
+            "t.1 goes out of scope. Rust treats t.1.0 and t.1.1 as possibly moved out. Each field is dropped here only if it still holds its value. Rust can track this with runtime drop flags.",
+            "t goes out of scope. t.0 was moved out earlier. Rust treats t.1.0 and t.1.1 as possibly moved out. Each field is dropped here only if it still holds its value. Rust can track this with runtime drop flags.",
         ],
         must_not_contain: &[
             "Move from t to x",
@@ -12563,12 +12557,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // drew `Move from t.1 to x` and dropped `t.1.0` and `t.1.1`
         // unconditionally.
         must_contain: &[
-            "x is bound from t.1.0 or t.1.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1.0, t.1.0's resource is moved into x here; otherwise t.1.0 still owns it (Rust tracks this with a runtime drop flag).",
-            "x is bound from t.1.0 or t.1.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1.1, t.1.1's resource is moved into x here; otherwise t.1.1 still owns it (Rust tracks this with a runtime drop flag).",
+            "The pattern has alternatives that bind x from t.1.0 or t.1.1. If the alternative that binds x from t.1.0 matches, t.1.0's resource is moved into x here. Rust drops whatever t.1.0 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
+            "The pattern has alternatives that bind x from t.1.0 or t.1.1. If the alternative that binds x from t.1.1 matches, t.1.1's resource is moved into x here. Rust drops whatever t.1.1 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
             "x acquires ownership of a resource",
             "n is initialized with a copy of t.0",
             "t.1.0 goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "t.1 goes out of scope. t.1.0 and t.1.1 were moved out in some of the branches above; each is dropped here only if no branch above moved it (Rust tracks this with runtime drop flags).",
+            "t.1 goes out of scope. Rust treats t.1.0 and t.1.1 as possibly moved out. Each field is dropped here only if it still holds its value. Rust can track this with runtime drop flags.",
         ],
         must_not_contain: &[
             "Move from t.1 to x",
@@ -12583,8 +12577,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // from `t.1.a` or `t.1.b`. The old plugin drew `Move from t.1 to
         // x` and dropped both fields at scope end.
         must_contain: &[
-            "x is bound from t.1.a or t.1.b, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1.a, t.1.a's resource is moved into x here; otherwise t.1.a still owns it (Rust tracks this with a runtime drop flag).",
-            "x is bound from t.1.a or t.1.b, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1.b, t.1.b's resource is moved into x here; otherwise t.1.b still owns it (Rust tracks this with a runtime drop flag).",
+            "The pattern has alternatives that bind x from t.1.a or t.1.b. If the alternative that binds x from t.1.a matches, t.1.a's resource is moved into x here. Rust drops whatever t.1.a still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
+            "The pattern has alternatives that bind x from t.1.a or t.1.b. If the alternative that binds x from t.1.b matches, t.1.b's resource is moved into x here. Rust drops whatever t.1.b still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
             "t.1.b goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
@@ -12601,8 +12595,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `t.1`). The old plugin drew `Move from t.0 to x` and `Copy
         // from t.1 to n`.
         must_contain: &[
-            "x is bound from t.0.0 or t.0.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.0.0, t.0.0's resource is moved into x here; otherwise t.0.0 still owns it (Rust tracks this with a runtime drop flag).",
-            "x is bound from t.0.0 or t.0.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.0.1, t.0.1's resource is moved into x here; otherwise t.0.1 still owns it (Rust tracks this with a runtime drop flag).",
+            "The pattern has alternatives that bind x from t.0.0 or t.0.1. If the alternative that binds x from t.0.0 matches, t.0.0's resource is moved into x here. Rust drops whatever t.0.0 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
+            "The pattern has alternatives that bind x from t.0.0 or t.0.1. If the alternative that binds x from t.0.1 matches, t.0.1's resource is moved into x here. Rust drops whatever t.0.1 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
             "n is bound to a copyable value",
             "t.0.1 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
         ],
@@ -12914,12 +12908,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // into a temporary").
         must_contain: &[
             "u's resource is moved into the temporary tuple (s, u)",
-            "x is bound from u.0 or u.1, whichever alternative of the pattern matches. If it's the alternative that binds x from u.0, u.0's resource is moved out of the temporary tuple (s, u) into x here; otherwise it stays in the tuple",
-            "x is bound from u.0 or u.1, whichever alternative of the pattern matches. If it's the alternative that binds x from u.1, u.1's resource is moved out of the temporary tuple (s, u) into x here; otherwise it stays in the tuple",
+            "The pattern has alternatives that bind x from u.0 or u.1. If the alternative that binds x from u.0 matches, u.0's resource is moved out of the temporary tuple (s, u) into x here. Whatever the pattern leaves in the tuple is dropped with it",
+            "The pattern has alternatives that bind x from u.0 or u.1. If the alternative that binds x from u.1 matches, u.1's resource is moved out of the temporary tuple (s, u) into x here. Whatever the pattern leaves in the tuple is dropped with it",
             "The temporary tuple (s, u) is dropped here, at the end of the match, and with it whatever of u.0's and u.1's resources x didn't take",
             "u.0 goes out of scope. No resource is dropped.",
             "u.1 goes out of scope. No resource is dropped.",
-            "y is bound from b or c, whichever alternative of the pattern matches. If it's the alternative that binds y from c, c's resource is moved out of the temporary tuple (a, (b, c)) into y here; otherwise it stays in the tuple",
+            "The pattern has alternatives that bind y from b or c. If the alternative that binds y from c matches, c's resource is moved out of the temporary tuple (a, (b, c)) into y here. Whatever the pattern leaves in the tuple is dropped with it",
             "The temporary tuple (a, (b, c)) is dropped here, at the end of the match, and with it whatever of b's and c's resources y didn't take",
             "c goes out of scope. No resource is dropped.",
             "The temporary tuple (s2, v) is dropped here, at the end of the match, and with it whatever of v.0's and v.1's resources z didn't take",
@@ -12942,10 +12936,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // match, "nothing above" after a `let`). The old plugin said on
         // the tuple's own dot that its whole previous value is dropped.
         must_contain: &[
-            "t acquires ownership of a new resource. Its previous t.0 and t.1 were moved out in some of the branches above; each is dropped here only if no branch above moved it (Rust tracks this with runtime drop flags).",
-            "u acquires ownership of a new resource. Its previous u.0 and u.1 may have been moved out above, so each is dropped here only if nothing above moved it (Rust tracks this with runtime drop flags).",
+            "t acquires ownership of a new resource. Rust treats t.0 and t.1 as possibly moved out. The assignment drops each old field only if it still held its value. Rust can track this with runtime drop flags.",
+            "u acquires ownership of a new resource. Rust treats u.0 and u.1 as possibly moved out. The assignment drops each old field only if it still held its value. Rust can track this with runtime drop flags.",
             "u.0 acquires ownership of a new resource. Its previous resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
-            "v.1 acquires ownership of a new resource. Its previous v.1.0 and v.1.1 were moved out in some of the branches above; each is dropped here only if no branch above moved it (Rust tracks this with runtime drop flags).",
+            "v.1 acquires ownership of a new resource. Rust treats v.1.0 and v.1.1 as possibly moved out. The assignment drops each old field only if it still held its value. Rust can track this with runtime drop flags.",
             "w acquires ownership of a new resource. Its previous w.0 was moved out earlier, so only its previous w.1 and w.2 are dropped.",
         ],
         must_not_contain: &[
@@ -12965,7 +12959,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "a's resource is moved into the temporary tuple (a, b)",
             "a.n's resource is moved into the temporary tuple (a, b)",
-            "x is bound from a or b, whichever alternative of the pattern matches. If it's the alternative that binds x from a, a.n's resource is moved out of the temporary tuple (a, b) into x.n here; otherwise it stays in the tuple",
+            "The pattern has alternatives that bind x from a or b. If the alternative that binds x from a matches, a.n's resource is moved out of the temporary tuple (a, b) into x.n here. Whatever the pattern leaves in the tuple is dropped with it",
             "The temporary tuple (a, b) is dropped here, at the end of the match, and with it whatever of a.n's and b.n's resources x didn't take",
             "a goes out of scope. No resource is dropped.",
             "a.n goes out of scope. No resource is dropped.",
@@ -16182,15 +16176,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // out of t.0 or t.1, so after the `if` each is maybe-moved (using t.0
         // there is E0382), and x gets its field column x.n.
         must_contain: &[
-            "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.0, t.0's resource is moved into x here; otherwise t.0 still owns it (Rust tracks this with a runtime drop flag).",
-            "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1, t.1's resource is moved into x here; otherwise t.1 still owns it (Rust tracks this with a runtime drop flag).",
+            "The pattern has alternatives that bind x from t.0 or t.1. If the alternative that binds x from t.0 matches, t.0's resource is moved into x here. Rust drops whatever t.0 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
+            "The pattern has alternatives that bind x from t.0 or t.1. If the alternative that binds x from t.1 matches, t.1's resource is moved into x here. Rust drops whatever t.1 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
             "x acquires ownership of a resource",
             "x goes out of scope. Its resource is dropped.",
             "x.n acquires ownership of a resource",
             "x.n goes out of scope. Its resource is dropped.",
             "t.0 goes out of scope. Its resource (including the P it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "t.1 goes out of scope. Its resource (including the P it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "t goes out of scope. t.0 and t.1 were moved out in some of the branches above; each is dropped here only if no branch above moved it (Rust tracks this with runtime drop flags).",
+            "t goes out of scope. Rust treats t.0 and t.1 as possibly moved out. Each field is dropped here only if it still holds its value. Rust can track this with runtime drop flags.",
         ],
         must_not_contain: &[
             "Move from t.0 to x",
@@ -16305,14 +16299,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `let ((Some(x), _) | (_, Some(x))) = t else { return };` with x: P. A
         // `let` is no branch: the drop-flag wording says "nothing above".
         must_contain: &[
-            "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.0, t.0's resource is moved into x here; otherwise t.0 still owns it (Rust tracks this with a runtime drop flag).",
-            "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1, t.1's resource is moved into x here; otherwise t.1 still owns it (Rust tracks this with a runtime drop flag).",
+            "The pattern has alternatives that bind x from t.0 or t.1. If the alternative that binds x from t.0 matches, t.0's resource is moved into x here. Rust drops whatever t.0 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
+            "The pattern has alternatives that bind x from t.0 or t.1. If the alternative that binds x from t.1 matches, t.1's resource is moved into x here. Rust drops whatever t.1 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
             "x acquires ownership of a resource",
             "x.n acquires ownership of a resource",
             "x.n goes out of scope. Its resource is dropped.",
             "t.0 goes out of scope. Its resource (including the P it holds, if any) is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
             "t.1 goes out of scope. Its resource (including the P it holds, if any) is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
-            "t goes out of scope. t.0 and t.1 may have been moved out above, so each is dropped here only if nothing above moved it (Rust tracks this with runtime drop flags).",
+            "t goes out of scope. Rust treats t.0 and t.1 as possibly moved out. Each field is dropped here only if it still holds its value. Rust can track this with runtime drop flags.",
         ],
         must_not_contain: &[
             "Move from t.0 to x",
@@ -16330,14 +16324,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // alternative is unreachable, but still counts t.1 as maybe-moved:
         // using it afterwards is E0382).
         must_contain: &[
-            "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.0, t.0's resource is moved into x here; otherwise t.0 still owns it (Rust tracks this with a runtime drop flag).",
-            "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1, t.1's resource is moved into x here; otherwise t.1 still owns it (Rust tracks this with a runtime drop flag).",
-            "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.0, t.0.n's resource is moved into x.n here; otherwise t.0.n still owns it (Rust tracks this with a runtime drop flag).",
-            "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1, t.1.n's resource is moved into x.n here; otherwise t.1.n still owns it (Rust tracks this with a runtime drop flag).",
+            "The pattern has alternatives that bind x from t.0 or t.1. If the alternative that binds x from t.0 matches, t.0's resource is moved into x here. Rust drops whatever t.0 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
+            "The pattern has alternatives that bind x from t.0 or t.1. If the alternative that binds x from t.1 matches, t.1's resource is moved into x here. Rust drops whatever t.1 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
+            "The pattern has alternatives that bind x from t.0 or t.1. If the alternative that binds x from t.0 matches, t.0.n's resource is moved into x.n here. Rust drops whatever t.0.n still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
+            "The pattern has alternatives that bind x from t.0 or t.1. If the alternative that binds x from t.1 matches, t.1.n's resource is moved into x.n here. Rust drops whatever t.1.n still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
             "x.n goes out of scope. Its resource is dropped.",
             "t.0 goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
             "t.1 goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
-            "t goes out of scope. t.0 and t.1 may have been moved out above, so each is dropped here only if nothing above moved it (Rust tracks this with runtime drop flags).",
+            "t goes out of scope. Rust treats t.0 and t.1 as possibly moved out. Each field is dropped here only if it still holds its value. Rust can track this with runtime drop flags.",
         ],
         must_not_contain: &[
             "Move from t.0 to x",
@@ -19638,7 +19632,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // `breakless_loop_branch_exits_drop_only_there`.)
             "g goes out of scope. Its resource is dropped.",
             "q goes out of scope. Its resource is dropped.",
-            "If the `?` here returns early, w's resource is dropped. If the `?` succeeds, nothing happens to w here.",
+            "If the `?` here returns early, w's resource is dropped. A successful `?` doesn't trigger this drop.",
             "s goes out of scope at the `return` on line 68 (or at the `?` on line 67, if that returns first). Its resource is dropped.",
             "t goes out of scope at the `return` on line 68 (or at the `?` on line 67, if that returns first). Its resource is dropped.",
             "y goes out of scope at the `return` on line 68",
@@ -21152,9 +21146,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // branch join's "its resource is dropped when x goes out of
         // scope", is #1147.)
         must_contain: &[
-            "If the `?` here returns early, b's resource is dropped. If the `?` succeeds, nothing happens to b here.",
-            "If the `?` here returns early, mixed.s's resource is dropped. If the `?` succeeds, nothing happens to mixed.s here.",
-            "If the `?` here returns early, mixed's resource is dropped. If the `?` succeeds, nothing happens to mixed here.",
+            "If the `?` here returns early, b's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "If the `?` here returns early, mixed.s's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "If the `?` here returns early, mixed's resource is dropped. A successful `?` doesn't trigger this drop.",
             "The `return` here hands the caller one of the values its `if` / `match` chooses between. If that value isn't x's, x goes out of scope here as the function returns (it has nothing to drop). If it is x's, x's value goes to the caller.",
             "The `return` here hands the caller one of the values its `if` / `match` chooses between. If that value isn't y's, y goes out of scope here as the function returns (it has nothing to drop). If it is y's, y's value goes to the caller.",
         ],
@@ -21232,11 +21226,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // an Fn closure (it only reads q), so its dot stays.
         must_contain: &[
             "f is moved into the call (an FnOnce closure can only be called once). s, which f captured, is dropped during the call",
-            "If the `?` here returns early, k's resource is dropped. If the `?` succeeds, nothing happens to k here.",
+            "If the `?` here returns early, k's resource is dropped. A successful `?` doesn't trigger this drop.",
             "h goes out of scope. Its captured resource is dropped here only if no branch above called it (Rust tracks this with a runtime drop flag).",
             // m, called in an `if` above the `?`, may still hold w: the
             // drop flag decides (#1194).
-            "If the `?` here returns early, m's resource is dropped if m still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to m here.",
+            "If the `?` here returns early, m's resource is dropped if m still holds it (Rust tracks this with a runtime drop flag). A successful `?` doesn't trigger this drop.",
         ],
         must_not_contain: &[
             "returns early, f's resource is dropped",
@@ -21286,7 +21280,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "d acquires ownership of a new resource; its previous resource is dropped",
             "d is assigned a new value; writing to a union never drops its old contents",
             "mu was moved in at least one branch above, so it can't be used after the branches.",
-            "If the `?` here returns early, d's resource is dropped. If the `?` succeeds, nothing happens to d here.",
+            "If the `?` here returns early, d's resource is dropped. A successful `?` doesn't trigger this drop.",
         ],
         must_not_contain: &[
             "returns early, m's resource is dropped",
@@ -21319,15 +21313,20 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // borrow (`x.push_str(&bar()?)`) or a move (`(y, bar()?)`) on the
         // same dot, where "nothing happens" contradicted the other lines.
         must_contain: &[
-            "If the `?` here returns early, s's resource is dropped. If the `?` succeeds, the assignment runs: s acquires ownership of a new resource; its previous resource is dropped.",
-            "If the `?` here returns early, t's resource is dropped. If the `?` succeeds, the assignment runs: t acquires ownership of a new resource; its previous resource is dropped.",
-            "If the `?` here returns early, p's resource is dropped. If the `?` succeeds, the assignment to p.f runs.",
-            "If the `?` here returns early, p.f's resource is dropped. If the `?` succeeds, the assignment runs: p.f acquires ownership of a new resource; its previous resource is dropped.",
-            "If the `?` here returns early, v's resource (including every String it holds) is dropped. If the `?` succeeds, the assignment runs: v[0] acquires ownership of a new resource; its previous resource is dropped.",
-            "If the `?` here returns early, u's resource is dropped. If the `?` succeeds, the assignment runs: u acquires ownership of a new resource; its previous resource is dropped.",
-            "If the `?` here returns early, x's resource is dropped. If the `?` succeeds, x's resource isn't dropped here.",
+            "If the `?` here returns early, s's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "s acquires ownership of a new resource; its previous resource is dropped",
+            "If the `?` here returns early, t's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "t acquires ownership of a new resource; its previous resource is dropped",
+            "If the `?` here returns early, p's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "If the `?` here returns early, p.f's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "p.f acquires ownership of a new resource; its previous resource is dropped",
+            "If the `?` here returns early, v's resource (including every String it holds) is dropped. A successful `?` doesn't trigger this drop.",
+            "v[0] acquires ownership of a new resource; its previous resource is dropped",
+            "If the `?` here returns early, u's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "u acquires ownership of a new resource; its previous resource is dropped",
+            "If the `?` here returns early, x's resource is dropped. A successful `?` doesn't trigger this drop.",
             "x's resource is mutably borrowed by push_str; x can't be used while the borrow is live",
-            "If the `?` here returns early, y's resource is dropped. If the `?` succeeds, y's resource isn't dropped here.",
+            "If the `?` here returns early, y's resource is dropped. A successful `?` doesn't trigger this drop.",
             "y's resource is moved",
         ],
         must_not_contain: &[
@@ -21339,12 +21338,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "nothing happens to u here",
             "nothing happens to x here",
             "nothing happens to y here",
-            // The assignment's own line, as if it happened on both paths.
-            "=s acquires ownership of a new resource; its previous resource is dropped",
-            "=t acquires ownership of a new resource; its previous resource is dropped",
-            "=v[0] acquires ownership of a new resource; its previous resource is dropped",
-            "=u acquires ownership of a new resource; its previous resource is dropped",
-            "=p.f acquires ownership of a new resource; its previous resource is dropped",
+            // Sharing a dot doesn't make the assignment part of the `?`.
+            "If the `?` succeeds, the assignment",
         ],
     },
     TooltipExpect {
@@ -23243,12 +23238,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "s goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             // `t = bar()?;`: on success the assignment runs (#1151).
-            "If the `?` here returns early, t's resource is dropped if t still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, the assignment runs: t acquires ownership of a new resource. Its previous resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "If the `?` here returns early, u's resource is dropped if u still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to u here.",
+            "If the `?` here returns early, t's resource is dropped if t still holds it (Rust tracks this with a runtime drop flag). A successful `?` doesn't trigger this drop.",
+            "t acquires ownership of a new resource. Its previous resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "If the `?` here returns early, u's resource is dropped if u still holds it (Rust tracks this with a runtime drop flag). A successful `?` doesn't trigger this drop.",
             "m goes out of scope. Its resource is dropped here only if m still holds it (Rust tracks this with a runtime drop flag).",
             "p goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "k goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "If the `?` here returns early, a's resource is dropped if a still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, a's resource isn't dropped here.",
+            "If the `?` here returns early, a's resource is dropped if a still holds it (Rust tracks this with a runtime drop flag). A successful `?` doesn't trigger this drop.",
             "b goes out of scope. Its resource (including the String it holds) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
@@ -23267,9 +23263,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "try_partial_move_1184",
         must_contain: &[
-            "If the `?` here returns early, Rust drops what is left of p: p.a was moved out earlier, so only p.b is dropped. If the `?` succeeds, nothing happens to p here.",
-            "If the `?` here returns early, Rust drops what is left of r: r.a was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). r.b is dropped. If the `?` succeeds, nothing happens to r here.",
-            "If the `?` here returns early, p.b's resource is dropped. If the `?` succeeds, nothing happens to p.b here.",
+            "If the `?` here returns early, Rust drops what is left of p: p.a was moved out earlier, so only p.b is dropped. A successful `?` doesn't trigger this drop.",
+            "If the `?` here returns early, Rust drops what is left of r: r.a was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). r.b is dropped. A successful `?` doesn't trigger this drop.",
+            "If the `?` here returns early, p.b's resource is dropped. A successful `?` doesn't trigger this drop.",
         ],
         must_not_contain: &[
             "returns early, p's resource is dropped",
@@ -24458,7 +24454,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "This temporary Vec<String> is dropped before the `else` block of this `if let` runs: nothing bound it to a variable or moved it on. Its resource is dropped",
             "This temporary Vec<String> is dropped when the block of this `if let` ends (its pattern matched): nothing bound it to a variable or moved it on. Its resource is dropped",
             "This temporary Vec<String> is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs): nothing bound it to a variable or moved it on. Its resource is dropped",
-            "If the `?` here returns early, (temporary)'s resource is dropped. If the `?` succeeds, nothing happens to (temporary) here.",
+            "If the `?` here returns early, (temporary)'s resource is dropped. A successful `?` doesn't trigger this drop.",
             "(temporary) is live in a conditional expression ",
         ],
         must_not_contain: &[
@@ -25947,11 +25943,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // assigned. The scope end at the fn's `}` keeps its drop-flag text.
         must_contain: &[
             "s goes out of scope. Its resource is dropped here only if s was assigned in the branch that ran (Rust tracks this with a runtime drop flag).",
-            "If the `?` here returns early, s's resource is dropped if the branch that ran assigned it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to s here.",
+            "If the `?` here returns early, s's resource is dropped if the branch that ran assigned it (Rust tracks this with a runtime drop flag). A successful `?` doesn't trigger this drop.",
             "p goes out of scope. Its resource is dropped here only if p was assigned in the branch that ran (Rust tracks this with a runtime drop flag).",
             "p.name goes out of scope. Its resource is dropped here only if p.name was assigned in the branch that ran (Rust tracks this with a runtime drop flag).",
             "s goes out of scope. Its resource is dropped.",
-            "If the `?` here returns early, (temporary)'s resource is dropped if the branch that made it (line 108) ran (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to (temporary) here.",
+            "If the `?` here returns early, (temporary)'s resource is dropped if the branch that made it (line 108) ran (Rust tracks this with a runtime drop flag). A successful `?` doesn't trigger this drop.",
             "(temporary 2) goes out of scope here, where `break` leaves early: a let borrowed it, so it lived past its statement. Its resource is dropped only if the branch that made it (line 117) ran (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
@@ -27420,7 +27416,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s2 isn't moved in any of the branches above",
             "s3 goes out of scope. Its resource is dropped.",
             "s3 isn't moved in any of the branches above",
-            "If the `?` here returns early, s4's resource is dropped. If the `?` succeeds, nothing happens to s4 here.",
+            "If the `?` here returns early, s4's resource is dropped. A successful `?` doesn't trigger this drop.",
         ],
         must_not_contain: &[
             "=s goes out of scope. No resource is dropped.",
@@ -28007,7 +28003,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "control_flow_try_1607",
         must_contain: &[
-            "If the `?` here returns early, s's resource is dropped. If the `?` succeeds, nothing happens to s here.",
+            "If the `?` here returns early, s's resource is dropped. A successful `?` doesn't trigger this drop.",
             "input's resource is moved into the `?`. The `?` either produces an output value or returns early.",
             "value acquires ownership of the resource produced by the `?` on input",
         ],
@@ -28037,13 +28033,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "try_block_drops_1656",
         must_contain: &[
-            "If the `?` here returns early, inner's resource is dropped. If the `?` succeeds, nothing happens to inner here.",
-            "If the `?` here returns early, deepest's resource is dropped. If the `?` succeeds, nothing happens to deepest here.",
-            "If the `?` here returns early, middle's resource is dropped. If the `?` succeeds, nothing happens to middle here.",
+            "If the `?` here returns early, inner's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "If the `?` here returns early, deepest's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "If the `?` here returns early, middle's resource is dropped. A successful `?` doesn't trigger this drop.",
             "Move from outer to drop",
-            "If the `?` here returns early, in_loop's resource is dropped. If the `?` succeeds, nothing happens to in_loop here.",
-            "If the `?` here returns early, element's resource is dropped. If the `?` succeeds, nothing happens to element here.",
-            "If the `?` here returns early, nested_iter's former resource, the loop's iterator, is dropped, along with whatever it still owns (such as elements it hasn't handed out yet). If the `?` succeeds, nothing happens to the iterator here.",
+            "If the `?` here returns early, in_loop's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "If the `?` here returns early, element's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "If the `?` here returns early, nested_iter's former resource, the loop's iterator, is dropped, along with whatever it still owns (such as elements it hasn't handed out yet). A successful `?` doesn't trigger this drop.",
         ],
         must_not_contain: &["nothing happens to outer here", "nothing happens to keep here", "nothing happens to late here", "nothing happens to carried here", "the function returns and"],
     },
@@ -28067,6 +28063,98 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Move from String::from to (temporary)",
             "=Move from bytes to String::from",
             "A temporary holds the value that String::from returns",
+        ],
+    },
+    TooltipExpect {
+        name: "try_call_arguments_1736",
+        // The second argument can return early even when the first one
+        // produced a value. A block operand can assign before its `?`.
+        must_contain: &[
+            "If the first `?` on this line returns early, s's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "If the second `?` on this line returns early, s's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "s acquires ownership of a new resource; its previous resource is dropped",
+            "If the third `?` on this line returns early, text's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "held acquires ownership of a new resource; its previous resource is dropped",
+            "If the `?` here returns early, held's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "If the second `?` on this line returns early, local's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "If the second `?` on this line returns early, iter's former resource, the loop's iterator, is dropped, along with whatever it still owns (such as elements it hasn't handed out yet). A successful `?` doesn't trigger this drop.",
+            "If the second `?` on this line returns early, the temporary tuple (first, rest) is dropped, and with it rest's resource. A successful `?` doesn't trigger this drop.",
+            "If the second `?` on this line returns early, closure_line's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "If the third `?` on this line returns early, closure_line's resource is dropped. A successful `?` doesn't trigger this drop.",
+        ],
+        must_not_contain: &[
+            "If the first `?` on this line returns early, closure_line's resource is dropped.",
+            "If the `?` succeeds, the assignment runs",
+            "If the `?` here returns early, s's resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "try_if_condition_1724",
+        // A successful `?` in a condition does not decide which branch
+        // runs. Give the following `?` its own drop as well.
+        must_contain: &[
+            "If the first `?` on this line returns early, s's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "If the second `?` on this line returns early, s's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "s acquires ownership of a new resource; its previous resource is dropped",
+            "If the second `?` on this line returns early, matched's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "If the second `?` on this line returns early, bound's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "If the second `?` on this line returns early, remaining's resource is dropped. A successful `?` doesn't trigger this drop.",
+        ],
+        must_not_contain: &[
+            "If the `?` succeeds, the assignment runs",
+            "If the `?` here returns early, s's resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "try_field_and_whole_assignment_1761",
+        // The last `?` sees the value after both assignments. A previously
+        // moved field only has its own drop at the `?` after refilling it.
+        must_contain: &[
+            "If the first `?` on this line returns early, p's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "If the second `?` on this line returns early, p's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "p acquires ownership of a new resource; its previous resource is dropped",
+            "p.a acquires ownership of a new resource; its previous resource is dropped",
+            "If the first `?` on this line returns early, Rust drops what is left of pair: pair.a was moved out earlier, so only pair.b is dropped. A successful `?` doesn't trigger this drop.",
+            "If the second `?` on this line returns early, pair's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "If the second `?` on this line returns early, pair.a's resource is dropped. A successful `?` doesn't trigger this drop.",
+        ],
+        must_not_contain: &[
+            "If the `?` succeeds, the assignment",
+            "If the first `?` on this line returns early, pair.a's resource is dropped.",
+        ],
+    },
+    TooltipExpect {
+        name: "or_pattern_unreachable_1653",
+        // rustc warns that the second alternative cannot match, and
+        // still rejects reads of either field after the `let` (E0382).
+        must_contain: &[
+            "The pattern has alternatives that bind y from u.0 or u.1. If the alternative that binds y from u.1 matches, u.1's resource is moved into y here. Rust drops whatever u.1 still owns (if anything) when it's overwritten or goes out of scope. Rust can track this with a runtime drop flag.",
+            "Rust treats u.0 and u.1 as possibly moved out, so u can't be used as a whole, and none of its fields can be used on their own. Whatever is left in u is dropped when it's overwritten or goes out of scope.",
+            "u acquires ownership of a new resource. Rust treats u.0 and u.1 as possibly moved out. The assignment drops each old field only if it still held its value. Rust can track this with runtime drop flags.",
+            "Rust treats v.1 as possibly moved, so it can't be used after the branches until it's assigned again. Whatever is still in v.1 is dropped when it's overwritten or goes out of scope.",
+            "w goes out of scope. Rust treats w.0 and w.1 as possibly moved out. Each field is dropped here only if it still holds its value. Rust can track this with runtime drop flags. w.2 is dropped.",
+            "if_pair goes out of scope. Rust treats if_pair.0 and if_pair.1 as possibly moved out. Each field is dropped here only if it still holds its value. Rust can track this with runtime drop flags.",
+            "else_pair goes out of scope. Rust treats else_pair.0 and else_pair.1 as possibly moved out. Each field is dropped here only if it still holds its value. Rust can track this with runtime drop flags.",
+            "If the `?` here returns early, Rust drops what is left of pending: Rust treats pending.0 and pending.1 as possibly moved out. Each field is dropped here only if it still holds its value. Rust can track this with runtime drop flags. pending.2 is dropped. A successful `?` doesn't trigger this drop.",
+            "loop_pair acquires ownership of a new resource. Rust treats loop_pair.0 and loop_pair.1 as possibly moved out. The assignment drops each old field only if it still held its value. Rust can track this with runtime drop flags.",
+        ],
+        must_not_contain: &[
+            "u.0 and u.1 may have been moved out",
+            "v.0 and v.1 were moved out in some of the branches above",
+            "v.1 was moved in at least one branch above",
+            "w.0 and w.1 may have been moved out",
+            "pending.0 and pending.1 may have been moved out",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/try_and_or_pattern_let_chains_1724_1653",
+        must_contain: &[
+            "If the second `?` on this line returns early, chained's resource is dropped. A successful `?` doesn't trigger this drop.",
+            "Rust treats chain_pair.1 as possibly moved, so it can't be used after the branches. Whatever is still in chain_pair.1 is dropped when it's overwritten or goes out of scope.",
+        ],
+        must_not_contain: &[
+            "If the `?` succeeds, the assignment runs",
+            "chain_pair.1 was moved in at least one branch above",
         ],
     },
 ];
@@ -38366,6 +38454,22 @@ fn struct_lines_after_maybe_moves_1568_1583() {
     }
     // Moved in both arms: nothing is left after the join (#1541).
     assert_eq!(line_state_at(&svg, "u", 73), None);
+}
+
+/// #1736 and #1761: drops and overwrites share a dot. Pin their order
+/// as well as the presence of both early-return alternatives.
+#[test]
+fn same_line_try_drops_and_assignments_in_order() {
+    assert_dot_lines_in_order("try_call_arguments_1736", &[
+        "If the first `?` on this line returns early, s's resource is dropped. A successful `?` doesn't trigger this drop.",
+        "If the second `?` on this line returns early, s's resource is dropped. A successful `?` doesn't trigger this drop.",
+        "s acquires ownership of a new resource; its previous resource is dropped",
+    ]);
+    assert_dot_lines_in_order("try_field_and_whole_assignment_1761", &[
+        "If the first `?` on this line returns early, p's resource is dropped. A successful `?` doesn't trigger this drop.",
+        "p acquires ownership of a new resource; its previous resource is dropped",
+        "If the second `?` on this line returns early, p's resource is dropped. A successful `?` doesn't trigger this drop.",
+    ]);
 }
 
 /// #1486, #1556, #1557, #1553, #1548, #1562: where loans and scopes end (and

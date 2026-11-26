@@ -2763,6 +2763,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         Ownership::None => out.moved.push(name),
         Ownership::Maybe => {
           out.by_cond |= self.maybe_moved_by_let_now(&name) || self.moved_by_chain_condition(&c);
+          out.by_or_pattern |= has_or_alt_move(self.preprocessed_events, *c.hash());
           out.maybe_moved.push(name);
         }
         Ownership::Held => {
@@ -15411,6 +15412,17 @@ pub fn literal_ref_parts<'tcx>(e: &'tcx Expr<'tcx>, typeck: &rustc_middle::ty::T
     }
   }
   out
+}
+
+/// Whether the events include this place as a move source of an
+/// or-pattern. As reducing the certainty of wording is safe even when
+/// a later move supersedes the pattern, there is no reachability check.
+fn has_or_alt_move(events: &[(usize, ExternalEvent)], hash: u64) -> bool {
+  events.iter().any(|(_, event)| match event {
+    ExternalEvent::OrAltMove { ro, tuple: None, .. } => *ro.hash() == hash,
+    ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| has_or_alt_move(&b.e_data, hash)),
+    _ => false,
+  })
 }
 
 /// `e?`'s operand `e`: `e?` is a `MatchSource::TryDesugar` match on

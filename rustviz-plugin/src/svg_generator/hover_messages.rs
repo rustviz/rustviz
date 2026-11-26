@@ -152,6 +152,20 @@ pub fn event_dot_box_drop_if_try_returns(my_name: &str) -> String {
     format!("If the `?` here returns early, whatever {} still holds (if anything) is dropped here.", styled_name_html(my_name))
 }
 
+// Move checking considers the alternatives written in a pattern, even
+// when an earlier alternative always wins. A drop still depends on
+// the value actually left in each field.
+fn or_pattern_fields_drop(fields: &str, plural: bool, reassign: bool) -> String {
+    let drop = match (plural, reassign) {
+        (true, true) => "The assignment drops each old field only if it still held its value.",
+        (false, true) => "The assignment drops the old field only if it still held its value.",
+        (true, false) => "Each field is dropped here only if it still holds its value.",
+        (false, false) => "The field is dropped here only if it still holds its value.",
+    };
+    let flags = if plural { "runtime drop flags" } else { "a runtime drop flag" };
+    format!(" Rust treats {fields} as possibly moved out. {drop} Rust can track this with {flags}.")
+}
+
 // A struct whose fields were partly moved out goes out of scope. Rust
 // drops only the fields that still hold a value (`dropped`); the
 // moved-out ones (`moved`) are already gone, and the struct as a whole
@@ -184,6 +198,7 @@ pub fn event_dot_struct_partial_go_out_of_scope(
     // may have moved it (#1031): whether it's dropped isn't down to
     // whether something above moved it, so "only if it still holds it".
     kept: bool,
+    by_or_pattern: bool,
     // A `Box` a field was moved out of (#602): Rust still frees the
     // box's heap allocation (none for a zero-sized payload, #1608).
     boxed: bool,
@@ -207,7 +222,9 @@ pub fn event_dot_struct_partial_go_out_of_scope(
         }
         if !maybe_moved.is_empty() {
             let (maybe_s, maybe_plural) = join(maybe_moved);
-            if by_cond {
+            if by_or_pattern {
+                out.push_str(&format!(" Rust treats {} as possibly moved out.", maybe_s));
+            } else if by_cond {
                 out.push_str(&format!(" {} may have been moved out above.", maybe_s));
             } else {
                 out.push_str(&format!(" {} {} moved out in at least one branch above.", maybe_s, if maybe_plural { "were" } else { "was" }));
@@ -222,7 +239,9 @@ pub fn event_dot_struct_partial_go_out_of_scope(
             out.push_str(&format!(" {} {} moved out earlier.", moved_s, if moved_plural { "were" } else { "was" }));
         }
         let (maybe_s, maybe_plural) = join(maybe_moved);
-        if kept && maybe_plural {
+        if by_or_pattern {
+            out.push_str(&or_pattern_fields_drop(&maybe_s, maybe_plural, false));
+        } else if kept && maybe_plural {
             out.push_str(&format!(
                 " {} may have been moved out above, so each is dropped here only if it still holds \
                  its value (Rust tracks this with runtime drop flags).",
@@ -590,20 +609,24 @@ pub fn event_dot_struct_drop_at_reassign_partial(my_name: &String, parts: &crate
         out.push_str(&format!(" Its previous {} {} moved out earlier.", moved_s, if moved_plural { "were" } else { "was" }));
     }
     let (maybe_s, maybe_plural) = join(&parts.maybe_moved);
-    out.push_str(&match (parts.by_cond, maybe_plural) {
-        (true, true) => format!(
-            " Its previous {} may have been moved out above, so each is dropped here only if nothing above \
-             moved it (Rust tracks this with runtime drop flags).", maybe_s),
-        (true, false) => format!(
-            " Its previous {} may have been moved out above, so it's dropped here only if nothing above \
-             moved it (Rust tracks this with a runtime drop flag).", maybe_s),
-        (false, true) => format!(
-            " Its previous {} were moved out in some of the branches above; each is dropped here only if no \
-             branch above moved it (Rust tracks this with runtime drop flags).", maybe_s),
-        (false, false) => format!(
-            " Its previous {} was moved out in at least one branch above, so it's dropped here only if no \
-             branch above moved it (Rust tracks this with a runtime drop flag).", maybe_s),
-    });
+    if parts.by_or_pattern {
+        out.push_str(&or_pattern_fields_drop(&maybe_s, maybe_plural, true));
+    } else {
+        out.push_str(&match (parts.by_cond, maybe_plural) {
+            (true, true) => format!(
+                " Its previous {} may have been moved out above, so each is dropped here only if nothing above \
+                 moved it (Rust tracks this with runtime drop flags).", maybe_s),
+            (true, false) => format!(
+                " Its previous {} may have been moved out above, so it's dropped here only if nothing above \
+                 moved it (Rust tracks this with a runtime drop flag).", maybe_s),
+            (false, true) => format!(
+                " Its previous {} were moved out in some of the branches above; each is dropped here only if no \
+                 branch above moved it (Rust tracks this with runtime drop flags).", maybe_s),
+            (false, false) => format!(
+                " Its previous {} was moved out in at least one branch above, so it's dropped here only if no \
+                 branch above moved it (Rust tracks this with a runtime drop flag).", maybe_s),
+        });
+    }
     if !parts.dropped.is_empty() {
         out.push_str(&format!(" Its previous {} {} dropped.", dropped_s, if dropped_plural { "are" } else { "is" }));
     }
@@ -825,8 +848,7 @@ pub fn event_dot_extended_temporary_drop_made(my_name: &String, when: &String, m
 pub fn event_dot_temp_drop_if_try_returns_made(my_name: &String, made_at: Option<usize>) -> String {
     format!(
         "If the `?` here returns early, {0}'s \
-         resource is dropped if {1} (Rust tracks this with a runtime drop flag). If the `?` succeeds, \
-         nothing happens to {0} here.",
+         resource is dropped if {1} (Rust tracks this with a runtime drop flag). A successful `?` doesn't trigger this drop.",
         styled_name_html(my_name), temp_made_in(made_at)
     )
 }
@@ -950,6 +972,7 @@ pub fn reassign_subsumes_acquire(reassign: &str, acquire: &str) -> bool {
             rest.strip_prefix("; its previous resource")
                 .is_some_and(|tail| tail.starts_with(" is dropped") || tail.starts_with(" (including "))
                 || rest.starts_with(". Its previous ")
+                || rest.starts_with(". Rust treats ")
                 // A re-boxed Box's path-dependent drop (#1220).
                 || rest.starts_with(". Whatever it still held ")
         })
@@ -1084,40 +1107,17 @@ pub fn event_dot_acquire_from_try(my_name: &String, from: &String, kind: TryMove
     format!("{} {holds} the `?` takes out of {inside}", styled_name_html(my_name))
 }
 
-// `x?` returns from the function on `Err` / `None`; every value the
-// function still owns is dropped there (#430). The dot sits on the
-// owner's column, which goes on: on success nothing happens here.
+// If `x?` returns early, the scopes it leaves drop what they still own
+// (#430, #1656). A successful `?` does not cause that drop.
 // `note`: what else the drop drops, or an Rc's count note (#542).
 pub fn event_dot_owner_drop_if_try_returns(my_name: &String, note: &str) -> String {
     let my_name_fmt = styled_name_html(my_name);
     let (holds, rest) = split_drop_note(note);
     format!(
         "If the `?` here returns early, {0}'s \
-         resource{1} is dropped{2}. If the `?` succeeds, nothing happens to {0} here.",
+         resource{1} is dropped{2}. A successful `?` doesn't trigger this drop.",
         my_name_fmt, holds, rest
     )
-}
-
-// `p.f = f()?;` (#1151): p's own dot. If the `?` succeeds, the assignment
-// gives the part `part` (drawn on its own column) a new value.
-pub fn event_dot_owner_drop_if_try_returns_part(my_name: &String, note: &str, part: &str) -> String {
-    let my_name_fmt = styled_name_html(my_name);
-    let (holds, rest) = split_drop_note(note);
-    format!(
-        "If the `?` here returns early, {0}'s \
-         resource{1} is dropped{2}. If the `?` succeeds, the assignment to {3} runs.",
-        my_name_fmt, holds, rest, styled_name_html(&part.to_string())
-    )
-}
-
-// A dot that says more than the drop at a `?` (#1151): "If the `?`
-// succeeds, nothing happens to s here" would contradict the dot's other
-// lines (s is borrowed by `s.push_str(&f()?)`, moved by `(s, f()?)`).
-// What is true either way is that the `?` itself doesn't drop it.
-pub fn try_drop_with_other_events(drop_text: &str) -> Option<String> {
-    let (head, owner) = drop_text.split_once(". If the `?` succeeds, nothing happens to ")?;
-    let owner = owner.strip_suffix(" here.")?;
-    Some(format!("{head}. If the `?` succeeds, {owner}'s resource isn't dropped here."))
 }
 
 // The same for a variable that holds a value on some paths only (moved,
@@ -1129,7 +1129,7 @@ pub fn event_dot_owner_drop_if_try_returns_maybe(my_name: &String, note: &str) -
     format!(
         "If the `?` here returns early, {0}'s \
          resource{1} is dropped{2} if {0} still holds it (Rust tracks this with a runtime drop flag). \
-         If the `?` succeeds, nothing happens to {0} here.",
+         A successful `?` doesn't trigger this drop.",
         my_name_fmt, holds, rest
     )
 }
@@ -1142,7 +1142,7 @@ pub fn event_dot_owner_drop_if_try_returns_maybe_init(my_name: &String, note: &s
     format!(
         "If the `?` here returns early, {0}'s \
          resource{1} is dropped{2} if the branch that ran {3} (Rust tracks this with a runtime drop \
-         flag). If the `?` succeeds, nothing happens to {0} here.",
+         flag). A successful `?` doesn't trigger this drop.",
         my_name_fmt, holds, rest, assigned_in_branch_that_ran(moved)
     )
 }
@@ -1156,41 +1156,9 @@ pub fn event_dot_owner_drop_if_try_returns_partial(my_name: &String, scope_end: 
     let rest = scope_end.strip_prefix(&format!("{} goes out of scope. ", my_name_fmt)).unwrap_or(scope_end);
     format!(
         "If the `?` here returns early, Rust drops \
-         what is left of {0}: {1} If the `?` succeeds, nothing happens to {0} here.",
+         what is left of {0}: {1} A successful `?` doesn't trigger this drop.",
         my_name_fmt, rest
     )
-}
-
-// `let n = a? + b?;`: b's dot holds both a's `?` (b is dropped if it
-// returns early) and b's own `?` (moves b). "If the `?` succeeds, nothing
-// happens to b here" is about a's `?` only, but read next to the move it
-// looks contradictory (#668). When the move is on the same dot, say which
-// `?` each line is about, in evaluation order.
-pub fn try_drop_before_own_try(drop_text: &str) -> Option<String> {
-    let (lead, tail) = ("If the `?` here returns early", ". If the `?` succeeds, nothing happens to ");
-    let rest = drop_text.strip_prefix(lead)?;
-    let (head, owner) = rest.split_once(tail)?;
-    let owner = owner.strip_suffix(" here.")?;
-    Some(format!(
-        "If an earlier `?` on this line returns early{head}. If it succeeds, {owner} is not dropped there; {owner}'s own `?` below moves it"
-    ))
-}
-
-// `s = f()?;` (#1151): the `?` is part of the right-hand side, which runs
-// before the assignment. If it returns early, the assignment never
-// happens and s's current resource is dropped by the return; if it
-// succeeds, the assignment gives s its new resource. The dot holds the
-// drop text (event_dot_owner_drop_if_try_returns) and the reassignment's
-// own text; this says the reassignment happens only on success, in place
-// of "nothing happens to s here".
-pub fn try_drop_then_reassign(drop_text: &str, reassign: &str) -> Option<String> {
-    let (head, owner) = drop_text.split_once(". If the `?` succeeds, nothing happens to ")?;
-    owner.strip_suffix(" here.")?;
-    if !reassign.contains(" acquires ownership of a new resource") {
-        return None;
-    }
-    let reassign = reassign.strip_suffix('.').unwrap_or(reassign);
-    Some(format!("{head}. If the `?` succeeds, the assignment runs: {reassign}."))
 }
 
 // `return if b { p } else { q };` in a branch (#697): the value the
@@ -1396,8 +1364,8 @@ pub fn event_dot_loop_iterator_drop(my_name: &String, left: LoopLeft, early: &[u
             "{0}'s former resource, the `for` loop's iterator, is dropped here: this `break` leaves the `for` loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
             styled_name_html(my_name)
         ),
-        LoopLeft::Try => format!(
-            "If the `?` here returns early, {0}'s former resource, the loop's iterator, is dropped, along with whatever it still owns (such as elements it hasn't handed out yet). If the `?` succeeds, nothing happens to the iterator here.",
+        LoopLeft::Try(_) => format!(
+            "If the `?` here returns early, {0}'s former resource, the loop's iterator, is dropped, along with whatever it still owns (such as elements it hasn't handed out yet). A successful `?` doesn't trigger this drop.",
             styled_name_html(my_name)
         ),
         LoopLeft::Panic => format!(
@@ -1544,11 +1512,10 @@ pub fn event_dot_move_to_tuple_temporary(my_name: &String, tuple: &String, value
 // else branch when the pattern doesn't match; a `match` keeps them to
 // the end of its statement.
 pub fn event_dot_tuple_temp_drop(tuple: &String, at: TupleDropAt, with: &[TupleLeft]) -> String {
-    let noun = tuple_noun(tuple);
     let tuple = temporary_tuple(tuple);
     let (lead, when) = match at {
         // Worded like event_dot_owner_drop_if_try_returns (#653).
-        TupleDropAt::TryReturns => ("If the `?` here returns early, ", ""),
+        TupleDropAt::TryReturns(_) => ("If the `?` here returns early, ", ""),
         TupleDropAt::IfEnd => ("", "here, at the end of the if branch"),
         TupleDropAt::IfExit => ("", "when the if branch leaves early"),
         TupleDropAt::Else => ("The pattern didn't match, so ", "here, before the else branch runs"),
@@ -1598,8 +1565,8 @@ pub fn event_dot_tuple_temp_drop(tuple: &String, at: TupleDropAt, with: &[TupleL
             join_and(&names), if ws.len() > 1 { "s" } else { "" }, notes, join_and(&takers)));
     }
     let items = join_and(&parts);
-    if at == TupleDropAt::TryReturns {
-        return format!("{lead}{tuple} is dropped, and with it {items}. If the `?` succeeds, nothing happens to the {noun} here.");
+    if matches!(at, TupleDropAt::TryReturns(_)) {
+        return format!("{lead}{tuple} is dropped, and with it {items}. A successful `?` doesn't trigger this drop.");
     }
     format!("{lead}{tuple} is dropped {when}, and with it {items}")
 }
@@ -3418,6 +3385,32 @@ pub fn state_fields_maybe_all_moved(my_name: &String, surely: &[String], maybe: 
     )
 }
 
+// The pattern lists move sources, which Rust checks even if an
+// alternative can't match. The runtime drop only sees what's left.
+pub fn state_or_pattern_partial_move(
+    my_name: &str, moved: &[String], maybe_moved: &[String], none_usable: bool, drops_nothing: bool,
+) -> String {
+    let name = styled_name_html(my_name);
+    let definite: Vec<_> = moved.iter().filter(|field| !maybe_moved.contains(field))
+        .map(|field| styled_name_html(field)).collect();
+    let maybe: Vec<_> = maybe_moved.iter().map(|field| styled_name_html(field)).collect();
+    let mut text = String::new();
+    if !definite.is_empty() {
+        let verb = if definite.len() == 1 { "was" } else { "were" };
+        text.push_str(&format!("{} {verb} moved out. ", join_and(&definite)));
+    }
+    let use_rule = if none_usable {
+        format!("{name} can't be used as a whole, and none of its fields can be used on their own")
+    } else {
+        format!("{name} can't be used as a whole. Its other fields still can be used")
+    };
+    text.push_str(&format!("Rust treats {} as possibly moved out, so {use_rule}.", join_and(&maybe)));
+    if !drops_nothing {
+        text.push_str(&format!(" Whatever is left in {name} is dropped when it's overwritten or goes out of scope."));
+    }
+    text
+}
+
 // The line of an array a slice pattern moved some elements out of
 // (`[c, _] => …`, #1285): the elements `left` stay in it, and are dropped
 // at its scope end, but it can't be used as a whole any more. `maybe`:
@@ -4152,6 +4145,16 @@ fn branch_merge_moved(name: &str, by_cond: Option<&str>) -> String {
     } else {
         format!("{} was moved in at least one branch above, so it can't be used after the branches", name)
     }
+}
+
+pub fn event_dot_branch_merge_or_pattern_move(my_name: &String, value: bool, mutable: bool) -> String {
+    let name = styled_name_html(my_name);
+    let until = if mutable { " until it's assigned again" } else { "" };
+    let mut text = format!("Rust treats {name} as possibly moved, so it can't be used after the branches{until}.");
+    if !value {
+        text.push_str(&format!(" Whatever is still in {name} is dropped when it's overwritten or goes out of scope."));
+    }
+    text
 }
 
 // The condition under which a maybe-moved variable's resource is still
@@ -5303,10 +5306,9 @@ fn or_list(sources: &[String]) -> String {
 }
 
 // An or-pattern arm (`(x, _) | (_, x) =>`) binds `into` from a different
-// place in each alternative, and `my_name` is one of them (#533). Which
-// alternative matches is decided at run time, so this place's resource
-// is moved into `into` only on some runs; the rest of the time it stays
-// here, and the drop flag decides whether it's dropped at scope end.
+// place in each alternative, and `my_name` is one of them (#533).
+// A pattern can include an alternative that never matches. State the
+// move only as the effect of matching that alternative.
 // `tuple`: `my_name` is a variable a tuple-literal scrutinee (`match (a,
 // b)`) moved into its temporary tuple (#327). Then it's that value in
 // the tuple which may move into `into`, and what it doesn't take stays
@@ -5324,21 +5326,23 @@ pub fn event_dot_or_alt_move(my_name: &String, into: &String, sources: &[String]
     };
     if let Some(tuple) = tuple {
         return format!(
-            "{1} is bound from {2}, whichever alternative of the pattern matches. If it's the alternative \
-             that binds {1} from {3}, {0}'s {4} is moved out of {5} into {6} here; otherwise it stays \
-             in the {7}",
+            "The pattern has alternatives that bind {1} from {2}. If the alternative \
+             that binds {1} from {3} matches, {0}'s {4} is moved out of {5} into {6} here. Whatever the pattern leaves in the {7} is dropped with it",
             me, bound, or_list(sources), bound_from, held(value), temporary_tuple(&tuple.to_owned()), styled_name_html(into), tuple_noun(tuple)
         );
     }
-    let otherwise = if value {
-        format!("otherwise {} still holds it", me)
+    let kept = if value {
+        format!("{me} keeps the value only if the matching alternative leaves it there")
     } else {
-        format!("otherwise {} still owns it (Rust tracks this with a runtime drop flag)", me)
+        format!(
+            "Rust drops whatever {me} still owns (if anything) when it's overwritten or goes out of scope. \
+             Rust can track this with a runtime drop flag"
+        )
     };
     format!(
-        "{1} is bound from {2}, whichever alternative of the pattern matches. If it's the alternative \
-         that binds {1} from {3}, {0}'s {4} is moved into {5} here; {6}.",
-        me, bound, or_list(sources), bound_from, held(value), styled_name_html(into), otherwise
+        "The pattern has alternatives that bind {1} from {2}. If the alternative \
+         that binds {1} from {3} matches, {0}'s {4} is moved into {5} here. {6}.",
+        me, bound, or_list(sources), bound_from, held(value), styled_name_html(into), kept
     )
 }
 
