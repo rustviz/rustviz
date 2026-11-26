@@ -73,7 +73,7 @@ fn rv3_spike_oracle() {
         .collect();
     keys.sort();
     let mut report = String::new();
-    let mut tsv = String::from("program\ttoday_tested\ttoday_violations\tproto_tested\tproto_violations\tcommon_points\tagree\tdisagree\n");
+    let mut tsv = String::from("program\ttoday_tested\ttoday_violations\tproto_tested\tproto_violations\tcommon_points\tagree\tdisagree\trv3render_tested\trv3render_violations\n");
     for key in keys {
         let p = |ext: &str| format!("{dir}/{key}{ext}");
         let (Ok(src), Ok(tl), Ok(code), Ok(facts)) = (std::fs::read_to_string(p(".rs")), std::fs::read_to_string(p(".today.svg")),
@@ -103,7 +103,19 @@ fn rv3_spike_oracle() {
         for v in &pv {
             let _ = writeln!(report, "   PROTO  {} {}", v.check, v.text);
         }
-        let _ = writeln!(tsv, "{key}\t{}\t{}\t{}\t{}\t{common}\t{agree}\t{disagree}", tst.tested, tst.violations, pst.tested, pst.violations);
+        // Today's renderer fed by the MIR facts (straight-line bodies only).
+        let (mut rt, mut rv) = (String::from("-"), String::from("-"));
+        if let (Ok(r), Ok(rc)) = (std::fs::read_to_string(p(".rv3.svg")), std::fs::read_to_string(p(".rv3code.svg"))) {
+            if r != tl {
+                let (vs, _, st) = check(&src, &r, &rc);
+                rt = st.tested.to_string();
+                rv = st.violations.to_string();
+                for v in &vs {
+                    let _ = writeln!(report, "   RV3RENDER  {} {}", v.check, v.text);
+                }
+            }
+        }
+        let _ = writeln!(tsv, "{key}\t{}\t{}\t{}\t{}\t{common}\t{agree}\t{disagree}\t{rt}\t{rv}", tst.tested, tst.violations, pst.tested, pst.violations);
     }
     std::fs::write(format!("{dir}/oracle-report.txt"), &report).unwrap();
     std::fs::write(format!("{dir}/oracle-summary.tsv"), &tsv).unwrap();

@@ -293,8 +293,21 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
             binding_columns.append(&mut visitor.binding_columns);
             moves_out_first.append(&mut visitor.moves_out_first);
             temp_emptying_moves.append(&mut visitor.temp_emptying_moves);
+            let rv3_raps = visitor.raps.clone();
             merge_visitor_raps(&mut rap_map, visitor.raps, fn_start_line);
             collect_shadow_notes(&tcx, impl_item.owner_id, fn_start_line, &mut shadow_notes_by_fq);
+            if crate::rv3_events::enabled() && crate::rv3_events::straight_line(bwf) {
+              let facts = crate::rv3_facts::body_facts(tcx, bwf, String::new());
+              let evs = crate::rv3_events::synthesize(&facts, &rv3_raps, &mut ids);
+              for l in facts.first_line..=facts.last_line {
+                if let Some(v) = line_map2.get_mut(&l) { v.clear(); }
+              }
+              for (l, e) in &evs {
+                if crate::rv3_events::is_arrow(e) { line_map2.entry(*l).or_default().push(e.clone()); }
+              }
+              fn_events = evs;
+            }
+            let _ = &rv3_raps;
             pre_events.append(&mut fn_events);
           }
         }
@@ -364,9 +377,22 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
         binding_columns.append(&mut visitor.binding_columns);
         moves_out_first.append(&mut visitor.moves_out_first);
         temp_emptying_moves.append(&mut visitor.temp_emptying_moves);
-        merge_visitor_raps(&mut rap_map, visitor.raps, fn_start_line);
+        let rv3_raps = visitor.raps.clone();
+            merge_visitor_raps(&mut rap_map, visitor.raps, fn_start_line);
         collect_shadow_notes(&tcx, item.owner_id, fn_start_line, &mut shadow_notes_by_fq);
-        pre_events.append(&mut fn_events);
+        if crate::rv3_events::enabled() && crate::rv3_events::straight_line(bwf) {
+              let facts = crate::rv3_facts::body_facts(tcx, bwf, String::new());
+              let evs = crate::rv3_events::synthesize(&facts, &rv3_raps, &mut ids);
+              for l in facts.first_line..=facts.last_line {
+                if let Some(v) = line_map2.get_mut(&l) { v.clear(); }
+              }
+              for (l, e) in &evs {
+                if crate::rv3_events::is_arrow(e) { line_map2.entry(*l).or_default().push(e.clone()); }
+              }
+              fn_events = evs;
+            }
+            let _ = &rv3_raps;
+            pre_events.append(&mut fn_events);
       },
       _ => {}
     }
@@ -443,6 +469,11 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   let shadow_notes: HashMap<u64, ShadowNote> = note_pairs.into_iter().map(|(h, _, n)| (h, n)).collect();
 
   // Pass information to svg-generator
+  if let Some(p) = std::env::var_os("RV3_EVENTS").filter(|v| !v.is_empty()) {
+    let mut txt = String::new();
+    for (l, e) in &pre_events { txt.push_str(&format!("{l}\t{e:?}\n")); }
+    let _ = std::fs::write(p, txt);
+  }
   if crate::rv3_facts::enabled() {
     let mut rv3_out = Vec::new();
     for def_id in tcx.hir_body_owners() {

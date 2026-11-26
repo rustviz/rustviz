@@ -33,6 +33,7 @@ use rustc_utils::mir::borrowck_facts;
 pub mod visitor;
 pub mod plugin;
 pub mod rv3_facts;
+pub mod rv3_events;
 pub mod utils;
 pub mod expr_visitor;
 pub mod expr_visitor_utils;

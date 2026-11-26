@@ -83,6 +83,8 @@ pub struct Row {
 #[derive(Serialize)]
 pub struct BodyFacts {
     pub func: String,
+    /// No `SwitchInt`: the MIR-fed render (`rv3_events`) handles it.
+    pub straight_line: bool,
     pub first_line: usize,
     pub last_line: usize,
     pub vars: Vec<VarInfo>,
@@ -186,6 +188,23 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
         if effect_at_end { self.line_hi(sp) } else { self.line_lo(sp) }
     }
 
+    /// The callee as the user wrote it (the name the HIR layer gives its
+    /// function column): `String::from`, `push_str`, `println!`.
+    fn call_name(&self, fn_span: Span) -> String {
+        let sm = self.tcx.sess.source_map();
+        if fn_span.from_expansion() && fn_span.desugaring_kind().is_none() {
+            let cs = fn_span.source_callsite();
+            let t = sm.span_to_snippet(cs).unwrap_or_default();
+            if let Some(i) = t.find('!') {
+                return t[..=i].trim().to_string();
+            }
+        }
+        let t = sm.span_to_snippet(fn_span).unwrap_or_default();
+        let head = t.split('(').next().unwrap_or("").trim();
+        let head = head.rsplit('.').next().unwrap_or(head).trim();
+        if head.is_empty() { "<call>".into() } else { head.split("::<").next().unwrap_or(head).to_string() }
+    }
+
     fn place_name(&self, place: Place<'tcx>) -> Option<String> {
         let mut name = self.names.get(&place.local)?.clone();
         let mut ty = self.body.local_decls[place.local].ty;
@@ -270,9 +289,9 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
                 }
             }
             let tl = Location { block: bb, statement_index: data.statements.len() };
-            if let TerminatorKind::Call { func, args, .. } = &data.terminator().kind {
+            if let TerminatorKind::Call { args, fn_span, .. } = &data.terminator().kind {
                 if args.iter().any(|a| matches!(&a.node, Operand::Move(p) | Operand::Copy(p) if p.local == tmp)) && best.is_none() {
-                    let f = func.const_fn_def().map(|(d, _)| self.tcx.def_path_str(d)).unwrap_or_else(|| "<call>".into());
+                    let f = self.call_name(*fn_span);
                     let _ = tl;
                     best = Some(format!("{}()", f));
                 }
@@ -570,7 +589,13 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         // Holder: the assigned place's user variable (through temporaries
         // on the row), else whoever's type holds the loan right after.
         let mut holders: Vec<String> = Vec::new();
-        let direct = cx.dest_name(bd.assigned_place(), *loc, 0);
+        let mut direct = cx.dest_name(bd.assigned_place(), *loc, 0);
+        if direct.starts_with('<') {
+            let sp = body.source_info(*loc).span;
+            if sp.from_expansion() && sp.desugaring_kind().is_none() {
+                direct = format!("{}()", cx.call_name(sp));
+            }
+        }
         if !direct.starts_with('<') && !direct.ends_with("()") {
             holders.push(direct.trim_start_matches("closure ").to_string());
         }
@@ -782,8 +807,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         let loc = Location { block: bb, statement_index: data.statements.len() };
         let row = cx.row_of(loc);
         match &data.terminator().kind {
-            TerminatorKind::Call { func, args, destination, .. } => {
-                let f = func.const_fn_def().map(|(d, _)| tcx.def_path_str(d)).unwrap_or_else(|| "<call>".into());
+            TerminatorKind::Call { args, destination, fn_span, .. } => {
+                let f = cx.call_name(*fn_span);
                 for a in args.iter() {
                     match &a.node {
                         Operand::Move(p) if cx.is_user(p.local) => {
@@ -877,7 +902,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         }
     }
     let _ = BasicBlock::from_usize(0);
-    BodyFacts { func, first_line, last_line, vars, loans, rows, notes }
+    let straight_line = body.basic_blocks.iter().all(|d| d.is_cleanup || !matches!(d.terminator().kind, TerminatorKind::SwitchInt { .. }));
+    BodyFacts { func, straight_line, first_line, last_line, vars, loans, rows, notes }
 }
 
 /// Entry point from `plugin::rv_visitor`: append one body's facts.

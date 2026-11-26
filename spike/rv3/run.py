@@ -31,6 +31,16 @@ def run(path):
         open(os.path.join(out, key + ".err"), "w").write(str(e) + "\n" + p.stdout[:2000] + p.stderr)
         return key + ": BAD OUTPUT"
     shutil.copy(path, os.path.join(out, key + ".rs"))
+    env2 = dict(env, RV3_RENDER="1", RV3_FACTS="")
+    import time; time.sleep(1.1); os.utime(os.path.join(proj, "src", "lib.rs"))  # cargo's check cache
+    q = subprocess.run(["cargo", "rv-plugin"], cwd=proj, env=env2, capture_output=True, text=True)
+    try:
+        o = json.loads(q.stdout)
+        open(os.path.join(out, key + ".rv3.svg"), "w").write(o["timeline_panel"])
+        open(os.path.join(out, key + ".rv3code.svg"), "w").write(o["code_panel"])
+    except Exception as e:
+        open(os.path.join(out, key + ".rv3.err"), "w").write(str(e) + "\n" + q.stderr[-3000:])
+        return key + ": ok (rv3 render FAILED)"
     return key + ": ok"
 with ThreadPoolExecutor(8) as ex:
     for r in ex.map(run, progs):
