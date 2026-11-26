@@ -1215,10 +1215,15 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
 
     /// What rustc's move data says a Box `name` and its contents (`*name`)
-    /// hold right after the conditional at `within`, where its arms join
-    /// (#1590): `(Box, contents)`, each Held, Maybe or None. `None` if
-    /// no such place (every arm leaves).
-    pub fn box_state_after(&self, name: &str, within: Span) -> Option<(Ownership, Ownership)> {
+    /// hold right after a conditional, where the code that follows it on
+    /// the normal path starts (#1590): just before the first MIR place
+    /// whose (macro call site) span starts at or after `after` (the
+    /// conditional's end) and lies inside `region` (the next statement,
+    /// or the rest of the block). A `return`'s way out from inside the
+    /// conditional has that `return`'s span, so it isn't one of them.
+    /// `(Box, contents)`, each Held, Maybe or None; `None` if no such
+    /// place.
+    pub fn box_state_after(&self, name: &str, after: rustc_span::BytePos, region: Span) -> Option<(Ownership, Ownership)> {
         use rustc_mir_dataflow::impls::{MaybeInitializedPlaces, MaybeUninitializedPlaces};
         use rustc_mir_dataflow::move_paths::MoveData;
         let body = &self.bwf.body;
@@ -1228,28 +1233,34 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let local = move_data.move_paths[mpi].place.local;
         let contents = move_data.move_paths.iter_enumerated().find(|(_, p)| p.place.local == local
             && p.place.projection.len() == 1 && matches!(p.place.projection[0], ProjectionElem::Deref)).map(|(m, _)| m);
-        // The block the arms flow into: the first block (in the source)
-        // that ends outside the conditional and is entered from a block
-        // that ends inside it (not cleanup; a `return`'s way out comes
-        // later in the source than the code that follows).
-        // (Spans from a macro's expansion, `println!`, count where the
-        // macro is called.)
-        let preds = body.basic_blocks.predecessors();
         let user = |sp: Span| sp.source_callsite();
-        let first_lo = |bb: rustc_middle::mir::BasicBlock| {
-            let data = &body.basic_blocks[bb];
-            user(data.statements.first().map(|st| st.source_info.span).unwrap_or(data.terminator().source_info.span)).lo()
-        };
-        let mut after: Vec<rustc_middle::mir::BasicBlock> = body.basic_blocks.iter_enumerated()
-            .filter(|(bb, data)| !data.is_cleanup && !within.contains(user(data.terminator().source_info.span))
-                && preds[*bb].iter().any(|p| {
-                    let pd = &body.basic_blocks[*p];
-                    !pd.is_cleanup && within.contains(user(pd.terminator().source_info.span))
-                }))
-            .map(|(bb, _)| bb)
-            .collect();
-        let lo = after.iter().map(|bb| first_lo(*bb)).min()?;
-        after.retain(|bb| first_lo(*bb) == lo);
+        let mut places: Vec<(Location, rustc_span::BytePos)> = Vec::new();
+        for (bb, data) in body.basic_blocks.iter_enumerated() {
+            if data.is_cleanup {
+                continue;
+            }
+            let spans = data.statements.iter().map(|st| st.source_info.span)
+                .chain(std::iter::once(data.terminator().source_info.span));
+            for (i, sp) in spans.enumerate() {
+                let sp = user(sp);
+                if !sp.is_dummy() && sp.lo() >= after && region.contains(sp) {
+                    places.push((Location { block: bb, statement_index: i }, sp.lo()));
+                }
+            }
+        }
+        // (At the entry of the block that place is in: a statement before
+        // it in the block may already belong to the code after, `drop(b)`'s
+        // `move b` before the call that has the earliest span.)
+        let lo = places.iter().map(|(_, lo)| *lo).min()?;
+        places.retain(|(_, l)| *l == lo);
+        for (at, _) in places.iter_mut() {
+            at.statement_index = 0;
+        }
+        // (Of those, the first ones run: not a block another of them
+        // dominates, `f = …`'s assignment after its old value's drop.)
+        let doms = body.basic_blocks.dominators();
+        let blocks: Vec<rustc_middle::mir::BasicBlock> = places.iter().map(|(at, _)| at.block).collect();
+        places.retain(|(at, _)| !blocks.iter().any(|b| *b != at.block && doms.dominates(*b, at.block)));
         let mut init = MaybeInitializedPlaces::new(self.tcx, body, &move_data)
             .iterate_to_fixpoint(self.tcx, body, None)
             .into_results_cursor(body);
@@ -1257,10 +1268,9 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
             .iterate_to_fixpoint(self.tcx, body, None)
             .into_results_cursor(body);
         let (mut b, mut c) = ((false, false), (false, false));
-        for bb in &after {
-            let at = Location { block: *bb, statement_index: 0 };
-            init.seek_before_primary_effect(at);
-            uninit.seek_before_primary_effect(at);
+        for (at, _) in &places {
+            init.seek_before_primary_effect(*at);
+            uninit.seek_before_primary_effect(*at);
             b = (b.0 || init.get().contains(mpi), b.1 || uninit.get().contains(mpi));
             if let Some(cm) = contents {
                 c = (c.0 || init.get().contains(cm), c.1 || uninit.get().contains(cm));

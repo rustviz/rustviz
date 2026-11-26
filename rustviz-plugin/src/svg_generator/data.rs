@@ -4396,8 +4396,10 @@ impl Event {
                         // depend on the path (a loop's earlier time round,
                         // a branch, a new Box since): rustc's drop flags
                         // decide.
+                        // (Not a Box holding a reference, `**b = …`: that
+                        // writes what the reference points to.)
                         PlaceWrite::AssignDropsOld | PlaceWrite::AssignOverMoved | PlaceWrite::AssignMaybeMoved { .. }
-                            if r.box_contents_moved() =>
+                            if r.box_contents_moved() && !r.holds_borrow() =>
                             hover_messages::event_dot_box_maybe_emptied_reassign(&self.deref_name(my_name)),
                         PlaceWrite::AssignDropsOld => hover_messages::event_dot_owner_drop_at_reassign(&self.deref_name(my_name), ""),
                         PlaceWrite::AssignOverMoved | PlaceWrite::AssignMaybeMoved { .. } =>

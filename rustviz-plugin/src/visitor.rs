@@ -4450,8 +4450,28 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// (`Owner::box_contents_moved`), what rustc's move data says it and its
   /// contents hold right after the conditional at `span` (#1590), in
   /// declaration order.
-  fn box_states_after(&self, live: &HashSet<ResourceAccessPoint>, span: rustc_span::Span) -> Vec<(u64, crate::svg_generator::data::ScopeEndHolds, crate::svg_generator::data::ScopeEndHolds)> {
+  fn box_states_after(&self, live: &HashSet<ResourceAccessPoint>, expr: &'tcx Expr<'tcx>) -> Vec<(u64, crate::svg_generator::data::ScopeEndHolds, crate::svg_generator::data::ScopeEndHolds)> {
     use crate::svg_generator::data::{in_decl_order, ScopeEndHolds};
+    if !in_decl_order(live).into_iter().any(|r| r.box_contents_moved()) {
+      return Vec::new();
+    }
+    // Where the code after the conditional starts: the next statement of
+    // the block it is in, or else the rest of that block.
+    let span = expr.span;
+    let mut region = None;
+    let mut child = expr.hir_id;
+    for (id, node) in self.tcx.hir_parent_iter(expr.hir_id) {
+      if let rustc_hir::Node::Block(b) = node {
+        let pos = b.stmts.iter().position(|st| st.hir_id == child);
+        region = Some(match pos.and_then(|i| b.stmts.get(i + 1)) {
+          Some(next) => next.span,
+          None => b.span,
+        });
+        break;
+      }
+      child = id;
+    }
+    let Some(region) = region else { return Vec::new() };
     let holds = |o: Ownership| match o {
       Ownership::Held => ScopeEndHolds::Value,
       Ownership::Maybe => ScopeEndHolds::Maybe,
@@ -4459,7 +4479,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     };
     in_decl_order(live).into_iter()
       .filter(|r| r.box_contents_moved())
-      .filter_map(|r| self.box_state_after(r.name(), span).map(|(b, c)| (*r.hash(), holds(b), holds(c))))
+      .filter_map(|r| self.box_state_after(r.name(), span.hi(), region).map(|(b, c)| (*r.hash(), holds(b), holds(c))))
       .collect()
   }
 
@@ -8916,7 +8936,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let reaching: Vec<&[(usize, ExternalEvent)]> = b_branches.iter()
       .filter(|b| !b.diverges).map(|b| b.e_data.as_slice()).collect();
     let maybe_held = self.maybe_held_after(&liveness, &reaching, &maybe_init, &self.deferred_cols(&maybe_init_before), |name| self.rap_ownership_now(name));
-    let box_states = self.box_states_after(&liveness, expr.span);
+    let box_states = self.box_states_after(&liveness, expr);
     self.add_external_event(line_num,
       ExternalEvent::Branch {
         box_states,
@@ -9770,7 +9790,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let reaching: Vec<&[(usize, ExternalEvent)]> = branch_data.iter()
       .filter(|b| !b.diverges).map(|b| b.e_data.as_slice()).collect();
     let maybe_held = self.maybe_held_after(&liveness, &reaching, &maybe_init, &held_before, |name| self.rap_ownership_now(name));
-    let box_states = self.box_states_after(&liveness, expr.span);
+    let box_states = self.box_states_after(&liveness, expr);
     self.add_external_event(split, ExternalEvent::Branch {
       box_states,
       live_vars: liveness,

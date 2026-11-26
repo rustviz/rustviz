@@ -1698,24 +1698,10 @@ fn render_branch_dots(
                 // below, says what is dropped.
                 hover_messages::event_dot_branch_merge_temp_moved_out(&is.real_name())
             } else if rap.box_contents_moved() && moves_only_box_contents(branch_history) {
-                // Only a Box's contents were moved (`let w = *e;`,
-                // #921): e keeps its heap allocation on every path.
-                // Its old contents, if still there, are dropped by the
-                // next `*e = …` or `e = …`, or else at its scope end.
-                let next_write = after.iter()
-                    .find(|(_, e)| matches!(e,
-                        Event::OwnerDropAtReassign { .. } | Event::Branch { .. }
-                        | Event::Acquire { is: ResourceTy::Deref(_), .. }
-                        | Event::Copy { is: ResourceTy::Deref(_), .. }))
-                    .map(|(_, e)| e);
-                let at = match next_write {
-                    Some(Event::OwnerDropAtReassign { payload: true, .. } | Event::Acquire { .. } | Event::Copy { .. }) =>
-                        hover_messages::ContentsDropAt::PayloadWrite,
-                    _ if reassigned_next => hover_messages::ContentsDropAt::Reassign,
-                    _ => hover_messages::ContentsDropAt::ScopeEnd,
-                };
-                hover_messages::event_dot_branch_merge_box_contents_moved(
-                    &is.real_name(), rap.is_mut(), rap.holds_phrase(), at, by_cond)
+                // Only a Box's contents were moved (`let w = *e;`, #921),
+                // where the rustc-based join above didn't settle it: only
+                // what may be so, no drop timing (#1590).
+                hover_messages::event_dot_box_join(&is.real_name(), rap.is_mut(), Some(true), None).unwrap_or_default()
             } else if let Some(kw) = by_cond.filter(|_| chain_condition_assigned_here(branch_history)) {
                 // It may have been given a new value when it held none
                 // (#603): no "if nothing above moved it".
@@ -2584,9 +2570,11 @@ fn render_dot(
                     };
                     let title = if visualization_data.timelines[hash].resource_access_point.box_contents_moved()
                         && matches!(event, Event::OwnerDropAtReassign { parts: None, .. } | Event::OwnerDropIfTryReturns)
-                        // (Not where its contents were moved out on every
-                        // path before and the Box is there: #1145 says so.)
-                        && !matches!(event, Event::OwnerDropAtReassign { maybe_moved: false, maybe_init: None, contents_gone: true, .. }) {
+                        // (Not `b = Box::new(*b)`, whose right-hand side
+                        // moves the contents out on this line, just before:
+                        // #1423 / #1145's text says so.)
+                        && !(matches!(event, Event::OwnerDropAtReassign { maybe_moved: false, maybe_init: None, contents_gone: true, .. })
+                            && before.iter().any(|(l, e)| l == line_number && matches!(e, Event::Move { is: ResourceTy::Deref(_), .. }))) {
                         // A Box whose contents the body moves out somewhere
                         // (#1590): what it still holds here may depend on
                         // the path (a branch, a loop's earlier time round, a

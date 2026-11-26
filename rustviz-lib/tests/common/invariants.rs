@@ -376,11 +376,11 @@ fn contents_moved(d: &Dot) -> bool {
 
 /// `b = Box::new(*b);` (#1423): the right-hand side moves what the Box
 /// points to out first, and the assignment then frees only the old
-/// Box's heap allocation, as the dot says. Its move names `*b`, and its
+/// Box (its heap allocation, if it has one), as the dot says. Its move names `*b`, and its
 /// drop says only the allocation is freed.
 fn reboxes_contents(d: &Dot) -> bool {
     d.tip.split(" / ").any(|part| part.trim_start_matches("• ").starts_with(&format!("*{}'s ", d.var)))
-        && d.tip.contains("contents were moved out earlier, so only its previous Box's heap allocation is freed")
+        && d.tip.contains("contents were moved out earlier, so only what is left of its previous Box is freed")
 }
 
 /// A slice pattern's move of some elements out of an array that keeps
@@ -902,7 +902,7 @@ mod unit {
     fn a_box_reboxing_its_own_contents_is_allowed() {
         // `b = Box::new(*b);` (#1423): `*b` moves out, then only the old
         // Box's allocation is freed.
-        let tip = "• *b's resource is moved / • b acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.";
+        let tip = "• *b's resource is moved / • b acquires ownership of a new resource. Its previous contents were moved out earlier, so only what is left of its previous Box is freed here.";
         let b = [header("b", 1), line("b", 1, 95, 215, "full_privilege"), dot("b", 1, 95, "acquire", false, "a"),
                  dot("b", 1, 155, "move acquire owner_drop_at_reassign", false, tip),
                  dot("b", 1, 215, "owner_go_out_of_scope", true, "o")].concat();
@@ -912,7 +912,7 @@ mod unit {
         let whole = b.replace(tip, "• b's resource is moved / • b acquires ownership of a new resource; its previous resource is dropped");
         assert_eq!(invs(&whole), vec!["drop-of-moved-value-at-reassign"]);
         // And so is a contents move whose drop text says the old value is dropped.
-        let wrong = b.replace("Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.", "Its previous resource is dropped.");
+        let wrong = b.replace("Its previous contents were moved out earlier, so only what is left of its previous Box is freed here.", "Its previous resource is dropped.");
         assert_eq!(invs(&wrong), vec!["drop-of-moved-value-at-reassign"]);
     }
 

@@ -17340,11 +17340,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // The join said "e was moved", and that the whole resource is
         // dropped only on the paths that didn't move it.
         must_contain: &[
-            "e can't be used after the branches: *e may have been moved out on some path.",
-            "f can't be used after the branches until *f or f is given a value: *f may have been moved out on some path.",
-            "g can't be used after the branches until *g or g is given a value: *g may have been moved out on some path.",
+            "e can't be read or moved here: its contents may have been moved out above, and Rust can't be sure they were put back",
+            "f can't be read or moved here: its contents may have been moved out above, and Rust can't be sure they were put back",
+            "g can't be read or moved here: its contents may have been moved out above, and Rust can't be sure they were put back",
             "g acquires ownership of a new resource. Whatever g still held here (if anything) is dropped.",
-            "b can't be used after the branches: *b may have been moved out on some path.",
+            "b can't be read or moved here: its contents may have been moved out above, and Rust can't be sure they were put back",
         ],
         must_not_contain: &[
             "e was moved in at least one branch above",
@@ -17470,11 +17470,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // is dropped at its scope end. Checked with a `Drop`-printing
         // type.
         must_contain: &[
-            "e's contents may have been moved out above, so e can't be used after the if until *e is assigned again. If nothing above moved them, the String is dropped when *e is assigned again.",
+            "e can't be read or moved here: its contents may have been moved out above, and Rust can't be sure they were put back",
             "*e acquires ownership of a new resource. Whatever *e still held here (if anything) is dropped.",
-            "f's contents may have been moved out above, so f can't be used after the if until f is assigned again. If nothing above moved them, the String is dropped when f is assigned again. The Box's heap allocation is freed then either way.",
+            "f can't be read or moved here: its contents may have been moved out above, and Rust can't be sure they were put back",
             "f acquires ownership of a new resource. Whatever f still held here (if anything) is dropped.",
-            "g's contents may have been moved out above, so g can't be used after the if. If nothing above moved them, the String is dropped when g goes out of scope. The Box's heap allocation is freed then either way.",
+            "g can't be read or moved here: its contents may have been moved out above, and Rust can't be sure they were put back",
         ],
         must_not_contain: &[
             "e was moved in at least one branch above",
@@ -21511,11 +21511,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // heap allocation is freed", a second free). b's contents are
         // moved out again, so its scope end keeps that text.
         must_contain: &[
-            "a acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
-            "b acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
-            "d acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
-            "f acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
-            "g acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
+            "a acquires ownership of a new resource. Whatever a still held here (if anything) is dropped.",
+            "b acquires ownership of a new resource. Whatever b still held here (if anything) is dropped.",
+            "d acquires ownership of a new resource. Whatever d still held here (if anything) is dropped.",
+            "f acquires ownership of a new resource. Whatever f still held here (if anything) is dropped.",
+            "g acquires ownership of a new resource. Whatever g still held here (if anything) is dropped.",
             "a goes out of scope. No resource is dropped.",
             "d goes out of scope. No resource is dropped.",
             "b goes out of scope. Whatever it still holds here (if anything) is dropped.",
@@ -21538,8 +21538,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "b goes out of scope. Whatever it still holds here (if anything) is dropped.",
             "f goes out of scope. Whatever it still holds here (if anything) is dropped.",
             "g goes out of scope. Whatever it still holds here (if anything) is dropped.",
-            "g can't be used after the branches until g is given a value: g may have no value on some path.",
-            "j acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
+            "g can't be read or moved here: it or its contents may have been moved out above, or it may never have been given a value, and Rust can't be sure it holds a whole Box again",
+            "j acquires ownership of a new resource. Whatever j still held here (if anything) is dropped.",
             "j acquires ownership of a new resource. Whatever j still held here (if anything) is dropped.",
         ],
         must_not_contain: &[
@@ -28054,46 +28054,46 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "*bf acquires ownership of a new resource. Whatever *bf still held here (if anything) is dropped.",
             "b acquires ownership of a new resource. Whatever b still held here (if anything) is dropped.",
-            "b can't be used after the branches until *b or b is given a value: *b may have been moved out on some path.",
+            "b can't be read or moved here: its contents may have been moved out above, and Rust can't be sure they were put back",
             "b goes out of scope. Whatever it still holds here (if anything) is dropped.",
             "b2 goes out of scope. Its resource is dropped (including the String it holds).",
             "bd acquires ownership of a new resource. Whatever bd still held here (if anything) is dropped.",
-            "bd can't be used after the branches until bd is given a value: bd may have no value on some path.",
+            "bd can't be read or moved here: it or its contents may have been moved out above, or it may never have been given a value, and Rust can't be sure it holds a whole Box again",
             "bd goes out of scope. Whatever it still holds here (if anything) is dropped.",
             "be acquires ownership of a new resource. Whatever be still held here (if anything) is dropped.",
-            "be can't be used after the branches until *be or be is given a value: *be may have been moved out on some path.",
+            "be can't be read or moved here: its contents may have been moved out above, and Rust can't be sure they were put back",
             "be goes out of scope. Whatever it still holds here (if anything) is dropped.",
             "bf acquires ownership of a new resource. Whatever bf still held here (if anything) is dropped.",
-            "bf can't be used after the branches until *bf or bf is given a value: *bf may have been moved out on some path.",
+            "bf can't be read or moved here: its contents may have been moved out above, and Rust can't be sure they were put back",
             "bf goes out of scope. Whatever it still holds here (if anything) is dropped.",
             "bl acquires ownership of a new resource. Whatever bl still held here (if anything) is dropped.",
-            "bl can't be used after the branches until *bl or bl is given a value: *bl may have been moved out on some path.",
+            "bl can't be read or moved here: its contents may have been moved out above, and Rust can't be sure they were put back",
             "bl goes out of scope. Whatever it still holds here (if anything) is dropped.",
             "bm acquires ownership of a new resource. Whatever bm still held here (if anything) is dropped.",
-            "bm can't be used after the branches until *bm or bm is given a value: *bm may have been moved out on some path.",
+            "bm can't be read or moved here: its contents may have been moved out above, and Rust can't be sure they were put back",
             "bm goes out of scope. Whatever it still holds here (if anything) is dropped.",
-            "bo can't be used after the branches until *bo or bo is given a value: *bo may have been moved out on some path.",
+            "bo can't be read or moved here: its contents may have been moved out above, and Rust can't be sure they were put back",
             "bo goes out of scope. Whatever it still holds here (if anything) is dropped.",
             "bp acquires ownership of a new resource. Whatever bp still held here (if anything) is dropped.",
-            "bp can't be used after the branches until *bp or bp is given a value: *bp may have been moved out on some path.",
+            "bp can't be read or moved here: its contents may have been moved out above, and Rust can't be sure they were put back",
             "bp goes out of scope. Whatever it still holds here (if anything) is dropped.",
             "bq acquires ownership of a new resource. Whatever bq still held here (if anything) is dropped.",
-            "bq can't be used after the branches until *bq or bq is given a value: *bq may have been moved out on some path.",
+            "bq can't be read or moved here: its contents may have been moved out above, and Rust can't be sure they were put back",
             "bq goes out of scope. Whatever it still holds here (if anything) is dropped.",
             "br acquires ownership of a new resource. Whatever br still held here (if anything) is dropped.",
-            "br can't be used after the branches until *br or br is given a value: *br may have been moved out on some path.",
+            "br can't be read or moved here: its contents may have been moved out above, and Rust can't be sure they were put back",
             "br goes out of scope. Whatever it still holds here (if anything) is dropped.",
             "bs acquires ownership of a new resource. Whatever bs still held here (if anything) is dropped.",
-            "bs can't be used after the branches until *bs or bs is given a value: *bs may have been moved out on some path.",
+            "bs can't be read or moved here: its contents may have been moved out above, and Rust can't be sure they were put back",
             "bs goes out of scope. Whatever it still holds here (if anything) is dropped.",
             "bt acquires ownership of a new resource. Whatever bt still held here (if anything) is dropped.",
-            "bt can't be used after the branches until *bt or bt is given a value: *bt may have been moved out on some path.",
+            "bt can't be read or moved here: its contents may have been moved out above, and Rust can't be sure they were put back",
             "bt goes out of scope. Whatever it still holds here (if anything) is dropped.",
-            "bu acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
-            "bu can't be used after the branches until *bu or bu is given a value: *bu may have been moved out on some path.",
+            "bu acquires ownership of a new resource. Whatever bu still held here (if anything) is dropped.",
+            "bu can't be read or moved here: its contents may have been moved out above, and Rust can't be sure they were put back",
             "bu goes out of scope. Whatever it still holds here (if anything) is dropped.",
             "bw acquires ownership of a new resource. Whatever bw still held here (if anything) is dropped.",
-            "bw can't be used after the branches until bw is given a value: bw may have no value on some path.",
+            "bw can't be read or moved here: it or its contents may have been moved out above, or it may never have been given a value, and Rust can't be sure it holds a whole Box again",
             "bw goes out of scope. Whatever it still holds here (if anything) is dropped.",
             "Only if the `?` after the assignment returns early: the function returns and b2's resource (including the String it holds) is dropped. If that `?` succeeds, nothing happens to b2 here.",
             "Only if the `?` here returns early: whatever bo still holds here (if anything) is dropped. If the `?` succeeds, nothing happens to bo here.",
@@ -38471,6 +38471,16 @@ fn maybe_held_joins_and_splits_have_dots() {
         }
         for leg in branch_legs_in_mid_air(&tl) {
             missing.push(format!("{}: {}", name, leg));
+        }
+    }
+    // #1590: the join after the re-boxing arm (b on line 19, bm on line 30)
+    // says what may be uninitialized, not only the first join.
+    let tl = run_with_local_backend("box_reboxed_in_arm_1590").timeline_panel_string();
+    for (id, text) in [("b@L19:dot:branch+branch_join", " can't be read or moved here"), ("bm@L30:dot:branch+branch_join", " can't be read or moved here")] {
+        let found = start_tags(&tl, "circle").into_iter().any(|t| attr(t, "data-rv-id") == Some(id)
+            && attr(t, "data-tooltip-text").is_some_and(|tip| tip.contains(text)));
+        if !found {
+            missing.push(format!("box_reboxed_in_arm_1590: {} without {:?}", id, text));
         }
     }
     // #1584: the split's text is on its own dot, not merged into a drop's

@@ -175,19 +175,24 @@ pub fn event_dot_box_maybe_emptied_go_out_of_scope(my_name: &String) -> String {
 // on some, `Some(false)` on none. Only what may be uninitialized, and
 // what that keeps from being used. `mutable`: it can be given a value.
 pub fn event_dot_box_join(my_name: &String, mutable: bool, boxed: Option<bool>, contents: Option<bool>) -> Option<String> {
+    let _ = mutable;
     let name = styled_name_html(my_name);
-    let deref = styled_name_html(&format!("*{}", my_name));
-    // (Only "may", also where rustc says on every path: nothing here
-    // needs more.)
-    let (what, until) = match (boxed, contents) {
-        (Some(false) | None, _) => (format!("{} may have no value on some path", name), format!(" until {} is given a value", name)),
-        (Some(true), Some(false) | None) => (format!("{} may have been moved out on some path", deref), format!(" until {} or {} is given a value", deref, name)),
-        (Some(true), Some(true)) => return None,
-    };
-    Some(format!(
-        "{} can't be used after the branches{}: {}.",
-        name, if mutable { until.as_str() } else { "" }, what
-    ))
+    // (Only "may", also where rustc says on every path: nothing here needs
+    // more; and no "until it's assigned again": rustc may still reject a
+    // read after an assignment it can't follow, so only "can't be sure".)
+    match (boxed, contents) {
+        (Some(false) | None, _) => Some(format!(
+            "{} can't be read or moved here: it or its contents may have been moved out above, or it may never \
+             have been given a value, and Rust can't be sure it holds a whole Box again",
+            name
+        )),
+        (Some(true), Some(false) | None) => Some(format!(
+            "{} can't be read or moved here: its contents may have been moved out above, and Rust can't be sure \
+             they were put back",
+            name
+        )),
+        (Some(true), Some(true)) => None,
+    }
 }
 
 // A struct whose fields were partly moved out goes out of scope. Rust
@@ -543,12 +548,13 @@ pub fn event_dot_owner_drop_at_reassign_maybe_moved(my_name: &String, note: &str
 
 // `b = Box::new(…)` after the old Box's whole contents were moved out
 // (`let s = *b;`): the old contents aren't the Box's to drop any more,
-// but its heap allocation is freed here (#1145). (Starts ". Its
+// but what is left of the Box is freed here (#1145; no "heap allocation":
+// a zero-sized payload has none). (Starts ". Its
 // previous", so it subsumes the line's plain acquire.)
 pub fn event_dot_owner_drop_at_reassign_box_contents_moved(my_name: &String) -> String {
     format!(
         "{} acquires ownership of a new resource. Its previous contents were moved out earlier, \
-         so only its previous Box's heap allocation is freed here.",
+         so only what is left of its previous Box is freed here.",
         styled_name_html(my_name)
     )
 }
@@ -4205,68 +4211,6 @@ fn branch_merge_unless(by_cond: bool) -> &'static str {
     if by_cond { "If nothing above moved it" } else { "If the branch that ran didn't move it" }
 }
 
-/// Where the contents of a Box that some branches moved out of (`let w
-/// = *e;`) are dropped on the paths that didn't (#921).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ContentsDropAt {
-    /// At e's scope end, together with the Box's heap allocation.
-    ScopeEnd,
-    /// At `e = …`, which also frees the old Box's heap allocation.
-    Reassign,
-    /// At `*e = …`, which keeps the Box's heap allocation.
-    PayloadWrite,
-}
-
-// `event_dot_branch_merge_moved_with_drop` for a Box whose contents (`*e`),
-// not the Box itself, were moved out in some branches (#921). e still
-// owns its heap allocation on every path, so the drop flag decides only
-// whether the contents are dropped. rustc rejects any use of e after the
-// join (E0382) except a new value for `*e` or for e (both need `let mut
-// e`). `holds`: the Box's `Owner::holds` (`the String it holds`), `None`
-// when the contents need no drop. `by_cond`: a let-chain's condition,
-// not only a branch, may have moved them (`if let … && { let w = *e;
-// … }`, #940): see `moved_above`.
-pub fn event_dot_branch_merge_box_contents_moved(my_name: &String, mutable: bool, holds: Option<&str>, at: ContentsDropAt, by_cond: Option<&str>) -> String {
-    let name = styled_name_html(my_name);
-    let deref = styled_name_html(&format!("*{}", my_name));
-    let until = match at {
-        ContentsDropAt::Reassign => format!(" until {} is assigned again", name),
-        ContentsDropAt::PayloadWrite => format!(" until {} is assigned again", deref),
-        ContentsDropAt::ScopeEnd if mutable => format!(" (until {} or {} is assigned again)", deref, name),
-        ContentsDropAt::ScopeEnd => String::new(),
-    };
-    let mut out = if let Some(kw) = by_cond {
-        format!(
-            "{0}'s contents may have been moved out above, so {0} can't be used after the {1}{2}.",
-            name, styled_name_html(&kw.to_owned()), until
-        )
-    } else {
-        format!(
-            "{0}'s contents were moved out in at least one branch above, so {0} can't be used after \
-             the branches{1}.",
-            name, until
-        )
-    };
-    let when = match at {
-        ContentsDropAt::ScopeEnd => format!("when {} goes out of scope", name),
-        ContentsDropAt::Reassign => format!("when {} is assigned again", name),
-        ContentsDropAt::PayloadWrite => format!("when {} is assigned again", deref),
-    };
-    if let Some(h) = holds {
-        let what = h.strip_suffix(" it holds").map_or_else(
-            || format!("{}'s contents", name),
-            escape_tooltip_name,
-        );
-        let unless = if by_cond.is_some() { "If nothing above moved them" } else { "If the branch that ran didn't move them" };
-        out.push_str(&format!(" {}, {} is dropped {}.", unless, what, when));
-        if at != ContentsDropAt::PayloadWrite {
-            out.push_str(" The Box's heap allocation is freed then either way.");
-        }
-    } else if at != ContentsDropAt::PayloadWrite {
-        out.push_str(&format!(" The Box's heap allocation is freed {} either way.", when));
-    }
-    out
-}
 
 // `event_dot_branch_merge_moved_with_drop` when the variable is assigned
 // again before it goes out of scope: the old value, if it's still there,
