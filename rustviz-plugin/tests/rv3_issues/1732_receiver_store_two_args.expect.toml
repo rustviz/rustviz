@@ -1,8 +1,6 @@
 issue = 1732
 cluster = "C18"
 title = "v.store(&mut a, &b): a method storing both arguments records both as mutable; b is only shared (case 4)"
-xfail = "P0"
-note = "Gap (spike): the dump names the method body `Store::<'a>::store` (generic args in the path), so the oracle's `Store::store` rows (self / y after rows 6 and 7) can't find it; every assertion about main passes."
 beyond_facts = "P2: \"b can't be used\" wording"
 
 # holder omitted: the spike names a joined holder set ("r|v"); the holder is the one named in the title/why

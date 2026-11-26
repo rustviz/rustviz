@@ -17,7 +17,8 @@ why = "`*s.p = 3;` inserted after row 6 is E0506 (probe a4); after row 7 (the pr
 
 [[lent]]
 row = 6
-place = "*s.p"
+place = "s.p"
+lender = "*s.p"
 kind = "shared"
 holder = "h"
 src = "issue"
@@ -25,7 +26,8 @@ why = "while h is live *s.p can be read (row 7 does) but not written (E0506)"
 
 [[lent]]
 row = 7
-place = "*s.p"
+place = "s.p"
+lender = "*s.p"
 absent = true
 src = "issue"
 why = "h's last use is row 7, then the write on row 8 compiles"

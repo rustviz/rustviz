@@ -6,7 +6,8 @@ beyond_facts = "P4: the 'read-only until the loop ends' line and its stretch are
 
 [[lent]]
 row = 4
-place = "*v"
+place = "v"
+lender = "*v"
 absent = true
 src = "issue"
 why = "the body's `v.clear()` (a write through v) compiles: the shared borrow of *v ended when collect returned (the elements borrow the promoted `1`, not *v)"

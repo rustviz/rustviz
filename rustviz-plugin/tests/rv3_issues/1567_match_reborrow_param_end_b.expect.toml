@@ -17,7 +17,8 @@ why = "two ends, one per path: on the match row 3 on the edge into arm 2 (row 8)
 
 [[lent]]
 row = 4
-place = "*m"
+place = "m"
+lender = "*m"
 kind = "shared"
 holder = "r"
 src = "issue"

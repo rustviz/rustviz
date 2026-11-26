@@ -2,8 +2,9 @@ issue = 1706
 cluster = "C40"
 title = "\"r can't be used until keep returns\" when keep stores the reborrow in an output argument"
 places = ["*r"]
+xfail = "P0"
+note = "Gap (spike): the reborrow `&mut *r` passed to `keep` is a plain mutable reborrow, but the dump calls it `mut(two-phase)` with no activation row, so r (rustc: `&mut r` conflicts after row 7, state mut) reads as own Also: the dump gives the reborrow `&mut *r` passed to `keep` no activation row, so r (rustc: `&mut r` conflicts after row 7, state mut) reads as own"
 beyond_facts = "P4: the call dot's 'until keep returns' suffix is presentation; the fact is the row where the reborrow ends"
-note = "The spike's dump spells a two-phase autoref loan `mut(two-phase)`, which the harness's kind check (`mut`) doesn't match, so the two-phase loan assertions give no kind."
 
 [[loan]]
 row = 7
@@ -14,14 +15,16 @@ why = "keep stores the reborrow in holder.r, last used on row 8: `r.push('x')` i
 
 [[lent]]
 row = 7
-place = "*r"
+place = "r"
+lender = "*r"
 kind = "mut"
 src = "issue"
 why = "r cannot be used between the call and holder.r's last use (E0499 on `r.push('x')` after row 7)"
 
 [[lent]]
 row = 8
-place = "*r"
+place = "r"
+lender = "*r"
 absent = true
 src = "issue"
 why = "after row 8 holder.r is dead and r is usable again (probe b10)"

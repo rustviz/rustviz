@@ -14,7 +14,8 @@ why = "passing r reborrows *r mutably for the call only (the callee returns noth
 
 [[lent]]
 row = 5
-place = "*r"
+place = "r"
+lender = "*r"
 absent = true
 src = "issue"
 why = "r can be used again right after the call (probe b11)"

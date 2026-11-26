@@ -16,14 +16,16 @@ why = "k is never used after row 9 and p never again, so `m.push('x')` on row 10
 
 [[lent]]
 row = 9
-place = "*m"
+place = "m"
+lender = "*m"
 absent = true
 src = "issue"
 why = "after row 9 (k built from p, neither used again) the loan is gone: `m.push('x')` there compiles; with `let _ = k.n;` after the push it still compiles, with a read of k.r it would not"
 
 [[lent]]
 row = 10
-place = "*m"
+place = "m"
+lender = "*m"
 absent = true
 src = "issue"
 

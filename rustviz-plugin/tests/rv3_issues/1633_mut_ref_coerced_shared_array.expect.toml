@@ -23,7 +23,8 @@ why = "r is last used on row 7 (`*r = 3`); `let _ = &b;` after row 6 is E0502, a
 
 [[lent]]
 row = 5
-place = "*r"
+place = "r"
+lender = "*r"
 kind = "shared"
 holder = "h"
 src = "issue"
@@ -31,7 +32,8 @@ why = "while h is live r can only read through *r (E0506 when the write moves ab
 
 [[lent]]
 row = 6
-place = "*r"
+place = "r"
+lender = "*r"
 absent = true
 src = "issue"
 why = "h is dead after row 6, so *r can be written on row 7 (the program compiles)"
