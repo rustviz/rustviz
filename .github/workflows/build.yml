@@ -42,7 +42,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # macOS + Windows only where it matters for landing: PRs into main, the merge queue, pushes to
+        # main, manual runs. PRs into other bases (the rv3 integration branch and its stacks) run Linux
+        # only, for speed; the full matrix runs again when rv3 goes to main.
+        os: ${{ fromJSON((github.event_name == 'pull_request' && github.base_ref != 'main') && '["ubuntu-latest"]' || '["ubuntu-latest", "macos-latest", "windows-latest"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     # Use bash everywhere — Windows runners ship Git Bash under the
@@ -200,7 +203,8 @@ jobs:
   # xtask setup` pulls main's image from GHCR. It runs when the image's
   # inputs or rustviz-lib/ change.
   runner-image:
-    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    # PRs into main only (plus pushes to main): the runner image is a deploy concern, not rv3's.
+    if: (github.event_name == 'pull_request' && github.base_ref == 'main') || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     strategy:
       fail-fast: false
       matrix:
