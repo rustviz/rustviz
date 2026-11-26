@@ -192,6 +192,12 @@ impl<'a> BodyEnds<'a> {
     out
   }
 
+  /// Whether `k` is surely moved by its last row in scope (not moved on
+  /// some paths only: `let m2 = m;` in one arm).
+  pub fn moved_on_every_path(&self, k: &str) -> bool {
+    self.facts.rows.iter().rev().find_map(|r| r.after.state.get(k)).is_some_and(|s| *s == "moved")
+  }
+
   /// Whether `k` itself is moved anywhere in the body.
   pub fn moved_anywhere(&self, k: &str) -> bool {
     self.facts.rows.iter().flat_map(|r| r.facts.iter()).any(|e| matches!(&e.fact, Fact::Move { path, .. } if path == k))
