@@ -14594,7 +14594,7 @@ fn end_scrutinee_borrows_in_other_arms(events: &mut Vec<(usize, ExternalEvent)>,
     let (before, rest) = events.split_at_mut(k);
     let (cur, after) = rest.split_at_mut(1);
     k += 1;
-    let ExternalEvent::Branch { branches, live_vars, branch_type, merge_point, .. } = &mut cur[0].1 else { continue };
+    let ExternalEvent::Branch { branches, live_vars, branch_type, split_point, merge_point, .. } = &mut cur[0].1 else { continue };
     for arm in branches.iter_mut() {
       let ExtBranchData { e_data, line_map, .. } = arm;
       end_scrutinee_borrows_in_other_arms(e_data, line_map, unique_id);
@@ -14646,7 +14646,9 @@ fn end_scrutinee_borrows_in_other_arms(events: &mut Vec<(usize, ExternalEvent)>,
         match &after[j] {
           (l, ExternalEvent::StaticDie { from: ResourceTy::Value(f), to: ResourceTy::Value(t), still_borrowed_by, .. }
             | ExternalEvent::MutableDie { from: ResourceTy::Value(f), to: ResourceTy::Value(t), still_borrowed_by, .. })
-            if *f == h && *t == lender && still_borrowed_by.is_empty() && *l == *merge_point
+            // (Or on the binding arm's row where the loan ends, as the
+            // facts put it: `if let Some(e) = o { e.push('x'); }`.)
+            if *f == h && *t == lender && still_borrowed_by.is_empty() && (*split_point..=*merge_point).contains(l)
               && bound_back.is_some_and(|b| *l >= b) => Some(j),
           _ => None,
         }

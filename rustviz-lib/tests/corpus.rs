@@ -39707,7 +39707,8 @@ fn branch_local_ref_ends_with_scope() {
         // h's old loan of b ends where the old value is dropped (24); the
         // new one at h's drop (37).
         ("assign_branch_struct_fields_1483",
-         &["r@L30:dot:static_die+ref_go_out_of_scope", "h.0@L24:dot:static_die+branch",
+         // (Q7, P2-1b: r's own borrow ends where `H(r)` copies it.)
+         &["r@L29:dot:duplicate+static_die", "r@L30:dot:ref_go_out_of_scope", "h.0@L24:dot:static_die+branch",
            "h.0@L37:dot:static_die+ref_go_out_of_scope", "h2.0@L52:dot:static_die+ref_go_out_of_scope",
            "r@L116:dot:mutable_lend+mutable_die", "r@L117:dot:ref_go_out_of_scope"][..],
          &["r@L37:", "r@L52:", "r@L70:", "p@L99:", "q@L99:", "r@L118:", "r@L138:"][..]),
