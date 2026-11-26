@@ -17,7 +17,9 @@
 //! 3. **State after row L** is read at the row's exits that go on to the
 //!    next row of the same path: not a `?`'s or `break`'s jump further
 //!    down, nor the way out of a loop head. Loans are read where the
-//!    next row starts (NLL kills a loan before the next location).
+//!    next row starts (NLL kills a loan before the next location). A
+//!    match arm continues through its `FalseEdge`'s real target. The
+//!    imaginary edge into another arm is never a row exit.
 //! 4. **Early exits.** The drops on a `return` / `break` / `continue` /
 //!    `?` path carry the span of the scope's `}`; a drop that only an
 //!    exit reaches belongs to the exit's row, for its events and for the
@@ -218,28 +220,21 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
         (0..=n).map(move |i| Location { block: bb, statement_index: i })
     }
 
-    fn succs(&self, l: Location) -> Vec<Location> {
-        let data = &self.body.basic_blocks[l.block];
-        if l.statement_index < data.statements.len() {
-            vec![Location { block: l.block, statement_index: l.statement_index + 1 }]
-        } else {
-            data.terminator()
-                .successors()
-                .filter(|s| !self.body.basic_blocks[*s].is_cleanup && !is_unreachable(self.body, *s))
-                .map(|s| Location { block: s, statement_index: 0 })
-                .collect()
-        }
-    }
-
-    /// The successors a path can run: `succs` without borrowck's imaginary
-    /// `FalseEdge` targets.
+    /// The non-cleanup successors this path can take.
     pub(super) fn real_succs(&self, l: Location) -> Vec<Location> {
         let data = &self.body.basic_blocks[l.block];
-        let imaginary = match &data.terminator().kind {
-            TerminatorKind::FalseEdge { imaginary_target, real_target } if l.statement_index == data.statements.len() && imaginary_target != real_target => Some(*imaginary_target),
-            _ => None,
+        if l.statement_index < data.statements.len() {
+            return vec![l.successor_within_block()];
+        }
+        let term = data.terminator();
+        let targets = match term.kind {
+            TerminatorKind::FalseEdge { real_target, .. } | TerminatorKind::FalseUnwind { real_target, .. } => vec![real_target],
+            _ => term.successors().collect(),
         };
-        self.succs(l).into_iter().filter(|s| Some(s.block) != imaginary).collect()
+        targets.into_iter()
+            .filter(|s| !self.body.basic_blocks[*s].is_cleanup && !is_unreachable(self.body, *s))
+            .map(|block| Location { block, statement_index: 0 })
+            .collect()
     }
 
     /// A location that shows nothing of its own on a row: a `StorageDead`
@@ -737,7 +732,7 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
             // Not into code only a `break` / `continue` runs (its drops keep
             // the `}` row for states, rule 4): that path leaves the row's
             // scope, it doesn't go on to the next row (`if c { break l.name; }`).
-            let succ_rows: Vec<usize> = self.succs(loc).iter()
+            let succ_rows: Vec<usize> = self.real_succs(loc).iter()
                 .filter(|s| early_exit.contains_key(&loc) || !early_exit.contains_key(*s))
                 .filter_map(|s| row.get(s).copied())
                 .collect();
@@ -786,7 +781,7 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
                         if !seen.insert(l) || seen.len() > 4096 {
                             continue;
                         }
-                        for sc in self.succs(l) {
+                        for sc in self.real_succs(l) {
                             match row.get(&sc) {
                                 Some(sr) if sr > r => out.push((*sr, l)),
                                 Some(_) => work.push(sc),
@@ -847,7 +842,7 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
                     .iter()
                     .copied()
                     .filter(|l| {
-                        let ss = self.succs(*l);
+                        let ss = self.real_succs(*l);
                         ss.is_empty() || ss.iter().any(|s| !locs.contains(s))
                     })
                     .collect();
