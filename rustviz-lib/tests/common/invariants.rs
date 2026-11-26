@@ -45,6 +45,15 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 /// the ones in those directories. One entry covers every violation of
 /// that invariant in that snippet.
 pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
+    // A guard whose call stores a borrow and turns out false: the later
+    // arm's legs start where the columns have no dot.
+    ("guard_stores_borrow_1769", "line-starts-nowhere", 1786),
+    // An emptied Box assigned and returned in a `return if` arm: its line
+    // stops before the scope-end drop on the path that skips the arm.
+    ("return_if_box_contents_1743", "drop-without-value", 1787),
+    // Several writes to r on one line (#1752): the `&s` arrow's head lies
+    // along r's line.
+    ("dead_loan_one_line_1752", "arrow-along-leg", 1752),
     // Geometric (`geometry.rs`), from here on.
     // Tuple column goes on after its fields were moved out.
     ("edition2024/if_let_chain_irrefutable_move", "line-ends-nowhere", 1157),

@@ -615,7 +615,7 @@ pub fn event_dot_struct_drop_at_reassign_partial(my_name: &String, parts: &crate
 // The two dots of its column: where it comes into being, and the drop.
 pub fn event_dot_unbound_temporary_acquire(from_name: &String) -> String {
     format!(
-        "A temporary holds the value that {0}. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
+        "A temporary holds the value that {0}. Rust drops it as soon as its statement (or enclosing expression) is done",
         temporary_source(from_name)
     )
 }
@@ -777,7 +777,7 @@ pub fn event_dot_unbound_temporary_takes(from_name: &String, moved_on: bool) -> 
         return format!("This temporary takes the value of {0}, which is moved into it", styled_name_html(from_name));
     }
     format!(
-        "This temporary takes the value of {0}, which is moved into it. Nothing binds the temporary to a variable or moves it on, so Rust drops it, and what it holds, as soon as its statement (or enclosing expression) is done",
+        "This temporary takes the value of {0}, which is moved into it. Rust drops the temporary, and what it holds, as soon as its statement (or enclosing expression) is done",
         styled_name_html(from_name)
     )
 }
@@ -786,7 +786,7 @@ pub fn event_dot_unbound_temporary_takes(from_name: &String, moved_on: bool) -> 
 // and nothing binds that value (#783).
 pub fn event_dot_unbound_temporary_takes_result(from_name: &String) -> String {
     format!(
-        "This temporary takes the value that {0}, which is moved into it. Nothing binds the temporary to a variable or moves it on, so Rust drops it, and what it holds, as soon as its statement (or enclosing expression) is done",
+        "This temporary takes the value that {0}, which is moved into it. Rust drops the temporary, and what it holds, as soon as its statement (or enclosing expression) is done",
         temporary_source(from_name)
     )
 }
@@ -796,7 +796,7 @@ pub fn event_dot_unbound_temporary_takes_result(from_name: &String) -> String {
 // is dropped here and not at the end of its statement.
 pub fn event_dot_temporary_go_out_of_scope(my_name: &String) -> String {
     format!(
-        "{0} goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+        "{0} goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
         styled_name_html(my_name)
     )
 }
@@ -806,7 +806,7 @@ pub fn event_dot_temporary_go_out_of_scope(my_name: &String) -> String {
 // the block" would be false.
 pub fn event_dot_extended_temporary_drop(my_name: &String, when: &String) -> String {
     format!(
-        "{0} goes out of scope {1}: a let borrowed it, so it lived past its statement. Its resource is dropped.",
+        "{0} goes out of scope {1}: a let borrowed it, so it lived past its statement. It is dropped here.",
         styled_name_html(my_name), when
     )
 }
@@ -815,8 +815,8 @@ pub fn event_dot_extended_temporary_drop(my_name: &String, when: &String) -> Str
 // that branch made (#1397, #1436): a drop flag decides.
 pub fn event_dot_extended_temporary_drop_made(my_name: &String, when: &String, made_at: Option<usize>) -> String {
     format!(
-        "{0} goes out of scope {1}: a let borrowed it, so it lived past its statement. Its resource \
-         is dropped only if {2} (Rust tracks this with a runtime drop flag).",
+        "{0} goes out of scope {1}: a let borrowed it, so it lived past its statement. It \
+         is dropped here only if {2} (Rust tracks this with a runtime drop flag).",
         styled_name_html(my_name), when, temp_made_in(made_at)
     )
 }
@@ -824,8 +824,8 @@ pub fn event_dot_extended_temporary_drop_made(my_name: &String, when: &String, m
 // Its drop at a `?` (#1436).
 pub fn event_dot_temp_drop_if_try_returns_made(my_name: &String, made_at: Option<usize>) -> String {
     format!(
-        "If the `?` here returns early, {0}'s \
-         resource is dropped if {1} (Rust tracks this with a runtime drop flag). If the `?` succeeds, \
+        "If the `?` here returns early, {0} \
+         is dropped if {1} (Rust tracks this with a runtime drop flag). If the `?` succeeds, \
          nothing happens to {0} here.",
         styled_name_html(my_name), temp_made_in(made_at)
     )
@@ -836,19 +836,19 @@ pub fn event_dot_temporary_drop(ty: &String, when: &String, literal: bool, assig
         // `(a, _) = (m, n);` (#1387): rustc lowers it to `{ let (lhs, _)
         // = (m, n); a = lhs; }`, so the temporary goes first.
         return format!(
-            "This temporary {0}, built by the literal on the right of the destructuring assignment, is dropped as soon as the assignment has taken it apart (before the places on the left get their new values), and with it whatever the pattern didn't assign to a place. Its resource is dropped",
+            "This temporary {0}, built by the literal on the right of the destructuring assignment, is dropped as soon as the assignment has taken it apart (before the places on the left get their new values), and with it whatever the pattern didn't assign to a place",
             styled_name_html(ty)
         );
     }
     if literal {
         // `let (x, _) = (m, n);`: m went into x, n stayed in the literal.
         return format!(
-            "This temporary {0}, built by the literal on the right of the let, is dropped {1}. What the pattern didn't bind by value stays in it and is dropped with it. Its resource is dropped",
+            "This temporary {0}, built by the literal on the right of the let, is dropped {1}. What the pattern didn't bind by value stays in it and is dropped with it",
             styled_name_html(ty), when
         );
     }
     format!(
-        "This temporary {0} is dropped {1}: nothing bound it to a variable or moved it on. Its resource is dropped",
+        "This temporary {0} is dropped {1}",
         styled_name_html(ty), when
     )
 }
@@ -988,27 +988,27 @@ pub fn rc_drop_note(rc: Option<RcDrop>) -> String {
     match rc {
         None => String::new(),
         Some(RcDrop::Own(k)) if k.is_weak() => String::from(
-            " (a Weak doesn't keep the value alive; dropping it frees only the Weak itself)"),
+            " (a Weak doesn't keep the value alive)"),
         Some(RcDrop::Own(k)) => format!(
-            " (for an {0}, that lowers the reference count; the shared value is freed only when its last {0} is dropped)",
+            " (for an {0}, that lowers the reference count; the shared value is dropped only if that was its last {0})",
             k.strong_name()),
         Some(RcDrop::Inside { kind, buffer: true, .. }) if kind.is_weak() => String::from(
-            " (each Weak in it doesn't keep its value alive; its own buffer is freed)"),
+            " (a Weak doesn't keep its value alive; the collection's own buffer, if it has one, is freed)"),
         Some(RcDrop::Inside { kind, buffer: true, .. }) => format!(
-            " (each {} in it only lowers its reference count; its own buffer is freed)",
+            " (dropping an {0} lowers its reference count, and drops the shared value only if it was the last {0}; the collection's own buffer, if it has one, is freed)",
             kind.strong_name()),
         Some(RcDrop::Inside { kind, many: false, .. }) if kind.is_weak() => String::from(
-            " (the Weak inside doesn't keep its value alive)"),
+            " (a Weak doesn't keep its value alive)"),
         Some(RcDrop::Inside { kind, many: true, .. }) if kind.is_weak() => String::from(
             " (the Weaks inside don't keep their values alive)"),
         Some(RcDrop::Inside { kind, many: false, .. }) => format!(
-            " (the {} inside only lowers its reference count)", kind.strong_name()),
+            " (dropping an {0} lowers its reference count, and drops the shared value only if it was the last {0})", kind.strong_name()),
         Some(RcDrop::Inside { kind, many: true, .. }) => format!(
-            " (the {}s inside only lower their reference counts)", kind.strong_name()),
+            " (dropping each {0} in it lowers that {0}'s reference count, and drops its shared value only if it was the last {0})", kind.strong_name()),
         Some(RcDrop::Fields(k)) if k.is_weak() => String::from(
-            " (its Weak fields don't keep their values alive; dropping them frees only the Weaks)"),
+            " (its Weak fields don't keep their values alive)"),
         Some(RcDrop::Fields(k)) => format!(
-            " (its {} fields only lower their reference counts)", k.strong_name()),
+            " (dropping an {0} lowers its reference count, and drops the shared value only if it was the last {0})", k.strong_name()),
     }
 }
 
@@ -1199,7 +1199,7 @@ pub fn try_drop_then_reassign(drop_text: &str, reassign: &str) -> Option<String>
 // dropped as the function returns. The dot sits on p's column.
 // `value`: p holds a value with nothing to drop. `note`: see
 // event_dot_owner_drop_if_try_returns.
-pub fn event_dot_owner_drop_unless_returned(my_name: &String, value: bool, note: &str) -> String {
+pub fn event_dot_owner_drop_unless_returned(my_name: &String, value: bool, _note: &str) -> String {
     let my_name_fmt = styled_name_html(my_name);
     if value {
         return format!(
@@ -1209,12 +1209,11 @@ pub fn event_dot_owner_drop_unless_returned(my_name: &String, value: bool, note:
             my_name_fmt
         );
     }
-    let (holds, rest) = split_drop_note(note);
     format!(
         "The `return` here hands the caller one of the values its `if` / `match` chooses between. \
-         If that value isn't {0}'s, {0}'s resource{1} is dropped here as the function returns{2}. \
-         If it is {0}'s, its resource goes to the caller instead and isn't dropped.",
-        my_name_fmt, holds, rest
+         If that value isn't {0}'s, whatever {0} still holds (if anything) is dropped here as the \
+         function returns. If it is {0}'s, it goes to the caller instead and isn't dropped.",
+        my_name_fmt
     )
 }
 
@@ -2960,7 +2959,7 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
     // struct with a reference field can carry the borrow too (#336).
     let (noun, not_ref) = match carrier {
         ViaCarrier::Reference => ("reference", String::new()),
-        ViaCarrier::Value => ("value", format!("; {0} isn't a reference, but its value holds one", to_fmt)),
+        ViaCarrier::Value => ("value", format!("; {0} isn't a reference, but its value may hold one", to_fmt)),
         ViaCarrier::StructField => ("struct", String::new()),
         ViaCarrier::TupleField => ("tuple", String::new()),
         ViaCarrier::Element | ViaCarrier::StoredBy | ViaCarrier::PatternBinding { .. } | ViaCarrier::PatternRef | ViaCarrier::ReturnedClosure { .. } | ViaCarrier::Part | ViaCarrier::StoredThrough => unreachable!(),
@@ -3105,7 +3104,12 @@ fn signature_tie(func_fmt: &str, what: &str, point: &str, to_name: &String, name
         // 'a: 'b`: x's lifetime isn't the result's, but outlives it (#1125).
         return format!("{0}'s signature lets {1} point into {2} (a lifetime bound like `'a: 'b` lets a longer-lived reference stand in for a shorter one){3}", func_fmt, what, tied, tail);
     }
-    format!("{0}'s signature gives {1} the same lifetime as {2}{3}", func_fmt, what, tied, tail)
+    // Not "the same lifetime as": a by-value argument (`o.unwrap()` with
+    // `o: Option<&T>`) can be gone while the result is used, and a bound
+    // like `T: 'b` is only a lower bound (#1690). The signature lets the
+    // result borrow from the arguments or from what they borrow.
+    format!("{0}'s signature lets {1} borrow from {2}, or from what {3} borrows{4}", func_fmt, what, tied,
+        if tie.tied.len() > 1 || tie.stored_in.iter().any(|st| !st.referent_is_ref) { "each of them" } else { "it" }, tail)
 }
 
 
@@ -4283,7 +4287,7 @@ pub fn event_dot_branch_merge_temp_made(my_name: &String, made_at: Option<usize>
 pub fn event_dot_go_out_of_scope_temp_made(my_name: &String, made_at: Option<usize>) -> String {
     format!(
         "{0} goes out of scope at the end of the block: a let borrowed it, so it was kept alive \
-         past the end of its statement. Its resource is dropped here only if {1} (Rust tracks \
+         past the end of its statement. It is dropped here only if {1} (Rust tracks \
          this with a runtime drop flag).",
         styled_name_html(my_name), temp_made_in(made_at)
     )
@@ -4695,10 +4699,10 @@ pub fn event_dot_dead_loan_note(lender: &String, borrower: &String, repoint: Opt
     let (x, c) = (styled_name_html(lender), styled_name_html(borrower));
     match repoint {
         Some((n, true)) => format!(
-            "{DEAD_LOAN_NOTE_START} {c} was given a new reference on line {n}, so {c}'s borrow of {x} is already over here; {x} stays borrowed only on paths that skip line {n}"
+            "{DEAD_LOAN_NOTE_START} {c} was given a new reference on line {n}, so {c}'s borrow of {x} is already over here"
         ),
         Some((n, false)) => format!(
-            "{DEAD_LOAN_NOTE_START} {c} is given a new reference on line {n} before it is used again, so {c}'s borrow of {x} is already over here; {x} stays borrowed only on paths that skip line {n}"
+            "{DEAD_LOAN_NOTE_START} {c} is given a new reference on line {n} before it is used again, so {c}'s borrow of {x} is already over here"
         ),
         None => format!(
             "{DEAD_LOAN_NOTE_START} {c} isn't used again, so {c}'s borrow of {x} is already over here; {x} stays borrowed only on the other paths"
@@ -5020,7 +5024,7 @@ pub fn event_dot_chain_fail_move(
         // reached when this arm's pattern doesn't match.
         (_, FailPath::Guard(_)) => format!(
             "{0} may have been moved: when {1} and then turns out false, matching goes on with the \
-             later arms after that {2}, so {0} can't be used here (the borrow checker counts every \
+             next pattern after that {2}, so {0} can't be used here (the borrow checker counts every \
              later arm as one that may run after a failed guard)",
             name, moves, act),
         (false, FailPath::Else) => format!(
@@ -5120,7 +5124,7 @@ fn chain_fail_new_value(my_name: &String, path: FailPath, how: &ChainFailHow) ->
         format!("{} holds the new value or nothing", name)
     };
     let runs = match path {
-        FailPath::Guard(_) => "matching goes on with the later arms after that assignment, so here".to_owned(),
+        FailPath::Guard(_) => "matching goes on with the next pattern after that assignment, so here".to_owned(),
         FailPath::Else => "the else branch runs after that assignment, so here".to_owned(),
         FailPath::NoElse => format!(
             "the body is skipped but the assignment has happened, so after the {}", styled_name_html(&"if".to_owned())),
@@ -5197,7 +5201,7 @@ fn chain_fail_assign_then_move(my_name: &String, path: FailPath, how: &ChainFail
     let when = format!("when {} assigns {} a new value{}, then {} and turns out false", cond, target, dropping, moves);
     match path {
         FailPath::Guard(_) => format!(
-            "{0} may have been moved: {1}, matching goes on with the later arms after that move, so {0} \
+            "{0} may have been moved: {1}, matching goes on with the next pattern after that move, so {0} \
              can't be used here (the borrow checker counts every later arm as one that may run after a \
              failed guard)",
             name, when),
@@ -5446,7 +5450,7 @@ pub fn event_dot_chain_ref_borrow(my_name: &String, sources: &[String], chain: &
     match chain.path {
         FailPath::Guard(_) => format!(
             "{0} may have been assigned a new reference: when {1} and then turns out false, matching goes on \
-             with the later arms after that assignment, so here {0} points {2} (the borrow \
+             with the next pattern after that assignment, so here {0} points {2} (the borrow \
              checker counts every later arm as one that may run after a failed guard)",
             r, assigns, alts),
         FailPath::Else => format!(
@@ -5559,14 +5563,17 @@ pub fn event_dot_chain_fail_use(
     let bound: Vec<String> = uses.iter().filter(|u| u.binding && !u.to.is_empty()).map(|u| u.to.clone()).collect();
     let gos = match bound.len() {
         0 => String::new(),
-        1 => format!("{} goes out of scope, so ", join(&bound)),
-        _ => format!("{} go out of scope, so ", join(&bound)),
+        1 => format!("{} goes out of scope, and ", join(&bound)),
+        _ => format!("{} go out of scope, and ", join(&bound)),
     };
-    let ended = if uses.len() > 1 { "those borrows have ended" } else { "that borrow has ended" };
+    // Not "after that borrow has ended": a call in the condition may
+    // have stored the reference somewhere that outlives it (#1769). "The
+    // next pattern": a false guard can send matching to the same arm's
+    // next or-pattern alternative.
     let then = match path {
-        FailPath::NoElse => format!("the body is skipped after {}", ended),
-        FailPath::Else => format!("the else branch runs after {}", ended),
-        FailPath::Guard(_) => format!("matching goes on with the later arms after {}", ended),
+        FailPath::NoElse => "the body is skipped",
+        FailPath::Else => "the else branch runs",
+        FailPath::Guard(_) => "matching goes on with the next pattern",
     };
     let mut out = if definite {
         format!("{} was {}borrowed: {} before it can turn out false; when it does, {}{}",
@@ -5607,7 +5614,7 @@ pub fn event_dot_chain_fail_assign(
     let mut out = if let FailPath::Guard(line) = path {
         format!(
             "{0} may have been assigned a new {1}: when the guard on line {2} assigns to {0} and \
-             then turns out false, matching goes on with the later arms after that assignment, so \
+             then turns out false, matching goes on with the next pattern after that assignment, so \
              here {0} holds either its previous {1} or the new one.",
             name, what, line)
     } else if path == FailPath::NoElse {

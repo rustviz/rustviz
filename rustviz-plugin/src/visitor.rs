@@ -12049,7 +12049,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // temporaries outlive the pattern match.
           ExprKind::If(c, then, els) if c.hir_id == cur && matches!(c.kind, ExprKind::Let(_)) => {
             if matches!(e.span.desugaring_kind(), Some(rustc_span::DesugaringKind::WhileLoop)) {
-              return Some(("at the end of each iteration of this `while let` loop", end(e.span), None));
+              return Some(("at the end of each pass of this `while let` loop (or, when its pattern doesn't match, as the loop ends)", end(e.span), None));
             }
             if expr.span.edition() >= rustc_span::edition::Edition::Edition2024 {
               // Edition 2024: dropped before the `else` block runs, or
@@ -12076,7 +12076,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // block the chain matched ends or the `else` runs (#604).
           ExprKind::If(c, then, els) if c.hir_id == cur && is_let_chain(c) => {
             if matches!(e.span.desugaring_kind(), Some(rustc_span::DesugaringKind::WhileLoop)) {
-              return Some(("at the end of each iteration of this `while let` loop", end(e.span), None));
+              return Some(("at the end of each pass of this `while let` loop (or, when its pattern doesn't match, as the loop ends)", end(e.span), None));
             }
             let w = if els.is_some() {
               "before the `else` block of this `if` runs, or when the block its let chain matched ends"
