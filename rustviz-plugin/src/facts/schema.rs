@@ -142,7 +142,11 @@ pub struct LoanInfo {
     /// Variables that hold it through a call's result: the call was given
     /// the loan, or a reference to something holding it, and its result
     /// carries it (`let b = s.as_bytes();`, `let m = v.iter().max();`, `for
-    /// item in list`), and copies of those.
+    /// item in list`), and copies of those. Named by the fields whose types
+    /// carry the loan as rustc's lifetimes say: `pair<'a>(x: &'a mut A, y:
+    /// &'a mut A) -> (&'a mut A, &'a mut A)` gives both loans to `t.0` and
+    /// `t.1`, as borrowck counts them (which referent each field points to
+    /// is in the callee's body, not this one's).
     pub via_call: Vec<String>,
     /// The borrow isn't written in the source: a method call's auto-ref
     /// (`v.len()`), the reborrow of a reference that is passed on (`G(r)`,
