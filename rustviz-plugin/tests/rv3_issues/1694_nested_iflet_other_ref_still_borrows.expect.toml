@@ -30,6 +30,7 @@ place = "v"
 kind = "shared"
 holder = "other"
 src = "issue"
+why = "`other` is an `Option<&String>`, which is `Copy`: the later `other.unwrap()` copies it, and that use of `other` keeps the loan from `v.first()` live, so v is still lent shared in the inner arm."
 
 [[lent]]
 row = 9
@@ -37,6 +38,7 @@ place = "v"
 kind = "shared"
 holder = "other"
 src = "issue"
+why = "The nested if has not consumed other. Its later unwrap keeps the v.first() loan live at the join."
 
 [[lent]]
 row = 11
@@ -44,6 +46,7 @@ place = "v"
 kind = "shared"
 holder = "other"
 src = "issue"
+why = "The else path also reaches other.unwrap(). Calling v.len() only needs a shared read."
 
 [[state]]
 row = 9

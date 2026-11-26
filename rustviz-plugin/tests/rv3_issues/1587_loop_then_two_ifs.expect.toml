@@ -17,6 +17,7 @@ row = 5
 place = "s"
 is = "own"
 src = "issue"
+why = "`let _ = &mut s;` immediately after row 5 compiles."
 
 [[state]]
 row = 6
@@ -30,6 +31,7 @@ row = 8
 place = "s"
 is = "own"
 src = "issue"
+why = "`let _ = &mut s;` immediately after row 8 compiles."
 
 [[state]]
 row = 9
@@ -43,6 +45,7 @@ row = 11
 place = "s"
 is = "own"
 src = "issue"
+why = "`let _ = &mut s;` immediately after row 11 compiles."
 
 [[state]]
 row = 13

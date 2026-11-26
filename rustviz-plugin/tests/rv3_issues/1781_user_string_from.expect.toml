@@ -9,6 +9,7 @@ row = 8
 place = "s"
 is = "own"
 src = "issue"
+why = "With s bound as mut, `let _ = &mut s;` immediately after row 8 compiles."
 
 [[event]]
 row = 9
@@ -21,6 +22,7 @@ row = 9
 place = "s"
 is = "moved"
 src = "issue"
+why = "Borrowing s after row 9 gives E0382. Rustc identifies the move on row 9."
 
 # No destructor for a type without drop glue (not a std String).
 [[drop]]

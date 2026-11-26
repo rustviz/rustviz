@@ -1,7 +1,7 @@
 issue = 1683
 cluster = "C01"
 title = "`if let Some(x) = v.first()` with a moving nested `if let` and a later read of x: v drawn shared again after the outer `if let`"
-note = "Passes since rv3-p0b. Review of the old pin: the end on the `if x.is_empty()` row (row 8) was written `[8, 12]`, but the path that skips the arm rejoins at the inner if's `}` (row 10: MIR's implicit-else unit value is spanned there) and then runs row 11 (x's scope end: StorageDead(x), a fact on that row), so by the format's rule (the next row is the `}` where the path rejoins; brace rows are skipped only when the dump has no facts on them) the edge is `[8, 10]`. The facts' `to_line` had been right since rv3-p0; the case was rewritten, no fact changed."
+note = "The skipped inner if evaluates its unit result at the join brace on row 10. The outer pattern binding ends its storage on row 11."
 
 # x's loan of v: no match (row 4); `x.is_empty()` false (row 8); true,
 # after the `println!` (row 9).

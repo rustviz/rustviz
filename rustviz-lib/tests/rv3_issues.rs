@@ -23,8 +23,7 @@
 //! - `rv3_issue_cases_gen` (`RV3_ISSUES_GEN=1`): (re)derives the
 //!   `[oracle]` block of each case (`RV3_ISSUES_ONLY=<prefix>,..` narrows)
 //!   and reports hand-written states rustc contradicts.
-// `why` / `note` fields document a case for its readers; the harness
-// doesn't read them.
+// Every hand-written assertion cites its evidence in `why`.
 #![allow(dead_code)]
 
 mod common;
@@ -72,6 +71,9 @@ struct Case {
     /// Field paths the oracle should probe besides the variables.
     #[serde(default)]
     places: Vec<String>,
+    /// Additional reviewed statement boundaries in nested expression blocks.
+    #[serde(default)]
+    probe: Vec<common::oracle::IssueProbe>,
     /// RustViz 3 doesn't pass this yet: the PLAN.md phase that should.
     xfail: Option<String>,
     /// The plugin as a whole panics on this program (a drawing-path crash)
@@ -165,8 +167,8 @@ struct LoanA {
     holder: Option<String>,
     /// Exactly these ends, one per CFG edge where the loan goes out of
     /// scope: `9` (an end on row 9, on any edge) or `[5, 6]` (an end on
-    /// row 5 on the path that next runs row 6; rows holding only braces
-    /// or `else` in between are skipped).
+    /// row 5 on the path that next runs row 6; arm entries
+    /// and join braces are distinct targets).
     ends: Option<Vec<EndSpec>>,
     #[serde(default)]
     ends_include: Vec<u32>,
@@ -242,6 +244,10 @@ struct EventA {
 struct OrderA {
     row: u32,
     events: Vec<String>,
+    /// The path runs no destructor the order does not name (stops a dump
+    /// that drops both locals on a path where one moved).
+    #[serde(default)]
+    exact_drops: bool,
     src: String,
     #[serde(default, rename = "fn")]
     func: Option<String>,
@@ -287,12 +293,16 @@ fn cases() -> Vec<(String, String, String)> {
 }
 
 /// FNV-1a 64 of what the oracle block is derived from (the program, the
-/// extra places, the toolchain): stable across Rust versions.
-fn source_hash(src: &str, places: &[String], toolchain: &str) -> String {
+/// extra places and probe sites, the toolchain): stable across Rust versions.
+fn source_hash(src: &str, case: &Case, toolchain: &str) -> String {
     // Rustc treats CRLF as LF, so Windows checkouts share the same hash.
     let src = src.replace("\r\n", "\n");
     let mut h: u64 = 0xcbf29ce484222325;
-    for b in src.bytes().chain([0]).chain(places.join(",").into_bytes()).chain([0]).chain(toolchain.bytes()) {
+    let mut inputs = case.places.join(",");
+    for p in &case.probe {
+        let _ = write!(inputs, "\0{} {} {}", p.func, p.row, p.place);
+    }
+    for b in src.bytes().chain([0]).chain(inputs.bytes()).chain([0]).chain(toolchain.bytes()) {
         h ^= b as u64;
         h = h.wrapping_mul(0x100000001b3);
     }
@@ -310,7 +320,7 @@ enum Check {
     Loan(LoanA),
     Drop { row: u32, place: String, how: String, absent: bool },
     Event { row: u32, ev: String, absent: bool },
-    Order { row: u32, events: Vec<String> },
+    Order { row: u32, events: Vec<String>, exact_drops: bool },
 }
 
 struct Assertion {
@@ -357,7 +367,7 @@ fn assertions(c: &Case) -> Vec<Assertion> {
     }
     for o in &c.order {
         out.push(Assertion { src: o.src.clone(), func: f(&o.func), what: format!("on row {}, in order: {:?}", o.row, o.events),
-            check: Check::Order { row: o.row, events: o.events.clone() } });
+            check: Check::Order { row: o.row, events: o.events.clone(), exact_drops: o.exact_drops } });
     }
     for s in c.oracle.iter().flat_map(|o| &o.states) {
         if let Ok((func, row, place, is)) = oracle_entry(s) {
@@ -422,6 +432,17 @@ fn problems(name: &str, src: &str, text: &str) -> Vec<String> {
             out.push("known_crash and xfail are separate markers: use one".into());
         }
     }
+    for (kind, row, why) in c.state.iter().map(|a| ("state", a.row, &a.why))
+        .chain(c.lent.iter().map(|a| ("lent", a.row, &a.why)))
+        .chain(c.loan.iter().map(|a| ("loan", a.row, &a.why)))
+        .chain(c.drop.iter().map(|a| ("drop", a.row, &a.why)))
+        .chain(c.event.iter().map(|a| ("event", a.row, &a.why)))
+        .chain(c.order.iter().map(|a| ("order", a.row, &a.why)))
+    {
+        if why.as_deref().is_none_or(|w| w.trim().is_empty()) {
+            out.push(format!("[[{kind}]] row {row}: give the rustc evidence in `why`"));
+        }
+    }
     let n_lines = src.lines().count() as u32;
     let rows: Vec<u32> = c.state.iter().map(|s| s.row).chain(c.lent.iter().map(|s| s.row)).chain(c.loan.iter().map(|s| s.row))
         .chain(c.loan.iter().flat_map(|l| l.ends.iter().flatten().flat_map(|e| match *e {
@@ -440,6 +461,7 @@ fn problems(name: &str, src: &str, text: &str) -> Vec<String> {
         }
         match &a.check {
             Check::State { is, .. } if !STATES.contains(&is.as_str()) => out.push(format!("{}: state {is:?} not in {STATES:?}", a.what)),
+            Check::Lent { kind: Some(k), .. } if k == "reserved" => {}
             Check::Lent { kind: Some(k), .. } | Check::Loan(LoanA { kind: Some(k), .. }) if !["shared", "mut", "unique", "exclusive"].contains(&k.as_str()) => {
                 out.push(format!("{}: kind {k:?} not shared|mut|unique|exclusive", a.what))
             }
@@ -476,8 +498,13 @@ fn problems(name: &str, src: &str, text: &str) -> Vec<String> {
     match &c.oracle {
         None => out.push("no [oracle] block: run RV3_ISSUES_GEN=1".into()),
         Some(o) => {
-            if o.source_hash != source_hash(src, &c.places, &o.toolchain) || o.toolchain != toolchain() {
-                out.push("[oracle] is stale (the program, `places` or the toolchain changed): run RV3_ISSUES_GEN=1".into());
+            if o.source_hash != source_hash(src, &c, &o.toolchain) || o.toolchain != toolchain() {
+                out.push("[oracle] is stale (the program, probe inputs or toolchain changed): run RV3_ISSUES_GEN=1".into());
+            }
+            for p in &c.probe {
+                if !generated.contains(&(p.func.clone(), p.row, p.place.clone())) {
+                    out.push(format!("missing generated verdict for probe {} {} {}", p.func, p.row, p.place));
+                }
             }
             for e in &o.states {
                 if let Err(m) = oracle_entry(e) {
@@ -544,8 +571,8 @@ fn rv3_issue_case_freshness_accepts_crlf() {
 #[derive(Debug, Clone)]
 struct Lent {
     loan: usize,
-    /// Normalised: shared | mut | unique | shallow.
-    kind: String,
+    /// Normalised row kind, or None for a legacy two-phase loan with no phase.
+    kind: Option<String>,
     /// One loan can have several holders (a copied reference: "r|h").
     holders: Vec<String>,
 }
@@ -572,6 +599,7 @@ struct LoanF {
     col: Option<u32>,
     lender: String,
     kind: String,
+    two_phase: bool,
     holders: Vec<String>,
     /// The loan record's end rows, when the dump gives them.
     end_lines: Option<Vec<u32>>,
@@ -589,8 +617,8 @@ struct BodyF {
     loans: Vec<LoanF>,
     /// (loan, row, the next row of that path) of every `BorrowEnd`.
     ends: Vec<(usize, u32, u32, u32)>,
-    /// (row, path) of every `Move` fact.
-    moved: Vec<(u32, String)>,
+    /// None for the spike, whose facts have no arm or loan-phase information.
+    version: Option<u64>,
 }
 
 /// The producer's borrow kind, normalised: `mut(two-phase)` is mut, a
@@ -693,9 +721,10 @@ fn unmark(v: &Value) -> Result<Value, String> {
 fn load_facts(v: &Value) -> Result<Vec<BodyF>, String> {
     let unmarked = unmark(v)?;
     let v = &unmarked;
+    let version = v.get("version").and_then(Value::as_u64);
     let (bodies, spike) = match v {
         Value::Array(a) => (a.clone(), true),
-        Value::Object(o) => match (o.get("version").and_then(Value::as_u64), o.get("bodies")) {
+        Value::Object(o) => match (version, o.get("bodies")) {
             (Some(1 | 2 | 3), Some(Value::Array(b))) => {
                 // A body the producer failed on has no facts: that's a
                 // failure to read, never an expected (xfail) result.
@@ -733,7 +762,11 @@ fn load_facts(v: &Value) -> Result<Vec<BodyF>, String> {
                         let s = l.as_str().unwrap_or("");
                         let (kind, rest) = s.split_once(':').unwrap_or(("", s));
                         let (id, holder) = rest.split_once("->").unwrap_or((rest, ""));
-                        let lt = Lent { loan: id.trim_start_matches('L').parse().unwrap_or(usize::MAX), kind: norm_kind(kind), holders: holder_set(holder) };
+                        let lt = Lent {
+                            loan: id.trim_start_matches('L').parse().unwrap_or(usize::MAX),
+                            kind: (kind != "mut(two-phase)").then(|| norm_kind(kind)),
+                            holders: holder_set(holder),
+                        };
                         let mut cols: Vec<String> = state.keys().filter(|c| overlaps(k, c, &ty_of)).cloned().collect();
                         cols.push(k.clone());
                         cols.sort();
@@ -744,7 +777,8 @@ fn load_facts(v: &Value) -> Result<Vec<BodyF>, String> {
                     } else {
                         lent.entry(k.clone()).or_default().push(Lent {
                             loan: l["loan"].as_u64().unwrap_or(u64::MAX) as usize,
-                            kind: norm_kind(l["kind"].as_str().unwrap_or("")),
+                            // `mut(two-phase)` names the loan's kind, not its phase.
+                            kind: l["kind"].as_str().filter(|k| *k != "mut(two-phase)").map(norm_kind),
                             holders: holder_set(l["holder"].as_str().unwrap_or("")),
                         });
                     }
@@ -765,21 +799,24 @@ fn load_facts(v: &Value) -> Result<Vec<BodyF>, String> {
             col: l["col"].as_u64().map(|c| c as u32),
             lender: l["lender"].as_str().unwrap_or("").into(),
             kind: norm_kind(l["kind"].as_str().unwrap_or("")),
+            two_phase: l["two_phase"] == true || l["kind"] == "mut(two-phase)",
             holders: strs(&l["holders"]).iter().flat_map(|h| holder_set(h)).collect(),
             end_lines: l.get("end_lines").map(nums),
             tracked: l.get("source").and_then(Value::as_str).is_none_or(|s| s == "borrow" || s == "temporary"),
         }).collect();
         // A spike row says `mut` for a closure's unique capture: its `lent`
         // entries take the kind from the loan's record. RustViz 3 rows
-        // (v2: shared | mut | unique | reserved) are kept as they are, so a
+        // (v2 and v3: shared | mut | unique | reserved) are kept as they are, so a
         // row that contradicts its record is caught.
-        if spike {
+        if !matches!(version, Some(2 | 3)) {
             for r in rows.values_mut() {
                 for ls in r.lent.values_mut() {
                     for lt in ls.iter_mut() {
                         if let Some(x) = loans.iter().find(|x| x.id == lt.loan) {
-                            if x.kind == "unique" {
-                                lt.kind = x.kind.clone();
+                            if x.two_phase {
+                                lt.kind = None;
+                            } else if x.kind == "unique" {
+                                lt.kind = Some(x.kind.clone());
                             }
                         }
                     }
@@ -787,22 +824,19 @@ fn load_facts(v: &Value) -> Result<Vec<BodyF>, String> {
             }
         }
         let mut ends = Vec::new();
-        let mut moved = Vec::new();
         for (line, r) in &rows {
             for f in &r.facts {
-                match f["ev"].as_str() {
-                    Some("BorrowEnd") => ends.push((
+                if f["ev"] == "BorrowEnd" {
+                    ends.push((
                         f["loan"].as_u64().unwrap_or(u64::MAX) as usize,
                         *line,
                         f["to_line"].as_u64().map_or(0, |t| t as u32),
                         f["to_col"].as_u64().map_or(0, |t| t as u32),
-                    )),
-                    Some("Move") => moved.extend(f["path"].as_str().map(|p| (*line, p.to_owned()))),
-                    _ => {}
+                    ));
                 }
             }
         }
-        out.push(BodyF { func: b["func"].as_str().unwrap_or("").into(), rows, loans, ends, moved });
+        out.push(BodyF { func: b["func"].as_str().unwrap_or("").into(), rows, loans, ends, version });
     }
     Ok(out)
 }
@@ -987,18 +1021,6 @@ fn canon_fn(s: &str) -> String {
     out
 }
 
-/// The program's lines.
-#[derive(Default)]
-struct Shape<'a> {
-    lines: Vec<&'a str>,
-}
-
-impl<'a> Shape<'a> {
-    fn of(src: &'a str) -> Shape<'a> {
-        Shape { lines: src.lines().collect() }
-    }
-}
-
 /// The state after row `row`, as the producer gives it for that row. A
 /// row without a state of its own has none here: carrying a textually
 /// earlier row would take a state from another path (a loop body, a
@@ -1007,20 +1029,44 @@ fn row_after(b: &BodyF, row: u32) -> Option<&RowF> {
     b.rows.get(&row).filter(|r| !r.state.is_empty())
 }
 
-/// The facts that happen on row `row`, with the arm of the row each runs
-/// in (the dump's `arm`; None: on every path through the row): the row's
-/// own, except drops the dump marks as run only on an early exit elsewhere
-/// (their MIR span is the scope's `}`), plus facts marked as run by an
-/// early exit on `row` (`early_exit`) or shared with one (`also_on_exits`),
-/// which keep their `arm` (the exit row's arm that exits).
-fn row_facts(b: &BodyF, row: u32) -> Vec<(&Value, Option<usize>)> {
-    let mut out = Vec::new();
+/// Events with a position on a specific exit carry that exit row's arm.
+/// Older dumps can identify a shared MIR drop only by `also_on_exits`.
+/// Such a summary has no position in the exit's evaluation order.
+#[derive(Default)]
+struct RowFacts<'a> {
+    located: Vec<&'a Value>,
+    shared_drops: Vec<&'a Value>,
+    /// A v3 producer gives every exit that drops a value its own positioned
+    /// event (an exit whose value already moved has none), so a shared
+    /// summary says nothing more about whether this exit drops.
+    resolved: bool,
+}
+
+impl<'a> RowFacts<'a> {
+    /// A definite drop at a shared site runs on every listed exit. A drop
+    /// flag at that site does not say which exit actually drops the value.
+    fn events(&self) -> impl Iterator<Item = &'a Value> + '_ {
+        self.located.iter().copied().chain(self.shared_drops.iter().copied().filter(|f| f["how"] == "drops"))
+    }
+
+    fn may_drop(&self, place: &str) -> bool {
+        !self.resolved && self.shared_drops.iter().any(|f| matches!(f["how"].as_str(), Some("drops_if_init" | "drops_rest"))
+            && (place == "_" || f["path"] == place))
+    }
+}
+
+fn row_facts(b: &BodyF, row: u32) -> RowFacts<'_> {
+    let mut out = RowFacts { resolved: b.version == Some(3), ..Default::default() };
     for (l, r) in &b.rows {
         for f in &r.facts {
             let exit = f["early_exit"].as_u64().map(|e| e as u32);
-            let also = nums(&f["also_on_exits"]);
-            if (*l == row && exit.is_none()) || exit == Some(row) || (*l != row && also.contains(&row)) {
-                out.push((f, f["arm"].as_u64().map(|a| a as usize)));
+            // The scope-end summary is not the exit's own drop, even when the
+            // exit and the closing brace share a source row.
+            let summary = f["ev"] == "Drop" && exit.is_none() && nums(&f["also_on_exits"]).contains(&row);
+            if !summary && exit.unwrap_or(*l) == row {
+                out.located.push(f);
+            } else if f["ev"] == "Drop" && nums(&f["also_on_exits"]).contains(&row) {
+                out.shared_drops.push(f);
             }
         }
     }
@@ -1066,35 +1112,28 @@ fn arm_paths(arms: &[(usize, Option<usize>)]) -> Vec<Vec<usize>> {
     paths
 }
 
-/// Whether `src`'s row `r` holds only braces, `else`, `;` (no code).
-fn brace_only(src: &[&str], r: u32) -> bool {
-    r >= 1 && src.get(r as usize - 1).is_some_and(|l| l.replace("else", "").chars().all(|c| c.is_whitespace() || "{}();".contains(c)))
-}
-
-/// Whether a `BorrowEnd` on (`row`, `to`) is the end `want` names. `next`
-/// may be any row, an earlier one included (a loop's back edge); the dump's
-/// `to` may stop at rows before it that `skip` allows (brace-only rows the
-/// dump has no facts on: a `}` row with a drop is code of its own path).
-fn end_fits(want: EndSpec, row: u32, to: u32, col: u32, skip: &dyn Fn(u32) -> bool) -> bool {
+/// Match the successor's MIR span exactly, including a backward edge or
+/// the unit value at a join brace with no events.
+fn end_fits(want: EndSpec, (row, to, col): (u32, u32, u32)) -> bool {
     match want {
         EndSpec::Row(r) => r == row,
-        EndSpec::Edge([r, n]) => r == row && (to == n || (to < n && (to..n).all(skip))),
-        EndSpec::EdgeCol([r, n, c]) => r == row && c == col && (to == n || (to < n && (to..n).all(skip))),
+        EndSpec::Edge([r, n]) => (r, n) == (row, to),
+        EndSpec::EdgeCol([r, n, c]) => (r, n, c) == (row, to, col),
     }
 }
 
 /// Whether the dump's ends match `want` one to one (a multiset: two
 /// edges ending on one row are two ends), in any order (a bipartite
 /// matching, so overlapping specs can't steal each other's edge).
-fn ends_match(want: &[EndSpec], got: &[(u32, u32, u32)], skip: &dyn Fn(u32) -> bool) -> bool {
+fn ends_match(want: &[EndSpec], got: &[(u32, u32, u32)]) -> bool {
     if want.len() != got.len() {
         return false;
     }
-    fn augment(w: usize, want: &[EndSpec], got: &[(u32, u32, u32)], skip: &dyn Fn(u32) -> bool, seen: &mut [bool], owner: &mut [Option<usize>]) -> bool {
+    fn augment(w: usize, want: &[EndSpec], got: &[(u32, u32, u32)], seen: &mut [bool], owner: &mut [Option<usize>]) -> bool {
         for g in 0..got.len() {
-            if !seen[g] && end_fits(want[w], got[g].0, got[g].1, got[g].2, skip) {
+            if !seen[g] && end_fits(want[w], got[g]) {
                 seen[g] = true;
-                if owner[g].is_none_or(|o| augment(o, want, got, skip, seen, owner)) {
+                if owner[g].is_none_or(|o| augment(o, want, got, seen, owner)) {
                     owner[g] = Some(w);
                     return true;
                 }
@@ -1103,7 +1142,7 @@ fn ends_match(want: &[EndSpec], got: &[(u32, u32, u32)], skip: &dyn Fn(u32) -> b
         false
     }
     let mut owner = vec![None; got.len()];
-    (0..want.len()).all(|w| augment(w, want, got, skip, &mut vec![false; got.len()], &mut owner))
+    (0..want.len()).all(|w| augment(w, want, got, &mut vec![false; got.len()], &mut owner))
 }
 
 fn kind_ok(want: &Option<String>, got: &str) -> bool {
@@ -1114,12 +1153,9 @@ fn kind_ok(want: &Option<String>, got: &str) -> bool {
     }
 }
 
-/// Ok(()) or what the facts say instead. `shape`: the program's; `hand`:
-/// the case's hand-written states (they say why a bare `maybe` is maybe).
-fn check(a: &Assertion, facts: &[BodyF], shape: &Shape, hand: &[(String, u32, String, String)]) -> Result<(), String> {
-    let src = &shape.lines[..];
+/// Ok(()) or what the facts say instead.
+fn check(a: &Assertion, facts: &[BodyF]) -> Result<(), String> {
     let b = body(facts, &a.func)?;
-    let skip = |k: u32| brace_only(src, k) && b.rows.get(&k).is_none_or(|r| r.facts.is_empty());
     match &a.check {
         Check::State { row, place, is } => {
             let r = row_after(b, *row);
@@ -1129,29 +1165,21 @@ fn check(a: &Assertion, facts: &[BodyF], shape: &Shape, hand: &[(String, u32, St
             let any_parts = parts.is_some_and(|(m, may)| !m.is_empty() || !may.is_empty());
             // `reserved` (a two-phase `&mut` before activation) lets others
             // read: not exclusive. `mut` and `unique` are.
-            let excl = lent.iter().any(|l| l.kind == "mut" || l.kind == "unique");
-            // Why a place is "maybe": the dump's cause when it gives one
-            // (`maybe-moved` / `maybe-unassigned`, or `cause`), else the
-            // case's hand-written state for this row; else undecided.
+            let excl = lent.iter().any(|l| matches!(l.kind.as_deref(), Some("mut" | "unique")));
+            let readable = lent.iter().all(|l| matches!(l.kind.as_deref(), Some("shared" | "reserved" | "shallow")));
             let cause = match st {
                 Some("maybe-moved") => Some("moved"),
                 Some("maybe-unassigned") => Some("unassigned"),
-                Some("maybe") => r.and_then(|r| r.cause.get(place)).map(String::as_str).or_else(|| {
-                    hand.iter().find(|(f, hr, hp, _)| *hr == *row && hp == place && canon_fn(f) == canon_fn(&a.func)).and_then(|h| match h.3.as_str() {
-                        "maybe-moved" => Some("moved"),
-                        "maybe-unassigned" => Some("unassigned"),
-                        _ => None,
-                    })
-                }),
+                Some("maybe") => r.and_then(|r| r.cause.get(place)).map(String::as_str),
                 _ => None,
             };
             let maybe = matches!(st, Some("maybe" | "maybe-moved" | "maybe-unassigned"));
             if maybe && cause.is_none() && matches!(is.as_str(), "moved*" | "unassigned*" | "maybe-moved" | "maybe-unassigned" | "maybe-imaginary") {
-                return Err(format!("`maybe` without a cause after row {row}: add a hand-written maybe-moved / maybe-unassigned state for {place} on this row"));
+                return Err(format!("`maybe` without a cause after row {row}: the dump must distinguish moved from unassigned for {place}"));
             }
             let ok = match is.as_str() {
                 "own" => st == Some("own") && lent.is_empty() && !any_parts,
-                "shared" => st == Some("own") && !lent.is_empty() && !excl,
+                "shared" => st == Some("own") && !lent.is_empty() && readable,
                 "mut" => matches!(st, Some("own" | "partly")) && excl,
                 "moved" => st == Some("moved"),
                 "maybe-moved" => maybe && cause == Some("moved"),
@@ -1169,7 +1197,7 @@ fn check(a: &Assertion, facts: &[BodyF], shape: &Shape, hand: &[(String, u32, St
                 _ => false,
             };
             let got = format!("{} lent {:?} parts {:?}", st.unwrap_or("(no state for this row)"),
-                lent.iter().map(|l| format!("{}:L{}->{}", l.kind, l.loan, l.holders.join("|"))).collect::<Vec<_>>(), parts);
+                lent.iter().map(|l| format!("{}:L{}->{}", l.kind.as_deref().unwrap_or("phase unknown"), l.loan, l.holders.join("|"))).collect::<Vec<_>>(), parts);
             if ok { Ok(()) } else { Err(got) }
         }
         Check::Lent { row, place, kind, holder, lender, absent } => {
@@ -1179,12 +1207,20 @@ fn check(a: &Assertion, facts: &[BodyF], shape: &Shape, hand: &[(String, u32, St
                 return Err("(no state for this row)".into());
             }
             let lender_of = |l: &Lent| b.loans.iter().find(|x| x.id == l.loan).map(|x| x.lender.as_str());
-            let hit = lent.iter().any(|l| {
-                kind_ok(kind, &l.kind)
-                    && holder.as_deref().is_none_or(|h| h == "_" || l.holders.iter().any(|x| x == h))
+            let candidates = lent.iter().filter(|l| {
+                holder.as_deref().is_none_or(|h| h == "_" || l.holders.iter().any(|x| x == h))
                     && lender.as_deref().is_none_or(|w| lender_of(l) == Some(w))
             });
-            let got = format!("lent {:?}", lent.iter().map(|l| format!("{}:L{}->{}", l.kind, l.loan, l.holders.join("|"))).collect::<Vec<_>>());
+            let two_phase = |l: &Lent| b.loans.iter().find(|x| x.id == l.loan).is_some_and(|x| x.two_phase);
+            // Only a two-phase loan can be reserved: the loan record must agree with the row.
+            let hit = candidates.clone().any(|l| kind.is_none()
+                || l.kind.as_deref().is_some_and(|k| kind_ok(kind, k) && (k != "reserved" || two_phase(l))));
+            if !hit && matches!(kind.as_deref(), Some("reserved" | "exclusive" | "mut"))
+                && candidates.clone().any(|l| l.kind.is_none())
+            {
+                return Err("the dump has no phase for this two-phase loan".into());
+            }
+            let got = format!("lent {:?}", lent.iter().map(|l| format!("{}:L{}->{}", l.kind.as_deref().unwrap_or("phase unknown"), l.loan, l.holders.join("|"))).collect::<Vec<_>>());
             if hit != *absent { Ok(()) } else { Err(got) }
         }
         Check::Loan(l) => {
@@ -1214,7 +1250,7 @@ fn check(a: &Assertion, facts: &[BodyF], shape: &Shape, hand: &[(String, u32, St
                 });
                 let rec = |r: &u32| x.end_lines.as_ref().is_none_or(|el| el.contains(r));
                 let not_rec = |r: &u32| x.end_lines.as_ref().is_none_or(|el| !el.contains(r));
-                l.ends.as_ref().is_none_or(|want| ends_match(want, &e, &skip) && summary_ok(want))
+                l.ends.as_ref().is_none_or(|want| ends_match(want, &e) && summary_ok(want))
                     && l.ends_include.iter().all(|r| e.iter().any(|g| g.0 == *r) && rec(r))
                     && !l.ends_exclude.iter().any(|r| e.iter().any(|g| g.0 == *r) || !not_rec(r))
             };
@@ -1228,8 +1264,8 @@ fn check(a: &Assertion, facts: &[BodyF], shape: &Shape, hand: &[(String, u32, St
             if l.absent { if cands.is_empty() { Ok(()) } else { Err(got) } } else if hit { Ok(()) } else { Err(got) }
         }
         Check::Drop { row, place, how, absent } => {
-            let fs: Vec<&Value> = row_facts(b, *row).into_iter().map(|x| x.0).collect();
-            let drops: Vec<&&Value> = fs.iter().filter(|f| {
+            let fs = row_facts(b, *row);
+            let drops: Vec<&Value> = fs.events().filter(|f| {
                 let ev = f["ev"].as_str().unwrap_or("");
                 (ev == "Drop" || ev == "ScopeEnd") && f["path"].as_str() == Some(place.as_str())
             }).collect();
@@ -1244,33 +1280,53 @@ fn check(a: &Assertion, facts: &[BodyF], shape: &Shape, hand: &[(String, u32, St
                     _ => !scope_end && h != "nothing_to_drop",
                 }
             });
+            if *absent && !hit && fs.may_drop(place) {
+                return Err(format!("shared drop of {place} has no drop kind for this exit"));
+            }
             let got = format!("{:?}", drops.iter().map(|f| f.to_string()).collect::<Vec<_>>());
             if hit != *absent { Ok(()) } else { Err(got) }
         }
         Check::Event { row, ev, absent } => {
             let p = Pat::parse(ev)?;
-            let fs: Vec<&Value> = row_facts(b, *row).into_iter().map(|x| x.0).collect();
+            let row = row_facts(b, *row);
+            let fs: Vec<_> = row.events().collect();
             let hit = fs.iter().any(|f| p.matches(f));
+            if *absent && !hit && p.kind == "drop" && row.may_drop(&p.place) {
+                return Err(format!("shared drop of {} may run on this exit", p.place));
+            }
             if hit != *absent { Ok(()) } else { Err(format!("row facts: {}", brief(&fs))) }
         }
-        Check::Order { row, events } => {
+        Check::Order { row, events, exact_drops } => {
+            if b.version.is_none() {
+                return Err("spike dumps sort events by kind and have no arm membership to prove order on one path".into());
+            }
             let pats: Vec<Pat> = events.iter().map(|e| Pat::parse(e)).collect::<Result<_, _>>()?;
-            let fs = row_facts(b, *row);
+            let fs = row_facts(b, *row).located;
+            // A v1 producer moved an early-exit drop to the exit row but took
+            // its `arm` at the original cleanup location.
+            if b.version == Some(1) && fs.iter().any(|f| f["early_exit"].is_u64()) {
+                return Err("a v1 early-exit drop's arm is not the exit's: order cannot be proved on one path".into());
+            }
             // One sequence per path through the row: facts outside any arm
             // plus those of one choice of arms (one arm per branch whose
             // parent arm runs; sequential branches on one row combine).
             let arms = b.rows.get(row).map_or(&[][..], |r| &r.arms[..]);
             let in_order = |path: &[usize]| {
                 let mut k = 0;
-                for (f, arm) in &fs {
-                    if arm.is_none_or(|a| path.contains(&a)) && k < pats.len() && pats[k].matches(f) {
-                        k += 1;
+                let mut drops = 0;
+                for f in &fs {
+                    let arm = f["arm"].as_u64().map(|a| a as usize);
+                    if arm.is_none_or(|a| path.contains(&a)) {
+                        drops += (f["ev"] == "Drop") as usize;
+                        if k < pats.len() && pats[k].matches(f) {
+                            k += 1;
+                        }
                     }
                 }
-                k == pats.len()
+                // `exact_drops`: the path runs no destructor the order doesn't name.
+                k == pats.len() && (!*exact_drops || drops == pats.iter().filter(|p| p.kind == "drop").count())
             };
-            let all: Vec<&Value> = fs.iter().map(|x| x.0).collect();
-            if arm_paths(arms).iter().any(|p| in_order(p)) { Ok(()) } else { Err(format!("row facts in order: {}", brief(&all))) }
+            if arm_paths(arms).iter().any(|p| in_order(p)) { Ok(()) } else { Err(format!("row facts in order: {}", brief(&fs))) }
         }
     }
 }
@@ -1352,16 +1408,12 @@ fn rv3_issue_cases_against_facts() {
             }
         };
         checked += 1;
-        let src = all.iter().find(|c| &c.0 == name).map(|c| c.1.as_str()).unwrap_or("");
-        let shape = Shape::of(src);
-        let hand: Vec<(String, u32, String, String)> = case.state.iter()
-            .map(|h| (h.func.clone().unwrap_or_else(|| case.func.clone()), h.row, h.place.clone(), h.is.clone())).collect();
         let mut fails = Vec::new();
         for a in assertions(case) {
             a_total += 1;
             let e = a_pass.entry(a.src.clone()).or_default();
             e.1 += 1;
-            match check(&a, facts, &shape, &hand) {
+            match check(&a, facts) {
                 Ok(()) => e.0 += 1,
                 Err(got) => fails.push(format!("    [{}] {}: got {}", a.src, a.what, got)),
             }
@@ -1473,10 +1525,15 @@ fn gen_one(name: &str, src: &str, text: &str) -> String {
         Err(e) => return format!("hand-written part doesn't parse: {e}"),
     };
     let tc = toolchain();
-    let mut block = format!("{GEN_MARK}\n[oracle]\ntoolchain = {:?}\nsource_hash = {:?}\n", tc, source_hash(src, &case.places, &tc));
+    let mut block = format!("{GEN_MARK}\n[oracle]\ntoolchain = {:?}\nsource_hash = {:?}\n", tc, source_hash(src, &case, &tc));
     let mut note = String::new();
-    match common::oracle::derive_states(src, &case.places) {
+    match common::oracle::derive_states(src, &case.places, &case.probe) {
         Ok(states) => {
+            for p in &case.probe {
+                if !states.iter().any(|d| d.line == p.row && d.place == p.place && d.func == p.func) {
+                    return format!("FAILED, no rustc verdict for {} {} {}; previous block kept", p.func, p.row, p.place);
+                }
+            }
             block.push_str("states = [\n");
             for d in &states {
                 let _ = writeln!(block, "  \"{} {} {} {}\",", d.func, d.line, d.place, d.is);
@@ -1496,7 +1553,7 @@ fn gen_one(name: &str, src: &str, text: &str) -> String {
         Err(e) => {
             // A failure must not erase states generated before (a transient
             // rustc or probe failure): keep the old block and fail the run.
-            if case_had_states(text) {
+            if case_had_states(text) || !case.probe.is_empty() {
                 return format!("FAILED, kept the previous block: {e}");
             }
             let _ = writeln!(block, "skipped = {e:?}");
@@ -1514,8 +1571,6 @@ fn gen_one(name: &str, src: &str, text: &str) -> String {
 #[test]
 fn rv3_harness_catches_wrong_facts() {
     let text = std::fs::read_to_string(cases_dir().join("1675_repoint_in_arm.expect.toml")).unwrap();
-    let src = std::fs::read_to_string(cases_dir().join("1675_repoint_in_arm.rs")).unwrap();
-    let shape = Shape::of(&src);
     let case: Case = toml::from_str(&text).unwrap();
     // `l0_end5`: the row-5 end of c's loan of x, on the edge into the arm
     // (next row 6), or none.
@@ -1537,7 +1592,7 @@ fn rv3_harness_catches_wrong_facts() {
         load_facts(&v).unwrap()
     };
     let issue: Vec<Assertion> = assertions(&case).into_iter().filter(|a| a.src == "issue").collect();
-    let failing = |f: &[BodyF]| issue.iter().filter(|a| check(a, f, &shape, &[]).is_err()).map(|a| a.what.clone()).collect::<Vec<_>>();
+    let failing = |f: &[BodyF]| issue.iter().filter(|a| check(a, f).is_err()).map(|a| a.what.clone()).collect::<Vec<_>>();
     let right = dump(true, "[]");
     assert!(failing(&right).is_empty(), "right facts fail: {:?}", failing(&right));
     let wrong = dump(false, r#"[{"loan": 0, "kind": "shared", "holder": "c"}]"#);
@@ -1553,8 +1608,6 @@ fn rv3_harness_catches_wrong_facts() {
 #[test]
 fn rv3_harness_loan_checks_skip_untracked() {
     let text = std::fs::read_to_string(cases_dir().join("1567_match_reborrow_param_end.expect.toml")).unwrap();
-    let src = std::fs::read_to_string(cases_dir().join("1567_match_reborrow_param_end.rs")).unwrap();
-    let shape = Shape::of(&src);
     let case: Case = toml::from_str(&text).unwrap();
     let dump = |source: &str| -> Vec<BodyF> {
         let v: Value = serde_json::from_str(&format!(r#"{{"version": 3, "errors": [], "bodies": [{{"func": "run",
@@ -1563,7 +1616,7 @@ fn rv3_harness_loan_checks_skip_untracked() {
         load_facts(&v).unwrap()
     };
     let issue: Vec<Assertion> = assertions(&case).into_iter().filter(|a| a.src == "issue").collect();
-    let failing = |f: &[BodyF]| issue.iter().filter(|a| check(a, f, &shape, &[]).is_err()).map(|a| a.what.clone()).collect::<Vec<_>>();
+    let failing = |f: &[BodyF]| issue.iter().filter(|a| check(a, f).is_err()).map(|a| a.what.clone()).collect::<Vec<_>>();
     assert!(failing(&dump("untracked")).is_empty(), "{:?}", failing(&dump("untracked")));
     assert!(!failing(&dump("borrow")).is_empty(), "a tracked loan of *p must still contradict it");
 }
@@ -1588,23 +1641,12 @@ fn rv3_harness_adapter() {
     assert!(overlaps("**r", "r", &types), "**r through &mut &mut restricts r");
     assert!(!overlaps("**q", "q", &types), "**q through &mut & doesn't restrict q (`&mut q` compiles while it's live)");
     assert!(overlaps("v[_]", "v", &types) && overlaps("p.a", "p", &types) && overlaps("p", "p.a", &types));
-    let src = ["fn f() {", "    if c {", "        x();", "    }", "    y();", "}"];
-    let braces = |k: u32| brace_only(&src, k);
-    // An end on row 2 on the path that skips the arm continues at row 4's
-    // `}` (braces only) and then row 5.
-    assert!(ends_match(&[EndSpec::Edge([2, 5])], &[(2, 4, 0)], &braces));
-    assert!(!ends_match(&[EndSpec::Edge([2, 5])], &[(2, 4, 0)], &|_| false), "a brace row with facts isn't skipped");
-    assert!(!ends_match(&[EndSpec::Edge([2, 5])], &[(2, 3, 0)], &braces), "the edge into the arm is another path");
-    assert!(!ends_match(&[EndSpec::Edge([2, 5])], &[(2, 2, 0)], &braces), "an end before the branch isn't per path");
-    assert!(!ends_match(&[EndSpec::Row(2)], &[(2, 3, 0), (2, 4, 0)], &braces), "two edges are two ends");
-    assert!(ends_match(&[EndSpec::Row(2), EndSpec::Edge([2, 3])], &[(2, 4, 0), (2, 3, 0)], &braces));
-    assert!(ends_match(&[EndSpec::Row(4), EndSpec::Row(4)], &[(4, 5, 16), (4, 5, 38)], &braces), "two ends on one row pair, two columns");
-    assert!(ends_match(&[EndSpec::EdgeCol([4, 5, 16]), EndSpec::EdgeCol([4, 5, 38])], &[(4, 5, 38), (4, 5, 16)], &braces));
-    assert!(!ends_match(&[EndSpec::EdgeCol([4, 5, 16]), EndSpec::EdgeCol([4, 5, 16])], &[(4, 5, 16), (4, 5, 38)], &braces), "the column is checked");
-    let src2 = ["fn f() {", "    if c {", "    }", "    }", "    y();"];
-    let braces2 = |k: u32| brace_only(&src2, k);
-    assert!(ends_match(&[EndSpec::Edge([2, 5]), EndSpec::Edge([2, 4])], &[(2, 4, 0), (2, 5, 0)], &braces2), "matching is order-free");
-    assert!(ends_match(&[EndSpec::Edge([5, 2])], &[(5, 2, 0)], &braces2), "a back edge's next row is earlier");
+    assert!(!ends_match(&[EndSpec::Row(2)], &[(2, 3, 0), (2, 4, 0)]), "two edges are two ends");
+    assert!(ends_match(&[EndSpec::Row(2), EndSpec::Edge([2, 3])], &[(2, 4, 0), (2, 3, 0)]));
+    assert!(ends_match(&[EndSpec::Row(4), EndSpec::Row(4)], &[(4, 5, 16), (4, 5, 38)]), "two ends on one row pair, two columns");
+    assert!(ends_match(&[EndSpec::EdgeCol([4, 5, 16]), EndSpec::EdgeCol([4, 5, 38])], &[(4, 5, 38), (4, 5, 16)]));
+    assert!(!ends_match(&[EndSpec::EdgeCol([4, 5, 16]), EndSpec::EdgeCol([4, 5, 16])], &[(4, 5, 16), (4, 5, 38)]), "the column is checked");
+    assert!(ends_match(&[EndSpec::Edge([5, 2])], &[(5, 2, 0)]), "a back edge's next row is earlier");
     let v: Value = serde_json::from_str(r#"{"version": 2, "bodies": [
         {"func": "A::run", "loans": [], "rows": [
           {"line": 3, "state": {"s": "own"}, "lent": {}, "facts": []},
@@ -1621,13 +1663,12 @@ fn rv3_harness_adapter() {
     assert!(body(&f, "<D as Drop>::drop").is_err(), "an unqualified D names neither");
     let a = body(&f, "A::run").unwrap();
     assert!(row_after(a, 4).is_none(), "row 4 has no state: not carried from row 3");
-    let drops = |row: u32| row_facts(a, row).iter().map(|f| f.0["path"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    let drops = |row: u32| row_facts(a, row).events().map(|f| f["path"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
     assert_eq!(drops(4), vec!["s", "t"]);
     assert_eq!(drops(6), vec!["t", "u"], "s's drop runs only on the exit");
-    let shape = Shape::default();
     let drop_u = Assertion { src: "issue".into(), func: "A::run".into(), what: String::new(),
         check: Check::Drop { row: 6, place: "u".into(), how: "definite".into(), absent: false } };
-    assert!(check(&drop_u, &f, &shape, &[]).is_err(), "nothing_to_drop is no destructor");
+    assert!(check(&drop_u, &f).is_err(), "nothing_to_drop is no destructor");
     assert!(facts_of(Some("/nonexistent/rv3-facts"), "x", "", None).is_err(), "a missing RV3_FACTS_DIR is an error");
     let bad: Value = serde_json::from_str(r#"{"version": 1, "bodies": [], "errors": ["main: panicked"]}"#).unwrap();
     assert!(load_facts(&bad).is_err(), "a producer error is a read failure");
@@ -1643,18 +1684,15 @@ fn rv3_harness_adapter() {
     assert!(paths.contains(&vec![0, 2]) && paths.contains(&vec![1, 3]));
     let nested = arm_paths(&[(0, None), (0, None), (1, Some(1)), (1, Some(1))]);
     assert_eq!(nested.len(), 3, "{nested:?}");
-    // A bare `maybe` needs a cause: the dump's, or the case's hand state.
+    // A bare `maybe` needs a cause from the producer.
     let m: Value = serde_json::from_str(r#"{"version": 2, "bodies": [{"func": "main", "loans": [], "rows": [
         {"line": 4, "state": {"s": "maybe"}, "lent": {}, "facts": []},
         {"line": 5, "state": {"s": "maybe"}, "cause": {"s": "unassigned"}, "lent": {}, "facts": []}]}], "errors": []}"#).unwrap();
     let mf = load_facts(&m).unwrap();
     let st = |row: u32, is: &str| Assertion { src: "oracle".into(), func: "main".into(), what: String::new(),
         check: Check::State { row, place: "s".into(), is: is.into() } };
-    assert!(check(&st(4, "moved*"), &mf, &shape, &[]).is_err(), "no cause: undecided");
-    let hand = [("main".to_owned(), 4, "s".to_owned(), "maybe-moved".to_owned())];
-    assert!(check(&st(4, "moved*"), &mf, &shape, &hand).is_ok());
-    assert!(check(&st(4, "unassigned*"), &mf, &shape, &hand).is_err());
-    assert!(check(&st(5, "unassigned*"), &mf, &shape, &[]).is_ok() && check(&st(5, "moved*"), &mf, &shape, &[]).is_err());
+    assert!(check(&st(4, "moved*"), &mf).is_err(), "no cause: undecided");
+    assert!(check(&st(5, "unassigned*"), &mf).is_ok() && check(&st(5, "moved*"), &mf).is_err());
 }
 
 #[test]
@@ -1666,4 +1704,180 @@ fn scope_marks_dropped_only_when_columns_stay_apart() {
         "rows": [{"line": 2, "state": {"x": "moved", "x": "own"}, "lent": {}, "facts": []}], "loans": []}]}"#).unwrap();
     let st = &unmark(&two).unwrap()["bodies"][0]["rows"][0]["state"];
     assert_eq!(st.as_object().map(|o| o.len()), Some(2), "two columns that differ only by marks stay apart: {st}");
+}
+
+/// Corrupt or incomplete dumps must not prove facts that rustc cannot establish.
+fn check_fixture(dump: Value, assertion: Check) -> Result<(), String> {
+    let a = Assertion { src: "issue".into(), func: "main".into(), what: String::new(), check: assertion };
+    check(&a, &load_facts(&dump)?)
+}
+
+#[test]
+fn missing_producer_cause_is_not_proved_by_the_expectation() {
+    let dump = serde_json::json!({"version":2,"bodies":[{"func":"main","rows":[{"line":2,"state":{"x":"maybe"}}]}]});
+    assert!(check_fixture(dump, Check::State { row: 2, place: "x".into(), is: "maybe-moved".into() }).is_err());
+}
+
+#[test]
+fn an_edge_to_the_join_brace_is_distinct_from_the_statement_after_it() {
+    // In MIR the implicit else assigns () at the join brace. The following
+    // statement is a separate location even when the brace has no events.
+    let dump = serde_json::json!({"version":2,"bodies":[{"func":"main","loans":[
+        {"loan":0,"line":1,"lender":"x","kind":"shared","end_lines":[2]}],"rows":[
+        {"line":2,"facts":[{"ev":"BorrowEnd","loan":0,"to_line":4,"to_col":5}]}]}]});
+    let loan = |to| Check::Loan(LoanA { row: 1, lender: "x".into(), holder: None, kind: None,
+        ends: Some(vec![EndSpec::Edge([2,to])]), ends_include: vec![], ends_exclude: vec![],
+        col: None, absent: false, src: "issue".into(), func: None, why: None });
+    assert!(check_fixture(dump.clone(), loan(4)).is_ok());
+    assert!(check_fixture(dump, loan(5)).is_err());
+}
+
+#[test]
+fn spike_order_needs_path_evidence() {
+    // if c { drop(x) } else { drop(y) }: the two MIR calls are siblings.
+    let dump = serde_json::json!([{"func":"main","rows":[{"line":2,"facts":[
+        {"ev":"Move","path":"x","to":"drop()"},{"ev":"Move","path":"y","to":"drop()"}]}]}]);
+    assert!(check_fixture(dump, Check::Order { row: 2, events: vec!["move x".into(), "move y".into()], exact_drops: false }).is_err());
+}
+
+#[test]
+fn spike_two_phase_kind_alone_does_not_prove_exclusivity() {
+    // v.push(v.len()) compiles: its receiver loan exists while len reads v.
+    let dump = serde_json::json!([{"func":"main","rows":[{"line":2,"state":{"v":"own"},"lent":{"v":["mut:L0->push()"]}}],
+        "loans":[{"loan":0,"line":2,"lender":"v","kind":"mut(two-phase)"}]}]);
+    for is in ["mut", "shared"] {
+        assert!(check_fixture(dump.clone(), Check::State { row: 2, place: "v".into(), is: is.into() }).is_err(),
+            "the spike has no reservation/activation phase for {is}");
+    }
+}
+
+#[test]
+fn shared_drop_summary_does_not_duplicate_an_exit_drop() {
+    // A local's destructor runs once on return. The exit copy carries the
+    // arm and drop kind for that path; the scope-end summary is on another row.
+    let dump = serde_json::json!({"version":2,"bodies":[{"func":"main","rows":[
+        {"line":2,"arms":[{"branch":0},{"branch":0}],"facts":[
+            {"ev":"Drop","path":"x","how":"drops","early_exit":2,"arm":0},
+            {"ev":"Move","path":"y","to":"drop()","arm":1}]},
+        {"line":6,"facts":[{"ev":"Drop","path":"x","how":"drops_if_init","also_on_exits":[2]}]}]}]});
+    for seq in [["drop x","drop x"],["move y","drop x"]] {
+        assert!(check_fixture(dump.clone(), Check::Order { row: 2, events: seq.map(String::from).to_vec(), exact_drops: false }).is_err());
+    }
+    // An older v2 summary records a conditional drop but gives the exit
+    // no local event. That alone cannot prove the destructor was skipped.
+    let summary_only = serde_json::json!({"version":2,"bodies":[{"func":"main","rows":[
+        {"line":6,"facts":[{"ev":"Drop","path":"x","how":"drops_if_init","also_on_exits":[2]}]}]}]});
+    assert!(check_fixture(summary_only, Check::Event { row: 2, ev: "drop x".into(), absent: true }).is_err());
+}
+
+#[test]
+fn exit_and_summary_on_one_row_are_one_destructor() {
+    // `return` and the closing `}` on row 2: x is dropped once on the exit.
+    // The scope-end summary (no `early_exit`, lists row 2) is not a second drop.
+    let dump = serde_json::json!({"version":3,"bodies":[{"func":"main","rows":[
+        {"line":2,"facts":[
+            {"ev":"Drop","path":"x","how":"drops","early_exit":2},
+            {"ev":"Drop","path":"x","how":"drops","also_on_exits":[2]}]}]}]});
+    let order = |events: [&str; 2]| Check::Order { row: 2, events: events.map(String::from).to_vec(), exact_drops: false };
+    assert!(check_fixture(dump.clone(), order(["drop x", "drop x"])).is_err(), "one destructor, not two");
+    assert!(check_fixture(dump, Check::Order { row: 2, events: vec!["drop x".into()], exact_drops: true }).is_ok());
+}
+
+#[test]
+fn exact_drops_rejects_a_drop_the_order_does_not_name() {
+    // On this path `a` moved into n, so only b is dropped. A dump that
+    // drops both still contains the subsequence [move a, drop b].
+    let dump = serde_json::json!({"version":3,"bodies":[{"func":"main","rows":[
+        {"line":5,"facts":[
+            {"ev":"Move","path":"a","to":"n"},
+            {"ev":"Drop","path":"a","how":"drops","early_exit":5},
+            {"ev":"Drop","path":"b","how":"drops","early_exit":5}]}]}]});
+    let order = |exact_drops| Check::Order { row: 5, events: vec!["move a -> n".into(), "drop b".into()], exact_drops };
+    assert!(check_fixture(dump.clone(), order(false)).is_ok());
+    assert!(check_fixture(dump, order(true)).is_err());
+}
+
+#[test]
+fn v3_exit_events_are_complete_so_a_summary_cannot_veto_absence() {
+    // x moved before the return on row 2, so the producer gives that exit no
+    // drop of x; a shared cleanup on row 6 still lists the exit.
+    let dump = |v: u32| serde_json::json!({"version":v,"bodies":[{"func":"main","rows":[
+        {"line":6,"facts":[{"ev":"Drop","path":"x","how":"drops_if_init","also_on_exits":[2]}]}]}]});
+    let absent = || Check::Event { row: 2, ev: "drop x".into(), absent: true };
+    assert!(check_fixture(dump(3), absent()).is_ok());
+    assert!(check_fixture(dump(2), absent()).is_err(), "an older dump can't resolve the exit");
+}
+
+#[test]
+fn v1_early_exit_arm_cannot_prove_an_order() {
+    let dump = serde_json::json!({"version":1,"bodies":[{"func":"main","rows":[
+        {"line":2,"facts":[{"ev":"Move","path":"y","to":"n"},{"ev":"Drop","path":"x","how":"drops","early_exit":2}]}]}]});
+    assert!(check_fixture(dump, Check::Order { row: 2, events: vec!["move y".into(), "drop x".into()], exact_drops: false }).is_err());
+}
+
+#[test]
+fn a_two_phase_kind_spelling_or_record_does_not_prove_a_phase() {
+    let dump = |row_kind: &str, two_phase: bool| serde_json::json!({"version":3,"bodies":[{"func":"main",
+        "loans":[{"loan":0,"line":2,"lender":"v","kind":"mut","two_phase":two_phase,"source":"borrow"}],
+        "rows":[{"line":2,"state":{"v":"own"},"lent":{"v":[{"loan":0,"kind":row_kind,"holder":"remove()"}]}}]}]});
+    let lent = |kind: &str| Check::Lent { row: 2, place: "v".into(), kind: Some(kind.into()), holder: None, lender: None, absent: false };
+    // `mut(two-phase)` is the loan's kind, with no activation phase.
+    assert!(check_fixture(dump("mut(two-phase)", true), lent("mut")).is_err());
+    assert!(check_fixture(dump("mut(two-phase)", true), lent("shared")).is_err());
+    // Only a two-phase loan can be reserved.
+    assert!(check_fixture(dump("reserved", true), lent("reserved")).is_ok());
+    assert!(check_fixture(dump("reserved", false), lent("reserved")).is_err());
+}
+
+#[test]
+fn explicit_probe_must_name_the_body_it_is_in() {
+    use common::oracle::{derive_states, IssueProbe};
+    let src = include_str!("../../rustviz-plugin/tests/rv3_issues/1845_nested_probe_points.rs");
+    // Row 6's `local` is in the closure; labelling it `run` would present the
+    // closure's measurement as a verdict about the outer function.
+    let wrong = IssueProbe { func: "run".into(), row: 6, place: "local".into() };
+    let err = derive_states(src, &[], &[wrong]).unwrap_err();
+    assert!(err.contains("not `run`"), "{err}");
+    // And the converse: a closure name for a probe in the outer function.
+    let wrong = IssueProbe { func: "run::{closure#0}".into(), row: 11, place: "arg".into() };
+    assert!(derive_states(src, &[], &[wrong]).is_err());
+}
+
+#[test]
+fn explicit_probes_refuse_programs_with_glob_imports() {
+    use common::oracle::{derive_states, IssueProbe};
+    // With `Equal` imported, `let Equal = o else { .. }` matches the variant
+    // and binds nothing.
+    let src = "use std::cmp::Ordering::*;\nfn f(o: std::cmp::Ordering) {\n    let Equal = o else { return; };\n    let n = 1;\n}\n";
+    let p = IssueProbe { func: "f".into(), row: 3, place: "Equal".into() };
+    assert!(derive_states(src, &[], &[p]).unwrap_err().contains("glob"));
+}
+
+#[test]
+fn issue_assertions_cite_their_evidence() {
+    let case = "issue=1845\ncluster='C01'\ntitle='Evidence'\n[[event]]\nrow=1\nev='move x'\nsrc='issue'\nwhy=' '\n";
+    assert!(problems("1845_evidence", "fn main() {}", case).iter().any(|m| m.contains("why")));
+}
+
+#[test]
+fn explicit_probes_measure_nested_locals_and_skip_unreachable_uses() {
+    use common::oracle::{derive_states, IssueProbe};
+    let src = include_str!("../../rustviz-plugin/tests/rv3_issues/1845_nested_probe_points.rs");
+    let text = include_str!("../../rustviz-plugin/tests/rv3_issues/1845_nested_probe_points.expect.toml");
+    let case: Case = toml::from_str(text).unwrap();
+    let states = derive_states(src, &case.places, &case.probe).unwrap();
+    let state = |f, row, place| states.iter().find(|d| d.func == f && d.line == row && d.place == place).map(|d| d.is);
+    assert_eq!(state("run::{closure#0}", 6, "local"), Some("moved*"));
+    assert_eq!(state("run", 11, "arg"), Some("own"));
+    assert_eq!(state("run", 12, "arg"), Some("moved*"));
+    assert_eq!(state("stopped", 20, "s"), None);
+
+    // An outer variable used only by an added probe would create a capture.
+    let outer = IssueProbe { func: "run::{closure#0}".into(), row: 6, place: "outside".into() };
+    let src = src.replace("pub fn run() -> usize {", "pub fn run() -> usize { let outside = 42;");
+    assert!(derive_states(&src, &[], &[outer]).unwrap_err().contains("same block"));
+
+    let dead = IssueProbe { func: "stopped".into(), row: 20, place: "s".into() };
+    let states = derive_states(&src, &[], &[dead]).unwrap();
+    assert!(!states.iter().any(|d| d.func == "stopped" && d.line == 20));
 }

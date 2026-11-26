@@ -236,7 +236,9 @@ pub struct Arm {
 pub struct Ev {
     /// Source column (1-based) where the MIR location's span starts.
     pub col: usize,
-    /// The arm of `Row::arms` it happens in (innermost), if any.
+    /// The innermost arm of this event's row. For an early-exit drop,
+    /// this indexes the exit row's arms, including when several exits on
+    /// that row share a destructor in MIR.
     pub arm: Option<usize>,
     #[serde(flatten)]
     pub fact: Fact,
@@ -288,7 +290,8 @@ pub enum Fact {
     /// "nothing_to_drop". `early_exit`: the row of
     /// the `return` / `break` / `continue` / `?` whose path alone runs
     /// this drop (its MIR span is the scope's `}`); `also_on_exits`: rows
-    /// of early exits that share this drop with the normal path.
+    /// of exits sharing this MIR drop. Each exit that drops a value has
+    /// its own event with the arm and drop kind for that path.
     Drop { path: String, how: &'static str, at_reassign: bool, early_exit: Option<usize>, also_on_exits: Vec<usize> },
     /// `StorageDead` of a variable with nothing to drop.
     ScopeEnd { path: String, note: &'static str },

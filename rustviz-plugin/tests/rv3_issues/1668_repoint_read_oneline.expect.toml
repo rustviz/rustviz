@@ -19,6 +19,7 @@ lender = "b"
 holder = "r"
 kind = "shared"
 src = "issue"
+why = "MIR assigns &b to r between the len and is_empty calls on this same row."
 
 [[order]]
 row = 6

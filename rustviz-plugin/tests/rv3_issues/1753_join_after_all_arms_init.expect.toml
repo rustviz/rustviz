@@ -17,6 +17,7 @@ row = 9
 place = "r"
 is = "own"
 src = "issue"
+why = "With r bound as mut, `let _ = &mut r;` immediately after row 9 compiles."
 
 [[state]]
 row = 13

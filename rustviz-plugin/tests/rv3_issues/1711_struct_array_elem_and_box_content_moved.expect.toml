@@ -28,6 +28,7 @@ row = 5
 place = "p"
 is = "partly"
 src = "issue"
+why = "Borrowing p after row 5 gives E0382 for a partial move on row 4."
 
 # p is dropped at the end for what is left: p.a[1], the Box's allocation, p.z.
 [[drop]]

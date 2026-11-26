@@ -17,6 +17,7 @@ row = 8
 place = "s"
 is = "own"
 src = "issue"
+why = "`let _ = &mut s;` immediately after row 8 compiles."
 
 [[state]]
 row = 11

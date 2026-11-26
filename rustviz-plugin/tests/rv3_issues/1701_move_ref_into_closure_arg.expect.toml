@@ -14,6 +14,7 @@ row = 4
 place = "r"
 is = "moved"
 src = "issue"
+why = "Borrowing r after row 4 gives E0382. Rustc identifies the move on row 4."
 
 [[drop]]
 row = 4

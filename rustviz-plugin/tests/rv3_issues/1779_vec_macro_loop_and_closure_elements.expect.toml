@@ -17,6 +17,7 @@ row = 3
 place = "loop_s"
 is = "moved"
 src = "issue"
+why = "Borrowing loop_s after row 3 gives E0382. Rustc identifies the move on row 3."
 
 [[drop]]
 row = 5

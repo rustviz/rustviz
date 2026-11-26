@@ -17,6 +17,7 @@ row = 8
 place = "p.b"
 is = "moved"
 src = "issue"
+why = "Borrowing p.b after row 8 gives E0382. Rustc identifies the move on row 8."
 
 [[state]]
 row = 8
@@ -37,6 +38,7 @@ row = 9
 place = "p.b"
 is = "maybe-moved"
 src = "issue"
+why = "Only the then arm moves p.b into b. Borrowing p.b at the join is E0382."
 
 [[state]]
 row = 9

@@ -27,6 +27,7 @@ place = "a9"
 kind = "mut"
 holder = "o9"
 src = "issue"
+why = "The true arm passes &mut a9 to downgrade. Its returned reference can be in o9 when the println uses it."
 
 [[event]]
 row = 5

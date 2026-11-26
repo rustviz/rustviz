@@ -21,6 +21,7 @@ holder = "a8"
 kind = "shared"
 ends = [3]
 src = "issue"
+why = "In the false-pattern alternative MIR borrows the second tuple field into a8. Neither successor of the nested if reads a8."
 
 [[lent]]
 row = 4

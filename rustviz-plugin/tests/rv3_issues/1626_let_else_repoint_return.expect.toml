@@ -1,7 +1,7 @@
 issue = 1626
 cluster = "C05"
 title = "let-else whose `else` re-points `r = &mut b` and returns: the write `*r = ..` after it is drawn dropping b's value"
-note = "Spike: the else block's events (`r = &mut b`, its loan) are dumped on row 8, and the return path's drops of a and b on row 10 with no early-exit row. rv3-p0 build: the else path's end continues at row 8 (`};`), not row 6."
+note = "The failed match continues at the assignment `r = &mut b` on row 6. Success reaches the write through the original r on row 9."
 
 [[loan]]
 row = 4
@@ -34,6 +34,7 @@ place = "a"
 kind = "mut"
 holder = "r"
 src = "issue"
+why = "Only the Some successor reaches *r = String::new(), with the original &mut a. The assignment of &mut b is followed by return."
 
 [[drop]]
 row = 9
@@ -47,6 +48,7 @@ row = 9
 place = "b"
 absent = true
 src = "issue"
+why = "The write through r reaches a on the continuing path. The MIR drop of b on that path is at scope exit."
 
 [[drop]]
 row = 7
@@ -60,6 +62,7 @@ row = 7
 place = "b"
 how = "definite"
 src = "issue"
+why = "On the return successor MIR drops both initialized strings in reverse declaration order. b is the later binding."
 
 [[order]]
 row = 7

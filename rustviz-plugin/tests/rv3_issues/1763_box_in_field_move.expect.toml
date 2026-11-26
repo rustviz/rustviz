@@ -11,6 +11,7 @@ row = 4
 place = "h.inner.a"
 is = "moved"
 src = "issue"
+why = "Borrowing h.inner.a after row 4 gives E0382. Rustc identifies the move on row 4."
 
 [[state]]
 row = 4
@@ -31,6 +32,7 @@ row = 5
 place = "h"
 is = "partly"
 src = "issue"
+why = "Borrowing h after row 5 gives E0382 for a partial move on row 4."
 
 [[state]]
 row = 5

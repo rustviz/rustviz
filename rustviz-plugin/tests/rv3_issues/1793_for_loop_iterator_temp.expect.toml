@@ -15,6 +15,7 @@ row = 3
 place = "v"
 is = "moved"
 src = "issue"
+why = "After row 3, `let _ = &v;` produces E0382 (borrow of moved value: `v`)."
 
 [[event]]
 row = 5

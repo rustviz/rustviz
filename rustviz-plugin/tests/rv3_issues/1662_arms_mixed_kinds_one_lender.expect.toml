@@ -27,6 +27,7 @@ lender = "s"
 holder = "r"
 kind = "mut"
 src = "issue"
+why = "Borrowck MIR takes &mut s before coercing the reference to &String for r."
 
 [[state]]
 row = 4

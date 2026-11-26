@@ -606,6 +606,13 @@ impl BlockSpan {
 #[derive(Default)]
 struct Points {
     points: Vec<Point>,
+    /// Reviewed issue probes may name a local declared in this very block,
+    /// even inside a closure or call argument. This prevents a probe from
+    /// introducing a capture. The case supplies the MIR body name.
+    pending_probes: BTreeSet<(u32, String)>,
+    /// Where each explicit probe landed: (row, place) -> the enclosing
+    /// function's name and whether the block sits inside a closure.
+    probe_sites: BTreeMap<(u32, String), (String, bool)>,
     /// Per function: binding name -> how many patterns bind it.
     bindings: Vec<HashMap<String, u32>>,
     /// Per function: (first line, last line, the line after which a
@@ -876,9 +883,26 @@ impl<'ast> Visit<'ast> for Points {
         let stmts = b.stmts.iter().map(|st| line_of(st.span())).collect();
         self.blocks.push(BlockSpan { open, close, func, stmts });
         self.block_stack.push(self.blocks.len() - 1);
-        if self.closures == 0 && self.no_points == 0 {
+        let ordinary = self.closures == 0 && self.no_points == 0;
+        if !self.unprobeable[func] && (ordinary || !self.pending_probes.is_empty()) {
+            let mut locals = HashSet::new();
             let n = b.stmts.len();
             for (i, st) in b.stmts.iter().enumerate() {
+                if !self.pending_probes.is_empty() {
+                    if let syn::Stmt::Local(local) = st {
+                        // A cfg-disabled declaration could expose an outer
+                        // binding and make a probe change closure captures.
+                        if local.attrs.is_empty() {
+                            let pat = match &local.pat {
+                                syn::Pat::Type(p) => &*p.pat,
+                                p => p,
+                            };
+                            if let syn::Pat::Ident(p) = pat {
+                                locals.insert(p.ident.to_string());
+                            }
+                        }
+                    }
+                }
                 let tail = i + 1 == n && matches!(st, syn::Stmt::Expr(_, None) | syn::Stmt::Macro(syn::StmtMacro { semi_token: None, .. }));
                 if tail || matches!(st, syn::Stmt::Item(_)) {
                     continue;
@@ -889,8 +913,17 @@ impl<'ast> Visit<'ast> for Points {
                 // comment opened on that line runs on past it.
                 let open_comment = self.src.get(end as usize - 1)
                     .is_some_and(|l| l.rfind("/*").is_some_and(|a| !l[a..].contains("*/")));
-                if next > end && !open_comment && !self.unprobeable[func] {
-                    self.points.push(Point { line: end, func, in_loop: self.loops > 0, ancestors: self.block_stack.clone() });
+                if next > end && !open_comment {
+                    if ordinary {
+                        self.points.push(Point { line: end, func, in_loop: self.loops > 0, ancestors: self.block_stack.clone() });
+                    }
+                    let (name, in_closure) = (self.names[func].clone(), self.closures > 0);
+                    let landed: Vec<(u32, String)> = self.pending_probes.iter()
+                        .filter(|(row, place)| *row == end && locals.contains(place)).cloned().collect();
+                    for k in landed {
+                        self.pending_probes.remove(&k);
+                        self.probe_sites.insert(k, (name.clone(), in_closure));
+                    }
                 }
             }
         }
@@ -2171,18 +2204,51 @@ pub struct Derived {
     pub is: &'static str,
 }
 
+/// An explicit issue-test probe. Its body name is taken from the fixture's
+/// rustc MIR. Only a local declared inside the same block can be requested.
+#[derive(serde::Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct IssueProbe {
+    #[serde(rename = "fn")]
+    pub func: String,
+    pub row: u32,
+    pub place: String,
+}
+
 /// The states rustc decides for every variable bound once in its
 /// function (and each of `extra`'s field paths, `p.a`) after every probe
 /// point, by probing `&x` and `&mut x` there as `check` does. A pair rustc
 /// doesn't decide (out of scope, the probe keeps a loan alive, behind a
 /// `&`, dead code) gives no state.
-pub fn derive_states(src: &str, extra: &[String]) -> Result<Vec<Derived>, String> {
+pub fn derive_states(src: &str, extra: &[String], explicit: &[IssueProbe]) -> Result<Vec<Derived>, String> {
     if src.contains("macro_rules") {
         return Err("the program defines a macro (bindings syn can't see)".into());
     }
     let file = syn::parse_file(src).map_err(|e| format!("syn: {e}"))?;
+    if !explicit.is_empty() && src.contains("::*") {
+        // `let Equal = o else {..}` is a variant pattern, not a binding, when a glob import brings `Equal` in.
+        return Err("explicit probes need a program with no glob `use` (a bare identifier pattern could be a variant or constant)".into());
+    }
     let mut pts = Points { src: src.lines().map(str::to_owned).collect(), ..Default::default() };
+    for p in explicit {
+        if !pts.pending_probes.insert((p.row, p.place.clone())) {
+            return Err(format!("duplicate probe for {} after row {}", p.place, p.row));
+        }
+    }
     pts.visit_file(&file);
+    if let Some((row, place)) = pts.pending_probes.first() {
+        return Err(format!("probe of {place} after row {row} needs a local declared in the same block and a statement boundary"));
+    }
+    for p in explicit {
+        // The verdict is labelled with the fixture's MIR body name; it must
+        // be the body the syntax puts the probe in (the enclosing fn, or one
+        // of its closures), not just any name.
+        let (outer, in_closure) = &pts.probe_sites[&(p.row, p.place.clone())];
+        let ok = if *in_closure { p.func.starts_with(&format!("{outer}::{{closure#")) } else { p.func == *outer };
+        if !ok {
+            return Err(format!("probe of {} after row {} is in {}{}, not `{}`", p.place, p.row, outer, if *in_closure { "'s closure" } else { "" }, p.func));
+        }
+    }
     match rustc_errors(src)? {
         e if e.is_empty() => {}
         e => return Err(format!("doesn't compile as an edition-2024 lib: {:?}", e.first())),
@@ -2206,6 +2272,17 @@ pub fn derive_states(src: &str, extra: &[String]) -> Result<Vec<Derived>, String
         for n in names {
             claims.push(Claim { line: p.line, func: p.func, var: n, drawn: Drawn::Usable, in_loop: p.in_loop, tip: String::new(), strict: false });
         }
+    }
+    for p in explicit {
+        if pts.items.contains(p.place.trim_start_matches("r#")) {
+            return Err(format!("probe of {} after row {} could resolve to an item", p.place, p.row));
+        }
+        // The reachability sentinel is local to this point, too. Declaring
+        // it in the enclosing function would make the closure capture it.
+        let func = pts.names.len();
+        pts.names.push(p.func.clone());
+        pts.spans.push((p.row, p.row, Some(p.row)));
+        claims.push(Claim { line: p.row, func, var: p.place.clone(), drawn: Drawn::Usable, in_loop: false, tip: String::new(), strict: false });
     }
     let lines: BTreeSet<(usize, u32)> = claims.iter().map(|c| (c.func, c.line)).collect();
     let live = reachable(src, &pts, &lines)?;

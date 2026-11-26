@@ -30,6 +30,7 @@ holder = "m2"
 kind = "mut"
 ends = [11]
 src = "issue"
+why = "Borrowck MIR creates m2 from &mut s2 and ends its storage without a read."
 
 [[state]]
 row = 9

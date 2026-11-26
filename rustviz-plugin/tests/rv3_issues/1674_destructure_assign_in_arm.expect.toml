@@ -10,12 +10,14 @@ row = 4
 place = "r.a"
 is = "moved"
 src = "issue"
+why = "Borrowing r.a after row 4 gives E0382. Rustc identifies the move on row 4."
 
 [[state]]
 row = 4
 place = "r.b"
 is = "moved"
 src = "issue"
+why = "Borrowing r.b after row 4 gives E0382. Rustc identifies the move on row 4."
 
 [[state]]
 row = 4
