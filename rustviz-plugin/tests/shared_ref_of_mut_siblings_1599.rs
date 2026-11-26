@@ -33,6 +33,10 @@ fn fixed() -> Option<&'static String> {
     None
 }
 
+fn pick<'a>(x: &'a mut &'a String, y: &'a &'a String, f: bool) -> &'a &'a String {
+    if f { x } else { y }
+}
+
 // A real `&mut i32` stored by `extend`: v can write through it.
 fn extended() {
     let mut a1 = 1;
@@ -184,7 +188,39 @@ fn hedged(f: bool, g: bool) {
     println!("{} {} {}", k21, keep21, r21);
 }
 
+// Fourth Codex round: `&*p` through a `&mut` is a shared reborrow; an arm
+// lending only its own (`let z = &c; Some(z)`); a holder of `&&String`
+// points to the reference variables; an earlier plain push keeps its
+// own wording.
+fn round4(f: bool, g: bool) {
+    let mut x22 = String::from("x");
+    let p22 = &mut x22;
+    let mut v22: Vec<&String> = Vec::new();
+    v22.push(&*p22);
+    println!("{} {:?}", p22, v22);
+    let mut a23 = String::from("a");
+    let b23 = String::from("b");
+    let c23 = String::from("c");
+    let r23: &String = &mut a23;
+    let o23 = if f { Some(r23) } else if g { Some(&b23) } else { let z23 = &c23; Some(z23) };
+    println!("{:?}", o23);
+    let s24 = String::from("s");
+    let t24 = String::from("t");
+    let mut p24 = &s24;
+    let q24 = &t24;
+    let mut v24: Vec<&&String> = Vec::new();
+    v24.push(pick(&mut p24, &q24, f));
+    println!("{:?}", v24);
+    let mut a25 = String::from("a");
+    let b25 = String::from("b");
+    let mut v25: Vec<&String> = Vec::new();
+    v25.push(&b25);
+    v25.push(choose(&mut a25, &b25, f));
+    println!("{:?}", v25);
+}
+
 fn main() {
+    round4(true, false);
     hedged(true, false);
     per_argument(true);
     extended();

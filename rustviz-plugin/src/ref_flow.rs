@@ -1466,7 +1466,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // kind, `r = choose(&mut a, &b)`, #1619.)
         let through = through_ref(inner, self.tcx).and_then(|r| expr_to_rap_name(peel_shared_reborrow(r, self.tcx), &self.tcx))
           .and_then(|n| self.borrow_map.get(&n));
+        // (Through a `&mut` p, `&*p` is a shared reborrow: p stays
+        // readable, #1619.)
+        let through_mut_ref = through_ref(inner, self.tcx)
+          .is_some_and(|r| matches!(self.tcx.typeck(r.hir_id.owner).expr_ty(r).kind(), ty::Ref(_, _, mm) if mm.is_mut()));
         match through {
+          Some(_) if !m.is_mut() && through_mut_ref => add(ls, false),
           Some(rd) if !m.is_mut() && !strict && !self.nested_ext_temps.contains_key(&e.hir_id) => {
             for l in ls {
               let lm = rd.mut_of(&l);
@@ -1637,6 +1642,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       _ => {}
     }
+  }
+
+  /// Whether `e`'s value may hold no reference at all: an `Option` not
+  /// built by `Some(..)` here.
+  pub fn may_be_none(&self, e: &'tcx Expr<'tcx>) -> bool {
+    let typeck = self.tcx.typeck(e.hir_id.owner);
+    let Some(t) = typeck.expr_ty_opt(e) else { return false };
+    let is_option = t.walk().any(|g| matches!(g.kind(), GenericArgKind::Type(x)
+      if matches!(x.kind(), ty::Adt(def, _) if self.tcx.item_name(def.did()).as_str() == "Option")));
+    let some_ctor = matches!(e.kind, ExprKind::Call(f, _) if matches!(f.kind, ExprKind::Path(QPath::Resolved(_, p))
+      if p.segments.last().is_some_and(|s| s.ident.as_str() == "Some")));
+    is_option && !some_ctor
   }
 
   /// What kind of reference a value of type `ty` stores: `Some(false)`

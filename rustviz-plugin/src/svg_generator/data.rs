@@ -1479,13 +1479,19 @@ pub struct BorrowVia {
     /// &String = &mut s`): it can only read, but the loan stays mutable
     /// (#1599). (A shared reference's own column says so by its type.)
     pub shared: bool,
-    /// The kind of this lender's loan isn't known exactly, and may be
-    /// mutable (`v.push(choose(&mut a, &b))`): the lender's text says it
-    /// is borrowed, "possibly mutably" (#1619's hedge).
+    /// Which lender the holder points into isn't known (`v.push(choose(&mut
+    /// a, &b))` may keep either reference): its dot says it may point into
+    /// any of `may_point_into` (#1619). Each lender's own loan kind is
+    /// exact.
     pub uncertain: bool,
     /// What the holder stores, from its type: shared references
     /// (`Some(false)`), `&mut`s (`Some(true)`), or unknown.
     pub holder_ref: Option<bool>,
+    /// With `uncertain`: the lenders the holder may point into (names; a
+    /// `*p` lender is the data p points to), and whether it may hold no
+    /// reference at all (an `Option`).
+    pub may_point_into: Vec<String>,
+    pub maybe_none: bool,
     /// The call whose result holds the borrow (`first_word`).
     pub func: String,
     /// Every variable the result borrows from, in argument order.
@@ -6655,10 +6661,12 @@ fn history_holds_mut_borrow(vd: &VisualizationData, history: &[(usize, Event)], 
                 .any(|(_, e2)| matches!(e2, Event::MutableBorrow { .. })),
             // (The source as of the copy: not a re-point after it on the
             // same row, `let k = r; r = &b;`, #1619.)
-            Event::Copy { from, .. } => from.extract_rap()
+            Event::Copy { from, id: copy_id, .. } => from.extract_rap()
                 .is_some_and(|src| src.hash() != ro.hash() && vd.timelines.get(src.hash()).is_some_and(|t| {
+                    // (This copy's own counterpart on the source, by id:
+                    // `k = r; ..; r = &mut b; k = r;` on one row, #1619.)
                     let cut = t.history.iter()
-                        .position(|(l2, e2)| l2 == l && matches!(e2, Event::Duplicate { to, .. } if to.extract_rap().is_some_and(|x| x.hash() == ro.hash())))
+                        .position(|(l2, e2)| l2 == l && matches!(e2, Event::Duplicate { id, .. } if id == copy_id))
                         .unwrap_or(t.history.len());
                     history_holds_mut_borrow(vd, &t.history[..cut], src, *l, seen)
                 })),
