@@ -32296,25 +32296,30 @@ fn owner_line_reads_the_state_table() {
 fn part_loans_restrict_the_owner_line() {
     let mut failures = Vec::new();
     for (snippet, col, row, state, want, forbidden) in [
-        ("1671_field_borrow_parent_restricted", "p", 4, "revoked_privilege", "p.a is mutably borrowed by r", "owner of the resource"),
-        ("1671_field_borrow_parent_restricted", "p", 6, "revoked_privilege", "use p as a whole", "owner of the resource"),
+        // The owner's own clause stays first (2.x's "p is the owner of the
+        // resource"); the part loan and what it forbids follow.
+        ("1671_field_borrow_parent_restricted", "p", 4, "revoked_privilege", "p is the owner of the resource; p.a is mutably borrowed by r, so you can't use p as a whole", "While"),
+        ("1671_field_borrow_parent_restricted", "p", 6, "revoked_privilege", "so you can't use p as a whole", "While"),
         ("1671_field_borrow_parent_restricted", "p.n", 6, "full_privilege", "copyable", "mutably borrowed"),
         ("1671_field_borrow_parent_restricted", "p", 7, "full_privilege", "owner", "mutably borrowed"),
-        ("1666_struct_last_field_moved_in_every_arm_b", "p", 3, "revoked_privilege", "p.b is mutably borrowed by r", "owner of the resource"),
-        ("1666_struct_last_field_moved_in_every_arm_b", "p", 4, "revoked_privilege", "p.a was moved out", "other fields still can"),
-        ("1666_struct_last_field_moved_in_every_arm_b", "p", 4, "revoked_privilege", "p.b is mutably borrowed by r", "other fields still can"),
-        ("1688_field_mut_ref_coerced_shared_array", "s", 6, "partial_privilege", "*s.p is immutably borrowed by h", "is mutably borrowed"),
+        ("1666_struct_last_field_moved_in_every_arm_b", "p", 3, "revoked_privilege", "p is the owner of the resource; p.b is mutably borrowed by r, so you can't use p as a whole", "While"),
+        ("1666_struct_last_field_moved_in_every_arm_b", "p", 4, "revoked_privilege", "p.a was moved out, so p can't be used as a whole. p.b is mutably borrowed by r", "other fields still can"),
+        // rustc (pinned nightly) accepts `&s`, `s = S { .. }` and `s.p = &mut c`
+        // while h holds `&*s.p`, and rejects moving s (E0505) and `&mut s`
+        // (E0502): s isn't read-only.
+        ("1688_field_mut_ref_coerced_shared_array", "s", 6, "partial_privilege", "s holds a value; *s.p is immutably borrowed by h, so you can't move or mutably borrow s as a whole", "read-only"),
         ("1688_field_mut_ref_coerced_shared_array", "s", 7, "full_privilege", "holds a value", "read-only"),
-        ("1689_extend_field_receiver", "p", 7, "partial_privilege", "s keeps p.0 immutably borrowed", "is mutably borrowed"),
-        ("1758_closure_two_field_captures", "p", 4, "partial_privilege", "p.b is immutably borrowed by g", "owner of the resource"),
-        ("1758_closure_two_field_captures", "p", 5, "partial_privilege", "r keeps p.a immutably borrowed", "p.b is immutably borrowed"),
-        ("1762_ref_valued_field_borrows", "h", 3, "partial_privilege", "h.s is immutably borrowed by s", "owner of the resource"),
-        ("1762_ref_valued_field_borrows", "h", 8, "partial_privilege", "h.s is immutably borrowed by c", "owner of the resource"),
-        ("1762_ref_valued_field_borrows", "b", 13, "partial_privilege", "b.s is immutably borrowed by x", "owner of the resource"),
-        ("1765_two_phase_multiline_insert", "p", 4, "partial_privilege", "p.a is reserved for a mutable borrow", "by r"),
-        ("1765_two_phase_multiline_insert", "p", 6, "revoked_privilege", "r keeps p.a mutably borrowed", "reserved"),
-        ("1766_overwrite_sibling_field_same_row", "p", 4, "partial_privilege", "p.1 is immutably borrowed by other", "p.0 is immutably borrowed"),
-        ("1766_overwrite_sibling_field_same_row", "p", 6, "partial_privilege", "h keeps p.1 immutably borrowed", "borrowed by other"),
+        ("1689_extend_field_receiver", "p", 7, "partial_privilege", "p holds a copyable value; s keeps p.0 immutably borrowed", "While"),
+        // g captures both fields: they're borrowed together, not "p.a or p.b".
+        ("1758_closure_two_field_captures", "p", 4, "partial_privilege", "p is the owner of the resource; the borrow checker counts p.a and p.b as immutably borrowed by g", " or p.b"),
+        ("1758_closure_two_field_captures", "p", 5, "partial_privilege", "p is the owner of the resource; r keeps p.a immutably borrowed", "p.b is immutably borrowed"),
+        ("1762_ref_valued_field_borrows", "h", 3, "partial_privilege", "h is the owner of the resource; h.s is immutably borrowed by s, so you can't change or move h as a whole", "While"),
+        ("1762_ref_valued_field_borrows", "h", 8, "partial_privilege", "h is the owner of the resource; h.s is immutably borrowed by c", "While"),
+        ("1762_ref_valued_field_borrows", "b", 13, "partial_privilege", "b is the owner of the resource; b.s is immutably borrowed by x", "While"),
+        ("1765_two_phase_multiline_insert", "p", 4, "partial_privilege", "p.a is reserved for a mutable borrow by a method call, so you can't change or move p as a whole", "by r"),
+        ("1765_two_phase_multiline_insert", "p", 6, "revoked_privilege", "p is the owner of the resource; r keeps p.a mutably borrowed, so you can't use p as a whole", "reserved"),
+        ("1766_overwrite_sibling_field_same_row", "p", 4, "partial_privilege", "p is the owner of the resource; p.1 is immutably borrowed by other", "p.0 is immutably borrowed"),
+        ("1766_overwrite_sibling_field_same_row", "p", 6, "partial_privilege", "p is the owner of the resource; h keeps p.1 immutably borrowed", "borrowed by other"),
     ] {
         let tl = run_with_local_backend(&format!("rv3_issues/{snippet}")).timeline_panel_string();
         let line = tl.split('<').filter(|tag| attr(tag, "data-rv-kind") == Some("line") && attr(tag, "data-rv-var") == Some(col))
@@ -32353,7 +32358,7 @@ fn part_loans_follow_the_drawn_arm() {
         assert!(tip.contains(field) && !tip.contains(sibling), "{tip}");
     }
     let between = tooltip_of_id(&tl, "p@L13-15:branch_line:revoked_privilege").unwrap();
-    assert!(between.contains("p.b is mutably borrowed by r") && !between.contains("owner of the resource"), "{between}");
+    assert!(between.contains("p is the owner of the resource; p.b is mutably borrowed by r, so you can't use p as a whole"), "{between}");
     assert!(tooltip_of_id(&tl, "p@L15-16:branch_line:full_privilege").is_some());
     // A loan through a raw pointer or a shared reference stored in h
     // doesn't conflict with borrowing h as a whole (line 26 compiles).
@@ -32361,10 +32366,33 @@ fn part_loans_follow_the_drawn_arm() {
     // Moving the &mut transfers it to next, with the same loan identity.
     let moved = tooltip_of_id(&tl, "p@L32-34:line:revoked_privilege").unwrap();
     assert!(moved.contains("by next") && !moved.contains("by r"), "{moved}");
-    // Either the whole place or p.b is borrowed. The same loan boundary
-    // spans the blank row before the use.
+    // Either the whole place or p.b is borrowed (one per path): said as
+    // the borrow checker counts them, not as both borrowed by r. The same
+    // loan boundary spans the blank row before the use.
     let joined = tooltip_of_id(&tl, "p@L40-42:line:revoked_privilege").unwrap();
-    assert!(joined.contains("p.b is mutably borrowed by r") && joined.contains("r keeps p mutably borrowed") && joined.contains("use p as a whole"), "{joined}");
+    assert!(joined.contains("the borrow checker counts p and p.b as mutably borrowed by r, so you can't use p as a whole")
+        && !joined.contains("p.b is mutably borrowed by r"), "{joined}");
+}
+
+/// P1-3b titles name a lent part as 2.x's columns do, never as MIR's place
+/// (`(o2 as Some).0`), and keep 2.x's hedge where the loan is live on some
+/// paths only (#1327's o2: r2 borrows it only if the `Some` arm ran).
+#[test]
+fn part_loan_titles_keep_names_and_hedges() {
+    for (snippet, want, forbidden) in [
+        ("arm_ref_binding_value_1327", Some("o2's resource may be immutably borrowed here (a branch above borrowed it on some paths only)"), "o2 is read-only as a whole"),
+        ("arm_ref_binding_value_1327", None, " as Some)"),
+        ("ref_binding_borrows_owned", Some("name's resource is mutably borrowed by n"), " as Some)"),
+        ("rv3_facts_constructs", None, " as Some)"),
+        ("or_pattern_if_let_ref_different_places", Some("t is the owner of the resource; the borrow checker counts t.0 and t.1 as immutably borrowed by x, so you can't change or move t as a whole"), " as Some)"),
+        ("or_pattern_ref_mut_different_places", Some("t is the owner of the resource; the borrow checker counts t.0 and t.1 as mutably borrowed by x, so you can't use t as a whole"), "t.0 is mutably borrowed by x or"),
+    ] {
+        let tips = timeline_tooltips(&run_with_local_backend(snippet).timeline_panel_string());
+        if let Some(want) = want {
+            assert!(tips.iter().any(|t| t.contains(want)), "{snippet}: no tooltip with {want:?}: {tips:#?}");
+        }
+        assert!(!tips.iter().any(|t| t.contains(forbidden)), "{snippet}: a tooltip has {forbidden:?}: {tips:#?}");
+    }
 }
 
 /// RustViz 3 P1-2: a struct's line reads what is moved out of it on each

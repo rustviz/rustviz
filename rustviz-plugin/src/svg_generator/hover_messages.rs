@@ -3898,33 +3898,64 @@ pub fn state_lent_with_parent(my_name: &str, parent: &str, by: Option<&str>, mut
     }
 }
 
-/// Describe the restriction borrowck sees. "While" leaves open which
-/// borrow actually ran when different arms can lend different places.
-pub fn part_loan(place: &str, kind: &str, holder: Option<&str>, direct: bool) -> String {
-    let what = match kind {
-        "mut" => "mutably borrowed",
-        "unique" => "uniquely borrowed",
-        "reserved" => "reserved for a mutable borrow",
-        _ => "immutably borrowed",
-    };
+/// RustViz 3 (P1-3b): a live loan of a part of an owner, as the owner's
+/// title says it: "p.a is mutably borrowed by r", "v keeps p.0 immutably
+/// borrowed" (`direct`: the holder took the borrow itself; else its value
+/// keeps it, as the borrow checker counts it). `may`: a path to here skips
+/// the loan.
+pub fn part_loan(place: &str, kind: &str, holder: Option<&str>, direct: bool, may: bool) -> String {
+    let what = part_loan_kind(kind);
     let place = styled_name_html(place);
+    let (is, keeps) = if may { ("may be", "may keep") } else { ("is", "keeps") };
     match holder {
-        Some(h) if direct => format!("{place} is {what} by {}", styled_name_html(h)),
-        Some(h) => format!("{} keeps {place} {what}", styled_name_html(h)),
-        None => format!("{place} is {what}"),
+        Some(h) if direct => format!("{place} {is} {what} by {}", styled_name_html(h)),
+        Some(h) => format!("{} {keeps} {place} {what}", styled_name_html(h)),
+        None => format!("{place} {is} {what}"),
     }
 }
 
-pub fn state_part_lent(owner: &str, loans: &[String], exclusive: bool, moved: bool) -> String {
-    let owner = styled_name_html(owner);
-    let reason = loans.join(" or ");
-    if exclusive {
-        format!("While {reason}, you can't use {owner} as a whole")
-    } else if moved {
-        format!("While {reason}, you can't mutably borrow {owner} as a whole")
-    } else {
-        format!("While {reason}, {owner} is read-only as a whole")
+/// RustViz 3 (P1-3b): several live loans of parts of an owner (`places`,
+/// sorted), as the borrow checker counts them: they need not all be taken
+/// on one path (an or-pattern's `t.0` and `t.1`, an `if` whose arms lend
+/// different fields).
+pub fn part_loans_counted(places: &[String], kind: &str, holder: Option<&str>) -> String {
+    let names: Vec<Option<String>> = places.iter().map(|p| Some(p.clone())).collect();
+    let by = holder.map_or_else(String::new, |h| format!(" by {}", styled_name_html(h)));
+    format!("the borrow checker counts {} as {}{by}", place_list(&names, "and"), part_loan_kind(kind))
+}
+
+fn part_loan_kind(kind: &str) -> &'static str {
+    match kind {
+        "mut" => "mutably borrowed",
+        "unique" => "uniquely borrowed",
+        "reserved" => "reserved for a mutable borrow by a method call",
+        _ => "immutably borrowed",
     }
+}
+
+/// RustViz 3 (P1-3b): an owner's title while a part of it is lent: its
+/// own clause (`teaching`: "p is the owner of the resource", or what was
+/// moved out of it), the loans, and what the borrow checker
+/// then forbids of the owner as a whole (`reason`: `part_loan` or
+/// `part_loans_counted`). `exclusive`: a mutable or unique
+/// loan; else a shared one or a reservation. `behind_ref`: every such loan
+/// is of a place behind a reference the owner holds (`*s.p`): giving the
+/// owner a new value doesn't touch it, so `s = ..` is still allowed (and so
+/// is reading `s`, for a shared loan). `moved`: part of the owner was moved
+/// out, which `teaching` says already keeps it from being used as a whole.
+pub fn state_part_lent(teaching: &str, owner: &str, reason: &str, exclusive: bool, behind_ref: bool, may: bool, moved: bool) -> String {
+    let me = styled_name_html(owner);
+    let paths = if may { format!(" ({})", some_paths_why(false)) } else { String::new() };
+    if moved {
+        return format!("{teaching}. {reason}{paths}");
+    }
+    let restriction = match (exclusive, behind_ref) {
+        (true, false) => "use",
+        (true, true) => "read, borrow or move",
+        (false, false) => "change or move",
+        (false, true) => "move or mutably borrow",
+    };
+    format!("{teaching}; {reason}{paths}, so you can't {restriction} {me} as a whole")
 }
 
 pub fn state_partial_privilege(my_name: &String, holds_value: bool) -> String {
