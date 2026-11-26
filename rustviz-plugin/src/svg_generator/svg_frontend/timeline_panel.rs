@@ -306,7 +306,6 @@ fn merged_dot_title(lines: &[(Option<usize>, String)]) -> String {
     // `?` (`s = f(o?); s = g(p?);`), not one before it (`s = …; o?;`:
     // the assignment has run when the `?` returns, #1590).
     let is_try = |t: &str| t.starts_with("Only if the `?` here returns early");
-    let mut merged_any = false;
     let mut k = 0;
     while k < texts.len() {
         if is_try(&texts[k]) {
@@ -315,47 +314,42 @@ fn merged_dot_title(lines: &[(Option<usize>, String)]) -> String {
             if let Some((j, merged)) = next {
                 texts[k] = merged;
                 texts.remove(j);
-                merged_any = true;
             }
         }
         k += 1;
     }
-    if merged_any {
-        // Each `?` after the first on this line says which one it is
-        // ("the second `?` on this line"), not "the `?` here", which the
-        // first one says (#1590); a first `?` after an assignment on this
-        // line (`b = …; o?;`) is "the `?` after the assignment".
-        let mut nth = 0;
+    // Which `?` each one is (#1590, #1600 review). The visitor keeps one
+    // `?` per stretch of the line where nothing else happens to the value
+    // (`a?; b?` is one), so they are told apart by the assignments before
+    // them, not counted: "a `?` after the (first) assignment", "a later
+    // `?` on this line". And a `?` on a dot with other events (`s.push_str(
+    // b?)`) doesn't say "nothing happens to s here" (#1151).
+    if texts.len() > 1 {
+        let assigns = |ts: &[String]| ts.iter().filter(|t| t.contains(" acquires ownership of a new resource")).count();
+        let all = assigns(&texts);
+        let others = texts.iter().any(|t| !is_try(t) && !t.contains(" acquires ownership of a new resource"));
+        let mut seen_try = false;
         for k in 0..texts.len() {
             if !is_try(&texts[k]) {
                 continue;
             }
-            nth += 1;
-            let r = if nth > 1 {
-                hover_messages::try_drop_nth_on_line(&texts[k], nth)
-            } else if texts[..k].iter().any(|t| t.contains(" acquires ownership of a new resource")) {
-                hover_messages::try_drop_after_assignment(&texts[k])
+            let first = !seen_try;
+            seen_try = true;
+            if others {
+                if let Some(r) = hover_messages::try_drop_with_other_events(&texts[k]) {
+                    texts[k] = r;
+                }
+            }
+            let before = assigns(&texts[..k]);
+            let r = if before > 0 {
+                hover_messages::try_drop_after_assignment(&texts[k], (all > 1).then_some(before))
+            } else if !first {
+                hover_messages::try_drop_later_on_line(&texts[k])
             } else {
                 None
             };
             if let Some(r) = r {
                 texts[k] = r;
-            }
-        }
-    } else if texts.len() > 1 {
-        // (A second `?` on the line, `o?; …; p?;`: "the second `?` on
-        // this line".)
-        let mut nth = 0;
-        for t in texts.iter_mut() {
-            let this_try = is_try(t);
-            nth += usize::from(this_try);
-            if let Some(r) = hover_messages::try_drop_with_other_events(t) {
-                *t = r;
-            }
-            if this_try && nth > 1 {
-                if let Some(r) = hover_messages::try_drop_nth_on_line(t, nth) {
-                    *t = r;
-                }
             }
         }
     }

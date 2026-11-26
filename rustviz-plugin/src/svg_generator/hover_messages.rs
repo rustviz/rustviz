@@ -1225,6 +1225,36 @@ pub fn try_drop_before_own_try(drop_text: &str) -> Option<String> {
     ))
 }
 
+// A `?` after an assignment on its line (`b = f(o?); p?;`, #1590): "a
+// `?` after the assignment", not "the `?` here", which the first one
+// says; with several assignments on the line, after which one
+// (`nth`, 1-based), and its own assignment is "the next" one. "a `?`":
+// the visitor keeps one for `p?; q?;` with nothing between them.
+pub fn try_drop_after_assignment(drop_text: &str, nth: Option<usize>) -> Option<String> {
+    let rest = drop_text.strip_prefix("Only if the `?` here returns early")?;
+    let rest = rest.strip_prefix(" (on an `Err` or `None`)").unwrap_or(rest);
+    let which = match nth {
+        None => "the assignment".to_owned(),
+        Some(n) => format!("the {} assignment on this line", match n {
+            1 => "first",
+            2 => "second",
+            3 => "third",
+            _ => "previous",
+        }),
+    };
+    let rest = rest.replacen("If the `?` succeeds, the assignment runs", "If it succeeds, the next assignment runs", 1)
+        .replacen("If the `?` succeeds", "If it succeeds", 1);
+    Some(format!("Only if a `?` after {which} returns early{rest}"))
+}
+
+// A later `?` on a line with no assignment before it (`o?; drop(a);
+// p?;`, #1590): "a later `?` on this line", not "the `?` here".
+pub fn try_drop_later_on_line(drop_text: &str) -> Option<String> {
+    let rest = drop_text.strip_prefix("Only if the `?` here returns early")?;
+    let rest = rest.strip_prefix(" (on an `Err` or `None`)").unwrap_or(rest);
+    Some(format!("Only if a later `?` on this line returns early{}", rest.replacen("If the `?` succeeds", "If it succeeds", 1)))
+}
+
 // `s = f()?;` (#1151): the `?` is part of the right-hand side, which runs
 // before the assignment. If it returns early, the assignment never
 // happens and s's current resource is dropped by the return; if it
@@ -1232,29 +1262,6 @@ pub fn try_drop_before_own_try(drop_text: &str) -> Option<String> {
 // drop text (event_dot_owner_drop_if_try_returns) and the reassignment's
 // own text; this says the reassignment happens only on success, in place
 // of "nothing happens to s here".
-// A later `?` on the line of `s = f()?; …` (#1590): it comes after that
-// assignment. Not "the `?` here", which the merged first one says.
-pub fn try_drop_after_assignment(drop_text: &str) -> Option<String> {
-    let rest = drop_text.strip_prefix("Only if the `?` here returns early")?;
-    let rest = rest.strip_prefix(" (on an `Err` or `None`)").unwrap_or(rest);
-    Some(format!("Only if the `?` after the assignment returns early{}", rest.replacen("If the `?` succeeds", "If that `?` succeeds", 1)))
-}
-
-// The `nth` (2 or more) `?` on a line (`o?; drop(a); a = …; p?;`,
-// `s = f(a?); s = g(b?); c?;`, #1590): "the second `?` on this line",
-// not "the `?` here", which the first one says.
-pub fn try_drop_nth_on_line(drop_text: &str, nth: usize) -> Option<String> {
-    let rest = drop_text.strip_prefix("Only if the `?` here returns early")?;
-    let rest = rest.strip_prefix(" (on an `Err` or `None`)").unwrap_or(rest);
-    let which = match nth {
-        2 => "the second",
-        3 => "the third",
-        4 => "the fourth",
-        _ => "a later",
-    };
-    Some(format!("Only if {which} `?` on this line returns early{}", rest.replacen("If the `?` succeeds", "If that `?` succeeds", 1)))
-}
-
 pub fn try_drop_then_reassign(drop_text: &str, reassign: &str) -> Option<String> {
     let (head, owner) = drop_text.split_once(". If the `?` succeeds, nothing happens to ")?;
     owner.strip_suffix(" here.")?;
