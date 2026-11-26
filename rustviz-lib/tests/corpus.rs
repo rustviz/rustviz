@@ -28047,6 +28047,28 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &["nothing happens to outer here", "nothing happens to keep here", "nothing happens to late here", "nothing happens to carried here", "the function returns and"],
     },
+    TooltipExpect {
+        name: "string_from_utf8_names_1631",
+        // #1631: any path containing `String::from` was shortened to it, so
+        // `String::from_utf8_lossy(..)` was named `String::from` in the
+        // arrows and tooltips (and the code panel; see
+        // `code_panel_names_from_utf8_1631`). Only the function `String::from`
+        // itself has that name.
+        must_contain: &[
+            "Move from String::from_utf8_lossy to (temporary)",
+            "Move from bytes to String::from_utf8",
+            "Move from String::from to w",
+            // `::std::string::String::from_utf8_lossy(..)`: the path root
+            // `{{root}}` is not part of the name.
+            "Move from std::string::String::from_utf8_lossy to (temporary 2)",
+        ],
+        must_not_contain: &[
+            "{{root}}",
+            "=Move from String::from to (temporary)",
+            "=Move from bytes to String::from",
+            "A temporary holds the value that String::from returns",
+        ],
+    },
 ];
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws
@@ -38337,4 +38359,18 @@ fn try_block_drops_on_the_residual_target_1656() {
         ).filter_map(|n| n.attribute("data-rv-var")).collect();
         assert_eq!(owners, [variable], "conditional drops at {statement}");
     }
+}
+
+/// #1631: the code panel shows `String::from_utf8_lossy(..)` and
+/// `String::from_utf8(..)` as written; the former was shown as
+/// `String::from(..)`, which doesn't compile.
+#[test]
+fn code_panel_names_from_utf8_1631() {
+    let code = run_with_local_backend("string_from_utf8_names_1631").code_panel_string();
+    for shown in ["String::from_utf8_lossy</tspan>(", "String::from_utf8</tspan>(", "std::string::String::from_utf8_lossy</tspan>("] {
+        assert!(code.contains(shown), "code panel lost {shown}:\n{code}");
+    }
+    assert!(!code.contains("{{root}}"), "path root shown: {code}");
+    // Only `w`'s `String::from(..)` is shown by that name.
+    assert_eq!(code.matches(">String::from</tspan>(").count(), 1, "{code}");
 }
