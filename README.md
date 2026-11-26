@@ -127,8 +127,8 @@ code, shadowed names, places like `*r` or `v[0]`, rows where the plugin
 added extra rows, arm legs whose path it can't identify, verdicts that
 don't decide the drawn state (a two-phase `&mut` reservation, a partial
 vs. whole move). Points inside closures, call arguments and const
-contexts, and functions with block comments or `line!()` / `column!()` /
-`file!()`, aren't collected at all. Missing a contradiction is
+contexts (array lengths in expressions and types), and functions with
+block comments, aren't collected at all. Missing a contradiction is
 acceptable; reporting a false one isn't. It compiles a few probe
 programs per snippet, so it's opt-in:
 
@@ -145,6 +145,17 @@ violation that isn't in `KNOWN_ORACLE_FAILURES`
 line and column, each with its issue) or on a listed claim that was
 tested and now passes. `tools/progen/progen.py check --oracle <dir>`
 runs it on generated programs.
+
+Limits (it misses rather than guesses): a definite "moved" or
+"partially moved" drawing can only be shown wrong, never confirmed
+(rustc's E0382 also fires when the value moved on just one path); a
+conflict whose loan is "later used" only by the probe itself is no
+verdict; it skips whole files that use `line!` / `column!` / `file!` /
+`env!` / `include*!` or define a macro, names that an item (fn, const,
+static, type, variant, `use`) also has, rows below which the next line
+is blank (stacked events), arm legs it can't tie to the point's path,
+and the `{` line of a block (it may hold the arm before it). About 30%
+of drawn states end up untested; the test prints the count per reason.
 
 **Running the playground locally:** `cd playground && cargo run
 --release`, then open <http://127.0.0.1:8080/>. Without Docker, set

@@ -103,20 +103,14 @@ pub const KNOWN_ORACLE_FAILURES: &[(&str, &str, u32, &str, u32)] = &[
     ("box_field_move_branch", "oracle-usable", 7, "b", 1673),
     ("box_field_move_param", "oracle-usable", 4, "b", 1673),
     ("box_partial_move_890", "oracle-usable", 22, "b2", 1673),
-    ("box_partial_move_890", "oracle-usable", 23, "b2", 1673),
     ("box_partial_move_890", "oracle-usable", 25, "b2", 1673),
     ("box_partial_move_890", "oracle-usable", 26, "b2", 1673),
     ("box_partial_move_890", "oracle-usable", 26, "bp", 1673),
-    ("box_partial_move_890", "oracle-usable", 27, "b2", 1673),
-    ("box_partial_move_890", "oracle-usable", 27, "bp", 1673),
     ("box_partial_move_890", "oracle-usable", 29, "b2", 1673),
     ("box_partial_move_890", "oracle-usable", 29, "bp", 1673),
     ("box_partial_move_890", "oracle-usable", 30, "b2", 1673),
     ("box_partial_move_890", "oracle-usable", 30, "bp", 1673),
     ("box_partial_move_890", "oracle-usable", 30, "bq", 1673),
-    ("box_partial_move_890", "oracle-usable", 31, "b2", 1673),
-    ("box_partial_move_890", "oracle-usable", 31, "bp", 1673),
-    ("box_partial_move_890", "oracle-usable", 31, "bq", 1673),
     ("box_partial_move_890", "oracle-usable", 33, "b2", 1673),
     ("box_partial_move_890", "oracle-usable", 33, "bp", 1673),
     ("box_partial_move_890", "oracle-usable", 33, "bq", 1673),
@@ -124,10 +118,6 @@ pub const KNOWN_ORACLE_FAILURES: &[(&str, &str, u32, &str, u32)] = &[
     ("box_partial_move_890", "oracle-usable", 34, "b4", 1673),
     ("box_partial_move_890", "oracle-usable", 34, "bp", 1673),
     ("box_partial_move_890", "oracle-usable", 34, "bq", 1673),
-    ("box_partial_move_890", "oracle-usable", 35, "b2", 1673),
-    ("box_partial_move_890", "oracle-usable", 35, "b4", 1673),
-    ("box_partial_move_890", "oracle-usable", 35, "bp", 1673),
-    ("box_partial_move_890", "oracle-usable", 35, "bq", 1673),
     ("box_partial_move_890", "oracle-usable", 37, "b2", 1673),
     ("box_partial_move_890", "oracle-usable", 37, "b4", 1673),
     ("box_partial_move_890", "oracle-usable", 37, "bp", 1673),
@@ -143,22 +133,12 @@ pub const KNOWN_ORACLE_FAILURES: &[(&str, &str, u32, &str, u32)] = &[
     ("box_partial_move_890", "oracle-usable", 39, "bp", 1673),
     ("box_partial_move_890", "oracle-usable", 39, "bq", 1673),
     ("box_partial_move_match_892", "oracle-usable", 14, "b7", 1673),
-    ("box_partial_move_match_892", "oracle-usable", 15, "b7", 1673),
     ("box_partial_move_match_892", "oracle-usable", 17, "b7", 1673),
-    ("box_partial_move_match_892", "oracle-usable", 20, "b2", 1673),
-    ("box_partial_move_match_892", "oracle-usable", 20, "b7", 1673),
     ("box_partial_move_match_892", "oracle-usable", 22, "b2", 1673),
     ("box_partial_move_match_892", "oracle-usable", 22, "b7", 1673),
-    ("box_partial_move_match_892", "oracle-usable", 26, "b2", 1673),
-    ("box_partial_move_match_892", "oracle-usable", 26, "b3", 1673),
-    ("box_partial_move_match_892", "oracle-usable", 26, "b7", 1673),
     ("box_partial_move_match_892", "oracle-usable", 28, "b2", 1673),
     ("box_partial_move_match_892", "oracle-usable", 28, "b3", 1673),
     ("box_partial_move_match_892", "oracle-usable", 28, "b7", 1673),
-    ("box_partial_move_match_892", "oracle-usable", 31, "b2", 1673),
-    ("box_partial_move_match_892", "oracle-usable", 31, "b3", 1673),
-    ("box_partial_move_match_892", "oracle-usable", 31, "b7", 1673),
-    ("box_partial_move_match_892", "oracle-usable", 31, "bp", 1673),
     ("box_partial_move_match_892", "oracle-usable", 33, "b2", 1673),
     ("box_partial_move_match_892", "oracle-usable", 33, "b3", 1673),
     ("box_partial_move_match_892", "oracle-usable", 33, "b7", 1673),
@@ -173,10 +153,7 @@ pub const KNOWN_ORACLE_FAILURES: &[(&str, &str, u32, &str, u32)] = &[
     ("box_payload_reassign_893", "oracle-usable", 23, "b2", 1673),
     ("box_payload_reassign_893", "oracle-usable", 28, "b3", 1673),
     ("box_payload_reassign_893", "oracle-usable", 33, "bp", 1673),
-    ("box_payload_whole_move_898", "oracle-usable", 14, "b1", 1673),
     ("box_payload_whole_move_898", "oracle-usable", 16, "b1", 1673),
-    ("box_payload_whole_move_898", "oracle-usable", 21, "b1", 1673),
-    ("box_payload_whole_move_898", "oracle-usable", 21, "b2", 1673),
     ("box_payload_whole_move_898", "oracle-usable", 23, "b1", 1673),
     ("box_payload_whole_move_898", "oracle-usable", 23, "b2", 1673),
     ("box_payload_whole_move_898", "oracle-usable", 24, "b1", 1673),
@@ -190,9 +167,6 @@ pub const KNOWN_ORACLE_FAILURES: &[(&str, &str, u32, &str, u32)] = &[
     ("box_payload_whole_move_898", "oracle-usable", 29, "b3", 1673),
     ("box_payload_whole_move_898", "oracle-usable", 30, "b1", 1673),
     ("box_payload_whole_move_898", "oracle-usable", 30, "b2", 1673),
-    ("box_payload_whole_move_898", "oracle-usable", 31, "b1", 1673),
-    ("box_payload_whole_move_898", "oracle-usable", 31, "b2", 1673),
-    ("box_payload_whole_move_898", "oracle-usable", 31, "b3", 1673),
     ("box_payload_whole_move_898", "oracle-usable", 33, "b1", 1673),
     ("box_payload_whole_move_898", "oracle-usable", 33, "b2", 1673),
     ("box_payload_whole_move_898", "oracle-usable", 33, "b3", 1673),
@@ -207,8 +181,6 @@ pub const KNOWN_ORACLE_FAILURES: &[(&str, &str, u32, &str, u32)] = &[
     ("box_payload_whole_move_898", "oracle-usable", 38, "b3", 1673),
     ("edition2024/box_partial_move_chain_892", "oracle-usable", 6, "b5", 1673),
     ("let_else_exit_drops_906", "oracle-usable", 37, "b", 1673),
-    ("let_else_nested_part_899", "oracle-usable", 19, "b", 1673),
-    ("let_else_nested_part_899", "oracle-usable", 23, "b", 1673),
     ("let_else_nested_part_899", "oracle-usable", 27, "b", 1673),
     ("tuple_scrutinee_var_field_977", "oracle-usable", 14, "y", 1673),
     ("tuple_scrutinee_var_field_977", "oracle-usable", 16, "y", 1673),
@@ -286,7 +258,6 @@ pub const KNOWN_ORACLE_FAILURES: &[(&str, &str, u32, &str, u32)] = &[
     ("same_name_bindings_1400", "oracle-borrowed", 63, "v", 1681),
     ("same_name_bindings_1400", "oracle-borrowed", 63, "w", 1681),
     // #1727: `for item in &mut iter`: iter drawn mutably borrowed past the loop.
-    ("try_block_drops_1656", "oracle-borrowed", 43, "iter", 1727),
     ("try_block_drops_1656", "oracle-borrowed", 45, "iter", 1727),
     ("try_block_drops_1656", "oracle-borrowed", 48, "iter", 1727),
     ("try_block_drops_1656", "oracle-borrowed", 49, "iter", 1727),
@@ -323,6 +294,7 @@ pub const KNOWN_ORACLE_FAILURES: &[(&str, &str, u32, &str, u32)] = &[
     ("try_partial_move_1184", "oracle-usable", 31, "r", 1595),
 ];
 
+
 /// Where the drawing deliberately follows what runs rather than rustc's
 /// borrow checker, which is conservative: (snippet, check, line, column, why). The
 /// test ignores these, and fails if one no longer happens.
@@ -346,6 +318,7 @@ pub const ORACLE_EXEMPT: &[(&str, &str, u32, &str, &str)] = &[
     ("edition2024/irrefutable_iflet_inline_995", "oracle-moved", 34, "p", "irrefutable pattern: code after never runs"),
     ("edition2024/irrefutable_iflet_inline_995", "oracle-moved", 35, "p", "irrefutable pattern: code after never runs"),
     ("inline_exit_1004", "oracle-moved", 11, "f", "irrefutable pattern: code after never runs"),
+    ("inline_exit_nested_1013", "oracle-moved", 13, "f", "irrefutable pattern: code after never runs"),
     ("inline_exit_nested_1013", "oracle-moved", 65, "s", "irrefutable pattern: code after never runs"),
     ("inline_exit_nested_1013", "oracle-moved", 66, "s", "irrefutable pattern: code after never runs"),
     ("manually_drop_by_hand", "oracle-moved", 14, "m2", "ManuallyDrop::take moves out behind a &mut"),
@@ -355,13 +328,14 @@ pub const ORACLE_EXEMPT: &[(&str, &str, u32, &str, &str)] = &[
     ("manually_drop_by_hand", "oracle-moved", 18, "m2", "ManuallyDrop::take moves out behind a &mut"),
 ];
 
+
 pub const ORACLE_CHECKS: &[(&str, &str)] = &[
     ("oracle-usable",
      "the column is drawn holding its value with no borrow of it after this line, but rustc reports a \
-      borrow conflict or a move for `&mut x` there"),
+      borrow conflict, a move or a missing value for `&mut x` there"),
     ("oracle-readable",
      "the column is drawn immutably borrowed (read only) after this line, but rustc reports a borrow \
-      conflict or a move for `&x` there"),
+      conflict, a move or a missing value for `&x` there"),
     ("oracle-borrowed",
      "the column is drawn borrowed after this line (read only, or lent out mutably), but rustc reports no \
       borrow conflict for the use the drawing forbids (`&mut x` for read only, `&x` for lent out mutably)"),
@@ -379,6 +353,8 @@ const CONFLICT: &[&str] = &["E0499", "E0500", "E0501", "E0502", "E0503", "E0505"
 const NO_VALUE: &[&str] = &["E0381", "E0382"];
 /// Mutability of the binding, not a borrow: says nothing either way.
 const IGNORED: &[&str] = &["E0596", "E0594"];
+/// Recorded for a conflict whose loan is used later only by a probe.
+const SELF_CONFLICT: &str = "self-conflict";
 /// Recorded for a `&mut` probe rustc refuses for another reason than the
 /// binding's mutability (behind a `&` reference, inside an `Rc`).
 const BEHIND_REF: &str = "E0596-behind-ref";
@@ -414,18 +390,17 @@ struct Point {
 struct BlockSpan {
     open: u32,
     close: u32,
-    /// The `{` line starts with the arm before it (`} else {`).
-    shared_open: bool,
     func: usize,
     /// (first, last) line of each statement.
     stmts: Vec<(u32, u32)>,
 }
 
 impl BlockSpan {
-    /// Whether line `l`'s events belong inside this block: not on a
-    /// `} else {` line, which is the arm above's too.
+    /// Whether line `l`'s events belong inside this block. Not on the
+    /// `{` line: that line may hold the arm before it (`} else {`,
+    /// `true => drop(x), false => {`) or the pattern that leads in.
     fn holds(&self, l: u32) -> bool {
-        (l > self.open || (l == self.open && !self.shared_open)) && l <= self.close
+        l > self.open && l <= self.close
     }
 }
 
@@ -456,6 +431,9 @@ struct Points {
     /// reserved there), or a const context (array length, const generic
     /// argument): no points.
     no_points: u32,
+    /// Every item name in the file (fns, consts, statics, types, enum
+    /// variants, `use` names).
+    items: HashSet<String>,
 }
 
 fn line_of(s: proc_macro2::Span) -> (u32, u32) {
@@ -478,7 +456,7 @@ impl Points {
         let end = body.map_or(line_of(sig).1, |b| b.brace_token.span.close().start().line as u32);
         let text: String = self.src.iter().skip(line_of(sig).0 as usize - 1).take((end + 1 - line_of(sig).0) as usize)
             .map(|l| l.as_str()).collect::<Vec<_>>().join("\n");
-        self.unprobeable.push(["/*", "*/", "line!", "column!", "file!", "__rv_"].iter().any(|t| text.contains(t)));
+        self.unprobeable.push(["/*", "*/", "__rv_"].iter().any(|t| text.contains(t)));
         self.spans.push((line_of(sig).0, end, open));
         self.stack.push(Some(self.bindings.len() - 1));
     }
@@ -497,6 +475,25 @@ impl Points {
 
 impl<'ast> Visit<'ast> for Points {
     fn visit_item(&mut self, i: &'ast syn::Item) {
+        // Every item name in the file: a probe of `x` could resolve to an
+        // item `x` in scope instead of the local.
+        let name = match i {
+            syn::Item::Fn(f) => Some(&f.sig.ident),
+            syn::Item::Const(c) => Some(&c.ident),
+            syn::Item::Static(c) => Some(&c.ident),
+            syn::Item::Struct(c) => Some(&c.ident),
+            syn::Item::Enum(c) => Some(&c.ident),
+            syn::Item::Union(c) => Some(&c.ident),
+            syn::Item::Type(c) => Some(&c.ident),
+            syn::Item::Mod(c) => Some(&c.ident),
+            syn::Item::Trait(c) => Some(&c.ident),
+            syn::Item::Macro(c) => c.ident.as_ref(),
+            syn::Item::ExternCrate(c) => Some(c.rename.as_ref().map_or(&c.ident, |r| &r.1)),
+            _ => None,
+        };
+        if let Some(n) = name {
+            self.items.insert(n.to_string().trim_start_matches("r#").to_owned());
+        }
         match i {
             syn::Item::Fn(_) | syn::Item::Impl(_) | syn::Item::Trait(_) | syn::Item::Mod(_) => visit::visit_item(self, i),
             _ => {
@@ -529,6 +526,30 @@ impl<'ast> Visit<'ast> for Points {
             *self.bindings[f].entry(p.ident.to_string().trim_start_matches("r#").to_owned()).or_default() += 1;
         }
         visit::visit_pat_ident(self, p);
+    }
+    fn visit_variant(&mut self, v: &'ast syn::Variant) {
+        self.items.insert(v.ident.to_string().trim_start_matches("r#").to_owned());
+        visit::visit_variant(self, v);
+    }
+    fn visit_use_name(&mut self, u: &'ast syn::UseName) {
+        self.items.insert(u.ident.to_string().trim_start_matches("r#").to_owned());
+    }
+    fn visit_use_rename(&mut self, u: &'ast syn::UseRename) {
+        self.items.insert(u.rename.to_string().trim_start_matches("r#").to_owned());
+    }
+    fn visit_foreign_item_fn(&mut self, f: &'ast syn::ForeignItemFn) {
+        self.items.insert(f.sig.ident.to_string());
+        visit::visit_foreign_item_fn(self, f);
+    }
+    fn visit_foreign_item_static(&mut self, f: &'ast syn::ForeignItemStatic) {
+        self.items.insert(f.ident.to_string());
+        visit::visit_foreign_item_static(self, f);
+    }
+    fn visit_type_array(&mut self, a: &'ast syn::TypeArray) {
+        self.visit_type(&a.elem);
+        self.no_points += 1;
+        self.visit_expr(&a.len);
+        self.no_points -= 1;
     }
     fn visit_receiver(&mut self, r: &'ast syn::Receiver) {
         if let Some(f) = self.func() {
@@ -609,10 +630,8 @@ impl<'ast> Visit<'ast> for Points {
         let close = b.brace_token.span.close().start().line as u32;
         let open_at = b.brace_token.span.open().start();
         let open = open_at.line as u32;
-        let shared_open = self.src.get(open as usize - 1)
-            .is_some_and(|l| l.chars().take(open_at.column).any(|c| c == '}'));
         let stmts = b.stmts.iter().map(|st| line_of(st.span())).collect();
-        self.blocks.push(BlockSpan { open, close, shared_open, func, stmts });
+        self.blocks.push(BlockSpan { open, close, func, stmts });
         self.block_stack.push(self.blocks.len() - 1);
         if self.closures == 0 && self.no_points == 0 {
             let n = b.stmts.len();
@@ -863,6 +882,12 @@ fn claims(pts: &Points, d: &Drawing, skips: &mut Skips) -> Vec<Claim> {
             continue;
         }
         let (fn_start, _, _) = pts.spans[p.func];
+        // The renderer stacks events on a blank (or comment-only) row
+        // below a line: the gap's state isn't the one after line L.
+        let next_text = pts.src.get(p.line as usize).map_or("", |l| l.trim());
+        if next_text.is_empty() || next_text.starts_with("//") {
+            continue;
+        }
         let y = (ya + yb) / 2.0;
         let added_rows = d.dots.iter().any(|x| x.y > ya + 1.0 && x.y < yb - 1.0);
         for (hash, var) in &d.columns {
@@ -996,6 +1021,10 @@ fn claims(pts: &Points, d: &Drawing, skips: &mut Skips) -> Vec<Claim> {
                 continue;
             };
             let root = name.split('.').next().unwrap();
+            if pts.items.contains(root) {
+                *skips.entry("an item of the same name exists").or_default() += 1;
+                continue;
+            }
             match pts.bindings[p.func].get(root) {
                 Some(1) => {}
                 Some(_) => {
@@ -1031,7 +1060,7 @@ fn reachable(src: &str, pts: &Points, lines: &BTreeSet<(usize, u32)>) -> Result<
     }
     let (text, at) = insert_lines(src, &ins);
     let mut out = HashSet::new();
-    for (code, line, msg) in rustc_errors(&text)? {
+    for (code, line, msg, _) in rustc_errors(&text)? {
         match (code.as_deref(), line.and_then(|l| at.get(&l)).and_then(|&k| use_of[k])) {
             (Some("E0381"), Some(point)) => {
                 out.insert(point);
@@ -1081,15 +1110,27 @@ fn cache_dir() -> PathBuf {
         .unwrap_or_else(|| Path::new(env!("CARGO_TARGET_TMPDIR")).join("rv-oracle-cache"))
 }
 
-/// One error: (code, primary line, message).
-type Diag = (Option<String>, Option<u32>, String);
+/// One error: (code, primary line, message, lines of the spans that say
+/// where a borrow is "later used" / "might be used").
+type Diag = (Option<String>, Option<u32>, String, Vec<u32>);
+
+/// `rustc -vV` of the pinned toolchain (version, commit, host): part of
+/// every cache key.
+fn rustc_version() -> &'static str {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| {
+        Command::new("rustc").arg("-vV").env("RUSTUP_TOOLCHAIN", toolchain()).output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default()
+    })
+}
 
 /// rustc's errors for `src` as an edition-2024 lib, cached as a JSON list
 /// of `[code, line, message]` keyed by the toolchain and source.
 fn rustc_errors(src: &str) -> Result<Vec<Diag>, String> {
     let tc = toolchain();
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    ("rv-oracle-1", tc.as_str(), src).hash(&mut h);
+    ("rv-oracle-2", tc.as_str(), rustc_version(), src).hash(&mut h);
     let key = format!("{:016x}{:08x}", h.finish(), src.len());
     let dir = cache_dir();
     let cached = dir.join(format!("{}.json", key));
@@ -1109,6 +1150,11 @@ fn rustc_errors(src: &str) -> Result<Vec<Diag>, String> {
         .output()
         .map_err(|e| format!("run rustc: {}", e))?;
     let stderr = String::from_utf8_lossy(&out.stderr);
+    // A finished compile with errors exits 1 and says "aborting due to";
+    // anything else (killed, crashed) gives no verdict.
+    if !out.status.success() && (out.status.code() != Some(1) || !stderr.contains("aborting due to")) {
+        return Err(format!("rustc didn't finish: {:?} {}", out.status, stderr.chars().take(400).collect::<String>()));
+    }
     if !out.status.success() && !stderr.contains("\"level\":\"error\"") {
         return Err(format!("rustc failed without a diagnostic: {}", stderr.chars().take(400).collect::<String>()));
     }
@@ -1126,9 +1172,13 @@ fn rustc_errors(src: &str) -> Result<Vec<Diag>, String> {
         if line.is_none() && code.is_none() {
             continue; // "aborting due to N previous errors"
         }
-        diags.push((code, line, msg));
+        let later: Vec<u32> = v["spans"].as_array().into_iter().flatten()
+            .filter(|s| s["label"].as_str().is_some_and(|l| l.contains("later used") || l.contains("might be used")))
+            .filter_map(|s| s["line_start"].as_u64().map(|l| l as u32))
+            .collect();
+        diags.push((code, line, msg, later));
     }
-    if diags.iter().any(|(c, _, _)| c.as_deref() == Some("E0463")) {
+    if diags.iter().any(|(c, _, _, _)| c.as_deref() == Some("E0463")) {
         return Err("rustc can't find a crate (E0463): toolchain setup".to_owned());
     }
     if !out.status.success() && diags.is_empty() {
@@ -1189,7 +1239,7 @@ fn run_probes(src: &str, probes: &[&Probe], claims: &[Claim]) -> Result<Vec<Outc
         let mut got: HashMap<usize, BTreeSet<(String, String)>> = HashMap::new();
         let mut bad = HashSet::new();
         let mut elsewhere = false;
-        for (code, line, msg) in errs {
+        for (code, line, msg, later) in errs {
             // E0596 for a binding not declared `mut` says nothing about
             // borrows (its span is the binding when reported for several
             // uses). For a place behind a `&` reference (`&mut p.a` with
@@ -1205,7 +1255,13 @@ fn run_probes(src: &str, probes: &[&Probe], claims: &[Claim]) -> Result<Vec<Outc
             match line.and_then(|l| lines.get(&l)) {
                 Some(&k) => {
                     let c = code.clone().unwrap_or_default();
-                    if CONFLICT.contains(&c.as_str()) || NO_VALUE.contains(&c.as_str()) {
+                    if CONFLICT.contains(&c.as_str()) && !later.iter().any(|l| !lines.contains_key(l)) {
+                        // The loan is "later used" only at a probe line (or
+                        // nowhere rustc says): the probe's own use of the
+                        // borrowing value keeps it alive (`t.1 = Some(&t.0)`
+                        // then `&mut t`). No verdict.
+                        got.entry(k).or_default().insert((SELF_CONFLICT.to_owned(), msg));
+                    } else if CONFLICT.contains(&c.as_str()) || NO_VALUE.contains(&c.as_str()) {
                         got.entry(k).or_default().insert((c, msg));
                     } else {
                         bad.insert(k);
@@ -1275,11 +1331,19 @@ fn describe(d: Drawn) -> &'static str {
 }
 
 /// The violations of one program: (check, what), and the counts.
-pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<Violation>, Vec<(u32, String)>, Stats) {
+pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<Violation>, Vec<(u32, String, &'static str)>, Stats) {
     let mut st = Stats { programs: 1, ..Default::default() };
     let mut out = Vec::new();
     if has_marker(src) {
         *st.skips.entry("program: rustviz: hide/skip").or_default() += 1;
+        return (out, Vec::new(), st);
+    }
+    if ["line!", "column!", "file!", "env!", "option_env!", "include!", "include_str!", "include_bytes!", "module_path!"]
+        .iter().any(|m| src.contains(m))
+    {
+        // Inserting lines changes what these expand to anywhere in the
+        // file (and `env!` makes the program depend on the environment).
+        *st.skips.entry("program: uses line!/column!/file!/env!/include!").or_default() += 1;
         return (out, Vec::new(), st);
     }
     if src.contains("macro_rules") {
@@ -1398,6 +1462,7 @@ pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<Violation>, Vec<(u32
     }
     // Each probe's verdict: right, wrong (a violation), or inconclusive.
     let mut wrong: BTreeMap<usize, (&'static str, String)> = BTreeMap::new();
+    let mut passed: Vec<(u32, String, &'static str)> = Vec::new();
     let mut unsure: BTreeMap<usize, &'static str> = BTreeMap::new();
     let code_is = |e: &BTreeSet<(String, String)>, codes: &[&str]| e.iter().find(|(c, _)| codes.contains(&c.as_str())).cloned();
     for (p, r) in probes.iter().zip(&res) {
@@ -1414,6 +1479,10 @@ pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<Violation>, Vec<(u32
         };
         if errs.iter().any(|(c, _)| c == BEHIND_REF) {
             unsure.entry(p.claim).or_insert("`&mut` refused for another reason than a borrow (behind `&`, in an `Rc`)");
+            continue;
+        }
+        if errs.iter().any(|(c, _)| c == SELF_CONFLICT) {
+            unsure.entry(p.claim).or_insert("the probe's own use keeps the loan alive");
             continue;
         }
         let c = &claims[p.claim];
@@ -1447,20 +1516,20 @@ pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<Violation>, Vec<(u32
                 (None, Some(_), _) | (None, None, Some(_)) => Err(None),
                 (None, None, None) => Err(Some(("oracle-borrowed", none.clone()))),
             },
-            // Moved: "use of moved value" (E0382), the whole value. A
-            // partial move, or E0381 (never assigned on some path), says
-            // something else: inconclusive. A borrow conflict or no error
-            // means x still holds a value.
-            (Drawn::Moved, _) => match (&e0382, &e0381) {
-                (Some(e), _) if !e.1.contains("partially") => Ok(()),
-                (Some(_), _) | (None, Some(_)) => Err(None),
-                (None, None) => Err(Some(("oracle-moved", conflict.as_ref().map_or(none.clone(), said)))),
-            },
-            (Drawn::PartlyMoved, _) => match (&e0382, &e0381) {
-                (Some(e), _) if e.1.contains("partially moved") => Ok(()),
-                (Some(_), _) | (None, Some(_)) => Err(None),
-                (None, None) => Err(Some(("oracle-moved", conflict.as_ref().map_or(none.clone(), said)))),
-            },
+            // Moved / partially moved: E0382 says "moved on some path"
+            // (rustc gives the same message after `if c { drop(x) }`), so
+            // it confirms only a drawing that says "may". A definite claim
+            // can only be shown wrong: no E0381/E0382 means x has its
+            // value on every path.
+            (Drawn::Moved | Drawn::PartlyMoved, _) => {
+                let maybe = MAYBE_MOVED.iter().chain(["may have been moved", "may have no value"].iter()).any(|m| c.tip.contains(m));
+                let partly = c.drawn == Drawn::PartlyMoved;
+                match (&e0382, &e0381) {
+                    (Some(e), _) if maybe && e.1.contains("partially") == partly => Ok(()),
+                    (Some(_), _) | (None, Some(_)) => Err(None),
+                    (None, None) => Err(Some(("oracle-moved", conflict.as_ref().map_or(none.clone(), said)))),
+                }
+            }
             // "has no value yet" is E0381 isn't initialized, on every
             // path; "may have no value" is any E0381 / E0382.
             (Drawn::Unassigned, _) => {
@@ -1473,8 +1542,14 @@ pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<Violation>, Vec<(u32
                 }
             }
         };
+        let check_of = match (c.drawn, p.mutable) {
+            (Drawn::Usable, _) => "oracle-usable",
+            (Drawn::Shared, false) => "oracle-readable",
+            (Drawn::Shared, true) | (Drawn::MutLent, _) => "oracle-borrowed",
+            _ => "oracle-moved",
+        };
         match v {
-            Ok(()) => {}
+            Ok(()) => passed.push((c.line, c.var.clone(), check_of)),
             Err(Some(w)) => {
                 wrong.entry(p.claim).or_insert(w);
             }
@@ -1484,19 +1559,17 @@ pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<Violation>, Vec<(u32
         }
     }
     // A probe that rustc contradicts is a violation even when another
-    // probe of the same claim was inconclusive; a claim with no violation
-    // counts as tested only if every probe gave a verdict.
-    let mut tested = Vec::new();
-    for (i, c) in claims.iter().enumerate() {
-        if wrong.contains_key(&i) {
-            tested.push((c.line, c.var.clone()));
+    // probe of the same claim was inconclusive. A listed violation is
+    // GONE only if its own check passed (`passed`).
+    let mut tested = 0;
+    for i in 0..claims.len() {
+        if wrong.contains_key(&i) || !unsure.contains_key(&i) {
+            tested += 1;
         } else if let Some(why) = unsure.get(&i) {
             *st.skips.entry(why).or_default() += 1;
-        } else {
-            tested.push((c.line, c.var.clone()));
         }
     }
-    st.tested = tested.len();
+    st.tested = tested;
     for (i, (check, verdict)) in wrong {
         let c = &claims[i];
         let src_line = src.lines().nth(c.line as usize - 1).unwrap_or("").trim();
@@ -1515,7 +1588,7 @@ pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<Violation>, Vec<(u32
             ),
         });
     }
-    (out, tested, st)
+    (out, passed, st)
 }
 
 /// One reported contradiction.
@@ -1533,9 +1606,9 @@ fn infra(text: String) -> Violation {
     Violation { check: "oracle-error", line: 0, var: String::new(), text }
 }
 
-/// One snippet's results: its violations and the (line, column) claims
-/// that were tested.
-pub type Checked = (Vec<Violation>, Vec<(u32, String)>);
+/// One snippet's results: its violations and the (line, column, check)
+/// probes that rustc confirmed.
+pub type Checked = (Vec<Violation>, Vec<(u32, String, &'static str)>);
 
 /// What differs from `KNOWN_ORACLE_FAILURES` / `ORACLE_EXEMPT`, in
 /// `invariants::report`'s format (`tools/progen` parses its NEW lines).
@@ -1562,8 +1635,8 @@ pub fn report(results: &BTreeMap<String, Checked>) -> String {
         }
     }
     let gone = |s: &str, c: &str, l: u32, v: &str| {
-        results.get(s).is_some_and(|(vs, tested)| {
-            tested.iter().any(|(tl, tv)| *tl == l && tv == v)
+        results.get(s).is_some_and(|(vs, passed)| {
+            passed.iter().any(|(pl, pv, pc)| *pl == l && pv == v && *pc == c)
                 && !vs.iter().any(|x| x.check == c && x.line == l && x.var == v)
         })
     };
@@ -1588,8 +1661,8 @@ pub fn report(results: &BTreeMap<String, Checked>) -> String {
 pub fn untested_listed(results: &BTreeMap<String, Checked>) -> usize {
     KNOWN_ORACLE_FAILURES.iter().map(|(s, c, l, v, _)| (*s, *c, *l, *v))
         .chain(ORACLE_EXEMPT.iter().map(|(s, c, l, v, _)| (*s, *c, *l, *v)))
-        .filter(|(s, c, l, v)| results.get(*s).is_some_and(|(vs, tested)| {
-            !tested.iter().any(|(tl, tv)| tl == l && tv == v)
+        .filter(|(s, c, l, v)| results.get(*s).is_none_or(|(vs, passed)| {
+            !passed.iter().any(|(pl, pv, pc)| pl == l && pv == v && pc == c)
                 && !vs.iter().any(|x| x.check == *c && x.line == *l && x.var == *v)
         }))
         .count()
@@ -1648,9 +1721,20 @@ mod unit {
     fn no_points_where_inserting_is_unsound() {
         // Call / method arguments (a two-phase `&mut` reservation may be
         // live), an array length (a const context), a function with a
-        // block comment or `line!()`.
-        let src = "fn main() {\n    let mut v = vec![1];\n    v.push({\n        let n = v.len();\n        n\n    });\n    let a = [0u8; {\n        let k = 2;\n        k\n    }];\n    let b = 1;\n    let _ = (a, b);\n}\nfn g() {\n    let x = 1; /* c */\n    let y = x;\n    let _ = y;\n}\nfn h() {\n    let x = line!();\n    let _ = x;\n}\n";
-        assert_eq!(points(src), vec![(2, false), (6, false), (10, false), (11, false), (12, false)]);
+        // block comment, an array type's length (`line!()` and friends
+        // skip the whole file, in `check`).
+        let src = "fn main() {\n    let mut v = vec![1];\n    v.push({\n        let n = v.len();\n        n\n    });\n    let a = [0u8; {\n        let k = 2;\n        k\n    }];\n    let b = 1;\n    let _ = (a, b);\n}\nfn g() {\n    let x = 1; /* c */\n    let y = x;\n    let _ = y;\n}\nfn h() {\n    let t: [u8; {\n        let k = 1;\n        k\n    }] = [0];\n    let _ = t;\n}\n";
+        assert_eq!(points(src), vec![(2, false), (6, false), (10, false), (11, false), (12, false), (23, false), (24, false)]);
+    }
+
+    #[test]
+    fn item_names_are_collected() {
+        let src = "const N: u8 = 1;\nenum E { A }\nuse std::mem::swap as sw;\nfn main() {\n    fn x() {}\n    let x = 1;\n}\n";
+        let mut p = Points { src: src.lines().map(str::to_owned).collect(), ..Default::default() };
+        p.visit_file(&syn::parse_file(src).unwrap());
+        for n in ["N", "E", "A", "sw", "main", "x"] {
+            assert!(p.items.contains(n), "{n}");
+        }
     }
 
     #[test]
