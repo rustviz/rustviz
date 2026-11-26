@@ -28062,6 +28062,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // ended. Earlier heads of #1602 also said r1's borrow "ended in
         // each branch above" before `r1.len()` read it again on that line,
         // and r4's inside a loop whose next iteration reads it.
+        // Known wrong, drawn as on main and not pinned here: the loop join
+        // still says "r4's immutable borrow ends" (#1647), a9/b9's
+        // "mutable borrow ends" at the join though the returned reference
+        // keeps the loan (#1693), and "push no longer borrows the resource
+        // r10 points to" before push's argument reads r10 (#1621).
         must_contain: &[
             "r7's borrow ended in each branch above",
             "r4 isn't moved in any of the branches above",
@@ -38405,4 +38410,18 @@ fn arm_ends_review_1602_lender_and_copy_cycle() {
     assert_eq!(moved_and_ended, Vec::<(f64, f64)>::new(), "r12 ended on its move");
     assert!(!dots_listing_tooltip(&tl, "a5's immutable borrow ends").is_empty()
         || !dots_listing_tooltip(&tl, "b5's immutable borrow ends").is_empty(), "copied_both_ways rendered");
+    // Round 5: a nested `if` that calls an `Fn` closure (no event) or
+    // reborrows in place before `return` uses the loan, so it isn't ended
+    // as that `if` starts (an earlier head did: "f13's immutable borrow
+    // ends" on the nested `if`'s dot, r14's above its reborrow).
+    let f13_ended_at_if = dots_where(&tl, |l| l.iter().any(|x| x == "f13's immutable borrow ends")
+        && l.iter().any(|x| x.starts_with("f13 is live in a conditional expression")));
+    assert_eq!(f13_ended_at_if, Vec::<(f64, f64)>::new(), "f13 ended as the nested if starts");
+    let reslice = dots_where(&tl, |l| l.iter().any(|x| x.starts_with("r14 now points to the same data again")));
+    let r14_ends = dots_listing_tooltip(&tl, "r14's mutable borrow ends");
+    assert_eq!(reslice.len(), 1, "r14's reborrow: {reslice:?}");
+    assert!(!r14_ends.is_empty() && r14_ends.iter().all(|e| e.1 >= reslice[0].1),
+        "r14's borrow ends above its reborrow {:?}: {r14_ends:?}", reslice[0]);
+    // (The unrelated `FnOnce` call: rendering at all is the check.)
+    assert!(!dots_listing_tooltip(&tl, "r15's immutable borrow ends").is_empty(), "unrelated_fnonce_in_nested_return rendered");
 }

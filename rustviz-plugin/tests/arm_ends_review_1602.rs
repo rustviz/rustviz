@@ -126,3 +126,52 @@ fn moved_through_call(r12: &mut String, q12: &String, c: bool, d: bool) -> usize
     }
     q12.len()
 }
+
+// Round 5 of the review: a nested `if` whose arm calls an `Fn` closure
+// (which records no event), reborrows in place, or calls an unrelated
+// `FnOnce` closure before `return` still uses what it may use: the loan
+// isn't ended as the nested `if` starts (an earlier head of #1602 did,
+// and the `FnOnce` case failed to render).
+fn fn_closure_in_nested_return(a: bool, c: bool) {
+    let s13 = String::from("hi");
+    let f13 = || s13.len();
+    if a {
+        if c {
+            f13();
+            return;
+        }
+    } else {
+        f13();
+    }
+    drop(s13);
+}
+
+fn reslice_in_nested_return(a: bool, c: bool) {
+    let mut s14 = String::from("hi");
+    let mut r14 = &mut s14;
+    if a {
+        if c {
+            r14 = &mut *r14;
+            return;
+        }
+    } else {
+        r14.len();
+    }
+    s14.push('b');
+}
+
+fn unrelated_fnonce_in_nested_return(a: bool, c: bool) {
+    let s15 = String::from("hi");
+    let t15 = String::from("t");
+    let r15 = &s15;
+    let f15 = || drop(t15);
+    if a {
+        if c {
+            f15();
+            return;
+        }
+    } else {
+        r15.len();
+    }
+    drop(s15);
+}

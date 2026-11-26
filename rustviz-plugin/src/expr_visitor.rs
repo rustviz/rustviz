@@ -14464,6 +14464,27 @@ fn uses_within(e: &ExternalEvent, r: &ResourceAccessPoint) -> bool {
   }
 }
 
+/// Whether the conditional `e` certainly doesn't use `r`, though r is
+/// live in it (`if c { return; }`, where r's scope ends): its arms hold
+/// only scope ends and plain moves/copies/borrows that don't involve r,
+/// and no closure is live in it (a call of an `Fn` closure, which may
+/// read what it captured, records no event). Anything else counts as a
+/// use, as before #1602 (a reborrow `r = &mut *r`, a closure call).
+#[expect(clippy::disallowed_methods, reason = "any() makes order irrelevant")]
+fn quiet_within(e: &ExternalEvent, r: &ResourceAccessPoint) -> bool {
+  let ExternalEvent::Branch { branches, live_vars, .. } = e else { return false };
+  !r.is_closure() && !live_vars.iter().any(|v| v.is_closure())
+    && branches.iter().all(|b| b.e_data.iter().all(|(_, e)| match e {
+      ExternalEvent::Branch { .. } => quiet_within(e, r),
+      ExternalEvent::GoOutOfScope { .. } => true,
+      ExternalEvent::Bind { .. } | ExternalEvent::Copy { .. } | ExternalEvent::Move { .. }
+      | ExternalEvent::StaticBorrow { .. } | ExternalEvent::StaticDie { .. }
+      | ExternalEvent::MutableBorrow { .. } | ExternalEvent::MutableDie { .. } | ExternalEvent::RefDie { .. }
+      | ExternalEvent::PassByStaticReference { .. } | ExternalEvent::PassByMutableReference { .. } => !touches(e, r),
+      _ => false,
+    }))
+}
+
 /// Whether `events` give `r` a new value after moving it out (`let z =
 /// r; .. r = &mut b;`).
 fn new_value_after_move(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint) -> bool {
@@ -14476,15 +14497,15 @@ fn new_value_after_move(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoi
 }
 
 /// Where `r` is last used in `events` (one arm's): (line, index just
-/// after that event). A nested conditional counts up to its join, if
-/// it uses r: one r is only live in (`if c { return; }`, where r's
-/// scope ends) doesn't keep its borrow alive, which ends before it
-/// (#1569).
+/// after that event). A nested conditional r is live in counts up to its
+/// join, unless it certainly doesn't use r (`quiet_within`: `if c {
+/// return; }`, where r's scope ends), which doesn't keep its borrow
+/// alive: that ends before it (#1569).
 fn last_use_in(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint) -> Option<(usize, usize)> {
   // (Also a dot saying the condition may have moved r, which the arm
   // starts with: r's column runs to it, and not always further, #1279.)
   let i = events.iter().rposition(|(_, e)| match e {
-    ExternalEvent::Branch { .. } => uses_within(e, r),
+    ExternalEvent::Branch { .. } => touches(e, r) && !quiet_within(e, r),
     _ => touches(e, r) || matches!(e, ExternalEvent::LoopExitMove { ro, .. } if ro == r),
   })?;
   let line = match &events[i].1 {
