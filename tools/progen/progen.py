@@ -126,13 +126,14 @@ def signature(inv, what, types):
     if inv == "invalid-state":
         return " ".join(sorted({norm_var(m.group("var"), types) for m in ID.finditer(what)}))
     if inv.startswith("oracle-"):
-        # `s after L5 `...`: drawn <state> ("<tooltip>"); rustc: error[E0502]: ...` / `rustc accepts ...`
+        # `s after L5 `...`: drawn <state> ("<tooltip>"); rustc: error[E0502]: ...` or
+        # `...; rustc reports no borrow conflict or move for ...`. The verdict is after the last "; rustc".
         m = re.match(r"(\S+) after L\d+ .*?: drawn ([^(]+?) \(", what)
-        code = re.search(r"; rustc(?: accepts|: error\[(E\d+)\])", what)
         if not m:
             return re.sub(r"`[^`]*`|\d+", "_", what)[:100]
-        return "%s %s / %s" % (norm_var(m.group(1), types), m.group(2),
-                               (code.group(1) or "accepts") if code else "?")
+        verdict = what[what.rfind("; rustc"):]
+        code = re.match(r"; rustc: error\[(E\d+)\]", verdict)
+        return "%s %s / %s" % (norm_var(m.group(1), types), m.group(2), code.group(1) if code else "none")
     if inv == "outside-figure":
         m = re.search(r": (\w+) = ", what)
         return m.group(1) if m else ""

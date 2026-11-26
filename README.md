@@ -124,8 +124,13 @@ ignored); `let _ = &x;` must compile where it's drawn read-only and fail
 where it's drawn mutably borrowed (E0502), moved (E0382) or not assigned
 yet (E0381). It skips (and counts) what it can't probe soundly: dead
 code, shadowed names, places like `*r` or `v[0]`, rows where the plugin
-added extra rows; points inside closures aren't collected at all. It
-compiles a few probe programs per snippet, so it's opt-in:
+added extra rows, arm legs whose path it can't identify, verdicts that
+don't decide the drawn state (a two-phase `&mut` reservation, a partial
+vs. whole move). Points inside closures, call arguments and const
+contexts, and functions with block comments or `line!()` / `column!()` /
+`file!()`, aren't collected at all. Missing a contradiction is
+acceptable; reporting a false one isn't. It compiles a few probe
+programs per snippet, so it's opt-in:
 
 ```sh
 RV_ORACLE=1 cargo test -p rustviz-lib --test corpus --locked corpus_oracle_holds -- --nocapture
@@ -136,8 +141,9 @@ with `RV_INVARIANTS_ONLY=book/,known_bugs/`, add a directory with
 `RV_INVARIANTS_EXTRA=<dir>`; `RV_ORACLE_VERBOSE=1` prints every violation, listed or not), caches each compile under
 `target/tmp/rv-oracle-cache` (or `$RV_ORACLE_CACHE`), and fails on a
 violation that isn't in `KNOWN_ORACLE_FAILURES`
-(`rustviz-lib/tests/common/oracle.rs`, one issue per entry) or on a
-listed one that's gone. `tools/progen/progen.py check --oracle <dir>`
+(`rustviz-lib/tests/common/oracle.rs`: one entry per snippet, check,
+line and column, each with its issue) or on a listed claim that was
+tested and now passes. `tools/progen/progen.py check --oracle <dir>`
 runs it on generated programs.
 
 **Running the playground locally:** `cd playground && cargo run
