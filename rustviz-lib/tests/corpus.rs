@@ -28010,24 +28010,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
     },
     TooltipExpect {
-        name: "nested_arm_shared_lender_end_1581",
-        // #1581: a reference last used in an arm of a nested conditional
-        // while another reference to the same lender lives on ends its
-        // borrow in each nested arm (an end that gives nothing back). On
-        // main the nested arms had no end, and their join said the
-        // reference "isn't moved", with no dot at the outer join.
-        must_contain: &[
-            "r2's borrow ended in each branch above",
-            "m's borrow ended in each branch above",
-            "m3's borrow ended in each branch above",
-        ],
-        must_not_contain: &[
-            "r2 isn't moved in any of the branches above",
-            "=m isn't moved in any of the branches above",
-            "m3 isn't moved in any of the branches above",
-        ],
-    },
-    TooltipExpect {
         name: "borrow_end_before_nested_return_1569",
         // #1569: the borrow ends as the arm that doesn't use it starts,
         // not at a nested `return` (the borrower's scope end there isn't

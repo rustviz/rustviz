@@ -11722,7 +11722,8 @@ pub fn print_out_of_scope(&mut self){
             // before this end and lasting past it.)
             let others = made.as_ref().is_some_and(|(r, _)| self.borrow_map.iter().any(|(n, d)|
               n != r.name() && d.all_lenders().iter().any(|l| l.extract_rap() == Some(&lender))
-                && d.assigned_at <= *line && d.lifetime > *line));
+                && loan_line_of(self.preprocessed_events, n, &lender).unwrap_or(d.assigned_at) <= *line
+                && d.lifetime > *line));
             let new_column = !matches!(ev, ExternalEvent::RefDie { .. }) && !others
               && lender_new_on_path(self.preprocessed_events, &path, &lender);
             if let (true, Some((r, made))) = (after_exits || new_column, made) {
@@ -14456,6 +14457,9 @@ fn uses_within(e: &ExternalEvent, r: &ResourceAccessPoint) -> bool {
   match e {
     ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| b.e_data.iter().any(|(_, e)| uses_within(e, r))),
     ExternalEvent::LoopExitMove { ro, .. } => ro == r,
+    // (A closure call may use what the closure captured; which captures
+    // isn't known here, so it counts, as before #1602.)
+    ExternalEvent::ClosureCall { .. } => true,
     _ => touches(e, r),
   }
 }
@@ -15195,6 +15199,19 @@ fn end_lender_in_other_arms(
     }
   }
   end_lender_in_other_arms(&mut branches[*a].e_data, rest, lender, r, made, line, mutable, unique_id);
+}
+
+/// The first line where `events` (looking into conditionals) lend
+/// `lender` to the variable `holder`, for a holder that borrows several
+/// lenders from different lines (`holder.push(&v[0])` after `vec![&w]`).
+fn loan_line_of(events: &[(usize, ExternalEvent)], holder: &str, lender: &ResourceAccessPoint) -> Option<usize> {
+  events.iter().filter_map(|(l, e)| match e {
+    ExternalEvent::StaticBorrow { from, to: ResourceTy::Value(t), .. }
+    | ExternalEvent::MutableBorrow { from, to: ResourceTy::Value(t), .. }
+      if from.extract_rap() == Some(lender) && t.name() == holder => Some(*l),
+    ExternalEvent::Branch { branches, .. } => branches.iter().filter_map(|b| loan_line_of(&b.e_data, holder, lender)).min(),
+    _ => None,
+  }).min()
 }
 
 /// Whether some conditional along `path` (see `arm_declaring`) doesn't
