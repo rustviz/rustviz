@@ -100,6 +100,12 @@ impl<'a> BodyEnds<'a> {
       .collect()
   }
 
+  /// The loans `k` holds in any way (also through a reborrow stored in it,
+  /// `refs[0] = tr`), for a lender none of its own loans lends.
+  pub fn loans_reaching(&self, k: &str) -> Vec<&'a LoanInfo> {
+    self.facts.loans.iter().filter(|l| l.holders.iter().any(|h| names_match(k, h))).collect()
+  }
+
   /// Whether `l` borrows from the variable `name` (`Caller` for a
   /// parameter's), itself or through the reference chain it is made through.
   pub fn lends(&self, l: &LoanInfo, name: &str) -> bool {
@@ -119,6 +125,15 @@ impl<'a> BodyEnds<'a> {
       work.extend(m.made_through.iter().copied());
     }
     false
+  }
+
+  /// After `row`, `column` is still lent by a loan not in `except`: a
+  /// borrow of it that ends there doesn't give it back (another one goes
+  /// on, `let r = &s; let r2 = &s;` with r used later).
+  pub fn lent_after(&self, row: usize, column: &str, except: &[usize]) -> bool {
+    self.facts.rows.iter().filter(|r| r.line == row).any(|r| {
+      r.after.lent.get(column).is_some_and(|ls| ls.iter().any(|l| !except.contains(&l.loan)))
+    })
   }
 
   /// The row an end on the edge from `row` to `to_line` is drawn on: the

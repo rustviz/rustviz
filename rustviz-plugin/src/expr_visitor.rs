@@ -11737,7 +11737,8 @@ pub fn print_out_of_scope(&mut self){
     }
     let ix = facts.map(|f| crate::borrow_ends::BodyEnds::new(self.tcx, f, self.hir_body));
     let mut slots: Vec<Slot> = Vec::new();
-    let mut claimed: BTreeSet<usize> = BTreeSet::new();
+    // The loans an earlier slot of the same name took (per name).
+    let mut claimed: HashMap<String, BTreeSet<usize>> = HashMap::new();
     let mut slot_loans: Vec<Vec<usize>> = Vec::new();
     // Earlier arms' loans first: each is the one taken where it was
     // assigned; then the retired variables', before the later variable of
@@ -11751,18 +11752,20 @@ pub fn print_out_of_scope(&mut self){
     }
     for (k, rd) in arm_loans {
       let loans: Vec<usize> = ix.as_ref().map(|ix| ix.loans_held_by(&k).into_iter()
-        .filter(|l| l.line == rd.assigned_at && !claimed.contains(&l.loan) && ix.lends(l, &rd.lender.real_name()))
+        .filter(|l| l.line == rd.assigned_at && !claimed.get(&k).is_some_and(|c| c.contains(&l.loan)) && ix.lends(l, &rd.lender.real_name()))
         .map(|l| l.loan).collect()).unwrap_or_default();
-      claimed.extend(loans.iter().copied());
+      claimed.entry(k.clone()).or_default().extend(loans.iter().copied());
       slot_loans.push(loans);
       slots.push(Slot { key: k, rd, rows: (0, usize::MAX), arm: true });
     }
     for r in retired {
       // (Its loans are those taken before the later variable is declared.)
       let loans: Vec<usize> = ix.as_ref().map(|ix| ix.loans_held_by(&r.name).into_iter()
-        .filter(|l| !claimed.contains(&l.loan) && l.line < r.until)
+        .filter(|l| !claimed.get(&r.name).is_some_and(|c| c.contains(&l.loan)) && l.line < r.until)
+        // (Not one the later variable holds as its own.)
+        .filter(|l| { let e = ix.holder_end(&r.name, &[l.loan], (r.until, usize::MAX)); e.gives_back.is_none() && e.stops.is_none() })
         .map(|l| l.loan).collect()).unwrap_or_default();
-      claimed.extend(loans.iter().copied());
+      claimed.entry(r.name.clone()).or_default().extend(loans.iter().copied());
       slot_loans.push(loans);
       slots.push(Slot { key: r.name.clone(), rd: r.data, rows: (0, r.until), arm: false });
     }
@@ -11772,7 +11775,7 @@ pub fn print_out_of_scope(&mut self){
     for (k, rd) in current {
       let from = later_from.get(&k).copied().unwrap_or(0);
       let loans: Vec<usize> = ix.as_ref().map(|ix| ix.loans_held_by(&k).into_iter()
-        .filter(|l| !claimed.contains(&l.loan)).map(|l| l.loan).collect()).unwrap_or_default();
+        .filter(|l| !claimed.get(&k).is_some_and(|c| c.contains(&l.loan))).map(|l| l.loan).collect()).unwrap_or_default();
       slot_loans.push(loans);
       slots.push(Slot { key: k, rd, rows: (from, usize::MAX), arm: false });
     }
@@ -11812,6 +11815,11 @@ pub fn print_out_of_scope(&mut self){
         let mut mine: Vec<usize> = loans.iter().copied()
           .filter(|id| info(id).is_some_and(|f| ix.lends(f, &l.real_name())))
           .collect();
+        if mine.is_empty() && !loans.is_empty() && i > 0 {
+          mine = ix.loans_reaching(&slot.key).into_iter()
+            .filter(|f| !claimed.get(&slot.key).is_some_and(|c| c.contains(&f.loan)) && ix.lends(f, &l.real_name()))
+            .map(|f| f.loan).collect();
+        }
         if i == 0 && mine.is_empty() {
           mine = loans.iter().copied()
             .filter(|id| info(id).is_some_and(|f| !lenders.iter().any(|o| ix.lends(f, &o.real_name()))))
@@ -11834,6 +11842,18 @@ pub fn print_out_of_scope(&mut self){
           // the walk's line if another slot gives the loan back.
           (Some(back), None, None) => (End::Arrow(back), Some((slot.rd.lifetime.min(back), back))),
         };
+        // The lender stays lent after the end if another loan of it goes on
+        // (2.x's "ultimate" reference): then this end gives nothing back.
+        let column = match l {
+          ResourceTy::Value(x) | ResourceTy::Deref(x) | ResourceTy::Index(x, _, _) | ResourceTy::DerefField(x, _, _, _) => Some(x.name().to_owned()),
+          _ => None,
+        };
+        let still_lent = |row: usize| column.as_ref().is_some_and(|c| ix.lent_after(row, c, &mine));
+        let (end, own) = match end {
+          End::Arrow(back) if still_lent(back) => (End::Own(own.map_or(back, |(o, _)| o)), None),
+          End::LoopExit { own, back } if still_lent(back) => (End::Own(own), None),
+          e => (e, own),
+        };
         if own.is_none() && matches!(end, End::Arrow(_) | End::LoopExit { .. }) {
           given_back.extend(mine.iter().copied());
         }
@@ -11851,6 +11871,14 @@ pub fn print_out_of_scope(&mut self){
       };
       (p.lender, end)
     }).collect()).collect();
+    if std::env::var_os("RV3_P2B_DEBUG").is_some() {
+      for ((slot, loans), ends) in slots.iter().zip(slot_loans.iter()).zip(decided.iter()) {
+        let e: Vec<String> = ends.iter().map(|(l, e)| format!("{}:{}", l.real_name(), match e {
+          End::Arrow(x) => format!("arrow@{x}"), End::Own(x) => format!("own@{x}"),
+          End::LoopExit { own, back } => format!("loop{own}/{back}"), End::None => "none".into() })).collect();
+        eprintln!("P2B fn{} slot {} rows {:?} arm {} lender {} loans {:?} -> {:?}", self.current_fn_start, slot.key, slot.rows, slot.arm, slot.rd.lender.real_name(), loans, e);
+      }
+    }
     // Later passes read a reference's end line from `borrow_map`.
     for (slot, ends) in slots.iter().zip(decided.iter()) {
       if slot.arm {
