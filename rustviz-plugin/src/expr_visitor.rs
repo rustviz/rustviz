@@ -12783,11 +12783,14 @@ pub fn print_out_of_scope(&mut self){
         lender: sb.lender.clone(), hash_of: &hash_of, derived: &derived, seen: vec![sb.holder.clone()], holders: Vec::new(), hops: Vec::new(),
       };
       walk.follow(list, &sb.holder, hash, sb.at, sb.until, false);
-      // A call in one arm of an `if` / `match` stores nothing on the
-      // other arms' paths: a read there doesn't find the lender still
-      // borrowed (#1679 review).
-      for h in walk.holders.iter_mut() {
-        started_arm_gaps(self.preprocessed_events, sb.at, &mut h.gaps);
+      // Where rustc's loan isn't live, nothing holds it: the other arm
+      // of the `if` the call is in, unless a loop or a match guard that
+      // falls through brings the loan there (#1679 review).
+      if !sb.loans.is_empty() {
+        let live: BTreeSet<usize> = self.loan_live_lines(&sb.loans).into_values().flatten().collect();
+        for h in walk.holders.iter_mut() {
+          h.gaps.extend((h.from + 1..h.to).filter(|l| !live.contains(l)).map(|l| (l, l)));
+        }
       }
       // The call's borrow end is the event after it (see
       // `stored_borrow`).
@@ -13923,29 +13926,6 @@ fn dead_arm_gaps(list: &[(usize, ExternalEvent)], holder: &str, from: usize, to:
         if first <= end {
           out.push((first, end));
         }
-      }
-    }
-  }
-}
-
-/// The lines of the other arms of each `if` / `match` in `list` that
-/// line `from` is in one arm of: a loan taken there isn't held on the
-/// other arms' paths. Not inside a loop, where a later pass through an
-/// other arm can still find the loan of an earlier pass.
-fn started_arm_gaps(list: &[(usize, ExternalEvent)], from: usize, out: &mut Vec<(usize, usize)>) {
-  for (_, ev) in list {
-    let ExternalEvent::Branch { branches, branch_type, .. } = ev else { continue };
-    if matches!(branch_type, BranchType::Loop(..)) {
-      continue;
-    }
-    let ranges: Vec<(usize, usize)> = (0..branches.len()).map(|a| branch_type.get_start_end(a)).collect();
-    let Some(j) = ranges.iter().position(|&(a, b)| a <= from && from <= b) else { continue };
-    for (i, b) in branches.iter().enumerate() {
-      let (start, end) = ranges[i];
-      if i == j {
-        started_arm_gaps(&b.e_data, from, out);
-      } else if !(start <= from && from <= end) {
-        out.push((start, end));
       }
     }
   }

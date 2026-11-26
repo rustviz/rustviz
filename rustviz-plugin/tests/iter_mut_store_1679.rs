@@ -62,3 +62,19 @@ fn keep_in_one_arm(c: bool) {
     }
     println!("{}", kept[0]);
 }
+
+// In a loop, a later pass through the other arm still finds the loan
+// of an earlier pass: the read there keeps loop_t shared.
+fn setter_in_loop_arm(n: usize) {
+    let a = String::from("a");
+    let loop_t = String::from("t");
+    let mut loop_refs = vec![&a];
+    for i in 0..n {
+        if i == 0 {
+            keep(&mut loop_refs, &loop_t);
+        } else {
+            println!("{loop_t}");
+        }
+    }
+    println!("{}", loop_refs.len());
+}

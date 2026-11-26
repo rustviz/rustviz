@@ -92,3 +92,15 @@ fn immutable_deferred(c: bool) {
         println!("{immut_s}");
     }
 }
+
+// The break's value only reads read_s: read_s still holds its string.
+fn break_value_reads(c: bool) {
+    let mut read_s = String::from("a");
+    'b: {
+        if c {
+            break 'b { let _ = read_s.len(); };
+        }
+        read_s = String::new();
+    }
+    drop(read_s);
+}

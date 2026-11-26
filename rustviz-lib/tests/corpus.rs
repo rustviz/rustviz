@@ -28088,6 +28088,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "new_value's resource is no longer borrowed by println!, but is still immutably borrowed by slots",
             "indexed's resource is no longer borrowed by println!, but is still immutably borrowed by slots",
             "set reads from other_arm; set's signature lets it store this reference in arm_refs, so other_arm stays borrowed while arm_refs is in use",
+            // A later pass, or a guard that turned out false, brings the
+            // loan to the other arm: rustc's loan is live there.
+            "loop_t's resource is no longer borrowed by println!, but is still immutably borrowed by loop_refs",
         ],
         must_not_contain: &[
             "@9 =t's resource is no longer immutably borrowed",
@@ -28108,7 +28111,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "@8 v's resource is mutably borrowed",
+            "@9 v's resource is mutably borrowed",
         ],
+    },
+    TooltipExpect {
+        name: "setter_in_guard_1769",
+        must_contain: &[
+            "guard_t's resource is no longer borrowed by println!, but is still immutably borrowed by guard_refs",
+        ],
+        must_not_contain: &["@18 =guard_t's resource is no longer immutably borrowed"],
     },
     TooltipExpect {
         name: "vec_macro_element_move_1682",
@@ -28124,6 +28135,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "@18 =moved_arg is the owner of the resource",
             // The panic stops the evaluation before panic_s (review of #1746).
             "Move from panic_s to pv",
+            "Move from quit_s to qv",
         ],
     },
     TooltipExpect {
@@ -28152,6 +28164,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "return_s may be left without a value",
             // An immutable binding can't be assigned again (E0384).
             "immut_s can't be used until it's assigned again",
+            "read_s may be left without a value",
         ],
     },
 ];

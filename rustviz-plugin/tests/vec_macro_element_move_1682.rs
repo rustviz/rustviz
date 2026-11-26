@@ -30,3 +30,14 @@ fn after_panic(c: bool) {
         println!("{}", pv.len());
     }
 }
+
+fn quit() -> ! {
+    std::process::exit(0)
+}
+
+// Evaluation stops at quit(): quit_s is never moved into the Vec.
+fn after_never_call() {
+    let quit_s = String::from("s");
+    let qv = vec![format!("first"), quit(), quit_s];
+    println!("{}", qv.len());
+}

@@ -4827,9 +4827,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // A break can also skip an assignment (#1685). Start each way
     // out with what the binding actually held on entry. A skipped
     // assignment to an already initialized binding doesn't empty it.
-    // (Not when a `break`'s value assigns, `break 'b { s = …; }`: its
-    // path was taken before that value. Say nothing then.)
-    if breaks_with_assigning_value(&self.tcx, expr) {
+    // (Not when a `break` carries anything but a variable or a
+    // literal, `break 'b { s = …; }`: its path is taken before that
+    // value, which can assign, move or just read. Say nothing then.)
+    if breaks_with_complex_value(expr) {
       return;
     }
     let mut assigned = Vec::new();
@@ -16593,13 +16594,13 @@ fn moved_on_path(events: &[(usize, ExternalEvent)], hide: &[std::ops::Range<usiz
 }
 
 /// Whether a `break` out of the labeled block `block` carries a value
-/// that assigns a variable (`break 'b { s = String::new(); }`).
-fn breaks_with_assigning_value<'tcx>(tcx: &rustc_middle::ty::TyCtxt<'tcx>, block: &'tcx Expr<'tcx>) -> bool {
-  struct Find<'a, 'tcx> { tcx: &'a rustc_middle::ty::TyCtxt<'tcx>, id: HirId, found: bool }
-  impl<'a, 'tcx> Visitor<'tcx> for Find<'a, 'tcx> {
+/// other than a variable or a literal (`break 'b { s = String::new(); }`).
+fn breaks_with_complex_value<'tcx>(block: &'tcx Expr<'tcx>) -> bool {
+  struct Find { id: HirId, found: bool }
+  impl<'tcx> Visitor<'tcx> for Find {
     fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
       if let ExprKind::Break(dest, Some(value)) = e.kind {
-        if dest.target_id == Ok(self.id) && !assigned_names(self.tcx, value).is_empty() {
+        if dest.target_id == Ok(self.id) && !matches!(value.kind, ExprKind::Path(..) | ExprKind::Lit(..)) {
           self.found = true;
         }
       }
@@ -16607,7 +16608,7 @@ fn breaks_with_assigning_value<'tcx>(tcx: &rustc_middle::ty::TyCtxt<'tcx>, block
     }
   }
   let ExprKind::Block(b, Some(_)) = block.kind else { return false };
-  let mut f = Find { tcx, id: b.hir_id, found: false };
+  let mut f = Find { id: b.hir_id, found: false };
   f.visit_expr(block);
   f.found
 }

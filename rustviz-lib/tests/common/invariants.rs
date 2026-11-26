@@ -45,6 +45,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 /// the ones in those directories. One entry covers every violation of
 /// that invariant in that snippet.
 pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
+    // A match guard whose call stores a reference and turns out false:
+    // the guard's leg segment starts where no dot is.
+    ("setter_in_guard_1769", "line-starts-nowhere", 1769),
     // Geometric (`geometry.rs`), from here on.
     // Tuple column goes on after its fields were moved out.
     ("edition2024/if_let_chain_irrefutable_move", "line-ends-nowhere", 1157),
