@@ -402,10 +402,12 @@ fn main() {
         "first's ref-line tooltip missing"
     );
 
-    // i.p inherits the same borrow (Copy of a ref → ref RAP).
+    // i.p inherits the same borrow (Copy of a ref → ref RAP). Its
+    // borrow starts and ends on the literal's dot, which has no bracket
+    // (#1611): the dot says it.
     assert!(
-        timeline.contains("i.p holds an immutable reference"),
-        "i.p's ref-line tooltip missing — likely still modelled as a Struct field"
+        timeline.contains("i.p's immutable borrow ends"),
+        "i.p's borrow end missing — likely still modelled as a Struct field"
     );
 
     // emit_borrow_ends resolves i.p's transitive lender (n) and
@@ -417,13 +419,14 @@ fn main() {
         "i.p didn't return its borrow to n"
     );
 
-    // Both ref-lines are drawn; first's spans a row (from `split` to the
-    // literal), i.p's only the literal's row (#1310).
+    // first's ref-line spans a row (from `split` to the literal); i.p's
+    // would span none (only the literal's dot, #1310), so it isn't drawn
+    // (#1611).
     let lines = ref_line_paths(&timeline);
     assert!(
-        lines.len() >= 2,
-        "expected ref-lines for both first and i.p, got {}",
-        lines.len()
+        lines.len() == 1,
+        "expected a ref-line for first only, got {:?}",
+        lines
     );
     assert!(
         lines.iter().any(|d| ref_line_v(d) > 10.0),

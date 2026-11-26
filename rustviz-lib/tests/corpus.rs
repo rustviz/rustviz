@@ -2566,11 +2566,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // be false (the call doesn't initialise add_one).
         must_contain: &[
             // Point holds only an i32: nothing to drop, so a value (#867).
+            // (No "r holds an immutable reference": that was the bracket
+            // of a borrow with no rows, a stub off the dot, #1611.)
             "r immutably borrows a value",
-            "r holds an immutable reference",
             "r's immutable borrow ends",
             "m mutably borrows a value",
-            "m holds a mutable reference",
             "m's mutable borrow ends",
         ],
         must_not_contain: &[
@@ -28311,6 +28311,10 @@ fn assert_well_formed(name: &str, rv: &Rustviz) {
         let problems = common::svg::rv_problems(svg);
         assert!(problems.is_empty(), "{}: {} panel's data-rv-* attributes: {:#?}", name, panel, problems);
     }
+    // A reference bound and ended on one dot has no span to bracket:
+    // drawn, its bracket was a 15 px stub off the dot (#1611).
+    let flat = flat_brackets(&timeline);
+    assert!(flat.is_empty(), "{}: zero-height reference bracket(s): {:?}", name, flat);
     let crossed = arrows_crossing_dots(&timeline);
     assert!(
         crossed.is_empty(),
@@ -28835,6 +28839,19 @@ fn off_canvas_ys(svg: &str) -> Vec<String> {
 }
 
 /// Start tags of every `<kind ...>` element in `svg`.
+/// The `data-rv-id`s of reference brackets (`M x y l dx dy v V l -dx
+/// dy`) whose vertical run `V` is zero or less (#1611).
+fn flat_brackets(svg: &str) -> Vec<String> {
+    // (By `data-rv-kind`: the id is cut short for long names.)
+    start_tags(svg, "path").into_iter()
+        .filter(|t| t.contains("data-rv-kind=\"bracket\""))
+        .filter(|t| t.split(" d=\"").nth(1).and_then(|d| d.split(" v ").nth(1))
+            .and_then(|v| v.split_whitespace().next()).and_then(|v| v.parse::<f64>().ok())
+            .is_some_and(|v| v <= 0.0))
+        .map(|t| t.split("data-rv-id=\"").nth(1).and_then(|i| i.split('"').next()).unwrap_or(t).to_owned())
+        .collect()
+}
+
 fn start_tags<'a>(svg: &'a str, kind: &str) -> Vec<&'a str> {
     let open = format!("<{} ", kind);
     svg.match_indices(&open)
@@ -38500,4 +38517,29 @@ fn code_panel_names_from_utf8_1631() {
     assert!(!code.contains("{{root}}"), "path root shown: {code}");
     // Only `w`'s `String::from(..)` is shown by that name.
     assert_eq!(code.matches(">String::from</tspan>(").count(), 1, "{code}");
+}
+
+/// #1612, #1615: a reference whose arms leave it in different states
+/// (assigned in some, re-pointed in one) had no dot where its legs meet.
+/// Each such join now has one, saying only that the conditional ends
+/// there: nothing about which paths get there (`returns`' inner `else`
+/// returns) or what they left in the reference.
+#[test]
+fn fallback_join_dots_1612() {
+    let svg = run_with_local_backend("join_dot_fallback_1612").timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    let tip = |id: &str| doc.descendants()
+        .find(|n| n.attribute("data-rv-id") == Some(id))
+        .and_then(|n| n.attribute("data-tooltip-text"))
+        .map(|t| t.to_owned());
+    for id in [
+        "r@L13:dot:branch_join", "r@L14:dot:branch_join",
+        "q@L30:dot:branch_join",
+        "a5@L44:dot:branch_join",
+        "w@L61:dot:branch_join", "w@L62:dot:branch_join",
+        "v@L78:dot:branch_join", "v@L79:dot:branch_join",
+        "p@L94:dot:branch_join",
+    ] {
+        assert_eq!(tip(id).as_deref(), Some("The conditional above ends here"), "{id}");
+    }
 }

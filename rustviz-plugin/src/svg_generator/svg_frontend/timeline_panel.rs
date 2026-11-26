@@ -1453,6 +1453,21 @@ fn render_branch_dots(
                     Some(State::OutOfScope) | Some(State::FullPrivilege { s: LineState::Uninit })
                 ) && (b.e_data.is_empty() || ends_borrow(&b.e_data))
             });
+        // The join is reached by the line of each arm that gets
+        // there still holding something (`render_branches`). Where
+        // no arm does (the arms of a nested `if` that kept s end at
+        // its own join, a reference's borrow ended in every arm),
+        // the dot would float: its text goes on the column's next
+        // dot instead, the scope end or the next event (#702).
+        // An arm still mutably lent out at the join (`r = &mut s` in it)
+        // reaches it with a dotted line (#722), and the dot is drawn
+        // where that line ends (another arm moved s, #1297) and where
+        // the column goes on after the join, dotted: the legs end at the
+        // join dot, not in mid-line (#1371).
+        let join_has_line = branch_history.iter().any(|b| {
+            let end = arm_end_state(rap, b, branch_history, ty);
+            !b.diverges && seg_drawn(rap, &end)
+        });
         // `None`: no join dot at all (the all-moved case below).
         let title = if borrow_ended_in_every_arm {
             Some(hover_messages::event_dot_branch_merge_borrow_ended(&is.real_name()))
@@ -1564,6 +1579,13 @@ fn render_branch_dots(
                     rap.is_mut(),
                     reassigned,
                 ))
+            } else if join_has_line {
+                // Anything else (a reference whose borrow ended in only
+                // some arms, `let r;` assigned in some, #1612; one re-pointed
+                // in an arm, #1615): its legs still meet here, so the join
+                // gets a dot. Its text claims nothing about which paths get
+                // here (an arm may return) or what they left in r.
+                Some(hover_messages::event_dot_branch_merge_conditional_ends())
             } else {
                 None
             }
@@ -1684,21 +1706,6 @@ fn render_branch_dots(
         } else {
             Some(branch_join_message(branch_history, ty, is))
         };
-        // The join is reached by the line of each arm that gets
-        // there still holding something (`render_branches`). Where
-        // no arm does (the arms of a nested `if` that kept s end at
-        // its own join, a reference's borrow ended in every arm),
-        // the dot would float: its text goes on the column's next
-        // dot instead, the scope end or the next event (#702).
-        // An arm still mutably lent out at the join (`r = &mut s` in it)
-        // reaches it with a dotted line (#722), and the dot is drawn
-        // where that line ends (another arm moved s, #1297) and where
-        // the column goes on after the join, dotted: the legs end at the
-        // join dot, not in mid-line (#1371).
-        let join_has_line = branch_history.iter().any(|b| {
-            let end = arm_end_state(rap, b, branch_history, ty);
-            !b.diverges && seg_drawn(rap, &end)
-        });
         // Unless the column's next event is a later conditional, which
         // draws no split dot either (none of its lines reach it): the
         // text would go on the first dot of each of its arms, and on its
@@ -10184,6 +10191,14 @@ fn render_ref_line(
                                 // diamond (#1308).
                                 data.y2 = end_y(*line_start).max(data.y1);
                                 let dv = data.y2 - data.y1;
+                                // A reference bound and ended on one dot
+                                // (`let r = x;` never used) has no span to
+                                // bracket: drawn, it was a 15 px stub off
+                                // the dot (#1611). The dot says it all.
+                                if dv <= 0 {
+                                    alive = false;
+                                    continue;
+                                }
                                 data.v = dv - 2*dv/5;
                                 data.dy = dv/5;
                                 data.rv = bracket.clone().rows(bracket_start, *line_start).attrs();
