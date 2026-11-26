@@ -1574,6 +1574,14 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         let StatementKind::Assign(asg) = &st.kind else { continue };
                         let (lhs, rv) = &**asg;
                         let no_deref = |p: &Place<'tcx>| !p.projection.iter().any(|e| e == ProjectionElem::Deref);
+                        let through_ref = |p: &Place<'tcx>| {
+                            p.projection.iter().enumerate().any(|(i, e)| {
+                                e == ProjectionElem::Deref && {
+                                    let base = Place { local: p.local, projection: tcx.mk_place_elems(&p.projection[..i]) };
+                                    !decl_place_ty(tcx, body, base).is_box()
+                                }
+                            })
+                        };
                         let gets = held_by(lhs.local, t.mid_index(loc)).contains(&l.loan);
                         let carried = |how: &BTreeMap<Local, u8>, p: &Place<'tcx>| -> Option<u8> {
                             let k = *how.get(&p.local)?;
@@ -1581,13 +1589,14 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         };
                         match rv {
                             // (A store through a reference, `*z = &c`, puts it in
-                            // what z points to; z's own value stays the same.)
-                            Rvalue::Use(Operand::Copy(p) | Operand::Move(p)) | Rvalue::Cast(_, Operand::Copy(p) | Operand::Move(p), _) if no_deref(lhs) => {
+                            // what z points to; z's own value stays the same. A
+                            // Box's contents are its own: `vec![&row]`.)
+                            Rvalue::Use(Operand::Copy(p) | Operand::Move(p)) | Rvalue::Cast(_, Operand::Copy(p) | Operand::Move(p), _) if !through_ref(lhs) => {
                                 if let Some(k) = carried(&how, p) {
                                     set(&mut how, lhs.local, k, t.mid_index(loc));
                                 }
                             }
-                            Rvalue::Aggregate(_, ops) if no_deref(lhs) => {
+                            Rvalue::Aggregate(_, ops) if !through_ref(lhs) => {
                                 for o in ops {
                                     if let Operand::Copy(p) | Operand::Move(p) = o {
                                         if let Some(k) = carried(&how, p) {
