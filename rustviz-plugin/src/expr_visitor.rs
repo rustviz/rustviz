@@ -11796,7 +11796,12 @@ pub fn print_out_of_scope(&mut self){
       loans: Vec<usize>,
       /// Its own end, if another slot gives the loans back.
       own: Option<(usize, usize)>,
+      /// A value holding the borrow (`o: Option<&mut T>`) that also stops
+      /// holding it while the loan goes on.
+      holder_stops: bool,
     }
+    // The loans a pattern's binding gives back (`if let Some(e) = o`).
+    let mut pattern_gives: BTreeSet<usize> = BTreeSet::new();
     let mut pending: Vec<Vec<Pending>> = Vec::new();
     let mut given_back: BTreeSet<usize> = BTreeSet::new();
     for (slot, loans) in slots.iter().zip(slot_loans.iter()) {
@@ -11804,7 +11809,7 @@ pub fn print_out_of_scope(&mut self){
       let mut ends = Vec::new();
       for (i, l) in lenders.iter().enumerate() {
         let Some(ix) = ix.as_ref() else {
-          ends.push(Pending { lender: l.clone(), end: End::Arrow(slot.rd.lifetime), loans: Vec::new(), own: None });
+          ends.push(Pending { lender: l.clone(), end: End::Arrow(slot.rd.lifetime), loans: Vec::new(), own: None, holder_stops: false });
           continue;
         };
         // With several lenders, each gives back the loans of its own;
@@ -11828,7 +11833,7 @@ pub fn print_out_of_scope(&mut self){
         if mine.is_empty() {
           // No loan the facts know of: the walk's line.
           let end = if loans.is_empty() && i == 0 { End::Arrow(slot.rd.lifetime) } else { End::None };
-          ends.push(Pending { lender: l.clone(), end, loans: Vec::new(), own: None });
+          ends.push(Pending { lender: l.clone(), end, loans: Vec::new(), own: None, holder_stops: false });
           continue;
         }
         let e = ix.holder_end(&slot.key, &mine, slot.rows);
@@ -11857,7 +11862,11 @@ pub fn print_out_of_scope(&mut self){
         if own.is_none() && matches!(end, End::Arrow(_) | End::LoopExit { .. }) {
           given_back.extend(mine.iter().copied());
         }
-        ends.push(Pending { lender: l.clone(), end, loans: mine, own });
+        if self.pattern_copies.contains(&slot.key) && e.gives_back.is_some() {
+          pattern_gives.extend(mine.iter().copied());
+        }
+        let holder_stops = e.stops.is_some() && self.raps.get(&slot.key).is_some_and(|r| !r.rap.is_ref() && r.rap.holds_borrow());
+        ends.push(Pending { lender: l.clone(), end, loans: mine, own, holder_stops });
       }
       pending.push(ends);
     }
@@ -11866,6 +11875,10 @@ pub fn print_out_of_scope(&mut self){
     // ends (its holder from then on has no column: `w.push((r, ..))`).
     let decided: Vec<Vec<(ResourceTy, End)>> = pending.into_iter().map(|ends| ends.into_iter().map(|p| {
       let end = match p.own {
+        // A value whose loan a pattern's binding took over (#1447): the
+        // binding gives it back on its arm, the scrutinee's temporary on
+        // the others (`end_scrutinee_borrows_in_other_arms`).
+        _ if p.holder_stops && p.loans.iter().any(|l| pattern_gives.contains(l)) => End::None,
         Some((own, _)) if p.loans.iter().any(|l| given_back.contains(l)) => End::Own(own),
         _ => p.end,
       };
