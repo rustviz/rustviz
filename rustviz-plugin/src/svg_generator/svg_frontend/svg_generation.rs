@@ -160,7 +160,7 @@ fn split_same_line_borrow_ends(group: &[ExternalEvent], in_arm: bool) -> (Vec<Ex
     };
     // (With where each is listed: an end listed before every borrow it
     // could end is an older loan's, given back before the line's new one
-    // is made, `h.r = &t;` re-pointing a field that may point into s or t.
+    // is made, `h.r = &u;` re-pointing a field that may point into s or t.
     // Moved below the stack with the new loan's end, it took a row of its
     // own, apart from the end to s it is one loan with, #1604.)
     let borrows: Vec<(usize, (u64, u64))> = group.iter().enumerate()
@@ -198,6 +198,23 @@ fn split_same_line_borrow_ends(group: &[ExternalEvent], in_arm: bool) -> (Vec<Ex
     let mut moved: Vec<bool> = group.iter().enumerate()
         .map(|(k, e)| (ends_a_borrow_here(k) || ends_a_received_borrow(e)) && !before_conflicting_borrow(k))
         .collect();
+    // An older loan's end listed after the new borrow of the same lender
+    // (`after_same_lender_borrow`: t in `h.r = &t;`) goes below with the
+    // new loan's, and so do that old loan's ends to its other lenders (s,
+    // when h.r may point into s or t): one loan, ended on one row (#1604).
+    // (Told apart from the new loan's by being made before the borrow.)
+    let into_before = |f: u64, k: usize| borrows.iter().find(|&&(b, (_, bt))| b < k && bt == f).map(|&(b, _)| group[b].get_id());
+    for k in 0..group.len() {
+        if moved[k] || !is_end(&group[k]) {
+            continue;
+        }
+        let Some((f, t)) = ends(&group[k]) else { continue };
+        let Some(bid) = into_before(f, k).filter(|&bid| group[k].get_id() < bid) else { continue };
+        if (0..group.len()).any(|i| moved[i] && is_end(&group[i]) && group[i].get_id() < bid
+            && ends(&group[i]).is_some_and(|(f2, t2)| f2 == f && t2 != t)) {
+            moved[k] = true;
+        }
+    }
     // The end of a reference that one of those ends gives its loan back
     // to (`let m2 = &mut *m; let r2 = &*m2;`, both ending on that line):
     // it comes after r2's end, on the same row, not on the line's first
@@ -1452,7 +1469,7 @@ pub fn mutate_branch_lines(
                                 b_data.e_data.insert(at + 1 + n, (row, d));
                             }
                         }
-                        let mut ev_len = if back.is_empty() { stacked_arrow_rows(&front, false) } else { ev.len() - 1 - hidden };
+                        let mut ev_len = if back.is_empty() { stacked_arrow_rows(&front, false) } else { ev.len() - 1 - hidden - grouped_field_ends(&back) };
                         if let Some((tracks, n)) = struct_write_tracks(&front).filter(|_| back.is_empty()) {
                             arrow_tracks.extend(tracks);
                             ev_len = half_row_tracks_extra_rows(n);
@@ -2226,7 +2243,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                     // lines right after `line_num`, those blank rows do
                     // the same job — reuse them instead of stacking our
                     // own on top, which produces an awkward double gap.
-                    let mut needed = if back.is_empty() { stacked_arrow_rows(&front, true) } else { ev.len() - 1 - hidden };
+                    let mut needed = if back.is_empty() { stacked_arrow_rows(&front, true) } else { ev.len() - 1 - hidden - grouped_field_ends(&back) };
                     if let Some((tracks, n)) = struct_write_tracks(&front).filter(|_| back.is_empty()) {
                         visualization_data.arrow_tracks.extend(tracks);
                         needed = half_row_tracks_extra_rows(n);

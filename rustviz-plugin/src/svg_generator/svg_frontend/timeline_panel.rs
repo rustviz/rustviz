@@ -8022,8 +8022,16 @@ fn field_lender_walk(
                 if from.is_same_underlying(to) {
                     continue;
                 }
-                let key = (*field.hash(), *row, matches!(ev, ExternalEvent::MutableDie { .. }),
+                let mut key = (*field.hash(), *row, matches!(ev, ExternalEvent::MutableDie { .. }),
                     assigned.get(&(*field.hash(), *row)).copied().unwrap_or(0));
+                // A second end to a lender the group already ends is a later
+                // loan's (`h.r = &t;` after `longest(&s, &t)`, both on one row
+                // of an arm: the old loan's end to t, then the new one's).
+                // (Counted apart from `assigned`'s, which a later borrow into
+                // the field on the row bumps.)
+                while ends.iter().any(|(k, _, g)| *k == key && g.iter().any(|(_, n)| *n == to.name())) {
+                    key.3 += 1 << 32;
+                }
                 let before: Vec<String> = pending.get(field.hash()).into_iter().flatten()
                     .filter(|(_, r)| r != row).map(|(n, _)| n.clone()).collect();
                 match ends.iter_mut().find(|(k, ..)| *k == key) {
