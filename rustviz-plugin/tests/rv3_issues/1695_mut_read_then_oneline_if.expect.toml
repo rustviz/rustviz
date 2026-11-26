@@ -2,8 +2,6 @@ issue = 1695
 cluster = "C28"
 title = "`r.len(); if c { s.push('a'); } else { r.len(); }` on one line: r's mutable loan is drawn ending on the join, after the other arm's use of s"
 fn = "run"
-xfail = "P3"
-note = "The spike lists the arms' borrows first and all ends after; the end of r on the `c` path is before `s.push`."
 beyond_facts = "P3/P4 (renderer-level, to be checked visually): one-line arms have no rows of their own; here the order of the row's events and the loan's end are pinned"
 
 [[loan]]

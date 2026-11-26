@@ -52,7 +52,7 @@ kind = "shared"                # optional: shared | mut | unique | exclusive
 holder = "c"                   # optional; must be among the loan's holders
 ends = [[5, 6], 9]             # optional: exactly these ends, one per CFG edge that ends the loan:
                                #   [5, 6] = on row 5, on the path that next runs row 6 (any row: a loop's
-                               #   back edge goes up); 9 = on row 9 (any edge). The loan record's
+                               #   back edge goes up); 9 = on row 9 (any edge); [4, 5, 16] = also the column the path continues at (the dump's `to_col`). Ends on one row pair with different columns are different ends. The loan record's
                                #   end rows must be the same set.
 ends_include = [5]             # optional
 ends_exclude = [8]             # optional

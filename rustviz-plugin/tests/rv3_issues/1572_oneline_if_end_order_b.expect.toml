@@ -2,8 +2,6 @@ issue = 1572
 cluster = "C28"
 title = "One-line `let n = if c { s2.len() } else { m2.len() };`: m2's loan end is on the join, after the `if` arm's read of s2"
 fn = "run"
-xfail = "P3"
-note = "The spike lists the borrows of the row, then every end; on the `if` path m2 is dead before `s2.len()`."
 beyond_facts = "P3: renderer-level, to be checked visually: the end and the read are drawn on the join dot; here the event order and the loan's end row are pinned (shape B of #1572)"
 
 [[loan]]
