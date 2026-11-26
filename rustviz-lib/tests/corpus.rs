@@ -28116,26 +28116,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &["only lowers", "only lower their", "its own buffer is freed", "the Weak inside", "freed only when"],
     },
-    TooltipExpect {
-        name: "join_dot_fallback_1612",
-        // #1612, #1615: a reference whose arms leave it in different
-        // states (assigned in some, re-pointed in one) had no dot where
-        // its legs join. The dot claims nothing about any path: only
-        // rustc's liveness, that it isn't read after the join. In a loop
-        // (the next pass may read it) it says only that the branches join.
-        must_contain: &[
-            "r isn't used after the branches above",
-            "q isn't used after the branches above",
-            "a5 isn't used after the branches above",
-            "The branches above join here",
-        ],
-        must_not_contain: &[
-            "w isn't used after the branches above",
-            "r's borrow ended in each branch above",
-            "q's borrow ended in each branch above",
-            "a5's borrow ended in each branch above",
-        ],
-    },
 ];
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws
@@ -38536,4 +38516,28 @@ fn code_panel_names_from_utf8_1631() {
     assert!(!code.contains("{{root}}"), "path root shown: {code}");
     // Only `w`'s `String::from(..)` is shown by that name.
     assert_eq!(code.matches(">String::from</tspan>(").count(), 1, "{code}");
+}
+
+/// #1612, #1615: a reference whose arms leave it in different states
+/// (assigned in some, re-pointed in one) had no dot where its legs meet.
+/// Each such join now has one, saying only that the conditional ends
+/// there: nothing about which paths get there (`returns`' inner `else`
+/// returns) or what they left in the reference.
+#[test]
+fn fallback_join_dots_1612() {
+    let svg = run_with_local_backend("join_dot_fallback_1612").timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    let tip = |id: &str| doc.descendants()
+        .find(|n| n.attribute("data-rv-id") == Some(id))
+        .and_then(|n| n.attribute("data-tooltip-text"))
+        .map(|t| t.to_owned());
+    for id in [
+        "r@L13:dot:branch_join", "r@L14:dot:branch_join",
+        "q@L30:dot:branch_join",
+        "a5@L44:dot:branch_join",
+        "w@L61:dot:branch_join", "w@L62:dot:branch_join",
+        "v@L78:dot:branch_join", "v@L79:dot:branch_join",
+    ] {
+        assert_eq!(tip(id).as_deref(), Some("The conditional above ends here"), "{id}");
+    }
 }

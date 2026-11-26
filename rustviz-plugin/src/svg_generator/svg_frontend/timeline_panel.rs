@@ -1583,13 +1583,9 @@ fn render_branch_dots(
                 // Anything else (a reference whose borrow ended in only
                 // some arms, `let r;` assigned in some, #1612; one re-pointed
                 // in an arm, #1615): its legs still meet here, so the join
-                // gets a dot, saying only what holds on every path. rustc's
-                // liveness says whether r is used after the join.
-                Some(if matches!(event, Event::Branch { dead_after: true, .. }) {
-                    hover_messages::event_dot_branch_merge_not_used_after(&is.real_name())
-                } else {
-                    hover_messages::event_dot_branch_merge_join()
-                })
+                // gets a dot. Its text claims nothing about which paths get
+                // here (an arm may return) or what they left in r.
+                Some(hover_messages::event_dot_branch_merge_conditional_ends())
             } else {
                 None
             }
@@ -10361,7 +10357,6 @@ mod tests {
             maybe_init: false,
             loop_assigned: false,
             maybe_held: false,
-            dead_after: false,
             id: 0,
         })];
         compute_width(&mut events);

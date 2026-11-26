@@ -45,8 +45,8 @@ fn copied_both_ways(c: bool) {
     println!("{}", t5);
 }
 
-// In a loop the next pass may read w again (rustc's liveness doesn't order
-// it by line there), so the join says only that the branches join.
+// The same in a loop. The join dots say only that the conditional ends
+// there, nothing about the paths through it.
 fn in_loop(s: String, t: String, a: bool, b: bool) {
     for _i in 0..2 {
         let w;
@@ -63,9 +63,26 @@ fn in_loop(s: String, t: String, a: bool, b: bool) {
     }
 }
 
+// An arm that returns: only the `if b` path reaches the inner join.
+fn returns(s: String, t: String, a: bool, b: bool) {
+    let v;
+    if a {
+        v = &s;
+        println!("{}", v);
+    } else {
+        if b {
+            v = &t;
+            println!("{}", v);
+        } else {
+            return;
+        }
+    }
+}
+
 fn main() {
     nested(String::new(), String::new(), true, false);
     arms(String::new(), String::new(), 1);
     copied_both_ways(true);
     in_loop(String::new(), String::new(), false, true);
+    returns(String::new(), String::new(), false, false);
 }

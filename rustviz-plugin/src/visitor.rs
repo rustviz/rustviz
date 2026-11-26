@@ -4382,25 +4382,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
-  /// Of `live`, the references that rustc's liveness says aren't used
-  /// on the conditional's merge line or after it (`dead_from_line`),
-  /// for its join's text (#1612, #1615). None in a loop, where a use
-  /// above the conditional may come next, or in a closure, whose
-  /// locals aren't this body's. Call after `note_exit_scope`.
-  fn dead_after_join(&self, live: &HashSet<ResourceAccessPoint>, merge: usize) -> HashSet<ResourceAccessPoint> {
-    if self.exit_scopes.get(&*self.unique_id).is_none_or(|s| s.in_closure || s.loop_lines.is_some()) {
-      return HashSet::new();
-    }
-    #[expect(clippy::disallowed_methods, reason = "only collects names to look up; order doesn't matter")]
-    let refs: Vec<&ResourceAccessPoint> = live.iter().filter(|r| r.is_ref()).collect();
-    if refs.is_empty() {
-      return HashSet::new();
-    }
-    let names: Vec<&str> = refs.iter().map(|r| r.name().as_str()).collect();
-    let dead = self.dead_from_line(&names, merge);
-    refs.into_iter().filter(|r| dead.contains(r.name())).cloned().collect()
-  }
-
   /// Of `live`, the variables (and field columns) that a loop this is
   /// inside, and that they were declared before, gives a new value
   /// somewhere in its body (#1026): at a join here that leaves one
@@ -8922,7 +8903,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let reaching: Vec<&[(usize, ExternalEvent)]> = b_branches.iter()
       .filter(|b| !b.diverges).map(|b| b.e_data.as_slice()).collect();
     let maybe_held = self.maybe_held_after(&liveness, &reaching, &maybe_init, &self.deferred_cols(&maybe_init_before), |name| self.rap_ownership_now(name));
-    let dead_after = self.dead_after_join(&liveness, merge);
     self.add_external_event(line_num,
       ExternalEvent::Branch {
         live_vars: liveness,
@@ -8933,7 +8913,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         maybe_init,
         loop_assigned,
         maybe_held,
-        dead_after,
         id: *self.unique_id });
         *self.unique_id += 1;
     // Both branches leave the function: nothing after the `if` runs.
@@ -9775,7 +9754,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let reaching: Vec<&[(usize, ExternalEvent)]> = branch_data.iter()
       .filter(|b| !b.diverges).map(|b| b.e_data.as_slice()).collect();
     let maybe_held = self.maybe_held_after(&liveness, &reaching, &maybe_init, &held_before, |name| self.rap_ownership_now(name));
-    let dead_after = self.dead_after_join(&liveness, merge);
     self.add_external_event(split, ExternalEvent::Branch {
       live_vars: liveness,
       branches: branch_data,
@@ -9785,7 +9763,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       maybe_init,
       loop_assigned,
       maybe_held,
-      dead_after,
       id: *self.unique_id });
     *self.unique_id += 1;
   }
@@ -13016,7 +12993,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let mut bound = Vec::new();
     pat.each_binding(|_, hid, _, _| bound.push(binding_name(&self.tcx, hid)));
     self.let_else_scrutinees.insert(*self.unique_id, (holder, bound));
-    let dead_after = self.dead_after_join(&liveness, merge);
     self.add_external_event(split, ExternalEvent::Branch {
       live_vars: liveness,
       branches,
@@ -13026,7 +13002,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       maybe_init: HashSet::new(),
       loop_assigned,
       maybe_held: HashSet::new(),
-      dead_after,
       id: *self.unique_id,
     });
     *self.unique_id += 1;

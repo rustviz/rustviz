@@ -1546,35 +1546,6 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         last
     }
 
-    /// Of `names` (RAP names), those that are a MIR local of this body
-    /// and that Polonius' liveness says aren't live anywhere on line
-    /// `from` or after: nothing reads their value from there on. A name
-    /// with no local (a field column, a temporary) is left out, so is
-    /// one whose local is live on any such line (the same name's other
-    /// locals count too, which only leaves more out). Lines only order
-    /// the body where no back edge leads up from `from`: the caller
-    /// keeps out conditionals in a loop (#1612).
-    pub fn dead_from_line(&self, names: &[&str], from: usize) -> BTreeSet<String> {
-        let bwf = self.bwf;
-        let local_names = self.mir_local_names(bwf);
-        #[expect(clippy::disallowed_methods, reason = "only collects the names that have a local into a sorted set")]
-        let mut out: BTreeSet<String> = local_names.values()
-            .filter(|n| names.contains(&n.as_str()))
-            .cloned()
-            .collect();
-        if out.is_empty() {
-            return out;
-        }
-        let p_output = Output::compute(bwf.input_facts.as_ref().unwrap(), Algorithm::Naive, true);
-        #[expect(clippy::disallowed_methods, reason = "only collects the live names into a sorted set")]
-        let live: BTreeSet<&String> = p_output.var_live_on_entry.iter()
-            .filter(|(p, _)| self.location_to_line(self.point_to_location(**p, bwf), bwf) >= from)
-            .flat_map(|(_, vars)| vars.iter().filter_map(|v| local_names.get(v)))
-            .collect();
-        out.retain(|n| !live.contains(n));
-        out
-    }
-
     /// The last line on which dropping the variable `name` (its RAP
     /// name) may use a borrow its value holds, from rustc's own facts:
     /// the drop check says its drop reads a lifetime of its type (a
