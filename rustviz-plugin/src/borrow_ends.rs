@@ -38,8 +38,9 @@ pub struct HolderEnd {
   pub only_loop_exits: bool,
   /// The last row where it stops holding a loan that goes on.
   pub stops: Option<usize>,
-  /// Some of the loans end in the body (on any holder's path).
-  pub any_end: bool,
+  /// The last row any of the loans ends on, whoever holds it there (the
+  /// borrow's last row, as 2.x's single end line has it).
+  pub last_end: Option<usize>,
 }
 
 /// `n` names the holder `k`, a field of it, or the variable it is a field of
@@ -141,9 +142,9 @@ impl<'a> BodyEnds<'a> {
       for e in &r.facts {
         match &e.fact {
           Fact::BorrowEnd { loan, holder, to_line, .. } if loans.contains(loan) => {
-            out.any_end = true;
+            let (row, exit) = self.drawn_row(r.line, *to_line);
+            out.last_end = Some(out.last_end.map_or(row, |g| g.max(row)));
             if holder.split('|').any(|h| names_match(k, h)) {
-              let (row, exit) = self.drawn_row(r.line, *to_line);
               out.gives_back = Some(out.gives_back.map_or(row, |g| g.max(row)));
               out.only_loop_exits &= exit;
             }

@@ -11783,42 +11783,70 @@ pub fn print_out_of_scope(&mut self){
       v.extend(rd.co_lenders.iter().filter(|c| matches!(c, ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..))).cloned());
       v
     };
-    let mut decided: Vec<Vec<(ResourceTy, End)>> = Vec::new();
+    // First where each slot's own facts put it: an arrow where it is the
+    // last holder on some path (or never stops holding before the loan
+    // ends), its own end where it only stops holding a loan that goes on.
+    #[derive(Clone)]
+    struct Pending {
+      lender: ResourceTy,
+      end: End,
+      loans: Vec<usize>,
+      /// Its own end, if another slot gives the loans back.
+      own: Option<(usize, usize)>,
+    }
+    let mut pending: Vec<Vec<Pending>> = Vec::new();
+    let mut given_back: BTreeSet<usize> = BTreeSet::new();
     for (slot, loans) in slots.iter().zip(slot_loans.iter()) {
       let lenders = lends_to(&slot.rd);
       let mut ends = Vec::new();
       for (i, l) in lenders.iter().enumerate() {
         let Some(ix) = ix.as_ref() else {
-          ends.push((l.clone(), End::Arrow(slot.rd.lifetime)));
+          ends.push(Pending { lender: l.clone(), end: End::Arrow(slot.rd.lifetime), loans: Vec::new(), own: None });
           continue;
         };
         // With several lenders, each gives back the loans of its own;
         // the first takes what none of the others lends.
-        let mine: Vec<usize> = if lenders.len() == 1 {
-          loans.clone()
-        } else {
-          loans.iter().copied().filter(|id| {
-            let Some(info) = ix.facts.loans.iter().find(|x| x.loan == *id) else { return false };
-            ix.lends(info, &l.real_name())
-              || (i == 0 && !lenders.iter().any(|o| ix.lends(info, &o.real_name())))
-          }).collect()
-        };
+        // (A reference's earlier loan of another lender, `c = &y` after
+        // `c = &x`, is the walk's to end.)
+        let info = |id: &usize| ix.facts.loans.iter().find(|x| x.loan == *id);
+        let mut mine: Vec<usize> = loans.iter().copied()
+          .filter(|id| info(id).is_some_and(|f| ix.lends(f, &l.real_name())))
+          .collect();
+        if i == 0 && mine.is_empty() {
+          mine = loans.iter().copied()
+            .filter(|id| info(id).is_some_and(|f| !lenders.iter().any(|o| ix.lends(f, &o.real_name()))))
+            .collect();
+        }
         if mine.is_empty() {
           // No loan the facts know of: the walk's line.
-          ends.push((l.clone(), if loans.is_empty() && i == 0 { End::Arrow(slot.rd.lifetime) } else { End::None }));
+          let end = if loans.is_empty() && i == 0 { End::Arrow(slot.rd.lifetime) } else { End::None };
+          ends.push(Pending { lender: l.clone(), end, loans: Vec::new(), own: None });
           continue;
         }
         let e = ix.holder_end(&slot.key, &mine, slot.rows);
-        let end = match (e.gives_back, e.stops) {
-          (Some(back), Some(own)) if e.only_loop_exits && own < back => End::LoopExit { own, back },
-          (Some(back), _) => End::Arrow(back),
-          (None, Some(own)) => End::Own(own),
-          (None, None) => End::None,
+        let (end, own) = match (e.last_end, e.gives_back, e.stops) {
+          (None, _, _) => (End::None, None),
+          (Some(back), Some(_), Some(own)) if e.only_loop_exits && own < back => (End::LoopExit { own, back }, None),
+          (Some(back), Some(_), _) | (Some(back), None, None) => (End::Arrow(back), None),
+          (Some(back), None, Some(own)) => (End::Arrow(back), Some((own, back))),
         };
-        ends.push((l.clone(), end));
+        if own.is_none() && matches!(end, End::Arrow(_) | End::LoopExit { .. }) {
+          given_back.extend(mine.iter().copied());
+        }
+        ends.push(Pending { lender: l.clone(), end, loans: mine, own });
       }
-      decided.push(ends);
+      pending.push(ends);
     }
+    // A slot that only stops holding gets its own end when another slot
+    // gives the loan back; else it gives it back itself, where the loan
+    // ends (its holder from then on has no column: `w.push((r, ..))`).
+    let decided: Vec<Vec<(ResourceTy, End)>> = pending.into_iter().map(|ends| ends.into_iter().map(|p| {
+      let end = match p.own {
+        Some((own, _)) if p.loans.iter().any(|l| given_back.contains(l)) => End::Own(own),
+        _ => p.end,
+      };
+      (p.lender, end)
+    }).collect()).collect();
     // Later passes read a reference's end line from `borrow_map`.
     for (slot, ends) in slots.iter().zip(decided.iter()) {
       if slot.arm {
