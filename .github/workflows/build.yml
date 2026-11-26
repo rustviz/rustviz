@@ -122,6 +122,9 @@ jobs:
           # corpus (`corpus_facts_oracle_holds`), on the renders the other
           # corpus tests make anyway. Linux only: once is enough.
           RV3_ORACLE: ${{ runner.os == 'Linux' && '1' || '' }}
+          # RustViz 3: the issue cases (rv3_issues.rs) fail on a case that
+          # fails without `xfail` or passes with one.
+          RV3_ISSUES_STRICT: '1'
         run: cargo test --workspace --exclude rustviz --locked
 
       - name: cargo test -p rustviz

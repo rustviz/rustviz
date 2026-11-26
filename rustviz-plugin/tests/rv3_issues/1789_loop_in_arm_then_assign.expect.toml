@@ -1,7 +1,6 @@
 issue = 1789
 cluster = "C09"
 title = "`if c { for .. { s = ..; } }`: after the `if`, s may hold the loop's value; it is not moved"
-xfail = "P1"
 fn = "loop_in_arm_then_assign"
 note = "Gap (spike): the dump gives row 6 (the loop's closing `}`) the loop body's state (own) instead of the loop exit's, where the loop may have run zero times (maybe-unassigned); no state for the bare `let mut s;` row 2. rv3-p0 build: the same (row 6 own)."
 beyond_facts = "P3: the row-7 join title says each branch moved s away"
