@@ -10,6 +10,13 @@ use rustc_hir::{Expr, ExprKind, Path, def::Res, Pat, PatKind, QPath, HirId, Stmt
 
 use crate::expr_visitor::{RapData, RefData};
 
+/// True iff the path `raw` ends in the whole function `String::from`, not in
+/// a longer name that merely starts with it (`String::from_utf8_lossy`,
+/// `String::from_utf8`; #1631).
+fn is_string_from(raw: &str) -> bool {
+  raw == "String::from" || raw.ends_with("::String::from")
+}
+
 // Best-effort name extraction from a HIR id. Originally implemented by
 // pretty-printing the node and grepping for backticked tokens; that pretty
 // printer (`Map::node_to_string`) was removed in rustc 1.85, so we now walk
@@ -42,9 +49,9 @@ pub fn hirid_to_var_name(id: HirId, tcx: &TyCtxt) -> Option<String> {
     },
     n => n.ident().map(|i| i.as_str().to_owned())?,
   };
-  // Preserve the historical normalization: any path containing String::from is
+  // Preserve the historical normalization: the path String::from is
   // collapsed to the bare String::from so callers don't see e.g. <String as From<&str>>::from.
-  if raw.contains("String::from") {
+  if is_string_from(&raw) {
     Some(String::from("String::from"))
   } else {
     Some(raw)
