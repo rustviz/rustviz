@@ -5,14 +5,14 @@ import glob, json, os, subprocess, sys, shutil, tempfile
 from concurrent.futures import ThreadPoolExecutor
 root, out = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
 here = os.path.dirname(os.path.abspath(__file__))
-progs = sorted(glob.glob(os.path.join(sys.argv[3] if len(sys.argv) > 3 else os.path.join(here, "programs"), "*.rs")))
+progs = sorted(sum((glob.glob(os.path.join(a, "*.rs")) for a in (sys.argv[3:] or [os.path.join(here, "programs")])), []))
 repo = os.path.dirname(os.path.dirname(here))
 toolchain = open(os.path.join(repo, "rust-toolchain.toml")).read()
 os.makedirs(out, exist_ok=True)
 work = tempfile.mkdtemp(prefix="rv3w-")
 home = os.path.join(work, "home"); os.makedirs(home); os.symlink(os.path.join(root, "bin"), os.path.join(home, "bin"))
 def run(path):
-    key = os.path.basename(path)[:-3]
+    key = os.path.basename(os.path.dirname(path)) + "__" + os.path.basename(path)[:-3] if os.environ.get("RV3_PREFIX") else os.path.basename(path)[:-3]
     proj = os.path.join(work, key); os.makedirs(os.path.join(proj, "src"))
     open(os.path.join(proj, "Cargo.toml"), "w").write('[package]\nname = "user-code"\nversion = "0.1.0"\nedition = "2024"\n')
     open(os.path.join(proj, "rust-toolchain.toml"), "w").write(toolchain)
@@ -31,6 +31,8 @@ def run(path):
         open(os.path.join(out, key + ".err"), "w").write(str(e) + "\n" + p.stdout[:2000] + p.stderr)
         return key + ": BAD OUTPUT"
     shutil.copy(path, os.path.join(out, key + ".rs"))
+    if os.environ.get("RV3_NO_RENDER"):
+        return key + ": ok"
     env2 = dict(env, RV3_RENDER="1", RV3_FACTS="")
     import time; time.sleep(1.1); os.utime(os.path.join(proj, "src", "lib.rs"))  # cargo's check cache
     q = subprocess.run(["cargo", "rv-plugin"], cwd=proj, env=env2, capture_output=True, text=True)

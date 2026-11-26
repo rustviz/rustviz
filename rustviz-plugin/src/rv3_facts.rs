@@ -879,9 +879,27 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
             // lent: loans in scope after the row's exits
             let mut live: BTreeSet<usize> = BTreeSet::new();
+            // Loans in scope where the next row starts: a loan whose last
+            // use is on this row is out of scope there (NLL kills it before
+            // the next location), though it is still in scope after the use.
             for e in exits {
-                inscope.seek_after_primary_effect(*e);
-                live.extend(inscope.get().iter().map(|b| b.index()));
+                let data = &body.basic_blocks[e.block];
+                let succs: Vec<Location> = if e.statement_index < data.statements.len() {
+                    vec![Location { block: e.block, statement_index: e.statement_index + 1 }]
+                } else {
+                    data.terminator().successors().filter(|s| !body.basic_blocks[*s].is_cleanup)
+                        .map(|s| Location { block: s, statement_index: 0 }).collect()
+                };
+                let later: Vec<Location> = succs.iter().copied().filter(|s| cx.row_of(*s) > line).collect();
+                let at = if later.is_empty() { succs } else { later };
+                if at.is_empty() {
+                    inscope.seek_after_primary_effect(*e);
+                    live.extend(inscope.get().iter().map(|b| b.index()));
+                }
+                for s in at {
+                    inscope.seek_before_primary_effect(s);
+                    live.extend(inscope.get().iter().map(|b| b.index()));
+                }
             }
             for l in &loans {
                 if live.contains(&l.loan) {

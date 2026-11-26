@@ -72,12 +72,41 @@ fn rv3_spike_oracle() {
         .filter_map(|n| n.strip_suffix(".facts.json").map(str::to_owned))
         .collect();
     keys.sort();
+    // Each program on its own thread (the oracle compiles probe programs).
+    let jobs = std::env::var("RV3_JOBS").ok().and_then(|v| v.parse().ok()).unwrap_or(6usize);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results = std::sync::Mutex::new(Vec::<(String, String, String)>::new());
+    std::thread::scope(|sc| {
+        for _ in 0..jobs {
+            sc.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(key) = keys.get(i) else { break };
+                if let Some((r, t)) = one(&dir, key) {
+                    results.lock().unwrap().push((key.clone(), r, t));
+                }
+            });
+        }
+    });
+    let mut results = results.into_inner().unwrap();
+    results.sort();
     let mut report = String::new();
     let mut tsv = String::from("program\ttoday_tested\ttoday_violations\tproto_tested\tproto_violations\tcommon_points\tagree\tdisagree\trv3render_tested\trv3render_violations\n");
-    for key in keys {
+    for (_, r, t) in &results {
+        report.push_str(r);
+        tsv.push_str(t);
+    }
+    std::fs::write(format!("{dir}/oracle-report.txt"), &report).unwrap();
+    std::fs::write(format!("{dir}/oracle-summary.tsv"), &tsv).unwrap();
+    eprintln!("{tsv}");
+}
+
+fn one(dir: &str, key: &str) -> Option<(String, String)> {
+    let mut report = String::new();
+    let mut tsv = String::new();
+    {
         let p = |ext: &str| format!("{dir}/{key}{ext}");
         let (Ok(src), Ok(tl), Ok(code), Ok(facts)) = (std::fs::read_to_string(p(".rs")), std::fs::read_to_string(p(".today.svg")),
-            std::fs::read_to_string(p(".code.svg")), std::fs::read_to_string(p(".facts.json"))) else { continue };
+            std::fs::read_to_string(p(".code.svg")), std::fs::read_to_string(p(".facts.json"))) else { return None };
         let facts: serde_json::Value = serde_json::from_str(&facts).unwrap();
         let (tv, _, tst) = check(&src, &tl, &code);
         let states = proto_states(&facts);
@@ -117,7 +146,5 @@ fn rv3_spike_oracle() {
         }
         let _ = writeln!(tsv, "{key}\t{}\t{}\t{}\t{}\t{common}\t{agree}\t{disagree}\t{rt}\t{rv}", tst.tested, tst.violations, pst.tested, pst.violations);
     }
-    std::fs::write(format!("{dir}/oracle-report.txt"), &report).unwrap();
-    std::fs::write(format!("{dir}/oracle-summary.tsv"), &tsv).unwrap();
-    eprintln!("{tsv}\n{report}");
+    Some((report, tsv))
 }
