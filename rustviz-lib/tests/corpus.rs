@@ -28066,20 +28066,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "h.r still has no value here",
         ],
     },    TooltipExpect {
-        name: "dead_outer_mut_arm_borrow_1596",
-        // #1596: m's mutable loan is over on the `if` path before `r3 =
-        // &mut s2` / `r3 = downgrade(&mut s2)` (the two can't overlap), so
-        // r3's end gives s2 back. Main drew no return arrow, and s2 stayed
-        // borrowed until m2 borrowed it again. (The wording for a `&String`
-        // made from the mutable borrow, `downgrade`, is #1122's; #1721.)
-        // The per-function give-backs are pinned by dot id in
-        // `repoint_old_loan_rows_1604_1596`.
-        must_contain: &[
-            "s2's resource is no longer mutably borrowed",
-        ],
-        must_not_contain: &[],
-    },
-    TooltipExpect {
         name: "repoint_later_use_1603",
         // Codex review of #1603: with the struct used again in the
         // re-pointing arm, h.r's old loan ends at that use (also after a
@@ -38455,17 +38441,13 @@ fn dot_y_by_id(timeline_svg: &str, id: &str) -> f64 {
     cy[..cy.find('"').unwrap()].parse().unwrap()
 }
 
-/// #1604, #1596 (and #1610's reviews).
-/// #1604: a field that may point into s or t, re-pointed in straight-line
-/// code, ends its old loan once, on one dot with one grouped return arrow;
-/// main drew a second end ("h.r's immutable borrow ends") with its own
-/// return arrow on the new loan's row.
-/// #1596: r3's mutable borrow, made in the `if` arm after m's last use
-/// there (rustc doesn't let the two mutable loans overlap), gives s2 back on
-/// its own line; main didn't. Two shared loans may overlap: then main's
-/// placement stands (`outer_read_after_join`).
+/// #1604 (and #1610's reviews): a field that may point into s or t,
+/// re-pointed in straight-line code, ends its old loan once, on one dot with
+/// one grouped return arrow; #1603's head drew it as separate ends to s and
+/// to t ("h.r's immutable borrow ends"). The third-lender and `&mut` cases
+/// were already grouped and are regression coverage.
 #[test]
-fn repoint_old_loan_rows_1604_1596() {
+fn repoint_old_loan_rows_1604() {
     let tl = run_with_local_backend("field_two_lender_repoint_1604").timeline_panel_string();
     // A row's dots for a column, top to bottom, each as its lines.
     let rows = |prefix: &str| -> Vec<Vec<String>> {
@@ -38486,8 +38468,9 @@ fn repoint_old_loan_rows_1604_1596() {
     };
     for (field, row, lender) in [("h.r", 19, "t"), ("h.r", 26, "s"), ("h.0", 33, "t")] {
         let lines: Vec<String> = rows(&format!("{}@L{}:dot:", field, row)).concat();
-        // The old loan ends once, naming both lenders; the new loan starts
-        // and ends after it.
+        // The old loan ends once, naming both lenders (on the write's dot,
+        // in either order with the new borrow); the new loan's end comes
+        // after its borrow.
         let old = lines.iter().filter(|l| *l == &format!("{}'s immutable borrow of s or t ends", field)
             || *l == &format!("{}'s immutable borrow of t or s ends", field)).count();
         assert_eq!(old, 1, "#1604: {} on line {}: {:?}", field, row, lines);
@@ -38517,14 +38500,23 @@ fn repoint_old_loan_rows_1604_1596() {
         && t.ends_with(&format!("({} may point into either; its borrow of both ends here)", from))).count();
     assert_eq!(grouped("h.r", "immutably"), 4);
     assert_eq!(grouped("h.0", "immutably"), 1);
-    assert_eq!(grouped("h.r", "mutably"), 1);
+    assert_eq!(grouped("h.r", "mutably"), 1, "(to_third_mut)");
     assert_eq!(tips.iter().filter(|t| *t == "Return immutably borrowed resource from h.0 to t").count(), 1, "#1604: returns from h.0 to t");
     // One lender re-pointed to itself: the new borrow, then (a row below)
     // the new loan's end (s is never free between the old loan and the new).
     assert!(dot_y_by_id(&tl, "h.r@L40:dot:static_borrow") < dot_y_by_id(&tl, "h.r@L40:dot:static_die"), "#1604: same_lender order");
-    // The `&mut` field re-pointed to u: one end of the old loan.
-    assert_eq!(dot_lines_by_id(&tl, "h.r@L62:dot:mutable_die+mutable_borrow"),
-        vec![vec!["h.r's mutable borrow of s or t ends".to_string(), "h.r mutably borrows a resource".to_string()]]);
+    // The `&mut` field re-pointed to u: one end of the old loan, on the
+    // write's dot (in either order with the new borrow, which the
+    // right-hand side makes first).
+    let l = dot_lines_by_id(&tl, "h.r@L62:dot:mutable_die+mutable_borrow").concat();
+    assert_eq!(l.iter().filter(|x| *x == "h.r's mutable borrow of s or t ends").count(), 1, "#1604: to_third_mut: {:?}", l);
+    assert!(l.iter().any(|x| x == "h.r mutably borrows a resource"), "#1604: to_third_mut: {:?}", l);
+    // With h.r read after the write (`to_third_mut_read`), h's one lifetime
+    // keeps s and t borrowed to that read (line 71), not the write (#531).
+    for lender in ["s", "t"] {
+        assert!(tl.contains(&format!("data-rv-id=\"{}@L71:dot:mutable_reacquire", lender)), "#1604: to_third_mut_read: {} given back at the read", lender);
+        assert!(!tl.contains(&format!("data-rv-id=\"{}@L70:dot:mutable_reacquire", lender)), "#1604: to_third_mut_read: {} given back at the write", lender);
+    }
     // One right-hand-side call borrowing both again: neither lender is drawn
     // free before the new loan ends.
     for lender in ["s", "t"] {
@@ -38533,18 +38525,4 @@ fn repoint_old_loan_rows_1604_1596() {
             "#1604: call_rhs: {}: {:?}", lender, l);
         assert_eq!(l.last(), Some(&format!("{}'s resource is no longer immutably borrowed", lender)), "#1604: call_rhs: {}: {:?}", lender, l);
     }
-
-    let tl = run_with_local_backend("dead_outer_mut_arm_borrow_1596").timeline_panel_string();
-    for id in ["s2@L15:dot:mutable_lend+dead_loan_note+mutable_reacquire+", "s2@L28:dot:mutable_lend+dead_loan_note+mutable_reacquire\"",
-        "s2@L29:dot:mutable_lend+dead_loan_note+mutable_reacquire\""] {
-        assert!(tl.contains(&format!("data-rv-id=\"{}", id)), "#1596: no {}", id);
-    }
-    // Same line: r3's end gives s2 back right after r3 borrows it.
-    let same = dot_lines_by_id(&tl, "s2@L67:dot:mutable_reacquire+mutable_lend+dead_loan_note");
-    assert!(same.iter().any(|d| d.iter().skip_while(|l| !l.contains("mutably borrowed by r3")).any(|l| l == "s2's resource is no longer mutably borrowed")),
-        "#1596: same_line: {:?}", same);
-    // o read after the `if` (or on its closing line): s stays borrowed by o
-    // at r's end.
-    assert!(!tl.contains("data-rv-id=\"s@L55:dot:static_reacquire"), "#1596: s given back while o is still live");
-    assert!(!tl.contains("data-rv-id=\"s@L81:dot:static_reacquire"), "#1596: s given back while o is still live (join line)");
 }

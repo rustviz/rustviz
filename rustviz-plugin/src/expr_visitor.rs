@@ -12303,10 +12303,7 @@ pub fn print_out_of_scope(&mut self){
             let Some(d) = self.borrow_map.get(*o) else { return true };
             *o == *r || d.lifetime < rd.assigned_at || d.assigned_at > rd.lifetime
               || match (self.raps.get(*r), self.raps.get(*o)) {
-                (Some(a), Some(b)) => {
-                  let mut_of = |x: &RefData| x.all_lenders().into_iter().find(|l| l.real_name() == *lender).is_some_and(|l| x.mut_of(&l));
-                  on_other_path(self.preprocessed_events, &a.rap, &b.rap, d.lifetime, rd.assigned_at, mut_of(rd) || mut_of(d))
-                }
+                (Some(a), Some(b)) => on_other_path(self.preprocessed_events, &a.rap, &b.rap, d.lifetime),
                 _ => false,
               }
           });
@@ -13327,13 +13324,7 @@ fn uses_beyond_drop(e: &ExternalEvent, r: &ResourceAccessPoint) -> bool {
 /// (looking into nested ones) that `o`, declared outside it, isn't used
 /// in, and whose lines don't hold `o_end`, the line o's loan ends on:
 /// o's borrow is used only on the other paths.
-/// With `exclusive` (r's or o's loan of the lender is mutable, so rustc
-/// doesn't let the two overlap), o's uses in that arm before the event
-/// that gives r its value on or after `r_from` don't count: o's loan is
-/// over on this path when r's starts (`let n = m.len();` before `let r3 =
-/// downgrade(&mut s2);`). Counted, r3's end gave s2 nothing back (#1596).
-/// Two shared loans may overlap, so then any use of o in the arm counts.
-fn on_other_path(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint, o: &ResourceAccessPoint, o_end: usize, r_from: usize, exclusive: bool) -> bool {
+fn on_other_path(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint, o: &ResourceAccessPoint, o_end: usize) -> bool {
   #[expect(clippy::disallowed_methods, reason = "`any` over the set: order never observed")]
   let declares = |b: &ExtBranchData, x: &ResourceAccessPoint| b.decl_vars.iter()
     .any(|d| d.hash() == x.hash() || x.name().starts_with(&format!("{}.", d.name())));
@@ -13344,19 +13335,12 @@ fn on_other_path(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint, o: 
     }
     (0..branches.len()).any(|a| {
       if !declares(&branches[a], r) {
-        return on_other_path(&branches[a].e_data, r, o, o_end, r_from, exclusive);
+        return on_other_path(&branches[a].e_data, r, o, o_end);
       }
       let (start, end) = branch_type.get_start_end(a);
-      let ev = &branches[a].e_data;
-      // (The event that gives r its value: not a use of an earlier one.)
-      let from = if exclusive {
-        ev.iter().position(|(l, x)| *l >= r_from && gives_new_value(x, r)).unwrap_or(0)
-      } else {
-        0
-      };
       !branches.iter().any(|b| declares(b, o))
         && !(start <= o_end && o_end <= end)
-        && !ev[from..].iter().any(|(_, x)| touches(x, o)
+        && !branches[a].e_data.iter().any(|(_, x)| touches(x, o)
           || ResourceAccessPoint_extract(x).0.extract_rap().is_some_and(|f| o.name().starts_with(&format!("{}.", f.name()))))
     })
   })

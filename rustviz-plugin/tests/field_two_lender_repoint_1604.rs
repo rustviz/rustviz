@@ -1,6 +1,6 @@
-// A reference field that may point into s or t (`longest`'s result),
-// re-pointed in straight-line code: its old loan ends once, on one dot,
-// before the new loan starts (#1604).
+// A field that may point into s or t (`longest`'s result), re-pointed in
+// straight-line code: its old loan ends once, on one dot, at the write (the
+// right-hand side's new loan may start before it) (#1604).
 
 struct Holder<'a> {
     r: &'a String,
