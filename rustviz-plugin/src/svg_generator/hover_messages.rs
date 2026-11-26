@@ -869,7 +869,7 @@ pub fn event_dot_extended_temporary_drop_made(my_name: &String, when: &String, m
 // Its drop at a `?` (#1436).
 pub fn event_dot_temp_drop_if_try_returns_made(my_name: &String, made_at: Option<usize>) -> String {
     format!(
-        "Only if the `?` here returns early (on an `Err` or `None`): the function returns and {0}'s \
+        "If the `?` here returns early, {0}'s \
          resource is dropped if {1} (Rust tracks this with a runtime drop flag). If the `?` succeeds, \
          nothing happens to {0} here.",
         styled_name_html(my_name), temp_made_in(made_at)
@@ -1104,13 +1104,13 @@ pub fn event_dot_move_into_try(my_name: &String, target: Option<&String>, kind: 
     let what = if value { "value" } else { "resource" };
     match kind {
         TryMove::Result => format!(
-            "{name}'s {what} is moved into the `?`. If {name} is `Ok`, {gets}; if it is `Err`, the function returns early and the error goes to the caller."
+            "{name}'s {what} is moved into the `?`. If {name} is `Ok`, {gets}. Otherwise the `?` returns early."
         ),
         TryMove::Option => format!(
-            "{name}'s {what} is moved into the `?`. If {name} is `Some`, {gets}; if it is `None`, the function returns `None` early."
+            "{name}'s {what} is moved into the `?`. If {name} is `Some`, {gets}. Otherwise the `?` returns early."
         ),
         TryMove::Other => format!(
-            "{name}'s {what} is moved into the `?`. If {name} holds a value to go on with, {gets}; otherwise the function returns early."
+            "{name}'s {what} is moved into the `?`. The `?` either produces an output value or returns early."
         ),
     }
 }
@@ -1122,7 +1122,9 @@ pub fn event_dot_acquire_from_try(my_name: &String, from: &String, kind: TryMove
     let inside = match kind {
         TryMove::Result => format!("{}'s `Ok`", styled_name_html(from)),
         TryMove::Option => format!("{}'s `Some`", styled_name_html(from)),
-        TryMove::Other => styled_name_html(from),
+        TryMove::Other => return format!(
+            "{} {holds} produced by the `?` on {}", styled_name_html(my_name), styled_name_html(from)
+        ),
     };
     format!("{} {holds} the `?` takes out of {inside}", styled_name_html(my_name))
 }
@@ -1135,7 +1137,7 @@ pub fn event_dot_owner_drop_if_try_returns(my_name: &String, note: &str) -> Stri
     let my_name_fmt = styled_name_html(my_name);
     let (holds, rest) = split_drop_note(note);
     format!(
-        "Only if the `?` here returns early (on an `Err` or `None`): the function returns and {0}'s \
+        "If the `?` here returns early, {0}'s \
          resource{1} is dropped{2}. If the `?` succeeds, nothing happens to {0} here.",
         my_name_fmt, holds, rest
     )
@@ -1147,7 +1149,7 @@ pub fn event_dot_owner_drop_if_try_returns_part(my_name: &String, note: &str, pa
     let my_name_fmt = styled_name_html(my_name);
     let (holds, rest) = split_drop_note(note);
     format!(
-        "Only if the `?` here returns early (on an `Err` or `None`): the function returns and {0}'s \
+        "If the `?` here returns early, {0}'s \
          resource{1} is dropped{2}. If the `?` succeeds, the assignment to {3} runs.",
         my_name_fmt, holds, rest, styled_name_html(&part.to_string())
     )
@@ -1170,7 +1172,7 @@ pub fn event_dot_owner_drop_if_try_returns_maybe(my_name: &String, note: &str) -
     let my_name_fmt = styled_name_html(my_name);
     let (holds, rest) = split_drop_note(note);
     format!(
-        "Only if the `?` here returns early (on an `Err` or `None`): the function returns and {0}'s \
+        "If the `?` here returns early, {0}'s \
          resource{1} is dropped{2} if {0} still holds it (Rust tracks this with a runtime drop flag). \
          If the `?` succeeds, nothing happens to {0} here.",
         my_name_fmt, holds, rest
@@ -1183,7 +1185,7 @@ pub fn event_dot_owner_drop_if_try_returns_maybe_init(my_name: &String, note: &s
     let my_name_fmt = styled_name_html(my_name);
     let (holds, rest) = split_drop_note(note);
     format!(
-        "Only if the `?` here returns early (on an `Err` or `None`): the function returns and {0}'s \
+        "If the `?` here returns early, {0}'s \
          resource{1} is dropped{2} if the branch that ran {3} (Rust tracks this with a runtime drop \
          flag). If the `?` succeeds, nothing happens to {0} here.",
         my_name_fmt, holds, rest, assigned_in_branch_that_ran(moved)
@@ -1198,7 +1200,7 @@ pub fn event_dot_owner_drop_if_try_returns_partial(my_name: &String, scope_end: 
     let my_name_fmt = styled_name_html(my_name);
     let rest = scope_end.strip_prefix(&format!("{} goes out of scope. ", my_name_fmt)).unwrap_or(scope_end);
     format!(
-        "Only if the `?` here returns early (on an `Err` or `None`): the function returns, and drops \
+        "If the `?` here returns early, Rust drops \
          what is left of {0}: {1} If the `?` succeeds, nothing happens to {0} here.",
         my_name_fmt, rest
     )
@@ -1210,12 +1212,12 @@ pub fn event_dot_owner_drop_if_try_returns_partial(my_name: &String, scope_end: 
 // looks contradictory (#668). When the move is on the same dot, say which
 // `?` each line is about, in evaluation order.
 pub fn try_drop_before_own_try(drop_text: &str) -> Option<String> {
-    let (lead, tail) = ("Only if the `?` here returns early", ". If the `?` succeeds, nothing happens to ");
+    let (lead, tail) = ("If the `?` here returns early", ". If the `?` succeeds, nothing happens to ");
     let rest = drop_text.strip_prefix(lead)?;
     let (head, owner) = rest.split_once(tail)?;
     let owner = owner.strip_suffix(" here.")?;
     Some(format!(
-        "Only if an earlier `?` on this line returns early{head}. If it succeeds, {owner} is not dropped there; {owner}'s own `?` below moves it"
+        "If an earlier `?` on this line returns early{head}. If it succeeds, {owner} is not dropped there; {owner}'s own `?` below moves it"
     ))
 }
 
@@ -1440,7 +1442,7 @@ pub fn event_dot_loop_iterator_drop(my_name: &String, left: LoopLeft, early: &[u
             styled_name_html(my_name)
         ),
         LoopLeft::Try => format!(
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns from inside the `for` loop and {0}'s former resource, the loop's iterator, is dropped, along with whatever it still owns (such as elements it hasn't handed out yet). If the `?` succeeds, nothing happens to the iterator here.",
+            "If the `?` here returns early, {0}'s former resource, the loop's iterator, is dropped, along with whatever it still owns (such as elements it hasn't handed out yet). If the `?` succeeds, nothing happens to the iterator here.",
             styled_name_html(my_name)
         ),
         LoopLeft::Panic => format!(
@@ -1591,7 +1593,7 @@ pub fn event_dot_tuple_temp_drop(tuple: &String, at: TupleDropAt, with: &[TupleL
     let tuple = temporary_tuple(tuple);
     let (lead, when) = match at {
         // Worded like event_dot_owner_drop_if_try_returns (#653).
-        TupleDropAt::TryReturns => ("Only if the `?` here returns early (on an `Err` or `None`): the function returns and ", ""),
+        TupleDropAt::TryReturns => ("If the `?` here returns early, ", ""),
         TupleDropAt::IfEnd => ("", "here, at the end of the if branch"),
         TupleDropAt::IfExit => ("", "when the if branch leaves early"),
         TupleDropAt::Else => ("The pattern didn't match, so ", "here, before the else branch runs"),

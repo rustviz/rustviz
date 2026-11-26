@@ -8497,36 +8497,36 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `b` and `c` are owned at both `?`. `a` was moved into `take`
         // before them, `n` and `opt` are `Copy`: no dot for those.
         must_contain: &[
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and b's \
+            "If the `?` here returns early, b's \
              resource is dropped. If the `?` succeeds, nothing happens to b here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and c's \
+            "If the `?` here returns early, c's \
              resource is dropped. If the `?` succeeds, nothing happens to c here.",
         ],
         must_not_contain: &[
-            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and a's \
+            "=If the `?` here returns early, a's \
              resource is dropped. If the `?` succeeds, nothing happens to a here.",
-            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and n's \
+            "=If the `?` here returns early, n's \
              resource is dropped. If the `?` succeeds, nothing happens to n here.",
-            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and opt's \
+            "=If the `?` here returns early, opt's \
              resource is dropped. If the `?` succeeds, nothing happens to opt here.",
         ],
     },
     TooltipExpect {
         name: "try_in_branch",
         must_contain: &[
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and t's \
+            "If the `?` here returns early, t's \
              resource is dropped. If the `?` succeeds, nothing happens to t here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and u's \
+            "If the `?` here returns early, u's \
              resource is dropped. If the `?` succeeds, nothing happens to u here.",
             // `v` is a `Vec<String>`: its drop says what it holds (#542).
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's \
+            "If the `?` here returns early, v's \
              resource (including every String it holds) is dropped. If the `?` succeeds, v's \
              resource isn't dropped here.", // (v's dot also has the borrow by first: #1151)
         ],
         must_not_contain: &[
-            "the function returns and v's resource is dropped. If",
+            "returns early, v's resource is dropped. If",
             // `s` is a reference.
-            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and s's \
+            "=If the `?` here returns early, s's \
              resource is dropped. If the `?` succeeds, nothing happens to s here.",
         ],
     },
@@ -8535,32 +8535,32 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "try_in_if_else_branch",
         must_contain: &[
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and t's \
+            "If the `?` here returns early, t's \
              resource is dropped. If the `?` succeeds, nothing happens to t here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and u's \
+            "If the `?` here returns early, u's \
              resource is dropped. If the `?` succeeds, nothing happens to u here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's \
+            "If the `?` here returns early, v's \
              resource (including every String it holds) is dropped. If the `?` succeeds, v's \
              resource isn't dropped here.", // (v's dot also has the borrow by first: #1151)
         ],
         must_not_contain: &[
-            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and s's \
+            "=If the `?` here returns early, s's \
              resource is dropped. If the `?` succeeds, nothing happens to s here.",
         ],
     },
     TooltipExpect {
         name: "try_in_loop_two_on_a_line",
         must_contain: &[
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and label's \
+            "If the `?` here returns early, label's \
              resource is dropped. If the `?` succeeds, nothing happens to label here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and note's \
+            "If the `?` here returns early, note's \
              resource is dropped. If the `?` succeeds, nothing happens to note here.",
         ],
         must_not_contain: &[
             // `total` is a `Copy`; `pair` and `items` are references.
-            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and total's \
+            "=If the `?` here returns early, total's \
              resource is dropped. If the `?` succeeds, nothing happens to total here.",
-            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and pair's \
+            "=If the `?` here returns early, pair's \
              resource is dropped. If the `?` succeeds, nothing happens to pair here.",
             // chunks is a method, not a lender (#868).
             "Return immutably borrowed resource from pair to chunks",
@@ -8797,7 +8797,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "o goes out of scope. Its resource is dropped (including the String it holds, if any).",
             "m goes out of scope. Its resource is dropped (including every key it holds).",
             "w goes out of scope. Its resource is dropped (including every String it holds).",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and names's \
+            "If the `?` here returns early, names's \
              resource (including every String it holds) is dropped. If the `?` succeeds, nothing happens \
              to names here.",
         ],
@@ -8807,7 +8807,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=o goes out of scope. Its resource is dropped.",
             "=m goes out of scope. Its resource is dropped.",
             "=w goes out of scope. Its resource is dropped.",
-            "the function returns and names's resource is dropped. If",
+            "returns early, names's resource is dropped. If",
         ],
     },
     TooltipExpect {
@@ -10006,15 +10006,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "edition2024/if_let_chain_else_try",
         must_contain: &[
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and w's \
+            "If the `?` here returns early, w's \
              resource is dropped. If the `?` succeeds, nothing happens to w here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and x's \
+            "If the `?` here returns early, x's \
              resource (including the String it holds, if any) is dropped. If the `?` succeeds, \
              x's resource isn't dropped here.", // (with the borrow on x's dot: #1151)
         ],
         must_not_contain: &[
             // `a` is a reference.
-            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and a's \
+            "=If the `?` here returns early, a's \
              resource is dropped. If the `?` succeeds, nothing happens to a here.",
         ],
     },
@@ -10022,47 +10022,47 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "edition2024/if_let_chain_else_try_moved",
         // `let Some(a) = x` moved the String into `a` before the `?`.
         must_contain: &[
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and w's \
+            "If the `?` here returns early, w's \
              resource is dropped. If the `?` succeeds, nothing happens to w here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and a's \
+            "If the `?` here returns early, a's \
              resource is dropped. If the `?` succeeds, a's resource isn't dropped here.", // (#1151)
         ],
         must_not_contain: &[
-            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and x's \
+            "=If the `?` here returns early, x's \
              resource is dropped. If the `?` succeeds, nothing happens to x here.",
         ],
     },
     TooltipExpect {
         name: "try_in_if_else",
         must_contain: &[
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and t's \
+            "If the `?` here returns early, t's \
              resource is dropped. If the `?` succeeds, nothing happens to t here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and u's \
+            "If the `?` here returns early, u's \
              resource is dropped. If the `?` succeeds, nothing happens to u here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's \
+            "If the `?` here returns early, v's \
              resource (including every String it holds) is dropped. If the `?` succeeds, v's \
              resource isn't dropped here.", // (v's dot also has the borrow by first: #1151)
         ],
         must_not_contain: &[
             // `s` is a reference, bound after the `?`.
-            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and s's \
+            "=If the `?` here returns early, s's \
              resource is dropped. If the `?` succeeds, nothing happens to s here.",
         ],
     },
     TooltipExpect {
         name: "try_in_match_arm",
         must_contain: &[
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and s's \
+            "If the `?` here returns early, s's \
              resource is dropped. If the `?` succeeds, nothing happens to s here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and t's \
+            "If the `?` here returns early, t's \
              resource is dropped. If the `?` succeeds, nothing happens to t here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's \
+            "If the `?` here returns early, v's \
              resource (including every String it holds) is dropped. If the `?` succeeds, v's \
              resource isn't dropped here.", // (v's dot also has the borrow by first: #1151)
         ],
         must_not_contain: &[
             // The arm's pattern moved o's String into `s`.
-            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and o's \
+            "=If the `?` here returns early, o's \
              resource is dropped. If the `?` succeeds, nothing happens to o here.",
         ],
     },
@@ -10898,18 +10898,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // early return drops `r`. A `Copy` `Result<i32, i32>` is copied.
         must_contain: &[
             "Move from r to n",
-            "r's resource is moved into the `?`. If r is `Ok`, n gets the value inside it; if it is `Err`, the function returns early and the error goes to the caller.",
+            "r's resource is moved into the `?`. If r is `Ok`, n gets the value inside it. Otherwise the `?` returns early.",
             "n is initialized with the value the `?` takes out of r's `Ok`",
             "r goes out of scope. No resource is dropped.",
             "Move from rs to s",
-            "rs's resource is moved into the `?`. If rs is `Ok`, s gets the value inside it; if it is `Err`, the function returns early and the error goes to the caller.",
+            "rs's resource is moved into the `?`. If rs is `Ok`, s gets the value inside it. Otherwise the `?` returns early.",
             "s acquires ownership of the resource the `?` takes out of rs's `Ok`",
-            "o's resource is moved into the `?`. If o is `Some`, t gets the value inside it; if it is `None`, the function returns `None` early.",
+            "o's resource is moved into the `?`. If o is `Some`, t gets the value inside it. Otherwise the `?` returns early.",
             "t acquires ownership of the resource the `?` takes out of o's `Some`",
             // m gets the i32 inside c's `Ok`, not a copy of c (#1352).
             "Partial copy from c to m",
             "m is initialized with a copy of a value inside c",
-            "e's resource is moved into the `?`. If e is `Ok`, `e?` gives the value inside it; if it is `Err`, the function returns early and the error goes to the caller.",
+            "e's resource is moved into the `?`. If e is `Ok`, `e?` gives the value inside it. Otherwise the `?` returns early.",
             "e goes out of scope. No resource is dropped.",
         ],
         must_not_contain: &[
@@ -10935,11 +10935,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the `?`'s drops of the function's values (#430). The `?` also
         // moves r / w (#652).
         must_contain: &[
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and the temporary tuple (x, y) is dropped, and with it y's resource. If the `?` succeeds, nothing happens to the tuple here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and the temporary tuple (p, q) is dropped, and with it q's resource. If the `?` succeeds, nothing happens to the tuple here.",
+            "If the `?` here returns early, the temporary tuple (x, y) is dropped, and with it y's resource. If the `?` succeeds, nothing happens to the tuple here.",
+            "If the `?` here returns early, the temporary tuple (p, q) is dropped, and with it q's resource. If the `?` succeeds, nothing happens to the tuple here.",
             "The temporary tuple (x, y) is dropped after this arm, when the match ends, and with it y's resource",
             "The temporary tuple (p, q) is dropped when the if branch leaves early, and with it q's resource",
-            "r's resource is moved into the `?`. If r is `Ok`, n gets the value inside it; if it is `Err`, the function returns early and the error goes to the caller.",
+            "r's resource is moved into the `?`. If r is `Ok`, n gets the value inside it. Otherwise the `?` returns early.",
             "w still owns its resource here: the branch that moved w returned before reaching this point",
         ],
         must_not_contain: &[
@@ -12112,8 +12112,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // "b's resource is moved into the `?`", which reads as a
         // contradiction (#668).
         must_contain: &[
-            "Only if an earlier `?` on this line returns early (on an `Err` or `None`): the function returns and b's resource (including the String it holds, if any) is dropped. If it succeeds, b is not dropped there; b's own `?` below moves it",
-            "b's resource is moved into the `?`. If b is `Ok`, `b?` gives the value inside it; if it is `Err`, the function returns early and the error goes to the caller.",
+            "If an earlier `?` on this line returns early, b's resource (including the String it holds, if any) is dropped. If it succeeds, b is not dropped there; b's own `?` below moves it",
+            "b's resource is moved into the `?`. If b is `Ok`, `b?` gives the value inside it. Otherwise the `?` returns early.",
         ],
         must_not_contain: &[
             "nothing happens to b here",
@@ -12242,10 +12242,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the loop's iterator, with the elements it hasn't handed out,
         // is dropped there, on `it`'s column.
         must_contain: &[
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns from inside the `for` loop and it's former resource, the loop's iterator, is dropped, along with whatever it still owns (such as elements it hasn't handed out yet). If the `?` succeeds, nothing happens to the iterator here.",
+            "If the `?` here returns early, it's former resource, the loop's iterator, is dropped, along with whatever it still owns (such as elements it hasn't handed out yet). If the `?` succeeds, nothing happens to the iterator here.",
             "it's former resource, the `for` loop's iterator, is dropped here, as the panic unwinds out of the loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
             // `w`'s own drop at the `?` (#430).
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and w's resource is dropped. If the `?` succeeds, w's resource isn't dropped here.", // (w is also borrowed on this dot: #1151)
+            "If the `?` here returns early, w's resource is dropped. If the `?` succeeds, w's resource isn't dropped here.", // (w is also borrowed on this dot: #1151)
         ],
         must_not_contain: &[
             "the function returns from inside the loop",
@@ -19637,7 +19637,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // `breakless_loop_branch_exits_drop_only_there`.)
             "g goes out of scope. Its resource is dropped.",
             "q goes out of scope. Its resource is dropped.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and w's resource is dropped. If the `?` succeeds, nothing happens to w here.",
+            "If the `?` here returns early, w's resource is dropped. If the `?` succeeds, nothing happens to w here.",
             "s goes out of scope at the `return` on line 68 (or at the `?` on line 67, if that returns first). Its resource is dropped.",
             "t goes out of scope at the `return` on line 68 (or at the `?` on line 67, if that returns first). Its resource is dropped.",
             "y goes out of scope at the `return` on line 68",
@@ -21151,23 +21151,23 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // branch join's "its resource is dropped when x goes out of
         // scope", is #1147.)
         must_contain: &[
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and b's resource is dropped. If the `?` succeeds, nothing happens to b here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and mixed.s's resource is dropped. If the `?` succeeds, nothing happens to mixed.s here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and mixed's resource is dropped. If the `?` succeeds, nothing happens to mixed here.",
+            "If the `?` here returns early, b's resource is dropped. If the `?` succeeds, nothing happens to b here.",
+            "If the `?` here returns early, mixed.s's resource is dropped. If the `?` succeeds, nothing happens to mixed.s here.",
+            "If the `?` here returns early, mixed's resource is dropped. If the `?` succeeds, nothing happens to mixed here.",
             "The `return` here hands the caller one of the values its `if` / `match` chooses between. If that value isn't x's, x goes out of scope here as the function returns (it has nothing to drop). If it is x's, x's value goes to the caller.",
             "The `return` here hands the caller one of the values its `if` / `match` chooses between. If that value isn't y's, y goes out of scope here as the function returns (it has nothing to drop). If it is y's, y's value goes to the caller.",
         ],
         must_not_contain: &[
-            "the function returns and md's resource is dropped",
-            "the function returns and nd's resource is dropped",
-            "the function returns and pair's resource is dropped",
-            "the function returns and pair.0's resource is dropped",
-            "the function returns and maybe's resource is dropped",
-            "the function returns and f's resource is dropped",
-            "the function returns and g's resource is dropped",
-            "the function returns and k's resource is dropped",
-            "the function returns and mixed.n's resource is dropped",
-            "the function returns and mixed.m's resource is dropped",
+            "returns early, md's resource is dropped",
+            "returns early, nd's resource is dropped",
+            "returns early, pair's resource is dropped",
+            "returns early, pair.0's resource is dropped",
+            "returns early, maybe's resource is dropped",
+            "returns early, f's resource is dropped",
+            "returns early, g's resource is dropped",
+            "returns early, k's resource is dropped",
+            "returns early, mixed.n's resource is dropped",
+            "returns early, mixed.m's resource is dropped",
             "If that value isn't x's, x's resource is dropped here",
             "If that value isn't y's, y's resource is dropped here",
         ],
@@ -21231,17 +21231,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // an Fn closure (it only reads q), so its dot stays.
         must_contain: &[
             "f is moved into the call (an FnOnce closure can only be called once). s, which f captured, is dropped during the call",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and k's resource is dropped. If the `?` succeeds, nothing happens to k here.",
+            "If the `?` here returns early, k's resource is dropped. If the `?` succeeds, nothing happens to k here.",
             "h goes out of scope. Its captured resource is dropped here only if no branch above called it (Rust tracks this with a runtime drop flag).",
             // m, called in an `if` above the `?`, may still hold w: the
             // drop flag decides (#1194).
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and m's resource is dropped if m still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to m here.",
+            "If the `?` here returns early, m's resource is dropped if m still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to m here.",
         ],
         must_not_contain: &[
-            "the function returns and f's resource is dropped",
-            "the function returns and g's resource is dropped",
-            "the function returns and h's resource is dropped",
-            "the function returns and m's resource is dropped. If",
+            "returns early, f's resource is dropped",
+            "returns early, g's resource is dropped",
+            "returns early, h's resource is dropped",
+            "returns early, m's resource is dropped. If",
         ],
     },
     TooltipExpect {
@@ -21285,15 +21285,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "d acquires ownership of a new resource; its previous resource is dropped",
             "d is assigned a new value; writing to a union never drops its old contents",
             "mu was moved in at least one branch above, so it can't be used after the branches.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and d's resource is dropped. If the `?` succeeds, nothing happens to d here.",
+            "If the `?` here returns early, d's resource is dropped. If the `?` succeeds, nothing happens to d here.",
         ],
         must_not_contain: &[
-            "the function returns and m's resource is dropped",
-            "the function returns and m2's resource is dropped",
-            "the function returns and u's resource is dropped",
-            "the function returns and mu's resource is dropped",
-            "the function returns and uu's resource is dropped",
-            "the function returns and w.u's resource is dropped",
+            "returns early, m's resource is dropped",
+            "returns early, m2's resource is dropped",
+            "returns early, u's resource is dropped",
+            "returns early, mu's resource is dropped",
+            "returns early, uu's resource is dropped",
+            "returns early, w.u's resource is dropped",
             "m goes out of scope. Its resource is dropped",
             "m2 goes out of scope. Its resource is dropped",
             "w.u goes out of scope. Its resource is dropped",
@@ -21318,15 +21318,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // borrow (`x.push_str(&bar()?)`) or a move (`(y, bar()?)`) on the
         // same dot, where "nothing happens" contradicted the other lines.
         must_contain: &[
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and s's resource is dropped. If the `?` succeeds, the assignment runs: s acquires ownership of a new resource; its previous resource is dropped.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and t's resource is dropped. If the `?` succeeds, the assignment runs: t acquires ownership of a new resource; its previous resource is dropped.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and p's resource is dropped. If the `?` succeeds, the assignment to p.f runs.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and p.f's resource is dropped. If the `?` succeeds, the assignment runs: p.f acquires ownership of a new resource; its previous resource is dropped.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's resource (including every String it holds) is dropped. If the `?` succeeds, the assignment runs: v[0] acquires ownership of a new resource; its previous resource is dropped.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and u's resource is dropped. If the `?` succeeds, the assignment runs: u acquires ownership of a new resource; its previous resource is dropped.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and x's resource is dropped. If the `?` succeeds, x's resource isn't dropped here.",
+            "If the `?` here returns early, s's resource is dropped. If the `?` succeeds, the assignment runs: s acquires ownership of a new resource; its previous resource is dropped.",
+            "If the `?` here returns early, t's resource is dropped. If the `?` succeeds, the assignment runs: t acquires ownership of a new resource; its previous resource is dropped.",
+            "If the `?` here returns early, p's resource is dropped. If the `?` succeeds, the assignment to p.f runs.",
+            "If the `?` here returns early, p.f's resource is dropped. If the `?` succeeds, the assignment runs: p.f acquires ownership of a new resource; its previous resource is dropped.",
+            "If the `?` here returns early, v's resource (including every String it holds) is dropped. If the `?` succeeds, the assignment runs: v[0] acquires ownership of a new resource; its previous resource is dropped.",
+            "If the `?` here returns early, u's resource is dropped. If the `?` succeeds, the assignment runs: u acquires ownership of a new resource; its previous resource is dropped.",
+            "If the `?` here returns early, x's resource is dropped. If the `?` succeeds, x's resource isn't dropped here.",
             "x's resource is mutably borrowed by push_str; x can't be used while the borrow is live",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and y's resource is dropped. If the `?` succeeds, y's resource isn't dropped here.",
+            "If the `?` here returns early, y's resource is dropped. If the `?` succeeds, y's resource isn't dropped here.",
             "y's resource is moved",
         ],
         must_not_contain: &[
@@ -23248,19 +23248,19 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "s goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             // `t = bar()?;`: on success the assignment runs (#1151).
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and t's resource is dropped if t still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, the assignment runs: t acquires ownership of a new resource. Its previous resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and u's resource is dropped if u still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to u here.",
+            "If the `?` here returns early, t's resource is dropped if t still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, the assignment runs: t acquires ownership of a new resource. Its previous resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "If the `?` here returns early, u's resource is dropped if u still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to u here.",
             "m goes out of scope. Its resource is dropped here only if m still holds it (Rust tracks this with a runtime drop flag).",
             "p goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "k goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and a's resource is dropped if a still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, a's resource isn't dropped here.",
+            "If the `?` here returns early, a's resource is dropped if a still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, a's resource isn't dropped here.",
             "b goes out of scope. Its resource (including the String it holds) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             // A drop the drop flag decides, stated as certain.
-            "the function returns and t's resource is dropped. If",
-            "the function returns and u's resource is dropped. If",
-            "the function returns and a's resource is dropped. If",
+            "returns early, t's resource is dropped. If",
+            "returns early, u's resource is dropped. If",
+            "returns early, a's resource is dropped. If",
             "If the `?` succeeds, nothing happens to t here",
             // `return` in `match n` after the `if` that moved a: rustc's
             // drop flag, not "nothing".
@@ -23272,15 +23272,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "try_partial_move_1184",
         must_contain: &[
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns, and drops what is left of p: p.a was moved out earlier, so only p.b is dropped. If the `?` succeeds, nothing happens to p here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns, and drops what is left of r: r.a was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). r.b is dropped. If the `?` succeeds, nothing happens to r here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and p.b's resource is dropped. If the `?` succeeds, nothing happens to p.b here.",
+            "If the `?` here returns early, Rust drops what is left of p: p.a was moved out earlier, so only p.b is dropped. If the `?` succeeds, nothing happens to p here.",
+            "If the `?` here returns early, Rust drops what is left of r: r.a was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). r.b is dropped. If the `?` succeeds, nothing happens to r here.",
+            "If the `?` here returns early, p.b's resource is dropped. If the `?` succeeds, nothing happens to p.b here.",
         ],
         must_not_contain: &[
-            "the function returns and p's resource is dropped",
-            "the function returns and r's resource is dropped",
+            "returns early, p's resource is dropped",
+            "returns early, r's resource is dropped",
             // q.a moved, q.n is Copy: nothing of q to drop.
-            "the function returns and q's resource is dropped",
+            "returns early, q's resource is dropped",
         ],
     },
     TooltipExpect {
@@ -24463,7 +24463,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "This temporary Vec<String> is dropped before the `else` block of this `if let` runs: nothing bound it to a variable or moved it on. Its resource is dropped",
             "This temporary Vec<String> is dropped when the block of this `if let` ends (its pattern matched): nothing bound it to a variable or moved it on. Its resource is dropped",
             "This temporary Vec<String> is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs): nothing bound it to a variable or moved it on. Its resource is dropped",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and (temporary)'s resource is dropped. If the `?` succeeds, nothing happens to (temporary) here.",
+            "If the `?` here returns early, (temporary)'s resource is dropped. If the `?` succeeds, nothing happens to (temporary) here.",
             "(temporary) is live in a conditional expression ",
         ],
         must_not_contain: &[
@@ -25952,11 +25952,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // assigned. The scope end at the fn's `}` keeps its drop-flag text.
         must_contain: &[
             "s goes out of scope. Its resource is dropped here only if s was assigned in the branch that ran (Rust tracks this with a runtime drop flag).",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and s's resource is dropped if the branch that ran assigned it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to s here.",
+            "If the `?` here returns early, s's resource is dropped if the branch that ran assigned it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to s here.",
             "p goes out of scope. Its resource is dropped here only if p was assigned in the branch that ran (Rust tracks this with a runtime drop flag).",
             "p.name goes out of scope. Its resource is dropped here only if p.name was assigned in the branch that ran (Rust tracks this with a runtime drop flag).",
             "s goes out of scope. Its resource is dropped.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and (temporary)'s resource is dropped if the branch that made it (line 108) ran (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to (temporary) here.",
+            "If the `?` here returns early, (temporary)'s resource is dropped if the branch that made it (line 108) ran (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to (temporary) here.",
             "(temporary 2) goes out of scope here, where `break` leaves early: a let borrowed it, so it lived past its statement. Its resource is dropped only if the branch that made it (line 117) ran (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
@@ -27425,7 +27425,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s2 isn't moved in any of the branches above",
             "s3 goes out of scope. Its resource is dropped.",
             "s3 isn't moved in any of the branches above",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and s4's resource is dropped. If the `?` succeeds, nothing happens to s4 here.",
+            "If the `?` here returns early, s4's resource is dropped. If the `?` succeeds, nothing happens to s4 here.",
         ],
         must_not_contain: &[
             "=s goes out of scope. No resource is dropped.",
@@ -28008,6 +28008,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "what is left in u",
         ],
+    },
+    TooltipExpect {
+        name: "control_flow_try_1607",
+        must_contain: &[
+            "If the `?` here returns early, s's resource is dropped. If the `?` succeeds, nothing happens to s here.",
+            "input's resource is moved into the `?`. The `?` either produces an output value or returns early.",
+            "value acquires ownership of the resource produced by the `?` on input",
+        ],
+        must_not_contain: &["on an `Err` or `None`", "the function returns and"],
     },
 ];
 
@@ -36378,7 +36387,7 @@ fn a_try_after_an_argument_drops_what_the_argument_holds() {
     let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
     let row = |src: &str| code_row_y(&code, src);
     for (name, line) in [("s", "take(s, bar()?);"), ("w", "q.put(w, bar()?);"), ("q", "q.eat(bar()?);")] {
-        let drop = format!("Only if the `?` here returns early (on an `Err` or `None`): the function returns and {name}'s resource is dropped.");
+        let drop = format!("If the `?` here returns early, {name}'s resource is dropped.");
         let ys: Vec<f64> = dots_where(&tl, |lines| lines.iter().any(|l| l.starts_with(&drop))
             && lines.iter().any(|l| *l == format!("{name}'s resource is moved")))
             .into_iter().map(|(_, y)| y).collect();
