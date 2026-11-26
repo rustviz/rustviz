@@ -57,6 +57,7 @@ ends = [[5, 6], 9]             # optional: exactly these ends, one per CFG edge 
                                #   end rows must be the same set.
 ends_include = [5]             # optional
 ends_exclude = [8]             # optional
+col = 5                        # optional: the source column (1-based) the dump records for the borrow
 absent = false                 # true: no such loan
 src = "issue"
 
@@ -82,8 +83,10 @@ src = "issue"
 **States** (`is`): `own` (holds its value, nothing borrows it), `shared`
 (holds it, only shared loans), `mut` (a mutable loan or a closure's unique
 immutable one: nothing else may use it), `moved`, `maybe-moved` (moved on
-some paths; the dump's `maybe` counts only if something moves the place or
-a parent in the body), `partly` (some fields moved), `unassigned` (no value
+some path that runs; the dump's `maybe` counts only if something moves the
+place or a parent in the body), `maybe-imaginary` (borrowck counts it as
+possibly moved, but only on an edge that never runs, such as an or-pattern's
+unreachable alternative: the dump's cause must be `imaginary`), `partly` (some fields moved), `unassigned` (no value
 on any path), `maybe-unassigned` (assigned on some paths only; the dump's
 `maybe` counts only if nothing moves the place), `absent` (no state). The oracle writes `moved*`,
 `partly*` and `unassigned*`: rustc says "moved" for a definite and a maybe

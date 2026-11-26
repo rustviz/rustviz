@@ -406,7 +406,32 @@ fn used_on_row(body: &Body<'_>, rows: &RowModel, loc: Location) -> Vec<Local> {
 /// since), at each block's entry: tells a `maybe` that may have been
 /// moved from one that may never have been assigned.
 fn maybe_moved_entry(body: &Body<'_>, md: &MoveData<'_>) -> BTreeMap<rustc_middle::mir::BasicBlock, BTreeSet<MovePathIndex>> {
+    may_entry(body, BTreeSet::new(), &|set, loc| moved_transfer(md, body, set, loc))
+}
+
+/// Which move paths may never have been given a value (since their
+/// variable's storage started), at each block's entry: a place that is
+/// uninitialized on every path and in none of these was moved out on
+/// every path.
+fn maybe_unassigned_entry(body: &Body<'_>, md: &MoveData<'_>) -> BTreeMap<rustc_middle::mir::BasicBlock, BTreeSet<MovePathIndex>> {
+    let start: BTreeSet<MovePathIndex> = md
+        .move_paths
+        .iter_enumerated()
+        .filter(|(_, mp)| mp.place.local.index() > body.arg_count)
+        .map(|(m, _)| m)
+        .collect();
+    may_entry(body, start, &|set, loc| unassigned_transfer(md, body, set, loc))
+}
+
+/// A forward "may" dataflow (union at joins) over the non-cleanup blocks,
+/// as the set at each block's entry.
+fn may_entry(
+    body: &Body<'_>,
+    start: BTreeSet<MovePathIndex>,
+    transfer: &dyn Fn(&mut BTreeSet<MovePathIndex>, Location),
+) -> BTreeMap<rustc_middle::mir::BasicBlock, BTreeSet<MovePathIndex>> {
     let mut entry: BTreeMap<rustc_middle::mir::BasicBlock, BTreeSet<MovePathIndex>> = BTreeMap::new();
+    entry.insert(rustc_middle::mir::START_BLOCK, start);
     let rpo: Vec<_> = body.basic_blocks.reverse_postorder().to_vec();
     let mut changed = true;
     while changed {
@@ -418,7 +443,7 @@ fn maybe_moved_entry(body: &Body<'_>, md: &MoveData<'_>) -> BTreeMap<rustc_middl
             }
             let mut set = entry.get(&bb).cloned().unwrap_or_default();
             for i in 0..=data.statements.len() {
-                moved_transfer(md, body, &mut set, Location { block: bb, statement_index: i });
+                transfer(&mut set, Location { block: bb, statement_index: i });
             }
             for succ in data.terminator().successors() {
                 let e = entry.entry(succ).or_default();
@@ -429,6 +454,36 @@ fn maybe_moved_entry(body: &Body<'_>, md: &MoveData<'_>) -> BTreeMap<rustc_middl
         }
     }
     entry
+}
+
+/// The set of a [`may_entry`] dataflow after `loc`.
+fn may_after(
+    entry: &BTreeMap<rustc_middle::mir::BasicBlock, BTreeSet<MovePathIndex>>,
+    transfer: &dyn Fn(&mut BTreeSet<MovePathIndex>, Location),
+    loc: Location,
+) -> BTreeSet<MovePathIndex> {
+    let mut set = entry.get(&loc.block).cloned().unwrap_or_default();
+    for i in 0..=loc.statement_index {
+        transfer(&mut set, Location { block: loc.block, statement_index: i });
+    }
+    set
+}
+
+/// A variable's storage starting or ending leaves it (and its fields)
+/// with no value; an assignment gives the place and its fields one.
+fn unassigned_transfer(md: &MoveData<'_>, body: &Body<'_>, set: &mut BTreeSet<MovePathIndex>, loc: Location) {
+    if let Some(StatementKind::StorageLive(l) | StatementKind::StorageDead(l)) =
+        body.basic_blocks[loc.block].statements.get(loc.statement_index).map(|s| &s.kind)
+    {
+        if let LookupResult::Exact(root) = md.rev_lookup.find(Place::from(*l).as_ref()) {
+            set.extend(descendants(md, root));
+        }
+    }
+    for ii in md.init_loc_map[loc].iter() {
+        for d in descendants(md, md.inits[*ii].path) {
+            set.remove(&d);
+        }
+    }
 }
 
 fn moved_transfer(md: &MoveData<'_>, body: &Body<'_>, set: &mut BTreeSet<MovePathIndex>, loc: Location) {
@@ -620,6 +675,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     // ---- dataflow, once --------------------------------------------------------
     let move_data = MoveData::gather_moves(body, tcx, |_| true);
     let moved_entry = maybe_moved_entry(body, &move_data);
+    let unassigned_entry = maybe_unassigned_entry(body, &move_data);
     let mut flow = Flow {
         body,
         md: &move_data,
@@ -650,6 +706,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         }
     }
     let rt_md = MoveData::gather_moves(&rt_body, tcx, |_| true);
+    let rt_moved_entry = maybe_moved_entry(&rt_body, &rt_md);
+    let rt_unassigned_entry = maybe_unassigned_entry(&rt_body, &rt_md);
     let mut rt = Flow {
         body: &rt_body,
         md: &rt_md,
@@ -2007,6 +2065,64 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         out.sort();
         out
     };
+    // What a `Drop` of a place does where it runs (`drop_how`), except that
+    // a place some of whose parts were moved out drops nothing when nothing
+    // left in it needs drop: drop elaboration drops what is left field by
+    // field (nested fields too), and a field that needs no drop, moved on
+    // some paths or not, adds none (`(bool, String, String)` with both
+    // Strings moved, `((String, bool), bool)` after `t.0.0` moved: no drop
+    // of `t`).
+    let rest_how = |rt: &mut Flow<'_, '_, 'tcx>, at: &[Location], after: bool, top: MovePathIndex| -> &'static str {
+        let how = drop_how(&rt.state(at, after, top));
+        if how != "drops_rest" {
+            return how;
+        }
+        let mut work = vec![top];
+        while let Some(m) = work.pop() {
+            let mty = rt.md.move_paths[m].place.ty(&body.local_decls, tcx).ty;
+            if !ty_info(mty).1 {
+                continue;
+            }
+            let st = rt.state(at, after, m);
+            match (st.may_init, st.may_uninit) {
+                // Moved out on every path: nothing in it left.
+                (false, _) => continue,
+                // Moved on some paths only: dropped behind a flag.
+                (true, true) => return how,
+                (true, false) => {}
+            }
+            if st.sub_moved.is_empty() && st.sub_maybe.is_empty() {
+                return how;
+            }
+            // (A Box frees its allocation; an enum's or an array's parts
+            // aren't followed here: something is dropped.)
+            let fields: Vec<rustc_middle::ty::Ty<'tcx>> = match mty.kind() {
+                TyKind::Tuple(tys) => tys.iter().collect(),
+                TyKind::Adt(def, args) if def.is_struct() && !mty.is_box() => def.non_enum_variant().fields.iter().map(|fd| fd.ty(tcx, args)).collect(),
+                _ => return how,
+            };
+            let mut child: BTreeMap<usize, MovePathIndex> = BTreeMap::new();
+            let mut c = rt.md.move_paths[m].first_child;
+            while let Some(ch) = c {
+                match rt.md.move_paths[ch].place.projection.last() {
+                    Some(ProjectionElem::Field(f, _)) => {
+                        child.insert(f.index(), ch);
+                    }
+                    _ => return how,
+                }
+                c = rt.md.move_paths[ch].next_sibling;
+            }
+            for (i, fty) in fields.iter().enumerate() {
+                match child.get(&i) {
+                    Some(ch) => work.push(*ch),
+                    // (No move path: it holds a value wherever its parent does.)
+                    None if ty_info(*fty).1 => return how,
+                    None => {}
+                }
+            }
+        }
+        "nothing_to_drop"
+    };
     // The hidden iterator of a `for` loop (`let mut iter =
     // IntoIterator::into_iter(<head>)` in the desugaring).
     let for_iter = |l: Local| {
@@ -2203,38 +2319,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 if cx.is_user(*place) {
                     let path = cx.name(*place).unwrap_or_default();
                     let how = match rt_md.rev_lookup.find(place.as_ref()) {
-                        LookupResult::Exact(mpi) => {
-                            let st = rt.state(&[loc], false, mpi);
-                            let how = drop_how(&st);
-                            // What is left needs no drop (every field that does was
-                            // moved out on every path; `(bool, String, String)`
-                            // with both Strings moved): nothing is dropped.
-                            let left_needs_drop = || {
-                                if !st.sub_maybe.is_empty() || st.payload_moved || st.payload_maybe {
-                                    return true;
-                                }
-                                let mut moved: BTreeSet<usize> = BTreeSet::new();
-                                for m in &st.sub_moved {
-                                    let mp = &rt_md.move_paths[*m];
-                                    match (mp.parent, mp.place.projection.last()) {
-                                        (Some(p), Some(ProjectionElem::Field(f, _))) if p == mpi => {
-                                            moved.insert(f.index());
-                                        }
-                                        _ => return true,
-                                    }
-                                }
-                                let pty = place.ty(&body.local_decls, tcx).ty;
-                                let fields: Vec<rustc_middle::ty::Ty<'tcx>> = match pty.kind() {
-                                    TyKind::Tuple(tys) => tys.iter().collect(),
-                                    TyKind::Adt(def, args) if def.is_struct() && !pty.is_box() => {
-                                        def.non_enum_variant().fields.iter().map(|fd| fd.ty(tcx, args)).collect()
-                                    }
-                                    _ => return true,
-                                };
-                                fields.iter().enumerate().any(|(i, fty)| !moved.contains(&i) && ty_info(*fty).1)
-                            };
-                            if how == "drops_rest" && !left_needs_drop() { "nothing_to_drop" } else { how }
-                        }
+                        LookupResult::Exact(mpi) => rest_how(&mut rt, &[loc], false, mpi),
                         LookupResult::Parent(_) => "drops",
                     };
                     let shared = cx.rows.shared_exits.get(&loc).cloned().unwrap_or_default();
@@ -2248,7 +2333,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     // the exit's row).
                     if let LookupResult::Exact(mpi) = rt_md.rev_lookup.find(place.as_ref()) {
                         for (r, at) in &shared {
-                            let how_there = drop_how(&rt.state(&[*at], true, mpi));
+                            let how_there = rest_how(&mut rt, &[*at], true, mpi);
                             if how_there == "nothing_to_drop" {
                                 continue;
                             }
@@ -2335,7 +2420,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     let shared = cx.rows.shared_exits.get(&loc).cloned().unwrap_or_default();
                     if let LookupResult::Exact(mpi) = rt_md.rev_lookup.find(place.as_ref()) {
                         for (r, at) in &shared {
-                            if drop_how(&rt.state(&[*at], true, mpi)) == "nothing_to_drop" {
+                            if rest_how(&mut rt, &[*at], true, mpi) == "nothing_to_drop" {
                                 continue;
                             }
                             let mut ev = cx.ev(loc, Fact::TempDrop { what: what.clone(), created_line, extended, early_exit: Some(*r) });
@@ -2375,18 +2460,56 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     let last_line = cx.r.line_hi(body.span);
     let mut state_after = |exits: &[Location]| -> State {
         let mut st = State::default();
+        // The row's exits on code that runs (an arm an earlier `_` arm
+        // shadows is reached only by borrowck's imaginary edges): what runs
+        // is read there only.
+        let rt_exits: Vec<Location> = exits.iter().copied().filter(|e| runs.contains(&e.block)).collect();
         for (mpi, place, name) in &columns {
             let s = flow.state(exits, true, *mpi);
+            let rt_mpi = match rt_md.rev_lookup.find(place.as_ref()) {
+                LookupResult::Exact(rm) if !rt_exits.is_empty() => Some(rm),
+                _ => None,
+            };
+            let rt_here = rt_mpi.map(|rm| rt.state(&rt_exits, true, rm));
+            // Moved out (or, for `unassigned`, never given a value) on some
+            // path that runs, by the runtime CFG's own move / assignment
+            // dataflows.
+            let rt_may = |entry: &BTreeMap<rustc_middle::mir::BasicBlock, BTreeSet<MovePathIndex>>, unassigned: bool| {
+                rt_mpi.is_some_and(|rm| {
+                    let (anc, desc) = (ancestors(&rt_md, rm), descendants(&rt_md, rm));
+                    rt_exits.iter().any(|e| {
+                        let set = if unassigned {
+                            may_after(entry, &|st, l| unassigned_transfer(&rt_md, &rt_body, st, l), *e)
+                        } else {
+                            may_after(entry, &|st, l| moved_transfer(&rt_md, &rt_body, st, l), *e)
+                        };
+                        if unassigned { set.contains(&rm) } else { set.iter().any(|m| anc.contains(m) || desc.contains(m)) }
+                    })
+                })
+            };
             // What runs, for the words (Q5 refined): moved on every real
             // execution, though borrowck's imaginary edges skip the move (an
             // or-pattern's second alternative after an irrefutable first,
-            // `(x, _) | (_, x)`), reads "moved".
-            let rt_here = match rt_md.rev_lookup.find(place.as_ref()) {
-                LookupResult::Exact(rm) => Some(rt.state(exits, true, rm)),
-                LookupResult::Parent(_) => None,
+            // `(x, _) | (_, x)`), reads "moved". (Uninitialized on every path
+            // that runs is not enough: on one of them it may never have been
+            // given a value, and then nothing was moved.)
+            // Uninitialized on every path, given a value on some of them
+            // (borrowck's own "moved"), but never given one on another: not
+            // moved on every path (`let x; if c { x = ..; drop(x); }` after
+            // the `if`): maybe (moved).
+            let never_assigned_somewhere = || {
+                exits.iter().any(|e| {
+                    may_after(&unassigned_entry, &|st, l| unassigned_transfer(&move_data, body, st, l), *e).contains(mpi)
+                })
             };
             let w = match s.word() {
-                "maybe" if rt_here.as_ref().is_some_and(|r| r.may_uninit && !r.may_init && r.ever_init) => "moved",
+                "moved" if never_assigned_somewhere() => "maybe",
+                "maybe"
+                    if rt_here.as_ref().is_some_and(|r| r.may_uninit && !r.may_init && r.ever_init)
+                        && !rt_may(&rt_unassigned_entry, true) =>
+                {
+                    "moved"
+                }
                 w => w,
             };
             // A variable not assigned yet (and its fields): no column yet.
@@ -2422,9 +2545,11 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     let (anc, desc) = (ancestors(&move_data, *mpi), descendants(&move_data, *mpi));
                     set.iter().any(|m| anc.contains(m) || desc.contains(m))
                 });
-                // Never moved at runtime, only on borrowck's imaginary edges
-                // (the unreachable alternative): it still can't be used.
-                let imaginary = rt_here.as_ref().is_some_and(|r| r.may_init && !r.may_uninit);
+                // Moved only on borrowck's imaginary edges (the unreachable
+                // alternative), never on a path that runs: it still can't be
+                // used, but nothing was moved. (A maybe that is only "never
+                // assigned" on an imaginary path is `unassigned`: E0381.)
+                let imaginary = moved && rt_mpi.is_some() && !rt_may(&rt_moved_entry, false);
                 st.cause.insert(name.clone(), if imaginary { "imaginary" } else if moved { "moved" } else { "unassigned" });
             }
             if (w == "partly" || w == "own") && (!s.sub_moved.is_empty() || !s.sub_maybe.is_empty()) {
@@ -2433,11 +2558,11 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 // irrefutable `if let (p, q) = pair && ..`'s `else`): which
                 // parts are gone is what runs.
                 let mut surely_gone = |m: MovePathIndex| match rt_md.rev_lookup.find(move_data.move_paths[m].place.as_ref()) {
-                    LookupResult::Exact(rm) => {
-                        let r = rt.state(exits, true, rm);
+                    LookupResult::Exact(rm) if !rt_exits.is_empty() => {
+                        let r = rt.state(&rt_exits, true, rm);
                         r.may_uninit && !r.may_init
                     }
-                    LookupResult::Parent(_) => false,
+                    _ => false,
                 };
                 let (rt_moved, still_maybe): (Vec<MovePathIndex>, Vec<MovePathIndex>) =
                     s.sub_maybe.iter().copied().partition(|m| surely_gone(*m));

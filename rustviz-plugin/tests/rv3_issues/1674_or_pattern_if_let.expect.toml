@@ -49,7 +49,7 @@ why = "Q5 refined (coordinator, rv3 P1-4): moved on every real execution (the ev
 [[state]]
 row = 4
 place = "u.1"
-is = "maybe-moved"
+is = "maybe-imaginary"
 src = "issue"
 why = "Q5 (refined): usability follows borrowck: `let _ = &u.1;` after row 4 is E0382 (moved by the second alternative, which borrowck counts though it never runs). It is never moved at runtime (the drop on row 6 is what runs), so the dump's cause is `imaginary`: the text mustn't claim a move happened"
 

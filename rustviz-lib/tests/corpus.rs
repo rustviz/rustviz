@@ -9357,6 +9357,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // each is dropped at scope end only if nothing moved it. (main
         // refused the program; drawing a definite `Move from t.0 to x`
         // would say `t.1` is still dropped when `x` came from it.)
+        // KNOWN WRONG (#1804): these pins hold 2.x's text, which is false
+        // here. The first alternative `(x, _)` matches every tuple, so x
+        // always takes t.0 and t.1 is dropped unconditionally at scope end
+        // (rustc warns the second alternative is unreachable). The fact
+        // layer has it right (t.0 `moved`, t.1 maybe-moved with cause
+        // `imaginary`); the text follows when titles come from the table.
         must_contain: &[
             "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.0, t.0's resource is moved into x here; otherwise t.0 still owns it (Rust tracks this with a runtime drop flag).",
             "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1, t.1's resource is moved into x here; otherwise t.1 still owns it (Rust tracks this with a runtime drop flag).",
@@ -10222,6 +10228,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // old plugin drew no `x` at all, and `u.0` / `u.1` as both
         // still owning and dropping their String, though one of them
         // was moved into `x`.
+        // KNOWN WRONG (#1804): as above, `(x, _)` always matches, so x always
+        // takes u.0 and u.1 is dropped unconditionally; the "bound from u.0
+        // or u.1" and drop-flag texts are 2.x's false ones.
         must_contain: &[
             "x acquires ownership of a resource",
             "x goes out of scope. Its resource is dropped.",
