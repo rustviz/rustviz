@@ -2831,7 +2831,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the resource r points to is captured by closure f (a mutable reborrow through r); r can't be used while the borrow is live",
             "Closure f captures: *r (mutably reborrowed)",
             "Closure capture (mutable reborrow) from r to f",
-            "the resource r points to is captured by closure len (an immutable reborrow through r); r is read-only while the borrow is live",
+            "the resource r points to is captured by closure len (an immutable reborrow through r)",
             "Closure len captures: *r (immutably reborrowed)",
             "Closure capture (immutable reborrow) from r to len",
             "the value p points to is captured by closure g (a mutable reborrow through p); p can't be used while the borrow is live",
@@ -3490,8 +3490,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the resource r2 points to is mutably borrowed by push through r2; r2 can't be used while the borrow is live",
             "push no longer borrows the resource r2 points to",
             "the resource r points to is mutably borrowed by push through r; r can't be used while the borrow is live",
-            "the resource r points to is immutably borrowed by r3 through r; r is read-only while the borrow is live",
-            "r holds a mutable reference, but the resource it points to is currently shared through it, so r can only read it",
+            "the resource r points to is immutably borrowed by r3 through r",
+            "r holds a mutable reference, but the resource it points to is currently shared through it, so r can only use it the way a shared reference can",
             "r3 no longer borrows the resource r points to",
             "the value p points to is mutably borrowed by q through p; p can't be used while the borrow is live",
             "q mutably borrows a value",
@@ -8497,36 +8497,36 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `b` and `c` are owned at both `?`. `a` was moved into `take`
         // before them, `n` and `opt` are `Copy`: no dot for those.
         must_contain: &[
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and b's \
+            "If the `?` here returns early, b's \
              resource is dropped. If the `?` succeeds, nothing happens to b here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and c's \
+            "If the `?` here returns early, c's \
              resource is dropped. If the `?` succeeds, nothing happens to c here.",
         ],
         must_not_contain: &[
-            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and a's \
+            "=If the `?` here returns early, a's \
              resource is dropped. If the `?` succeeds, nothing happens to a here.",
-            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and n's \
+            "=If the `?` here returns early, n's \
              resource is dropped. If the `?` succeeds, nothing happens to n here.",
-            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and opt's \
+            "=If the `?` here returns early, opt's \
              resource is dropped. If the `?` succeeds, nothing happens to opt here.",
         ],
     },
     TooltipExpect {
         name: "try_in_branch",
         must_contain: &[
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and t's \
+            "If the `?` here returns early, t's \
              resource is dropped. If the `?` succeeds, nothing happens to t here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and u's \
+            "If the `?` here returns early, u's \
              resource is dropped. If the `?` succeeds, nothing happens to u here.",
             // `v` is a `Vec<String>`: its drop says what it holds (#542).
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's \
+            "If the `?` here returns early, v's \
              resource (including every String it holds) is dropped. If the `?` succeeds, v's \
              resource isn't dropped here.", // (v's dot also has the borrow by first: #1151)
         ],
         must_not_contain: &[
-            "the function returns and v's resource is dropped. If",
+            "returns early, v's resource is dropped. If",
             // `s` is a reference.
-            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and s's \
+            "=If the `?` here returns early, s's \
              resource is dropped. If the `?` succeeds, nothing happens to s here.",
         ],
     },
@@ -8535,32 +8535,32 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "try_in_if_else_branch",
         must_contain: &[
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and t's \
+            "If the `?` here returns early, t's \
              resource is dropped. If the `?` succeeds, nothing happens to t here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and u's \
+            "If the `?` here returns early, u's \
              resource is dropped. If the `?` succeeds, nothing happens to u here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's \
+            "If the `?` here returns early, v's \
              resource (including every String it holds) is dropped. If the `?` succeeds, v's \
              resource isn't dropped here.", // (v's dot also has the borrow by first: #1151)
         ],
         must_not_contain: &[
-            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and s's \
+            "=If the `?` here returns early, s's \
              resource is dropped. If the `?` succeeds, nothing happens to s here.",
         ],
     },
     TooltipExpect {
         name: "try_in_loop_two_on_a_line",
         must_contain: &[
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and label's \
+            "If the `?` here returns early, label's \
              resource is dropped. If the `?` succeeds, nothing happens to label here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and note's \
+            "If the `?` here returns early, note's \
              resource is dropped. If the `?` succeeds, nothing happens to note here.",
         ],
         must_not_contain: &[
             // `total` is a `Copy`; `pair` and `items` are references.
-            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and total's \
+            "=If the `?` here returns early, total's \
              resource is dropped. If the `?` succeeds, nothing happens to total here.",
-            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and pair's \
+            "=If the `?` here returns early, pair's \
              resource is dropped. If the `?` succeeds, nothing happens to pair here.",
             // chunks is a method, not a lender (#868).
             "Return immutably borrowed resource from pair to chunks",
@@ -8797,7 +8797,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "o goes out of scope. Its resource is dropped (including the String it holds, if any).",
             "m goes out of scope. Its resource is dropped (including every key it holds).",
             "w goes out of scope. Its resource is dropped (including every String it holds).",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and names's \
+            "If the `?` here returns early, names's \
              resource (including every String it holds) is dropped. If the `?` succeeds, nothing happens \
              to names here.",
         ],
@@ -8807,7 +8807,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=o goes out of scope. Its resource is dropped.",
             "=m goes out of scope. Its resource is dropped.",
             "=w goes out of scope. Its resource is dropped.",
-            "the function returns and names's resource is dropped. If",
+            "returns early, names's resource is dropped. If",
         ],
     },
     TooltipExpect {
@@ -9579,7 +9579,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "b.name's resource is moved",
             "Move from b.name to take",
-            "b goes out of scope. b.name was moved out earlier, so only b.tag is dropped. The Box's heap allocation is freed.",
+            "b goes out of scope. b.name was moved out earlier, so only b.tag is dropped. The Box's heap allocation, if it has one, is freed.",
         ],
         must_not_contain: &[
             "b goes out of scope. Its resource is dropped.",
@@ -9589,7 +9589,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "box_field_move_all",
         must_contain: &[
             "b.name's resource is moved",
-            "b goes out of scope. b.name was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+            "b goes out of scope. b.name was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
         ],
         must_not_contain: &[
             "b goes out of scope. Its resource is dropped.",
@@ -9601,7 +9601,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "box_field_move_branch",
         must_contain: &[
             "b.name's resource is moved",
-            "b goes out of scope. b.name was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). b.tag is dropped. The Box's heap allocation is freed.",
+            "b goes out of scope. b.name was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). b.tag is dropped. The Box's heap allocation, if it has one, is freed.",
         ],
         must_not_contain: &[
             "b goes out of scope. Its resource is dropped.",
@@ -9611,7 +9611,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "box_field_move_param",
         must_contain: &[
             "b.name's resource is moved",
-            "b goes out of scope. b.name was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+            "b goes out of scope. b.name was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
         ],
         must_not_contain: &[
             "b goes out of scope. Its resource is dropped.",
@@ -9656,7 +9656,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "box_contents_move",
         must_contain: &[
-            "b goes out of scope. Its contents were moved out earlier, so only the Box's heap allocation is freed.",
+            "b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation, if it has one, is freed.",
         ],
         must_not_contain: &[
             "=b goes out of scope. No resource is dropped.",
@@ -9665,7 +9665,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "box_contents_move_string",
         must_contain: &[
-            "b goes out of scope. Its contents were moved out earlier, so only the Box's heap allocation is freed.",
+            "b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation, if it has one, is freed.",
         ],
         must_not_contain: &[
             "=b goes out of scope. No resource is dropped.",
@@ -9675,7 +9675,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "box_contents_move_pattern",
         must_contain: &[
-            "b goes out of scope. Its contents were moved out earlier, so only the Box's heap allocation is freed.",
+            "b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation, if it has one, is freed.",
         ],
         must_not_contain: &[
             "=b goes out of scope. No resource is dropped.",
@@ -9689,6 +9689,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "heap allocation is freed",
+            "heap allocation, if it has one",
         ],
     },
     // ─── Or-pattern arms that bind a reference, tuple or struct from
@@ -10006,15 +10007,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "edition2024/if_let_chain_else_try",
         must_contain: &[
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and w's \
+            "If the `?` here returns early, w's \
              resource is dropped. If the `?` succeeds, nothing happens to w here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and x's \
+            "If the `?` here returns early, x's \
              resource (including the String it holds, if any) is dropped. If the `?` succeeds, \
              x's resource isn't dropped here.", // (with the borrow on x's dot: #1151)
         ],
         must_not_contain: &[
             // `a` is a reference.
-            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and a's \
+            "=If the `?` here returns early, a's \
              resource is dropped. If the `?` succeeds, nothing happens to a here.",
         ],
     },
@@ -10022,47 +10023,47 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "edition2024/if_let_chain_else_try_moved",
         // `let Some(a) = x` moved the String into `a` before the `?`.
         must_contain: &[
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and w's \
+            "If the `?` here returns early, w's \
              resource is dropped. If the `?` succeeds, nothing happens to w here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and a's \
+            "If the `?` here returns early, a's \
              resource is dropped. If the `?` succeeds, a's resource isn't dropped here.", // (#1151)
         ],
         must_not_contain: &[
-            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and x's \
+            "=If the `?` here returns early, x's \
              resource is dropped. If the `?` succeeds, nothing happens to x here.",
         ],
     },
     TooltipExpect {
         name: "try_in_if_else",
         must_contain: &[
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and t's \
+            "If the `?` here returns early, t's \
              resource is dropped. If the `?` succeeds, nothing happens to t here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and u's \
+            "If the `?` here returns early, u's \
              resource is dropped. If the `?` succeeds, nothing happens to u here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's \
+            "If the `?` here returns early, v's \
              resource (including every String it holds) is dropped. If the `?` succeeds, v's \
              resource isn't dropped here.", // (v's dot also has the borrow by first: #1151)
         ],
         must_not_contain: &[
             // `s` is a reference, bound after the `?`.
-            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and s's \
+            "=If the `?` here returns early, s's \
              resource is dropped. If the `?` succeeds, nothing happens to s here.",
         ],
     },
     TooltipExpect {
         name: "try_in_match_arm",
         must_contain: &[
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and s's \
+            "If the `?` here returns early, s's \
              resource is dropped. If the `?` succeeds, nothing happens to s here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and t's \
+            "If the `?` here returns early, t's \
              resource is dropped. If the `?` succeeds, nothing happens to t here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's \
+            "If the `?` here returns early, v's \
              resource (including every String it holds) is dropped. If the `?` succeeds, v's \
              resource isn't dropped here.", // (v's dot also has the borrow by first: #1151)
         ],
         must_not_contain: &[
             // The arm's pattern moved o's String into `s`.
-            "=Only if the `?` here returns early (on an `Err` or `None`): the function returns and o's \
+            "=If the `?` here returns early, o's \
              resource is dropped. If the `?` succeeds, nothing happens to o here.",
         ],
     },
@@ -10613,7 +10614,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "edition2024/if_let_chain_box_move",
         must_contain: &[
             "*b may have been moved: when the condition moves *b to take and then turns out false, the else branch runs after that move, so *b can't be used here",
-            "b goes out of scope. Its resource (including the String it holds) is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag). The Box's heap allocation is freed either way.",
+            "b goes out of scope. Whatever it still holds (if anything) is dropped here.",
         ],
         must_not_contain: &[
             // #736: the drop flag decides only the String; the Box's
@@ -10898,18 +10899,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // early return drops `r`. A `Copy` `Result<i32, i32>` is copied.
         must_contain: &[
             "Move from r to n",
-            "r's resource is moved into the `?`. If r is `Ok`, n gets the value inside it; if it is `Err`, the function returns early and the error goes to the caller.",
+            "r's resource is moved into the `?`. If r is `Ok`, n gets the value inside it. Otherwise the `?` returns early.",
             "n is initialized with the value the `?` takes out of r's `Ok`",
             "r goes out of scope. No resource is dropped.",
             "Move from rs to s",
-            "rs's resource is moved into the `?`. If rs is `Ok`, s gets the value inside it; if it is `Err`, the function returns early and the error goes to the caller.",
+            "rs's resource is moved into the `?`. If rs is `Ok`, s gets the value inside it. Otherwise the `?` returns early.",
             "s acquires ownership of the resource the `?` takes out of rs's `Ok`",
-            "o's resource is moved into the `?`. If o is `Some`, t gets the value inside it; if it is `None`, the function returns `None` early.",
+            "o's resource is moved into the `?`. If o is `Some`, t gets the value inside it. Otherwise the `?` returns early.",
             "t acquires ownership of the resource the `?` takes out of o's `Some`",
             // m gets the i32 inside c's `Ok`, not a copy of c (#1352).
             "Partial copy from c to m",
             "m is initialized with a copy of a value inside c",
-            "e's resource is moved into the `?`. If e is `Ok`, `e?` gives the value inside it; if it is `Err`, the function returns early and the error goes to the caller.",
+            "e's resource is moved into the `?`. If e is `Ok`, `e?` gives the value inside it. Otherwise the `?` returns early.",
             "e goes out of scope. No resource is dropped.",
         ],
         must_not_contain: &[
@@ -10935,11 +10936,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the `?`'s drops of the function's values (#430). The `?` also
         // moves r / w (#652).
         must_contain: &[
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and the temporary tuple (x, y) is dropped, and with it y's resource. If the `?` succeeds, nothing happens to the tuple here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and the temporary tuple (p, q) is dropped, and with it q's resource. If the `?` succeeds, nothing happens to the tuple here.",
+            "If the `?` here returns early, the temporary tuple (x, y) is dropped, and with it y's resource. If the `?` succeeds, nothing happens to the tuple here.",
+            "If the `?` here returns early, the temporary tuple (p, q) is dropped, and with it q's resource. If the `?` succeeds, nothing happens to the tuple here.",
             "The temporary tuple (x, y) is dropped after this arm, when the match ends, and with it y's resource",
             "The temporary tuple (p, q) is dropped when the if branch leaves early, and with it q's resource",
-            "r's resource is moved into the `?`. If r is `Ok`, n gets the value inside it; if it is `Err`, the function returns early and the error goes to the caller.",
+            "r's resource is moved into the `?`. If r is `Ok`, n gets the value inside it. Otherwise the `?` returns early.",
             "w still owns its resource here: the branch that moved w returned before reaching this point",
         ],
         must_not_contain: &[
@@ -12112,8 +12113,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // "b's resource is moved into the `?`", which reads as a
         // contradiction (#668).
         must_contain: &[
-            "Only if an earlier `?` on this line returns early (on an `Err` or `None`): the function returns and b's resource (including the String it holds, if any) is dropped. If it succeeds, b is not dropped there; b's own `?` below moves it",
-            "b's resource is moved into the `?`. If b is `Ok`, `b?` gives the value inside it; if it is `Err`, the function returns early and the error goes to the caller.",
+            "If an earlier `?` on this line returns early, b's resource (including the String it holds, if any) is dropped. If it succeeds, b is not dropped there; b's own `?` below moves it",
+            "b's resource is moved into the `?`. If b is `Ok`, `b?` gives the value inside it. Otherwise the `?` returns early.",
         ],
         must_not_contain: &[
             "nothing happens to b here",
@@ -12242,10 +12243,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the loop's iterator, with the elements it hasn't handed out,
         // is dropped there, on `it`'s column.
         must_contain: &[
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns from inside the `for` loop and it's former resource, the loop's iterator, is dropped, along with whatever it still owns (such as elements it hasn't handed out yet). If the `?` succeeds, nothing happens to the iterator here.",
+            "If the `?` here returns early, it's former resource, the loop's iterator, is dropped, along with whatever it still owns (such as elements it hasn't handed out yet). If the `?` succeeds, nothing happens to the iterator here.",
             "it's former resource, the `for` loop's iterator, is dropped here, as the panic unwinds out of the loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
             // `w`'s own drop at the `?` (#430).
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and w's resource is dropped. If the `?` succeeds, w's resource isn't dropped here.", // (w is also borrowed on this dot: #1151)
+            "If the `?` here returns early, w's resource is dropped. If the `?` succeeds, w's resource isn't dropped here.", // (w is also borrowed on this dot: #1151)
         ],
         must_not_contain: &[
             "the function returns from inside the loop",
@@ -12761,7 +12762,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Box is dropped; the Box's own heap allocation is freed on every
         // path, so the scope end has to say so.
         must_contain: &[
-            "b goes out of scope. Its resource (including the String it holds) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). The Box's heap allocation is freed either way.",
+            "b goes out of scope. Whatever it still holds (if anything) is dropped here.",
         ],
         must_not_contain: &[
             // Read as "nothing is freed if the branch moved *b".
@@ -14084,7 +14085,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from y to z",
             "z is bound to a mutable reference",
             "Return mutably borrowed value from z to x",
-            "the value z points to is immutably borrowed by println! through z; z is read-only while the borrow is live",
+            "the value z points to is immutably borrowed by println! through z",
         ],
         must_not_contain: &[
             "(moved from",
@@ -14456,7 +14457,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from y to z",
             "z is bound to a mutable reference",
             "Return mutably borrowed value from z to x",
-            "the value z points to is immutably borrowed by println! through z; z is read-only while the borrow is live",
+            "the value z points to is immutably borrowed by println! through z",
             "*y's value is copied",
         ],
         must_not_contain: &[
@@ -14479,7 +14480,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from y to z",
             "z is bound to a mutable reference",
             "Return mutably borrowed value from z to x",
-            "the value z points to is immutably borrowed by println! through z; z is read-only while the borrow is live",
+            "the value z points to is immutably borrowed by println! through z",
             "*y's value is copied",
         ],
         must_not_contain: &[
@@ -15720,21 +15721,21 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from b2.1 to n",
             "n is initialized with a copy of b2.1",
             "b2.0 goes out of scope. No resource is dropped.",
-            "b2 goes out of scope. b2.0 was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+            "b2 goes out of scope. b2.0 was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
             "Move from bp.a to a",
             "bp.a's resource is moved",
             "bp.a goes out of scope. No resource is dropped.",
             "bp.b goes out of scope. Its resource is dropped.",
-            "bp goes out of scope. bp.a was moved out earlier, so only bp.b is dropped. The Box's heap allocation is freed.",
+            "bp goes out of scope. bp.a was moved out earlier, so only bp.b is dropped. The Box's heap allocation, if it has one, is freed.",
             "Move from bq.s to s2",
             "k is initialized with a copy of bq.k",
-            "bq goes out of scope. bq.s was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+            "bq goes out of scope. bq.s was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
             "Move from b4.0 to x",
             "Move from b4.1 to y",
-            "b4 goes out of scope. b4.0 and b4.1 were moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+            "b4 goes out of scope. b4.0 and b4.1 were moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
             "Move from bo.pair.0 to s3",
             "m is initialized with a copy of bo.pair.1",
-            "bo goes out of scope. bo.pair.0 was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+            "bo goes out of scope. bo.pair.0 was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
         ],
         must_not_contain: &[
             "*b2's resource is moved",
@@ -15897,23 +15898,23 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "n7 is initialized with a copy of b7.1",
             "b7.0's resource is moved",
             "b7.0 goes out of scope. No resource is dropped.",
-            "b7 goes out of scope. b7.0 was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+            "b7 goes out of scope. b7.0 was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
             "Move from b2.0 to s",
             "Copy from b2.1 to n",
             "b2.0 goes out of scope. No resource is dropped.",
-            "b2 goes out of scope. b2.0 was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+            "b2 goes out of scope. b2.0 was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
             "Move from b3.0 to s3",
             "Copy from b3.1 to n3",
             "b3.0 goes out of scope. No resource is dropped: b3.0 was moved or dropped in every branch above.",
-            "b3 goes out of scope. b3.0 was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+            "b3 goes out of scope. b3.0 was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
             "Move from bp.a to a",
             "bp.a goes out of scope. No resource is dropped.",
             "bp.b goes out of scope. Its resource is dropped.",
-            "bp goes out of scope. bp.a was moved out earlier, so only bp.b is dropped. The Box's heap allocation is freed.",
+            "bp goes out of scope. bp.a was moved out earlier, so only bp.b is dropped. The Box's heap allocation, if it has one, is freed.",
             "Move from bq.b to b",
             "Return immutably borrowed resource from r to bq.a",
             "bq.a goes out of scope. Its resource is dropped.",
-            "bq goes out of scope. bq.b was moved out earlier, so only bq.a is dropped. The Box's heap allocation is freed.",
+            "bq goes out of scope. bq.b was moved out earlier, so only bq.a is dropped. The Box's heap allocation, if it has one, is freed.",
         ],
         must_not_contain: &[
             "Move from *b7 to s7",
@@ -15951,7 +15952,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from b5.1 to n5",
             "b5.0 was moved: the condition moves b5.0 to s5 before it can turn out false, so the move has happened even when the body is skipped, and b5.0 can't be used after the if. When the condition fails after that move, s5 goes out of scope and its resource is dropped.",
             "b5.0 goes out of scope. No resource is dropped: b5.0 was moved or dropped in every branch above.",
-            "b5 goes out of scope. b5.0 was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+            "b5 goes out of scope. b5.0 was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
         ],
         must_not_contain: &[
             "Move from *b5 to s5",
@@ -16576,17 +16577,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from *b1 to x",
             "Move from b1.0 to s",
             "b1.0 goes out of scope. No resource is dropped: b1.0 was moved or dropped in every branch above.",
-            "b1 goes out of scope. b1.0 was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+            "b1 goes out of scope. b1.0 was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
             "b1 isn't moved in any of the branches above",
             "Move from *b2 to x",
             "b2.0 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "b2 goes out of scope. b2.0 was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). The Box's heap allocation is freed.",
+            "b2 goes out of scope. b2.0 was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). The Box's heap allocation, if it has one, is freed.",
             "Move from *b3 to x",
             "b3.0 goes out of scope. No resource is dropped: b3.0 was moved or dropped in every branch above.",
-            "b3 goes out of scope. b3.0 was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+            "b3 goes out of scope. b3.0 was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
             "Move from *b4 to take",
             "b4.0 goes out of scope. No resource is dropped: b4.0 was moved or dropped in every branch above.",
-            "b4 goes out of scope. b4.0 was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+            "b4 goes out of scope. b4.0 was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
         ],
         must_not_contain: &[
             "b1.0 goes out of scope. Its resource is dropped here only if no branch above moved it",
@@ -16621,7 +16622,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from b.0 to s2",
             "Copy from b.1 to n2",
             "b.0 goes out of scope. No resource is dropped.",
-            "b goes out of scope. b.0 was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+            "b goes out of scope. b.0 was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
             "Move from p.a to a",
             "p.a goes out of scope. No resource is dropped.",
             "p goes out of scope. p.a was moved out earlier, so only p.b is dropped.",
@@ -16797,7 +16798,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable reborrow from gw to u",
             "Return immutably borrowed resource from t to *gm",
             "Return immutably borrowed resource from u to *gw",
-            "the resource gm points to is immutably borrowed by t through gm; gm is read-only while the borrow is live",
+            "the resource gm points to is immutably borrowed by t through gm",
             // show_str(&gy) borrows what gy points to, for the call.
             "the resource gy points to is immutably borrowed by show_str",
             "show_str reads from gy",
@@ -17016,7 +17017,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "q.name goes out of scope. No resource is dropped: q.name was moved or dropped in every branch above.",
             "b.name's resource is moved into the temporary tuple (v, b.name)",
             "The temporary tuple (v, b.name) is dropped here, at the end of the if branch, and with it b.name's resource",
-            "b goes out of scope. b.name was moved out earlier, so only b.tag is dropped. The Box's heap allocation is freed.",
+            "b goes out of scope. b.name was moved out earlier, so only b.tag is dropped. The Box's heap allocation, if it has one, is freed.",
         ],
         must_not_contain: &[
             "=y.name goes out of scope. Its resource is dropped.",
@@ -17234,8 +17235,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // either way. main drew the move as unconditional and said only
         // the allocation was freed there.
         must_contain: &[
-            "e goes out of scope. Its resource (including the String it holds) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). The Box's heap allocation is freed either way.",
-            "e2 goes out of scope. Its resource (including the String it holds) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). The Box's heap allocation is freed either way.",
+            "e goes out of scope. Whatever it still holds (if anything) is dropped here.",
+            "e2 goes out of scope. Whatever it still holds (if anything) is dropped here.",
         ],
         must_not_contain: &[
             "e goes out of scope. Its contents were moved out earlier",
@@ -17275,7 +17276,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "q goes out of scope. Its resource is dropped.",
             "q.a goes out of scope. Its resource is dropped (including the String it holds, if any).",
             "p goes out of scope. p.a was moved out earlier, so only p.b is dropped.",
-            "b goes out of scope. b.0 was moved out earlier, so no field is dropped. The Box's heap allocation is freed.",
+            "b goes out of scope. b.0 was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
             "q goes out of scope. q.a was moved out earlier, so only q.b is dropped.",
             "This segment leads into the Some(t) branch.",
             "This segment leads into the Ok(n) branch.",
@@ -17340,11 +17341,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // The join said "e was moved", and that the whole resource is
         // dropped only on the paths that didn't move it.
         must_contain: &[
-            "e's contents were moved out in at least one branch above, so e can't be used after the branches. If the branch that ran didn't move them, the String is dropped when e goes out of scope. The Box's heap allocation is freed then either way.",
-            "f's contents were moved out in at least one branch above, so f can't be used after the branches until *f is assigned again. If the branch that ran didn't move them, the String is dropped when *f is assigned again.",
-            "g's contents were moved out in at least one branch above, so g can't be used after the branches until g is assigned again. If the branch that ran didn't move them, the String is dropped when g is assigned again. The Box's heap allocation is freed then either way.",
-            "g acquires ownership of a new resource. Its previous String is dropped here only if no branch above moved it out (Rust tracks this with a runtime drop flag). Its previous Box's heap allocation is freed here either way.",
-            "b's contents were moved out in at least one branch above, so b can't be used after the branches. The Box's heap allocation is freed when b goes out of scope either way.",
+            "e's contents may have been moved out above, so e can't be used from here on.",
+            "f's contents may have been moved out above, so f can't be used from here on until *f or f is assigned again.",
+            "g's contents may have been moved out above, so g can't be used from here on until *g or g is assigned again.",
+            "g acquires ownership of a new resource. Whatever it still held (if anything) is dropped here.",
+            "b's contents may have been moved out above, so b can't be used from here on.",
         ],
         must_not_contain: &[
             "e was moved in at least one branch above",
@@ -17384,8 +17385,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // allocation is freed on every path. It said the resource is
         // dropped only if no branch moved it, with a drop flag.
         must_contain: &[
-            "b goes out of scope. Its contents were moved out in at least one branch above; the Box's heap allocation is freed here either way.",
-            "c goes out of scope. Its contents were moved out in at least one branch above; the Box's heap allocation is freed here either way.",
+            "b goes out of scope. Its contents may have been moved out above; they need no drop either way. The Box's heap allocation, if it has one, is freed here.",
+            "c goes out of scope. Its contents may have been moved out above; they need no drop either way. The Box's heap allocation, if it has one, is freed here.",
         ],
         must_not_contain: &[
             "b goes out of scope. Its resource is dropped here only if no branch above moved it",
@@ -17468,11 +17469,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // is dropped at its scope end. Checked with a `Drop`-printing
         // type.
         must_contain: &[
-            "e's contents may have been moved out above, so e can't be used after the if until *e is assigned again. If nothing above moved them, the String is dropped when *e is assigned again.",
+            "e's contents may have been moved out above, so e can't be used from here on until *e or e is assigned again.",
             "*e acquires ownership of a new resource. Its previous String is dropped here only if nothing above moved it out (Rust tracks this with a runtime drop flag).",
-            "f's contents may have been moved out above, so f can't be used after the if until f is assigned again. If nothing above moved them, the String is dropped when f is assigned again. The Box's heap allocation is freed then either way.",
-            "f acquires ownership of a new resource. Its previous String is dropped here only if nothing above moved it out (Rust tracks this with a runtime drop flag). Its previous Box's heap allocation is freed here either way.",
-            "g's contents may have been moved out above, so g can't be used after the if. If nothing above moved them, the String is dropped when g goes out of scope. The Box's heap allocation is freed then either way.",
+            "f's contents may have been moved out above, so f can't be used from here on until *f or f is assigned again.",
+            "f acquires ownership of a new resource. Whatever it still held (if anything) is dropped here.",
+            "g's contents may have been moved out above, so g can't be used from here on.",
         ],
         must_not_contain: &[
             "e was moved in at least one branch above",
@@ -19637,7 +19638,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // `breakless_loop_branch_exits_drop_only_there`.)
             "g goes out of scope. Its resource is dropped.",
             "q goes out of scope. Its resource is dropped.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and w's resource is dropped. If the `?` succeeds, nothing happens to w here.",
+            "If the `?` here returns early, w's resource is dropped. If the `?` succeeds, nothing happens to w here.",
             "s goes out of scope at the `return` on line 68 (or at the `?` on line 67, if that returns first). Its resource is dropped.",
             "t goes out of scope at the `return` on line 68 (or at the `?` on line 67, if that returns first). Its resource is dropped.",
             "y goes out of scope at the `return` on line 68",
@@ -19684,16 +19685,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // pinned by the row test below. (`self.items's resource is no
         // longer mutably borrowed` is still right on the `push` line.)
         must_contain: &[
-            "the resource v points to is immutably borrowed by the `for` loop's iterator through v; v is read-only until the loop ends",
+            "the resource v points to is immutably borrowed by the `for` loop's iterator through v until the loop ends",
             "the `for` loop's iterator no longer borrows the resource v points to",
-            "v holds a mutable reference, but the resource it points to is currently shared through it, so v can only read it",
-            "the resource r points to is immutably borrowed by the `for` loop's iterator through r; r is read-only until the loop ends",
+            "v holds a mutable reference, but the resource it points to is currently shared through it, so v can only use it the way a shared reference can",
+            "the resource r points to is immutably borrowed by the `for` loop's iterator through r until the loop ends",
             "the `for` loop's iterator no longer borrows the resource r points to",
             "self.items is mutably borrowed by the `for` loop's iterator; self.items can't be used until the loop ends",
             "the resource self points to is modified through e",
             "the `for` loop's iterator no longer borrows self.items",
-            "self.items is immutably borrowed by the `for` loop's iterator; self.items is read-only until the loop ends",
-            "self holds a mutable reference, but self.items is immutably borrowed by the `for` loop's iterator, so self.items is read-only until the loop ends",
+            "self.items is immutably borrowed by the `for` loop's iterator until the loop ends",
+            "self holds a mutable reference, but self.items is immutably borrowed by the `for` loop's iterator until the loop ends",
             "the value e points to is modified through *e",
         ],
         must_not_contain: &[
@@ -19725,13 +19726,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // (what it borrows from isn't shown)"; e's own dot says it ends).
         // The rows are pinned by the row test below.
         must_contain: &[
-            "self.b is immutably borrowed by the `for` loop's iterator; self.b is read-only until the loop ends",
+            "self.b is immutably borrowed by the `for` loop's iterator until the loop ends",
             "the `for` loop's iterator no longer borrows self.b",
             "the `for` loop's iterator no longer borrows self.a",
             "the resource self points to is modified through x",
             "the resource self points to is modified through e",
-            "the resource b points to is immutably borrowed by the `for` loop's iterator through b; b is read-only until the loop ends",
-            "b holds a mutable reference, but the resource it points to is currently shared through it, so b can only read it",
+            "the resource b points to is immutably borrowed by the `for` loop's iterator through b until the loop ends",
+            "b holds a mutable reference, but the resource it points to is currently shared through it, so b can only use it the way a shared reference can",
             "the `for` loop's iterator no longer borrows the resource b points to",
             "the resource b points to is mutably borrowed by the `for` loop's iterator through b; b can't be used until the loop ends",
             "the resource a points to is modified through x",
@@ -20658,10 +20659,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // its style and names the field while it is borrowed.
         must_contain: &[
             "self holds a mutable reference, but self.items is mutably borrowed by the `for` loop's iterator, so self.items can't be used until the loop ends",
-            "self holds a mutable reference, but self.items is immutably borrowed by the `for` loop's iterator, so self.items is read-only until the loop ends",
+            "self holds a mutable reference, but self.items is immutably borrowed by the `for` loop's iterator until the loop ends",
             "self holds a mutable reference, but self.items is mutably borrowed by first, so self.items can't be used while the borrow is live",
             "self holds a mutable reference, but self.items is mutably borrowed by x, so self.items can't be used while the borrow is live",
-            "self holds a mutable reference, but self.items is immutably borrowed by m, so self.items is read-only while the borrow is live",
+            "self holds a mutable reference, but self.items is immutably borrowed by m while the borrow is live",
             "r holds a mutable reference, but r.items is mutably borrowed by the `for` loop's iterator, so r.items can't be used until the loop ends",
             "self holds a mutable reference; it can read and write the borrowed resource",
             "r holds a mutable reference; it can read and write the borrowed resource",
@@ -20700,13 +20701,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // each). `self.other` in `skip(self.n).take(self.other.len())` is
         // borrowed only for the call, so only `self.items` is named.
         must_contain: &[
-            "self holds a mutable reference, but self.items and self.other are immutably borrowed by it, so they are read-only while the borrow is live",
-            "self holds a mutable reference, but self.items is immutably borrowed by it, so self.items is read-only while the borrow is live",
-            "self holds a mutable reference, but self.items and self.other are immutably borrowed by l, so they are read-only while the borrow is live",
+            "self holds a mutable reference, but self.items and self.other are immutably borrowed by it while the borrow is live",
+            "self holds a mutable reference, but self.items is immutably borrowed by it while the borrow is live",
+            "self holds a mutable reference, but self.items and self.other are immutably borrowed by l while the borrow is live",
             "self holds a mutable reference, but self.items and self.other are mutably borrowed by x, so they can't be used while the borrow is live",
-            "self holds a mutable reference, but self.other is mutably borrowed and self.items immutably borrowed by the `for` loop's iterator, so self.other can't be used and self.items is read-only until the loop ends",
-            "r holds a mutable reference, but r.other is mutably borrowed and r.items immutably borrowed by pairs, so r.other can't be used and r.items is read-only while the borrow is live",
-            "r holds a mutable reference, but r.other is mutably borrowed and r.items immutably borrowed by the `for` loop's iterator, so r.other can't be used and r.items is read-only until the loop ends",
+            "self holds a mutable reference, but self.other is mutably borrowed and self.items immutably borrowed by the `for` loop's iterator until the loop ends, so self.other can't be used during that borrow",
+            "r holds a mutable reference, but r.other is mutably borrowed and r.items immutably borrowed by pairs while the borrow is live, so r.other can't be used during that borrow",
+            "r holds a mutable reference, but r.other is mutably borrowed and r.items immutably borrowed by the `for` loop's iterator until the loop ends, so r.other can't be used during that borrow",
             "it holds a value that immutably borrows self.items (it isn't a reference itself)",
             "it holds a value that immutably borrows self.other (it isn't a reference itself)",
             "pairs holds a value that mutably borrows r.other (pairs isn't a reference itself)",
@@ -20750,14 +20751,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // over such a head named only self.items; self.n's capture was not
         // drawn (`self.n += 1` in the body is E0506).
         must_contain: &[
-            "self holds a mutable reference, but self.items and self.n are immutably borrowed by it, so they are read-only while the borrow is live",
-            "self holds a mutable reference, but self.n is mutably borrowed and self.items immutably borrowed by it, so self.n can't be used and self.items is read-only while the borrow is live",
-            "self holds a mutable reference, but self.items and self.n are immutably borrowed by the `for` loop's iterator, so they are read-only until the loop ends",
-            "self holds a mutable reference, but self.n is immutably borrowed by it, so self.n is read-only while the borrow is live",
+            "self holds a mutable reference, but self.items and self.n are immutably borrowed by it while the borrow is live",
+            "self holds a mutable reference, but self.n is mutably borrowed and self.items immutably borrowed by it while the borrow is live, so self.n can't be used during that borrow",
+            "self holds a mutable reference, but self.items and self.n are immutably borrowed by the `for` loop's iterator until the loop ends",
+            "self holds a mutable reference, but self.n is immutably borrowed by it while the borrow is live",
             "it holds a value that immutably borrows self.items (it isn't a reference itself)",
             "it holds a value that immutably borrows self.n (it isn't a reference itself)",
             "it holds a value that mutably borrows self.n (it isn't a reference itself)",
-            "self.n is immutably borrowed by the `for` loop's iterator; self.n is read-only until the loop ends",
+            "self.n is immutably borrowed by the `for` loop's iterator until the loop ends",
             "the closure passed to map reads from self.n",
             "the `for` loop's iterator no longer borrows self.n",
             "Mutable borrow from self.n to it: map's signature gives the value it returns the same lifetime as the value it was called on and its argument, so it may borrow from either, and both stay borrowed while it is in use; it isn't a reference, but its value holds one",
@@ -20776,7 +20777,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "it no longer borrows the resource self points to",
             "Immutable borrow from self to",
             "Mutable borrow from self to",
-            "=self holds a mutable reference, but self.items is immutably borrowed by the `for` loop's iterator, so self.items is read-only until the loop ends",
+            "=self holds a mutable reference, but self.items is immutably borrowed by the `for` loop's iterator until the loop ends",
         ],
     },
     TooltipExpect {
@@ -20811,7 +20812,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p.n's value is immutably borrowed by r",
             "p.n's value is no longer immutably borrowed",
             "Return immutably borrowed value from r to p.n",
-            "self holds a mutable reference, but self.items is immutably borrowed by f, so self.items is read-only while the borrow is live",
+            "self holds a mutable reference, but self.items is immutably borrowed by f while the borrow is live",
             "self.items's resource is immutably borrowed by f; self.items is read-only while the borrow is live",
             "f holds a value that immutably borrows self.items (f isn't a reference itself)",
             "Immutable borrow from self.items to f: find's signature gives the value it returns the same lifetime as the references stored in the value it was called on; f isn't a reference, but its value holds one",
@@ -20855,7 +20856,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // compiles. Where the borrows end is pinned by
         // `a_boxed_closure_keeps_its_borrows_until_dropped`.
         must_contain: &[
-            "self holds a mutable reference, but self.n is immutably borrowed by g, so self.n is read-only while the borrow is live",
+            "self holds a mutable reference, but self.n is immutably borrowed by g while the borrow is live",
             "self.n's value is immutably borrowed by g; self.n is read-only while the borrow is live",
             "g holds a value that immutably borrows self.n (g isn't a reference itself)",
             "Immutable borrow from self.n to g: boxed's signature gives the value it returns the same lifetime as its argument; g isn't a reference, but its value holds one",
@@ -21151,23 +21152,23 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // branch join's "its resource is dropped when x goes out of
         // scope", is #1147.)
         must_contain: &[
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and b's resource is dropped. If the `?` succeeds, nothing happens to b here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and mixed.s's resource is dropped. If the `?` succeeds, nothing happens to mixed.s here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and mixed's resource is dropped. If the `?` succeeds, nothing happens to mixed here.",
+            "If the `?` here returns early, b's resource is dropped. If the `?` succeeds, nothing happens to b here.",
+            "If the `?` here returns early, mixed.s's resource is dropped. If the `?` succeeds, nothing happens to mixed.s here.",
+            "If the `?` here returns early, mixed's resource is dropped. If the `?` succeeds, nothing happens to mixed here.",
             "The `return` here hands the caller one of the values its `if` / `match` chooses between. If that value isn't x's, x goes out of scope here as the function returns (it has nothing to drop). If it is x's, x's value goes to the caller.",
             "The `return` here hands the caller one of the values its `if` / `match` chooses between. If that value isn't y's, y goes out of scope here as the function returns (it has nothing to drop). If it is y's, y's value goes to the caller.",
         ],
         must_not_contain: &[
-            "the function returns and md's resource is dropped",
-            "the function returns and nd's resource is dropped",
-            "the function returns and pair's resource is dropped",
-            "the function returns and pair.0's resource is dropped",
-            "the function returns and maybe's resource is dropped",
-            "the function returns and f's resource is dropped",
-            "the function returns and g's resource is dropped",
-            "the function returns and k's resource is dropped",
-            "the function returns and mixed.n's resource is dropped",
-            "the function returns and mixed.m's resource is dropped",
+            "returns early, md's resource is dropped",
+            "returns early, nd's resource is dropped",
+            "returns early, pair's resource is dropped",
+            "returns early, pair.0's resource is dropped",
+            "returns early, maybe's resource is dropped",
+            "returns early, f's resource is dropped",
+            "returns early, g's resource is dropped",
+            "returns early, k's resource is dropped",
+            "returns early, mixed.n's resource is dropped",
+            "returns early, mixed.m's resource is dropped",
             "If that value isn't x's, x's resource is dropped here",
             "If that value isn't y's, y's resource is dropped here",
         ],
@@ -21231,17 +21232,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // an Fn closure (it only reads q), so its dot stays.
         must_contain: &[
             "f is moved into the call (an FnOnce closure can only be called once). s, which f captured, is dropped during the call",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and k's resource is dropped. If the `?` succeeds, nothing happens to k here.",
+            "If the `?` here returns early, k's resource is dropped. If the `?` succeeds, nothing happens to k here.",
             "h goes out of scope. Its captured resource is dropped here only if no branch above called it (Rust tracks this with a runtime drop flag).",
             // m, called in an `if` above the `?`, may still hold w: the
             // drop flag decides (#1194).
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and m's resource is dropped if m still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to m here.",
+            "If the `?` here returns early, m's resource is dropped if m still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to m here.",
         ],
         must_not_contain: &[
-            "the function returns and f's resource is dropped",
-            "the function returns and g's resource is dropped",
-            "the function returns and h's resource is dropped",
-            "the function returns and m's resource is dropped. If",
+            "returns early, f's resource is dropped",
+            "returns early, g's resource is dropped",
+            "returns early, h's resource is dropped",
+            "returns early, m's resource is dropped. If",
         ],
     },
     TooltipExpect {
@@ -21285,15 +21286,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "d acquires ownership of a new resource; its previous resource is dropped",
             "d is assigned a new value; writing to a union never drops its old contents",
             "mu was moved in at least one branch above, so it can't be used after the branches.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and d's resource is dropped. If the `?` succeeds, nothing happens to d here.",
+            "If the `?` here returns early, d's resource is dropped. If the `?` succeeds, nothing happens to d here.",
         ],
         must_not_contain: &[
-            "the function returns and m's resource is dropped",
-            "the function returns and m2's resource is dropped",
-            "the function returns and u's resource is dropped",
-            "the function returns and mu's resource is dropped",
-            "the function returns and uu's resource is dropped",
-            "the function returns and w.u's resource is dropped",
+            "returns early, m's resource is dropped",
+            "returns early, m2's resource is dropped",
+            "returns early, u's resource is dropped",
+            "returns early, mu's resource is dropped",
+            "returns early, uu's resource is dropped",
+            "returns early, w.u's resource is dropped",
             "m goes out of scope. Its resource is dropped",
             "m2 goes out of scope. Its resource is dropped",
             "w.u goes out of scope. Its resource is dropped",
@@ -21318,15 +21319,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // borrow (`x.push_str(&bar()?)`) or a move (`(y, bar()?)`) on the
         // same dot, where "nothing happens" contradicted the other lines.
         must_contain: &[
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and s's resource is dropped. If the `?` succeeds, the assignment runs: s acquires ownership of a new resource; its previous resource is dropped.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and t's resource is dropped. If the `?` succeeds, the assignment runs: t acquires ownership of a new resource; its previous resource is dropped.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and p's resource is dropped. If the `?` succeeds, the assignment to p.f runs.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and p.f's resource is dropped. If the `?` succeeds, the assignment runs: p.f acquires ownership of a new resource; its previous resource is dropped.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and v's resource (including every String it holds) is dropped. If the `?` succeeds, the assignment runs: v[0] acquires ownership of a new resource; its previous resource is dropped.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and u's resource is dropped. If the `?` succeeds, the assignment runs: u acquires ownership of a new resource; its previous resource is dropped.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and x's resource is dropped. If the `?` succeeds, x's resource isn't dropped here.",
+            "If the `?` here returns early, s's resource is dropped. If the `?` succeeds, the assignment runs: s acquires ownership of a new resource; its previous resource is dropped.",
+            "If the `?` here returns early, t's resource is dropped. If the `?` succeeds, the assignment runs: t acquires ownership of a new resource; its previous resource is dropped.",
+            "If the `?` here returns early, p's resource is dropped. If the `?` succeeds, the assignment to p.f runs.",
+            "If the `?` here returns early, p.f's resource is dropped. If the `?` succeeds, the assignment runs: p.f acquires ownership of a new resource; its previous resource is dropped.",
+            "If the `?` here returns early, v's resource (including every String it holds) is dropped. If the `?` succeeds, the assignment runs: v[0] acquires ownership of a new resource; its previous resource is dropped.",
+            "If the `?` here returns early, u's resource is dropped. If the `?` succeeds, the assignment runs: u acquires ownership of a new resource; its previous resource is dropped.",
+            "If the `?` here returns early, x's resource is dropped. If the `?` succeeds, x's resource isn't dropped here.",
             "x's resource is mutably borrowed by push_str; x can't be used while the borrow is live",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and y's resource is dropped. If the `?` succeeds, y's resource isn't dropped here.",
+            "If the `?` here returns early, y's resource is dropped. If the `?` succeeds, y's resource isn't dropped here.",
             "y's resource is moved",
         ],
         must_not_contain: &[
@@ -21509,14 +21510,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // heap allocation is freed", a second free). b's contents are
         // moved out again, so its scope end keeps that text.
         must_contain: &[
-            "a acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
-            "b acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
-            "d acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
-            "f acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
-            "g acquires ownership of a new resource. Its previous contents were moved out earlier, so only its previous Box's heap allocation is freed here.",
+            "a acquires ownership of a new resource. Its previous contents were moved out earlier, so the previous Box doesn't drop them; only its heap allocation, if it has one, is freed here.",
+            "b acquires ownership of a new resource. Its previous contents were moved out earlier, so the previous Box doesn't drop them; only its heap allocation, if it has one, is freed here.",
+            "d acquires ownership of a new resource. Its previous contents were moved out earlier, so the previous Box doesn't drop them; only its heap allocation, if it has one, is freed here.",
+            "f acquires ownership of a new resource. Its previous contents were moved out earlier, so the previous Box doesn't drop them; only its heap allocation, if it has one, is freed here.",
+            "g acquires ownership of a new resource. Its previous contents were moved out earlier, so the previous Box doesn't drop them; only its heap allocation, if it has one, is freed here.",
             "a goes out of scope. No resource is dropped.",
             "d goes out of scope. No resource is dropped.",
-            "b goes out of scope. Its contents were moved out earlier, so only the Box's heap allocation is freed.",
+            "b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation, if it has one, is freed.",
             "g goes out of scope. Its resource is dropped (including the String it holds).",
         ],
         must_not_contain: &[
@@ -21531,14 +21532,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "box_rebox_branch_1220",
         must_contain: &[
-            "b goes out of scope. What is dropped here depends on the path (Rust tracks this with runtime drop flags): where b still holds the Box whose contents were moved out earlier, only its heap allocation is freed; where b was moved away, nothing is dropped.",
-            "f goes out of scope. What is dropped here depends on the path (Rust tracks this with runtime drop flags): where f still holds the Box whose contents were moved out earlier, only its heap allocation is freed; where f was given a new Box, its resource (including the String it holds) is dropped.",
-            "g goes out of scope. What is dropped here depends on the path (Rust tracks this with runtime drop flags): where g still holds the Box whose contents were moved out earlier, only its heap allocation is freed; where g was given a new Box, its resource (including the String it holds) is dropped; where g was moved away, nothing is dropped.",
-            "g was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). What is dropped when g goes out of scope depends on the path: its contents were moved out before the branches.",
-            "j acquires ownership of a new resource. What its previous value drops here depends on the path (Rust tracks this with runtime drop flags): where j still holds the Box whose contents were moved out earlier, only its heap allocation is freed; where j was given a new Box, its resource (including the String it holds) is dropped.",
+            "b goes out of scope. Whatever it still holds (if anything) is dropped here.",
+            "f goes out of scope. Whatever it still holds (if anything) is dropped here.",
+            "g goes out of scope. Whatever it still holds (if anything) is dropped here.",
+            "g was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). The Box may no longer hold its original contents.",
+            "j acquires ownership of a new resource. Whatever it still held (if anything) is dropped here.",
         ],
         must_not_contain: &[
-            "=b goes out of scope. Its contents were moved out earlier, so only the Box's heap allocation is freed.",
+            "=b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation, if it has one, is freed.",
             "f goes out of scope. Its resource (including the String it holds) is dropped here only if no branch above moved it",
             "g goes out of scope. Its resource (including the String it holds) is dropped here only if no branch above moved it",
             "If the branch that ran didn't move it, its resource (including the String it holds) is dropped when g goes out of scope",
@@ -21730,7 +21731,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "*b's resource is moved to the caller",
             "*b's value is copied to the caller",
-            "b goes out of scope. Its contents were moved out earlier, so only the Box's heap allocation is freed.",
+            "b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation, if it has one, is freed.",
             "Move from *b to _a",
         ],
         must_not_contain: &[
@@ -21971,7 +21972,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "a's resource is mutably borrowed by ra; a can't be used while the borrow is live",
             "a's resource is mutably borrowed by ra; a can't be used until the borrow ends",
             "Return mutably borrowed resource from ra to a",
-            "ra is a shared reference made from a mutable borrow of a resource: ra can only read it, but the borrow stays mutable while ra is live",
+            "ra is a shared reference made from a mutable borrow of a resource: ra only gives shared access to it, but the borrow stays mutable while ra is live",
             "ra holds an immutable reference; it can read the borrowed value",
             "b's resource is mutably borrowed by rb; b can't be used until the borrow ends",
             "Return mutably borrowed resource from rb to b",
@@ -22859,18 +22860,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // change through the reference, not that the method changes them:
         // `k.get()` only copies the value out (review of #1234).
         must_contain: &[
-            "set uses what c points to, through the shared reference c; that has interior \
-             mutability, so its contents can change even through a shared reference",
-            "borrow_mut uses what r points to, through the shared reference r; exclusive access to \
+            "set takes a shared borrow through c. The borrowed value has interior mutability, so its contents can change",
+            "borrow_mut takes a shared borrow through r. Exclusive access to \
              its contents is checked at runtime (a second borrow_mut while this one is live would panic)",
-            "set uses what rc points to, through the shared reference rc; that has interior \
-             mutability, so its contents can change even through a shared reference",
-            "add_one uses what rc points to, through the shared reference rc; that has interior \
-             mutability, so its contents can change even through a shared reference",
-            "set uses what k points to, through the shared reference k; that has interior \
-             mutability, so its contents can change even through a shared reference",
-            "get uses what k points to, through the shared reference k; that has interior \
-             mutability, so its contents can change even through a shared reference",
+            "set takes a shared borrow through rc. The borrowed value has interior mutability, so its contents can change",
+            "add_one takes a shared borrow through rc. The borrowed value has interior mutability, so its contents can change",
+            "set takes a shared borrow through k. The borrowed value has interior mutability, so its contents can change",
+            "get takes a shared borrow through k. The borrowed value has interior mutability, so its contents can change",
         ],
         must_not_contain: &[
             "set reads from c",
@@ -22934,8 +22930,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "cell_ref_return",
         // #1149: `r.set(2)` with `r: &Cell<i32>` writes the Cell.
         must_contain: &[
-            "set uses what r points to, through the shared reference r; that has interior \
-             mutability, so its contents can change even through a shared reference",
+            "set takes a shared borrow through r. The borrowed value has interior mutability, so its contents can change",
         ],
         must_not_contain: &["set reads from r", "set can change its contents"],
     },
@@ -23248,19 +23243,19 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "s goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             // `t = bar()?;`: on success the assignment runs (#1151).
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and t's resource is dropped if t still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, the assignment runs: t acquires ownership of a new resource. Its previous resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and u's resource is dropped if u still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to u here.",
+            "If the `?` here returns early, t's resource is dropped if t still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, the assignment runs: t acquires ownership of a new resource. Its previous resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "If the `?` here returns early, u's resource is dropped if u still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to u here.",
             "m goes out of scope. Its resource is dropped here only if m still holds it (Rust tracks this with a runtime drop flag).",
             "p goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "k goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and a's resource is dropped if a still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, a's resource isn't dropped here.",
+            "If the `?` here returns early, a's resource is dropped if a still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, a's resource isn't dropped here.",
             "b goes out of scope. Its resource (including the String it holds) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             // A drop the drop flag decides, stated as certain.
-            "the function returns and t's resource is dropped. If",
-            "the function returns and u's resource is dropped. If",
-            "the function returns and a's resource is dropped. If",
+            "returns early, t's resource is dropped. If",
+            "returns early, u's resource is dropped. If",
+            "returns early, a's resource is dropped. If",
             "If the `?` succeeds, nothing happens to t here",
             // `return` in `match n` after the `if` that moved a: rustc's
             // drop flag, not "nothing".
@@ -23272,15 +23267,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "try_partial_move_1184",
         must_contain: &[
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns, and drops what is left of p: p.a was moved out earlier, so only p.b is dropped. If the `?` succeeds, nothing happens to p here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns, and drops what is left of r: r.a was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). r.b is dropped. If the `?` succeeds, nothing happens to r here.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and p.b's resource is dropped. If the `?` succeeds, nothing happens to p.b here.",
+            "If the `?` here returns early, Rust drops what is left of p: p.a was moved out earlier, so only p.b is dropped. If the `?` succeeds, nothing happens to p here.",
+            "If the `?` here returns early, Rust drops what is left of r: r.a was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). r.b is dropped. If the `?` succeeds, nothing happens to r here.",
+            "If the `?` here returns early, p.b's resource is dropped. If the `?` succeeds, nothing happens to p.b here.",
         ],
         must_not_contain: &[
-            "the function returns and p's resource is dropped",
-            "the function returns and r's resource is dropped",
+            "returns early, p's resource is dropped",
+            "returns early, r's resource is dropped",
             // q.a moved, q.n is Copy: nothing of q to drop.
-            "the function returns and q's resource is dropped",
+            "returns early, q's resource is dropped",
         ],
     },
     TooltipExpect {
@@ -24069,7 +24064,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "push no longer borrows the resource k[0] points to",
             "the resource k[0] points to is mutably borrowed by takes through k[0]; k can't be used while the borrow is live",
             "takes reads and writes through k[0] (mutable reborrow — k can't be used until takes returns)",
-            "the resource k[0] points to is immutably borrowed by len through k[0]; k is read-only while the borrow is live",
+            "the resource k[0] points to is immutably borrowed by len through k[0]",
             "len reads from k[0]",
             // `[s]` with s a `&String`: a read through the shared reference.
             "the resource k[0] points to is immutably borrowed by len",
@@ -24095,23 +24090,23 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // as a copy of r, and `Some(r)` as a move of r (or, with nothing
         // after it, as o mutably borrowing e).
         must_contain: &[
-            "the value r points to is immutably borrowed by look through r; r is read-only while the borrow is live",
+            "the value r points to is immutably borrowed by look through r",
             "look reads from r",
             "look no longer borrows the value r points to",
-            "the value r points to is immutably borrowed by check through r; r is read-only while the borrow is live",
-            "the value r points to is immutably borrowed by add through r; r is read-only while the borrow is live",
-            "the value r points to is immutably borrowed by get through r; r is read-only while the borrow is live",
-            "the value r points to is immutably borrowed by s through r; r is read-only while the borrow is live",
+            "the value r points to is immutably borrowed by check through r",
+            "the value r points to is immutably borrowed by add through r",
+            "the value r points to is immutably borrowed by get through r",
+            "the value r points to is immutably borrowed by s through r",
             "s no longer borrows the value r points to",
-            "the value r points to is immutably borrowed by t through r; r is read-only while the borrow is live",
-            "the value r points to is immutably borrowed by v.r through r; r is read-only while the borrow is live",
-            "the value r points to is immutably borrowed by o through r; r is read-only while the borrow is live",
+            "the value r points to is immutably borrowed by t through r",
+            "the value r points to is immutably borrowed by v.r through r",
+            "the value r points to is immutably borrowed by o through r",
             "o holds a value that immutably borrows the data r points to (o isn't a reference itself)",
-            "the value r points to is immutably borrowed by p.0 through r; r is read-only while the borrow is live",
+            "the value r points to is immutably borrowed by p.0 through r",
             "a reference to *r, reborrowed through r, is returned to the caller; the data it points to is not copied",
             // The `else if look(r)` arm: both joins are drawn.
             "r's borrow ended in each branch above",
-            "the resource r points to is immutably borrowed by w through r; r is read-only while the borrow is live",
+            "the resource r points to is immutably borrowed by w through r",
             "w no longer borrows the resource r points to",
             // A generic `T` parameter does take the reference: m is moved.
             "m's mutable reference is moved (not the value it points to)",
@@ -24142,8 +24137,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t's resource is mutably borrowed by b; t can't be used while the borrow is live",
             "a's mutable reference is moved (not the resource it points to)",
             // `let k: [&String; 2] = [a, b];`: both immutably reborrowed.
-            "the resource a points to is immutably borrowed by k through a; a is read-only while the borrow is live",
-            "the resource b points to is immutably borrowed by k through b; b is read-only while the borrow is live",
+            "the resource a points to is immutably borrowed by k through a",
+            "the resource b points to is immutably borrowed by k through b",
             // `(a, b)` moves both.
             "b's mutable reference is moved (not the resource it points to)",
         ],
@@ -24463,7 +24458,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "This temporary Vec<String> is dropped before the `else` block of this `if let` runs: nothing bound it to a variable or moved it on. Its resource is dropped",
             "This temporary Vec<String> is dropped when the block of this `if let` ends (its pattern matched): nothing bound it to a variable or moved it on. Its resource is dropped",
             "This temporary Vec<String> is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs): nothing bound it to a variable or moved it on. Its resource is dropped",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and (temporary)'s resource is dropped. If the `?` succeeds, nothing happens to (temporary) here.",
+            "If the `?` here returns early, (temporary)'s resource is dropped. If the `?` succeeds, nothing happens to (temporary) here.",
             "(temporary) is live in a conditional expression ",
         ],
         must_not_contain: &[
@@ -24630,7 +24625,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable reborrow from r to w: as_str's signature gives the reference it returns the same lifetime as the value it was called on",
             "Mutable reborrow from r to w: first_mut's signature gives the reference it returns the same lifetime as its argument",
             "Immutable reborrow from r to o: Some's signature gives the value it returns the same lifetime as its argument; o isn't a reference, but its value holds one",
-            "the resource r points to is immutably borrowed by w through r; r is read-only while the borrow is live",
+            "the resource r points to is immutably borrowed by w through r",
             "the resource r points to is mutably borrowed by w through r; r can't be used while the borrow is live",
             "w no longer borrows the resource r points to",
             "Return immutably borrowed resource from w to *r",
@@ -25952,11 +25947,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // assigned. The scope end at the fn's `}` keeps its drop-flag text.
         must_contain: &[
             "s goes out of scope. Its resource is dropped here only if s was assigned in the branch that ran (Rust tracks this with a runtime drop flag).",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and s's resource is dropped if the branch that ran assigned it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to s here.",
+            "If the `?` here returns early, s's resource is dropped if the branch that ran assigned it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to s here.",
             "p goes out of scope. Its resource is dropped here only if p was assigned in the branch that ran (Rust tracks this with a runtime drop flag).",
             "p.name goes out of scope. Its resource is dropped here only if p.name was assigned in the branch that ran (Rust tracks this with a runtime drop flag).",
             "s goes out of scope. Its resource is dropped.",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and (temporary)'s resource is dropped if the branch that made it (line 108) ran (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to (temporary) here.",
+            "If the `?` here returns early, (temporary)'s resource is dropped if the branch that made it (line 108) ran (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to (temporary) here.",
             "(temporary 2) goes out of scope here, where `break` leaves early: a let borrowed it, so it lived past its statement. Its resource is dropped only if the branch that made it (line 117) ran (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
@@ -27425,7 +27420,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s2 isn't moved in any of the branches above",
             "s3 goes out of scope. Its resource is dropped.",
             "s3 isn't moved in any of the branches above",
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns and s4's resource is dropped. If the `?` succeeds, nothing happens to s4 here.",
+            "If the `?` here returns early, s4's resource is dropped. If the `?` succeeds, nothing happens to s4 here.",
         ],
         must_not_contain: &[
             "=s goes out of scope. No resource is dropped.",
@@ -27649,7 +27644,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // column), not on the line it was made.
         name: "field_reborrow_param_1538",
         must_contain: &[
-            "the resource m points to is immutably borrowed by h.r through m; m is read-only while the borrow is live",
+            "the resource m points to is immutably borrowed by h.r through m",
             "m's mutable borrow ends",
             "h.r no longer borrows the resource m points to",
             "m2's mutable borrow ends",
@@ -28008,6 +28003,49 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "what is left in u",
         ],
+    },
+    TooltipExpect {
+        name: "control_flow_try_1607",
+        must_contain: &[
+            "If the `?` here returns early, s's resource is dropped. If the `?` succeeds, nothing happens to s here.",
+            "input's resource is moved into the `?`. The `?` either produces an output value or returns early.",
+            "value acquires ownership of the resource produced by the `?` on input",
+        ],
+        must_not_contain: &["on an `Err` or `None`", "the function returns and"],
+    },
+    TooltipExpect {
+        name: "box_zst_drop_1608",
+        must_contain: &[
+            "b's contents may have been moved out above, so b can't be used from here on.",
+            "b goes out of scope. Whatever it still holds (if anything) is dropped here.",
+            "If the `?` here returns early, whatever pending still holds (if anything) is dropped here.",
+            "old acquires ownership of a new resource. Its previous contents were moved out earlier, so the previous Box doesn't drop them; only its heap allocation, if it has one, is freed here.",
+        ],
+        // The hedged "heap allocation, if it has one" is true for a
+        // zero-sized Token (no allocation); the unhedged claims weren't.
+        must_not_contain: &["heap allocation is freed", "the Token is dropped when b goes out of scope"],
+    },
+    TooltipExpect {
+        name: "shared_reborrow_cell_1655",
+        must_contain: &[
+            "r holds a mutable reference, but the value it points to is currently shared through it, so r can only use it the way a shared reference can",
+            "the value r points to is immutably borrowed by shared through r",
+            "set takes a shared borrow through r. The borrowed value has interior mutability, so its contents can change",
+        ],
+        must_not_contain: &["r can only read it", "r is read-only", "through the shared reference r"],
+    },
+    TooltipExpect {
+        name: "try_block_drops_1656",
+        must_contain: &[
+            "If the `?` here returns early, inner's resource is dropped. If the `?` succeeds, nothing happens to inner here.",
+            "If the `?` here returns early, deepest's resource is dropped. If the `?` succeeds, nothing happens to deepest here.",
+            "If the `?` here returns early, middle's resource is dropped. If the `?` succeeds, nothing happens to middle here.",
+            "Move from outer to drop",
+            "If the `?` here returns early, in_loop's resource is dropped. If the `?` succeeds, nothing happens to in_loop here.",
+            "If the `?` here returns early, element's resource is dropped. If the `?` succeeds, nothing happens to element here.",
+            "If the `?` here returns early, nested_iter's former resource, the loop's iterator, is dropped, along with whatever it still owns (such as elements it hasn't handed out yet). If the `?` succeeds, nothing happens to the iterator here.",
+        ],
+        must_not_contain: &["nothing happens to outer here", "nothing happens to keep here", "nothing happens to late here", "nothing happens to carried here", "the function returns and"],
     },
 ];
 
@@ -34014,7 +34052,7 @@ fn early_holder_borrow_end_keeps_arm_rows() {
     let print = code_row_y(&code, "println!(\"{}\", x);");
     let at = |text: &str| -> Vec<f64> { dots_listing_tooltip(&tl, text).into_iter().map(|(_, y)| y).collect() };
     assert_eq!(at("the resource x points to is mutably borrowed by push through x; x can't be used while the borrow is live"), vec![push]);
-    assert_eq!(at("the resource x points to is immutably borrowed by println! through x; x is read-only while the borrow is live"), vec![print]);
+    assert_eq!(at("the resource x points to is immutably borrowed by println! through x"), vec![print]);
     // x's borrow ends on its last use, the println!, not on push's row.
     assert_eq!(at("x's mutable borrow ends"), vec![print]);
 }
@@ -35205,13 +35243,13 @@ fn loop_over_a_mut_ref_keeps_it_borrowed_until_the_loop_ends() {
         ("self", code_row_y(&code, "*e += 1;"), "the resource self points to is modified through e"),
         ("self", closes[1], "the `for` loop's iterator no longer borrows self.items"),
         ("self", code_row_y(&code, "for x in self.items.iter() {"),
-            "self.items is immutably borrowed by the `for` loop's iterator; self.items is read-only until the loop ends"),
+            "self.items is immutably borrowed by the `for` loop's iterator until the loop ends"),
         ("self", closes[3], "the `for` loop's iterator no longer borrows self.items"),
         ("v", code_row_y(&code, "for x in v.iter() {"),
-            "the resource v points to is immutably borrowed by the `for` loop's iterator through v; v is read-only until the loop ends"),
+            "the resource v points to is immutably borrowed by the `for` loop's iterator through v until the loop ends"),
         ("v", closes[6], "the `for` loop's iterator no longer borrows the resource v points to"),
         ("r", code_row_y(&code, "for x in r.iter() {"),
-            "the resource r points to is immutably borrowed by the `for` loop's iterator through r; r is read-only until the loop ends"),
+            "the resource r points to is immutably borrowed by the `for` loop's iterator through r until the loop ends"),
         ("r", closes[8], "the `for` loop's iterator no longer borrows the resource r points to"),
     ];
     for (column, y, text) in rows {
@@ -35249,13 +35287,13 @@ fn adapter_loops_over_a_mut_ref_keep_it_borrowed_and_draw_writes() {
     // struct's), add's the seventh, both's the ninth.
     let rows = [
         ("self", code_row_y(&code, "for (x, y) in self.a.iter_mut().zip(self.b.iter()) {"),
-            "self.b is immutably borrowed by the `for` loop's iterator; self.b is read-only until the loop ends"),
+            "self.b is immutably borrowed by the `for` loop's iterator until the loop ends"),
         ("self", add_writes[0], "the resource self points to is modified through x"),
         ("self", closes[1], "the `for` loop's iterator no longer borrows self.b"),
         ("self", closes[1], "the `for` loop's iterator no longer borrows self.a"),
         ("self", enum_writes[0], "the resource self points to is modified through e"),
         ("b", code_row_y(&code, "for (x, y) in a.iter_mut().zip(b.iter()) {"),
-            "the resource b points to is immutably borrowed by the `for` loop's iterator through b; b is read-only until the loop ends"),
+            "the resource b points to is immutably borrowed by the `for` loop's iterator through b until the loop ends"),
         ("a", add_writes[1], "the resource a points to is modified through x"),
         ("b", closes[6], "the `for` loop's iterator no longer borrows the resource b points to"),
         ("b", code_row_y(&code, "for (x, y) in a.iter_mut().zip(b.iter_mut()) {"),
@@ -35480,7 +35518,7 @@ fn shared_ref_iter_loop_keeps_its_borrow_until_the_loop_ends() {
         ("list", largest_for, "list's immutable borrow ends"),
         ("r", main_for, "iter no longer borrows the resource r points to"),
         ("p", main_for, "p's resource is no longer immutably borrowed"),
-        ("q", collect_for, "the resource q points to is immutably borrowed by the `for` loop's iterator through q; q is read-only until the loop ends"),
+        ("q", collect_for, "the resource q points to is immutably borrowed by the `for` loop's iterator through q until the loop ends"),
     ] {
         let at = (label_x(&tl, column), y);
         let there = dots_where(&tl, |lines| lines.iter().any(|l| l == end));
@@ -35653,13 +35691,13 @@ fn a_field_borrow_through_a_reference_keeps_its_line() {
         (selfs[0], code_row_y(&code, "for e in self.items.iter_mut() {"), closes[1],
             "self holds a mutable reference, but self.items is mutably borrowed by the `for` loop's iterator, so self.items can't be used until the loop ends"),
         (selfs[1], code_row_y(&code, "for x in self.items.iter() {"), closes[3],
-            "self holds a mutable reference, but self.items is immutably borrowed by the `for` loop's iterator, so self.items is read-only until the loop ends"),
+            "self holds a mutable reference, but self.items is immutably borrowed by the `for` loop's iterator until the loop ends"),
         (selfs[2], code_row_y(&code, "let first = self.items.first_mut().unwrap();"), code_row_y(&code, "*first += 1;"),
             "self holds a mutable reference, but self.items is mutably borrowed by first, so self.items can't be used while the borrow is live"),
         (selfs[3], code_row_y(&code, "if let Some(x) = self.items.last_mut() {"), code_row_y(&code, "*x += 1;"),
             "self holds a mutable reference, but self.items is mutably borrowed by x, so self.items can't be used while the borrow is live"),
         (selfs[4], code_row_y(&code, "let m = self.items.iter().max().unwrap();"), code_row_y(&code, "*m"),
-            "self holds a mutable reference, but self.items is immutably borrowed by m, so self.items is read-only while the borrow is live"),
+            "self holds a mutable reference, but self.items is immutably borrowed by m while the borrow is live"),
         (label_x(&tl, "r"), code_row_y(&code, "for e in r.items.iter_mut() {"), closes[10],
             "r holds a mutable reference, but r.items is mutably borrowed by the `for` loop's iterator, so r.items can't be used until the loop ends"),
     ];
@@ -35742,21 +35780,21 @@ fn a_borrow_of_several_fields_through_a_reference_keeps_its_line() {
     let pairs = "let pairs = r.other.iter_mut().zip(r.items.iter());";
     let spans = [
         (selfs[0], row(both), counts[0],
-            "self holds a mutable reference, but self.items and self.other are immutably borrowed by it, so they are read-only while the borrow is live"),
+            "self holds a mutable reference, but self.items and self.other are immutably borrowed by it while the borrow is live"),
         (selfs[1], row("let it = self.items.iter();"), counts[1],
-            "self holds a mutable reference, but self.items is immutably borrowed by it, so self.items is read-only while the borrow is live"),
+            "self holds a mutable reference, but self.items is immutably borrowed by it while the borrow is live"),
         (selfs[2], row(longer), row("l.len()"),
-            "self holds a mutable reference, but self.items and self.other are immutably borrowed by l, so they are read-only while the borrow is live"),
+            "self holds a mutable reference, but self.items and self.other are immutably borrowed by l while the borrow is live"),
         (selfs[3], row(skip), row("it.sum()"),
-            "self holds a mutable reference, but self.items is immutably borrowed by it, so self.items is read-only while the borrow is live"),
+            "self holds a mutable reference, but self.items is immutably borrowed by it while the borrow is live"),
         (selfs[4], row(looped), close_after(row("*b += *a;")),
-            "self holds a mutable reference, but self.other is mutably borrowed and self.items immutably borrowed by the `for` loop's iterator, so self.other can't be used and self.items is read-only until the loop ends"),
+            "self holds a mutable reference, but self.other is mutably borrowed and self.items immutably borrowed by the `for` loop's iterator until the loop ends, so self.other can't be used during that borrow"),
         (selfs[5], row(peek), row("*x += 1;"),
             "self holds a mutable reference, but self.items and self.other are mutably borrowed by x, so they can't be used while the borrow is live"),
         (r, row(pairs), row("for (o, i) in pairs {"),
-            "r holds a mutable reference, but r.other is mutably borrowed and r.items immutably borrowed by pairs, so r.other can't be used and r.items is read-only while the borrow is live"),
+            "r holds a mutable reference, but r.other is mutably borrowed and r.items immutably borrowed by pairs while the borrow is live, so r.other can't be used during that borrow"),
         (r, row("for (o, i) in pairs {"), close_after(row("*o += *i;")),
-            "r holds a mutable reference, but r.other is mutably borrowed and r.items immutably borrowed by the `for` loop's iterator, so r.other can't be used and r.items is read-only until the loop ends"),
+            "r holds a mutable reference, but r.other is mutably borrowed and r.items immutably borrowed by the `for` loop's iterator until the loop ends, so r.other can't be used during that borrow"),
     ];
     for (x, from, to, text) in spans {
         let lines = column(x);
@@ -35846,13 +35884,13 @@ fn a_closure_capturing_a_field_through_a_reference_keeps_its_line() {
     let loop_end = close_after(row("self.other.push(x as i32);"));
     let spans = [
         (selfs[0], row(read), counts[0],
-            "self holds a mutable reference, but self.items and self.n are immutably borrowed by it, so they are read-only while the borrow is live"),
+            "self holds a mutable reference, but self.items and self.n are immutably borrowed by it while the borrow is live"),
         (selfs[1], row(bump), counts[1],
-            "self holds a mutable reference, but self.n is mutably borrowed and self.items immutably borrowed by it, so self.n can't be used and self.items is read-only while the borrow is live"),
+            "self holds a mutable reference, but self.n is mutably borrowed and self.items immutably borrowed by it while the borrow is live, so self.n can't be used during that borrow"),
         (selfs[2], row(looped), loop_end,
-            "self holds a mutable reference, but self.items and self.n are immutably borrowed by the `for` loop's iterator, so they are read-only until the loop ends"),
+            "self holds a mutable reference, but self.items and self.n are immutably borrowed by the `for` loop's iterator until the loop ends"),
         (selfs[3], row(count), row("it.sum()"),
-            "self holds a mutable reference, but self.n is immutably borrowed by it, so self.n is read-only while the borrow is live"),
+            "self holds a mutable reference, but self.n is immutably borrowed by it while the borrow is live"),
     ];
     for (x, from, to, text) in spans {
         let lines = column(x);
@@ -35923,7 +35961,7 @@ fn a_closure_find_does_not_keep_borrows_only_the_receiver_field() {
     let lets = [code_row_y(&code, "let f = self.items.iter().find(|x| **x as usize == self.n);"), code_row_y(&code, "let f = self.items.iter().find(|x| {")];
     let ends = code_rows_y(&code, "*f.unwrap_or(&0)");
     assert_eq!(ends.len(), 2, "rows: {:?}", ends);
-    let text = "self holds a mutable reference, but self.items is immutably borrowed by f, so self.items is read-only while the borrow is live";
+    let text = "self holds a mutable reference, but self.items is immutably borrowed by f while the borrow is live";
     for (x, from, to) in [(selfs[2], lets[0], ends[0]), (selfs[3], lets[1], ends[1])] {
         let lines = column(x);
         let before = lines.iter().find(|(a, b, _)| *a < from && *b >= from)
@@ -36378,7 +36416,7 @@ fn a_try_after_an_argument_drops_what_the_argument_holds() {
     let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
     let row = |src: &str| code_row_y(&code, src);
     for (name, line) in [("s", "take(s, bar()?);"), ("w", "q.put(w, bar()?);"), ("q", "q.eat(bar()?);")] {
-        let drop = format!("Only if the `?` here returns early (on an `Err` or `None`): the function returns and {name}'s resource is dropped.");
+        let drop = format!("If the `?` here returns early, {name}'s resource is dropped.");
         let ys: Vec<f64> = dots_where(&tl, |lines| lines.iter().any(|l| l.starts_with(&drop))
             && lines.iter().any(|l| *l == format!("{name}'s resource is moved")))
             .into_iter().map(|(_, y)| y).collect();
@@ -38280,5 +38318,23 @@ fn ref_old_loan_and_never_fn_ids_1486_1556_1557_1553() {
         for id in absent {
             assert!(!tl.contains(&format!("data-rv-id=\"{}", id)), "{}: unexpected {}", snippet, id);
         }
+    }
+}
+
+/// A middle local survives the innermost `?` and drops at the outer one.
+/// Checking only a bag of tooltips would accept a drop on both lines.
+#[test]
+fn try_block_drops_on_the_residual_target_1656() {
+    let name = "try_block_drops_1656";
+    let svg = run_with_local_backend(name).timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    let source = read_corpus(name);
+    for (statement, variable) in [("first?;", "deepest"), ("second?;", "middle")] {
+        let line = source.lines().position(|l| l.trim() == statement).unwrap() + 1;
+        let owners: Vec<_> = doc.descendants().filter(|n|
+            n.attribute("data-rv-event").is_some_and(|e| e.split_whitespace().any(|s| s == "owner_drop_if_try_returns"))
+            && n.attribute("data-rv-line").and_then(|s| s.parse::<usize>().ok()) == Some(line)
+        ).filter_map(|n| n.attribute("data-rv-var")).collect();
+        assert_eq!(owners, [variable], "conditional drops at {statement}");
     }
 }

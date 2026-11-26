@@ -129,45 +129,27 @@ pub fn event_dot_closure_go_out_of_scope(my_name: &String, move_capture_count: u
 }
 
 // A `Box` whose whole contents were moved out (`take(*b)`, #609) goes
-// out of scope: the contents' drop isn't the box's, but the heap
-// allocation is still freed.
+// out of scope without dropping the value that was moved. Its heap
+// allocation is freed; a zero-sized payload has none (#1608).
 pub fn event_dot_box_contents_moved_go_out_of_scope(my_name: &String) -> String {
     format!(
-        "{} goes out of scope. Its contents were moved out earlier, so only the Box's heap allocation is freed.",
+        "{} goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation, if it has one, is freed.",
         styled_name_html(my_name)
     )
 }
 
-// A Box whose contents were moved out (`let s = *b;`) on some paths and
-// that, on the others, was given a new Box since (`whole`) or moved away
-// whole (`nothing`) goes out of scope (#1220): drop flags decide what is
-// dropped.
-pub fn event_dot_box_paths_go_out_of_scope(my_name: &String, note: &str, kept: bool, reboxed: bool, nothing: bool) -> String {
-    let (holds, rest) = split_drop_note(note);
-    let name = styled_name_html(my_name);
-    let parts: Vec<String> = [
-        Some(format!("where {0} still holds the Box whose contents were moved out earlier, only its heap allocation is freed", name)),
-        kept.then(|| format!("where {0} still holds its first Box whole, its resource{1} is dropped{2}", name, holds, rest)),
-        reboxed.then(|| format!("where {0} was given a new Box, its resource{1} is dropped{2}", name, holds, rest)),
-        nothing.then(|| format!("where {0} was moved away, nothing is dropped", name)),
-    ].into_iter().flatten().collect();
-    format!(
-        "{0} goes out of scope. What is dropped here depends on the path (Rust tracks this with runtime drop flags): {1}.",
-        name, parts.join("; ")
-    )
+// A Box can be empty, refilled, replaced, or moved away on different paths.
+// Only the value still present at the actual drop or overwrite is dropped.
+pub fn event_dot_box_paths_go_out_of_scope(my_name: &str) -> String {
+    format!("{} goes out of scope. Whatever it still holds (if anything) is dropped here.", styled_name_html(my_name))
 }
 
-// The same where the Box is given a new value (#1220): what its old value
-// drops depends on the path.
-pub fn event_dot_owner_drop_at_reassign_box_paths(my_name: &String, note: &str, kept: bool, reboxed: bool, nothing: bool) -> String {
-    let scope_end = event_dot_box_paths_go_out_of_scope(my_name, note, kept, reboxed, nothing);
-    let name = styled_name_html(my_name);
-    let rest = scope_end.strip_prefix(&format!("{} goes out of scope. What is dropped here depends on the path (Rust tracks this with runtime drop flags): ", name))
-        .unwrap_or(&scope_end);
-    format!(
-        "{0} acquires ownership of a new resource. What its previous value drops here depends on the path (Rust tracks this with runtime drop flags): {1}",
-        name, rest
-    )
+pub fn event_dot_owner_drop_at_reassign_box_paths(my_name: &str) -> String {
+    format!("{} acquires ownership of a new resource. Whatever it still held (if anything) is dropped here.", styled_name_html(my_name))
+}
+
+pub fn event_dot_box_drop_if_try_returns(my_name: &str) -> String {
+    format!("If the `?` here returns early, whatever {} still holds (if anything) is dropped here.", styled_name_html(my_name))
 }
 
 // A struct whose fields were partly moved out goes out of scope. Rust
@@ -203,10 +185,10 @@ pub fn event_dot_struct_partial_go_out_of_scope(
     // whether something above moved it, so "only if it still holds it".
     kept: bool,
     // A `Box` a field was moved out of (#602): Rust still frees the
-    // box's heap allocation, so the text says so.
+    // box's heap allocation (none for a zero-sized payload, #1608).
     boxed: bool,
 ) -> String {
-    const FREED: &str = " The Box's heap allocation is freed.";
+    const FREED: &str = " The Box's heap allocation, if it has one, is freed.";
     fn join(names: &[String]) -> (String, bool) {
         let fmt: Vec<String> = names.iter().map(|n| styled_name_html(n)).collect();
         let s = match fmt.len() {
@@ -523,47 +505,20 @@ pub fn event_dot_owner_drop_at_reassign_maybe_moved(my_name: &String, note: &str
 
 // `b = Box::new(…)` after the old Box's whole contents were moved out
 // (`let s = *b;`): the old contents aren't the Box's to drop any more,
-// but its heap allocation is freed here (#1145). (Starts ". Its
+// even when the payload has size zero (#1145, #1608). (Starts ". Its
 // previous", so it subsumes the line's plain acquire.)
 pub fn event_dot_owner_drop_at_reassign_box_contents_moved(my_name: &String) -> String {
     format!(
         "{} acquires ownership of a new resource. Its previous contents were moved out earlier, \
-         so only its previous Box's heap allocation is freed here.",
+         so the previous Box doesn't drop them; only its heap allocation, if it has one, is freed here.",
         styled_name_html(my_name)
     )
-}
-
-// `event_dot_owner_drop_at_reassign_maybe_moved` for a Box whose
-// contents (`*b`), not the Box itself, were moved out in some branches
-// above (#921): the drop flag decides only whether the old contents are
-// dropped; the old Box's heap allocation is freed either way. `holds`:
-// the Box's `Owner::holds` (`the String it holds`), `None` when the
-// contents need no drop.
-pub fn event_dot_owner_drop_at_reassign_box_contents_maybe_moved(my_name: &String, holds: Option<&str>, by_cond: bool) -> String {
-    // (Starts ". Its previous ", so it subsumes the line's plain
-    // acquire: `reassign_subsumes_acquire`.)
-    let name = styled_name_html(my_name);
-    let mut out = format!("{} acquires ownership of a new resource.", name);
-    match holds.map(|h| h.strip_suffix(" it holds").and_then(|t| t.strip_prefix("the "))) {
-        Some(Some(ty)) => out.push_str(&format!(
-            " Its previous {} is dropped here only if {} moved it out (Rust tracks this with a runtime \
-             drop flag). Its previous Box's heap allocation is freed here either way.",
-            escape_tooltip_name(ty), moved_above(by_cond)
-        )),
-        Some(None) => out.push_str(&format!(
-            " Its previous contents are dropped here only if {} moved them out (Rust tracks this with \
-             a runtime drop flag). Its previous Box's heap allocation is freed here either way.",
-            moved_above(by_cond)
-        )),
-        None => out.push_str(" Its previous Box's heap allocation is freed here."),
-    }
-    out
 }
 
 // `*b = v` on a Box whose old contents were moved out before (`let w =
 // *b;`, #928): `maybe` None when they were moved on every path (nothing
 // is dropped), `Some(by_cond)` when on some paths only (a drop flag
-// decides). The Box keeps its heap allocation either way. `holds`: the
+// decides). This writes into the existing Box. `holds`: the
 // Box's `Owner::holds` (`the String it holds`).
 pub fn event_dot_box_contents_write_after_move(deref_name: &String, holds: Option<&str>, maybe: Option<bool>) -> String {
     // (Starts ". Its previous ", so it subsumes the line's plain
@@ -586,13 +541,13 @@ pub fn event_dot_box_contents_write_after_move(deref_name: &String, holds: Optio
 
 // Scope end of a Box whose contents need no drop (`Box<P>`, P with no
 // drop glue) and were moved out in some branches only (#929): nothing of
-// the contents is dropped on any path, so no drop flag matters; the
-// Box's heap allocation is freed on every path.
-pub fn event_dot_go_out_of_scope_box_plain_contents_maybe_moved(my_name: &String, by_cond: bool) -> String {
+// the contents needs dropping on any path; the Box's heap allocation (if
+// any: a zero-sized payload has none, #1608) is freed on every path.
+pub fn event_dot_go_out_of_scope_box_plain_contents_maybe_moved(my_name: &str) -> String {
     format!(
-        "{} goes out of scope. Its contents {}; the Box's heap allocation is freed here either way.",
-        styled_name_html(my_name),
-        if by_cond { "may have been moved out above" } else { "were moved out in at least one branch above" }
+        "{} goes out of scope. Its contents may have been moved out above; they need no drop either way. \
+         The Box's heap allocation, if it has one, is freed here.",
+        styled_name_html(my_name)
     )
 }
 
@@ -869,7 +824,7 @@ pub fn event_dot_extended_temporary_drop_made(my_name: &String, when: &String, m
 // Its drop at a `?` (#1436).
 pub fn event_dot_temp_drop_if_try_returns_made(my_name: &String, made_at: Option<usize>) -> String {
     format!(
-        "Only if the `?` here returns early (on an `Err` or `None`): the function returns and {0}'s \
+        "If the `?` here returns early, {0}'s \
          resource is dropped if {1} (Rust tracks this with a runtime drop flag). If the `?` succeeds, \
          nothing happens to {0} here.",
         styled_name_html(my_name), temp_made_in(made_at)
@@ -996,7 +951,7 @@ pub fn reassign_subsumes_acquire(reassign: &str, acquire: &str) -> bool {
                 .is_some_and(|tail| tail.starts_with(" is dropped") || tail.starts_with(" (including "))
                 || rest.starts_with(". Its previous ")
                 // A re-boxed Box's path-dependent drop (#1220).
-                || rest.starts_with(". What its previous value drops ")
+                || rest.starts_with(". Whatever it still held ")
         })
 }
 
@@ -1104,13 +1059,13 @@ pub fn event_dot_move_into_try(my_name: &String, target: Option<&String>, kind: 
     let what = if value { "value" } else { "resource" };
     match kind {
         TryMove::Result => format!(
-            "{name}'s {what} is moved into the `?`. If {name} is `Ok`, {gets}; if it is `Err`, the function returns early and the error goes to the caller."
+            "{name}'s {what} is moved into the `?`. If {name} is `Ok`, {gets}. Otherwise the `?` returns early."
         ),
         TryMove::Option => format!(
-            "{name}'s {what} is moved into the `?`. If {name} is `Some`, {gets}; if it is `None`, the function returns `None` early."
+            "{name}'s {what} is moved into the `?`. If {name} is `Some`, {gets}. Otherwise the `?` returns early."
         ),
         TryMove::Other => format!(
-            "{name}'s {what} is moved into the `?`. If {name} holds a value to go on with, {gets}; otherwise the function returns early."
+            "{name}'s {what} is moved into the `?`. The `?` either produces an output value or returns early."
         ),
     }
 }
@@ -1122,7 +1077,9 @@ pub fn event_dot_acquire_from_try(my_name: &String, from: &String, kind: TryMove
     let inside = match kind {
         TryMove::Result => format!("{}'s `Ok`", styled_name_html(from)),
         TryMove::Option => format!("{}'s `Some`", styled_name_html(from)),
-        TryMove::Other => styled_name_html(from),
+        TryMove::Other => return format!(
+            "{} {holds} produced by the `?` on {}", styled_name_html(my_name), styled_name_html(from)
+        ),
     };
     format!("{} {holds} the `?` takes out of {inside}", styled_name_html(my_name))
 }
@@ -1135,7 +1092,7 @@ pub fn event_dot_owner_drop_if_try_returns(my_name: &String, note: &str) -> Stri
     let my_name_fmt = styled_name_html(my_name);
     let (holds, rest) = split_drop_note(note);
     format!(
-        "Only if the `?` here returns early (on an `Err` or `None`): the function returns and {0}'s \
+        "If the `?` here returns early, {0}'s \
          resource{1} is dropped{2}. If the `?` succeeds, nothing happens to {0} here.",
         my_name_fmt, holds, rest
     )
@@ -1147,7 +1104,7 @@ pub fn event_dot_owner_drop_if_try_returns_part(my_name: &String, note: &str, pa
     let my_name_fmt = styled_name_html(my_name);
     let (holds, rest) = split_drop_note(note);
     format!(
-        "Only if the `?` here returns early (on an `Err` or `None`): the function returns and {0}'s \
+        "If the `?` here returns early, {0}'s \
          resource{1} is dropped{2}. If the `?` succeeds, the assignment to {3} runs.",
         my_name_fmt, holds, rest, styled_name_html(&part.to_string())
     )
@@ -1170,7 +1127,7 @@ pub fn event_dot_owner_drop_if_try_returns_maybe(my_name: &String, note: &str) -
     let my_name_fmt = styled_name_html(my_name);
     let (holds, rest) = split_drop_note(note);
     format!(
-        "Only if the `?` here returns early (on an `Err` or `None`): the function returns and {0}'s \
+        "If the `?` here returns early, {0}'s \
          resource{1} is dropped{2} if {0} still holds it (Rust tracks this with a runtime drop flag). \
          If the `?` succeeds, nothing happens to {0} here.",
         my_name_fmt, holds, rest
@@ -1183,7 +1140,7 @@ pub fn event_dot_owner_drop_if_try_returns_maybe_init(my_name: &String, note: &s
     let my_name_fmt = styled_name_html(my_name);
     let (holds, rest) = split_drop_note(note);
     format!(
-        "Only if the `?` here returns early (on an `Err` or `None`): the function returns and {0}'s \
+        "If the `?` here returns early, {0}'s \
          resource{1} is dropped{2} if the branch that ran {3} (Rust tracks this with a runtime drop \
          flag). If the `?` succeeds, nothing happens to {0} here.",
         my_name_fmt, holds, rest, assigned_in_branch_that_ran(moved)
@@ -1198,7 +1155,7 @@ pub fn event_dot_owner_drop_if_try_returns_partial(my_name: &String, scope_end: 
     let my_name_fmt = styled_name_html(my_name);
     let rest = scope_end.strip_prefix(&format!("{} goes out of scope. ", my_name_fmt)).unwrap_or(scope_end);
     format!(
-        "Only if the `?` here returns early (on an `Err` or `None`): the function returns, and drops \
+        "If the `?` here returns early, Rust drops \
          what is left of {0}: {1} If the `?` succeeds, nothing happens to {0} here.",
         my_name_fmt, rest
     )
@@ -1210,12 +1167,12 @@ pub fn event_dot_owner_drop_if_try_returns_partial(my_name: &String, scope_end: 
 // looks contradictory (#668). When the move is on the same dot, say which
 // `?` each line is about, in evaluation order.
 pub fn try_drop_before_own_try(drop_text: &str) -> Option<String> {
-    let (lead, tail) = ("Only if the `?` here returns early", ". If the `?` succeeds, nothing happens to ");
+    let (lead, tail) = ("If the `?` here returns early", ". If the `?` succeeds, nothing happens to ");
     let rest = drop_text.strip_prefix(lead)?;
     let (head, owner) = rest.split_once(tail)?;
     let owner = owner.strip_suffix(" here.")?;
     Some(format!(
-        "Only if an earlier `?` on this line returns early{head}. If it succeeds, {owner} is not dropped there; {owner}'s own `?` below moves it"
+        "If an earlier `?` on this line returns early{head}. If it succeeds, {owner} is not dropped there; {owner}'s own `?` below moves it"
     ))
 }
 
@@ -1440,7 +1397,7 @@ pub fn event_dot_loop_iterator_drop(my_name: &String, left: LoopLeft, early: &[u
             styled_name_html(my_name)
         ),
         LoopLeft::Try => format!(
-            "Only if the `?` here returns early (on an `Err` or `None`): the function returns from inside the `for` loop and {0}'s former resource, the loop's iterator, is dropped, along with whatever it still owns (such as elements it hasn't handed out yet). If the `?` succeeds, nothing happens to the iterator here.",
+            "If the `?` here returns early, {0}'s former resource, the loop's iterator, is dropped, along with whatever it still owns (such as elements it hasn't handed out yet). If the `?` succeeds, nothing happens to the iterator here.",
             styled_name_html(my_name)
         ),
         LoopLeft::Panic => format!(
@@ -1591,7 +1548,7 @@ pub fn event_dot_tuple_temp_drop(tuple: &String, at: TupleDropAt, with: &[TupleL
     let tuple = temporary_tuple(tuple);
     let (lead, when) = match at {
         // Worded like event_dot_owner_drop_if_try_returns (#653).
-        TupleDropAt::TryReturns => ("Only if the `?` here returns early (on an `Err` or `None`): the function returns and ", ""),
+        TupleDropAt::TryReturns => ("If the `?` here returns early, ", ""),
         TupleDropAt::IfEnd => ("", "here, at the end of the if branch"),
         TupleDropAt::IfExit => ("", "when the if branch leaves early"),
         TupleDropAt::Else => ("The pattern didn't match, so ", "here, before the else branch runs"),
@@ -1788,7 +1745,7 @@ pub fn event_dot_lend_through_ref(ref_name: &String, target_name: &String, mutab
             r, t, noun),
         (true, false) => event_dot_mut_lend_ref_var(ref_name, target_name),
         (false, true) => format!(
-            "the {2} {0} points to is immutably borrowed by {1} through {0}; {0} is read-only while the borrow is live",
+            "the {2} {0} points to is immutably borrowed by {1} through {0}",
             r, t, noun),
         (false, false) => format!(
             "the {2} {0} points to is immutably borrowed by {1}",
@@ -1870,8 +1827,8 @@ pub fn event_dot_lend_deep(ref_name: &String, pointer: &str, via: &str, target_n
             "the {3} {0} points to is mutably borrowed by {1} through {4}; {2} can't be used while the borrow is live",
             place, t, r, noun, via),
         (false, true) => format!(
-            "the {3} {0} points to is immutably borrowed by {1} through {4}; {2} is read-only while the borrow is live",
-            place, t, r, noun, via),
+            "the {2} {0} points to is immutably borrowed by {1} through {3}",
+            place, t, noun, via),
         (false, false) => format!("the {2} {0} points to is immutably borrowed by {1}", place, t, noun),
     }
 }
@@ -1983,7 +1940,7 @@ pub fn event_dot_lend_to_undrawn_place(my_name: &String, is_mut: bool, omit_read
     );
     if is_mut {
         format!("{0}; {1} can't be used while the borrow is live", base, my_name_fmt)
-    } else if omit_read_only {
+    } else if omit_read_only || through_ref.is_some() {
         base
     } else {
         format!("{0}; {1} is read-only while the borrow is live", base, my_name_fmt)
@@ -2618,11 +2575,11 @@ pub fn event_dot_mut_borrow(my_name: &String, holds_value: bool) -> String {
 
 // A shared reference holding a mutable loan (`let r: &String = &mut
 // s;`, `let r = downgrade(&mut s);` with `fn(&mut String) -> &str`):
-// r can only read, but s stays mutably borrowed while r is live
-// (#1122).
+// r gives only shared access (which can still mutate through a `Cell`,
+// #1655), but s stays mutably borrowed while r is live (#1122).
 pub fn event_dot_mut_borrow_by_shared_ref(my_name: &String, holds_value: bool) -> String {
     format!(
-        "{0} is a shared reference made from a mutable borrow of a {1}: {0} can only read it, but the borrow stays mutable while {0} is live",
+        "{0} is a shared reference made from a mutable borrow of a {1}: {0} only gives shared access to it, but the borrow stays mutable while {0} is live",
         styled_name_html(my_name), held(holds_value)
     )
 }
@@ -2751,7 +2708,7 @@ pub fn event_dot_capture_mut_lend_to_closure(my_name: &String, target_name: &Str
 // read-only during a shared one; a `&T` r was read-only already.
 // `pointee_value`: what r points to is a value (Copy, or nothing to
 // drop; #1163).
-pub fn event_dot_capture_reborrow_through_ref(ref_name: &String, closure_name: &String, mutable: bool, ref_is_mut: bool, pointee_value: bool) -> String {
+pub fn event_dot_capture_reborrow_through_ref(ref_name: &String, closure_name: &String, mutable: bool, pointee_value: bool) -> String {
     let base = format!(
         "the {3} {0} points to is captured by closure {1} ({2} reborrow through {0})",
         styled_name_html(ref_name),
@@ -2761,8 +2718,6 @@ pub fn event_dot_capture_reborrow_through_ref(ref_name: &String, closure_name: &
     );
     if mutable {
         format!("{0}; {1} can't be used while the borrow is live", base, styled_name_html(ref_name))
-    } else if ref_is_mut {
-        format!("{0}; {1} is read-only while the borrow is live", base, styled_name_html(ref_name))
     } else {
         base
     }
@@ -3235,12 +3190,12 @@ pub fn fn_dot_shared_ref_interior_mut(fn_name: &String, my_name: &String, refcel
     let r = styled_name_html(my_name);
     if refcell_borrow_mut {
         format!(
-            "{0} uses what {1} points to, through the shared reference {1}; exclusive access to its contents is checked at runtime (a second {0} while this one is live would panic)",
+            "{0} takes a shared borrow through {1}. Exclusive access to its contents is checked at runtime (a second {0} while this one is live would panic)",
             f, r
         )
     } else {
         format!(
-            "{0} uses what {1} points to, through the shared reference {1}; that has interior mutability, so its contents can change even through a shared reference",
+            "{0} takes a shared borrow through {1}. The borrowed value has interior mutability, so its contents can change",
             f, r
         )
     }
@@ -3784,7 +3739,7 @@ pub fn event_dot_lend_through_ref_to_loop_iterator(ref_name: &String, is_mut: bo
         )
     } else {
         format!(
-            "the {1} {0} points to is immutably borrowed by the `for` loop's iterator through {0}; {0} is read-only until the loop ends",
+            "the {1} {0} points to is immutably borrowed by the `for` loop's iterator through {0} until the loop ends",
             styled_name_html(ref_name), held(pointee_copy)
         )
     }
@@ -3816,7 +3771,7 @@ pub fn event_dot_lend_field_through_ref_to_loop_iterator(place: &String, is_mut:
         )
     } else {
         format!(
-            "{0} is immutably borrowed by the `for` loop's iterator; {0} is read-only until the loop ends",
+            "{0} is immutably borrowed by the `for` loop's iterator until the loop ends",
             styled_name_html(place)
         )
     }
@@ -3838,12 +3793,14 @@ pub fn state_borrowed_by_loop_iterator(my_name: &String, holds_value: bool) -> S
 }
 
 // PartialPrivilege on a `&mut` reference's lifeline: what it points to
-// is shared through it (`let r3 = &*r;`), so r can only read until
-// those shared borrows end (#313). r owns nothing, so the owner's
-// "r's resource is being shared" was wrong.
+// is shared through it (`let r3 = &*r;`), so until those shared borrows
+// end r can only do what a shared reference could: read, or mutate
+// through interior mutability (`Cell::set`, #1655), but not `*r = …` or
+// `r.push(…)` (#313). r owns nothing, so the owner's "r's resource is
+// being shared" was wrong.
 pub fn state_mut_ref_partial_privilege(my_name: &String, pointee_copy: bool) -> String {
     format!(
-        "{0} holds a mutable reference, but the {1} it points to is currently shared through it, so {0} can only read it",
+        "{0} holds a mutable reference, but the {1} it points to is currently shared through it, so {0} can only use it the way a shared reference can",
         styled_name_html(my_name), held(pointee_copy)
     )
 }
@@ -3859,7 +3816,7 @@ pub fn state_mut_ref_field_borrowed_by_loop_iterator(my_name: &String, place: &S
         )
     } else {
         format!(
-            "{0} holds a mutable reference, but {1} is immutably borrowed by the `for` loop's iterator, so {1} is read-only until the loop ends",
+            "{0} holds a mutable reference, but {1} is immutably borrowed by the `for` loop's iterator until the loop ends",
             styled_name_html(my_name), styled_name_html(place)
         )
     }
@@ -3877,7 +3834,7 @@ pub fn state_mut_ref_field_borrowed_by(my_name: &String, place: &String, borrowe
         )
     } else {
         format!(
-            "{0} holds a mutable reference, but {1} is immutably borrowed by {2}, so {1} is read-only while the borrow is live",
+            "{0} holds a mutable reference, but {1} is immutably borrowed by {2} while the borrow is live",
             styled_name_html(my_name), styled_name_html(place), styled_name_html(borrower)
         )
     }
@@ -3918,14 +3875,14 @@ fn fields_borrowed(my_name: &String, places: &[(String, bool)], borrower: &str, 
         )
     } else if muts.is_empty() {
         format!(
-            "{} holds a mutable reference, but {} are immutably borrowed by {}, so they are read-only {}",
+            "{} holds a mutable reference, but {} are immutably borrowed by {} {}",
             me, join_and(&shared), borrower, until
         )
     } else {
         let verb = |v: &Vec<String>| if v.len() == 1 { "is" } else { "are" };
         format!(
-            "{0} holds a mutable reference, but {1} {2} mutably borrowed and {3} immutably borrowed by {4}, so {1} can't be used and {3} {5} read-only {6}",
-            me, join_and(&muts), verb(&muts), join_and(&shared), borrower, verb(&shared), until
+            "{0} holds a mutable reference, but {1} {2} mutably borrowed and {3} immutably borrowed by {4} {5}, so {1} can't be used during that borrow",
+            me, join_and(&muts), verb(&muts), join_and(&shared), borrower, until
         )
     }
 }
@@ -4171,8 +4128,8 @@ pub fn event_dot_branch_merge_moved_box_paths(my_name: &String, mutable: bool, b
     let my_name_fmt = styled_name_html(my_name);
     let again = if mutable { " (until it's assigned again)" } else { "" };
     format!(
-        "{0}{1}. What is dropped when {2} goes out of scope depends on the path: its contents were moved out before the branches.",
-        branch_merge_moved(&my_name_fmt, by_cond), again, my_name_fmt
+        "{0}{1}. The Box may no longer hold its original contents.",
+        branch_merge_moved(&my_name_fmt, by_cond), again
     )
 }
 
@@ -4203,67 +4160,19 @@ fn branch_merge_unless(by_cond: bool) -> &'static str {
     if by_cond { "If nothing above moved it" } else { "If the branch that ran didn't move it" }
 }
 
-/// Where the contents of a Box that some branches moved out of (`let w
-/// = *e;`) are dropped on the paths that didn't (#921).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ContentsDropAt {
-    /// At e's scope end, together with the Box's heap allocation.
-    ScopeEnd,
-    /// At `e = …`, which also frees the old Box's heap allocation.
-    Reassign,
-    /// At `*e = …`, which keeps the Box's heap allocation.
-    PayloadWrite,
-}
-
-// `event_dot_branch_merge_moved_with_drop` for a Box whose contents (`*e`),
-// not the Box itself, were moved out in some branches (#921). e still
-// owns its heap allocation on every path, so the drop flag decides only
-// whether the contents are dropped. rustc rejects any use of e after the
-// join (E0382) except a new value for `*e` or for e (both need `let mut
-// e`). `holds`: the Box's `Owner::holds` (`the String it holds`), `None`
-// when the contents need no drop. `by_cond`: a let-chain's condition,
-// not only a branch, may have moved them (`if let … && { let w = *e;
-// … }`, #940): see `moved_above`.
-pub fn event_dot_branch_merge_box_contents_moved(my_name: &String, mutable: bool, holds: Option<&str>, at: ContentsDropAt, by_cond: Option<&str>) -> String {
+// Only a Box's contents (`let w = *e;`), not the Box, were moved out on
+// some paths (#921): rustc rejects any use of e after the join (E0382)
+// except a new value for `*e` or for e (both need `let mut e`). The join
+// doesn't say when (or whether) the old contents are dropped later: a
+// later write or move can change that (#1608).
+pub fn event_dot_branch_merge_box_contents_moved(my_name: &str, mutable: bool) -> String {
     let name = styled_name_html(my_name);
-    let deref = styled_name_html(&format!("*{}", my_name));
-    let until = match at {
-        ContentsDropAt::Reassign => format!(" until {} is assigned again", name),
-        ContentsDropAt::PayloadWrite => format!(" until {} is assigned again", deref),
-        ContentsDropAt::ScopeEnd if mutable => format!(" (until {} or {} is assigned again)", deref, name),
-        ContentsDropAt::ScopeEnd => String::new(),
-    };
-    let mut out = if let Some(kw) = by_cond {
-        format!(
-            "{0}'s contents may have been moved out above, so {0} can't be used after the {1}{2}.",
-            name, styled_name_html(&kw.to_owned()), until
-        )
+    let until = if mutable {
+        format!(" until {} or {} is assigned again", styled_name_html(&format!("*{}", my_name)), name)
     } else {
-        format!(
-            "{0}'s contents were moved out in at least one branch above, so {0} can't be used after \
-             the branches{1}.",
-            name, until
-        )
+        String::new()
     };
-    let when = match at {
-        ContentsDropAt::ScopeEnd => format!("when {} goes out of scope", name),
-        ContentsDropAt::Reassign => format!("when {} is assigned again", name),
-        ContentsDropAt::PayloadWrite => format!("when {} is assigned again", deref),
-    };
-    if let Some(h) = holds {
-        let what = h.strip_suffix(" it holds").map_or_else(
-            || format!("{}'s contents", name),
-            escape_tooltip_name,
-        );
-        let unless = if by_cond.is_some() { "If nothing above moved them" } else { "If the branch that ran didn't move them" };
-        out.push_str(&format!(" {}, {} is dropped {}.", unless, what, when));
-        if at != ContentsDropAt::PayloadWrite {
-            out.push_str(" The Box's heap allocation is freed then either way.");
-        }
-    } else if at != ContentsDropAt::PayloadWrite {
-        out.push_str(&format!(" The Box's heap allocation is freed {} either way.", when));
-    }
-    out
+    format!("{0}'s contents may have been moved out above, so {0} can't be used from here on{1}.", name, until)
 }
 
 // `event_dot_branch_merge_moved_with_drop` when the variable is assigned
@@ -4619,17 +4528,12 @@ pub fn event_dot_owner_drop_at_reassign_maybe_entry(my_name: &String, note: &str
 // Scope end of a variable that was moved on some paths of a conditional
 // and not on others: whether anything is dropped is decided at runtime
 // by a drop flag (#179).
-//
-// `boxed` (#736): a `Box` whose contents (`*b`) are moved out on some
-// path. The drop flag decides only whether the contents are dropped;
-// the Box's own heap allocation is freed either way.
-pub fn event_dot_go_out_of_scope_maybe_moved(my_name: &String, note: &str, by_cond: bool, boxed: bool) -> String {
+pub fn event_dot_go_out_of_scope_maybe_moved(my_name: &String, note: &str, by_cond: bool) -> String {
     let (holds, rest) = split_drop_note(note);
     format!(
         "{0} goes out of scope. Its resource{1} is dropped{2} here only if {3} moved it \
-         (Rust tracks this with a runtime drop flag).{4}",
-        styled_name_html(my_name), holds, rest, moved_above(by_cond),
-        if boxed { " The Box's heap allocation is freed either way." } else { "" }
+         (Rust tracks this with a runtime drop flag).",
+        styled_name_html(my_name), holds, rest, moved_above(by_cond)
     )
 }
 
