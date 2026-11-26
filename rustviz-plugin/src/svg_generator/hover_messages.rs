@@ -4914,6 +4914,13 @@ pub fn event_dot_block_break_skips_move(my_name: &String) -> String {
     )
 }
 
+pub fn event_dot_block_maybe_assigned(my_name: &String) -> String {
+    format!(
+        "{0} may be left without a value when this block ends, so {0} can't be used until it's assigned again",
+        styled_name_html(my_name)
+    )
+}
+
 // At the end of a bare `loop` (#1000), for a variable declared before
 // it that owns a value at every `break` out of it, although the body
 // may leave it moved where it goes round again: `loop { s = …; if c {

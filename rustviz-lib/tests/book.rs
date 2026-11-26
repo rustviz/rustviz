@@ -1141,9 +1141,11 @@ const BOOK: &[Snippet] = &[
         id: "c13_12_closure_borrow_then_use",
         must_contain: &[
             "Closure capture (immutable borrow) from list to only_borrows",
+            "list's resource is no longer borrowed by println!, but is still immutably borrowed by only_borrows",
             "Return immutably borrowed resource from only_borrows to list",
             "list goes out of scope. Its resource is dropped.",
         ],
+        must_not_contain: &["L4 list's resource is no longer immutably borrowed"],
         ..E
     },
     // ─── Chapter 15: smart pointers ───────────────────────────────────

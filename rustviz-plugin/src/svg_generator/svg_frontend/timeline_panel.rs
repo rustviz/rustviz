@@ -3448,6 +3448,7 @@ fn chain_new_value_lasts<'a>(history: impl IntoIterator<Item = &'a (usize, Event
         for (_, e) in events {
             match e {
                 Event::LoopExitMove { at: MaybeMovedAt::ChainFail { how, .. }, .. } => lasts = how.may_hold_new(),
+                Event::LoopExitMove { at: MaybeMovedAt::LabeledBlockAssignment, .. } => lasts = true,
                 e if gives_new_value(e) => lasts = false,
                 Event::Branch { branch_history, .. } => {
                     lasts = branch_history.iter().any(|b| along(lasts, &b.e_data));

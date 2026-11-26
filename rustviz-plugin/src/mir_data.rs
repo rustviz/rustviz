@@ -388,10 +388,30 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     /// in scope there, but the program can use the lender right after
     /// `drop(g)` (#1104).
     fn nll_loan_end_lines(&self, body_with_facts: &BodyWithBorrowckFacts<'tcx>) -> HashMap<BorrowIndex, usize> {
+        let mut ends: HashMap<BorrowIndex, usize> = HashMap::new();
+        self.for_each_live_loan(body_with_facts, |b, line| {
+            let end = ends.entry(b).or_insert(line);
+            *end = (*end).max(line);
+        });
+        ends
+    }
+
+    /// The rows on which each requested loan is live. Its last line
+    /// alone would include rows in other branches where it is dead.
+    pub(crate) fn loan_live_lines(&self, loans: &[usize]) -> BTreeMap<usize, BTreeSet<usize>> {
+        let mut lines: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+        self.for_each_live_loan(self.bwf, |b, line| {
+            if loans.contains(&b.index()) {
+                lines.entry(b.index()).or_default().insert(line);
+            }
+        });
+        lines
+    }
+
+    fn for_each_live_loan(&self, body_with_facts: &BodyWithBorrowckFacts<'tcx>, mut visit: impl FnMut(BorrowIndex, usize)) {
         let body = &body_with_facts.body;
         let borrows = Borrows::new(self.tcx, body, &body_with_facts.region_inference_context, &body_with_facts.borrow_set);
         let mut cursor = borrows.iterate_to_fixpoint(self.tcx, body, None).into_results_cursor(body);
-        let mut ends: HashMap<BorrowIndex, usize> = HashMap::new();
         for (block, data) in body.basic_blocks.iter_enumerated() {
             if data.is_cleanup {
                 continue;
@@ -402,12 +422,10 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 if cursor.get().is_empty() { continue; }
                 let line = self.location_to_line(location, body_with_facts);
                 for b in cursor.get().iter() {
-                    let e = ends.entry(b).or_insert(line);
-                    if line > *e { *e = line; }
+                    visit(b, line);
                 }
             }
         }
-        ends
     }
 
     /// The last line, before `write_line`, where rustc's borrow checker

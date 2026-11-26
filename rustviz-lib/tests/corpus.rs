@@ -67,7 +67,8 @@ fn all_fixtures() -> Vec<String> {
 /// appear verbatim as a `data-tooltip-text` value somewhere in the rendered
 /// timeline; `must_not_contain` strings must not appear *anywhere inside*
 /// any tooltip (a substring check, so a fragment like "(copied from" works;
-/// #511). `must_contain` stays whole-tooltip equality. Adding new tooltips
+/// #511), optionally limited to a source row. `must_contain` stays
+/// whole-tooltip equality. Adding new tooltips
 /// downstream doesn't break the test — only removing a listed one (or
 /// producing text that's been forbidden) does.
 struct TooltipExpect {
@@ -81,7 +82,26 @@ struct TooltipExpect {
 /// `=` when the forbidden text is a full tooltip that is also a prefix or
 /// suffix of a correct one (`len reads from s` vs `len reads from s
 /// (implicitly borrowed)`, `f, immutable` vs `self, immutable`).
-fn forbidden_present(forbid: &str, actual: &[String]) -> bool {
+/// A leading `@N ` checks tooltips at source row N. A state segment
+/// covers all its rows except the ending row.
+fn forbidden_present(forbid: &str, actual: &[String], svg: &str) -> bool {
+    if let Some((row, text)) = forbid.strip_prefix('@').and_then(|s| s.split_once(' ')) {
+        let row = row.parse::<usize>().expect("tooltip pin row");
+        return svg.match_indices(" data-tooltip-text=\"").any(|(i, _)| {
+            let Some(start) = svg[..i].rfind('<') else { return false };
+            let Some((tag, _)) = svg[start..].split_once('>') else { return false };
+            let bounds = attr(tag, "data-rv-id")
+                .and_then(|id| id.rsplit_once("@L"))
+                .and_then(|(_, id)| id.split_once(":line:"))
+                .and_then(|(rows, _)| rows.split_once('-'))
+                .and_then(|(lo, hi)| Some((lo.parse::<usize>().ok()?, hi.parse::<usize>().ok()?)));
+            let covers = bounds.map_or_else(
+                || attr(tag, "data-rv-line").and_then(|s| s.parse().ok()) == Some(row),
+                |(lo, hi)| lo <= row && row < hi,
+            );
+            covers && forbidden_present(text, &timeline_tooltips(tag), svg)
+        });
+    }
     match forbid.strip_prefix('=') {
         Some(whole) => actual.iter().any(|a| a == whole),
         None => actual.iter().any(|a| a.contains(forbid)),
@@ -28047,6 +28067,80 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &["nothing happens to outer here", "nothing happens to keep here", "nothing happens to late here", "nothing happens to carried here", "the function returns and"],
     },
+    TooltipExpect {
+        name: "closure_shared_read_1678",
+        must_contain: &[
+            "list's resource is no longer borrowed by println!, but is still immutably borrowed by only_borrows",
+            "branch_list's resource is no longer borrowed by println!, but is still immutably borrowed by read",
+            "Return immutably borrowed resource from only_borrows to list",
+        ],
+        must_not_contain: &[
+            "@4 =list's resource is no longer immutably borrowed",
+            "@4 =list is the owner of the resource",
+            "@12 =branch_list's resource is no longer immutably borrowed",
+            "same_row_list's resource is no longer borrowed by println!, but is still immutably borrowed by read",
+        ],
+    },
+    TooltipExpect {
+        name: "iter_mut_store_1679",
+        must_contain: &[
+            "set reads from t; set's signature lets it store this reference in refs, so t stays borrowed while refs is in use",
+            "t's resource is no longer borrowed by println!, but is still immutably borrowed by refs",
+            "new_value's resource is no longer borrowed by println!, but is still immutably borrowed by slots",
+            "indexed's resource is no longer borrowed by println!, but is still immutably borrowed by slots",
+        ],
+        must_not_contain: &[
+            "@9 =t's resource is no longer immutably borrowed",
+            "@10 =t's resource is no longer immutably borrowed",
+            "@10 =t is the owner of the resource",
+            "@29 =indexed's resource is no longer immutably borrowed",
+        ],
+    },
+    TooltipExpect {
+        name: "if_let_then_for_1681",
+        must_contain: &[
+            "Return mutably borrowed resource from o to v",
+            "v is the owner of the resource",
+        ],
+        must_not_contain: &[
+            "@8 v's resource is mutably borrowed",
+        ],
+    },
+    TooltipExpect {
+        name: "vec_macro_element_move_1682",
+        must_contain: &[
+            "Move from s2 to v",
+            "Move from moved to v",
+            "Move from moved_arg to consume",
+            "v goes out of scope. Its resource is dropped (including every String it holds).",
+        ],
+        must_not_contain: &[
+            "@4 =s2 is the owner of the resource",
+            "@12 =moved is the owner of the resource",
+            "@18 =moved_arg is the owner of the resource",
+        ],
+    },
+    TooltipExpect {
+        name: "labeled_block_skips_assignment_1685",
+        must_contain: &[
+            "s2 may be left without a value when this block ends, so s2 can't be used until it's assigned again",
+            "pair_a may be left without a value when this block ends, so pair_a can't be used until it's assigned again",
+            "pair_b may be left without a value when this block ends, so pair_b can't be used until it's assigned again",
+            "either may be left without a value when this block ends, so either can't be used until it's assigned again",
+            "both_old's resource is moved into drop, which drops it",
+            "later acquires ownership of a new resource. Its previous resource is dropped here only if later still holds it (Rust tracks this with a runtime drop flag).",
+            "If the `?` here returns early, pending's resource is dropped if pending still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to pending here.",
+            "s2 goes out of scope. Its resource is dropped here only if s2 still holds it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "@9 =s2 is the owner of the resource",
+            "@20 =pair_a is the owner of the resource",
+            "@20 =pair_b is the owner of the resource",
+            "@33 =either is the owner of the resource",
+            "later acquires ownership of a new resource; its previous resource is dropped",
+            "the function returns and pending's resource is dropped.",
+        ],
+    },
 ];
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws
@@ -30988,8 +31082,9 @@ fn corpus_expected_tooltips_present() {
         let label = entry_label(idx);
         let res = std::panic::catch_unwind(|| {
             let rv = run_with_local_backend(expect.name);
-            assert_no_negative_sizes(expect.name, &rv.timeline_panel_string());
-            let actual = timeline_tooltips(&rv.timeline_panel_string());
+            let svg = rv.timeline_panel_string();
+            assert_no_negative_sizes(expect.name, &svg);
+            let actual = timeline_tooltips(&svg);
             // #308: a numbered header stops at "declared on line N"; the
             // long "While s₂ is in scope the name s refers to s₂ ..."
             // sentence was dropped as noise.
@@ -31008,7 +31103,7 @@ fn corpus_expected_tooltips_present() {
                 .must_not_contain
                 .iter()
                 .copied()
-                .filter(|forbid| forbidden_present(forbid, &actual))
+                .filter(|forbid| forbidden_present(forbid, &actual, &svg))
                 .collect();
 
             if !missing.is_empty() || !unexpected.is_empty() {

@@ -754,6 +754,9 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// `note_sharers_across_calls` didn't see r share b before the write:
   /// a read of b in between said b was no longer borrowed (#1492).
   pub repointed_loans: Vec<(String, Vec<String>, usize, usize)>,
+  /// Shared capture loans, which have borrow events but no RefData
+  /// entry (the closure can capture more than one place).
+  closure_sharers: Vec<(Sharer, usize)>,
   /// References whose borrow lasts at least until a line, whatever the
   /// MIR loan matched to them says: one a re-pointed reborrow gave back
   /// to (m in `h.r = r;` after `h = Holder { r: &*m }`, #1538), and one
@@ -1247,6 +1250,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       loans_carried_on: Vec::new(),
       repointed_ends: Vec::new(),
       repointed_loans: Vec::new(),
+      closure_sharers: Vec::new(),
       min_lifetimes: Vec::new(),
       pre_split_end_ids: Vec::new(),
       retired_until: HashMap::new(),
@@ -4705,9 +4709,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       ExprKind::Index(base, _, _) => holder_of(base),
       ExprKind::Unary(UnOp::Deref, inner) if matches!(inner.kind, ExprKind::Call(..) | ExprKind::MethodCall(..))
         && !inner.span.from_expansion() => {
-        let lenders = self.pointer_lenders(inner).unwrap_or_else(|| self.call_lenders(inner));
-        let [ResourceTy::Value(h)] = lenders.as_slice() else { return None };
-        (h.holds_borrow() && self.borrow_map.contains_key(h.name())).then(|| h.to_owned())
+        let holder = self.call_pointer_lender(inner)?;
+        (holder.holds_borrow() && self.borrow_map.contains_key(holder.name())).then_some(holder)
       }
       ExprKind::Unary(UnOp::Deref, inner) => {
         if !matches!(inner.kind, ExprKind::Path(QPath::Resolved(None, _))) || self.is_ref_param(inner) {
@@ -4962,8 +4965,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// (auto-referenced), and for a local reference `rh` that borrows
   /// `hold`.
   fn mut_arg_place(&self, target: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
+    if !target.span.from_expansion() && matches!(target.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) {
+      return self.call_pointer_lender(target).filter(|place| place.holds_borrow());
+    }
     let place = match target.kind {
-      ExprKind::AddrOf(_, _, inner) => inner,
+      ExprKind::AddrOf(_, _, inner) => {
+        if let Some(holder) = self.element_holder(inner) {
+          return Some(holder);
+        }
+        inner
+      }
       _ => target,
     };
     if !matches!(place.kind, ExprKind::Path(_) | ExprKind::Field(..)) {
@@ -7808,6 +7819,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // add_ev maps (lhs, rhs) to a Die { from: rhs, to: lhs }: the
       // borrow goes back from g to s, as in the closure literal arm.
       let die = if k.is_mut { Evt::MDie } else { Evt::SDie };
+      if !k.is_mut && !lender.is_ref() {
+        self.note_closure_sharer(&to, &lender, line, k.end_line, k.loan);
+      }
       self.add_ev(k.end_line.max(line), die, from, to.clone(), false);
     }
   }
@@ -11544,19 +11558,11 @@ pub fn match_rhs_closure(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, clos
       }
     }
     if let Some(die_evt) = die_evt {
-      let kill_line = mir_b_data.iter().find_map(|b| {
-        // Match on (assignment line, upvar name): the loan
-        // for this capture is issued at the closure literal's
-        // line and borrows the upvar by name. region.1 is the
-        // NLL-refined kill line.
-        if b.region.0 == line_num
-          && b.borrowed_place.as_deref() == Some(upvar_name.as_str())
-        {
-          Some(b.region.1)
-        } else {
-          None
-        }
-      });
+      // Match the capture's span so a different borrow of the upvar on
+      // the same line doesn't supply the closure's loan end.
+      let loan = mir_b_data.iter().find(|b| rhs.span.contains(b.span)
+        && b.borrowed_place.as_deref() == Some(upvar_name.as_str()));
+      let kill_line = loan.map(|b| b.region.1);
       // A reference the closure reborrows through or borrows (`|| r.len()`,
       // `|| println!("{}", r)`) stays live, and its own borrow with it,
       // while the closure holds that loan: up to the closure's last use,
@@ -11576,7 +11582,15 @@ pub fn match_rhs_closure(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, clos
           *floor = (*floor).max(die_line);
         }
       }
-      if let Some(die_line) = kill_line {
+      if let Some(loan) = loan {
+        let die_line = loan.region.1;
+        if matches!(die_evt, Evt::SDie) {
+          if let ResourceTy::Value(lender) = &from {
+            if !lender.is_ref() || of_ref_var {
+              self.note_closure_sharer(&lhs, lender, line_num, die_line, loan.borrow_idx);
+            }
+          }
+        }
         // add_ev maps (lhs, rhs) → StaticDie/MutableDie
         // {from: rhs, to: lhs}. We want from=closure (f),
         // to=upvar (s) so the renderer's return arrow goes
@@ -11847,9 +11861,12 @@ pub fn print_out_of_scope(&mut self){
       .filter(|(_, d)| d.borrow_span.is_none() && d.loan_line.is_none())
       .filter_map(|(n, d)| {
         let hash = *self.raps.get(n)?.rap.hash();
+        let until = self.retired_until.get(n).copied().unwrap_or(usize::MAX);
         let mut lines = Vec::new();
         borrow_lines_into(self.preprocessed_events, hash, &mut lines);
-        lines.retain(|(l, _)| *l > d.assigned_at);
+        // A later binding can reuse this column, including as a for
+        // binding. Its borrow isn't an arm of the earlier loan (#1681).
+        lines.retain(|(l, _)| d.assigned_at < *l && *l < until);
         (!lines.is_empty()).then(|| (n.clone(), lines))
       })
       .collect();
@@ -11867,9 +11884,10 @@ pub fn print_out_of_scope(&mut self){
       .filter(|(n, _)| self.raps.get(*n).is_some_and(|r| !r.rap.is_ref() && r.rap.holds_borrow()))
       .filter_map(|(n, d)| {
         let hash = *self.raps.get(n)?.rap.hash();
+        let until = self.retired_until.get(n).copied().unwrap_or(usize::MAX);
         let mut lines = Vec::new();
         borrow_lines_into(self.preprocessed_events, hash, &mut lines);
-        let last = lines.iter().map(|(l, _)| *l).max()?;
+        let last = lines.iter().map(|(l, _)| *l).filter(|l| d.assigned_at <= *l && *l < until).max()?;
         let lenders: Vec<String> = d.all_lenders().iter()
           .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)))
           .map(|l| l.real_name())
@@ -12708,7 +12726,7 @@ pub fn print_out_of_scope(&mut self){
         first_and_moved(self.preprocessed_events, base, rd.assigned_at, &mut seen);
         let from = seen.0.unwrap_or(rd.assigned_at);
         let moved = seen.1;
-        Some(Sharer { name: name.clone(), hash, from, to: rd.lifetime, moved, lenders, from_kept_call: false, stored: false, gaps: Vec::new() })
+        Some(Sharer { name: name.clone(), hash, from, to: rd.lifetime, moved, lenders, from_kept_call: false, stored: false, gaps: Vec::new(), loan_lines: None })
       })
       .collect();
     // A re-pointed reference shares its old lenders until its old loan
@@ -12717,11 +12735,22 @@ pub fn print_out_of_scope(&mut self){
       let Some(rap) = self.raps.get(name).map(|r| &r.rap) else { continue };
       sharers.push(Sharer {
         name: name.clone(), hash: *rap.hash(), from: *from, to: *to, moved: None, lenders: lenders.clone(),
-        from_kept_call: false, stored: false, gaps: Vec::new(),
+        from_kept_call: false, stored: false, gaps: Vec::new(), loan_lines: None,
       });
     }
     // An arm whose path ends the reference's loan (it returns, or the
     // last use is in another arm) doesn't hold it after that end (#796).
+    if !self.closure_sharers.is_empty() {
+      let loans: Vec<usize> = self.closure_sharers.iter().map(|(_, loan)| *loan).collect();
+      let lines = self.loan_live_lines(&loans);
+      for (mut sharer, loan) in self.closure_sharers.drain(..) {
+        let mut seen = (None, None);
+        first_and_moved(self.preprocessed_events, &sharer.name, sharer.from, &mut seen);
+        sharer.moved = seen.1;
+        sharer.loan_lines = Some(lines.get(&loan).cloned().unwrap_or_default());
+        sharers.push(sharer);
+      }
+    }
     for s in sharers.iter_mut() {
       ended_arm_gaps(self.preprocessed_events, &s.name, &s.lenders, s.from, s.to, &mut s.gaps);
     }
@@ -12819,6 +12848,7 @@ pub fn print_out_of_scope(&mut self){
         from_kept_call: *head_call,
         stored: false,
         gaps: Vec::new(),
+        loan_lines: None,
       });
     }
     let mut noted: HashMap<usize, Vec<String>> = HashMap::new();
@@ -12832,6 +12862,17 @@ pub fn print_out_of_scope(&mut self){
           }
         }
       }
+    }
+  }
+
+  fn note_closure_sharer(&mut self, holder: &ResourceTy, lender: &ResourceAccessPoint, from: usize, to: usize, loan: usize) {
+    let ResourceTy::Value(closure) = holder else { return };
+    if from < to && !self.skip_raps.contains(closure.name()) && !self.skip_raps.contains(lender.name()) {
+      self.closure_sharers.push((Sharer {
+        name: closure.name().to_owned(), hash: *closure.hash(), from, to,
+        moved: None, lenders: vec![lender.name().to_owned()],
+        from_kept_call: false, stored: true, gaps: Vec::new(), loan_lines: None,
+      }, loan));
     }
   }
 
@@ -13596,11 +13637,14 @@ struct Sharer {
   /// Lines (first, last) it doesn't hold the loan on: the rest of an
   /// arm that moved its value on (`if c { let w = v; .. }`, #997).
   gaps: Vec<(usize, usize)>,
+  // Capture loans use MIR liveness as well as the drawn branch ends.
+  loan_lines: Option<BTreeSet<usize>>,
 }
 
 impl Sharer {
   fn in_gap(&self, line: usize) -> bool {
-    self.gaps.iter().any(|&(a, b)| a <= line && line <= b)
+    self.loan_lines.as_ref().is_some_and(|lines| !lines.contains(&line))
+      || self.gaps.iter().any(|&(a, b)| a <= line && line <= b)
   }
 }
 
@@ -13837,7 +13881,7 @@ impl HolderWalk<'_> {
     };
     dead_arm_gaps(list, holder, from, to, &mut gaps);
     self.holders.push(Sharer {
-      name: holder.to_owned(), hash, from, to, moved: cut, lenders: vec![self.lender.clone()], from_kept_call: false, stored: true, gaps,
+      name: holder.to_owned(), hash, from, to, moved: cut, lenders: vec![self.lender.clone()], from_kept_call: false, stored: true, gaps, loan_lines: None,
     });
     for h in hops {
       let Some(dest) = h.dest else { continue };
@@ -14120,7 +14164,11 @@ fn note_sharers_in(events: &mut [(usize, ExternalEvent)], sharers: &[Sharer], no
           .filter(|s| {
             let started = s.from < *line
               || (s.from_kept_call && s.from == *line && kept.iter().any(|(l, n)| l == line && n == lender.name()));
-            started && s.to >= *line && s.moved.is_none_or(|m| m >= *line) && !s.in_gap(*line)
+            // A capture ending on this row gives the lender back by
+            // the end of the row. The row alone can't order its last
+            // use relative to this call.
+            let continues = s.to > *line || (s.to == *line && s.loan_lines.is_none());
+            started && continues && s.moved.is_none_or(|m| m >= *line) && !s.in_gap(*line)
               && s.lenders.iter().any(|l| l == lender.name())
           })
           .map(|s| s.name.clone())
@@ -14145,7 +14193,7 @@ fn note_sharers_in(events: &mut [(usize, ExternalEvent)], sharers: &[Sharer], no
         if still_borrowed_by.is_empty() && (!lender.is_ref() || *of_ref_var) =>
       {
         let (holder, stored_end) = match from {
-          ResourceTy::Value(r) => (r.name().to_owned(), false),
+          ResourceTy::Value(r) => (r.name().to_owned(), r.is_closure()),
           ResourceTy::Index(_, place, PlaceWrite::Update) => (place.clone(), true),
           _ => continue,
         };
@@ -14835,7 +14883,8 @@ fn ownership_after(events: &[(usize, ExternalEvent)], rap_name: &str, start: Opt
       // The start of an `else` branch that a let-chain condition may
       // have moved it before (#281). It held the value before the
       // condition, which moved it.
-      ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::ChainFail { .. }, .. } if ro.name() == rap_name => {
+      ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::ChainFail { .. } | MaybeMovedAt::LabeledBlockAssignment, .. }
+        if ro.name() == rap_name => {
         return Some(Ownership::Maybe);
       }
       // The end of a `while` loop whose condition may have moved it
