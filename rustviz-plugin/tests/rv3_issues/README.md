@@ -45,7 +45,8 @@ lender = "*a"                  # optional: the loan's borrowed place (a reborrow
 absent = false                 # true: no such loan
 src = "issue"
 
-[[loan]]                       # a borrow taken on `row`
+[[loan]]                       # a borrow taken on `row` (a loan of rustc's borrow set: not the dump's
+                               #   v3 `source` "caller" / "static" / "untracked" loans)
 row = 4
 lender = "x"                   # the borrowed place as written: x, p.a, *b, v[_]
 kind = "shared"                # optional: shared | mut | unique | exclusive
