@@ -28292,6 +28292,23 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &["v's resource is being shared by one or more variables. The `for` loop's iterator holds a shared borrow"],
         must_not_contain: &["until the loop ends"],
     },
+    // #1866's review: an arm's column reads the state table on the arm's
+    // own rows. Each must_not is the PR's first version's text.
+    TooltipExpect {
+        name: "branch_legs_table_review_1866",
+        must_contain: &[
+            // v is borrowed by `maybe` only on the path where `choose` was true.
+            "v's resource may be immutably borrowed here (a branch above borrowed it on some paths only), so v is read-only until that borrow ends",
+        ],
+        must_not_contain: &[
+            "v's resource is being shared by one or more variables",
+            // A `/* => */` comment doesn't make the row a match arm: r3 is
+            // never used, so s2 is free after it (r3's own dot says it
+            // borrows s2 "while the borrow is live").
+            "s2's resource is mutably borrowed by r3; s2 can't be used until the borrow ends",
+        ],
+    },
+
 ];
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws
@@ -39822,4 +39839,15 @@ fn fallback_join_dots_1612() {
     ] {
         assert_eq!(tip(id).as_deref(), Some("The conditional above ends here"), "{id}");
     }
+}
+
+/// #1866 (P1-6): `ym` is assigned after the arms of `ym = Some(if .. { ..
+/// } else { .. })`, so on the arms' own rows it has no value yet: the leg
+/// is dashed, "ym has no value yet" (2.x drew it solid, "holds a value").
+#[test]
+fn arm_leg_no_value_yet_is_dashed_1866() {
+    let rv = run_with_local_backend("ctor_cond_ref_value_1472");
+    let timeline = rv.timeline_panel_string();
+    assert!(timeline.contains("data-rv-id=\"ym@L40-41:branch_line:full_privilege_uninit"), "ym's leg on L40 is dashed");
+    assert!(!timeline.contains("data-rv-id=\"ym@L40-41:branch_line:full_privilege\""), "not solid");
 }

@@ -8786,12 +8786,37 @@ fn render_branches(
                 let Some((y1, y2)) = apexes.segment_ys(*top, bot) else { continue };
                 if stop_line == Some(bot) { stop_y = Some(y2 as f64); }
                 let n = segs.len();
-                push_seg_if_renderable(
-                    &mut segs, rap,
-                    (branch_x, y1 as f64),
-                    (branch_x, y2 as f64),
-                    state, visualization_data, &arm_label, Leg::Column, *top, bot, &arm_path,
-                );
+                // RustViz 3: on the arm's own rows, the state table's.
+                // (Not a one-line conditional's: its row's state is every arm's.)
+                let own = if branch_is_collapsed(*split_point, *merge_point) { (1, 0) } else { ty.get_start_end(i) };
+                let pieces = leg_table_pieces(rap, visualization_data, &state, *top, bot, own, *split_point);
+                if pieces.is_empty() {
+                    push_seg_if_renderable(
+                        &mut segs, rap,
+                        (branch_x, y1 as f64),
+                        (branch_x, y2 as f64),
+                        state, visualization_data, &arm_label, Leg::Column, *top, bot, &arm_path,
+                    );
+                }
+                for (p_top, p_bot, p_state, p_title) in pieces {
+                    // (Inside the stretch 2.x draws for the segment.)
+                    let Some((py1, py2)) = apexes.segment_ys(p_top, p_bot) else { continue };
+                    let (py1, py2) = (if p_top == *top { y1 } else { py1.max(y1) }, if p_bot == bot { y2 } else { py2.min(y2) });
+                    if py2 <= py1 {
+                        continue;
+                    }
+                    match p_title {
+                        Some(title) if seg_drawn(rap, &p_state) => segs.push(BranchSeg {
+                            p1: (branch_x, py1 as f64), p2: (branch_x, py2 as f64), state: p_state, title,
+                            inactive_arm: None, own_row: false, rows: (p_top, p_bot),
+                        }),
+                        Some(_) => {}
+                        None => push_seg_if_renderable(
+                            &mut segs, rap, (branch_x, py1 as f64), (branch_x, py2 as f64),
+                            p_state, visualization_data, &arm_label, Leg::Column, p_top, p_bot, &arm_path,
+                        ),
+                    }
+                }
                 if segs.len() > n { ended_title(&mut segs, bot); }
             }
             // A diverging arm on one row (`0 => return s,`, a one-line
@@ -9087,6 +9112,222 @@ fn render_branches(
             );
         }
     }
+}
+
+/// RustViz 3 (P1-6): an arm's column on its own rows reads each row's
+/// state from the state table, as a straight column does
+/// (`table_lent_state`, `table_partly_moved_title`): a row inside a
+/// multi-line arm has that arm's path's state. The pieces (first row,
+/// last row, state, title; `None`: the leg's own title for that state)
+/// cover `top..bot`. None where the table changes nothing or doesn't
+/// apply (a stretch drawn dashed or not at all, rows beside another
+/// arm's code), and 2.x's segment stands.
+fn leg_table_pieces(
+    rap: &ResourceAccessPoint,
+    visualization_data: &VisualizationData,
+    state: &State,
+    top: usize,
+    bot: usize,
+    own: (usize, usize),
+    split: usize,
+) -> Vec<(usize, usize, State, Option<String>)> {
+    let lined = match state {
+        State::FullPrivilege { s } | State::PartialPrivilege { s } => !matches!(s, LineState::Gray | LineState::Uninit),
+        State::RevokedPrivilege { .. } => true,
+        _ => false,
+    };
+    if !lined || rap.is_fn() || rap.is_closure() || top >= bot {
+        return Vec::new();
+    }
+    if !visualization_data.fn_source_lines.get(rap.hash()).is_some_and(|l| visualization_data.state_table.has_fn(*l)) {
+        return Vec::new();
+    }
+    let rl = &visualization_data.row_lines;
+    let mut bounds = vec![top];
+    // (A reference column's: after a row's last stacked sub-row of dots,
+    // as on a straight column.)
+    bounds.extend((top + 1..bot).filter(|r| !rap.is_ref() || rl.get(r + 1).is_none_or(Option::is_some)));
+    bounds.push(bot);
+    // (Each piece: whether the table decided it.)
+    let mut out: Vec<(usize, usize, State, Option<String>, bool)> = Vec::new();
+    for w in bounds.windows(2) {
+        // A blank or comment-only row of the arm carries the row above
+        // (design Q3), and so does a row that leaves it (`return;`): the
+        // state is the one the exit leaves with.
+        let blank = w[0] > own.0 && w[0] < own.1 && rl.get(w[0]).copied().flatten()
+            .and_then(|l| visualization_data.source_lines.get(l.wrapping_sub(1)))
+            .is_some_and(|t| {
+                let code = code_text(t);
+                code.is_empty() || code.split(|c: char| !c.is_alphanumeric() && c != '_').next().is_some_and(|w| matches!(w, "return" | "break" | "continue"))
+            });
+        if let (true, Some(last)) = (blank, out.last_mut()) {
+            if last.4 && last.1 == w[0] {
+                last.1 = w[1];
+                continue;
+            }
+        }
+        let (st, title, table) = match leg_table_row(rap, visualization_data, w[0], own, split) {
+            None => (state.clone(), None, false),
+            Some(at) => match leg_lent_state(state, rap, visualization_data, at) {
+                Some((st, t)) => (st, t, true),
+                None => (state.clone(), None, true),
+            },
+        };
+        let same = |last: &(usize, usize, State, Option<String>, bool)| {
+            last.4 == table && last.3 == title
+                && (!table || std::mem::discriminant(&last.2) == std::mem::discriminant(&st))
+                && (!table || title.is_some() || last.2 == st)
+        };
+        match out.last_mut() {
+            Some(last) if same(last) => last.1 = w[1],
+            _ => out.push((w[0], w[1], st, title, table)),
+        }
+    }
+    // Nothing differs from 2.x's.
+    let unchanged = |st: &State| st == state || matches!((st, state), (State::RevokedPrivilege { .. }, State::RevokedPrivilege { .. }));
+    if out.iter().all(|p| !p.4 || (p.3.is_none() && unchanged(&p.2))) {
+        return Vec::new();
+    }
+    out.into_iter().map(|(a, b, st, t, _)| (a, b, st, t)).collect()
+}
+
+/// The visual row whose state-table state an arm's column shows below
+/// visual row `row` (`leg_table_pieces`), when the table has it on the
+/// arm's path: a row of the arm's own (`own`: its first and last row)
+/// that the next one is too, with a state of its own. Not the
+/// conditional's own row (`split`), nor a row with a branch of its own:
+/// their state is one arm's or every arm's. The arm's first row, when it
+/// only closes the arm above (`} else {`) or is a match arm's head (`Some(x)
+/// => {`, whose state the facts read before the arm's way in, #1865), reads the
+/// next row's state, if that row does nothing to the variable.
+fn leg_table_row(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, row: usize, own: (usize, usize), split: usize) -> Option<usize> {
+    let (first, last) = own;
+    // (Not a one-row arm's row, `0 => r = &t,`: the facts read its state
+    // where it would go on to the next row, another arm's, #1865.)
+    if row < first || row >= last || row == split {
+        return None;
+    }
+    let rl = &visualization_data.row_lines;
+    // (Not between dots stacked under one source line: the table's state
+    // is the one after the whole line.)
+    if rl.get(row + 1).is_some_and(Option::is_none) {
+        return None;
+    }
+    let table = &visualization_data.state_table;
+    let fn_line = *visualization_data.fn_source_lines.get(rap.hash())?;
+    let col = rap.name();
+    let src = rv_attrs::line_of(row, rl)?;
+    // (The conditional's own line: the first source line from its split
+    // row on; a let chain's split row is one added above it.)
+    if rl.get(split..).and_then(|v| v.iter().find_map(|l| *l)).is_none_or(|split_src| src <= split_src) {
+        return None;
+    }
+    let text = code_text(visualization_data.source_lines.get(src.wrapping_sub(1))?);
+    // A row the column's state can be read after on this path: it has a
+    // state of its own and, if it branches (`if d {` inside the arm, the
+    // column not forked there), every way on agrees: its arms' states are
+    // the same, or it does nothing to the column (a loan dying on one way
+    // on only is an event of the row).
+    let own_state = |l: usize| table.cell(fn_line, col, l, l).is_some() && {
+        let arms = table.arms(fn_line, col, l);
+        let cells: Vec<_> = (0..arms.len()).map(|i| table.cell_in_arm(fn_line, col, l, i).map(|c| (c.init, c.lent.iter().map(|x| x.loan).collect::<Vec<_>>(), c.parts))).collect();
+        let heads = code_text(visualization_data.source_lines.get(l.wrapping_sub(1)).map_or("", |t| t.as_str()));
+        if cells.is_empty() {
+            !opens_conditional(&heads) || table.quiet(fn_line, col, l, false)
+        } else {
+            cells.windows(2).all(|w| w[0] == w[1])
+        }
+    };
+    // (A match arm on one row, `0 => c = &y,`: as a one-row arm, #1865.)
+    let arm_head = text.contains("=>");
+    if arm_head && !text.ends_with('{') {
+        return None;
+    }
+    let entry = row == first && (text.starts_with('}') || arm_head);
+    if !entry {
+        // A row that closes a block inside the arm (a nested conditional's
+        // join) is read where the next row starts (`segment_cell`): only
+        // when that row is the arm's too.
+        let next_inside = || table.next_state_row(fn_line, col, src)
+            .and_then(|n| rl.iter().position(|l| *l == Some(n)))
+            .is_some_and(|at| at < last);
+        return (own_state(src) && (!text.starts_with('}') || next_inside())).then_some(row);
+    }
+    // The row closes the arm above: its own state (if any) is that arm's.
+    let code = text.trim_start_matches('}').trim().trim_start_matches("else").trim().trim_end_matches('{').trim();
+    if text.starts_with('}') && !code.is_empty() {
+        return None;
+    }
+    let next = table.next_state_row(fn_line, col, src)?;
+    let next_text = code_text(visualization_data.source_lines.get(next.wrapping_sub(1)).map_or("", |t| t.as_str()));
+    if next_text.starts_with('}') || !own_state(next) || !table.quiet(fn_line, col, next, false) {
+        return None;
+    }
+    let at = rl.iter().position(|l| *l == Some(next))?;
+    (at > row && at < last && rl.get(at + 1).is_none_or(Option::is_some)).then_some(at)
+}
+
+/// The state and title of an arm's column after visual row `at` (one
+/// `leg_table_row` chose), as a straight column's: `owner_segment` for an
+/// owner or a field, `table_lent_state` for a reference.
+fn leg_lent_state(state: &State, rap: &ResourceAccessPoint, visualization_data: &VisualizationData, at: usize) -> Option<(State, Option<String>)> {
+    if rap.is_ref() {
+        return table_lent_state(state, rap, visualization_data, at);
+    }
+    // (The row's own state: `segment_cell` reads the line below a row that
+    // jumps or ends a block from the next row, which is another path's
+    // here, Q3.)
+    let fn_line = *visualization_data.fn_source_lines.get(rap.hash())?;
+    let src = rv_attrs::line_of(at, &visualization_data.row_lines)?;
+    let cell = visualization_data.state_table.cell(fn_line, rap.name(), src, src);
+    // No value yet on the arm's path (`let y = Some(if c { .. } else { ..
+    // });` is assigned after the arms): an arm's leg is dashed then, as
+    // 2.x draws a `let s;` local in an arm.
+    let unassigned = cell.as_ref().is_some_and(|c| c.init == crate::facts::table::Init::Unassigned);
+    owner_segment_of(rap, visualization_data, at, state, cell).map(|(st, title)| {
+        (if unassigned { State::FullPrivilege { s: LineState::Uninit } } else { st }, Some(title))
+    })
+}
+
+/// A source line's code: without comments and string or char literals'
+/// contents (`println!("=>")` reads `println!("")`), trimmed.
+fn code_text(line: &str) -> String {
+    let mut out = String::new();
+    let mut chars = line.chars().peekable();
+    let mut in_str = false;
+    let mut in_block = false;
+    while let Some(c) = chars.next() {
+        if in_block {
+            if c == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block = false;
+            }
+        } else if in_str {
+            if c == '\\' {
+                chars.next();
+            } else if c == '"' {
+                in_str = false;
+                out.push(c);
+            }
+        } else if c == '"' {
+            in_str = true;
+            out.push(c);
+        } else if c == '/' && chars.peek() == Some(&'/') {
+            break;
+        } else if c == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            in_block = true;
+        } else {
+            out.push(c);
+        }
+    }
+    out.trim().to_owned()
+}
+
+/// Whether a line of code opens a conditional or loop whose block starts
+/// on it (`if d {`, `let x = match y {`, `while let Some(v) = it.next() {`).
+fn opens_conditional(code: &str) -> bool {
+    code.ends_with('{') && code.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| matches!(w, "if" | "match" | "while" | "for" | "loop"))
 }
 
 /// Push a `BranchSeg` for the given centerline endpoints + state
@@ -9558,6 +9799,14 @@ fn render_timeline(
 /// reference, borrowed by ...) and adds or corrects only what the cell
 /// knows (who holds a borrow, on some paths only, moved parts).
 fn owner_segment(rap: &ResourceAccessPoint, vd: &VisualizationData, row: usize, layout: &State) -> Option<(State, String)> {
+    let fn_line = *vd.fn_source_lines.get(rap.hash())?;
+    let src = rv_attrs::line_of(row, &vd.row_lines)?;
+    owner_segment_of(rap, vd, row, layout, vd.state_table.segment_cell(fn_line, rap.name(), src))
+}
+
+/// `owner_segment` from the cell `cell` (the one `segment_cell` reads, or
+/// a branch leg's: its row's own on the arm's path, P1-6).
+fn owner_segment_of(rap: &ResourceAccessPoint, vd: &VisualizationData, row: usize, layout: &State, cell: Option<crate::facts::table::Cell>) -> Option<(State, String)> {
     use crate::facts::table::Init;
     let name = rap.name();
     let table = &vd.state_table;
@@ -9566,7 +9815,7 @@ fn owner_segment(rap: &ResourceAccessPoint, vd: &VisualizationData, row: usize, 
     let legacy = || Some((layout.clone(), timeline_segment_title(layout, rap, vd, Some(row))));
     // No MIR place for it (a temporary, a static, an async fn's
     // parameter, a `(parameter)` column) or no state here: 2.x's title.
-    let Some(mut cell) = table.segment_cell(fn_line, name, src) else {
+    let Some(mut cell) = cell else {
         if matches!(layout, State::ResourceMoved { .. }) {
             return None;
         }
