@@ -367,6 +367,19 @@ const Description: React.FC = () => (
       <li>
         Raw pointers and <code>async</code> code aren&apos;t modelled.
       </li>
+      <li>
+        Some drawings are known to be wrong in tricky cases (branches,
+        closures, re-pointed references). If a drawing seems to contradict
+        what the compiler accepts or rejects, trust the compiler. See the{' '}
+        <a
+          href="https://github.com/rustviz/rustviz/issues?q=is%3Aissue+is%3Aopen+label%3Abug"
+          target="_blank"
+          rel="noreferrer"
+        >
+          open issues
+        </a>
+        .
+      </li>
     </ul>
     <p>
       See the{' '}

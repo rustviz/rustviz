@@ -21,6 +21,14 @@ at the University of Michigan.
 
 > **Try it live:** <https://rustviz.github.io/>
 
+> **Status:** 2.1.1 is the final 2.x release, a design checkpoint: it is `main`
+> as it stood, with no further 2.x fixes planned. RustViz 3, a rebuild that
+> reads MIR / borrow-checker facts and drives the renderer from a per-row state
+> table, is in progress. Some drawings are known to be wrong; each is tracked as
+> a GitHub issue: [open `bug` issues](https://github.com/rustviz/rustviz/issues?q=is%3Aissue+is%3Aopen+label%3Abug),
+> [open `needs-mir` issues](https://github.com/rustviz/rustviz/issues?q=is%3Aissue+is%3Aopen+label%3Aneeds-mir)
+> (wrong in ways that need RustViz 3's MIR facts to fix).
+
 ![A RustViz visualization: the code panel on the left, the ownership and borrow timeline on the right](rustviz-plugin/src/svg_generator/rv2_example.png)
 
 ---
@@ -41,7 +49,7 @@ rustviz init                # installs nightly-2026-05-01 + the plugin
 `rustviz init` runs `rustup toolchain install nightly-2026-05-01` (with
 the `rust-src`, `rustc-dev` and `llvm-tools-preview` components) and
 then `cargo install`s `rustviz-plugin` from this repository's git, at
-the tag matching the CLI's own version (e.g. `v2.1.0`), so the plugin
+the tag matching the CLI's own version (e.g. `v2.1.1`), so the plugin
 matches the CLI. Pass `--dry-run` to see exactly what it would run,
 `--plugin-rev` to install a different branch / tag / commit,
 `--plugin-git` to install from a fork (its default branch, unless you
