@@ -412,7 +412,7 @@ fn says_maybe_moved(d: &Dot) -> bool {
 /// line reaches. (A Box whose contents were moved out says "Its
 /// contents were moved out earlier";
 /// `contents_moved` covers it.)
-const PARTIAL_DROP_PHRASES: &[&str] = &["dropped here only if", "dropped only if", "dropped if the branch", "moved out earlier, so only", "Whatever it still holds (if anything)"];
+const PARTIAL_DROP_PHRASES: &[&str] = &["drop flag", "dropped here only if", "dropped only if", "dropped if the branch", "moved out earlier, so only", "Whatever it still holds (if anything)"];
 /// A move drawn on the column's own line that says it happens on some
 /// paths only (`break f` in a loop whose value is returned, #1171).
 const CONDITIONAL_MOVE_PHRASES: &[&str] = &["if the loop ended with"];
@@ -856,7 +856,7 @@ mod unit {
         // A struct whose fields were moved out in arms: its line stops
         // with no move of its own, and the scope end says a drop flag
         // decides.
-        let flag = "s goes out of scope. Its resource is dropped here only if no branch above moved it.";
+        let flag = "s goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).";
         let arms = [header("s", 1), line("s", 1, 95, 155, "full_privilege"), dot("s", 1, 95, "acquire", false, "a"),
                     dot("s", 1, 215, "owner_go_out_of_scope", true, flag)].concat();
         assert_eq!(invs(&arms), Vec::<&str>::new());

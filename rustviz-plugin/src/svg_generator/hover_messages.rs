@@ -225,32 +225,33 @@ pub fn event_dot_struct_partial_go_out_of_scope(
         if kept && maybe_plural {
             out.push_str(&format!(
                 " {} may have been moved out above, so each is dropped here only if it still holds \
-                 its value.",
+                 its value (Rust tracks this with runtime drop flags).",
                 maybe_s
             ));
         } else if kept {
             out.push_str(&format!(
                 " {0} may have been moved out above, so it's dropped here only if {0} still holds \
-                 it.",
+                 it (Rust tracks this with a runtime drop flag).",
                 maybe_s
             ));
         } else if by_cond {
             out.push_str(&format!(
                 " {} may have been moved out above, so {} dropped here only if nothing above moved \
-                 it.",
+                 it (Rust tracks this with {}).",
                 maybe_s,
                 if maybe_plural { "each is" } else { "it's" },
+                if maybe_plural { "runtime drop flags" } else { "a runtime drop flag" }
             ));
         } else if maybe_plural {
             out.push_str(&format!(
                 " {} were moved out in some of the branches above; each is dropped here only if no \
-                 branch above moved it.",
+                 branch above moved it (Rust tracks this with runtime drop flags).",
                 maybe_s
             ));
         } else {
             out.push_str(&format!(
                 " {} was moved out in at least one branch above, so it's dropped here only if no \
-                 branch above moved it.",
+                 branch above moved it (Rust tracks this with a runtime drop flag).",
                 maybe_s
             ));
         }
@@ -497,7 +498,7 @@ pub fn event_dot_owner_drop_at_reassign_maybe_moved(my_name: &String, note: &str
     let (holds, rest) = split_drop_note(note);
     format!(
         "{0} acquires ownership of a new resource. Its previous resource{1} is dropped{2} here only if \
-         {3} moved it.",
+         {3} moved it (Rust tracks this with a runtime drop flag).",
         styled_name_html(my_name), holds, rest, moved_above(by_cond)
     )
 }
@@ -531,7 +532,7 @@ pub fn event_dot_box_contents_write_after_move(deref_name: &String, holds: Optio
             what, if plural { "were" } else { "was" }
         ),
         Some(by_cond) => format!(
-            "Its previous {} {} dropped here only if {} moved {} out.",
+            "Its previous {} {} dropped here only if {} moved {} out (Rust tracks this with a runtime drop flag).",
             what, if plural { "are" } else { "is" }, moved_above(by_cond), if plural { "them" } else { "it" }
         ),
     };
@@ -592,16 +593,16 @@ pub fn event_dot_struct_drop_at_reassign_partial(my_name: &String, parts: &crate
     out.push_str(&match (parts.by_cond, maybe_plural) {
         (true, true) => format!(
             " Its previous {} may have been moved out above, so each is dropped here only if nothing above \
-             moved it.", maybe_s),
+             moved it (Rust tracks this with runtime drop flags).", maybe_s),
         (true, false) => format!(
             " Its previous {} may have been moved out above, so it's dropped here only if nothing above \
-             moved it.", maybe_s),
+             moved it (Rust tracks this with a runtime drop flag).", maybe_s),
         (false, true) => format!(
             " Its previous {} were moved out in some of the branches above; each is dropped here only if no \
-             branch above moved it.", maybe_s),
+             branch above moved it (Rust tracks this with runtime drop flags).", maybe_s),
         (false, false) => format!(
             " Its previous {} was moved out in at least one branch above, so it's dropped here only if no \
-             branch above moved it.", maybe_s),
+             branch above moved it (Rust tracks this with a runtime drop flag).", maybe_s),
     });
     if !parts.dropped.is_empty() {
         out.push_str(&format!(" Its previous {} {} dropped.", dropped_s, if dropped_plural { "are" } else { "is" }));
@@ -815,7 +816,7 @@ pub fn event_dot_extended_temporary_drop(my_name: &String, when: &String) -> Str
 pub fn event_dot_extended_temporary_drop_made(my_name: &String, when: &String, made_at: Option<usize>) -> String {
     format!(
         "{0} goes out of scope {1}: a let borrowed it, so it lived past its statement. It \
-         is dropped here only if {2}.",
+         is dropped here only if {2} (Rust tracks this with a runtime drop flag).",
         styled_name_html(my_name), when, temp_made_in(made_at)
     )
 }
@@ -824,7 +825,7 @@ pub fn event_dot_extended_temporary_drop_made(my_name: &String, when: &String, m
 pub fn event_dot_temp_drop_if_try_returns_made(my_name: &String, made_at: Option<usize>) -> String {
     format!(
         "If the `?` here returns early, {0} \
-         is dropped if {1}. If the `?` succeeds, \
+         is dropped if {1} (Rust tracks this with a runtime drop flag). If the `?` succeeds, \
          nothing happens to {0} here.",
         styled_name_html(my_name), temp_made_in(made_at)
     )
@@ -1127,7 +1128,7 @@ pub fn event_dot_owner_drop_if_try_returns_maybe(my_name: &String, note: &str) -
     let (holds, rest) = split_drop_note(note);
     format!(
         "If the `?` here returns early, {0}'s \
-         resource{1} is dropped{2} if {0} still holds it. \
+         resource{1} is dropped{2} if {0} still holds it (Rust tracks this with a runtime drop flag). \
          If the `?` succeeds, nothing happens to {0} here.",
         my_name_fmt, holds, rest
     )
@@ -1140,7 +1141,8 @@ pub fn event_dot_owner_drop_if_try_returns_maybe_init(my_name: &String, note: &s
     let (holds, rest) = split_drop_note(note);
     format!(
         "If the `?` here returns early, {0}'s \
-         resource{1} is dropped{2} if the branch that ran {3}. If the `?` succeeds, nothing happens to {0} here.",
+         resource{1} is dropped{2} if the branch that ran {3} (Rust tracks this with a runtime drop \
+         flag). If the `?` succeeds, nothing happens to {0} here.",
         my_name_fmt, holds, rest, assigned_in_branch_that_ran(moved)
     )
 }
@@ -4281,7 +4283,8 @@ pub fn event_dot_branch_merge_temp_made(my_name: &String, made_at: Option<usize>
 pub fn event_dot_go_out_of_scope_temp_made(my_name: &String, made_at: Option<usize>) -> String {
     format!(
         "{0} goes out of scope at the end of the block: a let borrowed it, so it was kept alive \
-         past the end of its statement. It is dropped here only if {1}.",
+         past the end of its statement. It is dropped here only if {1} (Rust tracks \
+         this with a runtime drop flag).",
         styled_name_html(my_name), temp_made_in(made_at)
     )
 }
@@ -4307,7 +4310,7 @@ pub fn event_dot_owner_drop_at_reassign_maybe_init(my_name: &String, note: &str,
     let (holds, rest) = split_drop_note(note);
     format!(
         "{0} acquires ownership of a new resource. Its previous resource{1} is dropped{2} here only \
-         if {0} was assigned in the branch that ran{3}.",
+         if {0} was assigned in the branch that ran{3} (Rust tracks this with a runtime drop flag).",
         styled_name_html(my_name), holds, rest,
         if moved { " and wasn't moved there" } else { "" }
     )
@@ -4319,7 +4322,7 @@ pub fn event_dot_go_out_of_scope_maybe_init(my_name: &String, note: &str, moved:
     let (holds, rest) = split_drop_note(note);
     format!(
         "{0} goes out of scope. Its resource{1} is dropped{2} here only if {0} was assigned in the \
-         branch that ran{3}.",
+         branch that ran{3} (Rust tracks this with a runtime drop flag).",
         styled_name_html(my_name), holds, rest,
         if moved { " and wasn't moved there" } else { "" }
     )
@@ -4358,7 +4361,7 @@ pub fn event_dot_go_out_of_scope_init_all_moved(my_name: &String) -> String {
 pub fn event_dot_init_drops_earlier_iteration(my_name: &String) -> String {
     format!(
         "On a later iteration of the loop, the resource an earlier iteration gave {0} is dropped \
-         here first, if {0} still holds it.",
+         here first, if {0} still holds it (Rust tracks this with a runtime drop flag).",
         styled_name_html(my_name)
     )
 }
@@ -4431,7 +4434,7 @@ pub fn event_dot_owner_drop_at_reassign_after_loop(my_name: &String, note: &str,
     let (holds, rest) = split_drop_note(note);
     format!(
         "{0} acquires ownership of a new resource. Its previous resource{1} is dropped{2} here only \
-         if the loop above assigned {0}{3}.",
+         if the loop above assigned {0}{3} (Rust tracks this with a runtime drop flag).",
         styled_name_html(my_name), holds, rest, or_not_moved_above(before_loop)
     )
 }
@@ -4448,7 +4451,7 @@ pub fn event_dot_owner_drop_at_reassign_outer_loop(my_name: &String, note: &str,
     let name = styled_name_html(my_name);
     format!(
         "{0} acquires ownership of a new resource. Its previous resource{1} is dropped{2} here only if \
-         {0} still holds it{3}.",
+         {0} still holds it (Rust tracks this with a runtime drop flag){3}.",
         name, holds, rest,
         if moves {
             String::new()
@@ -4465,7 +4468,8 @@ pub fn event_dot_owner_drop_at_reassign_outer_loop(my_name: &String, note: &str,
 pub fn event_dot_go_out_of_scope_maybe_kept(my_name: &String, note: &str) -> String {
     let (holds, rest) = split_drop_note(note);
     format!(
-        "{0} goes out of scope. Its resource{1} is dropped{2} here only if {0} still holds it.",
+        "{0} goes out of scope. Its resource{1} is dropped{2} here only if {0} still holds it \
+         (Rust tracks this with a runtime drop flag).",
         styled_name_html(my_name), holds, rest
     )
 }
@@ -4475,7 +4479,7 @@ pub fn event_dot_owner_drop_at_reassign_maybe_kept(my_name: &String, note: &str)
     let (holds, rest) = split_drop_note(note);
     format!(
         "{0} acquires ownership of a new resource. Its previous resource{1} is dropped{2} here only if \
-         {0} still holds it.",
+         {0} still holds it (Rust tracks this with a runtime drop flag).",
         styled_name_html(my_name), holds, rest
     )
 }
@@ -4485,7 +4489,7 @@ pub fn event_dot_go_out_of_scope_after_loop(my_name: &String, note: &str, before
     let (holds, rest) = split_drop_note(note);
     format!(
         "{0} goes out of scope. Its resource{1} is dropped{2} here only if the loop above assigned \
-         {0}{3}.",
+         {0}{3} (Rust tracks this with a runtime drop flag).",
         styled_name_html(my_name), holds, rest, or_not_moved_above(before_loop)
     )
 }
@@ -4515,7 +4519,7 @@ pub fn event_dot_owner_drop_at_reassign_maybe_entry(my_name: &String, note: &str
     let (holds, rest) = split_drop_note(note);
     format!(
         "{0} acquires ownership of a new resource. Its previous resource{1} is dropped{2} here only if \
-         {0} still holds it: the first time round the loop, \
+         {0} still holds it (Rust tracks this with a runtime drop flag): the first time round the loop, \
          only if {3} moved it; a later time round, only if the time round before left {0} holding one.",
         styled_name_html(my_name), holds, rest, moved_above(by_cond)
     )
@@ -4527,7 +4531,8 @@ pub fn event_dot_owner_drop_at_reassign_maybe_entry(my_name: &String, note: &str
 pub fn event_dot_go_out_of_scope_maybe_moved(my_name: &String, note: &str, by_cond: bool) -> String {
     let (holds, rest) = split_drop_note(note);
     format!(
-        "{0} goes out of scope. Its resource{1} is dropped{2} here only if {3} moved it.",
+        "{0} goes out of scope. Its resource{1} is dropped{2} here only if {3} moved it \
+         (Rust tracks this with a runtime drop flag).",
         styled_name_html(my_name), holds, rest, moved_above(by_cond)
     )
 }
@@ -4593,7 +4598,7 @@ pub fn event_dot_block_break_out_go_out_of_scope_maybe_moved(my_name: &String, n
     let (holds, rest) = split_drop_note(note);
     format!(
         "{0} goes out of scope. Unless the block ended with {3}, its resource{1} is dropped{2} as the block ends \
-         only if no branch above moved it.",
+         only if no branch above moved it (Rust tracks this with a runtime drop flag).",
         styled_name_html(my_name), holds, rest, alt_how(alt)
     )
 }
@@ -4626,7 +4631,7 @@ pub fn event_dot_break_out_go_out_of_scope_maybe_moved(my_name: &String, note: &
     let (holds, rest) = split_drop_note(note);
     format!(
         "{0} goes out of scope. On the iterations that don't end the loop, its resource{1} is dropped{2} here \
-         only if no branch above moved it.",
+         only if no branch above moved it (Rust tracks this with a runtime drop flag).",
         styled_name_html(my_name), holds, rest
     )
 }
@@ -4965,7 +4970,7 @@ pub fn event_dot_owner_drop_at_reassign_loop_head(my_name: &String, note: &str) 
     let (holds, rest) = split_drop_note(note);
     format!(
         "{0} acquires ownership of a new resource. Its previous resource{1} is dropped{2} here only if \
-         {0} still holds it: it does the first time round \
+         {0} still holds it (Rust tracks this with a runtime drop flag): it does the first time round \
          the loop, but not if the previous time round left {0} moved.",
         styled_name_html(my_name), holds, rest
     )
@@ -5141,7 +5146,8 @@ fn chain_fail_new_value(my_name: &String, path: FailPath, how: &ChainFailHow) ->
 pub fn event_dot_go_out_of_scope_chain_new_value(my_name: &String, note: &str) -> String {
     let (holds, rest) = split_drop_note(note);
     format!(
-        "{0} goes out of scope. Its resource{1} is dropped{2} here only if {0} still holds it.",
+        "{0} goes out of scope. Its resource{1} is dropped{2} here only if {0} still holds it \
+         (Rust tracks this with a runtime drop flag).",
         styled_name_html(my_name), holds, rest
     )
 }
@@ -5151,7 +5157,7 @@ pub fn event_dot_owner_drop_at_reassign_chain_new_value(my_name: &String, note: 
     let (holds, rest) = split_drop_note(note);
     format!(
         "{0} acquires ownership of a new resource. Its previous resource{1} is dropped{2} here only if \
-         {0} still holds it.",
+         {0} still holds it (Rust tracks this with a runtime drop flag).",
         styled_name_html(my_name), holds, rest
     )
 }
@@ -5327,7 +5333,7 @@ pub fn event_dot_or_alt_move(my_name: &String, into: &String, sources: &[String]
     let otherwise = if value {
         format!("otherwise {} still holds it", me)
     } else {
-        format!("otherwise {} still owns it", me)
+        format!("otherwise {} still owns it (Rust tracks this with a runtime drop flag)", me)
     };
     format!(
         "{1} is bound from {2}, whichever alternative of the pattern matches. If it's the alternative \
@@ -5784,7 +5790,8 @@ pub fn event_dot_closure_go_out_of_scope_maybe_moved(my_name: &String, by_cond: 
     };
     let cond = if by_cond { format!("nothing above {} it", what) } else { format!("no branch above {} it", what) };
     format!(
-        "{0} goes out of scope. Its captured {1} dropped here only if {2}.",
+        "{0} goes out of scope. Its captured {1} dropped here only if {2} \
+         (Rust tracks this with a runtime drop flag).",
         styled_name_html(my_name),
         if count == 1 { "resource is" } else { "resources are" },
         cond
