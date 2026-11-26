@@ -38926,7 +38926,7 @@ fn a_reference_declared_in_a_one_line_arm_ends_its_borrow_there() {
         ("x", "immutable", "x is initialized with a copy of ra", "ra isn't moved in any of the branches above"),
         ("y", "immutable", "y is initialized with a copy of rb", "rb isn't moved in any of the branches above"),
         // (Q7, P2-1b: w's own end, a `RefDie`, is drawn on w's scope-end
-        // dot in the one-line arm, not on its copy's: renderer, P3.)
+        // dot in the one-line arm, not on its copy's: renderer, P3, #1868.)
         ("w", "immutable", "w goes out of scope", "rd isn't moved in any of the branches above"),
         ("z", "immutable", "z is initialized with a copy of w", "rd isn't moved in any of the branches above"),
         ("q", "immutable", "q is initialized with a copy of re", "re isn't moved in any of the branches above"),
