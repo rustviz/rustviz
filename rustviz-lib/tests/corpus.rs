@@ -28063,12 +28063,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "h on L15 | h acquires ownership of a new resource; its previous resource is dropped",
             "old on L45 | old's resource is no longer borrowed by h.0, but is still immutably borrowed by other",
             "old after L58 | old is the owner of the resource",
+            // Review of #1777: a multi-line call keeps the drop on its first
+            // row; a field write leaves p holding old's loan until p.h.0's read.
+            "h on L68 | h acquires ownership of a new resource; its previous resource is dropped",
+            "old after L85 | old's resource is being shared by one or more variables",
         ],
         must_not_contain: &[
             "b after L11 | b is the owner of the resource",
             "h on L10 | h acquires ownership of a new resource; its previous resource is dropped",
             "old after L45 | old is the owner of the resource",
             "old after L58 | old's resource is being shared by one or more variables",
+            "h on L70 | h acquires ownership of a new resource",
+            "old after L85 | old is the owner of the resource",
         ],
     },
     TooltipExpect {
@@ -28077,7 +28083,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // is used; len's own borrow ending must not free t on that path.
         must_contain: &[
             "t after L7 | t's resource is being shared by one or more variables",
-            "len reads from t (implicitly borrowed)",
+            "t on L6 | t's resource is no longer borrowed by len, but is still immutably borrowed by g.r",
         ],
         must_not_contain: &[
             "t after L7 | t is the owner of the resource",

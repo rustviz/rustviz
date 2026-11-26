@@ -58,3 +58,30 @@ fn loop_rhs(c: bool) {
     };
     println!("{}", h.0);
 }
+
+// Review of #1777: these keep main's drop on the assignment's first row.
+// A plain call spread over several lines.
+fn multiline_call() {
+    let old = String::new();
+    let new = String::new();
+    let mut h = H(&old);
+    h = mk(
+        &new,
+    );
+    println!("{}", h.0);
+}
+fn mk<'a>(s: &'a String) -> H<'a> { H(s) }
+
+// A field write: p's lifetime keeps old borrowed while p is used.
+struct P<'a> { h: H<'a> }
+fn field_write(c: bool) {
+    let old = String::new();
+    let new = String::new();
+    let mut p = P { h: H(&old) };
+    p.h = if c {
+        H(&new)
+    } else {
+        H(&new)
+    };
+    println!("{}", p.h.0);
+}

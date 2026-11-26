@@ -7226,11 +7226,32 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
+  /// Whether an `if let`'s scrutinee temporaries are dropped before its
+  /// `else` runs (edition 2024). Before that, a temporary with `Drop`
+  /// (`if let Some(x) = G(&v).get()`) keeps its loan through the `else`.
+  fn else_after_temps(&self) -> bool {
+    self.tcx.sess.edition() >= rustc_span::edition::Edition::Edition2024
+  }
+
   pub(crate) fn replacement_drop(&mut self, lhs: &'tcx Expr<'tcx>, rhs: &'tcx Expr<'tcx>) -> ReplacementDrop {
     let start = expr_to_line(lhs, &self.tcx);
     let end = span_end_line(&rhs.span, &self.tcx);
     let mut drop = ReplacementDrop { line: start, loans: Vec::new() };
     if end <= start { return drop; }
+    // Only a whole local given a branching or block value (`h = if c
+    // {..} else {..};`), whose RHS doesn't touch the old h. A field write
+    // (`p.h = ..`) leaves p's lifetime holding the old loan past the drop;
+    // an RHS that moves or rewrites h (`drop(h)`, `h.0 = ..`) changes what
+    // the drop sees on some paths; a plain multi-line call draws the
+    // assignment on its first row. Those keep the drop where it starts.
+    let ExprKind::Path(QPath::Resolved(None, path)) = lhs.kind else { return drop };
+    let Res::Local(lhs_id) = path.res else { return drop };
+    let mut value = rhs;
+    while let ExprKind::DropTemps(e) = value.kind { value = e; }
+    if !matches!(value.kind, ExprKind::If(..) | ExprKind::Match(..) | ExprKind::Block(..) | ExprKind::Loop(..)) {
+      return drop;
+    }
+    if locals_in(rhs, ClosureLocals::Captures(self.tcx)).iter().any(|m| m.id == lhs_id) { return drop; }
     let Some(live) = self.replacement_drop_loans(lhs.span, rhs.span) else { return drop };
     let Some(ResourceTy::Value(rap)) = self.resource_of_lhs(lhs) else { return drop };
     drop.line = end;
@@ -11732,7 +11753,7 @@ pub fn print_out_of_scope(&mut self){
         ExternalEvent::StaticDie { from: ResourceTy::Value(r), to, .. }
         | ExternalEvent::MutableDie { from: ResourceTy::Value(r), to, .. }
         | ExternalEvent::RefDie { from: ResourceTy::Value(r), to, .. } => match to.extract_rap() {
-          Some(lender) => arm_declaring(self.preprocessed_events, r, Some(lender), *line, false)
+          Some(lender) => arm_declaring(self.preprocessed_events, r, Some(lender), *line, false, self.else_after_temps())
             .map(|path| (path, Some(lender.clone())))
             // An end that gives nothing back (another reference still
             // holds the loan: `Holder { r }` in an arm of a loop's body,
@@ -11741,19 +11762,19 @@ pub fn print_out_of_scope(&mut self){
             // the reference's scope end in the arm, and its column ran
             // on past the struct's move (#1568).
             .or_else(|| matches!(ev, ExternalEvent::RefDie { .. })
-              .then(|| arm_declaring(self.preprocessed_events, r, None, *line, false))
+              .then(|| arm_declaring(self.preprocessed_events, r, None, *line, false, self.else_after_temps()))
               .flatten()
               .map(|path| (path, None))),
           // A borrow from the caller (`let m2 = m;` in an arm, m a `&mut`
           // parameter) has no lender column: it ends in the arm that
           // declares its reference (#1502). Left at the top level, it was
           // drawn on a row of a later arm, after the reference's scope end.
-          None => arm_declaring(self.preprocessed_events, r, None, *line, false).map(|path| (path, None)),
+          None => arm_declaring(self.preprocessed_events, r, None, *line, false, self.else_after_temps()).map(|path| (path, None)),
         },
         // An or-pattern reference's (#734), with each place it may
         // borrow.
         ExternalEvent::OrAltBorrow { ro, into, end: true, .. } =>
-          arm_declaring(self.preprocessed_events, into, Some(ro), *line, false).map(|path| (path, Some(ro.clone()))),
+          arm_declaring(self.preprocessed_events, into, Some(ro), *line, false, self.else_after_temps()).map(|path| (path, Some(ro.clone()))),
         _ => None,
       };
       match path {
@@ -12337,7 +12358,7 @@ pub fn print_out_of_scope(&mut self){
             *o == *r || d.lifetime < rd.assigned_at || d.assigned_at > rd.lifetime
               || match (self.raps.get(*r), self.raps.get(*o)) {
                 (Some(a), Some(b)) => on_other_path(self.preprocessed_events, &a.rap, &b.rap, d.lifetime)
-                  || (arm_declaring(self.preprocessed_events, &a.rap, None, rd.lifetime, false).is_some() && dead_here(o, d)),
+                  || (arm_declaring(self.preprocessed_events, &a.rap, None, rd.lifetime, false, self.else_after_temps()).is_some() && dead_here(o, d)),
                 _ => false,
               }
           });
@@ -12628,7 +12649,8 @@ pub fn print_out_of_scope(&mut self){
     hoist_ends_on_other_arms_lines(self.preprocessed_events);
     dedupe_borrow_ends(self.preprocessed_events, self.event_line_map);
     self.nest_borrow_ends_in_arms();
-    end_scrutinee_borrows_in_other_arms(self.preprocessed_events, self.event_line_map, self.unique_id, &self.borrow_map);
+    let else_after_temps = self.else_after_temps();
+    end_scrutinee_borrows_in_other_arms(self.preprocessed_events, self.event_line_map, self.unique_id, &self.borrow_map, else_after_temps);
     self.end_outer_borrows_in_arms();
     self.end_arm_borrows_in_nested_arms();
     // A lender that got a column in a conditional just now (its borrow
@@ -12972,7 +12994,7 @@ pub fn print_out_of_scope(&mut self){
       let (Some(bd), Some(brap)) = (self.borrow_map.get(b), self.raps.get(b)) else { continue };
       let lenders = bd.all_lenders();
       let Some(lrap) = lenders.iter().filter_map(|l| l.extract_rap()).find(|l| l.name() == lender) else { continue };
-      let Some(path) = arm_declaring(self.preprocessed_events, &brap.rap, Some(lrap), bd.lifetime, false) else { continue };
+      let Some(path) = arm_declaring(self.preprocessed_events, &brap.rap, Some(lrap), bd.lifetime, false, self.else_after_temps()) else { continue };
       let Some(ExternalEvent::Branch { live_vars, branches, .. }) = branch_on_path(self.preprocessed_events, &path) else { continue };
       let arm = &branches[path.last().map_or(0, |p| p.1)];
       #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "collected into a Vec and sorted below")]
@@ -15007,6 +15029,7 @@ fn arm_declaring(
   lender: Option<&ResourceAccessPoint>,
   line: usize,
   outer: bool,
+  else_after_temps: bool,
 ) -> Option<Vec<(usize, usize)>> {
   for (k, (_, ev)) in events.iter().enumerate() {
     let ExternalEvent::Branch { branches, live_vars, split_point, merge_point, branch_type, .. } = ev else { continue };
@@ -15018,14 +15041,16 @@ fn arm_declaring(
     for a in order {
       let b = &branches[a];
       let has_lender = outer || lender.is_none_or(|l| live_vars.contains(l) || b.decl_vars.contains(l));
-      if let Some(mut path) = arm_declaring(&b.e_data, r, lender, line, has_lender) {
+      if let Some(mut path) = arm_declaring(&b.e_data, r, lender, line, has_lender, else_after_temps) {
         path.insert(0, (k, a));
         return Some(path);
       }
       // The lender of a pattern bound just before the fork also needs a
       // column for its return. Leaving that return on the trunk can insert
       // extra rows after its arms have already been laid out (#1686).
-      if b.decl_vars.contains(r) && (has_lender || events[..k].iter().any(|(l, e)|
+      // (Before edition 2024 the scrutinee's temporaries can hold that
+      // loan through the `else`: main's layout.)
+      if b.decl_vars.contains(r) && (has_lender || else_after_temps && events[..k].iter().any(|(l, e)|
           l == split_point && call_pattern_loan(e).is_some_and(|(from, to, _)| to == r && from.extract_rap() == lender))) {
         return Some(vec![(k, a)]);
       }
@@ -15100,7 +15125,7 @@ fn draw_lender_along(events: &mut [(usize, ExternalEvent)], path: &[(usize, usiz
 /// borrowed on that path, so its scope end said it dropped nothing.
 /// End it first thing in each such arm (no arrow: nothing gives it
 /// back).
-fn end_scrutinee_borrows_in_other_arms(events: &mut Vec<(usize, ExternalEvent)>, line_map: &mut BTreeMap<usize, Vec<ExternalEvent>>, unique_id: &mut usize, loans: &HashMap<String, RefData>) {
+fn end_scrutinee_borrows_in_other_arms(events: &mut Vec<(usize, ExternalEvent)>, line_map: &mut BTreeMap<usize, Vec<ExternalEvent>>, unique_id: &mut usize, loans: &HashMap<String, RefData>, else_after_temps: bool) {
   let mut k = 0;
   while k < events.len() {
     let (before, rest) = events.split_at_mut(k);
@@ -15109,7 +15134,7 @@ fn end_scrutinee_borrows_in_other_arms(events: &mut Vec<(usize, ExternalEvent)>,
     let ExternalEvent::Branch { branches, live_vars, branch_type, merge_point, split_point, .. } = &mut cur[0].1 else { continue };
     for arm in branches.iter_mut() {
       let ExtBranchData { e_data, line_map, .. } = arm;
-      end_scrutinee_borrows_in_other_arms(e_data, line_map, unique_id, loans);
+      end_scrutinee_borrows_in_other_arms(e_data, line_map, unique_id, loans, else_after_temps);
     }
     if matches!(branch_type, BranchType::Loop(..)) {
       continue;
@@ -15135,7 +15160,7 @@ fn end_scrutinee_borrows_in_other_arms(events: &mut Vec<(usize, ExternalEvent)>,
         // A lone if-let copies the pattern binding before its fork.
         // It belongs only to the success arm even when its return is
         // nested. A separate pre-existing loan can still span the fork.
-        Some((line, ev)) if *line == *split_point => {
+        Some((line, ev)) if *line == *split_point && else_after_temps => {
           let Some((ResourceTy::Value(l), r, mutable)) = call_pattern_loan(ev) else { continue };
           if *l != lender || !branches.iter().any(|b| b.decl_vars.contains(r)) { continue; }
           #[expect(clippy::disallowed_methods, reason = "only checks whether any other loan spans the fork")]
