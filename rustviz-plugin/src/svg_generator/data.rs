@@ -2023,6 +2023,8 @@ pub enum ExternalEvent {
         /// `from` is `Anonymous`: `to` gets a copy of this constant (`let
         /// m = MAX;`, #690), which has no column.
         of_const: Option<String>,
+        /// A Copy Option or Result whose `?` gives its output to `to`.
+        via_try: bool,
     },
     // `loop_head`: a `for` loop's head moved into the loop, whose
     // iterator has drop glue (#482). Only the for-loop arm of the
@@ -2664,6 +2666,8 @@ pub enum CopyOf {
     /// Some(x) = opt`, `Fruit::Apple(z) =>` on `match x`): the
     /// ExternalEvent's `is_partial`.
     Inside,
+    /// The output from applying `?` to a Copy Option or Result.
+    TryOutput,
     /// `from` was copied into a value this constructor builds, which
     /// the receiver holds (`y = Fruit::Apple(z)`): ExternalEvent's
     /// `into_ctor`.
@@ -2688,13 +2692,14 @@ fn source_copy_of(of: CopyOf) -> CopyOf {
 }
 
 impl CopyOf {
-    fn of(is_partial: bool, into_ctor: &Option<String>, pointee: Option<bool>, of_const: &Option<String>) -> CopyOf {
+    fn of(is_partial: bool, into_ctor: &Option<String>, pointee: Option<bool>, of_const: &Option<String>, via_try: bool) -> CopyOf {
         if let Some(c) = of_const {
             return CopyOf::Const(c.clone());
         }
         match (into_ctor, pointee) {
             (Some(c), _) => CopyOf::IntoCtor(c.clone()),
             (None, Some(part)) => CopyOf::Pointee { part },
+            (None, None) if via_try => CopyOf::TryOutput,
             (None, None) if is_partial => CopyOf::Inside,
             (None, None) => CopyOf::Whole,
         }
@@ -3777,6 +3782,13 @@ impl Event {
         matches!(self, Event::Move { is: ResourceTy::Deref(ResourceAccessPoint::Struct(Struct { is_box: true, .. })), .. })
     }
 
+    pub fn is_projected_try_move(&self) -> bool {
+        matches!(self, Event::Move {
+            is: ResourceTy::Deref(_) | ResourceTy::DerefField(..),
+            via_try: Some(_), ..
+        })
+    }
+
     /// For an or-pattern's possible borrow (#565), the plain borrow
     /// event that changes the column's state the same way.
     pub fn or_alt_plain_equivalent(&self) -> Option<Event> {
@@ -4102,6 +4114,11 @@ impl Event {
             Event::Duplicate{ is: ResourceTy::Index(r, place, _), .. } => {
                 hover_messages::event_dot_copy_out_of_element(r.name(), place, r.is_ref(), if r.is_ref() { r.points_to_copy() } else { r.holds_value() })
             }
+            // `(*r)?` copies only the output value to its destination.
+            Event::Duplicate{ is, of: CopyOf::TryOutput, ..} => {
+                let place = hover_messages::styled_name_html(&is.name());
+                format!("{place} is copied for the `?`. If the `?` continues, the value inside the copy goes on.")
+            }
             // `&self.s` returned: a reborrow through `self` (#784).
             Event::Duplicate{ to: ResourceTy::Caller, is: ResourceTy::DerefField(r, place, _, _), ..} if place.starts_with('&') => {
                 hover_messages::event_dot_reborrow_to_caller(r.name(), place)
@@ -4155,7 +4172,11 @@ impl Event {
                     ResourceTy::Caller => Some("the caller".to_owned()),
                     _ => None,
                 };
-                hover_messages::event_dot_move_into_try(&self.deref_name(my_name), target.as_ref(), *kind, is_plain(is))
+                let mut text = hover_messages::event_dot_move_into_try(&self.deref_name(my_name), target.as_ref(), *kind, is_plain(is));
+                if matches!(to, ResourceTy::Value(ResourceAccessPoint::Function(f)) if f.drops_arg.0) {
+                    text.push_str(" If the `?` continues, its output is dropped by the call.");
+                }
+                text
             }
             // Moving a `&mut` moves the reference, not its referent; so
             // does moving a struct with a `&T` field (#637).
@@ -4275,7 +4296,7 @@ impl Event {
             }
             // arrow going in
             // `n` in `let n = r?;` (#652).
-            Event::Acquire{ from: ResourceTy::Value(from), is, via_try: Some(kind), ..} => {
+            Event::Acquire{ from, is: is @ ResourceTy::Value(_), via_try: Some(kind), ..} => {
                 let holds = match is.extract_rap() {
                     Some(r) if r.is_mutref() => hover_messages::acquire_from_try_holds(hover_messages::TryHolds::MutRef),
                     Some(r) if r.is_ref() => hover_messages::acquire_from_try_holds(hover_messages::TryHolds::Ref),
@@ -4283,7 +4304,7 @@ impl Event {
                     _ if is_plain(is) => hover_messages::acquire_from_try_holds(hover_messages::TryHolds::Plain),
                     _ => hover_messages::acquire_from_try_holds(hover_messages::TryHolds::Resource),
                 };
-                hover_messages::event_dot_acquire_from_try(&self.deref_name(my_name), from.name(), *kind, holds)
+                hover_messages::event_dot_acquire_from_try(&self.deref_name(my_name), &from.name(), *kind, holds)
             }
             // `let o = Some(5);`: the value a constructor of literals
             // builds; nothing is copied from the constructor (#768).
@@ -4479,6 +4500,7 @@ impl Event {
                     PlaceWrite::Update | PlaceWrite::UpdateValue => hover_messages::event_dot_write_element(r.name(), place, r.is_ref(), element_update_holds_value(r, place, write)),
                     // `v[i] = Some(y);`: a new value, built from y (#866).
                     _ if matches!(of, CopyOf::IntoCtor(_)) => hover_messages::event_dot_copyable_assign(place),
+                    _ if *of == CopyOf::TryOutput => hover_messages::event_dot_copyable_assign_copy_inside(place, &from.name()),
                     _ => place_assign_copy_message(place, from),
                 };
                 with_alternatives(msg, r, place, write, alts)
@@ -4493,6 +4515,7 @@ impl Event {
                 };
                 match write {
                     PlaceWrite::AssignCopy if matches!(of, CopyOf::IntoCtor(_)) => hover_messages::event_dot_copyable_assign(&deref),
+                    PlaceWrite::AssignCopy if *of == CopyOf::TryOutput => hover_messages::event_dot_copyable_assign_copy_inside(&deref, &from.name()),
                     PlaceWrite::AssignCopy => place_assign_copy_message(&deref, from),
                     // `*r += y` / `r.f += y`: an in-place update; the arrow
                     // shows the copy. `*r` is a Copy value here; `r.f`
@@ -4538,7 +4561,7 @@ impl Event {
             }
             // `if let Some(x) = opt`: x gets a copy of the value inside
             // opt, not of opt (#866).
-            Event::Copy{ from, of: CopyOf::Inside, ..} => {
+            Event::Copy{ from, of: CopyOf::Inside | CopyOf::TryOutput, ..} => {
                 hover_messages::event_dot_copy_from_inside(&self.deref_name(my_name), &target_name(from))
             }
             // `let Some(&y) = orr`: y gets a copy of n, which the
@@ -5900,8 +5923,8 @@ impl Visualizable for VisualizationData {
           if to_o { vec![(line_num,  Event::Acquire{from : from.to_owned(), is: to.clone(), via_try: None, id: *id, break_alt: break_alt.clone(), loop_head: LoopHead::No})] }
           else { vec![(line_num, Event::Duplicate{to : to.to_owned(), is: from.clone(), into_closure: false, of: CopyOf::Whole, id: *id, break_alt: break_alt.clone()})] }
         },
-        ExternalEvent::Copy{from: from_ro, to: to_ro, id, into_closure, break_alt, is_partial, into_ctor, pointee, of_const, ..} => {
-          let of = CopyOf::of(*is_partial, into_ctor, *pointee, of_const);
+        ExternalEvent::Copy{from: from_ro, to: to_ro, id, into_closure, break_alt, is_partial, into_ctor, pointee, of_const, via_try, ..} => {
+          let of = CopyOf::of(*is_partial, into_ctor, *pointee, of_const, *via_try);
           if to_o { vec![(line_num,  Event::Copy{from : from_ro.to_owned(), is: to_ro.clone(), of, id: *id, break_alt: break_alt.clone()})] }
           else { vec![(line_num, Event::Duplicate{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: *into_closure, of: source_copy_of(of), id: *id, break_alt: break_alt.clone()})] }
         },
@@ -6300,8 +6323,8 @@ impl Visualizable for VisualizationData {
                 maybe_append_event(self, &from_ro.clone(), Event::Duplicate{to : to_ro.to_owned(), is: from_ro, into_closure: false, of: CopyOf::Whole, id: id, break_alt}, line_number);
             },
             // eg: let x : i64 = y as i64;
-            ExternalEvent::Copy{from: from_ro, to: to_ro, id, into_closure, break_alt, is_partial, into_ctor, pointee, of_const, ..} => {
-                let of = CopyOf::of(is_partial, &into_ctor, pointee, &of_const);
+            ExternalEvent::Copy{from: from_ro, to: to_ro, id, into_closure, break_alt, is_partial, into_ctor, pointee, of_const, via_try, ..} => {
+                let of = CopyOf::of(is_partial, &into_ctor, pointee, &of_const, via_try);
                 let source_of = source_copy_of(of.clone());
                 maybe_append_event(self, &to_ro.clone(), Event::Copy{from : from_ro.to_owned(), is: to_ro.clone(), of, id: id, break_alt: break_alt.clone()}, line_number);
                 maybe_append_event(self, &from_ro.clone(), Event::Duplicate{to : to_ro.to_owned(), is: from_ro, into_closure, of: source_of, id: id, break_alt}, line_number);

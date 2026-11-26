@@ -1357,7 +1357,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// variable, or a field of one, that has a column and isn't `Copy`:
   /// `Try::branch(r)` takes it by value, so the `?` moves it (#652).
   /// Its column, which `Try` type it is, and `r`.
-  pub fn try_moved_place(&self, try_expr: &'tcx Expr<'tcx>) -> Option<(ResourceAccessPoint, TryMove, &'tcx Expr<'tcx>)> {
+  pub fn try_moved_place(&self, try_expr: &'tcx Expr<'tcx>) -> Option<(ResourceTy, TryMove, &'tcx Expr<'tcx>)> {
     fn is_place(e: &Expr) -> bool {
       match e.kind {
         ExprKind::Path(QPath::Resolved(None, p)) => matches!(p.res, Res::Local(_)),
@@ -1365,9 +1365,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         _ => false,
       }
     }
-    let ExprKind::Match(scrutinee, _, rustc_hir::MatchSource::TryDesugar(_)) = try_expr.kind else { return None };
-    let ExprKind::Call(_, [operand]) = scrutinee.kind else { return None };
-    if !is_place(operand) || operand.span.from_expansion() {
+    let operand = try_operand(try_expr)?;
+    if operand.span.from_expansion() {
       return None;
     }
     let typeck = self.tcx.typeck(operand.hir_id.owner);
@@ -1381,16 +1380,91 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if self.ty_is_copy(ty, operand.hir_id.owner) {
       return None;
     }
-    let ResourceTy::Value(rap) = get_rap(operand, &self.tcx, &self.raps) else { return None };
-    if rap.is_fn() {
-      return None;
-    }
-    let kind = match ty.ty_adt_def() {
+    let place = if is_place(operand) {
+      let ResourceTy::Value(rap) = get_rap(operand, &self.tcx, &self.raps) else { return None };
+      if rap.is_fn() { return None; }
+      ResourceTy::Value(rap)
+    } else {
+      self.try_deref_place(operand, false)?
+    };
+    Some((place, self.try_kind(ty), operand))
+  }
+
+  fn try_kind(&self, ty: Ty<'tcx>) -> TryMove {
+    match ty.ty_adt_def() {
       Some(adt) if self.tcx.is_diagnostic_item(rustc_span::sym::Result, adt.did()) => TryMove::Result,
       Some(adt) if self.tcx.is_diagnostic_item(rustc_span::sym::Option, adt.did()) => TryMove::Option,
       _ => TryMove::Other,
-    };
-    Some((rap, kind, operand))
+    }
+  }
+
+  /// A written dereference used by `?`. Moving requires an owned Box
+  /// at each dereference. Copying can also read through references.
+  fn try_deref_place(&self, operand: &'tcx Expr<'tcx>, copy: bool) -> Option<ResourceTy> {
+    let typeck = self.tcx.typeck(operand.hir_id.owner);
+    let mut base = operand;
+    let mut depth = 0;
+    while let ExprKind::Unary(UnOp::Deref, inner) = base.kind {
+      let ty = typeck.expr_ty(inner);
+      if !(ty.is_box() || copy && ty.is_ref()) {
+        return None;
+      }
+      base = inner;
+      depth += 1;
+    }
+    if depth == 0 || operand.span.from_expansion() {
+      return None;
+    }
+    let ResourceTy::Value(rap) = get_rap(base, &self.tcx, &self.raps) else { return None };
+    if rap.is_fn() { return None; }
+    if depth == 1 && typeck.expr_ty(base).is_box() {
+      return Some(ResourceTy::Deref(rap));
+    }
+    let place = format!("{}{}", "*".repeat(depth), rap.name());
+    Some(ResourceTy::DerefField(rap, place, PlaceWrite::Update,
+      self.field_holds(typeck.expr_ty(operand), operand.hir_id.owner)))
+  }
+
+  /// The receiver of a projected operand's `?` gets its output, not
+  /// the entire operand. Shared by the let/assignment, call and return paths.
+  pub fn match_projected_try(&mut self, lhs: &ResourceTy, rhs: &'tcx Expr<'tcx>) -> bool {
+    let Some(operand) = try_operand(rhs) else { return false };
+    let ty = self.tcx.typeck(operand.hir_id.owner).expr_ty(operand);
+    let line = expr_to_line(operand, &self.tcx);
+    if self.ty_is_copy(ty, operand.hir_id.owner) {
+      let Some(from) = self.try_deref_place(operand, true) else { return false };
+      if let Some(rap) = from.extract_rap() {
+        self.update_rap(rap, line);
+      }
+      if matches!(self.try_kind(ty), TryMove::Other) {
+        // An arbitrary Try implementation can transform its operand
+        // into a new output (for example, Poll changes its wrapper).
+        self.add_ev(line, Evt::Copy, ResourceTy::Anonymous, from, false);
+        self.add_ev(line, Evt::Bind, lhs.clone(), ResourceTy::Anonymous, false);
+        return true;
+      }
+      let mut copy = self.ext_ev_of_evt(Evt::Copy, lhs.clone(), from, *self.unique_id, true);
+      if let ExternalEvent::Copy { via_try, .. } = &mut copy {
+        *via_try = true;
+      }
+      self.add_external_event(line, copy);
+      *self.unique_id += 1;
+      if let ResourceTy::Value(rap) = lhs {
+        for borrow in self.pattern_ref_copy_borrow(rap, &Evt::Copy, operand) {
+          self.add_external_event(line, borrow);
+        }
+      }
+    } else {
+      let Some((from @ (ResourceTy::Deref(_) | ResourceTy::DerefField(..)), kind, _)) =
+        self.try_moved_place(rhs) else { return false };
+      if let Some(Some(id)) = self.try_moves.insert(rhs.hir_id, None) {
+        self.preprocessed_events.retain(|(_, e)| e.get_id() != id);
+      }
+      let prev = self.try_move.replace(kind);
+      self.add_ev(line, Evt::Move, lhs.clone(), from, false);
+      self.try_move = prev;
+    }
+    true
   }
 
   /// True iff `ty` is not `Copy` but has nothing to drop (no drop glue):
@@ -2255,7 +2329,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         *self.unique_id += 1;
         let to_anonymous = matches!(dest, ResourceTy::Anonymous);
         let ev = if is_copy {
-          ExternalEvent::Copy { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, break_alt: None, closure_value: false, into_ctor: None, pointee: None, of_const: None }
+          ExternalEvent::Copy { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, break_alt: None, closure_value: false, into_ctor: None, pointee: None, of_const: None, via_try: false }
         } else {
           ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: None, closure_value: false }
         };
@@ -2327,7 +2401,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       *self.unique_id += 1;
       let (from, to) = (ResourceTy::Value(child), ResourceTy::Value(dest));
       self.add_external_event(line_num, if is_copy {
-        ExternalEvent::Copy { from, to, id: ev_id, is_partial: false, into_closure: false, break_alt: None, closure_value: false, into_ctor: None, pointee: None, of_const: None }
+        ExternalEvent::Copy { from, to, id: ev_id, is_partial: false, into_closure: false, break_alt: None, closure_value: false, into_ctor: None, pointee: None, of_const: None, via_try: false }
       } else {
         ExternalEvent::Move { from, to, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: None, closure_value: false }
       });
@@ -2928,7 +3002,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           .filter(|(parent, _)| *parent == rhs)
           .map(|(_, part)| *part);
         let is_partial = is_partial && pointee.is_none();
-        ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial, into_closure: false, break_alt: None, closure_value: false, into_ctor: None, pointee, of_const: None }
+        ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial, into_closure: false, break_alt: None, closure_value: false, into_ctor: None, pointee, of_const: None, via_try: false }
       }
       Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: self.try_move, closure_value: false },
       Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None, of_ref_var: false },
@@ -6051,6 +6125,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       if let ResourceTy::Value(rap) = &to_ro {
         to_ro = ResourceTy::Value(rap.with_drops_arg());
       }
+    }
+    // Retargeting a constructor's argument into the surrounding binding
+    // would make that binding look like it holds the unwrapped payload.
+    if !arg_ty.is_ref() && !self.enclosing_ctor_name(arg).is_some_and(|name| name == fn_name)
+      && self.match_projected_try(&to_ro, arg) {
+      return;
     }
     // type-check the arg and add event accordingly
     if arg_ty.is_ref() {
@@ -10604,6 +10684,9 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       if let rustc_hir::MatchSource::TryDesugar(_) = source {
         match scrutinee.kind {
           ExprKind::Call(_, [operand]) => {
+            if self.match_projected_try(&lhs, rhs) {
+              return;
+            }
             // `let n = r?;` with `r` a non-`Copy` place: the `?` moves
             // `r`, and `n` gets the value inside it (#652). Drawn as a
             // move from `r` to `n`, in place of the move into the `?`
@@ -10801,7 +10884,7 @@ pub fn match_rhs_path(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
       *self.unique_id += 1;
       self.add_external_event(line_num, ExternalEvent::Copy {
         from: ResourceTy::Anonymous, to: lhs, id, is_partial: false, into_closure: false, break_alt: None,
-        closure_value: false, into_ctor: None, pointee: None, of_const: Some(name),
+        closure_value: false, into_ctor: None, pointee: None, of_const: Some(name), via_try: false,
       });
       return;
     }

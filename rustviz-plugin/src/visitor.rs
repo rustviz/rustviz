@@ -306,6 +306,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     };
 
     let to_ro = ResourceTy::Caller;
+    if self.match_projected_try(&to_ro, e) {
+      return;
+    }
     // `*r` with r a reference: a copy of the value r points to is
     // returned, not a reference (#670). (A `*r` that isn't Copy can only
     // be reborrowed, never moved out from behind r; that's left as is.)
@@ -2754,12 +2757,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   fn note_try(&mut self, try_expr: &'tcx Expr<'tcx>) {
     let line = span_end_line(&try_expr.span, &self.tcx);
     let moved = self.try_moved_place(try_expr);
-    if let Some((rap, kind, operand)) = &moved {
+    if let Some((place, kind, operand)) = &moved {
       if !self.try_moves.contains_key(&try_expr.hir_id) {
         let id = *self.unique_id;
         *self.unique_id += 1;
         self.add_external_event(span_to_line(&operand.span, &self.tcx), ExternalEvent::Move {
-          from: ResourceTy::Value(rap.clone()),
+          from: place.clone(),
           to: ResourceTy::Anonymous,
           is_partial: false,
           into_closure: false,
@@ -2812,7 +2815,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let t = tuples.pop().unwrap();
         self.drop_tuple_if_try_returns(&t, line);
       }
-      if moved.as_ref().is_some_and(|(r, _, _)| r.hash() == rap.hash()) {
+      // A move out through a Box leaves the Box itself to be cleaned up.
+      if moved.as_ref().is_some_and(|(place, _, _)| matches!(place, ResourceTy::Value(r) if r.hash() == rap.hash())) {
         continue;
       }
       // Nothing to drop if it returns early: no dot (#1137). (An exit's
@@ -4120,6 +4124,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         own = match e {
           ExternalEvent::Move { to, .. } | ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. }
             if is(to) => Own::Yes,
+          // `(*b)?` can empty the Box, but whatever remains still has to
+          // be cleaned up on scope exit.
+          ExternalEvent::Move { from: from @ (ResourceTy::Deref(_) | ResourceTy::DerefField(..)), via_try: Some(_), .. }
+            if is(from) && own != Own::No => Own::Maybe,
           ExternalEvent::Move { from, .. } if is(from) => Own::No,
           // An `FnOnce` closure's call moves it into the call (#271):
           // it holds nothing after (#1136).

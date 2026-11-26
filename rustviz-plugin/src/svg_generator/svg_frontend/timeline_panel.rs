@@ -1595,13 +1595,17 @@ fn render_branch_dots(
             // for "can't be used after the if / match".
             let by_cond = chain_condition_moved_here(branch_history)
                 .then_some(if matches!(ty, BranchType::Match(..)) { "match" } else { "if" });
+            let projected_try_move = branch_history.iter().filter(|b| !b.diverges)
+                .any(|b| projected_try_may_have_moved(&b.e_data, false));
             Some(if rap.is_split_scrutinee_temporary() {
                 // A scrutinee temporary an arm's pattern moved (part of)
                 // its value out of (#1386): its drop, on this dot or
                 // below, says what is dropped.
                 hover_messages::event_dot_branch_merge_temp_moved_out(&is.real_name())
-            } else if rap.box_contents_moved() && moves_only_box_contents(branch_history) {
+            } else if (rap.box_contents_moved() || projected_try_move) && moves_only_box_contents(branch_history) {
                 hover_messages::event_dot_branch_merge_box_contents_moved(&is.real_name(), rap.is_mut())
+            } else if projected_try_move {
+                format!("{} or some of its contents may have been moved above.", hover_messages::styled_name_html(&is.real_name()))
             } else if let Some(kw) = by_cond.filter(|_| chain_condition_assigned_here(branch_history)) {
                 // It may have been given a new value when it held none
                 // (#603): no "if nothing above moved it".
@@ -2017,7 +2021,8 @@ fn render_scope_end_dot(
             };
             append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
             return true;
-        } else if mixed_box_paths(ro, history) {
+        } else if mixed_box_paths(ro, history)
+            || projected_try_may_have_moved(exit_path.as_deref().unwrap_or(history), false) {
             // A Box whose contents were moved out, given a new Box
             // or moved away whole on some paths only (#1220): what is
             // dropped here depends on the path.
@@ -2027,7 +2032,11 @@ fn render_scope_end_dot(
                 hash: *hash as u64,
                 dot_x: cx,
                 dot_y: cy,
-                title: hover_messages::event_dot_box_paths_go_out_of_scope(&name),
+                title: if projected_try_may_have_moved(exit_path.as_deref().unwrap_or(history), false) {
+                    hover_messages::event_dot_projected_try_box_drop(&name, false)
+                } else {
+                    hover_messages::event_dot_box_paths_go_out_of_scope(&name)
+                },
                 p1x: cx - 3, p1y: cy - 1,
                 p2x: cx + 3, p2y: cy - 1,
                 p3x: cx,     p3y: cy + 3,
@@ -2554,6 +2563,11 @@ fn render_dot(
                         let scope_end = hover_messages::event_dot_struct_partial_go_out_of_scope(&name, &split.moved, &split.maybe_moved, &split.dropped, false, split.by_cond, false, boxed);
                         hover_messages::event_dot_owner_drop_if_try_returns_partial(&name, &scope_end)
                     } else if matches!(event, Event::OwnerDropIfTryReturns)
+                        && (history.iter().any(|(l, e)| *l == *line_number && e.is_projected_try_move())
+                            || history_path(&visualization_data.timelines[hash].history, history, i)
+                                .is_some_and(|path| projected_try_may_have_moved(&path, false))) {
+                        hover_messages::event_dot_projected_try_box_drop(&name, true)
+                    } else if matches!(event, Event::OwnerDropIfTryReturns)
                         && visualization_data.timelines[hash].resource_access_point.box_contents_moved() {
                         hover_messages::event_dot_box_drop_if_try_returns(&name)
                     } else if let (Event::OwnerDropIfTryReturns, Some(InitJoin::Maybe { moved })) = (event,
@@ -2674,7 +2688,7 @@ fn render_dot(
                             // value, if it ever is, #874.)
                             CopyOf::IntoCtor(_) | CopyOf::Pointee { .. } => hover_messages::event_dot_copyable_assign(&name),
                             _ if from.extract_rap().is_some_and(|f| f.is_fn()) => hover_messages::event_dot_copyable_assign(&name),
-                            CopyOf::Inside => hover_messages::event_dot_copyable_assign_copy_inside(&name, &from.name()),
+                            CopyOf::Inside | CopyOf::TryOutput => hover_messages::event_dot_copyable_assign_copy_inside(&name, &from.name()),
                             CopyOf::Const(c) => hover_messages::event_dot_assign_copy_of_const(&name, c),
                             CopyOf::Whole => hover_messages::event_dot_copyable_assign_copy(&name, &from.name()),
                         };
@@ -2831,10 +2845,15 @@ fn analyze_branch_for_join(events: &[(usize, Event)], holder: bool) -> (bool, bo
             Event::Move { .. } | Event::LoopExitMove { .. } | Event::OrAltMove { tuple: None, .. } | Event::ClosureCall { .. } => { moved = true; acquired = false; }
             // (A copy in, `Ok(num) => num` with num an i32, gives it
             // its value too, #994.)
-            Event::Acquire { .. } | Event::Copy { .. } | Event::LoopExitKept { .. } => { moved = false; acquired = true; }
+            // A write through the column's place (`*b`, `r.field`,
+            // `v[i]`) leaves the binding itself in place.
+            Event::Acquire { is: ResourceTy::Value(_), .. }
+            | Event::Copy { is: ResourceTy::Value(_), .. }
+            | Event::LoopExitKept { .. } => { moved = false; acquired = true; }
             // A value that holds a borrow gets its value by the borrow
             // (`let t = if c { Some(&s) } else { None };`, #1435).
-            Event::StaticBorrow { .. } | Event::MutableBorrow { .. } if holder => { moved = false; acquired = true; }
+            Event::StaticBorrow { is: ResourceTy::Value(_), .. }
+            | Event::MutableBorrow { is: ResourceTy::Value(_), .. } if holder => { moved = false; acquired = true; }
             Event::Branch { branch_history, ty, .. } => {
                 let mut nested_any_moved = false;
                 let mut nested_all_acquired = branch_history.iter().any(|nb| !nb.diverges);
@@ -3676,6 +3695,27 @@ fn box_contents_moved_last(history: &[(usize, Event)]) -> Option<bool> {
     None
 }
 
+/// A move through one or more Boxes into `?` can leave cleanup for the
+/// Box while taking its payload. Across a join only claim that this
+/// might have happened.
+fn projected_try_may_have_moved(history: &[(usize, Event)], mut moved: bool) -> bool {
+    for (_, event) in history {
+        match event {
+            e if e.is_projected_try_move() => moved = true,
+            Event::Acquire { is: ResourceTy::Value(_), .. }
+            | Event::Copy { is: ResourceTy::Value(_), .. }
+            | Event::Move { is: ResourceTy::Value(_), .. } => moved = false,
+            Event::Branch { branch_history, ty, .. } => {
+                moved = (moved && !all_paths_present(ty, branch_history.len()))
+                    || branch_history.iter().filter(|b| !b.diverges)
+                        .any(|b| projected_try_may_have_moved(&b.e_data, moved));
+            }
+            _ => {}
+        }
+    }
+    moved
+}
+
 // An empty Box on one path and a replaced or moved Box on another
 // require a conditional drop description (#1220).
 fn mixed_box_paths(ro: &ResourceAccessPoint, history: &[(usize, Event)]) -> bool {
@@ -3718,6 +3758,7 @@ fn moves_only_box_contents_impl(branch_history: &[BranchData]) -> bool {
         for (_, e) in events {
             match e {
                 Event::Move { is: ResourceTy::Deref(_), .. } => any = true,
+                e if e.is_projected_try_move() => any = true,
                 // A let-chain's condition that moved `*e` before it
                 // failed (`&& { let w = *e; … }`, #940): the path into
                 // the else branch.
@@ -7287,6 +7328,10 @@ fn render_return_to_caller_arrow(line_number: &usize, external_event: &ExternalE
             _ => { let v = rap.holds_value(); Box::new(move |name: &String| hover_messages::event_dot_move_to_caller(name, v)) }
         };
         let title = match external_event {
+            ExternalEvent::Move { from: ResourceTy::Deref(_) | ResourceTy::DerefField(..), via_try: Some(_), .. } =>
+                format!("Value from the `?` on {} to the caller", hover_messages::styled_name_html(&from.name())),
+            ExternalEvent::Copy { via_try: true, .. } =>
+                format!("Copy of a value inside {} to the caller", hover_messages::styled_name_html(&from.name())),
             // `&self.s` returned: a reborrow through `self` (#784).
             ExternalEvent::Copy { from: ResourceTy::DerefField(r, place, _, _), .. } if place.starts_with('&') =>
                 hover_messages::event_dot_reborrow_to_caller(r.name(), place),

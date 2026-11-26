@@ -1158,7 +1158,9 @@ pub fn events_move_out_of_outer(
         // A move out of `*b` can only take a Box's contents (a
         // reference's referent can't be moved out of): `b` keeps its
         // allocation, but no longer owns the contents (#905).
-        ExternalEvent::Move { from: ResourceTy::Deref(rap), .. } => !decls.contains(rap),
+        ExternalEvent::Move { from: ResourceTy::Deref(rap), .. }
+        | ExternalEvent::Move { from: ResourceTy::DerefField(rap, ..), via_try: Some(_), .. } =>
+            !decls.contains(rap),
         // An element a slice pattern moves out of an array that keeps
         // the rest (`if let [Some(a), _] = arr`, #1285).
         ExternalEvent::Move { from: ResourceTy::Index(rap, place, _), .. } if !place.starts_with('*') && rap.elems_left().is_some() =>

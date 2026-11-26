@@ -152,6 +152,15 @@ pub fn event_dot_box_drop_if_try_returns(my_name: &str) -> String {
     format!("If the `?` here returns early, whatever {} still holds (if anything) is dropped here.", styled_name_html(my_name))
 }
 
+pub fn event_dot_projected_try_box_drop(my_name: &str, early: bool) -> String {
+    let name = styled_name_html(my_name);
+    if early {
+        format!("If the `?` here returns early, Rust cleans up what's left of {name} and drops any contents still there.")
+    } else {
+        format!("{name} goes out of scope. Rust cleans up what's left of the Box and drops any contents still there.")
+    }
+}
+
 // A struct whose fields were partly moved out goes out of scope. Rust
 // drops only the fields that still hold a value (`dropped`); the
 // moved-out ones (`moved`) are already gone, and the struct as a whole
@@ -1054,6 +1063,7 @@ pub fn event_dot_move_into_try(my_name: &String, target: Option<&String>, kind: 
     let name = styled_name_html(my_name);
     let gets = match target {
         Some(t) => format!("{} gets the value inside it", styled_name_html(t)),
+        None if my_name.starts_with('*') => format!("the `?` on {name} gives the value inside it"),
         None => format!("`{}?` gives the value inside it", my_name),
     };
     let what = if value { "value" } else { "resource" };
@@ -5918,6 +5928,13 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
     } else {
         format!("{} to {}", title, styled_to_string)
     };
+    if matches!(from, ResourceTy::Deref(_) | ResourceTy::DerefField(..))
+        && matches!(external_event, ExternalEvent::Move { via_try: Some(_), .. }) {
+        title = format!("Value from the `?` on {styled_from_string} to {styled_to_string}");
+    }
+    if matches!(external_event, ExternalEvent::Copy { via_try: true, .. }) {
+        title = format!("Copy of a value inside {styled_from_string} to {styled_to_string}");
+    }
     // `for w in words`: the arrow into the loop variable moves one
     // element out of the collection, not the collection (#850).
     if let ExternalEvent::Move { loop_head: LoopHead::Collection, .. } = external_event {
