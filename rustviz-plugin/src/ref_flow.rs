@@ -501,19 +501,42 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // returned (#682).
     let mut out: Vec<ResourceTy> = Vec::new();
     let mut is_mut = false;
-    for k in self.receiver_kept_loans(call) {
-      let Some(rd) = self.raps.get(&k.lender) else { continue };
+    let kept = self.receiver_kept_loans(call);
+    // One kind is drawn for every lender of a store: with loans of both
+    // kinds each is drawn as its whole variable, as before; otherwise a
+    // field borrowed alone is drawn as that field (`v.extend([&p.0])`
+    // borrows p.0, not p.1, #1632).
+    let one_kind = kept.iter().all(|k| k.is_mut == kept[0].is_mut);
+    for k in kept.iter() {
+      let rap = if one_kind { self.kept_lender_rap(k) } else { self.raps.get(&k.lender).map(|rd| rd.rap.to_owned()) };
+      let Some(rap) = rap else { continue };
       // A reborrow through a reference variable (`[&*r]`) isn't drawn.
-      if rd.rap.is_fn() || rd.rap.is_ref() || k.through_ref {
+      if rap.is_fn() || rap.is_ref() || k.through_ref {
         continue;
       }
-      let l = ResourceTy::Value(rd.rap.to_owned());
+      let l = ResourceTy::Value(rap);
       if !out.contains(&l) {
         out.push(l);
       }
       is_mut |= k.is_mut;
     }
     (out, is_mut)
+  }
+
+  /// The column a loan a store left in its receiver is drawn from: the
+  /// field it borrows, when that field has a column of its own and isn't
+  /// itself a reference, else the variable.
+  fn kept_lender_rap(&self, k: &crate::mir_data::KeptLoan) -> Option<ResourceAccessPoint> {
+    let mut place = k.lender_place.as_str();
+    loop {
+      if let Some(rd) = self.raps.get(place).filter(|rd| place.len() <= k.lender.len() || !rd.rap.is_ref()) {
+        return Some(rd.rap.to_owned());
+      }
+      if place.len() <= k.lender.len() {
+        return None;
+      }
+      place = &place[..place.rfind('.')?];
+    }
   }
 
   /// The loans a `&mut self` method call leaves in its receiver

@@ -28047,6 +28047,34 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &["nothing happens to outer here", "nothing happens to keep here", "nothing happens to late here", "nothing happens to carried here", "the function returns and"],
     },
+    TooltipExpect {
+        name: "extend_field_loan_1632",
+        // #1632: `v.extend([&p.0])` (a store through a trait bound, read
+        // from rustc's facts) borrows p.0, not p: p.1 stays usable, as with
+        // `v.push(&p.0)`. Main drew the loan from p and every field. A
+        // store whose loans are of both kinds, or a field inside an
+        // element, keeps the whole-variable drawing.
+        must_contain: &[
+            "Immutable borrow from p.0 to v, stored in v by extend; v isn't a reference, but its value now holds one",
+            "Immutable borrow from q.a to w, stored in w by extend; w isn't a reference, but its value now holds one",
+            "Mutable borrow from t.0 to u, stored in u by extend; u isn't a reference, but its value now holds one",
+            "Immutable borrow from d.0.1 to x, stored in x by extend; x isn't a reference, but its value now holds one",
+            "t.0's value is mutably borrowed by u; t.0 can't be used until the borrow ends",
+        ],
+        must_not_contain: &[
+            "Immutable borrow from p to v",
+            "Immutable borrow from q to w",
+            "Mutable borrow from t to u",
+            "Immutable borrow from d to x",
+            "p.1 is immutably borrowed",
+            "q.b is immutably borrowed",
+            "t.1 is mutably borrowed",
+            "d.1 is immutably borrowed",
+            "Mutable borrow from e.0",
+            "Immutable borrow from e.1",
+            "Mutable borrow from p2.0 to z",
+        ],
+    },
 ];
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws

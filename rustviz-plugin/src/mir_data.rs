@@ -64,6 +64,11 @@ pub struct KeptLoan {
     /// RAP name of the variable borrowed; with `through_ref`, the
     /// reference variable whose referent (`*r`) is reborrowed.
     pub lender: String,
+    /// The place borrowed, as a RAP name: `lender` with the struct and
+    /// tuple fields the borrow is of (`p.0` for `&p.0`, #1632); `lender`
+    /// itself when it borrows the whole variable, goes through a
+    /// reference, or reaches into an element (`&p.0[0].0`).
+    pub lender_place: String,
     pub through_ref: bool,
     pub is_mut: bool,
     /// Last line the loan is live on (`MIRBorrowData::region.1`).
@@ -944,10 +949,16 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                     if res.iter().any(|k| k.loan == loan.index() && k.holder == *holder) {
                         continue;
                     }
+                    // (Only a place that is all fields: `&p.0[0].0` is lent as p.)
+                    let lender_place = match self.field_path_name(lender, body.local_decls[place.local].ty, place.projection) {
+                        (path, steps) if !through_ref && steps == place.projection.len() => path,
+                        _ => lender.clone(),
+                    };
                     res.push(KeptLoan {
                         loan: loan.index(),
                         holder: holder.clone(),
                         lender: lender.clone(),
+                        lender_place,
                         through_ref,
                         is_mut: matches!(data.kind(), BorrowKind::Mut { .. }),
                         end_line: ends.get(&loan.index()).copied().unwrap_or_else(|| self.location_to_line(*issued, bwf)),
@@ -1470,23 +1481,35 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let names = self.mir_local_names(self.bwf);
         let mut out = Vec::new();
         for (mpi, path) in move_data.move_paths.iter_enumerated() {
-            let Some(mut name) = names.get(&path.place.local).cloned() else { continue };
-            let mut ty = body.local_decls[path.place.local].ty;
-            let mut is_field_path = true;
-            for elem in path.place.projection {
-                let ProjectionElem::Field(f, fty) = elem else { is_field_path = false; break };
-                match ty.kind() {
-                    TyKind::Adt(def, _) if def.is_struct() => name = format!("{}.{}", name, def.non_enum_variant().fields[f].name),
-                    TyKind::Tuple(_) => name = format!("{}.{}", name, f.index()),
-                    _ => { is_field_path = false; break }
-                }
-                ty = fty;
-            }
-            if is_field_path {
-                out.push((mpi, name));
+            let Some(name) = names.get(&path.place.local) else { continue };
+            let ty = body.local_decls[path.place.local].ty;
+            let (full, steps) = self.field_path_name(name, ty, path.place.projection);
+            if steps == path.place.projection.len() {
+                out.push((mpi, full));
             }
         }
         out
+    }
+
+    /// `name` (a local of type `ty`) followed by the struct and tuple
+    /// fields that lead `projection` (`p.0`, `s.a.b`), stopping at the
+    /// first other step (a deref, an index, an enum's field), and how
+    /// many steps it took.
+    fn field_path_name(&self, name: &str, ty: Ty<'tcx>, projection: &[PlaceElem<'tcx>]) -> (String, usize) {
+        let mut name = name.to_owned();
+        let mut ty = ty;
+        let mut steps = 0;
+        for elem in projection {
+            let ProjectionElem::Field(f, fty) = elem else { break };
+            match ty.kind() {
+                TyKind::Adt(def, _) if def.is_struct() => name = format!("{}.{}", name, def.non_enum_variant().fields[*f].name),
+                TyKind::Tuple(_) => name = format!("{}.{}", name, f.index()),
+                _ => break,
+            }
+            ty = *fty;
+            steps += 1;
+        }
+        (name, steps)
     }
 
     /// Whether a loan issued inside `within` (a closure literal passed
