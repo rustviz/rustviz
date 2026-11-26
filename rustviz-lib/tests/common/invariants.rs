@@ -54,8 +54,9 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // A one-line conditional's arms spread over rows inserted under its
     // line: the arm's leg is 12-17 degrees off level, and the row added
     // below an arrow left on a solid leg (#1560's rule) gives it no clean
-    // track there (assign_branch_ref_arms_1393); arm_binding_value_1327
-    // keeps main's drawing (its layout is past #1605's render-time cap).
+    // track there (assign_branch_ref_arms_1393); arm_binding_value_1327's
+    // layout is too big for a pass adding rows within #1605's render-time
+    // budget.
     ("arm_binding_value_1327", "arrow-along-leg", 1489),
     ("assign_branch_ref_arms_1393", "arrow-along-leg", 1489),
     // Fans that keep main's drawing (one head still along the column
@@ -65,10 +66,8 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // fan_into_one_dot_1542 only `longest_copied` (no side free without a
     // new crossing; the other function's fan gets the rule). Or the
     // drawing that clears it needs more layout work than #1605's
-    // render-time budget allows (branch_holder_lenders_1404,
-    // field_lenders_1354, let_else_holder_return_1458,
-    // tuple_scrutinee_nested).
-    ("branch_holder_lenders_1404", "arrow-along-leg", 1542),
+    // render-time budget allows (field_lenders_1354,
+    // let_else_holder_return_1458, tuple_scrutinee_nested).
     ("cond_holder_local_ref_1475", "arrow-along-leg", 1542),
     ("cond_holder_moved_1464", "arrow-along-leg", 1542),
     ("fan_into_one_dot_1542", "arrow-along-leg", 1542),

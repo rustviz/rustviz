@@ -2347,10 +2347,11 @@ pub fn render_svg(
     let mut best: Option<(usize, usize, usize, (String, String, i32), usize)> = None;
     timeline_panel::reset_work();
     for pass in 0..3 {
-        // (The passes adding rows give up past the figure's layout budget,
-        // `timeline_panel::rows_pass_cap`, and are dropped: a figure
-        // mustn't render much slower than on main, #1605's review.)
-        if pass == 1 {
+        // (The passes adding rows stop searching at the figure's layout
+        // budget, `timeline_panel::rows_pass_cap`, and are judged as they
+        // stand: a figure mustn't render much slower than on main, #1605's
+        // review.)
+        if pass > 0 {
             let cap = timeline_panel::rows_pass_cap();
             if timeline_panel::work_done() >= cap {
                 break;
@@ -2361,7 +2362,7 @@ pub fn render_svg(
         let (out, left, rows) = render_pass(annotated_src_str, source_rs_str, &mut vd, &extra);
         // (Nor where a pass ends up with main's drawing, #1542's fallback,
         // which wants no rows.)
-        if pass > 0 && (timeline_panel::take_over() || left.main_drawing) {
+        if pass > 0 && left.main_drawing {
             break;
         }
         // (Fewer arrows on legs or columns, and no more other marks.)

@@ -8433,9 +8433,11 @@ fn render_arrows_string_external_events_version(
     // functions where the rule's is worse, else the figure keeps main's
     // drawing (the maintainer's ruling on #1605).
     // Render time (#1605's review: no figure much slower than on main):
-    // the first layout gives up past `RULE_LAYOUT_WORK`, and the figure is
-    // drawn as main's router draws it; the other tries run only within
-    // the figure's budget (`figure_budget`).
+    // the first layout gives up past `RULE_LAYOUT_WORK` while its drawing
+    // would need comparing with main's (a second whole layout of a big
+    // figure costs seconds), and the figure is drawn as main's router draws
+    // it; the other tries run only within the figure's budget
+    // (`figure_budget`).
     let start = work_done();
     let fan_old: BTreeSet<(i64, i64)> = BTreeSet::new();
     let mut fan_variant: BTreeMap<(i64, i64), usize> = BTreeMap::new();
@@ -8467,20 +8469,19 @@ fn render_arrows_string_external_events_version(
         drawn = legacy_layout(dots);
         main_work = work_done() - w;
         main_drawing = true;
-    } else if all_fan_crossings(&drawn) > 0 || !heads_on_heads(&drawn, false).is_empty()
-        || !through_corners(&drawn, &dots.corners, &dots.lanes.ends).is_empty() {
+    } else if !over_budget() && needs_compare(&drawn, dots, first <= RULE_LAYOUT_WORK) {
         // No fan may cross other arrows more than it does in main's
-        // drawing (the maintainer's ruling on #1605): where a fan's arrows
-        // cross any, two heads lie on each other, or a track runs through
-        // a leg's joint (`through_corners`), the arrows are also laid out
-        // as main's router did (`legacy`) and compared.
+        // drawing (the maintainer's ruling on #1605): where the drawing
+        // needs it (`needs_compare`), the arrows are also laid out as
+        // main's router did (`legacy`) and compared.
         let kept = dots.lanes.clone();
         let w = work_done();
         let old = legacy_layout(dots);
         main_work = work_done() - w;
         let old_lanes = std::mem::replace(&mut dots.lanes, kept);
         let (corner_xy, ends) = (dots.corners.clone(), dots.lanes.ends.clone());
-        let corners = |d: &[Drawn]| through_corners(d, &corner_xy, &ends).len();
+        let rows_added = dots.rows_added;
+        let corners = |d: &[Drawn]| if rows_added { 0 } else { through_corners(d, &corner_xy, &ends).len() };
         let worse_fans = |d: &[Drawn]| fan_dots(d).into_iter().filter(|&c| fan_crossings_at(d, c) > fan_crossings_at(&old, c)).collect::<Vec<_>>();
         let worse = |d: &[Drawn]| !worse_fans(d).is_empty()
             || heads_on_heads(d, false).len() > heads_on_heads(&old, false).len()
@@ -8527,7 +8528,7 @@ fn render_arrows_string_external_events_version(
                 let bad_bands = |d: &[Drawn]| {
                     let mut bad: BTreeSet<usize> = worse_fans(d).into_iter().map(|c| band(c.1)).collect();
                     for (now, was) in [(heads_on_heads(d, false), heads_on_heads(&old, false)),
-                                       (through_corners(d, &corner_xy, &ends), through_corners(&old, &corner_xy, &ends))] {
+                                       if rows_added { (Vec::new(), Vec::new()) } else { (through_corners(d, &corner_xy, &ends), through_corners(&old, &corner_xy, &ends)) }] {
                         let was = per_band(&old, was);
                         bad.extend(per_band(d, now).into_iter().filter(|&(b, n)| n > was.get(&b).copied().unwrap_or(0)).map(|(b, _)| b));
                     }
@@ -8587,26 +8588,54 @@ thread_local! {
     static WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Where a layout gives up (`over_cap`): past the first, any layout
     /// (`set_cap`, a pass of `render_svg` adding rows); past the second, a
-    /// layout other than main's router's (`set_rule_cap`).
+    /// layout other than main's router's whose drawing needs comparing
+    /// with main's (`set_rule_cap`, `COMPARE`).
     static CAP: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((usize::MAX, usize::MAX)) };
     /// Whether a layout went past each cap.
     static OVER: std::cell::Cell<(bool, bool)> = const { std::cell::Cell::new((false, false)) };
     /// What main's router would spend on the figure's arrows (its first
     /// pass's `main_work`, `render_arrows_string_external_events_version`).
     static MAIN_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Whether the drawing the layout under way has reached would have to
+    /// be compared with main's (`needs_compare`, `note_compare`).
+    static COMPARE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Whether one of the layout's searches has ended on a drawing that
+    /// needs no comparison (`untangle`): `COMPARE` stays off then.
+    static CLEAN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// A first layout of a figure's arrows that does more probe work than this
-/// (about a quarter of a second) gives up, and the figure is drawn as
+/// Whether a drawing must be compared with main's before it is kept: a
+/// fan's arrows cross others or two heads lie on each other; or, where the
+/// comparison costs little (`joints`), on the first pass (not one adding
+/// rows, whose tracks below the forks main's drawing hasn't got) a track
+/// runs through a leg's joint (`through_corners`), which main's drawing
+/// mostly has too.
+fn needs_compare(drawn: &[Drawn], dots: &DotLayer, joints: bool) -> bool {
+    all_fan_crossings(drawn) > 0 || !heads_on_heads(drawn, false).is_empty()
+        || (joints && !dots.rows_added && !through_corners(drawn, &dots.corners, &dots.lanes.ends).is_empty())
+}
+
+/// Notes whether the drawing a layout other than main's router's has
+/// reached needs comparing with main's (`COMPARE`): past
+/// `RULE_LAYOUT_WORK`, such a layout gives up (`over_cap`).
+fn note_compare(drawn: &[Drawn], dots: &DotLayer) {
+    if !dots.legacy && !CLEAN.with(|c| c.get()) {
+        COMPARE.with(|c| c.set(needs_compare(drawn, dots, false)));
+    }
+}
+
+/// A first layout of a figure's arrows that has done more probe work than
+/// this (about a quarter of a second) gives up while its drawing would
+/// need comparing with main's (`COMPARE`), and the figure is drawn as
 /// main's router draws it (`render_arrows_string_external_events_version`):
-/// comparing a big figure's drawing with main's would take a second whole
-/// layout, seconds on the playground, which renders on every request
-/// (#1605's review).
+/// the comparison takes a second whole layout, seconds for a big figure on
+/// the playground, which renders on every request (#1605's review).
 const RULE_LAYOUT_WORK: usize = 12_000;
 
 /// About the time `rustc` takes to check a small program, as probe work
-/// (some 0.05 s): a figure's render costs that much besides its layouts.
-const RUSTC_WORK: usize = 2_000;
+/// (some 0.1 s, at 20-25 us a unit): a figure's render costs that much
+/// besides its layouts.
+const RUSTC_WORK: usize = 4_000;
 
 /// The most layout work a figure may do in all (its passes and tries),
 /// given what main's router spends on it (`main`): half again as long
@@ -8616,10 +8645,17 @@ fn figure_budget(main: usize) -> usize {
 }
 
 /// The cap on the layout work of a pass of `render_svg` adding rows: the
-/// figure's budget (`figure_budget`), as its first pass measured it.
+/// figure's budget (`figure_budget`), as its first pass measured it; none
+/// at all (0) for a figure whose first pass did more than `ROWS_PASS_WORK`
+/// (its own layout may already cost more than main's router's).
 pub fn rows_pass_cap() -> usize {
-    figure_budget(MAIN_WORK.with(|w| w.get()))
+    let main = MAIN_WORK.with(|w| w.get());
+    if main > ROWS_PASS_WORK { 0 } else { figure_budget(main) }
 }
+
+/// A figure whose first pass's layouts did more probe work than this
+/// (about 0.7 s) gets no pass adding rows (`rows_pass_cap`).
+const ROWS_PASS_WORK: usize = 30_000;
 
 /// Starts counting the layout work of a figure afresh.
 pub fn reset_work() {
@@ -8639,14 +8675,17 @@ pub fn set_cap(cap: Option<usize>) {
     CAP.with(|c| c.set((cap.unwrap_or(usize::MAX), c.get().1)));
 }
 
-/// A layout other than main's router's gives up past this much work.
+/// A layout other than main's router's gives up past this much work, if its
+/// drawing needs comparing with main's then.
 fn set_rule_cap(cap: Option<usize>) {
     CAP.with(|c| c.set((c.get().0, cap.unwrap_or(usize::MAX))));
 }
 
-/// Whether a layout went past `set_cap`'s cap since the last call.
-pub fn take_over() -> bool {
-    OVER.with(|o| { let v = o.get(); o.set((false, v.1)); v.0 })
+/// Whether a layout of this figure went past `set_cap`'s cap: its
+/// search stopped, and no other layout (main's, to compare) can be made
+/// in full.
+fn over_budget() -> bool {
+    OVER.with(|o| o.get().0)
 }
 
 /// Whether a layout went past `set_rule_cap`'s cap since the last call.
@@ -8661,7 +8700,7 @@ fn over_cap(dots: &DotLayer) -> bool {
     OVER.with(|o| {
         let mut v = o.get();
         v.0 |= w > all;
-        v.1 |= w > rule && !dots.legacy;
+        v.1 |= w > rule && !dots.legacy && COMPARE.with(|c| c.get());
         o.set(v);
         v.0 || v.1
     })
@@ -8687,6 +8726,8 @@ fn lay_out_arrows(
         recording: true, deep: dots.rows_added, fan_rule_off, fan_old: fan_old.clone(), fan_variant: fan_variant.clone(),
         ..Default::default()
     };
+    COMPARE.with(|c| c.set(false));
+    CLEAN.with(|c| c.set(false));
     render_all_arrows(&mut scratch, visualization_data, resource_owners_layout, dots, registry);
     let positions = dots.positions.clone();
     let legs: Vec<Piece> = dots.legs.iter().chain(&dots.dashed_legs).copied().collect();
@@ -8847,6 +8888,12 @@ fn untangle(
         untangle_search(visualization_data, resource_owners_layout, dots, registry);
         dots.lanes.probe_hops = true;
         let drawn = probe_arrows(visualization_data, resource_owners_layout, dots, registry);
+        // (A search that ended on a drawing needing no comparison with
+        // main's: the layout doesn't give up for the next one's start.)
+        if !dots.legacy && !needs_compare(&drawn, dots, false) {
+            COMPARE.with(|c| c.set(false));
+            CLEAN.with(|c| c.set(true));
+        }
         // (On a tie, the one with fewer heads along a column, #1488.)
         let c = untangle_cost(&drawn, dots);
         results.push(((c.0, c.1, on_cols(&drawn, &dots.cols).len()), dots.lanes.settings()));
@@ -8864,6 +8911,7 @@ fn untangle_search(
     registry: &Handlebars
 ) {
     let mut drawn = probe_arrows(visualization_data, resource_owners_layout, dots, registry);
+    note_compare(&drawn, dots);
     let tangled = !defects(&drawn, dots).is_empty();
     if !tangled && on_cols(&drawn, &dots.cols).is_empty() {
         return;
@@ -8958,6 +9006,7 @@ fn untangle_search(
             dots.lanes.set(s);
             cost = c;
             drawn = d;
+            note_compare(&drawn, dots);
             if budget == 0 || defects(&drawn, dots).is_empty() {
                 break;
             }
@@ -9050,6 +9099,7 @@ fn untangle_search(
             now_cost = cc;
             cost = untangle_cost(&d, dots);
             drawn = d;
+            note_compare(&drawn, dots);
         }
     }
 }
