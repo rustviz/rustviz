@@ -1,8 +1,9 @@
 issue = 1673
+xfail = "P1"
 cluster = "C14"
 title = "`let x = *b;` moves the whole contents out of a Box: b can't be used afterwards"
 places = ["b.a", "b.b"]
-note = "Gap: place naming through the Box: moving `*b` out reads as a partial move of b (state partly), no b.a / b.b columns"
+note = "Gap (rv3-p0): after a move out of a Box's contents (`let x = *b;`) the state table says `moved` for b; the Box allocation is still owned until scope end, so it is `partly` (rustc: E0382 with the note: move occurs because `*b`). Gap: place naming through the Box: moving `*b` out reads as a partial move of b (state partly), no b.a / b.b columns"
 beyond_facts = "P3: b's line says 'b is the owner of the resource' after the move"
 
 [[state]]

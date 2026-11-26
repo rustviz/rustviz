@@ -1,8 +1,6 @@
 issue = 1632
 cluster = "C17"
 title = "`v.extend([&p.0])`: only p.0 is lent (to v); the disjoint p.1 stays usable"
-xfail = "P1"
-note = "Gap: the loan facts are right (p.0, to v, ends 6); the dump has no per-field state columns for p.0 / p.1, so the field states (oracle and hand) fail."
 places = ["p.0", "p.1"]
 beyond_facts = "P3: arrow text 'from p to v' and p.1's 'read-only' line"
 

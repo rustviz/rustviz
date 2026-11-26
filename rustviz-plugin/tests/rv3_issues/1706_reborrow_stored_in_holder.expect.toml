@@ -2,8 +2,6 @@ issue = 1706
 cluster = "C40"
 title = "\"r can't be used until keep returns\" when keep stores the reborrow in an output argument"
 places = ["*r"]
-xfail = "P0"
-note = "Gap (spike): the reborrow `&mut *r` passed to `keep` is a plain mutable reborrow, but the dump calls it `mut(two-phase)` with no activation row, so r (rustc: `&mut r` conflicts after row 7, state mut) reads as own Also: the dump gives the reborrow `&mut *r` passed to `keep` no activation row, so r (rustc: `&mut r` conflicts after row 7, state mut) reads as own"
 beyond_facts = "P4: the call dot's 'until keep returns' suffix is presentation; the fact is the row where the reborrow ends"
 
 [[loan]]

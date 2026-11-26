@@ -2,8 +2,6 @@ issue = 1767
 cluster = "C29"
 title = "One-line let-else drawn as a branch: k's dots before and after the let-else stay on the row; its arrow to y slants to the join"
 fn = "local_before"
-xfail = "P0"
-note = "The `return` path's drop of s is not on row 3 in the spike (early-exit drop rows)."
 beyond_facts = "P3: renderer-level, to be checked visually: the column's state segments split at the join; here the order of the line's events is pinned"
 
 [[order]]

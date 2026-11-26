@@ -2,8 +2,6 @@ issue = 1751
 cluster = "C08"
 title = "Reference moved in one arm and read in the other: r20's moved-out stretch after the if starts with no join dot"
 fn = "repointed_then_moved"
-xfail = "P4"
-note = "Harness limitation, not a fact gap: the dump's row 12 (the else's closing `}`) is the join (a20 and r20 `maybe`, moved on the then path), but the round-2 `reaches` counts row 12 as inside the else arm, so the then arm's moves don't reach it. Remove the xfail when the harness reads a closing-brace row's state as the join"
 beyond_facts = "P3: the join dot saying r20 was moved in at least one branch is renderer-level; the state underneath is pinned here"
 
 [[state]]

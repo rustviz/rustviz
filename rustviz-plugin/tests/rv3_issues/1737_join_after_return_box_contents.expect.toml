@@ -4,7 +4,7 @@ title = "Join after an arm that moved only *b and returned: the Box itself was n
 fn = "f5"
 places = ["*b"]
 beyond_facts = "P3: the join text says 'the branch that moved b returned before reaching this point'"
-xfail = "P0"
+xfail = "P1"
 note = "Gap (expected): no state for the place `*b`."
 
 [[state]]

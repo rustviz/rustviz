@@ -47,6 +47,8 @@ states = [
   "main 5 h own",
   "main 5 h.r own",
   "main 6 f own",
+  "main 6 h mut",
+  "main 6 h.r mut",
   "main 6 n mut",
   "main 7 f own",
   "main 7 h own",

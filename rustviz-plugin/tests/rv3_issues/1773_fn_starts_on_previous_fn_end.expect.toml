@@ -1,8 +1,6 @@
 issue = 1773
 cluster = "C47"
 title = "A fn that starts on the line the previous fn ends: both fns put dots at the same point on that row"
-xfail = "P0"
-note = "the dump has no state for the field place `ff.a` in second_fn (field-level place missing); first_fn's facts are fine"
 fn = "first_fn"
 places = ["ff.a", "ff.b"]
 beyond_facts = "P3/P4: the two fns' dots on row 7 must not overlap (layout keyed by row); renderer-level, the facts are per function body and stay distinct"

@@ -1,8 +1,6 @@
 issue = 1723
 cluster = "C30"
 title = "Five `s = make();` on one line: logos #4 and #5 coincide"
-xfail = "P0"
-note = "Several same-kind events on one line collapse in the spike: `init s` twice and one `drop s`."
 beyond_facts = "P3/P4 (renderer-level, to be checked visually): logo placement (`ArrowLanes::alternatives`); here the number of distinct events on the line is pinned"
 
 [[order]]

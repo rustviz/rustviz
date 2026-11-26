@@ -3,8 +3,6 @@ cluster = "C26"
 title = "Calling an FnOnce closure stored in a field (`(p.f)()`) doesn't show the struct as partly moved"
 fn = "run"
 places = ["p.f", "p.z"]
-xfail = "P1"
-note = "p.z has no per-field state in the dump (parts only); the conditional drop of p.f at the end of run is a P2 gap (the dump says only `drops_rest` on p)"
 beyond_facts = "P3: the struct column's text"
 
 [[event]]

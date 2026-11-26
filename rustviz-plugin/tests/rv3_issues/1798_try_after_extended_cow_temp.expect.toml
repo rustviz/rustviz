@@ -2,8 +2,6 @@ issue = 1798
 cluster = "C37"
 title = "`?` after a let-extended Cow temporary: \"(temporary)'s resource (including the String it holds, if any) is dropped\""
 fn = "f"
-xfail = "P0"
-note = "Spike: the dump has the Cow temporary's TempDrop only on row 6, none on the `?` early-exit row 3."
 beyond_facts = "P3: the `?` dot's wording (a Cow::Borrowed holds no String); the fact is that the temporary is dropped on the early return"
 
 [[event]]

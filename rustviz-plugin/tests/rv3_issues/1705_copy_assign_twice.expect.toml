@@ -1,8 +1,6 @@
 issue = 1705
 cluster = "C30"
 title = "`x = n; x = n;` on one line: the dot lists one copy"
-xfail = "P0"
-note = "Several same-kind events on one line collapse in the spike: `init x` twice and one `copy n -> x`."
 beyond_facts = "P3: the dot's title must list both assignments; here the number of distinct events on the line is pinned"
 
 [[order]]

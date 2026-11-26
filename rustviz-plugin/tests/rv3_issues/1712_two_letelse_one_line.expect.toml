@@ -2,8 +2,6 @@ issue = 1712
 cluster = "C29"
 title = "Two one-line let-elses on one line: the second binding is drawn at the first let-else's join"
 fn = "two"
-xfail = "P0"
-note = "The `return` paths' drops of s are not on row 3 in the spike (early-exit drop rows)."
 beyond_facts = "P3: renderer-level, to be checked visually: the two let-elses' diamonds and the level of y's dot; here the order of the line's events and the loan are pinned"
 
 [[order]]

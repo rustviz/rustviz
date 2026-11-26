@@ -2,8 +2,7 @@ issue = 1775
 cluster = "C21"
 title = "Setter-stored borrow in a loop, read above the setter: the read says t is no longer borrowed"
 fn = "f"
-xfail = "P2"
-note = "Gap (spike): the dump also ends loan t (and a) on the loop-head row 5 although refs is used on row 12 on every path out of the loop, so rustc ends the loan only on row 12; `n` is a parameter, so the loop may run zero times and the then/else arms (i != 0) can both run on different passes"
+note = "`n` is a parameter, so the loop may run zero times and the then/else arms (i != 0) can both run on different passes"
 beyond_facts = "P3: the read on row 7 must not say t is no longer borrowed"
 
 [[loan]]

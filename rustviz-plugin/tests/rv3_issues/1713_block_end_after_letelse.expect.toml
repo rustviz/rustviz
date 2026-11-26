@@ -2,8 +2,6 @@ issue = 1713
 cluster = "C29"
 title = "Block closing on a one-line let-else's line, after it: k's drop is drawn on the row, before x's binding at the join"
 fn = "f"
-xfail = "P0"
-note = "The `return` path's drop of s is not on row 5 in the spike (early-exit drop rows)."
 beyond_facts = "P3: renderer-level, to be checked visually: the scope end's position relative to the join; here the order of the row's events is pinned"
 
 [[order]]

@@ -1,8 +1,6 @@
 issue = 1768
 cluster = "C02"
 title = "Unused or-pattern `ref` binding before a nested return: a8's loans end at the arm's end, a8 drawn in the nested if"
-xfail = "P0"
-note = "Spike: the or-pattern loans have no end, and the return path's drop of t8 is not on row 4 (early-exit drop rows)."
 fn = "or_pattern"
 places = ["t8.0", "t8.1"]
 beyond_facts = "P3: the nested if's join says 'a8 still has no value here' (a8 was bound by the pattern)"

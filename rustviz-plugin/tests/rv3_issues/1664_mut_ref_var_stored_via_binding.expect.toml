@@ -2,8 +2,6 @@ issue = 1664
 cluster = "C18"
 title = "&mut r stored via a binding (u.push(slot)): u said to mutably borrow 'the data r points to'; a is only shared-borrowed"
 fn = "slot_case"
-xfail = "P0"
-note = "Gap (spike): the reborrow `&mut *slot` made by `u.push(slot)` is a plain mutable reborrow, but the dump calls it `mut(two-phase)` and gives no activation row, so slot (rustc: `&mut slot` conflicts, state mut) reads as shared"
 beyond_facts = "P2: u's dot wording"
 
 [[loan]]

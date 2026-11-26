@@ -1,8 +1,6 @@
 issue = 1585
 cluster = "C02"
 title = "Unused `ref` match binding in an `if let` arm followed by a nested `if .. { return; }`: lender drawn shared through the nested if"
-xfail = "P0"
-note = "Spike: the unused ref binding's loan of s has no end at all (end_lines empty), and the early-exit drops of s / x3 on the return row (5) are missing (they sit on the closing rows)."
 fn = "run"
 beyond_facts = "P3: s's trunk runs through the fork; a gets two 'goes out of scope' dots"
 

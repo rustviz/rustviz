@@ -3,7 +3,7 @@ cluster = "C11"
 title = "`o?;` after `let s = *b;`: the early return drops s and also frees b's Box allocation; no dot for b"
 fn = "run"
 places = ["*b"]
-xfail = "P0"
+xfail = "P1"
 note = "Gap (expected): early-exit drop rows: the spike gives the `?` exit no drop of b"
 beyond_facts = "P3: no early-return dot for b"
 

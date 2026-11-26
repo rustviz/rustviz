@@ -1,8 +1,6 @@
 issue = 1752
 cluster = "C06"
 title = "Several writes to r on one line: s drawn lent before the push on straight-line code"
-xfail = "P3"
-note = "row 3 facts list the loan ends after the borrows; evaluation order is r = &t (old loan over), push, r = &s"
 fn = "f"
 beyond_facts = "P3: the dead-loan note must not say s stays borrowed on other paths, and s's dot must list the old loan ending before the push"
 

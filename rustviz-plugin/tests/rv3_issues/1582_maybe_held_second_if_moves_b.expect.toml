@@ -1,8 +1,6 @@
 issue = 1582
 cluster = "C10"
 title = "Same, with a `?` as the else arm's last statement: that leg stops at the `?` dot and the join has no dot"
-xfail = "P0"
-note = "the `?` early-exit row carries no drop of s (and no `n` state) in the fact dump"
 fn = "run"
 beyond_facts = "P3: the join dot on row 10 and the leg out of the `?` dot are renderer-level"
 

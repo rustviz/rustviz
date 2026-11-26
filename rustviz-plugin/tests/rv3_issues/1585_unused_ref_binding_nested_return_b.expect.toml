@@ -1,8 +1,6 @@
 issue = 1585
 cluster = "C02"
 title = "Second shape: `ref a` field binding of `p`, then `&mut p.a` and `drop(p.b)`: a's end processed after the mutable borrow (State::Invalid)"
-xfail = "P0"
-note = "Spike: a's loan of p.a has no end, and no state for the field place p.a after rows 6 and 7 (field-level places)."
 fn = "run"
 places = ["p.a", "p.b"]
 beyond_facts = "P3: p.a drawn mutably lent while still immutably borrowed (revoked line drawn upward)"

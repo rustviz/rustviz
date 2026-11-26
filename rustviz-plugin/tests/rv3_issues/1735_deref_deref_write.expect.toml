@@ -3,7 +3,7 @@ cluster = "C12"
 title = "`**b = String::new()` on Box<Box<String>>: the old String is dropped; *b (the inner Box) is neither reassigned nor dropped"
 fn = "f2"
 places = ["*b", "**b"]
-xfail = "P0"
+xfail = "P1"
 note = "Gap (expected): place naming `**b` / drops of a place two derefs deep"
 beyond_facts = "P3: the dot says '*b acquires ownership of a new resource; its previous resource is dropped'"
 

@@ -1,8 +1,7 @@
 issue = 1489
 cluster = "C38"
 title = "Else-if re-point: y>c's arrow leaves y's arm dot along y's fork leg and crosses z's and x's dashed legs at a shallow angle"
-xfail = "P0"
-note = "Gap (spike): the dump's ends are not per path: each end names its own row as the next row (7 -> 7, 9 -> 9), not the edge into the arm. Deviation from the issue's repro: `let n = 2;` became `let n = std::env::args().count();` (same row). With a constant n only the else arm can run, so the then/else-if arms (the issue's point) were dead code; rustc's borrowck does not evaluate it, but a reader would take the arms as reachable. Probed with `mut x`, `mut y`, `mut z`."
+note = "Deviation from the issue's repro: `let n = 2;` became `let n = std::env::args().count();` (same row). With a constant n only the else arm can run, so the then/else-if arms (the issue's point) were dead code; rustc's borrowck does not evaluate it, but a reader would take the arms as reachable. Probed with `mut x`, `mut y`, `mut z`."
 beyond_facts = "renderer-level, check visually in P3/P4: the arrow's route (angle against fork legs) is pure geometry; the facts underneath are pinned"
 
 # c's loan of x: dead on the edge into each re-pointing arm (c is overwritten

@@ -2,8 +2,6 @@ issue = 1668
 cluster = "C28"
 title = "`let n = r.len(); r = &b; let v = r.is_empty();` on one line: the read through r's new loan is drawn before the old loan ends"
 fn = "f6"
-xfail = "P3"
-note = "The spike lists `borrow shared b -> r` before `end a -> r`; r's old loan is dead before the re-point."
 beyond_facts = "P3/P4 (renderer-level, to be checked visually): `uses_ref_ended_in_front` stacks the calls ahead of the end; here the order of the row's events and the loans are pinned"
 
 [[loan]]

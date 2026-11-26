@@ -1,8 +1,6 @@
 issue = 1761
 cluster = "C31"
 title = "`p.a = x?…; p = pair(); y?;`: the `?` after both assignments is described as guarding the p.a assignment"
-xfail = "P2"
-note = "facts call the assignments `init p.a` / `init p` (not reassign) and list them out of evaluation order on row 5"
 fn = "f6"
 places = ["p.a"]
 beyond_facts = "P3: the `?` after `p = pair()` must be described on its own: both assignments have already run there"

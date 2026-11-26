@@ -2,8 +2,6 @@ issue = 1690
 cluster = "C22"
 title = "`unwrap_or_else` on a by-value receiver: the result has the lifetime of the reference inside the Option, not of the Option"
 fn = "main"
-xfail = "P1"
-note = "`let r;` (deferred init) has no state row before its assignment in the dump (expected unassigned)"
 beyond_facts = "P3: wording: the result has the lifetime of the reference(s) the Option holds, not of the Option value"
 
 [[loan]]

@@ -2,9 +2,8 @@ issue = 1567
 cluster = "C03"
 title = "The issue's `&mut` variant (`m: &mut String`, `let r = &*m;`, other arm uses m): m's loan lives to r's last read in arm 1"
 fn = "run"
-xfail = "P2"
 beyond_facts = "P3: m's end and r's end on one dot on row 5"
-note = "Gap (spike): the dump has a third end, (4, 8), for the same edge into arm 2: the match is one `switchInt` on row 3, so rustc ends the loan once on that path. `n` is a parameter, so both arms can run. The issue's own variant (it says 'same with `m: &mut String`'); here the reborrow is a real loan, so the end row is checkable with rustc."
+note = "`n` is a parameter, so both arms can run. The issue's own variant (it says 'same with `m: &mut String`'); here the reborrow is a real loan, so the end row is checkable with rustc."
 
 [[loan]]
 row = 2

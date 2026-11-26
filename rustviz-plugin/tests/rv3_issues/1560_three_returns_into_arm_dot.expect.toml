@@ -1,8 +1,6 @@
 issue = 1560
 cluster = "C38"
 title = "Three loans of s ending in the first arm of an else-if chain: a return arrow comes into the arm's dot along s's fork leg"
-xfail = "P0"
-note = "Gap (spike): the dump's ends are not per path: every end names its own row as the next row (6 -> 6, 8 -> 8, 10 -> 10), not the edge into the arm."
 beyond_facts = "renderer-level, check visually in P3/P4: how three returns approach one arm dot is geometry; which loans end on which row is pinned"
 
 # a and r are read only in the second arm: they end on the edge into the

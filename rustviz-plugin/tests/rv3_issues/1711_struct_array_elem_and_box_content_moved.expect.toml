@@ -1,4 +1,5 @@
 issue = 1711
+xfail = "P1"
 cluster = "C15"
 title = "Struct line says p.a / p.q was moved out when only an array element / a Box's contents inside it moved"
 fn = "run"
@@ -6,6 +7,8 @@ places = ["p.a", "p.q"]
 beyond_facts = "P3: the struct line's title names p.a and p.q as moved out; the facts underneath are that only p.a[0] and *p.q moved"
 
 # `let [x, _] = p.a;` moves only element 0: p.a is partly moved, not moved.
+note = "Gap (rv3-p0): after a move out of a Box's contents (`let x = *p.q;`) the state table says `moved` for p.q; the Box allocation is still owned until scope end, so it is `partly` (rustc: E0382 with the note: move occurs because `*p.q`)"
+
 [[state]]
 row = 4
 place = "p.a"

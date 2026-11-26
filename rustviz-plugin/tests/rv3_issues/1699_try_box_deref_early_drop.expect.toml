@@ -4,7 +4,7 @@ title = "`(*b)?` with a Box parameter: on the early-return path the Box is still
 fn = "run"
 places = ["*b"]
 beyond_facts = "P3: no dot for the conditional drop of b at the `?` (after #1661 it is not drawn at all)"
-xfail = "P0"
+xfail = "P1"
 note = "Gap (expected): early-exit drop rows: the `?` exit has no drop of the Box param."
 
 [[event]]

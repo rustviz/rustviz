@@ -1,9 +1,8 @@
 issue = 1801
 cluster = "C99"
 title = "`if let .. else if a` without a final `else`: the join says r's borrow ended in each branch, but one path never assigns r"
-xfail = "P1"
 fn = "f"
-note = "C99 = unclustered (filed after the clustering). The `else`-less path is the one the 2.x join title ignores; here it leaves r unassigned. Spike gap: no state at all for a deferred `let r;` (rustc: unassigned, then maybe-unassigned at the join)."
+note = "The `else`-less path is the one the 2.x join title ignores; here it leaves r unassigned."
 beyond_facts = "P3: the join dot title must be true on the implicit-else path (no borrow of r began or ended there)"
 
 [[loan]]

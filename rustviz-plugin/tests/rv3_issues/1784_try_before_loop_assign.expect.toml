@@ -1,8 +1,7 @@
 issue = 1784
 cluster = "C10"
 title = "`?` before a loop body assigns a moved value: no early-return drop dot for lt, though a later time round leaves one to drop"
-xfail = "P0"
-note = "Gap (spike): early-exit drop rows (the `?` on row 6, the return on row 10) are missing from the dump. Deviation from the issue's repro (same rows): `o` is `mut` and row 8 also does `o = None;`. With an unchanging `o: Option<u8>` the `?` could only fail on the first time round, when lt is still moved, so the drop-flag-guarded drop on row 6 would never run with lt held (rustc still compiles the flag); now g(2, Some(1)) returns at the `?` on the second time round and drops lt there (Drop-printing run), g(_, None) returns with nothing to drop, g(0, Some(_)) returns on row 10."
+note = "Deviation from the issue's repro (same rows): `o` is `mut` and row 8 also does `o = None;`. With an unchanging `o: Option<u8>` the `?` could only fail on the first time round, when lt is still moved, so the drop-flag-guarded drop on row 6 would never run with lt held (rustc still compiles the flag); now g(2, Some(1)) returns at the `?` on the second time round and drops lt there (Drop-printing run), g(_, None) returns with nothing to drop, g(0, Some(_)) returns on row 10."
 fn = "g"
 beyond_facts = "P3: the column must be drawn for the loop's later time rounds so the dot has a line; renderer-level"
 

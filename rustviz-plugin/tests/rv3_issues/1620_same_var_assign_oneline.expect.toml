@@ -1,8 +1,6 @@
 issue = 1620
 cluster = "C30"
 title = "`s = String::from(\"b\"); s = String::from(\"c\");` on one line: the arrows and logos of the later calls are drawn on top of each other"
-xfail = "P0"
-note = "Several same-kind events on one line collapse in the spike: two `init s` and one `drop s` where there are three values and two drops."
 beyond_facts = "P3/P4 (renderer-level, to be checked visually): arrows 2 and 3 and logos 2 and 3 coincide; here the number of distinct events on the line is pinned (three inits/assignments, two drops of the previous value)"
 
 [[order]]

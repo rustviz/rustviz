@@ -1,7 +1,7 @@
 issue = 1639
 cluster = "C11"
 title = "`(*b)?` on a Box<Result>: the Result is moved out of the Box on every path, so b's later drop frees only the allocation"
-xfail = "P0"
+xfail = "P1"
 places = ["*b"]
 note = "Gap (expected): the `*b` operand of `?` is a move out of the Box; the place is named `*b` and the spike may not give it its own state"
 beyond_facts = "P3: both the `?` dot and the scope end say b's resource includes the Result it holds"

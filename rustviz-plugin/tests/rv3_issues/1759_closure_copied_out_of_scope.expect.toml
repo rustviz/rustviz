@@ -1,8 +1,6 @@
 issue = 1759
 cluster = "C25"
 title = "Copy closure `f` copied to `h` and f out of scope: the capture of s is held by h, not f"
-xfail = "P0"
-note = "Gap: the loan and its end are right; its holder set is `f|h`, but f is out of scope (the Copy closure was copied to h) so only h holds it."
 beyond_facts = "P3: the read on row 8 says 'still immutably borrowed by f' (f is out of scope)"
 
 [[loan]]

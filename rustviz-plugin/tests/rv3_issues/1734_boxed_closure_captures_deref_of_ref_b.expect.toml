@@ -1,8 +1,6 @@
 issue = 1734
 cluster = "C25"
 title = "Boxed closure capturing only `p.b` of an owned p: p.a stays usable (drawn as borrowing all of p)"
-xfail = "P1"
-note = "Gap: the p.b loan, its end (8) and p.a being free are right; the dump has no per-field state column for p.b."
 places = ["p.a", "p.b"]
 beyond_facts = "P3: 'p.a is immutably borrowed along with p' wording"
 

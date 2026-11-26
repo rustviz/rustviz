@@ -1,8 +1,6 @@
 issue = 1649
 cluster = "C02"
 title = "Unused or-pattern `ref` binding with a mutable use of the field on the same line: the binding's end is listed after the mutable borrow"
-xfail = "P2"
-note = "Spike: both alternatives' loans have end_lines empty; on row 3 the end of t.0 is listed after the push's mutable borrow (order, P3)."
 fn = "run"
 places = ["t.0", "t.1"]
 beyond_facts = "P3: within row 3, a's end is listed before the push's mutable borrow"

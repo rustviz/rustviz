@@ -2,8 +2,6 @@ issue = 1594
 cluster = "C29"
 title = "One-line let-else drawn as a branch: x's column starts on the `else` sub-row, above the join"
 fn = "f"
-xfail = "P0"
-note = "The `return` path's drop of s is not on row 3 in the spike (early-exit drop rows)."
 beyond_facts = "P3: renderer-level, to be checked visually: x's column starts at the join sub-row, with the copy arrow coming in there; here the row of each event is pinned"
 
 [[event]]

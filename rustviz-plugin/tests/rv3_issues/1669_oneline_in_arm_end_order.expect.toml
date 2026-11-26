@@ -2,8 +2,6 @@ issue = 1669
 cluster = "C28"
 title = "`let r = &s; let n = r.len(); let m = &mut s;` on one line in an `if` arm: s is drawn mutably borrowed before r's loan ends"
 fn = "f7"
-xfail = "P3"
-note = "The spike lists `borrow mut s -> m` before `end s -> r`."
 beyond_facts = "P3/P4 (renderer-level, to be checked visually): the arm's separate stacking path; here the order of the row's events is pinned"
 
 [[loan]]

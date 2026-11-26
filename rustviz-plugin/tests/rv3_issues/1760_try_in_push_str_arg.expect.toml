@@ -3,8 +3,6 @@ cluster = "C27"
 title = "`s.push_str(a?)`: the dot lists push_str's write before the `?` that may return first"
 fn = "f2"
 beyond_facts = "P3: the order of the `?` bullet and push_str's write on the dot"
-xfail = "P0"
-note = "The spike dump has no drop of s on row 3 for the `?` early return (early-exit drop rows)."
 
 [[drop]]
 row = 3
