@@ -185,12 +185,15 @@ struct DropA {
 enum EndSpec {
     Row(u32),
     Edge([u32; 2]),
+    /// `[row, next, col]`: also the column the path continues at (two ends
+    /// on one row pair with different columns are two ends).
+    EdgeCol([u32; 3]),
 }
 
 impl EndSpec {
     fn row(self) -> u32 {
         match self {
-            EndSpec::Row(r) | EndSpec::Edge([r, _]) => r,
+            EndSpec::Row(r) | EndSpec::Edge([r, _]) | EndSpec::EdgeCol([r, _, _]) => r,
         }
     }
 }
@@ -386,7 +389,7 @@ fn problems(name: &str, src: &str, text: &str) -> Vec<String> {
     let rows: Vec<u32> = c.state.iter().map(|s| s.row).chain(c.lent.iter().map(|s| s.row)).chain(c.loan.iter().map(|s| s.row))
         .chain(c.loan.iter().flat_map(|l| l.ends.iter().flatten().flat_map(|e| match *e {
             EndSpec::Row(r) => vec![r],
-            EndSpec::Edge([r, n]) => vec![r, n],
+            EndSpec::Edge([r, n]) | EndSpec::EdgeCol([r, n, _]) => vec![r, n],
         })))
         .chain(c.loan.iter().flat_map(|l| l.ends_include.iter().chain(&l.ends_exclude).copied()))
         .chain(c.oracle.iter().flat_map(|o| &o.states).filter_map(|s| oracle_entry(s).ok().map(|e| e.1)))
@@ -518,7 +521,7 @@ struct BodyF {
     rows: BTreeMap<u32, RowF>,
     loans: Vec<LoanF>,
     /// (loan, row, the next row of that path) of every `BorrowEnd`.
-    ends: Vec<(usize, u32, u32)>,
+    ends: Vec<(usize, u32, u32, u32)>,
     /// (row, path) of every `Move` fact.
     moved: Vec<(u32, String)>,
 }
@@ -694,6 +697,7 @@ fn load_facts(v: &Value) -> Result<Vec<BodyF>, String> {
                         f["loan"].as_u64().unwrap_or(u64::MAX) as usize,
                         *line,
                         f["to_line"].as_u64().map_or(0, |t| t as u32),
+                        f["to_col"].as_u64().map_or(0, |t| t as u32),
                     )),
                     Some("Move") => moved.extend(f["path"].as_str().map(|p| (*line, p.to_owned()))),
                     _ => {}
@@ -952,23 +956,24 @@ fn brace_only(src: &[&str], r: u32) -> bool {
 /// may be any row, an earlier one included (a loop's back edge); the dump's
 /// `to` may stop at rows before it that `skip` allows (brace-only rows the
 /// dump has no facts on: a `}` row with a drop is code of its own path).
-fn end_fits(want: EndSpec, row: u32, to: u32, skip: &dyn Fn(u32) -> bool) -> bool {
+fn end_fits(want: EndSpec, row: u32, to: u32, col: u32, skip: &dyn Fn(u32) -> bool) -> bool {
     match want {
         EndSpec::Row(r) => r == row,
         EndSpec::Edge([r, n]) => r == row && (to == n || (to < n && (to..n).all(skip))),
+        EndSpec::EdgeCol([r, n, c]) => r == row && c == col && (to == n || (to < n && (to..n).all(skip))),
     }
 }
 
 /// Whether the dump's ends match `want` one to one (a multiset: two
 /// edges ending on one row are two ends), in any order (a bipartite
 /// matching, so overlapping specs can't steal each other's edge).
-fn ends_match(want: &[EndSpec], got: &[(u32, u32)], skip: &dyn Fn(u32) -> bool) -> bool {
+fn ends_match(want: &[EndSpec], got: &[(u32, u32, u32)], skip: &dyn Fn(u32) -> bool) -> bool {
     if want.len() != got.len() {
         return false;
     }
-    fn augment(w: usize, want: &[EndSpec], got: &[(u32, u32)], skip: &dyn Fn(u32) -> bool, seen: &mut [bool], owner: &mut [Option<usize>]) -> bool {
+    fn augment(w: usize, want: &[EndSpec], got: &[(u32, u32, u32)], skip: &dyn Fn(u32) -> bool, seen: &mut [bool], owner: &mut [Option<usize>]) -> bool {
         for g in 0..got.len() {
-            if !seen[g] && end_fits(want[w], got[g].0, got[g].1, skip) {
+            if !seen[g] && end_fits(want[w], got[g].0, got[g].1, got[g].2, skip) {
                 seen[g] = true;
                 if owner[g].is_none_or(|o| augment(o, want, got, skip, seen, owner)) {
                     owner[g] = Some(w);
@@ -1065,9 +1070,9 @@ fn check(a: &Assertion, facts: &[BodyF], shape: &Shape, hand: &[(String, u32, St
                     && l.holder.as_deref().is_none_or(|h| h == "_" || x.holders.iter().any(|y| y == h)))
                 .collect();
             // Ends per CFG edge, from the dump's BorrowEnd facts: (row, next row).
-            let edges = |x: &LoanF| -> Vec<(u32, u32)> { b.ends.iter().filter(|e| e.0 == x.id).map(|e| (e.1, e.2)).collect() };
+            let edges = |x: &LoanF| -> Vec<(u32, u32, u32)> { b.ends.iter().filter(|e| e.0 == x.id).map(|e| (e.1, e.2, e.3)).collect() };
             let fits = |x: &&LoanF| {
-                // One end per (row, next row): MIR can have two CFG edges
+                // One end per (row, next row, column): MIR can have two CFG edges
                 // between the same rows (a false edge), one path end.
                 let mut e = edges(x);
                 e.sort();
@@ -1426,16 +1431,19 @@ fn rv3_harness_adapter() {
     let braces = |k: u32| brace_only(&src, k);
     // An end on row 2 on the path that skips the arm continues at row 4's
     // `}` (braces only) and then row 5.
-    assert!(ends_match(&[EndSpec::Edge([2, 5])], &[(2, 4)], &braces));
-    assert!(!ends_match(&[EndSpec::Edge([2, 5])], &[(2, 4)], &|_| false), "a brace row with facts isn't skipped");
-    assert!(!ends_match(&[EndSpec::Edge([2, 5])], &[(2, 3)], &braces), "the edge into the arm is another path");
-    assert!(!ends_match(&[EndSpec::Edge([2, 5])], &[(2, 2)], &braces), "an end before the branch isn't per path");
-    assert!(!ends_match(&[EndSpec::Row(2)], &[(2, 3), (2, 4)], &braces), "two edges are two ends");
-    assert!(ends_match(&[EndSpec::Row(2), EndSpec::Edge([2, 3])], &[(2, 4), (2, 3)], &braces));
+    assert!(ends_match(&[EndSpec::Edge([2, 5])], &[(2, 4, 0)], &braces));
+    assert!(!ends_match(&[EndSpec::Edge([2, 5])], &[(2, 4, 0)], &|_| false), "a brace row with facts isn't skipped");
+    assert!(!ends_match(&[EndSpec::Edge([2, 5])], &[(2, 3, 0)], &braces), "the edge into the arm is another path");
+    assert!(!ends_match(&[EndSpec::Edge([2, 5])], &[(2, 2, 0)], &braces), "an end before the branch isn't per path");
+    assert!(!ends_match(&[EndSpec::Row(2)], &[(2, 3, 0), (2, 4, 0)], &braces), "two edges are two ends");
+    assert!(ends_match(&[EndSpec::Row(2), EndSpec::Edge([2, 3])], &[(2, 4, 0), (2, 3, 0)], &braces));
+    assert!(ends_match(&[EndSpec::Row(4), EndSpec::Row(4)], &[(4, 5, 16), (4, 5, 38)], &braces), "two ends on one row pair, two columns");
+    assert!(ends_match(&[EndSpec::EdgeCol([4, 5, 16]), EndSpec::EdgeCol([4, 5, 38])], &[(4, 5, 38), (4, 5, 16)], &braces));
+    assert!(!ends_match(&[EndSpec::EdgeCol([4, 5, 16]), EndSpec::EdgeCol([4, 5, 16])], &[(4, 5, 16), (4, 5, 38)], &braces), "the column is checked");
     let src2 = ["fn f() {", "    if c {", "    }", "    }", "    y();"];
     let braces2 = |k: u32| brace_only(&src2, k);
-    assert!(ends_match(&[EndSpec::Edge([2, 5]), EndSpec::Edge([2, 4])], &[(2, 4), (2, 5)], &braces2), "matching is order-free");
-    assert!(ends_match(&[EndSpec::Edge([5, 2])], &[(5, 2)], &braces2), "a back edge's next row is earlier");
+    assert!(ends_match(&[EndSpec::Edge([2, 5]), EndSpec::Edge([2, 4])], &[(2, 4, 0), (2, 5, 0)], &braces2), "matching is order-free");
+    assert!(ends_match(&[EndSpec::Edge([5, 2])], &[(5, 2, 0)], &braces2), "a back edge's next row is earlier");
     let v: Value = serde_json::from_str(r#"{"version": 2, "bodies": [
         {"func": "A::run", "loans": [], "rows": [
           {"line": 3, "state": {"s": "own"}, "lent": {}, "facts": []},
