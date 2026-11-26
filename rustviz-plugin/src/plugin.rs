@@ -184,7 +184,11 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   // it (`emit_borrow_ends`); it also feeds the state table and, if
   // `RV3_FACTS` asks for them, the JSON dump.
   let crate_facts = crate::facts::collect_crate(tcx, &in_target);
-  let body_facts = |line: usize| crate_facts.bodies.iter().find(|b| b.kind == "fn" && b.first_line == line);
+  // (By the body's own path, `Foo::bar`: two fns can start on one line.)
+  let body_facts = |def_id: rustc_hir::def_id::LocalDefId| {
+    let func = tcx.def_path_str(def_id.to_def_id());
+    crate_facts.bodies.iter().find(|b| b.kind == "fn" && b.func == func)
+  };
 
   
   
@@ -288,7 +292,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
               &mut a_line_map, &mut owner_to_hash, &mut ids, output, &skip_lines,
             );
             visitor.visit_body(hir_body);
-            visitor.emit_borrow_ends(body_facts(fn_start_line));
+            visitor.emit_borrow_ends(body_facts(local_def_id));
             visitor.print_out_of_scope();
             visitor.fill_scope_end_holds(0);
             visitor.mark_temp_emptying_moves(0);
@@ -359,7 +363,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
           &mut a_line_map, &mut owner_to_hash, &mut ids, output, &skip_lines,
         );
         visitor.visit_body(hir_body);
-        visitor.emit_borrow_ends(body_facts(fn_start_line));
+        visitor.emit_borrow_ends(body_facts(def_id));
         visitor.print_out_of_scope();
         visitor.fill_scope_end_holds(0);
         visitor.mark_temp_emptying_moves(0);

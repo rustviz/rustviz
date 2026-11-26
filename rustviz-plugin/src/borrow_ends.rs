@@ -192,6 +192,14 @@ impl<'a> BodyEnds<'a> {
     out
   }
 
+  /// Whether a variable other than `k`'s holds one of `loans` after `row`
+  /// (`q` of `let q = r;`, on to a diverging `never(q)`).
+  pub fn others_hold_after(&self, k: &str, loans: &[usize], row: usize) -> bool {
+    let var = root(k);
+    self.facts.rows.iter().filter(|r| r.line >= row)
+      .any(|r| r.after.holds.iter().any(|(v, ls)| v != var && ls.iter().any(|l| loans.contains(l))))
+  }
+
   /// Whether `k` itself is moved on a row in `from+1..=to`.
   pub fn moved_in(&self, k: &str, from: usize, to: usize) -> bool {
     self.facts.rows.iter().filter(|r| r.line > from && r.line <= to).flat_map(|r| r.facts.iter())
@@ -277,8 +285,10 @@ impl<'a> BodyEnds<'a> {
         // (A borrowed temporary's column, `Some(&String::from("x"))`.)
         || (name == "(temporary)" && m.source == "temporary")
         || root(&m.lender) == name
-        // (A field lender, `&mut o.inner`.)
+        // (A field lender, `&mut o.inner`, `&p.name`, or a place in it,
+        // `&p.a.b` for `p.a`: the column the field has.)
         || m.lender == name
+        || m.lender.strip_prefix(name).is_some_and(|r| r.starts_with('.') || r.starts_with('['))
         || m.through.as_deref().is_some_and(|t| root(t) == name)
       {
         return true;
@@ -295,11 +305,18 @@ impl<'a> BodyEnds<'a> {
   /// stored, `keep(&mut v, &s)`, is said on the end instead: "still
   /// borrowed by v", `note_sharers_across_calls`).
   pub fn lent_after(&self, row: usize, column: &str, except: &[usize], tracked: &[String]) -> bool {
+    // Where on the row `except` ends (its last end there, by source
+    // column), if it ends there.
+    let end_col = self.facts.rows.iter().filter(|r| r.line == row).flat_map(|r| r.facts.iter())
+      .filter(|e| matches!(&e.fact, Fact::BorrowEnd { loan, .. } | Fact::HoldEnd { loan, .. } if except.contains(loan)))
+      .map(|e| e.col).max();
     self.facts.rows.iter().filter(|r| r.line == row).any(|r| {
-      // (One taken on an earlier row: a loan taken later on the row, `let
-      // m = &mut s;` after r's last use, doesn't keep r's borrow on.)
+      // (One taken before the end: a loan taken later on the row, `let
+      // m = &mut s;` after r's last use, doesn't keep r's borrow on; one
+      // taken earlier on it does, `let b = &s; println!("{}", a);`.)
       r.after.lent.get(column).is_some_and(|ls| ls.iter().any(|l| !except.contains(&l.loan)
-        && self.facts.loans.iter().any(|x| x.loan == l.loan && x.line < row
+        && self.facts.loans.iter().any(|x| x.loan == l.loan
+          && (x.line < row || (x.line == row && end_col.is_some_and(|c| x.col < c)))
           && x.direct_holders.iter().chain(x.holders.iter()).any(|h| tracked.iter().any(|t| names_match(t, h))))))
     })
   }

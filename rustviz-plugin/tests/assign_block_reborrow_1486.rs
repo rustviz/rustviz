@@ -2,8 +2,8 @@
 // reborrows a `&mut` the block declares (`v = { let r = &mut a; vec![r] };`).
 // v's type is known, so rustc reborrows r there (`&mut *r`). r goes out of
 // scope at the block's end, and what v holds from then on is r's loan of a,
-// until v's last use (line 18): v gives a back there, and r's own borrow ends
-// with its scope. main drew no borrow into v, ended r's borrow after its
+// until v's last use (line 17): v gives a back there; r goes out of scope
+// still lent to v. main drew no borrow into v, ended r's borrow after its
 // scope and had v give back "*r".
 fn main() {
     let mut a = String::from("a");

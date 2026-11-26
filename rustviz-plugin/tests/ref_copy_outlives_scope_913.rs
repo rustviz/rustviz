@@ -1,7 +1,7 @@
 // #913: a reference copied into a variable that outlives it shares its
 // loan, which lasts until the copy's last use (rustc rejects a
-// `t.push('!')` before the `println!`). The copy gives t back there; w
-// is gone by then, so its own end is at its scope end.
+// `t.push('!')` before the `println!`). The copy gives t back there; w's
+// own end is at its last use, the copy (Q7).
 fn copied_out() {
     let a = String::from("a");
     let t = String::from("t");

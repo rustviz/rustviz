@@ -1,7 +1,7 @@
 // #1431: a `&mut` declared in a branch whose value goes into a reference
 // declared outside (`m = if c { let w = &mut s; w } else { &mut t };`) is
 // reborrowed through (`&mut *w`, a coercion). m then borrows what w
-// borrowed, s, until m's last use; w's own borrow ends with its scope. The
+// borrowed, s, until m's last use; w goes out of scope still lent to m. The
 // other branch's lender t stays borrowed to m's last use too: it used to be
 // given back at the join, and w's borrow ended after w had gone out of
 // scope.

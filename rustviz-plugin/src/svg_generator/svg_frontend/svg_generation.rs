@@ -241,9 +241,11 @@ fn note_still_borrowed_below(front: &mut [ExternalEvent], back: &[ExternalEvent]
     for k in 0..front.len() {
         let Some((mutable, r, lender)) = end_of(&front[k]) else { continue };
         let later = &front[k + 1..];
+        let sources = copy_sources(front.iter().chain(back.iter()), *r.hash());
         let holders: Vec<String> = back.iter()
             .filter_map(end_of)
-            .filter(|(m, o, l)| *m == mutable && *l == lender && o.hash() != r.hash() && !borrows_after(later, o, lender))
+            .filter(|(m, o, l)| *m == mutable && *l == lender && o.hash() != r.hash() && !borrows_after(later, o, lender)
+                && !sources.contains(o.hash()))
             .map(|(_, o, _)| o.name().to_owned())
             .collect();
         let e = &mut front[k];
@@ -255,6 +257,29 @@ fn note_still_borrowed_below(front: &mut [ExternalEvent], back: &[ExternalEvent]
             }
         }
     }
+}
+
+/// The references `r` (a hash) is a copy of, through the copies among
+/// `events` (`let _r2 = r;`): they share one loan, which the copy gives
+/// back as its last holder on that path, so the one it copies isn't
+/// "still borrowing" the lender after the copy's end there (it isn't used
+/// on that path after it; rustc accepts a write to the lender there).
+fn copy_sources<'a>(events: impl Iterator<Item = &'a ExternalEvent>, r: u64) -> Vec<u64> {
+    let copies: Vec<(u64, u64)> = events.filter_map(|e| match e {
+        ExternalEvent::Copy { from: ResourceTy::Value(f), to: ResourceTy::Value(t), .. } => Some((*f.hash(), *t.hash())),
+        _ => None,
+    }).collect();
+    let mut out: Vec<u64> = Vec::new();
+    let mut work = vec![r];
+    while let Some(n) = work.pop() {
+        for (f, t) in &copies {
+            if *t == n && !out.contains(f) {
+                out.push(*f);
+                work.push(*f);
+            }
+        }
+    }
+    out
 }
 
 /// Sorts each run of consecutive borrow ends (`StaticDie` / `MutableDie`)
@@ -301,10 +326,11 @@ fn note_still_borrowed_on_later_rows(e_data: &mut [(usize, ExternalEvent)], src_
     for i in 0..e_data.len() {
         let Some((mutable, r, lender)) = end_of(&e_data[i].1) else { continue };
         let (row, line) = (e_data[i].0, src_line.get(&e_data[i].1.get_id()).copied());
+        let sources = copy_sources(e_data.iter().map(|(_, e)| e), *r.hash());
         let holders: Vec<String> = e_data.iter()
             .filter(|(l, e)| *l > row && line.is_some() && src_line.get(&e.get_id()).copied() == line)
             .filter_map(|(_, e)| end_of(e))
-            .filter(|(m, o, l)| *m == mutable && *l == lender && o.hash() != r.hash())
+            .filter(|(m, o, l)| *m == mutable && *l == lender && o.hash() != r.hash() && !sources.contains(o.hash()))
             .map(|(_, o, _)| o.name().to_owned())
             .collect();
         if let ExternalEvent::StaticDie { still_borrowed_by, .. } | ExternalEvent::MutableDie { still_borrowed_by, .. } = &mut e_data[i].1 {
@@ -509,6 +535,17 @@ fn arrives_after_whole_move(e: &ExternalEvent, group: &[ExternalEvent]) -> bool 
     let (ExternalEvent::Move { to: ResourceTy::Value(t), .. } | ExternalEvent::Copy { to: ResourceTy::Value(t), .. }) = e else { return false };
     group.iter().any(|g| matches!(g, ExternalEvent::Move { from: ResourceTy::Value(x), to: ResourceTy::Value(f), .. }
         if field_of(t.name(), x.name()) && f.is_fn()))
+}
+
+/// Whether `e` is a reference's own borrow end (`RefDie`, no arrow) and
+/// one of the line's stacked arrows (`group`) copies or moves that
+/// reference out, its last use (`let z = w;` in `else { let w = rd; let
+/// z = w; .. }`): the end goes on that arrow's dot, not on the stack's
+/// last row with the reference's scope end (#1868).
+fn ref_die_with_departure(e: &ExternalEvent, group: &[ExternalEvent]) -> bool {
+    let ExternalEvent::RefDie { from: ResourceTy::Value(r), .. } = e else { return false };
+    group.iter().any(|g| matches!(g, ExternalEvent::Copy { from: ResourceTy::Value(f), .. }
+        | ExternalEvent::Move { from: ResourceTy::Value(f), .. } if f.hash() == r.hash()))
 }
 
 /// Whether `e`, an event of a line that draws no arrow (the write in
@@ -910,8 +947,9 @@ fn insert_in_declaring_arm(branches: &mut [ExtBranchData], r: &ResourceAccessPoi
 /// for the line. The lender's column still gets it (`data.rs`, the
 /// Branch's ends of lenders it doesn't draw), and its dot there names
 /// the references whose ends stay after the conditional as still
-/// borrowing it (`ra`, on the join row). Returns how many events left
-/// `events`.
+/// borrowing it, except one the arm's reference is a copy of (`ra` of
+/// `let x = ra;` shares x's loan, which x gives back on that path).
+/// Returns how many events left `events`.
 fn nest_arm_ref_ends(events: &mut Vec<(usize, ExternalEvent)>, i: usize, skip: &HashSet<usize>, line_map: &mut BTreeMap<usize, Vec<ExternalEvent>>) -> usize {
     let line = events[i].0;
     let ExternalEvent::Branch { branches, .. } = &events[i].1 else { return 0 };
@@ -934,14 +972,50 @@ fn nest_arm_ref_ends(events: &mut Vec<(usize, ExternalEvent)>, i: usize, skip: &
         ExternalEvent::StaticDie { to, .. } | ExternalEvent::MutableDie { to, .. } => to.extract_rap().map(|r| *r.hash()),
         _ => None,
     };
+    // The references each arm copies into another (`let x = ra;`), as
+    // (from, to) names.
+    fn copies_in(branches: &[ExtBranchData], out: &mut Vec<(String, String)>) {
+        for arm in branches {
+            for (_, e) in &arm.e_data {
+                match e {
+                    ExternalEvent::Copy { from: ResourceTy::Value(f), to: ResourceTy::Value(t), .. } => out.push((f.name().to_owned(), t.name().to_owned())),
+                    ExternalEvent::Branch { branches, .. } => copies_in(branches, out),
+                    _ => {}
+                }
+            }
+        }
+    }
+    let mut copies = Vec::new();
+    copies_in(branches, &mut copies);
+    // The references `r` is a copy of, through copies in the arms.
+    let copied_from = |r: &str| {
+        let mut out: Vec<String> = Vec::new();
+        let mut work = vec![r.to_owned()];
+        while let Some(n) = work.pop() {
+            for (f, t) in &copies {
+                if *t == n && !out.contains(f) {
+                    out.push(f.clone());
+                    work.push(f.clone());
+                }
+            }
+        }
+        out
+    };
     let mut taken: Vec<(ResourceAccessPoint, (usize, ExternalEvent))> = Vec::new();
     for &j in &moved {
         let mut end = events[j].clone();
+        // (Not a reference this one is a copy of, `ra` of `let x = ra;`:
+        // a copy shares its loan, and the copy gives it back as the last
+        // one holding it on the arm's path, so ra no longer keeps the
+        // lender borrowed there. Its end after the conditional is on the
+        // other paths.)
+        let sources = ended(&end.1).map(|r| copied_from(r.name())).unwrap_or_default();
         let holders: Vec<String> = on_line.iter()
             .filter(|k| !moved.contains(k))
             .map(|&k| &events[k].1)
             .filter(|o| lender(o).is_some() && lender(o) == lender(&end.1))
             .filter_map(|o| ended(o).map(|r| r.name().to_owned()))
+            .filter(|n| !sources.contains(n))
             .collect();
         if let ExternalEvent::StaticDie { still_borrowed_by, .. } | ExternalEvent::MutableDie { still_borrowed_by, .. } = &mut end.1 {
             for name in holders {
@@ -1379,6 +1453,7 @@ pub fn mutate_branch_lines(
                             .filter(|p_e| binds_source_of_line(p_e, &ev) || binds_borrower_of_line(p_e, &front)
                                 || uses_ref_ended_in_front(p_e, &front, &back)
                                 || follows_arrival_on_line(p_e, &ev, &rest)
+                                || ref_die_with_departure(p_e, &front)
                                 || front.iter().any(|g| part_moves_with_whole(p_e, g)))
                             .map(|p_e| p_e.get_id())
                             .collect();
