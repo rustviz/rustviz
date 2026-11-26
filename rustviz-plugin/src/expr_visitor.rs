@@ -11846,6 +11846,8 @@ pub fn print_out_of_scope(&mut self){
         let (end, own) = match (e.last_end, e.gives_back, e.stops) {
           (None, _, _) => (End::None, None),
           (Some(back), Some(_), Some(own)) if e.only_loop_exits && own < back => (End::LoopExit { own, back }, None),
+          // (Given back only on paths into a later arm: there, as 2.x.)
+          (Some(_), Some(_), _) if e.jumps_to.is_some() => (End::Arrow(e.jumps_to.unwrap_or(0)), None),
           (Some(back), Some(_), _) => (End::Arrow(back), None),
           (Some(back), None, Some(own)) => (End::Arrow(back), Some((own, back))),
           // Neither named where the loan ends nor seen to stop (on the row
@@ -11872,8 +11874,13 @@ pub fn print_out_of_scope(&mut self){
           pattern_gives.extend(mine.iter().copied());
         }
         // (Only for a lender with a column of its own, as that pass draws.)
+        // (And only a call's result: `o = refs.iter_mut().next()`, the
+        // borrow that pass finds; not `Some(if c { &mut a } else { .. })`.)
         let holder_stops = e.stops.is_some() && matches!(l, ResourceTy::Value(_))
-          && self.raps.get(&slot.key).is_some_and(|r| !r.rap.is_ref() && r.rap.holds_borrow());
+          && self.raps.get(&slot.key).is_some_and(|r| !r.rap.is_ref() && r.rap.holds_borrow())
+          && mine.iter().all(|id| ix.facts.loans.iter().any(|f| f.loan == *id
+            && f.via_call.iter().any(|h| crate::borrow_ends::names_match(&slot.key, h))
+            && !f.direct_holders.iter().any(|h| crate::borrow_ends::names_match(&slot.key, h))));
         ends.push(Pending { lender: l.clone(), end, loans: mine, own, holder_stops });
       }
       pending.push(ends);
@@ -11892,6 +11899,14 @@ pub fn print_out_of_scope(&mut self){
       };
       (p.lender, end)
     }).collect()).collect();
+    if std::env::var_os("RV3_P2B_DEBUG").is_some() {
+      for ((slot, loans), ends) in slots.iter().zip(slot_loans.iter()).zip(decided.iter()) {
+        let e: Vec<String> = ends.iter().map(|(l, e)| format!("{}:{}", l.real_name(), match e {
+          End::Arrow(x) => format!("arrow@{x}"), End::Own(x) => format!("own@{x}"),
+          End::LoopExit { own, back } => format!("loop{own}/{back}"), End::None => "none".into() })).collect();
+        eprintln!("P2B fn{} slot {} rows {:?} arm {} at {} lender {} loans {:?} -> {:?}", self.current_fn_start, slot.key, slot.rows, slot.arm, slot.rd.assigned_at, slot.rd.lender.real_name(), loans, e);
+      }
+    }
     // Later passes read a reference's end line from `borrow_map`.
     for (slot, ends) in slots.iter().zip(decided.iter()) {
       if slot.arm {
