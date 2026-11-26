@@ -28058,8 +28058,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from String::from_utf8_lossy to (temporary)",
             "Move from bytes to String::from_utf8",
             "Move from String::from to w",
+            // `::std::string::String::from_utf8_lossy(..)`: the path root
+            // `{{root}}` is not part of the name.
+            "Move from std::string::String::from_utf8_lossy to (temporary 2)",
         ],
         must_not_contain: &[
+            "{{root}}",
             "=Move from String::from to (temporary)",
             "=Move from bytes to String::from",
             "A temporary holds the value that String::from returns",
@@ -38363,9 +38367,10 @@ fn try_block_drops_on_the_residual_target_1656() {
 #[test]
 fn code_panel_names_from_utf8_1631() {
     let code = run_with_local_backend("string_from_utf8_names_1631").code_panel_string();
-    for shown in ["String::from_utf8_lossy</tspan>(", "String::from_utf8</tspan>("] {
+    for shown in ["String::from_utf8_lossy</tspan>(", "String::from_utf8</tspan>(", "std::string::String::from_utf8_lossy</tspan>("] {
         assert!(code.contains(shown), "code panel lost {shown}:\n{code}");
     }
+    assert!(!code.contains("{{root}}"), "path root shown: {code}");
     // Only `w`'s `String::from(..)` is shown by that name.
     assert_eq!(code.matches(">String::from</tspan>(").count(), 1, "{code}");
 }

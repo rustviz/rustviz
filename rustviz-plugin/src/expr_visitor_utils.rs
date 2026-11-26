@@ -23,7 +23,8 @@ fn is_string_from(raw: &str) -> bool {
 // the node directly.
 pub fn hirid_to_var_name(id: HirId, tcx: &TyCtxt) -> Option<String> {
   fn name_of_path(p: &Path<'_>) -> String {
-    let segs: Vec<String> = p.segments.iter().map(|s| s.ident.as_str().to_owned()).collect();
+    // A leading `::` is the path-root segment `{{root}}`: not a name.
+    let segs: Vec<String> = p.segments.iter().map(|s| s.ident.as_str().to_owned()).filter(|s| s != "{{root}}").collect();
     segs.join("::")
   }
   // For `T::method`, recover the qself's type name so the returned string
