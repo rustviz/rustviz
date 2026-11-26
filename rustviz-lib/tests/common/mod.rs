@@ -3,4 +3,5 @@
 
 pub mod geometry;
 pub mod invariants;
+pub mod oracle;
 pub mod svg;

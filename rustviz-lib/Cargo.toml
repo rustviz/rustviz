@@ -32,3 +32,7 @@ libc = "0.2"
 # Strict XML parse of every rendered panel (#1049): the SVG is also opened
 # on its own and embedded with <object>, where a browser rejects malformed XML.
 roxmltree = "0.20"
+# The rustc oracle (`tests/common/oracle.rs`, RV_ORACLE=1) finds statement
+# boundaries with syn; span-locations gives their source lines.
+syn = { version = "2", features = ["full", "visit"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }

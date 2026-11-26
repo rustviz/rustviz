@@ -11,6 +11,9 @@ The checks are `corpus_invariants_hold` in rustviz-lib/tests/corpus.rs
 (ownership invariants + geometry), run on our files through
 RV_INVARIANTS_EXTRA / RV_INVARIANTS_ONLY; plugin panics and other plugin
 errors come back as that test's "Snippets the plugin failed on".
+`--oracle` (on `run` and `check`) adds `corpus_oracle_holds`: rustc's
+borrow checker as ground truth for each variable's drawn state
+(rustviz-lib/tests/common/oracle.rs).
 """
 import argparse
 import concurrent.futures as cf
@@ -31,6 +34,8 @@ import gen  # noqa: E402
 
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 JOBS = max(2, (os.cpu_count() or 4))
+# `--oracle`: also run the rustc oracle (`corpus_oracle_holds`).
+ORACLE = False
 
 
 @functools.lru_cache(None)
@@ -120,6 +125,14 @@ def signature(inv, what, types):
         return re.sub(r"`[^`]*`|\d+", "_", what)[:100]
     if inv == "invalid-state":
         return " ".join(sorted({norm_var(m.group("var"), types) for m in ID.finditer(what)}))
+    if inv.startswith("oracle-"):
+        # `s after L5 `...`: drawn <state> ("<tooltip>"); rustc: error[E0502]: ...` / `rustc accepts ...`
+        m = re.match(r"(\S+) after L\d+ .*?: drawn ([^(]+?) \(", what)
+        code = re.search(r"; rustc(?: accepts|: error\[(E\d+)\])", what)
+        if not m:
+            return re.sub(r"`[^`]*`|\d+", "_", what)[:100]
+        return "%s %s / %s" % (norm_var(m.group(1), types), m.group(2),
+                               (code.group(1) or "accepts") if code else "?")
     if inv == "outside-figure":
         m = re.search(r": (\w+) = ", what)
         return m.group(1) if m else ""
@@ -195,14 +208,20 @@ def run_checks(paths, exe, plugin_env, workdir):
             dst.write(src.read())
     d = os.path.realpath(d)
     env = dict(os.environ, **plugin_env, RV_INVARIANTS_EXTRA=d, RV_INVARIANTS_ONLY=d, RV_RUNNER="local")
-    p = subprocess.run([exe, "corpus_invariants_hold", "--exact", "--nocapture", "--test-threads=1"],
-                       env=env, capture_output=True, text=True, cwd=REPO)
-    out = p.stdout + p.stderr
     # the test names a file by its canonical path, without `.rs`
     copies = {os.path.join(d, os.path.basename(p))[:-3]: p[:-3] for p in paths}
-    found = parse_check_output(out, lambda name: copies.get(name, name))
-    if p.returncode != 0 and not found and "invariant violations" not in out and "Snippets the plugin" not in out:
-        raise RuntimeError("check run failed:\n" + out[-3000:])
+    found = defaultdict(list)
+    tests = ["corpus_invariants_hold"] + (["corpus_oracle_holds"] if ORACLE else [])
+    for test in tests:
+        p = subprocess.run([exe, test, "--exact", "--nocapture", "--test-threads=1"],
+                           env=dict(env, RV_ORACLE="1"), capture_output=True, text=True, cwd=REPO)
+        out = p.stdout + p.stderr
+        got = parse_check_output(out, lambda name: copies.get(name, name))
+        if p.returncode != 0 and not got and "violations differ" not in out and "Snippets the plugin" not in out:
+            raise RuntimeError("check run failed:\n" + out[-3000:])
+        for k, v in got.items():
+            # a crash shows up in both tests' lists
+            found[k].extend(x for x in v if x not in found[k])
     return dict(found)
 
 
@@ -513,7 +532,12 @@ def main():
     g.add_argument("--out", required=True)
     c = sub.add_parser("check")
     c.add_argument("dir")
+    for x in (r, c):
+        x.add_argument("--oracle", action="store_true",
+                       help="also check each drawn state against rustc (corpus_oracle_holds)")
     a = ap.parse_args()
+    global ORACLE
+    ORACLE = getattr(a, "oracle", False)
     {"run": cmd_run, "gen": cmd_gen, "check": cmd_check}[a.cmd](a)
 
 

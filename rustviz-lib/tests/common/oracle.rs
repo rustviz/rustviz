@@ -1,0 +1,1148 @@
+//! rustc as ground truth for what a timeline says about each variable
+//! (`RV_ORACLE=1`, test `corpus_oracle_holds` in `corpus.rs`).
+//!
+//! The invariant checks (`invariants.rs`) look for pictures that
+//! contradict themselves. This one asks the borrow checker. Between two
+//! source lines a column is drawn in one state: holding its value and
+//! free to use (solid or hollow), immutably borrowed (hollow: read
+//! only), mutably borrowed (dotted: can't be used), or moved / not
+//! assigned yet (no line, or dashed). Each of those is a claim rustc can
+//! check: insert a statement that uses the variable right after the line
+//! and compile.
+//!
+//! | drawn after line L                 | probe after L     | rustc must          | check name          |
+//! |------------------------------------|-------------------|---------------------|---------------------|
+//! | holds its value, not borrowed      | `let _ = &mut x;` | accept it           | `oracle-usable`     |
+//! | immutably borrowed (read only)     | `let _ = &x;`     | accept it           | `oracle-readable`   |
+//! | immutably borrowed (read only)     | `let _ = &mut x;` | reject: E0502/E0505 | `oracle-borrowed`   |
+//! | mutably borrowed (can't be used)   | `let _ = &x;`     | reject: E0502/E0503 | `oracle-borrowed`   |
+//! | moved, or no value yet             | `let _ = &x;`     | reject: E0382/E0381 | `oracle-moved`      |
+//!
+//! "Accept" ignores E0596 (`&mut` of a variable not declared `mut`):
+//! rustc still reports a borrow conflict next to it, so a probe of a
+//! non-`mut` variable tests the borrow all the same.
+//!
+//! **Where a probe goes.** Only after a statement that ends on line L,
+//! where the next statement (or the block's `}`) starts on a later line,
+//! found with `syn` (statement spans, not text guessing). The probe is a
+//! new statement in the same block, so it changes no control flow and
+//! takes nothing: `let _ = &mut x;` borrows for that statement only.
+//! Never inside a closure (a use there would change what the closure
+//! captures), a macro's arguments, or a block's tail expression. The
+//! drawn state is read in the gap between rows L and L+1 of the
+//! timeline; if the plugin added rows there (stacked arrows, a one-line
+//! conditional), the point is skipped.
+//!
+//! **What is skipped** (counted, never reported): a column whose name
+//! isn't a variable or field path (`*r`, `v[0]`, `String::from`); a name
+//! bound more than once in the function (shadowing: the probe could name
+//! the other binding); a gap where only another arm's dashed line runs,
+//! or the column is drawn in two states at once; a program with
+//! `// rustviz: hide` / `skip` (its gutter or events differ from the
+//! source); and a probe rustc can't type-check (the variable is out of
+//! scope there). A claim inside a loop is checked like any other (the
+//! probe is still one point of the program) and its message says
+//! "in a loop".
+//!
+//! Probes are compiled in two batches per program (moves apart: rustc
+//! reports one use of a moved value per move, so a missing E0382 is
+//! re-checked with that probe alone) as an edition-2024 lib with the
+//! pinned nightly (`rust-toolchain.toml`), like `tools/progen`. Every
+//! compile is cached by the hash of its source and toolchain under
+//! `$RV_ORACLE_CACHE` (default `<target>/tmp/rv-oracle-cache`).
+//!
+//! `KNOWN_ORACLE_FAILURES` lists what main gets wrong today, each with
+//! its issue, like `KNOWN_INVARIANT_FAILURES`.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use syn::spanned::Spanned;
+use syn::visit::{self, Visit};
+
+/// Violations main has today: (snippet, check, issue).
+pub const KNOWN_ORACLE_FAILURES: &[(&str, &str, u32)] = &[
+    // A field is borrowed; the struct is drawn a free owner.
+    ("borrow_stored_through_local_ref", "oracle-usable", 1671),
+    ("closure_disjoint_field_capture", "oracle-usable", 1671),
+    ("closure_tuple_element_capture", "oracle-usable", 1671),
+    ("copy_part_borrow_value_1233", "oracle-usable", 1671),
+    ("field_borrow_through_ref_1073", "oracle-usable", 1671),
+    ("field_through_ref", "oracle-usable", 1671),
+    ("field_write_through_local_ref", "oracle-usable", 1671),
+    ("for_iter_method_borrow_1347", "oracle-usable", 1671),
+    ("get_mut_write_861", "oracle-usable", 1671),
+    ("let_ref_binding_borrows", "oracle-usable", 1671),
+    ("nested_struct_borrow", "oracle-usable", 1671),
+    ("ref_write_through_local_mut_ref_1361", "oracle-usable", 1671),
+    ("whole_struct_borrow_fields_1130_1193", "oracle-usable", 1671),
+    // Whole struct borrowed, written through the reference in an arm: fields drawn free.
+    ("dead_loan_note_sibling_branch_1153", "oracle-usable", 1672),
+    ("field_write_through_ref_column", "oracle-usable", 1672),
+    // A Box's contents moved out: "b is the owner of the resource".
+    ("box_deref_write_1345", "oracle-usable", 1673),
+    ("box_field_move", "oracle-usable", 1673),
+    ("box_field_move_all", "oracle-usable", 1673),
+    ("box_field_move_branch", "oracle-usable", 1673),
+    ("box_field_move_param", "oracle-usable", 1673),
+    ("box_partial_move_890", "oracle-usable", 1673),
+    ("box_partial_move_match_892", "oracle-usable", 1673),
+    ("box_payload_reassign_893", "oracle-usable", 1673),
+    ("box_payload_whole_move_898", "oracle-usable", 1673),
+    ("edition2024/box_partial_move_chain_892", "oracle-usable", 1673),
+    ("let_else_exit_drops_906", "oracle-usable", 1673),
+    ("let_else_nested_part_899", "oracle-usable", 1673),
+    ("tuple_scrutinee_var_field_977", "oracle-usable", 1673),
+    // Partial moves in arms that #1646 doesn't cover (or-patterns, destructuring assignment, loops, tuple scrutinees).
+    ("destructure_assign_parts_1412", "oracle-usable", 1674),
+    ("loop_drop_flags_1026", "oracle-usable", 1674),
+    ("loop_struct_line_1031", "oracle-usable", 1674),
+    ("or_pattern_if_let_different_places", "oracle-usable", 1674),
+    ("or_pattern_if_let_different_values_else", "oracle-usable", 1674),
+    ("or_pattern_if_let_struct_different_places", "oracle-usable", 1674),
+    ("or_pattern_let_shadowed_name", "oracle-usable", 1674),
+    ("or_pattern_nested_if_let", "oracle-usable", 1674),
+    ("scrutinee_temp_taken_1367", "oracle-usable", 1674),
+    // A reference re-pointed in an arm: the old lender drawn borrowed on that path.
+    ("basic_if7", "oracle-borrowed", 1675),
+    ("borrow_end_join_one_branch", "oracle-borrowed", 1675),
+    ("branch_dead_loan_move_1178", "oracle-borrowed", 1675),
+    ("branch_mut_lend_move_1132", "oracle-borrowed", 1675),
+    ("dead_loan_write_796", "oracle-borrowed", 1675),
+    ("dead_loan_write_near_796", "oracle-borrowed", 1675),
+    ("else_if_join_1294", "oracle-borrowed", 1675),
+    ("known_bugs/1132_mut_borrow_vs_drop_arms", "oracle-borrowed", 1675),
+    ("mut_lend_move_join_1297", "oracle-borrowed", 1675),
+    ("ref_reassigned_other_ref_dead_1439", "oracle-borrowed", 1675),
+    ("repoint_chain_one_return_1479", "oracle-borrowed", 1675),
+    ("repoint_ref_cond_call_loan_1557", "oracle-borrowed", 1675),
+    // A holder overwritten before it is read: its first loan drawn live to the overwrite.
+    ("borrow_struct_moved_holder", "oracle-borrowed", 1676),
+    ("borrow_struct_moved_over", "oracle-borrowed", 1676),
+    ("borrow_struct_overwrite_call", "oracle-borrowed", 1676),
+    ("borrow_struct_overwrite_whole", "oracle-borrowed", 1676),
+    ("holder_borrows_1094", "oracle-borrowed", 1676),
+    // A Drop holder reassigned from a conditional: old loan drawn ended before the arms.
+    ("assign_branch_struct_fields_1483", "oracle-usable", 1677),
+    // A closure's shared capture given back by a later read's borrow end.
+    ("book/c13_12_closure_borrow_then_use", "oracle-usable", 1678),
+    // A loan stored into a Vec through iter_mut() isn't drawn.
+    ("iter_mut_holder_1399", "oracle-usable", 1679),
+    // A holder's reference copied in an `else if` arm: lender drawn free.
+    ("else_if_holder_copy_1421", "oracle-usable", 1680),
+    // Two `e` bindings (last_mut / iter_mut): v drawn mutably borrowed after the block.
+    ("same_name_bindings_1400", "oracle-borrowed", 1681),
+    // Loops are drawn as one pass: a loan carried into the next iteration isn't shown.
+    ("copied_ref_field_end_1568", "oracle-usable", 853),
+    ("shared_iter_loop_1081", "oracle-usable", 853),
+    // `if let Some(x) = o.as_ref()` nested in an else: o drawn shared in its else (PR #1602).
+    ("head_boxed_in_comes_in_level_1499", "oracle-borrowed", 1574),
+    // A struct's line through a conditional says "owner" in the arm after a field moved (PR #1646).
+    ("assign_branch_reborrow_holder_1482", "oracle-usable", 1595),
+    ("edition2024/if_let_chain_field_move", "oracle-usable", 1595),
+    ("edition2024/if_let_chain_irrefutable_move", "oracle-usable", 1595),
+    ("edition2024/loop_always_breaks_1467", "oracle-usable", 1595),
+    ("fields_maybe_all_moved_1583", "oracle-usable", 1595),
+    ("if_no_else_partial_move", "oracle-usable", 1595),
+    ("manually_drop_maybe_moved_1147", "oracle-usable", 1595),
+    ("no_drop_partial_maybe", "oracle-usable", 1595),
+    ("partial_move_if_branches", "oracle-usable", 1595),
+    ("partial_move_one_arm_struct", "oracle-usable", 1595),
+    ("struct_parts_moved_out_1157", "oracle-usable", 1595),
+    ("struct_refilled_partial_drop_1577", "oracle-usable", 1595),
+    ("try_partial_move_1184", "oracle-usable", 1595),
+];
+
+/// Where the drawing deliberately follows what runs rather than rustc's
+/// borrow checker, which is conservative: (snippet, check, why). The
+/// test ignores these, and fails if one no longer happens.
+pub const ORACLE_EXEMPT: &[(&str, &str, &str)] = &[
+    // A pattern that can't fail (`if let x = f`, `Some(x)` on `Some(f)`):
+    // its `else` block, and the code after a body that always returns,
+    // never run, so the drawing shows nothing there. rustc still checks
+    // them as if they could run (#987, #995, #1004, #1013, #949).
+    ("edition2024/dead_else_987", "oracle-moved", "irrefutable pattern: dead else"),
+    ("edition2024/dead_else_987", "oracle-usable", "irrefutable pattern: dead else"),
+    ("edition2024/irrefutable_iflet_inline_995", "oracle-moved", "irrefutable pattern: code after never runs"),
+    ("inline_exit_1004", "oracle-moved", "irrefutable pattern: code after never runs"),
+    ("inline_exit_nested_1013", "oracle-moved", "irrefutable pattern: code after never runs"),
+    ("edition2024/ctor_let_chain_949", "oracle-usable", "`Some(x)` on `Some(k)` can't fail"),
+    // `ManuallyDrop::take(&mut m)` moves the value out (#283); rustc only
+    // sees a `&mut` borrow.
+    ("manually_drop_by_hand", "oracle-moved", "ManuallyDrop::take moves out behind a &mut"),
+];
+
+pub const ORACLE_CHECKS: &[(&str, &str)] = &[
+    ("oracle-usable",
+     "the column is drawn holding its value with no borrow of it after this line, but rustc rejects \
+      `&mut x` there: something still borrows it, or it has no value"),
+    ("oracle-readable",
+     "the column is drawn immutably borrowed (read only) after this line, but rustc rejects `&x` there: \
+      it is mutably borrowed, or has no value"),
+    ("oracle-borrowed",
+     "the column is drawn borrowed after this line (read only, or lent out mutably), but rustc accepts \
+      the use the drawing forbids: nothing borrows it there"),
+    ("oracle-moved",
+     "the column is drawn moved, or with no value yet, after this line, but rustc accepts `&x` there"),
+];
+
+/// Borrow conflicts: the place is borrowed where the probe uses it.
+const CONFLICT: &[&str] = &["E0499", "E0500", "E0501", "E0502", "E0503", "E0505", "E0506", "E0510", "E0524"];
+/// The place has no value (moved, or not assigned yet).
+const NO_VALUE: &[&str] = &["E0381", "E0382"];
+/// Mutability of the binding, not a borrow: says nothing either way.
+const IGNORED: &[&str] = &["E0596", "E0594"];
+
+// ─── Statement boundaries (syn) ─────────────────────────────────────
+
+#[derive(Debug, Clone)]
+struct Point {
+    /// The last line of the statement the probe follows.
+    line: u32,
+    func: usize,
+    in_loop: bool,
+    /// Lines of the innermost block's `{` and `}`.
+    block: (u32, u32),
+    /// The `{` line starts with the arm before it (`} else {`).
+    shared_open: bool,
+}
+
+#[derive(Default)]
+struct Points {
+    points: Vec<Point>,
+    /// Per function: binding name -> how many patterns bind it.
+    bindings: Vec<HashMap<String, u32>>,
+    /// Per function: (first line, last line, line of the body's `{` if
+    /// nothing follows it on that line).
+    spans: Vec<(u32, u32, Option<u32>)>,
+    /// The function (index) each item level is in; None in a const,
+    /// static or other non-fn item.
+    stack: Vec<Option<usize>>,
+    loops: u32,
+    closures: u32,
+    /// The source's lines.
+    src: Vec<String>,
+}
+
+fn line_of(s: proc_macro2::Span) -> (u32, u32) {
+    (s.start().line as u32, s.end().line as u32)
+}
+
+impl Points {
+    fn func(&self) -> Option<usize> {
+        self.stack.last().copied().flatten()
+    }
+    fn enter_fn(&mut self, sig: proc_macro2::Span, body: Option<&syn::Block>) {
+        self.bindings.push(HashMap::new());
+        let open = body.and_then(|b| {
+            let o = b.brace_token.span.open().start().line as u32;
+            let first = b.stmts.first().map_or(b.brace_token.span.close().start().line as u32, |s| line_of(s.span()).0);
+            (first > o).then_some(o)
+        });
+        let end = body.map_or(line_of(sig).1, |b| b.brace_token.span.close().start().line as u32);
+        self.spans.push((line_of(sig).0, end, open));
+        self.stack.push(Some(self.bindings.len() - 1));
+    }
+    fn body<F: FnOnce(&mut Self)>(&mut self, f: F) {
+        let (loops, closures) = (self.loops, self.closures);
+        self.loops = 0;
+        self.closures = 0;
+        f(self);
+        self.loops = loops;
+        self.closures = closures;
+        self.stack.pop();
+    }
+}
+
+impl<'ast> Visit<'ast> for Points {
+    fn visit_item(&mut self, i: &'ast syn::Item) {
+        match i {
+            syn::Item::Fn(_) | syn::Item::Impl(_) | syn::Item::Trait(_) | syn::Item::Mod(_) => visit::visit_item(self, i),
+            _ => {
+                self.stack.push(None);
+                visit::visit_item(self, i);
+                self.stack.pop();
+            }
+        }
+    }
+    fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+        self.enter_fn(f.sig.span(), Some(&f.block));
+        self.body(|s| visit::visit_item_fn(s, f));
+    }
+    fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+        self.enter_fn(f.sig.span(), Some(&f.block));
+        self.body(|s| visit::visit_impl_item_fn(s, f));
+    }
+    fn visit_trait_item_fn(&mut self, f: &'ast syn::TraitItemFn) {
+        self.enter_fn(f.sig.span(), f.default.as_ref());
+        self.body(|s| visit::visit_trait_item_fn(s, f));
+    }
+    fn visit_impl_item_const(&mut self, c: &'ast syn::ImplItemConst) {
+        self.stack.push(None);
+        visit::visit_impl_item_const(self, c);
+        self.stack.pop();
+    }
+    fn visit_pat_ident(&mut self, p: &'ast syn::PatIdent) {
+        if let Some(f) = self.func() {
+            *self.bindings[f].entry(p.ident.to_string()).or_default() += 1;
+        }
+        visit::visit_pat_ident(self, p);
+    }
+    fn visit_receiver(&mut self, r: &'ast syn::Receiver) {
+        if let Some(f) = self.func() {
+            *self.bindings[f].entry("self".to_owned()).or_default() += 1;
+        }
+        visit::visit_receiver(self, r);
+    }
+    fn visit_expr_closure(&mut self, c: &'ast syn::ExprClosure) {
+        self.closures += 1;
+        visit::visit_expr_closure(self, c);
+        self.closures -= 1;
+    }
+    fn visit_expr_async(&mut self, a: &'ast syn::ExprAsync) {
+        self.closures += 1;
+        visit::visit_expr_async(self, a);
+        self.closures -= 1;
+    }
+    fn visit_expr_const(&mut self, c: &'ast syn::ExprConst) {
+        self.closures += 1;
+        visit::visit_expr_const(self, c);
+        self.closures -= 1;
+    }
+    fn visit_expr_loop(&mut self, l: &'ast syn::ExprLoop) {
+        self.loops += 1;
+        visit::visit_expr_loop(self, l);
+        self.loops -= 1;
+    }
+    fn visit_expr_while(&mut self, l: &'ast syn::ExprWhile) {
+        self.loops += 1;
+        visit::visit_expr_while(self, l);
+        self.loops -= 1;
+    }
+    fn visit_expr_for_loop(&mut self, l: &'ast syn::ExprForLoop) {
+        self.loops += 1;
+        visit::visit_expr_for_loop(self, l);
+        self.loops -= 1;
+    }
+    fn visit_block(&mut self, b: &'ast syn::Block) {
+        if let (Some(func), 0) = (self.func(), self.closures) {
+            let close = b.brace_token.span.close().start().line as u32;
+            let open_at = b.brace_token.span.open().start();
+            let open = open_at.line as u32;
+            let shared_open = self.src.get(open as usize - 1)
+                .is_some_and(|l| l.chars().take(open_at.column).any(|c| c == '}'));
+            let n = b.stmts.len();
+            for (i, st) in b.stmts.iter().enumerate() {
+                let tail = i + 1 == n && matches!(st, syn::Stmt::Expr(_, None) | syn::Stmt::Macro(syn::StmtMacro { semi_token: None, .. }));
+                if tail || matches!(st, syn::Stmt::Item(_)) {
+                    continue;
+                }
+                let (_, end) = line_of(st.span());
+                let next = b.stmts.get(i + 1).map_or(close, |s| line_of(s.span()).0);
+                if next > end {
+                    self.points.push(Point { line: end, func, in_loop: self.loops > 0, block: (open, close), shared_open });
+                }
+            }
+        }
+        visit::visit_block(self, b);
+    }
+}
+
+// ─── The drawing ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+struct Dot {
+    hash: String,
+    var: String,
+    line: u32,
+    x: f64,
+    y: f64,
+    events: Vec<String>,
+    tip: String,
+}
+
+#[derive(Debug, Clone)]
+struct Seg {
+    hash: String,
+    var: String,
+    state: String,
+    tip: String,
+    /// (x1, y1, x2, y2) of each drawn line.
+    lines: Vec<(f64, f64, f64, f64)>,
+}
+
+struct Drawing {
+    dots: Vec<Dot>,
+    segs: Vec<Seg>,
+    /// hash -> column name.
+    columns: BTreeMap<String, String>,
+    /// hash -> x of the column's header (its line outside conditionals).
+    header_x: HashMap<String, f64>,
+    /// Columns of references (they have a bracket): their line's style
+    /// says what kind of reference they hold, not that they're borrowed.
+    refs: HashSet<String>,
+    /// Source line -> y of its timeline row.
+    row: HashMap<u32, f64>,
+}
+
+fn plain(t: &str) -> String {
+    let t = t.replace("<br>", " / ");
+    let mut out = String::with_capacity(t.len());
+    let mut in_tag = false;
+    for c in t.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn num(n: roxmltree::Node, a: &str) -> f64 {
+    n.attribute(a).and_then(|v| v.parse().ok()).unwrap_or(f64::NAN)
+}
+
+fn drawing(timeline: &str, code: &str) -> Result<Drawing, String> {
+    let doc = roxmltree::Document::parse(timeline).map_err(|e| e.to_string())?;
+    let mut d = Drawing { dots: vec![], segs: vec![], columns: BTreeMap::new(), header_x: HashMap::new(), refs: HashSet::new(), row: HashMap::new() };
+    for n in doc.descendants().filter(|n| n.attribute("data-rv-id").is_some()) {
+        let a = |k: &str| n.attribute(k).unwrap_or("").to_owned();
+        let hash = n.descendants().find_map(|c| c.attribute("data-hash")).unwrap_or("").to_owned();
+        match a("data-rv-kind").as_str() {
+            "dot" => {
+                let Some(c) = n.descendants().find(|c| c.has_tag_name("circle")) else { continue };
+                d.dots.push(Dot {
+                    hash, var: a("data-rv-var"),
+                    line: a("data-rv-line").parse().unwrap_or(0),
+                    x: num(c, "cx"),
+                    y: num(c, "cy"),
+                    events: a("data-rv-event").split(' ').filter(|e| !e.is_empty()).map(str::to_owned).collect(),
+                    tip: plain(&a("data-tooltip-text")),
+                });
+            }
+            kind @ ("line" | "branch_line") => {
+                let part = n.attribute("data-rv-part");
+                if kind == "branch_line" && !matches!(part, Some("line" | "side1" | "side2")) {
+                    continue;
+                }
+                let mut tip = a("data-tooltip-text");
+                if tip.is_empty() {
+                    tip = n.parent().and_then(|p| p.attribute("data-tooltip-text")).unwrap_or("").to_owned();
+                }
+                let lines = n.descendants().filter(|c| c.has_tag_name("line"))
+                    .map(|l| (num(l, "x1"), num(l, "y1"), num(l, "x2"), num(l, "y2"))).collect();
+                d.segs.push(Seg { hash, var: a("data-rv-var"), state: a("data-rv-state"), tip: plain(&tip), lines });
+            }
+            "header" => {
+                d.header_x.entry(hash.clone()).or_insert(num(n, "x"));
+                d.columns.insert(hash, a("data-rv-var"));
+            }
+            "bracket" => {
+                d.refs.insert(hash);
+            }
+            _ => {}
+        }
+    }
+    // Rows line up with the code panel's lines; a dot sits a fixed
+    // offset above its line's text baseline.
+    let cdoc = roxmltree::Document::parse(code).map_err(|e| e.to_string())?;
+    let mut text_y = HashMap::new();
+    for n in cdoc.descendants().filter(|n| n.attribute("data-rv-kind") == Some("code_line")) {
+        if let (Some(l), y) = (n.attribute("data-rv-line").and_then(|l| l.parse::<u32>().ok()), num(n, "y")) {
+            text_y.insert(l, y);
+        }
+    }
+    let mut offsets: HashMap<i64, u32> = HashMap::new();
+    for dot in &d.dots {
+        if let Some(y) = text_y.get(&dot.line) {
+            *offsets.entry((dot.y - y).round() as i64).or_default() += 1;
+        }
+    }
+    let off = offsets.into_iter().max_by_key(|(o, n)| (*n, -o)).map_or(-5.0, |(o, _)| o as f64);
+    d.row = text_y.into_iter().map(|(l, y)| (l, y + off)).collect();
+    Ok(d)
+}
+
+// ─── Claims ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Drawn {
+    Usable,
+    Shared,
+    MutLent,
+    Moved,
+    Unassigned,
+}
+
+#[derive(Debug, Clone)]
+struct Claim {
+    line: u32,
+    func: usize,
+    var: String,
+    drawn: Drawn,
+    in_loop: bool,
+    /// The tooltip that says it: the segment's, or the moving dot's.
+    tip: String,
+}
+
+/// A variable or a field path (`s`, `p.x`, `t.0`), as a probe can name it.
+fn place_name(var: &str) -> Option<String> {
+    let v: String = var.chars().filter(|c| !('₀'..='₉').contains(c)).collect();
+    let ok = !v.is_empty()
+        && v.split('.').enumerate().all(|(i, p)| {
+            !p.is_empty()
+                && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && (i > 0 || !p.starts_with(|c: char| c.is_ascii_digit()))
+        });
+    ok.then_some(v)
+}
+
+/// Where `seg` crosses height `y` (x), if it does.
+fn crossing(seg: &Seg, y: f64) -> Option<f64> {
+    seg.lines.iter().find_map(|&(x1, y1, x2, y2)| {
+        (y1.min(y2) + 0.5 < y && y < y1.max(y2) - 0.5).then(|| x1 + (x2 - x1) * (y - y1) / (y2 - y1))
+    })
+}
+
+const MOVE_EVENTS: &[&str] = &["move", "closure_call", "loop_exit_move", "or_alt_move"];
+const VALUE_EVENTS: &[&str] = &[
+    "acquire", "copy", "static_borrow", "mutable_borrow", "init_ref_param", "loop_maybe_init",
+    "loop_exit_kept", "or_alt_borrow",
+];
+/// What a reference's line says (a deferred `let r;` has no bracket).
+const HOLDS_REF: &[&str] = &["holds an immutable reference", "holds a mutable reference"];
+/// What a struct's line says once a field was moved out of it.
+const PARTLY_MOVED: &[&str] = &["is partially moved", "can't be used as a whole"];
+const MAYBE_MOVED: &[&str] = &["moved in at least one branch", "may have been moved", "moved out in at least one branch"];
+
+pub type Skips = BTreeMap<&'static str, usize>;
+
+fn claims(pts: &Points, d: &Drawing, skips: &mut Skips) -> Vec<Claim> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for p in &pts.points {
+        let (Some(&ya), Some(&yb)) = (d.row.get(&p.line), d.row.get(&(p.line + 1))) else { continue };
+        if !seen.insert(p.line) {
+            continue;
+        }
+        let (fn_start, _, _) = pts.spans[p.func];
+        let y = (ya + yb) / 2.0;
+        let added_rows = d.dots.iter().any(|x| x.y > ya + 1.0 && x.y < yb - 1.0);
+        for (hash, var) in &d.columns {
+            // The column's last dot so far in this function. When it is
+            // in a conditional's arm and in the point's own block, the
+            // point is on that arm's path: other arms' legs (an `if`
+            // without `else` draws its implicit `else` solid beside the
+            // `then` arm) say nothing about it.
+            let last = d.dots.iter()
+                .filter(|x| &x.hash == hash && x.line >= fn_start && x.line <= p.line && x.y <= ya + 1.0)
+                .max_by(|a, b| a.y.total_cmp(&b.y));
+            let in_arm = last.is_some_and(|l| d.header_x.get(hash).is_some_and(|hx| (hx - l.x).abs() > 1.0));
+            // (Not on a `} else {` line: that is the arm above's too.)
+            let local = last.is_some_and(|l| {
+                (l.line > p.block.0 || (l.line == p.block.0 && !p.shared_open)) && l.line <= p.block.1
+            });
+            let segs: Vec<&Seg> = d.segs.iter()
+                .filter(|s| &s.hash == hash)
+                .filter(|s| match (crossing(s, y), last) {
+                    (None, _) => false,
+                    (Some(x), Some(l)) if in_arm && local => (x - l.x).abs() < 3.0,
+                    _ => true,
+                })
+                .collect();
+            let mut drawn: BTreeSet<Drawn> = BTreeSet::new();
+            let mut gray = false;
+            let mut skip: Option<&'static str> = None;
+            let mut tip = String::new();
+            for s in &segs {
+                let st = s.state.as_str();
+                let k = if st.ends_with("_gray") {
+                    gray = true;
+                    continue;
+                } else if st.ends_with("_uninit") {
+                    if d.refs.contains(hash) || s.tip.contains("borrow has ended") {
+                        // A reference's dashed line after its borrow
+                        // ended on one path: it still holds a value.
+                        skip = Some("a reference's dashed line (borrow ended on a path)");
+                        continue;
+                    }
+                    Drawn::Unassigned
+                } else if PARTLY_MOVED.iter().any(|m| s.tip.contains(m)) {
+                    // A struct with a field moved out: its line goes on
+                    // (the other fields can be used), and says so.
+                    Drawn::Moved
+                } else {
+                    match st {
+                        // A reference's line: hollow holds a `&`, solid a `&mut`.
+                        "full_privilege" | "partial_privilege" if d.refs.contains(hash) || HOLDS_REF.iter().any(|h| s.tip.contains(h)) => {
+                            skip = Some("a reference's line (says what it holds)");
+                            continue;
+                        }
+                        "full_privilege" => Drawn::Usable,
+                        "partial_privilege" => Drawn::Shared,
+                        "revoked_privilege" => Drawn::MutLent,
+                        "resource_moved" => Drawn::Moved,
+                        _ => continue,
+                    }
+                };
+                // A loan dead on some paths only, drawn live through the
+                // conditional with a note on the dot where it died
+                // ("x stays borrowed only on paths that skip line 8"):
+                // the line is every path's, the probe one path's.
+                let noted = d.dots.iter().any(|x| &x.hash == hash && x.y < y
+                    && x.events.iter().any(|e| e == "dead_loan_note")
+                    && s.lines.iter().any(|&(_, y1, _, y2)| y1.min(y2) - 1.0 <= x.y && x.y <= y1.max(y2) + 1.0));
+                if noted && matches!(k, Drawn::Shared | Drawn::MutLent) {
+                    skip = Some("loan dead on this path only, with a note saying so");
+                    continue;
+                }
+                drawn.insert(k);
+                tip = s.tip.clone();
+            }
+            if segs.is_empty() {
+                // No line: moved, if the column's last dot so far moved
+                // it, on this path (not in another arm).
+                let Some(last) = last else { continue };
+                if in_arm && !local {
+                    continue;
+                }
+                let pos = |es: &[&str]| last.events.iter().rposition(|e| es.contains(&e.as_str()));
+                let moved = match (pos(MOVE_EVENTS), pos(VALUE_EVENTS)) {
+                    (Some(m), Some(v)) => m > v,
+                    (Some(_), None) => true,
+                    _ => last.events.iter().any(|e| e == "branch_join") && MAYBE_MOVED.iter().any(|m| last.tip.contains(m)),
+                };
+                if !moved {
+                    continue;
+                }
+                if last.tip.split(" / ").any(|b| b.trim_start_matches("• ").starts_with('*')) {
+                    // `let x = *b;`: what the Box points to moved; the
+                    // drawing keeps the Box itself.
+                    skip = Some("only what a Box points to was moved");
+                } else {
+                    drawn.insert(Drawn::Moved);
+                    tip = last.tip.clone();
+                }
+            }
+            let why = if drawn.is_empty() {
+                skip.or(gray.then_some("only another arm's line runs here"))
+            } else if added_rows {
+                Some("rows added between the lines")
+            } else if drawn.len() > 1 {
+                Some("drawn in two states at once")
+            } else {
+                None
+            };
+            if let Some(why) = why {
+                *skips.entry(why).or_default() += 1;
+                continue;
+            }
+            if drawn.is_empty() {
+                continue;
+            }
+            let Some(name) = place_name(var) else {
+                *skips.entry("not a variable or field path").or_default() += 1;
+                continue;
+            };
+            let root = name.split('.').next().unwrap();
+            match pts.bindings[p.func].get(root) {
+                Some(1) => {}
+                Some(_) => {
+                    *skips.entry("name bound more than once in the function").or_default() += 1;
+                    continue;
+                }
+                None => {
+                    *skips.entry("not bound in this function").or_default() += 1;
+                    continue;
+                }
+            }
+            let drawn = *drawn.iter().next().unwrap();
+            out.push(Claim { line: p.line, func: p.func, var: name, drawn, in_loop: p.in_loop, tip });
+        }
+    }
+    out
+}
+
+/// The points rustc reaches: a never-assigned local per point, borrowed
+/// there, is an error (E0381) only where the code is reachable. After a
+/// `return`, `break`, `panic!` or `process::exit` nothing is
+/// borrow-checked, so a probe there would pass whatever is drawn.
+fn reachable(src: &str, pts: &Points, lines: &BTreeSet<(usize, u32)>) -> Result<HashSet<(usize, u32)>, String> {
+    let mut ins: Vec<(u32, String)> = Vec::new();
+    // For each inserted line, the point whose use it is.
+    let mut use_of: Vec<Option<(usize, u32)>> = Vec::new();
+    for (k, &(f, l)) in lines.iter().enumerate() {
+        let Some(open) = pts.spans[f].2 else { continue };
+        ins.push((open, format!("let __rv_reach_{}: u8;", k)));
+        use_of.push(None);
+        ins.push((l, format!("let _ = &__rv_reach_{};", k)));
+        use_of.push(Some((f, l)));
+    }
+    let (text, at) = insert_lines(src, &ins);
+    let mut out = HashSet::new();
+    for (code, line, msg) in rustc_errors(&text)? {
+        match (code.as_deref(), line.and_then(|l| at.get(&l)).and_then(|&k| use_of[k])) {
+            (Some("E0381"), Some(point)) => {
+                out.insert(point);
+            }
+            _ => return Err(format!("reachability probe: {:?} L{:?}: {}", code, line, msg)),
+        }
+    }
+    Ok(out)
+}
+
+/// `src` with each (after line, text) on a new line after that line;
+/// new line number -> index into `ins`.
+fn insert_lines(src: &str, ins: &[(u32, String)]) -> (String, HashMap<u32, usize>) {
+    let mut at: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+    for (i, (l, _)) in ins.iter().enumerate() {
+        at.entry(*l).or_default().push(i);
+    }
+    let mut out = String::new();
+    let mut lines = HashMap::new();
+    let mut n = 0u32;
+    for (i, l) in src.lines().enumerate() {
+        out.push_str(l);
+        out.push('\n');
+        n += 1;
+        for &k in at.get(&(i as u32 + 1)).into_iter().flatten() {
+            out.push_str(&ins[k].1);
+            out.push('\n');
+            n += 1;
+            lines.insert(n, k);
+        }
+    }
+    (out, lines)
+}
+
+// ─── rustc ──────────────────────────────────────────────────────────
+
+fn toolchain() -> String {
+    let t = include_str!("../../../rust-toolchain.toml");
+    t.lines()
+        .find_map(|l| l.trim().strip_prefix("channel").map(|r| r.trim_start_matches([' ', '=']).trim().trim_matches('"').to_owned()))
+        .expect("channel in rust-toolchain.toml")
+}
+
+fn cache_dir() -> PathBuf {
+    std::env::var_os("RV_ORACLE_CACHE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_TARGET_TMPDIR")).join("rv-oracle-cache"))
+}
+
+/// One error: (code, primary line, message).
+type Diag = (Option<String>, Option<u32>, String);
+
+/// rustc's errors for `src` as an edition-2024 lib, cached as a JSON list
+/// of `[code, line, message]` keyed by the toolchain and source.
+fn rustc_errors(src: &str) -> Result<Vec<Diag>, String> {
+    let tc = toolchain();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    ("rv-oracle-1", tc.as_str(), src).hash(&mut h);
+    let key = format!("{:016x}{:08x}", h.finish(), src.len());
+    let dir = cache_dir();
+    let cached = dir.join(format!("{}.json", key));
+    if let Some(d) = std::fs::read_to_string(&cached).ok().and_then(|s| serde_json::from_str::<Vec<Diag>>(&s).ok()) {
+        return Ok(d);
+    }
+    let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let file = tmp.path().join("probe.rs");
+    std::fs::write(&file, src).map_err(|e| e.to_string())?;
+    let out = Command::new("rustc")
+        .args(["--edition", "2024", "--crate-type", "lib", "--emit=metadata", "--error-format=json",
+               "-A", "warnings", "--crate-name", "rv_oracle_probe", "--out-dir"])
+        .arg(tmp.path())
+        .arg(&file)
+        .env("RUSTUP_TOOLCHAIN", &tc)
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .map_err(|e| format!("run rustc: {}", e))?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() && !stderr.contains("\"level\":\"error\"") {
+        return Err(format!("rustc failed without a diagnostic: {}", stderr.chars().take(400).collect::<String>()));
+    }
+    let mut diags = Vec::new();
+    for l in stderr.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(l) else { continue };
+        if v["level"] != "error" {
+            continue;
+        }
+        let code = v["code"]["code"].as_str().map(str::to_owned);
+        let line = v["spans"].as_array().and_then(|ss| {
+            ss.iter().find(|s| s["is_primary"] == true).and_then(|s| s["line_start"].as_u64()).map(|l| l as u32)
+        });
+        let msg = v["message"].as_str().unwrap_or("").to_owned();
+        if line.is_none() && code.is_none() {
+            continue; // "aborting due to N previous errors"
+        }
+        diags.push((code, line, msg));
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    let part = dir.join(format!("{}.{}.{:?}.tmp", key, std::process::id(), std::thread::current().id()));
+    if serde_json::to_string(&diags).is_ok_and(|j| std::fs::write(&part, j).is_ok()) {
+        let _ = std::fs::rename(&part, &cached);
+    }
+    Ok(diags)
+}
+
+#[derive(Debug, Clone)]
+struct Probe {
+    claim: usize,
+    after: u32,
+    mutable: bool,
+}
+
+impl Probe {
+    fn text(&self, claims: &[Claim]) -> String {
+        format!("let _ = &{}{}; // rv-oracle", if self.mutable { "mut " } else { "" }, claims[self.claim].var)
+    }
+}
+
+/// `src` with each probe on a new line after its line; the probe's line.
+fn with_probes(src: &str, probes: &[&Probe], claims: &[Claim]) -> (String, HashMap<u32, usize>) {
+    let ins: Vec<(u32, String)> = probes.iter().map(|p| (p.after, p.text(claims))).collect();
+    insert_lines(src, &ins)
+}
+
+/// What rustc said about one probe.
+#[derive(Debug, Clone)]
+enum Outcome {
+    /// The probe compiled with these errors at its line: (code, message).
+    Errors(BTreeSet<(String, String)>),
+    /// rustc can't type-check it there (out of scope, no such field).
+    NoTypecheck,
+    /// It makes another line fail: using a reference (or a closure or
+    /// iterator holding one) keeps its loan alive up to the probe.
+    Disturbs,
+}
+
+/// rustc's verdict on each probe. Probes that don't type-check are left
+/// out and the rest compiled again; probes that make another line fail
+/// are found by halving the set.
+fn run_probes(src: &str, probes: &[&Probe], claims: &[Claim]) -> Result<Vec<Outcome>, String> {
+    let mut result: Vec<Outcome> = vec![Outcome::NoTypecheck; probes.len()];
+    let mut active: Vec<usize> = (0..probes.len()).collect();
+    for _ in 0..8 {
+        if active.is_empty() {
+            return Ok(result);
+        }
+        let ps: Vec<&Probe> = active.iter().map(|&i| probes[i]).collect();
+        let (text, lines) = with_probes(src, &ps, claims);
+        let errs = rustc_errors(&text)?;
+        let mut got: HashMap<usize, BTreeSet<(String, String)>> = HashMap::new();
+        let mut bad = HashSet::new();
+        let mut elsewhere = false;
+        for (code, line, msg) in errs {
+            // E0596's span is the binding (with a `mut` suggestion) when
+            // it was reported for several uses.
+            if code.as_deref().is_some_and(|c| IGNORED.contains(&c)) {
+                continue;
+            }
+            match line.and_then(|l| lines.get(&l)) {
+                Some(&k) => {
+                    let c = code.clone().unwrap_or_default();
+                    if CONFLICT.contains(&c.as_str()) || NO_VALUE.contains(&c.as_str()) {
+                        got.entry(k).or_default().insert((c, msg));
+                    } else {
+                        bad.insert(k);
+                    }
+                }
+                None => elsewhere = true,
+            }
+        }
+        if !bad.is_empty() {
+            active = active.iter().enumerate().filter(|(k, _)| !bad.contains(k)).map(|(_, &i)| i).collect();
+            continue;
+        }
+        if elsewhere {
+            if active.len() == 1 {
+                result[active[0]] = Outcome::Disturbs;
+                return Ok(result);
+            }
+            let (a, b) = active.split_at(active.len() / 2);
+            for half in [a, b] {
+                let ps: Vec<&Probe> = half.iter().map(|&i| probes[i]).collect();
+                for (k, o) in run_probes(src, &ps, claims)?.into_iter().enumerate() {
+                    result[half[k]] = o;
+                }
+            }
+            return Ok(result);
+        }
+        for (k, &i) in active.iter().enumerate() {
+            result[i] = Outcome::Errors(got.remove(&k).unwrap_or_default());
+        }
+        return Ok(result);
+    }
+    Err("probes still don't type-check after 8 rounds".to_owned())
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct Stats {
+    pub programs: usize,
+    pub claims: usize,
+    pub tested: usize,
+    pub violations: usize,
+    pub in_loop_violations: usize,
+    pub skips: Skips,
+}
+
+impl Stats {
+    pub fn add(&mut self, o: &Stats) {
+        self.programs += o.programs;
+        self.claims += o.claims;
+        self.tested += o.tested;
+        self.violations += o.violations;
+        self.in_loop_violations += o.in_loop_violations;
+        for (k, v) in &o.skips {
+            *self.skips.entry(k).or_default() += v;
+        }
+    }
+}
+
+fn describe(d: Drawn) -> &'static str {
+    match d {
+        Drawn::Usable => "holding its value, not borrowed",
+        Drawn::Shared => "immutably borrowed (read only)",
+        Drawn::MutLent => "mutably borrowed (can't be used)",
+        Drawn::Moved => "moved (no value)",
+        Drawn::Unassigned => "not assigned yet",
+    }
+}
+
+/// The violations of one program: (check, what), and the counts.
+pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<(&'static str, String)>, Stats) {
+    let mut st = Stats { programs: 1, ..Default::default() };
+    let mut out = Vec::new();
+    if src.contains("rustviz: hide") || src.contains("rustviz: skip") {
+        *st.skips.entry("program: rustviz: hide/skip").or_default() += 1;
+        return (out, st);
+    }
+    let d = match drawing(timeline, code) {
+        Ok(d) => d,
+        Err(e) => {
+            out.push(("oracle-usable", format!("couldn't read the panels: {}", e)));
+            return (out, st);
+        }
+    };
+    let Ok(file) = syn::parse_file(src) else {
+        *st.skips.entry("program: syn can't parse it").or_default() += 1;
+        return (out, st);
+    };
+    let mut pts = Points { src: src.lines().map(str::to_owned).collect(), ..Default::default() };
+    pts.visit_file(&file);
+    let claims = claims(&pts, &d, &mut st.skips);
+    match rustc_errors(src) {
+        Ok(e) if e.is_empty() => {}
+        _ => {
+            *st.skips.entry("program: doesn't compile as an edition-2024 lib").or_default() += 1;
+            return (out, st);
+        }
+    }
+    let lines: BTreeSet<(usize, u32)> = claims.iter().map(|c| (c.func, c.line)).collect();
+    let live = match reachable(src, &pts, &lines) {
+        Ok(r) => r,
+        Err(e) => {
+            out.push(("oracle-usable", format!("probe program failed: {}", e)));
+            return (out, st);
+        }
+    };
+    let (claims, dead): (Vec<Claim>, Vec<Claim>) = claims.into_iter().partition(|c| live.contains(&(c.func, c.line)));
+    for c in &dead {
+        let why = if pts.spans[c.func].2.is_none() { "function body starts on its `{` line" } else { "dead code (after a return, break, panic)" };
+        *st.skips.entry(why).or_default() += 1;
+    }
+    st.claims = claims.len() + st.skips.values().sum::<usize>();
+    let mut probes = Vec::new();
+    for (i, c) in claims.iter().enumerate() {
+        match c.drawn {
+            Drawn::Usable => probes.push(Probe { claim: i, after: c.line, mutable: true }),
+            Drawn::Shared => {
+                probes.push(Probe { claim: i, after: c.line, mutable: false });
+                probes.push(Probe { claim: i, after: c.line, mutable: true });
+            }
+            Drawn::MutLent | Drawn::Moved | Drawn::Unassigned => {
+                probes.push(Probe { claim: i, after: c.line, mutable: false })
+            }
+        }
+    }
+    let moved = |p: &Probe| matches!(claims[p.claim].drawn, Drawn::Moved | Drawn::Unassigned);
+    let mut res: Vec<Outcome> = vec![Outcome::NoTypecheck; probes.len()];
+    for want_moved in [false, true] {
+        let idx: Vec<usize> = (0..probes.len()).filter(|&i| moved(&probes[i]) == want_moved).collect();
+        let ps: Vec<&Probe> = idx.iter().map(|&i| &probes[i]).collect();
+        match run_probes(src, &ps, &claims) {
+            Ok(r) => {
+                for (k, v) in r.into_iter().enumerate() {
+                    res[idx[k]] = v;
+                }
+            }
+            Err(e) => {
+                out.push(("oracle-usable", format!("probe program failed: {}", e)));
+                return (out, st);
+            }
+        }
+    }
+    // A batch only proves a probe clean. Another probe can make one fail
+    // (using a reference after a probe of its lender keeps the loan
+    // alive over it), and rustc reports one use of a moved value per
+    // move. So every probe that failed, and every moved probe, is
+    // compiled again on its own, and that verdict counts.
+    for i in 0..probes.len() {
+        let again = match &res[i] {
+            Outcome::Errors(e) => !e.is_empty() || moved(&probes[i]),
+            _ => false,
+        };
+        if again {
+            match run_probes(src, &[&probes[i]], &claims) {
+                Ok(r) => res[i] = r.into_iter().next().unwrap(),
+                Err(e) => {
+                    out.push(("oracle-usable", format!("probe program failed: {}", e)));
+                    return (out, st);
+                }
+            }
+        }
+    }
+    let mut tested = vec![false; claims.len()];
+    let mut untestable: Vec<Option<&'static str>> = vec![None; claims.len()];
+    let mut bad: BTreeMap<usize, (&'static str, String)> = BTreeMap::new();
+    for (p, r) in probes.iter().zip(&res) {
+        let errs = match r {
+            Outcome::Errors(e) => e,
+            Outcome::NoTypecheck => {
+                untestable[p.claim] = Some("probe doesn't type-check there (out of scope?)");
+                continue;
+            }
+            Outcome::Disturbs => {
+                untestable[p.claim] = Some("probe makes another line fail (keeps a loan alive)");
+                continue;
+            }
+        };
+        tested[p.claim] = true;
+        let conflict = errs.iter().find(|(c, _)| CONFLICT.contains(&c.as_str()));
+        let novalue = errs.iter().find(|(c, _)| NO_VALUE.contains(&c.as_str()));
+        let c = &claims[p.claim];
+        let verdict = |e: Option<&(String, String)>| match e {
+            Some((code, msg)) => format!("rustc: error[{}]: {}", code, msg),
+            None => format!("rustc accepts `{}`", p.text(&claims).trim_end_matches(" // rv-oracle")),
+        };
+        let wrong: Option<(&'static str, String)> = match (c.drawn, p.mutable) {
+            (Drawn::Usable, _) => conflict.or(novalue).map(|e| ("oracle-usable", verdict(Some(e)))),
+            (Drawn::Shared, false) => conflict.or(novalue).map(|e| ("oracle-readable", verdict(Some(e)))),
+            (Drawn::Shared, true) | (Drawn::MutLent, _) => match (conflict, novalue) {
+                (None, None) => Some(("oracle-borrowed", verdict(None))),
+                (None, Some(e)) => Some(("oracle-borrowed", verdict(Some(e)))),
+                _ => None,
+            },
+            (Drawn::Moved | Drawn::Unassigned, _) => novalue.is_none().then(|| ("oracle-moved", verdict(conflict))),
+        };
+        if let Some((check, v)) = wrong {
+            bad.entry(p.claim).or_insert((check, v));
+        }
+    }
+    for i in 0..claims.len() {
+        if let (false, Some(why)) = (tested[i], untestable[i]) {
+            *st.skips.entry(why).or_default() += 1;
+        }
+    }
+    st.tested = tested.iter().filter(|t| **t).count();
+    for (i, (check, verdict)) in bad {
+        let c = &claims[i];
+        let src_line = src.lines().nth(c.line as usize - 1).unwrap_or("").trim();
+        st.violations += 1;
+        if c.in_loop {
+            st.in_loop_violations += 1;
+        }
+        let tip: String = c.tip.chars().take(160).collect();
+        out.push((check, format!(
+            "{} after L{} `{}`{}: drawn {} ({:?}); {}",
+            c.var, c.line, src_line, if c.in_loop { " (in a loop)" } else { "" }, describe(c.drawn), tip, verdict
+        )));
+    }
+    (out, st)
+}
+
+/// What differs from `KNOWN_ORACLE_FAILURES`, in `invariants::report`'s
+/// format (`tools/progen` parses its NEW lines).
+pub fn report(found: &BTreeMap<(String, &'static str), Vec<String>>, checked: &HashSet<String>) -> String {
+    let known: BTreeMap<(&str, &str), u32> =
+        KNOWN_ORACLE_FAILURES.iter().map(|(s, i, n)| ((*s, *i), *n)).collect();
+    let exempt: HashSet<(&str, &str)> = ORACLE_EXEMPT.iter().map(|(s, c, _)| (*s, *c)).collect();
+    let mut out = String::new();
+    for ((snippet, check), whats) in found {
+        if known.contains_key(&(snippet.as_str(), *check)) || exempt.contains(&(snippet.as_str(), *check)) {
+            continue;
+        }
+        let why = ORACLE_CHECKS.iter().find(|(n, _)| n == check).map_or("", |(_, w)| *w);
+        out.push_str(&format!("\nNEW  {snippet}: {check} ({why})\n"));
+        for w in whats {
+            out.push_str(&format!("       {w}\n"));
+        }
+    }
+    for ((snippet, check), issue) in &known {
+        if checked.contains(*snippet) && !found.contains_key(&(snippet.to_string(), *check)) {
+            out.push_str(&format!(
+                "\nGONE {snippet}: {check} (#{issue}) no longer happens. Fixed? Delete its entry from \
+                 KNOWN_ORACLE_FAILURES (and check #{issue}).\n"));
+        }
+    }
+    for (snippet, check, why) in ORACLE_EXEMPT {
+        if checked.contains(*snippet) && !found.contains_key(&(snippet.to_string(), *check)) {
+            out.push_str(&format!(
+                "\nGONE {snippet}: {check} (exempt: {why}) no longer happens. Delete its entry from ORACLE_EXEMPT.\n"));
+        }
+    }
+    out
+}
+
+/// Every entry names a check, and no (snippet, check) twice.
+pub fn known_list_problems() -> Vec<String> {
+    let names: HashSet<&str> = ORACLE_CHECKS.iter().map(|(n, _)| *n).collect();
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    let both = KNOWN_ORACLE_FAILURES.iter().map(|(s, c, _)| (*s, *c)).chain(ORACLE_EXEMPT.iter().map(|(s, c, _)| (*s, *c)));
+    for (s, c) in both {
+        if !names.contains(c) {
+            out.push(format!("({s}, {c}) names no check"));
+        }
+        if !seen.insert((s, c)) {
+            out.push(format!("({s}, {c}) is listed twice"));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod unit {
+    use super::*;
+
+    fn points(src: &str) -> Vec<(u32, bool)> {
+        let mut p = Points { src: src.lines().map(str::to_owned).collect(), ..Default::default() };
+        p.visit_file(&syn::parse_file(src).unwrap());
+        let mut v: Vec<(u32, bool)> = p.points.iter().map(|p| (p.line, p.in_loop)).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn statement_boundaries() {
+        let src = "fn main() {\n    let a = 1; let b = 2;\n    let s = String::new();\n    if a > b {\n        let t = 1;\n    }\n    for i in 0..2 {\n        let _ = i;\n    }\n    let c = || {\n        let z = 1;\n    };\n    let d = {\n        5\n    };\n    d\n}\n";
+        // Not after `let a` (b starts on its line), not in the closure,
+        // not after a tail (`5`, `d`).
+        assert_eq!(points(src), vec![(2, false), (3, false), (5, false), (6, false), (8, true), (9, false), (12, false), (15, false)]);
+    }
+
+    #[test]
+    fn place_names() {
+        assert_eq!(place_name("s₂").as_deref(), Some("s"));
+        assert_eq!(place_name("p.x").as_deref(), Some("p.x"));
+        assert_eq!(place_name("t.0").as_deref(), Some("t.0"));
+        assert_eq!(place_name("*r"), None);
+        assert_eq!(place_name("String::from"), None);
+        assert_eq!(place_name("v[0]"), None);
+        assert_eq!(place_name("0"), None);
+    }
+}

@@ -1914,9 +1914,11 @@ name = "rustviz-lib"
 version = "2.1.0"
 dependencies = [
  "libc",
+ "proc-macro2",
  "roxmltree",
  "serde",
  "serde_json",
+ "syn",
  "tempfile",
 ]
 

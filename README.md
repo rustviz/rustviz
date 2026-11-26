@@ -113,6 +113,32 @@ silently test a stale build. On Windows, run `build` and `test` as
 `rustviz` and `rustviz-cli` both produce a `rustviz` bin, and linking
 both in one invocation fails with LNK1104 (CI does the same).
 
+**Checking drawings against rustc (`RV_ORACLE=1`):** the borrow checker
+knows, for every point of a program, whether a variable is borrowed,
+moved or free, so it can check what each timeline draws. After every
+statement, for every variable whose state is drawn there, the test
+inserts a use and compiles: `let _ = &mut x;` must compile where `x` is
+drawn holding its value with nothing borrowing it, `let _ = &x;` must
+compile where it's drawn read-only and fail where it's drawn mutably
+borrowed, moved or not assigned yet (E0502, E0382, ...). The check
+skips (and counts) what it can't probe soundly: points inside closures
+or dead code, shadowed names, places like `*r` or `v[0]`, rows where the
+plugin added extra rows. It compiles a few probe programs per snippet,
+so it's opt-in:
+
+```sh
+RV_ORACLE=1 cargo test -p rustviz-lib --test corpus --locked corpus_oracle_holds -- --nocapture
+```
+
+It runs on every fixture, Book snippet and known-bug repro (narrow it
+with `RV_INVARIANTS_ONLY=book/,known_bugs/`, add a directory with
+`RV_INVARIANTS_EXTRA=<dir>`), caches each compile under
+`target/tmp/rv-oracle-cache` (or `$RV_ORACLE_CACHE`), and fails on a
+violation that isn't in `KNOWN_ORACLE_FAILURES`
+(`rustviz-lib/tests/common/oracle.rs`, one issue per entry) or on a
+listed one that's gone. `tools/progen/progen.py check --oracle <dir>`
+runs it on generated programs.
+
 **Running the playground locally:** `cd playground && cargo run
 --release`, then open <http://127.0.0.1:8080/>. Without Docker, set
 `RV_RUNNER=local` (fine on your own machine, never on a public

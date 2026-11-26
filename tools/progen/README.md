@@ -51,6 +51,14 @@ Environment:
 `progen.py check DIR` runs the checks on a directory of `.rs` files (any
 programs, e.g. a batch of bug repros).
 
+`--oracle` (on `run` and `check`) also runs `corpus_oracle_holds`, which
+compares each variable's drawn state with rustc's borrow checker (see
+"Checking drawings against rustc" in the top-level README). Its failures
+are bucketed as `oracle-usable` / `oracle-readable` / `oracle-borrowed` /
+`oracle-moved` by the variable's type, the drawn state and rustc's error
+code. It compiles a few probe programs per generated program, so a run
+takes about twice as long.
+
 Needs Python 3.8+ (standard library only) and the toolchain from
 `rust-toolchain.toml` (rustc's borrow checker is the filter). 3,000
 programs take about 3 minutes to generate and check on 18 cores; shrinking
