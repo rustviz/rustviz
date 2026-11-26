@@ -6613,3 +6613,7 @@ mod still_borrowed_with_lend_tests {
         assert!(still_borrowed_with_lend(&still, &event_dot_static_lend(&n("w"), &n("x"), false, false)).is_none());
     }
 }
+
+pub fn approx_note_unfinished_vec() -> &'static str {
+    "If evaluation returns early or unwinds after this move and before the vector is built, Rust drops this element."
+}

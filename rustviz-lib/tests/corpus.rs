@@ -69,7 +69,9 @@ fn all_fixtures() -> Vec<String> {
 /// any tooltip (a substring check, so a fragment like "(copied from" works;
 /// #511). `must_contain` stays whole-tooltip equality. Adding new tooltips
 /// downstream doesn't break the test — only removing a listed one (or
-/// producing text that's been forbidden) does.
+/// producing text that's been forbidden) does. A forbidden state followed by
+/// ` @before ` and a unique source line applies only to column segments
+/// leading into that row. The same state can be correct earlier in the program.
 struct TooltipExpect {
     name: &'static str,
     must_contain: &'static [&'static str],
@@ -28069,6 +28071,53 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "A temporary holds the value that String::from returns",
         ],
     },
+    TooltipExpect {
+        name: "reused_element_1681",
+        must_contain: &[
+            "Return mutably borrowed resource from e to v",
+            "Return mutably borrowed resource from o to v",
+            "o's mutable borrow ends",
+        ],
+        must_not_contain: &[
+            r#"v's resource is mutably borrowed; v can't be used until the borrow ends @before println!("{}", v.len());"#,
+            "Move from v to e",
+        ],
+    },
+    TooltipExpect {
+        name: "mixed_vec_elements_1682",
+        must_contain: &[
+            "Move from s2 to v",
+            "s2 goes out of scope. No resource is dropped.",
+            "v goes out of scope. Its resource is dropped (including every String it holds).",
+            "Move from item to dst",
+            "Move from arg to consume",
+            "yes's resource is moved to the caller",
+            "no's resource is moved to the caller",
+            "head's resource is moved",
+            "Move from nested to lists",
+            "inner's resource is moved",
+            "first's resource is moved",
+            "previous goes out of scope. Its resource is dropped (including every String it holds).",
+            "part's resource is moved",
+            "early's resource is moved",
+            "later goes out of scope. Its resource is dropped.",
+            "If evaluation returns early or unwinds after this move and before the vector is built, Rust drops this element.",
+            "dst acquires ownership of a new resource; its previous resource (including every String it holds) is dropped",
+        ],
+        must_not_contain: &[
+            r#"s2 is the owner of the resource @before println!("{}", v.len());"#,
+            "Move from r to v",
+            "Move from first to values",
+            "Move from inner to outer",
+            "Move from early to missing",
+            "previous acquires ownership of a new resource",
+            "previous's resource is moved into drop",
+            "later's resource is moved",
+            "missing acquires ownership",
+            "missing goes out of scope. Its resource is dropped",
+            "s2 goes out of scope. Its resource is dropped.",
+        ],
+    },
 ];
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws
@@ -31090,8 +31139,9 @@ fn corpus_expected_tooltips_present() {
         let label = entry_label(idx);
         let res = std::panic::catch_unwind(|| {
             let rv = run_with_local_backend(expect.name);
-            assert_no_negative_sizes(expect.name, &rv.timeline_panel_string());
-            let actual = timeline_tooltips(&rv.timeline_panel_string());
+            let timeline = rv.timeline_panel_string();
+            assert_no_negative_sizes(expect.name, &timeline);
+            let actual = timeline_tooltips(&timeline);
             // #308: a numbered header stops at "declared on line N"; the
             // long "While s₂ is in scope the name s refers to s₂ ..."
             // sentence was dropped as noise.
@@ -31110,7 +31160,15 @@ fn corpus_expected_tooltips_present() {
                 .must_not_contain
                 .iter()
                 .copied()
-                .filter(|forbid| forbidden_present(forbid, &actual))
+                .filter(|forbid| {
+                    if let Some((state, source)) = forbid.split_once(" @before ") {
+                        let row = code_row_y(&rv.code_panel_string(), source);
+                        return state_lines_with_tooltip(&timeline, state).into_iter()
+                            .chain(column_lines_with_tooltip(&timeline, state))
+                            .any(|(lo, hi)| lo < row && row <= hi);
+                    }
+                    forbidden_present(forbid, &actual)
+                })
                 .collect();
 
             if !missing.is_empty() || !unexpected.is_empty() {
@@ -38453,4 +38511,24 @@ fn code_panel_names_from_utf8_1631() {
     assert!(!code.contains("{{root}}"), "path root shown: {code}");
     // Only `w`'s `String::from(..)` is shown by that name.
     assert_eq!(code.matches(">String::from</tspan>(").count(), 1, "{code}");
+}
+
+#[test]
+fn reused_element_releases_vector_before_loop_1681() {
+    let rv = run_with_local_backend("reused_element_1681");
+    let timeline = rv.timeline_panel_string();
+    let code = rv.code_panel_string();
+    let read = code_row_y(&code, r#"println!("{}", v.len());"#);
+    let last_use = code_row_y(&code, "e.push('x');");
+    assert!(dots_listing_tooltip(&timeline, "e's mutable borrow ends").iter().any(|d| d.1 == last_use));
+    let owners = column_lines_with_tooltip(&timeline, "v is the owner of the resource");
+    assert!(owners.iter().any(|&(a, b)| a < read && read <= b), "v must be usable before v.len()");
+}
+
+#[test]
+fn moved_vec_element_stops_being_an_owner_1682() {
+    let rv = run_with_local_backend("mixed_vec_elements_1682");
+    let row = code_row_y(&rv.code_panel_string(), r#"let v = vec![s2, format!("{}!", r)];"#);
+    let owners = state_lines_with_tooltip(&rv.timeline_panel_string(), "s2 is the owner of the resource");
+    assert!(!owners.iter().any(|&(_, b)| b > row), "s2 still owns the string below the vec! row");
 }

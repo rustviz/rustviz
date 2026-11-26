@@ -11,7 +11,7 @@ use rustc_middle::{
   mir::Body,
   ty::*,
 };
-use rustc_hir::{Expr, ExprKind, QPath, PatKind, Mutability, UnOp, def::*, Pat};
+use rustc_hir::{HirId, Expr, ExprKind, QPath, PatKind, Mutability, UnOp, def::*, Pat};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use crate::expr_visitor_utils::*;
 use crate::svg_generator::data::*;
@@ -138,7 +138,7 @@ fn add_lenders(out: &mut Vec<ResourceTy>, rd: &RefData) {
 }
 
 fn same_loan(a: &RefData, b: &RefData) -> bool {
-  a.lender == b.lender && a.assigned_at == b.assigned_at && a.loan_line == b.loan_line
+  a.binding == b.binding && a.lender == b.lender && a.assigned_at == b.assigned_at && a.loan_line == b.loan_line
     && a.borrow_span == b.borrow_span && a.co_lenders == b.co_lenders
 }
 
@@ -181,6 +181,9 @@ pub struct StoredBorrow {
 
 #[derive(Debug, Clone)]
 pub struct RefData {
+  /// The source binding for MIR queries, even after another variable takes
+  /// over its display column (#1681). Synthetic columns have no binding.
+  pub binding: Option<HirId>,
   pub lender: ResourceTy, // who this reference borrowed from
   pub assigned_at: usize, // gen point
   pub lifetime: usize, // kill point
@@ -571,7 +574,7 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // While the pattern of `for (x, y) in [(&e, &g)]` is registered: the
   // elements of the literal head, whose references a reference binding
   // copies (#1433).
-  pub pattern_literal: Option<&'tcx [Expr<'tcx>]>,
+  pub pattern_literal: Option<Vec<&'tcx Expr<'tcx>>>,
   // Temporaries given a column of their own in this fn body because a
   // `let` borrows them (`let r = &String::from("a");`, #400); numbers
   // the next one's label.
@@ -1741,7 +1744,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // Adds a reference RAP
   // `pointee_copy`: the referent type is Copy (see `ref_pointee_is_copy`).
-  pub fn add_ref(&mut self, name: String, ref_mutability: bool, lhs_mut: bool, line_num: usize, lender: ResourceTy, alia: VecDeque<String>, scope: usize, is_global: bool, pointee_copy: bool) {
+  pub fn add_ref(&mut self, binding: Option<HirId>, name: String, ref_mutability: bool, lhs_mut: bool, line_num: usize, lender: ResourceTy, alia: VecDeque<String>, scope: usize, is_global: bool, pointee_copy: bool) {
     match ref_mutability {
       true => {
         self.add_mut_ref_member(name.clone(), lhs_mut, scope, is_global, None, pointee_copy);
@@ -1759,16 +1762,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if self.holder_shadowed(&name) {
       return;
     }
-    self.retire_loan(&name, line_num);
-    self.borrow_map.insert(name.clone(), RefData { lender: lender.clone(), assigned_at: line_num, lifetime: line_num, ref_mutability: ref_mutability, aliasing: alia, static_lender: None, borrow_span: None, loan_line: None, co_lenders: Vec::new(), lender_muts: Vec::new(), through: Vec::new() });
+    self.retire_loan(&name, line_num, binding);
+    self.borrow_map.insert(name.clone(), RefData { binding, lender: lender.clone(), assigned_at: line_num, lifetime: line_num, ref_mutability: ref_mutability, aliasing: alia, static_lender: None, borrow_span: None, loan_line: None, co_lenders: Vec::new(), lender_muts: Vec::new(), through: Vec::new() });
   }
   /// A variable named `name` declared on `line` takes over the column
   /// of an earlier one of that name, which is out of scope by now
   /// (sibling blocks, two `for x` loops, #903): set the earlier one's
   /// loan aside in `retired_loans`, where `emit_borrow_ends` still ends
   /// it, rather than lose it to the new variable's.
-  fn retire_loan(&mut self, name: &str, line: usize) {
-    if !self.borrow_map.get(name).is_some_and(|old| old.assigned_at < line) {
+  fn retire_loan(&mut self, name: &str, line: usize, binding: Option<HirId>) {
+    let replaced = self.borrow_map.get(name).is_some_and(|old| match (old.binding, binding) {
+      (Some(old_id), Some(new_id)) => old_id != new_id,
+      _ => old.assigned_at < line,
+    });
+    if !replaced {
       return;
     }
     let Some(data) = self.borrow_map.remove(name) else { return };
@@ -3336,6 +3343,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             _ => None,
           };
           self.borrow_map.insert(name.to_owned(), RefData {
+            binding: None,
             lender: l,
             assigned_at: line,
             lifetime: line,
@@ -5616,6 +5624,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // `lhs` the same way (#1143).
     let mut work: Vec<&'tcx Expr<'tcx>> = parts.into_iter().rev().collect();
     while let Some(elem) = work.pop() {
+      if let Some(nested) = self.vec_macro_elems(elem) {
+        work.extend(nested.into_iter().rev());
+        continue;
+      }
       if !elem.span.from_expansion() {
         match elem.kind {
           ExprKind::Struct(_, fields, tail) => {
@@ -6001,8 +6013,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // (`f([s, t])`, `f(vec![s])`): each element is passed into the
     // call with it, so `s` is moved into the call (#297).
     let built_elems = match arg.kind {
-      ExprKind::Array(elems) if !arg.span.from_expansion() => Some(elems),
-      _ => vec_macro_elems(arg),
+      ExprKind::Array(elems) if !arg.span.from_expansion() => Some(elems.iter().collect()),
+      _ => self.vec_macro_elems(arg),
     };
     if let Some(elems) = built_elems {
       self.add_fn(fn_name.clone());
@@ -6012,7 +6024,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         // `take(vec![B { name: r }])`, `take([(r, 1)])`: what the
         // literal element is built from goes into the call (#1143).
         let is_literal = matches!(elem.kind, ExprKind::Struct(..) | ExprKind::Tup(_)) && !elem.span.from_expansion();
-        if is_var || is_literal {
+        if is_var || is_literal || self.vec_macro_elems(elem).is_some() {
           self.match_arg(elem, fn_name.clone());
         }
       }
@@ -6896,7 +6908,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
 
   // Add a RAP to our collection of raps for a let stmt
-  pub fn define_lhs(&mut self, name: String, mutability: bool, expr: &'tcx Expr, ty: Ty <'tcx>) {
+  pub fn define_lhs(&mut self, binding: Option<HirId>, name: String, mutability: bool, expr: &'tcx Expr, ty: Ty <'tcx>) {
     // (Declared ahead of the conditional whose branch value it now
     // gets, #1007.)
     if self.bind_existing && self.raps.contains_key(&name) {
@@ -6914,7 +6926,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         .any(|a| matches!(a.kind, adjustment::Adjust::Pointer(adjustment::PointerCoercion::Unsize)))
         .then(|| typeck.expr_ty(expr));
       let pointee_copy = self.ref_pointee_is_copy(unsized_from.unwrap_or(ty), expr.hir_id.owner);
-      self.add_ref(name.clone(), 
+      self.add_ref(binding, name.clone(),
       bool_of_mut(ty.ref_mutability().unwrap()), 
       mutability, 
       expr_to_line(&expr, &self.tcx),
@@ -7005,7 +7017,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             self.add_owner(name.clone(), mutability, is_copy, self.ty_is_plain(ty, expr.hir_id.owner), interior_mut, self.current_scope, !self.inside_branch);
             self.mark_owner_type(&name, ty);
           }
-          self.register_holder(&name, expr, ty);
+          self.register_holder(binding, &name, expr, ty);
         }
       }
     }
@@ -7031,7 +7043,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let is_copy = self.ty_is_copy(ty, expr.hir_id.owner);
       self.add_owner(name.clone(), mutability, is_copy, self.ty_is_plain(ty, expr.hir_id.owner), self.ty_has_interior_mut(ty, expr.hir_id.owner), self.current_scope, !self.inside_branch);
       self.mark_owner_type(&name, ty);
-      self.register_holder(&name, expr, ty);
+      self.register_holder(binding, &name, expr, ty);
     }
   }
 
@@ -7192,6 +7204,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         self.mark_holder(&fname);
         let line = expr_to_line(&init, &self.tcx);
         self.borrow_map.insert(fname, RefData {
+          binding: None,
           lender,
           assigned_at: line,
           lifetime: line,
@@ -7219,6 +7232,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// the new borrow from the updated `borrow_map` entry.
   pub fn reassign_holder(&mut self, h: &ResourceAccessPoint, rhs: &'tcx Expr<'tcx>, ty: Ty<'tcx>, line: usize) {
     let name = h.name().to_owned();
+    let binding = self.borrow_map.get(&name).and_then(|rd| rd.binding);
     if let Some(old) = self.borrow_map.get(&name).cloned() {
       let mir_b_data = self.gather_borrow_data(self.bwf);
       let end = mir_b_data.iter()
@@ -7247,6 +7261,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let lender = lenders.remove(0);
     let aliasing = get_aliasing_data(&lender, &self.borrow_map);
     self.borrow_map.insert(name, RefData {
+      binding,
       lender,
       assigned_at: line,
       lifetime: line,
@@ -7463,8 +7478,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// so it lasts until the holder's last use (MIR refines it in
   /// `emit_borrow_ends`), and a reference later taken out of it
   /// (`it.next().unwrap()`) finds `v` as its lender (#336).
-  fn register_holder(&mut self, name: &String, init: &'tcx Expr<'tcx>, ty: Ty<'tcx>) {
-    self.retire_loan(name, expr_to_line(&init, &self.tcx));
+  fn register_holder(&mut self, binding: Option<HirId>, name: &String, init: &'tcx Expr<'tcx>, ty: Ty<'tcx>) {
+    self.retire_loan(name, expr_to_line(&init, &self.tcx), binding);
     let (mut lenders, is_mut) = self.holder_lenders(init, ty);
     let mut lender_muts = self.holder_lender_muts(init);
     // `let w: Vec<&String> = v.iter().copied().collect();` holds the
@@ -7521,6 +7536,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       _ => None,
     };
     self.borrow_map.insert(name.clone(), RefData {
+      binding,
       lender,
       assigned_at: line,
       lifetime: line,
@@ -7931,6 +7947,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       None => {
         let aliasing = get_aliasing_data(&lenders[0], &self.borrow_map);
         self.borrow_map.insert(name, RefData {
+          binding: None,
           lender: lenders[0].clone(),
           assigned_at: line,
           lifetime: line,
@@ -8017,6 +8034,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         // statement, so stretch the loan to the enclosing scope so
         // the ref-line trapezoid actually has a non-degenerate range.
         self.borrow_map.insert(field_name, RefData {
+          binding: None,
           lender: ref_lender.clone(),
           assigned_at: site.assigned_at,
           lifetime: site.scope,
@@ -8339,7 +8357,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                 let through_parent = parent_ty.is_ref() && *parent_ty != ty;
                 let lender = if by_ref || through_parent { parent.clone() } else { ResourceTy::Anonymous };
                 let pointee_copy = self.ref_pointee_is_copy(ty, id.owner);
-                self.add_ref(name.clone(), ref_mutability, muta, line_num, lender, VecDeque::new(), scope, false, pointee_copy);
+                self.add_ref(Some(id), name.clone(), ref_mutability, muta, line_num, lender, VecDeque::new(), scope, false, pointee_copy);
             } else if matches!(ty.kind(), TyKind::Tuple(_)) && self.has_member_columns(ty) {
                 // A tuple binding gets a column per element, like a
                 // struct binding's fields (#189).
@@ -10143,8 +10161,8 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     let line_num = span_to_line(&user_span, &self.tcx);
     // `vec![s, t]` / `vec![x; n]`: the elements the user wrote are
     // moved (or copied) into the new Vec, like an array literal's.
-    if let Some(elems) = vec_macro_elems(rhs) {
-      self.match_array_elems(lhs, elems, line_num);
+    if let Some(elems) = self.vec_macro_elems(rhs) {
+      self.match_literal_parts(lhs, elems, line_num);
       return;
     }
     self.bind_from_anonymous(line_num, lhs);
@@ -10408,7 +10426,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
             let member = if !elem_ty.is_ref() && !self.has_member_columns(elem_ty)
               && matches!(member, ResourceAccessPoint::Struct(_)) {
               let name = member.name().to_owned();
-              self.register_holder(&name, holder_value, elem_ty);
+              self.register_holder(None, &name, holder_value, elem_ty);
               self.raps.get(&name).map_or(member, |rd| rd.rap.to_owned())
             } else {
               member
@@ -11195,7 +11213,7 @@ pub fn enclosing_ctor_name(&self, e: &'tcx Expr<'tcx>) -> Option<String> {
 /// isn't a value of literals. What it is built from goes to the caller
 /// with it (#1143).
 pub fn is_nested_literal(&self, e: &'tcx Expr<'tcx>) -> bool {
-  if vec_macro_elems(e).is_some() {
+  if self.vec_macro_elems(e).is_some() {
     return true;
   }
   !e.span.from_expansion() && match e.kind {
@@ -11272,7 +11290,7 @@ pub fn match_struct_field_of(&mut self, lhs: &ResourceTy, field_name: &str, expr
     _ => expr,
   };
   if holder {
-    self.register_holder(&new_lhs_name, expr, field_ty);
+    self.register_holder(None, &new_lhs_name, expr, field_ty);
   }
   let field_rap = self.raps.get(&new_lhs_name).unwrap().rap.to_owned();
   let is_copyable = self.ty_is_copy(field_ty, expr.hir_id.owner);
@@ -11843,14 +11861,24 @@ pub fn print_out_of_scope(&mut self){
     // it's bound on: a branch's `&mut m1` in `let km = match n { 0 =>
     // Some(&mut m1), .. };` is issued on the arm's line (#1464).
     #[expect(clippy::disallowed_methods, reason = "collected into a map, each entry on its own")]
-    let arm_lines: HashMap<String, Vec<(usize, String)>> = self.borrow_map.iter()
+    let arm_kills: HashMap<String, usize> = self.borrow_map.iter()
       .filter(|(_, d)| d.borrow_span.is_none() && d.loan_line.is_none())
       .filter_map(|(n, d)| {
         let hash = *self.raps.get(n)?.rap.hash();
         let mut lines = Vec::new();
         borrow_lines_into(self.preprocessed_events, hash, &mut lines);
         lines.retain(|(l, _)| *l > d.assigned_at);
-        (!lines.is_empty()).then(|| (n.clone(), lines))
+        if lines.is_empty() { return None; }
+        // Disjoint bindings share a column. Only a loan in this binding's
+        // MIR type can refine its lifetime, even if a later binding borrows
+        // the very same lender (#1681).
+        let held = self.loan_indices_held_by(n)?;
+        let end = mir_b_data.iter()
+          .filter(|m| held.contains(&m.borrow_idx) && !by_span.contains(&m.borrow_idx))
+          .filter(|m| lines.iter().any(|(line, lender)| m.region.0 == *line
+            && m.borrowed_place.as_deref().is_some_and(|p| lender == p || lender.strip_prefix(p).is_some_and(|rest| rest.starts_with('.')))))
+          .map(|m| m.region.1).max()?;
+        Some((n.clone(), end))
       })
       .collect();
     // A holder given a reference variable's value in a branch that
@@ -11909,13 +11937,7 @@ pub fn print_out_of_scope(&mut self){
       // them: a move into an `if let`'s binding hands them on, and on
       // the path that didn't match they end there too).
       if !mir_b_data.iter().any(|m| ExprVisitor::borrow_match(data, m).is_some()) {
-        let arm_kill = arm_lines.get(name).into_iter().flatten()
-          .filter_map(|(line, lender)| mir_b_data.iter()
-            .filter(|m| !by_span.contains(&m.borrow_idx) && m.region.0 == *line && m.borrowed_place.as_deref()
-              .is_some_and(|p| lender == p || lender.strip_prefix(p).is_some_and(|rest| rest.starts_with('.'))))
-            .map(|m| m.region.1)
-            .max())
-          .max()
+        let arm_kill = arm_kills.get(name).copied()
           .or_else(|| held_kills.get(name).copied());
         if let Some(kill) = arm_kill {
           data.lifetime = kill;

@@ -25,6 +25,12 @@ type Loan = <RustcFacts as FactTypes>::Loan;
 type Point = <RustcFacts as FactTypes>::Point;
 type Origin = <RustcFacts as FactTypes>::Origin;
 
+#[derive(Default)]
+pub struct VecElements<'tcx> {
+    completed: Vec<&'tcx rustc_hir::Expr<'tcx>>,
+    pub interrupted: Vec<&'tcx rustc_hir::Expr<'tcx>>,
+}
+
 /// Why a write to a lender is allowed at a line where a loan of it is
 /// drawn live (#796): on the write's path the loan is already dead.
 #[derive(Clone, Debug)]
@@ -370,6 +376,116 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
             }
         }
         res
+    }
+
+    /// Elements of a standard vector literal which reach the array used to
+    /// build it. A macro element may return early, leaving an earlier element
+    /// in a temporary that gets dropped before the array exists (#1682).
+    pub fn vec_macro_elems(&self, expr: &'tcx rustc_hir::Expr<'tcx>) -> Option<Vec<&'tcx rustc_hir::Expr<'tcx>>> {
+        self.vec_elements(expr).map(|elements| elements.completed)
+    }
+
+    pub fn vec_elements(&self, expr: &'tcx rustc_hir::Expr<'tcx>) -> Option<VecElements<'tcx>> {
+        let (span, elems) = crate::expr_visitor_utils::vec_macro_parts(self.tcx, expr)?;
+        let mut elements = VecElements::default();
+        if elems.iter().all(|e| !e.span.from_expansion()) && !self.unfinished_vec(expr) {
+            elements.completed.extend(elems);
+            return Some(elements);
+        }
+
+        let body = &self.bwf.body;
+        let build = body.basic_blocks.iter_enumerated().find_map(|(block, bb)| {
+            if bb.is_cleanup { return None; }
+            let index = bb.statements.iter().position(|s| s.source_info.span == span
+                && matches!(&s.kind, StatementKind::Assign(a) if matches!(a.1, Rvalue::Aggregate(..))));
+            let call = bb.terminator().source_info.span == span
+                && matches!(bb.terminator().kind, TerminatorKind::Call { target: Some(_), .. });
+            index.or(call.then_some(bb.statements.len())).map(|statement_index| Location { block, statement_index })
+        });
+        let typeck = self.tcx.typeck(expr.hir_id.owner);
+        // For a literal inside a literal, rustc moves the inner value into
+        // an outer element slot. Check that slot before attributing any of
+        // the inner moves to the outer destination.
+        let inputs = build.and_then(|loc| body.basic_blocks[loc.block].statements.get(loc.statement_index))
+            .and_then(|s| match &s.kind {
+                StatementKind::Assign(a) => match &a.1 { Rvalue::Aggregate(_, ops) => Some(&ops.as_slice().raw), _ => None },
+                _ => None,
+            });
+        for (index, elem) in elems.iter().enumerate() {
+            let local = crate::expr_visitor_utils::local_of_path(elem);
+            let Some(id) = local.filter(|id| !self.ty_is_copy(typeck.expr_ty(elem), id.owner)
+                && typeck.expr_adjustments(elem).is_empty()) else {
+                let temp = match inputs.and_then(|ops| ops.get(index)) {
+                    Some(Operand::Move(p)) => p.as_local(),
+                    // If the outer literal never finishes, a completed inner
+                    // vector still has a MIR call assigning its result.
+                    _ if build.is_none() && crate::expr_visitor_utils::vec_macro_parts(self.tcx, elem).is_some() =>
+                        body.basic_blocks.iter().filter(|bb| !bb.is_cleanup).find_map(|bb| {
+                            let term = bb.terminator();
+                            match &term.kind {
+                                TerminatorKind::Call { destination, target: Some(_), .. } if term.source_info.span == elem.span => destination.as_local(),
+                                _ => None,
+                            }
+                        }),
+                    _ => None,
+                };
+                if local.is_none() && temp.is_some_and(|t| !self.vec_temp_reaches_build(t, build)) { elements.interrupted.push(elem); }
+                else if build.is_some() { elements.completed.push(elem); }
+                continue;
+            };
+            let locals = self.locals_of_binding(id);
+            let temp = body.basic_blocks.iter().filter(|bb| !bb.is_cleanup)
+                .flat_map(|bb| &bb.statements).find_map(|s| {
+                    if s.source_info.span != elem.span { return None; }
+                    let StatementKind::Assign(a) = &s.kind else { return None };
+                    match &a.1 {
+                        Rvalue::Use(Operand::Move(p)) if p.projection.is_empty() && locals.contains(&p.local) => a.0.as_local(),
+                        _ => None,
+                    }
+                });
+            let Some(temp) = temp else { continue };
+            if self.vec_temp_reaches_build(temp, build) { elements.completed.push(elem); }
+            else { elements.interrupted.push(elem); }
+        }
+        Some(elements)
+    }
+
+    fn vec_temp_reaches_build(&self, temp: Local, build: Option<Location>) -> bool {
+        let Some(build) = build else { return false };
+        let body = &self.bwf.body;
+        let dominators = body.basic_blocks.dominators();
+        // Borrowck MIR includes drops even after the value was moved into the
+        // array. A storage end outside its dominance can discard the element
+        // before construction.
+        body.basic_blocks.iter_enumerated().filter(|(_, bb)| !bb.is_cleanup).all(|(block, bb)| {
+            let ends = bb.statements.iter().enumerate().filter_map(|(i, s)|
+                matches!(s.kind, StatementKind::StorageDead(local) if local == temp).then_some(i));
+            let drop = matches!(bb.terminator().kind, TerminatorKind::Drop { place, .. } if place.as_local() == Some(temp));
+            ends.chain(drop.then_some(bb.statements.len())).all(|statement_index|
+                build.dominates(Location { block, statement_index }, dominators))
+        })
+    }
+
+    /// MIR locals that describe this HIR binding. A guard may have another
+    /// debug entry for the same binding. Two disjoint patterns with the same
+    /// spelling have different identifier spans, even on the same line.
+    fn locals_of_binding(&self, id: rustc_hir::HirId) -> Vec<Local> {
+        let ident = self.tcx.hir_ident(id);
+        self.bwf.body.var_debug_info.iter().filter_map(|info| match info.value {
+            VarDebugInfoContents::Place(place) if place.projection.is_empty()
+                && info.name == ident.name && info.source_info.span.contains(ident.span) => Some(place.local),
+            _ => None,
+        }).collect()
+    }
+
+    fn borrow_locals(&self, name: &str) -> Vec<Local> {
+        if let Some(id) = self.borrow_map.get(name).and_then(|d| d.binding) {
+            return self.locals_of_binding(id);
+        }
+        let names = self.mir_local_names(self.bwf);
+        #[expect(clippy::disallowed_methods, reason = "only membership is used")]
+        let locals = names.iter().filter(|(_, n)| n.as_str() == name).map(|(l, _)| *l).collect();
+        locals
     }
 
     /// The last line at which each loan is in scope for rustc's NLL
@@ -1534,9 +1650,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     pub fn last_live_line(&self, name: &str, lines: (usize, usize)) -> Option<usize> {
         let bwf = self.bwf;
         let p_output = Output::compute(bwf.input_facts.as_ref().unwrap(), Algorithm::Naive, true);
-        let names = self.mir_local_names(bwf);
-        #[expect(clippy::disallowed_methods, reason = "only collects the locals named `name`; order doesn't matter")]
-        let locals: Vec<Local> = names.iter().filter(|(_, n)| n.as_str() == name).map(|(l, _)| *l).collect();
+        let locals = self.borrow_locals(name);
         #[expect(clippy::disallowed_methods, reason = "only takes the greatest line")]
         let last = p_output.var_live_on_entry.iter()
             .filter(|(_, vars)| vars.iter().any(|v| locals.contains(v)))
@@ -1563,12 +1677,8 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     pub fn last_drop_use_line(&self, name: &str) -> Option<usize> {
         let bwf = self.bwf;
         let facts = bwf.input_facts.as_ref()?;
-        let names = self.mir_local_names(bwf);
-        #[expect(clippy::disallowed_methods, reason = "only collects the locals named `name`; order doesn't matter")]
-        let locals: Vec<Local> = names.iter()
-            .filter(|(l, n)| n.as_str() == name && facts.drop_of_var_derefs_origin.iter().any(|(v, _)| v == *l))
-            .map(|(l, _)| *l)
-            .collect();
+        let locals: Vec<_> = self.borrow_locals(name).into_iter()
+            .filter(|l| facts.drop_of_var_derefs_origin.iter().any(|(v, _)| v == l)).collect();
         if locals.is_empty() {
             return None;
         }
@@ -1650,9 +1760,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     fn loans_in_type_of(&self, name: &str, fields: &[&str]) -> Option<BTreeSet<Loan>> {
         let bwf = self.bwf;
         let body = &bwf.body;
-        let names = self.mir_local_names(bwf);
-        #[expect(clippy::disallowed_methods, reason = "only collects the locals named `name`; order doesn't matter")]
-        let locals: Vec<Local> = names.iter().filter(|(_, n)| n.as_str() == name).map(|(l, _)| *l).collect();
+        let locals = self.borrow_locals(name);
         if locals.is_empty() {
             return None;
         }
@@ -1702,8 +1810,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let bwf = self.bwf;
         let body = &bwf.body;
         let names = self.mir_local_names(bwf);
-        #[expect(clippy::disallowed_methods, reason = "only collects the locals named `name`; order doesn't matter")]
-        let locals: Vec<Local> = names.iter().filter(|(_, n)| n.as_str() == name).map(|(l, _)| *l).collect();
+        let locals = self.borrow_locals(name);
         if locals.is_empty() {
             return None;
         }

@@ -378,7 +378,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // (a constructor never receives anything, #768).
     let ctor_value = !e.span.from_expansion()
       && matches!(e.kind, ExprKind::Call(callee, args) if is_ctor_path(callee, tycheck_results)
-        && args.iter().any(|a| ctor_part_carries_value(a, tycheck_results)
+        && args.iter().any(|a| ctor_part_carries_value(self, a, tycheck_results)
           // `Some(*b)`: the Box's contents (#1191).
           || self.box_contents_of(a).is_some()
           // `Some(B { name: s })`: what the literal is built from (#1143).
@@ -388,7 +388,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       && !self.is_copy_literal_value(e);
     if (matches!(e.kind, ExprKind::Struct(..) | ExprKind::Tup(..) | ExprKind::Array(..)) && !e.span.from_expansion())
       || ctor_value
-      || vec_macro_elems(e).is_some() {
+      || self.vec_macro_elems(e).is_some() {
       // `User { email, .. }` / `(s, 1)` / `[s, t]` as the returned value: the
       // literal's field initialisers move/copy their sources into
       // the returned value.
@@ -2099,9 +2099,9 @@ fn holds_try(e: &Expr<'_>) -> bool {
 /// a variable or field, a call's result (#783), or a tuple, array or
 /// `vec![…]` literal holding one (`Some((s, 1))`, `Some(vec![s])`,
 /// #1185). Those go to the caller inside the returned value.
-fn ctor_part_carries_value<'tcx>(a: &'tcx Expr<'tcx>, typeck: &rustc_middle::ty::TypeckResults<'_>) -> bool {
-  if let Some(elems) = vec_macro_elems(a) {
-    return elems.iter().any(|e| ctor_part_carries_value(e, typeck));
+fn ctor_part_carries_value<'tcx>(visitor: &ExprVisitor<'_, 'tcx>, a: &'tcx Expr<'tcx>, typeck: &rustc_middle::ty::TypeckResults<'_>) -> bool {
+  if let Some(elems) = visitor.vec_macro_elems(a) {
+    return elems.iter().any(|e| ctor_part_carries_value(visitor, e, typeck));
   }
   if a.span.from_expansion() {
     return matches!(a.kind, ExprKind::Path(_) | ExprKind::Field(..));
@@ -2109,7 +2109,7 @@ fn ctor_part_carries_value<'tcx>(a: &'tcx Expr<'tcx>, typeck: &rustc_middle::ty:
   match a.kind {
     ExprKind::Path(_) | ExprKind::Field(..) => true,
     ExprKind::Call(..) | ExprKind::MethodCall(..) => !typeck.node_type(a.hir_id).is_ref(),
-    ExprKind::Tup(elems) | ExprKind::Array(elems) => elems.iter().any(|e| ctor_part_carries_value(e, typeck)),
+    ExprKind::Tup(elems) | ExprKind::Array(elems) => elems.iter().any(|e| ctor_part_carries_value(visitor, e, typeck)),
     _ => false,
   }
 }
@@ -3487,6 +3487,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if self.tcx.typeck(e.hir_id.owner).expr_ty_opt(e).is_some_and(|ty| ty.is_never()) {
       return true;
     }
+    // The store cannot happen either if its vector RHS never produces a value.
+    let value = match e.kind { ExprKind::Assign(_, rhs, _) => rhs, _ => e };
+    if self.unfinished_vec(value) { return true; }
     match e.kind {
       // A local closure whose body never completes (#1562): rustc may
       // type the call `()` (before edition 2024 the closure's return type
@@ -5069,7 +5072,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
               Some(col) => ResourceTy::Value(self.raps.get(col).unwrap().rap.to_owned()),
               None => ResourceTy::Caller,
             };
-            self.add_ref(name.clone(),
+            self.add_ref(Some(binding_hirid), name.clone(),
             bool_of_mut(ty.ref_mutability().unwrap()),
             bool_of_mut(binding_annotation.1), line_num,
             lender.clone(), VecDeque::new(), self.current_scope, !self.inside_branch, pointee_copy);
@@ -5248,7 +5251,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       {
         self.descend_through_expansion(expr);
         if let Some(name) = self.std_value_macro(expr) {
-          self.note_macro_temporary_drop(expr, name);
+          if name == "vec!" { self.note_interrupted_vec_moves(expr); }
+          if !self.unfinished_vec(expr) { self.note_macro_temporary_drop(expr, name); }
         }
         return;
       }
@@ -9825,6 +9829,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         })
       {
         let head_from = self.in_scope.len();
+        // The loop takes the finished vector as its iterator's input. Its
+        // elements have already been evaluated by value on the way in.
+        if let Some(elems) = self.vec_macro_elems(head_arg) {
+          self.match_literal_parts(ResourceTy::Anonymous, elems, expr_to_line(head_arg, &self.tcx));
+        }
         let head_temp = self.note_for_head_temporary(head_arg, guard_expr, expr);
         // Iterand event: shape of head_arg dictates the arrow.
         //   &v       ⇒ SBorrow from v
@@ -9985,7 +9994,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               }
             }
             self.add_ref(
-              pat_name.clone(),
+              Some(pat_hirid), pat_name.clone(),
               bool_of_mut(pat_ty.ref_mutability().unwrap()),
               false,
               for_line,
@@ -10006,7 +10015,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // left to end a borrow on after the move.
             let (first, rest) = lenders.split_first().map(|(f, r)| (f.clone(), r.to_vec())).unwrap();
             self.add_ref(
-              pat_name.clone(),
+              Some(pat_hirid), pat_name.clone(),
               bool_of_mut(pat_ty.ref_mutability().unwrap()),
               false,
               for_line,
@@ -10029,7 +10038,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // for `for r in refs` (#1389), drawn from each lender.
             let (first, rest) = lenders.split_first().map(|(f, r)| (f.clone(), r.to_vec())).unwrap();
             self.add_ref(
-              pat_name.clone(),
+              Some(pat_hirid), pat_name.clone(),
               bool_of_mut(pat_ty.ref_mutability().unwrap()),
               false,
               for_line,
@@ -10108,7 +10117,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               call_lender = Some((lender.clone(), evt));
             }
             self.add_ref(
-              pat_name.clone(),
+              Some(pat_hirid), pat_name.clone(),
               bool_of_mut(pat_ty.ref_mutability().unwrap()),
               false,
               for_line,
@@ -10228,8 +10237,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // references (#1433).
           if iterand_evt.is_none() {
             self.pattern_literal = match head_arg.kind {
-              ExprKind::Array(elems) if !head_arg.span.from_expansion() => Some(elems),
-              _ => vec_macro_elems(head_arg),
+              ExprKind::Array(elems) if !head_arg.span.from_expansion() => Some(elems.iter().collect()),
+              _ => self.vec_macro_elems(head_arg),
             };
           }
           self.register_pattern_bindings_anon(user_pat, for_line);
@@ -10684,7 +10693,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// is drawn.
   fn literal_head_lenders(&self, head: &'tcx Expr<'tcx>) -> Option<Vec<ResourceTy>> {
     let literal = matches!(head.kind, ExprKind::Array(..) | ExprKind::Repeat(..)) && !head.span.from_expansion()
-      || vec_macro_elems(head).is_some();
+      || self.vec_macro_elems(head).is_some();
     if !literal {
       return None;
     }
@@ -10702,10 +10711,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// `.1.name`; the whole element when None) of each element of a
   /// literal `for` head (`[(&e, &g)]`, #1433). A part that isn't itself
   /// written as a literal counts the whole element's.
-  fn literal_part_lenders(&self, elems: &'tcx [Expr<'tcx>], path: Option<&str>) -> Vec<ResourceTy> {
+  fn literal_part_lenders(&self, elems: &[&'tcx Expr<'tcx>], path: Option<&str>) -> Vec<ResourceTy> {
     let mut out: Vec<ResourceTy> = Vec::new();
     for elem in elems {
-      let mut e = elem;
+      let mut e = *elem;
       for seg in path.unwrap_or("").split('.').filter(|s| !s.is_empty()) {
         let next = match (e.kind, seg.parse::<usize>()) {
           (ExprKind::Tup(es), Ok(i)) => es.get(i),
@@ -10771,6 +10780,51 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     (!lenders.is_empty()).then(|| (rap.name().to_owned(), lenders))
   }
 
+  /// MIR entered this standard vector expansion but never calls the function
+  /// that makes its result. This also covers an exit in a nested element.
+  pub(crate) fn unfinished_vec(&self, expr: &'tcx Expr<'tcx>) -> bool {
+    if self.std_value_macro(expr) != Some("vec!") || vec_macro_parts(self.tcx, expr).is_none() {
+      return false;
+    }
+    let Some(result_fn) = callee_def_id(self.tcx, expr) else { return false };
+    let mut entered = false;
+    for bb in self.bwf.body.basic_blocks.iter().filter(|bb| !bb.is_cleanup) {
+      let term = bb.terminator();
+      if term.source_info.span.ctxt() != expr.span.ctxt() { continue; }
+      if let rustc_middle::mir::TerminatorKind::Call { func, .. } = &term.kind {
+        if func.const_fn_def().is_some_and(|(id, _)| id == result_fn) { return false; }
+        entered = true;
+      }
+    }
+    entered
+  }
+
+  /// An element moved before a later one can exit belongs to a temporary.
+  /// Give the source its move, without promising which destination gets it.
+  fn note_interrupted_vec_moves(&mut self, expr: &'tcx Expr<'tcx>) {
+    let Some(elements) = self.vec_elements(expr) else { return };
+    for elem in elements.interrupted {
+      let start = self.preprocessed_events.len();
+      let line = expr_to_line(elem, &self.tcx);
+      if local_of_path(elem).is_some() {
+        let from = get_rap(elem, &self.tcx, &self.raps);
+        self.add_ev(line, Evt::Move, ResourceTy::Anonymous, from, false);
+      } else {
+        // Values may already have moved into a nested literal. It, in turn,
+        // can be dropped before the outer vector exists.
+        self.match_literal_parts(ResourceTy::Anonymous, vec![elem], line);
+      }
+      for (line, event) in &self.preprocessed_events[start..] {
+        let ExternalEvent::Move { from, .. } = event else { continue };
+        let Some(rap) = from.extract_rap() else { continue };
+        self.approx_notes.push(ApproxNote::At {
+          hash: *rap.hash(), lines: (*line, *line),
+          text: crate::svg_generator::hover_messages::approx_note_unfinished_vec().to_owned(),
+        });
+      }
+    }
+  }
+
   /// The std macro whose result `expr` is, when the user wrote the macro
   /// call (not a macro inside another macro's expansion): `vec![..]`,
   /// `format!(..)`. Their expansion isn't a `Call` the visitor reaches,
@@ -10809,8 +10863,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       ExprKind::Tup(items) | ExprKind::Array(items) => items.iter().collect(),
       ExprKind::Repeat(x, _) => vec![x],
-      _ => match vec_macro_elems(e) {
-        Some(items) => items.iter().collect(),
+      _ => match self.vec_macro_elems(e) {
+        Some(items) => items,
         // `vec![]`, a `format!`: nothing is moved in.
         None => return Some(Vec::new()),
       },
@@ -10822,7 +10876,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             places.push((src, expr_to_line(x, &self.tcx)));
           }
         }
-      } else if matches!(x.kind, ExprKind::Struct(..) | ExprKind::Tup(_) | ExprKind::Array(_)) {
+      } else if matches!(x.kind, ExprKind::Struct(..) | ExprKind::Tup(_) | ExprKind::Array(_)) || self.vec_macro_elems(x).is_some() {
         places.extend(self.literal_moved_places(x)?);
       }
     }
@@ -12678,6 +12732,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // and returns it. Treat it as `let y = e;` so the move / copy /
     // borrow (and, for `dbg!(&x)`, the lender) is e's.
     let init = dbg_single_arg(init).unwrap_or(init);
+    if !is_skipped && self.unfinished_vec(init) {
+      self.visit_expr(init);
+      return;
+    }
     // For `let s = if … { … } else { … };` (and the match analog),
     // emit the Move-into-LHS events FIRST. Match_rhs's If/Match arms
     // recurse into each branch's trailing expression and emit a
@@ -13117,7 +13175,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     for b in bs {
       let PatKind::Binding(annotation, hirid, _, _) = b.kind else { continue };
       let lhs_ty = self.tcx.typeck(hirid.owner).node_type(hirid);
-      self.define_lhs(binding_name(&self.tcx, hirid), bool_of_mut(annotation.1), init, lhs_ty);
+      self.define_lhs(Some(hirid), binding_name(&self.tcx, hirid), bool_of_mut(annotation.1), init, lhs_ty);
     }
   }
 
@@ -13168,7 +13226,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let tmp = self.temp_field_column(&tmp, place, operand).unwrap_or(tmp);
 
     let name = binding_name(&self.tcx, hirid);
-    self.add_ref(name.clone(), bool_of_mut(lhs_ty.ref_mutability().unwrap()), bool_of_mut(annotation.1),
+    self.add_ref(Some(hirid), name.clone(), bool_of_mut(lhs_ty.ref_mutability().unwrap()), bool_of_mut(annotation.1),
       line_num, ResourceTy::Value(tmp.clone()), VecDeque::new(), self.current_scope, !self.inside_branch,
       self.ref_pointee_is_copy(lhs_ty, hirid.owner));
     let r_data = self.raps.get_mut(&name).unwrap();
@@ -13208,7 +13266,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   fn extended_temp_column(&mut self, operand: &'tcx Expr<'tcx>, borrow_mut: Mutability, tmp_ty: rustc_middle::ty::Ty<'tcx>, line_num: usize) -> ResourceAccessPoint {
     self.temp_count += 1;
     let tmp_name = temporary_label(self.temp_count);
-    self.define_lhs(tmp_name.clone(), borrow_mut == Mutability::Mut, operand, tmp_ty);
+    self.define_lhs(None, tmp_name.clone(), borrow_mut == Mutability::Mut, operand, tmp_ty);
     let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();
     let n_events = self.preprocessed_events.len();
     self.match_rhs(ResourceTy::Value(tmp.clone()), operand, Evt::Move);
@@ -13303,7 +13361,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     (self.current_scope, self.inside_branch) = (decl.scope, decl.inside_branch);
     self.deferred_decl_at.insert(name.clone(), decl.frames_at);
     let names_at = self.in_scope.len();
-    self.define_lhs(name.clone(), bool_of_mut(decl.annotation.1), tmp, tmp_ty);
+    self.define_lhs(None, name.clone(), bool_of_mut(decl.annotation.1), tmp, tmp_ty);
     self.fill_deferred_slot(tmp.hir_id, names_at);
     (self.current_scope, self.inside_branch) = saved;
     let rap = self.raps.get(&name).unwrap().rap.to_owned();
@@ -13792,7 +13850,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let name = binding_name(&self.tcx, hirid);
         let lhs_ty = self.tcx.typeck(hirid.owner).node_type(hirid);
         let evt = self.bind_evt(lhs_ty, hirid);
-        self.define_lhs(name.clone(), bool_of_mut(annotation.1), init, lhs_ty);
+        self.define_lhs(Some(hirid), name.clone(), bool_of_mut(annotation.1), init, lhs_ty);
         // `let P { part: r } = p;` with `part: &T` copies the
         // reference in `p.part`: `r` borrows what that borrows (#709).
         if member_ty.is_ref() {
@@ -13853,7 +13911,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 rustc_hir::ByRef::No if self.ty_is_copy(lhs_ty, hirid.owner) => Evt::Copy,
                 rustc_hir::ByRef::No => Evt::Move,
               };
-              self.define_lhs(name.clone(), bool_of_mut(annotation.1), init, lhs_ty);
+              self.define_lhs(Some(hirid), name.clone(), bool_of_mut(annotation.1), init, lhs_ty);
               let to = self.raps.get(&name).unwrap().rap.to_owned();
               self.bind_or_conflict(c, to, evt, span_to_line(&init.span, &self.tcx));
             }
@@ -13896,7 +13954,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let name = binding_name(&self.tcx, hirid);
       let lhs_ty = typeck.node_type(hirid);
       let evt = self.bind_evt(lhs_ty, hirid);
-      self.define_lhs(name.clone(), bool_of_mut(annotation.1), init, lhs_ty);
+      self.define_lhs(Some(hirid), name.clone(), bool_of_mut(annotation.1), init, lhs_ty);
       let to = self.raps.get(&name).unwrap().rap.to_owned();
       // `let (Some(k), n) = t else { .. }` with `t.0: Option<i32>`: k
       // gets a copy of a value inside t.0.
@@ -14419,7 +14477,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         if pat_ty.is_ref() {
           let pointee_copy = self.ref_pointee_is_copy(pat_ty, hirid.owner);
           self.add_ref(
-            name.clone(),
+            Some(hirid), name.clone(),
             bool_of_mut(pat_ty.ref_mutability().unwrap()),
             false,
             line,
@@ -14481,7 +14539,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // `x` in `for (x, y) in [(&e, &g)]` (#1433): a copy of the
           // reference the literal holds in that part of each element.
           (None, None) if pat_ty.is_ref() && !by_ref && derefs == 0 && self.pattern_literal.is_some() => {
-            let lenders = self.literal_part_lenders(self.pattern_literal.unwrap_or_default(), path.as_deref());
+            let lenders = self.literal_part_lenders(self.pattern_literal.as_deref().unwrap_or_default(), path.as_deref());
             if lenders.is_empty() {
               self.add_ev(line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
             } else {
@@ -14577,7 +14635,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // One { a } = if c { One { a: &s1 } } else { .. };`, #1405), declared
     // before the branches: it may hold what any branch gives it.
     let in_branch_value = self.bind_existing && self.raps.contains_key(&name);
-    self.define_lhs(name.clone(), bool_of_mut(annotation.1), init, lhs_ty);
+    self.define_lhs(Some(hirid), name.clone(), bool_of_mut(annotation.1), init, lhs_ty);
     if in_branch_value && !is_skipped {
       self.add_value_lenders(&name, init);
     }
@@ -15264,7 +15322,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     (self.current_scope, self.inside_branch) = (decl.scope, decl.inside_branch);
     self.deferred_decl_at.insert(name.clone(), decl.frames_at);
     let names_at = self.in_scope.len();
-    self.define_lhs(name.clone(), bool_of_mut(decl.annotation.1), rhs, lhs_ty);
+    self.define_lhs(Some(hirid), name.clone(), bool_of_mut(decl.annotation.1), rhs, lhs_ty);
     self.fill_deferred_slot(hirid, names_at);
     (self.current_scope, self.inside_branch) = saved;
     if decl.is_skipped {
@@ -15808,7 +15866,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
     }
     let pointee_copy = self.ref_pointee_is_copy(lhs_ty, hirid.owner);
-    self.add_ref(name.clone(), bool_of_mut(mutbl), bool_of_mut(annotation.1), line_num,
+    self.add_ref(Some(hirid), name.clone(), bool_of_mut(mutbl), bool_of_mut(annotation.1), line_num,
       lender.clone(), aliasing, self.current_scope, !self.inside_branch, pointee_copy);
     if is_skipped {
       self.skip_raps.insert(name);
