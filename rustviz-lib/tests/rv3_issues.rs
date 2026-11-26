@@ -627,11 +627,35 @@ fn derefs_restrict(ty: &str, n: usize) -> bool {
     true
 }
 
+/// Column names are the 2.x ones, which mark a variable that can't share a
+/// column with a same-named one (the `iter` of a `for` desugaring) with
+/// invisible `SCOPE_MARK`s (U+E000); cases name what is shown. A body's
+/// marks are dropped only when that keeps its columns apart (two columns
+/// that differ only by marks keep them, and a case can't name the marked
+/// one).
+fn unmark(v: &Value) -> Result<Value, String> {
+    const MARK: char = '\u{E000}';
+    let Some(bodies) = v.get("bodies").and_then(Value::as_array) else { return Ok(v.clone()) };
+    let mut out = v.clone();
+    for (k, b) in bodies.iter().enumerate() {
+        let names: Vec<&str> = b["columns"].as_array().into_iter().flatten().filter_map(|c| c["name"].as_str())
+            .chain(b["vars"].as_array().into_iter().flatten().filter_map(|c| c["name"].as_str()))
+            .collect();
+        let mut plain: Vec<String> = names.iter().map(|n| n.replace(MARK, "")).collect();
+        let mut raw: Vec<&str> = names.clone();
+        raw.sort();
+        raw.dedup();
+        plain.sort();
+        plain.dedup();
+        if plain.len() == raw.len() {
+            out["bodies"][k] = serde_json::from_str(&b.to_string().replace(MARK, "")).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(out)
+}
+
 fn load_facts(v: &Value) -> Result<Vec<BodyF>, String> {
-    // Column names are the 2.x ones, which mark a variable that can't share
-    // a column with a same-named one (the `iter` of a `for` desugaring) with
-    // invisible `SCOPE_MARK`s (U+E000); cases name what is shown.
-    let unmarked: Value = serde_json::from_str(&v.to_string().replace('\u{E000}', "")).map_err(|e| e.to_string())?;
+    let unmarked = unmark(v)?;
     let v = &unmarked;
     let (bodies, spike) = match v {
         Value::Array(a) => (a.clone(), true),
@@ -1567,4 +1591,15 @@ fn rv3_harness_adapter() {
     assert!(check(&st(4, "moved*"), &mf, &shape, &hand).is_ok());
     assert!(check(&st(4, "unassigned*"), &mf, &shape, &hand).is_err());
     assert!(check(&st(5, "unassigned*"), &mf, &shape, &[]).is_ok() && check(&st(5, "moved*"), &mf, &shape, &[]).is_err());
+}
+
+#[test]
+fn scope_marks_dropped_only_when_columns_stay_apart() {
+    let one: Value = serde_json::from_str(r#"{"version": 2, "errors": [], "bodies": [{"func": "main", "columns": [{"name": "iter"}], "vars": [],
+        "rows": [{"line": 2, "state": {"iter": "own"}, "lent": {}, "facts": []}], "loans": []}]}"#).unwrap();
+    assert!(unmark(&one).unwrap()["bodies"][0]["rows"][0]["state"].get("iter").is_some(), "a lone marked column is named as shown");
+    let two: Value = serde_json::from_str(r#"{"version": 2, "errors": [], "bodies": [{"func": "main", "columns": [{"name": "x"}, {"name": "x"}], "vars": [],
+        "rows": [{"line": 2, "state": {"x": "moved", "x": "own"}, "lent": {}, "facts": []}], "loans": []}]}"#).unwrap();
+    let st = &unmark(&two).unwrap()["bodies"][0]["rows"][0]["state"];
+    assert_eq!(st.as_object().map(|o| o.len()), Some(2), "two columns that differ only by marks stay apart: {st}");
 }

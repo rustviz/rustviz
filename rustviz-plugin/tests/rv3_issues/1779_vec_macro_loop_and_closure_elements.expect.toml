@@ -4,7 +4,7 @@ title = "`vec![s, format!(..), loop {..}]`: s's move isn't drawn; `vec![.., clos
 fn = "loop_element"
 xfail = "P2"
 beyond_facts = "P3: closure_call_element's scope-end title (\"No resource is dropped\")"
-note = "loop_element passes on the P0 facts. closure_call_element stays open (re-tagged P2 by rv3-p0b): the caller's MIR doesn't know the closure always panics, so on every path MIR treats as returning, call_s is moved into the vec (borrowck: moved after row 8, which the facts give). The drop the issue is about happens only on the unwind path (a cleanup block), which the fact layer doesn't read: stating it needs (1) knowing from the closure's own MIR that its body never returns, so the call's return edge is dead, and (2) drop events on unwind paths. Whether RustViz shows panics and unwinding at all is a presentation decision, so this belongs with P2's drop events, not the P0 fact layer."
+note = "loop_element passes on the P0 facts. closure_call_element stays open (re-tagged P2 by rv3-p0b): on the paths where the call returns (all MIR can tell from the caller), call_s is moved into the vec (borrowck: moved after row 8, which the facts give). The drop the issue is about is on the call's unwind edge: the caller's MIR has it (the cleanup block after the call drops call_s), so stating \"if this call unwinds, call_s is dropped here\" only needs the fact layer to read cleanup paths, which it doesn't yet. Saying that it is the only path needs more: the closure's own MIR showing its body never returns. Whether RustViz shows unwinding at all is a presentation decision, so this goes with P2's drop events."
 
 [[event]]
 row = 3
