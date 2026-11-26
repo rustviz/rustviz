@@ -26,7 +26,8 @@ use rustc_middle::mir::{
 };
 use rustc_middle::ty::{TyCtxt, TyKind};
 use rustc_mir_dataflow::impls::{EverInitializedPlaces, MaybeInitializedPlaces, MaybeUninitializedPlaces};
-use rustc_mir_dataflow::move_paths::{InitLocation, LookupResult, MoveData, MovePathIndex};
+use rustc_utils::SpanExt;
+use rustc_mir_dataflow::move_paths::{LookupResult, MoveData, MovePathIndex};
 use rustc_mir_dataflow::Analysis;
 use rustc_span::Span;
 use serde::Serialize;
@@ -105,6 +106,7 @@ struct Cx<'a, 'tcx> {
     bwf: &'a BodyWithBorrowckFacts<'tcx>,
     body: &'a Body<'tcx>,
     names: BTreeMap<Local, String>,
+    rows: std::collections::HashMap<Location, usize>,
 }
 
 impl<'a, 'tcx> Cx<'a, 'tcx> {
@@ -125,11 +127,61 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
     /// covers several rows takes effect when its right-hand side is done:
     /// its last row. Everything else (conditions, gotos, drops) its first.
     fn row_of(&self, l: Location) -> usize {
+        self.rows.get(&l).copied().unwrap_or_else(|| self.raw_row(l))
+    }
+
+    /// Rows along the CFG: a location's own row, but never above the row
+    /// of the code that runs just before it on its only way in. MIR gives
+    /// `drop(h); h = move tmp;` for `h = if c {..} else {..};` the span of
+    /// `h` (the first row), though it runs after the arms.
+    fn compute_rows(&self) -> std::collections::HashMap<Location, usize> {
+        let body = self.body;
+        let rpo: Vec<BasicBlock> = body.basic_blocks.reverse_postorder().to_vec();
+        let order: std::collections::HashMap<BasicBlock, usize> = rpo.iter().enumerate().map(|(i, b)| (*b, i)).collect();
+        let preds = body.basic_blocks.predecessors();
+        let mut rows: std::collections::HashMap<Location, usize> = std::collections::HashMap::new();
+        for bb in rpo {
+            let data = &body.basic_blocks[bb];
+            if data.is_cleanup {
+                continue;
+            }
+            let fwd: Vec<BasicBlock> = preds[bb].iter().copied()
+                .filter(|p| !body.basic_blocks[*p].is_cleanup && order.get(p).is_some_and(|o| *o < order[&bb]))
+                .collect();
+            let mut floor = 0;
+            if fwd.len() == 1 && preds[bb].len() == 1 {
+                let p = fwd[0];
+                floor = rows.get(&Location { block: p, statement_index: body.basic_blocks[p].statements.len() }).copied().unwrap_or(0);
+            }
+            for i in 0..=data.statements.len() {
+                let loc = Location { block: bb, statement_index: i };
+                let r = self.raw_row(loc).max(floor);
+                rows.insert(loc, r);
+                floor = r;
+            }
+        }
+        rows
+    }
+
+    fn raw_row(&self, l: Location) -> usize {
         let sp = self.span_of(l);
         let data = &self.body.basic_blocks[l.block];
-        let effect_at_end = match data.statements.get(l.statement_index) {
+        // The drop of the old value before `x = <rhs>;` runs once the
+        // right-hand side is done: on the assignment's row.
+        if l.statement_index == data.statements.len() {
+            if let TerminatorKind::Drop { place, target, .. } = &data.terminator().kind {
+                let t = &self.body.basic_blocks[*target];
+                if matches!(t.statements.first().map(|s| &s.kind), Some(StatementKind::Assign(asg)) if asg.0 == *place) {
+                    return self.raw_row(Location { block: *target, statement_index: 0 });
+                }
+            }
+        }
+        // Desugarings (`for`, `?`, `while let`) carry the whole construct's
+        // span: their calls happen at its start.
+        let desugared = self.body.source_info(l).span.desugaring_kind().is_some();
+        let effect_at_end = !desugared && match data.statements.get(l.statement_index) {
             Some(st) => matches!(st.kind, StatementKind::Assign(..)),
-            None => matches!(data.terminator().kind, TerminatorKind::Call { .. }),
+            None => matches!(data.terminator().kind, TerminatorKind::Call { .. } | TerminatorKind::Drop { .. }),
         };
         if effect_at_end { self.line_hi(sp) } else { self.line_lo(sp) }
     }
@@ -195,7 +247,8 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
             }
             for (i, st) in data.statements.iter().enumerate() {
                 let here = Location { block: bb, statement_index: i };
-                if let StatementKind::Assign(box (lhs, rv)) = &st.kind {
+                if let StatementKind::Assign(asg) = &st.kind {
+                    let (lhs, rv) = &**asg;
                     if lhs.local == tmp {
                         continue;
                     }
@@ -208,7 +261,7 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
                     };
                     if uses && self.row_of(here).abs_diff(row) <= 3 {
                         let what = match rv {
-                            Rvalue::Aggregate(box AggregateKind::Closure(..), _) => "closure ",
+                            Rvalue::Aggregate(k, _) if matches!(**k, AggregateKind::Closure(..)) => "closure ",
                             _ => "",
                         };
                         let d = self.dest_name(*lhs, here, depth + 1);
@@ -241,6 +294,12 @@ fn local_names<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> BTreeMap<Local, St
             continue;
         }
         let span = vdi.source_info.span;
+        if span.from_expansion() && span.desugaring_kind().is_none() || span.desugaring_kind().is_some_and(|k| !matches!(k, rustc_span::DesugaringKind::ForLoop) ) {
+            continue;
+        }
+        if span.desugaring_kind().is_some() && vdi.name.as_str() == "iter" {
+            continue;
+        }
         let ident = vdi.name.as_str();
         let name = names
             .by_span
@@ -252,10 +311,28 @@ fn local_names<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> BTreeMap<Local, St
     res
 }
 
+/// Where to read what `place` held before the assignment at `loc`: if
+/// MIR drops the old value first (`drop(s) -> bb; bb: s = ..`), before
+/// those drops; else at `loc`.
+fn before_reassign_drop<'tcx>(body: &Body<'tcx>, loc: Location, place: Place<'tcx>) -> Vec<Location> {
+    if loc.statement_index != 0 {
+        return vec![loc];
+    }
+    let preds = &body.basic_blocks.predecessors()[loc.block];
+    let drops: Vec<Location> = preds
+        .iter()
+        .filter(|p| matches!(&body.basic_blocks[**p].terminator().kind, TerminatorKind::Drop { place: dp, .. } if *dp == place))
+        .map(|p| Location { block: *p, statement_index: body.basic_blocks[*p].statements.len() })
+        .collect();
+    if drops.is_empty() { vec![loc] } else { drops }
+}
+
 pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, func: String) -> BodyFacts {
     let body = &bwf.body;
     let names = local_names(tcx, body);
-    let cx = Cx { tcx, bwf, body, names };
+    let mut cx = Cx { tcx, bwf, body, names, rows: Default::default() };
+    cx.rows = cx.compute_rows();
+    let cx = cx;
     let mut notes: Vec<String> = Vec::new();
     let def_id = body.source.def_id();
     let typing_env = rustc_middle::ty::TypingEnv::post_analysis(tcx, def_id);
@@ -264,7 +341,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     let mut vars: Vec<VarInfo> = Vec::new();
     for (local, name) in &cx.names {
         let decl = &body.local_decls[*local];
-        let ty = decl.ty;
+        let ty = tcx.erase_and_anonymize_regions(decl.ty);
         let kind = match ty.kind() {
             TyKind::Ref(_, _, rustc_middle::mir::Mutability::Mut) => "mut_ref",
             TyKind::Ref(..) => "shared_ref",
@@ -354,7 +431,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     .map(|s| cx.row_of(Location { block: s, statement_index: 0 }))
                     .collect()
             };
-            if succ_rows.is_empty() || succ_rows.iter().any(|r| *r != row) {
+            if (succ_rows.is_empty() || succ_rows.iter().any(|r| *r != row)) {
                 row_exits.entry(row).or_default().push(loc);
             }
         }
@@ -432,6 +509,26 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         }
         out
     };
+    let mut holders_any: BTreeMap<BorrowIndex, Vec<(usize, String)>> = BTreeMap::new();
+    if let (Some(pol), Some(t)) = (pol.as_ref(), table) {
+        for (p, m) in pol.origin_contains_loan_at.iter() {
+            let row = cx.row_of(t.to_location(*p));
+            for (local, os) in &origins_of {
+                for o in os {
+                    for l in m.get(o).into_iter().flatten() {
+                        let v = holders_any.entry(*l).or_default();
+                        match v.iter_mut().find(|(_, n)| *n == cx.names[local]) {
+                            Some(e) => e.0 = e.0.min(row),
+                            None => v.push((row, cx.names[local].clone())),
+                        }
+                    }
+                }
+            }
+        }
+        for v in holders_any.values_mut() {
+            v.sort();
+        }
+    }
     let kind_str = |k: BorrowKind| -> String {
         match k {
             BorrowKind::Shared => "shared".into(),
@@ -467,6 +564,19 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     holders.push(h);
                 }
             }
+        }
+        // Anyone whose type holds the loan at some point (Polonius'
+        // `origin_contains_loan_at`), in order of the first row they do.
+        if let Some(hs) = holders_any.get(&bi) {
+            for (_, h) in hs {
+                if !holders.contains(h) && *h != lender {
+                    holders.push(h.clone());
+                }
+            }
+        }
+        if !cx.is_user(bd.borrowed_place().local) {
+            // a loan of a MIR temporary (`&mut *_14` for `next()`): not a column
+            continue;
         }
         // Skip MIR's own reborrows for a call whose result keeps nothing
         // and that no user variable holds: those are drawn as the call's
@@ -517,7 +627,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         let st = sdata.statements.get(s.statement_index);
                         if let Some(st) = st {
                             match &st.kind {
-                                StatementKind::Assign(box (lhs, _)) if cx.is_user(lhs.local) && li.holders.contains(cx.names.get(&lhs.local).unwrap()) => {
+                                StatementKind::Assign(asg) if cx.is_user(asg.0.local) && li.holders.contains(cx.names.get(&asg.0.local).unwrap()) => {
                                     w = "holder overwritten".into()
                                 }
                                 StatementKind::StorageDead(l) if cx.is_user(*l) => w = format!("{} out of scope", cx.names[l]),
@@ -563,14 +673,15 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             let loc = Location { block: bb, statement_index: i };
             let row = cx.row_of(loc);
             match &st.kind {
-                StatementKind::Assign(box (lhs, rv)) => {
+                StatementKind::Assign(asg) => {
+                    let (lhs, rv) = &**asg;
                     // moves / copies out of user places
                     let mut ops: Vec<&Operand<'tcx>> = Vec::new();
                     match rv {
                         Rvalue::Use(o) | Rvalue::Cast(_, o, _) | Rvalue::UnaryOp(_, o) | Rvalue::Repeat(o, _) => ops.push(o),
-                        Rvalue::BinaryOp(_, box (a, b)) => {
-                            ops.push(a);
-                            ops.push(b);
+                        Rvalue::BinaryOp(_, ab) => {
+                            ops.push(&ab.0);
+                            ops.push(&ab.1);
                         }
                         Rvalue::Aggregate(_, os) => ops.extend(os.iter()),
                         _ => {}
@@ -605,7 +716,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         };
                         let (reassign, maybe_had) = match move_data.rev_lookup.find(lhs.as_ref()) {
                             LookupResult::Exact(mpi) => {
-                                let s = state_at(&mut init, &mut uninit, &mut ever, &[loc], false, mpi);
+                                let at = before_reassign_drop(body, loc, *lhs);
+                                let s = state_at(&mut init, &mut uninit, &mut ever, &at, false, mpi);
                                 (s != "unassigned", s == "maybe" || s == "moved")
                             }
                             LookupResult::Parent(_) => (false, false),
@@ -637,18 +749,13 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     }
                 }
                 StatementKind::StorageDead(l) if cx.is_user(*l) => {
-                    let ty = body.local_decls[*l].ty;
+                    let ty = tcx.erase_and_anonymize_regions(body.local_decls[*l].ty);
                     if !ty.needs_drop(tcx, typing_env) {
                         let note = if tcx.type_is_copy_modulo_regions(typing_env, ty) { "copy: nothing to drop" } else { "no drop glue" };
                         by_row.entry(row).or_default().push(Fact::ScopeEnd { path: cx.names[l].clone(), note: note.into() });
-                    } else if let LookupResult::Exact(mpi) = move_data.rev_lookup.find(Place::from(*l).as_ref()) {
-                        // a needs-drop variable that reaches its scope end with
-                        // nothing left gets no Drop terminator: say so here.
-                        let s = state_at(&mut init, &mut uninit, &mut ever, &[loc], false, mpi);
-                        if s == "moved" || s == "unassigned" {
-                            by_row.entry(row).or_default().push(Fact::ScopeEnd { path: cx.names[l].clone(), note: format!("{}: nothing to drop", s) });
-                        }
                     }
+                    // (a needs-drop variable always has a `Drop` terminator at
+                    // its scope end in this MIR; it is classified there.)
                 }
                 _ => {}
             }
@@ -686,7 +793,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 // Is this the drop before an assignment (`s = ...;`)?
                 let tdata = &body.basic_blocks[*target];
                 let at_reassign = matches!(tdata.statements.first().map(|s| &s.kind),
-                    Some(StatementKind::Assign(box (lhs, _))) if lhs == place);
+                    Some(StatementKind::Assign(asg)) if asg.0 == *place);
                 if cx.is_user(place.local) {
                     let path = cx.place_name(*place).unwrap_or_default();
                     let how = match move_data.rev_lookup.find(place.as_ref()) {
@@ -699,7 +806,11 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         LookupResult::Parent(_) => "drops",
                     };
                     by_row.entry(row).or_default().push(Fact::Drop { path, how: how.into(), at_reassign });
-                } else if place.local != rustc_middle::mir::RETURN_PLACE && place.projection.is_empty() {
+                } else if place.local != rustc_middle::mir::RETURN_PLACE && place.projection.is_empty()
+                    && !body.local_decls[place.local].source_info.span.from_expansion()
+                    && matches!(move_data.rev_lookup.find(place.as_ref()), LookupResult::Exact(mpi)
+                        if matches!(state_at(&mut init, &mut uninit, &mut ever, &[loc], false, mpi), "own" | "maybe" | "partly"))
+                {
                     let decl = &body.local_decls[place.local];
                     let sp = decl.source_info.span;
                     let what = tcx.sess.source_map().span_to_snippet(sp.source_callsite()).unwrap_or_else(|_| "?".into());
