@@ -132,7 +132,10 @@ impl<'a> BodyEnds<'a> {
   /// on, `let r = &s; let r2 = &s;` with r used later).
   pub fn lent_after(&self, row: usize, column: &str, except: &[usize]) -> bool {
     self.facts.rows.iter().filter(|r| r.line == row).any(|r| {
-      r.after.lent.get(column).is_some_and(|ls| ls.iter().any(|l| !except.contains(&l.loan)))
+      // (One taken on an earlier row: a loan taken later on the row, `let
+      // m = &mut s;` after r's last use, doesn't keep r's borrow on.)
+      r.after.lent.get(column).is_some_and(|ls| ls.iter().any(|l| !except.contains(&l.loan)
+        && self.facts.loans.iter().any(|x| x.loan == l.loan && x.line < row)))
     })
   }
 

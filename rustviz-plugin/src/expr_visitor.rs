@@ -11774,8 +11774,14 @@ pub fn print_out_of_scope(&mut self){
     current.sort_by(|a, b| a.0.cmp(&b.0));
     for (k, rd) in current {
       let from = later_from.get(&k).copied().unwrap_or(0);
-      let loans: Vec<usize> = ix.as_ref().map(|ix| ix.loans_held_by(&k).into_iter()
-        .filter(|l| !claimed.get(&k).is_some_and(|c| c.contains(&l.loan))).map(|l| l.loan).collect()).unwrap_or_default();
+      let mut held: Vec<&crate::facts::schema::LoanInfo> = ix.as_ref().map(|ix| ix.loans_held_by(&k).into_iter()
+        .filter(|l| !claimed.get(&k).is_some_and(|c| c.contains(&l.loan))).collect()).unwrap_or_default();
+      // A loan taken into k before k got its current value (`r = &s;` in
+      // an arm after `let mut r = &s;`) is the walk's to end.
+      if held.iter().any(|l| l.line >= rd.assigned_at) {
+        held.retain(|l| l.line >= rd.assigned_at || l.direct_holders.first() != Some(&k));
+      }
+      let loans: Vec<usize> = held.into_iter().map(|l| l.loan).collect();
       slot_loans.push(loans);
       slots.push(Slot { key: k, rd, rows: (from, usize::MAX), arm: false });
     }
@@ -11865,7 +11871,9 @@ pub fn print_out_of_scope(&mut self){
         if self.pattern_copies.contains(&slot.key) && e.gives_back.is_some() {
           pattern_gives.extend(mine.iter().copied());
         }
-        let holder_stops = e.stops.is_some() && self.raps.get(&slot.key).is_some_and(|r| !r.rap.is_ref() && r.rap.holds_borrow());
+        // (Only for a lender with a column of its own, as that pass draws.)
+        let holder_stops = e.stops.is_some() && matches!(l, ResourceTy::Value(_))
+          && self.raps.get(&slot.key).is_some_and(|r| !r.rap.is_ref() && r.rap.holds_borrow());
         ends.push(Pending { lender: l.clone(), end, loans: mine, own, holder_stops });
       }
       pending.push(ends);
