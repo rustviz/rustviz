@@ -204,3 +204,25 @@ fn three_tries(a: Option<u8>, b: Option<u8>, c: Option<u8>) -> Option<u8> {
     println!("{}", s3);
     Some(0)
 }
+
+// The arm that moved the contents returns; the join (the function's
+// end) is reached only through the other one, which keeps them.
+fn returned_arm(c: bool) {
+    let mut br2 = Box::new(String::from("a"));
+    if c {
+        let _s = *br2;
+        return;
+    } else {
+        *br2 = String::new();
+    }
+}
+
+// `?`s around an assignment, and one on a dot with other events.
+fn tries_around(a: Option<u8>, b: Option<u8>, c: Option<u8>, d: Option<&str>) -> Option<u8> {
+    let mut s4 = String::new();
+    println!("{}", s4);
+    a?; s4 = b?.to_string(); c?;
+    s4 = a?.to_string(); s4.push_str(d?);
+    println!("{}", s4);
+    Some(0)
+}

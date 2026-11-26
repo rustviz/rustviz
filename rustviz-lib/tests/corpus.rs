@@ -28097,16 +28097,21 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "bw acquires ownership of a new resource. Whatever bw still held here (if anything) is dropped.",
             "bw can't be read or moved here: on some path to here it may not hold a whole Box, and Rust can't be sure it does",
             "bw goes out of scope. Whatever it still holds here (if anything) is dropped.",
-            "Only if the second `?` on this line returns early: the function returns and b2's resource (including the String it holds) is dropped. If that `?` succeeds, nothing happens to b2 here.",
-            // (#1600 review: three `?`s on a line, each named by its place.)
-            "Only if the second `?` on this line returns early: the function returns and s3's resource is dropped. If that `?` succeeds, the assignment runs: s3 acquires ownership of a new resource; its previous resource is dropped.",
-            "Only if the third `?` on this line returns early: the function returns and s3's resource is dropped. If that `?` succeeds, nothing happens to s3 here.",
+            "Only if a `?` after the assignment returns early: the function returns and b2's resource (including the String it holds) is dropped. If it succeeds, nothing happens to b2 here.",
+            // (#1600 review: several `?`s on a line, told apart by the
+            // assignments before them, not counted: the visitor keeps one
+            // for `a?; b?` with nothing between them.)
+            "Only if a `?` after the first assignment on this line returns early: the function returns and s3's resource is dropped. If it succeeds, the next assignment runs: s3 acquires ownership of a new resource; its previous resource is dropped.",
+            "Only if a `?` after the second assignment on this line returns early: the function returns and s3's resource is dropped. If it succeeds, nothing happens to s3 here.",
+            "Only if a `?` after the assignment returns early: the function returns and s4's resource is dropped. If it succeeds, nothing happens to s4 here.",
+            // (`s4.push_str(d?)`: the `?` itself doesn't drop it, #1151.)
+            "Only if a `?` after the assignment returns early: the function returns and s4's resource is dropped. If it succeeds, s4's resource isn't dropped here.",
             // (The join before `bz = Box::new(*bz);`: nothing moved yet.)
             "bz isn't moved in any of the branches above",
             "bz acquires ownership of a new resource. Its previous contents were moved out earlier, so they aren't dropped here; only the old Box itself is.",
             "Only if the `?` here returns early: whatever bo still holds here (if anything) is dropped. If the `?` succeeds, nothing happens to bo here.",
             "Only if the `?` here returns early: whatever bq still holds here (if anything) is dropped. If the `?` succeeds, nothing happens to bq here.",
-            "Only if the `?` here returns early: whatever bs still holds here (if anything) is dropped. If the `?` succeeds, bs's resource isn't dropped here.",
+            "Only if a `?` after the assignment returns early: whatever bs still holds here (if anything) is dropped. If it succeeds, nothing happens to bs here.",
             "Only if the `?` here returns early: whatever bt still holds here (if anything) is dropped. If the `?` succeeds, nothing happens to bt here.",
         ],
         must_not_contain: &[
@@ -28131,6 +28136,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Only if the `?` after the assignment returns early: the function returns and s3",
             "Only if the `?` after the assignment returns early: the function returns and b2",
             "bz can't be read or moved here",
+            // (The arm that moved br2's contents returned.)
+            "br2 can't be read or moved here",
+            "the second `?` on this line",
+            "the third `?` on this line",
             "heap allocation",
             "what is left of its previous Box is freed",
         ],

@@ -584,7 +584,7 @@ pub fn event_dot_owner_drop_at_reassign_box_contents_maybe_moved(my_name: &Strin
              a runtime drop flag). The old Box itself is dropped here either way.",
             moved_above(by_cond)
         )),
-        None => out.push_str(" Its previous contents were moved out, so only the old Box itself is dropped here."),
+        None => out.push_str(" Its previous Box is dropped here."),
     }
     out
 }

@@ -1223,7 +1223,8 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     /// conditional has that `return`'s span, so it isn't one of them.
     /// `(Box, contents)`, each Held, Maybe or None; `None` if no such
     /// place.
-    pub fn box_state_after(&self, name: &str, after: rustc_span::BytePos, region: Span) -> Option<(Ownership, Ownership)> {
+    pub fn box_state_after(&self, name: &str, cond: Span, region: Span, diverging: &[Span]) -> Option<(Ownership, Ownership)> {
+        let after = cond.hi();
         use rustc_mir_dataflow::impls::{MaybeInitializedPlaces, MaybeUninitializedPlaces};
         use rustc_mir_dataflow::move_paths::MoveData;
         let body = &self.bwf.body;
@@ -1261,6 +1262,15 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let doms = body.basic_blocks.dominators();
         let blocks: Vec<rustc_middle::mir::BasicBlock> = places.iter().map(|(at, _)| at.block).collect();
         places.retain(|(at, _)| !blocks.iter().any(|b| *b != at.block && doms.dominates(*b, at.block)));
+        // (Not what only an arm that doesn't reach the join runs into: a
+        // function's scope-end drops after its `return`, #1600 review.)
+        let in_diverging: Vec<rustc_middle::mir::BasicBlock> = body.basic_blocks.iter_enumerated()
+            .filter(|(_, data)| !data.is_cleanup && data.statements.iter().map(|st| st.source_info.span)
+                .chain(std::iter::once(data.terminator().source_info.span))
+                .any(|sp| { let sp = user(sp); !sp.is_dummy() && diverging.iter().any(|d| d.contains(sp)) }))
+            .map(|(bb, _)| bb)
+            .collect();
+        places.retain(|(at, _)| !in_diverging.iter().any(|d| doms.dominates(*d, at.block)));
         // (Of those, the ones that start first in the source: a function's
         // scope-end drops, shared with an arm's `return`, come after the
         // tail expression that the join runs into.)

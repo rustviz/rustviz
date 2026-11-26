@@ -4476,6 +4476,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       child = id;
     }
     let Some(region) = region else { return Vec::new() };
+    // The arms that don't reach the join (`return`, `break`, a panic): the
+    // code their exits run (a function's scope-end drops after a `return`)
+    // isn't after the join (#1600 review).
+    let typeck = self.tcx.typeck(expr.hir_id.owner);
+    let never = |e: &Expr<'tcx>| typeck.expr_ty_opt(e).is_some_and(|t| t.is_never());
+    let diverging: Vec<rustc_span::Span> = match expr.kind {
+      ExprKind::If(_, then, els) => std::iter::once(then).chain(els).filter(|e| never(e)).map(|e| e.span).collect(),
+      ExprKind::Match(_, arms, _) => arms.iter().filter(|a| never(a.body)).map(|a| a.body.span).collect(),
+      _ => Vec::new(),
+    };
     let holds = |o: Ownership| match o {
       Ownership::Held => ScopeEndHolds::Value,
       Ownership::Maybe => ScopeEndHolds::Maybe,
@@ -4483,7 +4493,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     };
     in_decl_order(live).into_iter()
       .filter(|r| r.box_contents_moved())
-      .filter_map(|r| self.box_state_after(r.name(), span.hi(), region).map(|(b, c)| (*r.hash(), holds(b), holds(c))))
+      .filter_map(|r| self.box_state_after(r.name(), span, region, &diverging).map(|(b, c)| (*r.hash(), holds(b), holds(c))))
       .collect()
   }
 
