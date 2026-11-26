@@ -660,7 +660,7 @@ fn load_facts(v: &Value) -> Result<Vec<BodyF>, String> {
     let (bodies, spike) = match v {
         Value::Array(a) => (a.clone(), true),
         Value::Object(o) => match (o.get("version").and_then(Value::as_u64), o.get("bodies")) {
-            (Some(1 | 2), Some(Value::Array(b))) => {
+            (Some(1 | 2 | 3), Some(Value::Array(b))) => {
                 // A body the producer failed on has no facts: that's a
                 // failure to read, never an expected (xfail) result.
                 let errs = o.get("errors").map(strs).unwrap_or_default();
