@@ -443,6 +443,17 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   let shadow_notes: HashMap<u64, ShadowNote> = note_pairs.into_iter().map(|(h, _, n)| (h, n)).collect();
 
   // Pass information to svg-generator
+  if crate::rv3_facts::enabled() {
+    let mut rv3_out = Vec::new();
+    for def_id in tcx.hir_body_owners() {
+      if !matches!(tcx.def_kind(def_id), rustc_hir::def::DefKind::Fn | rustc_hir::def::DefKind::AssocFn) { continue; }
+      let sp = tcx.def_span(def_id);
+      if sp.from_expansion() || !in_target(sp) { continue; }
+      crate::rv3_facts::collect(tcx, def_id, &mut rv3_out);
+    }
+    crate::rv3_facts::write(&rv3_out);
+  }
+
   match testing_helper.generate_vis(line_map2, pre_events, & mut a_line_map, rap_map.len() + 1, fn_start_lines, shadow_notes, binding_columns, moves_out_first, temp_emptying_moves, hidden_source_lines, approx_notes, args.write_to_cwd) {
     Ok(_) => {}
     Err(e) => {
