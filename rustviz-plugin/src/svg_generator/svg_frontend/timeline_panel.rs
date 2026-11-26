@@ -676,6 +676,7 @@ pub fn render_timeline_panel(visualization_data : & mut VisualizationData, rows_
     dots.legs = marks.legs;
     dots.dashed_legs = marks.dashed_legs;
     dots.rows_added = rows_added;
+    dots.cols = marks.cols;
     dots.bend_lines = dots.cols.iter().chain(&dots.legs).chain(&dots.dashed_legs).copied().collect();
     if rows_added {
         let ends: Vec<(f64, f64)> = dots.legs.iter().chain(&dots.dashed_legs).flat_map(|&(p, q)| [p, q]).collect();
@@ -687,7 +688,6 @@ pub fn render_timeline_panel(visualization_data : & mut VisualizationData, rows_
         }
         dots.corners = corners;
     }
-    dots.cols = marks.cols;
     render_ref_line(&mut output, visualization_data, &resource_owners_layout, &registry, &mut dots.brackets); // reference lines
     render_arrows_string_external_events_version(&mut output, visualization_data, &resource_owners_layout, &mut dots, &registry); // arrows
     // Written last: a call icon (`f`) added by the arrow pass shares
@@ -6887,7 +6887,11 @@ fn heads_on_heads(drawn: &[Drawn], touching: bool) -> Vec<usize> {
     for (i, a) in drawn.iter().enumerate().filter(|(_, d)| d.logo.is_none() && d.tri.len() == 3) {
         if drawn[..i].iter().any(|b| b.logo.is_none() && b.tri.len() == 3 && b.tip != a.tip && dist(b.tri[1], a.tri[1]) < 8.0 && {
             let depth = if touching && (down(a) || down(b)) { -0.5 } else { 1.0 };
-            samples(&tri_edges(&b.tri)).into_iter().any(|p| inside_tri(&a.tri, p) > depth)
+            // (Two heads drawn as one: every edge point on the other's
+            // boundary, at depth 0.)
+            let coincident = a.tri.iter().zip(&b.tri).all(|(&p, &q)| dist(p, q) < 1.0)
+                || (dist(a.tri[0], b.tri[2]) < 1.0 && dist(a.tri[1], b.tri[1]) < 1.0 && dist(a.tri[2], b.tri[0]) < 1.0);
+            coincident || samples(&tri_edges(&b.tri)).into_iter().any(|p| inside_tri(&a.tri, p) > depth)
         }) {
             out.push(i);
         }
@@ -8397,6 +8401,10 @@ fn render_arrows_string_external_events_version(
     let mut fan_variant: BTreeMap<(i64, i64), usize> = BTreeMap::new();
     let mut drawn = lay_out_arrows(visualization_data, resource_owners_layout, dots, registry, false, &fan_old, &fan_variant);
     let first = work_done();
+    // (A big figure isn't laid out again to compare its fans with main's
+    // drawing: a second whole layout of one costs seconds on the
+    // playground, which renders on every request, #1605's review.)
+    let big = first > BIG_FIGURE_WORK;
     let seen = dots.lanes.fans_seen.clone();
     // No fan may cross other arrows more than it does in main's drawing
     // (the maintainer's ruling on #1605). Only where a fan's arrows cross
@@ -8404,7 +8412,13 @@ fn render_arrows_string_external_events_version(
     // crosses more here, up to two other orders of approaches at the
     // rule's fans (within the work budget, `within_budget`), else the
     // figure keeps main's drawing.
-    if all_fan_crossings(&drawn) > 0 || !heads_on_heads(&drawn, false).is_empty() {
+    let mut main_drawing = false;
+    // (A big one whose rule-drawn fans cross: drawn without #1542's rule,
+    // in one more layout, its fans as main's router draws them.)
+    if big && seen.keys().any(|&(y, x)| fan_crossings_at(&drawn, (x as f64, y as f64)) > 0) {
+        drawn = lay_out_arrows(visualization_data, resource_owners_layout, dots, registry, true, &fan_old, &BTreeMap::new());
+    }
+    if !big && (all_fan_crossings(&drawn) > 0 || !heads_on_heads(&drawn, false).is_empty()) {
         let kept = dots.lanes.clone();
         let (legs, dashed) = (dots.legs.clone(), std::mem::take(&mut dots.dashed_legs));
         dots.legs.extend(dashed.iter().copied());
@@ -8442,6 +8456,7 @@ fn render_arrows_string_external_events_version(
             if !fixed {
                 drawn = old;
                 dots.lanes = old_lanes;
+                main_drawing = true;
             }
         }
     }
@@ -8450,11 +8465,19 @@ fn render_arrows_string_external_events_version(
     // left for one of its heads.)
     let heads = heads_on_heads(&drawn, false);
     let others = untangle_cost(&drawn, dots).0.saturating_sub(legs.len() + heads.len());
-    let left: Vec<usize> = legs.into_iter().chain(on_cols(&drawn, &dots.cols)).chain(heads).collect();
+    let mut left: Vec<usize> = legs.into_iter().chain(on_cols(&drawn, &dots.cols)).chain(heads).collect();
+    left.sort_unstable();
+    left.dedup();
     let mut rows: Vec<usize> = left.iter().map(|&i| drawn[i].key.1).collect();
     rows.sort_unstable();
     rows.dedup();
     dots.left_on = ArrowsLeftOn { rows, count: left.len(), others, fan_crossings: all_fan_crossings(&drawn) };
+    // (A figure that keeps main's drawing wants no rows: main has none
+    // there, and another pass would cost a whole layout again.)
+    if main_drawing {
+        dots.left_on.rows.clear();
+        dots.left_on.count = 0;
+    }
     render_all_arrows(output, visualization_data, resource_owners_layout, dots, registry);
 }
 
@@ -8464,6 +8487,10 @@ thread_local! {
     /// unlike a clock. Reset by `render_svg` (`reset_work`).
     static WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
+
+/// A figure whose first layout did more probe work than this (about a
+/// second) is big: it isn't laid out again for #1542's fans.
+const BIG_FIGURE_WORK: usize = 100_000;
 
 /// Starts counting the layout work of a figure afresh.
 pub fn reset_work() {
@@ -8517,6 +8544,11 @@ fn fan_crossings(drawn: &[Drawn], (y, x): (i64, i64)) -> usize {
     fan_crossings_at(drawn, (x as f64, y as f64))
 }
 
+/// How far apart two heads' `head_dot`s may be and point at one dot: a head
+/// stopping short of a call icon (`CALL_ICON_CLEARANCE`) is 3 px further
+/// off than one ending on the dot's rim.
+const FAN_DOT_PX: f64 = 4.0;
+
 /// The centre of the dot an arrow's head points at: 5.25 px on from its
 /// tip.
 fn head_dot(d: &Drawn) -> Option<(f64, f64)> {
@@ -8530,7 +8562,7 @@ fn head_dot(d: &Drawn) -> Option<(f64, f64)> {
 
 /// `fan_crossings` for the heads into the dot at `c` (within 3 px).
 fn fan_crossings_at(drawn: &[Drawn], c: (f64, f64)) -> usize {
-    let fan: Vec<usize> = (0..drawn.len()).filter(|&i| head_dot(&drawn[i]).is_some_and(|h| dist(h, c) < 3.0)).collect();
+    let fan: Vec<usize> = (0..drawn.len()).filter(|&i| head_dot(&drawn[i]).is_some_and(|h| dist(h, c) < FAN_DOT_PX)).collect();
     let mut n = 0;
     for &i in &fan {
         for (j, b) in drawn.iter().enumerate().filter(|(_, b)| b.logo.is_none()) {
@@ -8554,7 +8586,7 @@ fn fan_dots(drawn: &[Drawn]) -> Vec<(f64, f64)> {
     let tips: Vec<(f64, f64)> = drawn.iter().filter_map(head_dot).collect();
     let mut dots: Vec<(f64, f64)> = Vec::new();
     for &t in &tips {
-        if !dots.iter().any(|&d| dist(d, t) < 3.0) && tips.iter().filter(|&&u| dist(u, t) < 3.0).count() >= 2 {
+        if !dots.iter().any(|&d| dist(d, t) < FAN_DOT_PX) && tips.iter().filter(|&&u| dist(u, t) < FAN_DOT_PX).count() >= 2 {
             dots.push(t);
         }
     }
