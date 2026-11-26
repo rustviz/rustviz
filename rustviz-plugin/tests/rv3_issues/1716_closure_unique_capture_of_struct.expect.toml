@@ -1,8 +1,7 @@
 issue = 1716
 cluster = "C25"
 title = "Closure capturing a whole struct h by a unique immutable borrow (`println!(\"{:?}\", h); *h.r += 1;`), drawn as a shared borrow"
-xfail = "P1"
-note = "Gap: the unique capture of h (to f, ends 7) is right; the dump has no lent / state entry for the field h.r."
+note = "Passes since rv3-p0b: every field the source can name gets a column (a tuple's, or a struct's of this crate, nested ones too), so `h.r` have per-row states; a field with no move path of its own takes the state of its nearest ancestor that has one (moved with the whole, `own` beside a moved sibling), and its loans are the ones rustc's `places_conflict` says restrict it."
 places = ["h.r"]
 beyond_facts = "P2/P3: the capture's wording (unique, not shared)"
 

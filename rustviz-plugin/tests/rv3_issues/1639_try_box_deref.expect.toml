@@ -2,7 +2,7 @@ issue = 1639
 cluster = "C11"
 title = "`(*b)?` on a Box<Result>: the Result is moved out of the Box on every path, so b's later drop frees only the allocation"
 places = ["*b"]
-note = "Passes since rv3 P1-2: a move out of a Box's contents leaves the Box `partly` moved, not `moved`: the Box's own move path stays initialized and it still owns its allocation, which is freed when the Box is dropped (at its scope end, on an early exit, or when it is given a new Box). rustc reports a later use of the Box as E0382 \"use of moved value\", with a note that the move was of `*b`."
+note = "Passes since rv3 P1-2: a move out of a Box's contents leaves the Box `partly` moved, not `moved` (only the payload moved; the allocation is still owned and freed at scope end or on an early exit; rustc's E0382 says `borrow of moved value: b` and notes that `*b`, the contents, is what moved)."
 beyond_facts = "P3: both the `?` dot and the scope end say b's resource includes the Result it holds"
 
 [[event]]

@@ -4,7 +4,7 @@ title = "`(*b)?` with a Box parameter: on the early-return path the Box is still
 fn = "run"
 places = ["*b"]
 beyond_facts = "P3: no dot for the conditional drop of b at the `?` (after #1661 it is not drawn at all)"
-note = "Passes since rv3 P1-2: a move out of a Box's contents leaves the Box `partly` moved, not `moved`: the Box's own move path stays initialized and it still owns its allocation, which is freed when the Box is dropped (at its scope end, on an early exit, or when it is given a new Box). rustc reports a later use of the Box as E0382 \"use of moved value\", with a note that the move was of `*b`."
+note = "Passes since rv3 P1-2: a move out of a Box's contents leaves the Box `partly` moved, not `moved` (only the payload moved; the allocation is still owned and freed at scope end or on an early exit; rustc's E0382 says `borrow of moved value: b` and notes that `*b`, the contents, is what moved)."
 
 [[event]]
 row = 2

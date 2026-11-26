@@ -31355,6 +31355,62 @@ fn row_facts(body: &serde_json::Value, row: u64) -> Vec<serde_json::Value> {
         .and_then(|r| r["facts"].as_array().cloned()).unwrap_or_default()
 }
 
+/// What the review of #1850 found wrong in the facts, each fixed from MIR
+/// (`rv3_facts_review_1850.rs`).
+#[test]
+fn facts_pin_review_1850() {
+    let src = read_corpus("rv3_facts_review_1850");
+    let rv = run_with_local_backend("rv3_facts_review_1850");
+    let facts = rv.facts().expect("the plugin gave no facts (RV3_FACTS)");
+    let body = |f: &str| fact_body(facts, f);
+    let drop_at = |fs: &[serde_json::Value], path: &str, how: &str| {
+        fs.iter().position(|f| f["ev"] == "Drop" && f["path"] == path && f["how"] == how)
+            .unwrap_or_else(|| panic!("no drop of {path} ({how}) in {fs:#?}"))
+    };
+    let columns = |b: &serde_json::Value| -> Vec<String> {
+        b["columns"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap().to_owned()).collect()
+    };
+    // A Box whose contents may have been moved: the contents' flagged drop
+    // runs before the allocation is freed (drop elaboration).
+    let b = body("box_order");
+    let fs = row_facts(b, src_row_in(&src, b, "b = Box::new(String::from(\"cd\"))"));
+    assert!(drop_at(&fs, "*b", "drops_if_init") < drop_at(&fs, "b", "drops_rest"), "{fs:#?}");
+    // A Box inside a Box: innermost contents, inner Box, outer Box.
+    let b = body("nested_box");
+    let fs = row_facts(b, src_row_in(&src, b, "let text = **boxed;") + 1);
+    let (c, i, o) = (drop_at(&fs, "**boxed", "nothing_to_drop"), drop_at(&fs, "*boxed", "drops_rest"), drop_at(&fs, "boxed", "drops_rest"));
+    assert!(c < i && i < o, "{fs:#?}");
+    // Each early exit that shares the drop gets the parts it holds there.
+    let b = body("exit_payload");
+    let fs = row_facts(b, src_row_in(&src, b, "return 2;"));
+    drop_at(&fs, "*b", "nothing_to_drop");
+    drop_at(&fs, "b", "drops_rest");
+    let fs = row_facts(b, src_row_in(&src, b, "return 1;"));
+    drop_at(&fs, "b", "drops");
+    assert!(!fs.iter().any(|f| f["ev"] == "Drop" && f["path"] == "*b"), "{fs:#?}");
+    // After `let t = r;` the fields are still p's: no `r.b` state (r holds
+    // nothing), and `t.b` is a place.
+    let b = body("moved_ref");
+    let st = &fact_row(b, src_row_in(&src, b, "let t = r;"))["state"];
+    assert!(st.get("r.b").is_none() && st.get("r.a").is_none(), "{st:#}");
+    assert_eq!(st["t.b"], "own");
+    // Two `p`s in sibling scopes: each drops the field it still holds.
+    let b = body("sibling_scopes");
+    let fs = row_facts(b, src_row_in(&src, b, "let x = p.a;") + 1);
+    drop_at(&fs, "p.b", "drops");
+    let fs = row_facts(b, src_row_in(&src, b, "let y = p.b;") + 1);
+    drop_at(&fs, "p.a", "drops");
+    // Fields through a Box (`b.s`) and through `&&P` (`r.a`) are columns;
+    // a field private to another module is not.
+    let b = body("boxed_fields");
+    let row = fact_row(b, src_row_in(&src, b, "let n = 1;"));
+    assert_eq!(row["state"]["b.t"], "own");
+    assert_eq!(row["lent"]["b.s"][0]["kind"], "shared");
+    assert!(columns(body("double_ref")).contains(&"r.a".to_owned()));
+    let q = columns(body("private_field"));
+    assert!(q.contains(&"q.x".to_owned()) && !q.iter().any(|c| c == "q.secret"), "{q:?}");
+}
+
 /// What the review of #1833 found wrong in the facts, each fixed from MIR
 /// (`rv3_facts_review_1833.rs`).
 #[test]

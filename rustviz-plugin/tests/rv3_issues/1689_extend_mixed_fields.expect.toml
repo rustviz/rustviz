@@ -1,9 +1,8 @@
 issue = 1689
-xfail = "P1"
 cluster = "C18"
 title = "y.extend([(&e.0, &mut e.1)]): e.0 drawn \"can't be used\"; rustc accepts reading e.0 before y's last use (item 1, fields)"
 places = ["e.0", "e.1"]
-note = "Gap: spike has the lent facts (e.0 shared, e.1 mut, both to y) but no per-row state for the field paths e.0 / e.1."
+note = "Passes since rv3-p0b: every field the source can name gets a column (a tuple's, or a struct's of this crate, nested ones too), so `e.0` and `e.1` have per-row states; a field with no move path of its own takes the state of its nearest ancestor that has one (moved with the whole, `own` beside a moved sibling), and its loans are the ones rustc's `places_conflict` says restrict it."
 beyond_facts = "P2: wording; whether the arrow is drawn from e or e.0"
 
 [[lent]]

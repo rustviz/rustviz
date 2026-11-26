@@ -1,8 +1,7 @@
 issue = 1764
 cluster = "C17"
 title = "Whole-struct `&mut` moved to another variable (`let t = r;`): the field lines must name t as holder, not r"
-xfail = "P1"
-note = "Gap: loan (lender p, holder t, ends 6) is right; the dump has no lent entry for the fields p.a / p.b, nor field states."
+note = "Passes since rv3-p0b: every field the source can name gets a column (a tuple's, or a struct's of this crate, nested ones too), so `p.a` and `p.b` have per-row states; a field with no move path of its own takes the state of its nearest ancestor that has one (moved with the whole, `own` beside a moved sibling), and its loans are the ones rustc's `places_conflict` says restrict it."
 fn = "moved_holder"
 places = ["p.a", "p.b"]
 beyond_facts = "P3: the field columns' text says 'borrowed along with p by r' through t's last use (a holder name is text; the facts underneath are who holds the loan)"

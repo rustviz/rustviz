@@ -334,6 +334,9 @@ fn used_on_row(body: &Body<'_>, rows: &RowModel, loc: Location) -> Vec<Local> {
         }
         let mut v = Locals(Vec::new());
         match data.statements.get(i) {
+            // (A storage marker uses nothing: `StorageDead(r)` doesn't make
+            // r the loan's last user.)
+            Some(st) if matches!(st.kind, StatementKind::StorageDead(_) | StatementKind::StorageLive(_)) => {}
             Some(st) => v.visit_statement(st, l),
             None => v.visit_terminator(data.terminator(), l),
         }
@@ -627,46 +630,90 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         column_info.push(ColumnInfo { name: n.clone(), root, kind, copy, needs_drop });
         columns.push((mpi, mp.place, n));
     }
-    // The other fields of a struct or tuple column some of whose fields
-    // have move paths (`p.b` once `p.a` was moved): rustc tracks them
-    // with their parent, so their state follows it.
+    // Fields with no move path of their own (nothing moves or assigns them
+    // alone): rustc tracks them with the nearest ancestor that has one, so
+    // their state follows it (`p.b` once `p.a` was moved is `own`; `h.r` is
+    // moved with `h`). Every field the source can name gets a column: of a
+    // tuple or a struct of this crate (any struct some of whose fields have
+    // move paths), nested ones too, and the fields of a struct a reference
+    // variable points to (`self.a` through `&mut self`: its loans restrict
+    // `self.a` alone, its state is the reference's).
     let mut synth: Vec<(MovePathIndex, Place<'tcx>, String)> = Vec::new();
-    for (mpi, place, _) in &columns {
+    // Fields the source can't name from this body (private to another
+    // module) get no column.
+    let here = tcx.parent_module_from_def_id(def_id.expect_local()).to_def_id();
+    let mut work: Vec<(MovePathIndex, Place<'tcx>, bool)> = columns.iter().map(|(m, p, _)| (*m, *p, true)).collect();
+    while let Some((mpi, place, real)) = work.pop() {
         let mut kids: BTreeSet<usize> = BTreeSet::new();
-        let mut c = move_data.move_paths[*mpi].first_child;
-        while let Some(ch) = c {
-            if let Some(ProjectionElem::Field(f, _)) = move_data.move_paths[ch].place.projection.last() {
-                kids.insert(f.index());
+        let mut payload = false;
+        if real {
+            let mut c = move_data.move_paths[mpi].first_child;
+            while let Some(ch) = c {
+                match move_data.move_paths[ch].place.projection.last() {
+                    Some(ProjectionElem::Field(f, _)) => {
+                        kids.insert(f.index());
+                    }
+                    Some(ProjectionElem::Deref) => payload = true,
+                    _ => {}
+                }
+                c = move_data.move_paths[ch].next_sibling;
             }
-            c = move_data.move_paths[ch].next_sibling;
         }
-        // (A Box's payload `*b` gets its fields whenever it is a column, if
-        // the source can name them `b.a`: a tuple or a struct of this crate.)
-        let pty0 = place.ty(&body.local_decls, tcx).ty;
-        let own_type = match pty0.kind() {
-            TyKind::Adt(def, _) => def.did().is_local(),
+        let mut pty = place.ty(&body.local_decls, tcx).ty;
+        let mut place = place;
+        // Auto-deref, as the source's `x.f` does: through a reference
+        // variable (`self.a` of `&mut self`, `r.f` of `&&S`) and through a
+        // Box whose contents have no move path of their own (`b.s` of a
+        // `Box<H>`; else `*b`'s own column gives them).
+        if real && !payload {
+            loop {
+                let inner = match pty.kind() {
+                    TyKind::Ref(_, inner, _) if place.projection.iter().all(|e| e == ProjectionElem::Deref) && cx.names.locals.contains_key(&place.local) => *inner,
+                    _ if pty.is_box() => pty.boxed_ty().unwrap_or(pty),
+                    _ => break,
+                };
+                if inner == pty {
+                    break;
+                }
+                place = tcx.mk_place_deref(place);
+                pty = inner;
+            }
+        }
+        let nameable = match pty.kind() {
+            TyKind::Adt(def, _) => def.is_struct() && (def.did().is_local() || !kids.is_empty()),
             TyKind::Tuple(_) => true,
             _ => false,
         };
-        if kids.is_empty() && !(place.projection.last() == Some(&ProjectionElem::Deref) && own_type) {
+        if !nameable {
             continue;
         }
-        let pty = place.ty(&body.local_decls, tcx).ty;
-        let fields: Vec<rustc_middle::ty::Ty<'tcx>> = match pty.kind() {
-            TyKind::Adt(def, args) if def.is_struct() => def.non_enum_variant().fields.iter().map(|fd| fd.ty(tcx, args)).collect(),
-            TyKind::Tuple(tys) => tys.iter().collect(),
+        let fields: Vec<(rustc_middle::ty::Ty<'tcx>, bool)> = match pty.kind() {
+            TyKind::Adt(def, args) => def
+                .non_enum_variant()
+                .fields
+                .iter()
+                .map(|fd| (fd.ty(tcx, args), tcx.visibility(fd.did).is_accessible_from(here, tcx)))
+                .collect(),
+            TyKind::Tuple(tys) => tys.iter().map(|t| (t, true)).collect(),
             _ => continue,
         };
-        for (i, fty) in fields.into_iter().enumerate() {
-            if kids.contains(&i) {
+        for (i, (fty, visible)) in fields.into_iter().enumerate() {
+            if kids.contains(&i) || !visible {
                 continue;
             }
-            let fp = tcx.mk_place_field(*place, rustc_abi::FieldIdx::from_usize(i), fty);
+            let fp = tcx.mk_place_field(place, rustc_abi::FieldIdx::from_usize(i), fty);
             let Some(n) = cx.name(fp) else { continue };
             let Some((root, _, _)) = cx.names.root(fp) else { continue };
-            let (copy, needs_drop, _) = ty_info(fty);
-            column_info.push(ColumnInfo { name: n.clone(), root, kind: "field", copy, needs_drop });
-            synth.push((*mpi, fp, n));
+            // (Two variables of one name in sibling scopes share a column
+            // name; each keeps its own places.)
+            if !column_info.iter().any(|c| c.name == n) {
+                let (copy, needs_drop, _) = ty_info(fty);
+                column_info.push(ColumnInfo { name: n.clone(), root, kind: "field", copy, needs_drop });
+            }
+            synth.push((mpi, fp, n));
+            // (Nested structs and tuples; never through a reference or a
+            // Box stored in a field, so the type nesting bounds this.)
+            work.push((mpi, fp, false));
         }
     }
     let column_name = |mpi: MovePathIndex| columns.iter().find(|(m, _, _)| *m == mpi).map(|(_, _, n)| n.clone());
@@ -695,6 +742,52 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 out.push(cx.names.locals[local].clone());
             }
         }
+        out
+    };
+    // Who held the loan last on the way to `loc`: on each way back over the
+    // CFG (borrowck's imaginary edges and cleanup excluded), the nearest
+    // location where some variable's origin contains it; the union over
+    // the ways (two arms can leave it in different variables). Empty when
+    // the search can't finish (it decides nothing then).
+    let preds_all = body.basic_blocks.predecessors();
+    let last_holders = |loc: Location, loan: BorrowIndex| -> Vec<String> {
+        let Some(t) = table else { return Vec::new() };
+        let mut seen: BTreeSet<Location> = BTreeSet::new();
+        let mut out: Vec<String> = Vec::new();
+        let mut work = vec![loc];
+        while let Some(l) = work.pop() {
+            if !seen.insert(l) {
+                continue;
+            }
+            if seen.len() > 4096 {
+                return Vec::new();
+            }
+            let mut hs = holders_at(t.mid_index(l), loan);
+            if hs.is_empty() {
+                hs = holders_at(t.start_index(l), loan);
+            }
+            if !hs.is_empty() {
+                for h in hs {
+                    if !out.contains(&h) {
+                        out.push(h);
+                    }
+                }
+                continue;
+            }
+            if l.statement_index > 0 {
+                work.push(Location { block: l.block, statement_index: l.statement_index - 1 });
+            } else {
+                for p in &preds_all[l.block] {
+                    let pdata = &body.basic_blocks[*p];
+                    let imaginary = matches!(&pdata.terminator().kind,
+                        TerminatorKind::FalseEdge { imaginary_target, real_target } if *imaginary_target == l.block && *real_target != l.block);
+                    if !pdata.is_cleanup && !imaginary {
+                        work.push(Location { block: *p, statement_index: pdata.statements.len() });
+                    }
+                }
+            }
+        }
+        out.sort();
         out
     };
     // Anyone whose type holds the loan at some point, with the first row.
@@ -886,8 +979,14 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     .filter(|n| now.contains(n) || li.holders.contains(n))
                     .collect();
                 let first = loan_holder(li);
+                // Nobody's origin holds it here (its last holder's last use
+                // is behind): who held it last on the way here, not whoever
+                // held it first (`vr` after `vr.push(r)`, not the dead `r`).
+                let last = if now.is_empty() { last_holders(loc, *b) } else { Vec::new() };
                 let holder = if let Some(u) = used.first() {
                     u.clone()
+                } else if !last.is_empty() {
+                    last.join("|")
                 } else if now.is_empty() || now.contains(&first) {
                     first
                 } else {
@@ -898,7 +997,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 // else nothing uses the loan any more on this path.
                 let holds = |n: &str| {
                     let root = n.split('.').next().unwrap_or(n);
-                    now.iter().any(|h| h == root) || (now.is_empty() && li.holders.first().is_some_and(|h| h == n))
+                    now.iter().any(|h| h == root)
+                        || (now.is_empty() && !last.is_empty() && last.iter().any(|h| h == root))
+                        || (now.is_empty() && last.is_empty() && li.holders.first().is_some_and(|h| h == n))
                 };
                 let mut why = "no further use".to_string();
                 let sdata = &body.basic_blocks[s.block];
@@ -1027,6 +1128,74 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             .collect()
     };
 
+    // The parts of a place that drop elaboration drops on their own when some
+    // of it was moved out (on some path), as (field key, depth, name, how):
+    // each field in declaration order, those that may hold a value behind a
+    // flag (`b.a` re-assigned in one arm); a Box inside (`*b`, or `*p.b`)
+    // also frees its own allocation, after its contents (deeper parts sort
+    // first). A field with no move path of its own holds a value exactly
+    // where its parent (as a whole) does.
+    let field_drops = |rt: &mut Flow<'_, '_, 'tcx>, at: &[Location], after: bool, top: MovePathIndex| -> Vec<(Vec<usize>, std::cmp::Reverse<usize>, String, &'static str)> {
+        let key = |p: &Place<'tcx>| -> Vec<usize> {
+            p.projection.iter().filter_map(|e| match e {
+                ProjectionElem::Field(f, _) => Some(f.index()),
+                _ => None,
+            }).collect()
+        };
+        let mut out = Vec::new();
+        let mut work = vec![top];
+        while let Some(m) = work.pop() {
+            let st = rt.state(at, after, m);
+            if st.sub_moved.is_empty() && st.sub_maybe.is_empty() {
+                continue;
+            }
+            let mut c = rt.md.move_paths[m].first_child;
+            while let Some(ch) = c {
+                let cp = rt.md.move_paths[ch].place;
+                c = rt.md.move_paths[ch].next_sibling;
+                if !ty_info(cp.ty(&body.local_decls, tcx).ty).1 {
+                    continue;
+                }
+                let cst = rt.state(at, after, ch);
+                let inner = !cst.sub_moved.is_empty() || !cst.sub_maybe.is_empty();
+                // (A part some of whose own parts were moved: those, inside;
+                // a Box among them still frees its allocation.)
+                if inner {
+                    work.push(ch);
+                }
+                if !inner || cp.ty(&body.local_decls, tcx).ty.is_box() {
+                    if let Some(n) = cx.name(cp) {
+                        // (After its own contents.)
+                        let mut k = key(&cp);
+                        if inner {
+                            k.push(usize::MAX);
+                        }
+                        out.push((k, std::cmp::Reverse(cp.projection.len()), n, drop_how(&cst)));
+                    }
+                }
+            }
+            let parent_how = match (st.may_init, st.may_uninit) {
+                (true, false) => Some("drops"),
+                (true, true) => Some("drops_if_init"),
+                _ => None,
+            };
+            // (Its own fields: not a field's fields, nor fields behind a
+            // reference, nor another scope's variable of the same name.)
+            let mplace = rt.md.move_paths[m].place;
+            for (_, fp, n) in &synth {
+                let direct = fp.local == mplace.local
+                    && fp.projection.len() == mplace.projection.len() + 1
+                    && fp.projection[..mplace.projection.len()] == mplace.projection[..];
+                if direct && ty_info(fp.ty(&body.local_decls, tcx).ty).1 {
+                    if let Some(h) = parent_how {
+                        out.push((key(fp), std::cmp::Reverse(fp.projection.len()), n.clone(), h));
+                    }
+                }
+            }
+        }
+        out.sort();
+        out
+    };
     // ---- moves, copies, inits, re-points, drops, scope ends ---------------------
     let mut temps: BTreeMap<Local, TempInfo> = BTreeMap::new();
     for (&loc, _) in &cx.rows.row {
@@ -1208,86 +1377,51 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     };
                     let shared = cx.rows.shared_exits.get(&loc).cloned().unwrap_or_default();
                     let also_on_exits: Vec<usize> = shared.iter().map(|(r, _)| *r).collect();
+                    // A Box's contents are dropped before its allocation is
+                    // freed; a struct's summary drop comes before its fields'.
+                    let is_box = place.ty(&body.local_decls, tcx).ty.is_box();
                     // The drop also runs on early exits that share it: each
-                    // exit gets its own on its row, with what the place
-                    // holds when that path leaves (Q2: on the exit's row).
+                    // exit gets its own on its row, with what the place (and
+                    // each part of it) holds when that path leaves (Q2: on
+                    // the exit's row).
                     if let LookupResult::Exact(mpi) = rt_md.rev_lookup.find(place.as_ref()) {
                         for (r, at) in &shared {
                             let how_there = drop_how(&rt.state(&[*at], true, mpi));
                             if how_there == "nothing_to_drop" {
                                 continue;
                             }
-                            let mut ev = cx.ev(loc, Fact::Drop {
-                                path: path.clone(),
-                                how: how_there,
-                                at_reassign: false,
-                                early_exit: Some(*r),
-                                also_on_exits: Vec::new(),
-                            });
-                            ev.0 = *r;
-                            ev.1.col = cx.rows.col.get(at).copied().unwrap_or(0);
-                            ev.1.arm = cx.rows.arm_of(*at);
-                            ev.1.order = cx.rows.order(*at);
-                            push(&mut evs, ev);
+                            let parts = field_drops(&mut rt, &[*at], true, mpi);
+                            let mut items: Vec<(String, &'static str)> = parts.into_iter().map(|(_, _, n, h)| (n, h)).collect();
+                            if is_box {
+                                items.push((path.clone(), how_there));
+                            } else {
+                                items.insert(0, (path.clone(), how_there));
+                            }
+                            for (n, h) in items {
+                                let mut ev = cx.ev(loc, Fact::Drop { path: n, how: h, at_reassign: false, early_exit: Some(*r), also_on_exits: Vec::new() });
+                                ev.0 = *r;
+                                ev.1.col = cx.rows.col.get(at).copied().unwrap_or(0);
+                                ev.1.arm = cx.rows.arm_of(*at);
+                                ev.1.order = cx.rows.order(*at);
+                                push(&mut evs, ev);
+                            }
                         }
                     }
-                    // Some fields moved out (on some path): drop elaboration
-                    // drops each field on its own, in declaration order, those
-                    // that may hold a value behind a flag (`b.a` re-assigned
-                    // in one arm). A field with no move path of its own holds
-                    // a value exactly where its parent (as a whole) does.
-                    let key = |p: &Place<'tcx>| -> Vec<usize> {
-                        p.projection.iter().filter_map(|e| match e {
-                            ProjectionElem::Field(f, _) => Some(f.index()),
-                            _ => None,
-                        }).collect()
+                    let parts = match rt_md.rev_lookup.find(place.as_ref()) {
+                        LookupResult::Exact(top) => field_drops(&mut rt, &[loc], false, top),
+                        LookupResult::Parent(_) => Vec::new(),
                     };
-                    let mut field_drops: Vec<(Vec<usize>, String, &'static str)> = Vec::new();
-                    if let LookupResult::Exact(top) = rt_md.rev_lookup.find(place.as_ref()) {
-                        let mut work = vec![top];
-                        while let Some(m) = work.pop() {
-                            let st = rt.state(&[loc], false, m);
-                            if st.sub_moved.is_empty() && st.sub_maybe.is_empty() {
-                                continue;
-                            }
-                            let mut c = rt_md.move_paths[m].first_child;
-                            while let Some(ch) = c {
-                                let cp = rt_md.move_paths[ch].place;
-                                c = rt_md.move_paths[ch].next_sibling;
-                                if !ty_info(cp.ty(&body.local_decls, tcx).ty).1 {
-                                    continue;
-                                }
-                                let cst = rt.state(&[loc], false, ch);
-                                // (A Box's payload: its fields, inside.)
-                                if !cst.sub_moved.is_empty() || !cst.sub_maybe.is_empty() || cp.projection.last() == Some(&ProjectionElem::Deref) {
-                                    work.push(ch);
-                                    continue;
-                                }
-                                if let Some(n) = cx.name(cp) {
-                                    field_drops.push((key(&cp), n, drop_how(&cst)));
-                                }
-                            }
-                            let parent_how = match (st.may_init, st.may_uninit) {
-                                (true, false) => Some("drops"),
-                                (true, true) => Some("drops_if_init"),
-                                _ => None,
-                            };
-                            let mname = cx.name(rt_md.move_paths[m].place);
-                            for (parent, fp, n) in &synth {
-                                if column_name(*parent) == mname && ty_info(fp.ty(&body.local_decls, tcx).ty).1 {
-                                    if let Some(h) = parent_how {
-                                        field_drops.push((key(fp), n.clone(), h));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    field_drops.sort();
                     // Only early exits reach this drop: each has its own above.
                     if !cx.rows.exit_only.contains(&loc) {
-                        push(&mut evs, cx.ev(loc, Fact::Drop { path, how, at_reassign, early_exit, also_on_exits }));
-                        for (_, n, h) in field_drops {
-                            push(&mut evs, cx.ev(loc, Fact::Drop { path: n, how: h, at_reassign, early_exit, also_on_exits: Vec::new() }));
+                        let whole = (path, how, also_on_exits);
+                        let mut items: Vec<(String, &'static str, Vec<usize>)> = parts.into_iter().map(|(_, _, n, h)| (n, h, Vec::new())).collect();
+                        if is_box {
+                            items.push(whole);
+                        } else {
+                            items.insert(0, whole);
+                        }
+                        for (n, h, also) in items {
+                            push(&mut evs, cx.ev(loc, Fact::Drop { path: n, how: h, at_reassign, early_exit, also_on_exits: also }));
                         }
                     }
                 } else if place.local != RETURN_PLACE
@@ -1403,9 +1537,30 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 st.parts.insert(name.clone(), parts);
             }
         }
-        for (parent, _, name) in &synth {
+        for (parent, fp, name) in &synth {
             let Some(pn) = column_name(*parent) else { continue };
             let Some(pw) = st.state.get(&pn).copied() else { continue };
+            // A field reached through a reference (`self.a`, `r.a`) is a
+            // place only while the reference holds one: after `let t = r;`
+            // the fields are still the referent's, not moved.
+            let through_ref = {
+                let mut ty = body.local_decls[fp.local].ty;
+                let mut any = false;
+                for e in fp.projection.iter() {
+                    if e == ProjectionElem::Deref && ty.is_ref() {
+                        any = true;
+                    }
+                    ty = match e {
+                        ProjectionElem::Field(_, t) => t,
+                        ProjectionElem::Deref => ty.builtin_deref(true).unwrap_or(ty),
+                        _ => ty,
+                    };
+                }
+                any
+            };
+            if through_ref && pw != "own" {
+                continue;
+            }
             st.state.insert(name.clone(), if pw == "partly" { "own" } else { pw });
             if let Some(c) = st.cause.get(&pn).copied() {
                 st.cause.insert(name.clone(), c);

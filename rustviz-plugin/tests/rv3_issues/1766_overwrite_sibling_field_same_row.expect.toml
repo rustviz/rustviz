@@ -1,10 +1,9 @@
 issue = 1766
-xfail = "P1"
 cluster = "C32"
 title = "Unread holder overwritten, with a second loan (of p.1) on the same row: p.0's loan drawn live through the push"
 fn = "same_row"
 places = ["p.0", "p.1"]
-note = "Review fix: the why said `other` moves into h; it is a shared reference and is copied. Gap: spike has the lent fact for p.1 but no per-row state for the field paths p.0 / p.1."
+note = "Review fix: the why said `other` moves into h; it is a shared reference and is copied. Passes since rv3-p0b: every field the source can name gets a column (a tuple's, or a struct's of this crate, nested ones too), so `p.0` and `p.1` have per-row states; a field with no move path of its own takes the state of its nearest ancestor that has one (moved with the whole, `own` beside a moved sibling), and its loans are the ones rustc's `places_conflict` says restrict it."
 beyond_facts = "P2: p.0's dot title on rows 4-6"
 
 [[loan]]

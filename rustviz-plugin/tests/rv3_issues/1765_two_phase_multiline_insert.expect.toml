@@ -4,8 +4,7 @@ title = "multi-line `p.a.insert(..)`: the argument rows drawn as exclusively bor
 fn = "two_phase"
 places = ["p.a"]
 beyond_facts = "P4: where the exclusive loan is drawn to start (call row vs reserved) is presentation"
-xfail = "P1"
-note = "The spike's dump has the loan and the lent entry for p.a but no state for the field place p.a (rows 6-7). The spike's dump spells a two-phase autoref loan `mut(two-phase)`, which the harness's kind check (`mut`) doesn't match, so the two-phase loan assertions give no kind."
+note = "Passes since rv3-p0b: every field the source can name gets a column (a tuple's, or a struct's of this crate, nested ones too), so `p.a` have per-row states; a field with no move path of its own takes the state of its nearest ancestor that has one (moved with the whole, `own` beside a moved sibling), and its loans are the ones rustc's `places_conflict` says restrict it."
 
 [[loan]]
 row = 4

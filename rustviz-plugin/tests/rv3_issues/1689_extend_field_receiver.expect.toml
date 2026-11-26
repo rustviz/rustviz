@@ -1,9 +1,8 @@
 issue = 1689
-xfail = "P1"
 cluster = "C18"
 title = "s.v.extend([&p.0]): the receiver is a field path; no store is drawn and p.0 is shown given back at the call (item 2)"
 places = ["p.0", "p.1"]
-note = "Gap: spike has the lent fact for p.0 (held by s) but no per-row state for the field paths p.0 / p.1."
+note = "Passes since rv3-p0b: every field the source can name gets a column (a tuple's, or a struct's of this crate, nested ones too), so `p.0` and `p.1` have per-row states; a field with no move path of its own takes the state of its nearest ancestor that has one (moved with the whole, `own` beside a moved sibling), and its loans are the ones rustc's `places_conflict` says restrict it."
 beyond_facts = "P2: the 'stored in s.v' arrow"
 
 [[lent]]
