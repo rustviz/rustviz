@@ -2,7 +2,7 @@ issue = 1717
 cluster = "C27"
 title = "`let r = &v; v.push(r.len());`: push's borrow drawn before `r.len()` (alias of the receiver)"
 beyond_facts = "P3: the order of push's borrow and r's read on the dot"
-note = "The spike's dump spells a two-phase autoref loan `mut(two-phase)`, which the harness's kind check (`mut`) doesn't match, so the two-phase loan assertions give no kind."
+note = "The borrow record gives push's mutable receiver kind. The shared alias is still readable during argument evaluation."
 
 [[loan]]
 row = 3
@@ -16,6 +16,7 @@ why = "r is last used by `r.len()` on row 4, evaluated before push activates; wi
 [[loan]]
 row = 4
 lender = "v"
+kind = "mut"
 src = "issue"
 why = "push's two-phase borrow of v is reserved on row 4, with r's shared loan still live while it is reserved (probe b5 compiles, two-phase allows it)"
 

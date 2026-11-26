@@ -31,6 +31,7 @@ row = 10
 place = "z"
 is = "own"
 src = "issue"
+why = "`let _ = &mut z;` immediately after row 10 compiles."
 
 [[drop]]
 row = 7

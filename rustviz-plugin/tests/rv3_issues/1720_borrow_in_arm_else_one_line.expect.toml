@@ -28,6 +28,7 @@ holder = "m2"
 kind = "mut"
 ends = [7]
 src = "issue"
+why = "MIR assigns &mut s2 to m2 in the then arm and ends its storage without reading it."
 
 [[state]]
 row = 5

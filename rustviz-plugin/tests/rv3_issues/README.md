@@ -34,16 +34,17 @@ row = 6
 place = "x"
 is = "own"                     # see the states table
 src = "issue"
-why = "..."                    # optional, recommended: the rustc check that proves it
+why = "..."                    # required on every hand-written assertion: the rustc check that proves it
 
 [[lent]]                       # a loan restricts the place after the row
 row = 8
-place = "x"                    # a column: a variable or field path (`a`, not `*a`)
-kind = "shared"                # shared | mut | unique | exclusive (= mut or unique); optional
+place = "a"                    # a column: a variable or field path (`a`, not `*a`)
+kind = "shared"                # shared | reserved | mut | unique | exclusive (= mut or unique); optional
 holder = "c"                   # the reference/variable holding the loan; optional; "_" = any
 lender = "*a"                  # optional: the loan's borrowed place (a reborrow through a)
 absent = false                 # true: no such loan
 src = "issue"
+why = "Borrowck rejects a write through a (E0506) while c, a shared reborrow of *a, is still used; reads through a stay allowed."
 
 [[loan]]                       # a borrow taken on `row` (a loan of rustc's borrow set: not the dump's
                                #   v3 `source` "caller" / "static" / "untracked" loans)
@@ -60,6 +61,7 @@ ends_exclude = [8]             # optional
 col = 5                        # optional: the source column (1-based) the dump records for the borrow
 absent = false                 # true: no such loan
 src = "issue"
+why = "The taken arm replaces c on row 6. Only the other path still needs the old loan at the read on row 9."
 
 [[drop]]                       # a destructor runs (or not) for the place on the row
 row = 10
@@ -67,39 +69,41 @@ place = "x"
 how = "definite"               # definite | conditional (drop flag) | rest (fields left) | none | any
 absent = false                 # true: no such drop on this row
 src = "issue"
+why = "Both successors reach the MIR drop of the initialized x."
 
 [[event]]                      # an event on the row (or its absence)
 row = 6
 ev = "move s -> v"
 absent = false
 src = "issue"
+why = "MIR moves the String s into v."
 
 [[order]]                      # events on one row, in this evaluation order (a subsequence)
 row = 5
 events = ["end x -> c", "borrow-mut x"]
 src = "issue"
+why = "Taking the new mutable loan on this path requires the old loan to have ended."
 ```
 
-**States** (`is`): `own` (holds its value, nothing borrows it), `shared`
-(holds it, only shared loans), `mut` (a mutable loan or a closure's unique
-immutable one: nothing else may use it), `moved`, `maybe-moved` (moved on
-some path that runs; the dump's `maybe` counts only if something moves the
-place or a parent in the body), `maybe-imaginary` (borrowck counts it as
+**States.** `own` means a whole, initialized value with no live loans.
+`shared` permits shared reads (shared loans or two-phase reservations).
+`mut` requires an active mutable loan or a closure's unique immutable loan.
+`moved` and `unassigned` apply on every path, `maybe-moved` and
+`maybe-unassigned` on some paths that run: the producer's row-local `cause`
+for that place says which (`moved` or `unassigned`), and a move on a path
+that returned before the join cannot supply it. `maybe-imaginary` means borrowck counts the place as
 possibly moved, but only on an edge that never runs, such as an or-pattern's
-unreachable alternative: the dump's cause must be `imaginary`), `partly` (some fields moved), `unassigned` (no value
-on any path), `maybe-unassigned` (assigned on some paths only; the dump's
-`maybe` counts only if nothing moves the place), `absent` (no state). The oracle writes `moved*`,
-`partly*` and `unassigned*`: rustc says "moved" for a definite and a maybe
-move alike, and E0381's wording ("isn't initialized" / "possibly-uninitialized")
-doesn't follow the paths, so these accept either.
+unreachable alternative: the dump's cause must be `imaginary`. `partly`
+records a field move and `absent` means the place has no state on this row.
+The oracle writes `moved*`, `partly*` and `unassigned*` because E0382 and
+E0381 alone do not distinguish a definite move or missing assignment from a
+possible one.
 
-**Kinds.** The dump's spellings are normalised (`mut(two-phase)` is
-`mut`); `unique` (a closure's unique immutable capture) is not `mut`.
-`exclusive` matches either. A row's `lent` entry takes its kind from the
-loan's record. A two-phase loan counts as exclusive (state `mut`) only
-from its activation row (`activation_line` in the loan record); before
-that, or when the dump doesn't say, it is a reservation and counts as
-shared.
+**Kinds.** `[[loan]]` checks the kind at issuance. `[[lent]]` checks the
+phase on that row. Version 2 emits `reserved` until a two-phase mutable
+loan activates. A spike loan record identifies the two-phase borrow, but
+cannot establish its row phase. In that case a phase-dependent assertion
+needs more evidence. `exclusive` matches an active `mut` or `unique` loan.
 
 **Events** (`ev`): `<kind> <place>[ -> <target>]`, `_` matches anything.
 Kinds: `init`, `reassign`, `move`, `copy` (place `-> to`), `borrow`,
@@ -115,37 +119,45 @@ for row L. A row the dump gives no state is "no state": the harness never
 borrows a state from a textually earlier row (it can be another path's: a
 loop body, a sibling arm). A drop the dump marks `early_exit = N` (MIR span
 `}`, run only by the exit on row N) counts on row N and not on the `}` row;
-one marked `also_on_exits` counts on its row and on each exit's row. An
-`[[order]]` must hold on one path through the row: events outside any arm
-plus one arm's (and its parents'), by the dump's `arm` index. When
-a row has several paths (an `if` row), state the path the issue is about
-with a row inside that arm, or use `[[loan]] ends` with `[row, next]`
-edges. In an edge, `next` is where that path goes on: the first row of
-the arm it enters, or the row of the `}` where it rejoins the code after
-the branch (a skipped `if`, a failed `if let`). The dump's next row may
-stop short of it only at rows holding only braces / `else` that the dump
-has no facts on (a `}` row with a drop is code of another path). Two dump
-edges with the same (row, next) are one end.
+current dumps give each exit that drops a value its own fact. Its `arm`
+indexes the exit row. `also_on_exits` on the scope-end summary identifies
+shared MIR drops. A definite shared drop also proves the destructor runs on
+each listed exit in an archived dump. Only positioned events can establish
+evaluation order. A shared drop flag alone leaves the exit-specific result open.
 
-**Why a place is `maybe`.** RustViz 3's state `maybe` doesn't say why
-(moved on some path, or never assigned on some). The dump may say
-(`maybe-moved` / `maybe-unassigned`, or a row's `cause` map); otherwise the
-case must, with a hand-written `maybe-moved` / `maybe-unassigned` state on
-that row. A bare `maybe` with neither fails `moved*` / `unassigned*` with
-a message saying which row to annotate.
+An `[[order]]` is checked along a single path through a row. For nested
+branches that includes the selected arm's parents. Spike dumps lack arm
+membership and sort events by kind, so they cannot verify an order, and a
+v1 early-exit drop's `arm` was taken at the wrong place, so v1 cannot either.
+`exact_drops = true` additionally requires that the path runs no destructor
+the order does not name (use it where a dump that drops both locals on a path
+where one moved must fail). From v3 on, each exit that drops a value has its
+own positioned event, so a shared scope-end summary no longer makes an absence
+assertion uncertain; older dumps still do.
+For a per-path loan end use `[row, next]`, optionally with a third element
+for the successor column. The harness matches the producer's MIR successor
+row exactly, including a join brace and a loop's back edge. It counts
+distinct `(row, next, column)` triples for the same loan.
+
+**Why a place is `maybe`.** A `maybe` state needs the producer's row-local
+`cause` for that place: `moved`, `unassigned` or `imaginary`. The harness also
+accepts those causes encoded directly in the state name. A missing cause
+cannot prove either expectation.
 
 **Sources** (`src`). `oracle`: derived by rustc probes, written only by the
 generator into the block at the end of the file. `issue`: hand-written from
 the issue and checked against rustc (a probe, a compile error, a run with a
 Drop-printing type for drop timing, `--emit=mir` for moves and drops).
-Give the check in `why` (not every case has one yet; new ones should). Write `issue` assertions only for what the oracle can't decide, or
+Give the check in a nonempty `why` on every hand-written assertion. Write `issue` assertions only for what the oracle can't decide, or
 for the exact point the issue is about (repeat it even if the oracle has it:
 it names the bug).
 
-**`[[oracle_skip]]`** (`place`, optional `row` / `fn`, `why`) leaves
-matching generated states unchecked, for a rustc verdict that isn't what
-the program does (borrowck's view of an unreachable or-pattern
-alternative). Pin what MIR does with `issue` assertions next to it.
+**Or-patterns.** Pin usability against borrowck, including its imaginary
+edges. Pin moves and drops against executable MIR. In #1674 a read of
+either tuple field after binding `x` produces E0382, while only `u.0`
+actually moves and `u.1` drops at scope exit. The format also supports
+`[[oracle_skip]]` (`place`, optional `row` / `fn`, `why`) for documented
+exceptions to a generated check.
 
 **Known crashes** (`[known_crash]`: `issue`, `panic_at`, `phase`). For a
 crash issue whose program makes the plugin as a whole exit nonzero (a panic
@@ -181,7 +193,25 @@ If rustc or a probe fails on a case that already has states, the old block
 is kept and the run fails. A method's states are named `Type::name`, a trait
 impl's `<Type as Trait>::name`, a module's fn `module::name`.
 `rv3_issue_cases_well_formed` (always run) fails when the block is stale
-(the program, `places` or the toolchain changed) or has a malformed line.
+(the program, probe inputs or toolchain changed) or has a malformed line.
+
+A case may request an extra statement boundary inside a closure, a call
+argument block or a block in a tail expression. For example, the following
+entry in the nested-probes fixture checks a local after its move.
+
+```toml
+[[probe]]
+fn = "run::{closure#0}"
+row = 6
+place = "local"
+```
+
+Take the body name from rustc MIR. The place must be a simple local
+declared with `let` in the same block. The probe goes between complete
+statements and preserves the block's tail value. This also keeps the probe
+from introducing a capture. Generation requires a rustc verdict at each
+requested point. Dead code gives no ownership verdict. Use executable
+MIR to pin the absence of a move or drop after a diverging statement.
 
 ## Running against the fact layer
 
@@ -194,4 +224,4 @@ skips it. With `RV3_ISSUES_STRICT=1` it fails on a case that fails without
 couldn't be read (a missing `RV3_FACTS_DIR` or dump file, a plugin failure:
 `xfail` doesn't cover those), and when no case was checked. The dump's shape is read
 by `load_facts` (the one adapter point): RustViz 3's
-`{"version": 1, "bodies": [..]}` and the spike's bare array.
+versioned object (v1, v2 or v3) and the spike's bare array.

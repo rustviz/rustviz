@@ -16,6 +16,7 @@ row = 6
 ev = "reassign b"
 absent = true
 src = "issue"
+why = "The else successor assigns through the Box dereference. The local holding the allocation is never assigned again."
 
 [[state]]
 row = 7

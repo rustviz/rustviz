@@ -19,6 +19,7 @@ place = "s"
 kind = "mut"
 holder = "_"
 src = "issue"
+why = "MIR takes &mut s before the coercion, copies the resulting reference into Some, then passes the Option to push. The println uses the aggregate."
 
 [[lent]]
 row = 5

@@ -26,6 +26,7 @@ row = 7
 place = "p.0"
 is = "shared"
 src = "issue"
+why = "After row 7, `&p.0` compiles and `&mut p.0` conflicts with the live shared borrow (E0502)."
 
 [[state]]
 row = 7

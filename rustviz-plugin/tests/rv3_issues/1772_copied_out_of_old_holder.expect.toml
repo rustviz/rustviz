@@ -19,6 +19,7 @@ row = 5
 lender = "a"
 ends_exclude = [5, 6, 7, 9]
 src = "issue"
+why = "The copied field in x still refers to a when h is overwritten. The next println uses x."
 
 # holder omitted: the spike names a joined holder set ("r|v"); the holder is the one named in the title/why
 [[lent]]
@@ -26,6 +27,7 @@ row = 7
 place = "a"
 kind = "shared"
 src = "issue"
+why = "MIR copies h.r to x before overwriting h. The println reads x on row 8, which is the last use of this loan."
 
 [[state]]
 row = 7

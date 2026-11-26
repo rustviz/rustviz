@@ -2,7 +2,7 @@ issue = 1580
 cluster = "C05"
 title = "Second shape: old loan live into the re-pointing arm (`let r2 = r; r = &t;`), no end on the `else if` / `else` paths"
 fn = "run"
-note = "The issue's second shape (comments: wrong with a plain `else` too). Gap (spike): a per-path end's `to_line` is the branch row itself, not the next row of that path (row 3: the path into the else-if); P0's row model must give the next row. Gap (rv3-p0 build too): the edge's `to_line` is the branch row itself (the target block's first MIR location carries the branch's span); the schema's `to_line` is the next row of that path."
+note = "The issue's second shape also occurs with a plain else. The edge that skips the copy of r continues at the else-if condition on row 6."
 
 # Ends at row 4 (`let r2 = r;`) on the then path, at the condition (row 3)
 # on both else paths.

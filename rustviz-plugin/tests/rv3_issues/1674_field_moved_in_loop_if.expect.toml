@@ -18,6 +18,7 @@ row = 7
 place = "x.name"
 is = "moved"
 src = "issue"
+why = "Borrowing x.name after row 7 gives E0382. Rustc identifies the move on row 7."
 
 [[state]]
 row = 7
@@ -38,6 +39,7 @@ row = 8
 place = "x"
 is = "partly"
 src = "issue"
+why = "Borrowing x after row 8 gives E0382 for a partial move on row 7."
 
 [[state]]
 row = 10

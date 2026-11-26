@@ -19,23 +19,27 @@ row = 10
 ev = "reassign h"
 absent = true
 src = "issue"
+why = "The then successor constructs H in the right-hand-side temporary. MIR writes h only after the join and the drop."
 
 [[event]]
 row = 12
 ev = "reassign h"
 absent = true
 src = "issue"
+why = "The else successor also constructs H in the right-hand-side temporary before the common write."
 
 [[event]]
 row = 13
 ev = "reassign h"
 src = "issue"
+why = "At completion of the assignment MIR drops the old h and moves the arm result into its place."
 
 [[drop]]
 row = 13
 place = "h"
 how = "definite"
 src = "issue"
+why = "Both arm values reach the same MIR drop of the initialized h before the new value is stored."
 
 # Old value dropped first, then the new value moved in.
 [[order]]

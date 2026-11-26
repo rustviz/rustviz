@@ -31,6 +31,7 @@ row = 8
 place = "p"
 is = "partly"
 src = "issue"
+why = "Borrowing p after row 8 gives E0382 for a partial move on row 5."
 
 [[state]]
 row = 10

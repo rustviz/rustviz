@@ -16,6 +16,7 @@ row = 4
 place = "p.f"
 is = "moved"
 src = "issue"
+why = "After row 4, `let _ = &p.f;` produces E0382 (borrow of moved value: `p.f`)."
 
 [[state]]
 row = 4
@@ -29,6 +30,7 @@ row = 4
 place = "p.z"
 is = "own"
 src = "issue"
+why = "With p bound as mut, `let _ = &mut p.z;` immediately after row 4 compiles."
 
 # Drop-printing: c=false prints `end of run` then (the closure's capture) `drop cap`
 # then `drop z` at the end of run; c=true consumes the closure in the call (`drop cap`

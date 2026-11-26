@@ -20,6 +20,7 @@ place = "b"
 kind = "shared"
 holder = "h"
 src = "issue"
+why = "MIR evaluates the right-hand side while h still holds &b. The old H has a destructor at the assignment."
 
 [[lent]]
 row = 12
@@ -27,6 +28,7 @@ place = "b"
 kind = "shared"
 holder = "h"
 src = "issue"
+why = "The then arm constructs the replacement before dropping the old H that holds &b."
 
 [[lent]]
 row = 14
@@ -34,12 +36,14 @@ place = "b"
 kind = "shared"
 holder = "h"
 src = "issue"
+why = "The else arm constructs the replacement before dropping the old H that holds &b."
 
 [[state]]
 row = 15
 place = "b"
 is = "own"
 src = "issue"
+why = "With b bound as mut, `let _ = &mut b;` immediately after row 15 compiles."
 
 [[drop]]
 row = 15

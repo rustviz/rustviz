@@ -15,6 +15,7 @@ why = "`drop(h)` moves the struct (H has no Copy impl)"
 row = 15
 ev = "move h -> _"
 src = "issue"
+why = "The else successor calls drop with h by value. The E0382 probe for h.r records the effect on the whole aggregate."
 
 [[state]]
 row = 13
@@ -42,6 +43,7 @@ row = 15
 place = "h.r"
 is = "moved"
 src = "issue"
+why = "Borrowing h.r after row 15 gives E0382. Rustc identifies the move on row 15."
 
 # r keeps s borrowed to its read on row 18 (drawn right on 2.x).
 [[loan]]

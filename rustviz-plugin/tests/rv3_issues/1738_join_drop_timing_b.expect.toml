@@ -17,12 +17,14 @@ row = 9
 place = "z"
 is = "maybe-unassigned"
 src = "issue"
+why = "Neither assignment runs when c and d are both false. Borrowing z after a successful ? is E0381."
 
 [[state]]
 row = 10
 place = "z"
 is = "own"
 src = "issue"
+why = "`let _ = &mut z;` immediately after row 10 compiles."
 
 [[drop]]
 row = 9

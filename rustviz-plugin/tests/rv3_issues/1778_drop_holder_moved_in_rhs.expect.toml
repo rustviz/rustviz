@@ -20,18 +20,21 @@ row = 9
 place = "b"
 is = "own"
 src = "issue"
+why = "`let _ = &mut b;` immediately after row 9 compiles."
 
 [[state]]
 row = 10
 place = "b"
 is = "own"
 src = "issue"
+why = "`let _ = &mut b;` immediately after row 10 compiles."
 
 [[state]]
 row = 11
 place = "b"
 is = "own"
 src = "issue"
+why = "On this path drop(h) consumed the old H before the push. The arm result H(&a) only borrows a."
 
 [[lent]]
 row = 13
@@ -39,11 +42,13 @@ place = "b"
 kind = "shared"
 holder = "h"
 src = "issue"
+why = "The else successor constructs H(&a) while the old H(&b) still awaits its destructor at the assignment."
 
 [[event]]
 row = 9
 ev = "move h -> _"
 src = "issue"
+why = "MIR passes the old h by value to drop in the then successor before mutating b."
 
 # h is moved on one path into the assignment: its old value's drop there
 # runs only if h is still initialized (drop flag).

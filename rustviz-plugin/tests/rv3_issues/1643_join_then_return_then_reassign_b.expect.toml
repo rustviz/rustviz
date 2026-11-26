@@ -16,12 +16,14 @@ row = 5
 place = "s"
 is = "maybe-unassigned"
 src = "issue"
+why = "Only the c arm initializes s. Borrowing s on the continuing path after the return test is E0381."
 
 [[state]]
 row = 6
 place = "s"
 is = "own"
 src = "issue"
+why = "`let _ = &mut s;` immediately after row 6 compiles."
 
 [[drop]]
 row = 5

@@ -16,6 +16,7 @@ row = 3
 place = "*b"
 is = "moved"
 src = "issue"
+why = "After row 3, `let _ = &*b;` produces E0382 (borrow of moved value: `*b`)."
 
 [[drop]]
 row = 5

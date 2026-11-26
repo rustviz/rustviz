@@ -11,6 +11,7 @@ row = 3
 place = "b.a"
 is = "moved"
 src = "issue"
+why = "Borrowing b.a after row 3 gives E0382. Rustc identifies the move on row 3."
 
 [[state]]
 row = 3
@@ -24,6 +25,7 @@ row = 5
 place = "b.a"
 is = "own"
 src = "issue"
+why = "`let _ = &mut b.a;` immediately after row 5 compiles."
 
 [[state]]
 row = 5

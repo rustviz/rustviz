@@ -17,12 +17,14 @@ lender = "a"
 holder = "noise"
 ends = [7]
 src = "issue"
+why = "MIR takes a separate shared borrow into noise. Only the first println reads this binding."
 
 [[state]]
 row = 8
 place = "a"
 is = "shared"
 src = "issue"
+why = "After row 8, `&a` compiles and `&mut a` conflicts with the live shared borrow (E0502)."
 
 [[loan]]
 row = 8

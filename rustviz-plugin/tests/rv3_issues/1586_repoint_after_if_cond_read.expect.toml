@@ -11,6 +11,7 @@ lender = "s"
 holder = "r"
 ends = [3]
 src = "issue"
+why = "The condition calls is_empty through the original r. Its then successor can immediately move s into drop, and the next assignment to r replaces the reference."
 
 [[state]]
 row = 3
@@ -24,6 +25,7 @@ row = 4
 place = "s"
 is = "moved"
 src = "issue"
+why = "Borrowing s after row 4 gives E0382. Rustc identifies the move on row 4."
 
 [[lent]]
 row = 6

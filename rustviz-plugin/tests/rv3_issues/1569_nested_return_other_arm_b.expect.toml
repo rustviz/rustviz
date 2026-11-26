@@ -26,12 +26,14 @@ row = 8
 ev = "end s -> _"
 absent = true
 src = "issue"
+why = "The read s.len() before return already requires m's exclusive loan to have ended on this path."
 
 [[event]]
 row = 9
 ev = "end s -> _"
 absent = true
 src = "issue"
+why = "MIR continues from the inner if on the path where m has no further uses. Its push is in the sibling arm."
 
 [[drop]]
 row = 8

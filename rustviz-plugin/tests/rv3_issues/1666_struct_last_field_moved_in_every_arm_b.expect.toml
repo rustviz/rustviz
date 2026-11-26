@@ -20,6 +20,7 @@ row = 4
 place = "p.a"
 is = "moved"
 src = "issue"
+why = "Borrowing p.a after row 4 gives E0382. Rustc identifies the move on row 4."
 
 [[lent]]
 row = 4

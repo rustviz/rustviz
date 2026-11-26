@@ -15,6 +15,7 @@ row = 7
 place = "r"
 is = "own"
 src = "issue"
+why = "`let _ = &mut r;` immediately after row 7 compiles."
 
 [[loan]]
 row = 4

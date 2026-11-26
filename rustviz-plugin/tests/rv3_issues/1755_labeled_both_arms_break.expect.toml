@@ -17,6 +17,7 @@ row = 12
 place = "both_old"
 is = "moved"
 src = "issue"
+why = "Borrowing both_old after row 12 gives E0382. Rustc identifies the move on row 12."
 
 [[state]]
 row = 12
