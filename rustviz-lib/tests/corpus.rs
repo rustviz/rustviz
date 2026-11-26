@@ -28065,7 +28065,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "h.r's borrow ended before the branches above",
             "h.r still has no value here",
         ],
-    },    TooltipExpect {
+    },
+    TooltipExpect {
         name: "repoint_later_use_1603",
         // Codex review of #1603: with the struct used again in the
         // re-pointing arm, h.r's old loan ends at that use (also after a
