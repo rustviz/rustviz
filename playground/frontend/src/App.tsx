@@ -367,6 +367,19 @@ const Description: React.FC = () => (
       <li>
         Raw pointers and <code>async</code> code aren&apos;t modelled.
       </li>
+      <li>
+        Some drawings are known to be wrong in tricky cases (branches,
+        closures, re-pointed references). If a drawing looks wrong, it may be
+        RustViz and not your program. See the{' '}
+        <a
+          href="https://github.com/rustviz/rustviz/issues?q=is%3Aissue+is%3Aopen+label%3Abug"
+          target="_blank"
+          rel="noreferrer"
+        >
+          open issues
+        </a>
+        .
+      </li>
     </ul>
     <p>
       See the{' '}
