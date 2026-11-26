@@ -1,4 +1,4 @@
-fn f(s: String, t: String, u: String, a: bool, b: bool) {
+fn f(s: String, t: String, u: String, a: bool, b: bool, c: bool) {
     let r;
     if a {
         r = &s;
@@ -9,7 +9,7 @@ fn f(s: String, t: String, u: String, a: bool, b: bool) {
     let mut q = r;
     if b {
     } else {
-        if b {
+        if c {
             q = &u;
             println!("{}", q);
         } else {

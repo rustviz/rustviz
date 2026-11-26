@@ -434,8 +434,10 @@ struct Points {
     /// Every item name in the file (fns, consts, statics, types, enum
     /// variants, `use` names).
     items: HashSet<String>,
-    /// Per function: its name (`main`, `bar` for `Foo::bar`).
+    /// Per function: its name (`main`, `Foo::bar` for a method).
     names: Vec<String>,
+    /// The `impl` / `trait` blocks being visited: their type's name.
+    impls: Vec<String>,
 }
 
 fn line_of(s: proc_macro2::Span) -> (u32, u32) {
@@ -448,7 +450,11 @@ impl Points {
     }
     fn enter_fn(&mut self, name: &syn::Ident, sig: proc_macro2::Span, body: Option<&syn::Block>) {
         self.bindings.push(HashMap::new());
-        self.names.push(name.to_string());
+        self.names.push(match self.impls.last() {
+            // A method; not a fn nested in a method's body.
+            Some(ty) if self.func().is_none() => format!("{ty}::{name}"),
+            _ => name.to_string(),
+        });
         let open = body.and_then(|b| {
             let o = b.brace_token.span.open().start().line as u32;
             let first = b.stmts.first().map_or(b.brace_token.span.close().start().line as u32, |s| line_of(s.span()).0);
@@ -505,6 +511,20 @@ impl<'ast> Visit<'ast> for Points {
                 self.stack.pop();
             }
         }
+    }
+    fn visit_item_impl(&mut self, i: &'ast syn::ItemImpl) {
+        let ty = match &*i.self_ty {
+            syn::Type::Path(p) => p.path.segments.last().map_or(String::new(), |s| s.ident.to_string()),
+            _ => String::new(),
+        };
+        self.impls.push(ty);
+        visit::visit_item_impl(self, i);
+        self.impls.pop();
+    }
+    fn visit_item_trait(&mut self, t: &'ast syn::ItemTrait) {
+        self.impls.push(t.ident.to_string());
+        visit::visit_item_trait(self, t);
+        self.impls.pop();
     }
     fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
         self.enter_fn(&f.sig.ident, f.sig.span(), Some(&f.block));
@@ -1776,8 +1796,10 @@ pub struct Derived {
     pub func: String,
     pub line: u32,
     pub place: String,
-    /// `own` (`&mut x` accepted), `shared` (`&x` accepted, `&mut x` a
-    /// shared-loan conflict), `mut` (`&x` a conflict), `moved*` (E0382:
+    /// `own` (`&mut x` raises no borrow conflict and no missing value;
+    /// E0596, x not declared `mut`, is ignored), `shared` (`&x` accepted,
+    /// `&mut x` a shared-loan conflict), `mut` (`&x` a conflict: a mutable
+    /// or a closure's unique loan), `moved*` (E0382:
     /// moved on at least one path; rustc's message is the same for a
     /// definite and a maybe move), `partly*` (E0382 "partially moved" on
     /// at least one path), `unassigned*` (E0381: no value on at least one

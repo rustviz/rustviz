@@ -1,7 +1,7 @@
-fn run(c: bool, d: bool) {
+fn run(c: bool, d: bool, n: usize) {
     let mut s = String::from("a");
     drop(s);
-    for i in 0..2 {
+    for i in 0..n {
         s = String::from("b");
     }
     if c {
