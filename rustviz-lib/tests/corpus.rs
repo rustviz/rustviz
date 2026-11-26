@@ -27068,6 +27068,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from q.0 to a or b (q.0 may point into either; its borrow of both ends here)",
         ],
         must_not_contain: &[
+            // The old h (impl Drop) keeps its loan of b until the
+            // assignment drops it, after the RHS (#1677).
+            "b after L25 | b is the owner of the resource",
+            "h on L24 | h acquires ownership of a new resource; its previous resource is dropped",
             "Copy from r to H",
             "Copy from r to G",
             "Copy from r to M",
@@ -28049,6 +28053,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "drop_holder_rhs_1677",
+        // #1677: `h = if c {..} else {..};` with `impl Drop for H`: the old h is
+        // dropped after the RHS, so its loan of b lives through both arms (rustc:
+        // `&mut b` in an arm is E0502). A separate `other` keeps old borrowed.
         must_contain: &[
             "b after L11 | b's resource is being shared by one or more variables",
             "b after L14 | b's resource is being shared by one or more variables",
@@ -28066,6 +28073,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "nested_holder_copy_1680",
+        // #1680: g.r copied into g2 in an `else if` arm keeps t borrowed while g2
+        // is used; len's own borrow ending must not free t on that path.
         must_contain: &[
             "t after L7 | t's resource is being shared by one or more variables",
             "len reads from t (implicitly borrowed)",
@@ -28076,6 +28085,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "nested_if_let_join_1683",
+        // #1683: x's loan ends inside the `if let` (last use L9); the join must
+        // not revive it (rustc: `&mut v` after L11 compiles).
         must_contain: &[
             "v after L11 | v is the owner of the resource",
             "v after L8 | v's resource is being shared by one or more variables",
@@ -28086,6 +28097,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "move_after_loop_1686",
+        // #1686 p02713: the move into Box::new is on its own row (L11), not on
+        // the loop's closing brace.
         must_contain: &[
             "s on L11 | s's resource is moved",
             "Move from s to Box::new",
@@ -28096,6 +28109,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "box_shared_across_read_1686",
+        // #1686 p01285: r2 = &*b is read on L11, so println!'s borrow ending on
+        // L10 leaves b still borrowed by r2 (rustc: `&mut b` after L10 is E0502).
         must_contain: &[
             "b after L10 | b's resource is being shared by one or more variables",
             "b's resource is no longer borrowed by println!, but is still immutably borrowed by r2",
@@ -28107,6 +28122,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "let_else_unused_ref_1686",
+        // #1686 p01541: the unused `let r = &v[0];` in the let-else's else block
+        // ends at once; x isn't bound there (rustc: `&mut v` after L4 compiles).
         must_contain: &[
             "v after L4 | v is the owner of the resource",
         ],
@@ -28116,6 +28133,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "match_unused_ref_1686",
+        // #1686 p02796: x isn't read again on this path, so the unused
+        // `let r = &*b;` leaves b free (rustc: `&mut b` after L8 compiles).
         must_contain: &[
             "b after L8 | b is the owner of the resource",
         ],
@@ -28125,6 +28144,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "edition2024/nested_chain_1686",
+        // #1686 p02613: when the inner let-chain fails, its loans of v end at the
+        // condition (L5), not at the end of the skipped body.
         must_contain: &[
             "v after L7 | v is the owner of the resource",
             "v on L5 | v's resource is no longer immutably borrowed",
@@ -28136,6 +28157,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "pattern_else_lender_1686",
+        // #1686 p01934: the failed `if let` binds no x, so v isn't borrowed in
+        // the else arm's labeled block (rustc: `&mut v` after L9 compiles).
         must_contain: &[
             "v after L9 | v is the owner of the resource",
         ],
