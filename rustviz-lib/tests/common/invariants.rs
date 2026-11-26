@@ -77,6 +77,9 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("store_through_mut_ref_1124", "arrow-along-leg", 1542),
     ("tuple_scrutinee_nested", "arrow-along-leg", 1542),
     ("two_field_borrow_through_ref_1080", "arrow-along-leg", 1542),
+    // `second_conditional`: p's line stops where the second `if` splits,
+    // though p.a may still be in it (as on main; #1595).
+    ("fields_maybe_moved_1599", "line-starts-nowhere", 1595),
 ];
 
 /// The invariants, by the name the failure list and messages use.

@@ -9748,8 +9748,11 @@ fn parts_moved_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
         if let Some(inner) = parts_moved_at(r, visualization_data, line) {
             maybe |= inner.maybe;
             if inner.all {
+                // (Its fields moved one by one, `drop(z.pair.a);
+                // drop(z.pair.b);`, are named: z.pair itself never moved,
+                // #1599.)
                 unusable.push(r.name());
-                moved.push(r.name().clone());
+                moved.extend(inner.moved);
             } else if inner.none_usable {
                 // A field whose own fields are all moved, some on some
                 // paths only: nothing in it can be used, but it wasn't
@@ -9781,10 +9784,8 @@ fn parts_moved_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
     // `line` is in (`let s3 = p.b; if c { drop(p.a) } else { drop(p.a) }`,
     // #1541): their arm legs carry what's left of the struct, whose line
     // stops where they split (it can't say its other fields still can be
-    // used there). Not while a field moved on some paths only may still
-    // be in it: on those paths it goes on through the conditional (`if c
-    // { drop(p.a); } if d { drop(p.b) } else { drop(p.b) }`, #1599).
-    if !all && !none_usable && maybe_moved.is_empty() && parts.iter().all(|t| unusable.contains(&t.resource_access_point.name()) || moved_in_every_arm(t, line).is_some()) {
+    // used there).
+    if !all && !none_usable && parts.iter().all(|t| unusable.contains(&t.resource_access_point.name()) || moved_in_every_arm(t, line).is_some()) {
         all = true;
     }
     Some(PartsMoved { moved, maybe, all, maybe_moved, none_usable })

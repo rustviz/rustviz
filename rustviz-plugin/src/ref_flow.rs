@@ -452,6 +452,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     (ls, unnamed, is_mut)
   }
 
+  /// Whether some argument flowing into field `field` of `call`'s
+  /// result carries a mutable loan (`flow_is_mut`).
+  pub fn call_field_flows_mut(&self, call: &'tcx Expr<'tcx>, field: &str, strict: bool) -> bool {
+    let flows = self.call_arg_flows_into(call, FlowTarget::Field(field)).unwrap_or_default();
+    !flows.is_empty() && flows.iter().any(|f| self.flow_is_mut(f, strict))
+  }
+
   /// The 'static data (see `static_lender_of`) that the reference in
   /// field `field` of `call`'s result points to, when every argument
   /// the signature ties to that field is such data: `part("a")` with
@@ -523,15 +530,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// receiver only through shared references made from a mutable
   /// borrow (`vr.push(r)`: vr can only read s through it, but s stays
   /// mutably borrowed, #1599).
-  pub fn receiver_store_kinds(&self, call: &'tcx Expr<'tcx>, lenders: &[ResourceTy], is_mut: bool) -> (Vec<bool>, bool) {
+  pub fn receiver_store_kinds(&self, call: &'tcx Expr<'tcx>, lenders: &[ResourceTy], is_mut: bool) -> (Vec<bool>, Vec<bool>) {
     let flows = self.call_arg_flows_into(call, FlowTarget::Receiver).unwrap_or_default();
-    let shared = is_mut && !flows.iter().any(|f| self.flow_is_mut(f, true));
+    // (No flows: the loans came from rustc's kept loans, `extend([&mut
+    // a])`, whose kinds are the loans' own.)
+    let shared = is_mut && !flows.is_empty() && !flows.iter().any(|f| self.flow_is_mut(f, true));
     let mut out: Vec<(ResourceTy, bool)> = Vec::new();
-    let written_out = flows.iter().all(|f| f.by_value && f.content && !f.place_mut && self.collect_lender_muts(f.arg, &mut out));
+    let mut shared_of: Vec<(ResourceTy, bool)> = Vec::new();
+    let written_out = !flows.is_empty() && flows.iter().all(|f| f.by_value && f.content && !f.place_mut
+      && self.collect_lender_muts(f.arg, &mut out)
+      && self.lender_shared_of_mut(f.arg).map(|v| shared_of.extend(v)).is_some());
     let kinds = lenders.iter()
       .map(|l| match out.iter().find(|(x, _)| x == l) {
         Some((_, m)) if written_out => *m,
         _ => is_mut,
+      })
+      .collect();
+    let shared = lenders.iter()
+      .map(|l| match shared_of.iter().find(|(x, _)| x == l) {
+        Some((_, sh)) if written_out => *sh,
+        _ => shared,
       })
       .collect();
     (kinds, shared)
@@ -1114,14 +1132,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let m = if flow.by_value {
         self.value_borrow_is_mut_k(flow.arg, strict)
       } else {
-        // (What the argument points to: a reference's own loan isn't
-        // in it.)
-        match peel_shared_reborrow(flow.arg).kind {
-          ExprKind::Path(QPath::Resolved(..)) | ExprKind::Field(..) => !is_implicit_shared_reborrow_of_mut(flow.arg, self.tcx.typeck(flow.arg.hir_id.owner))
-            && expr_to_rap_name(peel_shared_reborrow(flow.arg), &self.tcx)
-              .and_then(|n| self.borrow_map.get(&n))
-              .is_some_and(|rd| rd.ref_mutability),
-          _ => self.value_borrow_is_mut_k(flow.arg, strict),
+        // What the argument points to: a reference's own loan isn't in
+        // it, the loans held by the value it points to are (`first(&mut
+        // x)` / `first(rx)` with `rx = &x`: the kinds of x's loans).
+        match self.pointee_holder(flow.arg).and_then(|h| self.borrow_map.get(&h)) {
+          Some(rd) => rd.all_lenders().iter().any(|l| rd.mut_of(l)),
+          None => match peel_shared_reborrow(flow.arg, self.tcx).kind {
+            ExprKind::Path(QPath::Resolved(..)) | ExprKind::Field(..) => !is_implicit_shared_reborrow_of_mut(flow.arg, self.tcx.typeck(flow.arg.hir_id.owner))
+              && expr_to_rap_name(peel_shared_reborrow(flow.arg, self.tcx), &self.tcx)
+                .and_then(|n| self.borrow_map.get(&n))
+                .is_some_and(|rd| rd.ref_mutability),
+            _ => self.value_borrow_is_mut_k(flow.arg, strict),
+          },
         }
       };
       if m {
@@ -1136,8 +1158,28 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// returns through it (`r.as_str()`) reborrows through r and keeps
   /// that loan, so s stays mutably borrowed (#1570, as `id(r)` in
   /// #1510).
+  /// The variable holding the value a reference argument points to:
+  /// `x` for `&x` / `&mut x`, or for `rx` with `rx = &x` (one lender).
+  fn pointee_holder(&self, arg: &'tcx Expr<'tcx>) -> Option<String> {
+    match arg.kind {
+      ExprKind::AddrOf(_, _, inner) => expr_to_rap_name(inner, &self.tcx).filter(|n| self.raps.contains_key(n)),
+      ExprKind::Path(QPath::Resolved(..)) => {
+        let n = expr_to_rap_name(arg, &self.tcx)?;
+        if !self.raps.get(&n).is_some_and(|d| d.rap.is_ref()) {
+          return None;
+        }
+        let rd = self.borrow_map.get(&n)?;
+        match &rd.lender {
+          ResourceTy::Value(x) if rd.co_lenders.is_empty() && !x.is_ref() => Some(x.name().to_owned()),
+          _ => None,
+        }
+      }
+      _ => None,
+    }
+  }
+
   pub fn shared_ref_with_mut_loan(&self, e: &'tcx Expr<'tcx>) -> bool {
-    let e = peel_shared_reborrow(e);
+    let e = peel_shared_reborrow(e, self.tcx);
     matches!(e.kind, ExprKind::Path(QPath::Resolved(..)) | ExprKind::Field(..))
       && expr_to_rap_name(e, &self.tcx)
         .filter(|n| self.raps.get(n).is_some_and(|rd| rd.rap.is_ref()))
@@ -1155,6 +1197,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// keeps that loan but can only read (`Some(r)` with `r: &String =
   /// &mut s`; #1599).
   pub fn value_borrow_is_mut_k(&self, e: &'tcx Expr<'tcx>, strict: bool) -> bool {
+    // (`downgrade(&mut a)`, or `&mut a` coerced to `&String`, holds a
+    // shared reference, #1599.)
+    if strict && self.is_shared_ref_value(e) {
+      return false;
+    }
     match e.kind {
       // (`Some(r)` with r a `&mut` where an `Option<&T>` is expected
       // holds an immutable reborrow, `&*r`, #1329.)
@@ -1218,7 +1265,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // (A shared reference holding a mutable loan, `r` in `Some(if c {
       // r } else { &b })` with `r: &String = &mut a`, passes that loan on,
       // #1599.)
-      return (found, rty.ref_mutability().is_some_and(|m| m.is_mut()) || self.shared_ref_with_mut_loan(init));
+      return (found, rty.ref_mutability().is_some_and(|m| m.is_mut()) || self.value_borrow_is_mut(init));
     }
     // `let t = if c { Some(&s) } else { None };`, `let a = match .. {
     // .. => [&s], .. => [&u] };` (#1435): t may hold what any branch's
@@ -1316,6 +1363,25 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// (a lender borrowed both ways counts as mutable). False when `e`
   /// has a part this can't account for.
   fn collect_lender_muts(&self, e: &'tcx Expr<'tcx>, out: &mut Vec<(ResourceTy, bool)>) -> bool {
+    self.collect_lender_muts_k(e, out, false)
+  }
+
+  /// `collect_lender_muts`; `strict`: a lender counts as mutable only
+  /// through a `&mut` the value holds, not through a shared reference
+  /// made from a mutable borrow (see `value_borrow_is_mut_k`).
+  fn collect_lender_muts_k(&self, e: &'tcx Expr<'tcx>, out: &mut Vec<(ResourceTy, bool)>, strict: bool) -> bool {
+    // A value of a shared reference type (`downgrade(&mut a)`, `&mut a`
+    // coerced to `&String`) holds no `&mut` (#1599).
+    if strict && self.is_shared_ref_value(e) {
+      let mut all: Vec<(ResourceTy, bool)> = Vec::new();
+      let ok = self.collect_lender_muts_k(e, &mut all, false);
+      for (l, _) in all {
+        if !out.iter().any(|(x, _)| *x == l) {
+          out.push((l, false));
+        }
+      }
+      return ok;
+    }
     let mut add = |ls: Vec<ResourceTy>, m: bool| {
       for l in ls {
         match out.iter_mut().find(|(x, _)| *x == l) {
@@ -1330,20 +1396,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           rustc_hir::StructTailExpr::Base(b) => Some(b),
           _ => None,
         };
-        fields.iter().map(|f| f.expr).chain(base).all(|x| self.collect_lender_muts(x, out))
+        fields.iter().map(|f| f.expr).chain(base).all(|x| self.collect_lender_muts_k(x, out, strict))
       }
-      ExprKind::Tup(elems) | ExprKind::Array(elems) => elems.iter().all(|x| self.collect_lender_muts(x, out)),
-      ExprKind::Repeat(x, _) => self.collect_lender_muts(x, out),
-      ExprKind::Block(b, _) => b.expr.is_none_or(|x| self.collect_lender_muts(x, out)),
-      ExprKind::DropTemps(inner) => self.collect_lender_muts(inner, out),
+      ExprKind::Tup(elems) | ExprKind::Array(elems) => elems.iter().all(|x| self.collect_lender_muts_k(x, out, strict)),
+      ExprKind::Repeat(x, _) => self.collect_lender_muts_k(x, out, strict),
+      ExprKind::Block(b, _) => b.expr.is_none_or(|x| self.collect_lender_muts_k(x, out, strict)),
+      ExprKind::DropTemps(inner) => self.collect_lender_muts_k(inner, out, strict),
       // A branch's value (`Some(if c { r } else { &b })` with `r:
       // &String = &mut a`: a's loan is mutable, b's shared, #1599).
-      ExprKind::If(_, then, Some(els)) => self.collect_lender_muts(then, out) && self.collect_lender_muts(els, out),
-      ExprKind::Match(_, arms, _) => arms.iter().all(|a| self.collect_lender_muts(a.body, out)),
+      ExprKind::If(_, then, Some(els)) => self.collect_lender_muts_k(then, out, strict) && self.collect_lender_muts_k(els, out, strict),
+      ExprKind::Match(_, arms, _) => arms.iter().all(|a| self.collect_lender_muts_k(a.body, out, strict)),
       // A tuple struct / variant constructor (`Some(..)`, `W(..)`).
       ExprKind::Call(f, args) if matches!(f.kind, ExprKind::Path(QPath::Resolved(_, p))
         if matches!(p.res, rustc_hir::def::Res::Def(rustc_hir::def::DefKind::Ctor(..), _))) => {
-        args.iter().all(|x| self.collect_lender_muts(x, out))
+        args.iter().all(|x| self.collect_lender_muts_k(x, out, strict))
+      }
+      // Any other call: what its signature ties the result to, with one
+      // kind (`a.as_str()` in `v.push((a.as_str(), r))`, #1599).
+      ExprKind::Call(..) | ExprKind::MethodCall(..) => {
+        add(self.call_lenders(e), self.call_borrow_is_mut_k(e, strict));
+        true
       }
       ExprKind::AddrOf(_, m, inner) => {
         // (A temporary the `let` extends has its own column, #1357.)
@@ -1351,17 +1423,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           Some(tmp) => vec![ResourceTy::Value(tmp.clone())],
           None => self.place_lenders(inner),
         };
-        // (`&*r` with r a shared reference holding a mutable loan keeps
-        // that loan, #1599.)
-        add(ls, m.is_mut() || self.shared_ref_with_mut_loan(e));
+        // (`&*r` / `&r.x` with r a shared reference holding a mutable
+        // loan keeps that loan, #1599.)
+        add(ls, m.is_mut() || (!strict && self.shared_ref_with_mut_loan(e)));
         true
       }
       ExprKind::Path(QPath::Resolved(..)) | ExprKind::Field(..) => {
-        let m = self.value_borrow_is_mut(e);
+        let m = self.value_borrow_is_mut_k(e, strict);
+        let shared_ref = expr_to_rap_name(e, &self.tcx).and_then(|n| self.raps.get(&n)).is_some_and(|d| d.rap.is_ref() && !d.rap.is_mutref());
         match expr_to_rap_name(e, &self.tcx).and_then(|n| self.borrow_map.get(&n)) {
           Some(rd) => {
             for l in rd.all_lenders() {
-              let lm = rd.mut_of(&l);
+              let lm = rd.mut_of(&l) && !(strict && shared_ref);
               add(vec![l], lm);
             }
           }
@@ -1369,9 +1442,33 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
         true
       }
-      // A literal, a call, or anything else holding no borrow we track.
+      // A literal, or anything else holding no borrow we track.
       _ => self.value_lenders(e).is_empty(),
     }
+  }
+
+  /// Each lender `e`'s value holds, and whether its loan is mutable only
+  /// because the value holds a shared reference made from a mutable
+  /// borrow (`(r, &mut b)` with `r: &i32 = &mut a`: a yes, b no; #1599).
+  /// None when `e` has a part `collect_lender_muts` can't account for.
+  pub fn lender_shared_of_mut(&self, e: &'tcx Expr<'tcx>) -> Option<Vec<(ResourceTy, bool)>> {
+    let (mut loose, mut strict) = (Vec::new(), Vec::new());
+    if !self.collect_lender_muts_k(e, &mut loose, false) || !self.collect_lender_muts_k(e, &mut strict, true) {
+      return None;
+    }
+    Some(loose.into_iter()
+      .map(|(l, m)| {
+        let real = strict.iter().any(|(x, sm)| *x == l && *sm);
+        (l, m && !real)
+      })
+      .collect())
+  }
+
+  /// `e`'s value, as the place it goes to sees it (after coercions), is
+  /// a shared reference: it can't hold a `&mut`.
+  fn is_shared_ref_value(&self, e: &'tcx Expr<'tcx>) -> bool {
+    let typeck = self.tcx.typeck(e.hir_id.owner);
+    typeck.expr_ty_adjusted_opt(e).is_some_and(|t| matches!(t.kind(), ty::Ref(_, _, m) if !m.is_mut()))
   }
 
   /// `let r = refs[0];`: `r` is a copy of a reference stored in the
@@ -1873,12 +1970,24 @@ pub fn holder_branch_bodies<'tcx>(init: &'tcx Expr<'tcx>) -> Option<Vec<&'tcx Ex
 
 /// `e` without the shared reborrows and derefs around a place (`&*r`,
 /// `*r`): the reference they go through.
-fn peel_shared_reborrow<'tcx>(e: &'tcx Expr<'tcx>) -> &'tcx Expr<'tcx> {
+fn peel_shared_reborrow<'tcx>(e: &'tcx Expr<'tcx>, tcx: rustc_middle::ty::TyCtxt<'tcx>) -> &'tcx Expr<'tcx> {
+  // The reference a place goes through: `r` in `*r`, `r.x`, `(*r).x.y`.
+  fn through_ref<'tcx>(p: &'tcx Expr<'tcx>, tcx: rustc_middle::ty::TyCtxt<'tcx>) -> Option<&'tcx Expr<'tcx>> {
+    match p.kind {
+      ExprKind::Unary(rustc_hir::UnOp::Deref, inner) => Some(inner),
+      ExprKind::Field(base, _) if tcx.typeck(base.hir_id.owner).expr_ty(base).is_ref() => Some(base),
+      ExprKind::Field(base, _) => through_ref(base, tcx),
+      _ => None,
+    }
+  }
   let mut e = e;
   loop {
     match e.kind {
       ExprKind::DropTemps(inner) | ExprKind::Unary(rustc_hir::UnOp::Deref, inner) => e = inner,
-      ExprKind::AddrOf(_, m, inner) if !m.is_mut() && matches!(inner.kind, ExprKind::Unary(rustc_hir::UnOp::Deref, _)) => e = inner,
+      ExprKind::AddrOf(_, m, inner) if !m.is_mut() => match through_ref(inner, tcx) {
+        Some(r) => e = r,
+        None => return e,
+      },
       _ => return e,
     }
   }

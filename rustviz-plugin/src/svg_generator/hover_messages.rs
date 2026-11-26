@@ -3619,8 +3619,9 @@ pub fn event_dot_holder_borrow(my_name: &String, from_name: &String, is_mut: boo
 }
 
 // `vr.push(r)` / `let o = Some(r);` with `r: &String = &mut s` (#1599):
-// vr's value holds a shared reference, which can only read s, but keeps
-// the mutable loan it was made from, so s stays mutably borrowed.
+// vr's value holds a shared reference, which keeps the mutable loan it
+// was made from until vr's last use, so s stays mutably borrowed. (Not
+// "can only read": a `&Cell<i32>` can write.)
 pub fn event_dot_holder_shared_ref_of_mut(my_name: &String, from_name: &String, from: HolderLender, holds_value: bool) -> String {
     let what = match from {
         HolderLender::Pointee => format!("the data {} points to", styled_name_html(from_name)),
@@ -3628,7 +3629,7 @@ pub fn event_dot_holder_shared_ref_of_mut(my_name: &String, from_name: &String, 
         HolderLender::Own => format!("{}'s {}", styled_name_html(from_name), if holds_value { "value" } else { "resource" }),
     };
     format!(
-        "{0}'s value holds a shared reference made from a mutable borrow of {1}: through it {0} can only read, but the borrow stays mutable while {0} holds it ({0} isn't a reference itself)",
+        "{0}'s value holds a shared reference made from a mutable borrow of {1}; the borrow stays mutable while {0} is live ({0} isn't a reference itself)",
         styled_name_html(my_name), what
     )
 }
@@ -6054,13 +6055,19 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
     // id(r);`, `vr.push(r)`, `let o = Some(r);` with `r: &String = &mut
     // s`): what r2 / vr / o gets can only read s, though s stays mutably
     // borrowed while it is held (#1599).
-    if let ExternalEvent::MutableBorrow { via: Some(via), is_partial: false, is_reborrow: false, .. } = external_event {
+    if let ExternalEvent::MutableBorrow { via: Some(via), is_partial: false, is_reborrow, .. } = external_event {
         let shared_ref = matches!(to, ResourceTy::Value(r) if r.is_ref() && !r.is_mutref());
         if (via.shared || shared_ref) && !to.is_closure() {
-            title = if via.carrier == ViaCarrier::StoredBy {
-                format!("Shared reference made from a mutable borrow of {}", styled_from_string)
+            // (`downgrade(p)` with p a `&mut`: through p, #1599.)
+            let what = if *is_reborrow {
+                format!("a mutable reborrow through {}", styled_from_string)
             } else {
-                format!("Shared reference made from a mutable borrow of {}, to {}", styled_from_string, styled_to_string)
+                format!("a mutable borrow of {}", styled_from_string)
+            };
+            title = if via.carrier == ViaCarrier::StoredBy {
+                format!("Shared reference made from {}", what)
+            } else {
+                format!("Shared reference made from {}, to {}", what, styled_to_string)
             };
         }
     }

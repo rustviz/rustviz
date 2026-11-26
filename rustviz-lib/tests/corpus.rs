@@ -21085,13 +21085,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p is partially moved: p.a was moved out, so p can't be used as a whole; its other fields still can",
             "u is partially moved: u.0 was moved out, so u can't be used as a whole; its other fields still can",
             "o is partially moved: o.inner.x was moved out, so o can't be used as a whole; its other fields still can",
-            "o is partially moved: o.inner was moved out, so o can't be used as a whole; its other fields still can",
+            // (o.inner's fields were moved one by one: o.inner itself never
+            // was, #1619.)
+            "o is partially moved: o.inner.x and o.inner.y were moved out, so o can't be used as a whole; its other fields still can",
             "o.inner is partially moved: o.inner.x was moved out, so o.inner can't be used as a whole; its other fields still can",
             "q is partially moved: q.a may have been moved out, so q can't be used as a whole; its other fields still can",
             "r is partially moved: r.a was moved out, so r can't be used as a whole; its other fields still can",
             "r is the owner of the resource",
         ],
-        must_not_contain: &[],
+        must_not_contain: &["o is partially moved: o.inner was moved out"],
     },
     TooltipExpect {
         name: "non_ascii_names_1160",
@@ -27947,7 +27949,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // borrow from s to vr" read as if vr could write s).
         must_contain: &[
             "Shared reference made from a mutable borrow of s, stored in vr by push; vr isn't a reference, but its value now holds one",
-            "vr's value holds a shared reference made from a mutable borrow of s's resource: through it vr can only read, but the borrow stays mutable while vr holds it (vr isn't a reference itself)",
+            "vr's value holds a shared reference made from a mutable borrow of s's resource; the borrow stays mutable while vr is live (vr isn't a reference itself)",
             "s's resource is mutably borrowed by vr; s can't be used while the borrow is live",
             "Return mutably borrowed resource from vr to s",
             "Shared reference made from a mutable borrow of s1, stored in vs by push; vs isn't a reference, but its value now holds one",
@@ -28051,7 +28053,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Shared reference made from a mutable borrow of c, stored in u by push; u isn't a reference, but its value now holds one",
             "c's resource is mutably borrowed by u; c can't be used while the borrow is live",
             "Shared reference made from a mutable borrow of d, to o",
-            "o's value holds a shared reference made from a mutable borrow of d's resource: through it o can only read, but the borrow stays mutable while o holds it (o isn't a reference itself)",
+            "o's value holds a shared reference made from a mutable borrow of d's resource; the borrow stays mutable while o is live (o isn't a reference itself)",
             "Return mutably borrowed resource from o to d",
             "Immutable borrow from e to o",
             "Return immutably borrowed resource from o to e",
@@ -28082,17 +28084,79 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // out and z.pair may have been". m is `mut`: its fields can be
         // assigned again, and `m.a = ..` drops what is left in m.a there,
         // not at m's scope end (main: "what is left in m is dropped when
-        // it goes out of scope"). p's line through the second conditional
-        // is checked in `struct_line_through_later_conditional_1599`.
+        // it goes out of scope"). (p's line is missing through the second
+        // conditional, as on main: drawn, its title would say p.b can
+        // still be used after its drop, #1595.)
         must_contain: &[
             "z.t was moved out and z.pair.a and z.pair.b may have been, so neither z nor any of its fields can be used; what is left in z is dropped when it goes out of scope",
             "m.b was moved out and m.a may have been, so neither m nor any of its fields can be used until they are assigned new values; what is left in m is dropped when it is overwritten or m goes out of scope",
             "p.b was moved out and p.a may have been, so neither p nor any of its fields can be used; what is left in p is dropped when it goes out of scope",
+            "y.pair.a and y.pair.b were moved out and y.t may have been, so neither y nor any of its fields can be used; what is left in y is dropped when it goes out of scope",
         ],
         must_not_contain: &[
             "z.pair may have been",
+            "y.pair was moved out",
             "what is left in m is dropped when it goes out of scope",
             "is partially moved: m.b was moved out and m.a may have been",
+        ],
+    },
+    TooltipExpect {
+        name: "shared_ref_of_mut_siblings_1599",
+        // #1619's Codex review: siblings of shared_ref_of_mut_kinds_1599.
+        // A real `&mut i32` stored by `extend` stays a mutable borrow
+        // (v1 writes through it). `a2.as_str()` next to a `&mut`-derived
+        // `&` lends a2 shared (main: mutable, though `println!("{}", a2)`
+        // compiles). `first(&mut x4)` copies out a shared loan of a4 (main:
+        // a4 mutably borrowed); `first(rx5)` copies out r5's, which is
+        // mutable (main: a5 "read-only", but reading it is E0502). A `&String`
+        // made from `&mut` by `downgrade`, a coercion, `&r8.x`, a branch's
+        // call, or `downgrade(p10)` keeps the mutable loan and is a shared
+        // reference (main: "Immutable borrow from a8 / a9 / p10", "a8 is
+        // read-only"); h11.v holds r11's (main: immutable). Each arm of `if
+        // flag { Some(r12) } else { Some(&b12) }` lends its own lender with
+        // its own kind (main: b12 mutably borrowed).
+        must_contain: &[
+            "Mutable borrow from a1 to v1, stored in v1 by extend; v1 isn't a reference, but its value now holds one",
+            "Immutable borrow from a2 to v2, stored in v2 by push; v2 isn't a reference, but its value now holds one",
+            "Shared reference made from a mutable borrow of b2, stored in v2 by push; v2 isn't a reference, but its value now holds one",
+            "Shared reference made from a mutable borrow of a3, stored in v3 by push; v3 isn't a reference, but its value now holds one",
+            "Mutable borrow from b3 to v3, stored in v3 by push; v3 isn't a reference, but its value now holds one",
+            "Immutable borrow from a4 to w4, stored in w4 by push; w4 isn't a reference, but its value now holds one",
+            "a4's resource is immutably borrowed by w4; a4 is read-only while the borrow is live",
+            "Shared reference made from a mutable borrow of a5, stored in w5 by push; w5 isn't a reference, but its value now holds one",
+            "a5's resource is mutably borrowed by w5; a5 can't be used while the borrow is live",
+            "Shared reference made from a mutable borrow of a6, stored in v6 by push; v6 isn't a reference, but its value now holds one",
+            "Shared reference made from a mutable borrow of a7, stored in v7 by push; v7 isn't a reference, but its value now holds one",
+            "Shared reference made from a mutable borrow of a8, stored in v8 by push; v8 isn't a reference, but its value now holds one",
+            "a8's resource is mutably borrowed by v8; a8 can't be used while the borrow is live",
+            "Shared reference made from a mutable borrow of a9, to o9: downgrade's signature gives the value it returns the same lifetime as its argument; o9 isn't a reference, but its value holds one",
+            "Immutable borrow from e9 to o9",
+            "Shared reference made from a mutable reborrow through p10, to o10",
+            "Shared reference made from a mutable reborrow through p10, to r10: downgrade's signature gives the reference it returns the same lifetime as its argument",
+            "Shared reference made from a mutable borrow of a11, to h11.v: hold's signature gives the struct it returns the same lifetime as its argument",
+            "h11.v's value holds a shared reference made from a mutable borrow of a11's resource; the borrow stays mutable while h11.v is live (h11.v isn't a reference itself)",
+            "Shared reference made from a mutable borrow of a12, to o12: Some's signature gives the value it returns the same lifetime as its argument; o12 isn't a reference, but its value holds one",
+            "Immutable borrow from b12 to o12: Some's signature gives the value it returns the same lifetime as its argument; o12 isn't a reference, but its value holds one",
+        ],
+        must_not_contain: &[
+            "Shared reference made from a mutable borrow of a1, ",
+            "through it v1 can only read",
+            "Mutable borrow from a2 to v2",
+            "a2's resource is mutably borrowed by v2",
+            "v3 holds a value that mutably borrows a3",
+            "Mutable borrow from a4 to w4",
+            "a4's resource is mutably borrowed by w4",
+            "Immutable borrow from a5 to w5",
+            "a5's resource is immutably borrowed by w5",
+            "v6 holds a value that mutably borrows",
+            "Immutable borrow from a8 to v8",
+            "a8's resource is immutably borrowed by v8",
+            "Immutable borrow from a9 to o9",
+            "Immutable reborrow from p10 to o10",
+            "Mutable reborrow from p10 to r10",
+            "Immutable borrow from a11 to h11.v",
+            "Mutable borrow from b12 to o12",
+            "b12's resource is mutably borrowed by o12",
         ],
     },
 ];
@@ -38302,12 +38366,11 @@ fn struct_lines_after_maybe_moves_1568_1583() {
     assert_eq!(line_state_at(&svg, "h.r", 20), None, "h.r's line runs past h's move");
     assert_eq!(line_state_at(&svg, "c2.r", 31), None, "c2.r's line runs past c2's move");
     assert_eq!(line_state_at(&svg, "g2.r", 56), None, "g2.r's line runs past g2's move");
-    // (k.r's end on row 41, the loop body's scope end, pins where main
-    // puts a copied caller's reference's end today; k's last use is row
-    // 39, where it belongs: #1613.)
-    for id in ["c2.r@L31:dot:static_die\"", "k.r@L41:dot:static_die"] {
-        assert!(svg.contains(&format!("data-rv-id=\"{}", id)), "copied_ref_field_end_1568: no element {}", id);
-    }
+    assert!(svg.contains("data-rv-id=\"c2.r@L31:dot:static_die\""), "copied_ref_field_end_1568: no element c2.r@L31:dot:static_die");
+    // k.r's end comes by row 41, the loop body's scope end (main today);
+    // k's last use is row 39, where it belongs (#1613): either passes.
+    assert!(svg.contains("data-rv-id=\"k.r@L39:dot:static_die") || svg.contains("data-rv-id=\"k.r@L41:dot:static_die"),
+        "copied_ref_field_end_1568: k.r's end isn't on row 39 or 41");
     assert!(!svg.contains("data-rv-id=\"k.r@L42:"), "k.r's end is drawn below its column");
     let svg = run_with_local_backend("fields_maybe_all_moved_1583").timeline_panel_string();
     for (var, row) in [("p", 17), ("q", 28), ("w", 38), ("x", 49), ("y", 57), ("z", 64)] {
@@ -38315,19 +38378,6 @@ fn struct_lines_after_maybe_moves_1568_1583() {
     }
     // Moved in both arms: nothing is left after the join (#1541).
     assert_eq!(line_state_at(&svg, "u", 73), None);
-}
-
-/// #1599's Codex review: `if c { drop(p.a); }` then a conditional that
-/// moves p.b in both arms. On the `!c` paths p still holds p.a through
-/// that conditional (and drops it at its scope end): its line goes on
-/// there. Main stopped it where the second conditional split, as if p
-/// were empty, and drew it again after the join.
-#[test]
-fn struct_line_through_later_conditional_1599() {
-    let svg = run_with_local_backend("fields_maybe_moved_1599").timeline_panel_string();
-    for row in [29, 30, 31, 32] {
-        assert_eq!(line_state_at(&svg, "p", row).as_deref(), Some("full_privilege"), "p's line is missing on row {}", row);
-    }
 }
 
 /// #1486, #1556, #1557, #1553, #1548, #1562: where loans and scopes end (and
