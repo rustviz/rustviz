@@ -62,15 +62,15 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // Fans that keep main's drawing (one head still along the column
     // under the dot): each order of #1542's approaches added a crossing,
     // or two heads on each other, there, and no fan may have more
-    // crossings than on main (the maintainer's ruling on #1605); in
-    // fan_into_one_dot_1542 only `longest_copied` (no side free without a
-    // new crossing; the other function's fan gets the rule). Or the
+    // crossings than on main (the maintainer's ruling on #1605;
+    // fan_into_one_dot_keeps_main_1542: no side free without a new
+    // crossing). Or the
     // drawing that clears it needs more layout work than #1605's
     // render-time budget allows (field_lenders_1354,
     // let_else_holder_return_1458, tuple_scrutinee_nested).
     ("cond_holder_local_ref_1475", "arrow-along-leg", 1542),
     ("cond_holder_moved_1464", "arrow-along-leg", 1542),
-    ("fan_into_one_dot_1542", "arrow-along-leg", 1542),
+    ("fan_into_one_dot_keeps_main_1542", "arrow-along-leg", 1542),
     ("field_lenders_1354", "arrow-along-leg", 1542),
     ("holder_return_clear_of_leg_1476", "arrow-along-leg", 1542),
     ("holder_tuple_literal_1459", "arrow-along-leg", 1542),

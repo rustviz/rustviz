@@ -6019,6 +6019,10 @@ impl ArrowLanes {
                 continue;
             }
             let level: Vec<&(usize, bool, i64)> = legs.iter().filter(|l| l.2 == 0).collect();
+            // (The sides of the dot (right or not) a head from below or
+            // from above has already taken level: not free for the other
+            // side's fan, #1605's Codex review.)
+            let mut level_taken: Vec<bool> = Vec::new();
             for down in [true, false] {
                 let mut side: Vec<&(usize, bool, i64)> = legs.iter().filter(|l| l.2 != 0 && (l.2 > 0) == down).collect();
                 if side.is_empty() || (side.len() == 1 && level.is_empty()) {
@@ -6055,7 +6059,7 @@ impl ArrowLanes {
                     // half a row above the dot (the maintainer's ruling on
                     // #1605: above is a side too).
                     let mut free: Vec<FanSide> = [FanSide::Level { far: false }, FanSide::Level { far: true }].into_iter()
-                        .filter(|s| matches!(s, FanSide::Level { far } if !taken(right != *far)))
+                        .filter(|s| matches!(s, FanSide::Level { far } if !taken(right != *far) && !level_taken.contains(&(right != *far))))
                         .chain(down.then_some(FanSide::Above))
                         .collect();
                     let mut heads: Vec<&(usize, bool, i64)> = side.iter().copied().filter(|l| l.1).collect();
@@ -6109,6 +6113,7 @@ impl ArrowLanes {
                             // it would read as one arrow with any leaving the dot
                             // straight on, #1349.)
                             FanSide::Level { far } => {
+                                level_taken.push(right != far);
                                 self.level_in.insert(it.key, if far { LEVEL_IN_SLANT } else { 0 });
                                 if far {
                                     self.far.insert(it.key);
@@ -6931,6 +6936,20 @@ fn heads_on_heads(drawn: &[Drawn], touching: bool) -> Vec<usize> {
         }
     }
     out
+}
+
+/// The heads that lie on another head (`heads_on_heads`'s test, either way
+/// round), each counted once whatever the order the arrows are drawn in:
+/// what the comparison with main's drawing counts (#1605's Codex review).
+fn heads_on_heads_all(drawn: &[Drawn]) -> Vec<usize> {
+    let head = |d: &Drawn| d.logo.is_none() && d.tri.len() == 3;
+    let on = |a: &Drawn, b: &Drawn| dist(b.tri[1], a.tri[1]) < 8.0 && {
+        let coincident = a.tri.iter().zip(&b.tri).all(|(&p, &q)| dist(p, q) < 1.0)
+            || (dist(a.tri[0], b.tri[2]) < 1.0 && dist(a.tri[1], b.tri[1]) < 1.0 && dist(a.tri[2], b.tri[0]) < 1.0);
+        coincident || samples(&tri_edges(&b.tri)).into_iter().any(|p| inside_tri(&a.tri, p) > 1.0)
+    };
+    (0..drawn.len()).filter(|&i| head(&drawn[i]) && (0..drawn.len()).any(|j| j != i && head(&drawn[j]) && drawn[j].key != drawn[i].key
+        && (on(&drawn[i], &drawn[j]) || on(&drawn[j], &drawn[i])))).collect()
 }
 
 /// The arrows whose shaft runs through another arrow's hop (within 3 px of
@@ -8484,7 +8503,7 @@ fn render_arrows_string_external_events_version(
         let corners = |d: &[Drawn]| if rows_added { 0 } else { through_corners(d, &corner_xy, &ends).len() };
         let worse_fans = |d: &[Drawn]| fan_dots(d).into_iter().filter(|&c| fan_crossings_at(d, c) > fan_crossings_at(&old, c)).collect::<Vec<_>>();
         let worse = |d: &[Drawn]| !worse_fans(d).is_empty()
-            || heads_on_heads(d, false).len() > heads_on_heads(&old, false).len()
+            || heads_on_heads_all(d).len() > heads_on_heads_all(&old).len()
             || corners(d) > corners(&old);
         if worse(&drawn) {
             // (A try mustn't make more marks than main's drawing has.)
@@ -8527,7 +8546,7 @@ fn render_arrows_string_external_events_version(
                 };
                 let bad_bands = |d: &[Drawn]| {
                     let mut bad: BTreeSet<usize> = worse_fans(d).into_iter().map(|c| band(c.1)).collect();
-                    for (now, was) in [(heads_on_heads(d, false), heads_on_heads(&old, false)),
+                    for (now, was) in [(heads_on_heads_all(d), heads_on_heads_all(&old)),
                                        if rows_added { (Vec::new(), Vec::new()) } else { (through_corners(d, &corner_xy, &ends), through_corners(&old, &corner_xy, &ends)) }] {
                         let was = per_band(&old, was);
                         bad.extend(per_band(d, now).into_iter().filter(|&(b, n)| n > was.get(&b).copied().unwrap_or(0)).map(|(b, _)| b));
@@ -8561,11 +8580,12 @@ fn render_arrows_string_external_events_version(
     // left for one of its heads.)
     let heads = heads_on_heads(&drawn, false);
     let others = untangle_cost(&drawn, dots).0.saturating_sub(legs.len() + heads.len());
-    let mut left: Vec<usize> = legs.into_iter().chain(on_cols(&drawn, &dots.cols)).chain(heads)
-        .filter(|&i| !main_keys.contains(&drawn[i].key)).collect();
+    let mut left: Vec<usize> = legs.into_iter().chain(on_cols(&drawn, &dots.cols)).chain(heads).collect();
     left.sort_unstable();
     left.dedup();
-    let mut rows: Vec<usize> = left.iter().map(|&i| drawn[i].key.1).collect();
+    // (Those in functions drawn as main's router draws them still count,
+    // but ask for no rows.)
+    let mut rows: Vec<usize> = left.iter().filter(|&&i| !main_keys.contains(&drawn[i].key)).map(|&i| drawn[i].key.1).collect();
     rows.sort_unstable();
     rows.dedup();
     dots.left_on = ArrowsLeftOn { rows, count: left.len(), others, fan_crossings: all_fan_crossings(&drawn), main_drawing };
@@ -8611,7 +8631,7 @@ thread_local! {
 /// runs through a leg's joint (`through_corners`), which main's drawing
 /// mostly has too.
 fn needs_compare(drawn: &[Drawn], dots: &DotLayer, joints: bool) -> bool {
-    all_fan_crossings(drawn) > 0 || !heads_on_heads(drawn, false).is_empty()
+    all_fan_crossings(drawn) > 0 || !heads_on_heads_all(drawn).is_empty()
         || (joints && !dots.rows_added && !through_corners(drawn, &dots.corners, &dots.lanes.ends).is_empty())
 }
 
@@ -9079,7 +9099,7 @@ fn untangle_search(
         };
         for s in cands.into_iter().chain(level_ways) {
             if s.lane_y.get(&key) != now.lane_y.get(&key) || s.slot != now.slot || s.flipped != now.flipped || s.self_right != now.self_right
-                || (s.level_in != now.level_in && s.level_in.get(&key).is_none()) {
+                || (s.level_in != now.level_in && (dots.legacy || s.level_in.get(&key).is_none())) {
                 continue;
             }
             let (c, d) = eval(dots, &s, &mut budget);
