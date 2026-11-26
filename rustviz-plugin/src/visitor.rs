@@ -3474,6 +3474,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // A `loop` whose only `break`s can't be reached (`loop { return;
       // break; }`, typed `()`, #1518).
       ExprKind::Loop(..) => self.loop_never_ends(e),
+      // A visited break that targets the labeled block reaches the
+      // code after it, even if its body never reaches the closing
+      // brace (#1685). The body's own statements can still diverge.
+      ExprKind::Block(b, Some(_)) if self.way_out_moves.iter()
+        .any(|(target, brk, _)| *target == b.hir_id && brk.is_some()) => false,
       ExprKind::Block(b, _) => {
         b.expr.is_some_and(|t| self.expr_diverges(t))
           || b.stmts.iter().any(|st| matches!(st.kind,
@@ -4085,6 +4090,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// path (`No`) from one that holds one on some paths only (`Maybe`:
   /// its drop flag decides whether an exit here drops it, #1194).
   fn ownership_here(&self, hash: u64, binds: bool) -> OwnHere {
+    self.ownership_before(hash, binds, self.preprocessed_events.len())
+  }
+
+  fn ownership_before(&self, hash: u64, binds: bool, until: usize) -> OwnHere {
     use OwnHere as Own;
     fn step(events: &[(usize, ExternalEvent)], hash: u64, hide: &[std::ops::Range<usize>], mut own: Own) -> Own {
       let is = |r: &ResourceTy| *r.hash() == hash;
@@ -4108,6 +4117,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // may have ended before giving it one (#786, #1001).
           ExternalEvent::LoopExitKept { ro, .. } if *ro.hash() == hash => Own::Yes,
           ExternalEvent::LoopMaybeInit { ro, .. } if *ro.hash() == hash && own == Own::Yes => Own::Maybe,
+          ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::LabeledBlockAssignment, .. }
+            if *ro.hash() == hash => Own::Maybe,
           // A branch that diverges doesn't reach this point.
           ExternalEvent::Branch { branches, .. } => {
             let mut ends = branches.iter().filter(|b| !b.diverges).map(|b| step(&b.e_data, hash, &[], own));
@@ -4134,20 +4145,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     } else {
       Vec::new()
     };
+    let until = until.min(self.preprocessed_events.len());
+    let prefix = &self.preprocessed_events[..until];
     if frame_binds.is_empty() {
-      return step(self.preprocessed_events, hash, &hide, Own::No);
+      return step(prefix, hash, &hide, Own::No);
     }
     // The events in the order they happened: each arm's bindings
     // where its body starts.
     let mut events: Vec<(usize, ExternalEvent)> = Vec::new();
     let mut from = 0;
     for (at, b) in frame_binds {
-      let at = at.clamp(from, self.preprocessed_events.len());
-      events.extend_from_slice(&self.preprocessed_events[from..at]);
+      let at = at.clamp(from, until);
+      events.extend_from_slice(&prefix[from..at]);
       events.extend_from_slice(b);
       from = at;
     }
-    events.extend_from_slice(&self.preprocessed_events[from..]);
+    events.extend_from_slice(&prefix[from..]);
     step(&events, hash, &hide, Own::No)
   }
 
@@ -4758,11 +4771,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// }`), may have been moved after the block. A `break` that comes after
   /// the move is `emit_loop_exit_moves`' (`emitted`).
   /// `through`: the events on the way to its end.
-  fn emit_block_break_skips(&mut self, expr: &'tcx Expr<'tcx>, frame: LabeledFrame, through: &[(usize, ExternalEvent)], emitted: &[ResourceAccessPoint]) {
+  fn emit_block_break_skips(&mut self, expr: &'tcx Expr<'tcx>, frame: LabeledFrame, through: Option<&[(usize, ExternalEvent)]>, emitted: &[ResourceAccessPoint]) {
     if frame.paths.is_empty() {
       return;
     }
-    let events = through;
+    let events = through.unwrap_or_default();
     // (A `let s;` local assigned since stands for its columns, #1507.)
     let outer: Vec<String> = self.scope_names(0, frame.len.min(self.in_scope.len())).into_iter().map(|(_, n)| n.to_owned()).collect();
     let mut candidates = Vec::new();
@@ -4784,6 +4797,54 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         ro, definite: false, at: MaybeMovedAt::LabeledBlock { skipped: true, carried: false }, id: *self.unique_id,
       });
       *self.unique_id += 1;
+    }
+
+    // A break can also skip an assignment (#1685). Start each way
+    // out with what the binding actually held on entry. A skipped
+    // assignment to an already initialized binding doesn't empty it.
+    let mut assigned = Vec::new();
+    assigned_to(events, &mut assigned);
+    for (path, _, _) in &frame.paths {
+      assigned_to(path, &mut assigned);
+    }
+    for ro in assigned {
+      let root = ro.name().split('.').next().unwrap_or(ro.name());
+      if !outer.iter().any(|name| name == root) {
+        continue;
+      }
+      let entry = match self.ownership_before(*ro.hash(), true, frame.events_at) {
+        OwnHere::Yes => PathOwn::Yes,
+        OwnHere::No => PathOwn::No,
+        OwnHere::Maybe => PathOwn::Maybe,
+      };
+      let fallthrough = through.map(|path| path_own(path, &ro, &[], entry));
+      let mut exits = frame.paths.iter().map(|(path, hide, value_moves)| {
+        if value_moves.contains(ro.name()) {
+          PathOwn::No
+        } else {
+          path_own(path, &ro, hide, entry)
+        }
+      }).chain(fallthrough);
+      let first = exits.next().expect("the labeled block has a break");
+      let joined = if exits.all(|own| own == first) { first } else { PathOwn::Maybe };
+      if joined == PathOwn::Maybe {
+        // A deferred declaration can look unassigned after an `if`
+        // whose assigning arm breaks out of this block. That arm
+        // reaches the block's join, so the next assignment may drop
+        // a value instead of initializing it for the first time.
+        #[expect(clippy::disallowed_methods, reason = "only updates membership in the uninitialized and maybe-initialized sets")]
+        let deferred: Vec<HirId> = self.uninit_locals.keys().copied()
+          .filter(|&id| binding_name(&self.tcx, id) == root)
+          .collect();
+        for id in deferred {
+          self.uninit_locals.remove(&id);
+          self.maybe_init_locals.insert(id);
+        }
+        self.add_external_event(line, ExternalEvent::LoopExitMove {
+          ro, definite: false, at: MaybeMovedAt::LabeledBlockAssignment, id: *self.unique_id,
+        });
+        *self.unique_id += 1;
+      }
     }
   }
 
@@ -5656,8 +5717,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             self.way_out_moves.push((block.hir_id, None, way_out));
           }
           let emitted = self.emit_loop_exit_moves(expr, Some(block.hir_id), &before, true, through.as_deref());
-          if let (Some(frame), Some(through)) = (frame, through) {
-            self.emit_block_break_skips(expr, frame, &through, &emitted);
+          if let Some(frame) = frame {
+            self.emit_block_break_skips(expr, frame, through.as_deref(), &emitted);
           }
         }
       }
@@ -5956,7 +6017,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           let value_moves = value.map(|v| locals_moved_by(self.tcx, v)).unwrap_or_default();
           let call = value.is_some_and(|v| matches!(v.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)));
           self.note_break_path_moves(target, expr.hir_id, &value_moves, call);
-          self.note_labeled_break_path(target, expr.hir_id, value_moves);
+          if value.is_none_or(|v| !self.expr_diverges(v)) {
+            self.note_labeled_break_path(target, expr.hir_id, value_moves);
+          }
         }
         intravisit::walk_expr(self, expr);
         // `let r = loop { break k; }`: `r` gets `k` (#431).
@@ -8538,7 +8601,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // hold none where the `if` starts (#1034): on the implicit
         // `else` path it still may hold none after the `if`, so after
         // it, it only may hold a value.
-        let assigns_maybe_held = !always_matches && !self.expr_diverges(if_expr) && {
+        // An assignment before a break out of a labeled block must
+        // stay on the break's path, too. Inlining it would make later
+        // breaks out of the block see an assignment they skipped.
+        let breaks_block = !self.labeled_frames.is_empty()
+          && branch_leaves(self.tcx, BranchBody::Expr(if_expr)).exits.contains(&BranchExit::BreakBlock);
+        let assigns_maybe_held = !always_matches && (!self.expr_diverges(if_expr) || breaks_block) && {
           let mut body_live = HashSet::new();
           collect_event_live_vars(&body_ev, &mut body_live);
           let body_live = &body_live - &if_scope;
@@ -16465,6 +16533,24 @@ fn moved_on_path(events: &[(usize, ExternalEvent)], hide: &[std::ops::Range<usiz
     .collect()
 }
 
+/// The owned bindings that receive a value along a path, in event order.
+fn assigned_to(events: &[(usize, ExternalEvent)], out: &mut Vec<ResourceAccessPoint>) {
+  for (_, event) in events {
+    match event {
+      ExternalEvent::Bind { to: ResourceTy::Value(r), .. }
+      | ExternalEvent::Copy { to: ResourceTy::Value(r), .. }
+      | ExternalEvent::Move { to: ResourceTy::Value(r), .. }
+        if !r.is_fn() && !r.is_ref() && !out.contains(r) => out.push(r.clone()),
+      ExternalEvent::Branch { branches, .. } => {
+        for arm in branches {
+          assigned_to(&arm.e_data, out);
+        }
+      }
+      _ => {}
+    }
+  }
+}
+
 /// What a variable holds after a stretch of a path (see
 /// `ExprVisitor::loop_path_events`), from what it held before it.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -16488,6 +16574,8 @@ fn path_own(events: &[(usize, ExternalEvent)], rap: &ResourceAccessPoint, hide: 
       // move on the way to its end (#1286).
       ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::LabeledBlock { skipped: true, .. }, .. }
         if ro == rap && own == PathOwn::No => PathOwn::Maybe,
+      ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::LabeledBlockAssignment, .. }
+        if ro == rap => PathOwn::Maybe,
       // An inner loop's `break` after a move, or a let-chain's
       // condition that moved it before failing.
       ExternalEvent::LoopExitMove { ro, definite: true, .. } if ro == rap => PathOwn::No,

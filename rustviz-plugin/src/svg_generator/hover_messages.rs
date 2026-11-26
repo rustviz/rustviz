@@ -1170,8 +1170,8 @@ pub fn event_dot_owner_drop_if_try_returns_maybe(my_name: &String, note: &str) -
     let my_name_fmt = styled_name_html(my_name);
     let (holds, rest) = split_drop_note(note);
     format!(
-        "Only if the `?` here returns early (on an `Err` or `None`): the function returns and {0}'s \
-         resource{1} is dropped{2} if {0} still holds it (Rust tracks this with a runtime drop flag). \
+        "If the `?` here returns early, {0}'s resource{1} is dropped{2} if {0} still holds it \
+         (Rust tracks this with a runtime drop flag). \
          If the `?` succeeds, nothing happens to {0} here.",
         my_name_fmt, holds, rest
     )
@@ -5007,6 +5007,13 @@ pub fn event_dot_block_break_skips_move(my_name: &String) -> String {
          or by reaching its end after {0} is moved, so {0} can't be used after the block",
         styled_name_html(my_name),
         styled_name_html(&"break".to_owned())
+    )
+}
+
+pub fn event_dot_block_maybe_assigned(my_name: &String) -> String {
+    format!(
+        "{0} may be left without a value when this block ends, so {0} can't be used until it's assigned again",
+        styled_name_html(my_name)
     )
 }
 

@@ -1666,6 +1666,8 @@ pub enum MaybeMovedAt {
     /// 'a; } drop(s); }`, #1286); otherwise a `break` comes after it.
     /// `carried`: as for `Loop`.
     LabeledBlock { skipped: bool, carried: bool },
+    /// A labeled block may end without a value in a binding it assigns.
+    LabeledBlockAssignment,
     /// The start of the `else` branch (`path`: or the implicit empty
     /// one) of an `if` whose let-chain condition moves the variable in
     /// a part that a part which can be false comes after
@@ -3905,6 +3907,9 @@ impl Event {
             }
             Event::LoopExitMove { definite, at: MaybeMovedAt::LabeledBlock { skipped: false, carried } } => {
                 hover_messages::event_dot_loop_exit_move(my_name, *definite, true, *carried)
+            }
+            Event::LoopExitMove { at: MaybeMovedAt::LabeledBlockAssignment, .. } => {
+                hover_messages::event_dot_block_maybe_assigned(my_name)
             }
             Event::LoopExitMove { definite, at: MaybeMovedAt::ChainFail { to, dropped, path, how } } => {
                 hover_messages::event_dot_chain_fail_move(my_name, *definite, to, dropped, *path, how)

@@ -557,6 +557,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     (!lenders.is_empty() && lenders.len() < all.len() && lenders.iter().all(|l| all.contains(l))).then_some(lenders)
   }
 
+  /// The single known place a call's returned reference can point
+  /// into. A write through it reaches that place, not the lenders of
+  /// references already stored inside it.
+  pub fn call_pointer_lender(&self, call: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
+    let (lenders, unnamed) = match self.narrowed_target(call) {
+      Some((inner, FlowTarget::Pointer)) =>
+        self.narrowed_lenders_of_flows(self.call_arg_flows_into(inner, FlowTarget::Pointer)?),
+      _ => self.call_lenders_full(call),
+    };
+    match lenders.as_slice() {
+      [ResourceTy::Value(holder)] if !unnamed && !holder.is_fn() => Some(holder.clone()),
+      _ => None,
+    }
+  }
+
   /// `call_arg_tie` for the call `pointer_lenders` narrows through
   /// (`last_mut` in `refs.last_mut().unwrap()`), when `borrower` is it
   /// and `call`'s value is the reference it returns.
