@@ -1920,6 +1920,7 @@ dependencies = [
  "serde_json",
  "syn",
  "tempfile",
+ "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]

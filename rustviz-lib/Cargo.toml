@@ -36,3 +36,5 @@ roxmltree = "0.20"
 # boundaries with syn; span-locations gives their source lines.
 syn = { version = "2", features = ["full", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
+# RustViz 3 issue tests (`tests/rv3_issues.rs`) read `*.expect.toml`.
+toml = "0.9"

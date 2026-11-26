@@ -434,6 +434,13 @@ struct Points {
     /// Every item name in the file (fns, consts, statics, types, enum
     /// variants, `use` names).
     items: HashSet<String>,
+    /// Per function: its name (`main`, `Foo::bar` for a method).
+    names: Vec<String>,
+    /// The `impl` / `trait` blocks being visited: the method path prefix
+    /// (`Foo`, `<D as Drop>`, `Trait`).
+    impls: Vec<String>,
+    /// The modules being visited.
+    mods: Vec<String>,
 }
 
 fn line_of(s: proc_macro2::Span) -> (u32, u32) {
@@ -444,8 +451,18 @@ impl Points {
     fn func(&self) -> Option<usize> {
         self.stack.last().copied().flatten()
     }
-    fn enter_fn(&mut self, sig: proc_macro2::Span, body: Option<&syn::Block>) {
+    fn enter_fn(&mut self, name: &syn::Ident, sig: proc_macro2::Span, body: Option<&syn::Block>) {
         self.bindings.push(HashMap::new());
+        let mods: String = self.mods.iter().map(|m| format!("{m}::")).collect();
+        self.names.push(match self.impls.last() {
+            // A trait impl's method: `<a::D as Drop>::drop` (the module
+            // path is inside the brackets).
+            Some(p) if self.func().is_none() && p.starts_with('<') => format!("{p}::{name}"),
+            // An inherent or a trait's default method; not a fn nested in a
+            // method's body.
+            Some(p) if self.func().is_none() => format!("{mods}{p}::{name}"),
+            _ => format!("{mods}{name}"),
+        });
         let open = body.and_then(|b| {
             let o = b.brace_token.span.open().start().line as u32;
             let first = b.stmts.first().map_or(b.brace_token.span.close().start().line as u32, |s| line_of(s.span()).0);
@@ -503,16 +520,43 @@ impl<'ast> Visit<'ast> for Points {
             }
         }
     }
+    fn visit_item_impl(&mut self, i: &'ast syn::ItemImpl) {
+        let ty = match &*i.self_ty {
+            syn::Type::Path(p) => p.path.segments.last().map_or(String::new(), |s| s.ident.to_string()),
+            _ => String::new(),
+        };
+        let prefix = match &i.trait_ {
+            // `<a::D as Drop>`: the type keeps its module path.
+            Some((_, tr, _)) => {
+                let mods: String = self.mods.iter().map(|m| format!("{m}::")).collect();
+                format!("<{mods}{} as {}>", ty, tr.segments.last().map_or(String::new(), |s| s.ident.to_string()))
+            }
+            None => ty,
+        };
+        self.impls.push(prefix);
+        visit::visit_item_impl(self, i);
+        self.impls.pop();
+    }
+    fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
+        self.mods.push(m.ident.to_string());
+        visit::visit_item_mod(self, m);
+        self.mods.pop();
+    }
+    fn visit_item_trait(&mut self, t: &'ast syn::ItemTrait) {
+        self.impls.push(t.ident.to_string());
+        visit::visit_item_trait(self, t);
+        self.impls.pop();
+    }
     fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
-        self.enter_fn(f.sig.span(), Some(&f.block));
+        self.enter_fn(&f.sig.ident, f.sig.span(), Some(&f.block));
         self.body(|s| visit::visit_item_fn(s, f));
     }
     fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
-        self.enter_fn(f.sig.span(), Some(&f.block));
+        self.enter_fn(&f.sig.ident, f.sig.span(), Some(&f.block));
         self.body(|s| visit::visit_impl_item_fn(s, f));
     }
     fn visit_trait_item_fn(&mut self, f: &'ast syn::TraitItemFn) {
-        self.enter_fn(f.sig.span(), f.default.as_ref());
+        self.enter_fn(&f.sig.ident, f.sig.span(), f.default.as_ref());
         self.body(|s| visit::visit_trait_item_fn(s, f));
     }
     fn visit_impl_item_const(&mut self, c: &'ast syn::ImplItemConst) {
@@ -1763,4 +1807,131 @@ mod unit {
         assert_eq!(place_name("v[0]"), None);
         assert_eq!(place_name("0"), None);
     }
+}
+
+// ─── Deriving states (RustViz 3 issue tests) ───────────────────────
+
+/// One state rustc decides for a place after a row (`rv3_issues.rs`).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Derived {
+    pub func: String,
+    pub line: u32,
+    pub place: String,
+    /// `own` (`&mut x` raises no borrow conflict and no missing value;
+    /// E0596, x not declared `mut`, is ignored), `shared` (`&x` accepted,
+    /// `&mut x` a shared-loan conflict), `mut` (`&x` a conflict: a mutable
+    /// or a closure's unique loan), `moved*` (E0382:
+    /// moved on at least one path; rustc's message is the same for a
+    /// definite and a maybe move), `partly*` (E0382 "partially moved" on
+    /// at least one path), `unassigned*` (E0381: no value on at least one
+    /// path; its wording doesn't tell never-assigned from maybe-assigned).
+    pub is: &'static str,
+}
+
+/// The states rustc decides for every variable bound once in its
+/// function (and each of `extra`'s field paths, `p.a`) after every probe
+/// point, by probing `&x` and `&mut x` there as `check` does. A pair rustc
+/// doesn't decide (out of scope, the probe keeps a loan alive, behind a
+/// `&`, dead code) gives no state.
+pub fn derive_states(src: &str, extra: &[String]) -> Result<Vec<Derived>, String> {
+    if src.contains("macro_rules") {
+        return Err("the program defines a macro (bindings syn can't see)".into());
+    }
+    let file = syn::parse_file(src).map_err(|e| format!("syn: {e}"))?;
+    let mut pts = Points { src: src.lines().map(str::to_owned).collect(), ..Default::default() };
+    pts.visit_file(&file);
+    match rustc_errors(src)? {
+        e if e.is_empty() => {}
+        e => return Err(format!("doesn't compile as an edition-2024 lib: {:?}", e.first())),
+    }
+    let mut claims: Vec<Claim> = Vec::new();
+    let mut seen = HashSet::new();
+    for p in &pts.points {
+        if !seen.insert((p.func, p.line)) {
+            continue;
+        }
+        let mut names: Vec<String> = pts.bindings[p.func].iter()
+            .filter(|(n, &k)| k == 1 && n.as_str() != "_" && !n.starts_with('_') && !pts.items.contains(n.as_str()))
+            .map(|(n, _)| n.clone())
+            .collect();
+        names.extend(extra.iter().filter(|e| {
+            let root = e.split('.').next().unwrap_or("");
+            pts.bindings[p.func].get(root) == Some(&1) && !pts.items.contains(root)
+        }).cloned());
+        names.sort();
+        names.dedup();
+        for n in names {
+            claims.push(Claim { line: p.line, func: p.func, var: n, drawn: Drawn::Usable, in_loop: p.in_loop, tip: String::new() });
+        }
+    }
+    let lines: BTreeSet<(usize, u32)> = claims.iter().map(|c| (c.func, c.line)).collect();
+    let live = reachable(src, &pts, &lines)?;
+    claims.retain(|c| live.contains(&(c.func, c.line)));
+    let mut probes = Vec::new();
+    for i in 0..claims.len() {
+        probes.push(Probe { claim: i, after: claims[i].line, mutable: false });
+        probes.push(Probe { claim: i, after: claims[i].line, mutable: true });
+    }
+    // `&` and `&mut` probes in separate batches; every probe that fails
+    // is compiled again alone (another probe can keep a loan alive over
+    // it), and so is every clean probe of a variable some probe found
+    // moved (rustc reports one use of a moved value per move).
+    let mut res: Vec<Outcome> = vec![Outcome::NoTypecheck; probes.len()];
+    for want_mut in [false, true] {
+        let idx: Vec<usize> = (0..probes.len()).filter(|&i| probes[i].mutable == want_mut).collect();
+        let ps: Vec<&Probe> = idx.iter().map(|&i| &probes[i]).collect();
+        for (k, v) in run_probes(src, &ps, &claims)?.into_iter().enumerate() {
+            res[idx[k]] = v;
+        }
+    }
+    for i in 0..probes.len() {
+        if matches!(&res[i], Outcome::Errors(e) if !e.is_empty()) {
+            res[i] = run_probes(src, &[&probes[i]], &claims)?.into_iter().next().unwrap();
+        }
+    }
+    let root = |p: &Probe| claims[p.claim].var.split('.').next().unwrap().to_owned();
+    let moved_roots: HashSet<String> = probes.iter().zip(&res)
+        .filter(|(_, r)| matches!(r, Outcome::Errors(e) if e.iter().any(|(c, _)| NO_VALUE.contains(&c.as_str()))))
+        .map(|(p, _)| root(p))
+        .collect();
+    for i in 0..probes.len() {
+        if matches!(&res[i], Outcome::Errors(e) if e.is_empty()) && moved_roots.contains(&root(&probes[i])) {
+            res[i] = run_probes(src, &[&probes[i]], &claims)?.into_iter().next().unwrap();
+        }
+    }
+    let has = |e: &BTreeSet<(String, String)>, codes: &[&str]| e.iter().find(|(c, _)| codes.contains(&c.as_str())).cloned();
+    let mut out = Vec::new();
+    for (i, c) in claims.iter().enumerate() {
+        let (Outcome::Errors(shared), Outcome::Errors(mutable)) = (&res[2 * i], &res[2 * i + 1]) else { continue };
+        let unsure = |e: &BTreeSet<(String, String)>| e.iter().any(|(c, _)| c == BEHIND_REF || c == SELF_CONFLICT);
+        if unsure(shared) {
+            continue;
+        }
+        // E0381's wording ("isn't initialized" / "is possibly-uninitialized")
+        // doesn't follow the paths: rustc says "possibly" before the only
+        // assignment, and "isn't" after one in an arm. Only "no value on
+        // at least one path" is decided.
+        let is = if has(shared, &["E0381"]).is_some() {
+            "unassigned*"
+        } else if let Some((_, msg)) = has(shared, &["E0382"]) {
+            if msg.contains("partially") { "partly*" } else { "moved*" }
+        } else if has(shared, &["E0501", "E0502", "E0503", "E0505"]).is_some() {
+            // E0501: a closure's unique borrow (`|| *r += 1` holds r).
+            "mut"
+        } else if !shared.is_empty() {
+            continue;
+        } else if unsure(mutable) {
+            continue;
+        } else if mutable.is_empty() {
+            "own"
+        } else if has(mutable, &["E0502", "E0505", "E0506"]).is_some() && has(mutable, NO_VALUE).is_none() {
+            "shared"
+        } else {
+            continue;
+        };
+        out.push(Derived { func: pts.names[c.func].clone(), line: c.line, place: c.var.clone(), is });
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
 }
