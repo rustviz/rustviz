@@ -21068,18 +21068,21 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // is, its line stops (see
         // `a_struct_whose_fields_are_all_moved_out_has_no_line_after`).
         // A Copy field (`u.1`) stays, so u stays partially moved; refilling
-        // the field (`r.a = ra`) makes r whole again.
+        // the field (`r.a = ra`) makes r whole again. (RustViz 3, #1848: the
+        // state table names exactly the places moved out, and says the
+        // fields left can still be used only where the facts show each of
+        // them whole on every path: not after q.a may have been moved.)
         must_contain: &[
             "p is partially moved: p.a was moved out, so p can't be used as a whole; its other fields still can",
             "u is partially moved: u.0 was moved out, so u can't be used as a whole; its other fields still can",
             "o is partially moved: o.inner.x was moved out, so o can't be used as a whole; its other fields still can",
-            "o is partially moved: o.inner was moved out, so o can't be used as a whole; its other fields still can",
+            "o is partially moved: o.inner.x and o.inner.y were moved out, so o can't be used as a whole; its other fields still can",
             "o.inner is partially moved: o.inner.x was moved out, so o.inner can't be used as a whole; its other fields still can",
-            "q is partially moved: q.a may have been moved out, so q can't be used as a whole; its other fields still can",
+            "q is partially moved: q.a may have been moved out, so q can't be used as a whole",
             "r is partially moved: r.a was moved out, so r can't be used as a whole; its other fields still can",
             "r is the owner of the resource",
         ],
-        must_not_contain: &[],
+        must_not_contain: &["q is partially moved: q.a may have been moved out, so q can't be used as a whole; its other fields still can"],
     },
     TooltipExpect {
         name: "non_ascii_names_1160",
@@ -31593,10 +31596,38 @@ fn struct_line_text_reads_the_state_table() {
         ("partial_move_if_branches", "r@L38-39:line", "r.a was moved out", "owner of the resource"),
         ("struct_parts_moved_out_1157", "q@L42-44:line", "q.a was moved out", "may have been"),
         ("manually_drop_maybe_moved_1147", "t@L80-81:line", "t.a was moved out", "may have been"),
-        // After a loop a `break` left with l.name moved on one path: l is
-        // not whole (old: "l is the owner of the resource").
-        ("break_field_out_1280", "l@L14-15:line", "l.name may have been moved out", "owner of the resource"),
-        ("break_field_out_1280", "o@L39-40:line", "o.inner.first may have been moved out", "owner of the resource"),
+        // `if c { break l.name; }`: the break leaves l's scope (what is left
+        // in l is dropped as it goes), so the line going on is the other
+        // path's, where l is whole (#1848 review).
+        ("break_field_out_1280", "l@L14-15:line", "l is the owner of the resource", "moved out"),
+        ("break_field_out_1280", "o@L39-40:line", "o is the owner of the resource", "moved out"),
+        ("early_return_field_1141", "l@L64-65:line", "l is the owner of the resource", "moved out"),
+        // After a `}` the paths join: p.a may still be moved (only the arm
+        // refilled it).
+        ("rv3_facts_review_1833", "p@L127-129:line", "p.a may have been moved out", "owner of the resource"),
+        // Every field moved out, where 2.x draws the line on.
+        ("loop_struct_line_1031", "y@L111-112:line", "y.a and y.b were moved out, so neither y nor any of its fields can be used", "owner of the resource"),
+        // On some paths only: what may be left isn't said to drop at the
+        // scope end (the loop gives x.name a new value first).
+        ("loop_struct_line_1031", "x@L88-89:line", "x.name may have been moved out, so neither x nor any of its fields can be used", "dropped"),
+        // One arm moves o.inner.x, the other o.inner.y: o.inner never moved
+        // out whole.
+        ("rv3_table_titles_1848", "o@L26-28:line", "o.inner.x and o.inner.y may have been moved out", "o.inner may have been"),
+        // Both payload fields of a Box moved: the Box wasn't.
+        ("rv3_table_titles_1848", "b@L35-37:line", "b.inner.x and b.inner.y were moved out", "b.inner was moved out"),
+        // A move on the `} else { .. }` row, then a comment row.
+        ("rv3_table_titles_1848", "p@L44-47:line", "p.x may have been moved out, so p can't be used as a whole", "still can"),
+        // "Its other fields still can" where the facts show every field not
+        // surely moved out whole and not lent `&mut` (the Book's shapes);
+        // not where a sibling may have been moved, or is mutably borrowed.
+        ("book/c4_14_partial_move_field", "p@L8-10:line", "p.name was moved out, so p can't be used as a whole; its other fields still can", "may have been"),
+        ("book/c5_04_struct_update", "user1@L15-18:line", "user1.username was moved out, so user1 can't be used as a whole; its other fields still can", "may have been"),
+        ("rv3_table_titles_1848", "t@L74-76:line", "t.a was moved out and t.b may have been moved out, so t can't be used as a whole", "still can"),
+        ("rv3_table_titles_1848", "t@L81-82:line", "t.a was moved out, so t can't be used as a whole", "still can"),
+        ("rv3_table_titles_1848", "t@L82-84:line", "t.a was moved out, so t can't be used as a whole; its other fields still can", "may have been"),
+        // An array element has no column: its field is named "part of", and
+        // nothing claims the fields left can be used.
+        ("rv3_table_titles_1848", "p@L58-60:line", "*p.q was moved out and part of p.a was moved out", "still can"),
     ] {
         let tl = run_with_local_backend(snippet).timeline_panel_string();
         let tip = tooltip_of_id(&tl, id).unwrap_or_else(|| panic!("{snippet}: no {id}"));
@@ -31604,9 +31635,10 @@ fn struct_line_text_reads_the_state_table() {
         assert!(!tip.contains(not), "{snippet} {id}: {tip:?} says {not:?}");
     }
     // A move out of a Box's contents moves only the payload: the Box's own
-    // move path stays initialized and its allocation is freed at scope end
-    // (MIR after ElaborateDrops: `<Box<String> as Drop>::drop(&mut b)`, not
-    // the String's drop; rustc's E0382 names `*b`). So b is `partly`.
+    // move path stays initialized and it still owns its allocation, freed
+    // when b is dropped (MIR after ElaborateDrops: `<Box<String> as
+    // Drop>::drop(&mut b)`, not the String's drop; rustc's E0382 on a later
+    // use of b notes that the move was of `*b`). So b is `partly`.
     let src = read_corpus("box_contents_move_string");
     let rv = run_with_local_backend("box_contents_move_string");
     let b = fact_body(rv.facts().expect("the plugin gave no facts (RV3_FACTS)"), "main");

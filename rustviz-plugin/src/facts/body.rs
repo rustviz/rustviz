@@ -1381,9 +1381,22 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 st.cause.insert(name.clone(), if moved { "moved" } else { "unassigned" });
             }
             if (w == "partly" || w == "own") && (!s.sub_moved.is_empty() || !s.sub_maybe.is_empty()) {
+                // A part borrowck counts as moved on some paths only is moved
+                // for sure when only its imaginary edges skip the move (an
+                // irrefutable `if let (p, q) = pair && ..`'s `else`): which
+                // parts are gone is what runs.
+                let mut surely_gone = |m: MovePathIndex| match rt_md.rev_lookup.find(move_data.move_paths[m].place.as_ref()) {
+                    LookupResult::Exact(rm) => {
+                        let r = rt.state(exits, true, rm);
+                        r.may_uninit && !r.may_init
+                    }
+                    LookupResult::Parent(_) => false,
+                };
+                let (rt_moved, still_maybe): (Vec<MovePathIndex>, Vec<MovePathIndex>) =
+                    s.sub_maybe.iter().copied().partition(|m| surely_gone(*m));
                 let mut parts = Parts {
-                    moved: s.sub_moved.iter().filter_map(|m| column_name(*m)).collect(),
-                    maybe: s.sub_maybe.iter().filter_map(|m| column_name(*m)).collect(),
+                    moved: s.sub_moved.iter().chain(rt_moved.iter()).filter_map(|m| column_name(*m)).collect(),
+                    maybe: still_maybe.iter().filter_map(|m| column_name(*m)).collect(),
                 };
                 parts.moved.sort();
                 parts.maybe.sort();

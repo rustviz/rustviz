@@ -3395,6 +3395,80 @@ pub fn state_partly_moved(my_name: &String, moved: &[String], maybe: bool) -> St
     )
 }
 
+// RustViz 3: the line of a struct some of whose fields were moved out, as
+// the state table (MIR) knows it: `surely` moved out on every path,
+// `maybe` on some, and `partly` fields with a part of them moved out that
+// has no name of its own (an array element). It can't be used as a whole
+// (E0382). `others_usable`: the facts show every other field whole and
+// usable on every path (not lent `&mut`), so it says they still can be
+// used; otherwise nothing is said about them.
+pub fn state_table_partly_moved(my_name: &String, surely: &[String], maybe: &[String], partly: &[String], others_usable: bool) -> String {
+    fn list(names: &[String]) -> String {
+        let fmt: Vec<String> = names.iter().map(|m| styled_name_html(m)).collect();
+        match fmt.as_slice() {
+            [init @ .., last] if !init.is_empty() => format!("{} and {}", init.join(", "), last),
+            _ => fmt.concat(),
+        }
+    }
+    let mut clauses = Vec::new();
+    if !surely.is_empty() {
+        clauses.push(format!("{} {} moved out", list(surely), if surely.len() > 1 { "were" } else { "was" }));
+    }
+    if !maybe.is_empty() {
+        clauses.push(format!("{} may have been moved out", list(maybe)));
+    }
+    if !partly.is_empty() {
+        clauses.push(if partly.len() > 1 {
+            format!("parts of {} were moved out", list(partly))
+        } else {
+            format!("part of {} was moved out", list(partly))
+        });
+    }
+    let said = match clauses.as_slice() {
+        [init @ .., last] if !init.is_empty() => format!("{} and {}", init.join(", "), last),
+        _ => clauses.concat(),
+    };
+    format!(
+        "{0} is partially moved: {1}, so {0} can't be used as a whole{2}",
+        styled_name_html(my_name), said, if others_usable { "; its other fields still can" } else { "" }
+    )
+}
+
+// RustViz 3: the line of a struct every field of which was moved out,
+// some of them on some paths only (`surely` / `maybe`): neither it nor any
+// field of it can be used (E0382). What happens to what may be left
+// depends on what follows (a new value, its scope end), so it isn't said.
+pub fn state_table_fields_maybe_gone(my_name: &String, surely: &[String], maybe: &[String]) -> String {
+    fn list(names: &[String]) -> String {
+        let fmt: Vec<String> = names.iter().map(|m| styled_name_html(m)).collect();
+        match fmt.as_slice() {
+            [init @ .., last] if !init.is_empty() => format!("{} and {}", init.join(", "), last),
+            _ => fmt.concat(),
+        }
+    }
+    let moved = match surely.len() {
+        0 => format!("{} may have been moved out", list(maybe)),
+        n => format!("{} {} moved out and {} may have been", list(surely), if n > 1 { "were" } else { "was" }, list(maybe)),
+    };
+    format!("{0} is partially moved: {1}, so neither {0} nor any of its fields can be used", styled_name_html(my_name), moved)
+}
+
+// The line of a struct every field of which was moved out (`let Pair { a,
+// b } = p;`) where it is drawn on: rustc calls it partially moved (the
+// struct's own place was never moved), but nothing of it can be used, and
+// nothing is left in it to drop.
+pub fn state_fields_all_moved(my_name: &String, moved: &[String]) -> String {
+    let names: Vec<String> = moved.iter().map(|m| styled_name_html(m)).collect();
+    let list = match names.as_slice() {
+        [init @ .., last] if !init.is_empty() => format!("{} and {}", init.join(", "), last),
+        _ => names.concat(),
+    };
+    format!(
+        "{0} is partially moved: {1} {2} moved out, so neither {0} nor any of its fields can be used; nothing is left in {0} to drop",
+        styled_name_html(my_name), list, if names.len() > 1 { "were" } else { "was" }
+    )
+}
+
 // The line of a struct every field of which was moved out, some of them
 // on some paths through a conditional above only (`let s2 = p.b; if c {
 // drop(p.a); }`, #1583): on the other paths it still holds those, and
