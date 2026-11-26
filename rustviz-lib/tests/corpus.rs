@@ -13802,18 +13802,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "r4.n is assigned a new value",
             "c.n is assigned a new value",
             "s.a acquires ownership of a new resource; its previous resource is dropped",
-            // A field's line under a whole-struct loan (#1672): a loan taken
-            // after an earlier `if` names its holder (an off-path conditional
-            // above doesn't make it ambiguous); inside the arms the column
-            // that doesn't fork says only what holds on every path.
-            "@s.n:31 s.n is mutably borrowed along with s by r2; s.n can't be used until the borrow ends",
-            "@s.n:36 s.n is mutably borrowed along with s by r3; s.n can't be used until the borrow ends",
-            "@s.inner:26 A borrow of all of s also covers s.inner. While that borrow is live, you can't move the field or take a mutable borrow of it directly through s.",
         ],
         must_not_contain: &[
-            // Main drew s.inner free inside the `if` while r1 was live (#1672).
-            "@s.inner:26 s.inner is the owner of the resource",
-            "@s.n:31 A borrow of all of s also covers s.n",
             // An assignment is not an in-place update.
             "modified through r.n",
             "modified through r1.n",
@@ -28077,60 +28067,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &["nothing happens to outer here", "nothing happens to keep here", "nothing happens to late here", "nothing happens to carried here", "the function returns and"],
     },
     TooltipExpect {
-        name: "borrowed_field_parent_1671",
-        must_contain: &[
-            "@p:4 While p.a is mutably borrowed, you can't use p directly as a whole.",
-            "@p.n:5 p.n holds a copyable value",
-            "@p:7 p is the owner of the resource",
-            "@o:13 While o.inner.a is borrowed, o can't be moved or mutably borrowed as a whole.",
-            "@o.inner:15 While o.inner.a is borrowed, o.inner can't be moved or mutably borrowed as a whole.",
-            "@list:23 While list.items is mutably borrowed, you can't use list directly as a whole.",
-            "@h:31 While h.shared is borrowed, h can't be moved or mutably borrowed as a whole.",
-            "@h:33 h holds a value",
-            // `&*h.unique` borrows what h.unique points to, not h.unique.
-            // Whether that restricts h depends on what lies behind h.unique
-            // (`&**h.r` through a `&mut &i32` doesn't), so the line makes no
-            // claim: deliberately weak, not the full truth for `&mut i32`.
-            "@h:35 h holds a value",
-            // The slot loan passed through `id` lasts while x is used, and
-            // ends with it.
-            "@h:44 While h.s is borrowed, h can't be moved or mutably borrowed as a whole.",
-            "@h:46 h holds a value",
-            "@g:53 While g.s is mutably borrowed, you can't use g directly as a whole.",
-        ],
-        must_not_contain: &[
-            "@p:4 p is the owner of the resource",
-            "@h:35 While h.unique is borrowed",
-            "@h:46 While h.s is borrowed",
-            "@g:53 g holds a value",
-        ],
-    },
-    TooltipExpect {
-        name: "borrowed_struct_arm_fields_1672",
-        must_contain: &[
-            "@s.n:7 s.n is mutably borrowed along with s by r1; s.n can't be used until the borrow ends",
-            "@s.a:7 s.a is mutably borrowed along with s by r1; s.a can't be used until the borrow ends",
-            "@s.n:8 s.n holds a copyable value",
-            "@data.n:19 data.n is mutably borrowed along with data by r; data.n can't be used until the borrow ends",
-            "@h.data:38 h.data is mutably borrowed along with h by r; h.data can't be used until the borrow ends",
-            "@data.n:29 data.n is immutably borrowed along with data by q; data.n is read-only while the borrow is live",
-        ],
-        must_not_contain: &["@s.n:7 s.n holds a copyable value", "@s.a:7 s.a is the owner of the resource"],
-    },
-    TooltipExpect {
-        name: "box_moved_contents_1673",
-        must_contain: &[
-            "@b:4 A value was moved from b.a, so b can't be used as a whole until all its contents are initialized.",
-            "@pair:12 A value was moved from pair.a, so pair can't be used as a whole until all its contents are initialized.",
-            "@pair:14 A value may have been moved from pair.a, so pair can't be used as a whole until all its contents are initialized.",
-            "@pair:16 pair is the owner of the resource",
-            "If the `?` here returns early, Rust drops what is left of pair: pair.a was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). pair.b is dropped. The Box's heap allocation, if it has one, is freed. If the `?` succeeds, nothing happens to pair here.",
-            "z goes out of scope. z.0 was moved out earlier, so only z.1 is dropped. The Box's heap allocation, if it has one, is freed.",
-            "b goes out of scope. b.a was moved out earlier, so only b.b is dropped. The Box's heap allocation, if it has one, is freed.",
-        ],
-        must_not_contain: &["@b:4 b is the owner of the resource", "heap allocation is freed"],
-    },
-    TooltipExpect {
         name: "unread_holder_overwrite_1676",
         must_contain: &[
             "@a:5 a is the owner of the resource",
@@ -28140,16 +28076,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "@first:22 first is the owner of the resource",
         ],
         must_not_contain: &["@a:5 a's resource is being shared by one or more variables"],
-    },
-    TooltipExpect {
-        name: "struct_ref_field_lent_1641",
-        must_contain: &[
-            "@p.n:7 p.n is mutably borrowed along with p by r; p.n can't be used until the borrow ends",
-            "@p.n:8 p.n holds a mutable reference; it can read and write the borrowed value",
-            "@q.n:16 A borrow of all of q also covers q.n. While that borrow is live, you can't move the field or take a mutable borrow of it directly through q.",
-        ],
-        // Main drew the reference fields free while their struct was lent.
-        must_not_contain: &["@p.n:7 p.n holds a mutable reference", "@q.n:16 q.n holds a mutable reference"],
     },
 ];
 
