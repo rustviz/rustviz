@@ -3645,13 +3645,20 @@ pub fn state_field_under_parent_loan(field: &str, parent: &str) -> String {
         styled_name_html(field), styled_name_html(parent))
 }
 
-pub fn state_field_borrowed(name: &str, field: &str, mutable: bool) -> String {
+// `through_ref`: the field is a reference, and the loan may be of what
+// it points to (`&*h.r`), not of the field itself (`&h.r`).
+pub fn state_field_borrowed(name: &str, field: &str, mutable: bool, through_ref: bool) -> String {
+    let what = if through_ref {
+        format!("{} or the value it points to", styled_name_html(field))
+    } else {
+        styled_name_html(field)
+    };
     if mutable {
         return format!("While {} is mutably borrowed, you can't use {} directly as a whole.",
-            styled_name_html(field), styled_name_html(name));
+            what, styled_name_html(name));
     }
     format!("While {} is borrowed, {} can't be moved or mutably borrowed as a whole.",
-        styled_name_html(field), styled_name_html(name))
+        what, styled_name_html(name))
 }
 
 pub fn state_box_part_moved(name: &str, field: &str, definite: bool) -> String {

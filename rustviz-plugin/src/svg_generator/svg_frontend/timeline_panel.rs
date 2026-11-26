@@ -4258,9 +4258,9 @@ fn parent_loan_title(parent: &Timeline, field: &ResourceAccessPoint, state: &Sta
         match e {
             Event::Branch { split_point, .. } if path.iter().filter(|(s, _)| s == split_point).count() == 1 => {}
             Event::Branch { merge_point, .. } => joined = joined.max(Some(*merge_point)),
-            Event::OrAltLend { .. } => {
-                return hover_messages::state_field_under_parent_loan(field.name(), name);
-            }
+            // Which place an or-pattern's binding borrows is decided at run
+            // time: loans from before it may be either.
+            Event::OrAltLend { .. } => joined = joined.max(Some(l)),
             Event::MutableLend { to, .. } | Event::StaticLend { to, .. } => holders.push((l, to)),
             Event::MutableReacquire { from, .. } | Event::StaticReacquire { from, .. } => {
                 if let Some(i) = holders.iter().position(|(_, to)| *to == from) {
@@ -9625,13 +9625,17 @@ struct PlaceSpan<'a> {
     start: usize,
     end: usize,
     path: Vec<(usize, usize)>,
+    /// A conditional's entry state, drawn on its arms' legs from the split.
+    entry: bool,
     effect: PlaceEffect<'a>,
 }
 
 #[derive(Clone, Copy)]
 enum PlaceEffect<'a> {
     ParentLoan(&'a Timeline, &'a State),
-    FieldLoan(&'a str, bool),
+    /// (field, mutable, the field is a reference that may only have been
+    /// reborrowed through: `&*h.r` borrows what h.r points to, not h.r)
+    FieldLoan(&'a str, bool, bool),
     BoxMove(&'a str, bool),
 }
 
@@ -9658,7 +9662,7 @@ fn place_spans<'a>(rap: &ResourceAccessPoint, viz: &'a VisualizationData) -> Vec
             State::PartialPrivilege { s: LineState::Full } | State::RevokedPrivilege { .. } if parent =>
                 Some(PlaceEffect::ParentLoan(t, state)),
             State::PartialPrivilege { s: LineState::Full } | State::RevokedPrivilege { .. } if !source.is_ref() || source.is_mutref() =>
-                Some(PlaceEffect::FieldLoan(source.name(), matches!(state, State::RevokedPrivilege { .. }))),
+                Some(PlaceEffect::FieldLoan(source.name(), matches!(state, State::RevokedPrivilege { .. }), source.is_ref())),
             State::ResourceMoved { move_at_line, dropped_by_hand: false, .. } if field && boxed => {
                 // A joined state can carry another arm's move. Name it as
                 // definite only when this straight-line history made it.
@@ -9674,23 +9678,36 @@ fn place_spans<'a>(rap: &ResourceAccessPoint, viz: &'a VisualizationData) -> Vec
 /// References currently borrowing the shared-reference field itself.
 fn reference_slot_loans<'a>(
     field: &'a str, history: &[(usize, Event)], range: (usize, usize),
-    path: &mut Vec<(usize, usize)>, holders: &mut Vec<ResourceTy>, spans: &mut Vec<PlaceSpan<'a>>,
+    path: &mut Vec<(usize, usize)>, holders: &mut Vec<(ResourceTy, bool)>, spans: &mut Vec<PlaceSpan<'a>>,
 ) {
     let mut from = range.0;
-    let record = |start, end, path: &[(usize, usize)], spans: &mut Vec<PlaceSpan<'a>>| {
+    let record = |start, end, path: &[(usize, usize)], holders: &[(ResourceTy, bool)], spans: &mut Vec<PlaceSpan<'a>>| {
         if start < end {
-            spans.push(PlaceSpan { start, end, path: path.to_vec(), effect: PlaceEffect::FieldLoan(field, false) });
+            let mutable = holders.iter().any(|(_, m)| *m);
+            spans.push(PlaceSpan { start, end, path: path.to_vec(), entry: false, effect: PlaceEffect::FieldLoan(field, mutable, false) });
         }
     };
     for (l, e) in history {
         let row = (*l).max(range.0).min(range.1);
-        if !holders.is_empty() { record(from, row, path, spans); }
+        if !holders.is_empty() { record(from, row, path, holders, spans); }
         from = row;
         match e {
-            Event::StaticLend { to, of_ref_var: true, .. } | Event::MutableLend { to, of_ref_var: true, .. } =>
-                holders.push(to.clone()),
-            Event::StaticReacquire { from, of_ref_var: true, .. } | Event::MutableReacquire { from, of_ref_var: true, .. } =>
-                holders.retain(|r| r != from),
+            Event::StaticLend { to, of_ref_var: true, .. } => holders.push((to.clone(), false)),
+            Event::MutableLend { to, of_ref_var: true, .. } => holders.push((to.clone(), true)),
+            Event::StaticReacquire { from, of_ref_var, .. } | Event::MutableReacquire { from, of_ref_var, .. } => {
+                // A call's slot loan is returned by whatever holds its
+                // result (`let x = id(&h.s);` ends with x's loan, recorded
+                // as a loan of what h.s points to): end the call's then.
+                // An unmatched return of the slot itself ends them all,
+                // rather than keep the struct restricted past it.
+                if let Some(i) = holders.iter().position(|(r, _)| r == from) {
+                    holders.remove(i);
+                } else {
+                    let n = holders.len();
+                    holders.retain(|(r, _)| !r.extract_rap().is_some_and(|r| r.is_fn()));
+                    if holders.len() == n && *of_ref_var { holders.clear(); }
+                }
+            }
             Event::Branch { branch_history, ty, split_point, merge_point, .. } => {
                 let mut after = if all_paths_present(ty, branch_history.len()) { Vec::new() } else { holders.clone() };
                 for (i, arm) in branch_history.iter().enumerate() {
@@ -9711,7 +9728,7 @@ fn reference_slot_loans<'a>(
             _ => {}
         }
     }
-    if !holders.is_empty() { record(from, range.1, path, spans); }
+    if !holders.is_empty() { record(from, range.1, path, holders, spans); }
 }
 
 /// The source state on an arm includes the diagonal into it, and the
@@ -9728,7 +9745,7 @@ fn collect_place_spans<'a>(
         let end = if !path.is_empty() && i + 1 == states.len() { range.1 } else { (*b).min(range.1) };
         if start >= end { continue; }
         if let Some(effect) = effect(state, history) {
-            spans.push(PlaceSpan { start, end, path: path.clone(), effect });
+            spans.push(PlaceSpan { start, end, path: path.clone(), entry: false, effect });
         }
     }
     for (_, event) in history {
@@ -9741,7 +9758,7 @@ fn collect_place_spans<'a>(
             let (start, end) = ((*split_point).max(range.0), first.min(range.1));
             if start < end {
                 if let Some(effect) = effect(entry, history) {
-                    spans.push(PlaceSpan { start, end, path: path.clone(), effect });
+                    spans.push(PlaceSpan { start, end, path: path.clone(), entry: true, effect });
                 }
             }
         }
@@ -9757,12 +9774,17 @@ fn collect_place_spans<'a>(
 
 fn place_effect_at<'a>(spans: &[PlaceSpan<'a>], row: usize, path: &[(usize, usize)]) -> Option<PlaceEffect<'a>> {
     spans.iter().rev().filter(|span| span.start <= row && row < span.end && span.path.iter().all(|(split, arm)|
-        !path.iter().any(|(s, a)| s == split && a != arm)))
+        !path.iter().any(|(s, a)| s == split && a != arm))
+        // A span from outside an arm that starts on or after the arm's
+        // split row belongs to the code after the conditional (`let (Some(s),
+        // _) = *b else { return; };` moves only on the path that continues),
+        // not to the arm.
+        && path.iter().all(|(split, _)| span.start < *split || span.entry || span.path.iter().any(|(s, _)| s == split)))
         .map(|span| span.effect)
         .max_by_key(|effect| match effect {
             PlaceEffect::ParentLoan(t, state) => (if matches!(state, State::RevokedPrivilege { .. }) { 4 } else { 3 }, t.resource_access_point.name().len()),
             PlaceEffect::BoxMove(_, definite) => (2, usize::from(*definite)),
-            PlaceEffect::FieldLoan(_, mutable) => (1, usize::from(*mutable)),
+            PlaceEffect::FieldLoan(_, mutable, _) => (1, usize::from(*mutable)),
         })
 }
 
@@ -9781,8 +9803,8 @@ fn place_segment<'a>(
         PlaceEffect::ParentLoan(parent, loan) => {
             (loan, parent_loan_title(parent, rap, loan, viz, row, path))
         }
-        PlaceEffect::FieldLoan(field, mutable) => {
-            let borrow = hover_messages::state_field_borrowed(name, field, mutable);
+        PlaceEffect::FieldLoan(field, mutable, through_ref) => {
+            let borrow = hover_messages::state_field_borrowed(name, field, mutable, through_ref);
             // A field loan can coexist with a move out of a different field.
             // State both restrictions without promising that every other
             // field can be used freely.

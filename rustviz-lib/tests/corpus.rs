@@ -28087,9 +28087,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "@list:23 While list.items is mutably borrowed, you can't use list directly as a whole.",
             "@h:31 While h.shared is borrowed, h can't be moved or mutably borrowed as a whole.",
             "@h:33 h holds a value",
-            "@h:35 While h.unique is borrowed, h can't be moved or mutably borrowed as a whole.",
+            // `&*h.unique` borrows what h.unique points to, not h.unique.
+            "@h:35 While h.unique or the value it points to is borrowed, h can't be moved or mutably borrowed as a whole.",
+            // The slot loan passed through `id` ends with x.
+            "@h:46 h holds a value",
+            "@g:53 While g.s is mutably borrowed, you can't use g directly as a whole.",
         ],
-        must_not_contain: &["@p:4 p is the owner of the resource"],
+        must_not_contain: &[
+            "@p:4 p is the owner of the resource",
+            "@h:35 While h.unique is borrowed",
+            "@h:46 While h.s is borrowed",
+            "@g:53 g holds a value",
+        ],
     },
     TooltipExpect {
         name: "borrowed_struct_arm_fields_1672",

@@ -35,3 +35,22 @@ fn reference_fields(h: Refs<'_>) {
     let unique = &*h.unique;
     println!("{}", unique);
 }
+
+// A loan of the slot passed through a call ends with the call's result
+// (x); `drop(h)` below compiles.
+struct S<'a> { s: &'a i32 }
+fn id<'a>(x: &'a &'a i32) -> &'a &'a i32 { x }
+fn via_call(h: S<'_>) {
+    let x = id(&h.s);
+    println!("{x}");
+    let n = 1;
+    drop(h);
+    println!("{n}");
+}
+
+// A mutable borrow of a reference field's slot locks the whole struct.
+fn mut_slot<'a>(mut g: S<'a>, k: &'a i32) {
+    let m = &mut g.s;
+    *m = k;
+    println!("{}", g.s);
+}
