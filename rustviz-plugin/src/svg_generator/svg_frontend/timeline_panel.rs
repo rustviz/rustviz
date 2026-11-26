@@ -9838,6 +9838,42 @@ fn table_lent_state(state: &State, rap: &ResourceAccessPoint, visualization_data
         .filter(|l| table.lends_whole(fn_line, rap.name(), l.loan))
         .filter(|l| !(rap.is_ref() && !rap.is_mutref() && l.kind == "shared"))
         .collect();
+    // A reference column: the loan is of the binding itself (`&mut r`,
+    // a closure's unique capture of r), of a struct it is a field of
+    // (`&mut p`, `&mut *h` for `h.r`), or of what it points to (`&mut *r`).
+    let col = rap.name();
+    let lender = |loan: usize| table.loan_lender(fn_line, col, loan).unwrap_or("");
+    let of_itself = |loan: usize| lender(loan) == col;
+    let of_parent = |loan: usize| col.starts_with(&format!("{}.", lender(loan).trim_start_matches('*')));
+    if rap.is_ref() && !own_loans.is_empty() {
+        // Where the table can't say it per path or 2.x's words don't fit,
+        // 2.x's style stands: a loan taken in one arm of a branch on one
+        // row; a shared loan of the binding or its struct (`&r`, `match &r`:
+        // not "shared through it"); a unique capture of an enclosing struct;
+        // or a loan through it taken before it was given another reference
+        // on some path (it may point elsewhere now).
+        if own_loans.iter().any(|l| table.loan_arm(fn_line, col, l.loan).is_some())
+            || own_loans.iter().any(|l| l.kind == "shared" && (of_itself(l.loan) || of_parent(l.loan)))
+            || own_loans.iter().any(|l| l.kind == "unique" && of_parent(l.loan))
+        {
+            return None;
+        }
+        let through_lines: Vec<usize> = own_loans.iter()
+            .filter(|l| !of_itself(l.loan) && !of_parent(l.loan))
+            .filter_map(|l| table.loan_line(fn_line, col, l.loan))
+            .collect();
+        if let (Some(first), Some(t)) = (through_lines.iter().min(), visualization_data.timelines.get(rap.hash())) {
+            let mut evs = Vec::new();
+            flat_history(&t.history, &[], &mut evs);
+            let repointed = evs.iter().any(|(l, e)| {
+                matches!(e, Event::StaticBorrow { .. } | Event::MutableBorrow { .. } | Event::Acquire { .. } | Event::Copy { .. })
+                    && rv_attrs::line_of(*l, &visualization_data.row_lines).is_some_and(|sl| sl > *first && sl <= src)
+            });
+            if repointed {
+                return None;
+            }
+        }
+    }
     let exclusive: Vec<_> = own_loans.iter().filter(|l| matches!(l.kind, "mut" | "unique")).collect();
     let shared = own_loans.iter().any(|l| l.kind == "shared");
     let reserved = own_loans.iter().find(|l| l.kind == "reserved");
@@ -9890,18 +9926,15 @@ fn table_lent_state(state: &State, rap: &ResourceAccessPoint, visualization_data
         };
         let title = if !every_path && !unique {
             hover_messages::state_maybe_lent_out(rap.name())
-        } else if unique && !rap.is_ref() {
+        } else if unique {
+            // (For a reference: a closure's unique immutable borrow of the
+            // binding itself, which writes through it.)
             hover_messages::state_unique_lent(rap.name(), lent_to)
         } else if rap.is_ref() {
-            // (A closure's unique borrow of a `&mut` writes what it points
-            // to through it, as a reborrow does.)
-            // What it points to is borrowed through it (`&mut *r`), or the
-            // reference itself is (`&mut r`, or the struct it is a field
-            // of: `&mut p` for `p.n`; always so for a `&T`).
-            // (A unique borrow only writes through it, whatever its place.)
-            let ref_itself = !rap.is_mutref()
-                || exclusive.iter().all(|l| l.kind != "unique" && table.loan_lender(fn_line, rap.name(), l.loan)
-                    .is_some_and(|p| p == rap.name() || rap.name().starts_with(&format!("{p}."))));
+            // The reference itself is borrowed (`&mut r`, or the struct it is
+            // a field of: `&mut p` for `p.n`; always so for a `&T`), or what
+            // it points to is, through it (`&mut *r`).
+            let ref_itself = !rap.is_mutref() || exclusive.iter().all(|l| of_itself(l.loan) || of_parent(l.loan));
             hover_messages::state_lent_out(rap.name(), lent_to, rap.is_mutref().then(|| rap.points_to_copy()), ref_itself, rap.holds_value())
         } else {
             hover_messages::state_lent_out(rap.name(), lent_to, None, false, rap.holds_value())
@@ -9910,17 +9943,6 @@ fn table_lent_state(state: &State, rap: &ResourceAccessPoint, visualization_data
         return Some((State::RevokedPrivilege { to: to.clone(), borrow_to: to, prev_state: Box::new(State::FullPrivilege { s }) }, Some(title)));
     }
     if rap.is_ref() {
-        // (Shared on some paths only, by a loan taken in one arm of a
-        // branch on one row: 2.x's style stands.)
-        let shared_arms: Vec<_> = own_loans.iter().filter(|l| l.kind == "shared").map(|l| table.loan_arm(fn_line, rap.name(), l.loan)).collect();
-        let shared_branches: BTreeSet<(usize, usize)> = shared_arms.iter().flatten().map(|((l, b, _), _)| (*l, *b)).collect();
-        let shared_every_path = shared_arms.iter().any(Option::is_none) || shared_branches.iter().any(|(l, b)| {
-            let covered: BTreeSet<usize> = shared_arms.iter().flatten().filter(|((l2, b2, _), _)| l2 == l && b2 == b).map(|((_, _, a), _)| *a).collect();
-            shared_arms.iter().flatten().find(|((l2, b2, _), _)| l2 == l && b2 == b).is_some_and(|(_, n)| covered.len() == *n)
-        });
-        if shared && !shared_every_path {
-            return None;
-        }
         // A `&mut` whose referent is shared through it is read-only
         // meanwhile; a `&T` is drawn shared all along (2.x's style).
         return match (shared, reserved, state) {

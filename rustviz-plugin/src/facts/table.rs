@@ -266,6 +266,11 @@ impl StateTable {
         self.body(fn_line, column).and_then(|b| b.loan_lenders.get(&loan)).map(String::as_str)
     }
 
+    /// The source line `loan` is taken on.
+    pub fn loan_line(&self, fn_line: usize, column: &str, loan: usize) -> Option<usize> {
+        self.body(fn_line, column).and_then(|b| b.loan_at.get(&loan)).map(|(line, _)| *line)
+    }
+
     pub fn lends_whole(&self, fn_line: usize, column: &str, loan: usize) -> bool {
         let Some(lender) = self.body(fn_line, column).and_then(|b| b.loan_lenders.get(&loan)) else { return false };
         // The facts name a Box payload's fields without the deref (`b.0` for

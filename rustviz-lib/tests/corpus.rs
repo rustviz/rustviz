@@ -17923,9 +17923,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t's resource is mutably borrowed by closure h; t can't be used until the borrow ends",
             // An i32 is a value, and p only points to it.
             "n's value is mutably borrowed by p; n can't be used until the borrow ends",
-            "the value p points to is mutably borrowed by closure g through p; p can't be used until the borrow ends",
+            // The closure's capture is a unique immutable borrow of p itself
+            // (it writes through p); RustViz 3's state table words it so
+            // (#1860's review: not "borrowed by g through p").
+            "p is uniquely borrowed by closure g, which writes through a reference stored in p (not to p itself); p can't be used until the borrow ends",
         ],
         must_not_contain: &[
+            "the value p points to is mutably borrowed by closure g through p",
             "n's resource is mutably borrowed",
             "p's value is mutably borrowed",
             "so it cannot access the value",
@@ -28154,7 +28158,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "borrow_stored_through_local_ref",
-        // `let rh = &mut hold.r;` borrows the reference itself.
+        // `let rh = &mut hold;` borrows the struct, which restricts its field
+        // hold.r (a whole-struct loan; not a direct borrow of the field).
         must_contain: &["hold.r is mutably borrowed by rh; hold.r can't be used until the borrow ends"],
         must_not_contain: &[],
     },
@@ -28164,6 +28169,20 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // reference, not by v.
         must_contain: &["the resource v points to is mutably borrowed through v; v can't be used until the borrow ends"],
         must_not_contain: &["mutably borrowed by v through v"],
+    },
+    // #1860's review: where the table can't word a reference's loan, 2.x's
+    // style stands (each must_not is the PR's first version's text).
+    TooltipExpect {
+        name: "ref_column_styles_1860",
+        must_contain: &["p is uniquely borrowed by closure f, which writes through a reference stored in p (not to p itself); p can't be used until the borrow ends"],
+        must_not_contain: &[
+            // `match &sb` borrows the binding sb, not what it points to.
+            "sb holds a mutable reference, but the value it points to is currently shared through it",
+            // The reborrow through ra2 is on one path; "ra2 may be mutably
+            // borrowed" names the binding.
+            "ra2 may be mutably borrowed here",
+            "the value p points to is mutably borrowed by closure f through p",
+        ],
     },
 ];
 
