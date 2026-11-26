@@ -1,7 +1,6 @@
 issue = 1673
 cluster = "C14"
 title = "`let x = b.a;` out of a Box<P>: b is partly moved for the rest of its life (rustc rejects any use of b as a whole)"
-xfail = "P0"
 places = ["b.a", "b.b"]
 beyond_facts = "P3: b's line says 'b is the owner of the resource' after the move"
 note = "Gap: place naming through the Box: the move is `*b.a`, and no b.a / b.b state columns exist. Fact-layer place naming (`(*b).a` vs `b.a`) may need the P0 place-naming work."

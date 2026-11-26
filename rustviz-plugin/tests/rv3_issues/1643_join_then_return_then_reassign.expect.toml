@@ -1,7 +1,6 @@
 issue = 1643
 cluster = "C09"
 title = "Maybe-moved join, then `if d { return; }`, then a reassignment: the old value is dropped at the return or at the reassignment, not at scope end"
-xfail = "P0"
 note = "The issue tests `c` in both ifs; on its repro the `return` never drops anything (c moved s first) and the reassignment always does, though rustc compiles drop flags at both. The case tests an independent `d` (environment variable D) on row 5 so both drops really are conditional; rows are unchanged. Gap: early-exit drop rows: the dump has no drop of s on the `return` row (row 5)"
 beyond_facts = "P3: the row-4 join title says the value is dropped when s goes out of scope"
 

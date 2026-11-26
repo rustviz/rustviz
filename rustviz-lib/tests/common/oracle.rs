@@ -455,8 +455,8 @@ impl Points {
         self.bindings.push(HashMap::new());
         let mods: String = self.mods.iter().map(|m| format!("{m}::")).collect();
         self.names.push(match self.impls.last() {
-            // A trait impl's method: `<D as Drop>::drop` (no module path;
-            // the harness compares last segments of its types).
+            // A trait impl's method: `<a::D as Drop>::drop` (the module
+            // path is inside the brackets).
             Some(p) if self.func().is_none() && p.starts_with('<') => format!("{p}::{name}"),
             // An inherent or a trait's default method; not a fn nested in a
             // method's body.
@@ -526,7 +526,11 @@ impl<'ast> Visit<'ast> for Points {
             _ => String::new(),
         };
         let prefix = match &i.trait_ {
-            Some((_, tr, _)) => format!("<{} as {}>", ty, tr.segments.last().map_or(String::new(), |s| s.ident.to_string())),
+            // `<a::D as Drop>`: the type keeps its module path.
+            Some((_, tr, _)) => {
+                let mods: String = self.mods.iter().map(|m| format!("{m}::")).collect();
+                format!("<{mods}{} as {}>", ty, tr.segments.last().map_or(String::new(), |s| s.ident.to_string()))
+            }
             None => ty,
         };
         self.impls.push(prefix);
@@ -1911,7 +1915,8 @@ pub fn derive_states(src: &str, extra: &[String]) -> Result<Vec<Derived>, String
             "unassigned*"
         } else if let Some((_, msg)) = has(shared, &["E0382"]) {
             if msg.contains("partially") { "partly*" } else { "moved*" }
-        } else if has(shared, &["E0502", "E0503", "E0505"]).is_some() {
+        } else if has(shared, &["E0501", "E0502", "E0503", "E0505"]).is_some() {
+            // E0501: a closure's unique borrow (`|| *r += 1` holds r).
             "mut"
         } else if !shared.is_empty() {
             continue;

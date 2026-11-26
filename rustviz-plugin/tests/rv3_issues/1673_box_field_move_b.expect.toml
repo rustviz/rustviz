@@ -1,7 +1,6 @@
 issue = 1673
 cluster = "C14"
 title = "`let x = *b;` moves the whole contents out of a Box: b can't be used afterwards"
-xfail = "P0"
 places = ["b.a", "b.b"]
 note = "Gap: place naming through the Box: moving `*b` out reads as a partial move of b (state partly), no b.a / b.b columns"
 beyond_facts = "P3: b's line says 'b is the owner of the resource' after the move"

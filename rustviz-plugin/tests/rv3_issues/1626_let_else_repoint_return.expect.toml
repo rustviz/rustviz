@@ -2,7 +2,7 @@ issue = 1626
 cluster = "C05"
 title = "let-else whose `else` re-points `r = &mut b` and returns: the write `*r = ..` after it is drawn dropping b's value"
 xfail = "P0"
-note = "Spike: the else block's events (`r = &mut b`, its loan) are dumped on row 8, and the return path's drops of a and b on row 10 with no early-exit row."
+note = "Spike: the else block's events (`r = &mut b`, its loan) are dumped on row 8, and the return path's drops of a and b on row 10 with no early-exit row. rv3-p0 build: the else path's end continues at row 8 (`};`), not row 6."
 
 [[loan]]
 row = 4

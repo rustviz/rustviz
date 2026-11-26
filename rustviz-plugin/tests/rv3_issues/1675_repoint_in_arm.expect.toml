@@ -2,7 +2,7 @@ issue = 1675
 cluster = "C05"
 title = "Reference re-pointed in one arm (`c = &y;`): x drawn still lent on that path after the re-point"
 xfail = "P0"
-note = "Gap (spike): a per-path end's `to_line` is the branch row itself, not the next row of that path (row 5: the edge into the arm, which next runs row 6)."
+note = "Gap (spike): a per-path end's `to_line` is the branch row itself, not the next row of that path (row 5: the edge into the arm, which next runs row 6). Gap (rv3-p0 build too): the edge's `to_line` is the branch row itself (the target block's first MIR location carries the branch's span); the schema's `to_line` is the next row of that path."
 
 # c's loan of x is dead on the path into the arm (c is overwritten at row
 # 6 before any read): it ends on the edge into the arm, and at row 9 on

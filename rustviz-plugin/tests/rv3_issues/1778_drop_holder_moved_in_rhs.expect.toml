@@ -1,7 +1,6 @@
 issue = 1778
 cluster = "C33"
 title = "`Drop` holder moved inside its own reassignment's right-hand side (`drop(h)` in an arm): old lender b drawn shared on that path while `b.push` mutably borrows it"
-xfail = "P1"
 note = "The issue's repro has `let c = a.len() > 0;`, always true; the case reads c from the arguments so the `else` path can run (rows unchanged). Spike: row 11's state still lists b lent to h (and the `else` arm's loan of a), though on the `if` path h was dropped on row 9; the end facts ([9, 14]) are right, the row state merges paths."
 beyond_facts = "P2: the old loan ends at `drop(h)` on the `if` path and at the assignment on the `else` path"
 

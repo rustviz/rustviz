@@ -9,7 +9,7 @@ row = 4
 lender = "v"
 holder = "x"
 kind = "shared"
-ends = [[4, 7], 5]
+ends = [[4, 6], 5]
 src = "issue"
 why = "`let _ = &mut v;` compiles at the start of the `else` and after row 5, and is E0502 at the start of the Some arm"
 

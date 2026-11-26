@@ -1,7 +1,6 @@
 issue = 1738
 cluster = "C09"
 title = "Maybe-assigned join followed by `if stop { return; }` and a reassignment: a held value is dropped at the return or at the reassignment (row 10), not at scope end"
-xfail = "P0"
 fn = "no_move"
 note = "Gap: early-exit drop rows: no drop of z on the `return` row (9); no state for the bare `let mut z;` row 2 (z is unassigned there)"
 beyond_facts = "P3: the row-8 join title says the value is dropped when z goes out of scope"

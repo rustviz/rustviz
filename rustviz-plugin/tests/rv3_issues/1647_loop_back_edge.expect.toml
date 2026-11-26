@@ -3,7 +3,7 @@ cluster = "C01"
 title = "Reference read in a one-line conditional inside a `for` loop: r's loan drawn ending at row 6's join, though the next iteration reads r"
 xfail = "P0"
 fn = "run"
-note = "The issue comment's shape (`fn lp(v: &mut Vec<i32>, ..)`, `continue` in one arm) is not a case: v is a parameter, so no local loan's end states it. Gap (spike): the loop-exit end's `to_line` is the loop head (row 5) itself, not row 8, the row the exit path runs next."
+note = "The issue comment's shape (`fn lp(v: &mut Vec<i32>, ..)`, `continue` in one arm) is not a case: v is a parameter, so no local loan's end states it. Gap (spike): the loop-exit end's `to_line` is the loop head (row 5) itself, not row 8, the row the exit path runs next. Gap (rv3-p0 build too): the edge's `to_line` is the branch row itself (the target block's first MIR location carries the branch's span); the schema's `to_line` is the next row of that path."
 beyond_facts = "P3: row 6 holds three arms on one row; r's line runs through the loop body with no end on row 6 and ends where the loop exits"
 
 # r's loan is live at every point of the loop (a later iteration may read

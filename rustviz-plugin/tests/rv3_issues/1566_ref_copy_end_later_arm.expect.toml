@@ -2,7 +2,6 @@ issue = 1566
 cluster = "C01"
 title = "Unused copy of a reference in a match arm (`let h = r;`): its borrow end drawn in a later arm, after h's scope ended"
 fn = "run"
-xfail = "P0"
 note = "Spike: s's loan also ends on row 8, where the slice match's length test has an `unreachable` fall-through (MIR bb2); an unreachable edge counted as a path. The issue's second shape (`let r2 = r;` in an `if` arm, a `match` reborrowing a `&mut` parameter in the `else`) states the same fact (no end of s's loan in the other arm); not a separate case."
 beyond_facts = "P2: h, a copy of r that is never read, stops holding s at its own `let` (row 6) inside its arm; the loan itself stays live through r until row 10"
 

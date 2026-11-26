@@ -1,7 +1,6 @@
 issue = 1618
 cluster = "C05"
 title = "`r = if r.is_empty() {..}`: r's old loan is drawn ending before the condition reads through r"
-xfail = "P3"
 note = "The spike lists row 8's BorrowEnd of a after the borrows of b and c; the loan ends when the condition is done, before `&b` / `&c` run."
 beyond_facts = "P3: the dot lists the end before is_empty's read through r (a shared reborrow through r has no loan, so the read is no fact)"
 
