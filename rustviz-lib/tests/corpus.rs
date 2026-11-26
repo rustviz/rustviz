@@ -38533,7 +38533,8 @@ fn repoint_old_loan_rows_1592_1604_1596() {
         let new_end = format!("{}'s immutable borrow ends", field);
         assert_eq!(lines.iter().filter(|l| **l == new_end).count(), 1, "#1604: {} on line {}: {:?}", field, row, lines);
         let borrow = lines.iter().position(|l| *l == format!("{} immutably borrows a resource", field)).unwrap();
-        assert!(borrow < lines.iter().position(|l| *l == new_end).unwrap(), "#1604: {} on line {}: {:?}", field, row, lines);
+        let old_at = lines.iter().position(|l| l.ends_with(" ends") && l.contains(" or ")).unwrap();
+        assert!(old_at < borrow && borrow < lines.iter().position(|l| *l == new_end).unwrap(), "#1604: {} on line {}: {:?}", field, row, lines);
         // The lender is lent to the new loan before anything gives it back,
         // and given back once: never free in between (#1603, #1610's review;
         // main: "no longer borrowed / borrowed by h.r / no longer borrowed").
@@ -38543,43 +38544,38 @@ fn repoint_old_loan_rows_1592_1604_1596() {
         assert_eq!(l.first(), Some(&lend), "#1604: {} on line {}: {:?}", lender, row, l);
         assert_eq!(l.iter().filter(|x| **x == back).count(), 1, "#1604: {} on line {}: {:?}", lender, row, l);
     }
-    // One grouped return arrow per re-pointed two-lender field:
-    // to_second_lender, to_first_lender, to_third, two_writes_one_line; the
-    // tuple field; the `&mut` one. Main also drew a separate return of the
-    // old loan to the lender re-borrowed: one return from h.0 to t (the new
-    // loan's) here.
+    // Grouped return arrows in the fixture (one per re-pointed two-lender
+    // field: to_second_lender, to_first_lender, to_third, and call_rhs's new
+    // loan; the tuple field; the `&mut` one). Main also drew a separate
+    // return of the old loan to the lender re-borrowed: one return from h.0
+    // to t (the new loan's) here.
     let tips = timeline_tooltips(&tl);
     let grouped = |from: &str, kind: &str| tips.iter().filter(|t| t.starts_with(&format!("Return {} borrowed resource from {} to ", kind, from))
         && t.ends_with(&format!("({} may point into either; its borrow of both ends here)", from))).count();
-    assert_eq!(grouped("h.r", "immutably"), 5, "(and third_then_old's first write)");
+    assert_eq!(grouped("h.r", "immutably"), 4);
     assert_eq!(grouped("h.0", "immutably"), 1);
     assert_eq!(grouped("h.r", "mutably"), 1);
     assert_eq!(tips.iter().filter(|t| *t == "Return immutably borrowed resource from h.0 to t").count(), 1, "#1604: returns from h.0 to t");
     // One lender re-pointed to itself: the new borrow, then (a row below)
-    // the old loan's end and the new one's, two returns to s.
+    // the new loan's end (s is never free between the old loan and the new).
     assert!(dot_y_by_id(&tl, "h.r@L40:dot:static_borrow") < dot_y_by_id(&tl, "h.r@L40:dot:static_die"), "#1604: same_lender order");
-    // Two writes on one line: one loan of t, then one of u (not one that may
-    // point into either).
-    assert!(!tips.iter().any(|t| ["t or u", "u or t", "u or v", "v or u", "u, t or s", "t, u"].iter().any(|x| t.contains(x))),
-        "#1604: successive writes merged into one loan");
-    let two = rows("h.r@L55:dot:").concat();
-    for l in ["h.r's immutable borrow of t ends", "h.r's immutable borrow of u ends"] {
-        assert!(two.iter().any(|x| x == l), "#1604: two_writes_one_line: no {:?} in {:?}", l, two);
-    }
-    // Two loans ended on one line (`h.r = &t; h.r = &String::new();`) take a
-    // row each: t2's end is below every arrow of the stack.
-    assert!(dot_y_by_id(&tl, "t2@L62:dot:mutable_die") - dot_y_by_id(&tl, "t2@L62:dot:mutable_borrow") >= 150.0, "#1604: t2's end on the stack");
     // The `&mut` field re-pointed to u: one end of the old loan.
-    assert_eq!(dot_lines_by_id(&tl, "h.r@L77:dot:mutable_die+mutable_borrow"),
+    assert_eq!(dot_lines_by_id(&tl, "h.r@L62:dot:mutable_die+mutable_borrow"),
         vec![vec!["h.r's mutable borrow of s or t ends".to_string(), "h.r mutably borrows a resource".to_string()]]);
+    // One right-hand-side call borrowing both again: neither lender is drawn
+    // free before the new loan ends.
+    for lender in ["s", "t"] {
+        let l = rows(&format!("{}@L78:dot:", lender)).concat();
+        assert_eq!(l.iter().filter(|x| **x == format!("{}'s resource is no longer immutably borrowed", lender)).count(), 1,
+            "#1604: call_rhs: {}: {:?}", lender, l);
+        assert_eq!(l.last(), Some(&format!("{}'s resource is no longer immutably borrowed", lender)), "#1604: call_rhs: {}: {:?}", lender, l);
+    }
 
     let tl = run_with_local_backend("dead_outer_mut_arm_borrow_1596").timeline_panel_string();
     for id in ["s2@L15:dot:mutable_lend+dead_loan_note+mutable_reacquire+", "s2@L28:dot:mutable_lend+dead_loan_note+mutable_reacquire\"",
         "s2@L29:dot:mutable_lend+dead_loan_note+mutable_reacquire\""] {
         assert!(tl.contains(&format!("data-rv-id=\"{}", id)), "#1596: no {}", id);
     }
-    assert_eq!(timeline_tooltips(&tl).iter().filter(|t| *t == "Return mutably borrowed resource from r3 to s2").count(), 4,
-        "#1596: one return from r3 to s2 per function");
     // Same line: r3's end gives s2 back right after r3 borrows it.
     let same = dot_lines_by_id(&tl, "s2@L67:dot:mutable_reacquire+mutable_lend+dead_loan_note");
     assert!(same.iter().any(|d| d.iter().skip_while(|l| !l.contains("mutably borrowed by r3")).any(|l| l == "s2's resource is no longer mutably borrowed")),

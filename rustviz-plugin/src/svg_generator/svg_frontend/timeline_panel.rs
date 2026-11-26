@@ -7940,11 +7940,7 @@ fn field_lender_walk(
     out: &mut HashMap<usize, FieldLenders>,
 ) {
     // (field, row, mutable) -> (id, lender, place in the call's arguments)
-    // (field, row, mutable, ends of the field on the row before the borrow:
-    // borrows a write after an end gives are a later loan, `h.r = &t; h.r =
-    // &u; h.r = &v;` on one line, not alternatives)
-    let mut borrows: Vec<((u64, usize, bool, usize), Vec<(usize, String, usize)>)> = Vec::new();
-    let mut ended_on_row: BTreeMap<(u64, usize), usize> = BTreeMap::new();
+    let mut borrows: Vec<((u64, usize, bool), Vec<(usize, String, usize)>)> = Vec::new();
     // (field, row, mutable, assignments to the field on the row before
     // the end) -> (lenders before the row, [(id, lender)])
     let mut ends: Vec<((u64, usize, bool, usize, usize), Vec<String>, Vec<(usize, String)>)> = Vec::new();
@@ -8002,8 +7998,7 @@ fn field_lender_walk(
                 if ends.iter().any(|(k, ..)| k.0 == *field.hash() && k.1 == *row) {
                     *assigned.entry((*field.hash(), *row)).or_default() += 1;
                 }
-                let key = (*field.hash(), *row, matches!(ev, ExternalEvent::MutableBorrow { .. }),
-                    ended_on_row.get(&(*field.hash(), *row)).copied().unwrap_or(0));
+                let key = (*field.hash(), *row, matches!(ev, ExternalEvent::MutableBorrow { .. }));
                 let order = via.as_ref().and_then(|v| v.lenders.iter().position(|l| l == lender.name())).unwrap_or(usize::MAX);
                 match borrows.iter_mut().find(|(k, _)| *k == key) {
                     Some((_, g)) => g.push((*id, name, order)),
@@ -8027,7 +8022,6 @@ fn field_lender_walk(
                 if from.is_same_underlying(to) {
                     continue;
                 }
-                *ended_on_row.entry((*field.hash(), *row)).or_default() += 1;
                 let mut key = (*field.hash(), *row, matches!(ev, ExternalEvent::MutableDie { .. }),
                     assigned.get(&(*field.hash(), *row)).copied().unwrap_or(0), 0);
                 // A second end to a lender the group already ends is a later

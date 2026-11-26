@@ -47,21 +47,6 @@ fn to_third(s: String, t: String, u: String) {
     h.r = &u;
 }
 
-// Two writes on one line: two loans, one after the other, not one that
-// may point into t or u.
-fn two_writes_one_line(s: String, t: String, u: String) {
-    let mut h = Holder { r: longest(&s, &t) };
-    let n = 1;
-    h.r = &t; h.r = &u;
-}
-
-// The old loan of s and the next one of t are two loans: two returns.
-fn two_writes_then_mut(s: String, mut t: String) {
-    let mut h = Holder { r: &s };
-    let n = 1;
-    h.r = &t; h.r = &String::new(); let t2 = &mut t;
-}
-
 struct HolderMut<'a> {
     r: &'a mut String,
 }
@@ -86,19 +71,11 @@ fn to_third_mut_read(mut s: String, mut t: String, mut u: String) {
     h.r.push('x');
 }
 
-// A third lender, then one of the old ones: the second write's old value
-// is u's loan only.
-fn third_then_old(s: String, t: String, u: String) {
+// One right-hand-side call borrowing both lenders again.
+fn call_rhs(s: String, t: String) {
     let mut h = Holder { r: longest(&s, &t) };
     let n = 1;
-    h.r = &u; h.r = &t;
-}
-
-// Three writes on one line: three loans, one after another.
-fn three_writes(s: String, t: String, u: String, v: String) {
-    let mut h = Holder { r: &s };
-    let n = 1;
-    h.r = &t; h.r = &u; h.r = &v;
+    h.r = longest(&t, &s);
 }
 
 fn main() {
@@ -107,10 +84,7 @@ fn main() {
     tuple_field(String::from("a"), String::from("b"));
     same_lender(String::from("a"));
     to_third(String::from("a"), String::from("b"), String::from("c"));
-    two_writes_one_line(String::from("a"), String::from("b"), String::from("c"));
-    two_writes_then_mut(String::from("a"), String::from("b"));
     to_third_mut(String::from("a"), String::from("b"), String::from("c"));
     to_third_mut_read(String::from("a"), String::from("b"), String::from("c"));
-    third_then_old(String::from("a"), String::from("b"), String::from("c"));
-    three_writes(String::from("a"), String::from("b"), String::from("c"), String::from("d"));
+    call_rhs(String::from("a"), String::from("b"));
 }

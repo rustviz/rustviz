@@ -7179,9 +7179,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // ends at the write, as before.
           let old_value_last_use = (ref_data.loan().is_none() && !field_write).then(|| {
             let loans = self.gather_borrow_data(self.bwf);
-            let roots: Vec<String> = ref_data.all_lenders().iter()
-              .filter_map(|l| match l { ResourceTy::Value(r) if !r.is_fn() => Some(r.name().split('.').next().unwrap_or(r.name()).to_owned()), _ => None })
-              .collect();
+            // (Whole variables only: rustc's loan data names the borrowed
+            // local, so a field's loan can't be told from a sibling field's,
+            // `&p.right` beside `&p.left`. Then main's placement stands.)
+            let mut roots: Vec<String> = Vec::new();
+            for l in ref_data.all_lenders() {
+              match l {
+                ResourceTy::Value(r) if !r.is_fn() && !r.name().contains('.') => roots.push(r.name().to_owned()),
+                _ => return None,
+              }
+            }
             let at = ref_data.assigned_at;
             let end = loans.iter()
               .filter(|b| b.borrowed_place.as_ref().is_some_and(|p| roots.contains(p)) && b.region.0 <= at && at <= b.region.1)

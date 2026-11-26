@@ -132,17 +132,11 @@ fn grouped_field_ends(front: &[ExternalEvent]) -> usize {
             Some((*f.hash(), matches!(e, ExternalEvent::MutableDie { .. }), *t.hash())),
         _ => None,
     };
-    // (One loan's: no new value given to the field between the two, `h.r
-    // = &t; h.r = &String::new();` ends two loans, drawn as two arrows.)
-    let gives_field = |e: &ExternalEvent, f: u64| matches!(e, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }
-        | ExternalEvent::Move { .. } | ExternalEvent::Copy { .. })
-        && ResourceAccessPoint_extract(e).1.extract_rap().is_some_and(|r| *r.hash() == f);
     // (Nor a second end to a lender already ended: a later loan's, drawn
     // as an arrow of its own, `h.r = &t;`'s new loan of t after the old
     // one's ends to s and t.)
     (0..front.len()).filter(|&k| end_of(&front[k]).is_some_and(|(f, m, t)| (0..k)
-        .any(|j| end_of(&front[j]).is_some_and(|(f2, m2, t2)| f2 == f && m2 == m && t2 != t)
-            && !front[j + 1..k].iter().any(|o| gives_field(o, f)))
+        .any(|j| end_of(&front[j]).is_some_and(|(f2, m2, t2)| f2 == f && m2 == m && t2 != t))
         && !(0..k).any(|j| end_of(&front[j]).is_some_and(|(f2, _, t2)| f2 == f && t2 == t)))).count()
 }
 
@@ -207,13 +201,31 @@ fn split_same_line_borrow_ends(group: &[ExternalEvent], in_arm: bool) -> (Vec<Ex
     // new loan's, and so do that old loan's ends to its other lenders (s,
     // when h.r may point into s or t): one loan, ended on one row (#1604).
     // (Told apart from the new loan's by being made before the borrow.)
+    // (One write to the reference on the line: several are left as they
+    // were.)
+    let one_write = |f: u64| {
+        let mut runs = 0;
+        let mut in_run = false;
+        for e in group {
+            let into = matches!(e, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }
+                | ExternalEvent::Move { .. } | ExternalEvent::Copy { .. })
+                && ResourceAccessPoint_extract(e).1.extract_rap().is_some_and(|r| *r.hash() == f);
+            if into {
+                if !in_run { runs += 1; }
+                in_run = true;
+            } else if is_end(e) && ends(e).is_some_and(|(h, _)| h == f) {
+                in_run = false;
+            }
+        }
+        runs == 1
+    };
     let into_before = |f: u64, k: usize| borrows.iter().find(|&&(b, (_, bt))| b < k && bt == f).map(|&(b, _)| group[b].get_id());
     for k in 0..group.len() {
         if moved[k] || !is_end(&group[k]) {
             continue;
         }
         let Some((f, t)) = ends(&group[k]) else { continue };
-        let Some(bid) = into_before(f, k).filter(|&bid| group[k].get_id() < bid) else { continue };
+        let Some(bid) = into_before(f, k).filter(|&bid| group[k].get_id() < bid && one_write(f)) else { continue };
         if (0..group.len()).any(|i| moved[i] && is_end(&group[i]) && group[i].get_id() < bid
             && ends(&group[i]).is_some_and(|(f2, t2)| f2 == f && t2 != t)) {
             moved[k] = true;
@@ -255,17 +267,6 @@ fn split_same_line_borrow_ends(group: &[ExternalEvent], in_arm: bool) -> (Vec<Ex
             }
             let Some(src) = rap_hash(ResourceAccessPoint_extract(&group[j]).0) else { continue };
             if (0..j).any(|i| moved[i] && is_end(&group[i]) && ends(&group[i]).is_some_and(|(_, t)| t == src)) {
-                moved[j] = true;
-            }
-            // So does a borrow into a reference listed after an end below of
-            // that reference's borrow: a later write to it, after the loan the
-            // line gave it first is over (`h.r = &t; h.r = &u;`). Left on
-            // the first row beside that loan's borrow, the two were drawn as
-            // one borrow that may point into t or u (#1610's review).
-            // (A reference: a closure's captures are all one value.)
-            let into = ResourceAccessPoint_extract(&group[j]).1.extract_rap().filter(|r| r.is_ref()).map(|r| *r.hash());
-            if matches!(group[j], ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. })
-                && into.is_some() && (0..j).any(|i| moved[i] && is_end(&group[i]) && ends(&group[i]).is_some_and(|(f, _)| Some(f) == into)) {
                 moved[j] = true;
             }
         }
