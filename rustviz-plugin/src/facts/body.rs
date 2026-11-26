@@ -4,7 +4,7 @@
 //! the CFG without its imaginary edges for what runs (drop kinds, which
 //! events happen). Then read at the row model's locations.
 
-use super::places::{column_projection, Capture, Names};
+use super::places::{borrows_part_of, column_projection, Capture, Names};
 use super::rows::{is_unreachable, RowModel, Rows};
 use super::schema::*;
 use polonius_engine::{Algorithm, FactTypes, Output};
@@ -1210,11 +1210,17 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         };
         let to_call = direct.strip_suffix("()").filter(|_| holders.is_empty()).map(str::to_owned);
         let holder = at_issue;
+        let mut part_of = Vec::new();
         let cols: Vec<String> = columns
             .iter()
             .chain(synth.iter())
             .filter(|(_, cp, _)| places_conflict(tcx, body, bp, *cp, PlaceConflictBias::Overlap))
-            .map(|(_, _, n)| n.clone())
+            .map(|(_, cp, name)| {
+                if borrows_part_of(bp, *cp) {
+                    part_of.push(name.clone());
+                }
+                name.clone()
+            })
             .collect();
         if let (Some(through), Some(t), Some(pol)) = (cx.names.through(tcx, body, bp), table, &pol) {
             if cx.names.locals.get(&bp.local) == Some(&through) {
@@ -1245,6 +1251,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             whole,
             direct_holder: cx.name(bd.assigned_place()),
             runs: runs.contains(&loc.block),
+            part_of,
             kind,
             two_phase,
             through: cx.names.through(tcx, body, bp),
@@ -1310,6 +1317,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             whole: BTreeSet::new(),
             direct_holder: None,
             runs: u.at.is_none_or(|loc| runs.contains(&loc.block)),
+            part_of: Vec::new(),
             kind: u.kind,
             two_phase: false,
             through: u.place.and_then(|bp| cx.names.through(tcx, body, bp)),
@@ -3053,6 +3061,14 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         let mut row = Row { line, ..Default::default() };
         if let Some(exits) = cx.rows.exits.get(&line) {
             row.after = state_at(exits, true);
+            if let [exit] = exits.as_slice() {
+                if let [next] = cx.r.real_succs(*exit).as_slice() {
+                    let next_line = cx.row_of(*next);
+                    if next_line > line + 1 && (next.block == exit.block || body.basic_blocks.predecessors()[next.block].len() == 1) {
+                        row.continues_to = Some(next_line);
+                    }
+                }
+            }
         }
         row.block_end = block_ends.contains(&line);
         // Code that runs on the row only leaves it by a jump (`break k;`,

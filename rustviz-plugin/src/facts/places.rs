@@ -180,6 +180,18 @@ fn same_elem<'tcx>(a: PlaceElem<'tcx>, b: PlaceElem<'tcx>) -> bool {
     }
 }
 
+/// Does this loan select a field or element strictly inside the column?
+/// Overlap alone does not imply containment (for example, union fields).
+pub(super) fn borrows_part_of<'tcx>(borrowed: Place<'tcx>, column: Place<'tcx>) -> bool {
+    let prefix = column.projection;
+    borrowed.local == column.local
+        && borrowed.projection.iter().zip(prefix.iter()).all(|(a, b)| same_elem(a, b))
+        && borrowed.projection.iter().skip(prefix.len()).any(|p| matches!(p,
+            ProjectionElem::Field(..) | ProjectionElem::Index(..) |
+            ProjectionElem::ConstantIndex { .. } | ProjectionElem::Subslice { .. }
+        ))
+}
+
 fn is_closure_env<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> bool {
     tcx.is_closure_like(body.source.def_id())
 }

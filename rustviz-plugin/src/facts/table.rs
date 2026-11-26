@@ -96,6 +96,14 @@ pub struct Cell {
 
 type Cells = BTreeMap<String, Cell>;
 
+/// Source coordinates of the arm represented by a drawn leg. Its HIR
+/// span and the MIR arm spans use the same 1-based character positions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArmSpan {
+    pub start: (usize, usize),
+    pub end: (usize, usize),
+}
+
 /// An arm of a one-line branch on a row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArmInfo {
@@ -111,6 +119,7 @@ struct RowCells {
     /// The row has a state of its own (MIR code runs on it on a way that
     /// goes on): a column missing from it is out of scope there.
     snapshot: bool,
+    continues_to: Option<usize>,
     cells: Cells,
     before: Option<Cells>,
     block_end: bool,
@@ -131,6 +140,7 @@ struct BodyTable {
     boxes: BTreeSet<String>,
     /// Each loan's borrowed place (`s`, `p.a`, `*b`, `v[_]`).
     loans: BTreeMap<usize, LoanInfo>,
+    part_lenders: BTreeSet<String>,
     /// Columns with fields this body can't name (no columns of their own).
     hidden_fields: BTreeSet<String>,
 }
@@ -168,6 +178,42 @@ impl StateTable {
     /// (the nearest state doesn't have it) or nothing is known.
     pub fn cell(&self, fn_line: usize, column: &str, row: usize, floor: usize) -> Option<Cell> {
         self.cell_on(fn_line, column, row, floor, None)
+    }
+
+    pub fn has_part_loans(&self, fn_line: usize, column: &str) -> bool {
+        self.body(fn_line, column).is_some_and(|b| b.part_lenders.contains(column))
+    }
+
+    /// A loan boundary on the drawn path. Carry across an empty row only
+    /// along the MIR edge that actually connects the surrounding rows.
+    pub fn loan_cell(&self, fn_line: usize, column: &str, row: usize, floor: usize) -> Option<Cell> {
+        let c = self.cell(fn_line, column, row, floor)?;
+        let body = self.body(fn_line, column)?;
+        (c.from_row == row || body.rows[&c.from_row].continues_to.is_some_and(|n| row < n)).then_some(c)
+    }
+
+    /// Associate a rendered arm with its own MIR exit. SwitchInt successor
+    /// order is not source order. On a shared row, require exactly one
+    /// MIR arm inside the supplied span. Never use the joined snapshot
+    /// for a leg that cannot be identified.
+    pub fn arm_loan_cell(&self, fn_line: usize, column: &str, row: usize, span: ArmSpan) -> Option<(Cell, Option<usize>)> {
+        if row < span.start.0 || row > span.end.0 {
+            return None;
+        }
+        let body = self.body(fn_line, column)?;
+        if let Some(rc) = body.rows.get(&row).filter(|rc| !rc.arms.is_empty()) {
+            let mut matches = rc.arms.iter().enumerate().filter(|(_, (a, _))|
+                a.col_lo != 0 && span.start <= (row, a.col_lo) && (row, a.col_hi) <= span.end);
+            let (arm, _) = matches.next()?;
+            if matches.next().is_some() { return None; }
+            return Some((self.cell_in_arm(fn_line, column, row, arm)?, Some(arm)));
+        }
+        // An interior row belongs to this arm alone. A boundary row can
+        // include its condition, a sibling arm, or code after the join.
+        if span.start.0 < row && row < span.end.0 {
+            return Some((self.loan_cell(fn_line, column, row, span.start.0 + 1)?, None));
+        }
+        None
     }
 
     /// `cell` on one arm of a row with several (`arms`): its own state and
@@ -463,7 +509,7 @@ fn body_table(b: &BodyFacts) -> BodyTable {
     };
     let mut rows = BTreeMap::new();
     for r in &b.rows {
-        let mut rc = RowCells { snapshot: !r.after.state.is_empty(), cells: cells_of(&r.after), before: r.before.as_ref().map(cells_of), block_end: r.block_end, jumps: r.jumps, ..Default::default() };
+        let mut rc = RowCells { snapshot: !r.after.state.is_empty(), continues_to: r.continues_to, cells: cells_of(&r.after), before: r.before.as_ref().map(cells_of), block_end: r.block_end, jumps: r.jumps, ..Default::default() };
         for a in &r.arms {
             let info = ArmInfo { branch: a.branch, arm: a.arm, parent: a.parent, col_lo: a.col_lo, col_hi: a.col_hi };
             rc.arms.push((info, cells_of(&a.after)));
@@ -497,9 +543,10 @@ fn body_table(b: &BodyFacts) -> BodyTable {
     }
     let array_lengths = b.columns.iter().filter_map(|c| Some((c.name.clone(), c.array_len?))).collect();
     let boxes = b.columns.iter().filter(|c| c.is_box).map(|c| c.name.clone()).collect();
+    let part_lenders = b.loans.iter().flat_map(|l| l.part_of.iter().cloned()).collect();
     let loans = b.loans.iter().map(|l| (l.loan, l.clone())).collect();
     let hidden_fields = b.columns.iter().filter(|c| c.hidden_fields).map(|c| c.name.clone()).collect();
-    BodyTable { first_line: b.first_line, last_line: b.last_line, rows, columns, array_lengths, boxes, loans, hidden_fields }
+    BodyTable { first_line: b.first_line, last_line: b.last_line, rows, columns, array_lengths, boxes, loans, part_lenders, hidden_fields }
 }
 
 #[cfg(test)]
@@ -520,7 +567,7 @@ mod tests {
 
     fn row(line: usize, cols: &[(&str, &'static str)], lent: &[(&str, usize, &'static str)], facts: Vec<(Option<usize>, Fact)>) -> Row {
         let facts = facts.into_iter().map(|(arm, fact)| Ev { col: 1, arm, fact, order: (0, 0, 0), site: None }).collect();
-        Row { line, after: state(cols, lent), before: None, block_end: false, jumps: false, facts, arms: Vec::new() }
+        Row { line, continues_to: None, after: state(cols, lent), before: None, block_end: false, jumps: false, facts, arms: Vec::new() }
     }
 
     fn col(name: &str) -> ColumnInfo {
@@ -544,6 +591,7 @@ mod tests {
                 columns: vec!["s".into()],
                 whole: BTreeSet::from(["s".into()]),
                 direct_holder: Some("r".into()),
+                part_of: Vec::new(),
                 runs: true,
                 kind: "shared",
                 two_phase: false,

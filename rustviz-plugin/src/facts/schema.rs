@@ -123,6 +123,11 @@ pub struct LoanInfo {
     pub direct_holder: Option<String>,
     #[serde(skip)]
     pub runs: bool,
+    /// Conflicting columns for which the borrowed MIR place selects a field
+    /// or element inside them. Dereferencing a whole Box alone is not a
+    /// field or element borrow.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub part_of: Vec<String>,
     /// "shared" | "mut" | "unique" (a closure's unique immutable
     /// capture: the closure may not mutate it, but nobody else may use it)
     pub kind: &'static str,
@@ -252,6 +257,10 @@ pub struct State {
 #[derive(Serialize, Default)]
 pub struct Row {
     pub line: usize,
+    /// A single forward MIR edge with no join or fork. Blank display rows
+    /// up to this successor lie on the same path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continues_to: Option<usize>,
     /// The columns' states after the row, as the next row of the same
     /// path sees them. A row with no MIR location on a path that goes on
     /// (blank, `} else {`, the `};` of a `let ... else { return }`) is

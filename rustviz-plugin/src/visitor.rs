@@ -209,6 +209,16 @@ struct ChainFail {
 }
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
+  fn arm_span(&self, span: rustc_span::Span) -> Option<crate::facts::table::ArmSpan> {
+    if span.from_expansion() { return None; }
+    let sm = self.tcx.sess.source_map();
+    let pos = |p| {
+      let loc = sm.lookup_char_pos(p);
+      (loc.line, loc.col.0 + 1)
+    };
+    Some(crate::facts::table::ArmSpan { start: pos(span.lo()), end: pos(span.hi()) })
+  }
+
   /// Give each `static` the body names a column (#690), after the
   /// parameters' ones. Like a parameter, it exists before the function
   /// runs (its dot is on the signature's line); unlike one, it doesn't
@@ -8866,8 +8876,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           vec!["If".to_owned(), "Else".to_owned()],
           vec![if_slice, else_slice],
           vec![
-            ExtBranchData { e_data: if_ev,   line_map: if_map,   decl_vars: if_decl,   diverges: if_diverges,   exits: if_exits, break_carries: if_carries   },
-            ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars: else_decl, diverges: else_diverges, exits: else_exits, break_carries: else_carries },
+            ExtBranchData { source_span: self.arm_span(if_expr.span), e_data: if_ev,   line_map: if_map,   decl_vars: if_decl,   diverges: if_diverges,   exits: if_exits, break_carries: if_carries   },
+            ExtBranchData { source_span: else_expr.and_then(|e| self.arm_span(e.span)), e_data: else_ev, line_map: else_map, decl_vars: else_decl, diverges: else_diverges, exits: else_exits, break_carries: else_carries },
           ],
         )
       }
@@ -8882,8 +8892,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           vec!["If".to_owned(), "Else".to_owned()],
           vec![if_slice, else_slice],
           vec![
-            ExtBranchData { e_data: if_ev, line_map: if_map, decl_vars: if_decl, diverges: if_diverges, exits: if_exits, break_carries: if_carries },
-            ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars: HashSet::new(), diverges: false, exits: Vec::new(), break_carries: Vec::new() },
+            ExtBranchData { source_span: self.arm_span(if_expr.span), e_data: if_ev, line_map: if_map, decl_vars: if_decl, diverges: if_diverges, exits: if_exits, break_carries: if_carries },
+            ExtBranchData { source_span: else_expr.and_then(|e| self.arm_span(e.span)), e_data: else_ev, line_map: else_map, decl_vars: HashSet::new(), diverges: false, exits: Vec::new(), break_carries: Vec::new() },
           ],
         )
       }
@@ -9319,7 +9329,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // An arm of type `!` (`_ => unreachable!()`) never
         // reaches the merge (#296).
         let (diverges, exits, break_carries) = self.branch_divergence(BranchBody::Expr(arm.body), &branch_e_data, &arm_decls);
-        branch_data.push(ExtBranchData { e_data: branch_e_data, line_map: branch_line_map, decl_vars: arm_decls, diverges, exits, break_carries });
+        branch_data.push(ExtBranchData { source_span: self.arm_span(arm.span), e_data: branch_e_data, line_map: branch_line_map, decl_vars: arm_decls, diverges, exits, break_carries });
       }
     }
     self.arm_borrows_end(arm_borrows);
@@ -12967,11 +12977,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let match_slice = if collapsed { (merge, merge) } else { (merge, merge.saturating_sub(1)) };
     let else_map = create_line_map(&else_ev);
     let matched = ExtBranchData {
+      source_span: self.arm_span(pat.span),
       e_data: Vec::new(), line_map: BTreeMap::new(), decl_vars: HashSet::new(),
       diverges: false, exits: Vec::new(), break_carries: Vec::new(),
     };
     let branches = vec![
-      ExtBranchData { e_data: else_ev, line_map: else_map, decl_vars, diverges, exits, break_carries },
+      ExtBranchData { source_span: self.arm_span(els.span), e_data: else_ev, line_map: else_map, decl_vars, diverges, exits, break_carries },
       matched,
     ];
     // The matched path is named by the pattern as written.

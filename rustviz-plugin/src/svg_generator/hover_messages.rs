@@ -3898,6 +3898,35 @@ pub fn state_lent_with_parent(my_name: &str, parent: &str, by: Option<&str>, mut
     }
 }
 
+/// Describe the restriction borrowck sees. "While" leaves open which
+/// borrow actually ran when different arms can lend different places.
+pub fn part_loan(place: &str, kind: &str, holder: Option<&str>, direct: bool) -> String {
+    let what = match kind {
+        "mut" => "mutably borrowed",
+        "unique" => "uniquely borrowed",
+        "reserved" => "reserved for a mutable borrow",
+        _ => "immutably borrowed",
+    };
+    let place = styled_name_html(place);
+    match holder {
+        Some(h) if direct => format!("{place} is {what} by {}", styled_name_html(h)),
+        Some(h) => format!("{} keeps {place} {what}", styled_name_html(h)),
+        None => format!("{place} is {what}"),
+    }
+}
+
+pub fn state_part_lent(owner: &str, loans: &[String], exclusive: bool, moved: bool) -> String {
+    let owner = styled_name_html(owner);
+    let reason = loans.join(" or ");
+    if exclusive {
+        format!("While {reason}, you can't use {owner} as a whole")
+    } else if moved {
+        format!("While {reason}, you can't mutably borrow {owner} as a whole")
+    } else {
+        format!("While {reason}, {owner} is read-only as a whole")
+    }
+}
+
 pub fn state_partial_privilege(my_name: &String, holds_value: bool) -> String {
     // update styling
     let my_name_fmt = styled_name_html(my_name);
