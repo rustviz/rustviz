@@ -39,8 +39,8 @@ use std::process::Command;
 // ─── The case format ────────────────────────────────────────────────
 
 const STATES: &[&str] = &[
-    "own", "shared", "mut", "moved", "maybe-moved", "moved*", "partly", "partly*", "unassigned", "maybe-unassigned",
-    "unassigned*", "absent",
+    "own", "shared", "mut", "moved", "maybe-moved", "maybe-imaginary", "moved*", "partly", "partly*", "unassigned",
+    "maybe-unassigned", "unassigned*", "absent",
 ];
 const PHASES: &[&str] = &["P0", "P1", "P2", "P3", "P4"];
 const DROP_HOW: &[&str] = &["definite", "conditional", "rest", "none", "any"];
@@ -172,6 +172,10 @@ struct LoanA {
     ends_include: Vec<u32>,
     #[serde(default)]
     ends_exclude: Vec<u32>,
+    /// The source column (1-based) the dump records for the borrow: where
+    /// it takes effect on its row (it places the loan in a one-line arm).
+    #[serde(default)]
+    col: Option<u32>,
     #[serde(default)]
     absent: bool,
     src: String,
@@ -527,7 +531,8 @@ struct RowF {
     /// column -> (fields moved on every path, fields moved on some paths)
     parts: BTreeMap<String, (Vec<String>, Vec<String>)>,
     lent: BTreeMap<String, Vec<Lent>>,
-    /// column -> why it is "maybe" ("moved" | "unassigned"), if the dump says.
+    /// column -> why it is "maybe" ("moved" | "unassigned" | "imaginary"),
+    /// if the dump says.
     cause: BTreeMap<String, String>,
     facts: Vec<Value>,
     /// The row's arms (several arms of branches on one row): each one's
@@ -539,6 +544,7 @@ struct RowF {
 struct LoanF {
     id: usize,
     line: u32,
+    col: Option<u32>,
     lender: String,
     kind: String,
     holders: Vec<String>,
@@ -731,6 +737,7 @@ fn load_facts(v: &Value) -> Result<Vec<BodyF>, String> {
         let loans: Vec<LoanF> = b["loans"].as_array().into_iter().flatten().map(|l| LoanF {
             id: l["loan"].as_u64().unwrap_or(u64::MAX) as usize,
             line: l["line"].as_u64().unwrap_or(0) as u32,
+            col: l["col"].as_u64().map(|c| c as u32),
             lender: l["lender"].as_str().unwrap_or("").into(),
             kind: norm_kind(l["kind"].as_str().unwrap_or("")),
             holders: strs(&l["holders"]).iter().flat_map(|h| holder_set(h)).collect(),
@@ -1114,7 +1121,7 @@ fn check(a: &Assertion, facts: &[BodyF], shape: &Shape, hand: &[(String, u32, St
                 _ => None,
             };
             let maybe = matches!(st, Some("maybe" | "maybe-moved" | "maybe-unassigned"));
-            if maybe && cause.is_none() && matches!(is.as_str(), "moved*" | "unassigned*" | "maybe-moved" | "maybe-unassigned") {
+            if maybe && cause.is_none() && matches!(is.as_str(), "moved*" | "unassigned*" | "maybe-moved" | "maybe-unassigned" | "maybe-imaginary") {
                 return Err(format!("`maybe` without a cause after row {row}: add a hand-written maybe-moved / maybe-unassigned state for {place} on this row"));
             }
             let ok = match is.as_str() {
@@ -1123,7 +1130,11 @@ fn check(a: &Assertion, facts: &[BodyF], shape: &Shape, hand: &[(String, u32, St
                 "mut" => matches!(st, Some("own" | "partly")) && excl,
                 "moved" => st == Some("moved"),
                 "maybe-moved" => maybe && cause == Some("moved"),
-                "moved*" => st == Some("moved") || (maybe && cause == Some("moved")),
+                // Moved only on an edge borrowck checks but that never runs
+                // (an or-pattern's unreachable alternative): the dump must say
+                // so itself. rustc's own verdict is the same as for a maybe-move.
+                "maybe-imaginary" => maybe && cause == Some("imaginary"),
+                "moved*" => st == Some("moved") || (maybe && matches!(cause, Some("moved" | "imaginary"))),
                 "partly" => st == Some("partly"),
                 "partly*" => st == Some("partly") || any_parts,
                 "unassigned" => st == Some("unassigned"),
@@ -1154,6 +1165,7 @@ fn check(a: &Assertion, facts: &[BodyF], shape: &Shape, hand: &[(String, u32, St
         Check::Loan(l) => {
             let cands: Vec<&LoanF> = b.loans.iter()
                 .filter(|x| x.tracked && x.line == l.row && x.lender == l.lender && kind_ok(&l.kind, &x.kind)
+                    && l.col.is_none_or(|c| x.col == Some(c))
                     && l.holder.as_deref().is_none_or(|h| h == "_" || x.holders.iter().any(|y| y == h)))
                 .collect();
             // Ends per CFG edge, from the dump's BorrowEnd facts: (row, next row).
@@ -1182,7 +1194,7 @@ fn check(a: &Assertion, facts: &[BodyF], shape: &Shape, hand: &[(String, u32, St
                     && !l.ends_exclude.iter().any(|r| e.iter().any(|g| g.0 == *r) || !not_rec(r))
             };
             let hit = cands.iter().any(fits);
-            let show = |x: &LoanF| format!("{} {} -> {:?} ends (row, next) {:?}, record {:?}", x.kind, x.lender, x.holders, edges(x), x.end_lines);
+            let show = |x: &LoanF| format!("{} {} (col {:?}) -> {:?} ends (row, next) {:?}, record {:?}", x.kind, x.lender, x.col, x.holders, edges(x), x.end_lines);
             let got = if cands.is_empty() {
                 format!("loans on row {}: {:?}", l.row, b.loans.iter().filter(|x| x.line == l.row).map(show).collect::<Vec<_>>())
             } else {
@@ -1378,7 +1390,7 @@ fn rv3_issue_cases_against_facts() {
 /// Whether a hand-written state agrees with rustc's.
 fn compatible(hand: &str, rustc: &str) -> bool {
     hand == rustc
-        || matches!((hand, rustc), ("moved" | "maybe-moved", "moved*") | ("partly", "partly*") | ("unassigned" | "maybe-unassigned", "unassigned*"))
+        || matches!((hand, rustc), ("moved" | "maybe-moved" | "maybe-imaginary", "moved*") | ("partly", "partly*") | ("unassigned" | "maybe-unassigned", "unassigned*"))
 }
 
 #[test]

@@ -118,6 +118,12 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
                 }
             }
         }
+        // A binding a `let .. else { .. };` makes (`x2 = (o2 as Some).0`)
+        // takes effect when the statement is done, past its `else` block: on
+        // its `};` row, which so shows the path that goes on (rule 4).
+        if let Some(els) = self.let_else_end(l) {
+            return self.line_hi(els).max(self.line_lo(sp));
+        }
         // An assignment takes effect when its whole expression is done:
         // MIR gives `h = move tmp` (and the drop of the old `h` before it)
         // the span of `h`, but in `h = if c {..} else {..};` it runs
@@ -143,6 +149,36 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
                 None => matches!(data.terminator().kind, TerminatorKind::Call { .. } | TerminatorKind::Drop { .. }),
             };
         if effect_at_end { self.line_hi(sp) } else { self.line_lo(sp) }
+    }
+
+    /// For a binding a `let .. else { .. };` makes (`x2 = (o2 as Some).0`,
+    /// `r = &mut (o as Some).0` for `ref mut r`), the span of its `else`
+    /// block: the binding takes effect where that block ends.
+    fn let_else_end(&self, l: Location) -> Option<Span> {
+        let data = &self.body.basic_blocks[l.block];
+        let Some(StatementKind::Assign(asg)) = data.statements.get(l.statement_index).map(|s| &s.kind) else { return None };
+        if !asg.0.projection.is_empty() || !self.body.local_decls[asg.0.local].is_user_variable() {
+            return None;
+        }
+        let hir_id = self.body.location_to_hir_id(l);
+        let els = |n: hir::Node<'tcx>| match n {
+            hir::Node::LetStmt(ls) if !ls.span.from_expansion() => ls.els.map(|b| b.span),
+            _ => None,
+        };
+        match self.tcx.hir_node(hir_id) {
+            n @ hir::Node::LetStmt(_) => els(n),
+            hir::Node::Pat(_) => {
+                for (_, n) in self.tcx.hir_parent_iter(hir_id).take(16) {
+                    match n {
+                        hir::Node::LetStmt(_) => return els(n),
+                        hir::Node::Pat(_) | hir::Node::PatField(_) | hir::Node::PatExpr(_) => {}
+                        _ => break,
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
     }
 
     /// The construct an early exit at `l` leaves: the loop or block a
@@ -554,7 +590,15 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
             }
         }
         row.extend(lowered);
-        let col: BTreeMap<Location, usize> = row.keys().map(|l| (*l, self.col_lo(self.span_of(*l)))).collect();
+        // (A `let .. else` binding moved to its `};` row: at the `}` that
+        // ends the `else` block, before anything after the `;`.)
+        let col: BTreeMap<Location, usize> = row
+            .iter()
+            .map(|(l, r)| match self.let_else_end(*l) {
+                Some(els) if self.line_hi(els) == *r => (*l, self.col_hi(els).saturating_sub(1).max(1)),
+                _ => (*l, self.col_lo(self.span_of(*l))),
+            })
+            .collect();
 
         // Rule 4: which exit rows reach each scope-ending location. MIR
         // often merges an exit's jump into its block (`_0 = None;

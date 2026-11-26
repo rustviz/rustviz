@@ -1625,7 +1625,8 @@ pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<Violation>, Vec<(u32
 /// whose signature starts on `fn_line`: `state` is one of `own`, `moved`,
 /// `maybe`, `partly`, `unassigned`; `lent` is `""`, `"shared"` or
 /// `"mut"` (the strongest loan in scope that restricts the column);
-/// `cause`, for `maybe`: `moved` or `unassigned`.
+/// `cause`, for `maybe`: `moved`, `unassigned` or `imaginary` (moved only
+/// on an edge borrowck checks but that never runs).
 #[derive(Debug, Clone)]
 pub struct FactState {
     pub line: u32,

@@ -1,8 +1,7 @@
 issue = 1804
 cluster = "C99"
 title = "`(true, x, y) | (false, y, x)`: both strings move on either alternative, so \"otherwise t.1 still owns it\" is false (the sibling binding y takes t.1)"
-xfail = "P1"
-note = "Spike gap: scope end is `drops_rest` for t; MIR elaboration has no drop of t at all (both strings moved on both alternatives, the bool needs none)."
+note = "Passes since rv3 P1-4: a drop of what is left of t needs nothing when every field that needs drop was moved out on every path (both Strings moved by either alternative; the bool needs no drop): `nothing_to_drop`, as MIR drop elaboration leaves no drop of t."
 fn = "f"
 places = ["t.1", "t.2"]
 beyond_facts = "P3: x's dot says `... otherwise t.1 still owns it`"
