@@ -3618,9 +3618,9 @@ fn holder_lender_phrase(from_name: &String, from: HolderLender, holds_value: boo
     }
 }
 
-// A holder whose loans' kinds aren't stated (`BorrowVia::uncertain`,
-// #1619): only that it keeps its lenders borrowed while it is in use, as
-// rustc does; nothing about what it holds.
+// A holder's loan under the holder rule (not written as `&x` / `&mut x`
+// in the store, #1619): only that it keeps its lender borrowed while it
+// is in use, as rustc does; not the loan's kind or what it holds.
 pub fn event_dot_holder_keeps_borrowed(my_name: &String, lenders: &[String]) -> String {
     let names: Vec<String> = lenders.iter().map(|l| match l.strip_prefix('*') {
         Some(p) => format!("the data {} points to", styled_name_html(&p.to_owned())),
@@ -3634,16 +3634,27 @@ pub fn event_dot_holder_keeps_borrowed(my_name: &String, lenders: &[String]) -> 
 }
 
 // The lender's side of such a loan, and where it ends.
-pub fn event_dot_neutral_lend(my_name: &String, target_name: &String, holds_value: bool) -> String {
-    format!("{0}'s {2} is borrowed by {1}", styled_name_html(my_name), styled_name_html(target_name), held(holds_value))
+// (A reference lender owns nothing: `through`, a reborrow, lends the
+// data it points to; otherwise only that the reference is borrowed is
+// said, as the holder may hold `&r` itself.)
+pub fn event_dot_neutral_lend(my_name: &String, target_name: &String, holds_value: bool, is_ref: bool, through: bool) -> String {
+    match (is_ref, through) {
+        (true, true) => format!("the data {0} points to is borrowed by {1} through {0}", styled_name_html(my_name), styled_name_html(target_name)),
+        (true, false) => format!("{0} is borrowed by {1}", styled_name_html(my_name), styled_name_html(target_name)),
+        _ => format!("{0}'s {2} is borrowed by {1}", styled_name_html(my_name), styled_name_html(target_name), held(holds_value)),
+    }
 }
 
-pub fn event_dot_neutral_reacquire(my_name: &String, target_name: &String, holds_value: bool) -> String {
-    format!("{0}'s {2} is no longer borrowed by {1}", styled_name_html(my_name), styled_name_html(target_name), held(holds_value))
+pub fn event_dot_neutral_reacquire(my_name: &String, target_name: &String, holds_value: bool, is_ref: bool, through: bool) -> String {
+    match (is_ref, through) {
+        (true, true) => format!("{1} no longer borrows the data {0} points to", styled_name_html(my_name), styled_name_html(target_name)),
+        (true, false) => format!("{0} is no longer borrowed by {1}", styled_name_html(my_name), styled_name_html(target_name)),
+        _ => format!("{0}'s {2} is no longer borrowed by {1}", styled_name_html(my_name), styled_name_html(target_name), held(holds_value)),
+    }
 }
 
-pub fn arrow_neutral_return(holder: &String, lender: &String) -> String {
-    format!("Return borrowed resource from {} to {}", styled_name_html(holder), styled_name_html(lender))
+pub fn arrow_neutral_return(holder: &String, lender: &String, holds_value: bool) -> String {
+    format!("Return borrowed {} from {} to {}", held(holds_value), styled_name_html(holder), styled_name_html(lender))
 }
 
 pub fn event_dot_neutral_return(my_name: &String) -> String {
@@ -6071,15 +6082,6 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
     // id(r);`, `vr.push(r)`, `let o = Some(r);` with `r: &String = &mut
     // s`): what r2 / vr / o gets can only read s, though s stays mutably
     // borrowed while it is held (#1599).
-    // A lender reached through a copy, a call, an arm or a reborrow, in a
-    // store whose loans aren't all of one kind as written (`vr.push(r)`
-    // with `r: &String = &mut s`, `v.push(choose(&mut a, &b))`): its loan
-    // kind isn't stated (#1619).
-    if let ExternalEvent::MutableBorrow { via: Some(via), is_partial: false, .. } | ExternalEvent::StaticBorrow { via: Some(via), is_partial: false, .. } = external_event {
-        if via.uncertain && !to.is_closure() {
-            title = format!("Borrow from {} to {}", styled_from_string, styled_to_string);
-        }
-    }
     // `for w in words`: the arrow into the loop variable moves one
     // element out of the collection, not the collection (#850).
     if let ExternalEvent::Move { loop_head: LoopHead::Collection, .. } = external_event {
@@ -6161,6 +6163,20 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
         title.push_str(&arrow_borrow_via_call_suffix(&to.name(), &via.func, &via.lenders, via.also_unnamed, &via.tie, via.carrier, &via.passed_on));
     }
     title
+}
+
+/// `arrow_full_title` for a borrow into a holder under the holder rule
+/// (#1619): "Borrow from a to v", without the loan's kind, and without
+/// "v isn't a reference, but its value holds one".
+pub fn arrow_neutral_title(external_event: &ExternalEvent, from: &ResourceTy, to: &ResourceTy) -> String {
+    let full = arrow_full_title(external_event, from, to);
+    let head = format!(" from {} to {}", styled_name_html(&from.name()), styled_name_html(&to.name()));
+    let rest = full.split_once(&head).map_or(String::new(), |(_, r)| r.to_owned());
+    let rest = match rest.find(&format!("; {} isn't a reference", styled_name_html(&to.name()))) {
+        Some(i) => rest[..i].to_owned(),
+        None => rest,
+    };
+    format!("Borrow{}{}", head, rest)
 }
 
 /// The one arrow drawn for a reference field's borrows from, or borrow

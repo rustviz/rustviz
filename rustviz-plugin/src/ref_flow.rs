@@ -526,20 +526,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// Each of `lenders`' kind of borrow (`receiver_store_lenders`)
   /// when the values `call` stores are written out (`v.push((&a, r))`
   /// with `r: &String = &mut b`: a shared loan of a, b's mutable one),
-  /// else `is_mut` for each; and whether the mutable ones reach the
-  /// receiver only through shared references made from a mutable
-  /// borrow (`vr.push(r)`: vr can only read s through it, but s stays
-  /// mutably borrowed, #1599).
-  pub fn receiver_store_kinds(&self, call: &'tcx Expr<'tcx>, lenders: &[ResourceTy], is_mut: bool) -> (Vec<bool>, Vec<bool>, Vec<bool>, Option<bool>) {
+  /// else `is_mut` for each; and whether each was written as `&x` /
+  /// `&mut x` in a by-value argument (`BorrowVia::direct`, #1619).
+  pub fn receiver_store_kinds(&self, call: &'tcx Expr<'tcx>, lenders: &[ResourceTy], is_mut: bool) -> (Vec<bool>, Vec<bool>) {
     let flows = self.call_arg_flows_into(call, FlowTarget::Receiver).unwrap_or_default();
-    // (No flows: the loans came from rustc's kept loans, `extend([&mut
-    // a])`, whose kinds are the loans' own.)
-    let shared = is_mut && !flows.is_empty() && !flows.iter().any(|f| self.flow_is_mut(f, true));
     let mut out: Vec<(ResourceTy, bool)> = Vec::new();
-    let mut shared_of: Vec<(ResourceTy, bool)> = Vec::new();
     let written_out = !flows.is_empty() && flows.iter().all(|f| f.by_value && f.content && !f.place_mut
       && self.collect_lender_muts(f.arg, &mut out)
-      && self.lender_shared_of_mut(f.arg).map(|v| shared_of.extend(v)).is_some());
+      && self.lender_shared_of_mut(f.arg).is_some());
     // (No flows: each kept loan's own kind, `extend([(&a, &mut b)])`.)
     let kept: Vec<crate::mir_data::KeptLoan> = if flows.is_empty() { self.receiver_kept_loans(call) } else { Vec::new() };
     let kinds = lenders.iter()
@@ -550,32 +544,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         _ => is_mut,
       })
       .collect();
-    // What the receiver stores, by its type (`Vec<&String>`: shared
-    // references, whatever loan they keep, #1619).
-    let ExprKind::MethodCall(_, rcvr, _, _) = call.kind else { return (kinds, vec![false; lenders.len()], vec![true; lenders.len()], None) };
-    let holder_ref = self.tcx.typeck(call.hir_id.owner).expr_ty_opt(rcvr).and_then(|t| self.stored_ref_kind(t.peel_refs()));
-    let shared: Vec<bool> = lenders.iter().zip(kinds.iter())
-      .map(|(l, m)| holder_ref == Some(false) && *m || match shared_of.iter().find(|(x, _)| x == l) {
-        Some((_, sh)) if written_out => *sh,
-        _ => shared,
-      })
-      .collect();
-    // Whether each lender's kind is exact: rustc's kept loans are; a
-    // stored value's own borrows are (`lender_certainty`); several
-    // lenders through reference parameters aren't.
-    // Direct (`&x` / `&mut x` written in a by-value argument) or not
-    // (#1619): a lender through a reference parameter isn't.
-    let mut cert: Vec<(ResourceTy, bool)> = Vec::new();
-    let ExprKind::MethodCall(_, _, args, _) = call.kind else { unreachable!() };
+    let ExprKind::MethodCall(_, _, args, _) = call.kind else { return (kinds, vec![false; lenders.len()]) };
+    // Direct only in a by-value argument: not through a reference
+    // parameter.
+    let mut cert: Vec<(ResourceTy, Option<bool>)> = Vec::new();
     let by_value: Vec<bool> = self.callee_sig(call).map(|(sig, ..)| sig.inputs().iter().skip(1).map(|t| !t.is_ref()).collect()).unwrap_or_default();
     for (i, a) in args.iter().enumerate() {
       let direct_ok = by_value.get(i).copied().unwrap_or(false);
-      cert.extend(self.lender_certainty(a).into_iter().map(|(l, c)| (l, c && direct_ok)));
+      cert.extend(self.lender_certainty(a).into_iter().map(|(l, c)| (l, c.filter(|_| direct_ok))));
     }
-    let certain = lenders.iter()
-      .map(|l| cert.iter().any(|(x, _)| x == l) && cert.iter().filter(|(x, _)| x == l).all(|(_, c)| *c))
+    // (Direct only with the kind drawn: a fallback kind that differs
+    // from the one written is worded kind-neutrally.)
+    let certain = lenders.iter().zip(kinds.iter())
+      .map(|(l, m)| direct_kind(&cert, l) == Some(*m))
       .collect();
-    (kinds, shared, certain, holder_ref)
+    (kinds, certain)
   }
 
   /// The loans a `&mut self` method call leaves in its receiver
@@ -1565,17 +1548,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// one kind. Not through a call with several lenders (`choose(&mut a,
   /// &b)` may hold either), a reborrow through a reference with several,
   /// or a holder mixing kinds.
-  pub fn lender_certainty(&self, e: &'tcx Expr<'tcx>) -> Vec<(ResourceTy, bool)> {
-    let mut out: Vec<(ResourceTy, bool)> = Vec::new();
+  /// Each lender with `Some(is_mut)`, the kind written (`&a` / `&mut
+  /// a`), when it is borrowed directly; None when it isn't, or is
+  /// borrowed directly with both kinds.
+  pub fn lender_certainty(&self, e: &'tcx Expr<'tcx>) -> Vec<(ResourceTy, Option<bool>)> {
+    let mut out: Vec<(ResourceTy, Option<bool>)> = Vec::new();
     self.collect_certainty(e, &mut out);
     out
   }
 
-  fn collect_certainty(&self, e: &'tcx Expr<'tcx>, out: &mut Vec<(ResourceTy, bool)>) {
-    let mut add = |ls: Vec<ResourceTy>, c: bool| {
+  fn collect_certainty(&self, e: &'tcx Expr<'tcx>, out: &mut Vec<(ResourceTy, Option<bool>)>) {
+    let mut add = |ls: Vec<ResourceTy>, c: Option<bool>| {
       for l in ls {
         match out.iter_mut().find(|(x, _)| *x == l) {
-          Some(entry) => entry.1 &= c,
+          Some(entry) => if entry.1 != c { entry.1 = None },
           None => out.push((l, c)),
         }
       }
@@ -1593,7 +1579,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ExprKind::Repeat(x, _) | ExprKind::DropTemps(x) => self.collect_certainty(x, out),
       ExprKind::Block(b, _) => if let Some(x) = b.expr { self.collect_certainty(x, out) },
       // Reached through an arm: not direct (#1619).
-      ExprKind::If(..) | ExprKind::Match(..) => add(self.value_lenders(e), false),
+      ExprKind::If(..) | ExprKind::Match(..) => add(self.value_lenders(e), None),
       ExprKind::Call(f, args) if matches!(f.kind, ExprKind::Path(QPath::Resolved(_, p))
         if matches!(p.res, rustc_hir::def::Res::Def(rustc_hir::def::DefKind::Ctor(..), _))) => {
         args.iter().for_each(|x| self.collect_certainty(x, out));
@@ -1604,74 +1590,42 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           elems.iter().for_each(|x| self.collect_certainty(x, out));
           return;
         }
-        // Reached through a call: not direct (#1619).
-        add(self.call_lenders(e), false);
+        // Reached through a call: not direct (#1619), except the owner a
+        // method call borrows itself by autoref (`v.iter()`, `v.get(2)`):
+        // that loan is issued right here, of the kind the method's `self`
+        // takes.
+        let mut own: Vec<ResourceTy> = Vec::new();
+        let mut own_mut = false;
+        if let ExprKind::MethodCall(_, rcvr, _, _) = e.kind {
+          let typeck = self.tcx.typeck(rcvr.hir_id.owner);
+          let adjusted = typeck.expr_ty_adjusted_opt(rcvr).and_then(|t| t.ref_mutability());
+          own_mut = adjusted.is_some_and(|m| m.is_mut());
+          let autoref = typeck.expr_ty_opt(rcvr).is_some_and(|t| !t.is_ref()) && adjusted.is_some();
+          let owner = matches!(rcvr.kind, ExprKind::Path(QPath::Resolved(None, _)) | ExprKind::Field(..))
+            && through_ref(rcvr, self.tcx).is_none()
+            && expr_to_rap_name(rcvr, &self.tcx).and_then(|n| self.raps.get(&n)).is_some_and(|d| !d.rap.is_ref() && !d.rap.holds_borrow());
+          if autoref && owner {
+            own = self.place_lenders(rcvr);
+          }
+        }
+        for l in self.call_lenders(e) {
+          let c = own.contains(&l).then_some(own_mut);
+          add(vec![l], c);
+        }
       }
-      ExprKind::AddrOf(_, _, inner) => {
+      ExprKind::AddrOf(_, m, inner) => {
         // `&x` / `&mut x` on a place of the value's own: direct; through a
         // reference (`&*r`, `&r.x`), not.
-        add(self.place_lenders(inner), through_ref(inner, self.tcx).is_none());
+        add(self.place_lenders(inner), through_ref(inner, self.tcx).is_none().then_some(m.is_mut()));
       }
       // A copy of a reference or holder: not direct.
       ExprKind::Path(QPath::Resolved(..)) | ExprKind::Field(..) => {
         match expr_to_rap_name(e, &self.tcx).and_then(|n| self.borrow_map.get(&n)) {
-          Some(rd) => add(rd.all_lenders(), false),
-          None => add(self.value_lenders(e), false),
+          Some(rd) => add(rd.all_lenders(), None),
+          None => add(self.value_lenders(e), None),
         }
       }
       _ => {}
-    }
-  }
-
-  /// Whether `e`'s value may hold no reference at all: an `Option` not
-  /// built by `Some(..)` here.
-  pub fn may_be_none(&self, e: &'tcx Expr<'tcx>) -> bool {
-    let typeck = self.tcx.typeck(e.hir_id.owner);
-    let Some(t) = typeck.expr_ty_opt(e) else { return false };
-    let is_option = t.walk().any(|g| matches!(g.kind(), GenericArgKind::Type(x)
-      if matches!(x.kind(), ty::Adt(def, _) if self.tcx.item_name(def.did()).as_str() == "Option")));
-    let some_ctor = matches!(e.kind, ExprKind::Call(f, _) if matches!(f.kind, ExprKind::Path(QPath::Resolved(_, p))
-      if p.segments.last().is_some_and(|s| s.ident.as_str() == "Some")));
-    is_option && !some_ctor
-  }
-
-  /// What kind of reference a value of type `ty` stores: `Some(false)`
-  /// when it mentions only shared references (`Vec<&String>`), `Some(true)`
-  /// only `&mut`, None for both or neither (a struct like `IterMut`).
-  pub fn stored_ref_kind(&self, ty: Ty<'tcx>) -> Option<bool> {
-    // Only through types that store their elements as written (a `Vec`,
-    // an `Option`, a tuple): an `IterMut<'a, &String>` holds `&mut`s
-    // to the `&String`s, which its generic arguments don't show.
-    fn walk<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, t: Ty<'tcx>, shared: &mut bool, excl: &mut bool) -> bool {
-      match t.kind() {
-        ty::Ref(_, inner, m) => {
-          if m.is_mut() { *excl = true } else { *shared = true }
-          walk(tcx, *inner, shared, excl)
-        }
-        ty::Tuple(ts) => ts.iter().all(|x| walk(tcx, x, shared, excl)),
-        ty::Array(x, _) | ty::Slice(x) => walk(tcx, *x, shared, excl),
-        ty::Adt(def, args) => {
-          let krate = tcx.crate_name(def.did().krate);
-          let name = tcx.item_name(def.did());
-          let std_crate = matches!(krate.as_str(), "std" | "alloc" | "core");
-          if !std_crate || !matches!(name.as_str(), "Vec" | "Option" | "VecDeque" | "Box" | "Result") {
-            // (Any other type is fine only when it holds no borrow at
-            // all: `String`, an allocator.)
-            return !t.walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_)));
-          }
-          args.types().all(|x| walk(tcx, x, shared, excl))
-        }
-        _ => !t.walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_))),
-      }
-    }
-    let (mut shared, mut excl) = (false, false);
-    if !walk(self.tcx, ty, &mut shared, &mut excl) {
-      return None;
-    }
-    match (shared, excl) {
-      (true, false) => Some(false),
-      (false, true) => Some(true),
-      _ => None,
     }
   }
 
@@ -2183,7 +2137,15 @@ pub fn holder_branch_bodies<'tcx>(init: &'tcx Expr<'tcx>) -> Option<Vec<&'tcx Ex
 /// `*r`): the reference they go through.
 /// The reference a place goes through: `r` in `*r`, `r.x`, `(*r).x.y`,
 /// `r[0]` (#1619).
-fn through_ref<'tcx>(p: &'tcx Expr<'tcx>, tcx: rustc_middle::ty::TyCtxt<'tcx>) -> Option<&'tcx Expr<'tcx>> {
+/// The kind `l` is borrowed with directly in `cert` (`lender_certainty`),
+/// if every borrow of it there is direct and of that kind.
+pub(crate) fn direct_kind(cert: &[(ResourceTy, Option<bool>)], l: &ResourceTy) -> Option<bool> {
+  let mut ks = cert.iter().filter(|(x, _)| x == l).map(|(_, c)| *c);
+  let first = ks.next()??;
+  ks.all(|k| k == Some(first)).then_some(first)
+}
+
+pub(crate) fn through_ref<'tcx>(p: &'tcx Expr<'tcx>, tcx: rustc_middle::ty::TyCtxt<'tcx>) -> Option<&'tcx Expr<'tcx>> {
   match p.kind {
     ExprKind::Unary(rustc_hir::UnOp::Deref, inner) => Some(inner),
     ExprKind::Field(base, _) if tcx.typeck(base.hir_id.owner).expr_ty(base).is_ref() => Some(base),

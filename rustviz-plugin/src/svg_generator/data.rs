@@ -1474,24 +1474,11 @@ pub struct CapturedFate {
 /// (#171).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct BorrowVia {
-    /// A mutable borrow that the holder (not a reference itself) gets
-    /// only as a shared reference made from it (`vr.push(r)` with `r:
-    /// &String = &mut s`): it can only read, but the loan stays mutable
-    /// (#1599). (A shared reference's own column says so by its type.)
-    pub shared: bool,
-    /// Which lender the holder points into isn't known (`v.push(choose(&mut
-    /// a, &b))` may keep either reference): its dot says it may point into
-    /// any of `may_point_into` (#1619). Each lender's own loan kind is
-    /// exact.
-    pub uncertain: bool,
-    /// What the holder stores, from its type: shared references
-    /// (`Some(false)`), `&mut`s (`Some(true)`), or unknown.
-    pub holder_ref: Option<bool>,
-    /// With `uncertain`: the lenders the holder may point into (names; a
-    /// `*p` lender is the data p points to), and whether it may hold no
-    /// reference at all (an `Option`).
-    pub may_point_into: Vec<String>,
-    pub maybe_none: bool,
+    /// The borrow was written as `&x` / `&mut x` directly in the store
+    /// or `let` (`v.push(&s)`, `let o = Some(&mut s)`): a holder's texts
+    /// state its kind. Any other borrow into a holder (through a copy, a
+    /// call, an arm, a reborrow) is worded kind-neutrally (#1619).
+    pub direct: bool,
     /// The call whose result holds the borrow (`first_word`).
     pub func: String,
     /// Every variable the result borrows from, in argument order.
@@ -1599,8 +1586,8 @@ pub enum ViaCarrier {
     /// borrow in, through a `&mut` to it (`store_s(&mut r, &b)` with
     /// `dst: &mut &'a String`; #1353). `func` names the call.
     StoredThrough,
-    /// No call: only carries `BorrowVia::shared` (`Some(if c { r } else
-    /// { &b })` with `r: &String = &mut a`, #1599). No suffix.
+    /// No call: carries only `BorrowVia::direct` (a holder literal's or
+    /// a literal store's `&x`, #1619). No suffix.
     Plain,
 }
 
@@ -2842,9 +2829,6 @@ pub enum Event {
         is: ResourceTy,
         id: usize,
         of_ref_var: bool,
-        /// A holder gets the borrow only as a shared reference made
-        /// from it (`BorrowVia::shared`).
-        shared: bool,
     },
     MutableDie {
         to: ResourceTy,
@@ -3821,7 +3805,7 @@ impl Event {
                 let is = is.clone();
                 Some(match (*mutable, *end) {
                     (false, false) => Event::StaticBorrow { from: other, is, id, of_ref_var: false },
-                    (true, false) => Event::MutableBorrow { from: other, is, id, of_ref_var: false, shared: false },
+                    (true, false) => Event::MutableBorrow { from: other, is, id, of_ref_var: false },
                     (false, true) => Event::StaticDie { to: other, is, id },
                     (true, true) => Event::MutableDie { to: other, is, id },
                 })
@@ -4580,7 +4564,7 @@ impl Event {
             Event::Copy{ from ,..} => {
                 hover_messages::event_dot_copy_from(&self.deref_name(my_name), &target_name(from))
             }
-            Event::MutableBorrow{ from, is, of_ref_var, shared, ..} => {
+            Event::MutableBorrow{ from, is, of_ref_var, ..} => {
                 if is.is_closure() {
                     hover_messages::event_dot_closure_capture_mut_borrow(&self.deref_name(my_name), &from.name())
                 } else if is.holds_borrow() && matches!(from, ResourceTy::Caller) {
@@ -5953,8 +5937,8 @@ impl Visualizable for VisualizationData {
           }
           else { vec![(line_num, Event::StaticDie{to : to_ro.to_owned(), is: from_ro.clone(), id: *id})] }
         },
-        ExternalEvent::MutableBorrow{from: from_ro, to: to_ro, id, of_ref_var, via, ..} => {
-          if to_o { vec![(line_num,  Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id, of_ref_var: *of_ref_var, shared: via.as_ref().is_some_and(|v| v.shared)})] }
+        ExternalEvent::MutableBorrow{from: from_ro, to: to_ro, id, of_ref_var, ..} => {
+          if to_o { vec![(line_num,  Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id, of_ref_var: *of_ref_var})] }
           else { vec![(line_num, Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: *id, of_ref_var: *of_ref_var})] }
         },
         ExternalEvent::MutableDie{from: from_ro, to: to_ro, id, still_borrowed_by, of_ref_var, ..} => {
@@ -5994,7 +5978,7 @@ impl Visualizable for VisualizationData {
         },
         ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro, id, stored_in, result_keeps_borrow, of_ref_var, ..} => {
           if to_o { 
-            vec![(line_num,  Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id, of_ref_var: *of_ref_var, shared: false}),
+            vec![(line_num,  Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id, of_ref_var: *of_ref_var}),
             (line_num,  Event::MutableDie{to : from_ro.to_owned(), is: to_ro.clone(), id: *id})]
           }
           else if stored_in.0.is_some() || *result_keeps_borrow {
@@ -6454,11 +6438,10 @@ impl Visualizable for VisualizationData {
                     maybe_append_event(self, &from_ro.clone(), Event::StaticDie{to : to_ro.to_owned(), is: from_ro, id: id}, line_number);
                 }
             },
-            ExternalEvent::MutableBorrow{from: from_ro, to: to_ro, id, of_ref_var, via, ..} => {
+            ExternalEvent::MutableBorrow{from: from_ro, to: to_ro, id, of_ref_var, ..} => {
                 maybe_append_event(self, &from_ro, Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: id, of_ref_var}, line_number);
                 if !matches!(to_ro, ResourceTy::Index(..)) {
-                    let shared = via.as_ref().is_some_and(|v| v.shared);
-                    maybe_append_event(self, &to_ro.clone(), Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro, id: id, of_ref_var, shared}, line_number);
+                    maybe_append_event(self, &to_ro.clone(), Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro, id: id, of_ref_var}, line_number);
                 }
 
             },
@@ -6505,7 +6488,7 @@ impl Visualizable for VisualizationData {
             },
             ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro, id, stored_in, result_keeps_borrow, of_ref_var, ..} => {
                 maybe_append_event(self, &from_ro.clone(), Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: id, of_ref_var}, line_number);
-                maybe_append_event(self, &to_ro.clone(), Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: id, of_ref_var, shared: false}, line_number);
+                maybe_append_event(self, &to_ro.clone(), Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: id, of_ref_var}, line_number);
                 if stored_in.0.is_none() && !result_keeps_borrow {
                     maybe_append_event(self, &from_ro.clone(), Event::MutableReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: id, still_borrowed_by: Vec::new(), of_ref_var}, line_number);
                 }

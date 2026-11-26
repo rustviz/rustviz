@@ -8000,14 +8000,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // An element of a local holding borrows (`*el = &t1` with
       // `el = &mut refs[0]`) keeps it in that local instead (#1361).
       if let (false, ExprKind::AddrOf(..), ResourceTy::Deref(r)) = (repoints_ref_var, rhs_expr.kind, &lhs_rty) {
-        if !self.store_into_holder(lhs_expr, n_events, &lhs_rty) {
+        if !self.store_into_holder(lhs_expr, rhs_expr, n_events, &lhs_rty) {
           let place = ResourceTy::Index(r.clone(), format!("*{}", r.name()), PlaceWrite::Update);
           self.end_stored_borrow(lhs_expr, n_events, &lhs_rty, place);
         }
       } else if let (true, ExprKind::AddrOf(..), ResourceTy::Anonymous) = (lhs_ty.is_ref(), rhs_expr.kind, &lhs_rty) {
         // `*refs.get_mut(0).unwrap() = &t1;` (a place with no name):
         // kept in refs (#1384).
-        self.store_into_holder(lhs_expr, n_events, &lhs_rty);
+        self.store_into_holder(lhs_expr, rhs_expr, n_events, &lhs_rty);
       } else if is_assign && lhs_ty.is_ref() && match &lhs_rty {
         ResourceTy::Deref(_) => !repoints_ref_var,
         ResourceTy::Anonymous => true,
@@ -14066,11 +14066,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       return;
     }
     *v = Some(BorrowVia {
-      shared: false,
-      uncertain: false,
-      holder_ref: None,
-      may_point_into: Vec::new(),
-      maybe_none: false,
+      direct: false,
       func: part,
       lenders: vec![whole.clone()],
       also_unnamed: false,
@@ -14100,11 +14096,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       return;
     }
     let via = BorrowVia {
-      shared: false,
-      uncertain: false,
-      holder_ref: None,
-      may_point_into: Vec::new(),
-      maybe_none: false,
+      direct: false,
       func: part,
       lenders: vec![whole.clone()],
       also_unnamed: false,

@@ -2732,6 +2732,16 @@ fn render_dot(
                     } else {
                         data.title = event.print_message_with_name(& mut name);
                     }
+                    // "…, but is still immutably borrowed by w" naming a
+                    // holder under the holder rule: the kind isn't stated
+                    // (#1619).
+                    if let Event::StaticReacquire { is, still_borrowed_by, .. } | Event::MutableReacquire { is, still_borrowed_by, .. } = event {
+                        if still_borrowed_by.iter().any(|n| neutral_loan_named(visualization_data, n, is)) {
+                            data.title = data.title
+                                .replace(", but is still mutably borrowed by ", ", but is still borrowed by ")
+                                .replace(", but is still immutably borrowed by ", ", but is still borrowed by ");
+                        }
+                    }
                     // One of several `break` values reaching the loop's
                     // receiver: it happened only if that `break` ended
                     // the loop (#561).
@@ -3946,68 +3956,101 @@ fn deep_lend_title(event: &Event, visualization_data: &VisualizationData) -> Opt
 // literal did, or it borrows s through a reference it captured), so
 // this reads like any other lend to g rather than "captured by closure
 // g".
-/// Whether `holder`'s loan of `lender` has an unstated kind (a borrow
-/// event between them marked `BorrowVia::uncertain`, #1619). Only used
-/// for text that is then kind-neutral, which stays true on any path.
-fn uncertain_loan(visualization_data: &VisualizationData, holder: &ResourceTy, lender: &ResourceTy) -> bool {
-    fn key(r: &ResourceTy) -> Option<u64> {
-        match r {
-            ResourceTy::Value(x) | ResourceTy::Deref(x) => Some(*x.hash()),
-            _ => None,
-        }
+/// The holder rule (#1619): a holder (a non-reference column whose
+/// value holds references, not a closure) keeps its lenders borrowed, but
+/// the kind of each loan is stated only when every borrow from `lender`
+/// into it was written as `&x` / `&mut x` in the store or `let`
+/// (`BorrowVia::direct`). Otherwise its texts, and the lender's, are
+/// kind-neutral, on every row and in every arm.
+pub fn neutral_loan(visualization_data: &VisualizationData, holder: &ResourceTy, lender: &ResourceTy) -> bool {
+    let ResourceTy::Value(h) = holder else { return false };
+    if h.is_ref() || !h.holds_borrow() || h.is_closure() || h.is_fn() {
+        return false;
     }
-    let (Some(h), Some(l)) = (key(holder), key(lender)) else { return false };
+    let Some(l) = (match lender {
+        ResourceTy::Value(x) | ResourceTy::Deref(x) => Some(*x.hash()),
+        _ => None,
+    }) else { return false };
     fn find(events: &[(usize, ExternalEvent)], h: u64, l: u64) -> bool {
         events.iter().any(|(_, ev)| match ev {
-            ExternalEvent::MutableBorrow { from, to, via: Some(v), .. } | ExternalEvent::StaticBorrow { from, to, via: Some(v), .. } => v.uncertain
+            ExternalEvent::MutableBorrow { from, to, via, .. } | ExternalEvent::StaticBorrow { from, to, via, .. } =>
+                !via.as_ref().is_some_and(|v| v.direct)
                 && matches!(from, ResourceTy::Value(x) | ResourceTy::Deref(x) if *x.hash() == l)
                 && matches!(to, ResourceTy::Value(x) if *x.hash() == h),
             ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| find(&b.e_data, h, l)),
             _ => false,
         })
     }
-    find(&visualization_data.external_events, h, l)
+    find(&visualization_data.external_events, *h.hash(), l)
 }
 
-/// The borrow event `id`'s `BorrowVia` when its kind is unstated.
-fn uncertain_via(visualization_data: &VisualizationData, id: usize) -> Option<&crate::svg_generator::data::BorrowVia> {
-    fn find(events: &[(usize, ExternalEvent)], id: usize) -> Option<&crate::svg_generator::data::BorrowVia> {
-        events.iter().find_map(|(_, ev)| match ev {
-            ExternalEvent::MutableBorrow { id: i, via: Some(v), .. } | ExternalEvent::StaticBorrow { id: i, via: Some(v), .. }
-                if *i == id && v.uncertain => Some(v),
-            ExternalEvent::Branch { branches, .. } => branches.iter().find_map(|b| find(&b.e_data, id)),
-            _ => None,
+/// A lender that is a reference (`loan_through` tells whether what it
+/// points to is lent, by a reborrow through it).
+fn lender_is_ref(is: &ResourceTy) -> bool {
+    match is {
+        ResourceTy::Value(r) => r.is_ref(),
+        ResourceTy::Deref(_) => true,
+        _ => false,
+    }
+}
+
+/// Whether `holder`'s loans of the reference `lender` are reborrows
+/// through it (`is_reborrow`, or a `Deref` lender): what it points to is
+/// lent, not the reference itself.
+fn loan_through(visualization_data: &VisualizationData, holder: &ResourceTy, lender: &ResourceTy) -> bool {
+    let (Some(h), Some(l)) = (holder.extract_rap(), lender.extract_rap()) else { return false };
+    fn find(events: &[(usize, ExternalEvent)], h: u64, l: u64) -> bool {
+        events.iter().any(|(_, ev)| match ev {
+            ExternalEvent::MutableBorrow { is_reborrow, from, to, .. } | ExternalEvent::StaticBorrow { is_reborrow, from, to, .. } =>
+                (*is_reborrow || matches!(from, ResourceTy::Deref(_)))
+                && from.extract_rap().is_some_and(|x| *x.hash() == l) && to.extract_rap().is_some_and(|x| *x.hash() == h),
+            ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| find(&b.e_data, h, l)),
+            _ => false,
         })
     }
-    find(&visualization_data.external_events, id)
+    find(&visualization_data.external_events, *h.hash(), *l.hash())
 }
 
-/// The dots of a loan whose kind is unstated (#1619): the holder keeps
-/// its lenders borrowed; the lender is borrowed, then no longer.
+/// `neutral_loan` for the holder named `holder`.
+fn neutral_loan_named(visualization_data: &VisualizationData, holder: &str, lender: &ResourceTy) -> bool {
+    visualization_data.timelines.values()
+        .filter(|t| t.resource_access_point.name() == holder)
+        .any(|t| neutral_loan(visualization_data, &ResourceTy::Value(t.resource_access_point.clone()), lender))
+}
+
+/// The dots of a holder's loan under the holder rule (`neutral_loan`).
 fn uncertain_loan_title(event: &Event, name: &String, visualization_data: &VisualizationData) -> Option<String> {
     use crate::svg_generator::data::lender_holds_value;
     match event {
-        Event::MutableBorrow { id, is, .. } | Event::StaticBorrow { id, is, .. } if is.holds_borrow() =>
-            uncertain_via(visualization_data, *id).map(|v| hover_messages::event_dot_holder_keeps_borrowed(name, &v.may_point_into)),
-        Event::MutableLend { id, to, is, .. } | Event::StaticLend { id, to, is, .. } if uncertain_via(visualization_data, *id).is_some() =>
-            Some(hover_messages::event_dot_neutral_lend(name, &to.name(), lender_holds_value(is))),
-        Event::MutableReacquire { from, is, .. } | Event::StaticReacquire { from, is, .. } if uncertain_loan(visualization_data, from, is) =>
-            Some(hover_messages::event_dot_neutral_reacquire(name, &from.name(), lender_holds_value(is))),
-        Event::MutableDie { to, is, .. } | Event::StaticDie { to, is, .. } if is.holds_borrow() && uncertain_loan(visualization_data, is, to) =>
+        // (A reference lender: "the data r points to" only for a reborrow
+        // through it, else just r: the holder may hold `&r` itself.)
+        Event::MutableBorrow { from, is, .. } | Event::StaticBorrow { from, is, .. } if neutral_loan(visualization_data, is, from) => {
+            let lender = match from {
+                ResourceTy::Value(r) if r.is_ref() && loan_through(visualization_data, is, from) => format!("*{}", r.name()),
+                _ => from.name(),
+            };
+            Some(hover_messages::event_dot_holder_keeps_borrowed(name, &[lender]))
+        }
+        Event::MutableLend { to, is, .. } | Event::StaticLend { to, is, .. } if neutral_loan(visualization_data, to, is) =>
+            Some(hover_messages::event_dot_neutral_lend(name, &to.name(), lender_holds_value(is), lender_is_ref(is), loan_through(visualization_data, to, is))),
+        Event::MutableReacquire { from, is, .. } | Event::StaticReacquire { from, is, .. } if neutral_loan(visualization_data, from, is) =>
+            Some(hover_messages::event_dot_neutral_reacquire(name, &from.name(), lender_holds_value(is), lender_is_ref(is), loan_through(visualization_data, from, is))),
+        Event::MutableDie { to, is, .. } | Event::StaticDie { to, is, .. } if neutral_loan(visualization_data, is, to) =>
             Some(hover_messages::event_dot_neutral_return(name)),
         _ => None,
     }
 }
 
-/// The holder of a live loan of `rap` whose kind is unstated, on `line`.
-fn uncertain_lend_live_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, line: usize) -> Option<String> {
+/// The holder of a live loan of `rap` under the holder rule, on `line`
+/// (or at any row, with `line` None: an arm's segment).
+fn uncertain_lend_live_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, line: Option<usize>) -> Option<String> {
     let t = visualization_data.timelines.get(rap.hash())?;
     let me = ResourceTy::Value(rap.clone());
     let mut live: Vec<ResourceTy> = Vec::new();
-    for (l, e) in t.history.iter().filter(|(l, _)| *l <= line) {
+    for (l, e) in t.history.iter().filter(|(l, _)| line.is_none_or(|x| *l <= x)) {
         match e {
-            Event::StaticLend { to, .. } | Event::MutableLend { to, .. } if uncertain_loan(visualization_data, to, &me) => live.push(to.clone()),
-            Event::StaticReacquire { from, .. } | Event::MutableReacquire { from, .. } if *l < line => live.retain(|x| x != from),
+            Event::StaticLend { to, .. } | Event::MutableLend { to, .. } if neutral_loan(visualization_data, to, &me) => live.push(to.clone()),
+            Event::StaticReacquire { from, .. } | Event::MutableReacquire { from, .. } if line.is_some_and(|x| *l < x) => live.retain(|x| x != from),
             _ => {}
         }
     }
@@ -4225,8 +4268,8 @@ fn timeline_segment_title(
         }
         // Lent with an unstated kind (#1619): neither "read-only" nor
         // "can't be used".
-        if let Some(holder) = uncertain_lend_live_at(rap, visualization_data, line) {
-            return hover_messages::event_dot_neutral_lend(rap.name(), &holder, rap.holds_value());
+        if let Some(holder) = uncertain_lend_live_at(rap, visualization_data, Some(line)) {
+            return hover_messages::event_dot_neutral_lend(rap.name(), &holder, rap.holds_value(), rap.is_ref(), false);
         }
     }
     // A place an or-pattern's reference may borrow (#565): borrowed
@@ -4506,6 +4549,11 @@ fn moved_between(visualization_data: &VisualizationData, r: &ResourceAccessPoint
 /// result (`let w = first_mut(&mut v);`) isn't named; with several
 /// holders (`it` and the `y` taken out of it) none is.
 fn lent_out_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, line: usize, path: &[(usize, usize)]) -> String {
+    // (Lent to a holder under the holder rule, #1619: kind-neutral, also
+    // on an arm's segment.)
+    if let Some(holder) = uncertain_lend_live_at(rap, visualization_data, Some(line)) {
+        return hover_messages::event_dot_neutral_lend(rap.name(), &holder, rap.holds_value(), rap.is_ref(), false);
+    }
     let through_ref = rap.is_mutref().then(|| rap.points_to_copy());
     // `ref_itself`: a `&T` binding borrowed `&mut`, or a `&mut` reference
     // borrowed itself (`&mut r`, not `&mut *r`; #914): r is what's lent.
@@ -6964,8 +7012,12 @@ fn render_generic_arrow(
     }
     let title = match visualization_data.field_lenders.get(&external_event.get_id()) {
         Some(f) => hover_messages::arrow_field_lenders_title(external_event, from, to, &f.lenders, f.end),
-        None if matches!(external_event, ExternalEvent::MutableDie { .. } | ExternalEvent::StaticDie { .. }) && uncertain_loan(visualization_data, from, to) =>
-            hover_messages::arrow_neutral_return(&from.name(), &to.name()),
+        None if matches!(external_event, ExternalEvent::MutableDie { .. } | ExternalEvent::StaticDie { .. }) && neutral_loan(visualization_data, from, to) =>
+            hover_messages::arrow_neutral_return(&from.name(), &to.name(), crate::svg_generator::data::lender_holds_value(to)),
+        // A borrow into a holder not written as `&x` / `&mut x` (#1619).
+        None if matches!(external_event, ExternalEvent::MutableBorrow { via, .. } | ExternalEvent::StaticBorrow { via, .. }
+            if !via.as_ref().is_some_and(|v| v.direct)) && neutral_loan(visualization_data, to, from) =>
+            hover_messages::arrow_neutral_title(external_event, from, to),
         None => hover_messages::arrow_full_title(external_event, from, to),
     };
 
@@ -9344,6 +9396,10 @@ fn push_seg_if_renderable(
         }
         // `row`: the first source row the segment covers, for a `for`
         // loop around the conditional (#871).
+        // (Shared-lent to a holder under the holder rule, #1619.)
+        (false, _) if matches!(state, State::PartialPrivilege { .. })
+            && uncertain_lend_live_at(rap, visualization_data, Some(row)).is_some() =>
+            hover_messages::event_dot_neutral_lend(rap.name(), &uncertain_lend_live_at(rap, visualization_data, Some(row)).unwrap_or_default(), rap.holds_value(), rap.is_ref(), false),
         (false, _) => loop_iterator_title(&state, rap, visualization_data, row)
             .unwrap_or_else(|| timeline_segment_title(&state, rap, visualization_data, None)),
     };
