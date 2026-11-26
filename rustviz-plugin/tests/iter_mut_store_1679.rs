@@ -29,3 +29,36 @@ fn index_argument() {
     println!("{indexed}");
     println!("{}", slots[0]);
 }
+
+// The setter runs in one arm only: the other arm's read finds the
+// lender free (rustc accepts the `clear()` there).
+fn setter_in_one_arm(c: bool) {
+    let a = String::from("a");
+    let mut other_arm = String::from("t");
+    let mut arm_refs = vec![&a];
+    let mut arm_it = arm_refs.iter_mut();
+    if c {
+        set(arm_it.next().unwrap(), &other_arm);
+    } else {
+        println!("{other_arm}");
+        other_arm.clear();
+    }
+    println!("{}", arm_refs[0]);
+}
+
+fn keep<'a>(v: &mut Vec<&'a String>, s: &'a String) {
+    v.push(s);
+}
+
+fn keep_in_one_arm(c: bool) {
+    let a = String::from("a");
+    let mut kept_arm = String::from("t");
+    let mut kept = vec![&a];
+    if c {
+        keep(&mut kept, &kept_arm);
+    } else {
+        println!("{kept_arm}");
+        kept_arm.clear();
+    }
+    println!("{}", kept[0]);
+}

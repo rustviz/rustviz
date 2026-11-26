@@ -57,3 +57,38 @@ fn try_after(c: bool, r: Result<(), ()>) -> Result<(), ()> {
     drop(old);
     Ok(())
 }
+
+// Both ways out assign: the `break`'s value does it on its way out.
+fn break_value_assigns(c: bool) {
+    let operand_s;
+    'b: {
+        if c {
+            break 'b { operand_s = String::new(); };
+        }
+        operand_s = String::new();
+    }
+    drop(operand_s);
+}
+
+// The fallthrough never finishes: only the assigning `break` gets out.
+fn fallthrough_returns(c: bool) {
+    let return_s;
+    'b: {
+        if c {
+            return_s = String::new();
+            break 'b;
+        }
+        let _ = return;
+    }
+    drop(return_s);
+}
+
+// An immutable `let`: it can't be assigned again (E0384).
+fn immutable_deferred(c: bool) {
+    let immut_s: String;
+    'b: {
+        if c { break 'b; }
+        immut_s = String::from("x");
+        println!("{immut_s}");
+    }
+}

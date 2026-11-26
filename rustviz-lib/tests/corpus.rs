@@ -82,23 +82,22 @@ struct TooltipExpect {
 /// `=` when the forbidden text is a full tooltip that is also a prefix or
 /// suffix of a correct one (`len reads from s` vs `len reads from s
 /// (implicitly borrowed)`, `f, immutable` vs `self, immutable`).
-/// A leading `@N ` checks tooltips at source row N. A state segment
-/// covers all its rows except the ending row.
+/// A leading `@N ` checks tooltips at source row N: a mark on that row,
+/// or a segment (`line` or `branch_line`) that spans it, ending row
+/// excluded (`data-rv-line` / `data-rv-line-end`).
 fn forbidden_present(forbid: &str, actual: &[String], svg: &str) -> bool {
     if let Some((row, text)) = forbid.strip_prefix('@').and_then(|s| s.split_once(' ')) {
         let row = row.parse::<usize>().expect("tooltip pin row");
         return svg.match_indices(" data-tooltip-text=\"").any(|(i, _)| {
             let Some(start) = svg[..i].rfind('<') else { return false };
             let Some((tag, _)) = svg[start..].split_once('>') else { return false };
-            let bounds = attr(tag, "data-rv-id")
-                .and_then(|id| id.rsplit_once("@L"))
-                .and_then(|(_, id)| id.split_once(":line:"))
-                .and_then(|(rows, _)| rows.split_once('-'))
-                .and_then(|(lo, hi)| Some((lo.parse::<usize>().ok()?, hi.parse::<usize>().ok()?)));
-            let covers = bounds.map_or_else(
-                || attr(tag, "data-rv-line").and_then(|s| s.parse().ok()) == Some(row),
-                |(lo, hi)| lo <= row && row < hi,
-            );
+            let lo = attr(tag, "data-rv-line").and_then(|s| s.parse::<usize>().ok());
+            let hi = attr(tag, "data-rv-line-end").and_then(|s| s.parse::<usize>().ok());
+            let covers = match (lo, hi) {
+                (Some(lo), Some(hi)) => lo <= row && row < hi,
+                (Some(lo), None) => lo == row,
+                _ => false,
+            };
             covers && forbidden_present(text, &timeline_tooltips(tag), svg)
         });
     }
@@ -28088,17 +28087,22 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t's resource is no longer borrowed by println!, but is still immutably borrowed by refs",
             "new_value's resource is no longer borrowed by println!, but is still immutably borrowed by slots",
             "indexed's resource is no longer borrowed by println!, but is still immutably borrowed by slots",
+            "set reads from other_arm; set's signature lets it store this reference in arm_refs, so other_arm stays borrowed while arm_refs is in use",
         ],
         must_not_contain: &[
             "@9 =t's resource is no longer immutably borrowed",
             "@10 =t's resource is no longer immutably borrowed",
             "@10 =t is the owner of the resource",
             "@29 =indexed's resource is no longer immutably borrowed",
+            // The setter ran in the other arm (review of #1746).
+            "other_arm's resource is no longer borrowed by println!, but is still immutably borrowed by arm_refs",
+            "kept_arm's resource is no longer borrowed by println!, but is still immutably borrowed by kept",
         ],
     },
     TooltipExpect {
         name: "if_let_then_for_1681",
         must_contain: &[
+            "Return mutably borrowed resource from e to v",
             "Return mutably borrowed resource from o to v",
             "v is the owner of the resource",
         ],
@@ -28118,6 +28122,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "@4 =s2 is the owner of the resource",
             "@12 =moved is the owner of the resource",
             "@18 =moved_arg is the owner of the resource",
+            // The panic stops the evaluation before panic_s (review of #1746).
+            "Move from panic_s to pv",
         ],
     },
     TooltipExpect {
@@ -28131,6 +28137,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "later acquires ownership of a new resource. Its previous resource is dropped here only if later still holds it (Rust tracks this with a runtime drop flag).",
             "If the `?` here returns early, pending's resource is dropped if pending still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to pending here.",
             "s2 goes out of scope. Its resource is dropped here only if s2 still holds it (Rust tracks this with a runtime drop flag).",
+            "immut_s may be left without a value when this block ends, so immut_s can't be used after the block",
+            "return_s owns a resource here: the code after the block is reached only through a break, and every break comes after return_s gets a new resource",
         ],
         must_not_contain: &[
             "@9 =s2 is the owner of the resource",
@@ -28139,6 +28147,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "@33 =either is the owner of the resource",
             "later acquires ownership of a new resource; its previous resource is dropped",
             "the function returns and pending's resource is dropped.",
+            // Every way out assigns them (review of #1746).
+            "operand_s may be left without a value",
+            "return_s may be left without a value",
+            // An immutable binding can't be assigned again (E0384).
+            "immut_s can't be used until it's assigned again",
         ],
     },
 ];

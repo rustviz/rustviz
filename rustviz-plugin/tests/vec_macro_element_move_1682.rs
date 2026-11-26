@@ -21,3 +21,12 @@ fn argument() {
 fn consume(v: Vec<String>) {
     println!("{}", v.len());
 }
+
+// Evaluation stops at the panic: panic_s is never moved into the Vec.
+fn after_panic(c: bool) {
+    let panic_s = String::from("s");
+    if c {
+        let pv = vec![panic!("stop"), panic_s];
+        println!("{}", pv.len());
+    }
+}

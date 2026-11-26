@@ -1619,7 +1619,7 @@ fn render_branch_dots(
                     || matches!(next, Some(Event::OwnerDropAtReassign { maybe_init: Some(InitBy::EarlierIteration | InitBy::OuterLoop { .. } | InitBy::DropFlag), .. }))
                     && !after.iter()
                         .find(|(_, e)| matches!(e, Event::LoopExitKept { .. } | Event::LoopMaybeInit { .. } | Event::LoopExitMove { .. }))
-                        .is_some_and(|(_, e)| matches!(e, Event::LoopExitKept { reassigned: true }));
+                        .is_some_and(|(_, e)| matches!(e, Event::LoopExitKept { reassigned: true, .. }));
                 hover_messages::event_dot_branch_merge_moved_then_reassigned(&is.real_name(), by_cond, in_loop)
             } else if let Some(Some(every_path)) = matches!(next, Some(e @ Event::Branch { .. }) if assigns_in_branch(e))
                 .then(|| reassigned_after(&after)) {
@@ -2630,9 +2630,9 @@ fn render_dot(
                     data.title = hover_messages::event_dot_loop_maybe_init(
                         &name, rap.drops_nothing(), rap.is_mut(), reassigned, *before_loop);
                 }
-                Event::LoopExitKept { reassigned } => {
+                Event::LoopExitKept { reassigned, block } => {
                     let rap = &visualization_data.timelines[hash].resource_access_point;
-                    data.title = hover_messages::event_dot_loop_exit_kept(&name, *reassigned, rap.holds_value());
+                    data.title = hover_messages::event_dot_loop_exit_kept(&name, *reassigned, rap.holds_value(), *block);
                 }
                 _ => {
                     // Closure Bind-Acquire: aggregate every capture
@@ -3148,7 +3148,7 @@ fn reassigned_after(after: &[&(usize, Event)]) -> Option<bool> {
                 // every `break` out of it comes after it.
                 let kept = after[i..].iter()
                     .find(|(_, e)| matches!(e, Event::LoopExitKept { .. } | Event::LoopMaybeInit { .. } | Event::LoopExitMove { .. }))
-                    .is_some_and(|(_, e)| matches!(e, Event::LoopExitKept { reassigned: true }));
+                    .is_some_and(|(_, e)| matches!(e, Event::LoopExitKept { reassigned: true, .. }));
                 return Some(kept && !in_branch);
             }
             // In a loop that never comes back round and may end
@@ -3448,7 +3448,7 @@ fn chain_new_value_lasts<'a>(history: impl IntoIterator<Item = &'a (usize, Event
         for (_, e) in events {
             match e {
                 Event::LoopExitMove { at: MaybeMovedAt::ChainFail { how, .. }, .. } => lasts = how.may_hold_new(),
-                Event::LoopExitMove { at: MaybeMovedAt::LabeledBlockAssignment, .. } => lasts = true,
+                Event::LoopExitMove { at: MaybeMovedAt::LabeledBlockAssignment { .. }, .. } => lasts = true,
                 e if gives_new_value(e) => lasts = false,
                 Event::Branch { branch_history, .. } => {
                     lasts = branch_history.iter().any(|b| along(lasts, &b.e_data));

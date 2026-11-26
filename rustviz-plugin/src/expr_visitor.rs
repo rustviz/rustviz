@@ -12783,6 +12783,12 @@ pub fn print_out_of_scope(&mut self){
         lender: sb.lender.clone(), hash_of: &hash_of, derived: &derived, seen: vec![sb.holder.clone()], holders: Vec::new(), hops: Vec::new(),
       };
       walk.follow(list, &sb.holder, hash, sb.at, sb.until, false);
+      // A call in one arm of an `if` / `match` stores nothing on the
+      // other arms' paths: a read there doesn't find the lender still
+      // borrowed (#1679 review).
+      for h in walk.holders.iter_mut() {
+        started_arm_gaps(self.preprocessed_events, sb.at, &mut h.gaps);
+      }
       // The call's borrow end is the event after it (see
       // `stored_borrow`).
       ends.push((sb.id + 1, walk.holders.clone()));
@@ -13922,6 +13928,29 @@ fn dead_arm_gaps(list: &[(usize, ExternalEvent)], holder: &str, from: usize, to:
   }
 }
 
+/// The lines of the other arms of each `if` / `match` in `list` that
+/// line `from` is in one arm of: a loan taken there isn't held on the
+/// other arms' paths. Not inside a loop, where a later pass through an
+/// other arm can still find the loan of an earlier pass.
+fn started_arm_gaps(list: &[(usize, ExternalEvent)], from: usize, out: &mut Vec<(usize, usize)>) {
+  for (_, ev) in list {
+    let ExternalEvent::Branch { branches, branch_type, .. } = ev else { continue };
+    if matches!(branch_type, BranchType::Loop(..)) {
+      continue;
+    }
+    let ranges: Vec<(usize, usize)> = (0..branches.len()).map(|a| branch_type.get_start_end(a)).collect();
+    let Some(j) = ranges.iter().position(|&(a, b)| a <= from && from <= b) else { continue };
+    for (i, b) in branches.iter().enumerate() {
+      let (start, end) = ranges[i];
+      if i == j {
+        started_arm_gaps(&b.e_data, from, out);
+      } else if !(start <= from && from <= end) {
+        out.push((start, end));
+      }
+    }
+  }
+}
+
 /// The lines of the arms of an `if` / `match` in `list` that come after
 /// the end of `holder`'s loan of one of `lenders` drawn in that arm
 /// (#796): `let u = &h; if c { println!("{}", h); return; }
@@ -14883,7 +14912,7 @@ fn ownership_after(events: &[(usize, ExternalEvent)], rap_name: &str, start: Opt
       // The start of an `else` branch that a let-chain condition may
       // have moved it before (#281). It held the value before the
       // condition, which moved it.
-      ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::ChainFail { .. } | MaybeMovedAt::LabeledBlockAssignment, .. }
+      ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::ChainFail { .. } | MaybeMovedAt::LabeledBlockAssignment { .. }, .. }
         if ro.name() == rap_name => {
         return Some(Ownership::Maybe);
       }

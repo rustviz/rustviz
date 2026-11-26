@@ -4142,7 +4142,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // may have ended before giving it one (#786, #1001).
           ExternalEvent::LoopExitKept { ro, .. } if *ro.hash() == hash => Own::Yes,
           ExternalEvent::LoopMaybeInit { ro, .. } if *ro.hash() == hash && own == Own::Yes => Own::Maybe,
-          ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::LabeledBlockAssignment, .. }
+          ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::LabeledBlockAssignment { .. }, .. }
             if *ro.hash() == hash => Own::Maybe,
           // A branch that diverges doesn't reach this point.
           ExternalEvent::Branch { branches, .. } => {
@@ -4646,7 +4646,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
     }
     for (ro, reassigned) in kept {
-      self.add_external_event(line, ExternalEvent::LoopExitKept { ro, reassigned, id: *self.unique_id });
+      self.add_external_event(line, ExternalEvent::LoopExitKept { ro, reassigned, block: false, id: *self.unique_id });
       *self.unique_id += 1;
     }
     for (ro, before_loop, nested) in maybe_init {
@@ -4827,6 +4827,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // A break can also skip an assignment (#1685). Start each way
     // out with what the binding actually held on entry. A skipped
     // assignment to an already initialized binding doesn't empty it.
+    // (Not when a `break`'s value assigns, `break 'b { s = …; }`: its
+    // path was taken before that value. Say nothing then.)
+    if breaks_with_assigning_value(&self.tcx, expr) {
+      return;
+    }
     let mut assigned = Vec::new();
     assigned_to(events, &mut assigned);
     for (path, _, _) in &frame.paths {
@@ -4852,6 +4857,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }).chain(fallthrough);
       let first = exits.next().expect("the labeled block has a break");
       let joined = if exits.all(|own| own == first) { first } else { PathOwn::Maybe };
+      // The way to its end returns or panics (`let _ = return;`), so
+      // only the `break`s reach past it, each with a value in it, though
+      // the timeline's last state is that way's (#1685 review).
+      if through.is_none() && joined == PathOwn::Yes && self.ownership_here(*ro.hash(), true) != OwnHere::Yes {
+        #[expect(clippy::disallowed_methods, reason = "only updates membership in the uninitialized and maybe-initialized sets")]
+        let deferred: Vec<HirId> = self.uninit_locals.keys().copied()
+          .filter(|&id| binding_name(&self.tcx, id) == root)
+          .collect();
+        for id in deferred {
+          self.uninit_locals.remove(&id);
+        }
+        let reassigned = frame.paths.iter().all(|(path, hide, _)| path_own(path, &ro, hide, PathOwn::No) == PathOwn::Yes);
+        self.add_external_event(line, ExternalEvent::LoopExitKept {
+          ro, reassigned, block: true, id: *self.unique_id,
+        });
+        *self.unique_id += 1;
+        continue;
+      }
       if joined == PathOwn::Maybe {
         // A deferred declaration can look unassigned after an `if`
         // whose assigning arm breaks out of this block. That arm
@@ -4866,7 +4889,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           self.maybe_init_locals.insert(id);
         }
         self.add_external_event(line, ExternalEvent::LoopExitMove {
-          ro, definite: false, at: MaybeMovedAt::LabeledBlockAssignment, id: *self.unique_id,
+          at: MaybeMovedAt::LabeledBlockAssignment { mutable: ro.is_mut() }, ro, definite: false, id: *self.unique_id,
         });
         *self.unique_id += 1;
       }
@@ -16364,8 +16387,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// statement of it diverges (`if c { break k; } else { continue; }`).
   fn block_diverges(&self, b: &'tcx rustc_hir::Block<'tcx>) -> bool {
     b.expr.is_some_and(|t| self.expr_diverges(t))
-      || b.stmts.iter().any(|st| matches!(st.kind,
-        StmtKind::Expr(x) | StmtKind::Semi(x) if self.expr_diverges(x)))
+      || b.stmts.iter().any(|st| match st.kind {
+        StmtKind::Expr(x) | StmtKind::Semi(x) => self.expr_diverges(x),
+        // `let _ = return;` never finishes either (#1685 review).
+        StmtKind::Let(l) => l.init.is_some_and(|i| self.expr_diverges(i)),
+        _ => false,
+      })
   }
 
   /// The values several `break`s carry out of `loop_expr` (with each
@@ -16565,6 +16592,26 @@ fn moved_on_path(events: &[(usize, ExternalEvent)], hide: &[std::ops::Range<usiz
     .collect()
 }
 
+/// Whether a `break` out of the labeled block `block` carries a value
+/// that assigns a variable (`break 'b { s = String::new(); }`).
+fn breaks_with_assigning_value<'tcx>(tcx: &rustc_middle::ty::TyCtxt<'tcx>, block: &'tcx Expr<'tcx>) -> bool {
+  struct Find<'a, 'tcx> { tcx: &'a rustc_middle::ty::TyCtxt<'tcx>, id: HirId, found: bool }
+  impl<'a, 'tcx> Visitor<'tcx> for Find<'a, 'tcx> {
+    fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+      if let ExprKind::Break(dest, Some(value)) = e.kind {
+        if dest.target_id == Ok(self.id) && !assigned_names(self.tcx, value).is_empty() {
+          self.found = true;
+        }
+      }
+      intravisit::walk_expr(self, e);
+    }
+  }
+  let ExprKind::Block(b, Some(_)) = block.kind else { return false };
+  let mut f = Find { tcx, id: b.hir_id, found: false };
+  f.visit_expr(block);
+  f.found
+}
+
 /// The owned bindings that receive a value along a path, in event order.
 fn assigned_to(events: &[(usize, ExternalEvent)], out: &mut Vec<ResourceAccessPoint>) {
   for (_, event) in events {
@@ -16606,7 +16653,7 @@ fn path_own(events: &[(usize, ExternalEvent)], rap: &ResourceAccessPoint, hide: 
       // move on the way to its end (#1286).
       ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::LabeledBlock { skipped: true, .. }, .. }
         if ro == rap && own == PathOwn::No => PathOwn::Maybe,
-      ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::LabeledBlockAssignment, .. }
+      ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::LabeledBlockAssignment { .. }, .. }
         if ro == rap => PathOwn::Maybe,
       // An inner loop's `break` after a move, or a let-chain's
       // condition that moved it before failing.

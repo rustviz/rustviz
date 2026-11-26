@@ -2329,7 +2329,20 @@ pub fn vec_macro_elems<'tcx>(expr: &'tcx Expr<'tcx>) -> Option<&'tcx [Expr<'tcx>
       _ => None,
     }
   }
-  find(expr, ctxt)
+  // An element that never produces a value (`vec![panic!(..), s]`)
+  // stops the evaluation there: the elements after it are never moved
+  // into the Vec. Draw none of them (#1682 review).
+  find(expr, ctxt).filter(|elems| !elems.iter().any(never_produces))
+}
+
+/// A `vec!` element that can't produce a value: `return` / `break` /
+/// `continue`, or a `panic!`-like macro.
+fn never_produces(e: &Expr<'_>) -> bool {
+  if matches!(e.kind, ExprKind::Ret(..) | ExprKind::Break(..) | ExprKind::Continue(..)) {
+    return true;
+  }
+  e.span.macro_backtrace().any(|d| matches!(d.kind, rustc_span::hygiene::ExpnKind::Macro(_, name)
+    if matches!(name.as_str(), "panic" | "unreachable" | "todo" | "unimplemented")))
 }
 
 /// The typing environment for judging types that occur in the body of

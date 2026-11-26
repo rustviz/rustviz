@@ -4914,10 +4914,14 @@ pub fn event_dot_block_break_skips_move(my_name: &String) -> String {
     )
 }
 
-pub fn event_dot_block_maybe_assigned(my_name: &String) -> String {
+// The end of a labeled block a `break` may leave before an assignment
+// to s (#1685). `mutable`: s can be assigned again (an immutable
+// deferred `let s;` can't be: a second assignment is E0384).
+pub fn event_dot_block_maybe_assigned(my_name: &String, mutable: bool) -> String {
     format!(
-        "{0} may be left without a value when this block ends, so {0} can't be used until it's assigned again",
-        styled_name_html(my_name)
+        "{0} may be left without a value when this block ends, so {0} can't be used {1}",
+        styled_name_html(my_name),
+        if mutable { "until it's assigned again" } else { "after the block" }
     )
 }
 
@@ -4928,19 +4932,22 @@ pub fn event_dot_block_maybe_assigned(my_name: &String) -> String {
 // loop. `reassigned`: every `break` comes after the body gives it a
 // new value. `value`: a value with nothing to drop is a "value", not
 // a "resource" (#484).
-pub fn event_dot_loop_exit_kept(my_name: &String, reassigned: bool, value: bool) -> String {
+// `block`: the end of a labeled block whose way to its end returns or
+// panics, so only a `break` reaches the code after it (#1685).
+pub fn event_dot_loop_exit_kept(my_name: &String, reassigned: bool, value: bool, block: bool) -> String {
     let name = styled_name_html(my_name);
     let brk = styled_name_html(&"break".to_owned());
     let what = if value { "value" } else { "resource" };
+    let construct = if block { "block" } else { "loop" };
     if reassigned {
         format!(
-            "{0} owns a {2} here: the code after the loop is reached only through a {1}, and every {1} comes after {0} gets a new {2}",
-            name, brk, what
+            "{0} owns a {2} here: the code after the {3} is reached only through a {1}, and every {1} comes after {0} gets a new {2}",
+            name, brk, what, construct
         )
     } else {
         format!(
-            "{0} owns a {2} here: the code after the loop is reached only through a {1}, and {0} owns one at every {1}",
-            name, brk, what
+            "{0} owns a {2} here: the code after the {3} is reached only through a {1}, and {0} owns one at every {1}",
+            name, brk, what, construct
         )
     }
 }
