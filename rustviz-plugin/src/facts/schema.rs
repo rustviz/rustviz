@@ -190,6 +190,10 @@ pub struct Ev {
     /// `BorrowEnd` comes after the location's other events.
     #[serde(skip)]
     pub order: (usize, usize, u8),
+    /// For a copy of a shared drop on one early exit's row: that exit's own
+    /// location (its order), so copies on two exits stay two events.
+    #[serde(skip)]
+    pub site: Option<(usize, usize, u8)>,
 }
 
 #[derive(Serialize, Clone, PartialEq, Eq)]

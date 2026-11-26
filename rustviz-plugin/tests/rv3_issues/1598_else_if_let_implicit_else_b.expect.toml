@@ -3,8 +3,7 @@ cluster = "C08"
 title = "Two local references (the issue's second shape): r2's loan ends per path, one of them in the implicit else; r still borrows s there"
 fn = "run"
 places = ["o"]
-xfail = "P0"
-note = "Gap (spike): the empty `a` arm's end is dumped as 5 -> 6, the else-if line, which that path never runs (it goes to the rejoin `}` on row 8)."
+note = "Passes since rv3-p0b: the next row of an end's edge skips the unit value of an empty arm when its block starts on the branch's own row (`if a {` with its `}` on the `} else if let` row) and skips plain jumps (a `goto` carries the whole branch's span), so the empty `a` arm's end goes to the rejoin `}` on row 8, not the else-if row 6 that path never runs."
 beyond_facts = "P3: r2's end in the implicit else gives nothing back (r still borrows s); leg/dot placement is renderer-level"
 
 # r2 is read only in the `else if let` arm: one end per path: the `a` arm

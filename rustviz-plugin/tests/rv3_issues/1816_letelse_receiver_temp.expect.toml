@@ -1,9 +1,8 @@
 issue = 1816
 cluster = "C99"
 title = "Failing let-else: the receiver temporary `Source` is dropped before the else block runs, not after the `return`"
-xfail = "P0"
 fn = "f"
-note = "Row 8 (`};`) is not pinned absent: the success path (Some) does drop the temporary there (MIR: both drops are spanned on the `;` of row 8, checked with --emit=mir -Zmir-include-spans); only the failing path, which `get` always takes at run time, drops it before the else block. The issue's one-line let-else is split over several lines so rows can tell the initializer, the else block and the closing `};` apart. Spike gap: no temporary drop on the initializer row (row 5); the dump puts a TempDrop on row 8 (the closing `};`)."
+note = "Row 8 (`};`) is not pinned absent: the success path (Some) does drop the temporary there (MIR: both drops are spanned on the `;` of row 8, checked with --emit=mir -Zmir-include-spans); only the failing path, which `get` always takes at run time, drops it before the else block. The issue's one-line let-else is split over several lines so rows can tell the initializer, the else block and the closing `};` apart. Passes since rv3-p0b: a temporary's drop or storage end spanned on a later row than the code it runs before (here the failing path's drop, spanned at `};`, before the else block's rows 6-7) is on the row of the code that ran just before it (row 5), when every real way in (not borrowck's imaginary edges) agrees; the success path's drop stays on row 8."
 beyond_facts = "P0/P3: the drop is drawn at the closing `};` row, past the `return`"
 
 [[event]]

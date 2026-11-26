@@ -134,6 +134,13 @@ impl<'tcx> Names<'tcx> {
         Some(name_projections(root, &mut ty, &place.projection[skip..]))
     }
 
+    /// A place in a MIR temporary, written from the temporary's source
+    /// text: `(make_o().opt as Some).0`.
+    pub fn name_in_temp(&self, body: &Body<'tcx>, place: Place<'tcx>, root: String) -> String {
+        let mut ty = body.local_decls[place.local].ty;
+        name_projections(root, &mut ty, &place.projection[..])
+    }
+
     /// The reference a place is reached through, if it is behind one: the
     /// prefix before the place's last dereference of a reference (`r` for
     /// `*r`, `h.r` for `*h.r`, `r` for `r.f` with `r: &mut S`). A borrow

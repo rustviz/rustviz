@@ -101,6 +101,13 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
     fn raw_row(&self, l: Location) -> usize {
         let sp = self.span_of(l);
         let data = &self.body.basic_blocks[l.block];
+        // A `for` loop's own drops on its way out (its hidden iterator, its
+        // last `next()` value): the desugaring spans them at the loop's `}`,
+        // whose call site is the whole loop.
+        let drop = l.statement_index == data.statements.len() && matches!(data.terminator().kind, TerminatorKind::Drop { .. });
+        if drop && sp.desugaring_kind() == Some(rustc_span::DesugaringKind::ForLoop) {
+            return self.tcx.sess.source_map().lookup_char_pos(sp.hi()).line;
+        }
         // The drop of the old value before `x = <rhs>;` runs once the
         // right-hand side is done: on the assignment's row.
         if l.statement_index == data.statements.len() {
@@ -120,6 +127,17 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
             if let hir::Node::Expr(e @ hir::Expr { kind: hir::ExprKind::Assign(..) | hir::ExprKind::AssignOp(..), .. }) = self.tcx.hir_node(hir_id) {
                 if !e.span.from_expansion() {
                     return self.line_hi(e.span).max(self.line_lo(sp));
+                }
+            }
+        }
+        // A closure's captures are borrowed where its expression starts (its
+        // `|..|` head): its body's rows don't run here. (Its value is made at
+        // the expression's end, like any multi-row assignment.)
+        if let Some(StatementKind::Assign(asg)) = data.statements.get(l.statement_index).map(|s| &s.kind) {
+            if matches!(asg.1, rustc_middle::mir::Rvalue::Ref(..)) {
+                let hir_id = self.body.location_to_hir_id(l);
+                if let hir::Node::Expr(hir::Expr { kind: hir::ExprKind::Closure(..), .. }) = self.tcx.hir_node(hir_id) {
+                    return self.line_lo(sp);
                 }
             }
         }
@@ -163,6 +181,30 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
         }
     }
 
+    /// A location that does nothing on any row: the unit value of a block
+    /// stored in a MIR temporary (`_5 = const ()` of an empty `{ }` arm,
+    /// spanned over the arm's braces). The path's next row is past it.
+    fn is_silent(&self, l: Location) -> bool {
+        let body = self.body;
+        match body.basic_blocks[l.block].statements.get(l.statement_index).map(|s| &s.kind) {
+            Some(StatementKind::Assign(asg)) => {
+                let (lhs, rv) = &**asg;
+                lhs.projection.is_empty()
+                    && !body.local_decls[lhs.local].is_user_variable()
+                    && matches!(rv, rustc_middle::mir::Rvalue::Use(rustc_middle::mir::Operand::Constant(c)) if c.ty().is_unit())
+            }
+            _ => false,
+        }
+    }
+
+    /// A plain jump (`goto`; MIR gives it the span of the whole branch or
+    /// loop it leaves, or a row its floor pushed it to): no row of its own.
+    fn is_jump(&self, l: Location) -> bool {
+        let data = &self.body.basic_blocks[l.block];
+        l.statement_index == data.statements.len()
+            && matches!(data.terminator().kind, TerminatorKind::Goto { .. } | TerminatorKind::FalseEdge { .. } | TerminatorKind::FalseUnwind { .. })
+    }
+
     /// The next row of the path from `start` (a successor of a location
     /// on row `from`): the first row other than `from` its code reaches,
     /// past quiet locations (temporaries' drops, `StorageDead`s); `from`
@@ -185,7 +227,14 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
                 continue;
             }
             let Some(&r) = rows.row.get(&l) else { continue };
-            if r != from && !(skip_quiet && self.is_quiet(l)) {
+            // An empty arm's unit value is where its block starts: the arm's
+            // own row (`None => {}`), or the branch's row itself (`if a {`
+            // with its `}` on the `} else if b {` row: the path goes on to
+            // where the branch rejoins).
+            let silent = self.is_silent(l);
+            let r = if silent { self.line_lo(self.span_of(l)) } else { r };
+            let counts = if silent { r > from } else { r != from && !self.is_jump(l) && !(skip_quiet && self.is_quiet(l)) };
+            if counts {
                 best = Some(best.map_or(r, |b: usize| if (r > from) == (b > from) { b.min(r) } else if r > from { r } else { b }));
                 continue;
             }
@@ -212,7 +261,8 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
     fn exit_kind(&self, l: Location) -> Option<bool> {
         let sp = self.body.source_info(l).span;
         // `?` desugars to `match Try::branch(x) { .., Break(r) => return
-        // from_residual(r) }`: only its `from_residual` arm exits (the
+        // from_residual(r) }` (in a `try` block, `break 'try
+        // residual_into_try_type(r)`): only that arm exits (the
         // `branch` call runs on both paths), leaving the function when its
         // value goes to the return place, or a `try` block otherwise.
         if sp.desugaring_kind() == Some(rustc_span::DesugaringKind::QuestionMark) {
@@ -224,7 +274,10 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
                 },
                 None => match &data.terminator().kind {
                     TerminatorKind::Call { func, destination, .. }
-                        if func.const_fn_def().is_some_and(|(d, _)| self.tcx.item_name(d).as_str() == "from_residual") =>
+                        if func.const_fn_def().is_some_and(|(d, _)| {
+                            // (`residual_into_try_type`: a `?` in a `try` block.)
+                            matches!(self.tcx.item_name(d).as_str(), "from_residual" | "residual_into_try_type")
+                        }) =>
                     {
                         Some(destination.local == rustc_middle::mir::RETURN_PLACE)
                     }
@@ -322,6 +375,108 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
             }
             floor_out.insert(bb, floor);
         }
+        // Rule 1 from below: a temporary's drop or storage end whose span is
+        // a later row than the code it runs before (a failing `let ... else`
+        // drops its scrutinee's temporaries, spanned at `};`, before the
+        // `else` block runs) happens on the row of the code that ran just
+        // before it, when every real way in agrees on that row.
+        let temp_quiet = |l: Location| {
+            let data = &body.basic_blocks[l.block];
+            let temp = |local: rustc_middle::mir::Local| !body.local_decls[local].is_user_variable() && local.index() > body.arg_count;
+            match data.statements.get(l.statement_index) {
+                Some(st) => matches!(st.kind, StatementKind::StorageDead(x) | StatementKind::StorageLive(x) if temp(x)),
+                None => matches!(&data.terminator().kind, TerminatorKind::Drop { place, .. } if place.projection.is_empty() && temp(place.local)),
+            }
+        };
+        let real_preds = |bb: BasicBlock| -> Vec<BasicBlock> {
+            preds[bb]
+                .iter()
+                .copied()
+                .filter(|p| {
+                    !body.basic_blocks[*p].is_cleanup
+                        && !matches!(&body.basic_blocks[*p].terminator().kind,
+                            TerminatorKind::FalseEdge { imaginary_target, real_target } if *imaginary_target == bb && *real_target != bb)
+                })
+                .collect()
+        };
+        // Locations that do nothing on a row: storage, unit values, jumps
+        // (a `goto` carries the span of the whole branch or loop).
+        let passes = |l: Location| {
+            temp_quiet(l)
+                || self.is_silent(l)
+                || self.is_quiet(l)
+                || self.is_jump(l)
+        };
+        let mut lowered: BTreeMap<Location, usize> = BTreeMap::new();
+        for &bb in &rpo_v {
+            if body.basic_blocks[bb].is_cleanup {
+                continue;
+            }
+            for l in self.locations(bb) {
+                if !temp_quiet(l) {
+                    continue;
+                }
+                // The next rows this location's code goes on to.
+                // (Forward edges only: a loop's back edge goes up by design.)
+                let mut next: Option<usize> = None;
+                let mut back = false;
+                let mut seen: BTreeSet<Location> = BTreeSet::new();
+                let mut work: Vec<(Location, Location)> = self.succs(l).into_iter().map(|s| (l, s)).collect();
+                while let Some((from, s)) = work.pop() {
+                    if s.block != from.block && rpo.get(&s.block).is_none_or(|o| *o <= rpo[&from.block]) {
+                        back = true;
+                        continue;
+                    }
+                    if !seen.insert(s) || seen.len() > 1024 {
+                        continue;
+                    }
+                    if passes(s) {
+                        work.extend(self.succs(s).into_iter().map(|t| (s, t)));
+                        continue;
+                    }
+                    if let Some(r) = row.get(&s) {
+                        next = Some(next.map_or(*r, |n| n.max(*r)));
+                    }
+                }
+                let Some(next) = next else { continue };
+                if back || next >= row[&l] {
+                    continue;
+                }
+                // The row of the code before it, on every real way in.
+                let mut before: BTreeSet<usize> = BTreeSet::new();
+                let mut seen: BTreeSet<Location> = BTreeSet::new();
+                let mut work = vec![l];
+                while let Some(x) = work.pop() {
+                    if !seen.insert(x) || seen.len() > 1024 {
+                        continue;
+                    }
+                    let prev: Vec<Location> = if x.statement_index > 0 {
+                        vec![Location { block: x.block, statement_index: x.statement_index - 1 }]
+                    } else {
+                        real_preds(x.block).into_iter().map(|p| Location { block: p, statement_index: body.basic_blocks[p].statements.len() }).collect()
+                    };
+                    for p in prev {
+                        if passes(p) {
+                            match lowered.get(&p) {
+                                Some(r) => {
+                                    before.insert(*r);
+                                }
+                                None => work.push(p),
+                            }
+                        } else if let Some(r) = row.get(&p) {
+                            before.insert(*r);
+                        }
+                    }
+                }
+                if before.len() == 1 {
+                    let b = *before.iter().next().unwrap();
+                    if b <= next && b < row[&l] {
+                        lowered.insert(l, b);
+                    }
+                }
+            }
+        }
+        row.extend(lowered);
         let col: BTreeMap<Location, usize> = row.keys().map(|l| (*l, self.col_lo(self.span_of(*l)))).collect();
 
         // Rule 4: which exit rows reach each scope-ending location. MIR
@@ -445,6 +600,14 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
                 .collect();
             if succ_rows.is_empty() || succ_rows.iter().any(|x| *x != r) {
                 row_exits_all.entry(r).or_default().push((loc, succ_rows));
+            }
+        }
+        // A path that leaves the function on this row (`let ... else {
+        // return; };` on one line) has no next row: the state after the row
+        // is the continuing paths' (Q3), when there are any.
+        for ex in row_exits_all.values_mut() {
+            if ex.iter().any(|(l, _)| !leaves_fn.contains(l)) {
+                ex.retain(|(l, _)| !leaves_fn.contains(l));
             }
         }
         let mut exits: BTreeMap<usize, Vec<Location>> = BTreeMap::new();
