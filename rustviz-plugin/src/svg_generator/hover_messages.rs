@@ -3646,6 +3646,10 @@ pub fn state_lent_with_parent(my_name: &str, parent: &str, by: Option<&str>, mut
     }
 }
 
+pub fn state_maybe_shared(name: &str, holds_value: bool) -> String {
+    format!("{}'s {} may still be shared. A shared borrow allows reading while it is live.", styled_name_html(name), held(holds_value))
+}
+
 pub fn state_partial_privilege(my_name: &String, holds_value: bool) -> String {
     // update styling
     let my_name_fmt = styled_name_html(my_name);

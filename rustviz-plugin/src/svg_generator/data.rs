@@ -7,7 +7,7 @@
 //! we should use when rendering it's respective timeline in the frontend).
 
 
-use std::collections::{HashMap, HashSet, BTreeMap};
+use std::collections::{BTreeSet, HashMap, HashSet, BTreeMap};
 use std::vec::Vec;
 use std::fmt::{Formatter, Result, Display};
 use std::hash::{Hash, Hasher};
@@ -4707,6 +4707,9 @@ pub struct VisualizationData {
     /// (#1386). Other moves out of an unbound temporary leave it
     /// holding the rest.
     pub temp_emptying_moves: HashSet<usize>,
+    /// A competing shared loan reached a join on only some incoming
+    /// paths. The generic shared segments of this lender need a hedge.
+    pub maybe_shared_lenders: BTreeSet<u64>,
 
     /// Arrows of a struct write that share a track (#624): event id ->
     /// the id of its track's first arrow. Filled in by `render_svg` (see

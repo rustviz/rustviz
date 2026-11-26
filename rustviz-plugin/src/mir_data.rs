@@ -8,11 +8,11 @@
 //! multiple MIR instructions.
 
 use crate::{expr_visitor::*, expr_visitor_utils::{binding_names, span_end_line, span_to_line, written_name}};
-use crate::svg_generator::data::{ExternalEvent, ResourceAccessPoint, ScopeEndHolds};
+use crate::svg_generator::data::{ExternalEvent, ResourceAccessPoint, ResourceTy, ScopeEndHolds};
 use log::info;
 use rustc_middle::mir::{BorrowKind, Location, Local, Operand, Place, PlaceElem, ProjectionElem, Rvalue, StatementKind, TerminatorKind, VarDebugInfoContents};
 use rustc_middle::mir::visit::{PlaceContext, Visitor};
-use rustc_middle::ty::{GenericArgKind, RegionVid, Ty, TyKind};
+use rustc_middle::ty::{GenericArgKind, RegionVid, Ty, TyCtxt, TyKind};
 use rustc_hir::intravisit;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use rustc_utils::mir::{body::BodyExt, place::PlaceExt};
@@ -85,6 +85,180 @@ pub struct MIRBorrowData {
 
 }
 
+
+/// MIR points for comparing loans of the same local. Include the issuing
+/// statement even for a reference that is never used. `after` contains
+/// the first points outside each loan on normal control-flow edges.
+#[derive(Default)]
+pub(crate) struct LoanPaths {
+    held: BTreeMap<String, BTreeMap<String, BTreeSet<usize>>>,
+    loans: Vec<LoanRange>,
+}
+
+struct LoanRange {
+    root: Local,
+    whole: bool,
+    definite: bool,
+    mutable: bool,
+    issued: Location,
+    holders: BTreeSet<String>,
+    live: BTreeSet<Location>,
+    after: BTreeSet<Location>,
+}
+
+enum ArmLoanEnd {
+    Entry,
+    LastUse(Span),
+}
+
+impl LoanPaths {
+    /// Decline ambiguous origins (including reassignments) and projections.
+    pub fn loan(&self, holder: &str, lender: &str) -> Option<usize> {
+        let indices = self.held.get(holder)?.get(lender)?;
+        let &loan = indices.first()?;
+        (indices.len() == 1 && self.loans[loan].whole).then_some(loan)
+    }
+
+    pub fn isolated(&self, index: usize) -> bool {
+        let loan = &self.loans[index];
+        loan.mutable && loan.holders.len() == 1 && self.loans.iter().all(|other|
+            other.issued == loan.issued || other.root != loan.root || other.live.is_disjoint(&loan.live))
+    }
+
+    pub fn outlasts(&self, other: usize, ours: usize) -> bool {
+        let (a, b) = (&self.loans[ours], &self.loans[other]);
+        a.root == b.root && a.issued != b.issued && !a.after.is_empty()
+            && a.live.is_subset(&b.live) && a.after.is_subset(&b.live)
+    }
+
+    pub fn definite(&self, index: usize) -> bool {
+        self.loans[index].definite
+    }
+
+    /// A borrower-only end is normally omitted inside nested or empty
+    /// arms: HIR can miss a later use through a closure or an escaping
+    /// copy. Draw the dot only if the borrow checker confirms this end
+    /// on the actual successor of the switch (#1581).
+    pub fn confirm_arm_ends<'tcx>(&self, bwf: &BodyWithBorrowckFacts<'tcx>, tcx: TyCtxt<'tcx>,
+        scopes: &HashMap<usize, ExitScope>, events: &mut Vec<(usize, ExternalEvent)>,
+        line_map: &mut BTreeMap<usize, Vec<ExternalEvent>>, next_id: &mut usize) {
+        let mut k = 0;
+        while k < events.len() {
+            let (_, rest) = events.split_at_mut(k);
+            let (head, tail) = rest.split_at_mut(1);
+            k += 1;
+            let ExternalEvent::Branch { id, branches, branch_type, merge_point, live_vars, .. } = &mut head[0].1 else { continue };
+            for arm in branches.iter_mut() {
+                self.confirm_arm_ends(bwf, tcx, scopes, &mut arm.e_data, &mut arm.line_map, next_id);
+            }
+            let Some((condition, arms)) = scopes.get(id).and_then(|s| s.boolean_arms) else { continue };
+            for (i, arm) in branches.iter_mut().enumerate() {
+                for (line, event) in &mut arm.e_data {
+                    let ExternalEvent::RefDie { from: ResourceTy::Value(r), to: ResourceTy::Value(lender), id, .. } = event else { continue };
+                    // With a re-pointable binding the end could belong to an
+                    // older value in this column.
+                    if !r.is_ref() || r.is_mut() || lender.is_ref() { continue; }
+                    let Some(loan) = self.loan(r.name(), lender.name()) else { continue };
+                    if self.loans[loan].holders.len() != 1 || self.held[r.name()].len() != 1 { continue; }
+                    let Some(end) = self.end_on_boolean_edge(bwf, tcx, loan, condition, i == 0) else { continue };
+                    let row = match end {
+                        ArmLoanEnd::LastUse(span) if arms[i].is_some_and(|a| a.contains(span)) => span_to_line(&span, &tcx),
+                        ArmLoanEnd::LastUse(_) => continue,
+                        ArmLoanEnd::Entry => branch_type.get_start_end(i).0,
+                    };
+                    if row == *line {
+                        // No lender column changes state at this end.
+                        let (from, to, id) = (ResourceTy::Value(r.clone()), ResourceTy::Anonymous, *id);
+                        *event = if self.loans[loan].mutable {
+                            ExternalEvent::MutableDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false }
+                        } else {
+                            ExternalEvent::StaticDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false }
+                        };
+                    }
+                }
+            }
+
+            // A closing brace and the last use in the else arm can share
+            // a row (#1720). The row alone cannot put a give-back in an
+            // arm. If MIR locates both last uses inside the respective
+            // bodies, move the join's end to those uses.
+            let mut moved = Vec::new();
+            for (line, event) in tail {
+                let ExternalEvent::MutableDie { from: ResourceTy::Value(r), to: ResourceTy::Value(lender), id, .. } = event else { continue };
+                if line != merge_point || r.is_mut() || !live_vars.contains(r) || !live_vars.contains(lender) { continue; }
+                let Some(loan) = self.loan(r.name(), lender.name()).filter(|l| self.isolated(*l)) else { continue };
+
+                let end_row = |i: usize| {
+                    let ArmLoanEnd::LastUse(span) = self.end_on_boolean_edge(bwf, tcx, loan, condition, i == 0)? else { return None };
+                    arms[i]?.contains(span).then(|| span_to_line(&span, &tcx))
+                };
+                let (Some(then_end), Some(else_end)) = (end_row(0), end_row(1)) else { continue };
+                if then_end.max(else_end) != *line { continue; }
+                // The arm must have an unambiguous slot on this row.
+                // A nested diagram or another event changing the lender
+                // would also need its own MIR-to-display ordering.
+                if branches.iter().zip([then_end, else_end]).any(|(arm, row)|
+                    arm.e_data.iter().any(|(l, e)| matches!(e, ExternalEvent::Branch { .. })
+                        || (*l == row && (e.is_gos_ev().is_some() || {
+                            let (from, to) = crate::svg_generator::data::ResourceAccessPoint_extract(e);
+                            from.extract_rap() == Some(lender) || to.extract_rap() == Some(lender)
+                        })))) { continue; }
+                moved.push(*id);
+                for (arm, row) in branches.iter_mut().zip([then_end, else_end]) {
+                    let mut end = event.clone();
+                    if let ExternalEvent::MutableDie { id, .. } = &mut end {
+                        *id = *next_id;
+                        *next_id += 1;
+                    }
+                    let at = arm.e_data.iter().rposition(|(l, _)| *l <= row).map_or(0, |i| i + 1);
+                    arm.line_map.entry(row).or_default().push(end.clone());
+                    arm.e_data.insert(at, (row, end));
+                }
+            }
+            if !moved.is_empty() {
+                events.retain(|(_, e)| !moved.contains(&e.get_id()));
+                // The file-wide map has an entry for every source row,
+                // including rows of functions visited after this one.
+                for es in line_map.values_mut() {
+                    es.retain(|e| !moved.contains(&e.get_id()));
+                }
+            }
+        }
+    }
+
+    /// None if the outcome cannot be identified exactly. Otherwise the
+    /// loan is either dead on entry or ends at the last live MIR point
+    /// along a single sequence of normal edges. Stop at a second fork
+    /// or a back edge instead of guessing which exit to draw.
+    fn end_on_boolean_edge<'tcx>(&self, bwf: &BodyWithBorrowckFacts<'tcx>, tcx: TyCtxt<'tcx>, loan: usize,
+        condition: Span, outcome: bool) -> Option<ArmLoanEnd> {
+        let body = &bwf.body;
+        let mut switches = body.basic_blocks.iter_enumerated().filter_map(|(block, bb)| {
+            let term = bb.terminator();
+            let TerminatorKind::SwitchInt { discr, targets } = &term.kind else { return None };
+            (term.source_info.span == condition && !bb.is_cleanup && targets.as_static_if().is_some()
+                && discr.ty(body, tcx).is_bool()).then_some((
+                    Location { block, statement_index: bb.statements.len() }, targets.target_for_value(outcome as u128)))
+        });
+        let (split, mut block) = switches.next()?;
+        if switches.next().is_some() || !self.loans[loan].issued.dominates(split, body.basic_blocks.dominators())
+            || !self.loans[loan].live.contains(&split) { return None; }
+        let mut seen = BTreeSet::new();
+        let mut last = ArmLoanEnd::Entry;
+        while seen.insert(block) {
+            let bb = &body.basic_blocks[block];
+            for statement_index in 0..=bb.statements.len() {
+                let loc = Location { block, statement_index };
+                if !self.loans[loan].live.contains(&loc) { return Some(last); }
+                last = ArmLoanEnd::LastUse(body.source_info(loc).span);
+            }
+            let mut next = bb.terminator().successors().filter(|b| !body.basic_blocks[*b].is_cleanup);
+            block = next.next()?;
+            if next.next().is_some() { return None; }
+        }
+        None
+    }
+}
 
 /// Finds a move of a field out of `*local` (`move ((*_1).0)`).
 struct BoxFieldMoves { local: Local, found: bool }
@@ -370,6 +544,109 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
             }
         }
         res
+    }
+
+    /// Connect named holders to loans via the regions in their MIR types.
+    /// Never pick the first loan on a source line: an implicit reborrow,
+    /// a copy and an unrelated borrow can all be issued on that line.
+    pub(crate) fn loan_paths(&self) -> LoanPaths {
+        let bwf = self.bwf;
+        let body = &bwf.body;
+        let mut names = self.mir_local_names(bwf);
+        // Captures and projected debug places may share a MIR local. They
+        // cannot identify a single drawn binding for these decisions.
+        let mut locals = BTreeSet::new();
+        for info in &body.var_debug_info {
+            if let VarDebugInfoContents::Place(p) = info.value {
+                if !p.projection.is_empty() || !locals.insert(p.local) { names.remove(&p.local); }
+            }
+        }
+        // Two debug locals can also have the same display name.
+        let mut seen_names = BTreeSet::new();
+        let mut ambiguous = BTreeSet::new();
+        for local in body.local_decls.indices() {
+            if let Some(name) = names.get(&local) {
+                if !seen_names.insert(name.clone()) { ambiguous.insert(name.clone()); }
+            }
+        }
+        names.retain(|_, n| !ambiguous.contains(n));
+        let map = bwf.borrow_set.location_map();
+        let mut paths = LoanPaths::default();
+        let mut lenders = Vec::new();
+        for (issued, data) in map {
+            let p = data.borrowed_place();
+            paths.loans.push(LoanRange {
+                root: p.local,
+                whole: p.projection.is_empty(),
+                definite: true,
+                mutable: data.kind().mutability().is_mut(),
+                issued: *issued,
+                holders: BTreeSet::new(),
+                live: BTreeSet::from([*issued]),
+                after: BTreeSet::new(),
+            });
+            lenders.push(names.get(&p.local));
+        }
+        let mut holders = BTreeMap::<_, Vec<_>>::new();
+        for (local, decl) in body.local_decls.iter_enumerated() {
+            let Some(name) = names.get(&local) else { continue };
+            for arg in decl.ty.walk() {
+                if let GenericArgKind::Lifetime(r) = arg.kind() {
+                    if r.is_var() { holders.entry(r.as_var()).or_default().push(name); }
+                }
+            }
+        }
+        let output = Output::compute(bwf.input_facts.as_ref().unwrap(), Algorithm::Naive, true);
+        #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "unions loan identities into ordered sets")]
+        for origins in output.origin_contains_loan_at.values() {
+            for (origin, loans) in origins {
+                for holder in holders.get(&RegionVid::from(*origin)).into_iter().flatten() {
+                    for loan in loans {
+                        if let Some(lender) = lenders[loan.index()] {
+                            paths.held.entry((*holder).clone()).or_default()
+                                .entry(lender.clone()).or_default().insert(loan.index());
+                            paths.loans[loan.index()].holders.insert((*holder).clone());
+                        }
+                    }
+                }
+            }
+        }
+        let borrows = Borrows::new(self.tcx, body, &bwf.region_inference_context, &bwf.borrow_set);
+        let mut cursor = borrows.iterate_to_fixpoint(self.tcx, body, None).into_results_cursor(body);
+        for (block, bb) in body.basic_blocks.iter_enumerated().filter(|(_, bb)| !bb.is_cleanup) {
+            for statement_index in 0..=bb.statements.len() {
+                let loc = Location { block, statement_index };
+                cursor.seek_before_primary_effect(loc);
+                for loan in cursor.get().iter() {
+                    paths.loans[loan.index()].live.insert(loc);
+                }
+            }
+        }
+        for (index, loan) in paths.loans.iter_mut().enumerate() {
+            // Borrows is a may-analysis. At a join, an in-scope loan
+            // can have arrived along just one edge. Keep the end of the
+            // other loan borrower-only, and qualify the lender's state.
+            loan.definite = loan.live.iter().filter(|loc| loc.statement_index == 0 && **loc != loan.issued)
+                .all(|loc| body.basic_blocks.predecessors()[loc.block].iter().all(|&pred| {
+                    let bb = &body.basic_blocks[pred];
+                    bb.is_cleanup || {
+                        cursor.seek_after_primary_effect(Location { block: pred, statement_index: bb.statements.len() });
+                        cursor.get().contains(BorrowIndex::from(index))
+                    }
+                }));
+            let (live, after) = (&loan.live, &mut loan.after);
+            for loc in live {
+                let bb = &body.basic_blocks[loc.block];
+                if loc.statement_index < bb.statements.len() {
+                    let next = loc.successor_within_block();
+                    if !live.contains(&next) { after.insert(next); }
+                } else {
+                    after.extend(bb.terminator().successors().filter(|b| !body.basic_blocks[*b].is_cleanup)
+                        .map(|block| Location { block, statement_index: 0 }).filter(|next| !live.contains(next)));
+                }
+            }
+        }
+        paths
     }
 
     /// The last line at which each loan is in scope for rustc's NLL

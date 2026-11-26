@@ -1,4 +1,4 @@
-use std::collections::{HashMap, BTreeMap, HashSet};
+use std::collections::{BTreeSet, HashMap, BTreeMap, HashSet};
 use simplelog::*;
 use std::fs::OpenOptions;
 use log::error;
@@ -179,6 +179,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   // Moves of destructuring-assignment cycles drawn before the source's
   // new value (#1343).
   let mut moves_out_first: Vec<usize> = Vec::new();
+  let mut maybe_shared_lenders = BTreeSet::new();
   let mut temp_emptying_moves: Vec<usize> = Vec::new();
 
   
@@ -292,6 +293,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
             rap_hash_num = visitor.rap_hashes;
             binding_columns.append(&mut visitor.binding_columns);
             moves_out_first.append(&mut visitor.moves_out_first);
+            maybe_shared_lenders.append(&mut visitor.maybe_shared_lenders);
             temp_emptying_moves.append(&mut visitor.temp_emptying_moves);
             merge_visitor_raps(&mut rap_map, visitor.raps, fn_start_line);
             collect_shadow_notes(&tcx, impl_item.owner_id, fn_start_line, &mut shadow_notes_by_fq);
@@ -363,6 +365,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
         rap_hash_num = visitor.rap_hashes;
         binding_columns.append(&mut visitor.binding_columns);
         moves_out_first.append(&mut visitor.moves_out_first);
+        maybe_shared_lenders.append(&mut visitor.maybe_shared_lenders);
         temp_emptying_moves.append(&mut visitor.temp_emptying_moves);
         merge_visitor_raps(&mut rap_map, visitor.raps, fn_start_line);
         collect_shadow_notes(&tcx, item.owner_id, fn_start_line, &mut shadow_notes_by_fq);
@@ -443,7 +446,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   let shadow_notes: HashMap<u64, ShadowNote> = note_pairs.into_iter().map(|(h, _, n)| (h, n)).collect();
 
   // Pass information to svg-generator
-  match testing_helper.generate_vis(line_map2, pre_events, & mut a_line_map, rap_map.len() + 1, fn_start_lines, shadow_notes, binding_columns, moves_out_first, temp_emptying_moves, hidden_source_lines, approx_notes, args.write_to_cwd) {
+  match testing_helper.generate_vis(line_map2, pre_events, & mut a_line_map, rap_map.len() + 1, fn_start_lines, shadow_notes, binding_columns, moves_out_first, temp_emptying_moves, maybe_shared_lenders, hidden_source_lines, approx_notes, args.write_to_cwd) {
     Ok(_) => {}
     Err(e) => {
       eprintln!("{}", e);

@@ -28069,6 +28069,48 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "A temporary holds the value that String::from returns",
         ],
     },
+    TooltipExpect {
+        name: "downgraded_arm_loan_1596",
+        must_contain: &[
+            "Return mutably borrowed resource from r3 to s2",
+            "Return mutably borrowed resource from result to text",
+            "r3 is a shared reference made from a mutable borrow of a resource: r3 only gives shared access to it, but the borrow stays mutable while r3 is live",
+        ],
+        must_not_contain: &[
+            "s2's resource is mutably borrowed by r3; s2 can't be used until the borrow ends",
+            "Return mutably borrowed resource from third to data",
+        ],
+    },
+    TooltipExpect {
+        name: "inline_else_loans_1720",
+        must_contain: &[
+            "Return mutably borrowed resource from r3 to s2",
+            "Return mutably borrowed resource from m2 to s2",
+            "m's borrow ended in each branch above",
+        ],
+        must_not_contain: &["s2's resource is mutably borrowed; s2 can't be used until the borrow ends"],
+    },
+    TooltipExpect {
+        name: "nested_shared_ends_1581",
+        must_contain: &["r2's borrow ended in each branch above", "Return immutably borrowed resource from r to s"],
+        must_not_contain: &["r2 isn't moved in any of the branches above", "Return immutably borrowed resource from r2 to s"],
+    },
+    TooltipExpect {
+        name: "nested_overlapping_loans_1694",
+        must_contain: &[
+            "x's immutable borrow ends",
+            "x17's borrow ended in each branch above",
+            "mixed_v's resource may still be shared. A shared borrow allows reading while it is live.",
+            "Return immutably borrowed resource from other to v",
+            "Return immutably borrowed resource from other17 to v17",
+        ],
+        must_not_contain: &[
+            "Return immutably borrowed resource from x to v",
+            "Return immutably borrowed resource from x17 to v17",
+            "Return immutably borrowed resource from mixed_x to mixed_v",
+            "mixed_v's resource is being shared by one or more variables",
+        ],
+    },
 ];
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws
@@ -38453,4 +38495,41 @@ fn code_panel_names_from_utf8_1631() {
     assert!(!code.contains("{{root}}"), "path root shown: {code}");
     // Only `w`'s `String::from(..)` is shown by that name.
     assert_eq!(code.matches(">String::from</tspan>(").count(), 1, "{code}");
+}
+
+fn loan_dot_rows(doc: &roxmltree::Document<'_>, var: &str, text: &str) -> Vec<usize> {
+    let mut rows: Vec<_> = doc.descendants()
+        .filter(|n| n.attribute("data-rv-kind") == Some("dot") && n.attribute("data-rv-var") == Some(var))
+        .filter(|n| n.attribute("data-tooltip-text").is_some_and(|tip| tip.contains(text)))
+        .map(|n| n.attribute("data-rv-line").unwrap().parse().unwrap())
+        .collect();
+    rows.sort_unstable();
+    rows
+}
+
+/// The owner's final release is correct text on the last borrower's row.
+/// A global forbidden string would also forbid that legitimate dot.
+#[test]
+fn independent_shared_loans_release_the_owner_once_1694() {
+    let name = "nested_overlapping_loans_1694";
+    let svg = run_with_local_backend(name).timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    let source = read_corpus(name);
+    for (owner, last_use) in [("v", "other.unwrap();"), ("v17", "other17.len();")] {
+        let expected = source.lines().position(|line| line.trim() == last_use).unwrap() + 1;
+        assert_eq!(loan_dot_rows(&doc, owner, "'s resource is no longer immutably borrowed"), [expected],
+            "{owner} becomes available after {last_use}");
+    }
+}
+
+#[test]
+fn competing_loans_end_in_the_individual_arms() {
+    for (name, borrower, text, expected) in [
+        ("nested_shared_ends_1581", "r2", "'s immutable borrow ends", &[6, 7, 8][..]),
+        ("inline_else_loans_1720", "m", "'s mutable borrow ends", &[5, 8][..]),
+    ] {
+        let svg = run_with_local_backend(name).timeline_panel_string();
+        let doc = roxmltree::Document::parse(&svg).unwrap();
+        assert_eq!(loan_dot_rows(&doc, borrower, text), expected, "{name}: {borrower}");
+    }
 }

@@ -4193,6 +4193,9 @@ fn timeline_segment_title(
             }
         }
     }
+    if matches!(state, State::PartialPrivilege { .. }) && visualization_data.maybe_shared_lenders.contains(rap.hash()) {
+        return hover_messages::state_maybe_shared(rap.name(), rap.holds_value());
+    }
     // Copy-typed owners (i32 etc.) — "the owner of the resource"
     // language doesn't fit primitives; route to the value-flavoured
     // wording so the lifeline tooltip stays consistent with the

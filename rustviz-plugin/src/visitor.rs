@@ -3518,7 +3518,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         ExitFrame::Branch { .. } => None,
       })
       .map(|sp| (sm.lookup_char_pos(sp.lo()).line, sm.lookup_char_pos(sp.hi()).line));
-    self.exit_scopes.insert(*self.unique_id, ExitScope { in_closure: self.in_closure(expr), loop_lines });
+    self.exit_scopes.insert(*self.unique_id, ExitScope { in_closure: self.in_closure(expr), loop_lines, boolean_arms: None });
   }
 
   /// Whether a borrow made before the `if` without `else` `if_expr`
@@ -8897,6 +8897,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     let b_ty = BranchType::If(b_labels, b_slices);
     self.note_exit_scope(expr);
+    if !guard_expr.span.from_expansion() {
+      self.exit_scopes.get_mut(self.unique_id).unwrap().boolean_arms =
+        Some((guard_expr.span, [Some(if_expr.span), else_expr.map(|e| e.span)]));
+    }
     let loop_assigned = self.loop_assigned_now(&liveness);
     // (The arms' events are out of the global timeline by now: what
     // it says is the state where the `if` starts.)

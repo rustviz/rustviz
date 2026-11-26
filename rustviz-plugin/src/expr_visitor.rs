@@ -948,6 +948,7 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   pub temp_emptiers: HashMap<u64, Vec<Vec<String>>>,
   // The ids of those moves (`VisualizationData::temp_emptying_moves`).
   pub temp_emptying_moves: Vec<usize>,
+  pub maybe_shared_lenders: BTreeSet<u64>,
 
   // `r?` with `r` a non-`Copy` place moves `r` (#652). Set while
   // `match_rhs` draws that move into the variable `r?` is bound to;
@@ -1010,6 +1011,9 @@ pub struct ExitScope {
   /// First and last line of the innermost loop around the conditional,
   /// which a `break` / `continue` in it leaves.
   pub loop_lines: Option<(usize, usize)>,
+  /// Exact spans of a boolean condition and its arm bodies, when this
+  /// fork has a single boolean MIR switch.
+  pub boolean_arms: Option<(rustc_span::Span, [Option<rustc_span::Span>; 2])>,
 }
 
 /// `rap` was moved in a branch that leaves through the `break` `brk`
@@ -1279,6 +1283,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       approx_notes: Vec::new(),
       temp_emptiers: HashMap::new(),
       temp_emptying_moves: Vec::new(),
+      maybe_shared_lenders: BTreeSet::new(),
       break_binds: Vec::new(),
       deferred_breaks: Vec::new(),
       line_override: None,
@@ -12220,6 +12225,8 @@ pub fn print_out_of_scope(&mut self){
       }
     }
     let lender_to_refs = get_non_anon_lenders(&self.borrow_map);
+    let mut loan_facts = None;
+    let mut covered_ends = HashSet::new();
     info!("lender to refs {:#?}", lender_to_refs);
 
     // Loop through each lender's active references and pick out the
@@ -12279,6 +12286,29 @@ pub fn print_out_of_scope(&mut self){
               }
           });
           let lifetime = rd.lifetime;
+          // A reference (including one inside a call result) can have a
+          // different last borrower on each MIR path. Check the actual
+          // loans before falling back to the display's source extents.
+          let mut isolated = false;
+          if region.len() > 1 && matches!(&rd.lender, ResourceTy::Value(l) if l.name() == lender && !l.is_ref() && !l.is_fn()) {
+            let facts = loan_facts.get_or_insert_with(|| self.loan_paths());
+            if let Some(ours) = facts.loan(r, lender) {
+              // Equal-row ends already have a separate ordering in the
+              // renderer. Only arbitrate a competing later end here.
+              let mut longer = region.iter().filter(|o| self.borrow_map[**o].lifetime > lifetime)
+                .filter_map(|o| facts.loan(o, lender)).filter(|other| facts.outlasts(*other, ours)).peekable();
+              if longer.peek().is_some() {
+                if !longer.any(|other| facts.definite(other)) {
+                  self.maybe_shared_lenders.insert(*rd.lender.extract_rap().unwrap().hash());
+                }
+                covered_ends.insert((r.to_string(), lender.clone()));
+                continue;
+              }
+              isolated = rd.mut_of(&rd.lender) && facts.isolated(ours)
+                && mir_b_data.iter().any(|b| b.borrow_idx == ours && b.region.1 == lifetime)
+                && region.iter().all(|o| o == r || facts.loan(o, lender).is_some_and(|other| other != ours));
+            }
+          }
           // An old loan of the lender that a reassignment gave back
           // later on this path (`x2.len(); r.len(); r = &t;`): it isn't
           // in `borrow_map` any more, but the lender stays borrowed by
@@ -12303,7 +12333,7 @@ pub fn print_out_of_scope(&mut self){
           // ends before m's starts, and its end gives s back (#1529).
           let hash_of = |n: &str| self.raps.get(n).map(|d| *d.rap.hash());
           let before_mutable = || shared_loan_ends_before_mutable(r, lender, &self.borrow_map, region.iter().copied(), self.preprocessed_events, &hash_of);
-          if lifetime == max_lifetime || only_loan || alone_on_path() || last_on_its_path() || before_mutable() {
+          if isolated || lifetime == max_lifetime || only_loan || alone_on_path() || last_on_its_path() || before_mutable() {
             ultimate_refs.insert((r.to_string(), lender.to_owned()));
           }
         }
@@ -12470,7 +12500,13 @@ pub fn print_out_of_scope(&mut self){
         // only such values keep the lender borrowed past its last use:
         // its borrow is given back there, and the lender stays
         // borrowed by them (#575).
-        let holders = self.holders_still_borrowing(k, ref_data, &lender_to_refs, &handed_off);
+        let holders = if covered_ends.contains(&(k.clone(), r_ty.real_name())) {
+          // A different MIR loan keeps the lender borrowed. This is not
+          // a reference taken out of the holder of the same loan (#1694).
+          Vec::new()
+        } else {
+          self.holders_still_borrowing(k, ref_data, &lender_to_refs, &handed_off)
+        };
         if !holders.is_empty() {
           self.add_borrow_end_ev(*lifetime, to_ro, ResourceTy::Value(from_ro), ref_data, holders);
           continue;
@@ -12590,6 +12626,10 @@ pub fn print_out_of_scope(&mut self){
     self.note_sharers_across_calls();
     self.note_loop_iterator_keeps_moved();
     self.drop_arm_ref_ends_live_after();
+    if let Some(facts) = loan_facts {
+      facts.confirm_arm_ends(self.bwf, self.tcx, &self.exit_scopes, self.preprocessed_events,
+        self.event_line_map, self.unique_id);
+    }
   }
 
   /// The end of a moved `for` binding's borrow (#1511) gives nothing back
