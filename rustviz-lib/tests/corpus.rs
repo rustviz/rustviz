@@ -28067,17 +28067,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
     },    TooltipExpect {
         name: "dead_outer_mut_arm_borrow_1596",
-        // #1596: m is last used on the `if` path before `r3 = downgrade(&mut
-        // s2)` / `r3 = &mut s2`, so r3 is the only borrower of s2 there and
-        // its end gives s2 back. Main drew no return arrow, and s2 stayed
-        // mutably borrowed by r3 until m2 borrowed it again.
+        // #1596: m's mutable loan is over on the `if` path before `r3 =
+        // &mut s2` / `r3 = downgrade(&mut s2)` (the two can't overlap), so
+        // r3's end gives s2 back. Main drew no return arrow, and s2 stayed
+        // borrowed until m2 borrowed it again. (The wording for a `&String`
+        // made from the mutable borrow, `downgrade`, is #1122's; #1721.)
+        // The per-function give-backs are pinned by dot id in
+        // `repoint_old_loan_rows_1604_1596`.
         must_contain: &[
-            "Return mutably borrowed resource from r3 to s2",
             "s2's resource is no longer mutably borrowed",
         ],
-        must_not_contain: &[
-            "s2's resource is mutably borrowed by r3; s2 can't be used while the borrow is live. On this path m isn't used again",
-        ],
+        must_not_contain: &[],
     },
     TooltipExpect {
         name: "repoint_later_use_1603",
@@ -38455,56 +38455,17 @@ fn dot_y_by_id(timeline_svg: &str, id: &str) -> f64 {
     cy[..cy.find('"').unwrap()].parse().unwrap()
 }
 
-/// #1592, #1604, #1596 (and #1610's review): where a re-pointed reference's
-/// old loan ends.
-/// #1592: a reference with no loan of its own (a `match` arm's or `while
-/// let`'s binding copied out of the scrutinee, `let mut r = x;`), dead before
-/// the write, ends its old borrow at its last use or where it was bound;
-/// main ended it at the write, a row (or more) late, with its lender drawn
-/// borrowed down to there. Not before a use through a reference to it
-/// (`let z = &x; println!("{}", z);`), nor before a use on the write's own
-/// line (`println!("{}", r); r = &b;`, `r = if r.is_empty() ..`); a copy of
-/// a reference that may point into s or t ends both together.
+/// #1604, #1596 (and #1610's reviews).
 /// #1604: a field that may point into s or t, re-pointed in straight-line
-/// code, ends its old loan once, on one dot with one return arrow; main drew
-/// a second end ("h.r's immutable borrow ends") with its own return arrow on
-/// the new loan's row. Two writes on one line are two loans.
-/// #1596: r3's borrow, made and ended in the `if` arm after m's last use
-/// there, gives s2 back on its own line (main didn't, while m's loan was
-/// still live on the `else` path); not when o is read after the `if`.
+/// code, ends its old loan once, on one dot with one grouped return arrow;
+/// main drew a second end ("h.r's immutable borrow ends") with its own
+/// return arrow on the new loan's row.
+/// #1596: r3's mutable borrow, made in the `if` arm after m's last use
+/// there (rustc doesn't let the two mutable loans overlap), gives s2 back on
+/// its own line; main didn't. Two shared loans may overlap: then main's
+/// placement stands (`outer_read_after_join`).
 #[test]
-fn repoint_old_loan_rows_1592_1604_1596() {
-    let tl = run_with_local_backend("repoint_unread_arm_binding_1592").timeline_panel_string();
-    for id in ["x@L10:dot:static_die\"", "v@L10:dot:static_reacquire\"", "x@L23:dot:static_lend+static_reacquire+static_die",
-        "x@L36:dot:static_lend+static_reacquire+static_die", "x@L49:dot:static_die\"",
-        "r@L71:dot:copy+static_die", "x@L81:dot:static_die\"",
-        // (#1610's review) through z; on the write's line; both lenders.
-        "x@L94:dot:static_reacquire+static_die\"", "v@L94:dot:static_reacquire\"",
-        "r@L109:dot:static_lend+static_reacquire+static_die+static_borrow", "r@L132:dot:copy+static_die\""] {
-        assert!(tl.contains(&format!("data-rv-id=\"{}", id)), "#1592: no {}", id);
-    }
-    for id in ["x@L11:dot:static_die+static_borrow", "v@L11:dot:static_reacquire", "x@L25:dot:static_die+static_borrow",
-        "x@L37:dot:static_die+static_borrow", "x@L50:dot:static_die+static_borrow",
-        "r@L73:dot:static_die+static_borrow", "x@L93:dot:static_die", "v@L93:dot:static_reacquire", "r@L108:dot:static_die",
-        "r@L120:dot:static_die", "r@L134:dot:static_die+static_borrow",
-        // (#1610's review, round 2) the Option read after the `match`, a
-        // call result that may be r, a struct holding `&r`: no end before.
-        "v@L145:dot:static_reacquire", "v@L146:dot:static_reacquire", "r@L164:dot:static_die", "r@L180:dot:static_die"] {
-        assert!(!tl.contains(&format!("data-rv-id=\"{}", id)), "#1592: unexpected {}", id);
-    }
-    // `read_by_rhs`: the old loan ends on the write's line (where on its dot
-    // is #1618), not the line above.
-    assert!(tl.split("data-rv-id=\"r@L121:dot:").skip(1).any(|c| c.split('"').next().is_some_and(|id| id.contains("static_die"))),
-        "#1592: read_by_rhs: no end of r's old loan on the write's line");
-    // (`while_let_binding`: x's value comes out of `it`, whose loan of v
-    // lives on; with rustc's loan facts saying no more, x's old borrow ends
-    // at the write, as on main.)
-    let tips = timeline_tooltips(&tl);
-    for to in ["s", "t"] {
-        assert_eq!(tips.iter().filter(|t| **t == format!("Return immutably borrowed resource from r to {}", to)).count(), 1,
-            "#1592: copy_two_lenders returns r's old loan to {} once", to);
-    }
-
+fn repoint_old_loan_rows_1604_1596() {
     let tl = run_with_local_backend("field_two_lender_repoint_1604").timeline_panel_string();
     // A row's dots for a column, top to bottom, each as its lines.
     let rows = |prefix: &str| -> Vec<Vec<String>> {
@@ -38533,8 +38494,10 @@ fn repoint_old_loan_rows_1592_1604_1596() {
         let new_end = format!("{}'s immutable borrow ends", field);
         assert_eq!(lines.iter().filter(|l| **l == new_end).count(), 1, "#1604: {} on line {}: {:?}", field, row, lines);
         let borrow = lines.iter().position(|l| *l == format!("{} immutably borrows a resource", field)).unwrap();
-        let old_at = lines.iter().position(|l| l.ends_with(" ends") && l.contains(" or ")).unwrap();
-        assert!(old_at < borrow && borrow < lines.iter().position(|l| *l == new_end).unwrap(), "#1604: {} on line {}: {:?}", field, row, lines);
+        assert!(borrow < lines.iter().position(|l| *l == new_end).unwrap(), "#1604: {} on line {}: {:?}", field, row, lines);
+        // The new loan's end a row below its borrow.
+        assert!(dot_y_by_id(&tl, &format!("{}@L{}:dot:static_die", field, row))
+            > dot_y_by_id(&tl, &format!("{}@L{}:dot:static_die+static_borrow", field, row)), "#1604: {} on line {}: rows", field, row);
         // The lender is lent to the new loan before anything gives it back,
         // and given back once: never free in between (#1603, #1610's review;
         // main: "no longer borrowed / borrowed by h.r / no longer borrowed").

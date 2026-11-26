@@ -12303,7 +12303,10 @@ pub fn print_out_of_scope(&mut self){
             let Some(d) = self.borrow_map.get(*o) else { return true };
             *o == *r || d.lifetime < rd.assigned_at || d.assigned_at > rd.lifetime
               || match (self.raps.get(*r), self.raps.get(*o)) {
-                (Some(a), Some(b)) => on_other_path(self.preprocessed_events, &a.rap, &b.rap, d.lifetime, rd.assigned_at),
+                (Some(a), Some(b)) => {
+                  let mut_of = |x: &RefData| x.all_lenders().into_iter().find(|l| l.real_name() == *lender).is_some_and(|l| x.mut_of(&l));
+                  on_other_path(self.preprocessed_events, &a.rap, &b.rap, d.lifetime, rd.assigned_at, mut_of(rd) || mut_of(d))
+                }
                 _ => false,
               }
           });
@@ -13322,47 +13325,39 @@ fn uses_beyond_drop(e: &ExternalEvent, r: &ResourceAccessPoint) -> bool {
 
 /// Whether `r` is declared in an arm of a conditional among `events`
 /// (looking into nested ones) that `o`, declared outside it, isn't used
-/// in from `r_from` (the line r's loan is made on), and whose lines don't
-/// hold `o_end`, the line o's loan ends on, which is inside the
-/// conditional: o's borrow is used only on the other paths. (A use of o in the arm before r's loan is made, `let
-/// n = m.len();` before `let r3 = downgrade(&mut s2);`, ends o's loan on
-/// this path before r's starts. Counted, r3's end gave s2 nothing back,
-/// #1596.)
-fn on_other_path(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint, o: &ResourceAccessPoint, o_end: usize, r_from: usize) -> bool {
+/// in, and whose lines don't hold `o_end`, the line o's loan ends on:
+/// o's borrow is used only on the other paths.
+/// With `exclusive` (r's or o's loan of the lender is mutable, so rustc
+/// doesn't let the two overlap), o's uses in that arm before the event
+/// that gives r its value on or after `r_from` don't count: o's loan is
+/// over on this path when r's starts (`let n = m.len();` before `let r3 =
+/// downgrade(&mut s2);`). Counted, r3's end gave s2 nothing back (#1596).
+/// Two shared loans may overlap, so then any use of o in the arm counts.
+fn on_other_path(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint, o: &ResourceAccessPoint, o_end: usize, r_from: usize, exclusive: bool) -> bool {
   #[expect(clippy::disallowed_methods, reason = "`any` over the set: order never observed")]
   let declares = |b: &ExtBranchData, x: &ResourceAccessPoint| b.decl_vars.iter()
     .any(|d| d.hash() == x.hash() || x.name().starts_with(&format!("{}.", d.name())));
   events.iter().any(|(_, e)| {
-    let ExternalEvent::Branch { branches, branch_type, merge_point, .. } = e else { return false };
+    let ExternalEvent::Branch { branches, branch_type, .. } = e else { return false };
     if matches!(branch_type, BranchType::Loop(..)) {
       return false;
     }
     (0..branches.len()).any(|a| {
       if !declares(&branches[a], r) {
-        return on_other_path(&branches[a].e_data, r, o, o_end, r_from);
+        return on_other_path(&branches[a].e_data, r, o, o_end, r_from, exclusive);
       }
       let (start, end) = branch_type.get_start_end(a);
-      // (Nor when o is used after the conditional, `println!("{}", o)`
-      // after the `if` whose arm declares r, or on its closing line after
-      // it (`} println!("{}", o);`): that use is on r's path too, and keeps
-      // o's loan live through r's. It ended r's borrow giving the lender
-      // back, #1610's review. A use in a one-line arm ending on that line,
-      // `} else { m.push('a'); }`, is in that arm.)
-      let used_after = o_end > *merge_point || (o_end == *merge_point && events.iter()
-        .any(|(l, x)| *l == *merge_point && !matches!(x, ExternalEvent::Branch { .. }) && touches(x, o)));
+      let ev = &branches[a].e_data;
+      // (The event that gives r its value: not a use of an earlier one.)
+      let from = if exclusive {
+        ev.iter().position(|(l, x)| *l >= r_from && gives_new_value(x, r)).unwrap_or(0)
+      } else {
+        0
+      };
       !branches.iter().any(|b| declares(b, o))
-        && !used_after
         && !(start <= o_end && o_end <= end)
-        && {
-          // From r's loan on: the first of the arm's events on or after
-          // `r_from` that gives r its value, so that a use of o earlier on
-          // that line (`let n = m.len(); let r3 = &mut s2;`) is before it.
-          let ev = &branches[a].e_data;
-          let from = ev.iter().position(|(l, x)| *l >= r_from && touches(x, r))
-            .or_else(|| ev.iter().position(|(l, _)| *l >= r_from)).unwrap_or(ev.len());
-          !ev[from..].iter().any(|(_, x)| touches(x, o)
-            || ResourceAccessPoint_extract(x).0.extract_rap().is_some_and(|f| o.name().starts_with(&format!("{}.", f.name()))))
-        }
+        && !ev[from..].iter().any(|(_, x)| touches(x, o)
+          || ResourceAccessPoint_extract(x).0.extract_rap().is_some_and(|f| o.name().starts_with(&format!("{}.", f.name()))))
     })
   })
 }

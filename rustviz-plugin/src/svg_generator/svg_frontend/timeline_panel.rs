@@ -7943,7 +7943,7 @@ fn field_lender_walk(
     let mut borrows: Vec<((u64, usize, bool), Vec<(usize, String, usize)>)> = Vec::new();
     // (field, row, mutable, assignments to the field on the row before
     // the end) -> (lenders before the row, [(id, lender)])
-    let mut ends: Vec<((u64, usize, bool, usize, usize), Vec<String>, Vec<(usize, String)>)> = Vec::new();
+    let mut ends: Vec<((u64, usize, bool, usize), Vec<String>, Vec<(usize, String)>)> = Vec::new();
     // Ends on a row before an assignment to the field on it, and ends
     // after, are of different loans: the old value's and the new one's
     // (`h.r = r;` re-pointing h.r from s to t, where the new loan is
@@ -8022,14 +8022,8 @@ fn field_lender_walk(
                 if from.is_same_underlying(to) {
                     continue;
                 }
-                let mut key = (*field.hash(), *row, matches!(ev, ExternalEvent::MutableDie { .. }),
-                    assigned.get(&(*field.hash(), *row)).copied().unwrap_or(0), 0);
-                // A second end to a lender the group already ends is a later
-                // loan's (`h.r = &t;` after `longest(&s, &t)`, both on one row
-                // of an arm: the old loan's end to t, then the new one's).
-                while ends.iter().any(|(k, _, g)| *k == key && g.iter().any(|(_, n)| *n == to.name())) {
-                    key.4 += 1;
-                }
+                let key = (*field.hash(), *row, matches!(ev, ExternalEvent::MutableDie { .. }),
+                    assigned.get(&(*field.hash(), *row)).copied().unwrap_or(0));
                 let before: Vec<String> = pending.get(field.hash()).into_iter().flatten()
                     .filter(|(_, r)| r != row).map(|(n, _)| n.clone()).collect();
                 match ends.iter_mut().find(|(k, ..)| *k == key) {

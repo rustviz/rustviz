@@ -118,28 +118,6 @@ fn stacked_arrow_rows(evs: &[ExternalEvent], top_level: bool) -> usize {
         .unwrap_or(0)
 }
 
-/// How many of a split stack's first-row arrows (`front`) aren't drawn: the
-/// ends of one reference field's loan to its further lenders, after its end
-/// to the first (`h.r = &t;` with h.r from `longest(&s, &t)`: the ends to s
-/// and to t). `timeline_panel::field_lender_groups` draws those as one arrow
-/// naming all the lenders, so they take no row of the stack. Counted, they
-/// left an empty row between the stack and the row below it (#1604).
-fn grouped_field_ends(front: &[ExternalEvent]) -> usize {
-    let end_of = |e: &ExternalEvent| match e {
-        ExternalEvent::StaticDie { from: ResourceTy::Value(f), to: ResourceTy::Value(t), .. }
-        | ExternalEvent::MutableDie { from: ResourceTy::Value(f), to: ResourceTy::Value(t), .. }
-            if f.is_member() && f.is_ref() && !t.is_fn() && f.hash() != t.hash() =>
-            Some((*f.hash(), matches!(e, ExternalEvent::MutableDie { .. }), *t.hash())),
-        _ => None,
-    };
-    // (Nor a second end to a lender already ended: a later loan's, drawn
-    // as an arrow of its own, `h.r = &t;`'s new loan of t after the old
-    // one's ends to s and t.)
-    (0..front.len()).filter(|&k| end_of(&front[k]).is_some_and(|(f, m, t)| (0..k)
-        .any(|j| end_of(&front[j]).is_some_and(|(f2, m2, t2)| f2 == f && m2 == m && t2 != t))
-        && !(0..k).any(|j| end_of(&front[j]).is_some_and(|(f2, _, t2)| f2 == f && t2 == t)))).count()
-}
-
 /// Splits the arrows that share one source line (and so get stacked
 /// rows: the first straight on the line's row, the others as
 /// trapezoids dipping into extra rows below) into the ones that stay
@@ -156,14 +134,9 @@ fn split_same_line_borrow_ends(group: &[ExternalEvent], in_arm: bool) -> (Vec<Ex
         let (from, to) = ResourceAccessPoint_extract(e);
         Some((rap_hash(from)?, rap_hash(to)?))
     };
-    // (With where each is listed: an end listed before every borrow it
-    // could end is an older loan's, given back before the line's new one
-    // is made, `h.r = &u;` re-pointing a field that may point into s or t.
-    // Moved below the stack with the new loan's end, it took a row of its
-    // own, apart from the end to s it is one loan with, #1604.)
-    let borrows: Vec<(usize, (u64, u64))> = group.iter().enumerate()
-        .filter(|(_, e)| matches!(e, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }))
-        .filter_map(|(k, e)| Some((k, ends(e)?)))
+    let borrows: Vec<(u64, u64)> = group.iter()
+        .filter(|e| matches!(e, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }))
+        .filter_map(|e| ends(e))
         .collect();
     let is_end = |e: &ExternalEvent| matches!(e, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. });
     // An end that comes before a later borrow of the same lender on the
@@ -179,14 +152,14 @@ fn split_same_line_borrow_ends(group: &[ExternalEvent], in_arm: bool) -> (Vec<Ex
             && (mutable || matches!(b, ExternalEvent::MutableBorrow { .. }))
             && ends(b).is_some_and(|(bf, bt)| bf == l && bt != h))
     };
-    let ends_a_borrow_here = |k: usize| is_end(&group[k]) && ends(&group[k]).map_or(false, |(f, t)| {
-        f != t && borrows.iter().any(|&(b, (bf, bt))| b < k && ((bf, bt) == (f, t) || (bf, bt) == (t, f)))
+    let ends_a_borrow_here = |e: &ExternalEvent| is_end(e) && ends(e).map_or(false, |(f, t)| {
+        f != t && borrows.iter().any(|&(bf, bt)| (bf, bt) == (f, t) || (bf, bt) == (t, f))
     });
     // When the stack does split, the end of a reference the line gives
     // that borrow to (`let r = x;` after `Some(x) = v.first()` on one
     // line) goes below it too: drawn on the first rows, it came before r
     // got its value (#1426).
-    let split = (0..group.len()).any(ends_a_borrow_here);
+    let split = group.iter().any(ends_a_borrow_here);
     let received: Vec<u64> = group.iter()
         .filter(|e| matches!(e, ExternalEvent::Copy { .. } | ExternalEvent::Move { .. }))
         .filter_map(|e| ResourceAccessPoint_extract(e).1.extract_rap().filter(|r| r.is_ref()).map(|r| *r.hash()))
@@ -194,43 +167,8 @@ fn split_same_line_borrow_ends(group: &[ExternalEvent], in_arm: bool) -> (Vec<Ex
     let ends_a_received_borrow = |e: &ExternalEvent| split && is_end(e)
         && ends(e).is_some_and(|(f, t)| f != t && received.contains(&f));
     let mut moved: Vec<bool> = group.iter().enumerate()
-        .map(|(k, e)| (ends_a_borrow_here(k) || ends_a_received_borrow(e)) && !before_conflicting_borrow(k))
+        .map(|(k, e)| (ends_a_borrow_here(e) || ends_a_received_borrow(e)) && !before_conflicting_borrow(k))
         .collect();
-    // An older loan's end listed after the new borrow of the same lender
-    // (`after_same_lender_borrow`: t in `h.r = &t;`) goes below with the
-    // new loan's, and so do that old loan's ends to its other lenders (s,
-    // when h.r may point into s or t): one loan, ended on one row (#1604).
-    // (Told apart from the new loan's by being made before the borrow.)
-    // (One write to the reference on the line: several are left as they
-    // were.)
-    let one_write = |f: u64| {
-        let mut runs = 0;
-        let mut in_run = false;
-        for e in group {
-            let into = matches!(e, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }
-                | ExternalEvent::Move { .. } | ExternalEvent::Copy { .. })
-                && ResourceAccessPoint_extract(e).1.extract_rap().is_some_and(|r| *r.hash() == f);
-            if into {
-                if !in_run { runs += 1; }
-                in_run = true;
-            } else if is_end(e) && ends(e).is_some_and(|(h, _)| h == f) {
-                in_run = false;
-            }
-        }
-        runs == 1
-    };
-    let into_before = |f: u64, k: usize| borrows.iter().find(|&&(b, (_, bt))| b < k && bt == f).map(|&(b, _)| group[b].get_id());
-    for k in 0..group.len() {
-        if moved[k] || !is_end(&group[k]) {
-            continue;
-        }
-        let Some((f, t)) = ends(&group[k]) else { continue };
-        let Some(bid) = into_before(f, k).filter(|&bid| group[k].get_id() < bid && one_write(f)) else { continue };
-        if (0..group.len()).any(|i| moved[i] && is_end(&group[i]) && group[i].get_id() < bid
-            && ends(&group[i]).is_some_and(|(f2, t2)| f2 == f && t2 != t)) {
-            moved[k] = true;
-        }
-    }
     // The end of a reference that one of those ends gives its loan back
     // to (`let m2 = &mut *m; let r2 = &*m2;`, both ending on that line):
     // it comes after r2's end, on the same row, not on the line's first
@@ -435,9 +373,9 @@ fn ends_after_line_uses(e: &ExternalEvent, group: &[ExternalEvent], rest: &[Exte
     group.iter().enumerate().filter(|(k, o)| !own_borrow(*k, o)).map(|(_, o)| o).chain(rest)
         .filter(|o| o.get_id() != e.get_id() && !new_borrow_into(o, r, e.get_id()))
         // (Another end of the reference's borrow isn't a use of it: the
-        // end to t of a field that may point into s or t, `h.r = &t;`,
-        // is one loan with the end to s. Deferred for it, the end to s
-        // came after the new borrow of t on its row, #1604.)
+        // end to t of a field that may point into s or t is one loan with
+        // the end to s. Deferred for it, the end to s came after the new
+        // borrow of t on its row, apart from the rest of its loan, #1604.)
         .filter(|o| ended_ref(o) != Some(r))
         .any(|o| uses_rap(o, r))
 }
@@ -1403,8 +1341,7 @@ pub fn mutate_branch_lines(
                     }
                     Some(ev) => { // if there are multiple arrow events on this line
                         let (front, back) = split_same_line_borrow_ends(&ev, true);
-                        let hidden = if back.is_empty() { 0 } else { grouped_field_ends(&front) };
-                        let back_line = new_line_num + front.len() - hidden;
+                        let back_line = new_line_num + front.len();
                         // As in `place_external_events`: the end of a
                         // reference a conditional nested later on this line
                         // declares (`if let Some(x) = v.first() { let r = x; }
@@ -1474,7 +1411,7 @@ pub fn mutate_branch_lines(
                                 b_data.e_data.insert(at + 1 + n, (row, d));
                             }
                         }
-                        let mut ev_len = if back.is_empty() { stacked_arrow_rows(&front, false) } else { ev.len() - 1 - hidden - grouped_field_ends(&back) };
+                        let mut ev_len = if back.is_empty() { stacked_arrow_rows(&front, false) } else { ev.len() - 1 };
                         if let Some((tracks, n)) = struct_write_tracks(&front).filter(|_| back.is_empty()) {
                             arrow_tracks.extend(tracks);
                             ev_len = half_row_tracks_extra_rows(n);
@@ -2082,7 +2019,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                 if let (true, Some(line_ev)) = (ref_param_ends, line_ev) {
                     if let Some(r) = ended_ref(&event).filter(|r| line_ev.iter().any(|o| !skippable_ev.contains(&o.get_id()) && returns_to(o, *r))) {
                         let (front, back) = split_same_line_borrow_ends(line_ev, false);
-                        let row = if back.iter().any(|o| returns_to(o, r)) { final_line_num + front.len() - grouped_field_ends(&front) } else { final_line_num };
+                        let row = if back.iter().any(|o| returns_to(o, r)) { final_line_num + front.len() } else { final_line_num };
                         deferred_ends.push((line_num, event.clone(), row));
                         i += 1;
                         continue;
@@ -2145,8 +2082,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                         front = early;
                         back.splice(0..0, late);
                     }
-                    let hidden = if back.is_empty() { 0 } else { grouped_field_ends(&front) };
-                    let back_row = final_line_num + front.len() - hidden;
+                    let back_row = final_line_num + front.len();
                     let rest_of_line: Vec<ExternalEvent> = visualization_data.preprocess_external_events[i + 1..]
                         .iter()
                         .filter(|(l, e)| *l == line_num && !ev.iter().any(|g| g.get_id() == e.get_id()))
@@ -2248,7 +2184,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                     // lines right after `line_num`, those blank rows do
                     // the same job — reuse them instead of stacking our
                     // own on top, which produces an awkward double gap.
-                    let mut needed = if back.is_empty() { stacked_arrow_rows(&front, true) } else { ev.len() - 1 - hidden - grouped_field_ends(&back) };
+                    let mut needed = if back.is_empty() { stacked_arrow_rows(&front, true) } else { ev.len() - 1 };
                     if let Some((tracks, n)) = struct_write_tracks(&front).filter(|_| back.is_empty()) {
                         visualization_data.arrow_tracks.extend(tracks);
                         needed = half_row_tracks_extra_rows(n);
