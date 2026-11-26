@@ -7,7 +7,7 @@ note = "The issue's `make_o().opt` made concrete: `struct O { opt: Option<String
 
 [[event]]
 row = 5
-ev = "move _ -> x"
+ev = "move (make_o().opt as Some).0 -> x"
 src = "issue"
 why = "x binds the String by move out of the temporary's `opt` field (compiles: O has no Drop, so a partial move out of the temporary is allowed)"
 

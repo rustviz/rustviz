@@ -72,6 +72,15 @@ impl<'tcx> Names<'tcx> {
             {
                 continue;
             }
+            // A `for` loop's hidden iterator (`let mut iter = into_iter(..)`
+            // of the desugaring, declared at the loop's head expression): not
+            // the user's, even when the head is a variable named `iter`.
+            let decl_span = body.local_decls[place.local].source_info.span;
+            if span.desugaring_kind() == Some(rustc_span::DesugaringKind::ForLoop)
+                && decl_span.desugaring_kind() == Some(rustc_span::DesugaringKind::ForLoop)
+            {
+                continue;
+            }
             let written = sm.span_to_snippet(span).unwrap_or_default();
             let w = written.trim_start_matches("ref ").trim_start_matches("mut ").trim();
             let w = w.strip_prefix("r#").unwrap_or(w);

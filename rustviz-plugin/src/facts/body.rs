@@ -1247,6 +1247,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                                     && p.local.index() > body.arg_count
                                     && !body.local_decls[p.local].is_user_variable()
                                     && !body.local_decls[p.local].source_info.span.from_expansion()
+                                    // (A `Copy` value is copied, not moved: `n = (_t.0)` of
+                                    // a checked `+`'s `(usize, bool)` is arithmetic.)
+                                    && !ty_info(p.ty(&body.local_decls, tcx).ty).0
                                     && cx.is_user(*lhs) =>
                             {
                                 let sp = body.local_decls[p.local].source_info.span;
@@ -1491,10 +1494,32 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         held_by,
                     });
                     ti.extended |= extended;
-                    if !ti.drop_lines.contains(&drop_row) {
-                        ti.drop_lines.push(drop_row);
+                    // Early exits that share the drop run it too (two
+                    // `return`s out of a `for` loop drop its iterator): one
+                    // event on each exit's row, if it holds a value there.
+                    let shared = cx.rows.shared_exits.get(&loc).cloned().unwrap_or_default();
+                    if let LookupResult::Exact(mpi) = rt_md.rev_lookup.find(place.as_ref()) {
+                        for (r, at) in &shared {
+                            if drop_how(&rt.state(&[*at], true, mpi)) == "nothing_to_drop" {
+                                continue;
+                            }
+                            let mut ev = cx.ev(loc, Fact::TempDrop { what: what.clone(), created_line, extended, early_exit: Some(*r) });
+                            ev.0 = *r;
+                            ev.1.col = cx.rows.col.get(at).copied().unwrap_or(0);
+                            ev.1.arm = cx.rows.arm_of(*at);
+                            ev.1.site = Some(cx.rows.order(*at));
+                            if !ti.drop_lines.contains(r) {
+                                ti.drop_lines.push(*r);
+                            }
+                            push(&mut evs, ev);
+                        }
                     }
-                    push(&mut evs, cx.ev(loc, Fact::TempDrop { what, created_line, extended, early_exit }));
+                    if !cx.rows.exit_only.contains(&loc) {
+                        if !ti.drop_lines.contains(&drop_row) {
+                            ti.drop_lines.push(drop_row);
+                        }
+                        push(&mut evs, cx.ev(loc, Fact::TempDrop { what, created_line, extended, early_exit }));
+                    }
                 }
             }
             _ => {}

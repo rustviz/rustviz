@@ -18,7 +18,7 @@ src = "issue"
 
 [[event]]
 row = 5
-ev = "tempdrop _"
+ev = "tempdrop into_iter(v)"
 src = "issue"
 why = "MIR of main (-Zmir-include-spans): the iterator is dropped by a `drop(_6)` / `drop(_8)` at 5:5, the loop's `}`; Drop-printing program: the remaining Strings are dropped as the iterator is, after the last iteration"
 
