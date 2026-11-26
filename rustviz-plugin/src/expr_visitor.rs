@@ -11846,8 +11846,6 @@ pub fn print_out_of_scope(&mut self){
         let (end, own) = match (e.last_end, e.gives_back, e.stops) {
           (None, _, _) => (End::None, None),
           (Some(back), Some(_), Some(own)) if e.only_loop_exits && own < back => (End::LoopExit { own, back }, None),
-          // (Given back only on paths into a later arm: there, as 2.x.)
-          (Some(_), Some(_), _) if e.jumps_to.is_some() => (End::Arrow(e.jumps_to.unwrap_or(0)), None),
           (Some(back), Some(_), _) => (End::Arrow(back), None),
           (Some(back), None, Some(own)) => (End::Arrow(back), Some((own, back))),
           // Neither named where the loan ends nor seen to stop (on the row

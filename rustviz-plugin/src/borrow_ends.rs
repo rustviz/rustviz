@@ -38,9 +38,6 @@ pub struct HolderEnd {
   pub only_loop_exits: bool,
   /// The last row where it stops holding a loan that goes on.
   pub stops: Option<usize>,
-  /// Every path the holder gives back on jumps from its row into a later
-  /// arm (`if let Some(r) = km`'s `else`): the last row it jumps to.
-  pub jumps_to: Option<usize>,
   /// The last row any of the loans ends on, whoever holds it there (the
   /// borrow's last row, as 2.x's single end line has it).
   pub last_end: Option<usize>,
@@ -157,7 +154,6 @@ impl<'a> BodyEnds<'a> {
   /// their rows), the loans' ends anywhere.
   pub fn holder_end(&self, k: &str, loans: &[usize], rows: (usize, usize)) -> HolderEnd {
     let mut out = HolderEnd { only_loop_exits: true, ..HolderEnd::default() };
-    let mut all_jumps = true;
     for r in &self.facts.rows {
       let mine = r.line >= rows.0 && r.line < rows.1;
       for e in &r.facts {
@@ -168,11 +164,6 @@ impl<'a> BodyEnds<'a> {
             if mine && holder.split('|').any(|h| names_match(k, h)) {
               out.gives_back = Some(out.gives_back.map_or(row, |g| g.max(row)));
               out.only_loop_exits &= exit;
-              if *to_line > r.line + 1 {
-                out.jumps_to = Some(out.jumps_to.map_or(*to_line, |j| j.max(*to_line)));
-              } else {
-                all_jumps = false;
-              }
             }
           }
           Fact::HoldEnd { loan, holder, .. } if mine && loans.contains(loan) && names_match(k, holder) => {
@@ -184,9 +175,6 @@ impl<'a> BodyEnds<'a> {
     }
     if out.gives_back.is_none() {
       out.only_loop_exits = false;
-    }
-    if !all_jumps || out.only_loop_exits {
-      out.jumps_to = None;
     }
     out
   }
