@@ -3395,6 +3395,40 @@ pub fn state_partly_moved(my_name: &String, moved: &[String], maybe: bool) -> St
     )
 }
 
+// RustViz 3: the line of a Box whose contents were moved out (`let s =
+// *b;`, or every field of its payload): the Box itself wasn't moved and
+// still owns its heap allocation, freed when it is dropped, but it can't
+// be used as a whole (E0382) until it gets new contents. `maybe`: on some
+// paths only.
+pub fn state_box_contents_moved(my_name: &String, maybe: bool) -> String {
+    let me = styled_name_html(my_name);
+    format!(
+        "{0}'s contents {1} moved out, so {0} can't be used as a whole; the Box itself wasn't moved: its heap allocation, if it has one, is freed when {0} is dropped",
+        me, if maybe { "may have been" } else { "were" }
+    )
+}
+
+// RustViz 3: the line of a Box every field of whose payload was moved out,
+// some of them on some paths only (`surely` / `maybe`): it can't be used as
+// a whole (E0382), and it still owns its heap allocation.
+pub fn state_box_fields_maybe_gone(my_name: &String, surely: &[String], maybe: &[String]) -> String {
+    fn list(names: &[String]) -> String {
+        let fmt: Vec<String> = names.iter().map(|m| styled_name_html(m)).collect();
+        match fmt.as_slice() {
+            [init @ .., last] if !init.is_empty() => format!("{} and {}", init.join(", "), last),
+            _ => fmt.concat(),
+        }
+    }
+    let moved = match surely.len() {
+        0 => format!("{} may have been moved out", list(maybe)),
+        n => format!("{} {} moved out and {} may have been", list(surely), if n > 1 { "were" } else { "was" }, list(maybe)),
+    };
+    format!(
+        "{0} {2} partially moved: {1}, so {0} can't be used as a whole; the Box itself wasn't moved: its heap allocation, if it has one, is freed when {0} is dropped",
+        styled_name_html(my_name), moved, if surely.is_empty() { "may be" } else { "is" }
+    )
+}
+
 // RustViz 3: the line of a struct some of whose fields were moved out, as
 // the state table (MIR) knows it: `surely` moved out on every path,
 // `maybe` on some, and `partly` fields with a part of them moved out that
@@ -3429,8 +3463,9 @@ pub fn state_table_partly_moved(my_name: &String, surely: &[String], maybe: &[St
         _ => clauses.concat(),
     };
     format!(
-        "{0} is partially moved: {1}, so {0} can't be used as a whole{2}",
-        styled_name_html(my_name), said, if others_usable { "; its other fields still can" } else { "" }
+        "{0} {3} partially moved: {1}, so {0} can't be used as a whole{2}",
+        styled_name_html(my_name), said, if others_usable { "; its other fields still can" } else { "" },
+        if surely.is_empty() && partly.is_empty() { "may be" } else { "is" }
     )
 }
 
@@ -3450,7 +3485,10 @@ pub fn state_table_fields_maybe_gone(my_name: &String, surely: &[String], maybe:
         0 => format!("{} may have been moved out", list(maybe)),
         n => format!("{} {} moved out and {} may have been", list(surely), if n > 1 { "were" } else { "was" }, list(maybe)),
     };
-    format!("{0} is partially moved: {1}, so neither {0} nor any of its fields can be used", styled_name_html(my_name), moved)
+    format!(
+        "{0} {2} partially moved: {1}, so {0} can't be used as a whole, nor can any of its fields",
+        styled_name_html(my_name), moved, if surely.is_empty() { "may be" } else { "is" }
+    )
 }
 
 // The line of a struct every field of which was moved out (`let Pair { a,
@@ -3760,6 +3798,40 @@ pub enum LentTo<'a> {
     /// Nothing RustViz can name (several holders, or a call's result
     /// that isn't bound).
     Unknown,
+}
+
+/// RustViz 3: a column a closure borrows uniquely (it writes through a
+/// `&mut` reference stored in it: `*h.r += 1`), which is neither a shared
+/// nor a mutable borrow of the column: nothing else can use it until the
+/// borrow ends, but the closure doesn't change it, only what it points to.
+pub fn state_unique_lent(my_name: &String, to: LentTo) -> String {
+    let me = styled_name_html(my_name);
+    let by = match &to {
+        LentTo::Var(v) | LentTo::Closure(v) => format!(" by closure {}", styled_name_html(v)),
+        _ => " by a closure".to_owned(),
+    };
+    format!(
+        "{0} is uniquely borrowed{1}, which writes through a reference stored in {0} (not to {0} itself); {0} can't be used until the borrow ends",
+        me, by
+    )
+}
+
+/// RustViz 3: a column mutably borrowed on some paths only (the borrow was
+/// taken in one arm of a branch): the borrow checker treats it as borrowed
+/// on every path, so it can't be used until that borrow ends.
+pub fn state_maybe_lent_out(my_name: &String) -> String {
+    let me = styled_name_html(my_name);
+    format!("{0} may be mutably borrowed here (a branch above borrowed it on some paths only), so {0} can't be used until that borrow ends", me)
+}
+
+/// RustViz 3: a column reserved for a two-phase mutable borrow (a method
+/// call's `&mut self` receiver, `v.push(v.len())`, while the call's
+/// arguments run): it can still be read, not changed or moved, until the
+/// call starts and the mutable borrow begins. `call`: the method's name.
+pub fn state_reserved(my_name: &String, call: Option<&str>) -> String {
+    let me = styled_name_html(my_name);
+    let by = call.map_or(" by a method call".to_owned(), |c| format!(" by the call to {}", styled_name_html(&c.to_owned())));
+    format!("{0} is reserved for a mutable borrow{1}: until that call starts, {0} can still be read, but not changed or moved", me, by)
 }
 
 /// The faint dotted segment of a column while it is mutably lent out

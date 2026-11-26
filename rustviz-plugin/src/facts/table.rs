@@ -10,7 +10,7 @@
 //! may belong to another arm.
 
 use super::schema::{BodyFacts, CrateFacts, Fact, Lent, Parts, State};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A column's value on a row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +111,12 @@ struct BodyTable {
     columns: Vec<String>,
     /// Each loan's kind ("shared", "mut", "unique").
     loan_kinds: BTreeMap<usize, &'static str>,
+    /// Each loan's borrowed place (`s`, `p.a`, `*b`, `v[_]`).
+    loan_lenders: BTreeMap<usize, String>,
+    /// Columns with fields this body can't name (no columns of their own).
+    hidden_fields: BTreeSet<String>,
+    /// Each loan's row and source column.
+    loan_at: BTreeMap<usize, (usize, usize)>,
 }
 
 /// The state table of a crate: per fn body, per row (and arm), per
@@ -220,7 +226,11 @@ impl StateTable {
         let Some(body) = self.body(fn_line, column) else { return false };
         let Some(r) = body.rows.get(&row) else { return true };
         let root = |c: &str| c.trim_start_matches('*').split(['.', '[']).next().unwrap_or_default().to_owned();
-        r.why.iter().filter(|(c, _)| root(c) == root(column)).all(|(_, ws)| {
+        // (Not a place reached through a reference it holds, `*h.r = ..`:
+        // that writes what h.r points to, not h. Such places have no
+        // column; a Box's payload `*b` has one.)
+        let its = |c: &str| root(c) == root(column) && (!c.starts_with('*') || body.columns.iter().any(|k| k == c));
+        r.why.iter().filter(|(c, _)| its(c)).all(|(_, ws)| {
             ws.iter().all(|(_, w)| values_only && matches!(w, Why::Lent { .. } | Why::LoanEnded { .. }))
         })
     }
@@ -234,12 +244,45 @@ impl StateTable {
         let Some(r) = body.rows.get(&row) else { return true };
         let root = |c: &str| c.trim_start_matches('*').split(['.', '[']).next().unwrap_or_default().to_owned();
         let shared = |loan: &usize| body.loan_kinds.get(loan).is_some_and(|k| matches!(*k, "shared" | "reserved"));
-        r.why.iter().filter(|(c, _)| root(c) == root(column)).all(|(_, ws)| {
+        let its = |c: &str| root(c) == root(column) && (!c.starts_with('*') || body.columns.iter().any(|k| k == c));
+        r.why.iter().filter(|(c, _)| its(c)).all(|(_, ws)| {
             ws.iter().all(|(_, w)| match w {
                 Why::Lent { loan } | Why::LoanEnded { loan, .. } => shared(loan),
                 _ => false,
             })
         })
+    }
+
+    /// Whether `loan` (restricting `column`) borrows the column itself, a
+    /// place it is in (`p` for `p.a`) or, for a Box, its contents (`*b`),
+    /// rather than a part of it (`p.a` for `p`, an element `v[_]`).
+    pub fn lends_whole(&self, fn_line: usize, column: &str, loan: usize) -> bool {
+        let Some(lender) = self.body(fn_line, column).and_then(|b| b.loan_lenders.get(&loan)) else { return false };
+        // The facts name a Box payload's fields without the deref (`b.0` for
+        // `(*b).0`): a loan of `*b` (or `**b`) covers `b` and them.
+        let place = lender.trim_start_matches('*');
+        place == column || column.starts_with(&format!("{place}.")) || column.starts_with(&format!("{place}["))
+    }
+
+    /// Whether `column`'s field columns are all of its fields (none is
+    /// private to another module).
+    pub fn fields_complete(&self, fn_line: usize, column: &str) -> bool {
+        // (A Box's payload's fields are its: `*b`'s hidden ones too.)
+        self.body(fn_line, column)
+            .is_some_and(|b| !b.hidden_fields.contains(column) && !b.hidden_fields.contains(&format!("*{column}")))
+    }
+
+    /// The arm of a one-line branch `loan` was taken in (`if c { &mut x }
+    /// else { &mut y }`; held on that arm's path only), as (row, branch,
+    /// arm), with the number of arms that branch has.
+    pub fn loan_arm(&self, fn_line: usize, column: &str, loan: usize) -> Option<((usize, usize, usize), usize)> {
+        let b = self.body(fn_line, column)?;
+        let (line, col) = b.loan_at.get(&loan)?;
+        let r = b.rows.get(line)?;
+        // The innermost arm with the loan's column in it.
+        let (a, _) = r.arms.iter().filter(|(a, _)| a.col_lo <= *col && *col <= a.col_hi).min_by_key(|(a, _)| a.col_hi - a.col_lo)?;
+        let n = r.arms.iter().filter(|(o, _)| o.branch == a.branch).count();
+        Some(((*line, a.branch, a.arm), n))
     }
 
     /// Whether the table has a fn starting on `fn_line`.
@@ -302,7 +345,10 @@ fn body_table(b: &BodyFacts) -> BodyTable {
         rows.insert(r.line, rc);
     }
     let loan_kinds = b.loans.iter().map(|l| (l.loan, l.kind)).collect();
-    BodyTable { first_line: b.first_line, last_line: b.last_line, rows, columns, loan_kinds }
+    let loan_lenders = b.loans.iter().map(|l| (l.loan, l.lender.clone())).collect();
+    let hidden_fields = b.columns.iter().filter(|c| c.hidden_fields).map(|c| c.name.clone()).collect();
+    let loan_at = b.loans.iter().map(|l| (l.loan, (l.line, l.col))).collect();
+    BodyTable { first_line: b.first_line, last_line: b.last_line, rows, columns, loan_kinds, loan_lenders, hidden_fields, loan_at }
 }
 
 #[cfg(test)]
@@ -327,7 +373,7 @@ mod tests {
     }
 
     fn col(name: &str) -> ColumnInfo {
-        ColumnInfo { name: name.into(), root: name.split('.').next().unwrap().into(), kind: "var", copy: false, needs_drop: true }
+        ColumnInfo { name: name.into(), root: name.split('.').next().unwrap().into(), kind: "var", copy: false, needs_drop: true, hidden_fields: false }
     }
 
     fn body(func: &str, first: usize, cols: &[&str], rows: Vec<Row>) -> BodyFacts {

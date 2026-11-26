@@ -4146,11 +4146,13 @@ fn timeline_segment_title(
     // A struct some fields were moved out of can't be used as a whole
     // (E0382); one they all were has nothing left: its line stops
     // (an empty title, #1157).
-    if let (State::FullPrivilege { .. }, Some(line), ResourceAccessPoint::Struct(_)) = (state, line, rap) {
-        // RustViz 3: from MIR (the state table) where it has the column.
+    // RustViz 3: from MIR (the state table) where it has the column.
+    if let (State::FullPrivilege { .. }, Some(line)) = (state, line) {
         if let Some(title) = table_partly_moved_title(rap, visualization_data, line) {
             return title;
         }
+    }
+    if let (State::FullPrivilege { .. }, Some(line), ResourceAccessPoint::Struct(_)) = (state, line, rap) {
         if let Some(parts) = parts_moved_at(rap, visualization_data, line).filter(|_| !table_says_whole(rap, visualization_data, line)) {
             if parts.all {
                 return String::new();
@@ -9575,7 +9577,9 @@ fn render_timeline(
     // and stops once every field is (#1157). (With the state table, on
     // any row: pieces with the same text are drawn as one.)
     cuts.extend(parts_moved_rows(rap, visualization_data));
-    let table_rows = matches!(rap, ResourceAccessPoint::Struct(Struct { is_box: false, .. }))
+    // RustViz 3: an owner column's line reads its state on each row from
+    // the state table (what is moved out of it, what lends it out).
+    let table_rows = !rap.is_ref() && !rap.is_fn() && !rap.is_closure()
         && visualization_data.fn_source_lines.get(rap.hash()).is_some_and(|l| visualization_data.state_table.has_fn(*l));
     // So does an array's where a slice pattern moves an element out of
     // it (#1285).
@@ -9592,26 +9596,51 @@ fn render_timeline(
         let mut bounds = vec![*seg_start];
         if matches!(state, State::FullPrivilege { .. } | State::PartialPrivilege { .. }) {
             bounds.extend(cuts.iter().copied().filter(|l| l > seg_start && l < seg_end));
-            if table_rows && matches!(state, State::FullPrivilege { .. }) {
-                bounds.extend(seg_start + 1..*seg_end);
-                bounds.sort_unstable();
-                bounds.dedup();
-            }
         }
         if matches!(state, State::RevokedPrivilege { .. }) {
             bounds.extend(ref_move_rows(visualization_data, *seg_start, *seg_end));
         }
+        // (A Box 2.x drew moved after its contents were moved out: only on
+        // a column with no branches, whose moved stretch ends at its own
+        // scope-end dot, so the line joins the move to that dot.)
+        let box_held = table_rows
+            && matches!(state, State::ResourceMoved { dropped_by_hand: false, .. })
+            && !history.iter().any(|(_, e)| matches!(e, Event::Branch { .. }))
+            // (a plain move, not one with a `?`'s early return on it)
+            && history.iter().filter(|(l, _)| *l == *seg_start).all(|(_, e)| matches!(e, Event::Move { .. }))
+            && history.iter().any(|(l, e)| *l == *seg_end && matches!(e, Event::OwnerGoOutOfScope { early: None, .. }));
+        let lined = matches!(state, State::FullPrivilege { .. } | State::PartialPrivilege { .. } | State::RevokedPrivilege { .. })
+            || box_held;
+        if table_rows && lined {
+            bounds.extend(seg_start + 1..*seg_end);
+        }
+        bounds.sort_unstable();
+        bounds.dedup();
         bounds.push(*seg_end);
-        // (Pieces with the same text are drawn as one.)
-        let mut pieces: Vec<(usize, usize, String)> = Vec::new();
+        // (Pieces with the same state and text are drawn as one.)
+        let mut pieces: Vec<(usize, usize, State, String)> = Vec::new();
         for w in bounds.windows(2) {
-            let title = timeline_segment_title(state, rap, visualization_data, Some(w[0]));
+            // 2.x drew it moved where only what it holds was moved out (a
+            // Box's contents, `let s = *b;`): it still owns the Box, and
+            // its line goes on to its scope end, saying so.
+            let held = box_held.then(|| table_still_holds_title(rap, visualization_data, w[0])).flatten();
+            let (st, title) = match held.map(|t| (State::FullPrivilege { s: LineState::Full }, Some(t)))
+                .or_else(|| table_rows.then(|| table_lent_state(state, rap, visualization_data, w[0])).flatten())
+            {
+                Some((st, Some(title))) => (st, title),
+                Some((st, None)) => {
+                    let t = timeline_segment_title(&st, rap, visualization_data, Some(w[0]));
+                    (st, t)
+                }
+                None => (state.clone(), timeline_segment_title(state, rap, visualization_data, Some(w[0]))),
+            };
             match pieces.last_mut() {
-                Some(last) if last.2 == title => last.1 = w[1],
-                _ => pieces.push((w[0], w[1], title)),
+                Some(last) if last.3 == title && std::mem::discriminant(&last.2) == std::mem::discriminant(&st) => last.1 = w[1],
+                _ => pieces.push((w[0], w[1], st, title)),
             }
         }
-        for (line_start, line_end, title) in pieces {
+        for (line_start, line_end, piece_state, title) in pieces {
+            let state = &piece_state;
             // Every part was moved out: nothing is left to draw (#1157).
             if title.is_empty() {
                 continue;
@@ -9677,10 +9706,19 @@ fn moved_at(timeline: &Timeline, line: usize) -> bool {
 /// through the block join while the facts' row is one arm's code), the
 /// next row with one, whose state is what the line meets there when that
 /// row (and any `}` row on the way) does nothing to the column's
-/// variable. (Not a Box: its payload's fields are drawn as 2.x does for
-/// now.)
+/// variable.
 fn table_struct_row(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, row: usize) -> Option<(usize, usize)> {
-    let ResourceAccessPoint::Struct(Struct { is_box: false, .. }) = rap else { return None };
+    let ResourceAccessPoint::Struct(_) = rap else { return None };
+    table_row(rap, visualization_data, row, true)
+}
+
+/// `table_struct_row` for any owner column (a variable, struct, field or
+/// Box, not a reference). `values_only`: the next row may borrow from the
+/// column (only its value is read); otherwise it may do nothing to it.
+fn table_row(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, row: usize, values_only: bool) -> Option<(usize, usize)> {
+    if rap.is_ref() || rap.is_fn() || rap.is_closure() {
+        return None;
+    }
     let fn_line = *visualization_data.fn_source_lines.get(rap.hash())?;
     let src = rv_attrs::line_of(row, &visualization_data.row_lines)?;
     let table = &visualization_data.state_table;
@@ -9704,12 +9742,154 @@ fn table_struct_row(rap: &ResourceAccessPoint, visualization_data: &Visualizatio
     }
     let mut r = table.next_state_row(fn_line, rap.name(), src)?;
     while brace(r) {
-        if !table.quiet(fn_line, rap.name(), r, true) {
+        if !table.quiet(fn_line, rap.name(), r, values_only) {
             return None;
         }
         r = table.next_state_row(fn_line, rap.name(), r)?;
     }
-    table.quiet(fn_line, rap.name(), r, true).then_some((fn_line, r))
+    table.quiet(fn_line, rap.name(), r, values_only).then_some((fn_line, r))
+}
+
+/// RustViz 3: the style of an owner column's line after the visual row
+/// `row` from the state table's loans, where it differs from 2.x's `state`
+/// (a loan 2.x missed, or one it keeps after the borrow checker ended it):
+/// the new state, and its title when 2.x's history can't word it.
+fn table_lent_state(state: &State, rap: &ResourceAccessPoint, visualization_data: &VisualizationData, row: usize) -> Option<(State, Option<String>)> {
+    use crate::facts::table::Init;
+    let table = &visualization_data.state_table;
+    if rap.is_ref() || rap.is_fn() || rap.is_closure() {
+        return None;
+    }
+    let fn_line = *visualization_data.fn_source_lines.get(rap.hash())?;
+    let src = rv_attrs::line_of(row, &visualization_data.row_lines)?;
+    // It holds a value: as for its text (after a `}`, what the next row
+    // starts with), or, where that can't be read (the next row ends the
+    // fn), the row's own state.
+    let init = match table_row(rap, visualization_data, row, true) {
+        Some((_, r)) => table.cell(fn_line, rap.name(), r, r)?.init,
+        None => table.cell(fn_line, rap.name(), src, src)?.init,
+    };
+    if !matches!(init, Init::Own | Init::Partly) {
+        return None;
+    }
+    // Its loans are read where the next row starts (rule 3), past any join
+    // there: a row's own state has them (a `}` row's too). A row with none
+    // takes the next row's, when that one changes no loan of it.
+    // A row with none and no `}` between it and the row above that has
+    // one (inside a multi-line call, a closure's body passed to it, a
+    // comment) carries that row's loans (Q3): it is on the same path, and
+    // a loan the statement takes is held until its last row.
+    // (Only from a row whose code goes on onto the next line: a match
+    // arm's `x => y,` row is the end of its arm, not on the next row's
+    // path.)
+    let text = |l: usize| visualization_data.source_lines.get(l.wrapping_sub(1)).map(|t| t.split("//").next().unwrap_or("").trim().to_owned());
+    let brace = |l: usize| text(l).is_some_and(|t| t.starts_with('}'));
+    let continues = |l: usize| text(l).is_some_and(|t| t.ends_with(['{', '(', '[', '=', '|', '.']));
+    let carried = table.cell(fn_line, rap.name(), src, 0)
+        .filter(|c| !brace(c.from_row) && continues(c.from_row) && (c.from_row + 1..=src).all(|l| !brace(l)));
+    let cell = match (table.cell(fn_line, rap.name(), src, src), carried) {
+        (Some(c), _) => c,
+        (None, Some(c)) if !brace(src) => c,
+        _ => {
+            let (_, r) = table_row(rap, visualization_data, row, false)?;
+            table.cell(fn_line, rap.name(), r, r)?
+        }
+    };
+    let s = match state {
+        State::FullPrivilege { s } | State::PartialPrivilege { s } => s.clone(),
+        State::RevokedPrivilege { prev_state, .. } => match prev_state.as_ref() {
+            State::FullPrivilege { s } | State::PartialPrivilege { s } => s.clone(),
+            _ => LineState::Full,
+        },
+        _ => return None,
+    };
+    if matches!(s, LineState::Uninit) {
+        return None;
+    }
+    // Only a loan of the column itself (or of a place it is in) changes its
+    // line's style: one of a field leaves a struct's line as it is (#1073;
+    // how to word that is #1671).
+    let own_loans: Vec<_> = cell.lent.iter().filter(|l| table.lends_whole(fn_line, rap.name(), l.loan)).collect();
+    let exclusive: Vec<_> = own_loans.iter().filter(|l| matches!(l.kind, "mut" | "unique")).collect();
+    let shared = own_loans.iter().any(|l| l.kind == "shared");
+    let reserved = own_loans.iter().find(|l| l.kind == "reserved");
+    if !exclusive.is_empty() {
+        // Its holder, when every path agrees on one (a join may bring a
+        // loan of it from each arm to a different holder).
+        // (Not one taken in one arm of a branch on one row: on the other
+        // arm's path nothing holds it.)
+        let holders: BTreeSet<&str> = exclusive.iter().map(|l| l.holder.as_str()).collect();
+        let arms: Vec<_> = exclusive.iter().map(|l| table.loan_arm(fn_line, rap.name(), l.loan)).collect();
+        let in_arm = arms.iter().any(Option::is_some);
+        // Borrowed on some paths only: a loan from an arm, unless some
+        // loan isn't from one or every arm of that branch has one.
+        let branches: BTreeSet<(usize, usize)> = arms.iter().flatten().map(|((l, b, _), _)| (*l, *b)).collect();
+        let every_path = arms.iter().any(Option::is_none) || branches.iter().any(|(l, b)| {
+            let covered: BTreeSet<usize> = arms.iter().flatten().filter(|((l2, b2, _), _)| l2 == l && b2 == b).map(|((_, _, a), _)| *a).collect();
+            arms.iter().flatten().find(|((l2, b2, _), _)| l2 == l && b2 == b).is_some_and(|(_, n)| covered.len() == *n)
+        });
+        let holder = (holders.len() == 1 && !in_arm)
+            .then(|| visualization_data.timelines.values().map(|t| &t.resource_access_point).find(|h| {
+                holders.contains(h.name().as_str()) && visualization_data.fn_source_lines.get(h.hash()) == Some(&fn_line)
+            }))
+            .flatten();
+        // A closure's unique immutable borrow (it writes through a `&mut`
+        // stored in the column) isn't a mutable borrow of it.
+        let unique = exclusive.iter().all(|l| l.kind == "unique");
+        if let State::RevokedPrivilege { to, .. } = state {
+            // 2.x's own wording (it knows chains, loops, closures, "along
+            // with p", `by h.r`) stands, unless the facts show it wrong: a
+            // unique borrow, a borrow on some paths only, or a holder that
+            // no longer holds anything (`let t = r;` moved r: t holds the
+            // loan now).
+            let stale = match to {
+                ResourceTy::Value(h2) | ResourceTy::Deref(h2) => !matches!(
+                    table.cell(fn_line, h2.name(), src, 0).map(|c| c.init),
+                    Some(Init::Own | Init::Partly)
+                ) && holder.is_some_and(|h| h.name() != h2.name()),
+                _ => false,
+            };
+            if !unique && every_path && !stale {
+                return None;
+            }
+        }
+        let lent_to = match holder {
+            Some(h) if h.is_closure() => hover_messages::LentTo::Closure(h.name()),
+            Some(h) => hover_messages::LentTo::Var(h.name()),
+            None => hover_messages::LentTo::Unknown,
+        };
+        let title = if !every_path && !unique {
+            hover_messages::state_maybe_lent_out(rap.name())
+        } else if unique {
+            hover_messages::state_unique_lent(rap.name(), lent_to)
+        } else {
+            hover_messages::state_lent_out(rap.name(), lent_to, None, false, rap.holds_value())
+        };
+        let to = holder.map_or(ResourceTy::Anonymous, |h| ResourceTy::Value(h.clone()));
+        return Some((State::RevokedPrivilege { to: to.clone(), borrow_to: to, prev_state: Box::new(State::FullPrivilege { s }) }, Some(title)));
+    }
+    match (shared, reserved, state) {
+        (true, _, State::PartialPrivilege { .. }) => None,
+        (true, _, _) => Some((State::PartialPrivilege { s }, Some(hover_messages::state_partial_privilege(rap.name(), rap.holds_value())))),
+        // Only reserved for a two-phase `&mut` (a method call's receiver
+        // while its arguments run): it can still be read.
+        (false, Some(l), _) => Some((State::PartialPrivilege { s }, Some(hover_messages::state_reserved(rap.name(), l.holder.strip_suffix("()"))))),
+        (false, None, State::FullPrivilege { .. }) => None,
+        // Only a part of it is lent (a field, an element): 2.x's style stands.
+        (false, None, _) if !cell.lent.is_empty() => None,
+        (false, None, _) => Some((State::FullPrivilege { s }, None)),
+    }
+}
+
+/// RustViz 3: the title of a column 2.x's replay draws moved on the visual
+/// row `row` where the state table says it still holds something (only a
+/// part of it, a Box's contents, was moved out).
+fn table_still_holds_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, row: usize) -> Option<String> {
+    use crate::facts::table::Init;
+    let (fn_line, r) = table_row(rap, visualization_data, row, true)?;
+    (visualization_data.state_table.cell(fn_line, rap.name(), r, r)?.init == Init::Partly)
+        .then(|| table_partly_moved_title(rap, visualization_data, row))
+        .flatten()
 }
 
 /// `table_struct_row`'s cell of the column `column` (the struct's or a
@@ -9744,13 +9924,36 @@ fn table_partly_moved_title(rap: &ResourceAccessPoint, visualization_data: &Visu
     if parts_moved_at(rap, visualization_data, row).is_some_and(|p| p.all) {
         return None;
     }
-    let (fn_line, r) = table_struct_row(rap, visualization_data, row)?;
+    let (fn_line, r) = table_row(rap, visualization_data, row, true)?;
     let table = &visualization_data.state_table;
     let cell = table.cell(fn_line, rap.name(), r, r)?;
     if !matches!(cell.init, Init::Own | Init::Partly) {
         return None;
     }
     let parts = cell.parts.unwrap_or_default();
+    // A Box whose contents were moved out (`let s = *b;`): the Box itself
+    // wasn't, and still owns its heap allocation.
+    // (Moved on some paths only: a Box struct's fields say which were for
+    // sure.)
+    let contents = format!("*{}", rap.name());
+    let is_struct = matches!(rap, ResourceAccessPoint::Struct(_));
+    if parts.moved.contains(&contents) || (!is_struct && parts.maybe.contains(&contents)) {
+        return Some(hover_messages::state_box_contents_moved(rap.name(), !parts.moved.contains(&contents)));
+    }
+    // A move from deeper inside it (`**boxed` of a `Box<Box<String>>`: the
+    // inner Box stays): name the places moved out.
+    if !is_struct {
+        let surely: Vec<String> = parts.moved.clone();
+        let maybe: Vec<String> = parts.maybe.iter().filter(|m| !surely.contains(m)).cloned().collect();
+        return (!surely.is_empty() || !maybe.is_empty())
+            .then(|| hover_messages::state_table_partly_moved(rap.name(), &surely, &maybe, &[], false));
+    }
+    let ResourceAccessPoint::Struct(Struct { is_box, .. }) = rap else { return None };
+    // Its field columns are all of its fields (none is private to another
+    // module): only then can it say every field is gone, or that the
+    // others can be used.
+    let complete = table.fields_complete(fn_line, rap.name());
+    let is_box = *is_box;
     // Each direct field: what the moved places say of it, else its own
     // column's state (a part of it moved out may have no column: an array
     // element).
@@ -9773,9 +9976,18 @@ fn table_partly_moved_title(rap: &ResourceAccessPoint, visualization_data: &Visu
         })
         .collect();
     // Every field gone, surely or on some paths: none of it can be used.
-    if !field_init.is_empty() && field_init.iter().all(|(_, i)| matches!(i, Init::Moved | Init::Maybe)) {
+    if complete && !field_init.is_empty() && field_init.iter().all(|(_, i)| matches!(i, Init::Moved | Init::Maybe)) {
         let surely: Vec<String> = field_init.iter().filter(|(_, i)| *i == Init::Moved).map(|(f, _)| f.clone()).collect();
         let maybe: Vec<String> = field_init.iter().filter(|(_, i)| *i == Init::Maybe).map(|(f, _)| f.clone()).collect();
+        // Every field of a Box's payload: its contents (surely, or some
+        // fields on some paths only).
+        if is_box {
+            return Some(if maybe.is_empty() {
+                hover_messages::state_box_contents_moved(rap.name(), false)
+            } else {
+                hover_messages::state_box_fields_maybe_gone(rap.name(), &surely, &maybe)
+            });
+        }
         if maybe.is_empty() {
             return Some(hover_messages::state_fields_all_moved(rap.name(), &surely));
         }
@@ -9813,7 +10025,7 @@ fn table_partly_moved_title(rap: &ResourceAccessPoint, visualization_data: &Visu
     // here, lent at most shared. (Loans are read after a row: where the
     // state is the next row's, that row must not start or end a `&mut`
     // loan of it either.)
-    let others_usable = maybe.is_empty() && partly.is_empty()
+    let others_usable = complete && maybe.is_empty() && partly.is_empty()
         && (rv_attrs::line_of(row, &visualization_data.row_lines) == Some(r) || table.usable_same(fn_line, rap.name(), r))
         && {
             let others: Vec<&String> = field_init.iter().map(|(f, _)| f)
