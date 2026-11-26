@@ -31117,8 +31117,10 @@ fn fact_states(facts: &serde_json::Value) -> Vec<common::oracle::FactState> {
                 if !root_of(col).is_some_and(|r| owners.contains(&r.as_str())) {
                     continue;
                 }
+                // `unique` restricts like `mut`; a `reserved` two-phase
+                // borrow (not activated yet) like `shared`.
                 let lent = row["lent"][col].as_array().map_or("", |ls| {
-                    if ls.iter().any(|l| l["kind"] == "mut") { "mut" } else if ls.is_empty() { "" } else { "shared" }
+                    if ls.iter().any(|l| l["kind"] == "mut" || l["kind"] == "unique") { "mut" } else if ls.is_empty() { "" } else { "shared" }
                 });
                 out.push((line, col.clone(), st.as_str().unwrap_or("").to_owned(), lent.to_owned()));
             }
