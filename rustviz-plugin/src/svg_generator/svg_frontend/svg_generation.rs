@@ -2346,19 +2346,20 @@ pub fn render_svg(
     let mut extra: Vec<usize> = Vec::new();
     let mut best: Option<(usize, usize, usize, (String, String, i32), usize)> = None;
     timeline_panel::reset_work();
-    let mut first = 0;
     for pass in 0..3 {
-        // (One pass with rows; a third, where the stacked arrows took the
-        // row, only within the layout work budget,
-        // `timeline_panel::within_budget`.)
+        // (The passes adding rows give up past `RELAYOUT_WORK` more layout
+        // work than the first pass did, and are dropped: a figure mustn't
+        // render much slower than on main, #1605's review.)
         if pass == 1 {
-            first = timeline_panel::work_done();
-        }
-        if pass > 1 && !timeline_panel::within_budget(first) {
-            break;
+            timeline_panel::set_cap(Some(timeline_panel::work_done() + timeline_panel::RELAYOUT_WORK));
         }
         let mut vd = start.clone();
         let (out, left, rows) = render_pass(annotated_src_str, source_rs_str, &mut vd, &extra);
+        // (Nor where a pass ends up with main's drawing, #1542's fallback,
+        // which wants no rows.)
+        if pass > 0 && (timeline_panel::take_over() || left.main_drawing) {
+            break;
+        }
         // (Fewer arrows on legs or columns, and no more other marks.)
         let improves = best.as_ref().is_none_or(|b| left.count < b.0 && left.others <= b.1 && left.fan_crossings <= b.4);
         let same_rows = best.as_ref().is_some_and(|b| b.2 == rows);
@@ -2393,6 +2394,7 @@ struct LeftOn {
     /// (`timeline_panel::ArrowsLeftOn`).
     others: usize,
     fan_crossings: usize,
+    main_drawing: bool,
 }
 
 /// One pass of `render_svg`, with a blank row added before the line after
@@ -2451,7 +2453,7 @@ fn render_pass(
         .filter_map(|&r| row_lines.get(..=r)?.iter().rev().find_map(|l| *l))
         .collect();
     lines.dedup();
-    let left = LeftOn { count: rows_wanted.count, lines, others: rows_wanted.others, fan_crossings: rows_wanted.fan_crossings };
+    let left = LeftOn { count: rows_wanted.count, lines, others: rows_wanted.others, fan_crossings: rows_wanted.fan_crossings, main_drawing: rows_wanted.main_drawing };
     let rows = row_lines.len();
     // Each element's `data-rv-id`, and its rows as code-panel lines.
     let timeline_panel_string = rv_attrs::finalize(&timeline_panel_string, &row_lines);

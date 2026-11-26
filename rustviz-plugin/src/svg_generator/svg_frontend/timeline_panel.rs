@@ -132,6 +132,9 @@ pub struct ArrowsLeftOn {
     pub others: usize,
     /// The fans' crossings (`all_fan_crossings`): nor more of those.
     pub fan_crossings: usize,
+    /// The arrows are drawn as main's router draws them (#1542's
+    /// fallback): a pass adding rows gains nothing then.
+    pub main_drawing: bool,
 }
 
 /// The rendered timeline panel.
@@ -678,7 +681,7 @@ pub fn render_timeline_panel(visualization_data : & mut VisualizationData, rows_
     dots.rows_added = rows_added;
     dots.cols = marks.cols;
     dots.bend_lines = dots.cols.iter().chain(&dots.legs).chain(&dots.dashed_legs).copied().collect();
-    if rows_added {
+    {
         let ends: Vec<(f64, f64)> = dots.legs.iter().chain(&dots.dashed_legs).flat_map(|&(p, q)| [p, q]).collect();
         let mut corners: Vec<(f64, f64)> = Vec::new();
         for c in ends {
@@ -6069,9 +6072,16 @@ impl ArrowLanes {
                     let mut rest: Vec<&(usize, bool, i64)> = side.iter().copied().filter(|l| !l.1).collect();
                     let dip_leg = |it: &LaneItem, depth: i64| ((depth.abs() as f64 / 56f64.to_radians().tan()).round() as i64)
                         .clamp(2, (((it.hi - it.lo) / 2.0) as i64).max(2));
-                    // A track half a row above the dot that lies on nothing.
+                    // A track half a row above the dot that lies on nothing,
+                    // with no arrow on the row hopping the dot: the head
+                    // would come down onto the hop (#1605's review). (A
+                    // hop over its tail's dot, which its leg up crosses,
+                    // counts as a crossing at the fan, `fan_crossings_at`.)
+                    let hopped = |at: f64| placed.iter().any(|o| o.y == dot_y && !matches!(o.kind, LaneKind::FnResult)
+                        && o.lo < at - 2.0 && o.hi > at + 2.0);
                     let above_free = |it: &LaneItem| placed.iter().all(|o| o.y != dot_y - LANE_STEP || !stretches_overlap((it.lo, it.hi), (o.lo, o.hi)))
-                        && !dot_xy.iter().any(|&(dx, dy)| (dy - (dot_y - LANE_STEP)).abs() < 8 && (dx as f64) > it.lo - 8.0 && (dx as f64) < it.hi + 8.0);
+                        && !dot_xy.iter().any(|&(dx, dy)| (dy - (dot_y - LANE_STEP)).abs() < 8 && (dx as f64) > it.lo - 8.0 && (dx as f64) < it.hi + 8.0)
+                        && !hopped(x);
                     // (With no side left, one more from below on the dot's
                     // far side, at the same angle.)
                     let mut far_below = true;
@@ -6413,6 +6423,28 @@ struct LaneSettings {
     far: std::collections::HashSet<(usize, usize)>,
     self_right: std::collections::HashSet<(usize, usize)>,
     level_in: HashMap<(usize, usize), i64>,
+}
+
+impl LaneSettings {
+    /// These settings with the arrows and logos `keys` set as in `other`.
+    fn merged(self, other: &LaneSettings, keys: &BTreeSet<(usize, usize)>) -> LaneSettings {
+        fn take<K: Copy + Eq + std::hash::Hash, V: Copy>(mine: HashMap<K, V>, other: &HashMap<K, V>, of: impl Fn(&K) -> bool) -> HashMap<K, V> {
+            mine.into_iter().filter(|(k, _)| !of(k)).chain(other.iter().filter(|(k, _)| of(k)).map(|(k, v)| (*k, *v))).collect()
+        }
+        fn take_set<K: Copy + Eq + std::hash::Hash>(mine: std::collections::HashSet<K>, other: &std::collections::HashSet<K>, of: impl Fn(&K) -> bool) -> std::collections::HashSet<K> {
+            mine.into_iter().filter(|k| !of(k)).chain(other.iter().filter(|k| of(k)).copied()).collect()
+        }
+        let of = |k: &(usize, usize)| keys.contains(k);
+        LaneSettings {
+            lane_y: take(self.lane_y, &other.lane_y, of),
+            flipped: take_set(self.flipped, &other.flipped, of),
+            slot: take(self.slot, &other.slot, of),
+            leg_dx: take(self.leg_dx, &other.leg_dx, |(k, _)| of(k)),
+            far: take_set(self.far, &other.far, of),
+            self_right: take_set(self.self_right, &other.self_right, of),
+            level_in: take(self.level_in, &other.level_in, of),
+        }
+    }
 }
 
 fn dist(a: (f64, f64), b: (f64, f64)) -> f64 {
@@ -8394,72 +8426,114 @@ fn render_arrows_string_external_events_version(
     }
     // #1542's fans: drawn with the rule's approaches, unless that adds
     // crossings at a fan (arrow-arrow crossings of its arrows, counted as
-    // `fan_crossings`) over the drawing without the rule; then the fan's
-    // other orders of approaches are tried, and if each adds one too, the
-    // fan is drawn as without the rule (the maintainer's ruling on #1605).
+    // `fan_crossings_at`) over the drawing without the rule; then the fan's
+    // other orders of approaches are tried, then the rule off at the fans
+    // that cross more, and if each adds one too, the figure keeps main's
+    // drawing (the maintainer's ruling on #1605).
+    // Render time (#1605's review: no figure much slower than on main):
+    // the first layout gives up past `RULE_LAYOUT_WORK`, and the figure is
+    // drawn as main's router draws it; the other tries run within
+    // `RELAYOUT_WORK` more (`within_budget`).
+    let start = work_done();
     let fan_old: BTreeSet<(i64, i64)> = BTreeSet::new();
     let mut fan_variant: BTreeMap<(i64, i64), usize> = BTreeMap::new();
+    set_rule_cap(Some(start + RULE_LAYOUT_WORK));
     let mut drawn = lay_out_arrows(visualization_data, resource_owners_layout, dots, registry, false, &fan_old, &fan_variant);
-    let first = work_done();
-    // (A big figure isn't laid out again to compare its fans with main's
-    // drawing: a second whole layout of one costs seconds on the
-    // playground, which renders on every request, #1605's review.)
-    let big = first > BIG_FIGURE_WORK;
+    set_rule_cap(None);
+    let gave_up = take_rule_over();
+    let first = work_done() - start;
     let seen = dots.lanes.fans_seen.clone();
-    // No fan may cross other arrows more than it does in main's drawing
-    // (the maintainer's ruling on #1605). Only where a fan's arrows cross
-    // any: the arrows laid out as main's router did (`legacy`); if a fan
-    // crosses more here, up to two other orders of approaches at the
-    // rule's fans (within the work budget, `within_budget`), else the
-    // figure keeps main's drawing.
-    // (A big one whose rule-drawn fans cross, or with two heads on each
-    // other: main's drawing, in one more layout.)
-    let mut main_drawing_big = false;
-    if big && (seen.keys().any(|&(y, x)| fan_crossings_at(&drawn, (x as f64, y as f64)) > 0) || !heads_on_heads(&drawn, false).is_empty()) {
+    let legacy_layout = |dots: &mut DotLayer| {
         let (legs, dashed) = (dots.legs.clone(), std::mem::take(&mut dots.dashed_legs));
         dots.legs.extend(dashed.iter().copied());
         dots.legacy = true;
-        drawn = lay_out_arrows(visualization_data, resource_owners_layout, dots, registry, true, &fan_old, &BTreeMap::new());
+        let d = lay_out_arrows(visualization_data, resource_owners_layout, dots, registry, true, &BTreeSet::new(), &BTreeMap::new());
         dots.legacy = false;
         dots.legs = legs;
         dots.dashed_legs = dashed;
-        main_drawing_big = true;
-    }
-    let mut main_drawing = main_drawing_big;
-    if !big && (all_fan_crossings(&drawn) > 0 || !heads_on_heads(&drawn, false).is_empty()) {
+        d
+    };
+    let mut main_drawing = false;
+    if gave_up {
+        drawn = legacy_layout(dots);
+        main_drawing = true;
+    } else if all_fan_crossings(&drawn) > 0 || !heads_on_heads(&drawn, false).is_empty()
+        || !through_corners(&drawn, &dots.corners, &dots.lanes.ends).is_empty() {
+        // No fan may cross other arrows more than it does in main's
+        // drawing (the maintainer's ruling on #1605): where a fan's arrows
+        // cross any, two heads lie on each other, or a track runs through
+        // a leg's joint (`through_corners`), the arrows are also laid out
+        // as main's router did (`legacy`) and compared.
         let kept = dots.lanes.clone();
-        let (legs, dashed) = (dots.legs.clone(), std::mem::take(&mut dots.dashed_legs));
-        dots.legs.extend(dashed.iter().copied());
-        dots.legacy = true;
-        let old = lay_out_arrows(visualization_data, resource_owners_layout, dots, registry, true, &fan_old, &BTreeMap::new());
-        let old_lanes = dots.lanes.clone();
-        dots.legacy = false;
-        dots.legs = legs;
-        dots.dashed_legs = dashed;
-        // (Or two heads into one dot on each other where main's drawing has
-        // none.)
-        let worse = |d: &[Drawn]| fan_dots(d).into_iter().any(|c| fan_crossings_at(d, c) > fan_crossings_at(&old, c))
-            || heads_on_heads(d, false).len() > heads_on_heads(&old, false).len();
-        dots.lanes = kept;
+        let old = legacy_layout(dots);
+        let compared = work_done();
+        let old_lanes = std::mem::replace(&mut dots.lanes, kept);
+        let (corner_xy, ends) = (dots.corners.clone(), dots.lanes.ends.clone());
+        let corners = |d: &[Drawn]| through_corners(d, &corner_xy, &ends).len();
+        let worse_fans = |d: &[Drawn]| fan_dots(d).into_iter().filter(|&c| fan_crossings_at(d, c) > fan_crossings_at(&old, c)).collect::<Vec<_>>();
+        let worse = |d: &[Drawn]| !worse_fans(d).is_empty()
+            || heads_on_heads(d, false).len() > heads_on_heads(&old, false).len()
+            || corners(d) > corners(&old);
         if worse(&drawn) {
-            let marks = untangle_cost(&drawn, dots).0;
+            // (A try mustn't make more marks than main's drawing has.)
+            let marks = untangle_cost(&old, dots).0;
             let mut fixed = false;
+            let (rule_lanes, rule_drawn) = (dots.lanes.clone(), drawn.clone());
+            // (Other orders of approaches at the rule's fans that cross.)
             let tries: Vec<((i64, i64), usize)> = seen.iter()
                 .filter(|&(&(y, x), _)| fan_crossings_at(&drawn, (x as f64, y as f64)) > 0)
                 .flat_map(|(&f, &n)| (1..n.min(3)).map(move |v| (f, v)))
                 .take(2).collect();
             for (f, v) in tries {
-                if !within_budget(first) {
+                if !within_budget(compared, first) {
                     break;
                 }
-                fan_variant.insert(f, v);
+                fan_variant = BTreeMap::from([(f, v)]);
                 let d = lay_out_arrows(visualization_data, resource_owners_layout, dots, registry, false, &fan_old, &fan_variant);
                 if !worse(&d) && untangle_cost(&d, dots).0 <= marks {
                     drawn = d;
                     fixed = true;
                     break;
                 }
-                fan_variant.remove(&f);
+            }
+            // (Else main's drawing only in the functions where the rule's
+            // is worse: their arrows' tracks from main's layout, the rest
+            // kept. A function's arrows stay between its header rows.)
+            if !fixed {
+                let mut starts: Vec<i64> = visualization_data.fn_start_lines.values().map(|&l| get_y_axis_pos(l)).collect();
+                starts.sort_unstable();
+                starts.dedup();
+                let band = |y: f64| starts.iter().filter(|&&s| (s as f64) <= y).count();
+                let at = |d: &Drawn| d.tri.get(1).map(|t| t.1).or(d.logo.map(|l| l.1)).or(d.pieces.first().map(|p| p.0 .1)).unwrap_or(0.0);
+                let per_band = |d: &[Drawn], idx: Vec<usize>| {
+                    let mut n: BTreeMap<usize, usize> = BTreeMap::new();
+                    for i in idx {
+                        *n.entry(band(at(&d[i]))).or_default() += 1;
+                    }
+                    n
+                };
+                let bad_bands = |d: &[Drawn]| {
+                    let mut bad: BTreeSet<usize> = worse_fans(d).into_iter().map(|c| band(c.1)).collect();
+                    for (now, was) in [(heads_on_heads(d, false), heads_on_heads(&old, false)),
+                                       (through_corners(d, &corner_xy, &ends), through_corners(&old, &corner_xy, &ends))] {
+                        let was = per_band(&old, was);
+                        bad.extend(per_band(d, now).into_iter().filter(|&(b, n)| n > was.get(&b).copied().unwrap_or(0)).map(|(b, _)| b));
+                    }
+                    bad
+                };
+                let bad = bad_bands(&rule_drawn);
+                let all: BTreeSet<usize> = rule_drawn.iter().map(|d| band(at(d))).collect();
+                if all.iter().any(|b| !bad.contains(b)) {
+                    let keys: BTreeSet<(usize, usize)> = rule_drawn.iter().filter(|d| bad.contains(&band(at(d)))).map(|d| d.key).collect();
+                    dots.lanes = rule_lanes;
+                    let merged = dots.lanes.settings().merged(&old_lanes.settings(), &keys);
+                    dots.lanes.set(merged);
+                    let d = probe_arrows(visualization_data, resource_owners_layout, dots, registry);
+                    if !worse(&d) && untangle_cost(&d, dots).0 <= marks {
+                        drawn = d;
+                        fixed = true;
+                    }
+                }
             }
             if !fixed {
                 drawn = old;
@@ -8479,7 +8553,7 @@ fn render_arrows_string_external_events_version(
     let mut rows: Vec<usize> = left.iter().map(|&i| drawn[i].key.1).collect();
     rows.sort_unstable();
     rows.dedup();
-    dots.left_on = ArrowsLeftOn { rows, count: left.len(), others, fan_crossings: all_fan_crossings(&drawn) };
+    dots.left_on = ArrowsLeftOn { rows, count: left.len(), others, fan_crossings: all_fan_crossings(&drawn), main_drawing };
     // (A figure that keeps main's drawing wants no rows: main has none
     // there, and another pass would cost a whole layout again.)
     if main_drawing {
@@ -8494,15 +8568,31 @@ thread_local! {
     /// arrows drawn by probing passes (`probe_arrows`), summed. Deterministic,
     /// unlike a clock. Reset by `render_svg` (`reset_work`).
     static WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Where a layout gives up (`over_cap`): past the first, any layout
+    /// (`set_cap`, a pass of `render_svg` adding rows); past the second, a
+    /// layout other than main's router's (`set_rule_cap`).
+    static CAP: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((usize::MAX, usize::MAX)) };
+    /// Whether a layout went past each cap.
+    static OVER: std::cell::Cell<(bool, bool)> = const { std::cell::Cell::new((false, false)) };
 }
 
-/// A figure whose first layout did more probe work than this (about a
-/// second) is big: it isn't laid out again for #1542's fans.
-const BIG_FIGURE_WORK: usize = 100_000;
+/// A first layout of a figure's arrows that does more probe work than this
+/// (about a seventh of a second) gives up, and the figure is drawn as
+/// main's router draws it (`render_arrows_string_external_events_version`):
+/// comparing a big figure's drawing with main's would take a second whole
+/// layout, seconds on the playground, which renders on every request
+/// (#1605's review).
+const RULE_LAYOUT_WORK: usize = 15_000;
+
+/// How much more work than the first layout the other tries of a figure
+/// may do (another order of a fan's approaches, a pass with rows added).
+pub const RELAYOUT_WORK: usize = 6_000;
 
 /// Starts counting the layout work of a figure afresh.
 pub fn reset_work() {
     WORK.with(|w| w.set(0));
+    CAP.with(|c| c.set((usize::MAX, usize::MAX)));
+    OVER.with(|o| o.set((false, false)));
 }
 
 /// The layout work done so far for this figure (`WORK`).
@@ -8510,12 +8600,43 @@ pub fn work_done() -> usize {
     WORK.with(|w| w.get())
 }
 
-/// Whether another layout fits the budget: at most half again the work the
-/// figure's first layout did (`first`). The
-/// playground renders on every request (#1605: the extra layouts must not
-/// make a figure much slower).
-pub fn within_budget(first: usize) -> bool {
-    work_done() < first + first / 2
+/// Any layout gives up past this much work (`None`: no cap).
+pub fn set_cap(cap: Option<usize>) {
+    CAP.with(|c| c.set((cap.unwrap_or(usize::MAX), c.get().1)));
+}
+
+/// A layout other than main's router's gives up past this much work.
+fn set_rule_cap(cap: Option<usize>) {
+    CAP.with(|c| c.set((c.get().0, cap.unwrap_or(usize::MAX))));
+}
+
+/// Whether a layout went past `set_cap`'s cap since the last call.
+pub fn take_over() -> bool {
+    OVER.with(|o| { let v = o.get(); o.set((false, v.1)); v.0 })
+}
+
+/// Whether a layout went past `set_rule_cap`'s cap since the last call.
+fn take_rule_over() -> bool {
+    OVER.with(|o| { let v = o.get(); o.set((v.0, false)); v.1 })
+}
+
+/// Whether the layout under way has gone past a cap (`CAP`): its search
+/// then stops trying drawings (`untangle_search`).
+fn over_cap(dots: &DotLayer) -> bool {
+    let (w, (all, rule)) = (work_done(), CAP.with(|c| c.get()));
+    OVER.with(|o| {
+        let mut v = o.get();
+        v.0 |= w > all;
+        v.1 |= w > rule && !dots.legacy;
+        o.set(v);
+        v.0 || v.1
+    })
+}
+
+/// Whether another layout like the first (`first`, its work) fits the
+/// budget: no more than `RELAYOUT_WORK` past `from`.
+fn within_budget(from: usize, first: usize) -> bool {
+    work_done() - from + first <= RELAYOUT_WORK
 }
 
 /// Picks every arrow's track (`ArrowLanes`): a recording pass of the
@@ -8546,12 +8667,6 @@ fn lay_out_arrows(
     probe_arrows(visualization_data, resource_owners_layout, dots, registry)
 }
 
-/// How many times the arrows into the dot at `(y, x)` (a fan) cross other
-/// arrows, each crossing of two of them counted once.
-fn fan_crossings(drawn: &[Drawn], (y, x): (i64, i64)) -> usize {
-    fan_crossings_at(drawn, (x as f64, y as f64))
-}
-
 /// How far apart two heads' `head_dot`s may be and point at one dot: a head
 /// stopping short of a call icon (`CALL_ICON_CLEARANCE`) is 3 px further
 /// off than one ending on the dot's rim.
@@ -8568,7 +8683,9 @@ fn head_dot(d: &Drawn) -> Option<(f64, f64)> {
     Some((tip.0 + (tip.0 - mid.0) / l * 5.25, tip.1 + (tip.1 - mid.1) / l * 5.25))
 }
 
-/// `fan_crossings` for the heads into the dot at `c` (within 3 px).
+/// How many times the arrows into the dot at `c` (a fan: heads within
+/// `FAN_DOT_PX`) cross other arrows, each crossing of two of them counted
+/// once.
 fn fan_crossings_at(drawn: &[Drawn], c: (f64, f64)) -> usize {
     let fan: Vec<usize> = (0..drawn.len()).filter(|&i| head_dot(&drawn[i]).is_some_and(|h| dist(h, c) < FAN_DOT_PX)).collect();
     let mut n = 0;
@@ -8578,12 +8695,26 @@ fn fan_crossings_at(drawn: &[Drawn], c: (f64, f64)) -> usize {
                 continue;
             }
             n += drawn[i].pieces.iter().map(|&p| b.pieces.iter().filter(|&&q| pieces_cross(p, q)).count()).sum::<usize>();
+            // (A shaft through the other's hop crosses it too: the hops
+            // aren't among the straight pieces, #1605's review.)
+            n += hops_crossed(&drawn[i], b) + hops_crossed(b, &drawn[i]);
         }
     }
     n
 }
 
-/// `fan_crossings` summed over every fan of the figure (2 or more heads
+/// How many of `b`'s hops (13 arc points each, `Drawn::arcs`) a straight
+/// piece of `a` runs through.
+fn hops_crossed(a: &Drawn, b: &Drawn) -> usize {
+    let off = |c: (f64, f64), (p, q): Piece| {
+        let l = dist(p, q);
+        let t = if l < 1e-9 { 0.0 } else { (((c.0 - p.0) * (q.0 - p.0) + (c.1 - p.1) * (q.1 - p.1)) / (l * l)).clamp(0.0, 1.0) };
+        dist(c, (p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t))
+    };
+    b.arcs.chunks(13).filter(|hop| a.pieces.iter().any(|&piece| hop.iter().any(|&c| off(c, piece) < 2.0))).count()
+}
+
+/// `fan_crossings_at` summed over every fan of the figure (2 or more heads
 /// within 8 px of each other).
 fn all_fan_crossings(drawn: &[Drawn]) -> usize {
     fan_dots(drawn).into_iter().map(|c| fan_crossings_at(drawn, c)).sum()
@@ -8716,6 +8847,11 @@ fn untangle_search(
     // Every drawing tried costs a pass over the arrows.
     let mut budget: usize = 4000;
     let eval = |dots: &mut DotLayer, s: &LaneSettings, budget: &mut usize| {
+        // (A layout past its cap tries nothing more, `over_cap`.)
+        if over_cap(dots) {
+            *budget = 0;
+            return ((usize::MAX, usize::MAX), Vec::new());
+        }
         *budget = budget.saturating_sub(1);
         dots.lanes.set(s.clone());
         let d = probe_arrows(visualization_data, resource_owners_layout, dots, registry);
