@@ -563,20 +563,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // Whether each lender's kind is exact: rustc's kept loans are; a
     // stored value's own borrows are (`lender_certainty`); several
     // lenders through reference parameters aren't.
+    // Direct (`&x` / `&mut x` written in a by-value argument) or not
+    // (#1619): a lender through a reference parameter isn't.
     let mut cert: Vec<(ResourceTy, bool)> = Vec::new();
-    if written_out {
-      for f in flows.iter() {
-        cert.extend(self.lender_certainty(f.arg));
-      }
+    let ExprKind::MethodCall(_, _, args, _) = call.kind else { unreachable!() };
+    let by_value: Vec<bool> = self.callee_sig(call).map(|(sig, ..)| sig.inputs().iter().skip(1).map(|t| !t.is_ref()).collect()).unwrap_or_default();
+    for (i, a) in args.iter().enumerate() {
+      let direct_ok = by_value.get(i).copied().unwrap_or(false);
+      cert.extend(self.lender_certainty(a).into_iter().map(|(l, c)| (l, c && direct_ok)));
     }
     let certain = lenders.iter()
-      .map(|l| flows.is_empty() || if written_out {
-        cert.iter().filter(|(x, _)| x == l).all(|(_, c)| *c)
-      } else {
-        // (Through reference parameters of different kinds,
-        // `v.store(&a, &mut b)`: not known which loan is whose.)
-        !(flows.iter().any(|f| self.flow_is_mut(f, false)) && flows.iter().any(|f| !self.flow_is_mut(f, false)))
-      })
+      .map(|l| cert.iter().any(|(x, _)| x == l) && cert.iter().filter(|(x, _)| x == l).all(|(_, c)| *c))
       .collect();
     (kinds, shared, certain, holder_ref)
   }
@@ -1583,8 +1580,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
       }
     };
-    let rd_certain = |n: Option<String>| n.and_then(|n| self.borrow_map.get(&n))
-      .is_none_or(|rd| rd.all_lenders().len() <= 1 || rd.lender_muts.is_empty());
     match e.kind {
       ExprKind::Struct(_, fields, tail) => {
         for f in fields.iter() {
@@ -1597,11 +1592,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ExprKind::Tup(elems) | ExprKind::Array(elems) => elems.iter().for_each(|x| self.collect_certainty(x, out)),
       ExprKind::Repeat(x, _) | ExprKind::DropTemps(x) => self.collect_certainty(x, out),
       ExprKind::Block(b, _) => if let Some(x) = b.expr { self.collect_certainty(x, out) },
-      ExprKind::If(_, then, Some(els)) => {
-        self.collect_certainty(then, out);
-        self.collect_certainty(els, out);
-      }
-      ExprKind::Match(_, arms, _) => arms.iter().for_each(|a| self.collect_certainty(a.body, out)),
+      // Reached through an arm: not direct (#1619).
+      ExprKind::If(..) | ExprKind::Match(..) => add(self.value_lenders(e), false),
       ExprKind::Call(f, args) if matches!(f.kind, ExprKind::Path(QPath::Resolved(_, p))
         if matches!(p.res, rustc_hir::def::Res::Def(rustc_hir::def::DefKind::Ctor(..), _))) => {
         args.iter().for_each(|x| self.collect_certainty(x, out));
@@ -1612,32 +1604,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           elems.iter().for_each(|x| self.collect_certainty(x, out));
           return;
         }
-        // Several lenders through arguments of different kinds
-        // (`choose(&mut a, &b)`): the result may keep either loan.
-        let mixed = self.call_lender_kinds(e, false)
-          .is_some_and(|k| k.iter().any(|(_, m)| *m) && k.iter().any(|(_, m)| !*m))
-          // (Or copied out of a holder whose loans mix kinds: `first(&x)`
-          // with `x = vec![r, &b]`.)
-          || match e.kind {
-            ExprKind::Call(_, args) => args.iter().collect::<Vec<_>>(),
-            ExprKind::MethodCall(_, rcvr, args, _) => std::iter::once(rcvr).chain(args.iter()).collect(),
-            _ => Vec::new(),
-          }.into_iter().any(|a| self.pointee_holder(a).and_then(|h| self.borrow_map.get(&h)).is_some_and(|rd| !rd.lender_muts.is_empty()));
-        add(self.call_lenders(e), !mixed);
+        // Reached through a call: not direct (#1619).
+        add(self.call_lenders(e), false);
       }
       ExprKind::AddrOf(_, _, inner) => {
-        let c = match through_ref(inner, self.tcx) {
-          None => true,
-          Some(r) => rd_certain(expr_to_rap_name(peel_shared_reborrow(r, self.tcx), &self.tcx)),
-        };
-        add(self.place_lenders(inner), c);
+        // `&x` / `&mut x` on a place of the value's own: direct; through a
+        // reference (`&*r`, `&r.x`), not.
+        add(self.place_lenders(inner), through_ref(inner, self.tcx).is_none());
       }
+      // A copy of a reference or holder: not direct.
       ExprKind::Path(QPath::Resolved(..)) | ExprKind::Field(..) => {
-        let n = expr_to_rap_name(e, &self.tcx);
-        let c = rd_certain(n.clone());
-        match n.and_then(|n| self.borrow_map.get(&n)) {
-          Some(rd) => add(rd.all_lenders(), c),
-          None => add(self.value_lenders(e), c),
+        match expr_to_rap_name(e, &self.tcx).and_then(|n| self.borrow_map.get(&n)) {
+          Some(rd) => add(rd.all_lenders(), false),
+          None => add(self.value_lenders(e), false),
         }
       }
       _ => {}

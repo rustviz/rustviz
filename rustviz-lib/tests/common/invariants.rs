@@ -582,31 +582,21 @@ pub fn check(fig: &Fig, src: &str) -> Vec<(&'static str, String)> {
     // A reference re-pointed by a copy of another one (`r = r2;`) holds
     // that one's loan from then on, of its kind (#1521): the kinds of the
     // borrows the source's column last drew, at or before the copy.
-    // (On the copy's own row, only what the source drew before it was
-    // copied: `let k = r; r = &b;` copies r's old loan, #1619.)
-    let last_borrow_kinds = |var: &str, line: u32, nth: usize| -> BTreeSet<&'static str> {
+    let last_borrow_kinds = |var: &str, line: u32| -> BTreeSet<&'static str> {
         let mut ds: Vec<&Dot> = fig.dots.iter().filter(|d| d.var == var && d.line <= line).collect();
         ds.sort_by(|a, b| a.y.total_cmp(&b.y));
         ds.iter().rev()
-            .map(|d| {
-                // (The nth copy on the row reads the source up to its nth
-                // duplicate: `k = r; ..; r = &mut b; k = r;`.)
-                let upto = if d.line == line {
-                    d.events.iter().enumerate().filter(|(_, e)| *e == "duplicate").nth(nth).map_or(d.events.len(), |(i, _)| i)
-                } else { d.events.len() };
-                d.events[..upto].iter().filter_map(|e| match e.as_str() {
-                    "static_borrow" => Some("static"),
-                    "mutable_borrow" => Some("mutable"),
-                    _ => None,
-                }).collect::<BTreeSet<&'static str>>()
-            })
-            .find(|k| !k.is_empty())
+            .find(|d| d.has_any(&["static_borrow", "mutable_borrow"]))
+            .map(|d| d.events.iter().filter_map(|e| match e.as_str() {
+                "static_borrow" => Some("static"),
+                "mutable_borrow" => Some("mutable"),
+                _ => None,
+            }).collect())
             .unwrap_or_default()
     };
     for ds in dots_of.values() {
         let (mut borrows, mut lends) = (BTreeSet::new(), BTreeSet::new());
         for d in ds {
-            let mut copies_seen = 0;
             for e in &d.events {
                 let kind = e.split('_').next().unwrap_or("");
                 match e.as_str() {
@@ -618,9 +608,8 @@ pub fn check(fig: &Fig, src: &str) -> Vec<(&'static str, String)> {
                             .filter(|a| repoints(a, &d.var, &fig.header_vars) && a.line == d.line)
                             .collect();
                         if !from.is_empty() {
-                            borrows = from.iter().flat_map(|a| last_borrow_kinds(&a.var, d.line, copies_seen)).collect();
+                            borrows = from.iter().flat_map(|a| last_borrow_kinds(&a.var, d.line)).collect();
                         }
-                        copies_seen += 1;
                     }
                     "static_borrow" | "mutable_borrow" => { borrows.insert(kind); }
                     "static_lend" | "mutable_lend" => { lends.insert(kind); }

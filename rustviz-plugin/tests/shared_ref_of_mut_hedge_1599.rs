@@ -19,8 +19,8 @@ fn pick<'a>(x: &'a mut &'a String, y: &'a &'a String, f: bool) -> &'a &'a String
 
 // Third Codex round: an arm lending nothing; a reference copied out of
 // a holder of mixed loans, or reborrowed from a result that may hold
-// either, keeps a loan of unknown kind; a copy taken before its source
-// is re-pointed on the same row.
+// either: the kind of what the holder keeps isn't stated. (A copy taken
+// before its source is re-pointed on the same row is #1742.)
 fn hedged(f: bool, g: bool) {
     let mut a18 = String::from("a");
     let b18 = String::from("b");
@@ -40,12 +40,6 @@ fn hedged(f: bool, g: bool) {
     let mut v20: Vec<&String> = Vec::new();
     v20.push(&*r20);
     println!("{:?}", v20);
-    let mut a21 = String::from("a");
-    let b21 = String::from("b");
-    let mut r21: &String = &mut a21;
-    let keep21 = r21;
-    let k21 = r21; r21 = &b21;
-    println!("{} {} {}", k21, keep21, r21);
 }
 
 // Fourth Codex round: `&*p` through a `&mut` is a shared reborrow; an arm

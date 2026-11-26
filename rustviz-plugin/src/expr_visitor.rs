@@ -7434,13 +7434,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let holder_ref = self.tcx.typeck(v.hir_id.owner).expr_ty_opt(v).and_then(|t| self.stored_ref_kind(t));
     let certainty = self.lender_certainty(v);
     let lenders: Vec<ResourceTy> = lenders.iter().filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_))).cloned().collect();
-    let any_mut = lenders.iter().any(|l| rd.mut_of(l));
+    // A lender not borrowed directly (`&x` written here), in a value whose
+    // loans mix kinds or keep a mutable loan through a shared reference:
+    // its kind isn't stated (#1619).
+    let mixed = lenders.iter().any(|l| rd.mut_of(l)) && lenders.iter().any(|l| !rd.mut_of(l));
+    let trigger = mixed || shared;
+    let unstated = |l: &ResourceTy| trigger && certainty.iter().any(|(x, c)| x == l && !*c);
     let may: Vec<String> = may_point_into_names(&lenders.iter()
-      .map(|l| (l.clone(), rd.mut_of(l), any_mut && certainty.iter().any(|(x, c)| x == l && !*c)))
+      .map(|l| (l.clone(), rd.mut_of(l), unstated(l)))
       .collect::<Vec<_>>(), holder_ref);
     let maybe_none = self.may_be_none(v);
-    for l in lenders {
-      let uncertain = any_mut && certainty.iter().any(|(x, c)| *x == l && !*c);
+    for l in lenders.clone() {
+      let uncertain = unstated(&l);
       let m = rd.mut_of(&l);
       let evt = if m { Evt::MBorrow } else { Evt::SBorrow };
       let shared = m && (holder_ref == Some(false) || shared_of.as_ref().and_then(|v| v.iter().find(|(x, _)| *x == l)).map_or(shared, |(_, sh)| *sh));
@@ -7941,8 +7946,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // A lender whose loan kind isn't exact while some loan of the store
     // may be mutable: drawn as a mutable loan, worded "possibly mutably"
     // (#1619's hedge).
-    let any_mut = kinds.iter().any(|m| *m);
-    let uncertain: Vec<bool> = certain.iter().map(|c| !c && any_mut).collect();
+    // A lender not borrowed directly (`&x` written in a by-value argument),
+    // in a store whose loans mix kinds or keep a mutable loan through a
+    // shared reference: its kind isn't stated (#1619).
+    let mixed = kinds.iter().any(|m| *m) && kinds.iter().any(|m| !*m);
+    let trigger = mixed || shared.iter().zip(kinds.iter()).any(|(sh, m)| *sh && *m);
+    let uncertain: Vec<bool> = certain.iter().map(|c| !c && trigger).collect();
     let may_point_into = may_point_into_names(&lenders.iter().cloned().zip(kinds.iter().copied()).zip(uncertain.iter().copied()).map(|((l, m), u)| (l, m, u)).collect::<Vec<_>>(), holder_ref);
     let maybe_none = { let ExprKind::MethodCall(_, _, args, _) = call.kind else { unreachable!() }; args.iter().any(|a| self.may_be_none(a)) };
     let name = rcvr.name().to_owned();
@@ -9150,14 +9159,22 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
       passed_on,
     },
   };
-  let any_mut = lenders.iter().any(|l| muts.iter().find(|(x, _)| x == l).map_or(is_mut, |(_, m)| *m));
+  // (A lender not borrowed directly, in a holder's value whose loans mix
+  // kinds or keep a mutable loan through a shared reference: its kind
+  // isn't stated, #1619.)
+  let kind_of = |l: &ResourceTy| muts.iter().find(|(x, _)| x == l).map_or(is_mut, |(_, m)| *m);
+  let mixed = lenders.iter().any(|l| kind_of(l)) && lenders.iter().any(|l| !kind_of(l));
+  let shared_any = !lhs_rap.is_ref() && lenders.iter().any(|l| kind_of(l) && (holder_ref == Some(false)
+    || shared_of.as_ref().and_then(|v| v.iter().find(|(x, _)| x == l)).map_or(via_shared_default(&shared), |(_, sh)| *sh)));
+  let trigger = !lhs_rap.is_ref() && (mixed || shared_any);
+  let unstated = |l: &ResourceTy| trigger && certainty.iter().any(|(x, c)| x == l && !*c);
   let may_point_into = may_point_into_names(&lenders.iter()
-    .map(|l| (l.clone(), muts.iter().find(|(x, _)| x == l).map_or(is_mut, |(_, m)| *m), any_mut && certainty.iter().any(|(x, c)| x == l && !*c)))
+    .map(|l| (l.clone(), kind_of(l), unstated(l)))
     .collect::<Vec<_>>(), holder_ref);
   let maybe_none = !lhs_rap.is_ref() && self.may_be_none(call);
   for lender in lenders.iter() {
     let id = *self.unique_id;
-    let uncertain = any_mut && certainty.iter().any(|(l, c)| l == lender && !*c);
+    let uncertain = unstated(lender);
     let is_mut = muts.iter().find(|(l, _)| l == lender).map_or(is_mut, |(_, m)| *m);
     // `r.first_mut()` with r a local `&mut`: a reborrow through r, drawn
     // like `&mut *r` (#1152).
@@ -11032,9 +11049,11 @@ fn ref_into_holder_value(&mut self, lhs: &ResourceTy, r: &ResourceAccessPoint, r
     && v.borrow_map.get(r.name()).is_some_and(|rd| rd.mut_of(l)));
   // (r with several lenders of different kinds, `choose(&mut a, &b)`:
   // which loan the value keeps isn't known, #1619's hedge.)
-  let certain = self.borrow_map.get(r.name()).is_none_or(|rd| rd.all_lenders().len() <= 1 || rd.lender_muts.is_empty());
+  // (Reached through the copy of r: its kinds aren't stated when they
+  // mix or come from a shared reference holding a mutable loan, #1619.)
   let any_mut = lenders.iter().any(|l| kind_of(self, l));
-  let uncertain = !certain && any_mut;
+  let mixed = any_mut && lenders.iter().any(|l| !kind_of(self, l));
+  let uncertain = mixed || (any_mut && !is_mut);
   let may: Vec<String> = lenders.iter().filter_map(|l| match l {
     ResourceTy::Value(x) => Some(x.name().to_owned()),
     ResourceTy::Deref(x) => Some(format!("*{}", x.name())),
@@ -15953,20 +15972,20 @@ fn stmt_may_exit<'tcx>(tcx: TyCtxt<'tcx>, st: &'tcx rustc_hir::Stmt<'tcx>) -> bo
   v.found
 }
 
-/// The names a holder may point into (`BorrowVia::may_point_into`): the
-/// lenders whose referent isn't known, only the mutably lent ones when it
-/// stores `&mut`s (a shared loan can't give one, #1619).
-fn may_point_into_names(lenders: &[(ResourceTy, bool, bool)], holder_ref: Option<bool>) -> Vec<String> {
-  // (A holder of references to references, `Vec<&&String>`, points into
-  // the reference variables, not what they point to.)
-  let to_ref_vars = lenders.iter().any(|(l, _, u)| *u && matches!(l, ResourceTy::Value(x) if x.is_ref()));
+/// The lenders whose loan kind isn't stated (`BorrowVia::may_point_into`,
+/// named; a `*p` lender is the data p points to), for the holder's dot.
+fn may_point_into_names(lenders: &[(ResourceTy, bool, bool)], _holder_ref: Option<bool>) -> Vec<String> {
   lenders.iter()
-    .filter(|(l, _, _)| !to_ref_vars || matches!(l, ResourceTy::Value(x) if x.is_ref()))
-    .filter(|(_, m, u)| *u && (holder_ref != Some(true) || *m))
+    .filter(|(_, _, u)| *u)
     .filter_map(|(l, _, _)| match l {
       ResourceTy::Value(x) => Some(x.name().to_owned()),
       ResourceTy::Deref(x) => Some(format!("*{}", x.name())),
       _ => None,
     })
     .collect()
+}
+
+/// `shared` as computed for a whole call result (`emit_call_result_borrows`).
+fn via_shared_default(shared: &bool) -> bool {
+  *shared
 }

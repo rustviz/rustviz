@@ -740,7 +740,7 @@ fn element_update_holds_value(r: &ResourceAccessPoint, place: &str, write: &Plac
 fn append_decl_ref_die(vd: &VisualizationData, e: &ExternalEvent, line: usize, var: &ResourceAccessPoint, b_history: &mut Vec<(usize, Event)>) {
     if let ExternalEvent::RefDie { from: from_ro @ ResourceTy::Value(r), id, .. } = e {
         if r == var {
-            if !r.is_mutref() && history_holds_mut_borrow(vd, b_history, r, line, &mut Vec::new()) {
+            if !r.is_mutref() && history_holds_mut_borrow(vd, b_history, r, line, 4) {
                 b_history.push((line, Event::MutableDie { to: ResourceTy::Anonymous, is: from_ro.clone(), id: *id }));
             } else {
                 b_history.extend(vd.event_of_external_event(line, e, false));
@@ -4583,9 +4583,6 @@ impl Event {
             Event::MutableBorrow{ from, is, of_ref_var, shared, ..} => {
                 if is.is_closure() {
                     hover_messages::event_dot_closure_capture_mut_borrow(&self.deref_name(my_name), &from.name())
-                } else if is.holds_borrow() && *shared && !*of_ref_var {
-                    // `vr.push(r)` with `r: &String = &mut s` (#1599).
-                    hover_messages::event_dot_holder_shared_ref_of_mut(&self.deref_name(my_name), &from.name(), holder_lender_kind(from), holds_copy_value(from))
                 } else if is.holds_borrow() && matches!(from, ResourceTy::Caller) {
                     // `let k = Box::new(r);` with r a `&mut` parameter (#1289).
                     hover_messages::event_dot_holder_borrow_caller(&self.deref_name(my_name))
@@ -6614,7 +6611,7 @@ impl Visualizable for VisualizationData {
 /// nothing back (another reference still holds the loan) ended it as an
 /// immutable one.
 fn holds_mut_borrow(vd: &VisualizationData, ro: &ResourceAccessPoint) -> bool {
-    holds_mut_borrow_by(vd, ro, usize::MAX, &mut Vec::new())
+    holds_mut_borrow_by(vd, ro, usize::MAX, 4)
 }
 
 /// `holds_mut_borrow` for `ro`'s value as of line `by`. A copy of another
@@ -6622,56 +6619,34 @@ fn holds_mut_borrow(vd: &VisualizationData, ro: &ResourceAccessPoint) -> bool {
 /// `holder(downgrade(&mut s4))`) holds that reference's loan, so its kind
 /// is the source's as of the copy (the checker's rule, #1521); `depth`
 /// bounds the walk along copies.
-/// `seen`: the (column, line) pairs already followed, so a chain of
-/// copies of any length is followed (a bound of 4 left the fifth copy's
-/// end immutable, #1599) and copies round a loop end.
-fn holds_mut_borrow_by(vd: &VisualizationData, ro: &ResourceAccessPoint, by: usize, seen: &mut Vec<(u64, usize)>) -> bool {
+fn holds_mut_borrow_by(vd: &VisualizationData, ro: &ResourceAccessPoint, by: usize, depth: usize) -> bool {
     let Some(t) = vd.timelines.get(ro.hash()) else { return false };
-    history_holds_mut_borrow(vd, &t.history, ro, by, seen)
+    history_holds_mut_borrow(vd, &t.history, ro, by, depth)
 }
 
 /// `holds_mut_borrow_by` with `ro`'s events so far in `history`: a
 /// reference declared in an arm has its events collected there before
 /// they reach its column (`append_decl_branch_events`), so its end,
 /// collected with them, can't look at the column (#1571).
-fn history_holds_mut_borrow(vd: &VisualizationData, history: &[(usize, Event)], ro: &ResourceAccessPoint, by: usize, seen: &mut Vec<(u64, usize)>) -> bool {
+fn history_holds_mut_borrow(vd: &VisualizationData, history: &[(usize, Event)], ro: &ResourceAccessPoint, by: usize, depth: usize) -> bool {
     if ro.is_ref() {
-        if seen.contains(&(*ro.hash(), by)) {
-            return false;
-        }
-        seen.push((*ro.hash(), by));
         // (A copy of another reference re-points it; a call's result
         // copied in, `n` in `if let Some(n) = Some(id(r))`, comes with the
         // borrow drawn into it.)
         let from_column = |f: &ResourceTy| f.extract_rap().is_some_and(|r| !r.is_fn());
-        let before: Vec<&(usize, Event)> = history.iter().filter(|(l, _)| *l <= by).collect();
-        let pos = before.iter().rposition(|(_, e)| match e {
+        return history.iter().rev()
+            .filter(|(l, _)| *l <= by)
+            .find(|(_, e)| match e {
                 Event::MutableBorrow { .. } | Event::StaticBorrow { .. } | Event::Acquire { .. } => true,
                 Event::Copy { from, .. } => from_column(from),
                 _ => false,
+            })
+            .is_some_and(|(l, e)| match e {
+                Event::MutableBorrow { .. } => true,
+                Event::Copy { from, .. } => depth > 0 && from.extract_rap()
+                    .is_some_and(|src| src.hash() != ro.hash() && holds_mut_borrow_by(vd, src, *l, depth - 1)),
+                _ => false,
             });
-        let latest = pos.map(|i| before[i]);
-        return latest.is_some_and(|(l, e)| match e {
-            // Any of the loans it got together, on that row (`choose(&mut
-            // a, &b)` gives it a's mutable loan and b's shared one, in
-            // argument order, #1599); not one an earlier re-point on the
-            // row gave it (`let mut r = &mut a; r = &b;`, #1619).
-            Event::MutableBorrow { .. } | Event::StaticBorrow { .. } => before[..=pos.unwrap_or(0)].iter().rev()
-                .take_while(|(l2, e2)| l2 == l && matches!(e2, Event::MutableBorrow { .. } | Event::StaticBorrow { .. }))
-                .any(|(_, e2)| matches!(e2, Event::MutableBorrow { .. })),
-            // (The source as of the copy: not a re-point after it on the
-            // same row, `let k = r; r = &b;`, #1619.)
-            Event::Copy { from, id: copy_id, .. } => from.extract_rap()
-                .is_some_and(|src| src.hash() != ro.hash() && vd.timelines.get(src.hash()).is_some_and(|t| {
-                    // (This copy's own counterpart on the source, by id:
-                    // `k = r; ..; r = &mut b; k = r;` on one row, #1619.)
-                    let cut = t.history.iter()
-                        .position(|(l2, e2)| l2 == l && matches!(e2, Event::Duplicate { id, .. } if id == copy_id))
-                        .unwrap_or(t.history.len());
-                    history_holds_mut_borrow(vd, &t.history[..cut], src, *l, seen)
-                })),
-            _ => false,
-        });
     }
     ro.holds_borrow() && history.iter().any(|(_, e)| matches!(e, Event::MutableBorrow { .. }))
 }

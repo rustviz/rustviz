@@ -3946,14 +3946,31 @@ fn deep_lend_title(event: &Event, visualization_data: &VisualizationData) -> Opt
 // literal did, or it borrows s through a reference it captured), so
 // this reads like any other lend to g rather than "captured by closure
 // g".
-/// The holder's dot of a borrow into a holder that may point into
-/// any of several lenders (`BorrowVia::may_point_into`, #1619), found by
-/// the borrow's own event id.
-fn uncertain_loan_title(event: &Event, name: &String, visualization_data: &VisualizationData) -> Option<String> {
-    let id = match event {
-        Event::MutableBorrow { id, is, .. } | Event::StaticBorrow { id, is, .. } if is.holds_borrow() => *id,
-        _ => return None,
-    };
+/// Whether `holder`'s loan of `lender` has an unstated kind (a borrow
+/// event between them marked `BorrowVia::uncertain`, #1619). Only used
+/// for text that is then kind-neutral, which stays true on any path.
+fn uncertain_loan(visualization_data: &VisualizationData, holder: &ResourceTy, lender: &ResourceTy) -> bool {
+    fn key(r: &ResourceTy) -> Option<u64> {
+        match r {
+            ResourceTy::Value(x) | ResourceTy::Deref(x) => Some(*x.hash()),
+            _ => None,
+        }
+    }
+    let (Some(h), Some(l)) = (key(holder), key(lender)) else { return false };
+    fn find(events: &[(usize, ExternalEvent)], h: u64, l: u64) -> bool {
+        events.iter().any(|(_, ev)| match ev {
+            ExternalEvent::MutableBorrow { from, to, via: Some(v), .. } | ExternalEvent::StaticBorrow { from, to, via: Some(v), .. } => v.uncertain
+                && matches!(from, ResourceTy::Value(x) | ResourceTy::Deref(x) if *x.hash() == l)
+                && matches!(to, ResourceTy::Value(x) if *x.hash() == h),
+            ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| find(&b.e_data, h, l)),
+            _ => false,
+        })
+    }
+    find(&visualization_data.external_events, h, l)
+}
+
+/// The borrow event `id`'s `BorrowVia` when its kind is unstated.
+fn uncertain_via(visualization_data: &VisualizationData, id: usize) -> Option<&crate::svg_generator::data::BorrowVia> {
     fn find(events: &[(usize, ExternalEvent)], id: usize) -> Option<&crate::svg_generator::data::BorrowVia> {
         events.iter().find_map(|(_, ev)| match ev {
             ExternalEvent::MutableBorrow { id: i, via: Some(v), .. } | ExternalEvent::StaticBorrow { id: i, via: Some(v), .. }
@@ -3962,8 +3979,39 @@ fn uncertain_loan_title(event: &Event, name: &String, visualization_data: &Visua
             _ => None,
         })
     }
-    let v = find(&visualization_data.external_events, id)?;
-    Some(hover_messages::event_dot_holder_may_point_into(name, &v.may_point_into, v.holder_ref, v.maybe_none))
+    find(&visualization_data.external_events, id)
+}
+
+/// The dots of a loan whose kind is unstated (#1619): the holder keeps
+/// its lenders borrowed; the lender is borrowed, then no longer.
+fn uncertain_loan_title(event: &Event, name: &String, visualization_data: &VisualizationData) -> Option<String> {
+    use crate::svg_generator::data::lender_holds_value;
+    match event {
+        Event::MutableBorrow { id, is, .. } | Event::StaticBorrow { id, is, .. } if is.holds_borrow() =>
+            uncertain_via(visualization_data, *id).map(|v| hover_messages::event_dot_holder_keeps_borrowed(name, &v.may_point_into)),
+        Event::MutableLend { id, to, is, .. } | Event::StaticLend { id, to, is, .. } if uncertain_via(visualization_data, *id).is_some() =>
+            Some(hover_messages::event_dot_neutral_lend(name, &to.name(), lender_holds_value(is))),
+        Event::MutableReacquire { from, is, .. } | Event::StaticReacquire { from, is, .. } if uncertain_loan(visualization_data, from, is) =>
+            Some(hover_messages::event_dot_neutral_reacquire(name, &from.name(), lender_holds_value(is))),
+        Event::MutableDie { to, is, .. } | Event::StaticDie { to, is, .. } if is.holds_borrow() && uncertain_loan(visualization_data, is, to) =>
+            Some(hover_messages::event_dot_neutral_return(name)),
+        _ => None,
+    }
+}
+
+/// The holder of a live loan of `rap` whose kind is unstated, on `line`.
+fn uncertain_lend_live_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, line: usize) -> Option<String> {
+    let t = visualization_data.timelines.get(rap.hash())?;
+    let me = ResourceTy::Value(rap.clone());
+    let mut live: Vec<ResourceTy> = Vec::new();
+    for (l, e) in t.history.iter().filter(|(l, _)| *l <= line) {
+        match e {
+            Event::StaticLend { to, .. } | Event::MutableLend { to, .. } if uncertain_loan(visualization_data, to, &me) => live.push(to.clone()),
+            Event::StaticReacquire { from, .. } | Event::MutableReacquire { from, .. } if *l < line => live.retain(|x| x != from),
+            _ => {}
+        }
+    }
+    live.first().map(|h| h.name())
 }
 
 fn kept_closure_lend_title(event: &Event, name: &String, visualization_data: &VisualizationData) -> Option<String> {
@@ -4174,6 +4222,11 @@ fn timeline_segment_title(
     if let (State::PartialPrivilege { .. } | State::RevokedPrivilege { .. }, Some(line)) = (state, line) {
         if let Some(title) = lent_with_parent_title(state, rap, visualization_data, line) {
             return title;
+        }
+        // Lent with an unstated kind (#1619): neither "read-only" nor
+        // "can't be used".
+        if let Some(holder) = uncertain_lend_live_at(rap, visualization_data, line) {
+            return hover_messages::event_dot_neutral_lend(rap.name(), &holder, rap.holds_value());
         }
     }
     // A place an or-pattern's reference may borrow (#565): borrowed
@@ -6911,6 +6964,8 @@ fn render_generic_arrow(
     }
     let title = match visualization_data.field_lenders.get(&external_event.get_id()) {
         Some(f) => hover_messages::arrow_field_lenders_title(external_event, from, to, &f.lenders, f.end),
+        None if matches!(external_event, ExternalEvent::MutableDie { .. } | ExternalEvent::StaticDie { .. }) && uncertain_loan(visualization_data, from, to) =>
+            hover_messages::arrow_neutral_return(&from.name(), &to.name()),
         None => hover_messages::arrow_full_title(external_event, from, to),
     };
 
