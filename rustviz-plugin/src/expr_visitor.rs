@@ -7286,12 +7286,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       if self.ref_handed_off(member.name()) {
         continue;
       }
-      // The loan is live while the old value is used and dead after:
-      // if MIR ends it at a later use, it ends there; otherwise (no
-      // use since the borrow was stored) it ends at the overwrite.
+      // An unread field's loan can end on the very row it was created.
+      // If Drop needs the reference, rustc keeps its loan to the write.
       let kill = mir_b_data.iter()
-        .find_map(|m| ExprVisitor::borrow_match(old, m))
-        .filter(|&kill| kill > old.assigned_at);
+        .filter(|m| Self::borrow_span_match(old, m))
+        .map(|m| m.region.1)
+        .max()
+        .or_else(|| mir_b_data.iter().filter_map(|m| Self::borrow_match(old, m)).max())
+        .map(|kill| kill.max(old.assigned_at));
       let lenders = old.all_lenders().into_iter()
         .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)))
         .collect();

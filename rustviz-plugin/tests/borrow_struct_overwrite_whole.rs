@@ -1,10 +1,6 @@
-// #538: `hold = H { r: &t };` overwrites a whole struct. The old value
-// of `hold` is dropped there, so the borrow of s it held ends at that
-// assignment, unlike a direct field write (`hold.r = &t;`, #531, where
-// hold's single lifetime keeps s borrowed until hold's last use). rustc
-// agrees: the `let m = &mut s;` after the overwrite compiles (it would
-// be E0502 with `hold.r = &t;`). RustViz draws s's borrow ending on the
-// overwrite's row, with t's starting there.
+// #538, #1676: the old value is dropped on a whole-struct overwrite.
+// An unread reference field's loan can already have ended at initialization.
+// A direct field overwrite can leave an old loan live (#531).
 struct H<'a> { r: &'a String }
 struct M<'a> { r: &'a mut String }
 struct P<'a> { a: &'a String, b: &'a String }
@@ -30,7 +26,7 @@ fn used_before() {
     println!("{}", hold.r);
 }
 
-// A `&mut` field: the old exclusive borrow of u ends at the overwrite,
+// A `&mut` field: the old exclusive borrow of u ends at its last use,
 // so `u` can be used (read here) before the last use of `h`.
 fn mutable() {
     let mut u = String::from("u");
@@ -42,7 +38,7 @@ fn mutable() {
     h.r.push('2');
 }
 
-// Two reference fields: each old borrow ends at the overwrite.
+// Two reference fields: both unread loans end on the initialization row.
 fn two_fields() {
     let x = String::from("x");
     let y = String::from("y");

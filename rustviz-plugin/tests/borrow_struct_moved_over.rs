@@ -1,5 +1,5 @@
 // #700: `hold = other;` moves a struct holding a reference over one that
-// holds another. The old value's borrow of a ends at the write (#569),
+// holds another. The old value's unused borrow of a ends at initialization (#1676),
 // and hold.r then holds the reference other.r had (to b) until its last
 // use: hold.r's column runs on from the write to the `println!`. Main
 // drew nothing between them, so hold.r looked dead where it is read.

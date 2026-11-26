@@ -48,7 +48,7 @@ fn filled_later() {
     println!("{}", first);
 }
 
-// #1097: overwriting the whole struct ends s2.items's borrow of h and
+// #1097: the unread loan of h ends at initialization. The later overwrite
 // drops the old value before s2.items borrows g (`drop(h)` after the
 // overwrite compiles; `drop(g)` before the println doesn't).
 fn overwritten() {

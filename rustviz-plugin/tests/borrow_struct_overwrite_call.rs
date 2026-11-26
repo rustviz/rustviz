@@ -1,7 +1,7 @@
 // #569: overwriting a whole struct with a call's result
 // (`hold = make(&t);`) or with another variable (`hold = other;`) drops
 // its old value, as a struct literal does (#538), so the borrow of s it
-// held ends at that write (or at the old value's last use, if earlier).
+// held ends at its last use, even if that was initialization (#1676).
 // rustc agrees: the `let m = &mut s;` after the overwrite compiles. The
 // struct's field now borrows what the new value borrows: `make`'s
 // result borrows t (main drew it borrowing s again).
@@ -25,7 +25,7 @@ fn main() {
     println!("{}", hold.r);
 }
 
-// Overwritten with another variable: a's borrow ends at the write too.
+// Overwritten with another variable: a's unused borrow ends at initialization.
 // b's borrow moves on to hold.r with the value (#637).
 fn from_variable() {
     let mut a = String::from("a");

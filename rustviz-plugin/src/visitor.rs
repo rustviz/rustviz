@@ -7864,9 +7864,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
     }
     // `hold = H { r: &t };` overwrites a whole struct whose
-    // reference fields hold borrows (#538). The old value is
-    // dropped, so the borrow checker ends the loans it held at the
-    // write (a `&mut s` right after compiles), unlike a direct
+    // reference fields hold borrows (#538). The old value is dropped
+    // at the write, but an unused loan can end earlier, unlike a direct
     // field write (#531), where `hold`'s single lifetime keeps
     // them. The old loans are read before the literal's fields
     // replace them and drawn after its Bind. The same holds for any

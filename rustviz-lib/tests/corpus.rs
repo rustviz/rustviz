@@ -88,6 +88,28 @@ fn forbidden_present(forbid: &str, actual: &[String]) -> bool {
     }
 }
 
+/// Prefix a pin with `@var:row ` to check the line leaving that row.
+/// The same sentence can be true before a borrow and false during it.
+fn tooltip_pin_present(pin: &str, svg: &str, actual: &[String], forbidden: bool) -> bool {
+    let selected;
+    let (text, candidates) = if let Some(scope) = pin.strip_prefix('@') {
+        let (place, text) = scope.split_once(' ').expect("scoped pin needs text");
+        let (var, row) = place.rsplit_once(':').expect("scoped pin needs a row");
+        let row: usize = row.parse().unwrap();
+        selected = svg.split('<').filter(|tag| {
+            let start = attr(tag, "data-rv-line").and_then(|l| l.parse::<usize>().ok());
+            let end = attr(tag, "data-rv-line-end").and_then(|l| l.parse::<usize>().ok());
+            matches!(attr(tag, "data-rv-kind"), Some("line" | "branch_line"))
+                && attr(tag, "data-rv-var") == Some(var)
+                && start.zip(end).is_some_and(|(a, b)| a <= row && row < b)
+        }).flat_map(timeline_tooltips).collect::<Vec<_>>();
+        (text, selected.as_slice())
+    } else {
+        (pin, actual)
+    };
+    if forbidden { forbidden_present(text, candidates) } else { candidates.iter().any(|a| a == text) }
+}
+
 /// Forbidden fragments main still prints: (snippet, fragment, why). Pinned
 /// so the suite is green while the bug is tracked; the test fails when the
 /// text disappears, so the entry gets moved to `must_not_contain`.
@@ -8569,12 +8591,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     // ─── A whole struct overwritten ends its old borrows (#538) ──────
     TooltipExpect {
         name: "borrow_struct_overwrite_whole",
-        // `hold = H { r: &t };` drops hold's old value, so s's borrow
-        // ends there (rustc accepts the `&mut s` right after; unlike
-        // `hold.r = &t`, #531). Main drew no end and no return arrow
-        // for s, x, y or u. `used_before` ends a's borrow at the
-        // println! that last uses it; see
-        // `whole_struct_overwrite_ends_old_borrow_at_the_write`.
+        // The old fields return their loans at their last uses, including
+        // initialization for unread fields (#1676). The struct itself is
+        // overwritten later. See the row checks below.
         must_contain: &[
             "s's resource is no longer immutably borrowed",
             "Return immutably borrowed resource from hold.r to s",
@@ -9620,7 +9639,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "borrow_struct_overwrite_call",
         // `hold = make(&t);` and `hold = other;` drop hold's old value,
-        // so s's / a's borrow ends at the write, as for a struct literal
+        // and each unread old loan ends at initialization, as for a literal
         // (#538); rustc accepts the `&mut s` / `&mut a` right after. The
         // field then borrows what the new value borrows. Main drew
         // `make`'s (and `M::new`'s) result borrowing the old lender
@@ -9628,7 +9647,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // overwrites a field of `o`, which stays live, so e stays
         // borrowed until o's last use (#531); #568 returned e's borrow
         // at the write. See
-        // `struct_overwrite_by_call_or_variable_ends_old_borrow_at_the_write`.
+        // `struct_overwrite_by_call_or_variable_uses_the_old_loans_last_use`.
         must_contain: &[
             "Return immutably borrowed resource from hold.r to s",
             "Immutable borrow from t to hold.r: make's signature gives the struct it returns the same lifetime as its argument",
@@ -28047,6 +28066,57 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &["nothing happens to outer here", "nothing happens to keep here", "nothing happens to late here", "nothing happens to carried here", "the function returns and"],
     },
+    TooltipExpect {
+        name: "borrowed_field_parent_1671",
+        must_contain: &[
+            "@p:4 While p.a is mutably borrowed, you can't use p directly as a whole.",
+            "@p.n:5 p.n holds a copyable value",
+            "@p:7 p is the owner of the resource",
+            "@o:13 While o.inner.a is borrowed, o can't be moved or mutably borrowed as a whole.",
+            "@o.inner:15 While o.inner.a is borrowed, o.inner can't be moved or mutably borrowed as a whole.",
+            "@list:23 While list.items is mutably borrowed, you can't use list directly as a whole.",
+            "@h:31 While h.shared is borrowed, h can't be moved or mutably borrowed as a whole.",
+            "@h:33 h holds a value",
+            "@h:35 While h.unique is borrowed, h can't be moved or mutably borrowed as a whole.",
+        ],
+        must_not_contain: &["@p:4 p is the owner of the resource"],
+    },
+    TooltipExpect {
+        name: "borrowed_struct_arm_fields_1672",
+        must_contain: &[
+            "@s.n:7 s.n is mutably borrowed along with s by r1; s.n can't be used until the borrow ends",
+            "@s.a:7 s.a is mutably borrowed along with s by r1; s.a can't be used until the borrow ends",
+            "@s.n:8 s.n holds a copyable value",
+            "@data.n:19 data.n is mutably borrowed along with data by r; data.n can't be used until the borrow ends",
+            "@h.data:38 h.data is mutably borrowed along with h by r; h.data can't be used until the borrow ends",
+            "@data.n:29 data.n is immutably borrowed along with data by q; data.n is read-only while the borrow is live",
+        ],
+        must_not_contain: &["@s.n:7 s.n holds a copyable value", "@s.a:7 s.a is the owner of the resource"],
+    },
+    TooltipExpect {
+        name: "box_moved_contents_1673",
+        must_contain: &[
+            "@b:4 A value was moved from b.a, so b can't be used as a whole until all its contents are initialized.",
+            "@pair:12 A value was moved from pair.a, so pair can't be used as a whole until all its contents are initialized.",
+            "@pair:14 A value may have been moved from pair.a, so pair can't be used as a whole until all its contents are initialized.",
+            "@pair:16 pair is the owner of the resource",
+            "If the `?` here returns early, Rust drops what is left of pair: pair.a was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). pair.b is dropped. The Box's heap allocation, if it has one, is freed. If the `?` succeeds, nothing happens to pair here.",
+            "z goes out of scope. z.0 was moved out earlier, so only z.1 is dropped. The Box's heap allocation, if it has one, is freed.",
+            "b goes out of scope. b.a was moved out earlier, so only b.b is dropped. The Box's heap allocation, if it has one, is freed.",
+        ],
+        must_not_contain: &["@b:4 b is the owner of the resource", "heap allocation is freed"],
+    },
+    TooltipExpect {
+        name: "unread_holder_overwrite_1676",
+        must_contain: &[
+            "@a:5 a is the owner of the resource",
+            "a's resource is no longer immutably borrowed",
+            "@b:7 b's resource is being shared by one or more variables",
+            "@first:21 first's resource is being shared by one or more variables",
+            "@first:22 first is the owner of the resource",
+        ],
+        must_not_contain: &["@a:5 a's resource is being shared by one or more variables"],
+    },
 ];
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws
@@ -30989,7 +31059,8 @@ fn corpus_expected_tooltips_present() {
         let res = std::panic::catch_unwind(|| {
             let rv = run_with_local_backend(expect.name);
             assert_no_negative_sizes(expect.name, &rv.timeline_panel_string());
-            let actual = timeline_tooltips(&rv.timeline_panel_string());
+            let svg = rv.timeline_panel_string();
+            let actual = timeline_tooltips(&svg);
             // #308: a numbered header stops at "declared on line N"; the
             // long "While s₂ is in scope the name s refers to s₂ ..."
             // sentence was dropped as noise.
@@ -31002,13 +31073,13 @@ fn corpus_expected_tooltips_present() {
                 .must_contain
                 .iter()
                 .copied()
-                .filter(|want| !actual.iter().any(|a| a == want))
+                .filter(|want| !tooltip_pin_present(want, &svg, &actual, false))
                 .collect();
             let unexpected: Vec<&str> = expect
                 .must_not_contain
                 .iter()
                 .copied()
-                .filter(|forbid| forbidden_present(forbid, &actual))
+                .filter(|forbid| tooltip_pin_present(forbid, &svg, &actual, true))
                 .collect();
 
             if !missing.is_empty() || !unexpected.is_empty() {
@@ -31403,42 +31474,45 @@ fn direct_field_overwrite_keeps_old_borrow_until_last_use() {
     assert!(x_end[0].1 < y_end[0].1, "x's borrow ends at the reassignment, before y's: {:?} {:?}", x_end, y_end);
 }
 
-/// #538: `hold = H { r: &t };` drops the old struct, so s's borrow ends
-/// on the overwrite's row, the row where t's borrow starts, and before
-/// the later `&mut s`.
+/// #538, #1676: the old value is dropped at the overwrite. Its unused
+/// field loan ends on the initialization row, before the new value arrives.
 #[test]
-fn whole_struct_overwrite_ends_old_borrow_at_the_write() {
-    let svg = run_with_local_backend("borrow_struct_overwrite_whole").timeline_panel_string();
-    let s_end = dots_with_tooltip(&svg, "s's resource is no longer immutably borrowed");
-    let s_mut_end = dots_with_tooltip(&svg, "s's resource is no longer mutably borrowed");
-    assert_eq!((s_end.len(), s_mut_end.len()), (1, 1), "{:?} {:?}", s_end, s_mut_end);
-    let mut write = dots_with_tooltip(&svg, "hold is assigned a new value");
-    write.sort_by(|a, b| a.1.total_cmp(&b.1));
-    assert!(!write.is_empty());
-    assert_eq!(s_end[0].1, write[0].1,
-        "s's borrow should end on the write's row, with t's start: {:?} vs {:?}", s_end, write);
-    assert!(s_end[0].1 < s_mut_end[0].1, "{:?} {:?}", s_end, s_mut_end);
+fn whole_struct_overwrite_ends_unused_loan_at_initialization() {
+    let rv = run_with_local_backend("borrow_struct_overwrite_whole");
+    let (svg, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let end = dots_listing_tooltip(&svg, "s's resource is no longer immutably borrowed");
+    let init = code_row_y(&code, "let mut hold = H { r: &s };");
+    let write = code_row_y(&code, "hold = H { r: &t };");
+    // A same-row return arrow can add a display row underneath the source.
+    assert_eq!(end.len(), 1);
+    assert!(init <= end[0].1 && end[0].1 < write);
 }
 
-/// #569: `hold = make(&t);` and `hold = other;` end the old borrow on the
-/// write's row, like a struct literal (#538), before the later `&mut`.
+/// #569, #1676: overwriting a whole holder with a call result or another
+/// variable allows its unread reference to end at initialization.
 /// `o.inner = H { r: &f };` overwrites a field of `o`, which stays live:
 /// e's borrow ends at o's last use, on the println!'s row (#531). When the
 /// new value borrows what the old one did (`hold = make(hold.r)`), x stays
 /// borrowed: its borrow ends once.
 #[test]
-fn struct_overwrite_by_call_or_variable_ends_old_borrow_at_the_write() {
+fn struct_overwrite_by_call_or_variable_uses_the_old_loans_last_use() {
     let rv = run_with_local_backend("borrow_struct_overwrite_call");
     let (svg, code) = (rv.timeline_panel_string(), rv.code_panel_string());
     let end = |v: &str| dots_with_tooltip(&svg, &format!("{}'s resource is no longer immutably borrowed", v));
     for (v, line) in [
-        ("s", "hold = make(&t);"),
-        ("a", "hold = other;"),
+        ("s", "let mut hold = H { r: &s };"),
+        ("a", "let mut hold = H { r: &a };"),
         ("e", "println!(\"{} {}\", o.inner.r, o.n);"),
     ] {
         let ends = end(v);
         assert_eq!(ends.len(), 1, "{}: {:?}", v, ends);
-        assert_eq!(ends[0].1, code_row_y(&code, line), "{}'s borrow should end on the row of `{}`: {:?}", v, line, ends);
+        let row = code_row_y(&code, line);
+        let next = code_rows_y(&code, match v {
+            "s" => "hold = make(&t);",
+            "a" => "let other = H { r: &b };",
+            _ => "e.push('!');",
+        })[0];
+        assert!((row..next).contains(&ends[0].1), "{v}'s return should be on `{line}`: {ends:?}");
     }
     for (v, later) in [("s", "let m = &mut s;"), ("a", "let m = &mut a;")] {
         assert!(end(v)[0].1 < code_row_y(&code, later), "{}'s borrow should end before `{}`", v, later);
@@ -31553,18 +31627,8 @@ fn borrow_ends_where_rustc_ends_the_loan() {
     }
 }
 
-/// #624: `p = P { a: &z, b: &z };` over `P { a: &x, b: &y }` has four
-/// arrows: x's and y's borrows returned from p.a and p.b, and z lent to
-/// both. Each arrow after the first dipped a whole row lower than the one
-/// before, with a row added for it, so the line took four rows, the
-/// println! below it three rows away from its code. Tracks are half a row
-/// apart: the write takes two rows, the `let` above it one. z's two
-/// borrows shared one track (a fork out of z) and the println!'s two
-/// returns to z its row, so only one of each pair could be hovered along
-/// the shared stretch (#1300): each now has a track of its own within
-/// those rows. (#1316: z's borrow of p.a, whose head lay on p.b's return
-/// to y, and y's borrow of p.b on the line above take the tracks half a
-/// row above their lines instead.)
+/// #1300, #1316, #1676: each field borrow and return arrow keeps
+/// its own track on its source row, including the unused initial loans.
 #[test]
 fn struct_write_arrows_share_rows() {
     let rv = run_with_local_backend("borrow_struct_overwrite_whole");
@@ -31572,27 +31636,25 @@ fn struct_write_arrows_share_rows() {
     let init = code_row_y(&code, "let mut p = P { a: &x, b: &y };");
     let write = code_row_y(&code, "p = P { a: &z, b: &z };");
     let read = code_row_y(&code, "println!(\"{} {}\", p.a, p.b);");
-    assert_eq!(write - init, 30.0, "a row is added below the `let` of p");
-    assert_eq!(read - write, 60.0, "the write of p should take two rows");
-    // Each arrow stays within its line's rows, or half a row above them:
-    // (arrow, its line's row, how far below it may run).
-    for (text, row, below) in [
-        ("Immutable borrow from y to p.b", init, 15.0),
-        ("Return immutably borrowed resource from p.b to y", write, 15.0),
-        ("Immutable borrow from z to p.a", write, 45.0),
-        ("Immutable borrow from z to p.b", write, 30.0),
-        ("Return immutably borrowed resource from p.a to z", read, 0.0),
-        ("Return immutably borrowed resource from p.b to z", read, 15.0),
+    // The let now includes both return arrows since neither old field is
+    // read. The overwrite has just the new loans and fits on one row.
+    assert_eq!(write - init, 120.0);
+    assert_eq!(read - write, 30.0);
+    // Each loan has its own horizontal track, including shafts which hop
+    // over a column. The two loans from z do not share a trunk.
+    let runs = arrow_horizontal_runs(&svg);
+    for (text, track) in [
+        ("Immutable borrow from y to p.b", init + 30.0),
+        ("Return immutably borrowed resource from p.b to y", init + 90.0),
+        ("Immutable borrow from z to p.a", write),
+        ("Immutable borrow from z to p.b", write + 15.0),
+        ("Return immutably borrowed resource from p.a to z", read),
+        ("Return immutably borrowed resource from p.b to z", read + 15.0),
     ] {
-        let arrow = arrow_points(&svg, text);
-        assert_eq!(arrow.len(), 1, "{}", text);
-        let lowest = arrow[0].iter().map(|p| p.1).fold(f64::MIN, f64::max);
-        let highest = arrow[0].iter().map(|p| p.1).fold(f64::MAX, f64::min);
-        assert!(lowest <= row + below && highest >= row - 15.0, "{}: {:?}", text, arrow[0]);
+        assert_eq!(arrow_shafts(&svg, text).len(), 1, "{text}");
+        let tracks: Vec<_> = runs.iter().filter(|r| r.0 == text).map(|r| r.1).collect();
+        assert!(!tracks.is_empty() && tracks.iter().all(|&y| y == track), "{text}: {tracks:?}");
     }
-    // z's two borrows don't leave z along one trunk.
-    let (to_a, to_b) = (arrow_points(&svg, "Immutable borrow from z to p.a"), arrow_points(&svg, "Immutable borrow from z to p.b"));
-    assert_ne!(to_a[0][..2], to_b[0][..2], "z's borrows share a trunk");
 }
 
 #[test]
@@ -33404,8 +33466,6 @@ fn no_dot_of_a_lent_out_column_floats() {
 #[test]
 fn reassigned_reference_ends_its_old_borrow_first() {
     for (name, end, start) in [
-        ("borrow_struct_overwrite_whole", "hold.r's immutable borrow ends", "hold.r immutably borrows a resource"),
-        ("borrow_struct_overwrite_whole", "p.a's immutable borrow ends", "p.a immutably borrows a resource"),
         ("borrow_end_nll_loop", "w's immutable borrow ends", "w immutably borrows a value"),
     ] {
         let timeline = run_with_local_backend(name).timeline_panel_string();
@@ -35388,9 +35448,11 @@ fn chain_reference_borrows_end_on_each_path() {
 fn a_holder_overwrite_ends_the_old_borrow_before_the_new_one() {
     let rv = run_with_local_backend("holder_borrows_1094");
     let dots = tooltip_lines(&rv.timeline_panel_string());
+    let end = dots_listing_tooltip(&rv.timeline_panel_string(), "s2.items's immutable borrow ends");
+    let write = code_row_y(&rv.code_panel_string(), "s2 = Shelf { items: vec![g.as_str()] };");
+    assert!(end.iter().any(|&(_, y)| y < write));
     let cases: [&[&str]; 3] = [
         &[
-            "s2.items's immutable borrow ends",
             "s2.items acquires ownership of a new resource; its previous resource is dropped",
             "s2.items holds a value that immutably borrows g's resource (s2.items isn't a reference itself)",
         ],

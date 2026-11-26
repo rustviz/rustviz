@@ -21,7 +21,7 @@ fn main() {
     t.push('x');
 }
 
-// Assigned over an earlier value: a's borrow ends at the write (#569),
+// Assigned over an earlier value: a's unread borrow ends at initialization (#1676),
 // b's moves on to hold and ends at hold's last use.
 fn assigned() {
     let mut a = String::from("a");

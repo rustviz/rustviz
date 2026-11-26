@@ -3427,68 +3427,9 @@ fn reference_used_later(rest: &[(usize, Event)]) -> bool {
     false
 }
 
-/// A struct or tuple borrowed as a whole (`let r = &mut p;`, `let (a, b)
-/// = &mut t;`) lends every field with it: rustc rejects a use of `p.name`
-/// while r is live (E0502), as it does a use of p. The borrow's events are
-/// on p's column only, so its fields' columns were drawn as unborrowed
-/// owners (#1130, #1193). Draw each field (and a nested struct's fields)
-/// in p's state for as long as p is lent, where the field itself is held
-/// and not borrowed more strongly. Rows of top-level timelines only.
-fn lend_struct_borrows_to_members(timelines: &mut BTreeMap<u64, Timeline>) {
-    // (parent name, the owner hash its members carry, lent spans)
-    let mut lent: Vec<(String, u64, Vec<(usize, usize, State)>)> = Vec::new();
-    for (hash, t) in timelines.iter() {
-        let ResourceAccessPoint::Struct(st) = &t.resource_access_point else { continue };
-        let spans: Vec<(usize, usize, State)> = t.states.iter()
-            .filter(|(a, b, s)| a < b && matches!(s, State::RevokedPrivilege { .. } | State::PartialPrivilege { .. }))
-            .cloned()
-            .collect();
-        if !spans.is_empty() {
-            lent.push((st.name.clone(), if st.is_member { st.owner } else { *hash }, spans));
-        }
-    }
-    if lent.is_empty() {
-        return;
-    }
-    for t in timelines.values_mut() {
-        let (name, owner) = match &t.resource_access_point {
-            ResourceAccessPoint::Struct(m) if m.is_member => (m.name.clone(), m.owner),
-            ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_) | ResourceAccessPoint::MutRef(_)
-            | ResourceAccessPoint::StaticRef(_) | ResourceAccessPoint::Function(_) => continue,
-        };
-        for (pname, powner, spans) in lent.iter() {
-            if *powner != owner || !name.starts_with(&format!("{}.", pname)) {
-                continue;
-            }
-            for (a, b, pstate) in spans {
-                let mut out: Vec<(usize, usize, State)> = Vec::new();
-                for (x, y, s) in t.states.drain(..) {
-                    let held = matches!(s, State::FullPrivilege { s: LineState::Full })
-                        || (matches!(s, State::PartialPrivilege { .. }) && matches!(pstate, State::RevokedPrivilege { .. }));
-                    let (lo, hi) = (x.max(*a), y.min(*b));
-                    if !held || lo >= hi {
-                        out.push((x, y, s));
-                        continue;
-                    }
-                    let lent_state = match pstate {
-                        State::RevokedPrivilege { to, borrow_to, .. } =>
-                            State::RevokedPrivilege { to: to.clone(), borrow_to: borrow_to.clone(), prev_state: Box::new(s.clone()) },
-                        _ => State::PartialPrivilege { s: LineState::Full },
-                    };
-                    if x < lo { out.push((x, lo, s.clone())); }
-                    out.push((lo, hi, lent_state));
-                    if hi < y { out.push((hi, y, s)); }
-                }
-                t.states = out;
-            }
-        }
-    }
-}
-
-
 /// #1311: a struct borrowed as a whole by a call (`c.reset()`, `inc(&mut
 /// c)`, `show(&c)`) is lent and given back on one row, so it has no lent
-/// span for `lend_struct_borrows_to_members` to draw on its fields: their
+/// span for the renderer to draw on its fields: their
 /// columns showed nothing on that row, as if the call couldn't touch them
 /// (`reset` writes `c.n`). Each field column that holds its value there
 /// gets a dot saying it is borrowed along with the struct. Not where the
@@ -5860,7 +5801,6 @@ impl Visualizable for VisualizationData {
             }
             self.compute_timeline_states(& mut timeline.history, &mut timeline.states, hash);
         }
-        lend_struct_borrows_to_members(&mut timelines);
         note_call_borrows_on_members(&mut timelines);
         self.timelines = timelines;
     }

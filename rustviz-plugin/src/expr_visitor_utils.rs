@@ -1235,7 +1235,12 @@ pub fn innermost_addr_of_operand<'tcx>(expr: &'tcx Expr<'tcx>) -> &'tcx Expr<'tc
 /// at the adjusted type.
 pub fn ref_var_borrow(addr_of: &Expr, typeck: &TypeckResults) -> bool {
   let ExprKind::AddrOf(rustc_hir::BorrowKind::Ref, _, inner) = addr_of.kind else { return false };
-  matches!(inner.kind, ExprKind::Path(QPath::Resolved(_, Path { res: Res::Local(_), .. })))
+  let slot = match inner.kind {
+    ExprKind::Path(QPath::Resolved(_, Path { res: Res::Local(_), .. })) => true,
+    ExprKind::Field(base, _) => typeck.expr_adjustments(base).is_empty() && !typeck.expr_ty(base).is_ref(),
+    _ => false,
+  };
+  slot
     && typeck.expr_ty(inner).is_ref()
     && typeck.expr_adjustments(addr_of).iter().filter(|a| matches!(a.kind, Adjust::Deref(_))).count() < 2
 }

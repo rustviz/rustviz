@@ -4117,11 +4117,6 @@ fn timeline_segment_title(
     if let State::FullPrivilege { s: LineState::Uninit } = state {
         return state.print_message_with_name(rap.name());
     }
-    if let (State::PartialPrivilege { .. } | State::RevokedPrivilege { .. }, Some(line)) = (state, line) {
-        if let Some(title) = lent_with_parent_title(state, rap, visualization_data, line) {
-            return title;
-        }
-    }
     // A place an or-pattern's reference may borrow (#565): borrowed
     // only if its alternative matched, though the borrow checker treats
     // it as borrowed either way.
@@ -4148,7 +4143,7 @@ fn timeline_segment_title(
                 let surely: Vec<String> = parts.moved.iter().filter(|m| !parts.maybe_moved.contains(m)).cloned().collect();
                 return hover_messages::state_fields_maybe_all_moved(rap.name(), &surely, &parts.maybe_moved);
             }
-            return hover_messages::state_partly_moved(rap.name(), &parts.moved, parts.maybe);
+            return hover_messages::state_partly_moved(rap.name(), &parts.moved, parts.maybe, None);
         }
     }
     // An array a slice pattern moved some elements out of (#1285): the
@@ -4246,68 +4241,38 @@ fn timeline_segment_title(
     state.print_message_with_name(rap.name())
 }
 
-/// A field's segment from row `line` drawn borrowed only because the
-/// struct it is in is borrowed as a whole there (`let r = &mut p;`; see
-/// `lend_struct_borrows_to_members`): "p.name is mutably borrowed along
-/// with p by r". None when the field's own events lend it at that row.
-fn lent_with_parent_title(state: &State, rap: &ResourceAccessPoint, visualization_data: &VisualizationData, line: usize) -> Option<String> {
-    let ResourceAccessPoint::Struct(m) = rap else { return None };
-    if !m.is_member {
-        return None;
-    }
-    let own = visualization_data.timelines.get(rap.hash())?;
-    let mut live: i64 = 0;
-    for (_, e) in own.history.iter().filter(|(l, _)| *l <= line) {
+/// Name the borrower only while its direct loan is unambiguous. Across
+/// a conditional or a move of the receiver the state can summarize
+/// several paths, even when one borrower happens to be last in the HIR.
+fn parent_loan_title(parent: &Timeline, field: &ResourceAccessPoint, state: &State, viz: &VisualizationData, row: usize, path: &[(usize, usize)]) -> String {
+    let name = parent.resource_access_point.name();
+    let mut holders = Vec::new();
+    let mutable = matches!(state, State::RevokedPrivilege { .. });
+    let mut events = Vec::new();
+    flat_history(&parent.history, path, &mut events);
+    for (l, e) in events.into_iter().filter(|(l, _)| *l <= row) {
         match e {
-            Event::StaticLend { .. } | Event::MutableLend { .. } => live += 1,
-            Event::StaticReacquire { .. } | Event::MutableReacquire { .. } => live -= 1,
+            Event::Branch { split_point, .. } if path.iter().filter(|(s, _)| s == split_point).count() == 1 => {}
+            Event::Branch { .. } | Event::OrAltLend { .. } => {
+                return hover_messages::state_field_under_parent_loan(field.name(), name);
+            }
+            Event::MutableLend { to, .. } | Event::StaticLend { to, .. } => holders.push((l, to)),
+            Event::MutableReacquire { from, .. } | Event::StaticReacquire { from, .. } => {
+                if let Some(i) = holders.iter().position(|(_, to)| *to == from) {
+                    holders.remove(i);
+                }
+            }
             _ => {}
         }
     }
-    if live > 0 {
-        return None;
+    let by = match holders.as_slice() {
+        [(l, to)] => to.extract_rap().filter(|r| !moved_between(viz, r, *l, row)).map(|r| r.name().as_str()),
+        _ => None,
+    };
+    if !mutable && (field.is_ref() || field.may_have_interior_mut()) {
+        return hover_messages::state_field_under_parent_loan(field.name(), name);
     }
-    let mutable = matches!(state, State::RevokedPrivilege { .. });
-    // The innermost enclosing struct lent there (`p.inner` before `p`).
-    let mut parents: Vec<(&Struct, &Timeline)> = visualization_data.timelines.values()
-        .filter_map(|t| match &t.resource_access_point {
-            ResourceAccessPoint::Struct(p) if (if p.is_member { p.owner } else { p.hash }) == m.owner
-                && m.name.starts_with(&format!("{}.", p.name)) => Some((p, t)),
-            _ => None,
-        })
-        .collect();
-    parents.sort_by_key(|(p, _)| std::cmp::Reverse(p.name.len()));
-    for (p, t) in parents {
-        let lent_there = t.states.iter().any(|(a, b, s)| *a <= line && line < *b && if mutable {
-            matches!(s, State::RevokedPrivilege { .. })
-        } else {
-            matches!(s, State::PartialPrivilege { .. })
-        });
-        if !lent_there {
-            continue;
-        }
-        // Who holds the borrow: the one lend of p live at `line`.
-        let mut holders: Vec<String> = Vec::new();
-        for (_, e) in t.history.iter().filter(|(l, _)| *l <= line) {
-            match e {
-                Event::MutableLend { to, .. } | Event::StaticLend { to, .. } => holders.push(to.name()),
-                Event::MutableReacquire { from, .. } | Event::StaticReacquire { from, .. } => {
-                    if let Some(i) = holders.iter().position(|h| *h == from.name()) {
-                        holders.remove(i);
-                    }
-                }
-                _ => {}
-            }
-        }
-        holders.sort();
-        holders.dedup();
-        let by = match holders.as_slice() {
-            [one] if !one.is_empty() => Some(one.as_str()),
-            _ => None,
-        };
-        return Some(hover_messages::state_lent_with_parent(&m.name, &p.name, by, mutable));
-    }
-    None
+    hover_messages::state_lent_with_parent(field.name(), name, by, mutable)
 }
 
 /// Every event of a column, those in its conditionals' arms included,
@@ -8680,6 +8645,7 @@ fn render_branches(
     timeline_data: &TimelineColumnData,
     maybe_init: bool,
     path: &[(usize, usize)],
+    spans: &[PlaceSpan],
     bars: &mut ColumnMarks,
 ) {
     if rap.is_fn() { return; }
@@ -8798,7 +8764,7 @@ fn render_branches(
             push_seg_if_renderable(
                 &mut segs, rap,
                 (parent_x, split_y), (branch_x, leg_end_y),
-                leading_state.clone(), visualization_data, &arm_label, Leg::Split, *split_point, *split_point, &arm_path,
+                leading_state.clone(), visualization_data, &arm_label, Leg::Split, *split_point, *split_point, &arm_path, spans,
             );
             // An arm that starts below the raised fork's row (the `else`)
             // runs down to its first row in the state it forked with. When
@@ -8819,7 +8785,7 @@ fn render_branches(
                     push_seg_if_renderable(
                         &mut segs, rap,
                         (branch_x, column_top_y), (branch_x, (get_y_axis_pos(first_row) - rise) as f64),
-                        leading_state, visualization_data, &arm_label, Leg::Column, *split_point, first_row, &arm_path,
+                        leading_state, visualization_data, &arm_label, Leg::Column, *split_point, first_row, &arm_path, spans,
                     );
                 }
             }
@@ -8897,7 +8863,7 @@ fn render_branches(
                     &mut segs, rap,
                     (branch_x, y1 as f64),
                     (branch_x, y2 as f64),
-                    state, visualization_data, &arm_label, Leg::Column, *top, bot, &arm_path,
+                    state, visualization_data, &arm_label, Leg::Column, *top, bot, &arm_path, spans,
                 );
                 if segs.len() > n { ended_title(&mut segs, bot); }
             }
@@ -8945,7 +8911,7 @@ fn render_branches(
                     push_seg_if_renderable(
                         &mut segs, rap,
                         (branch_x, leg_top_y), (parent_x, merge_y),
-                        end_state, visualization_data, &arm_label, Leg::Join, *merge_point, *merge_point, &arm_path,
+                        end_state, visualization_data, &arm_label, Leg::Join, *merge_point, *merge_point, &arm_path, spans,
                     );
                     if segs.len() > n { ended_title(&mut segs, *merge_point); }
                 }
@@ -9064,7 +9030,7 @@ fn render_branches(
                     let n = segs.len();
                     push_seg_if_renderable(
                         &mut segs, rap, (branch_x, y1), (branch_x, y2),
-                        st, visualization_data, &arm_label, Leg::Column, own_first, own_first, &arm_path,
+                        st, visualization_data, &arm_label, Leg::Column, own_first, own_first, &arm_path, spans,
                     );
                     if segs.len() > n {
                         let mut solid = segs.pop().unwrap();
@@ -9190,7 +9156,7 @@ fn render_branches(
 
             render_branches(
                 hash, rap, &branch.e_data, &branch.states,
-                output, visualization_data, &branch.t_data, entry_maybe_init, &arm_path, bars,
+                output, visualization_data, &branch.t_data, entry_maybe_init, &arm_path, spans, bars,
             );
         }
     }
@@ -9210,6 +9176,7 @@ fn push_seg_if_renderable(
     row: usize,
     end_row: usize,
     path: &[(usize, usize)],
+    spans: &[PlaceSpan],
 ) {
     if !seg_drawn(rap, &state) {
         return;
@@ -9239,7 +9206,25 @@ fn push_seg_if_renderable(
             .unwrap_or_else(|| timeline_segment_title(&state, rap, visualization_data, None)),
     };
     let inactive_arm = (inactive && leg == Leg::Column).then(|| arm_label.to_owned());
-    segs.push(BranchSeg { p1, p2, state, title, inactive_arm, own_row: false, rows: (row, end_row) });
+    let mut cuts = vec![row, end_row];
+    if !inactive && leg == Leg::Column && row < end_row {
+        cuts.extend(spans.iter().flat_map(|s| [s.start, s.end]).filter(|r| row < *r && *r < end_row));
+        cuts.sort_unstable();
+        cuts.dedup();
+    }
+    let mut start = p1;
+    for window in cuts.windows(2) {
+        let [a, b] = [window[0], window[1]];
+        let end = if b == end_row { p2 } else { (p1.0, get_y_axis_pos(b) as f64) };
+        let at = if leg == Leg::Join || (leg == Leg::Column && a == b && end.1 <= get_y_axis_pos(b) as f64) {
+            a.saturating_sub(1)
+        } else { a };
+        let (display, text) = place_segment(&state, place_effect_at(spans, at, path), rap, visualization_data, at, path)
+            .unwrap_or_else(|| (&state, title.clone()));
+        segs.push(BranchSeg { p1: start, p2: end, state: display.clone(), title: text,
+            inactive_arm: inactive_arm.clone(), own_row: false, rows: (a, b) });
+        start = end;
+    }
 }
 
 /// The y-range of code to underline while hovering a segment. A solid
@@ -9556,12 +9541,14 @@ fn render_timeline(
     // ranges (clean_states leaves an OOS placeholder over the
     // branch's split..merge span, so those rows naturally render
     // as nothing).
-    render_branches(hash, rap, history, states, output, visualization_data, timeline_data, false, &[], bars);
+    let spans = place_spans(rap, visualization_data);
+    render_branches(hash, rap, history, states, output, visualization_data, timeline_data, false, &[], &spans, bars);
 
     let apexes = CollapsedApexes::of(history);
     let mut cuts = field_borrow_rows(rap, history, visualization_data);
     // A struct's line changes text where a field is moved out of it,
     // and stops once every field is (#1157).
+    cuts.extend(spans.iter().flat_map(|span| [span.start, span.end]));
     cuts.extend(parts_moved_rows(rap, visualization_data));
     // So does an array's where a slice pattern moves an element out of
     // it (#1285).
@@ -9584,15 +9571,16 @@ fn render_timeline(
         }
         bounds.push(*seg_end);
         // (Pieces with the same text are drawn as one.)
-        let mut pieces: Vec<(usize, usize, String)> = Vec::new();
+        let mut pieces: Vec<(usize, usize, &State, String)> = Vec::new();
         for w in bounds.windows(2) {
-            let title = timeline_segment_title(state, rap, visualization_data, Some(w[0]));
+            let (display, title) = place_segment(state, place_effect_at(&spans, w[0], &[]), rap, visualization_data, w[0], &[])
+                .unwrap_or_else(|| (state, timeline_segment_title(state, rap, visualization_data, Some(w[0]))));
             match pieces.last_mut() {
-                Some(last) if last.2 == title => last.1 = w[1],
-                _ => pieces.push((w[0], w[1], title)),
+                Some(last) if last.3 == title => last.1 = w[1],
+                _ => pieces.push((w[0], w[1], display, title)),
             }
         }
-        for (line_start, line_end, title) in pieces {
+        for (line_start, line_end, state, title) in pieces {
             // Every part was moved out: nothing is left to draw (#1157).
             if title.is_empty() {
                 continue;
@@ -9618,6 +9606,183 @@ fn render_timeline(
             }
         }
     }
+}
+
+/// A column can stay initialized while access to its place changes on a
+/// related column. Use the original states, before projecting any loans:
+/// borrowing p.a affects p, but must never lend its sibling p.b.
+struct PlaceSpan<'a> {
+    start: usize,
+    end: usize,
+    path: Vec<(usize, usize)>,
+    effect: PlaceEffect<'a>,
+}
+
+#[derive(Clone, Copy)]
+enum PlaceEffect<'a> {
+    ParentLoan(&'a Timeline, &'a State),
+    FieldLoan(&'a str, bool),
+    BoxMove(&'a str, bool),
+}
+
+fn place_spans<'a>(rap: &ResourceAccessPoint, viz: &'a VisualizationData) -> Vec<PlaceSpan<'a>> {
+    if !rap.is_member() && !matches!(rap, ResourceAccessPoint::Struct(_)) { return Vec::new(); }
+    let root = |r: &ResourceAccessPoint| if r.is_member() { r.get_owner() } else { *r.hash() };
+    let boxed = matches!(rap, ResourceAccessPoint::Struct(Struct { is_box: true, .. }));
+    let mut spans = Vec::new();
+    for t in viz.timelines.values() {
+        let source = &t.resource_access_point;
+        if root(source) != root(rap) { continue; }
+        let parent = rap.name().strip_prefix(source.name()).is_some_and(|tail| tail.starts_with('.'));
+        let field = source.name().strip_prefix(rap.name()).is_some_and(|tail| tail.starts_with('.'));
+        if !parent && !field { continue; }
+
+        // An &T field is normally in the shared state just because it
+        // holds a reference. Only a borrow of the slot itself lends the
+        // struct. A reborrow through a copied &T leaves it available.
+        if field && source.is_ref() && !source.is_mutref() {
+            let end = t.states.last().map_or(0, |s| s.1);
+            reference_slot_loans(source.name(), &t.history, (0, end), &mut Vec::new(), &mut Vec::new(), &mut spans);
+        }
+        collect_place_spans(&t.states, &t.history, (0, usize::MAX), &mut Vec::new(), &|state, history| match state {
+            State::PartialPrivilege { s: LineState::Full } | State::RevokedPrivilege { .. } if parent =>
+                Some(PlaceEffect::ParentLoan(t, state)),
+            State::PartialPrivilege { s: LineState::Full } | State::RevokedPrivilege { .. } if !source.is_ref() || source.is_mutref() =>
+                Some(PlaceEffect::FieldLoan(source.name(), matches!(state, State::RevokedPrivilege { .. }))),
+            State::ResourceMoved { move_at_line, dropped_by_hand: false, .. } if field && boxed => {
+                // A joined state can carry another arm's move. Name it as
+                // definite only when this straight-line history made it.
+                let definite = history.iter().any(|(l, e)| l == move_at_line && matches!(e, Event::Move { .. }));
+                Some(PlaceEffect::BoxMove(source.name(), definite))
+            }
+            _ => None,
+        }, &mut spans);
+    }
+    spans
+}
+
+/// References currently borrowing the shared-reference field itself.
+fn reference_slot_loans<'a>(
+    field: &'a str, history: &[(usize, Event)], range: (usize, usize),
+    path: &mut Vec<(usize, usize)>, holders: &mut Vec<ResourceTy>, spans: &mut Vec<PlaceSpan<'a>>,
+) {
+    let mut from = range.0;
+    let record = |start, end, path: &[(usize, usize)], spans: &mut Vec<PlaceSpan<'a>>| {
+        if start < end {
+            spans.push(PlaceSpan { start, end, path: path.to_vec(), effect: PlaceEffect::FieldLoan(field, false) });
+        }
+    };
+    for (l, e) in history {
+        let row = (*l).max(range.0).min(range.1);
+        if !holders.is_empty() { record(from, row, path, spans); }
+        from = row;
+        match e {
+            Event::StaticLend { to, of_ref_var: true, .. } | Event::MutableLend { to, of_ref_var: true, .. } =>
+                holders.push(to.clone()),
+            Event::StaticReacquire { from, of_ref_var: true, .. } | Event::MutableReacquire { from, of_ref_var: true, .. } =>
+                holders.retain(|r| r != from),
+            Event::Branch { branch_history, ty, split_point, merge_point, .. } => {
+                let mut after = if all_paths_present(ty, branch_history.len()) { Vec::new() } else { holders.clone() };
+                for (i, arm) in branch_history.iter().enumerate() {
+                    let mut on_arm = holders.clone();
+                    let (lo, hi) = ty.get_start_end(i);
+                    path.push((*split_point, i));
+                    reference_slot_loans(field, &arm.e_data, (lo.max(range.0), (hi + 1).min(*merge_point).min(range.1)), path, &mut on_arm, spans);
+                    path.pop();
+                    if !arm.diverges {
+                        for h in on_arm {
+                            if !after.contains(&h) { after.push(h); }
+                        }
+                    }
+                }
+                *holders = after;
+                from = (*merge_point).min(range.1);
+            }
+            _ => {}
+        }
+    }
+    if !holders.is_empty() { record(from, range.1, path, spans); }
+}
+
+/// The source state on an arm includes the diagonal into it, and the
+/// state after the last event on its last row. A column without that fork
+/// also needs both boundaries. Clip each arm to the code it can execute.
+fn collect_place_spans<'a>(
+    states: &'a [(usize, usize, State)], history: &'a [(usize, Event)],
+    range: (usize, usize), path: &mut Vec<(usize, usize)>,
+    effect: &impl Fn(&'a State, &[(usize, Event)]) -> Option<PlaceEffect<'a>>,
+    spans: &mut Vec<PlaceSpan<'a>>,
+) {
+    for (i, (a, b, state)) in states.iter().enumerate() {
+        let start = (*a).max(range.0);
+        let end = if !path.is_empty() && i + 1 == states.len() { range.1 } else { (*b).min(range.1) };
+        if start >= end { continue; }
+        if let Some(effect) = effect(state, history) {
+            spans.push(PlaceSpan { start, end, path: path.clone(), effect });
+        }
+    }
+    for (_, event) in history {
+        let Event::Branch { branch_history, ty, split_point, merge_point, .. } = event else { continue };
+        // A split's entry state precedes its arm events, including ones
+        // drawn on the split row itself (`if let` bindings).
+        let first = branch_history.iter().flat_map(|arm| arm.e_data.first().map(|e| e.0))
+            .min().unwrap_or(*merge_point).min(split_point + 1);
+        if let Some(entry) = branch_history.first().and_then(|arm| arm.entry_state.as_ref()) {
+            let (start, end) = ((*split_point).max(range.0), first.min(range.1));
+            if start < end {
+                if let Some(effect) = effect(entry, history) {
+                    spans.push(PlaceSpan { start, end, path: path.clone(), effect });
+                }
+            }
+        }
+        for (i, arm) in branch_history.iter().enumerate() {
+            let (lo, hi) = ty.get_start_end(i);
+            path.push((*split_point, i));
+            collect_place_spans(&arm.states, &arm.e_data,
+                (lo.max(range.0), (hi + 1).min(range.1).min(*merge_point)), path, effect, spans);
+            path.pop();
+        }
+    }
+}
+
+fn place_effect_at<'a>(spans: &[PlaceSpan<'a>], row: usize, path: &[(usize, usize)]) -> Option<PlaceEffect<'a>> {
+    spans.iter().rev().filter(|span| span.start <= row && row < span.end && span.path.iter().all(|(split, arm)|
+        !path.iter().any(|(s, a)| s == split && a != arm)))
+        .map(|span| span.effect)
+        .max_by_key(|effect| match effect {
+            PlaceEffect::ParentLoan(t, state) => (if matches!(state, State::RevokedPrivilege { .. }) { 4 } else { 3 }, t.resource_access_point.name().len()),
+            PlaceEffect::BoxMove(_, definite) => (2, usize::from(*definite)),
+            PlaceEffect::FieldLoan(_, mutable) => (1, usize::from(*mutable)),
+        })
+}
+
+/// A field loan or payload move changes what the owner can do, without
+/// changing which value will be dropped. Keep this a display projection.
+fn place_segment<'a>(
+    state: &'a State, effect: Option<PlaceEffect<'a>>, rap: &ResourceAccessPoint,
+    viz: &VisualizationData, row: usize, path: &[(usize, usize)],
+) -> Option<(&'a State, String)> {
+    let effect = effect?;
+    let stronger = (matches!(effect, PlaceEffect::ParentLoan(_, State::RevokedPrivilege { .. })) || rap.is_ref())
+        && matches!(state, State::PartialPrivilege { s: LineState::Full });
+    if !stronger && !matches!(state, State::FullPrivilege { s: LineState::Full }) { return None; }
+    let name = rap.name();
+    Some(match effect {
+        PlaceEffect::ParentLoan(parent, loan) => {
+            (loan, parent_loan_title(parent, rap, loan, viz, row, path))
+        }
+        PlaceEffect::FieldLoan(field, mutable) => {
+            let borrow = hover_messages::state_field_borrowed(name, field, mutable);
+            // A field loan can coexist with a move out of a different field.
+            // State both restrictions without promising that every other
+            // field can be used freely.
+            let title = if let Some(parts) = parts_moved_at(rap, viz, row) {
+                hover_messages::state_partly_moved(name, &parts.moved, parts.maybe, Some(&borrow))
+            } else { borrow };
+            (state, title)
+        }
+        PlaceEffect::BoxMove(field, definite) => (state, hover_messages::state_box_part_moved(name, field, definite)),
+    })
 }
 
 /// The member columns directly under the struct column `rap` (`p.a`,

@@ -3380,7 +3380,7 @@ pub fn state_arm_join(label: &str) -> String {
 // it can't be used as a whole any more, only the fields still in it.
 // `maybe`: on some paths through a conditional above only; Rust still
 // rejects using the struct as a whole after it.
-pub fn state_partly_moved(my_name: &String, moved: &[String], maybe: bool) -> String {
+pub fn state_partly_moved(my_name: &String, moved: &[String], maybe: bool, field_loan: Option<&str>) -> String {
     let names: Vec<String> = moved.iter().map(|m| styled_name_html(m)).collect();
     let (list, verb) = match (names.as_slice(), maybe) {
         ([one], false) => (one.clone(), "was"),
@@ -3389,10 +3389,17 @@ pub fn state_partly_moved(my_name: &String, moved: &[String], maybe: bool) -> St
         ([init @ .., last], true) => (format!("{} and {}", init.join(", "), last), "may have been"),
         ([], _) => (String::new(), "was"),
     };
-    format!(
-        "{0} is partially moved: {1} {2} moved out, so {0} can't be used as a whole; its other fields still can",
+    let mut text = format!(
+        "{0} is partially moved: {1} {2} moved out, so {0} can't be used as a whole",
         styled_name_html(my_name), list, verb
-    )
+    );
+    if let Some(borrow) = field_loan {
+        text.push_str(". ");
+        text.push_str(borrow);
+    } else {
+        text.push_str("; its other fields still can");
+    }
+    text
 }
 
 // The line of a struct every field of which was moved out, some of them
@@ -3631,6 +3638,25 @@ pub fn event_dot_lend_part(whole: &str, part: &str, to: &str, mutable: bool) -> 
     } else {
         format!("{1} is immutably borrowed by {2}, as part of an immutable borrow of all of {0}; {0} is read-only while the borrow is live", w, p, t)
     }
+}
+
+pub fn state_field_under_parent_loan(field: &str, parent: &str) -> String {
+    format!("A borrow of all of {1} also covers {0}. While that borrow is live, you can't move the field or take a mutable borrow of it directly through {1}.",
+        styled_name_html(field), styled_name_html(parent))
+}
+
+pub fn state_field_borrowed(name: &str, field: &str, mutable: bool) -> String {
+    if mutable {
+        return format!("While {} is mutably borrowed, you can't use {} directly as a whole.",
+            styled_name_html(field), styled_name_html(name));
+    }
+    format!("While {} is borrowed, {} can't be moved or mutably borrowed as a whole.",
+        styled_name_html(field), styled_name_html(name))
+}
+
+pub fn state_box_part_moved(name: &str, field: &str, definite: bool) -> String {
+    format!("A value {} moved from {}, so {} can't be used as a whole until all its contents are initialized.",
+        if definite { "was" } else { "may have been" }, styled_name_html(field), styled_name_html(name))
 }
 
 // A field's segment while the struct it is in is borrowed as a whole
