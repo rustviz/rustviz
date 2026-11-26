@@ -104,3 +104,59 @@ fn break_value_reads(c: bool) {
     }
     drop(read_s);
 }
+
+// The way to the block's end stops inside a call's argument, or in a
+// nested block: only the assigning `break` gets out.
+fn fallthrough_returns_in_argument(c: bool) {
+    let arg_s;
+    'b: {
+        if c {
+            arg_s = String::new();
+            break 'b;
+        }
+        let _ = Some(return);
+    }
+    drop(arg_s);
+}
+
+fn fallthrough_returns_in_block(c: bool) {
+    let nested_s;
+    'b: {
+        if c {
+            nested_s = String::new();
+            break 'b;
+        }
+        {
+            let _ = return;
+        }
+    }
+    drop(nested_s);
+}
+
+// `break 'b ()` skips the assignment just like `break 'b`.
+fn unit_break_value(c: bool) {
+    let mut unit_s = String::from("a");
+    let unit_old = unit_s;
+    'b: {
+        if c {
+            break 'b ();
+        }
+        unit_s = String::from("b");
+    }
+    unit_s = String::from("c");
+    println!("{unit_s} {unit_old}");
+}
+
+// A field moved before the block and assigned on its way to the end:
+// the field join stays as on main.
+fn field_assigned(c: bool) {
+    let mut p = (String::from("a"), String::from("b"));
+    drop(p.0);
+    'b: {
+        if c {
+            break 'b;
+        }
+        p.0 = String::new();
+    }
+    println!("{}", p.1);
+}

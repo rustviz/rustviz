@@ -20,3 +20,12 @@ fn same_row() {
     read(); println!("{same_row_list:?}");
     same_row_list.push(2);
 }
+
+// A one-line `if` whose arms read the lender on the same row: the
+// capture is live in the else arm only, so the row says nothing of it.
+fn one_line_arms(c: bool) {
+    let mut line_s = String::from("s");
+    let line_g = || line_s.len();
+    if c { println!("{line_s}"); line_s.clear(); } else { println!("{line_s}");
+        line_g(); }
+}

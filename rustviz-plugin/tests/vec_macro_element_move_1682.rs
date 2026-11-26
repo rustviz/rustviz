@@ -41,3 +41,21 @@ fn after_never_call() {
     let qv = vec![format!("first"), quit(), quit_s];
     println!("{}", qv.len());
 }
+
+fn wrap(_: ()) -> String {
+    String::new()
+}
+
+// The argument returns before wrap_s is reached; so does the block's
+// first statement before block_s.
+fn nested_divergence(c: bool) {
+    let wrap_s = String::from("s");
+    let block_s = String::from("s");
+    if c {
+        let wv = vec![format!("first"), wrap(return), wrap_s];
+        println!("{}", wv.len());
+    } else {
+        let bv = vec![format!("first"), { quit(); String::new() }, block_s];
+        println!("{}", bv.len());
+    }
+}

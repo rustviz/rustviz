@@ -78,3 +78,17 @@ fn setter_in_loop_arm(n: usize) {
     }
     println!("{}", loop_refs.len());
 }
+
+// A reference variable borrows row_t on the setter's row and outlives
+// row_slots: after row_slots is gone only r holds row_t.
+fn two_loans_one_row() {
+    let a = String::from("a");
+    let row_t = String::from("t");
+    let r;
+    {
+        let mut row_slots = vec![&a];
+        r = &row_t; set(&mut row_slots[0], &row_t);
+        println!("{}", row_slots[0]);
+    }
+    println!("{r} {row_t}");
+}

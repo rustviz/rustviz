@@ -4840,7 +4840,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     for ro in assigned {
       let root = ro.name().split('.').next().unwrap_or(ro.name());
-      if !outer.iter().any(|name| name == root) {
+      // (Whole variables only: a field's parent has its own drop
+      // wording, which this doesn't feed (#1746 review).)
+      if !outer.iter().any(|name| name == root) || ro.name().contains('.') {
         continue;
       }
       let entry = match self.ownership_before(*ro.hash(), true, frame.events_at) {
@@ -5762,7 +5764,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         if let Some(before) = before {
           // The events on the way to its end, if that is reached.
           let frame = self.labeled_frames.pop();
-          let through = frame.as_ref().filter(|_| !self.block_diverges(block))
+          // (Nor when a statement on the way stops every time it runs,
+          // `let _ = Some(return);`, #1746 review.)
+          let through = frame.as_ref().filter(|_| !self.block_diverges(block) && !fallthrough_may_stop(self.tcx, block))
             .map(|f| self.preprocessed_events[f.events_at.min(self.preprocessed_events.len())..].to_vec());
           // Its end is a way out too, moving what the way there and
           // its last expression move (#1504).
@@ -16388,12 +16392,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// statement of it diverges (`if c { break k; } else { continue; }`).
   fn block_diverges(&self, b: &'tcx rustc_hir::Block<'tcx>) -> bool {
     b.expr.is_some_and(|t| self.expr_diverges(t))
-      || b.stmts.iter().any(|st| match st.kind {
-        StmtKind::Expr(x) | StmtKind::Semi(x) => self.expr_diverges(x),
-        // `let _ = return;` never finishes either (#1685 review).
-        StmtKind::Let(l) => l.init.is_some_and(|i| self.expr_diverges(i)),
-        _ => false,
-      })
+      || b.stmts.iter().any(|st| matches!(st.kind,
+        StmtKind::Expr(x) | StmtKind::Semi(x) if self.expr_diverges(x)))
   }
 
   /// The values several `break`s carry out of `loop_expr` (with each
@@ -16593,6 +16593,18 @@ fn moved_on_path(events: &[(usize, ExternalEvent)], hide: &[std::ops::Range<usiz
     .collect()
 }
 
+/// Whether a statement of `block` (or its tail) stops every time it
+/// runs (`let _ = Some(return);`, `{ let _ = return; }`), so the way to
+/// its end is never taken.
+fn fallthrough_may_stop<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, block: &'tcx rustc_hir::Block<'tcx>) -> bool {
+  block.expr.is_some_and(|t| may_diverge_in(tcx, t, false))
+    || block.stmts.iter().any(|st| match st.kind {
+      StmtKind::Expr(x) | StmtKind::Semi(x) => may_diverge_in(tcx, x, false),
+      StmtKind::Let(l) => l.init.is_some_and(|i| may_diverge_in(tcx, i, false)),
+      _ => false,
+    })
+}
+
 /// Whether a `break` out of the labeled block `block` carries a value
 /// other than a variable or a literal (`break 'b { s = String::new(); }`).
 fn breaks_with_complex_value<'tcx>(block: &'tcx Expr<'tcx>) -> bool {
@@ -16600,7 +16612,7 @@ fn breaks_with_complex_value<'tcx>(block: &'tcx Expr<'tcx>) -> bool {
   impl<'tcx> Visitor<'tcx> for Find {
     fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
       if let ExprKind::Break(dest, Some(value)) = e.kind {
-        if dest.target_id == Ok(self.id) && !matches!(value.kind, ExprKind::Path(..) | ExprKind::Lit(..)) {
+        if dest.target_id == Ok(self.id) && !matches!(value.kind, ExprKind::Path(..) | ExprKind::Lit(..) | ExprKind::Tup([])) {
           self.found = true;
         }
       }

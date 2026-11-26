@@ -6074,6 +6074,9 @@ pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, fro
     };
 
         let title_fn = match external_event {
+            // A callee that may store the reference (`set(slot, &t)`
+            // with `*slot = v`) needn't read t at all (#1746 review).
+            ExternalEvent::PassByStaticReference { stored_in: StoredIn(Some(_), ..), .. } => " gets a shared reference to ",
             ExternalEvent::PassByStaticReference { .. } => " reads from ",
             // `r` is itself a `&mut` reference (#812): f
             // reads and writes the value r points to, not r,

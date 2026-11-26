@@ -12726,7 +12726,7 @@ pub fn print_out_of_scope(&mut self){
         first_and_moved(self.preprocessed_events, base, rd.assigned_at, &mut seen);
         let from = seen.0.unwrap_or(rd.assigned_at);
         let moved = seen.1;
-        Some(Sharer { name: name.clone(), hash, from, to: rd.lifetime, moved, lenders, from_kept_call: false, stored: false, gaps: Vec::new(), loan_lines: None })
+        Some(Sharer { name: name.clone(), hash, from, to: rd.lifetime, moved, lenders, from_kept_call: false, stored: false, gaps: Vec::new(), loan_lines: None, mixed: BTreeSet::new() })
       })
       .collect();
     // A re-pointed reference shares its old lenders until its old loan
@@ -12735,7 +12735,7 @@ pub fn print_out_of_scope(&mut self){
       let Some(rap) = self.raps.get(name).map(|r| &r.rap) else { continue };
       sharers.push(Sharer {
         name: name.clone(), hash: *rap.hash(), from: *from, to: *to, moved: None, lenders: lenders.clone(),
-        from_kept_call: false, stored: false, gaps: Vec::new(), loan_lines: None,
+        from_kept_call: false, stored: false, gaps: Vec::new(), loan_lines: None, mixed: BTreeSet::new(),
       });
     }
     // An arm whose path ends the reference's loan (it returns, or the
@@ -12743,11 +12743,14 @@ pub fn print_out_of_scope(&mut self){
     if !self.closure_sharers.is_empty() {
       let loans: Vec<usize> = self.closure_sharers.iter().map(|(_, loan)| *loan).collect();
       let lines = self.loan_live_lines(&loans);
+      let full = self.loan_fully_live_lines(&loans);
       for (mut sharer, loan) in self.closure_sharers.drain(..) {
         let mut seen = (None, None);
         first_and_moved(self.preprocessed_events, &sharer.name, sharer.from, &mut seen);
         sharer.moved = seen.1;
-        sharer.loan_lines = Some(lines.get(&loan).cloned().unwrap_or_default());
+        let any = lines.get(&loan).cloned().unwrap_or_default();
+        sharer.mixed = any.difference(&full.get(&loan).cloned().unwrap_or_default()).copied().collect();
+        sharer.loan_lines = Some(any);
         sharers.push(sharer);
       }
     }
@@ -12789,7 +12792,7 @@ pub fn print_out_of_scope(&mut self){
       if !sb.loans.is_empty() {
         let live: BTreeSet<usize> = self.loan_live_lines(&sb.loans).into_values().flatten().collect();
         for h in walk.holders.iter_mut() {
-          h.gaps.extend((h.from + 1..h.to).filter(|l| !live.contains(l)).map(|l| (l, l)));
+          h.gaps.extend((h.from + 1..=h.to).filter(|l| !live.contains(l)).map(|l| (l, l)));
         }
       }
       // The call's borrow end is the event after it (see
@@ -12857,7 +12860,7 @@ pub fn print_out_of_scope(&mut self){
         from_kept_call: *head_call,
         stored: false,
         gaps: Vec::new(),
-        loan_lines: None,
+        loan_lines: None, mixed: BTreeSet::new(),
       });
     }
     let mut noted: HashMap<usize, Vec<String>> = HashMap::new();
@@ -12880,7 +12883,7 @@ pub fn print_out_of_scope(&mut self){
       self.closure_sharers.push((Sharer {
         name: closure.name().to_owned(), hash: *closure.hash(), from, to,
         moved: None, lenders: vec![lender.name().to_owned()],
-        from_kept_call: false, stored: true, gaps: Vec::new(), loan_lines: None,
+        from_kept_call: false, stored: true, gaps: Vec::new(), loan_lines: None, mixed: BTreeSet::new(),
       }, loan));
     }
   }
@@ -13648,6 +13651,10 @@ struct Sharer {
   gaps: Vec<(usize, usize)>,
   // Capture loans use MIR liveness as well as the drawn branch ends.
   loan_lines: Option<BTreeSet<usize>>,
+  /// Rows where that loan is live at some MIR points only. On a row two
+  /// arms of a conditional share (`if c { …; } else { …; ` on one
+  /// line) the row can't say which arm holds it, so neither does.
+  mixed: BTreeSet<usize>,
 }
 
 impl Sharer {
@@ -13890,7 +13897,7 @@ impl HolderWalk<'_> {
     };
     dead_arm_gaps(list, holder, from, to, &mut gaps);
     self.holders.push(Sharer {
-      name: holder.to_owned(), hash, from, to, moved: cut, lenders: vec![self.lender.clone()], from_kept_call: false, stored: true, gaps, loan_lines: None,
+      name: holder.to_owned(), hash, from, to, moved: cut, lenders: vec![self.lender.clone()], from_kept_call: false, stored: true, gaps, loan_lines: None, mixed: BTreeSet::new(),
     });
     for h in hops {
       let Some(dest) = h.dest else { continue };
@@ -14221,8 +14228,18 @@ fn note_sharers_in(events: &mut [(usize, ExternalEvent)], sharers: &[Sharer], no
         }
       }
       ExternalEvent::Branch { branches, .. } => {
+        // Rows two arms both have events on (#1746 review).
+        let rows: Vec<BTreeSet<usize>> = branches.iter().map(|b| b.e_data.iter().map(|(l, _)| *l).collect()).collect();
+        let shared: BTreeSet<usize> = rows.iter().enumerate()
+          .flat_map(|(i, r)| r.iter().filter(|l| rows.iter().enumerate().any(|(j, o)| j != i && o.contains(l))).copied().collect::<Vec<_>>())
+          .collect();
+        let arm_sharers: Vec<Sharer> = sharers.iter().map(|s| {
+          let mut s = s.clone();
+          s.gaps.extend(s.mixed.intersection(&shared).map(|&l| (l, l)));
+          s
+        }).collect();
         for b in branches.iter_mut() {
-          note_sharers_in(&mut b.e_data, sharers, noted);
+          note_sharers_in(&mut b.e_data, &arm_sharers, noted);
         }
       }
       _ => {}

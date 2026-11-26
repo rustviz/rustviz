@@ -2329,21 +2329,65 @@ pub fn vec_macro_elems<'tcx>(expr: &'tcx Expr<'tcx>) -> Option<&'tcx [Expr<'tcx>
       _ => None,
     }
   }
-  // An element that never produces a value (`vec![panic!(..), s]`)
-  // stops the evaluation there: the elements after it are never moved
-  // into the Vec. Draw none of them (#1682 review).
-  find(expr, ctxt).filter(|elems| !elems.iter().any(never_produces))
+  let elems = find(expr, ctxt)?;
+  // Main's case, no element a macro expansion: unchanged.
+  if elems.iter().all(|x| !x.span.from_expansion()) {
+    return Some(elems);
+  }
+  // With a macro element (`vec![s, format!(..)]`, #1682): unless an
+  // element may stop the evaluation (`panic!(..)`, `f(return)`, `{
+  // quit(); x }`), when the elements after it are never moved into the
+  // Vec. Then draw none of them, as before (#1746 review).
+  rustc_middle::ty::tls::with_opt(|tcx| {
+    let tcx = tcx?;
+    (!elems.iter().any(|e| may_diverge_in(tcx, e, true))).then_some(elems)
+  })
 }
 
-/// A `vec!` element that can't produce a value: one of type `!`
-/// (`return`, `panic!(..)`, a call to a `fn … -> !`).
-fn never_produces(e: &Expr<'_>) -> bool {
-  if matches!(e.kind, ExprKind::Ret(..) | ExprKind::Break(..) | ExprKind::Continue(..)) {
-    return true;
+/// Whether evaluating `e` may stop at an expression of type `!`
+/// (`return`, `panic!(..)`, a call to a `fn … -> !`), not counting
+/// closure bodies. `conditional`: also inside a branch, a loop, a
+/// labeled block or the right side of `&&` / `||`; otherwise only
+/// where `e` reaches it every time it runs (it then never completes).
+pub fn may_diverge_in<'t, 'v>(tcx: TyCtxt<'t>, e: &'v Expr<'v>, conditional: bool) -> bool {
+  use rustc_hir::intravisit::{self, Visitor};
+  struct Find<'t> { tcx: TyCtxt<'t>, conditional: bool, found: bool }
+  impl<'t, 'v> Visitor<'v> for Find<'t> {
+    fn visit_expr(&mut self, e: &'v Expr<'v>) {
+      if self.found {
+        return;
+      }
+      if matches!(e.kind, ExprKind::Ret(..) | ExprKind::Break(..) | ExprKind::Continue(..))
+        || self.tcx.typeck(e.hir_id.owner.def_id).node_type_opt(e.hir_id).is_some_and(|t| t.is_never())
+      {
+        self.found = true;
+        return;
+      }
+      match e.kind {
+        ExprKind::Closure(..) => {}
+        _ if self.conditional => intravisit::walk_expr(self, e),
+        ExprKind::If(cond, ..) => self.visit_expr(cond),
+        ExprKind::Match(scrutinee, ..) => self.visit_expr(scrutinee),
+        ExprKind::Loop(..) | ExprKind::Block(_, Some(_)) => {}
+        ExprKind::Binary(op, lhs, _) if matches!(op.node, rustc_hir::BinOpKind::And | rustc_hir::BinOpKind::Or) => self.visit_expr(lhs),
+        _ => intravisit::walk_expr(self, e),
+      }
+    }
+    fn visit_local(&mut self, l: &'v rustc_hir::LetStmt<'v>) {
+      // (A let-else's `else` runs only when the pattern fails.)
+      if let Some(init) = l.init {
+        self.visit_expr(init);
+      }
+      if self.conditional {
+        if let Some(els) = l.els {
+          self.visit_block(els);
+        }
+      }
+    }
   }
-  rustc_middle::ty::tls::with_opt(|tcx| tcx.is_some_and(|tcx| {
-    tcx.typeck(e.hir_id.owner.def_id).node_type_opt(e.hir_id).is_some_and(|t| t.is_never())
-  }))
+  let mut f = Find { tcx, conditional, found: false };
+  f.visit_expr(e);
+  f.found
 }
 
 /// The typing environment for judging types that occur in the body of

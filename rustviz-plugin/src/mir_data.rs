@@ -408,6 +408,43 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         lines
     }
 
+    /// The rows on which each requested loan is live at every MIR
+    /// point of the row. A row where it is live at some points only (a
+    /// one-line `if` whose arms differ, the closure's last call next to
+    /// a read) is left out, so a read there isn't said to be still
+    /// borrowed (#1746 review).
+    pub(crate) fn loan_fully_live_lines(&self, loans: &[usize]) -> BTreeMap<usize, BTreeSet<usize>> {
+        let body_with_facts = self.bwf;
+        let body = &body_with_facts.body;
+        let borrows = Borrows::new(self.tcx, body, &body_with_facts.region_inference_context, &body_with_facts.borrow_set);
+        let mut cursor = borrows.iterate_to_fixpoint(self.tcx, body, None).into_results_cursor(body);
+        let mut points: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut live: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+        for (block, data) in body.basic_blocks.iter_enumerated() {
+            if data.is_cleanup {
+                continue;
+            }
+            for statement_index in 0..=data.statements.len() {
+                let location = Location { block, statement_index };
+                cursor.seek_before_primary_effect(location);
+                let line = self.location_to_line(location, body_with_facts);
+                *points.entry(line).or_default() += 1;
+                for b in cursor.get().iter() {
+                    if loans.contains(&b.index()) {
+                        *live.entry((b.index(), line)).or_default() += 1;
+                    }
+                }
+            }
+        }
+        let mut lines: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+        for ((loan, line), n) in live {
+            if points.get(&line) == Some(&n) {
+                lines.entry(loan).or_default().insert(line);
+            }
+        }
+        lines
+    }
+
     fn for_each_live_loan(&self, body_with_facts: &BodyWithBorrowckFacts<'tcx>, mut visit: impl FnMut(BorrowIndex, usize)) {
         let body = &body_with_facts.body;
         let borrows = Borrows::new(self.tcx, body, &body_with_facts.region_inference_context, &body_with_facts.borrow_set);
