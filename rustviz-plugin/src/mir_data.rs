@@ -1546,6 +1546,52 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         last
     }
 
+    /// Loans in scope just before evaluating a fresh borrow. Collect every
+    /// borrow in the expression (`&v[i]` also borrows v to call Index).
+    /// An empty result is evidence only if MIR actually contains a borrow
+    /// here, e.g. a closure body can belong to a different MIR owner.
+    pub fn loans_at_borrow_expr(&self, span: Span) -> Option<BTreeSet<usize>> {
+        let bwf = self.bwf;
+        let body = &bwf.body;
+        let mut locations = bwf.borrow_set.location_map().keys().copied().filter(|&loc|
+            !body.basic_blocks[loc.block].is_cleanup && span.contains(self.location_to_span(loc, bwf))).peekable();
+        locations.peek()?;
+        let borrows = Borrows::new(self.tcx, body, &bwf.region_inference_context, &bwf.borrow_set);
+        let mut cursor = borrows.iterate_to_fixpoint(self.tcx, body, None).into_results_cursor(body);
+        let mut live = BTreeSet::new();
+        for loc in locations {
+            cursor.seek_before_primary_effect(loc);
+            live.extend(cursor.get().iter().map(|loan| loan.index()));
+        }
+        Some(live)
+    }
+
+    /// A replacement Drop has the span of the assignment's LHS even when
+    /// the RHS spans several lines. Which earlier loans are in scope at
+    /// that Drop? Exclude loans made by the RHS for the incoming value.
+    pub fn replacement_drop_loans(&self, lhs: Span, rhs: Span) -> Option<BTreeMap<usize, String>> {
+        let bwf = self.bwf;
+        let body = &bwf.body;
+        let (bb, data) = body.basic_blocks.iter_enumerated().find(|(_, data)| {
+            !data.is_cleanup && data.terminator().source_info.span == lhs
+                && matches!(data.terminator().kind, TerminatorKind::Drop { .. })
+        })?;
+        let TerminatorKind::Drop { place, .. } = data.terminator().kind else { return None };
+        let facts = bwf.input_facts.as_ref()?;
+        if !facts.drop_of_var_derefs_origin.iter().any(|(v, _)| *v == place.local) {
+            return None;
+        }
+        let names = self.mir_local_names(bwf);
+        let borrows = Borrows::new(self.tcx, body, &bwf.region_inference_context, &bwf.borrow_set);
+        let mut cursor = borrows.iterate_to_fixpoint(self.tcx, body, None).into_results_cursor(body);
+        cursor.seek_before_primary_effect(Location { block: bb, statement_index: data.statements.len() });
+        Some(cursor.get().iter().filter_map(|loan| {
+            let (issued, data) = bwf.borrow_set.location_map().get_index(loan.index())?;
+            if rhs.contains(self.location_to_span(*issued, bwf)) { return None; }
+            Some((loan.index(), names.get(&data.borrowed_place().local)?.clone()))
+        }).collect())
+    }
+
     /// The last line on which dropping the variable `name` (its RAP
     /// name) may use a borrow its value holds, from rustc's own facts:
     /// the drop check says its drop reads a lifetime of its type (a

@@ -6551,10 +6551,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// value's drop is drawn where the assignment starts, as before. And
   /// for a struct drawn with columns for its reference fields (`h = if c
   /// { let r = &a; H(r) } else { .. };`, #1483): its fields' old loans
-  /// end where the assignment starts, as for `h = H(&a);`. Some(the
+  /// that survive until the replacement Drop are ended after the RHS. Some(the
   /// struct field ends left to draw: none) when paired; None, doing
   /// nothing, unless some branch's value is such.
-  fn pair_holder_arms_in_branch(&mut self, expr: &'tcx Expr<'tcx>, lhs_expr: &'tcx Expr<'tcx>, rhs_expr: &'tcx Expr<'tcx>) -> Option<Vec<(usize, Vec<ResourceTy>, ResourceTy, bool)>> {
+  fn pair_holder_arms_in_branch(&mut self, expr: &'tcx Expr<'tcx>, lhs_expr: &'tcx Expr<'tcx>, rhs_expr: &'tcx Expr<'tcx>, drop: &ReplacementDrop) -> Option<Vec<(usize, Vec<ResourceTy>, ResourceTy, bool)>> {
     if !matches!(expr.kind, ExprKind::Assign(..)) || expr.span.from_expansion() {
       return None;
     }
@@ -6581,10 +6581,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     let line = expr_to_line(lhs_expr, &self.tcx);
     let ends = if rap.holds_borrow() {
-      self.reassign_holder(&rap, cond, lhs_ty, line);
+      self.reassign_holder(&rap, cond, lhs_ty, line, drop);
       Vec::new()
     } else {
-      let ends = self.struct_field_borrow_ends(&rap, line);
+      let ends = self.struct_field_borrow_ends(&rap, line, drop);
       self.reassign_struct_field_lenders(&rap, cond, lhs_ty, line);
       // A field holding a borrow (`o: Option<&mut String>`) has none until
       // a branch gives it one, as for `let w = if ..`: no loan with no
@@ -6946,7 +6946,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // A branch gives r back its own value (#1430): r's old loan lives on
     // along that path, so the write ends none of it.
     let keeps_old_loan = ref_arms_keep == Some(true);
-    let branch_field_ends = if destructure_hid.is_none() { self.pair_holder_arms_in_branch(expr, lhs_expr, rhs_expr) } else { None };
+    let replacement = self.replacement_drop(lhs_expr, rhs_expr);
+    let branch_field_ends = if destructure_hid.is_none() { self.pair_holder_arms_in_branch(expr, lhs_expr, rhs_expr, &replacement) } else { None };
     let paired_in_branch = branch_field_ends.is_some();
     let rhs_lo = *self.unique_id;
     if destructure_hid.is_none() && !ref_arms {
@@ -7860,7 +7861,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if let (ResourceTy::Value(rap), false) = (&lhs_rty, paired_in_branch) {
       if rap.holds_borrow() && !lhs_is_union_field && matches!(expr.kind, ExprKind::Assign(..)) {
         let rap = rap.clone();
-        self.reassign_holder(&rap, pair_rhs, lhs_ty, line_num);
+        self.reassign_holder(&rap, pair_rhs, lhs_ty, line_num, &replacement);
       }
     }
     // `hold = H { r: &t };` overwrites a whole struct whose
@@ -7885,7 +7886,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       (ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)), ExprKind::Assign(..))
         if !lhs_is_union_field && matches!(rhs_expr.kind, ExprKind::Struct(..)) => {
         let rap = rap.clone();
-        let ends = self.struct_field_borrow_ends(&rap, line_num);
+        let ends = self.struct_field_borrow_ends(&rap, line_num, &replacement);
         // The literal's fields hold borrows made here: an earlier
         // move of the old value (`let h2 = hold;`, #637) doesn't
         // hand these on.
@@ -7895,13 +7896,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       (ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)), ExprKind::Assign(..))
         if !lhs_is_union_field => {
         let rap = rap.clone();
-        let ends = self.struct_field_borrow_ends(&rap, line_num);
+        let ends = self.struct_field_borrow_ends(&rap, line_num, &replacement);
         self.reassign_struct_field_lenders(&rap, rhs_expr, lhs_ty, line_num);
         ends
       }
       _ => Vec::new(),
     };
-    let mut drop_line = line_num;
+    let mut drop_line = replacement.line;
     let mut drop_at: Option<usize> = None;
     let mut late_holder_borrows: Vec<(String, &'tcx Expr<'tcx>)> = Vec::new();
     if let (ResourceTy::Index(..), ExprKind::AssignOp(..)) = (&lhs_rty, expr.kind) {
@@ -8106,6 +8107,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
     }
 
+    self.end_replaced_loans(replacement);
     let n_before_drops = self.preprocessed_events.len();
     let payload_target = drop_target.as_ref().map(|r| *r.hash());
     for ((((rap, maybe_moved), parts), loop_head), by_cond) in drop_target.into_iter().chain(field_drop_targets).zip(maybe_moved).zip(parts).zip(loop_head).zip(by_conds) {

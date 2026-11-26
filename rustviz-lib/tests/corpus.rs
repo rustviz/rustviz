@@ -27059,11 +27059,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `match`, and a Copy struct.
         must_contain: &[
             "Return immutably borrowed resource from h.0 to a or b (h.0 may point into either; its borrow of both ends here)",
-            "Return immutably borrowed resource from h.0 to b",
+            "h on L30 | h acquires ownership of a new resource; its previous resource is dropped",
             "Return immutably borrowed resource from h2.0 to a or b (h2.0 may point into either; its borrow of both ends here)",
             "Return immutably borrowed resource from g.0 to a or b (g.0 may point into either; its borrow of both ends here)",
             "Return immutably borrowed resource from k.p to a or b (k.p may point into either; its borrow of both ends here)",
-            "Return immutably borrowed resource from k.p to b",
+            "k on L97 | k acquires ownership of a new resource; its previous resource is dropped",
             "Return mutably borrowed resource from m.0 to a or b (m.0 may point into either; its borrow of both ends here)",
             "Return immutably borrowed resource from q.0 to a or b (q.0 may point into either; its borrow of both ends here)",
         ],
@@ -28046,6 +28046,102 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "If the `?` here returns early, nested_iter's former resource, the loop's iterator, is dropped, along with whatever it still owns (such as elements it hasn't handed out yet). If the `?` succeeds, nothing happens to the iterator here.",
         ],
         must_not_contain: &["nothing happens to outer here", "nothing happens to keep here", "nothing happens to late here", "nothing happens to carried here", "the function returns and"],
+    },
+    TooltipExpect {
+        name: "drop_holder_rhs_1677",
+        must_contain: &[
+            "b after L11 | b's resource is being shared by one or more variables",
+            "b after L14 | b's resource is being shared by one or more variables",
+            "b after L15 | b is the owner of the resource",
+            "h on L15 | h acquires ownership of a new resource; its previous resource is dropped",
+            "old on L45 | old's resource is no longer borrowed by h.0, but is still immutably borrowed by other",
+            "old after L58 | old is the owner of the resource",
+        ],
+        must_not_contain: &[
+            "b after L11 | b is the owner of the resource",
+            "h on L10 | h acquires ownership of a new resource; its previous resource is dropped",
+            "old after L45 | old is the owner of the resource",
+            "old after L58 | old's resource is being shared by one or more variables",
+        ],
+    },
+    TooltipExpect {
+        name: "nested_holder_copy_1680",
+        must_contain: &[
+            "t after L7 | t's resource is being shared by one or more variables",
+            "len reads from t (implicitly borrowed)",
+        ],
+        must_not_contain: &[
+            "t after L7 | t is the owner of the resource",
+        ],
+    },
+    TooltipExpect {
+        name: "nested_if_let_join_1683",
+        must_contain: &[
+            "v after L11 | v is the owner of the resource",
+            "v after L8 | v's resource is being shared by one or more variables",
+        ],
+        must_not_contain: &[
+            "v after L11 | v's resource is being shared by one or more variables",
+        ],
+    },
+    TooltipExpect {
+        name: "move_after_loop_1686",
+        must_contain: &[
+            "s on L11 | s's resource is moved",
+            "Move from s to Box::new",
+        ],
+        must_not_contain: &[
+            "s on L10 | s's resource is moved",
+        ],
+    },
+    TooltipExpect {
+        name: "box_shared_across_read_1686",
+        must_contain: &[
+            "b after L10 | b's resource is being shared by one or more variables",
+            "b's resource is no longer borrowed by println!, but is still immutably borrowed by r2",
+        ],
+        must_not_contain: &[
+            "b after L10 | b is the owner of the resource",
+            "b on L10 | b's resource is no longer immutably borrowed",
+        ],
+    },
+    TooltipExpect {
+        name: "let_else_unused_ref_1686",
+        must_contain: &[
+            "v after L4 | v is the owner of the resource",
+        ],
+        must_not_contain: &[
+            "v after L4 | v's resource is being shared by one or more variables",
+        ],
+    },
+    TooltipExpect {
+        name: "match_unused_ref_1686",
+        must_contain: &[
+            "b after L8 | b is the owner of the resource",
+        ],
+        must_not_contain: &[
+            "b after L8 | b's resource is being shared by one or more variables",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/nested_chain_1686",
+        must_contain: &[
+            "v after L7 | v is the owner of the resource",
+            "v on L5 | v's resource is no longer immutably borrowed",
+        ],
+        must_not_contain: &[
+            "v after L7 | v's resource is being shared by one or more variables",
+            "v on L8 | v's resource is no longer immutably borrowed",
+        ],
+    },
+    TooltipExpect {
+        name: "pattern_else_lender_1686",
+        must_contain: &[
+            "v after L9 | v is the owner of the resource",
+        ],
+        must_not_contain: &[
+            "v after L9 | v's resource is being shared by one or more variables",
+        ],
     },
 ];
 
@@ -30980,6 +31076,57 @@ fn entry_label(idx: usize) -> String {
     }
 }
 
+/// Some sentences are true elsewhere in the same diagram. A pin prefixed
+/// with "var after LN | " selects the line segment spanning the gap after
+/// source line N. "var on LN | " selects dots on that source line.
+fn expected_tooltip_values(expect: &TooltipExpect, rv: &Rustviz) -> Vec<String> {
+    let svg = rv.timeline_panel_string();
+    let mut actual = timeline_tooltips(&svg);
+    let scopes: std::collections::BTreeSet<_> = expect.must_contain.iter().chain(expect.must_not_contain.iter())
+        .filter_map(|pin| pin.split_once(" | ").map(|(scope, _)| scope))
+        .filter(|scope| scope.contains(" after L") || scope.contains(" on L"))
+        .collect();
+    if scopes.is_empty() { return actual; }
+
+    // A diagonal at a join can cross the gap before its tagged source row.
+    // Check what the student can actually hover between the two code rows.
+    let code = rv.code_panel_string();
+    let rows: BTreeMap<usize, f64> = start_tags(&code, "text").into_iter().filter_map(|tag| {
+        Some((attr(tag, "data-rv-line")?.parse().ok()?, attr(tag, "y")?.parse::<f64>().ok()? - 5.0))
+    }).collect();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    for scope in scopes {
+        let (var, row, gap) = match scope.split_once(" after L") {
+            Some((var, row)) => (var, row, true),
+            None => {
+                let (var, row) = scope.split_once(" on L").unwrap();
+                (var, row, false)
+            }
+        };
+        let row: usize = row.parse().expect("source line in tooltip pin");
+        for node in doc.descendants().filter(|n| n.attribute("data-rv-var") == Some(var) && n.has_attribute("data-tooltip-text")) {
+            let matches = match (gap, node.attribute("data-rv-kind")) {
+                (true, Some("line" | "branch_line")) => {
+                    let y = (rows[&row] + rows[&(row + 1)]) / 2.0;
+                    node.descendants().filter(|n| n.has_tag_name("line")).any(|n| {
+                        let y1: f64 = n.attribute("y1").unwrap().parse().unwrap();
+                        let y2: f64 = n.attribute("y2").unwrap().parse().unwrap();
+                        y1.min(y2) < y && y < y1.max(y2)
+                    })
+                }
+                (false, Some("dot")) => node.attribute("data-rv-line").and_then(|s| s.parse().ok()) == Some(row),
+                _ => false,
+            };
+            if matches {
+                let element = &svg[node.range()];
+                let tag = &element[..element.find('>').unwrap()];
+                actual.extend(timeline_tooltips(tag).into_iter().map(|t| format!("{scope} | {t}")));
+            }
+        }
+    }
+    actual
+}
+
 #[test]
 fn corpus_expected_tooltips_present() {
     prerender(EXPECTED_TOOLTIPS.iter().map(|e| e.name).chain(KNOWN_STILL_PRINTED.iter().map(|k| k.0)));
@@ -30989,7 +31136,7 @@ fn corpus_expected_tooltips_present() {
         let res = std::panic::catch_unwind(|| {
             let rv = run_with_local_backend(expect.name);
             assert_no_negative_sizes(expect.name, &rv.timeline_panel_string());
-            let actual = timeline_tooltips(&rv.timeline_panel_string());
+            let actual = expected_tooltip_values(expect, &rv);
             // #308: a numbered header stops at "declared on line N"; the
             // long "While s₂ is in scope the name s refers to s₂ ..."
             // sentence was dropped as noise.
@@ -38025,10 +38172,10 @@ fn branch_local_ref_ends_with_scope() {
          &["v@L22:dot:branch_join+mutable_die", "r@L23:", "r2@L44:", "r2@L45:", "r2@L46:", "q@L63:",
            "r@L83:", "r@L84:", "r@L85:", "r@L104:", "r@L128:", "r@L129:", "r@L130:",
            "v2@L146:dot:branch_join+mutable_die", "r@L147:"][..]),
-        // h's old loan of b ends where the old value is dropped (24); the
-        // new one at h's drop (37).
+        // The old h is dropped after the RHS (30). The new h.0 can
+        // still borrow b and gives back its loan at h's drop (37).
         ("assign_branch_struct_fields_1483",
-         &["r@L30:dot:static_die+ref_go_out_of_scope", "h.0@L24:dot:static_die+branch",
+         &["r@L30:dot:static_die+ref_go_out_of_scope", "h@L30:dot:branch_join+owner_drop_at_reassign",
            "h.0@L37:dot:static_die+ref_go_out_of_scope", "h2.0@L52:dot:static_die+ref_go_out_of_scope",
            "r@L117:dot:mutable_die+ref_go_out_of_scope"][..],
          &["r@L37:", "r@L52:", "r@L70:", "p@L99:", "q@L99:", "r@L118:", "r@L138:"][..]),

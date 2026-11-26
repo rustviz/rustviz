@@ -10,7 +10,6 @@
 
 use crate::expr_visitor::ExprVisitor;
 use crate::expr_visitor_utils::{binding_name, span_end_line, span_to_line};
-#[allow(non_snake_case)]
 use crate::svg_generator::data::ApproxNote;
 use crate::svg_generator::hover_messages;
 use rustc_hir::def::Res;
