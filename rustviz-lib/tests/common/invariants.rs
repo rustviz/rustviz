@@ -409,7 +409,7 @@ fn says_maybe_moved(d: &Dot) -> bool {
 /// stops where the (partial or maybe) move made the whole unusable, and
 /// the drop of what's left is stated on its own dot below, which no
 /// line reaches. (A Box whose contents were moved out says "Its
-/// contents were moved out earlier, so only the Box's heap allocation";
+/// contents were moved out earlier, so only what is left of the Box";
 /// `contents_moved` covers it.)
 const PARTIAL_DROP_PHRASES: &[&str] = &["drop flag", "moved out earlier, so only"];
 /// A move drawn on the column's own line that says it happens on some

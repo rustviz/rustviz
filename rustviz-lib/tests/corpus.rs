@@ -21544,6 +21544,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "=b goes out of scope. Its contents were moved out earlier, so only the Box's heap allocation is freed.",
+            "=b goes out of scope. Its contents were moved out earlier, so only what is left of the Box is freed.",
             "f goes out of scope. Its resource (including the String it holds) is dropped here only if no branch above moved it",
             "g goes out of scope. Its resource (including the String it holds) is dropped here only if no branch above moved it",
             "If the branch that ran didn't move it, its resource (including the String it holds) is dropped when g goes out of scope",
