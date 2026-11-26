@@ -113,6 +113,50 @@ silently test a stale build. On Windows, run `build` and `test` as
 `rustviz` and `rustviz-cli` both produce a `rustviz` bin, and linking
 both in one invocation fails with LNK1104 (CI does the same).
 
+**Checking drawings against rustc (`RV_ORACLE=1`):** the borrow checker
+knows, for every point of a program, whether a variable is borrowed,
+moved or free, so it can check what each timeline draws. After every
+statement, for every variable whose state is drawn there, the test
+inserts a use and compiles: where `x` is drawn holding its value with
+nothing borrowing it, `let _ = &mut x;` must not fail with a borrow
+conflict or a move error (E0596 for a binding not declared `mut` is
+ignored); `let _ = &x;` must compile where it's drawn read-only and fail
+where it's drawn mutably borrowed (E0502), moved (E0382) or not assigned
+yet (E0381). It skips (and counts) what it can't probe soundly: dead
+code, shadowed names, places like `*r` or `v[0]`, rows where the plugin
+added extra rows, arm legs whose path it can't identify, verdicts that
+don't decide the drawn state (a two-phase `&mut` reservation, a partial
+vs. whole move). Points inside closures, call arguments and const
+contexts (array lengths in expressions and types), and functions with
+block comments, aren't collected at all. Missing a contradiction is
+acceptable; reporting a false one isn't. It compiles a few probe
+programs per snippet, so it's opt-in:
+
+```sh
+RV_ORACLE=1 cargo test -p rustviz-lib --test corpus --locked corpus_oracle_holds -- --nocapture
+```
+
+It runs on every fixture, Book snippet and known-bug repro (narrow it
+with `RV_INVARIANTS_ONLY=book/,known_bugs/`, add a directory with
+`RV_INVARIANTS_EXTRA=<dir>`; `RV_ORACLE_VERBOSE=1` prints every violation, listed or not), caches each compile under
+`target/tmp/rv-oracle-cache` (or `$RV_ORACLE_CACHE`), and fails on a
+violation that isn't in `KNOWN_ORACLE_FAILURES`
+(`rustviz-lib/tests/common/oracle.rs`: one entry per snippet, check,
+line and column, each with its issue) or on a listed claim that was
+tested and now passes. `tools/progen/progen.py check --oracle <dir>`
+runs it on generated programs.
+
+Limits (it misses rather than guesses): a definite "moved" or
+"partially moved" drawing can only be shown wrong, never confirmed
+(rustc's E0382 also fires when the value moved on just one path); a
+conflict whose loan is "later used" only by the probe itself is no
+verdict; it skips whole files that use `line!` / `column!` / `file!` /
+`env!` / `include*!` or define a macro, names that an item (fn, const,
+static, type, variant, `use`) also has, rows below which the next line
+is blank (stacked events), arm legs it can't tie to the point's path,
+and the `{` line of a block (it may hold the arm before it). About 30%
+of drawn states end up untested; the test prints the count per reason.
+
 **Running the playground locally:** `cd playground && cargo run
 --release`, then open <http://127.0.0.1:8080/>. Without Docker, set
 `RV_RUNNER=local` (fine on your own machine, never on a public

@@ -30877,16 +30877,10 @@ fn one_line_arm_join_leg_starts_at_a_dot() {
     }
 }
 
-/// Every fixture, Book snippet and known-bug repro satisfies the
-/// corpus-wide invariants (`common/invariants.rs`), except the violations
-/// listed in `KNOWN_INVARIANT_FAILURES`, each tracked by an issue. A new
-/// violation fails, and so does a listed one that's gone (delete its
-/// entry). Reuses this binary's renders of the fixtures.
-#[test]
-fn corpus_invariants_hold() {
-    use common::invariants::{check, known_list_problems, parse, report, INVARIANTS, KNOWN_INVARIANT_FAILURES};
-    let problems = known_list_problems();
-    assert!(problems.is_empty(), "KNOWN_INVARIANT_FAILURES: {:#?}", problems);
+/// The programs the property checks run on: every fixture (minus
+/// `SKIP_WELL_FORMED`), Book snippet and known-bug repro, plus
+/// `RV_INVARIANTS_EXTRA`'s files, narrowed by `RV_INVARIANTS_ONLY`; sorted.
+fn property_snippets() -> Vec<String> {
     let skipped: Vec<&str> = SKIP_WELL_FORMED.iter().map(|(n, _)| *n).collect();
     let mut names: Vec<String> = all_fixtures().into_iter().filter(|n| !skipped.contains(&n.as_str())).collect();
     for dir in ["book", "known_bugs"] {
@@ -30914,6 +30908,20 @@ fn corpus_invariants_hold() {
         names.retain(|n| prefixes.iter().any(|p| n.starts_with(p)));
     }
     names.sort();
+    names
+}
+
+/// Every fixture, Book snippet and known-bug repro satisfies the
+/// corpus-wide invariants (`common/invariants.rs`), except the violations
+/// listed in `KNOWN_INVARIANT_FAILURES`, each tracked by an issue. A new
+/// violation fails, and so does a listed one that's gone (delete its
+/// entry). Reuses this binary's renders of the fixtures.
+#[test]
+fn corpus_invariants_hold() {
+    use common::invariants::{check, known_list_problems, parse, report, INVARIANTS, KNOWN_INVARIANT_FAILURES};
+    let problems = known_list_problems();
+    assert!(problems.is_empty(), "KNOWN_INVARIANT_FAILURES: {:#?}", problems);
+    let names = property_snippets();
     prerender(names.iter().map(|n| n.as_str()));
     let mut found: BTreeMap<(String, &'static str), Vec<String>> = BTreeMap::new();
     let mut failed = Vec::new();
@@ -30940,6 +30948,78 @@ fn corpus_invariants_hold() {
         "invariant violations differ from KNOWN_INVARIANT_FAILURES (rustviz-lib/tests/common/invariants.rs). \
          A NEW one is a bug this change introduced, or an old one nobody listed (file an issue and add an \
          entry with its number); a GONE one was fixed (delete its entry).\n{}\nSnippets the plugin failed on: {:#?}",
+        diff, failed
+    );
+}
+
+/// rustc as ground truth for the drawn state of each variable
+/// (`common/oracle.rs`): after a statement, a use of the variable that
+/// the drawing says is fine must compile, and one it forbids must not.
+/// Opt-in, since it compiles a few probe programs per snippet:
+/// `RV_ORACLE=1` (with `RV_INVARIANTS_EXTRA` / `RV_INVARIANTS_ONLY` as for
+/// the invariants). Violations main has today are listed in
+/// `KNOWN_ORACLE_FAILURES`; a new one fails, and so does a listed one
+/// that's gone.
+#[test]
+fn corpus_oracle_holds() {
+    use common::oracle::{check, known_list_problems, report, untested_listed, Checked, Stats};
+    let problems = known_list_problems();
+    assert!(problems.is_empty(), "KNOWN_ORACLE_FAILURES / ORACLE_EXEMPT: {:#?}", problems);
+    if env::var("RV_ORACLE").map_or(true, |v| v.is_empty() || v == "0") {
+        eprintln!("corpus_oracle_holds: skipped (set RV_ORACLE=1 to run it)");
+        return;
+    }
+    let names = property_snippets();
+    prerender(names.iter().map(|n| n.as_str()));
+    let results: Mutex<Vec<(String, Result<(Checked, Stats), String>)>> = Mutex::new(Vec::new());
+    let next = AtomicUsize::new(0);
+    let workers = std::thread::available_parallelism().map_or(2, |n| n.get()).min(names.len().max(1));
+    std::thread::scope(|sc| {
+        for _ in 0..workers {
+            sc.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(name) = names.get(i) else { break };
+                let r = render_cell(name).map(|rv| {
+                    let (v, tested, st) = check(&read_corpus(name), &rv.timeline_panel_string(), &rv.code_panel_string());
+                    ((v, tested), st)
+                });
+                results.lock().unwrap().push((name.clone(), r));
+            });
+        }
+    });
+    let mut checked: BTreeMap<String, Checked> = BTreeMap::new();
+    let mut failed = Vec::new();
+    let mut total = Stats::default();
+    for (name, r) in results.into_inner().unwrap() {
+        match r {
+            Ok((c, st)) => {
+                total.add(&st);
+                checked.insert(name, c);
+            }
+            Err(e) => failed.push(e),
+        }
+    }
+    failed.sort();
+    if env::var("RV_ORACLE_VERBOSE").is_ok_and(|v| !v.is_empty()) {
+        // Every violation, listed or not: snippet, check, line, column, text.
+        for (snippet, (vs, _)) in &checked {
+            for v in vs {
+                eprintln!("ALL\t{snippet}\t{}\t{}\t{}\t{}", v.check, v.line, v.var, v.text);
+            }
+        }
+    }
+    let diff = report(&checked);
+    eprintln!(
+        "oracle: {} snippets, {} claims, {} tested, {} violations ({} in loops), {} listed entries not tested this run; skipped: {:?}",
+        total.programs, total.claims, total.tested, total.violations, total.in_loop_violations,
+        untested_listed(&checked), total.skips
+    );
+    assert!(
+        diff.is_empty() && failed.is_empty(),
+        "rustc oracle violations differ from KNOWN_ORACLE_FAILURES (rustviz-lib/tests/common/oracle.rs). \
+         A NEW one is a drawn state rustc contradicts: a bug this change introduced, or an old one nobody \
+         listed (file an issue and add an entry with its number); a GONE one was tested and passed (delete \
+         its entry).\n{}\nSnippets the plugin failed on: {:#?}",
         diff, failed
     );
 }
