@@ -73,8 +73,10 @@ pub struct Cell {
     pub may: bool,
     /// For `Maybe`: "moved" or "unassigned".
     pub cause: Option<&'static str>,
-    /// The loans its references hold here (by loan id): none for a
-    /// reference that is dead (no later use) or holds no loan.
+    /// The loans its value keeps borrowed here, as the borrow checker
+    /// counts them (by loan id; `State.holds`): none for a reference no
+    /// later row uses, a moved-out or unassigned variable, or a field
+    /// column (only variable columns have them).
     pub holds: Vec<usize>,
     pub why: Vec<Why>,
     /// The row this state was read on (the row asked for, or the row

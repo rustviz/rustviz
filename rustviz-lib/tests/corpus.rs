@@ -31254,6 +31254,57 @@ fn fact_loan<'a>(body: &'a serde_json::Value, line: u64, lender: &str) -> &'a se
         .unwrap_or_else(|| panic!("no loan of {lender} on row {line} in {}: {:#}", body["func"], body["loans"]))
 }
 
+/// What each variable's value keeps borrowed after a row (`holds`, v4;
+/// `rv3_facts_holds.rs`), as the borrow checker counts it: per path (an
+/// arm's own loan, not the join's union; not a skipped arm's), nothing for
+/// a moved-out reference, and rustc's superset after a field overwrite.
+/// (#1857's review: the first three failed on its first version.)
+#[test]
+fn facts_pin_holds() {
+    let rv = run_with_local_backend("rv3_facts_holds");
+    let facts = rv.facts().expect("the plugin gave no facts (RV3_FACTS)");
+    assert_eq!(facts["errors"].as_array().map(Vec::len), Some(0), "{:#}", facts["errors"]);
+    let ids = |v: &serde_json::Value| -> Vec<u64> { v.as_array().into_iter().flatten().filter_map(|x| x.as_u64()).collect() };
+    let loan = |b: &serde_json::Value, line: u64, lender: &str| fact_loan(b, line, lender)["loan"].as_u64().unwrap();
+    // `if c { r = &x; } else { r = &y; }`: after the row r holds either;
+    // each arm only its own.
+    let arms = fact_body(facts, "arms");
+    let (lx, ly) = (loan(arms, 12, "x"), loan(arms, 12, "y"));
+    assert_eq!(ids(&fact_row(arms, 12)["holds"]["r"]), [lx, ly]);
+    let mut by_col: Vec<(u64, Vec<u64>)> = fact_row(arms, 12)["arms"].as_array().unwrap().iter()
+        .map(|a| (a["col_lo"].as_u64().unwrap(), ids(&a["holds"]["r"]))).collect();
+    by_col.sort();
+    assert_eq!(by_col.iter().map(|(_, h)| h.clone()).collect::<Vec<_>>(), [vec![lx], vec![ly]], "{by_col:?}");
+    // `if c {` (row 22): on the arm's path r is re-pointed before any read,
+    // so its loan of x is dead there (the read on row 26 is the other
+    // path's); after the arm's `}` (row 25), either loan.
+    let skipped = fact_body(facts, "skipped");
+    let (sx, sy) = (loan(skipped, 21, "x"), loan(skipped, 23, "y"));
+    assert_eq!(ids(&fact_row(skipped, 21)["holds"]["r"]), [sx]);
+    assert!(fact_row(skipped, 22)["holds"].get("r").is_none(), "{:#}", fact_row(skipped, 22));
+    assert_eq!(ids(&fact_row(skipped, 23)["holds"]["r"]), [sy]);
+    assert_eq!(ids(&fact_row(skipped, 25)["holds"]["r"]), [sx, sy]);
+    // `let n = m;`: m is moved out and holds nothing; n holds the loan.
+    let moved = fact_body(facts, "moved");
+    assert!(fact_row(moved, 33)["holds"].get("m").is_none(), "{:#}", fact_row(moved, 33));
+    assert_eq!(ids(&fact_row(moved, 33)["holds"]["n"]), [loan(moved, 32, "s")]);
+    // The same for a `&mut` parameter (its caller loans) once it is moved
+    // out (`let moved = h;`).
+    let param = fact_body(facts, "moved_param");
+    assert!(fact_row(param, 41)["holds"].get("h").is_none(), "{:#}", fact_row(param, 41));
+    assert!(!ids(&fact_row(param, 41)["holds"]["moved"]).is_empty());
+    assert!(fact_row(param, 42)["holds"].get("moved").is_none(), "moved's last use is row 42");
+    // `h.r = &b` (row 52): rustc keeps a's loan in h, and old (a copy of
+    // h.r made before) gets b's too: E0502 for a write to either while h
+    // and old are live. Only variable columns have `holds` (not `h.r`).
+    let ow = fact_body(facts, "overwrite");
+    let (oa, ob) = (loan(ow, 50, "a"), loan(ow, 52, "b"));
+    assert_eq!(ids(&fact_row(ow, 52)["holds"]["h"]), [oa, ob]);
+    assert_eq!(ids(&fact_row(ow, 52)["holds"]["old"]), [oa, ob]);
+    assert!(fact_row(ow, 52)["holds"].get("h.r").is_none());
+    assert!(fact_row(ow, 53)["holds"].as_object().unwrap().is_empty(), "nothing is used after row 53");
+}
+
 /// What the fact layer records for each construct P0 covers
 /// (`rv3_facts_constructs.rs`), as Rust has it. The oracle
 /// (`corpus_facts_oracle_holds`) checks states against rustc; these pin

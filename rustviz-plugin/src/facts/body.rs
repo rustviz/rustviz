@@ -2691,64 +2691,137 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
         }
         // What each variable's references hold where the next row of the
-        // same path starts: the loans its origins contain there (a loan
-        // its last use on this row ends is gone; the start of a later
-        // row, or the exit itself where the path leaves the function).
+        // same path starts, as the borrow checker counts it: the loans its
+        // origins contain both at the last point of the row's path and at
+        // the first point of the next row. The first keeps out loans a
+        // join below brings in from another arm (Polonius merges them at
+        // the join's first point); the second, loans of a reference no
+        // later row uses (its origin is dead there). Where the path leaves
+        // the function on the row, its last point alone. Only a variable
+        // that holds a value: a moved-out or unassigned one holds nothing.
+        // (A superset of what it points to when it runs: a field
+        // overwrite, `h.r = &b`, doesn't take `a`'s loan out of `h`'s
+        // origin, and a copy made before it, `let old = h.r`, gets `b`'s
+        // too; rustc rejects a write to either while they are live.)
         if let Some(t) = table {
             let known: BTreeSet<usize> = loans.iter().map(|l| l.loan).collect();
             let mut holds: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+            // Successors on code that runs: not cleanup, an unreachable
+            // block, or a `match`'s imaginary edge.
             let succs_of = |l: Location| -> Vec<Location> {
                 let data = &body.basic_blocks[l.block];
                 if l.statement_index < data.statements.len() {
-                    vec![l.successor_within_block()]
-                } else {
-                    data.terminator()
-                        .successors()
-                        .filter(|s| !body.basic_blocks[*s].is_cleanup && !is_unreachable(body, *s))
-                        .map(|s| Location { block: s, statement_index: 0 })
-                        .collect()
+                    return vec![l.successor_within_block()];
                 }
+                let targets: Vec<rustc_middle::mir::BasicBlock> = match &data.terminator().kind {
+                    TerminatorKind::FalseEdge { real_target, .. } | TerminatorKind::FalseUnwind { real_target, .. } => vec![*real_target],
+                    _ => data.terminator().successors().collect(),
+                };
+                targets
+                    .into_iter()
+                    .filter(|s| !body.basic_blocks[*s].is_cleanup && !is_unreachable(body, *s))
+                    .map(|s| Location { block: s, statement_index: 0 })
+                    .collect()
             };
+            // A block more than one way of code that runs comes into (a
+            // join).
+            let preds = body.basic_blocks.predecessors();
+            let is_join = |bb: rustc_middle::mir::BasicBlock| {
+                preds[bb]
+                    .iter()
+                    .filter(|p| {
+                        let end = Location { block: **p, statement_index: body.basic_blocks[**p].statements.len() };
+                        !body.basic_blocks[**p].is_cleanup && succs_of(end).iter().any(|s| s.block == bb)
+                    })
+                    .count()
+                    > 1
+            };
+            let lmap = bwf.borrow_set.location_map();
             for e in exits {
                 let line = cx.row_of(*e);
-                // Where each path from the exit reaches another row (MIR's
-                // jumps that carry the branch's own span stay on this row:
-                // a skipped `if`'s goto); a path that ends on the row (a
-                // return) is read at its last location.
-                let mut points: Vec<Point> = Vec::new();
+                // Each way the path leaves the row: its last point on the
+                // row and, unless it ends there (a return), the next row's
+                // first point and that row. MIR's jumps that carry the
+                // branch's own span stay on the row (a skipped `if`'s
+                // goto). A join on the row (after one-line arms, `if c { r
+                // = &x; } else { r = &y; }`) merges the arms' loans: the
+                // path's own are read just before it (`frozen`).
+                let mut legs: Vec<(Point, bool, Option<(Point, usize)>)> = Vec::new();
+                // Loans taken on the row after such a join (on every way
+                // through it).
+                let mut after_join: BTreeSet<usize> = BTreeSet::new();
                 let mut seen: BTreeSet<Location> = BTreeSet::new();
-                let mut work: Vec<Location> = succs_of(*e);
-                if work.is_empty() {
-                    points.push(t.mid_index(*e));
-                }
-                while let Some(l) = work.pop() {
-                    if !seen.insert(l) || seen.len() > 256 {
+                let mut work: Vec<(Location, Option<Point>)> = vec![(*e, None)];
+                while let Some((l, frozen)) = work.pop() {
+                    if !seen.insert(l) {
                         continue;
                     }
-                    if cx.rows.row.get(&l).is_some_and(|r| *r != line) {
-                        points.push(t.start_index(l));
-                        continue;
+                    if frozen.is_some() {
+                        if let Some(i) = lmap.get_index_of(&l) {
+                            after_join.insert(i);
+                        }
                     }
+                    let last = frozen.unwrap_or_else(|| t.mid_index(l));
                     let next = succs_of(l);
                     if next.is_empty() {
-                        points.push(t.mid_index(l));
+                        legs.push((last, frozen.is_some(), None));
                     }
-                    work.extend(next);
+                    for s in next {
+                        match cx.rows.row.get(&s) {
+                            Some(r) if *r != line => legs.push((last, frozen.is_some(), Some((t.start_index(s), *r)))),
+                            _ => {
+                                let f = frozen.or_else(|| (s.statement_index == 0 && is_join(s.block)).then(|| t.mid_index(l)));
+                                work.push((s, f));
+                            }
+                        }
+                    }
                 }
-                for p in points {
+                // Only the way on to the next row of the same path (rule
+                // 3): not a branch's skip, a `?`'s or `break`'s jump, or a
+                // loop head's way out, further down.
+                if let Some(n) = legs.iter().filter_map(|(_, _, nx)| nx.map(|(_, r)| r)).filter(|r| *r > line).min() {
+                    legs.retain(|(_, _, nx)| nx.is_some_and(|(_, r)| r == n));
+                }
+                for (last, frozen, nx) in legs {
                     for (o, untracked) in [(pol.as_ref(), false), (spol.as_ref(), true)] {
-                        let Some(m) = o.and_then(|o| o.origin_contains_loan_at.get(&p)) else { continue };
+                        let Some(o) = o else { continue };
+                        // (Each run's own loans: the untracked run's
+                        // placeholders share ids with tracked ones.)
+                        let ours = |l: &usize| (*l >= base) == untracked && known.contains(l);
+                        let at = |p: Point, os: &[Origin]| -> BTreeSet<usize> {
+                            o.origin_contains_loan_at.get(&p).map_or_else(BTreeSet::new, |m| {
+                                os.iter().filter_map(|o| m.get(o)).flatten().map(|l| l.index()).filter(ours).collect()
+                            })
+                        };
+                        // Past a join on the row, what the variable gets
+                        // there comes from any value the path had before
+                        // it (`let r = if c { &x } else { &y };` assigns a
+                        // temporary in each arm), or a loan taken after it.
+                        let before_join: BTreeSet<usize> = if frozen {
+                            o.origin_contains_loan_at
+                                .get(&last)
+                                .map(|m| m.values().flatten().map(|l| l.index()).filter(ours).collect::<BTreeSet<usize>>())
+                                .unwrap_or_default()
+                                .into_iter()
+                                .chain(after_join.iter().copied().filter(|l| !untracked && ours(l)))
+                                .collect()
+                        } else {
+                            BTreeSet::new()
+                        };
                         for (local, os) in &origins_of {
                             let name = &cx.names.locals[local];
-                            if !st.state.contains_key(name) {
+                            if !matches!(st.state.get(name), Some(&"own" | &"partly")) {
                                 continue;
                             }
-                            for l in os.iter().filter_map(|o| m.get(o)).flatten() {
-                                // (Each run's own loans: the untracked run's
-                                // placeholders share ids with tracked ones.)
-                                if (l.index() >= base) == untracked && known.contains(&l.index()) {
-                                    holds.entry(name.clone()).or_default().insert(l.index());
-                                }
+                            let mut held = if frozen { before_join.clone() } else { at(last, os) };
+                            if let Some((first, _)) = nx {
+                                let there = at(first, os);
+                                held.retain(|l| there.contains(l));
+                            } else if frozen {
+                                held.retain(|l| at(last, os).contains(l));
+                            }
+                            if !held.is_empty() {
+                                holds.entry(name.clone()).or_default().extend(held);
                             }
                         }
                     }

@@ -159,13 +159,15 @@ struct LentA {
     why: Option<String>,
 }
 
-/// A reference column holds a loan after the row (the loans its origins
-/// contain where the next row starts; a dead reference holds none).
+/// A variable's value keeps a loan borrowed after the row, as the borrow
+/// checker counts it (v4 `holds`: the loans its origins contain where the
+/// next row of the same path starts; a dead reference holds none).
 #[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 struct HoldsA {
     row: u32,
-    /// The column whose references hold it (`r`, `h.r`'s variable `h`).
+    /// The variable column whose value holds it (`r`, or `h` for `h.r`:
+    /// field columns have no `holds`).
     place: String,
     /// The loan's borrowed place as the dump names it (`x`, `*a`); `_`: any.
     lender: String,
@@ -474,7 +476,7 @@ fn problems(name: &str, src: &str, text: &str) -> Vec<String> {
         }
     }
     let n_lines = src.lines().count() as u32;
-    let rows: Vec<u32> = c.state.iter().map(|s| s.row).chain(c.lent.iter().map(|s| s.row)).chain(c.loan.iter().map(|s| s.row))
+    let rows: Vec<u32> = c.state.iter().map(|s| s.row).chain(c.lent.iter().map(|s| s.row)).chain(c.holds.iter().map(|s| s.row)).chain(c.loan.iter().map(|s| s.row))
         .chain(c.loan.iter().flat_map(|l| l.ends.iter().flatten().flat_map(|e| match *e {
             EndSpec::Row(r) => vec![r],
             EndSpec::Edge([r, n]) | EndSpec::EdgeCol([r, n, _]) => vec![r, n],
@@ -613,8 +615,10 @@ struct RowF {
     /// column -> (fields moved on every path, fields moved on some paths)
     parts: BTreeMap<String, (Vec<String>, Vec<String>)>,
     lent: BTreeMap<String, Vec<Lent>>,
-    /// column -> loans its references hold (v4 `holds`).
+    /// column -> loans its value keeps borrowed (v4 `holds`).
     holds: BTreeMap<String, Vec<usize>>,
+    /// Whether the dump gives `holds` on this row (v4 and later).
+    has_holds: bool,
     /// column -> why it is "maybe" ("moved" | "unassigned" | "imaginary"),
     /// if the dump says.
     cause: BTreeMap<String, String>,
@@ -825,7 +829,8 @@ fn load_facts(v: &Value) -> Result<Vec<BodyF>, String> {
                 .filter_map(|(k, c)| c.as_str().map(|c| (k.clone(), c.to_owned()))).collect();
             let holds = r["holds"].as_object().into_iter().flatten()
                 .map(|(k, v)| (k.clone(), v.as_array().into_iter().flatten().filter_map(Value::as_u64).map(|x| x as usize).collect())).collect();
-            rows.insert(line, RowF { state, parts, lent, cause, holds, facts, arms });
+            let has_holds = r["holds"].is_object();
+            rows.insert(line, RowF { state, parts, lent, cause, holds, has_holds, facts, arms });
         }
         let loans: Vec<LoanF> = b["loans"].as_array().into_iter().flatten().map(|l| LoanF {
             id: l["loan"].as_u64().unwrap_or(u64::MAX) as usize,
@@ -840,9 +845,9 @@ fn load_facts(v: &Value) -> Result<Vec<BodyF>, String> {
         }).collect();
         // A spike row says `mut` for a closure's unique capture: its `lent`
         // entries take the kind from the loan's record. RustViz 3 rows
-        // (v2 and v3: shared | mut | unique | reserved) are kept as they are, so a
+        // (v2 to v4: shared | mut | unique | reserved) are kept as they are, so a
         // row that contradicts its record is caught.
-        if !matches!(version, Some(2 | 3)) {
+        if !matches!(version, Some(2..=4)) {
             for r in rows.values_mut() {
                 for ls in r.lent.values_mut() {
                     for lt in ls.iter_mut() {
@@ -1090,7 +1095,7 @@ impl<'a> RowFacts<'a> {
 }
 
 fn row_facts(b: &BodyF, row: u32) -> RowFacts<'_> {
-    let mut out = RowFacts { resolved: b.version == Some(3), ..Default::default() };
+    let mut out = RowFacts { resolved: matches!(b.version, Some(3 | 4)), ..Default::default() };
     for (l, r) in &b.rows {
         for f in &r.facts {
             let exit = f["early_exit"].as_u64().map(|e| e as u32);
@@ -1259,7 +1264,16 @@ fn check(a: &Assertion, facts: &[BodyF]) -> Result<(), String> {
         }
         Check::Holds { row, place, lender, absent } => {
             let Some(r) = row_after(b, *row) else { return Err("(no state for this row)".into()) };
-            let held: Vec<&LoanF> = r.holds.get(place).into_iter().flatten().filter_map(|id| b.loans.iter().find(|x| x.id == *id)).collect();
+            if !r.has_holds {
+                return Err("(the dump has no `holds` on this row: v4 or later needed)".into());
+            }
+            let ids = r.holds.get(place).cloned().unwrap_or_default();
+            // Every id must name a loan of the body: a dangling one is a
+            // broken dump, not "holds nothing".
+            if let Some(id) = ids.iter().find(|id| !b.loans.iter().any(|x| x.id == **id)) {
+                return Err(format!("holds L{id}, which isn't a loan of the body"));
+            }
+            let held: Vec<&LoanF> = ids.iter().filter_map(|id| b.loans.iter().find(|x| x.id == *id)).collect();
             let hit = held.iter().any(|x| lender == "_" || x.lender == *lender);
             let got = format!("holds {:?}", held.iter().map(|x| format!("L{} {}", x.id, x.lender)).collect::<Vec<_>>());
             if hit != *absent { Ok(()) } else { Err(got) }
@@ -1643,6 +1657,40 @@ fn rv3_harness_catches_wrong_facts() {
     assert!(f.iter().any(|w| w.starts_with("loan of x on row 4")), "{f:?}");
     assert!(f.iter().any(|w| w == "after row 6: x is own"), "{f:?}");
     assert!(f.iter().any(|w| w == "after row 7: x is own"), "{f:?}");
+}
+
+/// `[[holds]]` (1675's pins) against synthetic v4 dumps: the right one
+/// passes; a dangling loan id, a dump without `holds`, the old loan kept
+/// after the re-point, or a loan left after the last use fails.
+#[test]
+fn rv3_harness_holds_checks() {
+    let text = std::fs::read_to_string(cases_dir().join("1675_repoint_in_arm.expect.toml")).unwrap();
+    let case: Case = toml::from_str(&text).unwrap();
+    let holds: Vec<Assertion> = assertions(&case).into_iter().filter(|a| matches!(a.check, Check::Holds { .. })).collect();
+    assert_eq!(holds.len(), 4);
+    // `h4`, `h6`, `h9`: c's `holds` after rows 4, 6 and 9 (None: no `holds` map).
+    let dump = |h4: Option<&str>, h6: &str, h9: &str| -> Vec<BodyF> {
+        let st = r#"{"x": "own", "y": "own", "c": "own"}"#;
+        let h = |ids: &str| if ids.is_empty() { "{}".to_owned() } else { format!(r#"{{"c": [{ids}]}}"#) };
+        let h4 = h4.map(|ids| format!(r#", "holds": {}"#, h(ids))).unwrap_or_default();
+        let v: Value = serde_json::from_str(&format!(r#"{{"version": 4, "errors": [], "bodies": [{{"func": "main",
+            "loans": [{{"loan": 0, "line": 4, "lender": "x", "kind": "shared", "holders": ["c"]}},
+                      {{"loan": 2, "line": 6, "lender": "y", "kind": "shared", "holders": ["c"]}}],
+            "rows": [
+              {{"line": 4, "state": {st}, "lent": {{}}, "facts": []{h4}}},
+              {{"line": 6, "state": {st}, "lent": {{}}, "facts": [], "holds": {}}},
+              {{"line": 9, "state": {st}, "lent": {{}}, "facts": [], "holds": {}}}
+            ]}}]}}"#, h(h6), h(h9))).unwrap();
+        load_facts(&v).unwrap()
+    };
+    let failing = |f: &[BodyF]| holds.iter().filter(|a| check(a, f).is_err()).map(|a| a.what.clone()).collect::<Vec<_>>();
+    assert!(failing(&dump(Some("0"), "2", "")).is_empty(), "right facts fail: {:?}", failing(&dump(Some("0"), "2", "")));
+    let f = failing(&dump(None, "2", ""));
+    assert_eq!(f, ["after row 4: c holds a loan of x"], "no `holds` map must fail, not pass");
+    let f = failing(&dump(Some("0"), "2", "999"));
+    assert_eq!(f, ["after row 9: c no longer holds a loan of _"], "a dangling id must fail");
+    let f = failing(&dump(Some("0"), "0, 2", "2"));
+    assert_eq!(f, ["after row 6: c no longer holds a loan of x", "after row 9: c no longer holds a loan of _"]);
 }
 
 /// `[[loan]]` is about rustc's borrow set: a v3 dump's loans borrowck
