@@ -48,12 +48,6 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // A guard whose call stores a borrow and turns out false: the later
     // arm's legs start where the columns have no dot.
     ("guard_stores_borrow_1769", "line-starts-nowhere", 1786),
-    // An emptied Box assigned and returned in a `return if` arm: its line
-    // stops before the scope-end drop on the path that skips the arm.
-    ("return_if_box_contents_1743", "drop-without-value", 1787),
-    // Several writes to r on one line (#1752): the `&s` arrow's head lies
-    // along r's line.
-    ("dead_loan_one_line_1752", "arrow-along-leg", 1752),
     // Geometric (`geometry.rs`), from here on.
     // Tuple column goes on after its fields were moved out.
     ("edition2024/if_let_chain_irrefutable_move", "line-ends-nowhere", 1157),
@@ -418,7 +412,7 @@ fn says_maybe_moved(d: &Dot) -> bool {
 /// line reaches. (A Box whose contents were moved out says "Its
 /// contents were moved out earlier";
 /// `contents_moved` covers it.)
-const PARTIAL_DROP_PHRASES: &[&str] = &["drop flag", "moved out earlier, so only", "Whatever it still holds (if anything)"];
+const PARTIAL_DROP_PHRASES: &[&str] = &["dropped here only if", "dropped only if", "dropped if the branch", "moved out earlier, so only", "Whatever it still holds (if anything)"];
 /// A move drawn on the column's own line that says it happens on some
 /// paths only (`break f` in a loop whose value is returned, #1171).
 const CONDITIONAL_MOVE_PHRASES: &[&str] = &["if the loop ended with"];
@@ -862,7 +856,7 @@ mod unit {
         // A struct whose fields were moved out in arms: its line stops
         // with no move of its own, and the scope end says a drop flag
         // decides.
-        let flag = "s goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).";
+        let flag = "s goes out of scope. Its resource is dropped here only if no branch above moved it.";
         let arms = [header("s", 1), line("s", 1, 95, 155, "full_privilege"), dot("s", 1, 95, "acquire", false, "a"),
                     dot("s", 1, 215, "owner_go_out_of_scope", true, flag)].concat();
         assert_eq!(invs(&arms), Vec::<&str>::new());

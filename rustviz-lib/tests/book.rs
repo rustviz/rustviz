@@ -156,7 +156,7 @@ const BOOK: &[Snippet] = &[
         id: "c4_07_first_word_loop",
         must_contain: &[
             "s is an immutable borrow from the caller",
-            "L2 Immutable borrow from s to bytes: as_bytes's signature lets the reference it returns borrow from the value it was called on, or from what it borrows",
+            "L2 Immutable borrow from s to bytes: as_bytes's signature gives the reference it returns the same lifetime as the value it was called on",
             // The loop's iterator reads through bytes until the loop's
             // `}` (#1081).
             "L3 the value bytes points to is immutably borrowed by the `for` loop's iterator, through a copy of bytes, until the loop ends",
@@ -198,7 +198,7 @@ const BOOK: &[Snippet] = &[
             "a reference to s[0..i], reborrowed through s, is returned to the caller; the data it points to is not copied",
             "a reference to s[..], reborrowed through s, is returned to the caller; the data it points to is not copied",
             "L13 word holds an immutable reference",
-            "L13 Immutable borrow from my_string to word: first_word's signature lets the reference it returns borrow from its argument, or from what it borrows",
+            "L13 Immutable borrow from my_string to word: first_word's signature gives the reference it returns the same lifetime as its argument",
             "L14 Return immutably borrowed resource from word to my_string",
             "my_string goes out of scope. Its resource is dropped.",
             // `==` on u8 copies item; it isn't an actor (#908).
@@ -509,7 +509,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c6_04_match_moves_string",
-        must_contain: &["Partial move from opt to s", "s goes out of scope. Its resource is dropped.", "opt was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource (including the String it holds, if any) is dropped when opt goes out of scope.", "opt goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag)."],
+        must_contain: &["Partial move from opt to s", "s goes out of scope. Its resource is dropped.", "opt was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource (including the String it holds, if any) is dropped when opt goes out of scope.", "opt goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it."],
         must_not_contain: &[JOIN_OPT],
         ..E
     },
@@ -542,7 +542,7 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c6_07_if_let_else_string",
         note: "on the else path name is dropped at the end of main (drop flag), not at the branch's end (#179)",
-        must_contain: &["Move from name to n", "n goes out of scope. Its resource is dropped.", "name was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource (including the String it holds, if any) is dropped when name goes out of scope.", "name goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag)."],
+        must_contain: &["Move from name to n", "n goes out of scope. Its resource is dropped.", "name was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource (including the String it holds, if any) is dropped when name goes out of scope.", "name goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it."],
         must_not_contain: &[
             "name was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
             "name goes out of scope. No resource is dropped.",
@@ -628,7 +628,7 @@ const BOOK: &[Snippet] = &[
         status: Correct,
         must_contain: &[
             "get reads from v (implicitly borrowed)",
-            "L3 Immutable borrow from v to third: get's signature lets the value it returns borrow from the value it was called on, or from what it borrows; third isn't a reference, but its value may hold one",
+            "L3 Immutable borrow from v to third: get's signature gives the value it returns the same lifetime as the value it was called on; third isn't a reference, but its value holds one",
             "L5 third₂ is initialized with a copy of a value inside third",
             "L5 a value inside third is copied",
             "L5 Immutable borrow from v to third₂: third₂ is a reference copied out of third",
@@ -768,7 +768,7 @@ const BOOK: &[Snippet] = &[
             "L9 text's borrow of the string literal ends (string literals live for the whole program)",
             // #1266: the borrow of map comes from `entry`; `or_insert`
             // passes it on (it named `or_insert` before).
-            "L7 Mutable borrow from map to count: entry's signature lets the value it returns borrow from the value it was called on and its argument (the other is a value with no column here), or from what each of them borrows, so map stays borrowed while count is in use; or_insert passes the borrow on",
+            "L7 Mutable borrow from map to count: entry's signature gives the value it returns the same lifetime as the value it was called on and its argument (the other is a value with no column here), so map stays borrowed while count is in use; or_insert passes the borrow on",
             "the value count points to is modified through *count",
             "Return mutably borrowed resource from count to map",
             "map goes out of scope. Its resource is dropped.",
@@ -800,7 +800,7 @@ const BOOK: &[Snippet] = &[
         id: "c8_16_as_str",
         must_contain: &[
             "as_str reads from s (implicitly borrowed)",
-            "Immutable borrow from s to t: as_str's signature lets the reference it returns borrow from the value it was called on, or from what it borrows",
+            "Immutable borrow from s to t: as_str's signature gives the reference it returns the same lifetime as the value it was called on",
             "Return immutably borrowed resource from t to s",
         ],
         must_not_contain: &["t is the owner of the resource", "L3 s's resource is no longer immutably borrowed"],
@@ -814,7 +814,7 @@ const BOOK: &[Snippet] = &[
             "Partial move from r to e",
             "e goes out of scope. Its resource is dropped.",
             "r was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource (including the String it holds, if any) is dropped when r goes out of scope.",
-            "r goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "r goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it.",
         ],
         must_not_contain: &[
             "r was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
@@ -848,7 +848,7 @@ const BOOK: &[Snippet] = &[
             "v is an immutable borrow from the caller",
             "first reads from v",
             "x holds an immutable reference; it can read the borrowed value",
-            "L2 Immutable borrow from v to x: first's signature lets the value it returns borrow from the value it was called on, or from what it borrows; the `?` passes the borrow on",
+            "L2 Immutable borrow from v to x: first's signature gives the value it returns the same lifetime as the value it was called on; the `?` passes the borrow on",
             "L3 Return immutably borrowed resource from x to v",
             "L3 v's immutable borrow ends",
             "first_plus_one reads from v",
@@ -918,7 +918,7 @@ const BOOK: &[Snippet] = &[
             "item's reference is copied (not the resource it points to)",
             "L5 largest is assigned a copy of item's reference",
             "L13 result holds an immutable reference",
-            "L13 Immutable borrow from number_list to result: largest's signature lets the reference it returns borrow from its argument, or from what it borrows",
+            "L13 Immutable borrow from number_list to result: largest's signature gives the reference it returns the same lifetime as its argument",
             "L14 Return immutably borrowed resource from result to number_list",
             "number_list goes out of scope. Its resource is dropped.",
             // #754: list's borrow goes on in the caller, through result.
@@ -968,7 +968,7 @@ const BOOK: &[Snippet] = &[
             "string2 is bound to an immutable reference",
             "as_str reads from string1 (implicitly borrowed)",
             "L8 string2's borrow of the string literal ends (string literals live for the whole program)",
-            "L8 Immutable borrow from string1 to result: longest's signature lets the reference it returns borrow from both arguments (the other is a value with no column here), or from what each of them borrows, so string1 stays borrowed while result is in use",
+            "L8 Immutable borrow from string1 to result: longest's signature gives the reference it returns the same lifetime as both arguments (the other is a value with no column here), so string1 stays borrowed while result is in use",
             "L9 Return immutably borrowed resource from result to string1",
             // Each branch of the tail `if` returns its reference (#674).
             "a reference from x is returned to the caller; the data it points to is not copied",
@@ -990,8 +990,8 @@ const BOOK: &[Snippet] = &[
             "longest reads from string1",
             "longest reads from string2",
             "L9 result holds an immutable reference",
-            "L9 Immutable borrow from string1 to result: longest's signature lets the reference it returns borrow from both arguments, or from what each of them borrows, so it may point into either, and both stay borrowed while result is in use",
-            "L9 Immutable borrow from string2 to result: longest's signature lets the reference it returns borrow from both arguments, or from what each of them borrows, so it may point into either, and both stay borrowed while result is in use",
+            "L9 Immutable borrow from string1 to result: longest's signature gives the reference it returns the same lifetime as both arguments, so it may point into either, and both stay borrowed while result is in use",
+            "L9 Immutable borrow from string2 to result: longest's signature gives the reference it returns the same lifetime as both arguments, so it may point into either, and both stay borrowed while result is in use",
             "L10 Return immutably borrowed resource from result to string1",
             "L10 Return immutably borrowed resource from result to string2",
             "L11 string2 goes out of scope. Its resource is dropped.",
@@ -1123,7 +1123,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "iter reads from v1 (implicitly borrowed)",
             "next reads from/writes to v1_iter (implicitly mutably borrowed)",
-            "L3 Immutable borrow from v1 to v1_iter: iter's signature lets the value it returns borrow from the value it was called on, or from what it borrows; v1_iter isn't a reference, but its value may hold one",
+            "L3 Immutable borrow from v1 to v1_iter: iter's signature gives the value it returns the same lifetime as the value it was called on; v1_iter isn't a reference, but its value holds one",
             "L5 Return immutably borrowed resource from v1_iter to v1",
         ],
         must_not_contain: &["L3 v1's resource is no longer immutably borrowed"],
@@ -1379,7 +1379,7 @@ const BOOK: &[Snippet] = &[
             "a reference to v[0], reborrowed through v, is returned to the caller; the data it points to is not copied",
             "first reads from v",
             "L7 f holds an immutable reference",
-            "L7 Immutable borrow from v to f: first's signature lets the reference it returns borrow from its argument, or from what it borrows",
+            "L7 Immutable borrow from v to f: first's signature gives the reference it returns the same lifetime as its argument",
             "L8 Return immutably borrowed resource from f to v",
             "v goes out of scope. Its resource is dropped (including every String it holds).",
         ],
@@ -1602,14 +1602,14 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "x16_match_arm_block_body",
         note: "control for c6_04: a block-bodied arm draws s's drop on canvas",
-        must_contain: &["Partial move from opt to s", "L6 s goes out of scope. Its resource is dropped.", "opt was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource (including the String it holds, if any) is dropped when opt goes out of scope.", "opt goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag)."],
+        must_contain: &["Partial move from opt to s", "L6 s goes out of scope. Its resource is dropped.", "opt was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource (including the String it holds, if any) is dropped when opt goes out of scope.", "opt goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it."],
         must_not_contain: &[JOIN_OPT],
         ..E
     },
     Snippet {
         id: "x17_match_arm_fn_call_body",
         note: "control: fn-call arm body",
-        must_contain: &["Partial move from opt to s", "Move from s to show", "s goes out of scope. No resource is dropped.", "opt was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource (including the String it holds, if any) is dropped when opt goes out of scope.", "opt goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag)."],
+        must_contain: &["Partial move from opt to s", "Move from s to show", "s goes out of scope. No resource is dropped.", "opt was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource (including the String it holds, if any) is dropped when opt goes out of scope.", "opt goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it."],
         must_not_contain: &[JOIN_OPT],
         ..E
     },
