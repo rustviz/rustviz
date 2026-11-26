@@ -12,21 +12,21 @@ row = 9
 place = "s5"
 is = "own"
 src = "issue"
-why = "else path: `let mut s5` + `let _ = &mut s5;` inserted after row 9 compiles (no E0502): a5 and b5 are dead"
+why = "else path: with `let mut s5`, `let _ = &mut s5;` after row 9 compiles (as written only E0596, no borrow conflict): a5 and b5 are dead"
 
 [[state]]
 row = 10
 place = "s5"
 is = "own"
 src = "issue"
-why = "`let _ = &mut s5;` after the join `}` compiles: neither a5 nor b5 is used again"
+why = "with `let mut s5`, `let _ = &mut s5;` after the join `}` compiles (as written only E0596, no borrow conflict): neither a5 nor b5 is used again"
 
 [[state]]
 row = 11
 place = "s5"
 is = "own"
 src = "issue"
-why = "`let _ = &mut s5;` after row 11 compiles"
+why = "with `let mut s5`, `let _ = &mut s5;` after row 11 compiles (as written only E0596, no borrow conflict)"
 
 [[lent]]
 row = 10

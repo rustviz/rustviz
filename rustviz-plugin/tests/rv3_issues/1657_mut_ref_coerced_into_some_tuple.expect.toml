@@ -1,7 +1,12 @@
 issue = 1657
 cluster = "C20"
 title = "Crash on 2.x: `&mut` coerced into a tuple inside `Some(..)`; r is reborrowed shared, not moved"
-note = "A crash issue (label `crash`): 2.x panics at data.rs:5175. Here the test is about the facts rv3 must give. Cluster C20 (with #1633, found while fixing it)."
+note = "A crash issue (label `crash`): the plugin as a whole still panics (2.x drawing path, data.rs:5179 on rv3; data.rs:5175 in the issue), but rv3's fact layer writes its dump first, so the facts are pinned here. known_crash fails strict mode when the panic stops, so the marker gets removed. Cluster C20 (with #1633, found while fixing it)."
+
+[known_crash]
+issue = 1657
+panic_at = "data.rs:5179"
+phase = "P2"
 
 # Row 5: the expected type `Option<(&i32, &i32)>` coerces r (`&mut i32`) by
 # a shared reborrow `&*r`. r is not moved, and h holds a shared loan of *r
