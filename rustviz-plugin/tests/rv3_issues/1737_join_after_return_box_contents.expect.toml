@@ -4,8 +4,7 @@ title = "Join after an arm that moved only *b and returned: the Box itself was n
 fn = "f5"
 places = ["*b"]
 beyond_facts = "P3: the join text says 'the branch that moved b returned before reaching this point'"
-xfail = "P1"
-note = "Gap (P1): the dump marks b `moved` after row 4 (`let _s = *b;`); it is `partly` (only the payload moved, the Box itself was never moved: `drop(b)` on row 7 compiles). Only the generated [oracle] state fails; the issue assertions hold. Review fix: the earlier note said there is no state for `*b`, but the dump handles that; the real gap is the Box binding's `moved`."
+note = "Passes since rv3 P1-2: a move out of a Box's contents leaves the Box `partly` moved, not `moved` (only the payload moved; the allocation is still owned and freed at scope end or on an early exit; rustc's E0382 names the place `*b`, not `b`)."
 
 [[state]]
 row = 4

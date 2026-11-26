@@ -188,6 +188,18 @@ impl StateTable {
             .map_or(Vec::new(), |r| r.arms.iter().map(|(a, _)| a.clone()).collect())
     }
 
+    /// The direct field columns of `column` (`p.a`, `p.b` of `p`).
+    pub fn fields_of(&self, fn_line: usize, column: &str) -> Vec<String> {
+        let prefix = format!("{}.", column);
+        self.body(fn_line, column).map_or(Vec::new(), |b| {
+            b.columns
+                .iter()
+                .filter(|n| n.strip_prefix(&prefix).is_some_and(|rest| !rest.is_empty() && !rest.contains('.')))
+                .cloned()
+                .collect()
+        })
+    }
+
     /// Whether the table has a fn starting on `fn_line`.
     pub fn has_fn(&self, fn_line: usize) -> bool {
         self.bodies.contains_key(&fn_line)

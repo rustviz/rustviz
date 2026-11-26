@@ -294,7 +294,8 @@ struct InitState {
     sub_maybe: Vec<MovePathIndex>,
     sub_moved: Vec<MovePathIndex>,
     /// The path is a Box whose payload (`*b`) was moved out (`let x =
-    /// *b;`): nothing in it can be used, rustc calls `b` moved.
+    /// *b;`): `b` is partly moved (its allocation is still owned and
+    /// freed at its scope end; nothing in it can be used).
     payload_moved: bool,
     payload_maybe: bool,
 }
@@ -302,8 +303,6 @@ struct InitState {
 impl InitState {
     fn word(&self) -> &'static str {
         match (self.may_init, self.may_uninit) {
-            (true, false) if self.payload_moved => "moved",
-            (true, false) if self.payload_maybe => "maybe",
             (true, false) if !self.sub_maybe.is_empty() || !self.sub_moved.is_empty() => "partly",
             (true, false) => "own",
             (true, true) => "maybe",

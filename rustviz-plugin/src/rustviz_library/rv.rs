@@ -41,6 +41,11 @@ impl Rustviz {
     /* ******************************************
             --- Build VisualizationData ---
     ****************************************** */
+    // The state table is in source lines; with hidden lines the code
+    // panel's lines aren't the source's, so it isn't used (2.x draws).
+    let state_table = if hidden_source_lines.is_empty() { state_table } else { Default::default() };
+    let fn_source_lines = fn_start_lines.clone();
+    let source_lines: Vec<String> = src_str.lines().map(str::to_owned).collect();
     let mut vd = VisualizationData {
       timelines: BTreeMap::new(),
       external_events: Vec::new(),
@@ -58,6 +63,8 @@ impl Rustviz {
       row_lines: Vec::new(),
       raised_headers: HashSet::new(),
       state_table,
+      fn_source_lines,
+      source_lines,
     };
     /* ******************************************
             --- Render SVG images ---

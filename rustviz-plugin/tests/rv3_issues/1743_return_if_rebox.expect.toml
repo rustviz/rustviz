@@ -3,8 +3,7 @@ cluster = "C11"
 title = "`return if c { b = Box::new(..); b } else { q }` after `let _old = *b;`: b's dot claims the String is dropped, but it was moved into _old"
 fn = "f"
 places = ["*b"]
-xfail = "P1"
-note = "Gap (expected): drops inside a `return` expression's arms. Rows 5 and 3 do not depend on the constant `if true` (rustc's MIR keeps both successors; the assertions are about the return path)."
+note = "Passes since rv3 P1-2: a move out of a Box's contents leaves the Box `partly` moved, not `moved` (only the payload moved; the allocation is still owned and freed at scope end or on an early exit; rustc's E0382 names the place `*b`, not `b`)."
 beyond_facts = "P3: b's dot says 'b's resource (including the String it holds) is dropped here'"
 
 [[state]]

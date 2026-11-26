@@ -1,9 +1,8 @@
 issue = 1639
 cluster = "C11"
 title = "`(*b)?` on a Box<Result>: the Result is moved out of the Box on every path, so b's later drop frees only the allocation"
-xfail = "P1"
 places = ["*b"]
-note = "Gap (expected): the `*b` operand of `?` is a move out of the Box; the place is named `*b` and the spike may not give it its own state"
+note = "Passes since rv3 P1-2: a move out of a Box's contents leaves the Box `partly` moved, not `moved` (only the payload moved; the allocation is still owned and freed at scope end or on an early exit; rustc's E0382 names the place `*b`, not `b`)."
 beyond_facts = "P3: both the `?` dot and the scope end say b's resource includes the Result it holds"
 
 [[event]]

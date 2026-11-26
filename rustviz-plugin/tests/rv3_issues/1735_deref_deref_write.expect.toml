@@ -3,8 +3,7 @@ cluster = "C12"
 title = "`**b = String::new()` on Box<Box<String>>: the old String is dropped; *b (the inner Box) is neither reassigned nor dropped"
 fn = "f2"
 places = ["*b", "**b"]
-xfail = "P1"
-note = "Gap (expected): place naming `**b` / drops of a place two derefs deep"
+note = "Passes since rv3 P1-2: a move out of a Box's contents leaves the Box `partly` moved, not `moved` (only the payload moved; the allocation is still owned and freed at scope end or on an early exit; rustc's E0382 names the place `*b`, not `b`)."
 beyond_facts = "P3: the dot says '*b acquires ownership of a new resource; its previous resource is dropped'"
 
 [[state]]

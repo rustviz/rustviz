@@ -3,8 +3,7 @@ cluster = "C11"
 title = "`o?;` after `let s = *b;`: the early return drops s and also frees b's Box allocation; no dot for b"
 fn = "run"
 places = ["*b"]
-xfail = "P1"
-note = "Gap (P1): the dump marks b `moved` after `let s = *b;` (rows 3 and 4); it is `partly` (only the payload moved; the Box allocation is freed at the `?` exit and at scope end). Only the generated [oracle] states fail; the issue assertions (drops of s and of b, rest) hold. Review fix: the earlier note named missing early-exit drop rows, which the dump already has."
+note = "Passes since rv3 P1-2: a move out of a Box's contents leaves the Box `partly` moved, not `moved` (only the payload moved; the allocation is still owned and freed at scope end or on an early exit; rustc's E0382 names the place `*b`, not `b`)."
 beyond_facts = "P3: no early-return dot for b"
 
 [[state]]

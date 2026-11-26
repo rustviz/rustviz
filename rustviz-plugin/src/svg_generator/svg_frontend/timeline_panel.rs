@@ -4147,7 +4147,11 @@ fn timeline_segment_title(
     // (E0382); one they all were has nothing left: its line stops
     // (an empty title, #1157).
     if let (State::FullPrivilege { .. }, Some(line), ResourceAccessPoint::Struct(_)) = (state, line, rap) {
-        if let Some(parts) = parts_moved_at(rap, visualization_data, line) {
+        // RustViz 3: from MIR (the state table) where it has the column.
+        if let Some(title) = table_partly_moved_title(rap, visualization_data, line) {
+            return title;
+        }
+        if let Some(parts) = parts_moved_at(rap, visualization_data, line).filter(|_| !table_says_whole(rap, visualization_data, line)) {
             if parts.all {
                 return String::new();
             }
@@ -9568,8 +9572,11 @@ fn render_timeline(
     let apexes = CollapsedApexes::of(history);
     let mut cuts = field_borrow_rows(rap, history, visualization_data);
     // A struct's line changes text where a field is moved out of it,
-    // and stops once every field is (#1157).
+    // and stops once every field is (#1157). (With the state table, on
+    // any row: pieces with the same text are drawn as one.)
     cuts.extend(parts_moved_rows(rap, visualization_data));
+    let table_rows = matches!(rap, ResourceAccessPoint::Struct(Struct { is_box: false, .. }))
+        && visualization_data.fn_source_lines.get(rap.hash()).is_some_and(|l| visualization_data.state_table.has_fn(*l));
     // So does an array's where a slice pattern moves an element out of
     // it (#1285).
     if rap.elems_left().is_some() {
@@ -9585,6 +9592,11 @@ fn render_timeline(
         let mut bounds = vec![*seg_start];
         if matches!(state, State::FullPrivilege { .. } | State::PartialPrivilege { .. }) {
             bounds.extend(cuts.iter().copied().filter(|l| l > seg_start && l < seg_end));
+            if table_rows && matches!(state, State::FullPrivilege { .. }) {
+                bounds.extend(seg_start + 1..*seg_end);
+                bounds.sort_unstable();
+                bounds.dedup();
+            }
         }
         if matches!(state, State::RevokedPrivilege { .. }) {
             bounds.extend(ref_move_rows(visualization_data, *seg_start, *seg_end));
@@ -9656,6 +9668,115 @@ fn direct_parts<'a>(rap: &ResourceAccessPoint, visualization_data: &'a Visualiza
 fn moved_at(timeline: &Timeline, line: usize) -> bool {
     timeline.states.iter().any(|(start, end, st)|
         *start <= line && line < *end && matches!(st, State::ResourceMoved { dropped_by_hand: false, .. }))
+}
+
+/// The state table's cell (RustViz 3, from MIR) of a struct column on the
+/// visual row `row`: the fn's first source line and the row's source line
+/// are the table's keys. (Not a Box: its payload's fields are drawn as 2.x
+/// does for now.)
+fn table_struct_cell(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, row: usize) -> Option<(usize, crate::facts::table::Cell)> {
+    let ResourceAccessPoint::Struct(Struct { is_box: false, .. }) = rap else { return None };
+    let fn_line = *visualization_data.fn_source_lines.get(rap.hash())?;
+    let src = rv_attrs::line_of(row, &visualization_data.row_lines)?;
+    // Not after a closing `}`: the state after it is the join of the paths
+    // the block's statement had, while the facts' row is the last arm's
+    // (`} else { .. }` ending on it). 2.x's title stands there.
+    if visualization_data.source_lines.get(src.wrapping_sub(1)).is_some_and(|l| l.trim_start().starts_with('}')) {
+        return None;
+    }
+    // Only a row's own state: a row with none (a `}` where arms join) can't
+    // carry the row above, which may be one arm's (Q3 needs the leg's first
+    // row, which this segment title doesn't know): 2.x's title stands there.
+    let cell = visualization_data.state_table.cell(fn_line, rap.name(), src, src)?;
+    Some((fn_line, cell))
+}
+
+/// The state table says the struct holds all its fields here (MIR: no
+/// field moved out on any path): 2.x's replayed partial move is wrong.
+fn table_says_whole(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, row: usize) -> bool {
+    table_struct_cell(rap, visualization_data, row).is_some_and(|(_, c)| {
+        c.init == crate::facts::table::Init::Own && c.parts.as_ref().is_none_or(|p| p.moved.is_empty() && p.maybe.is_empty())
+    })
+}
+
+/// The title of a struct column's line on visual row `row` when the state
+/// table says fields of it are moved out (surely or on some paths): what
+/// 2.x's `parts_moved_at` replays from the fields' histories, from MIR.
+/// `Some("")`: every field is surely moved, the line stops (#1157). None:
+/// no field is moved there (the owner's title stands), or the table
+/// doesn't have the column there (2.x's title stands).
+fn table_partly_moved_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, row: usize) -> Option<String> {
+    use crate::facts::table::Init;
+    let (fn_line, cell) = table_struct_cell(rap, visualization_data, row)?;
+    let parts = cell.parts?;
+    if !matches!(cell.init, Init::Own | Init::Partly) || (parts.moved.is_empty() && parts.maybe.is_empty()) {
+        return None;
+    }
+    // The moved-out places, outermost only (`o.inner.x` when only `x`
+    // left `o.inner`; not also `o.inner.x` when `o.inner` did).
+    let outermost = |list: &[String], also: &[String]| -> Vec<String> {
+        list.iter()
+            .filter(|m| !list.iter().chain(also.iter()).any(|o| m.starts_with(&format!("{}.", o))))
+            .cloned()
+            .collect()
+    };
+    // A place all of whose fields are gone is gone itself (`o.inner` when
+    // `o.inner.x` and `o.inner.y` both moved out), surely if all surely.
+    let table = &visualization_data.state_table;
+    let collapse = |gone: &mut Vec<String>, also: &[String]| loop {
+        let mut grew = false;
+        let parents: Vec<String> = gone.iter().filter_map(|g| g.rsplit_once('.').map(|(p, _)| p.to_owned())).collect();
+        for p in parents {
+            if gone.contains(&p) || p == *rap.name() {
+                continue;
+            }
+            let fs = table.fields_of(fn_line, &p);
+            if !fs.is_empty() && fs.iter().all(|f| gone.contains(f) || also.contains(f)) {
+                gone.push(p);
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    };
+    let mut surely_all: Vec<String> = parts.moved.clone();
+    collapse(&mut surely_all, &[]);
+    let mut maybe_all: Vec<String> = parts.maybe.clone();
+    collapse(&mut maybe_all, &surely_all);
+    let surely: Vec<String> = outermost(&surely_all, &[]);
+    let maybe: Vec<String> = outermost(&maybe_all, &surely).into_iter().filter(|m| !surely.contains(m)).collect();
+    let fields = table.fields_of(fn_line, rap.name());
+    let gone = |f: &String| surely.contains(f) || maybe.contains(f);
+    let all = !fields.is_empty() && fields.iter().all(gone);
+    // Where a struct's line stops (every field surely moved out, #1157) is
+    // 2.x's call for now: its segments start and end with its dots, and a
+    // stop or restart the table alone decides would leave a line that
+    // starts from nowhere.
+    if (all && maybe.is_empty()) || parts_moved_at(rap, visualization_data, row).is_some_and(|p| p.all) {
+        return None;
+    }
+    // Every field gone, some on some paths only: 2.x's call too (it
+    // decides where that line goes on; #1583).
+    if all {
+        return None;
+    }
+    let mut named = surely.clone();
+    named.extend(maybe.iter().cloned());
+    // The same fields as 2.x's replay names: its title stands (it tells
+    // "was" from "may have been" by what runs, where borrowck counts an
+    // irrefutable pattern's `else` too; the table differs where 2.x missed
+    // or misnamed a field).
+    if let Some(p2) = parts_moved_at(rap, visualization_data, row) {
+        let mut a: Vec<&String> = p2.moved.iter().collect();
+        let mut b: Vec<&String> = named.iter().collect();
+        a.sort();
+        b.sort();
+        if a == b {
+            return None;
+        }
+    }
+    Some(hover_messages::state_partly_moved(rap.name(), &named, !maybe.is_empty()))
 }
 
 /// The rows where a field of the struct column `rap` (at any depth) is

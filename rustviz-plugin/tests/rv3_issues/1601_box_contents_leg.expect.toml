@@ -4,8 +4,7 @@ title = "Legs after a Box whose contents may have been moved out: bt always hold
 fn = "run"
 places = ["*bt"]
 beyond_facts = "P3: the legs of the `if e` conditional say bt 'was assigned in only some of the branches above'"
-xfail = "P0"
-note = "Gap (expected): no state for `*bt` after the maybe-moved join, and no drop of bt on the `?` exit row."
+note = "Passes since rv3 P1-2: a move out of a Box's contents leaves the Box `partly` moved, not `moved` (only the payload moved; the allocation is still owned and freed at scope end or on an early exit; rustc's E0382 names the place `*b`, not `b`)."
 
 [[state]]
 row = 9

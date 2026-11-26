@@ -1,10 +1,9 @@
 issue = 1814
-xfail = "P1"
 cluster = "C99"
 title = "`drop(*b)` with `b: Box<String>`: the argument is the String itself; the Box's allocation is a separate, later cleanup at scope end"
 fn = "main"
 places = ["b"]
-note = "Gap (rv3-p0): after a move out of a Box's contents (`let x = *b;`) the state table says `moved` for b; the Box allocation is still owned until scope end, so it is `partly` (rustc: E0382 with the note: move occurs because `*b`). The issue's one-line program is split over three lines so rows can tell the call from the scope end."
+note = "Passes since rv3 P1-2: a move out of a Box's contents leaves the Box `partly` moved, not `moved` (only the payload moved; the allocation is still owned and freed at scope end or on an early exit; rustc's E0382 names the place `*b`, not `b`)."
 beyond_facts = "P4: the call's tooltip says drop frees `the String it holds`; the String is the argument"
 
 [[event]]
