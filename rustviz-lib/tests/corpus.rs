@@ -21083,19 +21083,20 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // A Copy field (`u.1`) stays, so u stays partially moved; refilling
         // the field (`r.a = ra`) makes r whole again.
         must_contain: &[
-            "p is partially moved: p.a was moved out, so p can't be used as a whole; its other fields still can",
-            "u is partially moved: u.0 was moved out, so u can't be used as a whole; its other fields still can",
-            // (o.inner.x moved: o.inner can't be used as a whole either,
-            // #1595.)
-            "o is partially moved: o.inner.x was moved out, so neither o nor o.inner can be used as a whole",
-            // (rustc's facts name the fields moved out of o.inner, #1595.)
-            "o is partially moved: o.inner.x and o.inner.y were moved out, so neither o nor o.inner can be used as a whole",
-            "o.inner is partially moved: o.inner.x was moved out, so o.inner can't be used as a whole; its other fields still can",
-            "part of q may have been moved out, so q can't be used as a whole",
-            "r is partially moved: r.a was moved out, so r can't be used as a whole; its other fields still can",
+            "p is partially moved: p.a was moved out, so p can't be used as a whole",
+            "u is partially moved: u.0 was moved out, so u can't be used as a whole",
+            "o is partially moved: o.inner.x was moved out, so o can't be used as a whole",
+            // (o.inner's fields were moved one by one: o.inner itself never
+            // was, #1619.)
+            "o is partially moved: o.inner.x and o.inner.y were moved out, so o can't be used as a whole",
+            "o.inner is partially moved: o.inner.x was moved out, so o.inner can't be used as a whole",
+            "Some of q's fields may have been moved out, so q can't be used as a whole",
+            "r is partially moved: r.a was moved out, so r can't be used as a whole",
             "r is the owner of the resource",
         ],
-        must_not_contain: &["=o is partially moved: o.inner.x was moved out, so o can't be used as a whole; its other fields still can"],
+        // (o.inner can't be used as a whole once o.inner.x is out, so
+        // "its other fields still can" isn't said, #1619.)
+        must_not_contain: &["o is partially moved: o.inner was moved out", "its other fields still can"],
     },
     TooltipExpect {
         name: "non_ascii_names_1160",
@@ -27998,15 +27999,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // paths, so its line goes on to its scope end (main stopped it at
         // the join; `struct_lines_after_maybe_moves_1568_1583` checks the
         // rows). Moved in every arm (u), it stops where they split (#1541).
+        // Not "y is partially moved" (#1599's Codex review): each arm
+        // that runs moves all of y, the others none of it.
         must_contain: &[
-            // (Since #1595 the text follows rustc's facts on the fields:
-            // some part may have been moved out; which isn't said.)
-            "part of p has been moved out, so p can't be used as a whole",
-            "part of x may have been moved out, so x can't be used as a whole",
-            "part of y may have been moved out, so y can't be used as a whole",
+            "Some of p's fields may have been moved out, so p can't be used as a whole",
+            "Some of x's fields may have been moved out, so x can't be used as a whole",
+            "Some of y's fields may have been moved out, so y can't be used as a whole",
         ],
         must_not_contain: &[
             "what is left in u",
+            "y is partially moved",
+            "p is partially moved: p.b was moved out and p.a may have been",
         ],
     },
     TooltipExpect {
@@ -28061,34 +28064,38 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // been moved out. Main said "the owner of the resource" on those
         // rows (`struct_line_text_follows_rustc_1595` checks them).
         must_contain: &[
-            "part of p has been moved out, so p can't be used as a whole",
-            "part of p may have been moved out, so p can't be used as a whole",
-            "q is partially moved: q.a was moved out, so q can't be used as a whole; its other fields still can",
-            "part of q may have been moved out, so q can't be used as a whole",
-            "part of w has been moved out, so w can't be used as a whole",
-            "t is partially moved: t.0 was moved out, so t can't be used as a whole; its other fields still can",
-            "part of t may have been moved out, so t can't be used as a whole",
-            "m is partially moved: m.b was moved out, so m can't be used as a whole; its other fields still can",
-            "part of m may have been moved out, so m can't be used as a whole",
-            "l is partially moved: l.a was moved out, so l can't be used as a whole; its other fields still can",
-            "e is partially moved: e.a was moved out, so e can't be used as a whole; its other fields still can",
-            "part of e may have been moved out, so e can't be used as a whole",
-            "o is partially moved: o.inner.x was moved out, so neither o nor o.inner can be used as a whole",
-            "g is partially moved: g.a was moved out, so g can't be used as a whole; its other fields still can",
-            "h is partially moved: h.a was moved out, so h can't be used as a whole; its other fields still can",
-            "part of h may have been moved out, so h can't be used as a whole",
-            "v is partially moved: v.a was moved out, so v can't be used as a whole; its other fields still can",
-            "part of v may have been moved out, so v can't be used as a whole",
-            "f is partially moved: f.a was moved out, so f can't be used as a whole; its other fields still can",
-            "part of y may have been moved out, so y can't be used as a whole",
-            "part of z may have been moved out, so z can't be used as a whole",
-            "d is partially moved: d.a was moved out, so d can't be used as a whole; its other fields still can",
-            "part of d may have been moved out, so d can't be used as a whole",
-            "hh is partially moved: hh.r was moved out, so hh can't be used as a whole; its other fields still can",
-            "part of hh may have been moved out, so hh can't be used as a whole",
+            "Some of p's fields may have been moved out, so p can't be used as a whole",
+            "Some of p's fields may have been moved out, so p can't be used as a whole",
+            "q is partially moved: q.a was moved out, so q can't be used as a whole",
+            "Some of q's fields may have been moved out, so q can't be used as a whole",
+            "Some of w's fields may have been moved out, so w can't be used as a whole",
+            "t is partially moved: t.0 was moved out, so t can't be used as a whole",
+            "Some of t's fields may have been moved out, so t can't be used as a whole",
+            "m is partially moved: m.b was moved out, so m can't be used as a whole",
+            "Some of m's fields may have been moved out, so m can't be used as a whole",
+            "l is partially moved: l.a was moved out, so l can't be used as a whole",
+            "e is partially moved: e.a was moved out, so e can't be used as a whole",
+            "Some of e's fields may have been moved out, so e can't be used as a whole",
+            "o is partially moved: o.inner.x was moved out, so o can't be used as a whole",
+            "g is partially moved: g.a was moved out, so g can't be used as a whole",
+            "h is partially moved: h.a was moved out, so h can't be used as a whole",
+            "Some of h's fields may have been moved out, so h can't be used as a whole",
+            "v is partially moved: v.a was moved out, so v can't be used as a whole",
+            "Some of v's fields may have been moved out, so v can't be used as a whole",
+            "f is partially moved: f.a was moved out, so f can't be used as a whole",
+            "Some of y's fields may have been moved out, so y can't be used as a whole",
+            "Some of z's fields may have been moved out, so z can't be used as a whole",
+            "d is partially moved: d.a was moved out, so d can't be used as a whole",
+            "Some of d's fields may have been moved out, so d can't be used as a whole",
+            "hh is partially moved: hh.r was moved out, so hh can't be used as a whole",
+            "Some of hh's fields may have been moved out, so hh can't be used as a whole",
+            // v forks for its own borrow; its join is where rustc says v.a
+            // may be moved out.
+            "v as a whole isn't moved in the branches above, but some of its fields may have been",
         ],
         must_not_contain: &[
-            "=o is partially moved: o.inner.x was moved out, so o can't be used as a whole; its other fields still can",
+            "its other fields still can",
+            "=v isn't moved in any of the branches above",
         ],
     },
 ];
@@ -36745,8 +36752,8 @@ fn a_struct_whose_fields_are_all_moved_out_has_no_line_after() {
     ] {
         let row = code_row_y(&code, last_move);
         let mut lines = state_lines_with_tooltip(&timeline, &format!("{var} is the owner of the resource"));
-        lines.extend(state_lines_with_tooltip(&timeline, &format!("{var} is partially moved: {var}.a was moved out, so {var} can't be used as a whole; its other fields still can")));
-        lines.extend(state_lines_with_tooltip(&timeline, &format!("{var} is partially moved: {var}.x was moved out, so {var} can't be used as a whole; its other fields still can")));
+        lines.extend(state_lines_with_tooltip(&timeline, &format!("{var} is partially moved: {var}.a was moved out, so {var} can't be used as a whole")));
+        lines.extend(state_lines_with_tooltip(&timeline, &format!("{var} is partially moved: {var}.x was moved out, so {var} can't be used as a whole")));
         assert!(!lines.is_empty(), "{name}: no line for {var}");
         let below: Vec<&(f64, f64)> = lines.iter().filter(|(_, y2)| *y2 > row + 1.0).collect();
         assert!(below.is_empty(), "{name}: {var}'s line goes on below `{last_move}` (y={row}): {below:?}");

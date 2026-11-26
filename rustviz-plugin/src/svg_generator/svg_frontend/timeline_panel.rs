@@ -1682,7 +1682,17 @@ fn render_branch_dots(
             // dropped there (`all_moved_at_end`).
             None
         } else {
-            Some(branch_join_message(branch_history, ty, is))
+            let title = branch_join_message(branch_history, ty, is);
+            // A struct none of whose own events moves it, some field of
+            // which rustc says may be moved out at the join (#1595): its
+            // line below says so; the dot mustn't read as "nothing moved".
+            let unchanged = hover_messages::event_dot_branch_merge_unchanged(&is.real_name());
+            if title == unchanged && matches!(rap, ResourceAccessPoint::Struct(_))
+                && mir_parts_at(rap, visualization_data, *merge_point).is_some_and(|(c, m)| !c.is_empty() || !m.is_empty()) {
+                Some(hover_messages::event_dot_branch_merge_parts_maybe_moved(&is.real_name()))
+            } else {
+                Some(title)
+            }
         };
         // The join is reached by the line of each arm that gets
         // there still holding something (`render_branches`). Where
@@ -9872,40 +9882,21 @@ impl PartsMoved {
             let surely: Vec<String> = self.moved.iter().filter(|m| !self.maybe_moved.contains(m)).cloned().collect();
             return hover_messages::state_fields_maybe_all_moved(rap.name(), &surely, &self.maybe_moved);
         }
-        // A field of a field moved out (`o.inner.x`): `o.inner` can't be
-        // used as a whole either.
-        let mut within: Vec<String> = Vec::new();
-        for m in &self.moved {
-            let rest = m.strip_prefix(&format!("{}.", rap.name())).unwrap_or(m);
-            let parts: Vec<&str> = rest.split('.').collect();
-            for k in 1..parts.len() {
-                let f = format!("{}.{}", rap.name(), parts[..k].join("."));
-                if !within.contains(&f) {
-                    within.push(f);
-                }
-            }
-        }
-        if !within.is_empty() {
-            return hover_messages::state_partly_moved_nested(rap.name(), &self.moved, self.maybe, &within);
-        }
         hover_messages::state_partly_moved(rap.name(), &self.moved, self.maybe)
     }
 }
 
 /// The line text of the struct column `rap` some fields of which rustc
 /// says are moved out (`certain`) or may be (`maybe`) (#1595): those
-/// surely moved are named; where any may be, no more than that some part
-/// may have been (which, and on which paths, isn't said).
+/// surely moved are named; where any may be, no more than that some of
+/// its fields may have been (which, and on which paths, isn't said).
 fn mir_parts_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, certain: &[String], maybe: &[String]) -> String {
-    // (Every field moved out: there are no other fields to use.)
+    // (Every field out on this path isn't "partially" moved: no more than
+    // that some may be, as #1619 says it.)
     let every = direct_parts(rap, visualization_data).iter()
         .all(|t| certain.iter().any(|c| c == t.resource_access_point.name()));
-    if !maybe.is_empty() || every {
-        return if certain.is_empty() {
-            hover_messages::state_part_maybe_moved(rap.name())
-        } else {
-            hover_messages::state_part_surely_moved(rap.name())
-        };
+    if !maybe.is_empty() || certain.is_empty() || every {
+        return hover_messages::state_fields_maybe_moved(rap.name());
     }
     PartsMoved { moved: certain.to_vec(), maybe: false, all: false, maybe_moved: Vec::new(), none_usable: false }.title(rap)
 }
