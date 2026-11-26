@@ -129,45 +129,26 @@ pub fn event_dot_closure_go_out_of_scope(my_name: &String, move_capture_count: u
 }
 
 // A `Box` whose whole contents were moved out (`take(*b)`, #609) goes
-// out of scope: the contents' drop isn't the box's, but the heap
-// allocation is still freed.
+// out of scope without dropping the value that was moved.
 pub fn event_dot_box_contents_moved_go_out_of_scope(my_name: &String) -> String {
     format!(
-        "{} goes out of scope. Its contents were moved out earlier, so only the Box's heap allocation is freed.",
+        "{} goes out of scope. Its contents were moved out earlier, so the Box doesn't drop that value here.",
         styled_name_html(my_name)
     )
 }
 
-// A Box whose contents were moved out (`let s = *b;`) on some paths and
-// that, on the others, was given a new Box since (`whole`) or moved away
-// whole (`nothing`) goes out of scope (#1220): drop flags decide what is
-// dropped.
-pub fn event_dot_box_paths_go_out_of_scope(my_name: &String, note: &str, kept: bool, reboxed: bool, nothing: bool) -> String {
-    let (holds, rest) = split_drop_note(note);
-    let name = styled_name_html(my_name);
-    let parts: Vec<String> = [
-        Some(format!("where {0} still holds the Box whose contents were moved out earlier, only its heap allocation is freed", name)),
-        kept.then(|| format!("where {0} still holds its first Box whole, its resource{1} is dropped{2}", name, holds, rest)),
-        reboxed.then(|| format!("where {0} was given a new Box, its resource{1} is dropped{2}", name, holds, rest)),
-        nothing.then(|| format!("where {0} was moved away, nothing is dropped", name)),
-    ].into_iter().flatten().collect();
-    format!(
-        "{0} goes out of scope. What is dropped here depends on the path (Rust tracks this with runtime drop flags): {1}.",
-        name, parts.join("; ")
-    )
+// A Box can be empty, refilled, replaced, or moved away on different paths.
+// Only the value still present at the actual drop or overwrite is dropped.
+pub fn event_dot_box_paths_go_out_of_scope(my_name: &str) -> String {
+    format!("{} goes out of scope. Whatever it still holds (if anything) is dropped here.", styled_name_html(my_name))
 }
 
-// The same where the Box is given a new value (#1220): what its old value
-// drops depends on the path.
-pub fn event_dot_owner_drop_at_reassign_box_paths(my_name: &String, note: &str, kept: bool, reboxed: bool, nothing: bool) -> String {
-    let scope_end = event_dot_box_paths_go_out_of_scope(my_name, note, kept, reboxed, nothing);
-    let name = styled_name_html(my_name);
-    let rest = scope_end.strip_prefix(&format!("{} goes out of scope. What is dropped here depends on the path (Rust tracks this with runtime drop flags): ", name))
-        .unwrap_or(&scope_end);
-    format!(
-        "{0} acquires ownership of a new resource. What its previous value drops here depends on the path (Rust tracks this with runtime drop flags): {1}",
-        name, rest
-    )
+pub fn event_dot_owner_drop_at_reassign_box_paths(my_name: &str) -> String {
+    format!("{} acquires ownership of a new resource. Whatever it still held (if anything) is dropped here.", styled_name_html(my_name))
+}
+
+pub fn event_dot_box_drop_if_try_returns(my_name: &str) -> String {
+    format!("If the `?` here returns early, whatever {} still holds (if anything) is dropped here.", styled_name_html(my_name))
 }
 
 // A struct whose fields were partly moved out goes out of scope. Rust
@@ -202,11 +183,9 @@ pub fn event_dot_struct_partial_go_out_of_scope(
     // may have moved it (#1031): whether it's dropped isn't down to
     // whether something above moved it, so "only if it still holds it".
     kept: bool,
-    // A `Box` a field was moved out of (#602): Rust still frees the
-    // box's heap allocation, so the text says so.
+    // An emptied Box can have no fields left to drop (#602).
     boxed: bool,
 ) -> String {
-    const FREED: &str = " The Box's heap allocation is freed.";
     fn join(names: &[String]) -> (String, bool) {
         let fmt: Vec<String> = names.iter().map(|n| styled_name_html(n)).collect();
         let s = match fmt.len() {
@@ -277,7 +256,6 @@ pub fn event_dot_struct_partial_go_out_of_scope(
             let (dropped_s, dropped_plural) = join(dropped);
             out.push_str(&format!(" {} {} dropped.", dropped_s, if dropped_plural { "are" } else { "is" }));
         }
-        if boxed { out.push_str(FREED); }
         return out;
     }
     let (moved_s, moved_plural) = join(moved);
@@ -288,12 +266,11 @@ pub fn event_dot_struct_partial_go_out_of_scope(
         format!("only {} {} dropped", dropped_s, if dropped_plural { "are" } else { "is" })
     };
     format!(
-        "{0} goes out of scope. {1} {2} moved out earlier, so {3}.{4}",
+        "{0} goes out of scope. {1} {2} moved out earlier, so {3}.",
         styled_name_html(my_name),
         moved_s,
         if moved_plural { "were" } else { "was" },
-        rest,
-        if boxed { FREED } else { "" }
+        rest
     )
 }
 
@@ -523,47 +500,20 @@ pub fn event_dot_owner_drop_at_reassign_maybe_moved(my_name: &String, note: &str
 
 // `b = Box::new(…)` after the old Box's whole contents were moved out
 // (`let s = *b;`): the old contents aren't the Box's to drop any more,
-// but its heap allocation is freed here (#1145). (Starts ". Its
+// even when the payload has size zero (#1145, #1608). (Starts ". Its
 // previous", so it subsumes the line's plain acquire.)
 pub fn event_dot_owner_drop_at_reassign_box_contents_moved(my_name: &String) -> String {
     format!(
         "{} acquires ownership of a new resource. Its previous contents were moved out earlier, \
-         so only its previous Box's heap allocation is freed here.",
+         so the previous Box doesn't drop that value here.",
         styled_name_html(my_name)
     )
-}
-
-// `event_dot_owner_drop_at_reassign_maybe_moved` for a Box whose
-// contents (`*b`), not the Box itself, were moved out in some branches
-// above (#921): the drop flag decides only whether the old contents are
-// dropped; the old Box's heap allocation is freed either way. `holds`:
-// the Box's `Owner::holds` (`the String it holds`), `None` when the
-// contents need no drop.
-pub fn event_dot_owner_drop_at_reassign_box_contents_maybe_moved(my_name: &String, holds: Option<&str>, by_cond: bool) -> String {
-    // (Starts ". Its previous ", so it subsumes the line's plain
-    // acquire: `reassign_subsumes_acquire`.)
-    let name = styled_name_html(my_name);
-    let mut out = format!("{} acquires ownership of a new resource.", name);
-    match holds.map(|h| h.strip_suffix(" it holds").and_then(|t| t.strip_prefix("the "))) {
-        Some(Some(ty)) => out.push_str(&format!(
-            " Its previous {} is dropped here only if {} moved it out (Rust tracks this with a runtime \
-             drop flag). Its previous Box's heap allocation is freed here either way.",
-            escape_tooltip_name(ty), moved_above(by_cond)
-        )),
-        Some(None) => out.push_str(&format!(
-            " Its previous contents are dropped here only if {} moved them out (Rust tracks this with \
-             a runtime drop flag). Its previous Box's heap allocation is freed here either way.",
-            moved_above(by_cond)
-        )),
-        None => out.push_str(" Its previous Box's heap allocation is freed here."),
-    }
-    out
 }
 
 // `*b = v` on a Box whose old contents were moved out before (`let w =
 // *b;`, #928): `maybe` None when they were moved on every path (nothing
 // is dropped), `Some(by_cond)` when on some paths only (a drop flag
-// decides). The Box keeps its heap allocation either way. `holds`: the
+// decides). This writes into the existing Box. `holds`: the
 // Box's `Owner::holds` (`the String it holds`).
 pub fn event_dot_box_contents_write_after_move(deref_name: &String, holds: Option<&str>, maybe: Option<bool>) -> String {
     // (Starts ". Its previous ", so it subsumes the line's plain
@@ -586,14 +536,9 @@ pub fn event_dot_box_contents_write_after_move(deref_name: &String, holds: Optio
 
 // Scope end of a Box whose contents need no drop (`Box<P>`, P with no
 // drop glue) and were moved out in some branches only (#929): nothing of
-// the contents is dropped on any path, so no drop flag matters; the
-// Box's heap allocation is freed on every path.
-pub fn event_dot_go_out_of_scope_box_plain_contents_maybe_moved(my_name: &String, by_cond: bool) -> String {
-    format!(
-        "{} goes out of scope. Its contents {}; the Box's heap allocation is freed here either way.",
-        styled_name_html(my_name),
-        if by_cond { "may have been moved out above" } else { "were moved out in at least one branch above" }
-    )
+// the contents needs dropping on any path.
+pub fn event_dot_go_out_of_scope_box_plain_contents_maybe_moved(my_name: &str) -> String {
+    format!("{} goes out of scope. Its contents may have been moved out and need no drop.", styled_name_html(my_name))
 }
 
 /// Who may have moved a maybe-moved variable, for the drop-flag
@@ -996,7 +941,7 @@ pub fn reassign_subsumes_acquire(reassign: &str, acquire: &str) -> bool {
                 .is_some_and(|tail| tail.starts_with(" is dropped") || tail.starts_with(" (including "))
                 || rest.starts_with(". Its previous ")
                 // A re-boxed Box's path-dependent drop (#1220).
-                || rest.starts_with(". What its previous value drops ")
+                || rest.starts_with(". Whatever it still held ")
         })
 }
 
@@ -4173,8 +4118,8 @@ pub fn event_dot_branch_merge_moved_box_paths(my_name: &String, mutable: bool, b
     let my_name_fmt = styled_name_html(my_name);
     let again = if mutable { " (until it's assigned again)" } else { "" };
     format!(
-        "{0}{1}. What is dropped when {2} goes out of scope depends on the path: its contents were moved out before the branches.",
-        branch_merge_moved(&my_name_fmt, by_cond), again, my_name_fmt
+        "{0}{1}. The Box may no longer hold its original contents.",
+        branch_merge_moved(&my_name_fmt, by_cond), again
     )
 }
 
@@ -4205,67 +4150,9 @@ fn branch_merge_unless(by_cond: bool) -> &'static str {
     if by_cond { "If nothing above moved it" } else { "If the branch that ran didn't move it" }
 }
 
-/// Where the contents of a Box that some branches moved out of (`let w
-/// = *e;`) are dropped on the paths that didn't (#921).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ContentsDropAt {
-    /// At e's scope end, together with the Box's heap allocation.
-    ScopeEnd,
-    /// At `e = …`, which also frees the old Box's heap allocation.
-    Reassign,
-    /// At `*e = …`, which keeps the Box's heap allocation.
-    PayloadWrite,
-}
-
-// `event_dot_branch_merge_moved_with_drop` for a Box whose contents (`*e`),
-// not the Box itself, were moved out in some branches (#921). e still
-// owns its heap allocation on every path, so the drop flag decides only
-// whether the contents are dropped. rustc rejects any use of e after the
-// join (E0382) except a new value for `*e` or for e (both need `let mut
-// e`). `holds`: the Box's `Owner::holds` (`the String it holds`), `None`
-// when the contents need no drop. `by_cond`: a let-chain's condition,
-// not only a branch, may have moved them (`if let … && { let w = *e;
-// … }`, #940): see `moved_above`.
-pub fn event_dot_branch_merge_box_contents_moved(my_name: &String, mutable: bool, holds: Option<&str>, at: ContentsDropAt, by_cond: Option<&str>) -> String {
-    let name = styled_name_html(my_name);
-    let deref = styled_name_html(&format!("*{}", my_name));
-    let until = match at {
-        ContentsDropAt::Reassign => format!(" until {} is assigned again", name),
-        ContentsDropAt::PayloadWrite => format!(" until {} is assigned again", deref),
-        ContentsDropAt::ScopeEnd if mutable => format!(" (until {} or {} is assigned again)", deref, name),
-        ContentsDropAt::ScopeEnd => String::new(),
-    };
-    let mut out = if let Some(kw) = by_cond {
-        format!(
-            "{0}'s contents may have been moved out above, so {0} can't be used after the {1}{2}.",
-            name, styled_name_html(&kw.to_owned()), until
-        )
-    } else {
-        format!(
-            "{0}'s contents were moved out in at least one branch above, so {0} can't be used after \
-             the branches{1}.",
-            name, until
-        )
-    };
-    let when = match at {
-        ContentsDropAt::ScopeEnd => format!("when {} goes out of scope", name),
-        ContentsDropAt::Reassign => format!("when {} is assigned again", name),
-        ContentsDropAt::PayloadWrite => format!("when {} is assigned again", deref),
-    };
-    if let Some(h) = holds {
-        let what = h.strip_suffix(" it holds").map_or_else(
-            || format!("{}'s contents", name),
-            escape_tooltip_name,
-        );
-        let unless = if by_cond.is_some() { "If nothing above moved them" } else { "If the branch that ran didn't move them" };
-        out.push_str(&format!(" {}, {} is dropped {}.", unless, what, when));
-        if at != ContentsDropAt::PayloadWrite {
-            out.push_str(" The Box's heap allocation is freed then either way.");
-        }
-    } else if at != ContentsDropAt::PayloadWrite {
-        out.push_str(&format!(" The Box's heap allocation is freed {} either way.", when));
-    }
-    out
+// The join doesn't determine when (or whether) a later drop will happen.
+pub fn event_dot_branch_merge_box_contents_moved(my_name: &str) -> String {
+    format!("{}'s contents may have been moved out. Using the whole Box requires initialized contents.", styled_name_html(my_name))
 }
 
 // `event_dot_branch_merge_moved_with_drop` when the variable is assigned
@@ -4621,17 +4508,12 @@ pub fn event_dot_owner_drop_at_reassign_maybe_entry(my_name: &String, note: &str
 // Scope end of a variable that was moved on some paths of a conditional
 // and not on others: whether anything is dropped is decided at runtime
 // by a drop flag (#179).
-//
-// `boxed` (#736): a `Box` whose contents (`*b`) are moved out on some
-// path. The drop flag decides only whether the contents are dropped;
-// the Box's own heap allocation is freed either way.
-pub fn event_dot_go_out_of_scope_maybe_moved(my_name: &String, note: &str, by_cond: bool, boxed: bool) -> String {
+pub fn event_dot_go_out_of_scope_maybe_moved(my_name: &String, note: &str, by_cond: bool) -> String {
     let (holds, rest) = split_drop_note(note);
     format!(
         "{0} goes out of scope. Its resource{1} is dropped{2} here only if {3} moved it \
-         (Rust tracks this with a runtime drop flag).{4}",
-        styled_name_html(my_name), holds, rest, moved_above(by_cond),
-        if boxed { " The Box's heap allocation is freed either way." } else { "" }
+         (Rust tracks this with a runtime drop flag).",
+        styled_name_html(my_name), holds, rest, moved_above(by_cond)
     )
 }
 
