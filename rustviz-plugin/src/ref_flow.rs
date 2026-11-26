@@ -48,6 +48,36 @@ pub struct CallReborrow {
   pub method: String,
 }
 
+/// A store keeps the original loan, which may be stronger than the
+/// stored reference. None means the kind can differ between possible
+/// loans of this same place.
+pub struct StoredLoan {
+  pub lender: ResourceTy,
+  pub mutable: Option<bool>,
+  pub of_ref_var: bool,
+}
+
+/// A holder draws one arrow per place, even when alternative loans
+/// from that place have different kinds.
+fn distinct_lenders(kinds: Vec<(ResourceTy, bool)>) -> Vec<ResourceTy> {
+  let mut lenders = Vec::new();
+  for (lender, _) in kinds {
+    if !lenders.contains(&lender) { lenders.push(lender); }
+  }
+  lenders
+}
+
+impl StoredLoan {
+  fn add(out: &mut Vec<Self>, lender: ResourceTy, mutable: Option<bool>, of_ref_var: bool) {
+    if let Some(old) = out.iter_mut().find(|loan| loan.lender == lender) {
+      if old.mutable != mutable { old.mutable = None; }
+      old.of_ref_var |= of_ref_var;
+    } else {
+      out.push(Self { lender, mutable, of_ref_var });
+    }
+  }
+}
+
 /// How an argument reaches a call's result (see the module docs).
 struct ArgFlow<'tcx> {
   index: usize,
@@ -438,7 +468,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // `Some(W { a: &s, b: &mut t })` (#708).
     let mixed = self.ctor_mixed_muts(call);
     if !mixed.is_empty() {
-      return (mixed.into_iter().map(|(l, _)| l).collect(), false);
+      return (distinct_lenders(mixed), false);
     }
     self.lenders_of_flows(self.call_arg_flows(call).unwrap_or_default())
   }
@@ -483,48 +513,55 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   pub fn call_stores_into_receiver(&self, call: &'tcx Expr<'tcx>) -> bool {
     matches!(call.kind, ExprKind::MethodCall(..))
       && (self.call_arg_flows_into(call, FlowTarget::Receiver).is_some_and(|f| !f.is_empty())
-        || !self.receiver_kept_loans(call).is_empty())
+        || self.receiver_kept_loans(call).iter().any(|k| k.direct && k.newly_held))
   }
 
-  /// The variables whose borrows `call` stores into its receiver
-  /// (`refs.push(&s)` → `s`), and whether any of them is mutable.
-  pub fn receiver_store_lenders(&self, call: &'tcx Expr<'tcx>) -> (Vec<ResourceTy>, bool) {
+  /// Which borrow of each lender the receiver can keep. MIR identifies
+  /// both the original loan of a passed-on reference and the exact field
+  /// borrowed, including when the field is itself a reference slot.
+  pub fn receiver_store_lenders(&self, call: &'tcx Expr<'tcx>) -> Vec<StoredLoan> {
+    let kept = self.receiver_kept_loans(call);
     let flows = self.call_arg_flows_into(call, FlowTarget::Receiver).unwrap_or_default();
-    let is_mut = flows.iter().any(|f| f.place_mut || (f.content && self.value_borrow_is_mut(f.arg)));
-    let lenders = self.lenders_of_flows(flows).0;
-    if !lenders.is_empty() {
-      return (lenders, is_mut);
-    }
-    // The signature ties the stored value to the receiver only through
-    // a trait bound (`extend<I: IntoIterator<Item = T>>(&mut self, iter:
-    // I)`): ask rustc which loans the receiver holds once the call has
-    // returned (#682).
-    let mut out: Vec<ResourceTy> = Vec::new();
-    let mut is_mut = false;
-    for k in self.receiver_kept_loans(call) {
-      let Some(rd) = self.raps.get(&k.lender) else { continue };
-      // A reborrow through a reference variable (`[&*r]`) isn't drawn.
-      if rd.rap.is_fn() || rd.rap.is_ref() || k.through_ref {
-        continue;
+    let mut out = Vec::new();
+    for flow in flows {
+      let lenders = self.arg_lenders(&flow);
+      for l in lenders.iter() {
+        if !matches!(l, ResourceTy::Value(r) | ResourceTy::Deref(r) if !r.is_fn()) { continue; }
+        let mut facts = kept.iter().filter(|k| k.argument == flow.index
+          && matches!(l, ResourceTy::Value(r) if *r.name() == k.place)).peekable();
+        if facts.peek().is_some() {
+          for k in facts {
+            let slot = matches!(l, ResourceTy::Value(r) if r.is_ref());
+            StoredLoan::add(&mut out, l.clone(), Some(k.mutable), slot);
+          }
+        } else {
+          // Borrow through an argument without a named MIR loan (for
+          // instance a reference parameter). Its type describes a plain
+          // place borrow; a composite flow does not give each lender a kind.
+          let kind = if flow.place && !flow.content {
+            Some(flow.place_mut)
+          } else if lenders.len() == 1 {
+            Some(self.value_borrow_is_mut(flow.arg))
+          } else {
+            None
+          };
+          let slot = ref_var_borrow(flow.arg, self.tcx.typeck(call.hir_id.owner))
+            && matches!(l, ResourceTy::Value(r) if r.is_ref());
+          StoredLoan::add(&mut out, l.clone(), kind, slot);
+        }
       }
-      let l = ResourceTy::Value(rd.rap.to_owned());
-      if !out.contains(&l) {
-        out.push(l);
-      }
-      is_mut |= k.is_mut;
     }
-    (out, is_mut)
+    for k in kept.into_iter().filter(|k| k.direct && k.newly_held) {
+      let Some(rd) = self.raps.get(&k.place) else { continue };
+      if !rd.rap.is_fn() {
+        StoredLoan::add(&mut out, ResourceTy::Value(rd.rap.clone()), Some(k.mutable), rd.rap.is_ref());
+      }
+    }
+    out
   }
 
-  /// The loans a `&mut self` method call leaves in its receiver
-  /// variable (see `loans_kept_after_call`). Only asked when the
-  /// receiver's type can hold a borrow and the method takes `&mut
-  /// self`, so the (costly) Polonius run is rare.
-  fn receiver_kept_loans(&self, call: &'tcx Expr<'tcx>) -> Vec<crate::mir_data::KeptLoan> {
+  fn receiver_kept_loans(&self, call: &'tcx Expr<'tcx>) -> Vec<crate::mir_data::TransferredLoan> {
     let ExprKind::MethodCall(_, rcvr, _, _) = call.kind else { return Vec::new() };
-    if !matches!(rcvr.kind, ExprKind::Path(QPath::Resolved(None, _))) {
-      return Vec::new();
-    }
     let Some((sig, ..)) = self.callee_sig(call) else { return Vec::new() };
     if !matches!(sig.inputs().first().map(|t| t.kind()), Some(ty::Ref(_, _, m)) if m.is_mut()) {
       return Vec::new();
@@ -533,8 +570,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if !typeck.expr_ty(rcvr).walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_))) {
       return Vec::new();
     }
+    // Only locals and their literal fields have a corresponding MIR type
+    // here. An index or explicit dereference would name a different place.
+    let mut base = rcvr;
+    while let ExprKind::Field(inner, _) = base.kind { base = inner; }
+    if local_of_path(base).is_none() { return Vec::new(); }
     let Some(name) = expr_to_rap_name(rcvr, &self.tcx) else { return Vec::new() };
-    self.loans_kept_after_call(call.span).into_iter().filter(|k| k.holder == name).collect()
+    self.transferred_loans(call.span, Some(&name))
   }
 
   /// The variables the reference `call` returns (or a value holding
@@ -1172,17 +1214,28 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       return (out, is_mut);
     }
-    // `Some(W { a: &s, b: &mut t })`: each lender has its own kind (#708).
-    let mixed = self.holder_lender_muts(init);
-    if !mixed.is_empty() {
-      return (mixed.into_iter().map(|(l, _)| l).collect(), false);
+    // Constructor/aggregate payloads can contain both kinds of reference.
+    let aggregate = match init.kind {
+      ExprKind::Call(f, _) => crate::visitor::is_ctor_path(f, self.tcx.typeck(init.hir_id.owner)) || vec_macro_elems(init).is_some(),
+      ExprKind::MethodCall(..) => false,
+      _ => true,
+    };
+    if aggregate {
+      let kinds = self.value_loan_kinds(init);
+      if kinds.iter().any(|(_, m)| *m) && kinds.iter().any(|(_, m)| !*m) {
+        return (distinct_lenders(kinds), false);
+      }
     }
     match init.kind {
       ExprKind::Call(..) | ExprKind::MethodCall(..) => {
         // `let el = refs.last_mut();` / `refs.iter_mut().next()` on a
         // `Vec<&String>`: an `Option` of a reference into refs (#1382,
         // #1395), not of what refs's elements borrow.
-        let lenders = self.pointer_lenders(init).unwrap_or_else(|| self.call_lenders(init));
+        let lenders = self.pointer_lenders(init).unwrap_or_else(|| {
+          let mut lenders = self.call_lenders(init);
+          self.add_result_loans(init, &mut lenders);
+          lenders
+        });
         // `let it = self.items.iter().chain(self.other.iter());`: only
         // those fields of what self points to (#1080).
         match self.field_call_lenders(init, &lenders) {
@@ -1205,53 +1258,85 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
-  /// For a value built from `&` and `&mut` borrows together
-  /// (`Some(W { a: &s, b: &mut t })`, a tuple, an array), each
-  /// lender with whether it is borrowed mutably. Empty unless both
-  /// kinds are present: a holder with one kind records it once.
-  pub fn holder_lender_muts(&self, init: &'tcx Expr<'tcx>) -> Vec<(ResourceTy, bool)> {
-    let mut out: Vec<(ResourceTy, bool)> = Vec::new();
-    // Fields of what a reference points to, borrowed each its own way
-    // (`r.other.iter_mut().zip(r.items.iter())`, #1080).
-    let ctor = matches!(init.kind, ExprKind::Call(f, _) if matches!(f.kind, ExprKind::Path(QPath::Resolved(_, p))
-      if matches!(p.res, rustc_hir::def::Res::Def(rustc_hir::def::DefKind::Ctor(..), _))));
-    // `vec![(&mut f, &g)]` (#1433): what the elements the user wrote hold.
-    if let Some(elems) = vec_macro_elems(init) {
-      if !elems.iter().all(|x| self.collect_lender_muts(x, &mut out)) {
-        return Vec::new();
+  /// A signature may tie an argument to the result only through an
+  /// associated type (for example a closure's FnOnce::Output). Include
+  /// that argument's direct result loans when rustc supplies them.
+  pub(crate) fn add_result_loans(&self, call: &'tcx Expr<'tcx>, lenders: &mut Vec<ResourceTy>) -> bool {
+    let before = lenders.len();
+    let Some((_, _, args, _)) = self.callee_sig(call) else { return false };
+    let flows = self.call_arg_flows(call).unwrap_or_default();
+    if args.len() == flows.len() { return false; }
+    for loan in self.transferred_loans(call.span, None) {
+      if !loan.direct || flows.iter().any(|f| f.index == loan.argument) { continue; }
+      if let Some(rd) = self.raps.get(&loan.place) {
+        let lender = ResourceTy::Value(rd.rap.clone());
+        if !lenders.contains(&lender) { lenders.push(lender); }
       }
+    }
+    before != lenders.len()
+  }
+
+  /// Kinds carried by this particular value. Keep the full list here:
+  /// two arms may share a lender but carry different loans of it.
+  pub(crate) fn value_loan_kinds(&self, init: &'tcx Expr<'tcx>) -> Vec<(ResourceTy, bool)> {
+    let mut out = Vec::new();
+    let ctor = matches!(init.kind, ExprKind::Call(f, _) if crate::visitor::is_ctor_path(f, self.tcx.typeck(init.hir_id.owner)));
+    if let Some(elems) = vec_macro_elems(init) {
+      if !elems.iter().all(|x| self.collect_lender_muts(x, &mut out)) { return Vec::new(); }
     } else if matches!(init.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) && !ctor {
       if let Some(fields) = self.field_call_lenders(init, &self.call_lenders(init)) {
-        out = fields;
+        return fields;
+      }
+      for loan in self.transferred_loans(init.span, None) {
+        if let Some(rd) = self.raps.get(&loan.place) {
+          out.push((ResourceTy::Value(rd.rap.clone()), loan.mutable));
+        }
       }
     } else if !self.collect_lender_muts(init, &mut out) {
       return Vec::new();
     }
-    if out.iter().any(|(_, m)| *m) && out.iter().any(|(_, m)| !*m) { out } else { Vec::new() }
+    out
+  }
+
+  pub fn holder_lender_muts(&self, init: &'tcx Expr<'tcx>) -> Vec<(ResourceTy, bool)> {
+    if let Some(bodies) = holder_branch_bodies(init) {
+      let mut out: Vec<(ResourceTy, bool)> = Vec::new();
+      for v in bodies.into_iter().filter_map(branch_value_expr) {
+        for (l, m) in self.value_loan_kinds(v) {
+          if !out.contains(&(l.clone(), m)) { out.push((l, m)); }
+        }
+      }
+      return out;
+    }
+    self.value_loan_kinds(init)
   }
 
   /// `holder_lender_muts` for a tuple struct / variant constructor
   /// call (`Some(W { a: &s, b: &mut t })`); empty for any other call.
   fn ctor_mixed_muts(&self, call: &'tcx Expr<'tcx>) -> Vec<(ResourceTy, bool)> {
     match call.kind {
-      ExprKind::Call(f, _) if matches!(f.kind, ExprKind::Path(QPath::Resolved(_, p))
-        if matches!(p.res, rustc_hir::def::Res::Def(rustc_hir::def::DefKind::Ctor(..), _))) => self.holder_lender_muts(call),
+      ExprKind::Call(f, _) if crate::visitor::is_ctor_path(f, self.tcx.typeck(call.hir_id.owner)) => {
+          let kinds = self.value_loan_kinds(call);
+          if kinds.iter().any(|(_, m)| *m) && kinds.iter().any(|(_, m)| !*m) { kinds } else { Vec::new() }
+        }
       _ => Vec::new(),
     }
   }
 
   /// Adds the lenders `e`'s value holds, with their kinds, to `out`
-  /// (a lender borrowed both ways counts as mutable). False when `e`
-  /// has a part this can't account for.
+  /// (including alternative kinds for the same lender). False when
+  /// `e` has a part this can't account for.
   fn collect_lender_muts(&self, e: &'tcx Expr<'tcx>, out: &mut Vec<(ResourceTy, bool)>) -> bool {
     let mut add = |ls: Vec<ResourceTy>, m: bool| {
       for l in ls {
-        match out.iter_mut().find(|(x, _)| *x == l) {
-          Some(entry) => entry.1 |= m,
-          None => out.push((l, m)),
-        }
+        if !out.contains(&(l.clone(), m)) { out.push((l, m)); }
       }
     };
+    if let Some(r) = self.reborrowed_local_mut_ref(e) {
+      let ty = self.tcx.typeck(e.hir_id.owner).expr_ty_adjusted(e);
+      add(vec![ResourceTy::Deref(r)], ty.ref_mutability().is_some_and(|m| m.is_mut()));
+      return true;
+    }
     match e.kind {
       ExprKind::Struct(_, fields, tail) => {
         let base = match tail {
@@ -1265,9 +1350,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ExprKind::Block(b, _) => b.expr.is_none_or(|x| self.collect_lender_muts(x, out)),
       ExprKind::DropTemps(inner) => self.collect_lender_muts(inner, out),
       // A tuple struct / variant constructor (`Some(..)`, `W(..)`).
-      ExprKind::Call(f, args) if matches!(f.kind, ExprKind::Path(QPath::Resolved(_, p))
-        if matches!(p.res, rustc_hir::def::Res::Def(rustc_hir::def::DefKind::Ctor(..), _))) => {
+      ExprKind::Call(f, args) if crate::visitor::is_ctor_path(f, self.tcx.typeck(e.hir_id.owner)) => {
         args.iter().all(|x| self.collect_lender_muts(x, out))
+      }
+      ExprKind::Call(..) | ExprKind::MethodCall(..) => {
+        let kinds = self.value_loan_kinds(e);
+        let mut lenders = self.call_lenders(e);
+        self.add_result_loans(e, &mut lenders);
+        lenders.into_iter().all(|l| {
+          let mut found = kinds.iter().filter(|(x, _)| x == &l).peekable();
+          if found.peek().is_none() { return false; }
+          for (_, m) in found { add(vec![l.clone()], *m); }
+          true
+        })
       }
       ExprKind::AddrOf(_, m, inner) => {
         // (A temporary the `let` extends has its own column, #1357.)

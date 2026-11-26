@@ -73,6 +73,17 @@ pub struct KeptLoan {
     pub span: Span,
 }
 
+/// A named, directly addressable place borrowed by an argument. The
+/// destination can keep a loan through another reference without pointing
+/// at that lender itself (a Vec<&&T> borrows the slot holding the &T).
+pub struct TransferredLoan {
+    pub place: String,
+    pub mutable: bool,
+    pub direct: bool,
+    pub argument: usize,
+    pub newly_held: bool,
+}
+
 pub struct MIRBorrowData {
     pub borrow_idx: usize,
     pub region: (usize, usize),
@@ -957,6 +968,90 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
             }
         }
         res
+    }
+
+    /// Named places whose loans flow from a call's arguments into its result,
+    /// or into a particular receiver place. Intersect loan indices, not names:
+    /// arguments can borrow different fields or reach a lender through several
+    /// calls, and the receiver may already contain unrelated borrows.
+    pub fn transferred_loans(&self, call: Span, receiver: Option<&str>) -> Vec<TransferredLoan> {
+        let bwf = self.bwf;
+        let body = &bwf.body;
+        let (Some(facts), Some(table)) = (&bwf.input_facts, &bwf.location_table) else { return Vec::new() };
+        let names = self.mir_local_names(bwf);
+        let mut held = BTreeSet::new();
+        for (bb, block) in body.basic_blocks.iter_enumerated() {
+            let term = block.terminator();
+            let TerminatorKind::Call { args, destination, target: Some(target), fn_span, .. } = &term.kind else { continue };
+            if term.source_info.span != call && *fn_span != call { continue; }
+            let dst_ty = match receiver {
+                Some(name) => {
+                    let mut parts = name.split('.');
+                    let base = parts.next().unwrap_or_default();
+                    let mut locals = body.local_decls.indices().filter(|l| names.get(l).is_some_and(|n| n == base));
+                    let Some(local) = locals.next() else { continue };
+                    if locals.next().is_some() { continue; }
+                    let Some(ty) = parts.try_fold(body.local_decls[local].ty, |ty, f| self.field_ty_named(ty, f)) else { continue };
+                    ty
+                }
+                None => destination.ty(&body.local_decls, self.tcx).ty,
+            };
+            let out = self.call_loan_facts.get_or_init(|| Output::compute(facts, Algorithm::Naive, true));
+            let at = |point: Point, regions: &BTreeSet<RegionVid>| -> BTreeSet<Loan> {
+                let mut loans = BTreeSet::new();
+                if let Some(origins) = out.origin_contains_loan_at.get(&point) {
+                    for r in regions {
+                        loans.extend(origins.get(&(*r).into()).into_iter().flatten());
+                    }
+                }
+                loans
+            };
+            let start = table.start_index(Location { block: bb, statement_index: block.statements.len() });
+            let after = table.start_index(Location { block: *target, statement_index: 0 });
+            let mut own = BTreeSet::new();
+            let mut behind = BTreeSet::new();
+            self.split_regions(dst_ty, false, &mut own, &mut behind, 0);
+            let direct: BTreeSet<_> = at(after, &own).difference(&at(after, &behind)).copied().collect();
+            own.extend(behind);
+            let dst = at(after, &own);
+            let before = at(start, &own);
+            for (index, arg) in args.iter().enumerate().skip(usize::from(receiver.is_some())) {
+                let arg_ty = arg.node.ty(&body.local_decls, self.tcx);
+                let regions = arg_ty.walk().filter_map(|g| match g.kind() {
+                    GenericArgKind::Lifetime(r) if r.is_var() => Some(r.as_var()),
+                    _ => None,
+                }).collect();
+                let src = at(start, &regions);
+                for loan in src.intersection(&dst) {
+                    let span = self.location_to_span(bwf.borrow_set[*loan].reserve_location(), bwf);
+                    let newly_held = !before.contains(loan) || call.contains(span);
+                    held.insert((*loan, index, direct.contains(loan), newly_held));
+                }
+            }
+        }
+        held.into_iter().filter_map(|(loan, argument, direct, newly_held)| {
+            let data = &bwf.borrow_set[loan];
+            let place = data.borrowed_place();
+            // A projected debug local (for example a closure environment)
+            // isn't a source variable that can be named by the local alone.
+            if !body.var_debug_info.iter().any(|info| matches!(info.value, VarDebugInfoContents::Place(p) if p.as_local() == Some(place.local))) {
+                return None;
+            }
+            let mut name = names.get(&place.local)?.clone();
+            let mut ty = body.local_decls[place.local].ty;
+            for proj in place.projection {
+                let ProjectionElem::Field(idx, field_ty) = proj else { return None };
+                let field = match ty.kind() {
+                    TyKind::Adt(adt, _) if adt.is_struct() => adt.non_enum_variant().fields[idx].name.to_string(),
+                    TyKind::Tuple(_) => idx.index().to_string(),
+                    _ => return None,
+                };
+                name.push('.');
+                name.push_str(&field);
+                ty = field_ty;
+            }
+            Some(TransferredLoan { place: name, mutable: data.kind().mutability().is_mut(), direct, argument, newly_held })
+        }).collect()
     }
 
     /// rustc's loans issued for the borrow expression at `span` (`&s`):

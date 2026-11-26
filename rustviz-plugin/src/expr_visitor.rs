@@ -237,7 +237,8 @@ impl RefData {
 
   /// Whether `lender`'s borrow by this reference is a mutable one.
   pub fn mut_of(&self, lender: &ResourceTy) -> bool {
-    self.lender_muts.iter().find(|(l, _)| l == lender).map_or(self.ref_mutability, |(_, m)| *m)
+    self.lender_muts.iter().filter(|(l, _)| l == lender).map(|(_, m)| *m)
+      .reduce(|a, b| a || b).unwrap_or(self.ref_mutability)
   }
 
   /// `lender` followed by `co_lenders`.
@@ -330,6 +331,7 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   pub mir_body: &'a Body<'tcx>, 
   pub hir_body: &'a rustc_hir::Body<'tcx>,
   pub bwf: &'a BodyWithBorrowckFacts<'tcx>,
+  pub(crate) call_loan_facts: std::cell::OnceCell<polonius_engine::Output<rustc_borrowck::consumers::RustcFacts>>,
 
   // Data structure used to represent active loans
   // borrower name -> RefData
@@ -1161,6 +1163,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       mir_body,
       hir_body,
       bwf,
+      call_loan_facts: Default::default(),
       current_scope: 0,
       current_fn_start,
       borrow_map: HashMap::new(),
@@ -3317,13 +3320,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     } else {
       self.holder_lenders(value, ty)
     };
+    let kinds = self.value_loan_kinds(value);
     let line = expr_to_line(value, &self.tcx);
     for l in found.into_iter().filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_))) {
+      let mutable = kinds.iter().find(|(x, _)| x == &l).map_or(is_mut, |(_, m)| *m);
       let aliasing = get_aliasing_data(&l, &self.borrow_map);
       match self.borrow_map.get_mut(name) {
         Some(rd) if rd.all_lenders().contains(&l) => {}
-        Some(rd) if matches!(rd.lender, ResourceTy::Value(_) | ResourceTy::Deref(_)) => rd.co_lenders.push(l),
+        Some(rd) if matches!(rd.lender, ResourceTy::Value(_) | ResourceTy::Deref(_)) => {
+          rd.lender_muts.push((l.clone(), mutable));
+          rd.co_lenders.push(l);
+        }
         Some(rd) => {
+          rd.lender_muts.push((l.clone(), mutable));
           rd.lender = l;
           rd.aliasing = aliasing;
           rd.static_lender = None;
@@ -3339,7 +3348,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             lender: l,
             assigned_at: line,
             lifetime: line,
-            ref_mutability: is_mut,
+            ref_mutability: mutable,
             aliasing,
             static_lender: None,
             borrow_span,
@@ -3635,11 +3644,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     for k in bound {
       let arms: Vec<RefData> = done.iter().filter(|(n, _)| *n == k).map(|(_, d)| d.clone()).collect();
       let Some(mut merged) = self.borrow_map.get(&k).cloned().or_else(|| arms.last().cloned()) else { continue };
+      let holder = self.raps.get(&k).is_some_and(|r| r.rap.holds_borrow());
       for d in arms.iter().chain(ab.before.get(&k)) {
         for l in d.all_lenders() {
-          if !matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)) || merged.all_lenders().contains(&l) {
+          if !matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)) { continue; }
+          if merged.all_lenders().contains(&l) {
+            let previous = merged.mut_of(&l);
+            let other = d.mut_of(&l);
+            if holder && previous != other {
+              let alternatives = [(l.clone(), previous), (l, other)];
+              self.note_mixed_holder_loans(&k, &alternatives);
+              merged.lender_muts.extend(alternatives);
+            }
             continue;
           }
+          merged.lender_muts.push((l.clone(), d.mut_of(&l)));
           if matches!(merged.lender, ResourceTy::Value(_) | ResourceTy::Deref(_)) {
             merged.co_lenders.push(l);
           } else {
@@ -5559,6 +5578,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if to_call {
       return false;
     }
+    // Like a written `&mut *r`, an inserted reborrow supplies a new
+    // reference to the payload. The holder's borrow event draws it.
+    if is_implicit_reborrow(elem, typeck) {
+      return false;
+    }
     match self.raps.get(&fn_key(fn_name)).map(|rd| ResourceTy::Value(rd.rap.to_owned())) {
       Some(to) => self.ref_part_to(elem, to),
       None => false,
@@ -7231,14 +7255,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         *self.unique_id += 1;
       } else {
         for l in old.all_lenders().into_iter().filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_))) {
-          let evt = if old.mut_of(&l) { Evt::MDie } else { Evt::SDie };
-          self.add_ev(end, evt, l, holder.clone(), false);
+          self.add_borrow_end_ev(end, l, holder.clone(), &old, Vec::new());
         }
       }
       self.borrow_map.remove(&name);
     }
     let (mut lenders, is_mut) = self.holder_lenders(rhs, ty);
     let mut lender_muts = self.holder_lender_muts(rhs);
+    self.note_mixed_holder_loans(&name, &lender_muts);
     let mut through = Vec::new();
     self.narrow_holder_lenders(&name, rhs, &mut lenders, &mut lender_muts, &mut through);
     if lenders.is_empty() {
@@ -7445,13 +7469,27 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let Some(rd) = self.borrow_map.get(h.name()).cloned() else { return };
     let Some(ty) = self.tcx.typeck(v.hir_id.owner).expr_ty_opt(v) else { return };
     let own = self.holder_lenders(v, ty).0;
+    let kinds = self.value_loan_kinds(v);
     let line = expr_to_line(&v, &self.tcx);
     let to = ResourceTy::Value(rap);
     for l in rd.all_lenders().into_iter().filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)) && own.contains(l)) {
-      let evt = if rd.mut_of(&l) { Evt::MBorrow } else { Evt::SBorrow };
+      let mutable = kinds.iter().find(|(x, _)| x == &l).map_or_else(|| rd.mut_of(&l), |(_, m)| *m);
+      let evt = if mutable { Evt::MBorrow } else { Evt::SBorrow };
       match l {
         ResourceTy::Deref(r) => self.add_borrow_ev(line, evt, to.clone(), ResourceTy::Value(r), true),
         l => self.add_ev(line, evt, to.clone(), l, false),
+      }
+    }
+  }
+
+  /// A single line after a join can stand for loans of both kinds.
+  /// Keep their restrictions conservative and qualify their common end.
+  fn note_mixed_holder_loans(&mut self, name: &str, kinds: &[(ResourceTy, bool)]) {
+    let Some(holder) = self.raps.get(name).map(|r| *r.rap.hash()) else { return };
+    for (l, mutable) in kinds {
+      if *mutable && kinds.contains(&(l.clone(), false)) {
+        let note = ApproxNote::MixedLoan { holder, lender: *l.hash() };
+        if !self.approx_notes.contains(&note) { self.approx_notes.push(note); }
       }
     }
   }
@@ -7467,6 +7505,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     self.retire_loan(name, expr_to_line(&init, &self.tcx));
     let (mut lenders, is_mut) = self.holder_lenders(init, ty);
     let mut lender_muts = self.holder_lender_muts(init);
+    self.note_mixed_holder_loans(name, &lender_muts);
     // `let w: Vec<&String> = v.iter().copied().collect();` holds the
     // references stored in v, not a borrow of v (#1094): a holder of
     // borrows whose own lenders all went is still one.
@@ -7886,26 +7925,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       return;
     }
     let ExprKind::MethodCall(seg, ..) = call.kind else { return };
-    let (lenders, is_mut) = self.receiver_store_lenders(call);
-    if lenders.is_empty() {
+    let loans = self.receiver_store_lenders(call);
+    if loans.is_empty() {
       return;
     }
+    let lenders: Vec<_> = loans.iter().map(|k| k.lender.clone()).collect();
+    let is_mut = loans.iter().any(|k| k.mutable != Some(false));
     let name = rcvr.name().to_owned();
-    // `refs.push(&x)` with x a reference variable and `refs:
-    // Vec<&&String>` stores a borrow of x itself, a value, not of what
-    // x points to (#973).
-    let ExprKind::MethodCall(_, _, args, _) = call.kind else { return };
-    let typeck = self.tcx.typeck(call.hir_id.owner);
-    let ref_var_args: Vec<String> = args.iter()
-      .filter(|a| ref_var_borrow(a, typeck))
-      .filter_map(|a| match a.kind {
-        ExprKind::AddrOf(_, _, inner) => expr_to_rap_name(inner, &self.tcx),
-        _ => None,
-      })
-      .collect();
-    let lends_ref_var = |l: &ResourceTy| matches!(l, ResourceTy::Value(r) if r.is_ref() && ref_var_args.iter().any(|n| n == r.name()));
-    for l in lenders.iter().filter(|l| lends_ref_var(l)) {
-      self.stored_ref_var_lends.insert((name.clone(), l.real_name()));
+    for k in &loans {
+      let l = &k.lender;
+      if k.mutable.is_none() {
+        self.approx_notes.push(ApproxNote::MixedLoan { holder: *rcvr.hash(), lender: *l.hash() });
+      }
+      if k.of_ref_var {
+        self.stored_ref_var_lends.insert((name.clone(), l.real_name()));
+      }
     }
     match self.borrow_map.get_mut(&name) {
       Some(rd) => {
@@ -7916,13 +7950,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           let m = rd.mut_of(&l);
           (l, m)
         }).collect();
-        for l in lenders.iter() {
+        for k in &loans {
+          let l = &k.lender;
+          let mutable = k.mutable.unwrap_or(true);
           if *l != rd.lender && !rd.co_lenders.contains(l) {
             rd.co_lenders.push(l.clone());
           }
           match muts.iter_mut().find(|(x, _)| x == l) {
-            Some(entry) => entry.1 |= is_mut,
-            None => muts.push((l.clone(), is_mut)),
+            Some(entry) => entry.1 |= mutable,
+            None => muts.push((l.clone(), mutable)),
           }
         }
         rd.ref_mutability |= is_mut;
@@ -7940,7 +7976,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           borrow_span: None,
           loan_line: None,
           co_lenders: lenders[1..].to_vec(),
-          lender_muts: Vec::new(),
+          lender_muts: loans.iter().map(|k| (k.lender.clone(), k.mutable.unwrap_or(true))).collect(),
           through: Vec::new(),
         });
       }
@@ -7954,14 +7990,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       passed_on: Vec::new(),
     };
     let to = ResourceTy::Value(rcvr.clone());
-    for lender in lenders.iter() {
+    for k in loans {
+      let lender = k.lender;
+      let of_ref_var = k.of_ref_var;
+      let mut via = via.clone();
+      if k.mutable.is_none() { via.carrier = ViaCarrier::UncertainStore; }
       let id = *self.unique_id;
       *self.unique_id += 1;
-      let of_ref_var = lends_ref_var(lender);
-      let ev = if is_mut {
-        ExternalEvent::MutableBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id, of_ref_var }
+      let ev = if k.mutable.unwrap_or(true) {
+        ExternalEvent::MutableBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via), id, of_ref_var }
       } else {
-        ExternalEvent::StaticBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id, of_ref_var }
+        ExternalEvent::StaticBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via), id, of_ref_var }
       };
       self.add_external_event(line, ev);
     }
@@ -8994,24 +9033,20 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
   // all branches (#337).
   // A holder mixing `&` and `&mut` records each lender's kind itself
   // (`Some(W { a: &s, b: &mut t })`, #708).
-  let own = match self.borrow_map.get(lhs_rap.name()) {
-    Some(rd) if !rd.lender_muts.is_empty() => rd.lender_muts.iter().map(|(l, _)| l.clone()).collect(),
-    _ => self.call_lenders(call),
-  };
-  let muts: Vec<(ResourceTy, bool)> = self.borrow_map.get(lhs_rap.name()).map(|rd| rd.lender_muts.clone()).unwrap_or_default();
+  let holder = !lhs_rap.is_ref();
+  let mut own = self.call_lenders(call);
+  let from_facts = holder && self.add_result_loans(call, &mut own);
+  let muts = if holder { self.value_loan_kinds(call) } else { Vec::new() };
   // `self.items.first_mut().unwrap()`: only the field (#1073), or
   // fields (#1080).
   let own: Vec<ResourceTy> = match self.field_call_lenders(call, &own) {
     Some(fields) => fields.into_iter().map(|(l, _)| l).collect(),
     None => own,
   };
-  let (lenders, is_mut): (Vec<ResourceTy>, bool) = match self.borrow_map.get(lhs_rap.name()) {
-    Some(rd) => (rd.all_lenders().into_iter()
-      .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..)) && own.contains(l))
-      .collect(),
-      if lhs_rap.is_ref() { lhs_rap.is_mutref() } else { rd.ref_mutability }),
-    None => return false,
-  };
+  let Some(rd) = self.borrow_map.get(lhs_rap.name()).cloned() else { return false };
+  let lenders: Vec<_> = rd.all_lenders().into_iter()
+    .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..)) && own.contains(l))
+    .collect();
   if lenders.is_empty() {
     return false;
   }
@@ -9047,13 +9082,16 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
       lenders: lenders.iter().map(|l| l.name()).collect(),
       also_unnamed: self.call_lenders_full(call).1,
       tie: self.narrowed_tie(call, borrower).unwrap_or_else(|| self.call_arg_tie(borrower, None)),
-      carrier: if lhs_rap.is_ref() { ViaCarrier::Reference } else { ViaCarrier::Value },
+      carrier: if lhs_rap.is_ref() { ViaCarrier::Reference } else if from_facts { ViaCarrier::KeptByResult } else { ViaCarrier::Value },
       passed_on,
     },
   };
   for lender in lenders.iter() {
     let id = *self.unique_id;
-    let is_mut = muts.iter().find(|(l, _)| l == lender).map_or(is_mut, |(_, m)| *m);
+    let mut kinds = muts.iter().filter(|(l, _)| l == lender).map(|(_, m)| *m);
+    let is_mut = kinds.next().unwrap_or_else(|| rd.mut_of(lender));
+    let mut via = via.clone();
+    if kinds.any(|m| m != is_mut) { via.carrier = ViaCarrier::UncertainResult; }
     // `r.first_mut()` with r a local `&mut`: a reborrow through r, drawn
     // like `&mut *r` (#1152).
     let (from, is_reborrow) = match lender {
@@ -10897,8 +10935,9 @@ fn ref_into_holder_value(&mut self, lhs: &ResourceTy, r: &ResourceAccessPoint, r
   if is_mut {
     self.add_ev(line_num, Evt::Move, lhs.clone(), ResourceTy::Value(r.clone()), false);
   }
-  let evt = if is_mut { Evt::MBorrow } else { Evt::SBorrow };
   for l in lenders {
+    let mutable = self.borrow_map.get(r.name()).map_or(is_mut, |rd| rd.mut_of(&l));
+    let evt = if mutable { Evt::MBorrow } else { Evt::SBorrow };
     match l {
       // r reborrows through another reference (`&mut *p`): drawn from
       // that reference's column, as `[r]` draws it (#1330).
@@ -12459,8 +12498,7 @@ pub fn print_out_of_scope(&mut self){
       let co_from = if self.for_moved_holders.contains(k) { ResourceTy::Anonymous } else { ResourceTy::Value(from_ro.clone()) };
       for co in co_lenders.iter().filter(|c| matches!(c, ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..))) {
         if ultimate_refs.contains(&(k.to_owned(), co.real_name())) {
-          let evt = if ref_data.mut_of(co) { Evt::MDie } else { Evt::SDie };
-          self.add_ev(*lifetime, evt, co.clone(), co_from.clone(), false);
+          self.add_borrow_end_ev(*lifetime, co.clone(), co_from.clone(), ref_data, Vec::new());
         }
       }
       // if ref is not an ultimate ref then it dies without returning a resource
@@ -12534,8 +12572,7 @@ pub fn print_out_of_scope(&mut self){
         l => l.clone(),
       };
       for co in rd.co_lenders.iter().filter(|c| matches!(c, ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..))) {
-        let evt = if rd.mut_of(co) { Evt::MDie } else { Evt::SDie };
-        self.add_ev(rd.lifetime, evt, co.clone(), ResourceTy::Value(from_ro.clone()), false);
+        self.add_borrow_end_ev(rd.lifetime, co.clone(), ResourceTy::Value(from_ro.clone()), &rd, Vec::new());
       }
       // Another reference that borrows the same lender and outlives
       // this loan keeps it borrowed: this one's end gives nothing back.

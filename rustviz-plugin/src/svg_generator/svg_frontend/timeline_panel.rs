@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{AltEnd, FieldLenders, ApproxNote, ElemsLeft, place_elem_names, breaks_out_only, is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier, leaves_maybe_held};
+use crate::svg_generator::data::{holder_lender_kind, holds_copy_value, AltEnd, FieldLenders, ApproxNote, ElemsLeft, place_elem_names, breaks_out_only, is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier, leaves_maybe_held};
 use crate::svg_generator::hover_messages::{self, styled_name_html};
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use crate::svg_generator::svg_frontend::rv_attrs::{self, Rv};
@@ -2694,6 +2694,8 @@ fn render_dot(
                         } else {
                             data.title = event.print_message_with_name(& mut name);
                         }
+                    } else if let Some(title) = holder_loan_dot(event, visualization_data) {
+                        data.title = title;
                     } else if let Some(title) = reborrow_kept_mut_loan_title(event, &history[..i], &name, rap) {
                         data.title = title;
                     } else if let Some(title) = field_lenders_dot_title(event, &name, visualization_data) {
@@ -3873,6 +3875,41 @@ fn closure_reborrow_lend_title(event: &Event, visualization_data: &Visualization
     Some(hover_messages::event_dot_capture_reborrow_through_ref(r.name(), &to.name(), mutable, r.points_to_copy()))
 }
 
+// Receiver-store arrows describe a loan rustc keeps live. The holder
+// dot uses the same evidence, without promising write access to its data.
+fn holder_loan_dot(event: &Event, vd: &VisualizationData) -> Option<String> {
+    match event {
+        Event::StaticDie { is: holder, to: lender, .. } | Event::MutableDie { is: holder, to: lender, .. }
+        | Event::StaticReacquire { from: holder, is: lender, .. } | Event::MutableReacquire { from: holder, is: lender, .. }
+            if vd.mixed_holder_loan(holder, lender) => {
+                return Some(hover_messages::possible_loan_end(&holder.name(), &lender.name()));
+            }
+        _ => {}
+    }
+    let (holder, lender, slot, lender_side) = match event {
+        Event::StaticBorrow { is, from, of_ref_var, .. } | Event::MutableBorrow { is, from, of_ref_var, .. }
+            if is.holds_borrow() => (is, from, *of_ref_var, false),
+        Event::StaticLend { is, to, of_ref_var, .. } | Event::MutableLend { is, to, of_ref_var, .. }
+            if to.holds_borrow() => (to, is, *of_ref_var, true),
+        _ => return None,
+    };
+    let id = event.get_id();
+    let carrier = all_external_events(vd).into_iter().find_map(|(_, e)| match e {
+        ExternalEvent::StaticBorrow { via: Some(v), id: i, .. } | ExternalEvent::MutableBorrow { via: Some(v), id: i, .. }
+            if *i == id => Some(v.carrier),
+        _ => None,
+    })?;
+    if !matches!(carrier, ViaCarrier::StoredBy | ViaCarrier::UncertainStore | ViaCarrier::UncertainResult | ViaCarrier::KeptByResult) { return None; }
+    let certain = !matches!(carrier, ViaCarrier::UncertainStore | ViaCarrier::UncertainResult);
+    if lender_side {
+        return (!certain).then(|| hover_messages::possible_lend(&lender.name()));
+    }
+    let kind = certain.then(|| matches!(event, Event::MutableBorrow { .. }));
+    let target = if slot { hover_messages::HolderLender::Own } else { holder_lender_kind(lender) };
+    let what = hover_messages::holder_borrow_target(&lender.name(), target, slot || holds_copy_value(lender));
+    Some(hover_messages::holder_keeps_loan(&holder.name(), &what, kind))
+}
+
 // Lender-side dots of a method call whose receiver r is a reference to
 // a reference (`r.len()` with `r: &&String`, #952): the call borrows
 // what `*r` points to. The lend / reacquire events don't carry
@@ -4399,6 +4436,9 @@ fn moved_between(visualization_data: &VisualizationData, r: &ResourceAccessPoint
 /// result (`let w = first_mut(&mut v);`) isn't named; with several
 /// holders (`it` and the `y` taken out of it) none is.
 fn lent_out_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, line: usize, path: &[(usize, usize)]) -> String {
+    if visualization_data.approx_notes.iter().any(|note| matches!(note, ApproxNote::MixedLoan { lender, .. } if lender == rap.hash())) {
+        return hover_messages::possible_lend(rap.name());
+    }
     let through_ref = rap.is_mutref().then(|| rap.points_to_copy());
     // `ref_itself`: a `&T` binding borrowed `&mut`, or a `&mut` reference
     // borrowed itself (`&mut r`, not `&mut *r`; #914): r is what's lent.
@@ -6855,9 +6895,13 @@ fn render_generic_arrow(
     if arrow_is_undrawn(external_event, from, to) || arrow_left_out(visualization_data, external_event) {
         return;
     }
-    let title = match visualization_data.field_lenders.get(&external_event.get_id()) {
-        Some(f) => hover_messages::arrow_field_lenders_title(external_event, from, to, &f.lenders, f.end),
-        None => hover_messages::arrow_full_title(external_event, from, to),
+    let title = if matches!(external_event, ExternalEvent::MutableDie { .. } | ExternalEvent::StaticDie { .. })
+        && visualization_data.mixed_holder_loan(from, to) {
+        hover_messages::possible_loan_end(&from.name(), &to.name())
+    } else if let Some(f) = visualization_data.field_lenders.get(&external_event.get_id()) {
+        hover_messages::arrow_field_lenders_title(external_event, from, to, &f.lenders, f.end)
+    } else {
+        hover_messages::arrow_full_title(external_event, from, to)
     };
 
     // order of points is to -> from

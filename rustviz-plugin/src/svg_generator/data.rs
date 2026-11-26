@@ -1555,6 +1555,12 @@ pub enum ViaCarrier {
     /// The borrower is the receiver a `&mut self` method stored the
     /// borrow in (`refs.push(&s)`; #392). `func` names the method.
     StoredBy,
+    /// Different loans of this same place may have different kinds.
+    UncertainStore,
+    /// The returned value may keep different kinds of loan of this place.
+    UncertainResult,
+    /// The result carries a loan from a call argument through a trait bound.
+    KeptByResult,
     /// The borrower is a reference a pattern copied (or, for `&mut`,
     /// moved) out of a value that holds one (`Some(x)` on `third =
     /// v.get(2)`; #391). `func` names that value, or the function whose
@@ -4738,6 +4744,10 @@ pub struct VisualizationData {
 }
 
 impl VisualizationData {
+    pub fn mixed_holder_loan(&self, holder: &ResourceTy, lender: &ResourceTy) -> bool {
+        self.approx_notes.contains(&ApproxNote::MixedLoan { holder: *holder.hash(), lender: *lender.hash() })
+    }
+
     /// Whether `event` is the lend of a call that reborrows through a
     /// `&mut` the column's value holds (`k.push('!')` with `k: Box<&mut
     /// String>`; `DeepPlace::held_mut`, #1282): k needn't be `mut`.
@@ -4787,8 +4797,10 @@ fn call_lend_line(last_lend: &Option<(usize, usize)>, e: &Event, line: usize) ->
 /// added to the tooltip of an event dot that is drawn anyway, never
 /// drawn as a dot of its own: a column with no dot where a note would
 /// go gets none.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApproxNote {
+    /// The holder may keep either kind of loan of this column.
+    MixedLoan { holder: u64, lender: u64 },
     /// `text` on the first event dot of column `hash` on a source line
     /// in `lines` (inclusive).
     At { hash: u64, lines: (usize, usize), text: String },
@@ -4822,6 +4834,7 @@ impl ApproxNote {
     /// the figure removed before it).
     pub fn map_lines(&mut self, f: impl Fn(usize) -> usize) {
         match self {
+            ApproxNote::MixedLoan { .. } => {},
             ApproxNote::At { lines, .. } => *lines = (f(lines.0), f(lines.1)),
             ApproxNote::Loop { head, pass, nested, .. } => {
                 *head = f(*head);
@@ -5301,6 +5314,10 @@ impl Visualizable for VisualizationData {
             // reacquire in between), so the lend to `w` continues the
             // same revocation rather than starting a second one.
             (State::RevokedPrivilege{ .. }, Event::MutableLend{ .. }) => (*previous_state).clone(),
+            // The conditional's entry state can include the other arm's
+            // mutable loan. This arm gives the holder a shared loan.
+            (State::RevokedPrivilege { .. }, Event::StaticLend { is, to, .. })
+                if self.mixed_holder_loan(to, is) => State::PartialPrivilege { s: LineState::Full },
 
             // A reference variable re-pointed through the `&mut` that
             // borrows it (`*r = &t` with `r = &mut x`, #904): x still
@@ -5332,6 +5349,11 @@ impl Visualizable for VisualizationData {
                     State::FullPrivilege {s: LineState::Full}
                 }
             }
+            // Both the reborrow and its holder can give back a loan of a
+            // reference slot. After the first return a shared reference
+            // already has the access its type permits.
+            (State::PartialPrivilege { .. }, Event::MutableReacquire { is, of_ref_var: true, .. })
+                if is.is_ref() && !is.is_mutref() => previous_state.clone(),
             (State::PartialPrivilege { .. }, Event::RefDie { .. })=> {
               State::PartialPrivilege{s: LineState::Full}
             }

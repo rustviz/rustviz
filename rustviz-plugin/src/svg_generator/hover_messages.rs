@@ -2856,12 +2856,8 @@ pub const TRY_PASSES_ON: &str = "\u{1d}?";
 pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[String], also_unnamed: bool, tie: &ArgTie, carrier: ViaCarrier, passed_on: &[String]) -> String {
     let func_fmt = styled_name_html(func);
     let to_fmt = styled_name_html(to_name);
-    if carrier == ViaCarrier::StoredBy {
-        // `refs.push(&s)` (#392): `func` is the method.
-        return format!(
-            ", stored in {0} by {1}; {0} isn't a reference, but its value now holds one",
-            to_fmt, func_fmt
-        );
+    if carrier == ViaCarrier::KeptByResult {
+        return format!(": using {} can keep this borrow live through the value {} returned", to_fmt, func_fmt);
     }
     if carrier == ViaCarrier::StoredThrough {
         // `store_s(&mut r, &b)` (#1353): `func` is the call.
@@ -2963,7 +2959,7 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
         ViaCarrier::Value => ("value", format!("; {0} isn't a reference, but its value holds one", to_fmt)),
         ViaCarrier::StructField => ("struct", String::new()),
         ViaCarrier::TupleField => ("tuple", String::new()),
-        ViaCarrier::Element | ViaCarrier::StoredBy | ViaCarrier::PatternBinding { .. } | ViaCarrier::PatternRef | ViaCarrier::ReturnedClosure { .. } | ViaCarrier::Part | ViaCarrier::StoredThrough => unreachable!(),
+        ViaCarrier::Element | ViaCarrier::StoredBy | ViaCarrier::UncertainStore | ViaCarrier::UncertainResult | ViaCarrier::KeptByResult | ViaCarrier::PatternBinding { .. } | ViaCarrier::PatternRef | ViaCarrier::ReturnedClosure { .. } | ViaCarrier::Part | ViaCarrier::StoredThrough => unreachable!(),
     };
     // A value can hold borrows of several of them at once (`map` over
     // `v.iter()` with a closure that borrows `extra`).
@@ -3539,17 +3535,32 @@ pub enum HolderLender {
 // self.items.iter();` with `self: &mut Self`; #1080) is named as the
 // place it is.
 pub fn event_dot_holder_borrow(my_name: &String, from_name: &String, is_mut: bool, from: HolderLender, holds_value: bool) -> String {
-    let what = match from {
+    let what = holder_borrow_target(from_name, from, holds_value);
+    if is_mut {
+        return holder_keeps_loan(my_name, &what, Some(true));
+    }
+    format!("{0} holds a value that immutably borrows {1} ({0} isn't a reference itself)", styled_name_html(my_name), what)
+}
+
+pub fn holder_borrow_target(from_name: &String, from: HolderLender, holds_value: bool) -> String {
+    match from {
         HolderLender::Pointee => format!("the data {} points to", styled_name_html(from_name)),
         HolderLender::FieldThroughRef => styled_name_html(from_name),
         HolderLender::Own => format!("{}'s {}", styled_name_html(from_name), if holds_value { "value" } else { "resource" }),
-    };
-    format!(
-        "{0} holds a value that {1} borrows {2} ({0} isn't a reference itself)",
-        styled_name_html(my_name),
-        if is_mut { "mutably" } else { "immutably" },
-        what
-    )
+    }
+}
+
+pub fn holder_keeps_loan(holder: &str, target: &str, kind: Option<bool>) -> String {
+    let kind = match kind { Some(true) => "mutable borrow", Some(false) => "shared borrow", None => "borrow" };
+    format!("Using {0} can keep the {1} of {2} live ({0} isn't a reference itself)", styled_name_html(holder), kind, target)
+}
+
+pub fn possible_loan_end(holder: &str, lender: &str) -> String {
+    format!("Any borrow of {} kept by {} ends here", styled_name_html(lender), styled_name_html(holder))
+}
+
+pub fn possible_lend(lender: &str) -> String {
+    format!("{} may be borrowed here, possibly mutably", styled_name_html(lender))
 }
 
 // `let k = Box::new(r);` with r a `&mut` parameter (#1289): k's value
@@ -5904,6 +5915,21 @@ pub fn arrow_fn_return_title(copy: bool, named_call: bool, styled_fn: &str) -> S
 /// call result, an `Rc` call, a borrow ending, a `break` alternative, a
 /// borrow a call result keeps).
 pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &ResourceTy) -> String {
+    if let ExternalEvent::StaticBorrow { via: Some(via), .. } | ExternalEvent::MutableBorrow { via: Some(via), .. } = external_event {
+        if via.carrier == ViaCarrier::UncertainResult {
+            return format!("Using {} can keep a borrow of {} live through the value {} returned",
+                styled_name_html(&to.name()), styled_name_html(&from.name()), styled_name_html(&via.func));
+        }
+        if matches!(via.carrier, ViaCarrier::StoredBy | ViaCarrier::UncertainStore) {
+            let kind = match (via.carrier, external_event) {
+                (ViaCarrier::UncertainStore, _) => "borrow",
+                (_, ExternalEvent::MutableBorrow { .. }) => "mutable borrow",
+                _ => "shared borrow",
+            };
+            return format!("{} can store a reference in {}, keeping the {} of {} live",
+                styled_name_html(&via.func), styled_name_html(&to.name()), kind, styled_name_html(&from.name()));
+        }
+    }
     let mut title = arrow_title(external_event);
     // complete title
     let styled_from_string = styled_name_html(&from.name());

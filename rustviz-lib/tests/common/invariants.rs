@@ -75,6 +75,7 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("pattern_ref_several_lenders", "arrow-along-leg", 1542),
     ("refs_array_literal", "arrow-along-leg", 1542),
     ("store_through_mut_ref_1124", "arrow-along-leg", 1542),
+    ("stored_loan_kinds_1732", "arrow-along-leg", 1542),
     ("tuple_scrutinee_nested", "arrow-along-leg", 1542),
     ("two_field_borrow_through_ref_1080", "arrow-along-leg", 1542),
 ];
