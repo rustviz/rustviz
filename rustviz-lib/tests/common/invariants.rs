@@ -82,7 +82,7 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("fields_maybe_moved_1599", "line-starts-nowhere", 1595),
     // `let r20 = choose(&mut a20, &b20, f);`: a20's arrow head along r20's
     // line, as other two-lender call results draw it (#1542).
-    ("shared_ref_of_mut_siblings_1599", "arrow-along-leg", 1542),
+    ("shared_ref_of_mut_hedge_1599", "arrow-along-leg", 1542),
 ];
 
 /// The invariants, by the name the failure list and messages use.

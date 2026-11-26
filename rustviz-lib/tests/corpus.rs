@@ -28155,26 +28155,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Mutable loan of a15 kept by v15, stored in v15 by push; v15 isn't a reference, but its value now holds one",
             "Mutable loan of a16 kept by v16, stored in v16 by push; v16 isn't a reference, but its value now holds one",
             "k17's immutable borrow ends",
-            // (hedged, third Codex round: `fixed()` lends nothing; w19 and
-            // v20 keep a19's / a20's mutable loan and b19's / b20's shared
-            // one, and may point into either; k21 copied r21's mutable loan
-            // before r21 was re-pointed.)
-            "Copy of the value fixed() returns to o18",
-            "Immutable borrow from b19 to w19, stored in w19 by push; w19 isn't a reference, but its value now holds one",
-            "b19's resource is immutably borrowed by w19; b19 is read-only while the borrow is live",
-            "w19 may hold a shared reference into a19 or b19 (w19 isn't a reference itself)",
-            "Immutable borrow from b20 to v20, stored in v20 by push; v20 isn't a reference, but its value now holds one",
-            "Mutable loan of a20 kept by v20, stored in v20 by push; v20 isn't a reference, but its value now holds one",
-            "k21's mutable borrow ends",
-            // (round4, fourth Codex round: `&*p22` through a `&mut` is a
-            // shared reborrow, p22 stays readable; the third arm lends c23
-            // shared; v24 points to p24 or q24 themselves; v25's first push
-            // keeps its own wording.)
-            "the resource p22 points to is immutably borrowed by v22 through p22; p22 is read-only while the borrow is live",
-            "Immutable borrow from c23 to o23: Some's signature gives the value it returns the same lifetime as its argument; o23 isn't a reference, but its value holds one",
-            "v24 may hold a shared reference into p24 or q24 (v24 isn't a reference itself)",
-            "v25 holds a value that immutably borrows b25's resource (v25 isn't a reference itself)",
-            "v25 may hold a shared reference into a25 or b25 (v25 isn't a reference itself)",
         ],
         must_not_contain: &[
             "Shared reference made from a mutable borrow of a1, ",
@@ -28198,14 +28178,41 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Mutable loan of b13",
             "b13's resource is mutably borrowed by v13",
             "possibly mutably",
-            "p22 can't be used",
-            "Mutable loan of c23",
-            "c23's resource is mutably borrowed by o23",
-            "the data p24 points to",
             "Mutable borrow from a14 to v14",
             "Immutable borrow from a15 to v15",
             "Immutable borrow from a16 to v16",
             "k17's borrow ends; a mutable loan behind it",
+        ],
+    },
+    TooltipExpect {
+        name: "shared_ref_of_mut_hedge_1599",
+        // #1619's third and fourth Codex reviews. `fixed()` lends nothing;
+        // w19 / v20 keep a19's / a20's mutable loan and b19's / b20's
+        // shared one, each stated exactly, and may point into either; k21
+        // copied r21's mutable loan before r21 was re-pointed; `&*p22`
+        // through a `&mut` is a shared reborrow; the third arm lends c23
+        // shared; v24 points to p24 or q24 themselves; v25's first push
+        // keeps its own wording.
+        must_contain: &[
+            "Copy of the value fixed() returns to o18",
+            "Immutable borrow from b19 to w19, stored in w19 by push; w19 isn't a reference, but its value now holds one",
+            "b19's resource is immutably borrowed by w19; b19 is read-only while the borrow is live",
+            "w19 may hold a shared reference into a19 or b19 (w19 isn't a reference itself)",
+            "Immutable borrow from b20 to v20, stored in v20 by push; v20 isn't a reference, but its value now holds one",
+            "Mutable loan of a20 kept by v20, stored in v20 by push; v20 isn't a reference, but its value now holds one",
+            "k21's mutable borrow ends",
+            "the resource p22 points to is immutably borrowed by v22 through p22; p22 is read-only while the borrow is live",
+            "Immutable borrow from c23 to o23: Some's signature gives the value it returns the same lifetime as its argument; o23 isn't a reference, but its value holds one",
+            "v24 may hold a shared reference into p24 or q24 (v24 isn't a reference itself)",
+            "v25 holds a value that immutably borrows b25's resource (v25 isn't a reference itself)",
+            "v25 may hold a shared reference into a25 or b25 (v25 isn't a reference itself)",
+        ],
+        must_not_contain: &[
+            "possibly mutably",
+            "p22 can't be used",
+            "Mutable loan of c23",
+            "c23's resource is mutably borrowed by o23",
+            "the data p24 points to",
             "fixed's signature",
             "Mutable borrow from b18 to o18",
             "Mutable loan of b19",
