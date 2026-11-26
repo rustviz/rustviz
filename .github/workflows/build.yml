@@ -13,6 +13,13 @@ on:
   merge_group:
   workflow_dispatch:
 
+# A new push to a PR cancels that PR's still-running build: stacked rv3 PRs push often and the
+# superseded runs were starving the merge queue of runners. Pushes to main and merge-queue runs
+# get a unique group (run_id), so they are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
   # for the runner-image job to push to GHCR
