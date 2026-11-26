@@ -90,3 +90,39 @@ fn or_pattern(t8: (String, String, bool), c: bool) {
         }
     }
 }
+
+// Round 2 of the review: one-line conditionals whose reference's loan
+// outlives the arm keep main's join-row end.
+fn returned_call_result<'a>(a9: &'a mut Vec<i32>, b9: &'a mut Vec<i32>) -> Option<&'a mut i32> {
+    if a9.is_empty() { b9.first_mut() } else { a9.first_mut() }
+}
+
+fn two_phase_receiver(c: bool) {
+    let mut v10 = vec![1];
+    let r10 = &mut v10;
+    r10.push(if c { r10.len() } else { 0 });
+}
+
+struct H11<'a> { p: &'a String }
+
+fn copied_out_of_arm(c: bool) {
+    let a11 = String::from("a");
+    let r11 = &a11;
+    let h11 = if c { H11 { p: r11 } } else { H11 { p: r11 } }; h11.p.len();
+}
+
+fn id<T>(x: T) -> T { x }
+
+fn moved_through_call(r12: &mut String, q12: &String, c: bool, d: bool) -> usize {
+    if c {
+        if d {
+            let moved = id(r12);
+            moved.push('x');
+        } else {
+            r12.len();
+        }
+    } else {
+        r12.len();
+    }
+    q12.len()
+}

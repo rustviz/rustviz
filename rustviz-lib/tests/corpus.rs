@@ -28114,6 +28114,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "a8 still has no value here",
             "r1's borrow ended in each branch above",
             "r4's borrow ended in each branch above",
+            // Round 2 of the review: a returned call result, a two-phase
+            // receiver and a copy bound after the conditional keep the loan
+            // past the arm (an earlier head of #1602 ended it there).
+            "a9's borrow ended in each branch above",
+            "b9's borrow ended in each branch above",
+            "r10's borrow ended in each branch above",
+            "r11's borrow ended in each branch above",
         ],
     },
 ];
@@ -38449,6 +38456,11 @@ fn arm_ends_review_1602_lender_and_copy_cycle() {
     // Both nested arms, the None path, and after `v6.len()` in the other
     // outer arm (main: 3, no give-back on the None path).
     assert_eq!(back.len(), 4, "v6 given back in both nested arms, on the None path and after len: {back:?}");
+    // A `&mut` moved on through a call that returns it (`id(r12)`) isn't
+    // ended on the move.
+    let moved_and_ended = dots_where(&tl, |l| l.iter().any(|x| x == "r12's mutable reference is moved (not the resource it points to)")
+        && l.iter().any(|x| x == "r12's mutable borrow ends"));
+    assert_eq!(moved_and_ended, Vec::<(f64, f64)>::new(), "r12 ended on its move");
     assert!(!dots_listing_tooltip(&tl, "a5's immutable borrow ends").is_empty()
         || !dots_listing_tooltip(&tl, "b5's immutable borrow ends").is_empty(), "copied_both_ways rendered");
 }

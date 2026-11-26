@@ -11714,7 +11714,13 @@ pub fn print_out_of_scope(&mut self){
             // (On any conditional along the path, not only the outermost:
             // v drawn in an outer `if` already gets a column in the `if
             // let` nested in its arm only now.)
-            let new_column = !matches!(ev, ExternalEvent::RefDie { .. })
+            // (Nor while another reference still borrows the lender past
+            // this end, `let other = v.first();` used after: on those
+            // paths v isn't given back, #1602.)
+            #[expect(clippy::disallowed_methods, reason = "`any` over the map: order never observed")]
+            let others = made.as_ref().is_some_and(|(r, _)| self.borrow_map.iter().any(|(n, d)|
+              n != r.name() && d.lender.extract_rap() == Some(&lender) && d.lifetime > *line));
+            let new_column = !matches!(ev, ExternalEvent::RefDie { .. }) && !others
               && lender_new_on_path(self.preprocessed_events, &path, &lender);
             if let (true, Some((r, made))) = (after_exits || new_column, made) {
               let (line, mutable) = (*line, matches!(ev, ExternalEvent::MutableDie { .. }));
@@ -12678,7 +12684,9 @@ pub fn print_out_of_scope(&mut self){
         continue;
       }
       if let ExternalEvent::Branch { branches, split_point, merge_point, .. } = &mut self.preprocessed_events[k].1 {
-        let one_line = *split_point == *merge_point;
+        // (In a loop only: a reference read after the conditional ends
+        // later anyway; an end there came from an exit in an arm.)
+        let one_line = *split_point == *merge_point && in_loop.contains(&k);
         let mut first: Option<ExternalEvent> = None;
         for b in branches.iter_mut() {
           if one_line && first.is_none() {
@@ -14350,16 +14358,40 @@ pub(crate) fn branch_ending_borrow(events: &[(usize, ExternalEvent)], r: &Resour
           ExternalEvent::Move { to: ResourceTy::Value(t), .. } | ExternalEvent::Copy { to: ResourceTy::Value(t), .. } => t != r,
           _ => true,
         });
-        // (Nor when r is used again on the line after the conditional,
-        // `(if c { r.len() } else { 0 }, r.len())`: its last use is that
-        // one, on every path, and the end stays after it. And the end of
-        // a loan an arm made, `r = &mut b;` in the `else`, goes into that
-        // arm, not one that read r's old loan.)
-        if events[k + 1..].iter().any(|(l, e)| *l == line && touches(e, r) && borrow_end_of(e).is_none()
-          && !matches!(e, ExternalEvent::GoOutOfScope { .. })) {
+        // The end stays beside the conditional, as before this rule, when
+        // r's loan may outlive the arm's use: r is used on the line outside
+        // the conditional too (`(if c { r.len() } else { 0 }, r.len())`,
+        // the receiver of `r.push(if c { r.len() } else { 0 })`, whose
+        // two-phase borrow is used after the argument, a read in the
+        // condition), an arm passes it to a call whose result keeps the
+        // borrow (`b.first_mut()` returned), or copies or moves it into
+        // something the arm doesn't declare (`H { p: r }` bound after the
+        // conditional), or several arms made the loan it ends (#1602).
+        let used_outside = events.iter().enumerate().any(|(i, (l, e))| i != k && *l == line && touches(e, r)
+          && borrow_end_of(e).is_none() && !matches!(e, ExternalEvent::GoOutOfScope { .. }));
+        let carried_on = (0..branches.len()).any(|a| branches[a].e_data.iter().any(|(_, e)| match e {
+          ExternalEvent::PassByStaticReference { from: ResourceTy::Value(f), result_keeps_borrow: true, .. }
+          | ExternalEvent::PassByMutableReference { from: ResourceTy::Value(f), result_keeps_borrow: true, .. } => f == r,
+          // (A call on r whose result the fn returns, `b.first_mut()` as
+          // the fn's value: the result may hold r's loan to the caller.)
+          ExternalEvent::PassByStaticReference { from: ResourceTy::Value(f), to: ResourceTy::Value(g), .. }
+          | ExternalEvent::PassByMutableReference { from: ResourceTy::Value(f), to: ResourceTy::Value(g), .. } if f == r && g.is_fn() =>
+            branches[a].e_data.iter().any(|(_, e2)| matches!(e2,
+              ExternalEvent::Move { from: ResourceTy::Value(h), to, .. } | ExternalEvent::Copy { from: ResourceTy::Value(h), to, .. }
+                if h == g && matches!(to, ResourceTy::Caller))),
+          ExternalEvent::Copy { from: ResourceTy::Value(f), to: ResourceTy::Value(t), .. }
+          | ExternalEvent::Move { from: ResourceTy::Value(f), to: ResourceTy::Value(t), .. } => f == r
+            && !declares_place(&branches[a].decl_vars, t.name()),
+          _ => false,
+        }));
+        let making: Vec<usize> = lender.map(|l| (0..branches.len()).filter(|&a| loan_made_in(&branches[a].e_data, r, l, line)).collect())
+          .unwrap_or_default();
+        if used_outside || carried_on || making.len() > 1 {
           return None;
         }
-        if let Some(a) = lender.and_then(|l| (0..branches.len()).find(|&a| loan_made_in(&branches[a].e_data, r, l, line))) {
+        // (The end of a loan an arm made, `r = &mut b;` in the `else`,
+        // goes into that arm, not one that read r's old loan.)
+        if let Some(&a) = making.first() {
           return Some((k, a));
         }
         return (0..branches.len()).find(|&a| uses(a)).map(|a| (k, a));
@@ -14445,12 +14477,12 @@ fn drop_ended_refs_from_conditionals(events: &mut [(usize, ExternalEvent)], ende
               Some(c) => c.into_iter().filter(|r| after.contains(r)).collect(),
             });
           }
-          // (An implicit `else` has no events: it ends nothing, so a
-          // borrow ended only in the `if` arm stays live after.)
-          for r in common.unwrap_or_default() {
-            if !ended.contains(&r) && !branches.iter().any(|b| b.decl_vars.contains(&r)) {
-              ended.push(r);
-            }
+          // After the join: what every arm that reaches it left ended (an
+          // implicit `else` has no events, so it ends nothing new; an arm
+          // that gives r a new loan, `r = &b;`, takes r off the list).
+          // With no arm reaching the join, what came before stays.
+          if let Some(common) = common {
+            ended = common.into_iter().filter(|r| !branches.iter().any(|b| b.decl_vars.contains(r))).collect();
           }
         }
       }
@@ -14651,7 +14683,7 @@ pub(crate) fn end_borrow_in_arms(
       arm.e_data.insert(i, (line, copy));
       continue;
     }
-    end_after_last_use(&mut arm.e_data, branch_type.get_start_end(b).0, copy, r, lender, unique_id);
+    end_after_last_use(&mut arm.e_data, branch_type.get_start_end(b).0, copy, r, lender, unique_id, moved_into_result);
   }
 }
 
@@ -14671,11 +14703,14 @@ fn end_after_last_use(
   r: &ResourceAccessPoint,
   lender: Option<&ResourceAccessPoint>,
   unique_id: &mut usize,
+  moved_into_result: &HashSet<usize>,
 ) {
-  // An arm that moves r's reference into another (`let moved = r;`)
-  // hands the borrow on: that one ends it, not r (#1602).
+  // An arm that moves r's reference into another (`let moved = r;`), or
+  // into a call whose result keeps it (`let moved = id(r);`), hands the
+  // borrow on: that one ends it, not r (#1602).
   if events.iter().any(|(_, e)| matches!(e,
-    ExternalEvent::Move { from: ResourceTy::Value(f), to: ResourceTy::Value(t), .. } if f == r && t.is_ref())) {
+    ExternalEvent::Move { from: ResourceTy::Value(f), to: ResourceTy::Value(t), id, .. }
+      if f == r && (t.is_ref() || (t.is_fn() && moved_into_result.contains(id))))) {
     return;
   }
   let at = match last_use_in(events, r) {
@@ -14696,7 +14731,7 @@ fn end_after_last_use(
             _ => unreachable!("only a borrow's end is moved into arms"),
           }
         }
-        end_after_last_use(&mut arm.e_data, branch_type.get_start_end(b).0, copy, r, lender, unique_id);
+        end_after_last_use(&mut arm.e_data, branch_type.get_start_end(b).0, copy, r, lender, unique_id, moved_into_result);
       }
       return;
     }
@@ -15246,6 +15281,13 @@ fn end_lender_in_other_arms(
     }
   }
   end_lender_in_other_arms(&mut branches[*a].e_data, rest, lender, r, made, line, mutable, unique_id);
+}
+
+/// Whether `decl` (an arm's declared variables) holds the variable
+/// `name`, or the struct `name` is a field of (`h.p`).
+#[expect(clippy::disallowed_methods, reason = "`any` over the set: order never observed")]
+fn declares_place(decl: &HashSet<ResourceAccessPoint>, name: &str) -> bool {
+  decl.iter().any(|d| d.name() == name || name.starts_with(&format!("{}.", d.name())))
 }
 
 /// Whether some conditional along `path` (see `arm_declaring`) doesn't
