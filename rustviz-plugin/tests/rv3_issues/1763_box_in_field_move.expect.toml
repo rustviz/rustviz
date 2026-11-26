@@ -1,7 +1,6 @@
 issue = 1763
 cluster = "C14"
 title = "`let x = h.inner.a;` with `inner: Box<P>`: both h.inner and h are partly moved"
-xfail = "P0"
 fn = "f"
 places = ["h.inner", "h.inner.a", "h.inner.b"]
 beyond_facts = "P3: h and h.inner both draw as available"

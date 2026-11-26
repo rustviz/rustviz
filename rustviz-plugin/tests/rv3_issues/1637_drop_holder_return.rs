@@ -5,7 +5,7 @@ impl Drop for D<'_> {
 fn main() {
     let mut n = 0;
     let d = D(&mut n);
-    if std::hint::black_box(true) {
+    if std::env::args().len() < 2 {
         println!("leaving");
         return;
     }

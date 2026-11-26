@@ -430,6 +430,7 @@ pub struct Rustviz {
     code_panel: String,
     timeline_panel: String,
     height: i32,
+    facts: Option<serde_json::Value>,
 }
 
 impl Rustviz {
@@ -475,6 +476,14 @@ impl Rustviz {
     /// container element when laying them out side by side.
     pub fn height(&self) -> i32 {
         self.height
+    }
+
+    /// The RustViz 3 fact layer's output (per body: columns, loans, and
+    /// each row's states and events), when the plugin ran with `RV3_FACTS`
+    /// set (to `1`, or to a file path, which also gets a copy) and not `0`;
+    /// `None` otherwise. Its schema is `rustviz-plugin/src/facts/schema.rs`.
+    pub fn facts(&self) -> Option<&serde_json::Value> {
+        self.facts.as_ref()
     }
 }
 
@@ -717,6 +726,8 @@ struct PluginOutput {
     code_panel: String,
     timeline_panel: String,
     height: i32,
+    #[serde(default)]
+    facts: Option<serde_json::Value>,
 }
 
 fn parse_output(stdout: &[u8]) -> Result<Rustviz, Box<dyn Error>> {
@@ -738,6 +749,7 @@ fn parse_output(stdout: &[u8]) -> Result<Rustviz, Box<dyn Error>> {
         code_panel: out.code_panel,
         timeline_panel: out.timeline_panel,
         height: out.height,
+        facts: out.facts,
     })
 }
 

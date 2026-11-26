@@ -1,7 +1,6 @@
 issue = 1595
 cluster = "C14"
 title = "`drop(p.a); let r = &mut p.b;` in an arm: after r's last use p is still partly moved"
-xfail = "P0"
 fn = "run"
 places = ["p.a", "p.b"]
 note = "Gap: field-level state for p.b while it is lent to r (no p.b column on rows 8-10)"

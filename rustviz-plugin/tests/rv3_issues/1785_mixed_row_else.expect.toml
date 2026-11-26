@@ -1,7 +1,6 @@
 issue = 1785
 cluster = "C14"
 title = "`if let Some(a) = p.name && a.len() > 5 { .. } else {`: on the `} else {` row p is already partly moved"
-xfail = "P0"
 places = ["p.name", "p.id"]
 note = "Gap: no state column for the never-moved field p.id"
 beyond_facts = "P3: p draws as 'the owner of the resource' on the mixed `} else {` row"

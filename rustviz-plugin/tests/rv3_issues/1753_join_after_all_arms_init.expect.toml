@@ -1,7 +1,6 @@
 issue = 1753
 cluster = "C09"
 title = "A reference initialized in both arms of an earlier `if` is definitely assigned afterwards; its loans end at the copy on row 9"
-xfail = "P0"
 fn = "f"
 note = "The issue's repro tests `b` again inside the `else` of `if b`, so rows 13-14 can never run; the case tests a new `c` there (rows unchanged). Gap: every hand-written assertion holds; the dump has no state for the bare `let r;` row 2 (r is unassigned there)."
 beyond_facts = "P3: the later join says r still has no value"

@@ -1,7 +1,6 @@
 issue = 1783
 cluster = "C33"
 title = "`h = if c {..} else {..};`: the arms drawn as h acquiring its new value before the assignment drops the old one"
-xfail = "P3"
 note = "Spike lists row 13's facts in kind order (reassign, end, drop), not evaluation order. Sibling of #1677 (same program, `impl Drop` on one line). MIR puts the drop and the move-in at the span of `h` on row 8; their row here is 13, where the statement ends, after the arms (a probe after row 13 sees them done, one inside an arm doesn't)."
 beyond_facts = "P3: the arms build an unnamed value that reaches h at row 13 (no 'h acquires' in the arms); design question in the issue"
 

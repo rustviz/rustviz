@@ -11,7 +11,7 @@ row = 2
 lender = "v"
 holder = "x"
 kind = "shared"
-ends = [[2, 8], [3, 7], 5]
+ends = [[2, 7], [3, 6], 5]
 src = "issue"
 why = "`let _ = &mut v;` (v made `mut`) is E0502 at the start of the Some arm, at the start of the `if c` arm and before row 5; it compiles after row 5, in an added `else` of `if c`, and in an added `else` of the `if let`"
 

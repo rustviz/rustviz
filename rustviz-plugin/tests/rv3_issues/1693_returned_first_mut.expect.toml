@@ -1,7 +1,6 @@
 issue = 1693
 cluster = "C01"
 title = "`a.first_mut()` returned from a nested arm: a's loan drawn ending in the arm (\"a's borrow ended in each branch above\"), though the returned reference keeps it"
-xfail = "P0"
 fn = "pick"
 note = "The loan's holder is the returned value (`'a`, into the caller); there is no holder name to pin, so only its ends are. Gap (spike): each returned loan has holders `a|b`, and both lenders are lent in each arm (`*b` after row 4, `*a` after row 6), though each arm borrows only its own."
 beyond_facts = "P2: the loan of *a (or *b) is handed to the caller with the return value, not ended in the arm or at a join"
@@ -24,7 +23,24 @@ ends = []
 src = "issue"
 why = "same shape as *a (the arms are symmetric); `a.len()` in the `b` arm compiles, so the two loans are per path"
 
-# Per path: in each arm only its own lender is borrowed.
+# Per path: in each arm its own lender is mutably borrowed (the returned
+# reference keeps it) and the sibling's is free.
+[[lent]]
+row = 4
+place = "a"
+lender = "*a"
+kind = "mut"
+src = "issue"
+why = "`let t = a.first_mut(); a.len(); t` is E0502 in the `d` arm"
+
+[[lent]]
+row = 6
+place = "b"
+lender = "*b"
+kind = "mut"
+src = "issue"
+why = "`let t = b.first_mut(); b.len(); t` is E0502 in the `else` arm"
+
 [[lent]]
 row = 4
 place = "b"

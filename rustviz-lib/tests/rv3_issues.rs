@@ -354,8 +354,12 @@ fn skipped_by<'a>(c: &'a Case, func: &str, row: u32, place: &str) -> Option<&'a 
 
 /// A generated state: "<fn> <row> <place> <state>".
 fn oracle_entry(s: &str) -> Result<(String, u32, String, String), String> {
-    let p: Vec<&str> = s.split_whitespace().collect();
-    let [func, row, place, is] = p[..] else { return Err(format!("generated state {s:?} isn't `<fn> <row> <place> <state>`")) };
+    // The fn name may hold spaces (`<D as Drop>::drop`): split from the right.
+    let p: Vec<&str> = s.trim().rsplitn(4, ' ').collect();
+    let [is, place, row, func] = p[..] else { return Err(format!("generated state {s:?} isn't `<fn> <row> <place> <state>`")) };
+    if func.trim().is_empty() {
+        return Err(format!("generated state {s:?} has no fn"));
+    }
     let row = row.parse().map_err(|_| format!("generated state {s:?}: row isn't a number"))?;
     Ok((func.into(), row, place.into(), is.into()))
 }
@@ -481,9 +485,6 @@ struct Lent {
     kind: String,
     /// One loan can have several holders (a copied reference: "r|h").
     holders: Vec<String>,
-    /// A two-phase borrow (`v.push(v.len())`): reserved first (others may
-    /// still read), exclusive only from its activation.
-    two_phase: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -492,10 +493,12 @@ struct RowF {
     /// column -> (fields moved on every path, fields moved on some paths)
     parts: BTreeMap<String, (Vec<String>, Vec<String>)>,
     lent: BTreeMap<String, Vec<Lent>>,
+    /// column -> why it is "maybe" ("moved" | "unassigned"), if the dump says.
+    cause: BTreeMap<String, String>,
     facts: Vec<Value>,
-    /// The row's arms (several arms of a branch on one row): each one's
-    /// parent arm, if nested.
-    arms: Vec<Option<usize>>,
+    /// The row's arms (several arms of branches on one row): each one's
+    /// branch and its parent arm, if nested.
+    arms: Vec<(usize, Option<usize>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -507,9 +510,6 @@ struct LoanF {
     holders: Vec<String>,
     /// The loan record's end rows, when the dump gives them.
     end_lines: Option<Vec<u32>>,
-    two_phase: bool,
-    /// The row a two-phase borrow is activated on, when the dump says.
-    activation: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -524,10 +524,11 @@ struct BodyF {
 }
 
 /// The producer's borrow kind, normalised: `mut(two-phase)` is mut, a
-/// closure's `unique(..)` stays unique (not mut).
+/// closure's `unique(..)` stays unique (not mut), `reserved` (a two-phase
+/// `&mut` before its activation, v2) stays reserved.
 fn norm_kind(k: &str) -> String {
     let k = k.trim().to_ascii_lowercase();
-    for base in ["shared", "mut", "unique", "shallow"] {
+    for base in ["shared", "mut", "unique", "reserved", "shallow"] {
         if k.starts_with(base) {
             return base.into();
         }
@@ -550,32 +551,62 @@ fn nums(v: &Value) -> Vec<u32> {
 
 /// Whether a loan of `lender` restricts column `col` (spike dumps only:
 /// RustViz 3's are keyed by column already). One is a field path of the
-/// other; `v[_]` restricts `v`. `*b` restricts `b` only when `b` owns its
-/// referent (a Box: `owns`) or is a `&mut` (`&mut b` could write `*b`); a
-/// loan of `*p` through a shared reference `p` leaves `p` free.
-fn overlaps(lender: &str, col: &str, owns: &dyn Fn(&str) -> bool) -> bool {
-    let mut l = lender;
-    while let Some(rest) = l.strip_prefix('*') {
-        let root = rest.trim_start_matches('*').split(['.', '[']).next().unwrap_or(rest);
-        if !owns(root) {
-            return l == col;
+/// other; `v[_]` restricts `v`. `*b` / `**r` restrict the root only when
+/// every dereference goes through a Box or a `&mut` (`ty_of`: the root's
+/// type); a loan of the referent of a shared reference leaves the
+/// reference free (`&**r` with `r: &mut &String` doesn't restrict r).
+fn overlaps(lender: &str, col: &str, ty_of: &dyn Fn(&str) -> Option<String>) -> bool {
+    let derefs = lender.len() - lender.trim_start_matches('*').len();
+    let l = lender.trim_start_matches('*');
+    if derefs > 0 {
+        let root = l.split(['.', '[']).next().unwrap_or(l);
+        if !ty_of(root).is_some_and(|t| derefs_restrict(&t, derefs)) {
+            return lender == col;
         }
-        l = rest;
     }
     let l = l.split('[').next().unwrap_or(l);
     l == col || l.starts_with(&format!("{col}.")) || col.starts_with(&format!("{l}."))
+}
+
+/// Whether dereferencing a value of type `ty` `n` times goes through `&mut`
+/// or `Box` only (a loan there restricts the value itself).
+fn derefs_restrict(ty: &str, n: usize) -> bool {
+    let mut t = ty.trim().to_owned();
+    for _ in 0..n {
+        if let Some(rest) = t.strip_prefix('&') {
+            let rest = rest.trim_start();
+            // A lifetime: `&'a mut T`.
+            let rest = if rest.starts_with('\'') { rest.split_once(' ').map_or("", |x| x.1) } else { rest };
+            match rest.strip_prefix("mut ") {
+                Some(inner) => t = inner.trim().to_owned(),
+                None => return false,
+            }
+        } else if let Some(at) = t.find("Box<").filter(|&a| t[..a].chars().all(|c| c.is_alphanumeric() || c == ':' || c == '_')) {
+            let inner = &t[at + 4..];
+            let inner = inner.rsplit_once('>').map_or(inner, |x| x.0);
+            // `Box<T, A>`: the first argument.
+            t = inner.split(", std::alloc").next().unwrap_or(inner).trim().to_owned();
+        } else {
+            return false;
+        }
+    }
+    true
 }
 
 fn load_facts(v: &Value) -> Result<Vec<BodyF>, String> {
     let (bodies, spike) = match v {
         Value::Array(a) => (a.clone(), true),
         Value::Object(o) => match (o.get("version").and_then(Value::as_u64), o.get("bodies")) {
-            (Some(1), Some(Value::Array(b))) => {
+            (Some(1 | 2), Some(Value::Array(b))) => {
                 // A body the producer failed on has no facts: that's a
                 // failure to read, never an expected (xfail) result.
                 let errs = o.get("errors").map(strs).unwrap_or_default();
                 if !errs.is_empty() {
                     return Err(format!("the fact producer failed: {errs:?}"));
+                }
+                // No body: nothing to check is a failure to read, too.
+                if b.is_empty() {
+                    return Err("the fact dump has no bodies".into());
                 }
                 (b.clone(), false)
             }
@@ -585,12 +616,11 @@ fn load_facts(v: &Value) -> Result<Vec<BodyF>, String> {
     };
     let mut out = Vec::new();
     for b in &bodies {
-        // Variables a `*x` loan restricts (spike dumps): Boxes and `&mut`s.
-        let restricting: Vec<String> = b["vars"].as_array().into_iter().flatten()
-            .filter(|v| v["kind"] == "mut_ref" || (v["kind"] == "owner" && v["ty"].as_str().is_some_and(|t| t.contains("Box<"))))
-            .filter_map(|v| v["name"].as_str().map(str::to_owned))
+        // Variables' types (spike dumps: which `*x` loans restrict x).
+        let types: Vec<(String, String)> = b["vars"].as_array().into_iter().flatten()
+            .filter_map(|v| Some((v["name"].as_str()?.to_owned(), v["ty"].as_str()?.to_owned())))
             .collect();
-        let owns = |root: &str| restricting.iter().any(|r| r == root);
+        let ty_of = |root: &str| types.iter().find(|(n, _)| n == root).map(|(_, t)| t.clone());
         let mut rows = BTreeMap::new();
         for r in b["rows"].as_array().into_iter().flatten() {
             let line = r["line"].as_u64().unwrap_or(0) as u32;
@@ -604,8 +634,8 @@ fn load_facts(v: &Value) -> Result<Vec<BodyF>, String> {
                         let s = l.as_str().unwrap_or("");
                         let (kind, rest) = s.split_once(':').unwrap_or(("", s));
                         let (id, holder) = rest.split_once("->").unwrap_or((rest, ""));
-                        let lt = Lent { loan: id.trim_start_matches('L').parse().unwrap_or(usize::MAX), kind: norm_kind(kind), holders: holder_set(holder), two_phase: kind.contains("two-phase") };
-                        let mut cols: Vec<String> = state.keys().filter(|c| overlaps(k, c, &owns)).cloned().collect();
+                        let lt = Lent { loan: id.trim_start_matches('L').parse().unwrap_or(usize::MAX), kind: norm_kind(kind), holders: holder_set(holder) };
+                        let mut cols: Vec<String> = state.keys().filter(|c| overlaps(k, c, &ty_of)).cloned().collect();
                         cols.push(k.clone());
                         cols.sort();
                         cols.dedup();
@@ -617,7 +647,6 @@ fn load_facts(v: &Value) -> Result<Vec<BodyF>, String> {
                             loan: l["loan"].as_u64().unwrap_or(u64::MAX) as usize,
                             kind: norm_kind(l["kind"].as_str().unwrap_or("")),
                             holders: holder_set(l["holder"].as_str().unwrap_or("")),
-                            two_phase: l["two_phase"] == Value::Bool(true),
                         });
                     }
                 }
@@ -625,8 +654,11 @@ fn load_facts(v: &Value) -> Result<Vec<BodyF>, String> {
             let parts = r["parts"].as_object().into_iter().flatten()
                 .map(|(k, p)| (k.clone(), (strs(&p["moved"]), strs(&p["maybe"])))).collect();
             let facts = r["facts"].as_array().cloned().unwrap_or_default();
-            let arms = r["arms"].as_array().into_iter().flatten().map(|a| a["parent"].as_u64().map(|p| p as usize)).collect();
-            rows.insert(line, RowF { state, parts, lent, facts, arms });
+            let arms = r["arms"].as_array().into_iter().flatten()
+                .map(|a| (a["branch"].as_u64().unwrap_or(0) as usize, a["parent"].as_u64().map(|p| p as usize))).collect();
+            let cause = r["cause"].as_object().into_iter().flatten()
+                .filter_map(|(k, c)| c.as_str().map(|c| (k.clone(), c.to_owned()))).collect();
+            rows.insert(line, RowF { state, parts, lent, cause, facts, arms });
         }
         let loans: Vec<LoanF> = b["loans"].as_array().into_iter().flatten().map(|l| LoanF {
             id: l["loan"].as_u64().unwrap_or(u64::MAX) as usize,
@@ -635,17 +667,20 @@ fn load_facts(v: &Value) -> Result<Vec<BodyF>, String> {
             kind: norm_kind(l["kind"].as_str().unwrap_or("")),
             holders: strs(&l["holders"]).iter().flat_map(|h| holder_set(h)).collect(),
             end_lines: l.get("end_lines").map(nums),
-            two_phase: l["two_phase"] == Value::Bool(true) || l["kind"].as_str().is_some_and(|k| k.contains("two-phase")),
-            activation: l["activation_line"].as_u64().map(|a| a as u32),
         }).collect();
-        // A row's `lent` entry takes its kind from the loan's record: a
-        // spike row says `mut` for a closure's unique capture.
-        for r in rows.values_mut() {
-            for ls in r.lent.values_mut() {
-                for lt in ls.iter_mut() {
-                    if let Some(x) = loans.iter().find(|x| x.id == lt.loan) {
-                        lt.kind = x.kind.clone();
-                        lt.two_phase |= x.two_phase;
+        // A spike row says `mut` for a closure's unique capture: its `lent`
+        // entries take the kind from the loan's record. RustViz 3 rows
+        // (v2: shared | mut | unique | reserved) are kept as they are, so a
+        // row that contradicts its record is caught.
+        if spike {
+            for r in rows.values_mut() {
+                for ls in r.lent.values_mut() {
+                    for lt in ls.iter_mut() {
+                        if let Some(x) = loans.iter().find(|x| x.id == lt.loan) {
+                            if x.kind == "unique" {
+                                lt.kind = x.kind.clone();
+                            }
+                        }
                     }
                 }
             }
@@ -770,22 +805,30 @@ impl Pat {
 /// whose path ends in `::func`; two such bodies (`A::run`, `B::run`) are
 /// an error, never a guess.
 fn body<'a>(facts: &'a [BodyF], func: &str) -> Result<&'a BodyF, String> {
-    let func = canon_fn(func);
-    if let Some(b) = facts.iter().find(|b| canon_fn(&b.func) == func) {
+    if let Some(b) = facts.iter().find(|b| b.func == func) {
         return Ok(b);
     }
-    let suffix = format!("::{func}");
-    let hits: Vec<&BodyF> = facts.iter().filter(|b| canon_fn(&b.func).ends_with(&suffix)).collect();
-    match hits[..] {
-        [b] => Ok(b),
-        [] => Err(format!("no body `{func}` in the dump")),
-        _ => Err(format!("`{func}` names several bodies: {:?}", hits.iter().map(|b| &b.func).collect::<Vec<_>>())),
+    let one = |hits: Vec<&'a BodyF>, how: &str| -> Option<Result<&'a BodyF, String>> {
+        match hits[..] {
+            [b] => Some(Ok(b)),
+            [] => None,
+            _ => Some(Err(format!("`{func}` names several bodies ({how}): {:?}", hits.iter().map(|b| &b.func).collect::<Vec<_>>()))),
+        }
+    };
+    let c = canon_fn(func);
+    if let Some(r) = one(facts.iter().filter(|b| canon_fn(&b.func) == c).collect(), "same canonical name") {
+        return r;
     }
+    let suffix = format!("::{c}");
+    one(facts.iter().filter(|b| canon_fn(&b.func).ends_with(&suffix)).collect(), "same path suffix")
+        .unwrap_or_else(|| Err(format!("no body `{func}` in the dump")))
 }
 
-/// A function path without generic arguments, with a qualified self
-/// type shortened to last segments: `<D<'_> as std::ops::Drop>::drop` ->
-/// `<D as Drop>::drop`; `a::Foo::<T>::bar` -> `a::Foo::bar`.
+/// A function path without generic arguments; in a qualified self type
+/// the trait is shortened to its last segment, the type keeps its module
+/// path: `<D<'_> as std::ops::Drop>::drop` -> `<D as Drop>::drop`,
+/// `<a::D as Drop>::drop` stays apart from `<b::D as Drop>::drop`;
+/// `a::Foo::<T>::bar` -> `a::Foo::bar`.
 fn canon_fn(s: &str) -> String {
     // Drop `<..>` right after a name or `::` (generic arguments); keep a
     // leading `<` (a qualified self type).
@@ -809,12 +852,11 @@ fn canon_fn(s: &str) -> String {
         }
         out.push(c);
     }
-    let last = |p: &str| p.rsplit("::").next().unwrap_or(p).trim().to_owned();
     if let Some(rest) = out.strip_prefix('<') {
         if let Some((inner, tail)) = rest.split_once('>') {
             let inner = match inner.split_once(" as ") {
-                Some((ty, tr)) => format!("{} as {}", last(ty), last(tr)),
-                None => last(inner),
+                Some((ty, tr)) => format!("{} as {}", ty.trim(), tr.rsplit("::").next().unwrap_or(tr).trim()),
+                None => inner.trim().to_owned(),
             };
             return format!("<{inner}>{tail}");
         }
@@ -822,70 +864,15 @@ fn canon_fn(s: &str) -> String {
     out
 }
 
-/// Where control can go, from the program text (`syn`): loop bodies (a
-/// back edge reaches their earlier rows) and the arms of each branch (an
-/// arm doesn't reach its siblings).
+/// The program's lines.
 #[derive(Default)]
 struct Shape<'a> {
     lines: Vec<&'a str>,
-    loops: Vec<(u32, u32)>,
-    branches: Vec<Vec<(u32, u32)>>,
 }
 
 impl<'a> Shape<'a> {
     fn of(src: &'a str) -> Shape<'a> {
-        use syn::spanned::Spanned;
-        use syn::visit::Visit;
-        let lines_of = |s: proc_macro2::Span| (s.start().line as u32, s.end().line as u32);
-        struct V<F: Fn(proc_macro2::Span) -> (u32, u32)> {
-            loops: Vec<(u32, u32)>,
-            branches: Vec<Vec<(u32, u32)>>,
-            l: F,
-        }
-        impl<'ast, F: Fn(proc_macro2::Span) -> (u32, u32)> Visit<'ast> for V<F> {
-            fn visit_expr_if(&mut self, e: &'ast syn::ExprIf) {
-                let mut arms = vec![(self.l)(e.then_branch.span())];
-                if let Some((_, els)) = &e.else_branch {
-                    arms.push((self.l)(els.span()));
-                }
-                self.branches.push(arms);
-                syn::visit::visit_expr_if(self, e);
-            }
-            fn visit_expr_match(&mut self, e: &'ast syn::ExprMatch) {
-                self.branches.push(e.arms.iter().map(|a| (self.l)(a.span())).collect());
-                syn::visit::visit_expr_match(self, e);
-            }
-            fn visit_expr_for_loop(&mut self, e: &'ast syn::ExprForLoop) {
-                self.loops.push((self.l)(e.span()));
-                syn::visit::visit_expr_for_loop(self, e);
-            }
-            fn visit_expr_while(&mut self, e: &'ast syn::ExprWhile) {
-                self.loops.push((self.l)(e.span()));
-                syn::visit::visit_expr_while(self, e);
-            }
-            fn visit_expr_loop(&mut self, e: &'ast syn::ExprLoop) {
-                self.loops.push((self.l)(e.span()));
-                syn::visit::visit_expr_loop(self, e);
-            }
-        }
-        let mut v = V { loops: Vec::new(), branches: Vec::new(), l: lines_of };
-        if let Ok(f) = syn::parse_file(src) {
-            v.visit_file(&f);
-        }
-        Shape { lines: src.lines().collect(), loops: v.loops, branches: v.branches }
-    }
-
-    /// Whether code on row `from` can run before the state after row `to`
-    /// on some path: in the same loop, or above it and not in a sibling arm.
-    fn reaches(&self, from: u32, to: u32) -> bool {
-        if self.loops.iter().any(|&(a, b)| a <= from && from <= b && a <= to && to <= b) {
-            return true;
-        }
-        let arm = |arms: &Vec<(u32, u32)>, r: u32| arms.iter().position(|&(a, b)| a < r && r <= b || a == r && a == b);
-        if self.branches.iter().any(|arms| matches!((arm(arms, from), arm(arms, to)), (Some(x), Some(y)) if x != y)) {
-            return false;
-        }
-        from <= to
+        Shape { lines: src.lines().collect() }
     }
 }
 
@@ -897,22 +884,63 @@ fn row_after(b: &BodyF, row: u32) -> Option<&RowF> {
     b.rows.get(&row).filter(|r| !r.state.is_empty())
 }
 
-/// The facts that happen on row `row`: the row's own, except drops the
-/// dump marks as run only on an early exit elsewhere (their MIR span is
-/// the scope's `}`), plus facts marked as run by an early exit on `row`
-/// (`early_exit`) or shared with one (`also_on_exits`).
-fn row_facts(b: &BodyF, row: u32) -> Vec<&Value> {
+/// The facts that happen on row `row`, with the arm of the row each runs
+/// in (the dump's `arm`; None: on every path through the row): the row's
+/// own, except drops the dump marks as run only on an early exit elsewhere
+/// (their MIR span is the scope's `}`), plus facts marked as run by an
+/// early exit on `row` (`early_exit`) or shared with one (`also_on_exits`),
+/// which keep their `arm` (the exit row's arm that exits).
+fn row_facts(b: &BodyF, row: u32) -> Vec<(&Value, Option<usize>)> {
     let mut out = Vec::new();
     for (l, r) in &b.rows {
         for f in &r.facts {
             let exit = f["early_exit"].as_u64().map(|e| e as u32);
             let also = nums(&f["also_on_exits"]);
             if (*l == row && exit.is_none()) || exit == Some(row) || (*l != row && also.contains(&row)) {
-                out.push(f);
+                out.push((f, f["arm"].as_u64().map(|a| a as usize)));
             }
         }
     }
     out
+}
+
+/// The paths through a row's arms: sets of arms that run together. One arm
+/// of each branch whose parent arm runs (or that has none); sequential
+/// branches on one row combine.
+fn arm_paths(arms: &[(usize, Option<usize>)]) -> Vec<Vec<usize>> {
+    let mut branches: Vec<(usize, Option<usize>)> = arms.iter().map(|&(b, p)| (b, p)).collect();
+    branches.sort();
+    branches.dedup();
+    let mut paths: Vec<Vec<usize>> = vec![Vec::new()];
+    // Branches in order of nesting: a branch is decided once its parent is.
+    let mut done: Vec<(usize, Option<usize>)> = Vec::new();
+    while done.len() < branches.len() {
+        let before = done.len();
+        for &(br, parent) in &branches {
+            if done.contains(&(br, parent)) || parent.is_some_and(|p| !done.iter().any(|&(b2, _)| arms.get(p).is_some_and(|a| a.0 == b2))) {
+                continue;
+            }
+            let members: Vec<usize> = (0..arms.len()).filter(|&k| arms[k] == (br, parent)).collect();
+            let mut next = Vec::new();
+            for path in &paths {
+                if parent.is_some_and(|p| !path.contains(&p)) {
+                    next.push(path.clone());
+                    continue;
+                }
+                for &m in &members {
+                    let mut q = path.clone();
+                    q.push(m);
+                    next.push(q);
+                }
+            }
+            paths = next;
+            done.push((br, parent));
+        }
+        if done.len() == before {
+            break;
+        }
+    }
+    paths
 }
 
 /// Whether `src`'s row `r` holds only braces, `else`, `;` (no code).
@@ -922,26 +950,27 @@ fn brace_only(src: &[&str], r: u32) -> bool {
 
 /// Whether a `BorrowEnd` on (`row`, `to`) is the end `want` names. `next`
 /// may be any row, an earlier one included (a loop's back edge); the dump's
-/// `to` may stop at brace-only rows before it.
-fn end_fits(want: EndSpec, row: u32, to: u32, src: &[&str]) -> bool {
+/// `to` may stop at rows before it that `skip` allows (brace-only rows the
+/// dump has no facts on: a `}` row with a drop is code of its own path).
+fn end_fits(want: EndSpec, row: u32, to: u32, skip: &dyn Fn(u32) -> bool) -> bool {
     match want {
         EndSpec::Row(r) => r == row,
-        EndSpec::Edge([r, n]) => r == row && (to == n || (to < n && (to..n).all(|k| brace_only(src, k)))),
+        EndSpec::Edge([r, n]) => r == row && (to == n || (to < n && (to..n).all(skip))),
     }
 }
 
 /// Whether the dump's ends match `want` one to one (a multiset: two
 /// edges ending on one row are two ends), in any order (a bipartite
 /// matching, so overlapping specs can't steal each other's edge).
-fn ends_match(want: &[EndSpec], got: &[(u32, u32)], src: &[&str]) -> bool {
+fn ends_match(want: &[EndSpec], got: &[(u32, u32)], skip: &dyn Fn(u32) -> bool) -> bool {
     if want.len() != got.len() {
         return false;
     }
-    fn augment(w: usize, want: &[EndSpec], got: &[(u32, u32)], src: &[&str], seen: &mut [bool], owner: &mut [Option<usize>]) -> bool {
+    fn augment(w: usize, want: &[EndSpec], got: &[(u32, u32)], skip: &dyn Fn(u32) -> bool, seen: &mut [bool], owner: &mut [Option<usize>]) -> bool {
         for g in 0..got.len() {
-            if !seen[g] && end_fits(want[w], got[g].0, got[g].1, src) {
+            if !seen[g] && end_fits(want[w], got[g].0, got[g].1, skip) {
                 seen[g] = true;
-                if owner[g].is_none_or(|o| augment(o, want, got, src, seen, owner)) {
+                if owner[g].is_none_or(|o| augment(o, want, got, skip, seen, owner)) {
                     owner[g] = Some(w);
                     return true;
                 }
@@ -950,7 +979,7 @@ fn ends_match(want: &[EndSpec], got: &[(u32, u32)], src: &[&str]) -> bool {
         false
     }
     let mut owner = vec![None; got.len()];
-    (0..want.len()).all(|w| augment(w, want, got, src, &mut vec![false; got.len()], &mut owner))
+    (0..want.len()).all(|w| augment(w, want, got, skip, &mut vec![false; got.len()], &mut owner))
 }
 
 fn kind_ok(want: &Option<String>, got: &str) -> bool {
@@ -961,10 +990,12 @@ fn kind_ok(want: &Option<String>, got: &str) -> bool {
     }
 }
 
-/// Ok(()) or what the facts say instead. `shape`: the program's.
-fn check(a: &Assertion, facts: &[BodyF], shape: &Shape) -> Result<(), String> {
+/// Ok(()) or what the facts say instead. `shape`: the program's; `hand`:
+/// the case's hand-written states (they say why a bare `maybe` is maybe).
+fn check(a: &Assertion, facts: &[BodyF], shape: &Shape, hand: &[(String, u32, String, String)]) -> Result<(), String> {
     let src = &shape.lines[..];
     let b = body(facts, &a.func)?;
+    let skip = |k: u32| brace_only(src, k) && b.rows.get(&k).is_none_or(|r| r.facts.is_empty());
     match &a.check {
         Check::State { row, place, is } => {
             let r = row_after(b, *row);
@@ -972,30 +1003,40 @@ fn check(a: &Assertion, facts: &[BodyF], shape: &Shape) -> Result<(), String> {
             let lent: Vec<&Lent> = r.and_then(|r| r.lent.get(place)).into_iter().flatten().collect();
             let parts = r.and_then(|r| r.parts.get(place));
             let any_parts = parts.is_some_and(|(m, may)| !m.is_empty() || !may.is_empty());
-            // A two-phase loan is exclusive only once activated; a dump
-            // without its activation row leaves it a reservation (others may
-            // still read: it counts as shared here).
-            let activated = |l: &Lent| {
-                !l.two_phase || b.loans.iter().find(|x| x.id == l.loan).and_then(|x| x.activation).is_some_and(|act| act <= *row)
+            // `reserved` (a two-phase `&mut` before activation) lets others
+            // read: not exclusive. `mut` and `unique` are.
+            let excl = lent.iter().any(|l| l.kind == "mut" || l.kind == "unique");
+            // Why a place is "maybe": the dump's cause when it gives one
+            // (`maybe-moved` / `maybe-unassigned`, or `cause`), else the
+            // case's hand-written state for this row; else undecided.
+            let cause = match st {
+                Some("maybe-moved") => Some("moved"),
+                Some("maybe-unassigned") => Some("unassigned"),
+                Some("maybe") => r.and_then(|r| r.cause.get(place)).map(String::as_str).or_else(|| {
+                    hand.iter().find(|(f, hr, hp, _)| *hr == *row && hp == place && canon_fn(f) == canon_fn(&a.func)).and_then(|h| match h.3.as_str() {
+                        "maybe-moved" => Some("moved"),
+                        "maybe-unassigned" => Some("unassigned"),
+                        _ => None,
+                    })
+                }),
+                _ => None,
             };
-            let excl = lent.iter().any(|l| (l.kind == "mut" || l.kind == "unique") && activated(l));
-            // "maybe" alone doesn't say why: moved on some path (a move of
-            // it, or of a parent, on a row whose code can run before this
-            // point) or never assigned on some path (no such move). A
-            // producer may also say so itself.
-            let was_moved = b.moved.iter().any(|(r, m)| (m == place || place.starts_with(&format!("{m}."))) && shape.reaches(*r, *row));
+            let maybe = matches!(st, Some("maybe" | "maybe-moved" | "maybe-unassigned"));
+            if maybe && cause.is_none() && matches!(is.as_str(), "moved*" | "unassigned*" | "maybe-moved" | "maybe-unassigned") {
+                return Err(format!("`maybe` without a cause after row {row}: add a hand-written maybe-moved / maybe-unassigned state for {place} on this row"));
+            }
             let ok = match is.as_str() {
                 "own" => st == Some("own") && lent.is_empty() && !any_parts,
                 "shared" => st == Some("own") && !lent.is_empty() && !excl,
                 "mut" => matches!(st, Some("own" | "partly")) && excl,
                 "moved" => st == Some("moved"),
-                "maybe-moved" => st == Some("maybe-moved") || (st == Some("maybe") && was_moved),
-                "moved*" => matches!(st, Some("moved" | "maybe" | "maybe-moved")),
+                "maybe-moved" => maybe && cause == Some("moved"),
+                "moved*" => st == Some("moved") || (maybe && cause == Some("moved")),
                 "partly" => st == Some("partly"),
                 "partly*" => st == Some("partly") || any_parts,
                 "unassigned" => st == Some("unassigned"),
-                "maybe-unassigned" => st == Some("maybe-unassigned") || (st == Some("maybe") && !was_moved),
-                "unassigned*" => matches!(st, Some("unassigned" | "maybe" | "maybe-unassigned")),
+                "maybe-unassigned" => maybe && cause == Some("unassigned"),
+                "unassigned*" => st == Some("unassigned") || (maybe && cause == Some("unassigned")),
                 "absent" => st.is_none(),
                 _ => false,
             };
@@ -1026,7 +1067,11 @@ fn check(a: &Assertion, facts: &[BodyF], shape: &Shape) -> Result<(), String> {
             // Ends per CFG edge, from the dump's BorrowEnd facts: (row, next row).
             let edges = |x: &LoanF| -> Vec<(u32, u32)> { b.ends.iter().filter(|e| e.0 == x.id).map(|e| (e.1, e.2)).collect() };
             let fits = |x: &&LoanF| {
-                let e = edges(x);
+                // One end per (row, next row): MIR can have two CFG edges
+                // between the same rows (a false edge), one path end.
+                let mut e = edges(x);
+                e.sort();
+                e.dedup();
                 // The loan record's end rows must agree too (a consumer of
                 // the summary sees those).
                 let summary_ok = |want: &Vec<EndSpec>| x.end_lines.as_ref().is_none_or(|el| {
@@ -1038,9 +1083,11 @@ fn check(a: &Assertion, facts: &[BodyF], shape: &Shape) -> Result<(), String> {
                     g.dedup();
                     a == g
                 });
-                l.ends.as_ref().is_none_or(|want| ends_match(want, &e, src) && summary_ok(want))
-                    && l.ends_include.iter().all(|r| e.iter().any(|g| g.0 == *r))
-                    && !l.ends_exclude.iter().any(|r| e.iter().any(|g| g.0 == *r))
+                let rec = |r: &u32| x.end_lines.as_ref().is_none_or(|el| el.contains(r));
+                let not_rec = |r: &u32| x.end_lines.as_ref().is_none_or(|el| !el.contains(r));
+                l.ends.as_ref().is_none_or(|want| ends_match(want, &e, &skip) && summary_ok(want))
+                    && l.ends_include.iter().all(|r| e.iter().any(|g| g.0 == *r) && rec(r))
+                    && !l.ends_exclude.iter().any(|r| e.iter().any(|g| g.0 == *r) || !not_rec(r))
             };
             let hit = cands.iter().any(fits);
             let show = |x: &LoanF| format!("{} {} -> {:?} ends (row, next) {:?}, record {:?}", x.kind, x.lender, x.holders, edges(x), x.end_lines);
@@ -1052,7 +1099,7 @@ fn check(a: &Assertion, facts: &[BodyF], shape: &Shape) -> Result<(), String> {
             if l.absent { if cands.is_empty() { Ok(()) } else { Err(got) } } else if hit { Ok(()) } else { Err(got) }
         }
         Check::Drop { row, place, how, absent } => {
-            let fs = row_facts(b, *row);
+            let fs: Vec<&Value> = row_facts(b, *row).into_iter().map(|x| x.0).collect();
             let drops: Vec<&&Value> = fs.iter().filter(|f| {
                 let ev = f["ev"].as_str().unwrap_or("");
                 (ev == "Drop" || ev == "ScopeEnd") && f["path"].as_str() == Some(place.as_str())
@@ -1073,7 +1120,7 @@ fn check(a: &Assertion, facts: &[BodyF], shape: &Shape) -> Result<(), String> {
         }
         Check::Event { row, ev, absent } => {
             let p = Pat::parse(ev)?;
-            let fs = row_facts(b, *row);
+            let fs: Vec<&Value> = row_facts(b, *row).into_iter().map(|x| x.0).collect();
             let hit = fs.iter().any(|f| p.matches(f));
             if hit != *absent { Ok(()) } else { Err(format!("row facts: {}", brief(&fs))) }
         }
@@ -1081,38 +1128,20 @@ fn check(a: &Assertion, facts: &[BodyF], shape: &Shape) -> Result<(), String> {
             let pats: Vec<Pat> = events.iter().map(|e| Pat::parse(e)).collect::<Result<_, _>>()?;
             let fs = row_facts(b, *row);
             // One sequence per path through the row: facts outside any arm
-            // (and those from other rows) plus one innermost arm and its
-            // parents. The events must be in order on one of them.
+            // plus those of one choice of arms (one arm per branch whose
+            // parent arm runs; sequential branches on one row combine).
             let arms = b.rows.get(row).map_or(&[][..], |r| &r.arms[..]);
-            let own: Vec<*const Value> = b.rows.get(row).map_or(Vec::new(), |r| r.facts.iter().map(|f| f as *const Value).collect());
-            let arm_of = |f: &Value| if own.contains(&(f as *const Value)) { f["arm"].as_u64().map(|a| a as usize) } else { None };
-            let chain = |k: usize| {
-                let mut c = vec![k];
-                while let Some(Some(p)) = arms.get(*c.last().unwrap()) {
-                    if c.contains(p) {
-                        break;
-                    }
-                    c.push(*p);
-                }
-                c
-            };
-            let paths: Vec<Option<Vec<usize>>> =
-                if arms.is_empty() { vec![None] } else { (0..arms.len()).map(|k| Some(chain(k))).collect() };
-            let in_order = |path: &Option<Vec<usize>>| {
+            let in_order = |path: &[usize]| {
                 let mut k = 0;
-                for f in &fs {
-                    let on = match (arm_of(f), path) {
-                        (None, _) => true,
-                        (Some(a), Some(c)) => c.contains(&a),
-                        (Some(_), None) => false,
-                    };
-                    if on && k < pats.len() && pats[k].matches(f) {
+                for (f, arm) in &fs {
+                    if arm.is_none_or(|a| path.contains(&a)) && k < pats.len() && pats[k].matches(f) {
                         k += 1;
                     }
                 }
                 k == pats.len()
             };
-            if paths.iter().any(in_order) { Ok(()) } else { Err(format!("row facts in order: {}", brief(&fs))) }
+            let all: Vec<&Value> = fs.iter().map(|x| x.0).collect();
+            if arm_paths(arms).iter().any(|p| in_order(p)) { Ok(()) } else { Err(format!("row facts in order: {}", brief(&all))) }
         }
     }
 }
@@ -1196,12 +1225,14 @@ fn rv3_issue_cases_against_facts() {
         checked += 1;
         let src = all.iter().find(|c| &c.0 == name).map(|c| c.1.as_str()).unwrap_or("");
         let shape = Shape::of(src);
+        let hand: Vec<(String, u32, String, String)> = case.state.iter()
+            .map(|h| (h.func.clone().unwrap_or_else(|| case.func.clone()), h.row, h.place.clone(), h.is.clone())).collect();
         let mut fails = Vec::new();
         for a in assertions(case) {
             a_total += 1;
             let e = a_pass.entry(a.src.clone()).or_default();
             e.1 += 1;
-            match check(&a, facts, &shape) {
+            match check(&a, facts, &shape, &hand) {
                 Ok(()) => e.0 += 1,
                 Err(got) => fails.push(format!("    [{}] {}: got {}", a.src, a.what, got)),
             }
@@ -1284,8 +1315,10 @@ fn rv3_issue_cases_gen() {
         failed.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n"));
 }
 
+/// Whether the case has a generated block that isn't a skip (even an empty
+/// `states = []`: a real result a failure mustn't overwrite).
 fn case_had_states(text: &str) -> bool {
-    toml::from_str::<Case>(text).ok().and_then(|c| c.oracle).is_some_and(|o| !o.states.is_empty())
+    toml::from_str::<Case>(text).ok().and_then(|c| c.oracle).is_some_and(|o| o.skipped.is_none())
 }
 
 fn gen_one(name: &str, src: &str, text: &str) -> String {
@@ -1359,7 +1392,7 @@ fn rv3_harness_catches_wrong_facts() {
         load_facts(&v).unwrap()
     };
     let issue: Vec<Assertion> = assertions(&case).into_iter().filter(|a| a.src == "issue").collect();
-    let failing = |f: &[BodyF]| issue.iter().filter(|a| check(a, f, &shape).is_err()).map(|a| a.what.clone()).collect::<Vec<_>>();
+    let failing = |f: &[BodyF]| issue.iter().filter(|a| check(a, f, &shape, &[]).is_err()).map(|a| a.what.clone()).collect::<Vec<_>>();
     let right = dump(true, "[]");
     assert!(failing(&right).is_empty(), "right facts fail: {:?}", failing(&right));
     let wrong = dump(false, r#"[{"loan": 0, "kind": "shared", "holder": "c"}]"#);
@@ -1375,51 +1408,82 @@ fn rv3_harness_catches_wrong_facts() {
 fn rv3_harness_adapter() {
     assert_eq!(norm_kind("mut(two-phase)"), "mut");
     assert_eq!(norm_kind("unique(closure)"), "unique");
+    assert_eq!(norm_kind("reserved"), "reserved");
     assert_eq!(holder_set("r|h"), vec!["r".to_owned(), "h".to_owned()]);
-    let owns_b = |r: &str| r == "b";
-    assert!(overlaps("*b", "b", &owns_b), "a loan of a Box's payload restricts the Box");
-    assert!(!overlaps("*p", "p", &owns_b), "a loan of *p through a shared reference leaves p free");
-    assert!(overlaps("v[_]", "v", &owns_b) && overlaps("p.a", "p", &owns_b) && overlaps("p", "p.a", &owns_b));
+    let types = |r: &str| match r {
+        "b" => Some("std::boxed::Box<std::string::String>".to_owned()),
+        "p" => Some("&std::string::String".to_owned()),
+        "r" => Some("&mut &mut std::string::String".to_owned()),
+        "q" => Some("&mut &std::string::String".to_owned()),
+        _ => Some("std::string::String".to_owned()),
+    };
+    assert!(overlaps("*b", "b", &types), "a loan of a Box's payload restricts the Box");
+    assert!(!overlaps("*p", "p", &types), "a loan of *p through a shared reference leaves p free");
+    assert!(overlaps("**r", "r", &types), "**r through &mut &mut restricts r");
+    assert!(!overlaps("**q", "q", &types), "**q through &mut & doesn't restrict q (`&mut q` compiles while it's live)");
+    assert!(overlaps("v[_]", "v", &types) && overlaps("p.a", "p", &types) && overlaps("p", "p.a", &types));
     let src = ["fn f() {", "    if c {", "        x();", "    }", "    y();", "}"];
+    let braces = |k: u32| brace_only(&src, k);
     // An end on row 2 on the path that skips the arm continues at row 4's
     // `}` (braces only) and then row 5.
-    assert!(ends_match(&[EndSpec::Edge([2, 5])], &[(2, 4)], &src));
-    assert!(!ends_match(&[EndSpec::Edge([2, 5])], &[(2, 3)], &src), "the edge into the arm is another path");
-    assert!(!ends_match(&[EndSpec::Edge([2, 5])], &[(2, 2)], &src), "an end before the branch isn't per path");
-    assert!(!ends_match(&[EndSpec::Row(2)], &[(2, 3), (2, 4)], &src), "two edges are two ends");
-    assert!(ends_match(&[EndSpec::Row(2), EndSpec::Edge([2, 3])], &[(2, 4), (2, 3)], &src));
-    let v: Value = serde_json::from_str(r#"{"version": 1, "bodies": [
+    assert!(ends_match(&[EndSpec::Edge([2, 5])], &[(2, 4)], &braces));
+    assert!(!ends_match(&[EndSpec::Edge([2, 5])], &[(2, 4)], &|_| false), "a brace row with facts isn't skipped");
+    assert!(!ends_match(&[EndSpec::Edge([2, 5])], &[(2, 3)], &braces), "the edge into the arm is another path");
+    assert!(!ends_match(&[EndSpec::Edge([2, 5])], &[(2, 2)], &braces), "an end before the branch isn't per path");
+    assert!(!ends_match(&[EndSpec::Row(2)], &[(2, 3), (2, 4)], &braces), "two edges are two ends");
+    assert!(ends_match(&[EndSpec::Row(2), EndSpec::Edge([2, 3])], &[(2, 4), (2, 3)], &braces));
+    let src2 = ["fn f() {", "    if c {", "    }", "    }", "    y();"];
+    let braces2 = |k: u32| brace_only(&src2, k);
+    assert!(ends_match(&[EndSpec::Edge([2, 5]), EndSpec::Edge([2, 4])], &[(2, 4), (2, 5)], &braces2), "matching is order-free");
+    assert!(ends_match(&[EndSpec::Edge([5, 2])], &[(5, 2)], &braces2), "a back edge's next row is earlier");
+    let v: Value = serde_json::from_str(r#"{"version": 2, "bodies": [
         {"func": "A::run", "loans": [], "rows": [
           {"line": 3, "state": {"s": "own"}, "lent": {}, "facts": []},
           {"line": 6, "state": {}, "lent": {}, "facts": [
             {"ev": "Drop", "path": "s", "how": "drops", "early_exit": 4, "also_on_exits": []},
             {"ev": "Drop", "path": "t", "how": "drops", "early_exit": null, "also_on_exits": [4]},
             {"ev": "Drop", "path": "u", "how": "nothing_to_drop", "early_exit": null, "also_on_exits": []}]}]},
-        {"func": "B::run", "loans": [], "rows": []}]}"#).unwrap();
+        {"func": "B::run", "loans": [], "rows": []},
+        {"func": "<a::D<'_> as std::ops::Drop>::drop", "loans": [], "rows": []},
+        {"func": "<b::D as Drop>::drop", "loans": [], "rows": []}], "errors": []}"#).unwrap();
     let f = load_facts(&v).unwrap();
     assert!(body(&f, "run").is_err(), "two bodies end in ::run");
+    assert!(body(&f, "<a::D as Drop>::drop").is_ok_and(|b| b.func.starts_with("<a::")), "module paths stay apart");
+    assert!(body(&f, "<D as Drop>::drop").is_err(), "an unqualified D names neither");
     let a = body(&f, "A::run").unwrap();
     assert!(row_after(a, 4).is_none(), "row 4 has no state: not carried from row 3");
-    let drops = |row: u32| row_facts(a, row).iter().map(|f| f["path"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    let drops = |row: u32| row_facts(a, row).iter().map(|f| f.0["path"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
     assert_eq!(drops(4), vec!["s", "t"]);
     assert_eq!(drops(6), vec!["t", "u"], "s's drop runs only on the exit");
     let shape = Shape::default();
     let drop_u = Assertion { src: "issue".into(), func: "A::run".into(), what: String::new(),
         check: Check::Drop { row: 6, place: "u".into(), how: "definite".into(), absent: false } };
-    assert!(check(&drop_u, &f, &shape).is_err(), "nothing_to_drop is no destructor");
+    assert!(check(&drop_u, &f, &shape, &[]).is_err(), "nothing_to_drop is no destructor");
     assert!(facts_of(Some("/nonexistent/rv3-facts"), "x", "").is_err(), "a missing RV3_FACTS_DIR is an error");
-    // Round 2: producer errors, `**r`, order-free edge matching, back
-    // edges, canonical names, reachability.
     let bad: Value = serde_json::from_str(r#"{"version": 1, "bodies": [], "errors": ["main: panicked"]}"#).unwrap();
     assert!(load_facts(&bad).is_err(), "a producer error is a read failure");
-    let owns_r = |x: &str| x == "r";
-    assert!(overlaps("**r", "r", &owns_r), "a loan of **r restricts r (a &mut &mut)");
-    let src2 = ["fn f() {", "    if c {", "    }", "    }", "    y();"];
-    assert!(ends_match(&[EndSpec::Edge([2, 5]), EndSpec::Edge([2, 4])], &[(2, 4), (2, 5)], &src2), "matching is order-free");
-    assert!(ends_match(&[EndSpec::Edge([5, 2])], &[(5, 2)], &src2), "a back edge's next row is earlier");
+    let empty: Value = serde_json::from_str(r#"{"version": 2, "bodies": [], "errors": []}"#).unwrap();
+    assert!(load_facts(&empty).is_err(), "no bodies is a read failure");
     assert_eq!(canon_fn("<D<'_> as std::ops::Drop>::drop"), "<D as Drop>::drop");
     assert_eq!(canon_fn("a::Foo::<T>::bar"), "a::Foo::bar");
-    let sh = Shape::of("fn f(c: bool) {\n    let x;\n    if c {\n        x = 1;\n    } else {\n        x = 2;\n    }\n    for _ in 0..2 {\n        g(x);\n    }\n}\n");
-    assert!(!sh.reaches(4, 6), "a sibling arm doesn't reach");
-    assert!(sh.reaches(9, 8) && sh.reaches(4, 9) && !sh.reaches(9, 4));
+    assert_eq!(oracle_entry("<D as Drop>::drop 3 self own").unwrap(), ("<D as Drop>::drop".to_owned(), 3, "self".to_owned(), "own".to_owned()));
+    // Arms: two sequential branches on one row combine; nested arms need
+    // their parent.
+    let paths = arm_paths(&[(0, None), (0, None), (1, None), (1, None)]);
+    assert_eq!(paths.len(), 4, "{paths:?}");
+    assert!(paths.contains(&vec![0, 2]) && paths.contains(&vec![1, 3]));
+    let nested = arm_paths(&[(0, None), (0, None), (1, Some(1)), (1, Some(1))]);
+    assert_eq!(nested.len(), 3, "{nested:?}");
+    // A bare `maybe` needs a cause: the dump's, or the case's hand state.
+    let m: Value = serde_json::from_str(r#"{"version": 2, "bodies": [{"func": "main", "loans": [], "rows": [
+        {"line": 4, "state": {"s": "maybe"}, "lent": {}, "facts": []},
+        {"line": 5, "state": {"s": "maybe"}, "cause": {"s": "unassigned"}, "lent": {}, "facts": []}]}], "errors": []}"#).unwrap();
+    let mf = load_facts(&m).unwrap();
+    let st = |row: u32, is: &str| Assertion { src: "oracle".into(), func: "main".into(), what: String::new(),
+        check: Check::State { row, place: "s".into(), is: is.into() } };
+    assert!(check(&st(4, "moved*"), &mf, &shape, &[]).is_err(), "no cause: undecided");
+    let hand = [("main".to_owned(), 4, "s".to_owned(), "maybe-moved".to_owned())];
+    assert!(check(&st(4, "moved*"), &mf, &shape, &hand).is_ok());
+    assert!(check(&st(4, "unassigned*"), &mf, &shape, &hand).is_err());
+    assert!(check(&st(5, "unassigned*"), &mf, &shape, &[]).is_ok() && check(&st(5, "moved*"), &mf, &shape, &[]).is_err());
 }

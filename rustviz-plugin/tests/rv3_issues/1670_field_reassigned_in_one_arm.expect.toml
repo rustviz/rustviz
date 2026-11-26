@@ -1,7 +1,6 @@
 issue = 1670
 cluster = "C14"
 title = "Moved-out field given a value again in only one arm: p is whole only inside that arm after the assignment, and partly moved after the `if`"
-xfail = "P2"
 fn = "run"
 places = ["p.a", "p.b"]
 note = "Gap: scope-end drop is `drops_rest` on p, with no conditional drop of p.a; no p.b state column"

@@ -62,6 +62,23 @@ The file must be one the crate compiles, e.g. `src/shapes.rs` declared with
 shows that file. Otherwise the plugin exits 1 with
 `src/foo.rs isn't compiled as part of this crate (check its `mod` declaration)`.
 
+## RustViz 3 facts (`RV3_FACTS`)
+
+The RustViz 3 fact layer (`src/facts/`) computes, from rustc's MIR and
+borrow checker only, each column's state after each row (owns / moved /
+maybe moved / partly moved / unassigned, and the loans that restrict it)
+and the row's events (moves, borrows and their ends per path, drops,
+temporaries, closure captures). It runs only when asked:
+
+```sh
+RV3_FACTS=1 cargo rv-plugin              # adds "facts" to the JSON on stdout
+RV3_FACTS=facts.json cargo rv-plugin     # ... and writes it to facts.json
+```
+
+With `--write-to-cwd` it writes `vis_facts.json` beside the SVGs. The
+schema is `src/facts/schema.rs` (`version` 2). Nothing it computes is
+drawn yet.
+
 ## Element ids
 
 Every hoverable element of the timeline, and every numbered code line,

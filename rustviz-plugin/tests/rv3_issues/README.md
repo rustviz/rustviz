@@ -116,9 +116,19 @@ one marked `also_on_exits` counts on its row and on each exit's row. An
 plus one arm's (and its parents'), by the dump's `arm` index. When
 a row has several paths (an `if` row), state the path the issue is about
 with a row inside that arm, or use `[[loan]] ends` with `[row, next]`
-edges. In an edge, `next` is the first row that path runs after the end;
-rows holding only braces / `else` in between may be skipped, so `[3, 7]`
-also matches an end whose dump says the path continues at a `}` on row 6.
+edges. In an edge, `next` is where that path goes on: the first row of
+the arm it enters, or the row of the `}` where it rejoins the code after
+the branch (a skipped `if`, a failed `if let`). The dump's next row may
+stop short of it only at rows holding only braces / `else` that the dump
+has no facts on (a `}` row with a drop is code of another path). Two dump
+edges with the same (row, next) are one end.
+
+**Why a place is `maybe`.** RustViz 3's state `maybe` doesn't say why
+(moved on some path, or never assigned on some). The dump may say
+(`maybe-moved` / `maybe-unassigned`, or a row's `cause` map); otherwise the
+case must, with a hand-written `maybe-moved` / `maybe-unassigned` state on
+that row. A bare `maybe` with neither fails `moved*` / `unassigned*` with
+a message saying which row to annotate.
 
 **Sources** (`src`). `oracle`: derived by rustc probes, written only by the
 generator into the block at the end of the file. `issue`: hand-written from

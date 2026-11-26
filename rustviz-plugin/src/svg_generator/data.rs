@@ -4735,6 +4735,10 @@ pub struct VisualizationData {
     /// … { x } else { y } }`) forks a row above it, on the row the headers
     /// sit on (#1342).
     pub raised_headers: HashSet<u64>,
+
+    /// RustViz 3: each column's state on each row, from MIR
+    /// (`crate::facts::table`). Not drawn from yet.
+    pub state_table: crate::facts::table::StateTable,
 }
 
 impl VisualizationData {

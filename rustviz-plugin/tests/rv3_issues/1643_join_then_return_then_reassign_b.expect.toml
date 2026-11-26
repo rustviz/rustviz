@@ -1,7 +1,6 @@
 issue = 1643
 cluster = "C09"
 title = "Maybe-assigned join, then `if d { return; }`, then a reassignment: the first value is dropped at the return or the reassignment"
-xfail = "P0"
 note = "The issue tests `c` in both ifs (its `return` always drops `first`, its reassignment never drops anything); the case tests an independent `d` (environment variable D) on row 5 so both drops really are conditional; rows are unchanged. Gap: early-exit drop rows: no drop of s on the `return` row (row 5); also no state for the bare `let mut s: String;` row (s is unassigned there)"
 beyond_facts = "P3: the row-4 join title leaves out the `return` on row 5"
 

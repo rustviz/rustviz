@@ -23,6 +23,7 @@ extern crate rustc_span;
 extern crate rustc_borrowck;
 extern crate polonius_engine;
 extern crate rustc_mir_dataflow;
+extern crate rustc_abi;
 
 
 use std::{borrow::Cow, env};
@@ -32,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use rustc_utils::mir::borrowck_facts;
 pub mod visitor;
 pub mod plugin;
+pub mod facts;
 pub mod utils;
 pub mod expr_visitor;
 pub mod expr_visitor_utils;
@@ -64,6 +66,9 @@ pub struct RVPluginArgs {
 /// change, drop cargo's fingerprints so the next check re-runs the driver.
 fn forget_cached_check_if_args_changed(target_dir: &Utf8Path, args: &RVPluginArgs) {
   let Ok(now) = serde_json::to_string(args) else { return };
+  // The fact dump is asked for by environment (`RV3_FACTS`), which cargo's
+  // freshness check doesn't see: a change of it reruns the driver too.
+  let now = format!("{now} RV3_FACTS={:?}", env::var_os("RV3_FACTS"));
   let stamp = target_dir.join("rv-last-args");
   if std::fs::read_to_string(&stamp).ok().as_deref() == Some(now.as_str()) {
     return;
@@ -152,6 +157,12 @@ const ISSUES_URL: &str = "https://github.com/rustviz/rustviz/issues";
 
 /// Panic message and location captured by the hook in `catch_plugin_panic`.
 static LAST_PANIC: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Forget a panic that was caught and handled inside the plugin run (a
+/// fact-layer body), so a later panic is the one reported.
+pub fn forget_last_panic() {
+  LAST_PANIC.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+}
 
 /// Developers get the stock panic output (and a backtrace, with
 /// `RUST_BACKTRACE=1`) by setting `RUSTVIZ_DEBUG=1` or `RUST_BACKTRACE`.
