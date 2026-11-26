@@ -4285,6 +4285,12 @@ impl Event {
             Event::StaticDie{ .. } => {
                 hover_messages::event_dot_static_return(&self.deref_name(my_name))
             }
+            // A closure's borrow of a reference variable (the variable
+            // itself, mutably or uniquely, #1627, or a reborrow through it):
+            // its end, without the kind.
+            Event::MutableDie{ is, to: ResourceTy::Value(r), .. } if is.is_closure() && r.is_ref() => {
+                hover_messages::event_dot_mut_ref_return_of_shared(&self.deref_name(my_name))
+            }
             Event::MutableDie{ .. } => {
                 hover_messages::event_dot_mut_return(&self.deref_name(my_name))
             }

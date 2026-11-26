@@ -28164,6 +28164,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "r is borrowed by closure f; r can't be used until the borrow ends",
             "Closure capture (borrow) from r to f",
             "Return borrowed value from f to r",
+            "f's borrow ends",
             "r is no longer borrowed",
             "r is borrowed by the closure passed to apply; r can't be used while the borrow is live",
             "the closure passed to apply uses r",
@@ -28176,6 +28177,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the closure passed to apply reads from r",
             "r is mutably borrowed by",
             "r (mutably borrowed)",
+            "f's mutable borrow ends",
         ],
     },
     TooltipExpect {
