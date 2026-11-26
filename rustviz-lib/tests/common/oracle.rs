@@ -1153,7 +1153,7 @@ fn rustc_version() -> &'static str {
 fn rustc_errors(src: &str) -> Result<Vec<Diag>, String> {
     let tc = toolchain();
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    ("rv-oracle-2", tc.as_str(), rustc_version(), src).hash(&mut h);
+    ("rv-oracle-3", tc.as_str(), rustc_version(), src).hash(&mut h);
     let key = format!("{:016x}{:08x}", h.finish(), src.len());
     let dir = cache_dir();
     let cached = dir.join(format!("{}.json", key));
@@ -1191,7 +1191,15 @@ fn rustc_errors(src: &str) -> Result<Vec<Diag>, String> {
         let line = v["spans"].as_array().and_then(|ss| {
             ss.iter().find(|s| s["is_primary"] == true).and_then(|s| s["line_start"].as_u64()).map(|l| l as u32)
         });
-        let msg = v["message"].as_str().unwrap_or("").to_owned();
+        let mut msg = v["message"].as_str().unwrap_or("").to_owned();
+        // A move out of a Box's contents (`let s = *b;`) is reported as "moved
+        // value: `b`", but the note says "move occurs because `*b` ..." and the
+        // Box allocation is still owned: the state is "partly moved".
+        if v["children"].as_array().into_iter().flatten().any(|c| {
+            c["message"].as_str().is_some_and(|m| m.starts_with("move occurs because `*"))
+        }) {
+            msg.push_str(" [moves out of a deref]");
+        }
         if line.is_none() && code.is_none() {
             continue; // "aborting due to N previous errors"
         }
@@ -1893,7 +1901,7 @@ pub fn derive_states(src: &str, extra: &[String]) -> Result<Vec<Derived>, String
         let is = if has(shared, &["E0381"]).is_some() {
             "unassigned*"
         } else if let Some((_, msg)) = has(shared, &["E0382"]) {
-            if msg.contains("partially") { "partly*" } else { "moved*" }
+            if msg.contains("partially") || (msg.contains("[moves out of a deref]") && !c.var.contains('.') && !c.var.starts_with('*')) { "partly*" } else { "moved*" }
         } else if has(shared, &["E0502", "E0503", "E0505"]).is_some() {
             "mut"
         } else if !shared.is_empty() {
