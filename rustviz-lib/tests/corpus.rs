@@ -17923,9 +17923,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t's resource is mutably borrowed by closure h; t can't be used until the borrow ends",
             // An i32 is a value, and p only points to it.
             "n's value is mutably borrowed by p; n can't be used until the borrow ends",
-            "the value p points to is mutably borrowed by closure g through p; p can't be used until the borrow ends",
+            // The closure's capture is a unique immutable borrow of p itself
+            // (it writes through p); RustViz 3's state table words it so
+            // (#1860's review: not "borrowed by g through p").
+            "p is uniquely borrowed by closure g, which writes through a reference stored in p (not to p itself); p can't be used until the borrow ends",
         ],
         must_not_contain: &[
+            "the value p points to is mutably borrowed by closure g through p",
             "n's resource is mutably borrowed",
             "p's value is mutably borrowed",
             "so it cannot access the value",
@@ -28127,6 +28131,58 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t's resource is moved into drop, which drops it (dropping an Rc lowers its reference count, and drops the shared value only if it was the last Rc)",
         ],
         must_not_contain: &["only lowers", "only lower their", "its own buffer is freed", "the Weak inside", "freed only when"],
+    },
+    // RustViz 3 P1-4b: a reference column's segment style follows what the
+    // state table says is borrowed through it (or of it). The must_contain
+    // texts are new (2.x drew these segments as plain holding); the first
+    // two must_not are 2.x's text there, which rustc contradicts.
+    TooltipExpect {
+        name: "aliasing2",
+        must_contain: &[],
+        // `b = &mut c;` re-points b before any use: its loan of a is dead
+        // after row 6 (`let _ = &mut a;` there compiles).
+        must_not_contain: &["a is mutably borrowed by b; a can't be used until the borrow ends"],
+    },
+    TooltipExpect {
+        name: "basic_ref5",
+        must_contain: &[],
+        // z is never used: `&mut y` doesn't restrict y after its row.
+        must_not_contain: &["y is mutably borrowed by z; y can't be used until the borrow ends"],
+    },
+    TooltipExpect {
+        name: "downgrade_ends_1414",
+        // `s` returned as `&String` is a shared reborrow of *s held by the
+        // caller: s can't write through itself after that row.
+        must_contain: &["s holds a mutable reference, but the resource it points to is currently shared through it, so s can only use it the way a shared reference can"],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "borrow_stored_through_local_ref",
+        // `let rh = &mut hold;` borrows the struct, which restricts its field
+        // hold.r (a whole-struct loan; not a direct borrow of the field).
+        must_contain: &["hold.r is mutably borrowed by rh; hold.r can't be used until the borrow ends"],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "return_elem_reborrow",
+        // A reborrow returned to the caller: held by the caller's
+        // reference, not by v.
+        must_contain: &["the resource v points to is mutably borrowed through v; v can't be used until the borrow ends"],
+        must_not_contain: &["mutably borrowed by v through v"],
+    },
+    // #1860's review: where the table can't word a reference's loan, 2.x's
+    // style stands (each must_not is the PR's first version's text).
+    TooltipExpect {
+        name: "ref_column_styles_1860",
+        must_contain: &["p is uniquely borrowed by closure f, which writes through a reference stored in p (not to p itself); p can't be used until the borrow ends"],
+        must_not_contain: &[
+            // `match &sb` borrows the binding sb, not what it points to.
+            "sb holds a mutable reference, but the value it points to is currently shared through it",
+            // The reborrow through ra2 is on one path; "ra2 may be mutably
+            // borrowed" names the binding.
+            "ra2 may be mutably borrowed here",
+            "the value p points to is mutably borrowed by closure f through p",
+        ],
     },
 ];
 
