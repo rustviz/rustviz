@@ -3380,19 +3380,167 @@ pub fn state_arm_join(label: &str) -> String {
 // it can't be used as a whole any more, only the fields still in it.
 // `maybe`: on some paths through a conditional above only; Rust still
 // rejects using the struct as a whole after it.
-pub fn state_partly_moved(my_name: &String, moved: &[String], maybe: bool) -> String {
-    let names: Vec<String> = moved.iter().map(|m| styled_name_html(m)).collect();
-    let (list, verb) = match (names.as_slice(), maybe) {
-        ([one], false) => (one.clone(), "was"),
-        ([one], true) => (one.clone(), "may have been"),
-        ([init @ .., last], false) => (format!("{} and {}", init.join(", "), last), "were"),
-        ([init @ .., last], true) => (format!("{} and {}", init.join(", "), last), "may have been"),
-        ([], _) => (String::new(), "was"),
+
+
+pub fn state_maybe(name: &str, cause: Option<&str>) -> String {
+    let me = styled_name_html(name);
+    match cause {
+        Some("imaginary") => format!("{me} still holds its value at runtime. The borrow checker considers a move on an unreachable path, so {me} can't be used here"),
+        Some("moved") => format!("{me} may have been moved out, so it can't be used here"),
+        Some("unassigned") => format!("{me} may have no value here because it hasn't been assigned on every path"),
+        _ => format!("The borrow checker can't prove that {me} holds a value here"),
+    }
+}
+
+pub fn state_imaginary_unassigned(name: &str) -> String {
+    let me = styled_name_html(name);
+    format!("{me} is assigned on every path that runs. The borrow checker also checks an unreachable path that skips the assignment, so {me} can't be used here")
+}
+
+/// 2.x's "s's resource is being shared by one or more variables", and who
+/// holds the borrow where the state table knows one holder.
+pub fn state_shared_by(name: &String, holder: Option<&str>, value: bool) -> String {
+    match holder {
+        Some(h) => format!("{}. {} holds a shared borrow", state_partial_privilege(name, value), styled_name_html(h)),
+        None => state_partial_privilege(name, value),
+    }
+}
+
+/// Names for a list of places; `None`: a temporary 2.x draws no column for.
+fn place_list(names: &[Option<String>], conj: &str) -> String {
+    let fmt: Vec<String> = names.iter().map(|n| n.as_deref().map_or_else(|| "a temporary value".to_owned(), styled_name_html)).collect();
+    match fmt.as_slice() {
+        [init @ .., last] if !init.is_empty() => format!("{} {conj} {last}", init.join(", ")),
+        _ => fmt.concat(),
+    }
+}
+
+/// RustViz 3: a column some part of which is borrowed (`p.a`, `v[_]`):
+/// the column can't be used as a whole meanwhile. `kind`: "shared",
+/// "mutable", "reserved" (a two-phase `&mut` of a method call's receiver,
+/// before the call) or "unique" (a closure's unique capture). `may`: on
+/// some paths only.
+pub fn state_lent_parts(name: &str, places: &std::collections::BTreeSet<&str>, holder: Option<&str>, kind: &str, may: bool) -> String {
+    let by = holder.map_or_else(String::new, |h| format!(" by {}", styled_name_html(h)));
+    let (what, restricted) = match kind {
+        "mutable" => ("mutable borrow", "used"),
+        "unique" => ("unique borrow", "used"),
+        "reserved" => ("reservation for a mutable borrow", "changed or moved"),
+        _ => ("shared borrow", "changed or moved"),
     };
+    let paths = if may { format!(" ({})", some_paths_why(false)) } else { String::new() };
+    let me = styled_name_html(name);
+    if places.len() == 1 {
+        let place = styled_name_html(places.first().unwrap());
+        let is = if may { "may be" } else { "is" };
+        let done = if kind == "reserved" { "reserved for a mutable borrow by a method call" } else { "borrowed" };
+        format!("{place} {is} {done}{by} here{paths}. This {what} prevents {me} from being {restricted} as a whole until it ends")
+    } else {
+        let names = places.iter().map(|p| styled_name_html(p)).collect::<Vec<_>>().join(", ");
+        let names = names.rsplit_once(", ").map_or(names.clone(), |(a, b)| format!("{a} and {b}"));
+        format!("The borrow checker counts {what}s of {names} here{paths}. While they are in scope, {me} can't be {restricted} as a whole")
+    }
+}
+
+/// RustViz 3: added to a borrowed column's title where the loan is held
+/// by `holder` as the borrow checker counts it, but the facts can't say the
+/// holder points to it (`result` of `longest(a, b)` may point into either).
+pub fn state_kept_borrowed_by(name: &str, holder: &str) -> String {
+    format!(". {} stays borrowed while {} is in use", styled_name_html(name), styled_name_html(holder))
+}
+
+/// RustViz 3: a column a `for` loop's iterator borrows, where 2.x had no
+/// loop title: 2.x's clause and who holds the borrow.
+pub fn state_borrowed_by_loop_iterator_holder(name: &String, holds_value: bool, mutable: bool) -> String {
+    let me = styled_name_html(name);
+    if mutable {
+        format!("{me}'s {} is mutably borrowed by the `for` loop's iterator; {me} can't be used until the borrow ends", held(holds_value))
+    } else {
+        format!("{}. The `for` loop's iterator holds a shared borrow", state_partial_privilege(name, holds_value))
+    }
+}
+
+pub fn state_through(reference: &str) -> String {
+    format!(". This borrow was taken through {}", styled_name_html(reference))
+}
+
+pub fn state_unnamed_part(name: &str, maybe: bool) -> String {
+    let me = styled_name_html(name);
+    let moved = if maybe { "may have been" } else { "was" };
+    format!("Part of {me} {moved} moved out, so {me} can't be used as a whole")
+}
+
+/// Why a column is borrowed on some paths only (the state table's
+/// `may_lend`): a branch above took the borrow on some paths, or (each path
+/// took it but) on some the variable holding it was given another value.
+fn some_paths_why(overwritten: bool) -> &'static str {
+    if overwritten {
+        "on some paths, what held the borrow was given another value"
+    } else {
+        "a branch above borrowed it on some paths only"
+    }
+}
+
+/// RustViz 3: a column immutably borrowed on some paths only: the borrow
+/// checker treats it as borrowed on every path.
+pub fn state_maybe_shared(name: &str, holder: Option<&str>, value: bool, read_only: bool, overwritten: bool) -> String {
+    let me = styled_name_html(name);
+    let by = holder.map_or(String::new(), |h| format!(" by {}", styled_name_html(h)));
+    let restriction = if read_only { "is read-only" } else { "can't be changed or moved as a whole" };
+    format!("{me}'s {} may be immutably borrowed{by} here ({}), so {me} {restriction} until that borrow ends", held(value), some_paths_why(overwritten))
+}
+
+/// RustViz 3: `state_maybe_lent_out` for a borrow that is a closure's
+/// unique capture on some paths.
+pub fn state_maybe_exclusive(name: &str, overwritten: bool) -> String {
+    let me = styled_name_html(name);
+    format!("{me} may be exclusively borrowed here ({}), so {me} can't be used until that borrow ends", some_paths_why(overwritten))
+}
+
+pub fn state_moved_out(name: &str) -> String {
+    format!("{}'s value was moved out, so it can't be used here", styled_name_html(name))
+}
+
+/// RustViz 3: a value that borrows (an iterator, a `Vec<&str>`, an
+/// `Option<&T>`), not a reference itself, with the places whose loans the
+/// borrow checker counts in it here.
+pub fn state_holder_borrows_from(name: &str, sources: &[Option<String>]) -> String {
+    let me = styled_name_html(name);
+    format!("{me} holds a value that borrows from {} ({me} isn't a reference itself)", place_list(sources, "and"))
+}
+
+/// RustViz 3: added to the title of a value that holds references: the
+/// places whose loans its origins contain here.
+pub fn state_holder_tracks(name: &str, sources: &[Option<String>]) -> String {
+    format!(". The borrow checker tracks borrowed data from {} through {}", place_list(sources, "and"), styled_name_html(name))
+}
+
+pub fn state_imaginary_borrow(name: &str, exclusive: bool) -> String {
     format!(
-        "{0} is partially moved: {1} {2} moved out, so {0} can't be used as a whole; its other fields still can",
-        styled_name_html(my_name), list, verb
+        "The borrow checker treats {} as {}borrowed here, even though the alternative that takes the borrow never runs",
+        styled_name_html(name),
+        if exclusive { "exclusively " } else { "immutably " }
     )
+}
+
+/// RustViz 3: added to the title of a column borrowed on some paths only:
+/// every place whose loans the holder's origins contain here (some may be
+/// held on every path, others on some).
+pub fn state_loan_sources(holder: &str, sources: &[Option<String>]) -> String {
+    state_holder_tracks(holder, sources)
+}
+
+pub fn state_parts_imaginary(name: &String, parts: &crate::facts::schema::Parts, imaginary: &[String]) -> String {
+    let mut title = if parts.moved.is_empty() && parts.maybe.is_empty() {
+        format!("{} can't be used as a whole", styled_name_html(name))
+    } else {
+        state_table_partly_moved(name, &parts.moved, &parts.maybe, &[], false)
+    };
+    for field in imaginary {
+        title.push_str(". ");
+        title.push_str(&state_maybe(field, Some("imaginary")));
+    }
+    title
 }
 
 // RustViz 3: the line of a Box whose contents were moved out (`let s =
@@ -3437,6 +3585,13 @@ pub fn state_box_fields_maybe_gone(my_name: &String, surely: &[String], maybe: &
 // usable on every path (not lent `&mut`), so it says they still can be
 // used; otherwise nothing is said about them.
 pub fn state_table_partly_moved(my_name: &String, surely: &[String], maybe: &[String], partly: &[String], others_usable: bool) -> String {
+    state_table_partly_moved_hedged(my_name, surely, maybe, partly, &[], others_usable)
+}
+
+/// `state_table_partly_moved` with `partly_maybe`: fields a part of which
+/// with no name (an enum payload) may have been moved out, on some paths
+/// only.
+pub fn state_table_partly_moved_hedged(my_name: &String, surely: &[String], maybe: &[String], partly: &[String], partly_maybe: &[String], others_usable: bool) -> String {
     fn list(names: &[String]) -> String {
         let fmt: Vec<String> = names.iter().map(|m| styled_name_html(m)).collect();
         match fmt.as_slice() {
@@ -3456,6 +3611,13 @@ pub fn state_table_partly_moved(my_name: &String, surely: &[String], maybe: &[St
             format!("parts of {} were moved out", list(partly))
         } else {
             format!("part of {} was moved out", list(partly))
+        });
+    }
+    if !partly_maybe.is_empty() {
+        clauses.push(if partly_maybe.len() > 1 {
+            format!("parts of {} may have been moved out", list(partly_maybe))
+        } else {
+            format!("part of {} may have been moved out", list(partly_maybe))
         });
     }
     let said = match clauses.as_slice() {
@@ -3504,29 +3666,6 @@ pub fn state_fields_all_moved(my_name: &String, moved: &[String]) -> String {
     format!(
         "{0} is partially moved: {1} {2} moved out, so neither {0} nor any of its fields can be used; nothing is left in {0} to drop",
         styled_name_html(my_name), list, if names.len() > 1 { "were" } else { "was" }
-    )
-}
-
-// The line of a struct every field of which was moved out, some of them
-// on some paths through a conditional above only (`let s2 = p.b; if c {
-// drop(p.a); }`, #1583): on the other paths it still holds those, and
-// drops them at its scope end, but neither it nor any field of it can
-// be used (E0382).
-pub fn state_fields_maybe_all_moved(my_name: &String, surely: &[String], maybe: &[String]) -> String {
-    fn list(names: &[String]) -> String {
-        let fmt: Vec<String> = names.iter().map(|m| styled_name_html(m)).collect();
-        match fmt.as_slice() {
-            [init @ .., last] if !init.is_empty() => format!("{} and {}", init.join(", "), last),
-            _ => fmt.concat(),
-        }
-    }
-    let moved = match surely.len() {
-        0 => format!("{} may have been moved out", list(maybe)),
-        n => format!("{} {} moved out and {} may have been", list(surely), if n > 1 { "were" } else { "was" }, list(maybe)),
-    };
-    format!(
-        "{0} is partially moved: {1}, so neither {0} nor any of its fields can be used; what is left in {0} is dropped when it goes out of scope",
-        styled_name_html(my_name), moved
     )
 }
 
@@ -3748,13 +3887,14 @@ pub fn event_dot_lend_part(whole: &str, part: &str, to: &str, mutable: bool) -> 
 // A field's segment while the struct it is in is borrowed as a whole
 // (`let r = &mut p;`, `let (a, b) = &mut t;`; #1130, #1193): the field is
 // borrowed with it. `by`: the one holder of the borrow, if known.
-pub fn state_lent_with_parent(my_name: &str, parent: &str, by: Option<&str>, mutable: bool) -> String {
+pub fn state_lent_with_parent(my_name: &str, parent: &str, by: Option<&str>, mutable: bool, read_only: bool) -> String {
     let me = styled_name_html(my_name);
     let by = by.map_or(String::new(), |b| format!(" by {}", styled_name_html(b)));
     if mutable {
         format!("{0} is mutably borrowed along with {1}{2}; {0} can't be used until the borrow ends", me, styled_name_html(parent), by)
     } else {
-        format!("{0} is immutably borrowed along with {1}{2}; {0} is read-only while the borrow is live", me, styled_name_html(parent), by)
+        let restriction = if read_only { "is read-only" } else { "can't be changed or moved as a whole" };
+        format!("{me} is immutably borrowed along with {}{by}; {me} {restriction} while the borrow is live", styled_name_html(parent))
     }
 }
 
@@ -3819,9 +3959,9 @@ pub fn state_unique_lent(my_name: &String, to: LentTo) -> String {
 /// RustViz 3: a column mutably borrowed on some paths only (the borrow was
 /// taken in one arm of a branch): the borrow checker treats it as borrowed
 /// on every path, so it can't be used until that borrow ends.
-pub fn state_maybe_lent_out(my_name: &String) -> String {
+pub fn state_maybe_lent_out(my_name: &String, overwritten: bool) -> String {
     let me = styled_name_html(my_name);
-    format!("{0} may be mutably borrowed here (a branch above borrowed it on some paths only), so {0} can't be used until that borrow ends", me)
+    format!("{0} may be mutably borrowed here ({1}), so {0} can't be used until that borrow ends", me, some_paths_why(overwritten))
 }
 
 /// RustViz 3: a column reserved for a two-phase mutable borrow (a method

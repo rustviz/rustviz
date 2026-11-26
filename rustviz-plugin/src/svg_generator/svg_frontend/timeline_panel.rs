@@ -4124,14 +4124,6 @@ fn timeline_segment_title(
     if let State::FullPrivilege { s: LineState::Uninit } = state {
         return state.print_message_with_name(rap.name());
     }
-    if let (State::PartialPrivilege { .. } | State::RevokedPrivilege { .. }, Some(line)) = (state, line) {
-        if let Some(title) = lent_with_parent_title(state, rap, visualization_data, line) {
-            return title;
-        }
-    }
-    // A place an or-pattern's reference may borrow (#565): borrowed
-    // only if its alternative matched, though the borrow checker treats
-    // it as borrowed either way.
     if matches!(state, State::PartialPrivilege { .. } | State::RevokedPrivilege { .. }) && !rap.is_ref() {
         if let Some((into, mutable, chain)) = or_alt_lend_at(visualization_data, rap, line) {
             if let Some((sources, chain)) = chain {
@@ -4142,41 +4134,6 @@ fn timeline_segment_title(
     }
     if let (State::RevokedPrivilege { .. }, Some(line)) = (state, line) {
         return lent_out_title(rap, visualization_data, line, &[]);
-    }
-    // A struct some fields were moved out of can't be used as a whole
-    // (E0382); one they all were has nothing left: its line stops
-    // (an empty title, #1157).
-    // RustViz 3: from MIR (the state table) where it has the column.
-    if let (State::FullPrivilege { .. }, Some(line)) = (state, line) {
-        if let Some(title) = table_partly_moved_title(rap, visualization_data, line) {
-            return title;
-        }
-    }
-    if let (State::FullPrivilege { .. }, Some(line), ResourceAccessPoint::Struct(_)) = (state, line, rap) {
-        if let Some(parts) = parts_moved_at(rap, visualization_data, line).filter(|_| !table_says_whole(rap, visualization_data, line)) {
-            if parts.all {
-                return String::new();
-            }
-            if parts.none_usable {
-                let surely: Vec<String> = parts.moved.iter().filter(|m| !parts.maybe_moved.contains(m)).cloned().collect();
-                return hover_messages::state_fields_maybe_all_moved(rap.name(), &surely, &parts.maybe_moved);
-            }
-            return hover_messages::state_partly_moved(rap.name(), &parts.moved, parts.maybe);
-        }
-    }
-    // An array a slice pattern moved some elements out of (#1285): the
-    // rest stay in it, but it can't be used as a whole.
-    if let (State::FullPrivilege { .. }, Some(line), Some(left)) = (state, line, rap.elems_left()) {
-        if let Some(t) = visualization_data.timelines.get(rap.hash()) {
-            let (moved, maybe) = elems_moved_before(&t.history, line, false);
-            if !moved.is_empty() {
-                // Still in it here: every element not moved yet (later
-                // patterns may take more of them, #1302).
-                let taken: Vec<String> = moved.iter().flat_map(|p| place_elem_names(p)).collect();
-                let still: Vec<String> = left.all().into_iter().filter(|n| !taken.contains(n)).collect();
-                return hover_messages::state_elems_moved(rap.name(), &moved, &still, maybe);
-            }
-        }
     }
     if let Some(title) = line.and_then(|l| loop_iterator_title(state, rap, visualization_data, l)) {
         return title;
@@ -4257,70 +4214,6 @@ fn timeline_segment_title(
         return hover_messages::state_mut_ref_partial_privilege(rap.name(), rap.points_to_copy());
     }
     state.print_message_with_name(rap.name())
-}
-
-/// A field's segment from row `line` drawn borrowed only because the
-/// struct it is in is borrowed as a whole there (`let r = &mut p;`; see
-/// `lend_struct_borrows_to_members`): "p.name is mutably borrowed along
-/// with p by r". None when the field's own events lend it at that row.
-fn lent_with_parent_title(state: &State, rap: &ResourceAccessPoint, visualization_data: &VisualizationData, line: usize) -> Option<String> {
-    let ResourceAccessPoint::Struct(m) = rap else { return None };
-    if !m.is_member {
-        return None;
-    }
-    let own = visualization_data.timelines.get(rap.hash())?;
-    let mut live: i64 = 0;
-    for (_, e) in own.history.iter().filter(|(l, _)| *l <= line) {
-        match e {
-            Event::StaticLend { .. } | Event::MutableLend { .. } => live += 1,
-            Event::StaticReacquire { .. } | Event::MutableReacquire { .. } => live -= 1,
-            _ => {}
-        }
-    }
-    if live > 0 {
-        return None;
-    }
-    let mutable = matches!(state, State::RevokedPrivilege { .. });
-    // The innermost enclosing struct lent there (`p.inner` before `p`).
-    let mut parents: Vec<(&Struct, &Timeline)> = visualization_data.timelines.values()
-        .filter_map(|t| match &t.resource_access_point {
-            ResourceAccessPoint::Struct(p) if (if p.is_member { p.owner } else { p.hash }) == m.owner
-                && m.name.starts_with(&format!("{}.", p.name)) => Some((p, t)),
-            _ => None,
-        })
-        .collect();
-    parents.sort_by_key(|(p, _)| std::cmp::Reverse(p.name.len()));
-    for (p, t) in parents {
-        let lent_there = t.states.iter().any(|(a, b, s)| *a <= line && line < *b && if mutable {
-            matches!(s, State::RevokedPrivilege { .. })
-        } else {
-            matches!(s, State::PartialPrivilege { .. })
-        });
-        if !lent_there {
-            continue;
-        }
-        // Who holds the borrow: the one lend of p live at `line`.
-        let mut holders: Vec<String> = Vec::new();
-        for (_, e) in t.history.iter().filter(|(l, _)| *l <= line) {
-            match e {
-                Event::MutableLend { to, .. } | Event::StaticLend { to, .. } => holders.push(to.name()),
-                Event::MutableReacquire { from, .. } | Event::StaticReacquire { from, .. } => {
-                    if let Some(i) = holders.iter().position(|h| *h == from.name()) {
-                        holders.remove(i);
-                    }
-                }
-                _ => {}
-            }
-        }
-        holders.sort();
-        holders.dedup();
-        let by = match holders.as_slice() {
-            [one] if !one.is_empty() => Some(one.as_str()),
-            _ => None,
-        };
-        return Some(hover_messages::state_lent_with_parent(&m.name, &p.name, by, mutable));
-    }
-    None
 }
 
 /// Every event of a column, those in its conditionals' arms included,
@@ -8572,20 +8465,7 @@ fn state_is_alive(state: &State) -> bool {
     !matches!(state, State::ResourceMoved { .. } | State::OutOfScope)
 }
 
-/// Whether a conditional's arm draws a line for the column in `state`
-/// (`push_seg_if_renderable`): where it doesn't, it draws nothing.
-///
-/// Not the dotted line of a column that is mutably lent out
-/// (`seg_drawn`): a split or join dot there would say the column is
-/// live in the conditional, so it's left out and its text goes on the
-/// column's next dot (#702).
-fn line_drawn(rap: &ResourceAccessPoint, state: &State) -> bool {
-    !matches!(determine_owner_line_styles(rap, state), OwnerLine::Empty | OwnerLine::Dotted)
-}
-
-/// Whether an arm draws a segment for the column in `state`: a line
-/// (`line_drawn`), or the dotted line of a column mutably lent out
-/// (#722).
+/// Whether the arm draws a solid, hollow or dotted segment for the column.
 fn seg_drawn(rap: &ResourceAccessPoint, state: &State) -> bool {
     !matches!(determine_owner_line_styles(rap, state), OwnerLine::Empty)
 }
@@ -9572,58 +9452,41 @@ fn render_timeline(
     render_branches(hash, rap, history, states, output, visualization_data, timeline_data, false, &[], bars);
 
     let apexes = CollapsedApexes::of(history);
-    let mut cuts = field_borrow_rows(rap, history, visualization_data);
-    // A struct's line changes text where a field is moved out of it,
-    // and stops once every field is (#1157). (With the state table, on
-    // any row: pieces with the same text are drawn as one.)
-    cuts.extend(parts_moved_rows(rap, visualization_data));
-    // RustViz 3: an owner column's line reads its state on each row from
-    // the state table (what is moved out of it, what lends it out).
-    let table_rows = !rap.is_ref() && !rap.is_fn() && !rap.is_closure()
-        && visualization_data.fn_source_lines.get(rap.hash()).is_some_and(|l| visualization_data.state_table.has_fn(*l));
-    // So does a reference column's, for what is borrowed through it (P1-4b;
-    // where its line runs and stops stays 2.x's until its ends come from
-    // the facts).
+    let owner = !rap.is_ref() && !rap.is_closure();
+    let cuts = if owner { Vec::new() } else { field_borrow_rows(rap, history, visualization_data) };
+    // A reference column's line reads the table for what is borrowed
+    // through it (P1-4b; where its line runs and stops stays 2.x's until
+    // its ends come from the facts).
     let table_ref_rows = rap.is_ref()
         && visualization_data.fn_source_lines.get(rap.hash()).is_some_and(|l| visualization_data.state_table.has_fn(*l));
-    // So does an array's where a slice pattern moves an element out of
-    // it (#1285).
-    if rap.elems_left().is_some() {
-        cuts.extend(history.iter().filter(|(_, e)| matches!(e, Event::Move { is: ResourceTy::Index(_, place, _), .. } if !place.starts_with('*'))).map(|(l, _)| *l));
-    }
-    cuts.sort_unstable();
-    cuts.dedup();
     for (seg_start, seg_end, state) in states {
-        // println!("{} -> start: {}, end: {}, state: {}", visualization_data.get_name_from_hash(hash).unwrap(), line_start, line_end, state); // DEBUG PURPOSES
-        // A field borrow through a `&mut` reference doesn't change its
-        // state (#1073), so the segment is cut where one starts or ends:
-        // its text names the field while the borrow is live.
         let mut bounds = vec![*seg_start];
-        if matches!(state, State::FullPrivilege { .. } | State::PartialPrivilege { .. }) {
-            bounds.extend(cuts.iter().copied().filter(|l| l > seg_start && l < seg_end));
-        }
-        if matches!(state, State::RevokedPrivilege { .. }) {
-            bounds.extend(ref_move_rows(visualization_data, *seg_start, *seg_end));
-        }
-        // (A Box 2.x drew moved after its contents were moved out: only on
-        // a column with no branches, whose moved stretch ends at its own
-        // scope-end dot, so the line joins the move to that dot.)
-        let box_held = table_rows
-            && matches!(state, State::ResourceMoved { dropped_by_hand: false, .. })
-            && !history.iter().any(|(_, e)| matches!(e, Event::Branch { .. }))
-            // (a plain move, not one with a `?`'s early return on it)
-            && history.iter().filter(|(l, _)| *l == *seg_start).all(|(_, e)| matches!(e, Event::Move { .. }))
-            && history.iter().any(|(l, e)| *l == *seg_end && matches!(e, Event::OwnerGoOutOfScope { early: None, .. }));
-        let lined = matches!(state, State::FullPrivilege { .. } | State::PartialPrivilege { .. } | State::RevokedPrivilege { .. })
-            || box_held;
-        if table_rows && lined {
+        if owner {
+            // OOS includes the placeholder occupied by the arm legs.
+            if matches!(state, State::OutOfScope | State::ResourceMoved { dropped_by_hand: true, .. }) {
+                continue;
+            }
+            // An owner line normally ends at its move dot. Moving just a
+            // Box's payload leaves the Box itself until its scope-end dot.
+            if matches!(state, State::ResourceMoved { .. }) && !(
+                !history.iter().any(|(_, e)| matches!(e, Event::Branch { .. }))
+                && history.iter().filter(|(l, _)| l == seg_start).all(|(_, e)| matches!(e, Event::Move { .. }))
+                && history.iter().any(|(l, e)| l == seg_end && matches!(e, Event::OwnerGoOutOfScope { early: None, .. }))
+            ) { continue; }
             bounds.extend(seg_start + 1..*seg_end);
-        }
-        // (A reference column's: after a row's last stacked sub-row of dots,
-        // not inside them; the table's state is after the row's events.)
-        if table_ref_rows && lined {
-            let rl = &visualization_data.row_lines;
-            bounds.extend((seg_start + 1..*seg_end).filter(|r| rl.get(r + 1).is_none_or(Option::is_some)));
+        } else {
+            bounds.extend(cuts.iter().copied().filter(|l| l > seg_start && l < seg_end));
+            if matches!(state, State::RevokedPrivilege { .. }) {
+                bounds.extend(ref_move_rows(visualization_data, *seg_start, *seg_end));
+            }
+            // (A reference column's: after a row's last stacked sub-row of
+            // dots, not inside them; the table's state is after the row's
+            // events.)
+            let lined = matches!(state, State::FullPrivilege { .. } | State::PartialPrivilege { .. } | State::RevokedPrivilege { .. });
+            if table_ref_rows && lined {
+                let rl = &visualization_data.row_lines;
+                bounds.extend((seg_start + 1..*seg_end).filter(|r| rl.get(r + 1).is_none_or(Option::is_some)));
+            }
         }
         bounds.sort_unstable();
         bounds.dedup();
@@ -9631,22 +9494,21 @@ fn render_timeline(
         // (Pieces with the same state and text are drawn as one.)
         let mut pieces: Vec<(usize, usize, State, String)> = Vec::new();
         for w in bounds.windows(2) {
-            // 2.x drew it moved where only what it holds was moved out (a
-            // Box's contents, `let s = *b;`): it still owns the Box, and
-            // its line goes on to its scope end, saying so.
-            let held = box_held.then(|| table_still_holds_title(rap, visualization_data, w[0])).flatten();
-            let (st, title) = match held.map(|t| (State::FullPrivilege { s: LineState::Full }, Some(t)))
-                .or_else(|| (table_rows || table_ref_rows).then(|| table_lent_state(state, rap, visualization_data, w[0])).flatten())
-            {
-                Some((st, Some(title))) => (st, title),
-                Some((st, None)) => {
-                    let t = timeline_segment_title(&st, rap, visualization_data, Some(w[0]));
-                    (st, t)
+            let (st, title) = if owner {
+                let Some(piece) = owner_segment(rap, visualization_data, w[0], state) else { continue };
+                piece
+            } else {
+                match table_ref_rows.then(|| table_lent_state(state, rap, visualization_data, w[0])).flatten() {
+                    Some((st, Some(title))) => (st, title),
+                    Some((st, None)) => {
+                        let t = timeline_segment_title(&st, rap, visualization_data, Some(w[0]));
+                        (st, t)
+                    }
+                    None => (state.clone(), timeline_segment_title(state, rap, visualization_data, Some(w[0]))),
                 }
-                None => (state.clone(), timeline_segment_title(state, rap, visualization_data, Some(w[0]))),
             };
             match pieces.last_mut() {
-                Some(last) if last.3 == title && std::mem::discriminant(&last.2) == std::mem::discriminant(&st) => last.1 = w[1],
+                Some(last) if last.1 == w[0] && last.3 == title && std::mem::discriminant(&last.2) == std::mem::discriminant(&st) => last.1 = w[1],
                 _ => pieces.push((w[0], w[1], st, title)),
             }
         }
@@ -9689,52 +9551,361 @@ fn render_timeline(
     }
 }
 
-/// The member columns directly under the struct column `rap` (`p.a`,
-/// not `p.a.x`), with their timelines.
-fn direct_parts<'a>(rap: &ResourceAccessPoint, visualization_data: &'a VisualizationData) -> Vec<&'a Timeline> {
-    let ResourceAccessPoint::Struct(Struct { owner, .. }) = rap else { return Vec::new() };
-    let root = if rap.is_member() { *owner } else { *rap.hash() };
-    let prefix = format!("{}.", rap.name());
-    let mut parts: Vec<&Timeline> = visualization_data.timelines.values()
+/// The straight segment for an owner or a field. The replay still lays
+/// out its column and the space occupied by branch legs; the segment's
+/// text comes from the state table's cell where the table has one. That
+/// text keeps every clause 2.x's title has (owner, copyable value, holds a
+/// reference, borrowed by ...) and adds or corrects only what the cell
+/// knows (who holds a borrow, on some paths only, moved parts).
+fn owner_segment(rap: &ResourceAccessPoint, vd: &VisualizationData, row: usize, layout: &State) -> Option<(State, String)> {
+    use crate::facts::table::Init;
+    let name = rap.name();
+    let table = &vd.state_table;
+    let fn_line = *vd.fn_source_lines.get(rap.hash())?;
+    let src = rv_attrs::line_of(row, &vd.row_lines)?;
+    let legacy = || Some((layout.clone(), timeline_segment_title(layout, rap, vd, Some(row))));
+    // No MIR place for it (a temporary, a static, an async fn's
+    // parameter, a `(parameter)` column) or no state here: 2.x's title.
+    let Some(mut cell) = table.segment_cell(fn_line, name, src) else {
+        if matches!(layout, State::ResourceMoved { .. }) {
+            return None;
+        }
+        return legacy();
+    };
+    // A field the layout draws moved out on this row, by a statement that
+    // MIR finishes on a row below (`..user1` in a struct literal that ends
+    // at `};`): the struct's line says so from the row of the field's move
+    // dot, as its arrow does (the state where that statement ends).
+    if matches!(rap, ResourceAccessPoint::Struct(_)) && cell.init == Init::Own
+        && cell.parts.as_ref().is_none_or(|p| p.moved.is_empty() && p.maybe.is_empty())
+        && field_drawn_moved(vd, fn_line, name, row)
+    {
+        if let Some(c) = (src + 1..).take_while(|l| *l <= src + 8)
+            .find_map(|l| table.cell(fn_line, name, l, l).filter(|c| c.from_row == l))
+            .filter(|c| c.init == Init::Partly || c.parts.as_ref().is_some_and(|p| !p.moved.is_empty() || !p.maybe.is_empty()))
+        {
+            cell = c;
+        }
+    }
+    let full = State::FullPrivilege { s: LineState::Full };
+    if matches!(layout, State::ResourceMoved { .. }) && !(cell.init == Init::Partly && table.is_box(fn_line, name)) {
+        return None;
+    }
+    if cell.init == Init::Partly
+        && matches!(rap, ResourceAccessPoint::Struct(Struct { is_box: false, .. }))
+        && trunk_ends_at_fields(vd, fn_line, name, row, src)
+    {
+        return None;
+    }
+    // The line holds a value where the cell says it may have none. A cell
+    // that says "maybe moved" where no row moves the place is where its
+    // scope ends
+    // (a `StorageDead` counts as a move in MIR's move data); "maybe
+    // unassigned" for a variable never without a value in its scope is
+    // read where the paths that never bound it join. 2.x's title
+    // stands for these lines: a solid line saying "moved" would contradict
+    // its own drawing. (A place moved or unassigned on every path, `let p
+    // = P {` .. `};` before its `};`, or moved on some paths only, or by
+    // the borrow checker's reckoning only, is the table's correction, Q5.)
+    let held = matches!(layout, State::FullPrivilege { s: LineState::Full } | State::PartialPrivilege { .. } | State::RevokedPrivilege { .. });
+    let artifact = match cell.init {
+        Init::Unassigned | Init::Moved => false,
+        Init::Maybe => match cell.cause {
+            Some("moved") => !table.has_move(fn_line, name),
+            // (A pattern's binding read where its block ends, joined with
+            // the way past the pattern, on which it never came into scope.)
+            Some("unassigned") => !cell.always_assigned && !table.unassigned_above(fn_line, name, src),
+            _ => false,
+        },
+        Init::Own | Init::Partly => false,
+    };
+    if held && artifact {
+        return legacy();
+    }
+    match cell.init {
+        // The segment still connects the layout's dots (a pattern move
+        // can be marked on the binding, below its MIR move). Its title
+        // describes the cell at the source boundary.
+        Init::Moved => return Some((layout.clone(), hover_messages::state_moved_out(name))),
+        Init::Unassigned => return Some((layout.clone(), hover_messages::state_uninitialized(name))),
+        Init::Maybe => {
+            let title = if cell.always_assigned {
+                hover_messages::state_imaginary_unassigned(name)
+            } else {
+                hover_messages::state_maybe(name, cell.cause)
+            };
+            return Some((layout.clone(), title));
+        }
+        Init::Own | Init::Partly => {}
+    }
+    let parts = table_partly_moved_title(rap, table, fn_line, src, &cell);
+    let whole_title = parts.is_none() && cell.init == Init::Own;
+    let mut title = parts.unwrap_or_else(|| {
+        if cell.init == Init::Partly {
+            hover_messages::state_unnamed_part(name, cell.unnamed_maybe || cell.may)
+        } else {
+            // 2.x's title for a column that holds its value (owner,
+            // copyable value, value holding a reference).
+            // (A value that borrows, `let it = v.iter();`, with what the
+            // borrow checker tracks through it: 2.x's "contains a
+            // reference" is false of a `slice::Iter`, which keeps raw
+            // pointers.)
+            let from = if rap.holds_borrow() { display_places(vd, fn_line, name, &cell.borrowed_from) } else { Vec::new() };
+            if from.is_empty() {
+                timeline_segment_title(&full, rap, vd, Some(row))
+            } else {
+                hover_messages::state_holder_borrows_from(name, &from)
+            }
+        }
+    });
+    if cell.lent.is_empty() {
+        return Some((full, title));
+    }
+    let (state, loan_title, whole) = owner_loan_title(rap, vd, fn_line, &cell, layout, row);
+    if !whole_title || !whole {
+        // Moved parts, or a loan of a part of it: both are said.
+        title.push_str(". ");
+        title.push_str(&loan_title);
+    } else {
+        title = loan_title;
+    }
+    Some((state, title))
+}
+
+/// Whether the layout draws a direct field of the struct column `name`
+/// moved out on the visual row `row` (its segment from there on is a
+/// moved one).
+fn field_drawn_moved(vd: &VisualizationData, fn_line: usize, name: &str, row: usize) -> bool {
+    let prefix = format!("{name}.");
+    vd.timelines.values().any(|t| {
+        let r = &t.resource_access_point;
+        r.name().strip_prefix(&prefix).is_some_and(|f| !f.contains('.'))
+            && vd.fn_source_lines.get(r.hash()) == Some(&fn_line)
+            && t.states.iter().any(|(a, b, st)| *a <= row && row < *b && matches!(st, State::ResourceMoved { dropped_by_hand: false, .. }))
+    })
+}
+
+/// The names 2.x's columns use for places the facts name (lenders and
+/// holders of loans): the place itself where it is a column or a Rust
+/// place (`s`, `h.r`, `*b`); for a part of an enum variant, `(o as
+/// Some).0`, the place it is in (`o`); for a temporary the facts name by
+/// its code, `(String::from("x"))`, its `(temporary N)` column where 2.x
+/// draws one (None where it doesn't: "a temporary value").
+fn display_place(vd: &VisualizationData, fn_line: usize, column: &str, place: &str) -> Option<String> {
+    let in_fn = |n: &str| vd.timelines.values().any(|t| {
+        t.resource_access_point.name() == n && vd.fn_source_lines.get(t.resource_access_point.hash()) == Some(&fn_line)
+    });
+    if !place.starts_with('(') {
+        return Some(place.to_owned());
+    }
+    if in_fn(place) {
+        return Some(place.to_owned());
+    }
+    // The parenthesized head and what follows it.
+    let mut depth = 0usize;
+    let close = place.char_indices().find_map(|(i, c)| {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        None
+    })?;
+    let (inner, rest) = (&place[1..close], &place[close + 1..]);
+    if let Some((base, _variant)) = inner.rsplit_once(" as ") {
+        return display_place(vd, fn_line, column, base);
+    }
+    let head = &place[..=close];
+    let lines = vd.state_table.lender_lines(fn_line, column, head);
+    let temps: BTreeSet<&str> = vd.timelines.values()
         .filter(|t| {
             let r = &t.resource_access_point;
-            let in_struct = match r {
-                ResourceAccessPoint::Struct(Struct { owner, is_member: true, .. }) => *owner == root,
-                ResourceAccessPoint::StaticRef(crate::svg_generator::data::StaticRef { member_of: Some(m), .. })
-                | ResourceAccessPoint::MutRef(crate::svg_generator::data::MutRef { member_of: Some(m), .. }) =>
-                    *m == root || m == rap.hash(),
-                _ => false,
-            };
-            in_struct && r.name().starts_with(&prefix) && !r.name()[prefix.len()..].contains('.')
+            r.name().starts_with("(temporary") && !r.name().contains('.')
+                && vd.fn_source_lines.get(r.hash()) == Some(&fn_line)
+                && {
+                    // (Its events in a branch's arms too: a temporary made
+                    // in one arm.)
+                    let mut events = Vec::new();
+                    flat_history(&t.history, &[], &mut events);
+                    events.iter().any(|(row, _)| rv_attrs::line_of(*row, &vd.row_lines).is_some_and(|l| lines.contains(&l)))
+                }
         })
+        .map(|t| t.resource_access_point.name().as_str())
         .collect();
-    parts.sort_by_key(|t| *t.resource_access_point.hash());
-    parts
+    match temps.into_iter().collect::<Vec<_>>().as_slice() {
+        [one] => Some(format!("{one}{rest}")),
+        _ => None,
+    }
 }
 
-/// Whether `timeline`'s value has been moved out on the row `line`
-/// (outside any conditional). Not dropped in place by
-/// `ManuallyDrop::drop`, which moves nothing out.
-fn moved_at(timeline: &Timeline, line: usize) -> bool {
-    timeline.states.iter().any(|(start, end, st)|
-        *start <= line && line < *end && matches!(st, State::ResourceMoved { dropped_by_hand: false, .. }))
+/// `display_place` of each, sorted, without repeats.
+fn display_places<'a>(vd: &VisualizationData, fn_line: usize, column: &str, places: impl IntoIterator<Item = &'a String>) -> Vec<Option<String>> {
+    let set: BTreeSet<Option<String>> = places.into_iter().map(|p| display_place(vd, fn_line, column, p)).collect();
+    set.into_iter().collect()
 }
 
-/// The row of the state table (RustViz 3, from MIR) that a struct column's
-/// line after the visual row `row` reads: the row's source line (the
-/// table's key, with the fn's first source line), or, where that row has
-/// no state of its own or closes a block (`}`, `} else {`, where the paths
-/// through the block join while the facts' row is one arm's code), the
-/// next row with one, whose state is what the line meets there when that
-/// row (and any `}` row on the way) does nothing to the column's
-/// variable.
-fn table_struct_row(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, row: usize) -> Option<(usize, usize)> {
-    let ResourceAccessPoint::Struct(_) = rap else { return None };
-    table_row(rap, visualization_data, row, true)
+/// The style and title of an owner column's line while loans restrict it
+/// (the cell's `lent`), and whether those loans borrow all of it (not a
+/// field or an element only).
+fn owner_loan_title(
+    rap: &ResourceAccessPoint,
+    vd: &VisualizationData,
+    fn_line: usize,
+    cell: &crate::facts::table::Cell,
+    layout: &State,
+    row: usize,
+) -> (State, String, bool) {
+    let table = &vd.state_table;
+    let name = rap.name();
+    let full = State::FullPrivilege { s: LineState::Full };
+    let exclusive = cell.lent.iter().any(|l| matches!(l.kind, "mut" | "unique"));
+    let mut state = if exclusive {
+        State::RevokedPrivilege { to: ResourceTy::Anonymous, borrow_to: ResourceTy::Anonymous, prev_state: Box::new(full) }
+    } else {
+        State::PartialPrivilege { s: LineState::Full }
+    };
+    let loans: Vec<_> = cell.lent.iter().filter(|l| matches!(l.kind, "mut" | "unique") == exclusive).collect();
+    let borrowed: BTreeSet<_> =
+        loans.iter().filter_map(|l| table.loan(fn_line, name, l.loan).map(|info| info.lender.as_str())).collect();
+    let by: BTreeSet<_> = loans.iter().flat_map(|l| l.current.iter().map(String::as_str)).collect();
+    let iterator = loans.iter().all(|l| l.iterator);
+    let direct: BTreeSet<_> = loans
+        .iter()
+        .filter_map(|l| table.loan(fn_line, name, l.loan)?.direct_holder.as_deref())
+        .filter(|h| by.contains(h))
+        .collect();
+    let candidate = if direct.len() == 1 { direct.first() } else { by.first().filter(|_| by.len() == 1) };
+    let holder = candidate.copied().filter(|h| loans.iter().all(|l| l.current.contains(*h)));
+    let shown_holder = holder.and_then(|h| display_place(vd, fn_line, name, h));
+    let holder = holder.filter(|_| shown_holder.is_some());
+    let holder_rap = |h: &str| vd.timelines.values().map(|t| &t.resource_access_point)
+        .find(|r| r.name() == h && vd.fn_source_lines.get(r.hash()) == Some(&fn_line));
+    // Named as the one holding the borrow only where the facts prove it:
+    // what the holder borrows is this place only (`result` of `longest(a,
+    // b)` may point into either), and a `&T` can't hold a mutable borrow
+    // (`let r2 = id(r)` downgrades it). Otherwise the title says only that
+    // the place stays borrowed while the holder is in use.
+    // It holds it where the borrow was assigned to it directly (`let r =
+    // &s;`, `&mut s` into a field), not through a call's result (`longest(a,
+    // b)` may return either; `id(r)` downgrades a `&mut`).
+    let exact = holder.is_some_and(|h| {
+        // (A closure's capture is its own: it holds what it captured.)
+        if holder_rap(h).is_some_and(|r| r.is_closure()) {
+            return true;
+        }
+        let sources = cell.holder_sources.get(h);
+        sources.is_some_and(|s| !s.is_empty() && s.iter().all(|x| borrowed.contains(x.as_str())))
+            && loans.iter().all(|l| table.loan(fn_line, name, l.loan).is_some_and(|i| i.direct_holder.as_deref() == Some(h)))
+            // (A `&T` downgraded from a `&mut` keeps a mutable loan live
+            // but can't write: it isn't said to hold it.)
+            && !(exclusive && holder_rap(h).is_some_and(|r| r.is_ref() && !r.is_mutref()))
+    }) && !iterator;
+    let exact_holder = shown_holder.as_deref().filter(|_| exact);
+    let kept_by = shown_holder.as_deref().filter(|_| !exact && !iterator);
+    let to = match exact_holder {
+        _ if iterator => hover_messages::LentTo::LoopIterator,
+        Some(h) if holder_rap(h).is_some_and(|r| r.is_closure()) => hover_messages::LentTo::Closure(h),
+        Some(h) => hover_messages::LentTo::Var(h),
+        None => hover_messages::LentTo::Unknown,
+    };
+    let whole = loans.iter().all(|l| table.loan(fn_line, name, l.loan).is_some_and(|i| i.whole.contains(name)));
+    if !whole && !matches!(layout, State::ResourceMoved { .. }) {
+        state = layout.clone();
+    }
+    let subject = borrowed.first().copied().filter(|_| borrowed.len() == 1);
+    let possible_sources = holder.and_then(|h| cell.holder_sources.get(h));
+    let read_only = whole && !rap.may_have_interior_mut();
+    // 2.x's title where its replay drew the same kind of loan and explains
+    // the paths itself: a place an or-pattern's reference may borrow
+    // (#565), "borrowed by r if the alternative that binds it matched".
+    let imaginary = loans.iter().all(|l| table.loan(fn_line, name, l.loan).is_some_and(|i| !i.runs));
+    let same_kind = std::mem::discriminant(layout) == std::mem::discriminant(&state);
+    let legacy = || timeline_segment_title(layout, rap, vd, Some(row));
+    if same_kind && !imaginary && !matches!(layout, State::ResourceMoved { .. }) && or_alt_lend_at(vd, rap, Some(row)).is_some() {
+        return (layout.clone(), legacy(), true);
+    }
+    // The places lent, as 2.x names them; a part named as the column itself
+    // (`(t.0 as Some).0` is shown as `t.0`) is a loan of it.
+    let parts: BTreeSet<String> = borrowed.iter().filter_map(|p| display_place(vd, fn_line, name, p)).collect();
+    let whole = whole || (!parts.is_empty() && parts.iter().all(|p| p == name));
+    let reserved = loans.iter().any(|l| l.kind == "reserved") && !exclusive;
+    let unique = loans.iter().any(|l| l.kind == "unique");
+    let mut title = if imaginary {
+        hover_messages::state_imaginary_borrow(name, exclusive)
+    } else if !whole {
+        // Only a part of it (a field, an element) is borrowed: the part is
+        // named, whatever the loan's kind (`p.a` reserved by `p.a.insert(..)`
+        // leaves `p.b` usable).
+        let kind = if unique { "unique" } else if exclusive { "mutable" } else if reserved { "reserved" } else { "shared" };
+        hover_messages::state_lent_parts(name, &parts.iter().map(String::as_str).collect(), exact_holder, kind, cell.may_lend)
+    } else if reserved {
+        let call =
+            loans.iter().find(|l| l.kind == "reserved").and_then(|l| table.loan(fn_line, name, l.loan)?.to_call.as_deref());
+        if cell.may_lend || !loans.iter().all(|l| l.kind == "reserved") {
+            format!("The borrow checker restricts changes to {} here. A two-phase mutable borrow can still allow reads before the call starts", styled_name_html(name))
+        } else {
+            hover_messages::state_reserved(name, call)
+        }
+    } else if cell.may_lend && exclusive {
+        if loans.iter().all(|l| l.kind == "mut") {
+            hover_messages::state_maybe_lent_out(name, false)
+        } else {
+            hover_messages::state_maybe_exclusive(name, false)
+        }
+    } else if cell.may_lend {
+        hover_messages::state_maybe_shared(name, exact_holder, rap.holds_value(), read_only, false)
+    } else if loans.iter().all(|l| l.kind == "unique") {
+        hover_messages::state_unique_lent(name, to)
+    } else if exclusive && unique {
+        format!("The borrow checker requires exclusive access to {} until the borrow ends", styled_name_html(name))
+    } else if let Some(parent) = subject.filter(|p| *p != name && rap.is_member()).and_then(|p| display_place(vd, fn_line, name, p)) {
+        hover_messages::state_lent_with_parent(name, &parent, exact_holder, exclusive, read_only)
+    } else if iterator {
+        // 2.x's own loop-iterator title where it drew one; else 2.x's clause
+        // and who holds the borrow (not "until the loop ends": a path that
+        // leaves the loop early ends it sooner, and a `Cell` inside can
+        // still be set).
+        let old = legacy();
+        if old.contains("loop's iterator") {
+            old
+        } else {
+            hover_messages::state_borrowed_by_loop_iterator_holder(name, rap.holds_value(), exclusive)
+        }
+    } else if kept_by.is_some() && same_kind && !matches!(layout, State::ResourceMoved { .. }) {
+        // The facts can't say the holder points to it: 2.x's title for the
+        // same kind of loan stands.
+        return (layout.clone(), legacy(), true);
+    } else if exclusive {
+        hover_messages::state_lent_out(name, to, None, false, rap.holds_value())
+    } else {
+        hover_messages::state_shared_by(name, exact_holder, rap.holds_value())
+    };
+    if let Some(h) = kept_by.filter(|_| whole && !imaginary && !cell.may_lend) {
+        title.push_str(&hover_messages::state_kept_borrowed_by(name, h));
+    }
+    if let Some((h, sources)) = shown_holder.as_deref().zip(possible_sources).filter(|(_, s)| cell.may_lend && s.len() > 1) {
+        let sources = display_places(vd, fn_line, name, sources);
+        if sources.len() > 1 {
+            title.push_str(&hover_messages::state_loan_sources(h, &sources));
+        }
+    }
+    let through: BTreeSet<_> = loans.iter().filter_map(|l| table.loan(fn_line, name, l.loan)?.through.as_deref()).collect();
+    if let Some(r) = through.first().filter(|_| {
+        through.len() == 1 && loans.iter().all(|l| table.loan(fn_line, name, l.loan).is_some_and(|i| i.through.is_some()))
+    }).and_then(|r| display_place(vd, fn_line, name, r)) {
+        title.push_str(&hover_messages::state_through(&r));
+    }
+    (state, title, whole)
 }
 
-/// `table_struct_row` for any column (a variable, struct, field, Box or
-/// reference). `values_only`: the next row may borrow from the
+/// RustViz 3 (P1-4b, reference columns): the row of the state table a
+/// column's line after the visual row `row` reads (see P1-3's
+/// `table_struct_row`, which P1-5 replaced for owners by `owner_segment`). `values_only`: the next row may borrow from the
 /// column (only its value is read); otherwise it may do nothing to it.
 fn table_row(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, row: usize, values_only: bool) -> Option<(usize, usize)> {
     if rap.is_fn() || rap.is_closure() {
@@ -9925,7 +10096,7 @@ fn table_lent_state(state: &State, rap: &ResourceAccessPoint, visualization_data
             None => hover_messages::LentTo::Unknown,
         };
         let title = if !every_path && !unique {
-            hover_messages::state_maybe_lent_out(rap.name())
+            hover_messages::state_maybe_lent_out(rap.name(), false)
         } else if unique {
             // (For a reference: a closure's unique immutable borrow of the
             // binding itself, which writes through it.)
@@ -9971,56 +10142,63 @@ fn table_lent_state(state: &State, rap: &ResourceAccessPoint, visualization_data
     }
 }
 
-/// RustViz 3: the title of a column 2.x's replay draws moved on the visual
-/// row `row` where the state table says it still holds something (only a
-/// part of it, a Box's contents, was moved out).
-fn table_still_holds_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, row: usize) -> Option<String> {
+/// A struct's trunk stops where the remaining fields' drawn legs carry
+/// them to their moves. Use the actual split/merge geometry and require
+/// the MIR state to confirm every field is gone at its respective end.
+fn trunk_ends_at_fields(vd: &VisualizationData, func: usize, name: &str, row: usize, src: usize) -> bool {
     use crate::facts::table::Init;
-    let (fn_line, r) = table_row(rap, visualization_data, row, true)?;
-    (visualization_data.state_table.cell(fn_line, rap.name(), r, r)?.init == Init::Partly)
-        .then(|| table_partly_moved_title(rap, visualization_data, row))
-        .flatten()
-}
-
-/// `table_struct_row`'s cell of the column `column` (the struct's or a
-/// field's).
-fn table_struct_cell(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, row: usize) -> Option<(usize, crate::facts::table::Cell)> {
-    let (fn_line, r) = table_struct_row(rap, visualization_data, row)?;
-    Some((fn_line, visualization_data.state_table.cell(fn_line, rap.name(), r, r)?))
-}
-
-/// The state table says the struct holds all its fields here (MIR: no
-/// field moved out on any path): 2.x's replayed partial move is wrong.
-fn table_says_whole(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, row: usize) -> bool {
-    table_struct_cell(rap, visualization_data, row).is_some_and(|(_, c)| {
-        c.init == crate::facts::table::Init::Own && c.parts.as_ref().is_none_or(|p| p.moved.is_empty() && p.maybe.is_empty())
+    let table = &vd.state_table;
+    let fields = table.fields_of(func, name);
+    if fields.is_empty() || !table.fields_complete(func, name) {
+        return false;
+    }
+    fields.iter().all(|f| {
+        let Some(t) = vd.timelines.values().find(|t| {
+            t.resource_access_point.name() == f && vd.fn_source_lines.get(t.resource_access_point.hash()) == Some(&func)
+        }) else {
+            return false;
+        };
+        if t.states
+            .iter()
+            .any(|(a, b, s)| *a <= row && row < *b && matches!(s, State::ResourceMoved { dropped_by_hand: false, .. }))
+            && table.segment_cell(func, f, src).is_some_and(|c| c.init == Init::Moved)
+        {
+            return true;
+        }
+        if t.history.iter().any(|(_, e)| match e {
+            Event::Branch { split_point, merge_point, .. } if *split_point <= row && row < *merge_point => {
+                rv_attrs::line_of(*merge_point, &vd.row_lines)
+                    .and_then(|r| table.segment_cell(func, f, r))
+                    .is_some_and(|c| c.init == Init::Moved)
+            }
+            _ => false,
+        }) {
+            return true;
+        }
+        trunk_ends_at_fields(vd, func, f, row, src)
     })
 }
 
-/// The title of a struct column's line on visual row `row` when the state
-/// table says fields of it are moved out (surely or on some paths): what
-/// 2.x's `parts_moved_at` replays from the fields' histories, from MIR.
-/// It names exactly what the table knows is gone: the moved places, and a
-/// field that isn't whole though no place in it is named (an array
-/// element moved out of it has no column: "part of p.a"). None: nothing is
-/// moved out there (the owner's title stands), the table doesn't have the
-/// column there, or every field is surely gone where 2.x stops the line.
-fn table_partly_moved_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, row: usize) -> Option<String> {
+fn table_partly_moved_title(rap: &ResourceAccessPoint, table: &crate::facts::table::StateTable,
+    fn_line: usize, r: usize, cell: &crate::facts::table::Cell) -> Option<String> {
     use crate::facts::table::Init;
-    // Where a struct's line stops is 2.x's call for now (#1157, #1541: at
-    // a fork whose arms all move its last fields): its segments start and
-    // end with its dots, and a stop or restart the table alone decided
-    // would leave a line that starts from nowhere.
-    if parts_moved_at(rap, visualization_data, row).is_some_and(|p| p.all) {
-        return None;
+    let mut parts = cell.parts.as_ref().cloned().unwrap_or_default();
+    let imaginary: Vec<_> = parts.maybe.iter().filter(|p| table.segment_cell(fn_line, p, r)
+        .is_some_and(|c| c.cause == Some("imaginary"))).cloned().collect();
+    if !imaginary.is_empty() {
+        parts.maybe.retain(|p| !imaginary.contains(p));
+        return Some(hover_messages::state_parts_imaginary(rap.name(), &parts, &imaginary));
     }
-    let (fn_line, r) = table_row(rap, visualization_data, row, true)?;
-    let table = &visualization_data.state_table;
-    let cell = table.cell(fn_line, rap.name(), r, r)?;
-    if !matches!(cell.init, Init::Own | Init::Partly) {
-        return None;
+    if let Some(n) = table.array_len(fn_line, rap.name()) {
+        if n <= crate::facts::schema::MAX_NAMED_ARRAY_LEN && (!parts.moved.is_empty() || !parts.maybe.is_empty()) {
+            let left = (0..n).map(|i| format!("{}[{i}]", rap.name()))
+                .filter(|p| !parts.moved.contains(p) && !parts.maybe.contains(p)).collect::<Vec<_>>();
+            if parts.maybe.is_empty() || parts.moved.is_empty() {
+                let list = if cell.may { &parts.maybe } else { &parts.moved };
+                return Some(hover_messages::state_elems_moved(rap.name(), list, &left, cell.may));
+            }
+        }
     }
-    let parts = cell.parts.unwrap_or_default();
     // A Box whose contents were moved out (`let s = *b;`): the Box itself
     // wasn't, and still owns its heap allocation.
     // (Moved on some paths only: a Box struct's fields say which were for
@@ -10060,7 +10238,7 @@ fn table_partly_moved_title(rap: &ResourceAccessPoint, visualization_data: &Visu
             } else if parts.moved.iter().chain(parts.maybe.iter()).any(|n| covers(&f, n)) {
                 Init::Partly
             } else {
-                table.cell(fn_line, &f, r, r)?.init
+                table.segment_cell(fn_line, &f, r)?.init
             };
             Some((f, init))
         })
@@ -10081,7 +10259,11 @@ fn table_partly_moved_title(rap: &ResourceAccessPoint, visualization_data: &Visu
         if maybe.is_empty() {
             return Some(hover_messages::state_fields_all_moved(rap.name(), &surely));
         }
-        return Some(hover_messages::state_table_fields_maybe_gone(rap.name(), &surely, &maybe));
+        let mut title = hover_messages::state_table_fields_maybe_gone(rap.name(), &surely, &maybe);
+        if table.drops_rest_at_exit(fn_line, rap.name(), r) {
+            title.push_str(&format!("; what is left in {} is dropped when it goes out of scope", styled_name_html(rap.name())));
+        }
+        return Some(title);
     }
     // The moved-out places, outermost only (`o.inner` when it moved out
     // whole, not also `o.inner.x`).
@@ -10093,8 +10275,10 @@ fn table_partly_moved_title(rap: &ResourceAccessPoint, visualization_data: &Visu
     };
     let mut surely = outermost(&parts.moved, &[]);
     let mut maybe: Vec<String> = outermost(&parts.maybe, &surely).into_iter().filter(|m| !surely.contains(m)).collect();
-    // A field that isn't whole though nothing in it is named.
+    // A field that isn't whole though nothing in it is named: on every
+    // path, or (its own cell says so) on some only.
     let mut partly = Vec::new();
+    let mut partly_maybe = Vec::new();
     for (f, init) in &field_init {
         if surely.iter().chain(maybe.iter()).any(|n| n.trim_start_matches('*') == f || covers(f, n)) {
             continue;
@@ -10102,129 +10286,32 @@ fn table_partly_moved_title(rap: &ResourceAccessPoint, visualization_data: &Visu
         match init {
             Init::Moved => surely.push(f.clone()),
             Init::Maybe => maybe.push(f.clone()),
+            // (Its own cell knows whether what is gone from it is gone on
+            // every path: `p.a[0]` of an array field, an enum payload.)
+            Init::Partly if table.segment_cell(fn_line, f, r).is_none_or(|c| c.unnamed_maybe || c.may) => partly_maybe.push(f.clone()),
             Init::Partly => partly.push(f.clone()),
             _ => {}
         }
     }
-    if surely.is_empty() && maybe.is_empty() && partly.is_empty() {
+    if surely.is_empty() && maybe.is_empty() && partly.is_empty() && partly_maybe.is_empty() {
         return None;
     }
     // "Its other fields still can" (be used), where the facts show it:
     // every place named was surely moved out (none may have been, no part
     // unnamed), and every other field holds its whole value on every path
-    // here, lent at most shared. (Loans are read after a row: where the
-    // state is the next row's, that row must not start or end a `&mut`
-    // loan of it either.)
-    let others_usable = complete && maybe.is_empty() && partly.is_empty()
-        && (rv_attrs::line_of(row, &visualization_data.row_lines) == Some(r) || table.usable_same(fn_line, rap.name(), r))
+    // here, lent at most shared.
+    let others_usable = complete && maybe.is_empty() && partly.is_empty() && partly_maybe.is_empty()
         && {
             let others: Vec<&String> = field_init.iter().map(|(f, _)| f)
                 .filter(|f| !surely.iter().any(|n| n.trim_start_matches('*') == f.as_str() || covers(f, n)))
                 .collect();
-            !others.is_empty() && others.iter().all(|f| table.cell(fn_line, f, r, r).is_some_and(|c| {
+            !others.is_empty() && others.iter().all(|f| table.segment_cell(fn_line, f, r).is_some_and(|c| {
                 c.init == Init::Own
                     && c.parts.as_ref().is_none_or(|p| p.moved.is_empty() && p.maybe.is_empty())
                     && c.lent.iter().all(|l| matches!(l.kind, "shared" | "reserved"))
             }))
         };
-    Some(hover_messages::state_table_partly_moved(rap.name(), &surely, &maybe, &partly, others_usable))
-}
-
-/// The rows where a field of the struct column `rap` (at any depth) is
-/// moved out, or gets a value again (#1157).
-fn parts_moved_rows(rap: &ResourceAccessPoint, visualization_data: &VisualizationData) -> Vec<usize> {
-    let mut rows = Vec::new();
-    if matches!(rap, ResourceAccessPoint::Struct(Struct { is_box: true, .. })) {
-        return rows;
-    }
-    for t in direct_parts(rap, visualization_data) {
-        for (start, end, st) in &t.states {
-            if matches!(st, State::ResourceMoved { dropped_by_hand: false, .. }) {
-                rows.push(*start);
-                rows.push(*end);
-            }
-        }
-        rows.extend(moved_in_every_arm(t, 0).map(|(split, _)| split));
-        rows.extend(parts_moved_rows(&t.resource_access_point, visualization_data));
-    }
-    rows
-}
-
-/// The (split, merge) rows of a conditional at the top level of
-/// `timeline` that moves its value in every arm reaching the join, and
-/// that row `line` is in (with `line` 0, the first such conditional):
-/// the field's arm legs carry it to their moves (#1541).
-fn moved_in_every_arm(timeline: &Timeline, line: usize) -> Option<(usize, usize)> {
-    timeline.history.iter().find_map(|(_, e)| match e {
-        Event::Branch { branch_history, ty, split_point, merge_point, .. }
-            if !matches!(ty, BranchType::Loop(..)) && (line == 0 || (*split_point <= line && line < *merge_point))
-                && merge_move_kind(branch_history, ty).1 => Some((*split_point, *merge_point)),
-        _ => None,
-    })
-}
-
-/// The fields of the struct column `rap` moved out of it by the row
-/// `line` (a field all of whose own fields were counts as moved), and
-/// whether that is all of them. `None` when none is (#1157). Not for a
-/// Box drawn as its payload's parts: moving them out leaves it its heap
-/// allocation (#898).
-fn parts_moved_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, line: usize) -> Option<PartsMoved> {
-    if matches!(rap, ResourceAccessPoint::Struct(Struct { is_box: true, .. })) {
-        return None;
-    }
-    let parts = direct_parts(rap, visualization_data);
-    let mut moved = Vec::new();
-    let mut maybe = false;
-    // The fields moved in some branches of a conditional above only.
-    let mut maybe_moved: Vec<String> = Vec::new();
-    for t in &parts {
-        let r = &t.resource_access_point;
-        if moved_at(t, line) {
-            moved.push(r.name().clone());
-            // Moved in some branches of a conditional above only.
-            let before: Vec<(usize, Event)> = t.history.iter().filter(|(l, _)| *l <= line).cloned().collect();
-            if maybe_moved_at_end(&before) {
-                maybe = true;
-                maybe_moved.push(r.name().clone());
-            }
-            continue;
-        }
-        if let Some(inner) = parts_moved_at(r, visualization_data, line) {
-            maybe |= inner.maybe;
-            // (A field whose own fields are all moved, some on some paths
-            // only, is maybe-moved as a whole: nothing in it can be used.)
-            if inner.all || inner.none_usable {
-                moved.push(r.name().clone());
-                if inner.none_usable {
-                    maybe_moved.push(r.name().clone());
-                }
-            } else {
-                moved.extend(inner.moved);
-                maybe_moved.extend(inner.maybe_moved);
-            }
-        }
-    }
-    if moved.is_empty() {
-        return None;
-    }
-    let mut all = parts.iter().all(|t| moved.contains(t.resource_access_point.name()));
-    // A field moved on some paths only is still in the struct on the
-    // others, which drop it at the struct's scope end: the struct's line
-    // goes on (`let s2 = p.b; if c { drop(p.a); } else if d { drop(p.a);
-    // }`, #1583). Nothing in it can be used, though.
-    let none_usable = all && !maybe_moved.is_empty();
-    if none_usable {
-        all = false;
-    }
-    // The fields still in it are moved in every arm of the conditional
-    // `line` is in (`let s3 = p.b; if c { drop(p.a) } else { drop(p.a) }`,
-    // #1541): their arm legs carry what's left of the struct, whose line
-    // stops where they split (it can't say its other fields still can be
-    // used there).
-    if !all && !none_usable && parts.iter().all(|t| moved.contains(t.resource_access_point.name()) || moved_in_every_arm(t, line).is_some()) {
-        all = true;
-    }
-    Some(PartsMoved { moved, maybe, all, maybe_moved, none_usable })
+    Some(hover_messages::state_table_partly_moved_hedged(rap.name(), &surely, &maybe, &partly, &partly_maybe, others_usable))
 }
 
 /// The elements (`pair[0]`) a slice pattern moved out of an array's
@@ -10287,18 +10374,6 @@ fn elems_split(history: &[(usize, Event)], el: &ElemsLeft) -> (Vec<String>, Vec<
     order(&mut maybe);
     let left = all.iter().filter(|n| !moved.contains(n) && !maybe.contains(n)).cloned().collect();
     (moved, maybe, left)
-}
-
-/// See `parts_moved_at`.
-struct PartsMoved {
-    moved: Vec<String>,
-    /// Some of them were moved on some paths through a conditional only.
-    maybe: bool,
-    all: bool,
-    /// Those of `moved` (at any depth) moved on some paths only.
-    maybe_moved: Vec<String>,
-    /// Every field is moved, some on some paths only (#1583).
-    none_usable: bool,
 }
 
 /// The rows where a borrow of a field of what the `&mut` reference

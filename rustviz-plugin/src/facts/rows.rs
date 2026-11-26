@@ -233,7 +233,7 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
 
     /// The successors a path can run: `succs` without borrowck's imaginary
     /// `FalseEdge` targets.
-    fn real_succs(&self, l: Location) -> Vec<Location> {
+    pub(super) fn real_succs(&self, l: Location) -> Vec<Location> {
         let data = &self.body.basic_blocks[l.block];
         let imaginary = match &data.terminator().kind {
             TerminatorKind::FalseEdge { imaginary_target, real_target } if l.statement_index == data.statements.len() && imaginary_target != real_target => Some(*imaginary_target),
