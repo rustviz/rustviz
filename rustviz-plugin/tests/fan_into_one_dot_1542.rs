@@ -4,8 +4,8 @@
 // (A fan with no such side keeps main's drawing:
 // fan_into_one_dot_keeps_main_1542.)
 
-// Three returns into r's `if let` dot: one level, one from below, one from
-// the other side.
+// Three arrows into r's `if let` dot (kc's reference moved into r, and the
+// loan from m1 or m2 it holds): one level, one from below, one from past it.
 fn three_into_one(mut m1: String, mut m2: String, c: bool) {
     let kc = if c { Some(&mut m1) } else { Some(&mut m2) };
     if let Some(r) = kc {

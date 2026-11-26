@@ -6014,15 +6014,15 @@ impl ArrowLanes {
             at.entry((dot_y, to.round() as i64, from > to)).or_default().push((i, true, depth));
             at.entry((dot_y, from.round() as i64, to > from)).or_default().push((i, false, depth));
         }
+        // (The sides of a dot (right or not) a fan's head has taken level:
+        // not free for another fan at that dot, from above or below, or
+        // from the other way along the row, #1605's Codex review.)
+        let mut level_taken: BTreeMap<(i64, i64), Vec<bool>> = BTreeMap::new();
         for (key, legs) in &at {
             if legs.len() < 2 || !legs.iter().any(|l| l.1) {
                 continue;
             }
             let level: Vec<&(usize, bool, i64)> = legs.iter().filter(|l| l.2 == 0).collect();
-            // (The sides of the dot (right or not) a head from below or
-            // from above has already taken level: not free for the other
-            // side's fan, #1605's Codex review.)
-            let mut level_taken: Vec<bool> = Vec::new();
             for down in [true, false] {
                 let mut side: Vec<&(usize, bool, i64)> = legs.iter().filter(|l| l.2 != 0 && (l.2 > 0) == down).collect();
                 if side.is_empty() || (side.len() == 1 && level.is_empty()) {
@@ -6059,7 +6059,8 @@ impl ArrowLanes {
                     // half a row above the dot (the maintainer's ruling on
                     // #1605: above is a side too).
                     let mut free: Vec<FanSide> = [FanSide::Level { far: false }, FanSide::Level { far: true }].into_iter()
-                        .filter(|s| matches!(s, FanSide::Level { far } if !taken(right != *far) && !level_taken.contains(&(right != *far))))
+                        .filter(|s| matches!(s, FanSide::Level { far } if !taken(right != *far)
+                            && !level_taken.get(&fan_key).is_some_and(|t| t.contains(&(right != *far)))))
                         .chain(down.then_some(FanSide::Above))
                         .collect();
                     let mut heads: Vec<&(usize, bool, i64)> = side.iter().copied().filter(|l| l.1).collect();
@@ -6113,7 +6114,7 @@ impl ArrowLanes {
                             // it would read as one arrow with any leaving the dot
                             // straight on, #1349.)
                             FanSide::Level { far } => {
-                                level_taken.push(right != far);
+                                level_taken.entry(fan_key).or_default().push(right != far);
                                 self.level_in.insert(it.key, if far { LEVEL_IN_SLANT } else { 0 });
                                 if far {
                                     self.far.insert(it.key);
@@ -6924,7 +6925,7 @@ fn heads_on_heads(drawn: &[Drawn], touching: bool) -> Vec<usize> {
     let down = |d: &Drawn| d.tri[1].1 - (d.tri[0].1 + d.tri[2].1) / 2.0 > 2.0;
     let mut out = Vec::new();
     for (i, a) in drawn.iter().enumerate().filter(|(_, d)| d.logo.is_none() && d.tri.len() == 3) {
-        if drawn[..i].iter().any(|b| b.logo.is_none() && b.tri.len() == 3 && b.tip != a.tip && dist(b.tri[1], a.tri[1]) < 8.0 && {
+        if drawn[..i].iter().any(|b| b.logo.is_none() && b.tri.len() == 3 && b.key != a.key && dist(b.tri[1], a.tri[1]) < 8.0 && {
             let depth = if touching && (down(a) || down(b)) { -0.5 } else { 1.0 };
             // (Two heads drawn as one: every edge point on the other's
             // boundary, at depth 0.)
@@ -8536,7 +8537,11 @@ fn render_arrows_string_external_events_version(
                 starts.sort_unstable();
                 starts.dedup();
                 let band = |y: f64| starts.iter().filter(|&&s| (s as f64) <= y).count();
-                let at = |d: &Drawn| d.tri.get(1).map(|t| t.1).or(d.logo.map(|l| l.1)).or(d.pieces.first().map(|p| p.0 .1)).unwrap_or(0.0);
+                // (An arrow's function: where its lowest point is. A
+                // result to the caller goes up from the signature's dot
+                // to above that row, #1605's Codex review.)
+                let at = |d: &Drawn| d.pieces.iter().flat_map(|&(p, q)| [p.1, q.1]).chain(d.tri.iter().map(|t| t.1)).chain(d.logo.map(|l| l.1))
+                    .fold(f64::NEG_INFINITY, f64::max);
                 let per_band = |d: &[Drawn], idx: Vec<usize>| {
                     let mut n: BTreeMap<usize, usize> = BTreeMap::new();
                     for i in idx {
