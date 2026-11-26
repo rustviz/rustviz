@@ -8412,12 +8412,20 @@ fn render_arrows_string_external_events_version(
     // crosses more here, up to two other orders of approaches at the
     // rule's fans (within the work budget, `within_budget`), else the
     // figure keeps main's drawing.
-    let mut main_drawing = false;
-    // (A big one whose rule-drawn fans cross: drawn without #1542's rule,
-    // in one more layout, its fans as main's router draws them.)
-    if big && seen.keys().any(|&(y, x)| fan_crossings_at(&drawn, (x as f64, y as f64)) > 0) {
+    // (A big one whose rule-drawn fans cross, or with two heads on each
+    // other: main's drawing, in one more layout.)
+    let mut main_drawing_big = false;
+    if big && (seen.keys().any(|&(y, x)| fan_crossings_at(&drawn, (x as f64, y as f64)) > 0) || !heads_on_heads(&drawn, false).is_empty()) {
+        let (legs, dashed) = (dots.legs.clone(), std::mem::take(&mut dots.dashed_legs));
+        dots.legs.extend(dashed.iter().copied());
+        dots.legacy = true;
         drawn = lay_out_arrows(visualization_data, resource_owners_layout, dots, registry, true, &fan_old, &BTreeMap::new());
+        dots.legacy = false;
+        dots.legs = legs;
+        dots.dashed_legs = dashed;
+        main_drawing_big = true;
     }
+    let mut main_drawing = main_drawing_big;
     if !big && (all_fan_crossings(&drawn) > 0 || !heads_on_heads(&drawn, false).is_empty()) {
         let kept = dots.lanes.clone();
         let (legs, dashed) = (dots.legs.clone(), std::mem::take(&mut dots.dashed_legs));
