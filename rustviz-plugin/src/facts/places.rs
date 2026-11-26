@@ -81,6 +81,21 @@ impl<'tcx> Names<'tcx> {
                 .map_or_else(|| ident.to_owned(), |(_, n)| n.clone());
             locals.entry(place.local).or_insert(name);
         }
+        // Two locals named alike (the 2.x name table numbers shadowing
+        // in fn bodies, not in closure bodies): number them by position.
+        let mut by_name: BTreeMap<String, Vec<(rustc_span::BytePos, Local)>> = BTreeMap::new();
+        for (l, n) in &locals {
+            by_name.entry(n.clone()).or_default().push((body.local_decls[*l].source_info.span.lo(), *l));
+        }
+        for (n, mut ls) in by_name {
+            if ls.len() < 2 || !is_closure_env(tcx, body) {
+                continue;
+            }
+            ls.sort();
+            for (k, (_, l)) in ls.into_iter().enumerate().skip(1) {
+                locals.insert(l, crate::expr_visitor_utils::numbered_name(written_name(&n), k + 1));
+            }
+        }
         // Longest alias first, so the most specific one names a place.
         aliases.sort_by_key(|(p, _, _)| std::cmp::Reverse(p.projection.len()));
         Names { locals, aliases }
@@ -111,16 +126,23 @@ impl<'tcx> Names<'tcx> {
         Some(name_projections(root, &mut ty, &place.projection[skip..]))
     }
 
-    /// The reference variable a place is reached through, if its first
-    /// projection after the variable is a deref of a reference (`*r`,
-    /// `r.f` with `r: &mut S`): a reborrow, "through r".
+    /// The reference a place is reached through, if it is behind one: the
+    /// prefix before the place's last dereference of a reference (`r` for
+    /// `*r`, `h.r` for `*h.r`, `r` for `r.f` with `r: &mut S`). A borrow
+    /// of such a place is a reborrow "through" it.
     pub fn through(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'tcx>) -> Option<String> {
-        let (root, skip, _) = self.root(place)?;
-        let ty = place_ty_prefix(tcx, body, place, skip);
-        match place.projection.get(skip) {
-            Some(ProjectionElem::Deref) if ty.is_ref() => Some(root),
-            _ => None,
+        let (_, skip, _) = self.root(place)?;
+        let mut ty = place_ty_prefix(tcx, body, place, skip);
+        let mut last = None;
+        for (i, e) in place.projection.iter().enumerate().skip(skip) {
+            if e == ProjectionElem::Deref && ty.is_ref() {
+                last = Some(i);
+            }
+            ty = project_ty(ty, &e);
         }
+        let i = last?;
+        let prefix = Place { local: place.local, projection: tcx.mk_place_elems(&place.projection[..i]) };
+        self.name(tcx, body, prefix)
     }
 }
 

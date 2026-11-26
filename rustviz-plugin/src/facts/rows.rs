@@ -11,7 +11,8 @@
 //!    `drop(h); h = move tmp;` for `h = if c {..} else {..};` the span of
 //!    `h`, the first row, though it runs after the arms.
 //! 2. **Multi-row statements** take effect on their last row (an
-//!    assignment, a call, a drop); desugared code (`for`'s `next()`,
+//!    assignment, a call, a drop; an assignment expression's whole span
+//!    counts, not just its place's); desugared code (`for`'s `next()`,
 //!    `?`) and everything else on its first.
 //! 3. **State after row L** is read at the row's exits that go on to the
 //!    next row of the same path: not a `?`'s or `break`'s jump further
@@ -51,10 +52,13 @@ pub struct RowModel {
     pub row: BTreeMap<Location, usize>,
     /// Row an event at the location is shown on (rule 4).
     pub event_row: BTreeMap<Location, usize>,
-    /// The exit row whose path alone runs the location (rule 4).
-    pub early_exit: BTreeMap<Location, usize>,
-    /// Early-exit rows that share the location with the normal path.
-    pub shared_exits: BTreeMap<Location, Vec<usize>>,
+    /// The exit (its row and its own location) whose path alone runs the
+    /// location (rule 4).
+    pub early_exit: BTreeMap<Location, (usize, Location)>,
+    /// Early exits (row, the exit's own location) that share the
+    /// location with the normal path or with each other: the drop runs
+    /// on each of those paths too.
+    pub shared_exits: BTreeMap<Location, Vec<(usize, Location)>>,
     /// Source column (1-based) the location's span starts at.
     pub col: BTreeMap<Location, usize>,
     /// Per row: the locations its state is read after (rule 3).
@@ -104,6 +108,18 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
                 }
             }
         }
+        // An assignment takes effect when its whole expression is done:
+        // MIR gives `h = move tmp` (and the drop of the old `h` before it)
+        // the span of `h`, but in `h = if c {..} else {..};` it runs
+        // after the arms, on the statement's last row.
+        if let Some(StatementKind::Assign(..)) = data.statements.get(l.statement_index).map(|s| &s.kind) {
+            let hir_id = self.body.location_to_hir_id(l);
+            if let hir::Node::Expr(e @ hir::Expr { kind: hir::ExprKind::Assign(..) | hir::ExprKind::AssignOp(..), .. }) = self.tcx.hir_node(hir_id) {
+                if !e.span.from_expansion() {
+                    return self.line_hi(e.span).max(self.line_lo(sp));
+                }
+            }
+        }
         let desugared = self.body.source_info(l).span.desugaring_kind().is_some();
         let effect_at_end = !desugared
             && match data.statements.get(l.statement_index) {
@@ -125,7 +141,7 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
         } else {
             data.terminator()
                 .successors()
-                .filter(|s| !self.body.basic_blocks[*s].is_cleanup)
+                .filter(|s| !self.body.basic_blocks[*s].is_cleanup && !is_unreachable(self.body, *s))
                 .map(|s| Location { block: s, statement_index: 0 })
                 .collect()
         }
@@ -148,9 +164,9 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
     /// `break` / `continue`.
     fn exit_kind(&self, l: Location) -> Option<bool> {
         let sp = self.body.source_info(l).span;
-        if sp.desugaring_kind() == Some(rustc_span::DesugaringKind::QuestionMark) {
-            return Some(true);
-        }
+        // (`?` desugars to `match Try::branch(x) { .., Break(r) => return
+        // from_residual(r) }`: only the `return` arm exits, found below by
+        // its `Ret` node; in a `try` block it is a `break` instead.)
         // The location computes a `return` / `break` value or is the jump:
         // its HIR node is, or is inside, the `return` / `break` /
         // `continue` expression (before any statement or block).
@@ -203,6 +219,8 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
 
         // Rule 1 and 2.
         let mut row: BTreeMap<Location, usize> = BTreeMap::new();
+        // The floor each block passes on (the last row that counts in it).
+        let mut floor_out: BTreeMap<BasicBlock, usize> = BTreeMap::new();
         for &bb in &rpo_v {
             let data = &body.basic_blocks[bb];
             if data.is_cleanup {
@@ -215,8 +233,7 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
                 .collect();
             let mut floor = 0;
             if fwd.len() == 1 && preds[bb].len() == 1 {
-                let p = fwd[0];
-                floor = row.get(&Location { block: p, statement_index: body.basic_blocks[p].statements.len() }).copied().unwrap_or(0);
+                floor = floor_out.get(&fwd[0]).copied().unwrap_or(0);
             }
             for loc in self.locations(bb) {
                 let r = self.raw_row(loc).max(floor);
@@ -225,14 +242,20 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
                 // and may carry a later span than the code after it (the
                 // let-else scrutinee's temporary dies at `};` before the
                 // `else` block runs): it doesn't push what follows down.
-                let storage = matches!(
-                    body.basic_blocks[bb].statements.get(loc.statement_index).map(|s| &s.kind),
-                    Some(StatementKind::StorageDead(_) | StatementKind::StorageLive(_))
-                );
+                // Nor does the drop of a temporary (the let-else scrutinee's
+                // `args()` is dropped at `};` before the `else` block runs).
+                let data = &body.basic_blocks[bb];
+                let storage = match data.statements.get(loc.statement_index) {
+                    Some(st) => matches!(st.kind, StatementKind::StorageDead(_) | StatementKind::StorageLive(_)),
+                    None => matches!(&data.terminator().kind, TerminatorKind::Drop { place, .. }
+                        if place.projection.is_empty() && !body.local_decls[place.local].is_user_variable()
+                            && place.local.index() > body.arg_count),
+                };
                 if !storage {
                     floor = r;
                 }
             }
+            floor_out.insert(bb, floor);
         }
         let col: BTreeMap<Location, usize> = row.keys().map(|l| (*l, self.col_lo(self.span_of(*l)))).collect();
 
@@ -246,6 +269,8 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
         // function), to tell it from a `return` / `?`.
         const LOOP_EXIT: usize = 1 << 40;
         let mut origin: BTreeMap<Location, BTreeSet<usize>> = BTreeMap::new();
+        // The exits' own locations, per scope-ending location.
+        let mut origin_at: BTreeMap<Location, BTreeSet<(usize, Location)>> = BTreeMap::new();
         let mut changed = true;
         while changed {
             changed = false;
@@ -267,22 +292,28 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
                             .collect()
                     };
                     let mut set: BTreeSet<usize> = BTreeSet::new();
+                    let mut at: BTreeSet<(usize, Location)> = BTreeSet::new();
                     for p in before {
                         if self.is_scope_end(p) {
                             if let Some(s) = origin.get(&p) {
                                 set.extend(s.iter().copied());
                             }
+                            if let Some(s) = origin_at.get(&p) {
+                                at.extend(s.iter().copied());
+                            }
                         }
                         if let Some(leaves) = self.exit_kind(p) {
                             if let Some(r) = row.get(&p) {
                                 set.insert(if leaves { *r } else { *r + LOOP_EXIT });
+                                at.insert((*r, p));
                             }
                         } else if !self.is_scope_end(p) {
                             set.insert(NORMAL);
                         }
                     }
-                    if origin.get(&loc) != Some(&set) {
+                    if origin.get(&loc) != Some(&set) || origin_at.get(&loc) != Some(&at) {
                         origin.insert(loc, set);
+                        origin_at.insert(loc, at);
                         changed = true;
                     }
                 }
@@ -290,7 +321,7 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
         }
         let mut event_row = row.clone();
         let mut early_exit = BTreeMap::new();
-        let mut shared_exits: BTreeMap<Location, Vec<usize>> = BTreeMap::new();
+        let mut shared_exits: BTreeMap<Location, Vec<(usize, Location)>> = BTreeMap::new();
         // Locations only a `return` / `?` reaches leave the function: their
         // state is not what the `}` row shows (`let ... else { return }`).
         // A `break`'s path goes on after the loop, so only its events move.
@@ -301,10 +332,18 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
                 continue;
             }
             if set.contains(&NORMAL) || exits.len() > 1 {
-                shared_exits.insert(*loc, exits.clone());
+                // One exit location per exit row (its first).
+                let mut per_row: BTreeMap<usize, Location> = BTreeMap::new();
+                for (r, l) in origin_at.get(loc).into_iter().flatten() {
+                    per_row.entry(*r).or_insert(*l);
+                }
+                shared_exits.insert(*loc, per_row.into_iter().collect());
             } else if exits[0] < row[loc] {
                 event_row.insert(*loc, exits[0]);
-                early_exit.insert(*loc, exits[0]);
+                // The exit's first location (`_0 = ..` of `return`, the
+                // `break` value), not a jump with no span of its own.
+                let at = origin_at.get(loc).and_then(|a| a.iter().next().map(|(_, l)| *l)).unwrap_or(*loc);
+                early_exit.insert(*loc, (exits[0], at));
                 if set.iter().all(|r| *r < LOOP_EXIT) {
                     leaves_fn.insert(*loc);
                 }
@@ -312,7 +351,7 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
         }
 
         for l in &leaves_fn {
-            row.insert(*l, early_exit[l]);
+            row.insert(*l, early_exit[l].0);
         }
 
         // Rule 3.
@@ -419,6 +458,19 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
     }
 }
 
+/// A block MIR marks unreachable (the fall-through of a slice pattern's
+/// length test): no path runs it.
+pub fn is_unreachable(body: &Body<'_>, bb: BasicBlock) -> bool {
+    let data = &body.basic_blocks[bb];
+    matches!(data.terminator().kind, TerminatorKind::Unreachable)
+        && data.statements.iter().all(|s| {
+            matches!(
+                s.kind,
+                StatementKind::StorageDead(_) | StatementKind::StorageLive(_) | StatementKind::Nop | StatementKind::FakeRead(..) | StatementKind::PlaceMention(..)
+            )
+        })
+}
+
 impl RowModel {
     /// The innermost arm (index into the row's arms) a location is in.
     pub fn arm_of(&self, l: Location) -> Option<usize> {
@@ -429,7 +481,7 @@ impl RowModel {
 
     /// Evaluation order of a location: (reverse postorder of its block,
     /// statement index).
-    pub fn order(&self, l: Location) -> (usize, usize) {
-        (self.rpo.get(&l.block).copied().unwrap_or(usize::MAX), l.statement_index)
+    pub fn order(&self, l: Location) -> (usize, usize, u8) {
+        (self.rpo.get(&l.block).copied().unwrap_or(usize::MAX), l.statement_index, 0)
     }
 }

@@ -76,7 +76,7 @@ RV3_FACTS=facts.json cargo rv-plugin     # ... and writes it to facts.json
 ```
 
 With `--write-to-cwd` it writes `vis_facts.json` beside the SVGs. The
-schema is `src/facts/schema.rs` (`version` 1). Nothing it computes is
+schema is `src/facts/schema.rs` (`version` 2). Nothing it computes is
 drawn yet.
 
 ## Element ids

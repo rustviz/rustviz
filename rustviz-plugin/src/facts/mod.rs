@@ -85,8 +85,10 @@ pub fn from_env(tcx: TyCtxt<'_>, in_target: &dyn Fn(Span) -> bool) -> Option<ser
     let facts = collect_crate(tcx, in_target);
     let v = serde_json::to_value(&facts).ok()?;
     if let Some(path) = std::env::var_os("RV3_FACTS").filter(|p| p != "1") {
-        if let Ok(s) = serde_json::to_string_pretty(&v) {
-            let _ = std::fs::write(path, s);
+        let written = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())
+            .and_then(|s| std::fs::write(&path, s).map_err(|e| e.to_string()));
+        if let Err(e) = written {
+            eprintln!("rustviz: couldn't write the RV3_FACTS dump to {:?}: {}", path, e);
         }
     }
     Some(v)

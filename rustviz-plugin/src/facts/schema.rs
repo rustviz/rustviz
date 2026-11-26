@@ -6,8 +6,10 @@
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-/// Bumped whenever a field changes meaning or goes away.
-pub const VERSION: u32 = 1;
+/// Bumped whenever a field changes meaning or goes away. 2: `Lent.kind`
+/// tells `unique` and `reserved` from `mut`; `Lent.holder` is who holds
+/// the loan on that row.
+pub const VERSION: u32 = 2;
 
 #[derive(Serialize)]
 pub struct CrateFacts {
@@ -87,14 +89,18 @@ pub struct LoanInfo {
     /// The reference the place is reached through (`r` for `&mut *r`,
     /// i.e. a reborrow): the presentation says "through r".
     pub through: Option<String>,
-    /// Where the reference goes: user variables (`r`, a struct field
-    /// `h.r`), in the order they first hold it.
+    /// Everyone who holds the loan at some point: the place it is stored
+    /// in (`r`, a struct field `h.r`), then other variables in the order
+    /// they first hold it (`s` after `let s = r;`). Who holds it on a
+    /// given row: `Lent.holder`.
     pub holders: Vec<String>,
     /// The call it is passed to, when no variable keeps it
     /// (`push_str`, `len`, `println!`).
     pub to_call: Option<String>,
-    /// Taken inside a macro's expansion on behalf of its argument
-    /// (`println!("{s}")` borrows `s`): the macro, as written.
+    /// Taken in a macro's expansion, or on an argument the expansion
+    /// wraps (`println!("{s}")` borrows `s`): the macro, as written. A
+    /// `macro_rules!` that pastes its argument unchanged leaves it
+    /// ordinary code (rustc's MIR has no trace of the macro there).
     pub in_macro: Option<String>,
     /// Rows where the loan goes out of scope (one per CFG edge where it
     /// leaves NLL's `Borrows`), sorted.
@@ -105,8 +111,13 @@ pub struct LoanInfo {
 #[derive(Serialize, Clone, PartialEq, Eq, Default)]
 pub struct Lent {
     pub loan: usize,
-    /// "shared" | "mut"
+    /// "shared" | "mut" | "unique" (a closure's unique immutable capture)
+    /// | "reserved" (a two-phase `&mut` before its activation: the place
+    /// can still be read, as in `v.push(v.len())`).
     pub kind: &'static str,
+    /// The variable whose value holds the loan on this row (`r`, or `h`
+    /// for a field `h.r`; `s` once `let s = r;` ran), or the call / macro
+    /// it was passed to.
     pub holder: String,
 }
 
@@ -172,8 +183,10 @@ pub struct Ev {
     pub arm: Option<usize>,
     #[serde(flatten)]
     pub fact: Fact,
+    /// (reverse postorder of the block, statement index, phase): a
+    /// `BorrowEnd` comes after the location's other events.
     #[serde(skip)]
-    pub order: (usize, usize),
+    pub order: (usize, usize, u8),
 }
 
 #[derive(Serialize, Clone, PartialEq, Eq)]
@@ -195,9 +208,11 @@ pub enum Fact {
     BorrowEnd { loan: usize, lender: String, holder: String, why: String, to_line: usize },
     /// `holder` (a reference) gets a new loan while it held `old`.
     Repoint { holder: String, old: Vec<usize>, new: Vec<usize> },
-    /// A `Drop` of `path`. `how`: "drops" (it holds a value on every
-    /// path), "drops_if_init" (a drop flag decides), "drops_rest" (some
-    /// fields were moved out), "nothing_to_drop". `early_exit`: the row of
+    /// A `Drop` of `path`. `how` (what runs, as drop elaboration decides:
+    /// borrowck's imaginary `else` of an irrefutable `if let` doesn't
+    /// count): "drops" (it holds a value on every path), "drops_if_init"
+    /// (a drop flag decides), "drops_rest" (some fields were moved out),
+    /// "nothing_to_drop". `early_exit`: the row of
     /// the `return` / `break` / `continue` / `?` whose path alone runs
     /// this drop (its MIR span is the scope's `}`); `also_on_exits`: rows
     /// of early exits that share this drop with the normal path.

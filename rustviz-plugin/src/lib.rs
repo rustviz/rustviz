@@ -23,6 +23,7 @@ extern crate rustc_span;
 extern crate rustc_borrowck;
 extern crate polonius_engine;
 extern crate rustc_mir_dataflow;
+extern crate rustc_abi;
 
 
 use std::{borrow::Cow, env};
@@ -65,6 +66,9 @@ pub struct RVPluginArgs {
 /// change, drop cargo's fingerprints so the next check re-runs the driver.
 fn forget_cached_check_if_args_changed(target_dir: &Utf8Path, args: &RVPluginArgs) {
   let Ok(now) = serde_json::to_string(args) else { return };
+  // The fact dump is asked for by environment (`RV3_FACTS`), which cargo's
+  // freshness check doesn't see: a change of it reruns the driver too.
+  let now = format!("{now} RV3_FACTS={:?}", env::var_os("RV3_FACTS"));
   let stamp = target_dir.join("rv-last-args");
   if std::fs::read_to_string(&stamp).ok().as_deref() == Some(now.as_str()) {
     return;
