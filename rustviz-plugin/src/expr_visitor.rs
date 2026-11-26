@@ -3562,29 +3562,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     self.last_live_line(root, (line + 1, hi))
   }
 
-  /// Whether `r` is used after `end` on `end`'s path: not in the arm
-  /// being visited when `end` is in another arm of its conditional
-  /// (`x` read only where r is re-pointed, Codex r2 on #1603).
-  /// (Polonius liveness at the points of `end`'s line: live there only if
-  /// used later on a path through it, Codex r3 on #1603.)
-  pub fn live_after_on_path(&self, r: &str, end: usize) -> bool {
-    self.last_live_line(r, (end, end)).is_some()
-  }
 
-  /// The last line `r` is used on in an arm of an enclosing `if` /
-  /// `match` other than the one being visited.
-  /// None when r is also used after one of them (`println!("{}", r)`
-  /// after the `if`): on that arm's path its value lives on past the
-  /// arm, and that read in the arm isn't its last use (Codex on #1603).
-  pub fn read_in_sibling_arms(&self, r: &str) -> Option<usize> {
-    if self.arm_frames.iter().any(|&(_, merge, _, _)| self.last_live_line(r, (merge, usize::MAX)).is_some()) {
-      return None;
-    }
-    self.arm_frames.iter().flat_map(|&(split, merge, lo, hi)| [(split + 1, lo.saturating_sub(1)), (hi + 1, merge.saturating_sub(1))])
-      .filter(|&(a, b)| a <= b)
-      .filter_map(|range| self.last_live_line(r, range))
-      .max()
-  }
 
   /// The column name of a deferred local (a key of `uninit_locals` /
   /// `maybe_init_locals`): a `let x;` binding's (numbered) name, or a
@@ -14768,15 +14746,21 @@ fn end_in_other_arms(events: &mut Vec<(usize, ExternalEvent)>, ev: &(usize, Exte
       match e {
         ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| b.e_data.iter().any(|(_, x)| uses_root(x, root))),
         _ => {
+          // (Any field of it, `h.n`, Codex r4 on #1603.)
           let (f, t) = ResourceAccessPoint_extract(e);
-          [f, t].iter().any(|x| x.extract_rap().is_some_and(|x| x.name() == root))
+          [f, t].iter().any(|x| x.extract_rap().is_some_and(|x| x.name() == root
+            || x.name().strip_prefix(root).is_some_and(|rest| rest.starts_with('.'))))
         }
       }
     }
     let root_use = (root != r.name()).then(|| arm.e_data.iter().rposition(|(_, e)| uses_root(e, root))).flatten();
     match root_use {
       Some(i) if last_use_in(&arm.e_data, &r).is_none_or(|(_, j)| j <= i) => {
-        let line = arm.e_data[i].0;
+        // (After a conditional, on its join's line, Codex r4 on #1603.)
+        let line = match &arm.e_data[i].1 {
+          ExternalEvent::Branch { merge_point, .. } => *merge_point,
+          _ => arm.e_data[i].0,
+        };
         arm.e_data.insert(i + 1, (line, copy));
       }
       _ => end_after_last_use(&mut arm.e_data, branch_type.get_start_end(b).0, copy, &r, lender.as_ref(), unique_id),

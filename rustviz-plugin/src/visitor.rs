@@ -7254,22 +7254,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // saying the lender stays borrowed by the others. A RefDie at
             // the write alone left the other arm's leg of r holding a
             // reference down to the join, which had no dot (#1439).
-            // (A copied reference, `let mut r = x;`, has no loan of its
-            // own: its borrow ends at its last use in another arm, where
-            // x's loan, which it carries, ends too. Ended at the write
-            // only, the other arm's read of r ended nothing, and its leg
-            // held a reference past the join, which had no dot, #1589.)
-            let copied = ref_data.loan().is_none() && matches!(ref_data.lender, ResourceTy::Value(_));
-            let sibling_end = self.loan_end(&ref_data).filter(|&e| e > line_num)
-              .or_else(|| copied.then(|| self.read_in_sibling_arms(&me)).flatten())
-              .filter(|&e| self.in_sibling_arm(e) && !taken_over && !ref_data.ref_mutability);
+            let sibling_end = self.loan_end(&ref_data)
+              .filter(|&e| e > line_num && self.in_sibling_arm(e) && !taken_over && !ref_data.ref_mutability);
             if let Some(end) = sibling_end {
               #[expect(clippy::disallowed_methods, reason = "sorted below")]
-              // (For a copy, the references whose loan it carries still
-              // borrow the lender only if read past that end: `x` read
-              // after the `if`, Codex on #1603.)
-              let mut others: Vec<String> = borrowers.iter().filter(|b| **b != me
-                && (!copied || self.live_after_on_path(b, end))).cloned().collect();
+              let mut others: Vec<String> = borrowers.iter().filter(|b| **b != me).cloned().collect();
               others.sort();
               self.defer_old_ends = true;
               self.add_borrow_end_ev(end, to_ro, lhs_rty.clone(), &ref_data, others);
@@ -7299,38 +7288,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 }
               }
             }
-          }
-          else if let Some(end_line) = self.field_write_loan_end(lhs_expr, &lhs_rap, &ref_data, line_num)
-            .filter(|&e| self.in_sibling_arm(e) && self.struct_used_later_in_arm(&lhs_rap, line_num, e).is_none()) {
-            // The loan's last use is in another arm (`if c { h.r = &s; }
-            // else { use(h.r) }`): there h.r still points to the lender,
-            // and its own borrow ends at that use; on this path the old
-            // loan ends at the write. `end_outer_borrows_in_arms` puts the
-            // end in that arm and ends it in this one, as for a variable
-            // (#806). Drawn on the lender's column only, it gave the
-            // lender back between the arms' legs, and h.r's leg in that
-            // arm held a reference down to the join (#1576).
-            // (Each of its lenders, `Holder { r: longest(&s, &t) }`:
-            // both stay borrowed as long, Codex on #1603.)
-            // (A lender another reference still reads past that end
-            // stays borrowed by it, Codex r2 on #1603.)
-            let me_f = lhs_rty.real_name();
-            #[expect(clippy::disallowed_methods, reason = "filtered into a sorted Vec")]
-            let still = |this: &Self, l: &ResourceTy| -> Vec<String> {
-              let mut v: Vec<String> = this.borrow_map.iter()
-                .filter(|(k, d)| **k != me_f && d.all_lenders().contains(l) && this.live_after_on_path(k, end_line))
-                .map(|(k, _)| k.clone()).collect();
-              v.sort();
-              v
-            };
-            self.defer_old_ends = true;
-            let others = still(self, &to_ro);
-            self.add_borrow_end_ev(end_line, to_ro.clone(), lhs_rty.clone(), &ref_data, others);
-            for co in ref_data.co_lenders.iter().filter(|c| matches!(c, ResourceTy::Value(_))) {
-              let others = still(self, co);
-              self.add_borrow_end_ev(end_line, co.clone(), lhs_rty.clone(), &ref_data, others);
-            }
-            self.defer_old_ends = false;
           }
           else if let Some(end_line) = self.field_write_loan_end(lhs_expr, &lhs_rap, &ref_data, line_num) {
             // (Its last use in another arm, with the struct used again
@@ -7367,7 +7324,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 // conditional still borrow it there, Codex r3 on #1603.)
                 #[expect(clippy::disallowed_methods, reason = "filtered into a sorted Vec")]
                 let mut still: Vec<String> = self.borrow_map.iter()
-                  .filter(|(k, d)| **k != me_f && d.all_lenders().contains(&l) && self.last_live_line(k, (merge, usize::MAX)).is_some())
+                  .filter(|(k, d)| **k != me_f && d.all_lenders().contains(&l)
+                    && self.last_live_line(k.split('.').next().unwrap_or(k), (merge, usize::MAX)).is_some())
                   .map(|(k, _)| k.clone()).collect();
                 still.sort();
                 let (from, to) = (lhs_rty.clone(), l.clone());

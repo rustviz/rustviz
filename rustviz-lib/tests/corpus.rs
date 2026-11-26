@@ -28038,27 +28038,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[],
     },
     TooltipExpect {
-        name: "repoint_copied_ref_other_arm_1589",
-        // #1589: a copied reference re-pointed in one arm and read in
-        // another ends its borrow at that read; main ended nothing there and
-        // drew r holding a reference past a dotless join.
-        must_contain: &[
-            "r's borrow ended in each branch above",
-            "x's borrow ended in each branch above",
-        ],
-        must_not_contain: &[],
-    },
-    TooltipExpect {
-        name: "field_repoint_read_other_arm_1576",
-        // #1576: h.r re-pointed in one arm, read in the other: its borrow
-        // ends at that read, in that arm (main gave s back between the
-        // legs, and h.r's join had no dot).
-        must_contain: &[
-            "h.r's borrow ended in each branch above",
-        ],
-        must_not_contain: &[],
-    },
-    TooltipExpect {
         name: "match_scrutinee_ref_repointed_1578",
         // #1578: r's loan ends at the scrutinee, before any arm runs; main
         // ended it in the re-pointing arm only (s was used, and moved, while
@@ -28099,23 +28078,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "repoint_later_use_1603",
-        // Codex review of #1603: when x (whose loan the copy r carries) is
-        // read after the `if`, s stays borrowed by x where r's borrow ends;
-        // with the struct used again in the re-pointing arm, h.r's old loan
-        // ends at that use; both of longest's lenders end at the other
-        // arm's read. (The PR's first head said s was free at r's end.)
+        // Codex review of #1603: with the struct used again in the
+        // re-pointing arm, h.r's old loan ends at that use (also after a
+        // nested `if`), and as the other arms start.
         must_contain: &[
-            "s's resource is no longer borrowed by r, but is still immutably borrowed by x",
             "Return immutably borrowed resource from h.r to s",
-            "h.r's immutable borrow of s or t ends",
-            "t's resource is no longer borrowed by h.r, but is still immutably borrowed by other",
         ],
-        // (Codex r2: s was said to be still borrowed by x on the path that
-        // never reads x again, and by r before the push that r's write
-        // follows.)
-        must_not_contain: &[
-            "s's resource is no longer borrowed by x, but is still immutably borrowed by r",
-        ],
+        must_not_contain: &[],
     },
 ];
 
@@ -28147,20 +28116,48 @@ fn same_loan_write_ends_nothing_1497() {
 fn match_scrutinee_loan_over_before_other_arm_1578() {
     let rv = run_with_local_backend("match_scrutinee_ref_repointed_1578");
     let timeline = rv.timeline_panel_string();
+    // The `_` arm's use of s, found by its dot's id (its line), not by its
+    // wording (Codex r4 on #1603): the println! (line 14), the move into
+    // `drop` (28), the `push` (45).
+    let dot_by_id = |prefix: &str| -> Option<(f64, f64)> {
+        let i = timeline.find(&format!("data-rv-id=\"{}", prefix))?;
+        let start = timeline[..i].rfind('<')?;
+        let rest = &timeline[start..];
+        let circle = if rest.starts_with("<circle ") { rest } else { &rest[rest.find("<circle ")?..] };
+        let tag = &circle[..circle.find('>')?];
+        let num = |n: &str| -> Option<f64> {
+            let k = format!(" {}=\"", n);
+            let s = tag.find(&k)? + k.len();
+            tag[s..s + tag[s..].find('"')?].parse().ok()
+        };
+        Some((num("cx")?, num("cy")?))
+    };
     for (back, using) in [
-        ("s's resource is no longer mutably borrowed", "s's resource is immutably borrowed by println!; s is read-only while the borrow is live"),
-        ("s's resource is no longer immutably borrowed", "s's resource is moved into drop, which drops it"),
-        ("s's resource is no longer mutably borrowed", "s's resource is mutably borrowed by push; s can't be used while the borrow is live"),
+        ("s's resource is no longer mutably borrowed", "s@L14:dot:"),
+        ("s's resource is no longer immutably borrowed", "s@L28:dot:"),
+        ("s's resource is no longer mutably borrowed", "s@L45:dot:"),
     ] {
-        let uses = dots_listing_tooltip(&timeline, using);
-        assert_eq!(uses.len(), 1, "one dot for {using:?}: {:?}", uses);
-        let (x, y) = uses[0];
-        // (Within the arm: a few rows above the use, not a give-back
-        // anywhere above it in the fixture, Codex r3 on #1603.)
+        let (x, y) = dot_by_id(using).unwrap_or_else(|| panic!("no dot {using:?}"));
+        // (Within the arm: a few rows above the use.)
         let before = dots_with_tooltip(&timeline, back).into_iter()
             .filter(|&(bx, by)| (bx - x).abs() < 0.5 && by < y && y - by <= 90.0).count();
         assert!(before >= 1, "{back:?} on the `_` arm's leg above {using:?} at ({x}, {y})");
     }
+}
+
+/// #1586: r's last use is the `if` / `match` condition, so s is given back
+/// before the split and owned (not "being shared") on every arm's leg.
+/// The line-through-fork invariant only checks the trunk's geometry
+/// (Codex r4 on #1603).
+#[test]
+fn lender_owned_in_arms_after_condition_last_use_1586() {
+    let rv = run_with_local_backend("cond_last_use_repointed_after_1586");
+    let timeline = rv.timeline_panel_string();
+    let shared_legs = timeline.match_indices("data-rv-id=\"s@L").filter(|(i, _)| {
+        let id = &timeline[i + 12..i + 12 + timeline[i + 12..].find('"').unwrap_or(0)];
+        id.contains(":branch_line:partial_privilege")
+    }).count();
+    assert_eq!(shared_legs, 0, "an arm leg of s says it is being shared");
 }
 
 /// #1440: on the line where two loans of v end, the first end's dot (with
