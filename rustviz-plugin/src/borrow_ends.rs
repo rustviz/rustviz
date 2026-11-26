@@ -145,6 +145,13 @@ impl<'a> BodyEnds<'a> {
       .any(|e| matches!(&e.fact, Fact::Move { path, .. } if path == k))
   }
 
+  /// Whether `k` or the struct it is a field of (`q` of `q.r`) is moved
+  /// on `row`: its column ends there.
+  pub fn moved_with_parent_on(&self, k: &str, row: usize) -> bool {
+    self.facts.rows.iter().filter(|r| r.line == row).flat_map(|r| r.facts.iter())
+      .any(|e| matches!(&e.fact, Fact::Move { path, .. } if path == k || k.strip_prefix(path.as_str()).is_some_and(|x| x.starts_with('.'))))
+  }
+
   /// The (row, holder) of each `BorrowEnd` of `loan`.
   pub fn end_holders(&self, loan: usize) -> Vec<(usize, &'a str)> {
     let mut out = Vec::new();
@@ -154,6 +161,24 @@ impl<'a> BodyEnds<'a> {
           if *l == loan {
             out.extend(holder.split('|').map(|h| (r.line, h)));
           }
+        }
+      }
+    }
+    out
+  }
+
+  /// The loans `loans` are made through, transitively, that borrow from
+  /// `name` too (a field's copy `q.r` of the parameter `r`: r's caller
+  /// loan).
+  pub fn sources_lending(&self, loans: &[usize], name: &str) -> Vec<usize> {
+    let mut out: Vec<usize> = Vec::new();
+    let mut work: Vec<usize> = loans.to_vec();
+    while let Some(id) = work.pop() {
+      let Some(l) = self.facts.loans.iter().find(|x| x.loan == id) else { continue };
+      for m in &l.made_through {
+        if !out.contains(m) && !loans.contains(m) && self.facts.loans.iter().any(|x| x.loan == *m && self.lends(x, name)) {
+          out.push(*m);
+          work.push(*m);
         }
       }
     }

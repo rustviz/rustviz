@@ -11882,6 +11882,9 @@ pub fn print_out_of_scope(&mut self){
           (None, _, _) => (End::None, None),
           (Some(back), Some(_), Some(own)) if e.only_loop_exits && own < back => (End::LoopExit { own, back }, None),
           (Some(back), Some(_), _) => (End::Arrow(back), None),
+          // (Moved away where it stops holding, `Some(q)`: its column ends
+          // there, so its end is there.)
+          (Some(back), None, Some(own)) if ix.moved_with_parent_on(&slot.key, own) => (End::Arrow(own), Some((own, back))),
           (Some(back), None, Some(own)) => (End::Arrow(back), Some((own, back))),
           // Neither named where the loan ends nor seen to stop (on the row
           // the loan ends, or a name two variables share): its own end on
@@ -11901,8 +11904,8 @@ pub fn print_out_of_scope(&mut self){
           e => (e, own),
         };
         if own.is_none() && matches!(end, End::Arrow(_) | End::LoopExit { .. }) {
-          for id in &mine {
-            given_back.entry(*id).or_default().push(l.real_name());
+          for id in mine.iter().copied().chain(ix.sources_lending(&mine, &l.real_name())) {
+            given_back.entry(id).or_default().push(l.real_name());
           }
         }
         if self.pattern_copies.contains(&slot.key) && e.gives_back.is_some() {
@@ -11926,11 +11929,24 @@ pub fn print_out_of_scope(&mut self){
     // The walk's own ends (a re-pointed reference's old loan, ...).
     let mut walk_ends = Vec::new();
     borrow_ends_in(self.preprocessed_events, &mut walk_ends);
+    walk_ends.extend(self.late_old_ends.iter().cloned());
     // A loan the walk gives back where the facts end it, from the holder
     // they name (`c.r` re-pointed while the copy `c2.r` held its old loan).
     let walk_gives = |id: usize, k: &str| ix.as_ref().is_some_and(|ix| ix.end_holders(id).iter().any(|(row, h)|
       walk_ends.iter().any(|(l, e)| *l == *row && !matches!(e, ExternalEvent::RefDie { .. })
-        && borrow_end_of(e).is_some_and(|(from, _)| from.name() != k && crate::borrow_ends::names_match(from.name(), h)))));
+        && borrow_end_of(e).is_some_and(|(from, to)| from.name() != k && crate::borrow_ends::names_match(from.name(), h)
+          // (Back to the loan's lender: a closure's end gives `*r` back to
+          // r, not r's loan of s.)
+          && to.extract_rap().is_some_and(|t| ix.facts.loans.iter().any(|f| f.loan == id && ix.lends(f, t.name())))))));
+    // Or another slot gives it back where the facts end it, from the holder
+    // they name (`c.r`'s arrow when `c` holds the loan c2.r copied).
+    let slot_arrows: Vec<(String, String)> = slots.iter().zip(pending.iter())
+      .flat_map(|(s, ends)| ends.iter().filter(|p| p.own.is_none() && matches!(p.end, End::Arrow(_) | End::LoopExit { .. }))
+        .map(|p| (s.key.clone(), p.lender.real_name())))
+      .collect();
+    let other_gives = |id: usize, k: &str| ix.as_ref().is_some_and(|ix| ix.end_holders(id).iter().any(|(_, h)|
+      slot_arrows.iter().any(|(key, ln)| key != k && crate::borrow_ends::names_match(key, h)
+        && ix.facts.loans.iter().any(|f| f.loan == id && ix.lends(f, ln)))));
     let mut decided: Vec<Vec<(ResourceTy, End)>> = pending.into_iter().zip(slots.iter()).map(|(ends, slot)| ends.into_iter().map(|p| {
       let end = match p.own {
         // A value whose loan a pattern's binding took over (#1447): the
@@ -11939,7 +11955,7 @@ pub fn print_out_of_scope(&mut self){
         _ if p.holder_stops && p.loans.iter().any(|l| pattern_gives.contains(l)) => End::None,
         // (Not by an arrow back to this reference itself, `k = [s]` giving
         // back to s: s still gives its own lender back.)
-        Some((own, _)) if p.loans.iter().any(|l| given_back.get(l).is_some_and(|to| to.iter().any(|t| *t != slot.key)) || walk_gives(*l, &slot.key)) => End::Own(own),
+        Some((own, _)) if p.loans.iter().any(|l| given_back.get(l).is_some_and(|to| to.iter().any(|t| *t != slot.key)) || walk_gives(*l, &slot.key) || other_gives(*l, &slot.key)) => End::Own(own),
         _ => p.end,
       };
       // (Its own end on the row it is moved on, `Some(r)`: the move hands
@@ -12099,6 +12115,15 @@ pub fn print_out_of_scope(&mut self){
           }
           End::Own(line) => {
             if co {
+              continue;
+            }
+            // A copy of a reference to a string literal or a `static`
+            // (whose lender has no column, so no end draws an arrow) says
+            // what it borrowed at its own end too.
+            if matches!(rd.lender, ResourceTy::Anonymous) && rd.static_lender.is_some() {
+              let id = *self.unique_id;
+              self.add_borrow_end_ev(line, to_ro, ResourceTy::Value(from_ro.clone()), &rd, Vec::new());
+              before_scope_end(self.preprocessed_events, id, line, &from_ro);
               continue;
             }
             // A reference a pattern copied out of a value that holds the
