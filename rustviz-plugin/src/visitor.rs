@@ -2805,6 +2805,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // (Also `*b = …`, which gives b new contents.)
           ExternalEvent::Move { to, .. } | ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. } =>
             to.extract_rap().is_some_and(|r| *r == rap),
+          // (Or a conditional it is live in: `if c { s = …; } else {
+          // drop(s); }`.)
+          ExternalEvent::Branch { live_vars, .. } => live_vars.contains(&rap),
           _ => false,
         }));
       if dup {

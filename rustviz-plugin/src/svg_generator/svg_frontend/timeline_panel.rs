@@ -1518,7 +1518,11 @@ fn render_branch_dots(
                     &is.real_name(),
                     is.extract_rap().map_or(false, |r| r.drops_nothing()),
                     rap.is_mut(),
-                    reassigned_after(&events_after(visualization_data, hash, history, event, *merge_point)),
+                    // (A loop's next time round may assign it, #1600 review.)
+                    match reassigned_after(&events_after(visualization_data, hash, history, event, *merge_point)) {
+                        None if matches!(event, Event::Branch { loop_assigned: true, .. }) => Some(false),
+                        r => r,
+                    },
                 )
             } else if entry_maybe_init() {
                 // Not if it may have held a value as the conditional
@@ -1631,7 +1635,11 @@ fn render_branch_dots(
                         &is.real_name(),
                         is.extract_rap().map_or(false, |r| r.drops_nothing()),
                         rap.is_mut(),
-                        reassigned_after(&events_after(visualization_data, hash, history, event, *merge_point)),
+                        // (A loop's next time round may assign it.)
+                        match reassigned_after(&events_after(visualization_data, hash, history, event, *merge_point)) {
+                            None if matches!(event, Event::Branch { loop_assigned: true, .. }) => Some(false),
+                            r => r,
+                        },
                     )
                 })
             } else if entry_maybe_init && !unassigned_everywhere && branch_history.iter().filter(|b| !b.diverges)
@@ -1643,7 +1651,10 @@ fn render_branch_dots(
                 // branch that gets here may assign it in a conditional of
                 // its own (#1514): it may hold a value or not, as for a
                 // `maybe_held` join.
-                let reassigned = reassigned_after(&events_after(visualization_data, hash, history, event, *merge_point));
+                let reassigned = match reassigned_after(&events_after(visualization_data, hash, history, event, *merge_point)) {
+                    None if matches!(event, Event::Branch { loop_assigned: true, .. }) => Some(false),
+                    r => r,
+                };
                 Some(hover_messages::event_dot_branch_merge_maybe_held(
                     &is.real_name(),
                     is.extract_rap().map_or(false, |r| r.drops_nothing()),
