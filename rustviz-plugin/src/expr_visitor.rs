@@ -14594,24 +14594,6 @@ pub(crate) fn end_borrow_in_arms(
       | ExternalEvent::MutableBorrow { to: ResourceTy::Value(t), .. }
       | ExternalEvent::Move { to: ResourceTy::Value(t), .. }
       | ExternalEvent::Copy { to: ResourceTy::Value(t), .. } if t == r));
-    // (Unless the arm doesn't read r's old value before it: then the old
-    // loan is over as the arm starts, and the lender is free for the
-    // arm's own uses of it, `s.push('a'); r = &t;`, Codex r2 on #1603.)
-    // (Only when the arm uses the lender before the write; otherwise the
-    // end stays on the write's row, #806's drawing. Not for a field: a
-    // write to it uses its struct, which keeps the old loan live up to the
-    // write, Codex r3 on #1603.)
-    if let Some(i) = new_value.filter(|&i| last_use_in(&arm.e_data, r).is_some() && !reads_before_new_value(&arm.e_data[..i], r)
-      && !r.name().contains('.') && !reborrows_lender(&arm.e_data[i].1, &copy)
-      && arm.e_data[..i].iter().any(|(_, e)| !matches!(e, ExternalEvent::Branch { .. }) && borrow_end_of(&copy).is_some_and(|(_, to)| {
-        let (f, t) = ResourceAccessPoint_extract(e);
-        to.extract_rap().is_some_and(|l| f.extract_rap() == Some(l) || t.extract_rap() == Some(l))
-      }))) {
-      let start = branch_type.get_start_end(b).0;
-      let at = arm.e_data.iter().position(|(el, _)| *el >= start).unwrap_or(arm.e_data.len()).min(i);
-      arm.e_data.insert(at, (start, copy));
-      continue;
-    }
     if let Some(i) = new_value.filter(|_| last_use_in(&arm.e_data, r).is_some()) {
       let line = arm.e_data[i].0;
       // (After a new borrow of the same lender, `r = &s;`: `&s` is taken
@@ -14732,39 +14714,32 @@ fn end_in_other_arms(events: &mut Vec<(usize, ExternalEvent)>, ev: &(usize, Exte
     if !before || handed_off_in(&arm.e_data, &r, moved_into_result, holders) {
       continue;
     }
+    // Only an arm whose last use of the field is plain to see: one that
+    // doesn't touch it, or reads it only directly in its own events. An
+    // arm that uses its struct or another field (`read(&h)`, `h.n`), uses
+    // it in a nested conditional, or gives it a value of its own keeps
+    // main's drawing (Codex r5 on #1603: those ends depend on the path).
+    let root = r.name().split('.').next().unwrap_or(r.name());
+    fn uses_struct(e: &ExternalEvent, root: &str, field: &ResourceAccessPoint) -> bool {
+      match e {
+        ExternalEvent::Branch { branches, live_vars, .. } => live_vars.contains(field)
+          || branches.iter().any(|b| b.e_data.iter().any(|(_, x)| uses_struct(x, root, field))),
+        _ => {
+          let (f, t) = ResourceAccessPoint_extract(e);
+          gives_new_value(e, field) || [f, t].iter().any(|x| x.extract_rap().is_some_and(|x| x != field && (x.name() == root
+            || x.name().strip_prefix(root).is_some_and(|rest| rest.starts_with('.')))))
+        }
+      }
+    }
+    if root != r.name() && arm.e_data.iter().any(|(_, e)| uses_struct(e, root, &r)) {
+      continue;
+    }
     let mut copy = ev.1.clone();
     if let ExternalEvent::StaticDie { id, .. } | ExternalEvent::MutableDie { id, .. } = &mut copy {
       *id = *unique_id;
       *unique_id += 1;
     }
-    // (A field's struct used in the arm, `read(&h)`, uses the field's
-    // loan too: the end goes after that, Codex r2 on #1603.)
-    let root = r.name().split('.').next().unwrap_or(r.name());
-    // (In a conditional nested in the arm too, `if d { read(&h); }`,
-    // Codex r3 on #1603: then after that conditional.)
-    fn uses_root(e: &ExternalEvent, root: &str) -> bool {
-      match e {
-        ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| b.e_data.iter().any(|(_, x)| uses_root(x, root))),
-        _ => {
-          // (Any field of it, `h.n`, Codex r4 on #1603.)
-          let (f, t) = ResourceAccessPoint_extract(e);
-          [f, t].iter().any(|x| x.extract_rap().is_some_and(|x| x.name() == root
-            || x.name().strip_prefix(root).is_some_and(|rest| rest.starts_with('.'))))
-        }
-      }
-    }
-    let root_use = (root != r.name()).then(|| arm.e_data.iter().rposition(|(_, e)| uses_root(e, root))).flatten();
-    match root_use {
-      Some(i) if last_use_in(&arm.e_data, &r).is_none_or(|(_, j)| j <= i) => {
-        // (After a conditional, on its join's line, Codex r4 on #1603.)
-        let line = match &arm.e_data[i].1 {
-          ExternalEvent::Branch { merge_point, .. } => *merge_point,
-          _ => arm.e_data[i].0,
-        };
-        arm.e_data.insert(i + 1, (line, copy));
-      }
-      _ => end_after_last_use(&mut arm.e_data, branch_type.get_start_end(b).0, copy, &r, lender.as_ref(), unique_id),
-    }
+    end_after_last_use(&mut arm.e_data, branch_type.get_start_end(b).0, copy, &r, lender.as_ref(), unique_id);
   }
 }
 

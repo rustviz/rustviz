@@ -2953,13 +2953,13 @@ fn ends_borrow(history: &[(usize, Event)]) -> bool {
 // the `else`, Codex on #1603.)
 fn started_before(history: &[(usize, Event)], line: usize) -> bool {
     history.iter().any(|(l, e)| match e {
-        Event::Branch { branch_history, ty, .. } => branch_history.iter().enumerate().any(|(i, b)| {
-            let (start, end) = ty.get_start_end(i);
-            // (Only the arm `line` is in: an assignment in an earlier
-            // conditional's arm may be on another path than this one,
-            // Codex r2/r3 on #1603.)
-            (start <= line && line <= end) && started_before(&b.e_data, line)
-        }),
+        // (Only the arm `line` is in, the later one on a line two arms
+        // share (`} else if b {`): an assignment in an earlier arm, or an
+        // earlier conditional's, may be on another path than this one,
+        // Codex r2/r3/r5 on #1603.)
+        Event::Branch { branch_history, ty, .. } => (0..branch_history.len()).rev()
+            .find(|&i| { let (start, end) = ty.get_start_end(i); start <= line && line <= end })
+            .is_some_and(|i| started_before(&branch_history[i].e_data, line)),
         Event::StaticBorrow { .. } | Event::MutableBorrow { .. } | Event::Copy { .. } | Event::Acquire { .. } => *l < line,
         _ => false,
     })

@@ -7314,20 +7314,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // The write and that use in one arm of a conditional the loan
             // was made before: on the other arms' paths the field still
             // holds it, and it ends there (#1588).
-            if let Some(&(_, merge, _, _)) = self.arm_frames.iter().find(|&&(split, _, lo, hi)| ref_data.assigned_at < split && lo <= end_line && end_line <= hi) {
+            if self.arm_frames.iter().any(|&(split, _, lo, hi)| ref_data.assigned_at < split && lo <= end_line && end_line <= hi) {
               self.field_end_ids.extend(ends_lo..*self.unique_id);
               let me_f = lhs_rty.real_name();
               for l in ref_data.all_lenders().into_iter().filter(|l| matches!(l, ResourceTy::Value(_))) {
                 let id = *self.unique_id;
                 *self.unique_id += 1;
-                // (Other references to the lender used after the
-                // conditional still borrow it there, Codex r3 on #1603.)
-                #[expect(clippy::disallowed_methods, reason = "filtered into a sorted Vec")]
-                let mut still: Vec<String> = self.borrow_map.iter()
-                  .filter(|(k, d)| **k != me_f && d.all_lenders().contains(&l)
-                    && self.last_live_line(k.split('.').next().unwrap_or(k), (merge, usize::MAX)).is_some())
-                  .map(|(k, _)| k.clone()).collect();
-                still.sort();
+                // (Not a lender another reference also borrows: whether it
+                // still does there depends on the path, so that arm keeps
+                // main's drawing, Codex r5 on #1603.)
+                #[expect(clippy::disallowed_methods, reason = "`any` over the map: order never observed")]
+                let shared = self.borrow_map.iter().any(|(k, d)| *k != me_f && d.all_lenders().contains(&l));
+                if shared {
+                  continue;
+                }
+                let still: Vec<String> = Vec::new();
                 let (from, to) = (lhs_rty.clone(), l.clone());
                 let ev = if ref_data.mut_of(&l) {
                   ExternalEvent::MutableDie { from, to, id, static_lender: None, still_borrowed_by: still, of_ref_var: false }

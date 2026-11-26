@@ -28038,16 +28038,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[],
     },
     TooltipExpect {
-        name: "match_scrutinee_ref_repointed_1578",
-        // #1578: r's loan ends at the scrutinee, before any arm runs; main
-        // ended it in the re-pointing arm only (s was used, and moved, while
-        // drawn borrowed in the `_` arm).
-        must_contain: &[
-            "r's borrow ended in each branch above",
-        ],
-        must_not_contain: &[],
-    },
-    TooltipExpect {
         name: "dead_loan_then_mut_borrow_1575",
         // #1575: m3's loan ends at its last use and gives s back; main put
         // the end off to m3's scope end with no return arrow.
@@ -28081,8 +28071,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Codex review of #1603: with the struct used again in the
         // re-pointing arm, h.r's old loan ends at that use (also after a
         // nested `if`), and as the other arms start.
+        // (The joins' text: main draws a straight-line "Return ... to s"
+        // in `same_lender_again` too, so that arrow didn't pin the arms,
+        // Codex r5 on #1603.)
         must_contain: &[
-            "Return immutably borrowed resource from h.r to s",
+            "h.r's borrow ended in each branch above",
         ],
         must_not_contain: &[],
     },
@@ -28153,11 +28146,15 @@ fn match_scrutinee_loan_over_before_other_arm_1578() {
 fn lender_owned_in_arms_after_condition_last_use_1586() {
     let rv = run_with_local_backend("cond_last_use_repointed_after_1586");
     let timeline = rv.timeline_panel_string();
-    let shared_legs = timeline.match_indices("data-rv-id=\"s@L").filter(|(i, _)| {
-        let id = &timeline[i + 12..i + 12 + timeline[i + 12..].find('"').unwrap_or(0)];
-        id.contains(":branch_line:partial_privilege")
-    }).count();
+    let ids: Vec<&str> = timeline.match_indices("data-rv-id=\"s@L").map(|(i, _)| {
+        &timeline[i + 12..i + 12 + timeline[i + 12..].find('"').unwrap_or(0)]
+    }).collect();
+    let shared_legs = ids.iter().filter(|id| id.contains(":branch_line:partial_privilege")).count();
     assert_eq!(shared_legs, 0, "an arm leg of s says it is being shared");
+    // (The legs are drawn, as s's owner: not just missing, Codex r5.)
+    let owned_legs = ids.iter().filter(|id| id.contains(":branch_line:full_privilege")).count();
+    assert!(owned_legs >= 6, "s's arm legs (two per conditional, three conditionals) say it is the owner: {owned_legs}");
+    assert!(timeline_tooltips(&timeline).iter().any(|t| t == "s is the owner of the resource"));
 }
 
 /// #1440: on the line where two loans of v end, the first end's dot (with
