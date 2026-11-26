@@ -4724,6 +4724,11 @@ pub struct VisualizationData {
     /// order the plugin found them.
     pub approx_notes: Vec<ApproxNote>,
 
+    /// rustc's facts on the fields of struct variables some field of which
+    /// is moved out (`PartsUninit`), by source line, for the struct's
+    /// line text (#1595).
+    pub parts_uninit: Vec<PartsUninit>,
+
     /// The source line the code panel shows on each visual row (`None`
     /// on rows it adds), set by `render_svg` before the timeline is
     /// drawn: approximation notes are placed by source line.
@@ -4735,6 +4740,21 @@ pub struct VisualizationData {
     /// … { x } else { y } }`) forks a row above it, on the row the headers
     /// sit on (#1342).
     pub raised_headers: HashSet<u64>,
+}
+
+/// After the code on source line `line` (on the paths that run it): the
+/// fields of the struct variable (or struct-typed field) `name` that
+/// surely hold no value (moved out), and those that may hold none
+/// (rustc's maybe-(un)initialized places, #1595). See
+/// `struct_parts_uninit_by_line`.
+#[derive(Clone, Debug)]
+pub struct PartsUninit {
+    pub name: String,
+    pub line: usize,
+    /// As control enters the line's code (else: as it leaves it).
+    pub entry: bool,
+    pub certain: Vec<String>,
+    pub maybe: Vec<String>,
 }
 
 impl VisualizationData {

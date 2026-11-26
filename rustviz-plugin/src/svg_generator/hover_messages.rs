@@ -3395,6 +3395,42 @@ pub fn state_partly_moved(my_name: &String, moved: &[String], maybe: bool) -> St
     )
 }
 
+// `state_partly_moved` where a moved field is a field of a field
+// (`o.inner.x`, #1595): the fields it is in (`within`, `o.inner`) can't be
+// used as a whole either.
+pub fn state_partly_moved_nested(my_name: &String, moved: &[String], maybe: bool, within: &[String]) -> String {
+    fn list(names: &[String], conj: &str) -> String {
+        let fmt: Vec<String> = names.iter().map(|m| styled_name_html(m)).collect();
+        match fmt.as_slice() {
+            [init @ .., last] if !init.is_empty() => format!("{}{} {}", init.join(", "), conj, last),
+            _ => fmt.concat(),
+        }
+    }
+    let verb = match (moved.len() > 1, maybe) {
+        (_, true) => "may have been",
+        (true, false) => "were",
+        (false, false) => "was",
+    };
+    let mut wholes = vec![my_name.clone()];
+    wholes.extend(within.iter().cloned());
+    format!(
+        "{0} is partially moved: {1} {2} moved out, so neither {3} can be used as a whole",
+        styled_name_html(my_name), list(moved, " and"), verb, list(&wholes, " nor")
+    )
+}
+
+// The line of a struct some field of which rustc says may have been moved
+// out here (in a conditional above, or in this arm, #1595): which, and on
+// which paths, isn't said.
+pub fn state_part_maybe_moved(my_name: &String) -> String {
+    format!("part of {0} may have been moved out, so {0} can't be used as a whole", styled_name_html(my_name))
+}
+
+// The same where rustc says some field surely was (#1595).
+pub fn state_part_surely_moved(my_name: &String) -> String {
+    format!("part of {0} has been moved out, so {0} can't be used as a whole", styled_name_html(my_name))
+}
+
 // The line of a struct every field of which was moved out, some of them
 // on some paths through a conditional above only (`let s2 = p.b; if c {
 // drop(p.a); }`, #1583): on the other paths it still holds those, and
@@ -3413,7 +3449,7 @@ pub fn state_fields_maybe_all_moved(my_name: &String, surely: &[String], maybe: 
         n => format!("{} {} moved out and {} may have been", list(surely), if n > 1 { "were" } else { "was" }, list(maybe)),
     };
     format!(
-        "{0} is partially moved: {1}, so neither {0} nor any of its fields can be used; what is left in {0} is dropped when it goes out of scope",
+        "{0} is partially moved: {1}, so neither {0} nor any of its fields can be used",
         styled_name_html(my_name), moved
     )
 }

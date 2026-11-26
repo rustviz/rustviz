@@ -163,6 +163,8 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   let mut hidden_source_lines: HashSet<usize> = HashSet::new();
   let mut shadow_notes_by_fq: HashMap<String, ShadowNote> = HashMap::new();
   let mut approx_notes: Vec<ApproxNote> = Vec::new();
+  // rustc's facts on struct variables' moved-out fields, by line (#1595).
+  let mut parts_uninit: Vec<crate::svg_generator::data::PartsUninit> = Vec::new();
   let mut a_line_map: BTreeMap<usize, Vec<String>> = BTreeMap::new();
   let mut owner_to_hash: HashMap<String, usize> = HashMap::new();
   let mut pre_events: Vec<(usize, ExternalEvent)> = Vec::new();
@@ -289,6 +291,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
             visitor.mark_temp_emptying_moves(0);
             visitor.collect_approx_notes(hir_body);
             approx_notes.append(&mut visitor.approx_notes);
+            parts_uninit.append(&mut visitor.struct_parts_uninit_by_line());
             rap_hash_num = visitor.rap_hashes;
             binding_columns.append(&mut visitor.binding_columns);
             moves_out_first.append(&mut visitor.moves_out_first);
@@ -360,6 +363,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
         visitor.mark_temp_emptying_moves(0);
         visitor.collect_approx_notes(hir_body);
         approx_notes.append(&mut visitor.approx_notes);
+        parts_uninit.append(&mut visitor.struct_parts_uninit_by_line());
         rap_hash_num = visitor.rap_hashes;
         binding_columns.append(&mut visitor.binding_columns);
         moves_out_first.append(&mut visitor.moves_out_first);
@@ -443,7 +447,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   let shadow_notes: HashMap<u64, ShadowNote> = note_pairs.into_iter().map(|(h, _, n)| (h, n)).collect();
 
   // Pass information to svg-generator
-  match testing_helper.generate_vis(line_map2, pre_events, & mut a_line_map, rap_map.len() + 1, fn_start_lines, shadow_notes, binding_columns, moves_out_first, temp_emptying_moves, hidden_source_lines, approx_notes, args.write_to_cwd) {
+  match testing_helper.generate_vis(line_map2, pre_events, & mut a_line_map, rap_map.len() + 1, fn_start_lines, shadow_notes, binding_columns, moves_out_first, temp_emptying_moves, hidden_source_lines, approx_notes, parts_uninit, args.write_to_cwd) {
     Ok(_) => {}
     Err(e) => {
       eprintln!("{}", e);

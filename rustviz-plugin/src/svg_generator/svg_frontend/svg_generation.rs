@@ -1605,6 +1605,10 @@ fn hide_source_lines(annotated_src_str: &str, source_rs_str: &str, visualization
         for note in visualization_data.approx_notes.iter_mut() {
             note.map_lines(|l| shift(l));
         }
+        // And rustc's facts on struct fields, by line (#1595).
+        for p in visualization_data.parts_uninit.iter_mut() {
+            p.line = shift(p.line);
+        }
 
         (pruned_a, pruned_s)
     }

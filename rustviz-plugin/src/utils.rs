@@ -255,6 +255,7 @@ impl RV1Helper {
     temp_emptying_moves: Vec<usize>,
     hidden_source_lines: HashSet<usize>,
     approx_notes: Vec<ApproxNote>,
+    parts_uninit: Vec<crate::svg_generator::data::PartsUninit>,
     write_to_cwd: bool) -> Result<()> {
     let mut keys_to_remove: Vec<usize> = Vec::new();
     for (k, v) in line_map.iter() {
@@ -272,7 +273,7 @@ impl RV1Helper {
 
 
     // send stuff to RV1
-    let rv = Rustviz::new(&annotated_source_str, &self.source_str, p_events, line_map, num_raps, fn_start_lines, shadow_notes, binding_columns, moves_out_first, temp_emptying_moves, hidden_source_lines, approx_notes)?;
+    let rv = Rustviz::new(&annotated_source_str, &self.source_str, p_events, line_map, num_raps, fn_start_lines, shadow_notes, binding_columns, moves_out_first, temp_emptying_moves, hidden_source_lines, approx_notes, parts_uninit)?;
 
     if write_to_cwd { // write the SVG files
       self.source_path.pop(); // just write to inside cwd

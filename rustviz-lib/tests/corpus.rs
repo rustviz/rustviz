@@ -21085,14 +21085,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "p is partially moved: p.a was moved out, so p can't be used as a whole; its other fields still can",
             "u is partially moved: u.0 was moved out, so u can't be used as a whole; its other fields still can",
-            "o is partially moved: o.inner.x was moved out, so o can't be used as a whole; its other fields still can",
-            "o is partially moved: o.inner was moved out, so o can't be used as a whole; its other fields still can",
+            // (o.inner.x moved: o.inner can't be used as a whole either,
+            // #1595.)
+            "o is partially moved: o.inner.x was moved out, so neither o nor o.inner can be used as a whole",
+            // (rustc's facts name the fields moved out of o.inner, #1595.)
+            "o is partially moved: o.inner.x and o.inner.y were moved out, so neither o nor o.inner can be used as a whole",
             "o.inner is partially moved: o.inner.x was moved out, so o.inner can't be used as a whole; its other fields still can",
-            "q is partially moved: q.a may have been moved out, so q can't be used as a whole; its other fields still can",
+            "part of q may have been moved out, so q can't be used as a whole",
             "r is partially moved: r.a was moved out, so r can't be used as a whole; its other fields still can",
             "r is the owner of the resource",
         ],
-        must_not_contain: &[],
+        must_not_contain: &["=o is partially moved: o.inner.x was moved out, so o can't be used as a whole; its other fields still can"],
     },
     TooltipExpect {
         name: "non_ascii_names_1160",
@@ -27996,9 +27999,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the join; `struct_lines_after_maybe_moves_1568_1583` checks the
         // rows). Moved in every arm (u), it stops where they split (#1541).
         must_contain: &[
-            "p is partially moved: p.b was moved out and p.a may have been, so neither p nor any of its fields can be used; what is left in p is dropped when it goes out of scope",
-            "x is partially moved: x.a and x.b may have been moved out, so neither x nor any of its fields can be used; what is left in x is dropped when it goes out of scope",
-            "y is partially moved: y.a and y.b may have been moved out, so neither y nor any of its fields can be used; what is left in y is dropped when it goes out of scope",
+            // (Since #1595 the text follows rustc's facts on the fields:
+            // some part may have been moved out; which isn't said.)
+            "part of p has been moved out, so p can't be used as a whole",
+            "part of x may have been moved out, so x can't be used as a whole",
+            "part of y may have been moved out, so y can't be used as a whole",
         ],
         must_not_contain: &[
             "what is left in u",
@@ -28046,6 +28051,45 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "If the `?` here returns early, nested_iter's former resource, the loop's iterator, is dropped, along with whatever it still owns (such as elements it hasn't handed out yet). If the `?` succeeds, nothing happens to the iterator here.",
         ],
         must_not_contain: &["nothing happens to outer here", "nothing happens to keep here", "nothing happens to late here", "nothing happens to carried here", "the function returns and"],
+    },
+    TooltipExpect {
+        name: "edition2024/struct_arm_parts_moved_1595",
+        // #1595: a struct some field of which an arm moves out keeps one
+        // line; its text follows rustc's facts on its fields (maybe- /
+        // surely-uninitialized after each line): in the arm after the move
+        // it is partly moved, after the conditional some part may have
+        // been moved out. Main said "the owner of the resource" on those
+        // rows (`struct_line_text_follows_rustc_1595` checks them).
+        must_contain: &[
+            "part of p has been moved out, so p can't be used as a whole",
+            "part of p may have been moved out, so p can't be used as a whole",
+            "q is partially moved: q.a was moved out, so q can't be used as a whole; its other fields still can",
+            "part of q may have been moved out, so q can't be used as a whole",
+            "part of w has been moved out, so w can't be used as a whole",
+            "t is partially moved: t.0 was moved out, so t can't be used as a whole; its other fields still can",
+            "part of t may have been moved out, so t can't be used as a whole",
+            "m is partially moved: m.b was moved out, so m can't be used as a whole; its other fields still can",
+            "part of m may have been moved out, so m can't be used as a whole",
+            "l is partially moved: l.a was moved out, so l can't be used as a whole; its other fields still can",
+            "e is partially moved: e.a was moved out, so e can't be used as a whole; its other fields still can",
+            "part of e may have been moved out, so e can't be used as a whole",
+            "o is partially moved: o.inner.x was moved out, so neither o nor o.inner can be used as a whole",
+            "g is partially moved: g.a was moved out, so g can't be used as a whole; its other fields still can",
+            "h is partially moved: h.a was moved out, so h can't be used as a whole; its other fields still can",
+            "part of h may have been moved out, so h can't be used as a whole",
+            "v is partially moved: v.a was moved out, so v can't be used as a whole; its other fields still can",
+            "part of v may have been moved out, so v can't be used as a whole",
+            "f is partially moved: f.a was moved out, so f can't be used as a whole; its other fields still can",
+            "part of y may have been moved out, so y can't be used as a whole",
+            "part of z may have been moved out, so z can't be used as a whole",
+            "d is partially moved: d.a was moved out, so d can't be used as a whole; its other fields still can",
+            "part of d may have been moved out, so d can't be used as a whole",
+            "hh is partially moved: hh.r was moved out, so hh can't be used as a whole; its other fields still can",
+            "part of hh may have been moved out, so hh can't be used as a whole",
+        ],
+        must_not_contain: &[
+            "=o is partially moved: o.inner.x was moved out, so o can't be used as a whole; its other fields still can",
+        ],
     },
 ];
 
@@ -38124,7 +38168,8 @@ fn struct_field_moves_and_ends() {
         // #1541: the struct's line stops where its last fields fork into arms
         // that all move them; u keeps u.c, so its line goes on.
         ("struct_last_field_moved_in_arms_1541",
-         &["p@L17-18:line", "q@L27-28:line", "t@L36-37:line", "u@L50-55:line", "u@L55-57:line"][..],
+         // (u's text changes where rustc says u.b is moved out, #1595.)
+         &["p@L17-18:line", "q@L27-28:line", "t@L36-37:line", "u@L50-52:line", "u@L52-57:line"][..],
          &["p@L17-22:line", "q@L27-31:line", "t@L36-43:line"][..]),
     ] {
         let tl = run_with_local_backend(snippet).timeline_panel_string();
@@ -38336,5 +38381,47 @@ fn try_block_drops_on_the_residual_target_1656() {
             && n.attribute("data-rv-line").and_then(|s| s.parse::<usize>().ok()) == Some(line)
         ).filter_map(|n| n.attribute("data-rv-var")).collect();
         assert_eq!(owners, [variable], "conditional drops at {statement}");
+    }
+}
+
+/// The tooltip of the main-column line of `var` covering row `row`.
+fn line_tip_at(svg: &str, var: &str, row: usize) -> Option<String> {
+    let prefix = format!("data-rv-id=\"{}@L", var);
+    for (i, _) in svg.match_indices(&prefix) {
+        let rest = &svg[i + prefix.len()..];
+        let id = &rest[..rest.find('"')?];
+        let mut parts = id.split(':');
+        let (Some(rows), Some("line")) = (parts.next(), parts.next()) else { continue };
+        let Some((a, b)) = rows.split_once('-') else { continue };
+        let (Ok(a), Ok(b)) = (a.parse::<usize>(), b.parse::<usize>()) else { continue };
+        if a <= row && row < b {
+            let start = svg[..i].rfind('<')?;
+            let end = i + svg[i..].find('>')?;
+            return tooltip_lines(&svg[start..=end]).into_iter().flatten().next();
+        }
+    }
+    None
+}
+
+/// #1595: a struct some field of which a conditional's arm moves out keeps
+/// one line through the conditional, and its text follows rustc's facts on
+/// its fields: on rows after the move in the arm, and after the
+/// conditional, it never says the struct owns the resource. Main did.
+#[test]
+fn struct_line_text_follows_rustc_1595() {
+    let svg = run_with_local_backend("edition2024/struct_arm_parts_moved_1595").timeline_panel_string();
+    for (var, row) in [
+        ("p", 22), ("p", 23), ("q", 29), ("q", 32), ("w", 39), ("t", 48), ("t", 49), ("m", 57), ("m", 60),
+        ("l", 66), ("l", 67), ("e", 74), ("e", 77), ("o", 102), ("o", 103), ("g", 108), ("h", 117), ("h", 118),
+        ("y", 143), ("d", 158), ("d", 160), ("hh", 166),
+    ] {
+        let tip = line_tip_at(&svg, var, row).unwrap_or_else(|| panic!("no line of {} on row {}", var, row));
+        assert!(!tip.contains("is the owner of the resource"), "{} on row {}: {}", var, row, tip);
+    }
+    // Where every field holds a value again (else rows, after a refill),
+    // it does own it.
+    for (var, row) in [("q", 31), ("g", 110), ("m", 55)] {
+        let tip = line_tip_at(&svg, var, row).unwrap_or_else(|| panic!("no line of {} on row {}", var, row));
+        assert_eq!(tip, format!("{var} is the owner of the resource"), "{} on row {}", var, row);
     }
 }

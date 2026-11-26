@@ -1465,6 +1465,215 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
     /// The move paths of `move_data` that are a user variable, or a
     /// field of one (`p.name`, `t.0`), each with the name of its column.
+    /// For each struct (or tuple) variable, and struct-typed field of one,
+    /// some field of which is moved out somewhere in this body: on each
+    /// source line, which of its fields rustc's dataflow says may be
+    /// uninitialized (moved out) after that line's code, split into those
+    /// surely uninitialized and those maybe (#1595). Read after the last
+    /// MIR location of the line in each block, on the paths that run that
+    /// line; a location whose span covers several lines (a conditional's
+    /// join) counts on its last. The outermost such field is named (`p.i`
+    /// when all of it is, not `p.i.x`). Not where the variable (or that
+    /// field) itself may be moved as a whole: its own column says so.
+    /// Cleanup blocks and code from other files are left out.
+    pub fn struct_parts_uninit_by_line(&self) -> Vec<crate::svg_generator::data::PartsUninit> {
+        use rustc_mir_dataflow::impls::{MaybeInitializedPlaces, MaybeUninitializedPlaces};
+        use rustc_mir_dataflow::move_paths::{MoveData, MovePathIndex};
+        let body = &self.bwf.body;
+        let move_data = MoveData::gather_moves(body, self.tcx, |_| true);
+        let names = self.move_path_names(&move_data);
+        let moved: BTreeSet<MovePathIndex> = move_data.moves.iter().map(|m| m.path).collect();
+        let fields: Vec<(MovePathIndex, String)> = names.iter().filter(|(_, n)| n.contains('.')).cloned().collect();
+        let mut structs: BTreeSet<String> = BTreeSet::new();
+        for (mpi, n) in &fields {
+            if moved.contains(mpi) {
+                let parts: Vec<&str> = n.split('.').collect();
+                for k in 1..parts.len() {
+                    structs.insert(parts[..k].join("."));
+                }
+            }
+        }
+        if structs.is_empty() {
+            return Vec::new();
+        }
+        let path_of = |name: &str| names.iter().find(|(_, n)| n == name).map(|(m, _)| *m);
+        let mut init = MaybeInitializedPlaces::new(self.tcx, body, &move_data)
+            .iterate_to_fixpoint(self.tcx, body, None)
+            .into_results_cursor(body);
+        let mut uninit = MaybeUninitializedPlaces::new(self.tcx, body, &move_data)
+            .iterate_to_fixpoint(self.tcx, body, None)
+            .into_results_cursor(body);
+        let sm = self.tcx.sess.source_map();
+        let file = sm.lookup_char_pos(body.span.lo()).file.name.clone();
+        // The source line a location's code is on (a span over several
+        // lines, a conditional's join, counts on its last), or none for
+        // what isn't code on a line: storage markers, drops (a scope's
+        // cleanup, also on a `return`'s way out), and code from elsewhere.
+        let line_of = |loc: Location| -> Option<usize> {
+            let data = &body.basic_blocks[loc.block];
+            match data.statements.get(loc.statement_index) {
+                Some(st) if matches!(st.kind, StatementKind::StorageLive(_) | StatementKind::StorageDead(_)) => return None,
+                None if matches!(data.terminator().kind, TerminatorKind::Drop { .. } | TerminatorKind::UnwindResume | TerminatorKind::Unreachable | TerminatorKind::Return) => return None,
+                _ => {}
+            }
+            let span = body.source_info(loc).span.source_callsite();
+            // (Not the signature's: a parameter's own code isn't on a line
+            // of the body.)
+            if span.is_dummy() || span.lo() < self.hir_body.value.span.lo() {
+                return None;
+            }
+            let pos = sm.lookup_char_pos(span.hi());
+            (pos.file.name == file).then_some(pos.line)
+        };
+        // The locations after which control leaves their line: the next
+        // locations on a line (past those on none) are on another, or
+        // there are none.
+        let next_lines = |loc: Location| -> BTreeSet<Option<usize>> {
+            let mut out = BTreeSet::new();
+            let mut work = vec![loc];
+            let mut seen: BTreeSet<Location> = BTreeSet::new();
+            let mut first = true;
+            while let Some(l) = work.pop() {
+                if !first {
+                    if !seen.insert(l) { continue; }
+                    if let Some(line) = line_of(l) { out.insert(Some(line)); continue; }
+                }
+                first = false;
+                let data = &body.basic_blocks[l.block];
+                if l.statement_index < data.statements.len() {
+                    work.push(Location { block: l.block, statement_index: l.statement_index + 1 });
+                } else {
+                    let succ: Vec<_> = data.terminator().successors().filter(|b| !body.basic_blocks[*b].is_cleanup).collect();
+                    if succ.is_empty() { out.insert(None); }
+                    work.extend(succ.into_iter().map(|b| Location { block: b, statement_index: 0 }));
+                }
+            }
+            out
+        };
+        // And the code that control enters a line from: the code on another
+        // line just before (past locations on none: storage markers, drops),
+        // read after it (so a scope's drops in between don't count).
+        let preds = body.basic_blocks.predecessors();
+        let prev_code = |loc: Location| -> BTreeSet<(Option<usize>, Option<Location>)> {
+            let mut out = BTreeSet::new();
+            let mut work = vec![loc];
+            let mut seen: BTreeSet<Location> = BTreeSet::new();
+            let mut first = true;
+            while let Some(l) = work.pop() {
+                if !first {
+                    if !seen.insert(l) { continue; }
+                    if let Some(line) = line_of(l) { out.insert((Some(line), Some(l))); continue; }
+                }
+                first = false;
+                if l.statement_index > 0 {
+                    work.push(Location { block: l.block, statement_index: l.statement_index - 1 });
+                } else {
+                    let ps: Vec<_> = preds[l.block].iter().filter(|b| !body.basic_blocks[**b].is_cleanup).collect();
+                    if ps.is_empty() { out.insert((None, None)); }
+                    work.extend(ps.into_iter().map(|b| Location { block: *b, statement_index: body.basic_blocks[*b].statements.len() }));
+                }
+            }
+            out
+        };
+        let body_end = sm.lookup_char_pos(self.hir_body.value.span.hi()).line;
+        // The body's `return`s (also a `?`'s, desugared into one).
+        struct Rets { spans: Vec<Span> }
+        impl<'tcx> intravisit::Visitor<'tcx> for Rets {
+            fn visit_expr(&mut self, e: &'tcx rustc_hir::Expr<'tcx>) {
+                if let rustc_hir::ExprKind::Ret(_) = e.kind {
+                    self.spans.push(e.span.source_callsite());
+                }
+                intravisit::walk_expr(self, e);
+            }
+        }
+        let mut rets = Rets { spans: Vec::new() };
+        intravisit::Visitor::visit_expr(&mut rets, self.hir_body.value);
+        let in_return = |loc: Location| {
+            let span = body.source_info(loc).span.source_callsite();
+            rets.spans.iter().any(|r| r.contains(span))
+        };
+        // Exits that leave the function (`return`, `?`): what continues
+        // below the line doesn't come from them, unless nothing does.
+        let mut leaving: BTreeMap<usize, Vec<Location>> = BTreeMap::new();
+        let mut exits: BTreeMap<usize, Vec<Location>> = BTreeMap::new();
+        let mut entries: BTreeMap<usize, Vec<Location>> = BTreeMap::new();
+        for (bb, data) in body.basic_blocks.iter_enumerated() {
+            if data.is_cleanup {
+                continue;
+            }
+            for i in 0..=data.statements.len() {
+                let loc = Location { block: bb, statement_index: i };
+                let Some(line) = line_of(loc) else { continue };
+                let next = next_lines(loc);
+                if next.iter().any(|n| *n != Some(line)) {
+                    // (A `return`'s, straight to the body's closing brace.)
+                    if line < body_end && in_return(loc) && next.iter().all(|n| n.is_none_or(|n| n >= body_end)) {
+                        leaving.entry(line).or_default().push(loc);
+                    } else {
+                        exits.entry(line).or_default().push(loc);
+                        // Falling through to the body's end: the way into its
+                        // closing brace (which may hold no code of its own).
+                        if line < body_end && next.iter().any(|n| n.is_none_or(|n| n >= body_end)) {
+                            let into_end = entries.entry(body_end).or_default();
+                            if !into_end.contains(&loc) { into_end.push(loc); }
+                        }
+                    }
+                }
+                let prev = prev_code(loc);
+                if prev.iter().any(|(n, _)| *n != Some(line)) {
+                    let from = entries.entry(line).or_default();
+                    for (n, l) in prev {
+                        if let (true, Some(l)) = (n != Some(line), l) {
+                            if !from.contains(&l) { from.push(l); }
+                        }
+                    }
+                }
+            }
+        }
+        for (line, locs) in leaving {
+            exits.entry(line).or_insert(locs);
+        }
+        let mut out = Vec::new();
+        for s in &structs {
+            let prefix = format!("{}.", s);
+            let own = path_of(s);
+            let below: Vec<&(MovePathIndex, String)> = fields.iter().filter(|(_, n)| n.starts_with(&prefix)).collect();
+            for (entry, line, locs) in exits.iter().map(|(l, v)| (false, l, v)).chain(entries.iter().map(|(l, v)| (true, l, v))) {
+                if locs.is_empty() {
+                    continue;
+                }
+                let mut whole = false;
+                // Per field: may lack a value after some exit; lacks one after all.
+                let mut may: Vec<bool> = vec![false; below.len()];
+                let mut sure: Vec<bool> = vec![true; below.len()];
+                for &loc in locs {
+                    init.seek_after_primary_effect(loc);
+                    uninit.seek_after_primary_effect(loc);
+                    if own.is_some_and(|o| uninit.get().contains(o)) {
+                        whole = true;
+                    }
+                    for (k, (m, _)) in below.iter().enumerate() {
+                        let lack = uninit.get().contains(*m);
+                        may[k] |= lack;
+                        sure[k] &= lack && !init.get().contains(*m);
+                    }
+                }
+                if whole {
+                    continue;
+                }
+                // The outermost fields that may lack a value.
+                let lacking: Vec<usize> = (0..below.len()).filter(|k| may[*k]).collect();
+                let outer = |k: &usize| !lacking.iter().any(|j| below[*k].1.starts_with(&format!("{}.", below[*j].1)));
+                let (mut certain, mut maybe) = (Vec::new(), Vec::new());
+                for k in lacking.iter().filter(|k| outer(k)) {
+                    if sure[*k] { certain.push(below[*k].1.clone()) } else { maybe.push(below[*k].1.clone()) }
+                }
+                out.push(crate::svg_generator::data::PartsUninit { name: s.clone(), line: *line, entry, certain, maybe });
+            }
+        }
+        out
+    }
+
     fn move_path_names(&self, move_data: &rustc_mir_dataflow::move_paths::MoveData<'tcx>) -> Vec<(rustc_mir_dataflow::move_paths::MovePathIndex, String)> {
         let body = &self.bwf.body;
         let names = self.mir_local_names(self.bwf);

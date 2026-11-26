@@ -33,6 +33,7 @@ impl Rustviz {
     temp_emptying_moves: Vec<usize>,
     hidden_source_lines: HashSet<usize>,
     approx_notes: Vec<ApproxNote>,
+    parts_uninit: Vec<crate::svg_generator::data::PartsUninit>,
   ) -> Result<Rustviz>{
     /* ******************************************
             --- Build VisualizationData ---
@@ -51,6 +52,7 @@ impl Rustviz {
       arrow_tracks: HashMap::new(),
       field_lenders: HashMap::new(),
       approx_notes,
+      parts_uninit,
       row_lines: Vec::new(),
       raised_headers: HashSet::new(),
     };
