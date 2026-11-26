@@ -64,8 +64,10 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // crossings than on main (the maintainer's ruling on #1605); in
     // fan_into_one_dot_1542 only `longest_copied` (no side free without a
     // new crossing; the other function's fan gets the rule). Or the
-    // figure's layout is past #1605's render-time cap
-    // (branch_holder_lenders_1404, field_lenders_1354).
+    // drawing that clears it needs more layout work than #1605's
+    // render-time budget allows (branch_holder_lenders_1404,
+    // field_lenders_1354, let_else_holder_return_1458,
+    // tuple_scrutinee_nested).
     ("branch_holder_lenders_1404", "arrow-along-leg", 1542),
     ("cond_holder_local_ref_1475", "arrow-along-leg", 1542),
     ("cond_holder_moved_1464", "arrow-along-leg", 1542),
@@ -75,8 +77,10 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("holder_tuple_literal_1459", "arrow-along-leg", 1542),
     ("iter_holder_copied_1399", "arrow-along-leg", 1542),
     ("iter_mut_holder_1399", "arrow-along-leg", 1542),
+    ("let_else_holder_return_1458", "arrow-along-leg", 1542),
     ("let_pattern_literal_unbound_moves", "arrow-along-leg", 1542),
     ("refs_array_literal", "arrow-along-leg", 1542),
+    ("tuple_scrutinee_nested", "arrow-along-leg", 1542),
 ];
 
 /// The invariants, by the name the failure list and messages use.

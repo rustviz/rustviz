@@ -6428,9 +6428,11 @@ struct LaneSettings {
 impl LaneSettings {
     /// These settings with the arrows and logos `keys` set as in `other`.
     fn merged(self, other: &LaneSettings, keys: &BTreeSet<(usize, usize)>) -> LaneSettings {
+        #[expect(clippy::disallowed_methods, reason = "collected into a map: order doesn't matter")]
         fn take<K: Copy + Eq + std::hash::Hash, V: Copy>(mine: HashMap<K, V>, other: &HashMap<K, V>, of: impl Fn(&K) -> bool) -> HashMap<K, V> {
             mine.into_iter().filter(|(k, _)| !of(k)).chain(other.iter().filter(|(k, _)| of(k)).map(|(k, v)| (*k, *v))).collect()
         }
+        #[expect(clippy::disallowed_methods, reason = "collected into a set: order doesn't matter")]
         fn take_set<K: Copy + Eq + std::hash::Hash>(mine: std::collections::HashSet<K>, other: &std::collections::HashSet<K>, of: impl Fn(&K) -> bool) -> std::collections::HashSet<K> {
             mine.into_iter().filter(|k| !of(k)).chain(other.iter().filter(|k| of(k)).copied()).collect()
         }
@@ -8427,13 +8429,13 @@ fn render_arrows_string_external_events_version(
     // #1542's fans: drawn with the rule's approaches, unless that adds
     // crossings at a fan (arrow-arrow crossings of its arrows, counted as
     // `fan_crossings_at`) over the drawing without the rule; then the fan's
-    // other orders of approaches are tried, then the rule off at the fans
-    // that cross more, and if each adds one too, the figure keeps main's
+    // other orders of approaches are tried, then main's drawing in the
+    // functions where the rule's is worse, else the figure keeps main's
     // drawing (the maintainer's ruling on #1605).
     // Render time (#1605's review: no figure much slower than on main):
     // the first layout gives up past `RULE_LAYOUT_WORK`, and the figure is
-    // drawn as main's router draws it; the other tries run within
-    // `RELAYOUT_WORK` more (`within_budget`).
+    // drawn as main's router draws it; the other tries run only within
+    // the figure's budget (`figure_budget`).
     let start = work_done();
     let fan_old: BTreeSet<(i64, i64)> = BTreeSet::new();
     let mut fan_variant: BTreeMap<(i64, i64), usize> = BTreeMap::new();
@@ -8454,8 +8456,16 @@ fn render_arrows_string_external_events_version(
         d
     };
     let mut main_drawing = false;
+    // (The arrows drawn as main's router draws them, in the functions where
+    // the rule's drawing is worse: they want no rows.)
+    let mut main_keys: BTreeSet<(usize, usize)> = BTreeSet::new();
+    // (What main's router would spend on this figure: the comparison's
+    // layout, else the first.)
+    let mut main_work = first;
     if gave_up {
+        let w = work_done();
         drawn = legacy_layout(dots);
+        main_work = work_done() - w;
         main_drawing = true;
     } else if all_fan_crossings(&drawn) > 0 || !heads_on_heads(&drawn, false).is_empty()
         || !through_corners(&drawn, &dots.corners, &dots.lanes.ends).is_empty() {
@@ -8465,8 +8475,9 @@ fn render_arrows_string_external_events_version(
         // a leg's joint (`through_corners`), the arrows are also laid out
         // as main's router did (`legacy`) and compared.
         let kept = dots.lanes.clone();
+        let w = work_done();
         let old = legacy_layout(dots);
-        let compared = work_done();
+        main_work = work_done() - w;
         let old_lanes = std::mem::replace(&mut dots.lanes, kept);
         let (corner_xy, ends) = (dots.corners.clone(), dots.lanes.ends.clone());
         let corners = |d: &[Drawn]| through_corners(d, &corner_xy, &ends).len();
@@ -8485,7 +8496,7 @@ fn render_arrows_string_external_events_version(
                 .flat_map(|(&f, &n)| (1..n.min(3)).map(move |v| (f, v)))
                 .take(2).collect();
             for (f, v) in tries {
-                if !within_budget(compared, first) {
+                if work_done() + first > figure_budget(main_work) {
                     break;
                 }
                 fan_variant = BTreeMap::from([(f, v)]);
@@ -8500,6 +8511,7 @@ fn render_arrows_string_external_events_version(
             // is worse: their arrows' tracks from main's layout, the rest
             // kept. A function's arrows stay between its header rows.)
             if !fixed {
+                #[expect(clippy::disallowed_methods, reason = "sorted next")]
                 let mut starts: Vec<i64> = visualization_data.fn_start_lines.values().map(|&l| get_y_axis_pos(l)).collect();
                 starts.sort_unstable();
                 starts.dedup();
@@ -8532,6 +8544,7 @@ fn render_arrows_string_external_events_version(
                     if !worse(&d) && untangle_cost(&d, dots).0 <= marks {
                         drawn = d;
                         fixed = true;
+                        main_keys = keys;
                     }
                 }
             }
@@ -8547,13 +8560,17 @@ fn render_arrows_string_external_events_version(
     // left for one of its heads.)
     let heads = heads_on_heads(&drawn, false);
     let others = untangle_cost(&drawn, dots).0.saturating_sub(legs.len() + heads.len());
-    let mut left: Vec<usize> = legs.into_iter().chain(on_cols(&drawn, &dots.cols)).chain(heads).collect();
+    let mut left: Vec<usize> = legs.into_iter().chain(on_cols(&drawn, &dots.cols)).chain(heads)
+        .filter(|&i| !main_keys.contains(&drawn[i].key)).collect();
     left.sort_unstable();
     left.dedup();
     let mut rows: Vec<usize> = left.iter().map(|&i| drawn[i].key.1).collect();
     rows.sort_unstable();
     rows.dedup();
     dots.left_on = ArrowsLeftOn { rows, count: left.len(), others, fan_crossings: all_fan_crossings(&drawn), main_drawing };
+    if !dots.rows_added {
+        MAIN_WORK.with(|w| w.set(main_work));
+    }
     // (A figure that keeps main's drawing wants no rows: main has none
     // there, and another pass would cost a whole layout again.)
     if main_drawing {
@@ -8574,25 +8591,42 @@ thread_local! {
     static CAP: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((usize::MAX, usize::MAX)) };
     /// Whether a layout went past each cap.
     static OVER: std::cell::Cell<(bool, bool)> = const { std::cell::Cell::new((false, false)) };
+    /// What main's router would spend on the figure's arrows (its first
+    /// pass's `main_work`, `render_arrows_string_external_events_version`).
+    static MAIN_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// A first layout of a figure's arrows that does more probe work than this
-/// (about a seventh of a second) gives up, and the figure is drawn as
+/// (about a quarter of a second) gives up, and the figure is drawn as
 /// main's router draws it (`render_arrows_string_external_events_version`):
 /// comparing a big figure's drawing with main's would take a second whole
 /// layout, seconds on the playground, which renders on every request
 /// (#1605's review).
-const RULE_LAYOUT_WORK: usize = 15_000;
+const RULE_LAYOUT_WORK: usize = 12_000;
 
-/// How much more work than the first layout the other tries of a figure
-/// may do (another order of a fan's approaches, a pass with rows added).
-pub const RELAYOUT_WORK: usize = 6_000;
+/// About the time `rustc` takes to check a small program, as probe work
+/// (some 0.05 s): a figure's render costs that much besides its layouts.
+const RUSTC_WORK: usize = 2_000;
+
+/// The most layout work a figure may do in all (its passes and tries),
+/// given what main's router spends on it (`main`): half again as long
+/// to render, `rustc` included (#1605's review).
+fn figure_budget(main: usize) -> usize {
+    main + (main + RUSTC_WORK) / 2
+}
+
+/// The cap on the layout work of a pass of `render_svg` adding rows: the
+/// figure's budget (`figure_budget`), as its first pass measured it.
+pub fn rows_pass_cap() -> usize {
+    figure_budget(MAIN_WORK.with(|w| w.get()))
+}
 
 /// Starts counting the layout work of a figure afresh.
 pub fn reset_work() {
     WORK.with(|w| w.set(0));
     CAP.with(|c| c.set((usize::MAX, usize::MAX)));
     OVER.with(|o| o.set((false, false)));
+    MAIN_WORK.with(|w| w.set(0));
 }
 
 /// The layout work done so far for this figure (`WORK`).
@@ -8631,12 +8665,6 @@ fn over_cap(dots: &DotLayer) -> bool {
         o.set(v);
         v.0 || v.1
     })
-}
-
-/// Whether another layout like the first (`first`, its work) fits the
-/// budget: no more than `RELAYOUT_WORK` past `from`.
-fn within_budget(from: usize, first: usize) -> bool {
-    work_done() - from + first <= RELAYOUT_WORK
 }
 
 /// Picks every arrow's track (`ArrowLanes`): a recording pass of the
