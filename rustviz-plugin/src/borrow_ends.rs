@@ -52,7 +52,7 @@ pub fn names_match(k: &str, n: &str) -> bool {
 }
 
 /// The variable a lender or holder place is in (`s` of `*s`, `p.a`, `v[_]`).
-fn root(place: &str) -> &str {
+pub fn root(place: &str) -> &str {
   let p = place.trim_start_matches('*').trim_start_matches('(');
   p.split(['.', '[', ' ', ')']).next().unwrap_or(p)
 }
@@ -81,7 +81,7 @@ impl<'a> BodyEnds<'a> {
   /// The loans whose own reference `k` holds (stored in it, copied or moved
   /// into it, or out of a call's result), less those a new value of `k`
   /// replaced (the walk ends those where it gives `k` that value).
-  pub fn loans_held_by(&self, k: &str) -> Vec<&'a LoanInfo> {
+  pub fn loans_held_by(&self, k: &str, k_is_ref: bool) -> Vec<&'a LoanInfo> {
     let mut replaced: BTreeSet<usize> = BTreeSet::new();
     let mut renewed: BTreeSet<usize> = BTreeSet::new();
     for r in &self.facts.rows {
@@ -96,6 +96,12 @@ impl<'a> BodyEnds<'a> {
     }
     self.facts.loans.iter()
       .filter(|l| l.direct_holders.iter().chain(l.via_call.iter()).any(|h| names_match(k, h)))
+      // (Held only through a field path, `a.1` of a tuple temporary the
+      // facts name after the pattern's first binding in `let (a, b) = (&x,
+      // &x)`, while another variable holds it by name: that one's.)
+      // (A reference has no fields of its own.)
+      .filter(|l| !k_is_ref || l.direct_holders.iter().chain(l.via_call.iter()).any(|h| h == k)
+        || !l.direct_holders.iter().any(|h| h != k && !h.contains('.') && !h.contains('<') && !h.contains('(')))
       .filter(|l| !replaced.contains(&l.loan) || renewed.contains(&l.loan))
       .collect()
   }
@@ -143,6 +149,19 @@ impl<'a> BodyEnds<'a> {
   pub fn moved_on(&self, k: &str, row: usize) -> bool {
     self.facts.rows.iter().filter(|r| r.line == row).flat_map(|r| r.facts.iter())
       .any(|e| matches!(&e.fact, Fact::Move { path, .. } if path == k))
+  }
+
+  /// Whether `k` itself is moved anywhere in the body.
+  pub fn moved_anywhere(&self, k: &str) -> bool {
+    self.facts.rows.iter().flat_map(|r| r.facts.iter()).any(|e| matches!(&e.fact, Fact::Move { path, .. } if path == k))
+  }
+
+  /// The first row in `from..row` where a field path `k` is part of
+  /// (`o2.inner` for `o2.inner.r`) is moved away.
+  pub fn moved_between(&self, k: &str, from: usize, row: usize) -> Option<usize> {
+    self.facts.rows.iter().filter(|r| r.line >= from && r.line < row).find(|r| r.facts.iter().any(|e| matches!(&e.fact,
+      Fact::Move { path, .. } if path.contains('.') && k.strip_prefix(path.as_str()).is_some_and(|x| x.starts_with('.')))))
+      .map(|r| r.line)
   }
 
   /// Whether `k` or the struct it is a field of (`q` of `q.r`) is moved
@@ -221,12 +240,16 @@ impl<'a> BodyEnds<'a> {
   /// After `row`, `column` is still lent by a loan not in `except`: a
   /// borrow of it that ends there doesn't give it back (another one goes
   /// on, `let r = &s; let r2 = &s;` with r used later).
-  pub fn lent_after(&self, row: usize, column: &str, except: &[usize]) -> bool {
+  /// Only loans some variable in `tracked` holds count (a borrow a call
+  /// stored, `keep(&mut v, &s)`, is said on the end instead: "still
+  /// borrowed by v", `note_sharers_across_calls`).
+  pub fn lent_after(&self, row: usize, column: &str, except: &[usize], tracked: &[String]) -> bool {
     self.facts.rows.iter().filter(|r| r.line == row).any(|r| {
       // (One taken on an earlier row: a loan taken later on the row, `let
       // m = &mut s;` after r's last use, doesn't keep r's borrow on.)
       r.after.lent.get(column).is_some_and(|ls| ls.iter().any(|l| !except.contains(&l.loan)
-        && self.facts.loans.iter().any(|x| x.loan == l.loan && x.line < row)))
+        && self.facts.loans.iter().any(|x| x.loan == l.loan && x.line < row
+          && x.direct_holders.iter().chain(x.holders.iter()).any(|h| tracked.iter().any(|t| names_match(t, h))))))
     })
   }
 

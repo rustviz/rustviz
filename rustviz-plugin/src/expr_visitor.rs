@@ -11758,7 +11758,7 @@ pub fn print_out_of_scope(&mut self){
       *e = (*e).max(r.until);
     }
     for (k, rd) in arm_loans {
-      let loans: Vec<usize> = ix.as_ref().map(|ix| ix.loans_held_by(&k).into_iter()
+      let loans: Vec<usize> = ix.as_ref().map(|ix| ix.loans_held_by(&k, self.raps.get(k.as_str()).is_some_and(|r| r.rap.is_ref())).into_iter()
         .filter(|l| l.line == rd.assigned_at && !claimed.get(&k).is_some_and(|c| c.contains(&l.loan)) && ix.lends(l, &rd.lender.real_name()))
         .map(|l| l.loan).collect()).unwrap_or_default();
       claimed.entry(k.clone()).or_default().extend(loans.iter().copied());
@@ -11767,7 +11767,7 @@ pub fn print_out_of_scope(&mut self){
     }
     for r in retired {
       // (Its loans are those taken before the later variable is declared.)
-      let loans: Vec<usize> = ix.as_ref().map(|ix| ix.loans_held_by(&r.name).into_iter()
+      let loans: Vec<usize> = ix.as_ref().map(|ix| ix.loans_held_by(&r.name, self.raps.get(r.name.as_str()).is_some_and(|r| r.rap.is_ref())).into_iter()
         .filter(|l| !claimed.get(&r.name).is_some_and(|c| c.contains(&l.loan)) && l.line < r.until)
         // (Not one the later variable holds as its own.)
         .filter(|l| { let e = ix.holder_end(&r.name, &[l.loan], (r.until, usize::MAX)); e.gives_back.is_none() && e.stops.is_none() })
@@ -11781,7 +11781,7 @@ pub fn print_out_of_scope(&mut self){
     current.sort_by(|a, b| a.0.cmp(&b.0));
     for (k, rd) in current {
       let from = later_from.get(&k).copied().unwrap_or(0);
-      let mut held: Vec<&crate::facts::schema::LoanInfo> = ix.as_ref().map(|ix| ix.loans_held_by(&k).into_iter()
+      let mut held: Vec<&crate::facts::schema::LoanInfo> = ix.as_ref().map(|ix| ix.loans_held_by(&k, self.raps.get(k.as_str()).is_some_and(|r| r.rap.is_ref())).into_iter()
         .filter(|l| !claimed.get(&k).is_some_and(|c| c.contains(&l.loan))).collect()).unwrap_or_default();
       // A pattern's binding moved out of a value holding the borrow (`if
       // let Some(x) = y`) holds what y held.
@@ -11801,6 +11801,7 @@ pub fn print_out_of_scope(&mut self){
       slots.push(Slot { key: k, rd, rows: (from, usize::MAX), arm: false });
     }
 
+    let slot_keys: Vec<String> = slots.iter().map(|s| s.key.clone()).collect();
     // Per slot and lender: the end, from the facts.
     let lends_to = |rd: &RefData| -> Vec<ResourceTy> {
       let mut v = vec![rd.lender.clone()];
@@ -11858,6 +11859,14 @@ pub fn print_out_of_scope(&mut self){
             .filter(|f| !claimed.get(&slot.key).is_some_and(|c| c.contains(&f.loan)) && ix.lends(f, &l.real_name()))
             .map(|f| f.loan).collect();
         }
+        // (Not for a lender with a column of its own the facts give k no
+        // loan of, `r2` after `std::mem::swap(&mut r1, &mut r2)`: the
+        // walk's line.)
+        let own_column = matches!(l, ResourceTy::Value(x) if self.raps.get(x.name().as_str()).is_some_and(|r| r.fn_start_line == self.current_fn_start && !r.rap.is_fn()));
+        if i == 0 && mine.is_empty() && own_column && !loans.is_empty() {
+          ends.push(Pending { lender: l.clone(), end: End::Arrow(slot.rd.lifetime), loans: Vec::new(), own: None, holder_stops: false });
+          continue;
+        }
         if i == 0 && mine.is_empty() {
           mine = loans.iter().copied()
             .filter(|id| info(id).is_some_and(|f| !lenders.iter().any(|o| ix.lends(f, &o.real_name()))))
@@ -11878,9 +11887,18 @@ pub fn print_out_of_scope(&mut self){
           Some(t) => ix.holder_end_within(&slot.key, &mine, slot.rows, t),
           None => ix.holder_end(&slot.key, &mine, slot.rows),
         };
+        // A reference to a string literal or a `static` (its loan never ends):
+        // its own end at its last use (Q7).
+        let all_static = mine.iter().all(|id| info(id).is_some_and(|f| f.source == "static"));
         let (end, own) = match (e.last_end, e.gives_back, e.stops) {
+          (None, _, Some(own)) if all_static => (End::Own(own), None),
           (None, _, _) => (End::None, None),
           (Some(back), Some(_), Some(own)) if e.only_loop_exits && own < back => (End::LoopExit { own, back }, None),
+          // (A field moved away with its part before then, `o.inner =
+          // o2.inner;`: what it moved into gives the loan back; its own
+          // end is at the move.)
+          (Some(back), Some(_), _) if ix.moved_between(&slot.key, slot.rd.assigned_at, back).is_some() =>
+            (End::Own(ix.moved_between(&slot.key, slot.rd.assigned_at, back).unwrap_or(back)), None),
           (Some(back), Some(_), _) => (End::Arrow(back), None),
           // (Moved away where it stops holding, `Some(q)`: its column ends
           // there, so its end is there.)
@@ -11897,7 +11915,7 @@ pub fn print_out_of_scope(&mut self){
           ResourceTy::Value(x) | ResourceTy::Deref(x) | ResourceTy::Index(x, _, _) | ResourceTy::DerefField(x, _, _, _) => Some(x.name().to_owned()),
           _ => None,
         };
-        let still_lent = |row: usize| column.as_ref().is_some_and(|c| ix.lent_after(row, c, &mine));
+        let still_lent = |row: usize| column.as_ref().is_some_and(|c| ix.lent_after(row, c, &mine, &slot_keys));
         let (end, own) = match end {
           End::Arrow(back) if still_lent(back) => (End::Own(own.map_or(back, |(o, _)| o)), None),
           End::LoopExit { own, back } if still_lent(back) => (End::Own(own), None),
@@ -11908,7 +11926,10 @@ pub fn print_out_of_scope(&mut self){
             given_back.entry(id).or_default().push(l.real_name());
           }
         }
-        if self.pattern_copies.contains(&slot.key) && e.gives_back.is_some() {
+        // (A binding of the payload itself, `Some(e)`: `end_scrutinee_borrows_in_other_arms`
+        // ends the holder's loan in the other arms. Not a field of a bound
+        // struct, `Some(x)` then `x.part`: the holder's own end does.)
+        if self.pattern_copies.contains(&slot.key) && !slot.key.contains('.') && e.gives_back.is_some() {
           pattern_gives.extend(mine.iter().copied());
         }
         // (Only for a lender with a column of its own, as that pass draws.)
@@ -11945,7 +11966,8 @@ pub fn print_out_of_scope(&mut self){
         .map(|p| (s.key.clone(), p.lender.real_name())))
       .collect();
     let other_gives = |id: usize, k: &str| ix.as_ref().is_some_and(|ix| ix.end_holders(id).iter().any(|(_, h)|
-      slot_arrows.iter().any(|(key, ln)| key != k && crate::borrow_ends::names_match(key, h)
+      // (Not an arrow back to k itself: k still gives its lender back.)
+      slot_arrows.iter().any(|(key, ln)| key != k && ln != k && crate::borrow_ends::names_match(key, h)
         && ix.facts.loans.iter().any(|f| f.loan == id && ix.lends(f, ln)))));
     let mut decided: Vec<Vec<(ResourceTy, End)>> = pending.into_iter().zip(slots.iter()).map(|(ends, slot)| ends.into_iter().map(|p| {
       let end = match p.own {
@@ -11957,6 +11979,13 @@ pub fn print_out_of_scope(&mut self){
         // back to s: s still gives its own lender back.)
         Some((own, _)) if p.loans.iter().any(|l| given_back.get(l).is_some_and(|to| to.iter().any(|t| *t != slot.key)) || walk_gives(*l, &slot.key) || other_gives(*l, &slot.key)) => End::Own(own),
         _ => p.end,
+      };
+      // (A `&mut` parameter moved away on some path, `let y = z;` in an
+      // arm: its end on the other paths draws no arrow either way, and as
+      // its own end the join says it was moved in a branch.)
+      let end = match end {
+        End::Arrow(row) if matches!(p.lender, ResourceTy::Caller) && ix.as_ref().is_some_and(|ix| ix.moved_anywhere(&slot.key)) => End::Own(row),
+        e => e,
       };
       // (Its own end on the row it is moved on, `Some(r)`: the move hands
       // the loan on and ends its column; nothing more to draw.)
@@ -12084,7 +12113,7 @@ pub fn print_out_of_scope(&mut self){
         // An end past the reference's scope end (a copy of it outlives it,
         // #913): its own end there, before the scope end.
         let scope_end = (from_ro.is_ref() && self.raps.get(k).is_some_and(|r| r.extra_scopes.is_empty()))
-          .then(|| gos_line_from(self.preprocessed_events, &from_ro, rd.assigned_at)).flatten();
+          .then(|| last_gos_line_from(self.preprocessed_events, &from_ro, rd.assigned_at, slot.rows.1)).flatten();
         let end = match end {
           End::Arrow(l) | End::Own(l) if scope_end.is_some_and(|s| s < l) => End::Own(scope_end.unwrap_or(l)),
           End::Arrow(l) if unlent => End::Own(l),
@@ -12129,8 +12158,10 @@ pub fn print_out_of_scope(&mut self){
             // A reference a pattern copied out of a value that holds the
             // borrow (`while let Some(n) = it.next()`): its end says the
             // value keeps the lender borrowed (#575).
-            let holders = if slot.rows.1 == usize::MAX && !slot.arm {
-              self.holders_still_borrowing(k, &rd, &lender_to_refs, &handed_off)
+            let holders = if !slot.arm {
+              let mut at = rd.clone();
+              at.lifetime = line;
+              self.holders_still_borrowing(k, &at, &lender_to_refs, &handed_off)
             } else {
               Vec::new()
             };
@@ -15123,6 +15154,18 @@ fn before_scope_end(events: &mut Vec<(usize, ExternalEvent)>, id: usize, end: us
     let ev = events.pop().unwrap();
     events.insert(i, ev);
   }
+}
+
+/// The last of `rap`'s scope ends from line `from` on (up to `until`):
+/// its block's end, not an early exit's (`return` in an arm drops it
+/// there too).
+fn last_gos_line_from(evs: &[(usize, ExternalEvent)], rap: &ResourceAccessPoint, from: usize, until: usize) -> Option<usize> {
+  evs.iter().filter_map(|(l, e)| match e {
+    ExternalEvent::GoOutOfScope { ro, .. } if ro.hash() == rap.hash() && *l >= from && *l <= until => Some(*l),
+    // (Not an arm that leaves, whose exit drops it early.)
+    ExternalEvent::Branch { branches, .. } => branches.iter().filter(|b| !b.diverges).filter_map(|b| last_gos_line_from(&b.e_data, rap, from, until)).max(),
+    _ => None,
+  }).max()
 }
 
 pub fn gos_line_from(evs: &[(usize, ExternalEvent)], rap: &ResourceAccessPoint, from: usize) -> Option<usize> {
