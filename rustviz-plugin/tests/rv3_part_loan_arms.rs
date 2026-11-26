@@ -42,3 +42,26 @@ fn whole_or_part(mut p: Pair, left: bool) {
     r.clear();
     inspect(&p);
 }
+
+// As `choose`, one arm per row: each arm's field stays lent past its `}`.
+fn choose_lines(mut p: Pair, left: bool) {
+    let r = if left {
+        inspect(&p);
+        &mut p.a
+    } else {
+        inspect(&p);
+        &mut p.b
+    };
+    r.clear();
+    inspect(&p);
+}
+
+// Events of p's stacked on one row of an arm: p is lent to q and given
+// back before p.a is lent to r.
+fn stacked(mut p: Pair, left: bool) {
+    if left {
+        let q = &p; inspect(q); let r = &mut p.a;
+        r.clear();
+    }
+    inspect(&p);
+}

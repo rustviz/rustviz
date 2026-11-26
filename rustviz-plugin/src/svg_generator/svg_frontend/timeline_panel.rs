@@ -9355,7 +9355,19 @@ fn part_loans_in_arm(
             continue;
         }
         if seg.p2.0 != branch_x {
-            if let Some((state, title)) = on_row(span.end.0, &seg.state, &seg.title) {
+            // The join diagonal: the state the arm leaves with. A one-line
+            // arm's is its row's own (a MIR arm snapshot); a longer arm's
+            // `}` row has none, so it's its last row with a state of its
+            // own (a loan taken there, `&mut p.b` as the arm's value, is
+            // still live past the `}`).
+            let exit = (span.start.0 + 1..span.end.0).rev()
+                .find(|r| data.state_table.arm_loan_cell(fn_line, rap.name(), *r, span).is_some());
+            let at = if span.start.0 == span.end.0 || data.state_table.arm_loan_cell(fn_line, rap.name(), span.end.0, span).is_some() {
+                Some(span.end.0)
+            } else {
+                exit
+            };
+            if let Some((state, title)) = at.and_then(|r| on_row(r, &seg.state, &seg.title)) {
                 (seg.state, seg.title) = (state, title);
             }
             out.push(seg);
@@ -9366,6 +9378,12 @@ fn part_loans_in_arm(
         for row in first..last {
             let y = get_y_axis_pos(row) as f64;
             if y >= seg.p2.1 { break; }
+            // (Between dots stacked under one source line the state after
+            // the whole line doesn't hold yet: `let q = &p; ..; let r = &mut
+            // p.a;` lends p.a after q's loan; it applies from the last.)
+            if data.row_lines.get(row + 1).is_some_and(Option::is_none) {
+                continue;
+            }
             let change = rv_attrs::line_of(row, &data.row_lines)
                 .filter(|_| span.start.0 != span.end.0)
                 .and_then(|src| on_row(src, &seg.state, &seg.title));
@@ -10301,38 +10319,58 @@ fn part_loan_state(
     if !strongest_loans().any(|l| table.loan(fn_line, col, l.loan).is_some_and(|loan| loan.part_of.contains(col))) {
         return None;
     }
-    // The loans, as the title says them: by holder and kind, each part
-    // named as 2.x's columns name it (`(t.0 as Some).0` is `t.0`), never
-    // as a MIR place.
-    let mut groups: BTreeMap<(Option<String>, &str, bool), BTreeSet<String>> = BTreeMap::new();
-    for lent in strongest_loans() {
+    // The loans, as the title says them: every part loan of the column
+    // live here (the strongest sets the line's style; a weaker one, `y`
+    // keeping `e.0` shared beside `e.1` mutable, is said too), each part
+    // named as 2.x's columns name it (`(t.0 as Some).0` is `t.0`), never as
+    // a MIR place.
+    let mut parts: Vec<(String, &str, Option<String>, bool)> = Vec::new();
+    let lenders: BTreeSet<&str> = cell.lent.iter().filter_map(|l| Some(table.loan(fn_line, col, l.loan)?.lender.as_str())).collect();
+    for lent in &cell.lent {
         let loan = table.loan(fn_line, col, lent.loan)?;
         // The eventual result of a call doesn't exist during reservation.
         // Name a holder only when its value keeps this loan on this path.
         let holder = (lent.kind != "reserved" && lent.holder != *col
             && cell_for(&lent.holder).is_some_and(|h| h.holds.contains(&lent.loan)))
             .then_some(lent.holder.as_str());
-        let direct = holder.is_some_and(|h| loan.direct_holders.iter().any(|d| d == h));
+        // Said to hold the borrow itself ("p.a is borrowed by r") only where
+        // the facts prove it, as `owner_loan_title` does: r took this loan
+        // itself, it runs, and r can point to nothing else here (not after
+        // `r = &other` on some path, not a `&T` keeping a `&mut` live).
+        let exact = holder.is_some_and(|h| {
+            loan.runs && loan.direct_holders.iter().any(|d| d == h)
+                && cell.holder_sources.get(h).is_some_and(|src| !src.is_empty() && src.iter().all(|x| lenders.contains(x.as_str())))
+                && !(rank(lent.kind) == 2 && data.timelines.values().map(|t| &t.resource_access_point)
+                    .any(|r| r.name() == h && r.is_ref() && !r.is_mutref() && data.fn_source_lines.get(r.hash()) == Some(&fn_line)))
+        });
         let shown = holder.and_then(|h| display_place(data, fn_line, col, h));
-        let place = display_place(data, fn_line, col, &loan.lender).unwrap_or_else(|| loan.lender.clone());
-        groups.entry((shown, lent.kind, direct && holder.is_some())).or_default().insert(place);
+        parts.push((part_display_name(data, fn_line, col, &loan.lender), lent.kind, shown, exact && loan.runs));
     }
     // A loan of a part 2.x's columns don't name (an enum's payload, shown
     // as the owner itself): the owner's own loan title says it.
-    let whole_named = groups.values().flatten().all(|p| p == col);
+    let whole_named = parts.iter().all(|(p, ..)| p == col);
     let behind_ref = strongest_loans().all(|l| table.loan(fn_line, col, l.loan).is_some_and(|i| i.through.is_some()));
-    // One loan: who holds it. Several (an or-pattern's alternatives, arms
-    // that lend different fields, a closure's captures): need not all be
-    // taken on one path, so they're said as the borrow checker counts them.
-    let reason = match groups.iter().next() {
-        Some(((holder, kind, direct), places)) if groups.len() == 1 && places.len() == 1 =>
-            hover_messages::part_loan(places.first()?, kind, holder.as_deref(), *direct, cell.may_lend),
+    // One loan held by a variable the facts prove holds it: who holds it.
+    // Otherwise (several loans, which need not all be taken on one path: an
+    // or-pattern's alternatives, arms lending different fields; a holder
+    // that may hold something else; a loan on some paths only or on none
+    // that runs): what the borrow checker counts, and while what is in use.
+    let holders: BTreeSet<Option<&str>> = parts.iter().map(|(_, _, h, _)| h.as_deref()).collect();
+    let holder = holders.first().copied().flatten().filter(|_| holders.len() == 1);
+    let runs = cell.lent.iter().all(|l| table.loan(fn_line, col, l.loan).is_some_and(|i| i.runs));
+    let reason = match parts.as_slice() {
+        [(place, kind, Some(h), true)] if !cell.may_lend => hover_messages::part_loan(place, kind, Some(h)),
+        [(place, kind, None, _)] if !cell.may_lend && runs => hover_messages::part_loan(place, kind, None),
+        [(place, kind, ..)] if cell.may_lend && runs => hover_messages::part_loan_maybe(place, kind, holder),
         _ => {
-            let places: Vec<String> = groups.values().flatten().cloned().collect::<BTreeSet<_>>().into_iter().collect();
-            let holders: BTreeSet<_> = groups.keys().map(|(h, _, _)| h.as_deref()).collect();
-            let kinds: BTreeSet<_> = groups.keys().map(|(_, k, _)| *k).collect();
-            let kind = if kinds.len() == 1 { kinds.first().copied().unwrap_or("shared") } else if strongest == 2 { "mut" } else { "shared" };
-            hover_messages::part_loans_counted(&places, kind, holders.first().copied().flatten().filter(|_| holders.len() == 1))
+            let mut by_kind: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+            for (place, kind, ..) in &parts {
+                by_kind.entry(*kind).or_default().insert(place.clone());
+            }
+            // (Strongest first: "e.1 as mutably borrowed and e.0 as immutably borrowed".)
+            let mut groups: Vec<(&str, Vec<String>)> = by_kind.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();
+            groups.sort_by_key(|(k, _)| std::cmp::Reverse(rank(k)));
+            hover_messages::part_loans_counted(&groups, holder)
         }
     };
     // The owner's own clause first, as where nothing is lent: what was
@@ -10355,7 +10393,7 @@ fn part_loan_state(
             }
         }
     });
-    let mut title = hover_messages::state_part_lent(&teaching, col, &reason, strongest == 2, behind_ref, cell.may_lend, moved);
+    let mut title = hover_messages::state_part_lent(&teaching, col, &reason, strongest == 2, behind_ref, moved);
     // Keep the teaching clause where every restricting loan is a reborrow
     // through one reference (`*h.r`, taken through `h.r`).
     let through: BTreeSet<_> = strongest_loans().filter_map(|l| table.loan(fn_line, col, l.loan)?.through.as_deref()).collect();
@@ -10371,12 +10409,29 @@ fn part_loan_state(
     Some((st, (!whole_named).then_some(title)))
 }
 
+/// A lent part's name in an owner's title: as 2.x's columns name it
+/// (`display_place`). A place behind a reference held in an enum's payload
+/// (`*(s.v as Some).0`) has no such name: it's what that reference points to.
+fn part_display_name(vd: &VisualizationData, fn_line: usize, column: &str, lender: &str) -> String {
+    if let Some(inner) = lender.strip_prefix('*').filter(|i| i.starts_with('(')) {
+        if let Some(shown) = display_place(vd, fn_line, column, inner).filter(|d| d != inner) {
+            return format!("what the reference in {shown} points to");
+        }
+    }
+    display_place(vd, fn_line, column, lender).filter(|d| !d.contains(" as ")).unwrap_or_else(|| format!("a part of {column}"))
+}
+
 /// Restrict the owner trunk at its own MIR boundary, including a Box
 /// that still owns its allocation after part of the payload moved.
 fn owner_part_loan_state(state: &State, rap: &ResourceAccessPoint, data: &VisualizationData, row: usize) -> Option<(State, PartLoanTitle)> {
     let table = &data.state_table;
     let fn_line = *data.fn_source_lines.get(rap.hash())?;
     if !table.has_part_loans(fn_line, rap.name()) { return None; }
+    // (Not between dots stacked under one source line: the state after the
+    // whole line holds from its last one, as in `part_loans_in_arm`.)
+    if data.row_lines.get(row + 1).is_some_and(Option::is_none) {
+        return None;
+    }
     let src = rv_attrs::line_of(row, &data.row_lines)?;
     let cell = table.loan_cell(fn_line, rap.name(), src, 0)?;
     let (st, title) = part_loan_state(state, rap, data, fn_line, &cell, None)?;

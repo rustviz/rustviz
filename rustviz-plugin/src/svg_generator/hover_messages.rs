@@ -3898,37 +3898,58 @@ pub fn state_lent_with_parent(my_name: &str, parent: &str, by: Option<&str>, mut
     }
 }
 
-/// RustViz 3 (P1-3b): a live loan of a part of an owner, as the owner's
-/// title says it: "p.a is mutably borrowed by r", "v keeps p.0 immutably
-/// borrowed" (`direct`: the holder took the borrow itself; else its value
-/// keeps it, as the borrow checker counts it). `may`: a path to here skips
-/// the loan.
-pub fn part_loan(place: &str, kind: &str, holder: Option<&str>, direct: bool, may: bool) -> String {
-    let what = part_loan_kind(kind);
-    let place = styled_name_html(place);
-    let (is, keeps) = if may { ("may be", "may keep") } else { ("is", "keeps") };
-    match holder {
-        Some(h) if direct => format!("{place} {is} {what} by {}", styled_name_html(h)),
-        Some(h) => format!("{} {keeps} {place} {what}", styled_name_html(h)),
-        None => format!("{place} {is} {what}"),
-    }
+/// RustViz 3 (P1-3b): the one live loan of a part of an owner, as the
+/// owner's title says it: "p.a is mutably borrowed by r" (`holder`: a
+/// variable the facts prove took this loan and holds nothing else).
+pub fn part_loan(place: &str, kind: &str, holder: Option<&str>) -> String {
+    let by = holder.map_or_else(String::new, |h| format!(" by {}", styled_name_html(h)));
+    format!("{} is {}{by}", part_name_html(place), part_loan_kind(kind))
 }
 
-/// RustViz 3 (P1-3b): several live loans of parts of an owner (`places`,
-/// sorted), as the borrow checker counts them: they need not all be taken
-/// on one path (an or-pattern's `t.0` and `t.1`, an `if` whose arms lend
-/// different fields).
-pub fn part_loans_counted(places: &[String], kind: &str, holder: Option<&str>) -> String {
-    let names: Vec<Option<String>> = places.iter().map(|p| Some(p.clone())).collect();
-    let by = holder.map_or_else(String::new, |h| format!(" by {}", styled_name_html(h)));
-    format!("the borrow checker counts {} as {}{by}", place_list(&names, "and"), part_loan_kind(kind))
+/// RustViz 3 (P1-3b): the one loan of a part, taken on some paths only;
+/// the borrow checker counts it on every path.
+pub fn part_loan_maybe(place: &str, kind: &str, holder: Option<&str>) -> String {
+    let while_ = holder.map_or_else(String::new, |h| format!(" while {} is in use", styled_name_html(h)));
+    format!("{} may be {}; the borrow checker counts it as borrowed{while_}", part_name_html(place), part_loan_kind(kind))
+}
+
+/// RustViz 3 (P1-3b): live loans of parts of an owner as the borrow
+/// checker counts them (`groups`: the places by kind, strongest first).
+/// They need not all be taken on one path (an or-pattern's `t.0` and
+/// `t.1`), nor be what `holder` points to now (`r = &other` on some path):
+/// `holder` is only the variable whose use keeps them live.
+pub fn part_loans_counted(groups: &[(&str, Vec<String>)], holder: Option<&str>) -> String {
+    let each: Vec<String> = groups.iter().map(|(kind, places)| {
+        let names: Vec<String> = places.iter().map(|p| part_name_html(p)).collect();
+        let names = match names.as_slice() {
+            [init @ .., last] if !init.is_empty() => format!("{} and {last}", init.join(", ")),
+            _ => names.concat(),
+        };
+        format!("{names} as {}", part_loan_kind(kind))
+    }).collect();
+    let while_ = holder.map_or_else(String::new, |h| format!(" while {} is in use", styled_name_html(h)));
+    format!("the borrow checker counts {}{while_}", each.join(" and "))
+}
+
+/// A lent part's name: a place (styled), or a phrase ("what the reference
+/// in s.v points to", "a part of s") with the places in it styled.
+fn part_name_html(place: &str) -> String {
+    if let Some(r) = place.strip_prefix("what the reference in ").and_then(|r| r.strip_suffix(" points to")) {
+        format!("what the reference in {} points to", styled_name_html(r))
+    } else if let Some(c) = place.strip_prefix("a part of ") {
+        format!("a part of {}", styled_name_html(c))
+    } else {
+        styled_name_html(place)
+    }
 }
 
 fn part_loan_kind(kind: &str) -> &'static str {
     match kind {
         "mut" => "mutably borrowed",
         "unique" => "uniquely borrowed",
-        "reserved" => "reserved for a mutable borrow by a method call",
+        // (A two-phase borrow: a method's receiver, a free function's
+        // `&mut` argument, an overloaded `+=`'s left side.)
+        "reserved" => "reserved for a mutable borrow",
         _ => "immutably borrowed",
     }
 }
@@ -3943,11 +3964,10 @@ fn part_loan_kind(kind: &str) -> &'static str {
 /// owner a new value doesn't touch it, so `s = ..` is still allowed (and so
 /// is reading `s`, for a shared loan). `moved`: part of the owner was moved
 /// out, which `teaching` says already keeps it from being used as a whole.
-pub fn state_part_lent(teaching: &str, owner: &str, reason: &str, exclusive: bool, behind_ref: bool, may: bool, moved: bool) -> String {
+pub fn state_part_lent(teaching: &str, owner: &str, reason: &str, exclusive: bool, behind_ref: bool, moved: bool) -> String {
     let me = styled_name_html(owner);
-    let paths = if may { format!(" ({})", some_paths_why(false)) } else { String::new() };
     if moved {
-        return format!("{teaching}. {reason}{paths}");
+        return format!("{teaching}. {}{}", reason[..1].to_uppercase(), &reason[1..]);
     }
     let restriction = match (exclusive, behind_ref) {
         (true, false) => "use",
@@ -3955,7 +3975,7 @@ pub fn state_part_lent(teaching: &str, owner: &str, reason: &str, exclusive: boo
         (false, false) => "change or move",
         (false, true) => "move or mutably borrow",
     };
-    format!("{teaching}; {reason}{paths}, so you can't {restriction} {me} as a whole")
+    format!("{teaching}; {reason}, so you can't {restriction} {me} as a whole")
 }
 
 pub fn state_partial_privilege(my_name: &String, holds_value: bool) -> String {
