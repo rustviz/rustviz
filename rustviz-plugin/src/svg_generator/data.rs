@@ -4742,19 +4742,40 @@ pub struct VisualizationData {
     pub raised_headers: HashSet<u64>,
 }
 
-/// After the code on source line `line` (on the paths that run it): the
-/// fields of the struct variable (or struct-typed field) `name` that
-/// surely hold no value (moved out), and those that may hold none
-/// (rustc's maybe-(un)initialized places, #1595). See
-/// `struct_parts_uninit_by_line`.
+/// rustc's facts on the fields of a struct variable (or struct-typed field)
+/// at a point of source line `line` (`at`): those that surely hold no
+/// value (moved out), and those that may hold none (rustc's maybe-
+/// (un)initialized places, #1595). See `struct_parts_uninit_by_line`.
 #[derive(Clone, Debug)]
 pub struct PartsUninit {
-    pub name: String,
+    /// The column's.
+    pub hash: u64,
     pub line: usize,
-    /// As control enters the line's code (else: as it leaves it).
-    pub entry: bool,
+    pub at: PartsAt,
+    /// For `PartsAt::Entry`: on the way in from that line only (else from
+    /// every line control enters it from).
+    pub from: Option<usize>,
     pub certain: Vec<String>,
     pub maybe: Vec<String>,
+    /// Those of `maybe` part of which (an array element, an enum field's
+    /// payload) is surely moved out.
+    pub partly: Vec<String>,
+    /// Fields that hold a value on every way that runs, but not on every
+    /// way the borrow checker counts (its imaginary edges into the second
+    /// alternative of `(x, _) | (_, x)`, or the `else` of `if let _ = ..`):
+    /// rustc won't let them be used, so they aren't said to hold their value.
+    pub unsure: Vec<String>,
+}
+
+/// Where on its line a `PartsUninit` holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PartsAt {
+    /// As control leaves the line's code.
+    After,
+    /// As control enters it.
+    Entry,
+    /// Where a conditional on the line branches (before its test).
+    Switch,
 }
 
 impl VisualizationData {

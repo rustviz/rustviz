@@ -1608,6 +1608,7 @@ fn hide_source_lines(annotated_src_str: &str, source_rs_str: &str, visualization
         // And rustc's facts on struct fields, by line (#1595).
         for p in visualization_data.parts_uninit.iter_mut() {
             p.line = shift(p.line);
+            p.from = p.from.map(&shift);
         }
 
         (pruned_a, pruned_s)

@@ -1463,57 +1463,125 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         Some((entry, back))
     }
 
-    /// The move paths of `move_data` that are a user variable, or a
-    /// field of one (`p.name`, `t.0`), each with the name of its column.
     /// For each struct (or tuple) variable, and struct-typed field of one,
-    /// some field of which is moved out somewhere in this body: on each
-    /// source line, which of its fields rustc's dataflow says may be
-    /// uninitialized (moved out) after that line's code, split into those
-    /// surely uninitialized and those maybe (#1595). Read after the last
-    /// MIR location of the line in each block, on the paths that run that
-    /// line; a location whose span covers several lines (a conditional's
-    /// join) counts on its last. The outermost such field is named (`p.i`
-    /// when all of it is, not `p.i.x`). Not where the variable (or that
-    /// field) itself may be moved as a whole: its own column says so.
-    /// Cleanup blocks and code from other files are left out.
+    /// some part of which is moved out somewhere in this body: what rustc's
+    /// dataflow says of its fields, those surely moved out and those that
+    /// may be (#1595), keyed by its column. On each source line: after the
+    /// line's code (`After`: after the last MIR location of the line in
+    /// each block, on the paths that run it; a location whose span covers
+    /// several lines, a conditional's join, counts on its last); as control
+    /// enters the line's code, from every line it comes from and from each
+    /// (`Entry`); and where a conditional on the line branches (`Switch`).
+    /// A field only part of which is moved out (an element of an array
+    /// field, an enum field's payload) is among those that may be: it
+    /// doesn't hold all of its value. The outermost such field is named
+    /// (`p.i` when all of it is moved, not `p.i.x`). None where the variable
+    /// (or that field) itself may be moved as a whole: its own column says
+    /// so. On the graph that runs: the borrow checker's imaginary edges
+    /// (`FalseEdge`, `FalseUnwind`) are left out, and so are cleanup blocks
+    /// and code from other files.
     pub fn struct_parts_uninit_by_line(&self) -> Vec<crate::svg_generator::data::PartsUninit> {
+        use rustc_middle::mir::BasicBlock;
         use rustc_mir_dataflow::impls::{MaybeInitializedPlaces, MaybeUninitializedPlaces};
         use rustc_mir_dataflow::move_paths::{MoveData, MovePathIndex};
-        let body = &self.bwf.body;
+        use crate::svg_generator::data::{PartsAt, PartsUninit};
+        let orig = &self.bwf.body;
+        let mut real = orig.clone();
+        for data in real.basic_blocks.as_mut().iter_mut() {
+            if let Some(t) = data.terminator.as_mut() {
+                if let TerminatorKind::FalseEdge { real_target, .. } | TerminatorKind::FalseUnwind { real_target, .. } = t.kind {
+                    t.kind = TerminatorKind::Goto { target: real_target };
+                }
+            }
+        }
+        let body = &real;
         let move_data = MoveData::gather_moves(body, self.tcx, |_| true);
-        let names = self.move_path_names(&move_data);
+        let paths = self.move_path_fields(body, &move_data);
         let moved: BTreeSet<MovePathIndex> = move_data.moves.iter().map(|m| m.path).collect();
-        let fields: Vec<(MovePathIndex, String)> = names.iter().filter(|(_, n)| n.contains('.')).cloned().collect();
-        let mut structs: BTreeSet<String> = BTreeSet::new();
-        for (mpi, n) in &fields {
+        // The structs some part of which is moved, by local and name.
+        let mut structs: BTreeSet<(Local, String)> = BTreeSet::new();
+        for (mpi, local, n, _) in &paths {
             if moved.contains(mpi) {
                 let parts: Vec<&str> = n.split('.').collect();
                 for k in 1..parts.len() {
-                    structs.insert(parts[..k].join("."));
+                    structs.insert((*local, parts[..k].join(".")));
                 }
             }
         }
         if structs.is_empty() {
             return Vec::new();
         }
-        let path_of = |name: &str| names.iter().find(|(_, n)| n == name).map(|(m, _)| *m);
         let mut init = MaybeInitializedPlaces::new(self.tcx, body, &move_data)
             .iterate_to_fixpoint(self.tcx, body, None)
             .into_results_cursor(body);
         let mut uninit = MaybeUninitializedPlaces::new(self.tcx, body, &move_data)
             .iterate_to_fixpoint(self.tcx, body, None)
             .into_results_cursor(body);
+        // And as the borrow checker sees it, imaginary edges and all: a
+        // field only they may have moved out can't be used either.
+        let move_data_b = MoveData::gather_moves(orig, self.tcx, |_| true);
+        let mut uninit_b = MaybeUninitializedPlaces::new(self.tcx, orig, &move_data_b)
+            .iterate_to_fixpoint(self.tcx, orig, None)
+            .into_results_cursor(orig);
+        let path_b = |m: MovePathIndex| match move_data_b.rev_lookup.find(move_data.move_paths[m].place.as_ref()) {
+            rustc_mir_dataflow::move_paths::LookupResult::Exact(b) => Some(b),
+            rustc_mir_dataflow::move_paths::LookupResult::Parent(_) => None,
+        };
         let sm = self.tcx.sess.source_map();
         let file = sm.lookup_char_pos(body.span.lo()).file.name.clone();
+        let rpo: Vec<BasicBlock> = body.basic_blocks.reverse_postorder().to_vec();
+        let order: BTreeMap<BasicBlock, usize> = rpo.iter().enumerate().map(|(i, b)| (*b, i)).collect();
+        // (Blocks only an imaginary edge led to never run.)
+        let runs = |b: &BasicBlock| order.contains_key(b) && !body.basic_blocks[*b].is_cleanup;
+        let doms = body.basic_blocks.dominators();
+        let lines_of = |span: Span| {
+            let span = span.source_callsite();
+            (!span.is_dummy()).then(|| (sm.lookup_char_pos(span.lo()).line, sm.lookup_char_pos(span.hi()).line))
+        };
+        // A `goto` whose span covers several lines (a `match`'s, from a
+        // pattern's bindings into its arm) that leads on to code on an
+        // earlier line than its last: it runs before that code, so it isn't
+        // code on its last line (where a join's `goto` is, after its arms).
+        let goes_back_up = |bb: BasicBlock| -> bool {
+            let t = orig.basic_blocks[bb].terminator();
+            let TerminatorKind::Goto { target } = t.kind else { return false };
+            let Some((lo, hi)) = lines_of(t.source_info.span) else { return false };
+            if lo == hi || !order.contains_key(&bb) || !order.contains_key(&target) || doms.dominates(target, bb) {
+                return false;
+            }
+            let mut b = target;
+            for _ in 0..8 {
+                let data = &orig.basic_blocks[b];
+                let spans = data.statements.iter()
+                    .filter(|st| !matches!(st.kind, StatementKind::StorageLive(_) | StatementKind::StorageDead(_) | StatementKind::Nop))
+                    .map(|st| st.source_info.span)
+                    .chain(std::iter::once(data.terminator().source_info.span));
+                for sp in spans {
+                    match lines_of(sp) {
+                        Some((a, z)) if a == z => return z < hi,
+                        Some(_) => return false,
+                        None => {}
+                    }
+                }
+                let TerminatorKind::Goto { target } = data.terminator().kind else { return false };
+                b = target;
+            }
+            false
+        };
         // The source line a location's code is on (a span over several
         // lines, a conditional's join, counts on its last), or none for
         // what isn't code on a line: storage markers, drops (a scope's
-        // cleanup, also on a `return`'s way out), and code from elsewhere.
+        // cleanup, also on a `return`'s way out), a loop's head (its span
+        // is the whole loop's), a `goto` into code above its last line, and
+        // code from elsewhere.
         let own_line = |loc: Location| -> Option<usize> {
-            let data = &body.basic_blocks[loc.block];
+            let data = &orig.basic_blocks[loc.block];
             match data.statements.get(loc.statement_index) {
                 Some(st) if matches!(st.kind, StatementKind::StorageLive(_) | StatementKind::StorageDead(_)) => return None,
-                None if matches!(data.terminator().kind, TerminatorKind::Drop { .. } | TerminatorKind::UnwindResume | TerminatorKind::Unreachable | TerminatorKind::Return) => return None,
+                None if matches!(data.terminator().kind, TerminatorKind::Drop { .. } | TerminatorKind::UnwindResume
+                    | TerminatorKind::Unreachable | TerminatorKind::Return
+                    | TerminatorKind::FalseEdge { .. } | TerminatorKind::FalseUnwind { .. }) => return None,
+                None if goes_back_up(loc.block) => return None,
                 _ => {}
             }
             let span = body.source_info(loc).span.source_callsite();
@@ -1531,12 +1599,10 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // ..user1 };`'s binding, on its first line, after the whole value)
         // counts on the latest line before it.
         let mut eff: BTreeMap<Location, Option<usize>> = BTreeMap::new();
-        let rpo: Vec<rustc_middle::mir::BasicBlock> = body.basic_blocks.reverse_postorder().to_vec();
-        let order: BTreeMap<rustc_middle::mir::BasicBlock, usize> = rpo.iter().enumerate().map(|(i, b)| (*b, i)).collect();
-        let preds0 = body.basic_blocks.predecessors();
+        let preds = body.basic_blocks.predecessors();
         for &bb in &rpo {
             let data = &body.basic_blocks[bb];
-            let mut carried: Option<usize> = match preds0[bb].as_slice() {
+            let mut carried: Option<usize> = match preds[bb].as_slice() {
                 [p] if order.get(p).is_some_and(|i| *i < order[&bb]) =>
                     (0..=body.basic_blocks[*p].statements.len()).rev()
                         .find_map(|i| eff.get(&Location { block: *p, statement_index: i }).copied().flatten()),
@@ -1550,9 +1616,8 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
             }
         }
         let line_of = |loc: Location| -> Option<usize> { eff.get(&loc).copied().flatten() };
-        // The locations after which control leaves their line: the next
-        // locations on a line (past those on none) are on another, or
-        // there are none.
+        // The lines control goes to after a location, past locations on
+        // none (`None`: it leaves the body).
         let next_lines = |loc: Location| -> BTreeSet<Option<usize>> {
             let mut out = BTreeSet::new();
             let mut work = vec![loc];
@@ -1568,7 +1633,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 if l.statement_index < data.statements.len() {
                     work.push(Location { block: l.block, statement_index: l.statement_index + 1 });
                 } else {
-                    let succ: Vec<_> = data.terminator().successors().filter(|b| !body.basic_blocks[*b].is_cleanup).collect();
+                    let succ: Vec<_> = data.terminator().successors().filter(|b| runs(b)).collect();
                     if succ.is_empty() { out.insert(None); }
                     work.extend(succ.into_iter().map(|b| Location { block: b, statement_index: 0 }));
                 }
@@ -1578,7 +1643,6 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // And the code that control enters a line from: the code on another
         // line just before (past locations on none: storage markers, drops),
         // read after it (so a scope's drops in between don't count).
-        let preds = body.basic_blocks.predecessors();
         let prev_code = |loc: Location| -> BTreeSet<(Option<usize>, Option<Location>)> {
             let mut out = BTreeSet::new();
             let mut work = vec![loc];
@@ -1593,7 +1657,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 if l.statement_index > 0 {
                     work.push(Location { block: l.block, statement_index: l.statement_index - 1 });
                 } else {
-                    let ps: Vec<_> = preds[l.block].iter().filter(|b| !body.basic_blocks[**b].is_cleanup).collect();
+                    let ps: Vec<_> = preds[l.block].iter().filter(|b| runs(b)).collect();
                     if ps.is_empty() { out.insert((None, None)); }
                     work.extend(ps.into_iter().map(|b| Location { block: *b, statement_index: body.basic_blocks[*b].statements.len() }));
                 }
@@ -1621,14 +1685,22 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // below the line doesn't come from them, unless nothing does.
         let mut leaving: BTreeMap<usize, Vec<Location>> = BTreeMap::new();
         let mut exits: BTreeMap<usize, Vec<Location>> = BTreeMap::new();
-        let mut entries: BTreeMap<usize, Vec<Location>> = BTreeMap::new();
-        for (bb, data) in body.basic_blocks.iter_enumerated() {
+        // The way into each line, with the line each part comes from.
+        let mut entries: BTreeMap<usize, Vec<(usize, Location)>> = BTreeMap::new();
+        // (The locations control enters each line at.)
+        let mut entry_at: BTreeMap<usize, Vec<Location>> = BTreeMap::new();
+        let mut switches: BTreeMap<usize, Vec<BasicBlock>> = BTreeMap::new();
+        for &bb in &rpo {
+            let data = &body.basic_blocks[bb];
             if data.is_cleanup {
                 continue;
             }
             for i in 0..=data.statements.len() {
                 let loc = Location { block: bb, statement_index: i };
                 let Some(line) = line_of(loc) else { continue };
+                if i == data.statements.len() && matches!(data.terminator().kind, TerminatorKind::SwitchInt { .. }) {
+                    switches.entry(line).or_default().push(bb);
+                }
                 let next = next_lines(loc);
                 if next.iter().any(|n| *n != Some(line)) {
                     // (A `return`'s, straight to the body's closing brace.)
@@ -1640,16 +1712,17 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                         // closing brace (which may hold no code of its own).
                         if line < body_end && next.iter().any(|n| n.is_none_or(|n| n >= body_end)) {
                             let into_end = entries.entry(body_end).or_default();
-                            if !into_end.contains(&loc) { into_end.push(loc); }
+                            if !into_end.contains(&(line, loc)) { into_end.push((line, loc)); }
                         }
                     }
                 }
                 let prev = prev_code(loc);
                 if prev.iter().any(|(n, _)| *n != Some(line)) {
+                    entry_at.entry(line).or_default().push(loc);
                     let from = entries.entry(line).or_default();
                     for (n, l) in prev {
-                        if let (true, Some(l)) = (n != Some(line), l) {
-                            if !from.contains(&l) { from.push(l); }
+                        if let (Some(n), Some(l)) = (n, l) {
+                            if n != line && !from.contains(&(n, l)) { from.push((n, l)); }
                         }
                     }
                 }
@@ -1658,26 +1731,89 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         for (line, locs) in leaving {
             exits.entry(line).or_insert(locs);
         }
-        let mut out = Vec::new();
-        for s in &structs {
-            let prefix = format!("{}.", s);
-            let own = path_of(s);
-            let below: Vec<&(MovePathIndex, String)> = fields.iter().filter(|(_, n)| n.starts_with(&prefix)).collect();
-            for (entry, line, locs) in exits.iter().map(|(l, v)| (false, l, v)).chain(entries.iter().map(|(l, v)| (true, l, v))) {
-                if locs.is_empty() {
-                    continue;
+        // The code on each line on the borrow checker's imaginary ways only
+        // (`(x, _) | (_, x)`'s second alternative).
+        let mut dead_at: BTreeMap<usize, Vec<Location>> = BTreeMap::new();
+        for &bb in orig.basic_blocks.reverse_postorder() {
+            if order.contains_key(&bb) || orig.basic_blocks[bb].is_cleanup {
+                continue;
+            }
+            for i in 0..=orig.basic_blocks[bb].statements.len() {
+                let loc = Location { block: bb, statement_index: i };
+                if let Some(line) = own_line(loc) {
+                    dead_at.entry(line).or_default().push(loc);
                 }
+            }
+        }
+        // Where a conditional on the line branches: its first test (`a` of
+        // `if a && b`, not a conditional nested in an arm on the line).
+        let switches: BTreeMap<usize, Vec<Location>> = switches.into_iter().map(|(line, bbs)| {
+            let first: Vec<Location> = bbs.iter()
+                .filter(|b| !bbs.iter().any(|o| o != *b && doms.dominates(*o, **b)))
+                .map(|b| Location { block: *b, statement_index: body.basic_blocks[*b].statements.len() })
+                .collect();
+            (line, first)
+        }).collect();
+        // Every place made of fields of the record's struct (rustc's facts on
+        // them, all at once).
+        let mut sets: Vec<(PartsAt, usize, Option<usize>, Vec<Location>)> = Vec::new();
+        for (line, locs) in &exits {
+            sets.push((PartsAt::After, *line, None, locs.clone()));
+        }
+        for (line, from) in &entries {
+            if from.is_empty() { continue; }
+            sets.push((PartsAt::Entry, *line, None, from.iter().map(|(_, l)| *l).collect()));
+            let lines: BTreeSet<usize> = from.iter().map(|(n, _)| *n).collect();
+            for n in lines {
+                sets.push((PartsAt::Entry, *line, Some(n), from.iter().filter(|(m, _)| *m == n).map(|(_, l)| *l).collect()));
+            }
+        }
+        for (line, locs) in &switches {
+            if !locs.is_empty() {
+                sets.push((PartsAt::Switch, *line, None, locs.clone()));
+            }
+        }
+        // By column, line, kind and source; a key two variables (of one
+        // name, sharing a column) both give facts for has none.
+        let mut out: BTreeMap<(u64, usize, PartsAt, Option<usize>), Option<(Local, PartsUninit)>> = BTreeMap::new();
+        for (local, s) in &structs {
+            let Some(hash) = self.raps.get(s).map(|d| *d.rap.hash()) else { continue };
+            let prefix = format!("{}.", s);
+            let own = if s.contains('.') {
+                paths.iter().find(|(_, l, n, partial)| l == local && n == s && !partial).map(|(m, ..)| *m)
+            } else {
+                move_data.move_paths.iter_enumerated()
+                    .find(|(_, p)| p.place.local == *local && p.place.projection.is_empty()).map(|(m, _)| m)
+            };
+            let below: Vec<&(MovePathIndex, Local, String, bool)> = paths.iter()
+                .filter(|(_, l, n, _)| l == local && n.starts_with(&prefix)).collect();
+            let below_b: Vec<Option<MovePathIndex>> = below.iter().map(|(m, ..)| path_b(*m)).collect();
+            for (kind, line, from, locs) in &sets {
                 let mut whole = false;
-                // Per field: may lack a value after some exit; lacks one after all.
+                // Per path: may lack a value after some location; lacks one after all.
                 let mut may: Vec<bool> = vec![false; below.len()];
                 let mut sure: Vec<bool> = vec![true; below.len()];
+                let mut may_b: Vec<bool> = vec![false; below.len()];
+                // As the borrow checker sees the line: where control enters
+                // it, and after its code, on every way it counts.
+                let none = Vec::new();
+                let before_b = entry_at.get(line).unwrap_or(&none).iter().map(|l| (*l, false));
+                let after_b = locs.iter().chain(dead_at.get(line).unwrap_or(&none)).map(|l| (*l, true));
+                for (loc, after) in before_b.chain(after_b) {
+                    if after { uninit_b.seek_after_primary_effect(loc) } else { uninit_b.seek_before_primary_effect(loc) }
+                    for (k, b) in below_b.iter().enumerate() {
+                        // (A path it doesn't know: unknown, so not held.)
+                        may_b[k] |= b.is_none_or(|b| uninit_b.get().contains(b));
+                    }
+                }
                 for &loc in locs {
+                    // (A switch's state is before its test: the same.)
                     init.seek_after_primary_effect(loc);
                     uninit.seek_after_primary_effect(loc);
                     if own.is_some_and(|o| uninit.get().contains(o)) {
                         whole = true;
                     }
-                    for (k, (m, _)) in below.iter().enumerate() {
+                    for (k, (m, ..)) in below.iter().enumerate() {
                         let lack = uninit.get().contains(*m);
                         may[k] |= lack;
                         sure[k] &= lack && !init.get().contains(*m);
@@ -1686,19 +1822,71 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 if whole {
                     continue;
                 }
-                // The outermost fields that may lack a value.
-                let lacking: Vec<usize> = (0..below.len()).filter(|k| may[*k]).collect();
-                let outer = |k: &usize| !lacking.iter().any(|j| below[*k].1.starts_with(&format!("{}.", below[*j].1)));
-                let (mut certain, mut maybe) = (Vec::new(), Vec::new());
-                for k in lacking.iter().filter(|k| outer(k)) {
-                    if sure[*k] { certain.push(below[*k].1.clone()) } else { maybe.push(below[*k].1.clone()) }
+                let mut certain: BTreeSet<String> = BTreeSet::new();
+                let mut maybe: BTreeSet<String> = BTreeSet::new();
+                for (k, (_, _, n, partial)) in below.iter().enumerate() {
+                    if !may[k] { continue; }
+                    // (Part of a field moved isn't the field moved.)
+                    if sure[k] && !partial { certain.insert(n.clone()); } else { maybe.insert(n.clone()); }
                 }
-                out.push(crate::svg_generator::data::PartsUninit { name: s.clone(), line: *line, entry, certain, maybe });
+                maybe.retain(|n| !certain.contains(n));
+                let partly: BTreeSet<String> = below.iter().enumerate()
+                    .filter(|(k, (_, _, n, partial))| *partial && may[*k] && sure[*k] && maybe.contains(n))
+                    .map(|(_, (_, _, n, _))| n.clone()).collect();
+                let unsure: Vec<String> = below.iter().enumerate()
+                    .filter(|(k, (_, _, n, _))| may_b[*k] && !may[*k] && !certain.contains(n) && !maybe.contains(n))
+                    .map(|(_, (_, _, n, _))| n.clone()).collect::<BTreeSet<String>>().into_iter().collect();
+                // The outermost fields that may lack a value.
+                let all: BTreeSet<String> = certain.union(&maybe).cloned().collect();
+                let outer = |n: &String| !all.iter().any(|a| n.starts_with(&format!("{}.", a)));
+                let rec = PartsUninit {
+                    hash, line: *line, at: *kind, from: *from,
+                    certain: certain.iter().filter(|n| outer(n)).cloned().collect(),
+                    maybe: maybe.iter().filter(|n| outer(n)).cloned().collect(),
+                    partly: partly.iter().filter(|n| outer(n)).cloned().collect(),
+                    unsure,
+                };
+                match out.entry((hash, *line, *kind, *from)) {
+                    std::collections::btree_map::Entry::Vacant(v) => { v.insert(Some((*local, rec))); }
+                    std::collections::btree_map::Entry::Occupied(mut o) => {
+                        if o.get().as_ref().is_some_and(|(l, _)| l != local) { o.insert(None); }
+                    }
+                }
+            }
+        }
+        out.into_values().flatten().map(|(_, r)| r).collect()
+    }
+
+    /// The move paths of `move_data` below a user variable's field (`p.a`,
+    /// `t.0`, `p.xs[0]`, `(p.opt as Some).0`): each with its variable, the
+    /// column name of its longest prefix of struct and tuple fields (`p.xs`,
+    /// `p.opt`), and whether it is only a part of that field.
+    fn move_path_fields(&self, body: &rustc_middle::mir::Body<'tcx>, move_data: &rustc_mir_dataflow::move_paths::MoveData<'tcx>) -> Vec<(rustc_mir_dataflow::move_paths::MovePathIndex, Local, String, bool)> {
+        let names = self.mir_local_names(self.bwf);
+        let mut out = Vec::new();
+        for (mpi, path) in move_data.move_paths.iter_enumerated() {
+            let Some(mut name) = names.get(&path.place.local).cloned() else { continue };
+            let mut ty = body.local_decls[path.place.local].ty;
+            let (mut fields, mut partial) = (0, false);
+            for elem in path.place.projection {
+                let ProjectionElem::Field(f, fty) = elem else { partial = true; break };
+                match ty.kind() {
+                    TyKind::Adt(def, _) if def.is_struct() => name = format!("{}.{}", name, def.non_enum_variant().fields[f].name),
+                    TyKind::Tuple(_) => name = format!("{}.{}", name, f.index()),
+                    _ => { partial = true; break }
+                }
+                ty = fty;
+                fields += 1;
+            }
+            if fields > 0 {
+                out.push((mpi, path.place.local, name, partial));
             }
         }
         out
     }
 
+    /// The move paths of `move_data` that are a user variable, or a
+    /// field of one (`p.name`, `t.0`), each with the name of its column.
     fn move_path_names(&self, move_data: &rustc_mir_dataflow::move_paths::MoveData<'tcx>) -> Vec<(rustc_mir_dataflow::move_paths::MovePathIndex, String)> {
         let body = &self.bwf.body;
         let names = self.mir_local_names(self.bwf);

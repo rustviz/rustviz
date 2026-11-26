@@ -1,6 +1,6 @@
 // #1595: a struct some field of which an arm moves out keeps one line;
 // its text follows rustc's facts on its fields: partly moved in the arm
-// after the move, "part of p may have been moved out" after the
+// after the move, "Some of p's fields may have been moved out" after the
 // conditional, never "the owner of the resource" while one may be.
 struct Pair {
     a: String,
@@ -173,6 +173,94 @@ fn or_alt(ta: (Option<String>, Option<String>)) {
     }
 }
 
+// Review cases (#1646): a field only part of which is moved out (an array
+// element, an enum field's payload) doesn't "still hold its value".
+struct Arr {
+    a: String,
+    tag: String,
+    xs: [String; 2],
+}
+
+struct Opt {
+    a: String,
+    opt: Option<String>,
+}
+
+fn array_part(ap: Arr) {
+    drop(ap.a);
+    let [head, _] = ap.xs;
+    let n = ap.tag.len();
+}
+
+fn enum_part(op: Opt) {
+    drop(op.a);
+    if let Some(s) = op.opt {
+        let k = s.len();
+    }
+}
+
+// Two variables of one name share a column; each has its own facts.
+fn two_blocks() {
+    {
+        let bp = Pair { a: String::new(), b: String::new() };
+        let n = bp.b.len();
+        drop(bp.a);
+    }
+    {
+        let bp = Pair { a: String::new(), b: String::new() };
+        let n = bp.a.len();
+        drop(bp.b);
+    }
+}
+
+// The else arm's comment row: nothing is moved on that way.
+fn else_comment(ec: Pair, c: bool) {
+    if c {
+        drop(ec.a);
+    } else {
+        // nothing here
+    }
+}
+
+fn use_ref(_p: &Pair) {}
+
+// A move after the join, on its line: not one of the branches'.
+fn after_join(aj: Pair, c: bool) {
+    if c {
+        use_ref(&aj);
+    } else {
+        let j = 2;
+    } drop(aj.a);
+}
+
+// The whole struct borrowed on the split line before the arm's move.
+fn split_line(sl: Pair, c: bool) {
+    if c { let r = &sl; use_ref(r); drop(sl.a);
+        let k = 1;
+    }
+}
+
+// A loop's body: its rows, not its closing brace.
+fn loop_refill(mut lr: Pair) {
+    loop {
+        drop(lr.a);
+        let n = lr.b.len();
+        lr.a = String::new();
+        break;
+    }
+}
+
+// An `else` that never runs moves nothing.
+#[allow(irrefutable_let_patterns)]
+fn dead_else(de: Pair) {
+    if let _ = () {
+        let k = 1;
+    } else {
+        drop(de.a);
+    }
+    let n = de.b.len();
+}
+
 fn main() {
     let mk = || Pair { a: String::from("a"), b: String::from("b") };
     whole(mk(), true);
@@ -195,4 +283,12 @@ fn main() {
     let mut i = 1;
     ref_field(Held { r: &mut i, n: 2 }, true);
     or_alt((Some(String::from("a")), None));
+    array_part(Arr { a: String::new(), tag: String::new(), xs: [String::new(), String::new()] });
+    enum_part(Opt { a: String::new(), opt: Some(String::new()) });
+    two_blocks();
+    else_comment(mk(), true);
+    after_join(mk(), true);
+    split_line(mk(), true);
+    loop_refill(mk());
+    dead_else(mk());
 }

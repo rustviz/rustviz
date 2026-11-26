@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{AltEnd, FieldLenders, ApproxNote, ElemsLeft, place_elem_names, breaks_out_only, is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier, leaves_maybe_held};
+use crate::svg_generator::data::{AltEnd, FieldLenders, PartsAt, PartsUninit, ApproxNote, ElemsLeft, place_elem_names, breaks_out_only, is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier, leaves_maybe_held};
 use crate::svg_generator::hover_messages::{self, styled_name_html};
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use crate::svg_generator::svg_frontend::rv_attrs::{self, Rv};
@@ -1684,11 +1684,17 @@ fn render_branch_dots(
         } else {
             let title = branch_join_message(branch_history, ty, is);
             // A struct none of whose own events moves it, some field of
-            // which rustc says may be moved out at the join (#1595): its
-            // line below says so; the dot mustn't read as "nothing moved".
+            // which rustc says may be moved out as control reaches the join
+            // (#1595; not by code after it on the line) and wasn't yet where
+            // the conditional branched (not a move above it): its line below
+            // says so; the dot mustn't read as "nothing moved".
             let unchanged = hover_messages::event_dot_branch_merge_unchanged(&is.real_name());
-            if title == unchanged && matches!(rap, ResourceAccessPoint::Struct(_))
-                && mir_parts_at(rap, visualization_data, *merge_point).is_some_and(|(c, m)| !c.is_empty() || !m.is_empty()) {
+            let within = |n: &String, f: &String| n == f || n.starts_with(&format!("{}.", f));
+            let moved_in_branches = || {
+                let (Some(at), Some(split)) = (mir_parts_entering(rap, visualization_data, *merge_point), mir_parts_at_switch(rap, visualization_data, *split_point)) else { return false };
+                at.certain.iter().chain(at.maybe.iter()).any(|n| !split.certain.iter().chain(split.maybe.iter()).any(|f| within(n, f)))
+            };
+            if title == unchanged && matches!(rap, ResourceAccessPoint::Struct(_)) && moved_in_branches() {
                 Some(hover_messages::event_dot_branch_merge_parts_maybe_moved(&is.real_name()))
             } else {
                 Some(title)
@@ -4158,8 +4164,7 @@ fn timeline_segment_title(
             // Where the column's own walk ends the line (every field moved
             // out), it stops as on main: the facts only change its text.
             (_, Some(parts)) if parts.all => return String::new(),
-            (Some((certain, maybe)), _) if !certain.is_empty() || !maybe.is_empty() =>
-                return mir_parts_title(rap, visualization_data, &certain, &maybe),
+            (Some(f), _) if f.moved() => return mir_parts_title(rap, visualization_data, &f),
             // rustc says every field holds a value here.
             (Some(_), _) => {}
             (None, Some(parts)) => return parts.title(rap),
@@ -8784,6 +8789,16 @@ fn render_branches(
                 let shared = first <= *split_point || (i > 0 && ty.get_start_end(i - 1).1 >= first);
                 if shared { first } else { 0 }
             };
+            // The arm's rows no other code is on (not the split's, the
+            // join's, nor another arm's): where its own code leaves for the
+            // join from (#1595). Empty (lo > hi) when none.
+            let arm_rows = {
+                let (first, last) = ty.get_start_end(i);
+                let lo = (first.max(*split_point + 1)).max(if i > 0 { ty.get_start_end(i - 1).1 + 1 } else { 0 });
+                let next_first = (i + 1 < branch_history.len()).then(|| ty.get_start_end(i + 1).0);
+                let hi = last.min(merge_point.saturating_sub(1)).min(next_first.map_or(usize::MAX, |f| f.saturating_sub(1)));
+                (lo, hi)
+            };
             // Active arm: i == 0 with non-empty body. Other arms,
             // and any empty body, render passive (Gray-converted
             // leading so it's dashed).
@@ -8822,7 +8837,7 @@ fn render_branches(
             push_seg_if_renderable(
                 &mut segs, rap,
                 (parent_x, split_y), (branch_x, leg_end_y),
-                leading_state.clone(), visualization_data, &arm_label, Leg::Split, *split_point, *split_point, &arm_path, arm_first,
+                leading_state.clone(), visualization_data, &arm_label, Leg::Split, *split_point, *split_point, &arm_path, arm_first, arm_rows,
             );
             // An arm that starts below the raised fork's row (the `else`)
             // runs down to its first row in the state it forked with. When
@@ -8843,7 +8858,7 @@ fn render_branches(
                     push_seg_if_renderable(
                         &mut segs, rap,
                         (branch_x, column_top_y), (branch_x, (get_y_axis_pos(first_row) - rise) as f64),
-                        leading_state, visualization_data, &arm_label, Leg::Column, *split_point, first_row, &arm_path, arm_first,
+                        leading_state, visualization_data, &arm_label, Leg::Column, *split_point, first_row, &arm_path, arm_first, arm_rows,
                     );
                 }
             }
@@ -8935,7 +8950,7 @@ fn render_branches(
                         &mut segs, rap,
                         (branch_x, py1 as f64),
                         (branch_x, py2 as f64),
-                        state.clone(), visualization_data, &arm_label, Leg::Column, w[0], w[1], &arm_path, arm_first,
+                        state.clone(), visualization_data, &arm_label, Leg::Column, w[0], w[1], &arm_path, arm_first, arm_rows,
                     );
                     if segs.len() > n { ended_title(&mut segs, w[1]); }
                 }
@@ -8984,7 +8999,7 @@ fn render_branches(
                     push_seg_if_renderable(
                         &mut segs, rap,
                         (branch_x, leg_top_y), (parent_x, merge_y),
-                        end_state, visualization_data, &arm_label, Leg::Join, *merge_point, *merge_point, &arm_path, arm_first,
+                        end_state, visualization_data, &arm_label, Leg::Join, *merge_point, *merge_point, &arm_path, arm_first, arm_rows,
                     );
                     if segs.len() > n { ended_title(&mut segs, *merge_point); }
                 }
@@ -9103,7 +9118,7 @@ fn render_branches(
                     let n = segs.len();
                     push_seg_if_renderable(
                         &mut segs, rap, (branch_x, y1), (branch_x, y2),
-                        st, visualization_data, &arm_label, Leg::Column, own_first, own_first, &arm_path, arm_first,
+                        st, visualization_data, &arm_label, Leg::Column, own_first, own_first, &arm_path, arm_first, arm_rows,
                     );
                     if segs.len() > n {
                         let mut solid = segs.pop().unwrap();
@@ -9250,6 +9265,7 @@ fn push_seg_if_renderable(
     end_row: usize,
     path: &[(usize, usize)],
     arm_first: usize,
+    arm_rows: (usize, usize),
 ) {
     if !seg_drawn(rap, &state) {
         return;
@@ -9264,10 +9280,48 @@ fn push_seg_if_renderable(
         State::FullPrivilege { s: LineState::Gray } | State::PartialPrivilege { s: LineState::Gray }
     );
     let split_row = path.last().map_or(row, |(split, _)| *split);
-    let facts_row = match leg {
-        Leg::Split => split_row,
-        Leg::Column if row <= arm_first => split_row,
-        _ => row,
+    // rustc's facts on a struct's fields (#1595) on this segment's way.
+    // The lines of the arm's own rows (no other arm's code, nor the split's
+    // or the join's, is on them).
+    let own_lines = match (rv_attrs::line_of(arm_rows.0, &visualization_data.row_lines), rv_attrs::line_of(arm_rows.1, &visualization_data.row_lines)) {
+        (Some(lo), Some(hi)) if arm_rows.0 <= arm_rows.1 => Some((lo, hi)),
+        _ => None,
+    };
+    let facts = || match leg {
+        // Into the arm: where the conditional branches.
+        Leg::Split => mir_parts_at_switch(rap, visualization_data, split_row),
+        Leg::Column => {
+            let line = rv_attrs::line_of(row, &visualization_data.row_lines);
+            let own = |l: usize| own_lines.is_some_and(|(lo, hi)| l >= lo && l <= hi);
+            match line {
+                Some(l) if own(l) => mir_parts_at(rap, visualization_data, row),
+                // A row other code is on too (the split's, `} else {`): what
+                // this row's code leaves on the way to the arm's own first
+                // line with code; else what the arm starts with, where the
+                // conditional branches.
+                Some(l) => {
+                    let into = mir_parts(rap, visualization_data)
+                        .filter(|p| p.at == PartsAt::Entry && p.from == Some(l) && own(p.line))
+                        .min_by_key(|p| p.line);
+                    match into {
+                        Some(p) => Some(PartsFacts::from(p)),
+                        None if row <= arm_first.max(split_row) => mir_parts_at_switch(rap, visualization_data, split_row),
+                        None => mir_parts_at(rap, visualization_data, row),
+                    }
+                }
+                None => None,
+            }
+        }
+        // Out of it: what this arm's own code leaves at the join (not the
+        // other arms'). Where that isn't known (the arm has no rows of its
+        // own), what every arm leaves: the fields lacking on every way in
+        // are on this one; those that may lack one are neither named nor
+        // said to hold their value.
+        Leg::Join => own_lines.and_then(|lines| mir_parts_entering_from(rap, visualization_data, row, lines))
+            .or_else(|| mir_parts_entering(rap, visualization_data, row).map(|f| PartsFacts {
+                unsure: f.maybe.iter().chain(f.unsure.iter()).cloned().collect(),
+                maybe: f.partly, certain: f.certain, partly: Vec::new(),
+            })),
     };
     let title = match (inactive, leg) {
         (true, Leg::Split) => hover_messages::state_arm_split(arm_label),
@@ -9281,14 +9335,11 @@ fn push_seg_if_renderable(
         }
         // `row`: the first source row the segment covers, for a `for`
         // loop around the conditional (#871).
-        // A struct's arm (it forks for its own events): rustc's facts on
-        // its fields (#1595).
-        // (On the arm's first row, or a diagonal, what it held where the
-        // conditional split: a row's facts there may be another arm's.)
+        // A struct's arm: rustc's facts on its fields where they're
+        // known for this way (else main's text).
         (false, _) if matches!((&state, rap), (State::FullPrivilege { .. }, ResourceAccessPoint::Struct(_)))
-            && mir_parts_at(rap, visualization_data, facts_row).is_some_and(|(c, m)| !c.is_empty() || !m.is_empty()) => {
-            let (certain, maybe) = mir_parts_at(rap, visualization_data, facts_row).unwrap_or_default();
-            mir_parts_title(rap, visualization_data, &certain, &maybe)
+            && facts().is_some_and(|f| f.moved()) => {
+            mir_parts_title(rap, visualization_data, &facts().unwrap_or_default())
         }
         (false, _) => loop_iterator_title(&state, rap, visualization_data, row)
             .unwrap_or_else(|| timeline_segment_title(&state, rap, visualization_data, None)),
@@ -9890,15 +9941,17 @@ impl PartsMoved {
 /// says are moved out (`certain`) or may be (`maybe`) (#1595): those
 /// surely moved are named; where any may be, no more than that some of
 /// its fields may have been (which, and on which paths, isn't said).
-fn mir_parts_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, certain: &[String], maybe: &[String]) -> String {
+fn mir_parts_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, facts: &PartsFacts) -> String {
+    let PartsFacts { certain, maybe, unsure, .. } = facts;
     let parts = direct_parts(rap, visualization_data);
     // (Every field out on this path isn't "partially" moved: no more than
     // that some may be, as #1619 says it.)
     let every = parts.iter().all(|t| certain.iter().any(|c| c == t.resource_access_point.name()));
     // The direct fields rustc says surely hold a value here, with all
-    // their own fields: none of them, nor a field inside, may lack one.
+    // their own fields: none of them, nor a field inside, may lack one
+    // (nor does the borrow checker think one may: `unsure`).
     let usable: Vec<String> = parts.iter().map(|t| t.resource_access_point.name().clone())
-        .filter(|f| !certain.iter().chain(maybe.iter()).any(|m| m == f || m.starts_with(&format!("{}.", f))))
+        .filter(|f| !certain.iter().chain(maybe.iter()).chain(unsure.iter()).any(|m| m == f || m.starts_with(&format!("{}.", f))))
         .collect();
     let text = if !maybe.is_empty() || certain.is_empty() || every {
         hover_messages::state_fields_maybe_moved(rap.name())
@@ -9908,32 +9961,99 @@ fn mir_parts_title(rap: &ResourceAccessPoint, visualization_data: &Visualization
     hover_messages::with_usable_fields(text, &usable)
 }
 
+/// rustc's facts on a struct's fields at a point (`PartsUninit`, #1595).
+#[derive(Clone, Debug, Default, PartialEq)]
+struct PartsFacts {
+    /// Surely moved out.
+    certain: Vec<String>,
+    /// May be (or part of it is).
+    maybe: Vec<String>,
+    /// Those of `maybe` part of which surely is.
+    partly: Vec<String>,
+    /// Hold a value, but the borrow checker counts a way they may not.
+    unsure: Vec<String>,
+}
+
+impl PartsFacts {
+    fn moved(&self) -> bool {
+        !self.certain.is_empty() || !self.maybe.is_empty()
+    }
+}
+
+impl From<&PartsUninit> for PartsFacts {
+    fn from(p: &PartsUninit) -> Self {
+        PartsFacts { certain: p.certain.clone(), maybe: p.maybe.clone(), partly: p.partly.clone(), unsure: p.unsure.clone() }
+    }
+}
+
+/// rustc's facts on the fields of the struct column `rap` (#1595).
+fn mir_parts<'a>(rap: &'a ResourceAccessPoint, visualization_data: &'a VisualizationData) -> impl Iterator<Item = &'a PartsUninit> + 'a {
+    visualization_data.parts_uninit.iter().filter(move |p| p.hash == *rap.hash())
+}
+
+/// The fields surely moved out and those that may be, over several ways
+/// (`recs`): surely only where on every way. `None` without any.
+fn merge_parts<'a>(recs: impl IntoIterator<Item = &'a PartsUninit>) -> Option<PartsFacts> {
+    let recs: Vec<&PartsUninit> = recs.into_iter().collect();
+    match recs.as_slice() {
+        [] => None,
+        [one] => Some(PartsFacts::from(*one)),
+        _ => {
+            let within = |n: &str, f: &str| n == f || n.starts_with(&format!("{}.", f));
+            let all: BTreeSet<String> = recs.iter().flat_map(|r| r.certain.iter().chain(r.maybe.iter())).cloned().collect();
+            let outer: Vec<String> = all.iter().filter(|n| !all.iter().any(|a| a != *n && within(n, a))).cloned().collect();
+            let (certain, maybe): (Vec<String>, Vec<String>) = outer.into_iter().partition(|n| recs.iter().all(|r| r.certain.iter().any(|c| within(n, c))));
+            // (Part of it on every way: whole on some, or part on each.)
+            let partly = maybe.iter().filter(|n| recs.iter().all(|r| r.certain.iter().chain(r.partly.iter()).any(|c| within(n, c) || within(c, n)))).cloned().collect();
+            let unsure: BTreeSet<String> = recs.iter().flat_map(|r| r.unsure.iter()).cloned().collect();
+            Some(PartsFacts { certain, maybe, partly, unsure: unsure.into_iter().collect() })
+        }
+    }
+}
+
 /// rustc's facts on the fields of the struct column `rap` after the code
 /// on the source line of row `row` (`PartsUninit`, #1595): the fields
-/// surely moved out, and those that may have been, from where its column
-/// starts. `None` without facts (no field of it is ever moved out).
-fn mir_parts_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, row: usize) -> Option<(Vec<String>, Vec<String>)> {
+/// surely moved out, and those that may have been. On a line with no code
+/// (a comment, an arm's `} else {`), what the code above left, where
+/// control goes on from there to the next line with code and enters that
+/// from no other line; else (an `else` arm's comment, below another arm's
+/// move) which way control came isn't known here: `None`, as without
+/// facts (no part of it is ever moved out).
+fn mir_parts_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, row: usize) -> Option<PartsFacts> {
     let line = rv_attrs::line_of(row, &visualization_data.row_lines)?;
-    let first_row = visualization_data.timelines.get(rap.hash())?.states.iter()
-        .find(|(a, b, st)| a < b && !matches!(st, State::OutOfScope)).map(|(a, _, _)| *a)?;
-    let first = rv_attrs::line_of(first_row, &visualization_data.row_lines)?;
-    let last_row = visualization_data.timelines.get(rap.hash())?.states.iter().map(|(_, b, _)| *b).max()?;
-    let last = rv_attrs::line_of(last_row, &visualization_data.row_lines)?;
-    let ours = || visualization_data.parts_uninit.iter().filter(|p| p.name == *rap.name() && p.line >= first && p.line <= last);
-    // After the line's own code; on a line with none (a conditional's
-    // closing `}`), as control enters the next line with code; past the
-    // last, after the latest.
-    // (Before the body's first code, none: the next line's way in may be
-    // a loop's way back.)
-    let found = match ours().find(|p| !p.entry && p.line == line) {
-        Some(p) => Some(p),
-        None if !ours().any(|p| !p.entry && p.line < line) => None,
-        None => match ours().filter(|p| p.line > line).map(|p| p.line).min() {
-            Some(next) => ours().find(|p| p.entry && p.line == next),
-            None => ours().filter(|p| !p.entry && p.line < line).max_by_key(|p| p.line),
-        },
-    };
-    found.map(|p| (p.certain.clone(), p.maybe.clone()))
+    let ours = || mir_parts(rap, visualization_data);
+    if let Some(p) = ours().find(|p| p.at == PartsAt::After && p.line == line) {
+        return Some(PartsFacts::from(p));
+    }
+    let prev = ours().filter(|p| p.at == PartsAt::After && p.line < line).map(|p| p.line).max()?;
+    let next = ours().filter(|p| p.at == PartsAt::Entry && p.line > line).map(|p| p.line).min()?;
+    let from: BTreeSet<Option<usize>> = ours().filter(|p| p.at == PartsAt::Entry && p.line == next && p.from.is_some()).map(|p| p.from).collect();
+    if from != BTreeSet::from([Some(prev)]) {
+        return None;
+    }
+    merge_parts(ours().filter(|p| p.at == PartsAt::Entry && p.line == next && p.from.is_none()))
+}
+
+/// As control enters the code on row `row`'s line, from every way in (a
+/// conditional's join: what its arms left). `None` without facts there.
+fn mir_parts_entering(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, row: usize) -> Option<PartsFacts> {
+    let line = rv_attrs::line_of(row, &visualization_data.row_lines)?;
+    merge_parts(mir_parts(rap, visualization_data).filter(|p| p.at == PartsAt::Entry && p.line == line && p.from.is_none()))
+}
+
+/// The same from the lines `lines` only (an arm's own: what that arm
+/// leaves at the join on row `row`). `None` if control enters from none.
+fn mir_parts_entering_from(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, row: usize, lines: (usize, usize)) -> Option<PartsFacts> {
+    let line = rv_attrs::line_of(row, &visualization_data.row_lines)?;
+    merge_parts(mir_parts(rap, visualization_data)
+        .filter(|p| p.at == PartsAt::Entry && p.line == line && p.from.is_some_and(|f| f >= lines.0 && f <= lines.1)))
+}
+
+/// Where the conditional on row `row`'s line branches. `None` without
+/// facts there (no test: `if let` a pattern that always matches).
+fn mir_parts_at_switch(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, row: usize) -> Option<PartsFacts> {
+    let line = rv_attrs::line_of(row, &visualization_data.row_lines)?;
+    merge_parts(mir_parts(rap, visualization_data).filter(|p| p.at == PartsAt::Switch && p.line == line))
 }
 
 /// The rows of the struct column `rap` where rustc's facts on its fields
