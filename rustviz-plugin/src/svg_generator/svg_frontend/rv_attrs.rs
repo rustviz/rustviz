@@ -184,7 +184,7 @@ pub fn event_name(e: &Event) -> &'static str {
         Event::LoopMaybeInit { .. } => "loop_maybe_init",
         Event::LoopExitKept { .. } => "loop_exit_kept",
         Event::LoopExitMove { .. } => "loop_exit_move",
-        Event::OwnerDropIfTryReturns => "owner_drop_if_try_returns",
+        Event::OwnerDropIfTryReturns { .. } => "owner_drop_if_try_returns",
         Event::OwnerDropUnlessReturned => "owner_drop_unless_returned",
         Event::TupleTempDrop { .. } => "tuple_temp_drop",
         Event::OrAltMove { .. } => "or_alt_move",

@@ -2378,8 +2378,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from String::from to s",
             "s acquires ownership of a resource",
             "s has no value yet",
-            "s was assigned a value in only some of the branches above, so it can't be used after the branches. If the branch that ran assigned it, its resource is dropped when s goes out of scope.",
-            "s goes out of scope. Its resource is dropped here only if s was assigned in the branch that ran (Rust tracks this with a runtime drop flag).",
+            "s may or may not hold a value here, so it can't be used here. Rust tracks whether it still holds its resource with a runtime drop flag.",
+            "s goes out of scope. Its resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             "s was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
@@ -13195,13 +13195,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "deferred_init_maybe",
         must_contain: &[
-            "s was assigned a value in only some of the branches above, so it can't be used after the branches until it's assigned again. If the branch that ran assigned it, its resource is dropped when s is assigned again.",
-            "s acquires ownership of a new resource. Its previous resource is dropped here only if s was assigned in the branch that ran (Rust tracks this with a runtime drop flag).",
-            "n was assigned a value in only some of the branches above, so it can't be used after the branches (until it's assigned again).",
+            "s may or may not hold a value here, so it can't be used here (until it's given a new value). Rust tracks whether it still holds its resource with a runtime drop flag.",
+            "s acquires ownership of a new resource. Its previous resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
+            "n may or may not hold a value here, so it can't be used here (until it's given a new value).",
             "n is assigned a new value",
             // The `_` arm panics: it doesn't count.
-            "t was assigned a value in only some of the branches above, so it can't be used after the branches. If the branch that ran assigned it, its resource is dropped when t goes out of scope.",
-            "t goes out of scope. Its resource is dropped here only if t was assigned in the branch that ran (Rust tracks this with a runtime drop flag).",
+            "t may or may not hold a value here, so it can't be used here. Rust tracks whether it still holds its resource with a runtime drop flag.",
+            "t goes out of scope. Its resource is dropped here only if t still holds it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             "s acquires ownership of a new resource; its previous resource is dropped",
@@ -13222,9 +13222,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "deferred_init_two_ifs",
         must_contain: &[
-            "s was assigned a value in only some of the branches above, so it can't be used after the branches until it's assigned again. If the branch that ran assigned it, its resource is dropped when s is assigned again.",
-            "s acquires ownership of a new resource. Its previous resource is dropped here only if s was assigned in the branch that ran (Rust tracks this with a runtime drop flag).",
-            "s may have no value here: it was assigned in only some of the branches above",
+            "s may or may not hold a value here, so it can't be used here (until it's given a new value). Rust tracks whether it still holds its resource with a runtime drop flag.",
+            "s acquires ownership of a new resource. Its previous resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
+            "s may have no value here",
             "s goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
@@ -13242,10 +13242,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "deferred_init_then_moved",
         must_contain: &[
-            "s was assigned a value in only some of the branches above, and each of them moved it away, so s holds nothing after the branches.",
+            "s holds no value here, so it can't be used here.",
             "s goes out of scope. No resource is dropped: each branch above that assigned s moved it away.",
-            "t was assigned a value in only some of the branches above, so it can't be used after the branches. If the branch that ran assigned it and didn't move it, its resource is dropped when t goes out of scope.",
-            "t goes out of scope. Its resource is dropped here only if t was assigned in the branch that ran and wasn't moved there (Rust tracks this with a runtime drop flag).",
+            "t may or may not hold a value here, so it can't be used here. Rust tracks whether it still holds its resource with a runtime drop flag.",
+            "t goes out of scope. Its resource is dropped here only if t still holds it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             "s goes out of scope. Its resource is dropped",
@@ -19093,21 +19093,21 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // was "assigned in only some of the branches above".
         must_contain: &[
             "s was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when s is assigned again (or, if it isn't, when it goes out of scope).",
-            "s may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when s goes out of scope.",
+            "s may or may not hold a value here, so it can't be used here (until it's given a new value). Rust tracks whether it still holds its resource with a runtime drop flag.",
             "s goes out of scope. Its resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
             "t was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when t is assigned again (or, if it isn't, when it goes out of scope).",
-            "t may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when t goes out of scope.",
+            "t may or may not hold a value here, so it can't be used here (until it's given a new value). Rust tracks whether it still holds its resource with a runtime drop flag.",
             "t goes out of scope. Its resource is dropped here only if t still holds it (Rust tracks this with a runtime drop flag).",
             "u was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when u is assigned again.",
-            "u may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when u is assigned again.",
+            "u may or may not hold a value here, so it can't be used here (until it's given a new value). Rust tracks whether it still holds its resource with a runtime drop flag.",
             "u acquires ownership of a new resource. Its previous resource is dropped here only if u still holds it (Rust tracks this with a runtime drop flag).",
             "u goes out of scope. Its resource is dropped.",
-            "v may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when v is assigned again (or, if it isn't, when it goes out of scope).",
+            "v may or may not hold a value here, so it can't be used here (until it's given a new value). Rust tracks whether it still holds its resource with a runtime drop flag.",
             "v may have no value after the loop: a branch above may have moved it, and the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it or no branch above moved it, its resource is dropped when v goes out of scope.",
             "v goes out of scope. Its resource is dropped here only if the loop above assigned v or no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "w may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when w goes out of scope.",
+            "w may or may not hold a value here, so it can't be used here (until it's given a new value). Rust tracks whether it still holds its resource with a runtime drop flag.",
             "w goes out of scope. Its resource is dropped here only if w still holds it (Rust tracks this with a runtime drop flag).",
-            "q may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when q is assigned again (or, if it isn't, when it goes out of scope).",
+            "q may or may not hold a value here, so it can't be used here (until it's given a new value). Rust tracks whether it still holds its resource with a runtime drop flag.",
             "q may have no value here: a loop above may have ended before assigning it",
         ],
         must_not_contain: &[
@@ -19141,15 +19141,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `else` arm "only if q was assigned in the branch that ran" (it
         // drops "w" only if the loop assigned q).
         must_contain: &[
-            "s may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when s goes out of scope.",
+            "s may or may not hold a value here, so it can't be used here (until it's given a new value). Rust tracks whether it still holds its resource with a runtime drop flag.",
             "s goes out of scope. Its resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
-            "t may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when t goes out of scope.",
+            "t may or may not hold a value here, so it can't be used here (until it's given a new value). Rust tracks whether it still holds its resource with a runtime drop flag.",
             "t goes out of scope. Its resource is dropped here only if t still holds it (Rust tracks this with a runtime drop flag).",
-            "u may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when u goes out of scope.",
+            "u may or may not hold a value here, so it can't be used here (until it's given a new value). Rust tracks whether it still holds its resource with a runtime drop flag.",
             "u goes out of scope. Its resource is dropped here only if u still holds it (Rust tracks this with a runtime drop flag).",
-            "v may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when v goes out of scope.",
+            "v may or may not hold a value here, so it can't be used here (until it's given a new value). Rust tracks whether it still holds its resource with a runtime drop flag.",
             "v goes out of scope. Its resource is dropped here only if v still holds it (Rust tracks this with a runtime drop flag).",
-            "w may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when w is assigned again.",
+            "w may or may not hold a value here, so it can't be used here (until it's given a new value). Rust tracks whether it still holds its resource with a runtime drop flag.",
             "w acquires ownership of a new resource. Its previous resource is dropped here only if w still holds it (Rust tracks this with a runtime drop flag).",
             "q acquires ownership of a new resource. Its previous resource is dropped here only if the loop above assigned q (Rust tracks this with a runtime drop flag).",
         ],
@@ -21197,7 +21197,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "u.m goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
             "md was moved in at least one branch above, so it can't be used after the branches.",
             "ma was moved in at least one branch above, so it can't be used after the branches.",
-            "mi was assigned a value in only some of the branches above, so it can't be used after the branches.",
+            "mi may or may not hold a value here, so it can't be used here.",
             "u.m was moved in at least one branch above, so it can't be used after the branches.",
             "s goes out of scope. s.a was moved out earlier, so no resource is dropped.",
             "t goes out of scope. t.a was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
@@ -25811,7 +25811,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from (temporary) to w.r",
             "(temporary) hasn't been made yet: only the branch that borrows it makes it",
             "(temporary) may not exist here: only some of the branches above make it",
-            "s may have no value here: it was assigned in only some of the branches above",
+            "s may have no value here",
             "(temporary) exists after the branches only if the branch that made it (line 30) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
             "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 30) ran (Rust tracks this with a runtime drop flag).",
             "(temporary) exists after the branches only if the branch that made it (line 37) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
@@ -25946,10 +25946,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // drop must be stated), nor the exit's drop of a local every branch
         // assigned. The scope end at the fn's `}` keeps its drop-flag text.
         must_contain: &[
-            "s goes out of scope. Its resource is dropped here only if s was assigned in the branch that ran (Rust tracks this with a runtime drop flag).",
-            "If the `?` here returns early, s's resource is dropped if the branch that ran assigned it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to s here.",
-            "p goes out of scope. Its resource is dropped here only if p was assigned in the branch that ran (Rust tracks this with a runtime drop flag).",
-            "p.name goes out of scope. Its resource is dropped here only if p.name was assigned in the branch that ran (Rust tracks this with a runtime drop flag).",
+            "s goes out of scope. Its resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
+            "If the `?` here returns early, s's resource is dropped if s still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to s here.",
+            "p goes out of scope. Its resource is dropped here only if p still holds it (Rust tracks this with a runtime drop flag).",
+            "p.name goes out of scope. Its resource is dropped here only if p.name still holds it (Rust tracks this with a runtime drop flag).",
             "s goes out of scope. Its resource is dropped.",
             "If the `?` here returns early, (temporary)'s resource is dropped if the branch that made it (line 108) ran (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to (temporary) here.",
             "(temporary 2) goes out of scope here, where `break` leaves early: a let borrowed it, so it lived past its statement. Its resource is dropped only if the branch that made it (line 117) ran (Rust tracks this with a runtime drop flag).",
@@ -25958,8 +25958,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s goes out of scope. No resource is dropped.",
             "(temporary) goes out of scope. No resource is dropped",
             "(temporary 2) goes out of scope. No resource is dropped",
-            "if s still holds it",
-            "only if s still holds it",
             "=(temporary 2) goes out of scope here, where `break` leaves early: a let borrowed it, so it lived past its statement. Its resource is dropped.",
         ],
     },
@@ -27261,10 +27259,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "loop_maybe_init_in_arm_1495",
         must_contain: &[
             "s may have no value after the loop: the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it, its resource is dropped when s goes out of scope.",
-            "s may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when s goes out of scope.",
+            "s may or may not hold a value here, so it can't be used here (until it's given a new value). Rust tracks whether it still holds its resource with a runtime drop flag.",
             "t was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped when t goes out of scope.",
             "t goes out of scope. Its resource is dropped here only if t still holds it (Rust tracks this with a runtime drop flag).",
-            "u may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when u goes out of scope.",
+            "u may or may not hold a value here, so it can't be used here (until it's given a new value). Rust tracks whether it still holds its resource with a runtime drop flag.",
             "w was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped when w goes out of scope.",
         ],
         must_not_contain: &[
@@ -27281,8 +27279,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "loop_maybe_init_nested_assign_1514",
         must_contain: &[
-            "s may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when s goes out of scope.",
-            "t may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when t goes out of scope.",
+            "s may or may not hold a value here, so it can't be used here (until it's given a new value). Rust tracks whether it still holds its resource with a runtime drop flag.",
+            "t may or may not hold a value here, so it can't be used here (until it's given a new value). Rust tracks whether it still holds its resource with a runtime drop flag.",
             "t goes out of scope. Its resource is dropped here only if t still holds it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
@@ -27295,11 +27293,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "maybe_held_then_exit_1533",
         must_contain: &[
-            "s may have no value here: it was assigned in only some of the branches above",
-            "s may have no value here, as before the branches: none of the branches that get here assigns it",
+            "s may have no value here",
+            "s may or may not hold a value here, so it can't be used here",
             "s goes out of scope. Its resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
-            "t may have no value here, as before the branches: none of the branches that get here assigns it",
-            "u may have no value here, as before the branches: none of the branches that get here assigns it",
+            "t may or may not hold a value here, so it can't be used here",
+            "u may or may not hold a value here, so it can't be used here",
             "u goes out of scope. Its resource is dropped here only if u still holds it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
@@ -28074,38 +28072,45 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // #1582: s holds a value after the first `if` only if c was true;
         // the second conditional's arm assigns it and moves that away, or
         // runs a `?`; the others leave it as it was. Each join has a dot
-        // (the legs reach it, `maybe_held_joins_and_splits_have_dots`), and
-        // the drops before and after it go by the drop flag: "only if s
-        // still holds it", not "only if no branch above moved it" (none
-        // did on the path that leaves s empty). For a `let x;` local main
-        // said each branch that assigned x moved it, "so x holds nothing",
-        // and the `?` after it that x's resource is dropped (only if c and
-        // not d). In `may_move` the arm only may move y (d && !e keeps the
-        // new String). Only "may move" (finish mode: no "each branch …
-        // moves"). In `no_move` nothing moves z: no "move" at all.
+        // (the legs reach it, `maybe_held_joins_and_splits_have_dots`).
+        // Wherever a value assigned (or moved) as a whole on some paths only
+        // may or may not hold one, the join, reassignment, `?` and scope end
+        // say only that a drop flag decides (#1600 review): no "which
+        // branch" (three-arm `match`), no "when it is dropped" (a `?` before
+        // the next assignment), no "assigned in only some of the branches".
         must_contain: &[
-            "z may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when z goes out of scope.",
-            "y may have no value here: it may have had none before the branches, and a branch that gets here and assigns it may move the new value away again",
+            "z may or may not hold a value here, so it can't be used here (until it's given a new value). Rust tracks whether it still holds its resource with a runtime drop flag.",
+            "y may or may not hold a value here, so it can't be used here (until it's given a new value). Rust tracks whether it still holds its resource with a runtime drop flag.",
+            "s may or may not hold a value here, so it can't be used here (until it's given a new value). Rust tracks whether it still holds its resource with a runtime drop flag.",
+            "m may or may not hold a value here, so it can't be used here (until it's given a new value). Rust tracks whether it still holds its resource with a runtime drop flag.",
+            "x may or may not hold a value here, so it can't be used here (until it's given a new value). Rust tracks whether it still holds its resource with a runtime drop flag.",
+            "q may or may not hold a value here, so it can't be used here (until it's given a new value). Rust tracks whether it still holds its resource with a runtime drop flag.",
+            "t may or may not hold a value here, so it can't be used here",
+            "e may or may not hold a value here, so it can't be used here",
             "If the `?` here returns early, x's resource is dropped if x still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to x here.",
-            "s may have no value here: it may have had none before the branches, and a branch that gets here and assigns it may move the new value away again",
-            "m may have no value here: it may have had none before the branches, and a branch that gets here and assigns it may move the new value away again",
-            "x may have no value here: it may have had none before the branches, and a branch that gets here and assigns it may move the new value away again",
-            "t may have no value here, as before the branches: none of the branches that get here assigns it",
-            "e may have no value here, as before the branches: none of the branches that get here assigns it",
+            "If the `?` here returns early, q's resource is dropped if q still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to q here.",
             "s acquires ownership of a new resource. Its previous resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
             "m acquires ownership of a new resource. Its previous resource is dropped here only if m still holds it (Rust tracks this with a runtime drop flag).",
+            "x acquires ownership of a new resource. Its previous resource is dropped here only if x still holds it (Rust tracks this with a runtime drop flag).",
+            "q acquires ownership of a new resource. Its previous resource is dropped here only if q still holds it (Rust tracks this with a runtime drop flag).",
             "s goes out of scope. Its resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
             "m goes out of scope. Its resource is dropped here only if m still holds it (Rust tracks this with a runtime drop flag).",
             "x goes out of scope. Its resource is dropped here only if x still holds it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
-            "=z may have no value here: it may have had none before the branches, and a branch that gets here and assigns it may move the new value away again",
             "each branch that gets here and assigns it moves the new value away again",
             "=If the `?` here returns early, x's resource is dropped. If the `?` succeeds, nothing happens to x here.",
             "no branch above moved it",
             "holds nothing after the branches",
+            "was assigned in the branch that ran",
+            "If the branch that ran assigned it",
+            "in only some of the branches above",
+            "is assigned again (or, if it isn't",
+            "is dropped when q is assigned again",
+            "is dropped when z goes out of scope",
         ],
     },
+
     TooltipExpect {
         name: "maybe_held_second_returning_if_1584",
         // #1584: the second returning `if` in the `if d` arm splits s's
@@ -28118,10 +28123,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "m is live in a conditional expression ",
             "s goes out of scope. Its resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
             "m goes out of scope. Its resource is dropped here only if m still holds it (Rust tracks this with a runtime drop flag).",
-            "s may have no value here, as before the branches: none of the branches that get here assigns it",
-            "m may have no value here, as before the branches: none of the branches that get here assigns it",
+            "s may or may not hold a value here, so it can't be used here",
+            "m may or may not hold a value here, so it can't be used here",
         ],
-        must_not_contain: &[],
+        must_not_contain: &["none of the branches that get here assigns it", "in only some of the branches above"],
     },
 ];
 
@@ -35269,7 +35274,7 @@ fn column_lines_with_tooltip(svg: &str, text: &str) -> Vec<(f64, f64)> {
 fn a_conditional_that_may_leave_a_variable_empty_draws_no_owner_line_after_it() {
     let rv = run_with_local_backend("maybe_held_if_1034");
     let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
-    for (var, assign_src, until_src, when) in [
+    for (var, assign_src, until_src, _when) in [
         ("s", "s = String::from(\"c\");", "}", "goes out of scope"),
         ("t", "t = String::from(\"c\");", "}", "goes out of scope"),
         ("u", "u = String::from(\"c\");", "u = String::from(\"d\");", "is assigned again"),
@@ -35283,9 +35288,8 @@ fn a_conditional_that_may_leave_a_variable_empty_draws_no_owner_line_after_it() 
         let close_row = code_rows_y(&code, "}").into_iter().find(|y| *y > assign_row).expect("the conditional's closing brace");
         let until_row = code_rows_y(&code, until_src).into_iter().find(|y| *y > close_row).expect("the row after it");
         let text = format!(
-            "{var} may have no value after the branches: it may have had none where they start, and only some of \
-             them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its \
-             resource is dropped when {var} {when}."
+            "{var} may or may not hold a value here, so it can't be used here (until it's given a new value). Rust \
+             tracks whether it still holds its resource with a runtime drop flag."
         );
         let dots = dots_listing_tooltip(&timeline, &text);
         assert!(
@@ -37970,7 +37974,7 @@ fn one_line_arm_value_arrives_before_it_moves_1441() {
 fn exits_state_maybe_init_drops_1436() {
     let rv = run_with_local_backend("exit_maybe_init_1436");
     let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
-    let flag = |n: &str| format!("{n} goes out of scope. Its resource is dropped here only if {n} was assigned in the branch that ran (Rust tracks this with a runtime drop flag).");
+    let flag = |n: &str| format!("{n} goes out of scope. Its resource is dropped here only if {n} still holds it (Rust tracks this with a runtime drop flag).");
     let at = |text: &str, src: &str, y: f64| {
         let dots = dots_listing_tooltip(&timeline, text);
         assert!(dots.iter().any(|&(_, dy)| dy == y), "no dot saying {text:?} at {src:?} (y={y}): {dots:?}");
@@ -38437,6 +38441,27 @@ fn maybe_held_joins_and_splits_have_dots() {
         }
         for leg in branch_legs_in_mid_air(&tl) {
             missing.push(format!("{}: {}", name, leg));
+        }
+    }
+    // (#1600 review: the drop-flag text on the dots themselves, not only
+    // somewhere in the fixture: the outer `no_move` join, the three-arm
+    // match's scope end, the join before a `?`, and #1587's reassignments
+    // after the loop and the `if`.)
+    for (name, id, text) in [
+        ("maybe_held_assign_move_join_1582", "z@L104:dot:branch_join", " may or may not hold a value here"),
+        ("maybe_held_assign_move_join_1582", "z@L105:dot:branch_join", " may or may not hold a value here"),
+        ("maybe_held_assign_move_join_1582", "x@L122:dot:owner_go_out_of_scope", " still holds it (Rust tracks this with a runtime drop flag)."),
+        ("maybe_held_assign_move_join_1582", "q@L132:dot:branch_join", " may or may not hold a value here"),
+        ("maybe_held_assign_move_join_1582", "q@L133:dot:owner_drop_if_try_returns", " still holds it (Rust tracks this with a runtime drop flag)."),
+        ("maybe_held_reassign_after_loop_1587", "s@L20:dot:acquire+owner_drop_at_reassign", " still holds it (Rust tracks this with a runtime drop flag)."),
+        ("maybe_held_reassign_after_loop_1587", "m@L35:dot:acquire+owner_drop_at_reassign", " still holds it (Rust tracks this with a runtime drop flag)."),
+        ("maybe_held_reassign_after_loop_1587", "u@L50:dot:acquire+owner_drop_at_reassign", " still holds it (Rust tracks this with a runtime drop flag)."),
+    ] {
+        let tl = run_with_local_backend(name).timeline_panel_string();
+        let found = ["circle", "g"].into_iter().flat_map(|tag| start_tags(&tl, tag)).any(|t| attr(t, "data-rv-id") == Some(id)
+            && attr(t, "data-tooltip-text").is_some_and(|tip| tip.contains(text)));
+        if !found {
+            missing.push(format!("{}: {} without {:?}", name, id, text));
         }
     }
     // #1584: the split's text is on its own dot, not merged into a drop's

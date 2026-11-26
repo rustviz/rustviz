@@ -2324,7 +2324,15 @@ pub enum ExternalEvent {
     // `OwnerDropAtReassign`.
     OwnerDropIfTryReturns {
         ro: ResourceAccessPoint,
-        id: usize
+        id: usize,
+        // rustc's move data says it only may hold a value where the `?`
+        // returns early (#1600): the drop flag decides. With more than one
+        // `?` on the line for it (one event), whether any of them does.
+        maybe: bool,
+        // rustc's move data says it holds a value there, at every `?` on
+        // the line for it: dropped on that early return, whatever the
+        // drawing knows of earlier conditionals (#1600 review).
+        held: bool,
     },
     // `return if b { p } else { q };` in a branch: `p`, which only some
     // of the returned `if`'s branches move to the caller, is dropped
@@ -2901,7 +2909,9 @@ pub enum Event {
     LoopExitMove { definite: bool, at: MaybeMovedAt },
     // The owner's resource is dropped here only if the `?` returns
     // early (#430). The owner's state is unchanged.
-    OwnerDropIfTryReturns,
+    // `maybe`: rustc's move data says the variable only may hold a value
+    // where this `?` returns early (#1600): a drop flag decides.
+    OwnerDropIfTryReturns { maybe: bool, held: bool },
     // See ExternalEvent::OwnerDropUnlessReturned.
     OwnerDropUnlessReturned,
     // See ExternalEvent::TupleTempDrop.
@@ -3720,7 +3730,7 @@ impl Display for Event {
             Event::LoopExitMove { .. } => {
                 write!(f, "May have been moved when the loop ends")
             },
-            Event::OwnerDropIfTryReturns => {
+            Event::OwnerDropIfTryReturns { .. } => {
                 write!(f, "Resource is dropped if the `?` returns early")
             },
             Event::OwnerDropUnlessReturned => {
@@ -4003,7 +4013,7 @@ impl Event {
             Event::TemporaryDrop { ty: Some(ty), when, literal, part: None, assign, .. } => {
                 hover_messages::event_dot_temporary_drop(ty, when, *literal, *assign)
             }
-            Event::OwnerDropIfTryReturns => {
+            Event::OwnerDropIfTryReturns { .. } => {
                 hover_messages::event_dot_owner_drop_if_try_returns(my_name, "")
             }
             Event::OwnerDropUnlessReturned => {
@@ -5411,7 +5421,7 @@ impl Visualizable for VisualizationData {
             (_, Event::TemporaryDrop { .. }) => State::OutOfScope,
             // Dropped only on the path that returns; the code after the
             // `?` runs on the other one.
-            (_, Event::OwnerDropIfTryReturns) => (*previous_state).clone(),
+            (_, Event::OwnerDropIfTryReturns { .. }) => (*previous_state).clone(),
             (_, Event::OwnerDropUnlessReturned) => (*previous_state).clone(),
             // A dot on a column whose value already went into the tuple:
             // no change.
@@ -5692,7 +5702,7 @@ impl Visualizable for VisualizationData {
                     // (`OutOfScope` here, drawn as "may have no value" up
                     // to the `?`, #1582): so is the rest of the arm, from
                     // the `?`'s dot, not from mid-air rows below it.
-                    if matches!(e, Event::OwnerDropIfTryReturns) && matches!(previous_state, State::OutOfScope) {
+                    if matches!(e, Event::OwnerDropIfTryReturns { .. }) && matches!(previous_state, State::OutOfScope) {
                         previous_state = branch_state_converter(&previous_state);
                     }
                     previous_line = *l;
@@ -6027,8 +6037,8 @@ impl Visualizable for VisualizationData {
         ExternalEvent::LoopExitMove{definite, at, ..} => {
           vec![(line_num, Event::LoopExitMove { definite: *definite, at: at.clone() })]
         },
-        ExternalEvent::OwnerDropIfTryReturns{..} => {
-          vec![(line_num, Event::OwnerDropIfTryReturns)]
+        ExternalEvent::OwnerDropIfTryReturns{maybe, held, ..} => {
+          vec![(line_num, Event::OwnerDropIfTryReturns { maybe: *maybe, held: *held })]
         },
         ExternalEvent::OwnerDropUnlessReturned{..} => {
           vec![(line_num, Event::OwnerDropUnlessReturned)]
@@ -6536,8 +6546,8 @@ impl Visualizable for VisualizationData {
             ExternalEvent::LoopExitMove{ro, definite, at, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopExitMove { definite, at }, line_number);
             },
-            ExternalEvent::OwnerDropIfTryReturns{ro, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropIfTryReturns, line_number);
+            ExternalEvent::OwnerDropIfTryReturns{ro, maybe, held, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropIfTryReturns { maybe, held }, line_number);
             },
             ExternalEvent::OwnerDropUnlessReturned{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropUnlessReturned, line_number);

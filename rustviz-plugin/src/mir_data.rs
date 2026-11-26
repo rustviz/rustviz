@@ -1214,6 +1214,52 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         })
     }
 
+    /// What the user variable `name` holds where the `?` at `try_span`
+    /// returns early (#1600): rustc's dataflow just before the `?`'s
+    /// residual path calls `FromResidual::from_residual`, after its
+    /// operand is evaluated (`{ s = …; o }?` has assigned s by then). The
+    /// variable is the local of that name whose scope holds the `?` (a
+    /// column can stand for bindings of one name in disjoint scopes).
+    /// `None` when either isn't found.
+    pub fn ownership_at_try(&self, name: &str, try_span: Span) -> Option<Ownership> {
+        use rustc_mir_dataflow::impls::{MaybeInitializedPlaces, MaybeUninitializedPlaces};
+        use rustc_mir_dataflow::move_paths::{LookupResult, MoveData};
+        let body = &self.bwf.body;
+        let names = self.mir_local_names(self.bwf);
+        let local = body.var_debug_info.iter().filter_map(|vdi| match vdi.value {
+            VarDebugInfoContents::Place(p) if p.projection.is_empty() && names.get(&p.local).is_some_and(|n| n == name) =>
+                Some((p.local, body.source_scopes[vdi.source_info.scope].span)),
+            _ => None,
+        }).filter(|(_, sp)| sp.contains(try_span))
+            .min_by_key(|(l, sp)| (sp.hi() - sp.lo(), *l))
+            .map(|(l, _)| l)?;
+        let at = body.basic_blocks.iter_enumerated().filter(|(_, d)| !d.is_cleanup).find_map(|(bb, data)| {
+            let t = data.terminator.as_ref()?;
+            let TerminatorKind::Call { func, .. } = &t.kind else { return None };
+            let (def_id, _) = func.const_fn_def()?;
+            (self.tcx.is_lang_item(def_id, rustc_hir::LangItem::TryTraitFromResidual)
+                // (The desugaring's span: the `?` expression's, in another
+                // syntax context.)
+                && t.source_info.span.lo() == try_span.lo() && t.source_info.span.hi() == try_span.hi())
+                .then(|| Location { block: bb, statement_index: data.statements.len() })
+        })?;
+        let move_data = MoveData::gather_moves(body, self.tcx, |_| true);
+        let LookupResult::Exact(mpi) = move_data.rev_lookup.find(Place::from(local).as_ref()) else { return None };
+        let mut init = MaybeInitializedPlaces::new(self.tcx, body, &move_data)
+            .iterate_to_fixpoint(self.tcx, body, None)
+            .into_results_cursor(body);
+        let mut uninit = MaybeUninitializedPlaces::new(self.tcx, body, &move_data)
+            .iterate_to_fixpoint(self.tcx, body, None)
+            .into_results_cursor(body);
+        init.seek_before_primary_effect(at);
+        uninit.seek_before_primary_effect(at);
+        Some(match (init.get().contains(mpi), uninit.get().contains(mpi)) {
+            (true, false) => Ownership::Held,
+            (false, _) => Ownership::None,
+            (true, true) => Ownership::Maybe,
+        })
+    }
+
     /// Fill in, on the scope ends among `preprocessed_events[from..]`
     /// (this body's events, also those in a conditional's arms), what
     /// rustc's move data says the variable holds there

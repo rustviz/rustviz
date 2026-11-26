@@ -104,3 +104,34 @@ fn no_move(c: bool, d: bool, e: bool) {
         }
     }
 }
+
+// #1600 review: a three-arm match where one arm leaves x alone.
+fn three_arms(c: bool, k: u8) {
+    let mut x;
+    if c {
+        x = String::new();
+    }
+    match k {
+        0 => x = String::new(),
+        1 => {
+            x = String::new();
+            drop(x);
+        }
+        _ => {}
+    }
+}
+
+// A `?` between the join and the next assignment.
+fn try_before_assign(c: bool, d: bool, o: Option<u8>) -> Option<u8> {
+    let mut q;
+    if c {
+        q = String::new();
+    }
+    if d {
+        q = String::new();
+    }
+    o?;
+    q = String::new();
+    drop(q);
+    Some(0)
+}

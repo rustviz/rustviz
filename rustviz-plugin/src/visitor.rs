@@ -2820,14 +2820,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if rap.drops_nothing() {
         continue;
       }
-      let dup = self.preprocessed_events.iter().any(|(l, e)| *l == line
-        && matches!(e, ExternalEvent::OwnerDropIfTryReturns { ro, .. } if *ro == rap));
-      if dup {
+      // Whether it only may hold a value where this `?` returns early, by
+      // rustc's move data (#1600): the drawing can lose that through
+      // conditionals. (One event per line and variable: with several
+      // `?`s on the line, whether any of them is such a place.)
+      let own = if self.in_closure(try_expr) { None } else { self.ownership_at_try(rap.name(), try_expr.span) };
+      let (maybe, held) = (own == Some(Ownership::Maybe), own == Some(Ownership::Held));
+      if let Some((_, ExternalEvent::OwnerDropIfTryReturns { maybe: m, held: h, .. })) = self.preprocessed_events.iter_mut()
+        .find(|(l, e)| *l == line && matches!(e, ExternalEvent::OwnerDropIfTryReturns { ro, .. } if *ro == rap)) {
+        *m |= maybe;
+        *h &= held;
         continue;
       }
       let id = *self.unique_id;
       *self.unique_id += 1;
-      self.add_external_event(line, ExternalEvent::OwnerDropIfTryReturns { ro: rap, id });
+      self.add_external_event(line, ExternalEvent::OwnerDropIfTryReturns { ro: rap, id, maybe, held });
     }
     while let Some(t) = tuples.pop() {
       self.drop_tuple_if_try_returns(&t, line);

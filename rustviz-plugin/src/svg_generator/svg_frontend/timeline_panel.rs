@@ -1467,7 +1467,7 @@ fn render_branch_dots(
             Some(if entry_maybe_init() && !moves_in_some_branch(branch_history) {
                 // (No branch moves it, #1600 review: it may hold the new
                 // value, the old one or none.)
-                hover_messages::event_dot_branch_merge_maybe_held(
+                (if rap.box_contents_moved() { hover_messages::event_dot_branch_merge_maybe_held_main } else { hover_messages::event_dot_branch_merge_maybe_held })(
                     &is.real_name(),
                     is.extract_rap().map_or(false, |r| r.drops_nothing()),
                     rap.is_mut(),
@@ -1525,7 +1525,7 @@ fn render_branch_dots(
                 None if matches!(event, Event::Branch { loop_assigned: true, .. }) => Some(false),
                 r => r,
             };
-            Some(hover_messages::event_dot_branch_merge_maybe_held(
+            Some((if rap.box_contents_moved() { hover_messages::event_dot_branch_merge_maybe_held_main } else { hover_messages::event_dot_branch_merge_maybe_held })(
                 &is.real_name(),
                 is.extract_rap().map_or(false, |r| r.drops_nothing()),
                 rap.is_mut(),
@@ -1584,7 +1584,7 @@ fn render_branch_dots(
                 Some(if moves_in_some_branch(branch_history) {
                     hover_messages::event_dot_branch_merge_maybe_init_assigned_moved(&is.real_name())
                 } else {
-                    hover_messages::event_dot_branch_merge_maybe_held(
+                    (if rap.box_contents_moved() { hover_messages::event_dot_branch_merge_maybe_held_main } else { hover_messages::event_dot_branch_merge_maybe_held })(
                         &is.real_name(),
                         is.extract_rap().map_or(false, |r| r.drops_nothing()),
                         rap.is_mut(),
@@ -1608,7 +1608,7 @@ fn render_branch_dots(
                     None if matches!(event, Event::Branch { loop_assigned: true, .. }) => Some(false),
                     r => r,
                 };
-                Some(hover_messages::event_dot_branch_merge_maybe_held(
+                Some((if rap.box_contents_moved() { hover_messages::event_dot_branch_merge_maybe_held_main } else { hover_messages::event_dot_branch_merge_maybe_held })(
                     &is.real_name(),
                     is.extract_rap().map_or(false, |r| r.drops_nothing()),
                     rap.is_mut(),
@@ -1660,6 +1660,17 @@ fn render_branch_dots(
                     is.extract_rap().map_or(false, |r| r.drops_nothing()),
                     rap.is_mut(), reassigned_next,
                     &is.extract_rap().map_or(String::new(), |r| r.drop_note()))
+            } else if by_cond.is_none() && !rap.box_contents_moved() && entry_maybe_init() {
+                // It may have had no value as the conditional started
+                // (#1582's shapes): which branch moved it, and when what
+                // it may hold is dropped, aren't said; only that a drop
+                // flag decides (#1600 review).
+                hover_messages::event_dot_branch_merge_maybe_held(
+                    &is.real_name(),
+                    is.extract_rap().map_or(false, |r| r.drops_nothing()),
+                    rap.is_mut(),
+                    None,
+                )
             } else if reassigned_next {
                 // That assignment is in a loop's body (#1012), which
                 // may end before it runs: unless every `break` out of
@@ -2487,12 +2498,12 @@ fn render_dot(
                     append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
                     continue;
                 },
-                Event::OwnerDropAtReassign { .. } | Event::OwnerDropIfTryReturns | Event::OwnerDropUnlessReturned | Event::TemporaryDrop { .. } | Event::TupleTempDrop { .. } | Event::LoopIteratorDrop { .. } => {
+                Event::OwnerDropAtReassign { .. } | Event::OwnerDropIfTryReturns { .. } | Event::OwnerDropUnlessReturned | Event::TemporaryDrop { .. } | Event::TupleTempDrop { .. } | Event::LoopIteratorDrop { .. } => {
                     let cx = timeline_data.x_val;
                     let cy = event_y;
                     // A reassignment, or the drop at a `?`'s early return,
                     // says what else goes with it (#373, #542).
-                    let note = if matches!(event, Event::OwnerDropAtReassign { parts: None, payload: false, .. } | Event::OwnerDropIfTryReturns | Event::OwnerDropUnlessReturned) {
+                    let note = if matches!(event, Event::OwnerDropAtReassign { parts: None, payload: false, .. } | Event::OwnerDropIfTryReturns { .. } | Event::OwnerDropUnlessReturned) {
                         visualization_data.timelines[hash].resource_access_point.drop_note()
                     } else { String::new() };
                     // `*b = …` drops the Box's old payload, not the Box
@@ -2600,9 +2611,9 @@ fn render_dot(
                         // dropped by an exit after the join (#1436): only
                         // if the branch that made it ran.
                         hover_messages::event_dot_extended_temporary_drop_made(&name, when, made_at)
-                    } else if let (Event::OwnerDropIfTryReturns, Some(made_at)) = (event, branch_temp_maybe_made(visualization_data, hash, history, i)) {
+                    } else if let (Event::OwnerDropIfTryReturns { .. }, Some(made_at)) = (event, branch_temp_maybe_made(visualization_data, hash, history, i)) {
                         hover_messages::event_dot_temp_drop_if_try_returns_made(&name, made_at)
-                    } else if let Some(split) = matches!(event, Event::OwnerDropIfTryReturns)
+                    } else if let Some(split) = matches!(event, Event::OwnerDropIfTryReturns { .. })
                         .then(|| try_partial_move_split(visualization_data, *hash as u64, *line_number)).flatten() {
                         // A struct some fields of which were moved out
                         // before the `?` (#1184): only what is left of it
@@ -2615,17 +2626,23 @@ fn render_dot(
                         let boxed = matches!(visualization_data.timelines[hash].resource_access_point, ResourceAccessPoint::Struct(Struct { is_box: true, .. }));
                         let scope_end = hover_messages::event_dot_struct_partial_go_out_of_scope(&name, &split.moved, &split.maybe_moved, &split.dropped, false, split.by_cond, false, boxed);
                         hover_messages::event_dot_owner_drop_if_try_returns_partial(&name, &scope_end)
-                    } else if matches!(event, Event::OwnerDropIfTryReturns)
+                    } else if matches!(event, Event::OwnerDropIfTryReturns { .. })
                         && visualization_data.timelines[hash].resource_access_point.box_contents_moved() {
                         hover_messages::event_dot_box_drop_if_try_returns(&name)
-                    } else if let (Event::OwnerDropIfTryReturns, Some(InitJoin::Maybe { moved })) = (event,
+                    } else if matches!(event, Event::OwnerDropIfTryReturns { maybe: true, .. }) {
+                        // rustc says it only may hold a value where this `?`
+                        // returns early (#1600): the drop flag decides.
+                        hover_messages::event_dot_owner_drop_if_try_returns_maybe(&name, &note)
+                    } else if let (Event::OwnerDropIfTryReturns { held: false, .. }, Some(InitJoin::Maybe { moved })) = (event,
                         history_path(&visualization_data.timelines[hash].history, history, i)
                             .filter(|path| !init_by_maybe_held(path.iter()))
                             .and_then(|path| init_at_end(&path))) {
                         // A `let s;` local only some branches above
                         // assigned (#1436).
                         hover_messages::event_dot_owner_drop_if_try_returns_maybe_init(&name, &note, moved)
-                    } else if matches!(event, Event::OwnerDropIfTryReturns)
+                    } else if matches!(event, Event::OwnerDropIfTryReturns { held: false, .. })
+                        // (Not where rustc says it holds one: `{ s = …; o }?`
+                        // has given s a value by then, #1600 review.)
                         && history_path(&visualization_data.timelines[hash].history, history, i)
                             .is_some_and(|path| maybe_moved_at_end(&path)
                                 || matches!(init_at_end(&path), Some(InitJoin::Maybe { .. } | InitJoin::Loop))) {
@@ -2636,13 +2653,13 @@ fn render_dot(
                         // A ManuallyDrop has nothing to drop either (#1137).
                         let value = visualization_data.timelines[hash].resource_access_point.drops_nothing();
                         hover_messages::event_dot_owner_drop_unless_returned(&name, value, &note)
-                    } else if let Some(part) = matches!(event, Event::OwnerDropIfTryReturns).then(|| try_assigned_part(visualization_data, *hash as u64, *line_number)).flatten() {
+                    } else if let Some(part) = matches!(event, Event::OwnerDropIfTryReturns { .. }).then(|| try_assigned_part(visualization_data, *hash as u64, *line_number)).flatten() {
                         // `p.f = f()?;` (#1151): on success the assignment
                         // gives a part of p, on its own column, a new value.
                         hover_messages::event_dot_owner_drop_if_try_returns_part(&name, &note, &part)
                     } else if note.is_empty() {
                         event.print_message_with_name(&mut name)
-                    } else if matches!(event, Event::OwnerDropIfTryReturns) {
+                    } else if matches!(event, Event::OwnerDropIfTryReturns { .. }) {
                         hover_messages::event_dot_owner_drop_if_try_returns(&name, &note)
                     } else {
                         hover_messages::event_dot_owner_drop_at_reassign(&name, &note)
@@ -3426,7 +3443,7 @@ fn leaves_value_as_it_was(branch_history: &[BranchData]) -> bool {
 fn leaves_in_some_branch(branch_history: &[BranchData]) -> bool {
     branch_history.iter().any(|b| b.diverges || b.e_data.iter().any(|(_, e)|
         // (Or a `?` in it may return early, #1582.)
-        matches!(e, Event::OwnerDropIfTryReturns)
+        matches!(e, Event::OwnerDropIfTryReturns { .. })
         || matches!(e, Event::Branch { branch_history, .. } if leaves_in_some_branch(branch_history))))
 }
 
@@ -3446,8 +3463,13 @@ fn moves_in_some_branch(branch_history: &[BranchData]) -> bool {
 // join gives the column a new value, also in a conditional nested in it
 // (#1582).
 fn assigns_in_some_branch(branch_history: &[BranchData]) -> bool {
-    branch_history.iter().filter(|b| !b.diverges).any(|b| b.e_data.iter().any(|(_, e)|
-        matches!(e, Event::OwnerDropAtReassign { .. } | Event::Acquire { .. }) || assigns_in_branch(e)))
+    // (Only branches that get to the join, also in a conditional nested
+    // in one: `if e { x = …; return; }` doesn't, #1600 review.)
+    branch_history.iter().filter(|b| !b.diverges).any(|b| b.e_data.iter().any(|(_, e)| match e {
+        Event::OwnerDropAtReassign { .. } | Event::Acquire { .. } => true,
+        Event::Branch { branch_history, .. } => assigns_in_some_branch(branch_history),
+        _ => false,
+    }))
 }
 
 // `init_at_end` for events that follow a point where the column was in
@@ -5257,7 +5279,7 @@ fn try_partial_move_split(visualization_data: &VisualizationData, hash: u64, lin
     fn try_drop_at(top: &[(usize, Event)], history: &[(usize, Event)], line: usize) -> Option<bool> {
         for (i, (l, e)) in history.iter().enumerate() {
             match e {
-                Event::OwnerDropIfTryReturns if *l == line =>
+                Event::OwnerDropIfTryReturns { .. } if *l == line =>
                     return Some(history_path(top, history, i).is_some_and(|path| maybe_moved_at_end(&path))),
                 Event::Branch { branch_history, .. } => {
                     if let Some(m) = branch_history.iter().find_map(|b| try_drop_at(top, &b.e_data, line)) {
