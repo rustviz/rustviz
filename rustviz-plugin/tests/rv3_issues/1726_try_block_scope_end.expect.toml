@@ -2,8 +2,7 @@ issue = 1726
 cluster = "C13"
 title = "`?` in a try block, d moved after it: no path reaches the block's end with d holding a value, so no drop flag"
 fn = "g"
-xfail = "P0"
-note = "Gap (expected): try blocks (early exit of the block as a break) and their early-exit drop rows"
+note = "Passes since rv3-p0b: a `?` in a `try` block (`residual_into_try_type` in the desugaring, where a fn's `?` has `from_residual`) is recognised as an early exit of the block, like a `break`: its path's drop of d (MIR span the block's `}`) is on the `?`'s row, and the `}` row keeps only the normal path's drop, which has nothing to drop."
 beyond_facts = "P3: d's scope-end dot says 'dropped here only if d still holds it (runtime drop flag)'"
 
 [[drop]]

@@ -1,8 +1,7 @@
 issue = 1627
 cluster = "C25"
 title = "Closure reading and writing through a captured `&mut` (`println!(\"{}\", r); *r += 1;`) holds r by a unique borrow: r unusable, not read-only"
-xfail = "P0"
-note = "Gap: the spike puts the closure's unique loan of r on the closure's last line (row 7), not on the row the closure expression starts (row 4); the capture's kind (unique) and end are right."
+note = "Passes since rv3-p0b: a closure's capture borrows (MIR span: the whole closure expression) are on the row its expression starts (the `|..|` head), not its last row; the closure value itself is still made on the statement's last row (row 7, rule 2), so r is lent to f after row 7 as before."
 beyond_facts = "P2/P3: the capture's text must not call this an immutable borrow (needs a capture-kind flag on the event)"
 
 [[loan]]

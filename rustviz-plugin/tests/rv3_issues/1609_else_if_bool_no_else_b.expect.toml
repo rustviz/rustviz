@@ -2,8 +2,7 @@ issue = 1609
 cluster = "C46"
 title = "Same shape with a local `&mut` (m = &mut s): m's loan of s ends once per path, including the `!a && !b` path of the implicit else"
 fn = "else_if_bool"
-xfail = "P0"
-note = "Gap (spike): the empty `a` arm's end is dumped as 4 -> 5 and the implicit else's as 5 -> 7 (right); the first should also go to the rejoin `}` on row 7: the `a` path never runs the else-if line."
+note = "Passes since rv3-p0b: the next row of an end's edge skips the unit value of an empty arm when its block starts on the branch's own row (`if a {` with its `}` on the `} else if b {` row) and skips plain jumps, so the empty `a` arm's end goes to the rejoin `}` on row 7, not the else-if row 5 that path never runs."
 beyond_facts = "P3: the nested conditional of `else if b` isn't drawn, so the `!a && !b` path has no leg and no end dot; renderer-level"
 
 # One end per path: `a` (row 4), neither (the edge out of the `else if b`

@@ -256,7 +256,7 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
         if matches!(fact, Fact::BorrowEnd { .. }) {
             order.2 = 1;
         }
-        let ev = Ev { col: self.rows.col.get(&at).copied().unwrap_or(0), arm: self.rows.arm_of(at), fact, order };
+        let ev = Ev { col: self.rows.col.get(&at).copied().unwrap_or(0), arm: self.rows.arm_of(at), fact, order, site: None };
         (row, ev)
     }
 }
@@ -1196,6 +1196,12 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         out.sort();
         out
     };
+    // The hidden iterator of a `for` loop (`let mut iter =
+    // IntoIterator::into_iter(<head>)` in the desugaring).
+    let for_iter = |l: Local| {
+        let decl = &body.local_decls[l];
+        decl.is_user_variable() && decl.source_info.span.desugaring_kind() == Some(rustc_span::DesugaringKind::ForLoop)
+    };
     // ---- moves, copies, inits, re-points, drops, scope ends ---------------------
     let mut temps: BTreeMap<Local, TempInfo> = BTreeMap::new();
     for (&loc, _) in &cx.rows.row {
@@ -1229,6 +1235,27 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                                     && !body.local_decls[p.local].ty.is_box()
                                     && cx.names.locals.contains_key(&p.local);
                                 if !through_ref {
+                                    push(&mut evs, cx.ev(loc, Fact::Move { path, to, in_macro: in_macro.clone() }));
+                                }
+                            }
+                            // A part of a temporary moved into a variable (`let
+                            // Some(x) = make_o().opt else ..`): named by the
+                            // temporary's source text.
+                            Operand::Move(p)
+                                if !p.projection.is_empty()
+                                    && p.local != RETURN_PLACE
+                                    && p.local.index() > body.arg_count
+                                    && !body.local_decls[p.local].is_user_variable()
+                                    && !body.local_decls[p.local].source_info.span.from_expansion()
+                                    // (A `Copy` value is copied, not moved: `n = (_t.0)` of
+                                    // a checked `+`'s `(usize, bool)` is arithmetic.)
+                                    && !ty_info(p.ty(&body.local_decls, tcx).ty).0
+                                    && cx.is_user(*lhs) =>
+                            {
+                                let sp = body.local_decls[p.local].source_info.span;
+                                if let Ok(text) = tcx.sess.source_map().span_to_snippet(sp) {
+                                    let path = cx.names.name_in_temp(body, *p, text.trim().to_string());
+                                    let to = cx.dest_name(*lhs, loc, 0);
                                     push(&mut evs, cx.ev(loc, Fact::Move { path, to, in_macro: in_macro.clone() }));
                                 }
                             }
@@ -1402,7 +1429,12 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                                 ev.0 = *r;
                                 ev.1.col = cx.rows.col.get(at).copied().unwrap_or(0);
                                 ev.1.arm = cx.rows.arm_of(*at);
-                                ev.1.order = cx.rows.order(*at);
+                                // In the order MIR runs it on that path: after
+                                // the exit's own drops of inner scopes (`t`
+                                // before `s` at `return`), which come before it
+                                // in the CFG; one copy per exit site.
+                                ev.1.order = cx.rows.order(loc);
+                                ev.1.site = Some(cx.rows.order(*at));
                                 push(&mut evs, ev);
                             }
                         }
@@ -1427,14 +1459,24 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 } else if place.local != RETURN_PLACE
                     && place.local.index() > body.arg_count
                     && place.projection.is_empty()
-                    && !body.local_decls[place.local].source_info.span.from_expansion()
+                    // (A macro's own locals aren't the user's; a `for` loop's
+                    // hidden iterator is: it holds what the loop hasn't
+                    // taken yet.)
+                    && (!body.local_decls[place.local].source_info.span.from_expansion() || for_iter(place.local))
                     && matches!(state, Some("own" | "maybe" | "partly"))
                 {
                     let decl = &body.local_decls[place.local];
                     let sp = decl.source_info.span;
-                    let what: String = tcx.sess.source_map().span_to_snippet(sp.source_callsite()).unwrap_or_else(|_| "?".into());
+                    // (The iterator's span is the loop's head expression, in
+                    // the desugaring: not its call site, the whole loop.)
+                    let sm = tcx.sess.source_map();
+                    let what: String = if for_iter(place.local) {
+                        format!("into_iter({})", sm.span_to_snippet(sp).unwrap_or_else(|_| "?".into()).trim())
+                    } else {
+                        sm.span_to_snippet(sp.source_callsite()).unwrap_or_else(|_| "?".into())
+                    };
                     let what: String = what.chars().take(40).collect();
-                    let created_line = cx.r.line_hi(sp);
+                    let created_line = if for_iter(place.local) { sm.lookup_char_pos(sp.hi()).line } else { cx.r.line_hi(sp) };
                     let drop_row = cx.rows.event_row.get(&loc).copied().unwrap_or(0);
                     let held_by = temp_holders.get(&place.local).cloned().unwrap_or_default();
                     // Extended: a variable holds a loan of it and it outlives the
@@ -1452,10 +1494,32 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         held_by,
                     });
                     ti.extended |= extended;
-                    if !ti.drop_lines.contains(&drop_row) {
-                        ti.drop_lines.push(drop_row);
+                    // Early exits that share the drop run it too (two
+                    // `return`s out of a `for` loop drop its iterator): one
+                    // event on each exit's row, if it holds a value there.
+                    let shared = cx.rows.shared_exits.get(&loc).cloned().unwrap_or_default();
+                    if let LookupResult::Exact(mpi) = rt_md.rev_lookup.find(place.as_ref()) {
+                        for (r, at) in &shared {
+                            if drop_how(&rt.state(&[*at], true, mpi)) == "nothing_to_drop" {
+                                continue;
+                            }
+                            let mut ev = cx.ev(loc, Fact::TempDrop { what: what.clone(), created_line, extended, early_exit: Some(*r) });
+                            ev.0 = *r;
+                            ev.1.col = cx.rows.col.get(at).copied().unwrap_or(0);
+                            ev.1.arm = cx.rows.arm_of(*at);
+                            ev.1.site = Some(cx.rows.order(*at));
+                            if !ti.drop_lines.contains(r) {
+                                ti.drop_lines.push(*r);
+                            }
+                            push(&mut evs, ev);
+                        }
                     }
-                    push(&mut evs, cx.ev(loc, Fact::TempDrop { what, created_line, extended, early_exit }));
+                    if !cx.rows.exit_only.contains(&loc) {
+                        if !ti.drop_lines.contains(&drop_row) {
+                            ti.drop_lines.push(drop_row);
+                        }
+                        push(&mut evs, cx.ev(loc, Fact::TempDrop { what, created_line, extended, early_exit }));
+                    }
                 }
             }
             _ => {}
@@ -1677,8 +1741,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         let mut fs = evs.remove(&line).unwrap_or_default();
         fs.sort_by_key(|e| e.order);
         // Only the same fact from the same MIR location is a duplicate (two
-        // evaluations of one argument are two events).
-        fs.dedup_by(|a, b| a.fact == b.fact && a.order == b.order);
+        // evaluations of one argument are two events), on the same exit site
+        // (a drop two early exits share is one event per exit).
+        fs.dedup_by(|a, b| a.fact == b.fact && a.order == b.order && a.site == b.site);
         row.facts = fs;
         out_rows.push(row);
     }

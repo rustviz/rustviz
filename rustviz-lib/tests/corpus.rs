@@ -31411,6 +31411,54 @@ fn facts_pin_review_1850() {
     assert!(q.contains(&"q.x".to_owned()) && !q.iter().any(|c| c == "q.secret"), "{q:?}");
 }
 
+/// What the review of #1851 found wrong in the facts, each fixed from MIR
+/// (`rv3_facts_review_1851.rs`).
+#[test]
+fn facts_pin_review_1851() {
+    let src = read_corpus("rv3_facts_review_1851");
+    let rv = run_with_local_backend("rv3_facts_review_1851");
+    let facts = rv.facts().expect("the plugin gave no facts (RV3_FACTS)");
+    let body = |f: &str| fact_body(facts, f);
+    let all = |b: &serde_json::Value| -> Vec<serde_json::Value> {
+        b["rows"].as_array().unwrap().iter().flat_map(|r| r["facts"].as_array().unwrap().clone()).collect()
+    };
+    let tempdrop = |fs: &[serde_json::Value], what: &str| fs.iter().any(|f| f["ev"] == "TempDrop" && f["what"] == what);
+    // `a.len() + b.len()`: a checked add's `(usize, bool)` field is copied
+    // arithmetic, not a move.
+    let b = body("checked_add");
+    assert!(!all(b).iter().any(|f| f["ev"] == "Move"), "{:#?}", all(b));
+    // A failing let-else whose `else` only returns drops the scrutinee's
+    // temporary before the `else` block runs: on the `let` row.
+    let b = body("letelse_return");
+    assert!(tempdrop(&row_facts(b, src_row_in(&src, b, "let Some(x) = Src.get()")), "Src"), "{:#?}", all(b));
+    assert!(!tempdrop(&row_facts(b, src_row_in(&src, b, "return;")), "Src"));
+    // Two `return`s in a one-line let-else: only the binding path goes on.
+    let b = body("two_returns");
+    assert_eq!(fact_row(b, src_row_in(&src, b, "let Some(x) = o else"))["state"]["x"], "own");
+    // `?` in a `try` block in tail position leaves the block, not the fn:
+    // d is dropped at the fn's end, not on the `?` row.
+    let b = body("try_tail");
+    assert!(!row_facts(b, src_row_in(&src, b, "o?;")).iter().any(|f| f["ev"] == "Drop" && f["path"] == "d"));
+    // A capture borrow is on the closure's first row, even after the
+    // closure's own reads of matched places spanned inside its body.
+    let b = body("capture_match");
+    assert_eq!(fact_loan(b, src_row_in(&src, b, "let c = || {"), "y")["kind"], "shared");
+    // `for s in iter`: the loop's hidden iterator is no column, whatever the
+    // head variable's name; its drop is a temporary's.
+    let b = body("iter_named");
+    assert!(tempdrop(&all(b), "into_iter(iter)"), "{:#?}", all(b));
+    // (The user's `iter` keeps 2.x's column name, `iter` + an invisible
+    // scope mark: 2.x counts the hidden binding apart.)
+    assert_eq!(b["vars"].as_array().unwrap().iter().filter(|v| v["name"].as_str().unwrap().trim_end_matches('\u{E000}') == "iter").count(), 1);
+    // Each exit that leaves a `for` loop drops its iterator, on its row.
+    let b = body("two_returns_in_loop");
+    for r in ["return 1;", "return 2;"] {
+        assert!(tempdrop(&row_facts(b, src_row_in(&src, b, r)), "into_iter(v)"), "{r}: {:#?}", all(b));
+    }
+    let b = body("break_in_loop");
+    assert!(tempdrop(&row_facts(b, src_row_in(&src, b, "break;")), "into_iter(v)"), "{:#?}", all(b));
+}
+
 /// What the review of #1833 found wrong in the facts, each fixed from MIR
 /// (`rv3_facts_review_1833.rs`).
 #[test]

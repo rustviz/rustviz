@@ -72,6 +72,15 @@ impl<'tcx> Names<'tcx> {
             {
                 continue;
             }
+            // A `for` loop's hidden iterator (`let mut iter = into_iter(..)`
+            // of the desugaring, declared at the loop's head expression): not
+            // the user's, even when the head is a variable named `iter`.
+            let decl_span = body.local_decls[place.local].source_info.span;
+            if span.desugaring_kind() == Some(rustc_span::DesugaringKind::ForLoop)
+                && decl_span.desugaring_kind() == Some(rustc_span::DesugaringKind::ForLoop)
+            {
+                continue;
+            }
             let written = sm.span_to_snippet(span).unwrap_or_default();
             let w = written.trim_start_matches("ref ").trim_start_matches("mut ").trim();
             let w = w.strip_prefix("r#").unwrap_or(w);
@@ -132,6 +141,13 @@ impl<'tcx> Names<'tcx> {
         let (root, skip, _) = self.root(place)?;
         let mut ty = place_ty_prefix(tcx, body, place, skip);
         Some(name_projections(root, &mut ty, &place.projection[skip..]))
+    }
+
+    /// A place in a MIR temporary, written from the temporary's source
+    /// text: `(make_o().opt as Some).0`.
+    pub fn name_in_temp(&self, body: &Body<'tcx>, place: Place<'tcx>, root: String) -> String {
+        let mut ty = body.local_decls[place.local].ty;
+        name_projections(root, &mut ty, &place.projection[..])
     }
 
     /// The reference a place is reached through, if it is behind one: the

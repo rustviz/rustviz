@@ -851,8 +851,8 @@ impl Pat {
             Some((h, t)) => (h.trim(), Some(t.trim().to_owned())),
             None => (s.trim(), None),
         };
-        let mut w = head.split_whitespace();
-        let (Some(kind), Some(place), None) = (w.next(), w.next(), w.next()) else {
+        // (A place may have spaces: `(make_o().opt as Some).0`.)
+        let Some((kind, place)) = head.split_once(char::is_whitespace).map(|(k, p)| (k, p.trim())).filter(|(_, p)| !p.is_empty()) else {
             return Err(format!("event {s:?} isn't `<kind> <place>[ -> <target>]`"));
         };
         if !EVENT_KINDS.contains(&kind) {

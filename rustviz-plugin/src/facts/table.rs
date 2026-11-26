@@ -322,7 +322,7 @@ mod tests {
     }
 
     fn row(line: usize, cols: &[(&str, &'static str)], lent: &[(&str, usize, &'static str)], facts: Vec<(Option<usize>, Fact)>) -> Row {
-        let facts = facts.into_iter().map(|(arm, fact)| Ev { col: 1, arm, fact, order: (0, 0, 0) }).collect();
+        let facts = facts.into_iter().map(|(arm, fact)| Ev { col: 1, arm, fact, order: (0, 0, 0), site: None }).collect();
         Row { line, after: state(cols, lent), facts, arms: Vec::new() }
     }
 

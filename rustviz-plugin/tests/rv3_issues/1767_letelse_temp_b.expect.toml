@@ -3,12 +3,11 @@ cluster = "C29"
 title = "One-line let-else drawn as a branch: the temporary `make_o()` and the pattern's move out of it stay on the row; the arrow to x slants"
 fn = "temp"
 beyond_facts = "P3: renderer-level, to be checked visually: the temporary's dots before/after the join; here the events on the line are pinned"
-xfail = "P0"
-note = "The issue's `make_o().opt` made concrete: `struct O { opt: Option<String> }`, so the pattern moves a String out of the temporary. The spike has no `move _ -> x` out of the temporary's field (only a TempDrop), no drop of s on the `return` row, and x's state after row 5 is not own."
+note = "The issue's `make_o().opt` made concrete: `struct O { opt: Option<String> }`, so the pattern moves a String out of the temporary. Passes since rv3-p0b: a move of a part of a MIR temporary into a variable is a Move event named by the temporary's source text (`(make_o().opt as Some).0 -> x`), and the state after a row that also holds a `return` path (the one-line let-else) is the continuing path's (Q3), not the union with the path that left the fn."
 
 [[event]]
 row = 5
-ev = "move _ -> x"
+ev = "move (make_o().opt as Some).0 -> x"
 src = "issue"
 why = "x binds the String by move out of the temporary's `opt` field (compiles: O has no Drop, so a partial move out of the temporary is allowed)"
 

@@ -1,8 +1,7 @@
 issue = 1793
 cluster = "C37"
 title = "`for` loop iterator: \"nothing bound it to a variable or moved it on\" (the loop binds it)"
-xfail = "P0"
-note = "Spike: the dump has no TempDrop for the `for` loop's hidden iterator (only `Drop s` on row 5)."
+note = "Passes since rv3-p0b: a `for` loop's hidden iterator (a desugaring-made binding, not a column) is reported like a temporary: its drop is a TempDrop (`into_iter(v)`), and the loop's own drops on its way out are on the loop's `}` row (their desugaring span), not on the `for` row (the desugaring's call site)."
 beyond_facts = "P3: wording of the iterator's drop text (the drop timing in the issue is right)"
 
 [[event]]
@@ -19,7 +18,7 @@ src = "issue"
 
 [[event]]
 row = 5
-ev = "tempdrop _"
+ev = "tempdrop into_iter(v)"
 src = "issue"
 why = "MIR of main (-Zmir-include-spans): the iterator is dropped by a `drop(_6)` / `drop(_8)` at 5:5, the loop's `}`; Drop-printing program: the remaining Strings are dropped as the iterator is, after the last iteration"
 
