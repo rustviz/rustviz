@@ -1601,7 +1601,7 @@ fn render_branch_dots(
                 // below, says what is dropped.
                 hover_messages::event_dot_branch_merge_temp_moved_out(&is.real_name())
             } else if rap.box_contents_moved() && moves_only_box_contents(branch_history) {
-                hover_messages::event_dot_branch_merge_box_contents_moved(&is.real_name())
+                hover_messages::event_dot_branch_merge_box_contents_moved(&is.real_name(), rap.is_mut())
             } else if let Some(kw) = by_cond.filter(|_| chain_condition_assigned_here(branch_history)) {
                 // It may have been given a new value when it held none
                 // (#603): no "if nothing above moved it".

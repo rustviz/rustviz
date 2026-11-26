@@ -2743,8 +2743,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// `r?` with `r` a non-`Copy` variable (or field) moves `r` first, on
   /// both paths (#652): unless `match_rhs` drew that move into the
   /// variable `r?` is bound to, it is drawn here as a move into the
-  /// `?`. `r` isn't dropped by the early return: the error in it goes
-  /// to the caller.
+  /// `?`. `r` isn't dropped by the early return: the residual in it goes
+  /// on with the early return (to the caller, or to an enclosing `try` block).
   ///
   /// A tuple-literal scrutinee whose arm or if branch the `?` is in
   /// (`live_tuples`) is dropped too if it returns early, after what

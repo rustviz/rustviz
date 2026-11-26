@@ -378,7 +378,7 @@ fn contents_moved(d: &Dot) -> bool {
 /// why the old Box doesn't drop the moved value.
 fn reboxes_contents(d: &Dot) -> bool {
     d.tip.split(" / ").any(|part| part.trim_start_matches("• ").starts_with(&format!("*{}'s ", d.var)))
-        && d.tip.contains("contents were moved out earlier, so the previous Box doesn't drop that value")
+        && d.tip.contains("contents were moved out earlier, so the previous Box doesn't drop them")
 }
 
 /// A slice pattern's move of some elements out of an array that keeps
@@ -899,7 +899,7 @@ mod unit {
     #[test]
     fn a_box_reboxing_its_own_contents_is_allowed() {
         // `b = Box::new(*b);` (#1423): the old Box no longer owns the payload.
-        let tip = "• *b's resource is moved / • b acquires ownership of a new resource. Its previous contents were moved out earlier, so the previous Box doesn't drop that value here.";
+        let tip = "• *b's resource is moved / • b acquires ownership of a new resource. Its previous contents were moved out earlier, so the previous Box doesn't drop them; only its heap allocation, if it has one, is freed here.";
         let b = [header("b", 1), line("b", 1, 95, 215, "full_privilege"), dot("b", 1, 95, "acquire", false, "a"),
                  dot("b", 1, 155, "move acquire owner_drop_at_reassign", false, tip),
                  dot("b", 1, 215, "owner_go_out_of_scope", true, "o")].concat();
@@ -909,7 +909,7 @@ mod unit {
         let whole = b.replace(tip, "• b's resource is moved / • b acquires ownership of a new resource; its previous resource is dropped");
         assert_eq!(invs(&whole), vec!["drop-of-moved-value-at-reassign"]);
         // And so is a contents move whose drop text says the old value is dropped.
-        let wrong = b.replace("Its previous contents were moved out earlier, so the previous Box doesn't drop that value here.", "Its previous resource is dropped.");
+        let wrong = b.replace("Its previous contents were moved out earlier, so the previous Box doesn't drop them; only its heap allocation, if it has one, is freed here.", "Its previous resource is dropped.");
         assert_eq!(invs(&wrong), vec!["drop-of-moved-value-at-reassign"]);
     }
 

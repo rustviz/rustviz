@@ -129,10 +129,11 @@ pub fn event_dot_closure_go_out_of_scope(my_name: &String, move_capture_count: u
 }
 
 // A `Box` whose whole contents were moved out (`take(*b)`, #609) goes
-// out of scope without dropping the value that was moved.
+// out of scope without dropping the value that was moved. Its heap
+// allocation is freed; a zero-sized payload has none (#1608).
 pub fn event_dot_box_contents_moved_go_out_of_scope(my_name: &String) -> String {
     format!(
-        "{} goes out of scope. Its contents were moved out earlier, so the Box doesn't drop that value here.",
+        "{} goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation, if it has one, is freed.",
         styled_name_html(my_name)
     )
 }
@@ -183,9 +184,11 @@ pub fn event_dot_struct_partial_go_out_of_scope(
     // may have moved it (#1031): whether it's dropped isn't down to
     // whether something above moved it, so "only if it still holds it".
     kept: bool,
-    // An emptied Box can have no fields left to drop (#602).
+    // A `Box` a field was moved out of (#602): Rust still frees the
+    // box's heap allocation (none for a zero-sized payload, #1608).
     boxed: bool,
 ) -> String {
+    const FREED: &str = " The Box's heap allocation, if it has one, is freed.";
     fn join(names: &[String]) -> (String, bool) {
         let fmt: Vec<String> = names.iter().map(|n| styled_name_html(n)).collect();
         let s = match fmt.len() {
@@ -256,6 +259,7 @@ pub fn event_dot_struct_partial_go_out_of_scope(
             let (dropped_s, dropped_plural) = join(dropped);
             out.push_str(&format!(" {} {} dropped.", dropped_s, if dropped_plural { "are" } else { "is" }));
         }
+        if boxed { out.push_str(FREED); }
         return out;
     }
     let (moved_s, moved_plural) = join(moved);
@@ -266,11 +270,12 @@ pub fn event_dot_struct_partial_go_out_of_scope(
         format!("only {} {} dropped", dropped_s, if dropped_plural { "are" } else { "is" })
     };
     format!(
-        "{0} goes out of scope. {1} {2} moved out earlier, so {3}.",
+        "{0} goes out of scope. {1} {2} moved out earlier, so {3}.{4}",
         styled_name_html(my_name),
         moved_s,
         if moved_plural { "were" } else { "was" },
-        rest
+        rest,
+        if boxed { FREED } else { "" }
     )
 }
 
@@ -505,7 +510,7 @@ pub fn event_dot_owner_drop_at_reassign_maybe_moved(my_name: &String, note: &str
 pub fn event_dot_owner_drop_at_reassign_box_contents_moved(my_name: &String) -> String {
     format!(
         "{} acquires ownership of a new resource. Its previous contents were moved out earlier, \
-         so the previous Box doesn't drop that value here.",
+         so the previous Box doesn't drop them; only its heap allocation, if it has one, is freed here.",
         styled_name_html(my_name)
     )
 }
@@ -536,9 +541,14 @@ pub fn event_dot_box_contents_write_after_move(deref_name: &String, holds: Optio
 
 // Scope end of a Box whose contents need no drop (`Box<P>`, P with no
 // drop glue) and were moved out in some branches only (#929): nothing of
-// the contents needs dropping on any path.
+// the contents needs dropping on any path; the Box's heap allocation (if
+// any: a zero-sized payload has none, #1608) is freed on every path.
 pub fn event_dot_go_out_of_scope_box_plain_contents_maybe_moved(my_name: &str) -> String {
-    format!("{} goes out of scope. Its contents may have been moved out and need no drop.", styled_name_html(my_name))
+    format!(
+        "{} goes out of scope. Its contents may have been moved out above; they need no drop either way. \
+         The Box's heap allocation, if it has one, is freed here.",
+        styled_name_html(my_name)
+    )
 }
 
 /// Who may have moved a maybe-moved variable, for the drop-flag
@@ -2565,11 +2575,11 @@ pub fn event_dot_mut_borrow(my_name: &String, holds_value: bool) -> String {
 
 // A shared reference holding a mutable loan (`let r: &String = &mut
 // s;`, `let r = downgrade(&mut s);` with `fn(&mut String) -> &str`):
-// r can only read, but s stays mutably borrowed while r is live
-// (#1122).
+// r gives only shared access (which can still mutate through a `Cell`,
+// #1655), but s stays mutably borrowed while r is live (#1122).
 pub fn event_dot_mut_borrow_by_shared_ref(my_name: &String, holds_value: bool) -> String {
     format!(
-        "{0} is a shared reference made from a mutable borrow of a {1}. It gives shared access to the borrowed {1}",
+        "{0} is a shared reference made from a mutable borrow of a {1}: {0} only gives shared access to it, but the borrow stays mutable while {0} is live",
         styled_name_html(my_name), held(holds_value)
     )
 }
@@ -3783,12 +3793,14 @@ pub fn state_borrowed_by_loop_iterator(my_name: &String, holds_value: bool) -> S
 }
 
 // PartialPrivilege on a `&mut` reference's lifeline: what it points to
-// is shared through it (`let r3 = &*r;`), preventing exclusive access until
-// those shared borrows end (#313). r owns nothing, so the owner's
-// "r's resource is being shared" was wrong.
+// is shared through it (`let r3 = &*r;`), so until those shared borrows
+// end r can only do what a shared reference could: read, or mutate
+// through interior mutability (`Cell::set`, #1655), but not `*r = …` or
+// `r.push(…)` (#313). r owns nothing, so the owner's "r's resource is
+// being shared" was wrong.
 pub fn state_mut_ref_partial_privilege(my_name: &String, pointee_copy: bool) -> String {
     format!(
-        "{0} holds a mutable reference. While the {1} it points to is shared, {0} can't overwrite it",
+        "{0} holds a mutable reference, but the {1} it points to is currently shared through it, so {0} can only use it the way a shared reference can",
         styled_name_html(my_name), held(pointee_copy)
     )
 }
@@ -4148,9 +4160,19 @@ fn branch_merge_unless(by_cond: bool) -> &'static str {
     if by_cond { "If nothing above moved it" } else { "If the branch that ran didn't move it" }
 }
 
-// The join doesn't determine when (or whether) a later drop will happen.
-pub fn event_dot_branch_merge_box_contents_moved(my_name: &str) -> String {
-    format!("{}'s contents may have been moved out. Using the whole Box requires initialized contents.", styled_name_html(my_name))
+// Only a Box's contents (`let w = *e;`), not the Box, were moved out on
+// some paths (#921): rustc rejects any use of e after the join (E0382)
+// except a new value for `*e` or for e (both need `let mut e`). The join
+// doesn't say when (or whether) the old contents are dropped later: a
+// later write or move can change that (#1608).
+pub fn event_dot_branch_merge_box_contents_moved(my_name: &str, mutable: bool) -> String {
+    let name = styled_name_html(my_name);
+    let until = if mutable {
+        format!(" until {} or {} is assigned again", styled_name_html(&format!("*{}", my_name)), name)
+    } else {
+        String::new()
+    };
+    format!("{0}'s contents may have been moved out above, so {0} can't be used from here on{1}.", name, until)
 }
 
 // `event_dot_branch_merge_moved_with_drop` when the variable is assigned

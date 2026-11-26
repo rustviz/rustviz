@@ -3491,7 +3491,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "push no longer borrows the resource r2 points to",
             "the resource r points to is mutably borrowed by push through r; r can't be used while the borrow is live",
             "the resource r points to is immutably borrowed by r3 through r",
-            "r holds a mutable reference. While the resource it points to is shared, r can't overwrite it",
+            "r holds a mutable reference, but the resource it points to is currently shared through it, so r can only use it the way a shared reference can",
             "r3 no longer borrows the resource r points to",
             "the value p points to is mutably borrowed by q through p; p can't be used while the borrow is live",
             "q mutably borrows a value",
@@ -9579,7 +9579,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "b.name's resource is moved",
             "Move from b.name to take",
-            "b goes out of scope. b.name was moved out earlier, so only b.tag is dropped.",
+            "b goes out of scope. b.name was moved out earlier, so only b.tag is dropped. The Box's heap allocation, if it has one, is freed.",
         ],
         must_not_contain: &[
             "b goes out of scope. Its resource is dropped.",
@@ -9589,7 +9589,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "box_field_move_all",
         must_contain: &[
             "b.name's resource is moved",
-            "b goes out of scope. b.name was moved out earlier, so no field is dropped.",
+            "b goes out of scope. b.name was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
         ],
         must_not_contain: &[
             "b goes out of scope. Its resource is dropped.",
@@ -9601,7 +9601,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "box_field_move_branch",
         must_contain: &[
             "b.name's resource is moved",
-            "b goes out of scope. b.name was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). b.tag is dropped.",
+            "b goes out of scope. b.name was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). b.tag is dropped. The Box's heap allocation, if it has one, is freed.",
         ],
         must_not_contain: &[
             "b goes out of scope. Its resource is dropped.",
@@ -9611,7 +9611,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "box_field_move_param",
         must_contain: &[
             "b.name's resource is moved",
-            "b goes out of scope. b.name was moved out earlier, so no field is dropped.",
+            "b goes out of scope. b.name was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
         ],
         must_not_contain: &[
             "b goes out of scope. Its resource is dropped.",
@@ -9656,7 +9656,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "box_contents_move",
         must_contain: &[
-            "b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop that value here.",
+            "b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation, if it has one, is freed.",
         ],
         must_not_contain: &[
             "=b goes out of scope. No resource is dropped.",
@@ -9665,7 +9665,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "box_contents_move_string",
         must_contain: &[
-            "b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop that value here.",
+            "b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation, if it has one, is freed.",
         ],
         must_not_contain: &[
             "=b goes out of scope. No resource is dropped.",
@@ -9675,7 +9675,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "box_contents_move_pattern",
         must_contain: &[
-            "b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop that value here.",
+            "b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation, if it has one, is freed.",
         ],
         must_not_contain: &[
             "=b goes out of scope. No resource is dropped.",
@@ -9689,6 +9689,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "heap allocation is freed",
+            "heap allocation, if it has one",
         ],
     },
     // ─── Or-pattern arms that bind a reference, tuple or struct from
@@ -15720,21 +15721,21 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from b2.1 to n",
             "n is initialized with a copy of b2.1",
             "b2.0 goes out of scope. No resource is dropped.",
-            "b2 goes out of scope. b2.0 was moved out earlier, so no field is dropped.",
+            "b2 goes out of scope. b2.0 was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
             "Move from bp.a to a",
             "bp.a's resource is moved",
             "bp.a goes out of scope. No resource is dropped.",
             "bp.b goes out of scope. Its resource is dropped.",
-            "bp goes out of scope. bp.a was moved out earlier, so only bp.b is dropped.",
+            "bp goes out of scope. bp.a was moved out earlier, so only bp.b is dropped. The Box's heap allocation, if it has one, is freed.",
             "Move from bq.s to s2",
             "k is initialized with a copy of bq.k",
-            "bq goes out of scope. bq.s was moved out earlier, so no field is dropped.",
+            "bq goes out of scope. bq.s was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
             "Move from b4.0 to x",
             "Move from b4.1 to y",
-            "b4 goes out of scope. b4.0 and b4.1 were moved out earlier, so no field is dropped.",
+            "b4 goes out of scope. b4.0 and b4.1 were moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
             "Move from bo.pair.0 to s3",
             "m is initialized with a copy of bo.pair.1",
-            "bo goes out of scope. bo.pair.0 was moved out earlier, so no field is dropped.",
+            "bo goes out of scope. bo.pair.0 was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
         ],
         must_not_contain: &[
             "*b2's resource is moved",
@@ -15897,23 +15898,23 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "n7 is initialized with a copy of b7.1",
             "b7.0's resource is moved",
             "b7.0 goes out of scope. No resource is dropped.",
-            "b7 goes out of scope. b7.0 was moved out earlier, so no field is dropped.",
+            "b7 goes out of scope. b7.0 was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
             "Move from b2.0 to s",
             "Copy from b2.1 to n",
             "b2.0 goes out of scope. No resource is dropped.",
-            "b2 goes out of scope. b2.0 was moved out earlier, so no field is dropped.",
+            "b2 goes out of scope. b2.0 was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
             "Move from b3.0 to s3",
             "Copy from b3.1 to n3",
             "b3.0 goes out of scope. No resource is dropped: b3.0 was moved or dropped in every branch above.",
-            "b3 goes out of scope. b3.0 was moved out earlier, so no field is dropped.",
+            "b3 goes out of scope. b3.0 was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
             "Move from bp.a to a",
             "bp.a goes out of scope. No resource is dropped.",
             "bp.b goes out of scope. Its resource is dropped.",
-            "bp goes out of scope. bp.a was moved out earlier, so only bp.b is dropped.",
+            "bp goes out of scope. bp.a was moved out earlier, so only bp.b is dropped. The Box's heap allocation, if it has one, is freed.",
             "Move from bq.b to b",
             "Return immutably borrowed resource from r to bq.a",
             "bq.a goes out of scope. Its resource is dropped.",
-            "bq goes out of scope. bq.b was moved out earlier, so only bq.a is dropped.",
+            "bq goes out of scope. bq.b was moved out earlier, so only bq.a is dropped. The Box's heap allocation, if it has one, is freed.",
         ],
         must_not_contain: &[
             "Move from *b7 to s7",
@@ -15951,7 +15952,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from b5.1 to n5",
             "b5.0 was moved: the condition moves b5.0 to s5 before it can turn out false, so the move has happened even when the body is skipped, and b5.0 can't be used after the if. When the condition fails after that move, s5 goes out of scope and its resource is dropped.",
             "b5.0 goes out of scope. No resource is dropped: b5.0 was moved or dropped in every branch above.",
-            "b5 goes out of scope. b5.0 was moved out earlier, so no field is dropped.",
+            "b5 goes out of scope. b5.0 was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
         ],
         must_not_contain: &[
             "Move from *b5 to s5",
@@ -16576,17 +16577,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from *b1 to x",
             "Move from b1.0 to s",
             "b1.0 goes out of scope. No resource is dropped: b1.0 was moved or dropped in every branch above.",
-            "b1 goes out of scope. b1.0 was moved out earlier, so no field is dropped.",
+            "b1 goes out of scope. b1.0 was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
             "b1 isn't moved in any of the branches above",
             "Move from *b2 to x",
             "b2.0 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "b2 goes out of scope. b2.0 was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "b2 goes out of scope. b2.0 was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). The Box's heap allocation, if it has one, is freed.",
             "Move from *b3 to x",
             "b3.0 goes out of scope. No resource is dropped: b3.0 was moved or dropped in every branch above.",
-            "b3 goes out of scope. b3.0 was moved out earlier, so no field is dropped.",
+            "b3 goes out of scope. b3.0 was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
             "Move from *b4 to take",
             "b4.0 goes out of scope. No resource is dropped: b4.0 was moved or dropped in every branch above.",
-            "b4 goes out of scope. b4.0 was moved out earlier, so no field is dropped.",
+            "b4 goes out of scope. b4.0 was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
         ],
         must_not_contain: &[
             "b1.0 goes out of scope. Its resource is dropped here only if no branch above moved it",
@@ -16621,7 +16622,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from b.0 to s2",
             "Copy from b.1 to n2",
             "b.0 goes out of scope. No resource is dropped.",
-            "b goes out of scope. b.0 was moved out earlier, so no field is dropped.",
+            "b goes out of scope. b.0 was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
             "Move from p.a to a",
             "p.a goes out of scope. No resource is dropped.",
             "p goes out of scope. p.a was moved out earlier, so only p.b is dropped.",
@@ -17016,7 +17017,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "q.name goes out of scope. No resource is dropped: q.name was moved or dropped in every branch above.",
             "b.name's resource is moved into the temporary tuple (v, b.name)",
             "The temporary tuple (v, b.name) is dropped here, at the end of the if branch, and with it b.name's resource",
-            "b goes out of scope. b.name was moved out earlier, so only b.tag is dropped.",
+            "b goes out of scope. b.name was moved out earlier, so only b.tag is dropped. The Box's heap allocation, if it has one, is freed.",
         ],
         must_not_contain: &[
             "=y.name goes out of scope. Its resource is dropped.",
@@ -17275,7 +17276,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "q goes out of scope. Its resource is dropped.",
             "q.a goes out of scope. Its resource is dropped (including the String it holds, if any).",
             "p goes out of scope. p.a was moved out earlier, so only p.b is dropped.",
-            "b goes out of scope. b.0 was moved out earlier, so no field is dropped.",
+            "b goes out of scope. b.0 was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
             "q goes out of scope. q.a was moved out earlier, so only q.b is dropped.",
             "This segment leads into the Some(t) branch.",
             "This segment leads into the Ok(n) branch.",
@@ -17340,11 +17341,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // The join said "e was moved", and that the whole resource is
         // dropped only on the paths that didn't move it.
         must_contain: &[
-            "e's contents may have been moved out. Using the whole Box requires initialized contents.",
-            "f's contents may have been moved out. Using the whole Box requires initialized contents.",
-            "g's contents may have been moved out. Using the whole Box requires initialized contents.",
+            "e's contents may have been moved out above, so e can't be used from here on.",
+            "f's contents may have been moved out above, so f can't be used from here on until *f or f is assigned again.",
+            "g's contents may have been moved out above, so g can't be used from here on until *g or g is assigned again.",
             "g acquires ownership of a new resource. Whatever it still held (if anything) is dropped here.",
-            "b's contents may have been moved out. Using the whole Box requires initialized contents.",
+            "b's contents may have been moved out above, so b can't be used from here on.",
         ],
         must_not_contain: &[
             "e was moved in at least one branch above",
@@ -17384,8 +17385,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // allocation is freed on every path. It said the resource is
         // dropped only if no branch moved it, with a drop flag.
         must_contain: &[
-            "b goes out of scope. Its contents may have been moved out and need no drop.",
-            "c goes out of scope. Its contents may have been moved out and need no drop.",
+            "b goes out of scope. Its contents may have been moved out above; they need no drop either way. The Box's heap allocation, if it has one, is freed here.",
+            "c goes out of scope. Its contents may have been moved out above; they need no drop either way. The Box's heap allocation, if it has one, is freed here.",
         ],
         must_not_contain: &[
             "b goes out of scope. Its resource is dropped here only if no branch above moved it",
@@ -17468,11 +17469,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // is dropped at its scope end. Checked with a `Drop`-printing
         // type.
         must_contain: &[
-            "e's contents may have been moved out. Using the whole Box requires initialized contents.",
+            "e's contents may have been moved out above, so e can't be used from here on until *e or e is assigned again.",
             "*e acquires ownership of a new resource. Its previous String is dropped here only if nothing above moved it out (Rust tracks this with a runtime drop flag).",
-            "f's contents may have been moved out. Using the whole Box requires initialized contents.",
+            "f's contents may have been moved out above, so f can't be used from here on until *f or f is assigned again.",
             "f acquires ownership of a new resource. Whatever it still held (if anything) is dropped here.",
-            "g's contents may have been moved out. Using the whole Box requires initialized contents.",
+            "g's contents may have been moved out above, so g can't be used from here on.",
         ],
         must_not_contain: &[
             "e was moved in at least one branch above",
@@ -19686,7 +19687,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "the resource v points to is immutably borrowed by the `for` loop's iterator through v until the loop ends",
             "the `for` loop's iterator no longer borrows the resource v points to",
-            "v holds a mutable reference. While the resource it points to is shared, v can't overwrite it",
+            "v holds a mutable reference, but the resource it points to is currently shared through it, so v can only use it the way a shared reference can",
             "the resource r points to is immutably borrowed by the `for` loop's iterator through r until the loop ends",
             "the `for` loop's iterator no longer borrows the resource r points to",
             "self.items is mutably borrowed by the `for` loop's iterator; self.items can't be used until the loop ends",
@@ -19731,7 +19732,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the resource self points to is modified through x",
             "the resource self points to is modified through e",
             "the resource b points to is immutably borrowed by the `for` loop's iterator through b until the loop ends",
-            "b holds a mutable reference. While the resource it points to is shared, b can't overwrite it",
+            "b holds a mutable reference, but the resource it points to is currently shared through it, so b can only use it the way a shared reference can",
             "the `for` loop's iterator no longer borrows the resource b points to",
             "the resource b points to is mutably borrowed by the `for` loop's iterator through b; b can't be used until the loop ends",
             "the resource a points to is modified through x",
@@ -21509,14 +21510,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // heap allocation is freed", a second free). b's contents are
         // moved out again, so its scope end keeps that text.
         must_contain: &[
-            "a acquires ownership of a new resource. Its previous contents were moved out earlier, so the previous Box doesn't drop that value here.",
-            "b acquires ownership of a new resource. Its previous contents were moved out earlier, so the previous Box doesn't drop that value here.",
-            "d acquires ownership of a new resource. Its previous contents were moved out earlier, so the previous Box doesn't drop that value here.",
-            "f acquires ownership of a new resource. Its previous contents were moved out earlier, so the previous Box doesn't drop that value here.",
-            "g acquires ownership of a new resource. Its previous contents were moved out earlier, so the previous Box doesn't drop that value here.",
+            "a acquires ownership of a new resource. Its previous contents were moved out earlier, so the previous Box doesn't drop them; only its heap allocation, if it has one, is freed here.",
+            "b acquires ownership of a new resource. Its previous contents were moved out earlier, so the previous Box doesn't drop them; only its heap allocation, if it has one, is freed here.",
+            "d acquires ownership of a new resource. Its previous contents were moved out earlier, so the previous Box doesn't drop them; only its heap allocation, if it has one, is freed here.",
+            "f acquires ownership of a new resource. Its previous contents were moved out earlier, so the previous Box doesn't drop them; only its heap allocation, if it has one, is freed here.",
+            "g acquires ownership of a new resource. Its previous contents were moved out earlier, so the previous Box doesn't drop them; only its heap allocation, if it has one, is freed here.",
             "a goes out of scope. No resource is dropped.",
             "d goes out of scope. No resource is dropped.",
-            "b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop that value here.",
+            "b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation, if it has one, is freed.",
             "g goes out of scope. Its resource is dropped (including the String it holds).",
         ],
         must_not_contain: &[
@@ -21538,7 +21539,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "j acquires ownership of a new resource. Whatever it still held (if anything) is dropped here.",
         ],
         must_not_contain: &[
-            "=b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop that value here.",
+            "=b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation, if it has one, is freed.",
             "f goes out of scope. Its resource (including the String it holds) is dropped here only if no branch above moved it",
             "g goes out of scope. Its resource (including the String it holds) is dropped here only if no branch above moved it",
             "If the branch that ran didn't move it, its resource (including the String it holds) is dropped when g goes out of scope",
@@ -21730,7 +21731,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "*b's resource is moved to the caller",
             "*b's value is copied to the caller",
-            "b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop that value here.",
+            "b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation, if it has one, is freed.",
             "Move from *b to _a",
         ],
         must_not_contain: &[
@@ -21971,7 +21972,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "a's resource is mutably borrowed by ra; a can't be used while the borrow is live",
             "a's resource is mutably borrowed by ra; a can't be used until the borrow ends",
             "Return mutably borrowed resource from ra to a",
-            "ra is a shared reference made from a mutable borrow of a resource. It gives shared access to the borrowed resource",
+            "ra is a shared reference made from a mutable borrow of a resource: ra only gives shared access to it, but the borrow stays mutable while ra is live",
             "ra holds an immutable reference; it can read the borrowed value",
             "b's resource is mutably borrowed by rb; b can't be used until the borrow ends",
             "Return mutably borrowed resource from rb to b",
@@ -28015,17 +28016,19 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "box_zst_drop_1608",
         must_contain: &[
-            "b's contents may have been moved out. Using the whole Box requires initialized contents.",
+            "b's contents may have been moved out above, so b can't be used from here on.",
             "b goes out of scope. Whatever it still holds (if anything) is dropped here.",
             "If the `?` here returns early, whatever pending still holds (if anything) is dropped here.",
-            "old acquires ownership of a new resource. Its previous contents were moved out earlier, so the previous Box doesn't drop that value here.",
+            "old acquires ownership of a new resource. Its previous contents were moved out earlier, so the previous Box doesn't drop them; only its heap allocation, if it has one, is freed here.",
         ],
-        must_not_contain: &["heap allocation", "the Token is dropped when b goes out of scope"],
+        // The hedged "heap allocation, if it has one" is true for a
+        // zero-sized Token (no allocation); the unhedged claims weren't.
+        must_not_contain: &["heap allocation is freed", "the Token is dropped when b goes out of scope"],
     },
     TooltipExpect {
         name: "shared_reborrow_cell_1655",
         must_contain: &[
-            "r holds a mutable reference. While the value it points to is shared, r can't overwrite it",
+            "r holds a mutable reference, but the value it points to is currently shared through it, so r can only use it the way a shared reference can",
             "the value r points to is immutably borrowed by shared through r",
             "set takes a shared borrow through r. The borrowed value has interior mutability, so its contents can change",
         ],
