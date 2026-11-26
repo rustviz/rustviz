@@ -83,6 +83,57 @@ fn if_let_binding() {
     }
 }
 
+// A reference to the binding keeps reading through it: x's old borrow
+// (of v) lasts to z's last use.
+fn ref_to_binding() {
+    let s2 = String::from("abc");
+    let v: Vec<String> = Vec::new();
+    match v.first() {
+        Some(mut x) => {
+            let z = &x;
+            println!("{}", z);
+            x = &s2;
+        }
+        None => {}
+    }
+}
+
+// Read on the write's own line, before the write: the old borrow lasts to
+// the write.
+fn read_on_write_line() {
+    let a = String::from("a");
+    let b = String::from("b");
+    let x = &a;
+    let mut r = x;
+    let n = 1;
+    println!("{}", r); r = &b;
+    println!("{}", r);
+}
+
+// Read by the write's own right-hand side.
+fn read_by_rhs() {
+    let a = String::from("a");
+    let b = String::from("b");
+    let c = String::from("c");
+    let x = &a;
+    let mut r = x;
+    let n = 1;
+    r = if r.is_empty() { &b } else { &c };
+    println!("{}", r);
+}
+
+fn longest<'a>(a: &'a String, b: &'a String) -> &'a String {
+    if a.len() > b.len() { a } else { b }
+}
+
+// A copy of a reference that may point into s or t: both end together.
+fn copy_two_lenders(s: String, t: String, u: String) {
+    let x = longest(&s, &t);
+    let mut r = x;
+    let n = 1;
+    r = &u;
+}
+
 fn main() {
     arm_binding();
     arm_binding_read();
@@ -91,4 +142,8 @@ fn main() {
     while_let_binding();
     copied_ref();
     if_let_binding();
+    ref_to_binding();
+    read_on_write_line();
+    read_by_rhs();
+    copy_two_lenders(String::from("a"), String::from("b"), String::from("c"));
 }

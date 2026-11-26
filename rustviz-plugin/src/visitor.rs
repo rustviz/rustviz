@@ -7167,8 +7167,33 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // arm re-points h.r, with its lenders free in that arm, and a
           // co-lender ended twice (#1588).
           let field_write = matches!(lhs_expr.kind, ExprKind::Field(..));
-          let dead_before_arms = (ref_data.loan().is_none() && !matches!(ref_data.lender, ResourceTy::Anonymous) && !field_write)
-            .then(|| self.last_live_line(&me, (ref_data.assigned_at, line_num.saturating_sub(1))).unwrap_or(ref_data.assigned_at))
+          // The last line before the write that uses r's old value: r
+          // itself, or a reference to r (`let z = &x; println!("{}", z);`
+          // reads x's lender through z). None when it is used on the
+          // write's own line, before or by the write (`println!("{}", r);
+          // r = &b;`, `r = if r.is_empty() { &b } else { &c };`): then the
+          // old loan lives up to the write. (#1610's review: the end was
+          // drawn above those uses, with the lender free while they read
+          // it.)
+          let old_value_last_use = (ref_data.loan().is_none() && !field_write).then(|| {
+            let mut names = vec![me.clone()];
+            let mut k = 0;
+            while k < names.len() {
+              #[expect(clippy::disallowed_methods, reason = "filtered into a sorted Vec")]
+              let mut refs: Vec<String> = self.borrow_map.iter()
+                .filter(|(n, d)| d.lender.real_name() == names[k] && !names.contains(n))
+                .map(|(n, _)| n.clone()).collect();
+              refs.sort();
+              names.extend(refs);
+              k += 1;
+            }
+            if names.iter().any(|n| self.used_on_line_upto(n, line_num, expr.span)) {
+              return None;
+            }
+            Some(names.iter().filter_map(|n| self.last_live_line(n, (ref_data.assigned_at, line_num.saturating_sub(1))))
+              .max().unwrap_or(ref_data.assigned_at))
+          }).flatten();
+          let dead_before_arms = old_value_last_use.filter(|_| !matches!(ref_data.lender, ResourceTy::Anonymous))
             .filter(|&l| l >= ref_data.assigned_at && self.arm_frames.last().is_some_and(|&(split, _, _, _)| l < split));
           // Such a reference dead before the write on the write's own path
           // (never read since it was bound, or last read a few lines up)
@@ -7180,8 +7205,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // (#1592); likewise `let mut r = x;` and a `while let` binding.
           // (Not a last use in another arm than the write's, which is on
           // another path.)
-          let dead_since = (ref_data.loan().is_none() && matches!(ref_data.lender, ResourceTy::Value(_)) && !field_write)
-            .then(|| self.last_live_line(&me, (ref_data.assigned_at, line_num.saturating_sub(1))).unwrap_or(ref_data.assigned_at))
+          let dead_since = old_value_last_use.filter(|_| matches!(ref_data.lender, ResourceTy::Value(_)))
             .filter(|&l| l >= ref_data.assigned_at && l < line_num
               && self.arm_frames.iter().all(|&(split, _, lo, hi)| l < split || (lo <= l && l <= hi)));
           // A let-else binding drawn as a branch is bound on the join row
@@ -7428,11 +7452,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // first lender's end isn't).
             for co in ref_data.co_lenders.iter() {
               let evt = if ref_data.mut_of(co) { Evt::MDie } else { Evt::SDie };
-              let co_end = end_of(self, co);
+              // (A copy's co-lenders end with its first lender, where its
+              // old value is last used, not at the write, #1610's review.)
+              let co_end = match end_of(self, co) {
+                e if e == line_num => lift(dead_before_arms.or(dead_since).unwrap_or(e)),
+                e => e,
+              };
               #[expect(clippy::disallowed_methods, reason = "`any` over the map: order never observed")]
               let shared = matches!(co, ResourceTy::Value(_)) && !ref_data.mut_of(co) && self.borrow_map.iter().any(|(k, rd)| *k != me
                 && !gone.contains(k) && rd.all_lenders().contains(co) && rd.assigned_at <= co_end
-                && self.loan_end(rd).unwrap_or(rd.lifetime).max(rd.lifetime) >= co_end);
+                && self.loan_end(rd).unwrap_or(rd.lifetime).max(rd.lifetime) >= co_end
+                // (Not one whose loan of it is over there too, as for the
+                // first lender (`over` above): x in `let mut r = x; ..; r =
+                // &u;` with x from `longest(&s, &t)`, both last used on the
+                // copy's line. Counted, r gave s back there but not t.)
+                && !(co_end < line_num && self.old_loan_end(k, rd, co, line_num, write_span).is_some_and(|e| e <= co_end)));
               if shared {
                 if co_end != end_line {
                   self.defer_old_ends = co_end > line_num;

@@ -13323,8 +13323,8 @@ fn uses_beyond_drop(e: &ExternalEvent, r: &ResourceAccessPoint) -> bool {
 /// Whether `r` is declared in an arm of a conditional among `events`
 /// (looking into nested ones) that `o`, declared outside it, isn't used
 /// in from `r_from` (the line r's loan is made on), and whose lines don't
-/// hold `o_end`, the line o's loan ends on: o's borrow is used only on
-/// the other paths. (A use of o in the arm before r's loan is made, `let
+/// hold `o_end`, the line o's loan ends on, which is inside the
+/// conditional: o's borrow is used only on the other paths. (A use of o in the arm before r's loan is made, `let
 /// n = m.len();` before `let r3 = downgrade(&mut s2);`, ends o's loan on
 /// this path before r's starts. Counted, r3's end gave s2 nothing back,
 /// #1596.)
@@ -13333,7 +13333,7 @@ fn on_other_path(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint, o: 
   let declares = |b: &ExtBranchData, x: &ResourceAccessPoint| b.decl_vars.iter()
     .any(|d| d.hash() == x.hash() || x.name().starts_with(&format!("{}.", d.name())));
   events.iter().any(|(_, e)| {
-    let ExternalEvent::Branch { branches, branch_type, .. } = e else { return false };
+    let ExternalEvent::Branch { branches, branch_type, merge_point, .. } = e else { return false };
     if matches!(branch_type, BranchType::Loop(..)) {
       return false;
     }
@@ -13342,10 +13342,23 @@ fn on_other_path(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint, o: 
         return on_other_path(&branches[a].e_data, r, o, o_end, r_from);
       }
       let (start, end) = branch_type.get_start_end(a);
+      // (Nor when o is used after the conditional, `println!("{}", o)`
+      // after the `if` whose arm declares r: that use is on r's path too,
+      // and keeps o's loan live through r's. It ended r's borrow giving
+      // the lender back, #1610's review.)
       !branches.iter().any(|b| declares(b, o))
+        && o_end <= *merge_point
         && !(start <= o_end && o_end <= end)
-        && !branches[a].e_data.iter().any(|(l, x)| *l >= r_from && (touches(x, o)
-          || ResourceAccessPoint_extract(x).0.extract_rap().is_some_and(|f| o.name().starts_with(&format!("{}.", f.name())))))
+        && {
+          // From r's loan on: the first of the arm's events on or after
+          // `r_from` that gives r its value, so that a use of o earlier on
+          // that line (`let n = m.len(); let r3 = &mut s2;`) is before it.
+          let ev = &branches[a].e_data;
+          let from = ev.iter().position(|(l, x)| *l >= r_from && touches(x, r))
+            .or_else(|| ev.iter().position(|(l, _)| *l >= r_from)).unwrap_or(ev.len());
+          !ev[from..].iter().any(|(_, x)| touches(x, o)
+            || ResourceAccessPoint_extract(x).0.extract_rap().is_some_and(|f| o.name().starts_with(&format!("{}.", f.name()))))
+        }
     })
   })
 }

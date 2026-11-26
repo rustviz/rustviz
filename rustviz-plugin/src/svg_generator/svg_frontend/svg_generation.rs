@@ -132,8 +132,14 @@ fn grouped_field_ends(front: &[ExternalEvent]) -> usize {
             Some((*f.hash(), matches!(e, ExternalEvent::MutableDie { .. }), *t.hash())),
         _ => None,
     };
-    (0..front.len()).filter(|&k| end_of(&front[k]).is_some_and(|(f, m, t)| front[..k].iter()
-        .any(|o| end_of(o).is_some_and(|(f2, m2, t2)| f2 == f && m2 == m && t2 != t)))).count()
+    // (One loan's: no new value given to the field between the two, `h.r
+    // = &t; h.r = &String::new();` ends two loans, drawn as two arrows.)
+    let gives_field = |e: &ExternalEvent, f: u64| matches!(e, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }
+        | ExternalEvent::Move { .. } | ExternalEvent::Copy { .. })
+        && ResourceAccessPoint_extract(e).1.extract_rap().is_some_and(|r| *r.hash() == f);
+    (0..front.len()).filter(|&k| end_of(&front[k]).is_some_and(|(f, m, t)| (0..k)
+        .any(|j| end_of(&front[j]).is_some_and(|(f2, m2, t2)| f2 == f && m2 == m && t2 != t)
+            && !front[j + 1..k].iter().any(|o| gives_field(o, f))))).count()
 }
 
 /// Splits the arrows that share one source line (and so get stacked
@@ -228,6 +234,17 @@ fn split_same_line_borrow_ends(group: &[ExternalEvent], in_arm: bool) -> (Vec<Ex
             }
             let Some(src) = rap_hash(ResourceAccessPoint_extract(&group[j]).0) else { continue };
             if (0..j).any(|i| moved[i] && is_end(&group[i]) && ends(&group[i]).is_some_and(|(_, t)| t == src)) {
+                moved[j] = true;
+            }
+            // So does a borrow into a reference listed after an end below of
+            // that reference's borrow: a later write to it, after the loan the
+            // line gave it first is over (`h.r = &t; h.r = &u;`). Left on
+            // the first row beside that loan's borrow, the two were drawn as
+            // one borrow that may point into t or u (#1610's review).
+            // (A reference: a closure's captures are all one value.)
+            let into = ResourceAccessPoint_extract(&group[j]).1.extract_rap().filter(|r| r.is_ref()).map(|r| *r.hash());
+            if matches!(group[j], ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. })
+                && into.is_some() && (0..j).any(|i| moved[i] && is_end(&group[i]) && ends(&group[i]).is_some_and(|(f, _)| Some(f) == into)) {
                 moved[j] = true;
             }
         }
