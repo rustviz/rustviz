@@ -1,0 +1,260 @@
+//! Naming MIR places the way the source writes them, and deciding which
+//! columns a loan restricts.
+//!
+//! Names: `s`, `p.a`, `t.0`, `b.a` (a field of a Box payload: the source
+//! auto-derefs), `*b`, `v[_]` (any index), `(o as Some).0` (an enum
+//! variant's field), `r.f` (a field behind a reference). Variables keep
+//! the 2.x column names (`s`, `s₂`) from `binding_names`.
+
+use crate::expr_visitor_utils::{binding_names, written_name};
+use rustc_middle::mir::{Body, Local, Place, PlaceElem, ProjectionElem, VarDebugInfoContents};
+use rustc_middle::ty::{Ty, TyCtxt, TyKind};
+use std::collections::BTreeMap;
+
+/// How a closure body sees a captured variable.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Capture {
+    ByValue,
+    ByRef,
+    ByMutRef,
+}
+
+pub struct Names<'tcx> {
+    /// User variables that are whole locals.
+    pub locals: BTreeMap<Local, String>,
+    /// Variables that live at a projection of a local: a closure's
+    /// captures (`(*_1).0`, or `*((*_1).0)` for a capture by reference).
+    pub aliases: Vec<(Place<'tcx>, String, Capture)>,
+}
+
+impl<'tcx> Names<'tcx> {
+    pub fn new(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> Self {
+        let owner = tcx.local_def_id_to_hir_id(body.source.def_id().expect_local()).owner;
+        let names = binding_names(&tcx, owner);
+        let sm = tcx.sess.source_map();
+        let mut locals: BTreeMap<Local, String> = BTreeMap::new();
+        let mut aliases = Vec::new();
+        for vdi in body.var_debug_info.iter() {
+            let VarDebugInfoContents::Place(place) = vdi.value else { continue };
+            let span = vdi.source_info.span;
+            let ident = vdi.name.as_str();
+            if !place.projection.is_empty() {
+                // A closure's captured variable: its debug info names the
+                // place in the closure's environment.
+                if place.local.as_usize() == 1 && is_closure_env(tcx, body) {
+                    let cap = capture_kind(body, place);
+                    let name = names
+                        .by_span
+                        .iter()
+                        .find(|(sp, n)| span.contains(*sp) && written_name(n) == ident)
+                        .map_or_else(|| ident.to_owned(), |(_, n)| n.clone());
+                    aliases.push((place, name, cap));
+                }
+                continue;
+            }
+            // A match guard sees its bindings through a reference of its
+            // own (`RefForGuard`), named like the binding: not a column.
+            if matches!(
+                body.local_decls[place.local].local_info(),
+                rustc_middle::mir::LocalInfo::User(rustc_middle::mir::BindingForm::RefForGuard(_))
+            ) {
+                continue;
+            }
+            // Only bindings the user wrote: not `val` of a `?`, `iter` of
+            // a `for`, `args` of `format_args!` (MIR's own), whose span
+            // text isn't the name.
+            if span.from_expansion() && span.desugaring_kind().is_none()
+                || span.desugaring_kind().is_some_and(|k| !matches!(k, rustc_span::DesugaringKind::ForLoop))
+            {
+                continue;
+            }
+            let written = sm.span_to_snippet(span).unwrap_or_default();
+            let w = written.trim_start_matches("ref ").trim_start_matches("mut ").trim();
+            let w = w.strip_prefix("r#").unwrap_or(w);
+            if w != ident && !(w == "self" || w.ends_with("self")) {
+                continue;
+            }
+            let name = names
+                .by_span
+                .iter()
+                .find(|(sp, n)| span.contains(*sp) && written_name(n) == ident)
+                .map_or_else(|| ident.to_owned(), |(_, n)| n.clone());
+            locals.entry(place.local).or_insert(name);
+        }
+        // Longest alias first, so the most specific one names a place.
+        aliases.sort_by_key(|(p, _, _)| std::cmp::Reverse(p.projection.len()));
+        Names { locals, aliases }
+    }
+
+    /// The variable a place starts at, and how many projections that
+    /// variable's own place takes (0 for a local, more for a capture).
+    pub fn root(&self, place: Place<'tcx>) -> Option<(String, usize, Option<Capture>)> {
+        if let Some(n) = self.locals.get(&place.local) {
+            return Some((n.clone(), 0, None));
+        }
+        for (p, n, cap) in &self.aliases {
+            if p.local == place.local
+                && p.projection.len() <= place.projection.len()
+                && place.projection.iter().zip(p.projection.iter()).all(|(a, b)| same_elem(a, b))
+            {
+                return Some((n.clone(), p.projection.len(), Some(*cap)));
+            }
+        }
+        None
+    }
+
+    /// The place as the source would write it, if it starts at a user
+    /// variable.
+    pub fn name(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'tcx>) -> Option<String> {
+        let (root, skip, _) = self.root(place)?;
+        let mut ty = place_ty_prefix(tcx, body, place, skip);
+        Some(name_projections(root, &mut ty, &place.projection[skip..]))
+    }
+
+    /// The reference variable a place is reached through, if its first
+    /// projection after the variable is a deref of a reference (`*r`,
+    /// `r.f` with `r: &mut S`): a reborrow, "through r".
+    pub fn through(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'tcx>) -> Option<String> {
+        let (root, skip, _) = self.root(place)?;
+        let ty = place_ty_prefix(tcx, body, place, skip);
+        match place.projection.get(skip) {
+            Some(ProjectionElem::Deref) if ty.is_ref() => Some(root),
+            _ => None,
+        }
+    }
+}
+
+/// Two projection elements are the same step (a field's type differs
+/// between debug info and the body by its region variables).
+fn same_elem<'tcx>(a: PlaceElem<'tcx>, b: PlaceElem<'tcx>) -> bool {
+    match (a, b) {
+        (ProjectionElem::Field(f, _), ProjectionElem::Field(g, _)) => f == g,
+        (ProjectionElem::Downcast(_, v), ProjectionElem::Downcast(_, w)) => v == w,
+        _ => a == b,
+    }
+}
+
+fn is_closure_env<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> bool {
+    tcx.is_closure_like(body.source.def_id())
+}
+
+fn capture_kind<'tcx>(body: &Body<'tcx>, place: Place<'tcx>) -> Capture {
+    // `(*_1).0` / `_1.0`: by value; `*((*_1).0)`: through a captured
+    // reference, whose type says shared or mutable.
+    if place.projection.last() == Some(&ProjectionElem::Deref) {
+        let mut ty = body.local_decls[place.local].ty;
+        for (i, e) in place.projection.iter().enumerate() {
+            if i + 1 == place.projection.len() {
+                return match ty.kind() {
+                    TyKind::Ref(_, _, rustc_middle::mir::Mutability::Mut) => Capture::ByMutRef,
+                    _ => Capture::ByRef,
+                };
+            }
+            ty = project_ty(ty, &e);
+        }
+    }
+    Capture::ByValue
+}
+
+/// The type after the first `n` projections of `place`.
+fn place_ty_prefix<'tcx>(_tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'tcx>, n: usize) -> Ty<'tcx> {
+    let mut ty = body.local_decls[place.local].ty;
+    for e in place.projection.iter().take(n) {
+        ty = project_ty(ty, &e);
+    }
+    ty
+}
+
+fn project_ty<'tcx>(ty: Ty<'tcx>, e: &PlaceElem<'tcx>) -> Ty<'tcx> {
+    match e {
+        ProjectionElem::Field(_, fty) => *fty,
+        ProjectionElem::Deref => ty.builtin_deref(true).unwrap_or(ty),
+        ProjectionElem::Index(_) | ProjectionElem::ConstantIndex { .. } => match ty.kind() {
+            TyKind::Array(t, _) | TyKind::Slice(t) => *t,
+            _ => ty,
+        },
+        _ => ty,
+    }
+}
+
+/// `root` followed by `proj`, written the way the source would.
+fn name_projections<'tcx>(root: String, ty: &mut Ty<'tcx>, proj: &[PlaceElem<'tcx>]) -> String {
+    let mut name = root;
+    // A pending deref: written `*x` unless a field follows (`x.f`).
+    let mut deref = 0usize;
+    let mut downcast: Option<String> = None;
+    for e in proj {
+        match e {
+            ProjectionElem::Deref => {
+                deref += 1;
+            }
+            ProjectionElem::Field(f, _) => {
+                let fname = match ty.kind() {
+                    TyKind::Adt(def, _) if def.is_struct() || def.is_union() => {
+                        def.non_enum_variant().fields[*f].name.to_string()
+                    }
+                    TyKind::Adt(def, _) if def.is_enum() => match &downcast {
+                        Some(v) => {
+                            let var = def.variants().iter().find(|vd| vd.name.as_str() == v);
+                            var.map_or_else(|| f.index().to_string(), |vd| vd.fields[*f].name.to_string())
+                        }
+                        None => f.index().to_string(),
+                    },
+                    TyKind::Closure(..) => format!("<cap{}>", f.index()),
+                    _ => f.index().to_string(),
+                };
+                // A deref followed by a field is the source's auto-deref.
+                deref = 0;
+                if let Some(v) = downcast.take() {
+                    name = format!("({} as {}).{}", name, v, fname);
+                } else {
+                    name = format!("{}.{}", name, fname);
+                }
+            }
+            ProjectionElem::Index(_) | ProjectionElem::ConstantIndex { .. } | ProjectionElem::Subslice { .. } => {
+                // `v[_]` indexes through `Vec`'s / a reference's deref.
+                deref = 0;
+                if let Some(v) = downcast.take() {
+                    name = format!("({} as {})", name, v);
+                }
+                name = format!("{}[_]", name);
+            }
+            ProjectionElem::Downcast(Some(sym), _) => {
+                if deref > 0 {
+                    name = format!("{}{}", "*".repeat(deref), name);
+                    deref = 0;
+                }
+                downcast = Some(sym.to_string());
+            }
+            _ => {}
+        }
+        *ty = project_ty(*ty, e);
+    }
+    if let Some(v) = downcast {
+        name = format!("({} as {})", name, v);
+    }
+    if deref > 0 {
+        name = format!("{}{}", "*".repeat(deref), name);
+    }
+    name
+}
+
+/// A projection the column model gives a column of its own: a struct or
+/// tuple field, or a Box's payload.
+pub fn column_projection<'tcx>(body: &Body<'tcx>, place: Place<'tcx>, skip: usize) -> bool {
+    let mut ty = body.local_decls[place.local].ty;
+    for (i, e) in place.projection.iter().enumerate() {
+        if i >= skip {
+            let ok = match e {
+                ProjectionElem::Field(..) => true,
+                ProjectionElem::Deref => ty.is_box(),
+                _ => false,
+            };
+            if !ok {
+                return false;
+            }
+        }
+        ty = project_ty(ty, &e);
+    }
+    true
+}

@@ -28222,6 +28222,9 @@ fn render_uncached(name: &str) -> Result<Rustviz, String> {
     // we only ever set it to the same value. The library reads RV_RUNNER
     // on each Rustviz::new call.
     env::set_var("RV_RUNNER", "local");
+    // RustViz 3: every render carries the fact layer's output too
+    // (`Rustviz::facts`), for the fact pins and the fact oracle.
+    env::set_var("RV3_FACTS", "1");
     let src = read_corpus(name);
     Rustviz::new(&src).map_err(|e| format!("{} failed: {}", name, e))
 }
@@ -31088,6 +31091,128 @@ fn corpus_oracle_holds() {
     );
 }
 
+/// The body `func` of a fixture's facts.
+fn fact_body<'a>(facts: &'a serde_json::Value, func: &str) -> &'a serde_json::Value {
+    facts["bodies"].as_array().unwrap().iter().find(|b| b["func"] == func)
+        .unwrap_or_else(|| panic!("no body {func} in the facts"))
+}
+
+/// The facts row for `line` of a body.
+fn fact_row(body: &serde_json::Value, line: u64) -> &serde_json::Value {
+    body["rows"].as_array().unwrap().iter().find(|r| r["line"] == line)
+        .unwrap_or_else(|| panic!("no row {line} in {}", body["func"]))
+}
+
+/// The loan of `lender` taken on `line`.
+fn fact_loan<'a>(body: &'a serde_json::Value, line: u64, lender: &str) -> &'a serde_json::Value {
+    body["loans"].as_array().unwrap().iter().find(|l| l["line"] == line && l["lender"] == lender)
+        .unwrap_or_else(|| panic!("no loan of {lender} on row {line} in {}: {:#}", body["func"], body["loans"]))
+}
+
+/// What the fact layer records for each construct P0 covers
+/// (`rv3_facts_constructs.rs`), as Rust has it. The oracle
+/// (`corpus_facts_oracle_holds`) checks states against rustc; these pin
+/// the presentation data it can't probe (holders, macro arguments,
+/// two-phase borrows, reborrows, temporaries, arms, early exits, closures).
+#[test]
+fn facts_pin_constructs() {
+    let rv = run_with_local_backend("rv3_facts_constructs");
+    let facts = rv.facts().expect("the plugin gave no facts (RV3_FACTS)");
+    assert_eq!(facts["version"], 1);
+    assert_eq!(facts["errors"].as_array().map(Vec::len), Some(0), "{:#}", facts["errors"]);
+    let main = fact_body(facts, "main");
+    let s = |v: &serde_json::Value| v.as_str().unwrap_or_default().to_owned();
+    // A closure that pushes to `list` holds a mutable loan of it until its
+    // last call; `list` can't be used meanwhile.
+    let cap = fact_loan(main, 15, "list");
+    assert_eq!(cap["kind"], "mut");
+    assert_eq!(cap["holders"], serde_json::json!(["f"]));
+    assert_eq!(cap["end_lines"], serde_json::json!([16]));
+    assert_eq!(fact_row(main, 15)["lent"]["list"][0]["kind"], "mut");
+    // `println!("{list:?}")` borrows `list` for the macro.
+    let fmt = fact_loan(main, 17, "list");
+    assert_eq!(fmt["kind"], "shared");
+    assert_eq!(fmt["in_macro"], "println!");
+    // `H { r: &mut n, .. }`: the field `h.r` holds the loan.
+    let field = fact_loan(main, 19, "n");
+    assert_eq!(field["holders"][0], "h.r");
+    // `v.push(v.len())`: a two-phase mutable borrow for `push`, and a
+    // shared one for `len` while it is only reserved.
+    let push = main["loans"].as_array().unwrap().iter()
+        .find(|l| l["line"] == 22 && l["lender"] == "v" && l["kind"] == "mut").unwrap();
+    assert_eq!(push["two_phase"], true);
+    assert_eq!(push["to_call"], "push");
+    assert_eq!(fact_loan(main, 22, "v")["kind"], "mut");
+    // `r.push(2)` reborrows through `r`; it doesn't borrow `v` anew.
+    let rb = fact_loan(main, 24, "*r");
+    assert_eq!(rb["through"], "r");
+    assert!(!main["loans"].as_array().unwrap().iter().any(|l| l["line"] == 24 && l["lender"] == "v"));
+    // `let t = &String::from("tmp");` extends the temporary to the end of
+    // `main`; it is dropped there, not on its own row.
+    let tmp = main["temps"].as_array().unwrap().iter().find(|t| s(&t["what"]) == "String::from(\"tmp\")").unwrap();
+    assert_eq!(tmp["extended"], true);
+    assert_eq!(tmp["held_by"], serde_json::json!(["t"]));
+    assert_eq!(tmp["drop_lines"], serde_json::json!([39]));
+    // `if c { v.push(1); } else { drop(v); }` on one row: two arms, `v`
+    // moved in one, still owned in the other, maybe moved after the row.
+    let one = fact_row(main, 28);
+    assert_eq!(one["arms"].as_array().map(Vec::len), Some(2), "{:#}", one["arms"]);
+    let mut arm_states: Vec<String> = one["arms"].as_array().unwrap().iter().map(|a| s(&a["state"]["v"])).collect();
+    arm_states.sort();
+    assert_eq!(arm_states, ["moved", "own"]);
+    assert_eq!(one["state"]["v"], "maybe");
+    // `let x = b.a;` moves a field out of the Box: `b` is partly moved.
+    let bx = fact_row(main, 30);
+    assert_eq!(bx["state"]["b"], "partly");
+    assert_eq!(bx["state"]["b.a"], "moved");
+    assert_eq!(bx["parts"]["b"]["moved"], serde_json::json!(["b.a"]));
+    // `if let Some(ref s) = o`: the loan is of `(o as Some).0`, and it
+    // restricts the column `o`.
+    let var = fact_loan(main, 32, "(o as Some).0");
+    assert!(var["columns"].as_array().unwrap().contains(&serde_json::json!("o")));
+    // `&mut arr[0]` restricts `arr` while `e` is live.
+    let idx = fact_loan(main, 36, "arr[_]");
+    assert_eq!(idx["holders"], serde_json::json!(["e"]));
+    assert_eq!(fact_row(main, 36)["lent"]["arr"][0]["kind"], "mut");
+    // An early `return`: `s` is dropped on that path at the `return`,
+    // and still owned on the path that goes on.
+    let early = fact_body(facts, "early");
+    let ret = fact_row(early, 44);
+    assert!(ret["facts"].as_array().unwrap().iter().any(|f| f["ev"] == "Drop" && f["path"] == "s" && f["early_exit"] == 44),
+        "{:#}", ret["facts"]);
+    assert_eq!(fact_row(early, 45)["state"]["s"], "own");
+    // Closure bodies have facts of their own: a `move` closure owns its
+    // capture and moves it out.
+    let cl = facts["bodies"].as_array().unwrap().iter().find(|b| b["kind"] == "closure" && b["parent"] == "moving_closure").unwrap();
+    let cs = cl["vars"].as_array().unwrap().iter().find(|v| v["name"] == "s").unwrap();
+    assert_eq!(cs["capture"], "by_value");
+    assert_eq!(fact_row(cl, 52)["state"]["s"], "moved");
+    // In `main`, the closure's captures are loans held by `f`; inside it,
+    // `list` is used through its captured reference.
+    let fc = facts["bodies"].as_array().unwrap().iter().find(|b| b["kind"] == "closure" && b["parent"] == "main").unwrap();
+    assert_eq!(fc["vars"][0]["capture"], "by_mut_ref");
+}
+
+/// A match guard sees its bindings through references of its own; they
+/// are not columns (they were named like the binding and hid its move).
+#[test]
+fn facts_pin_guard_binding_and_let_else() {
+    let rv = run_with_local_backend("partial_move_one_arm_struct");
+    let main = fact_body(rv.facts().unwrap(), "main");
+    assert_eq!(main["vars"].as_array().unwrap().iter().filter(|v| v["name"] == "a").count(), 1);
+    assert_eq!(fact_row(main, 19)["state"]["a"], "moved");
+    // `let Some(x) = opt else { ..d.into_bytes()..; return; };`: the
+    // `};` row shows the path that goes on, where `d` still has its value.
+    let rv = run_with_local_backend("let_else_move_1133");
+    let method = fact_body(rv.facts().unwrap(), "method");
+    assert_eq!(fact_row(method, 30)["facts"].as_array().unwrap().iter()
+        .filter(|f| f["ev"] == "Move" && f["path"] == "d").count(), 1);
+    // The `};` row has no code of its own on the path that goes on: no
+    // state there, and the next row's says `d` has its value.
+    assert!(!method["rows"].as_array().unwrap().iter().any(|r| r["line"] == 32 && r["state"].get("d").is_some_and(|d| d != "own")));
+    assert_eq!(fact_row(method, 33)["state"]["d"], "own");
+}
+
 #[test]
 fn corpus_all_fixtures_produce_well_formed_svg() {
     let skipped: Vec<&str> = SKIP_WELL_FORMED.iter().map(|(n, _)| *n).collect();
@@ -31255,6 +31380,7 @@ fn plugin_output_is_deterministic() {
             let again = render_uncached(name).unwrap_or_else(|e| panic!("{}", e));
             if again.code_panel_string() != first.code_panel_string()
                 || again.timeline_panel_string() != first.timeline_panel_string()
+                || again.facts() != first.facts()
             {
                 failures.push(format!("{}: run {} differs from run 1", name, run));
                 break;
