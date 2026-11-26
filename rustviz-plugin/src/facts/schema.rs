@@ -108,7 +108,7 @@ pub struct LoanInfo {
 }
 
 /// One place's state after a row (or an arm of a row).
-#[derive(Serialize, Clone, PartialEq, Eq, Default)]
+#[derive(Serialize, Clone, Debug, PartialEq, Eq, Default)]
 pub struct Lent {
     pub loan: usize,
     /// "shared" | "mut" | "unique" (a closure's unique immutable capture)
@@ -121,7 +121,7 @@ pub struct Lent {
     pub holder: String,
 }
 
-#[derive(Serialize, Clone, Default, PartialEq, Eq)]
+#[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Parts {
     /// Field paths moved out on every path.
     pub moved: Vec<String>,

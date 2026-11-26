@@ -1,7 +1,6 @@
 issue = 1592
 cluster = "C05"
 title = "`match` arm binding re-pointed before it is read: its unused first loan is drawn ending at the write, a row late"
-xfail = "P0"
 note = "Gap (spike): four ends for v's loan, (4,4) (4,8) (5,6) (5,8): one per path is (4,8) on the None arm and (5,6) after the Some binding. rv3-p0 build: four ends too, (4,4) (4,8) (5,6) (5,8)."
 
 # The Some path's last use of the scrutinee is binding x (row 5); the None

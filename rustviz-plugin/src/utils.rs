@@ -256,7 +256,8 @@ impl RV1Helper {
     hidden_source_lines: HashSet<usize>,
     approx_notes: Vec<ApproxNote>,
     write_to_cwd: bool,
-    facts: Option<serde_json::Value>) -> Result<()> {
+    facts: Option<serde_json::Value>,
+    state_table: crate::facts::table::StateTable) -> Result<()> {
     let mut keys_to_remove: Vec<usize> = Vec::new();
     for (k, v) in line_map.iter() {
       if v.is_empty() {
@@ -273,7 +274,7 @@ impl RV1Helper {
 
 
     // send stuff to RV1
-    let mut rv = Rustviz::new(&annotated_source_str, &self.source_str, p_events, line_map, num_raps, fn_start_lines, shadow_notes, binding_columns, moves_out_first, temp_emptying_moves, hidden_source_lines, approx_notes)?;
+    let mut rv = Rustviz::new(&annotated_source_str, &self.source_str, p_events, line_map, num_raps, fn_start_lines, shadow_notes, binding_columns, moves_out_first, temp_emptying_moves, hidden_source_lines, approx_notes, state_table)?;
 
     if write_to_cwd { // write the SVG files
       self.source_path.pop(); // just write to inside cwd

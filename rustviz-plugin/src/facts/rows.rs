@@ -446,6 +446,45 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
             let nxt = ex.iter().flat_map(|(_, rs)| rs.iter().copied()).filter(|x| x > r).min();
             let keep: Vec<Location> = match nxt {
                 Some(n) => ex.iter().filter(|(_, rs)| rs.contains(&n)).map(|(l, _)| *l).collect(),
+                // Every exit goes back up from a row with nothing but the
+                // loop body's closing `}` on it (its `StorageDead`s and the
+                // jump back): what the next row sees is the loop's way
+                // out, reached from here (`s` may be unassigned after `for
+                // _ in v { s = .. }`, #1789). A row of code in the body
+                // keeps the back edge's state: the next iteration is its
+                // next row.
+                None if row.iter().filter(|(_, rr)| *rr == r).all(|(l, _)| {
+                    let data = &self.body.basic_blocks[l.block];
+                    self.is_quiet(*l)
+                        || match data.statements.get(l.statement_index).map(|s| &s.kind) {
+                            // (`_ = ()`: the loop's own value.)
+                            Some(StatementKind::Assign(asg)) => {
+                                matches!(&asg.1, rustc_middle::mir::Rvalue::Use(rustc_middle::mir::Operand::Constant(c)) if c.ty().is_unit())
+                            }
+                            Some(_) => false,
+                            None => matches!(data.terminator().kind, TerminatorKind::Goto { .. } | TerminatorKind::FalseUnwind { .. }),
+                        }
+                }) => {
+                    let mut seen: BTreeSet<Location> = BTreeSet::new();
+                    let mut work: Vec<Location> = ex.iter().map(|(l, _)| *l).collect();
+                    let mut out: Vec<(usize, Location)> = Vec::new();
+                    while let Some(l) = work.pop() {
+                        if !seen.insert(l) || seen.len() > 4096 {
+                            continue;
+                        }
+                        for sc in self.succs(l) {
+                            match row.get(&sc) {
+                                Some(sr) if sr > r => out.push((*sr, l)),
+                                Some(_) => work.push(sc),
+                                None => {}
+                            }
+                        }
+                    }
+                    match out.iter().map(|(sr, _)| *sr).min() {
+                        Some(n) => out.iter().filter(|(sr, _)| *sr == n).map(|(_, l)| *l).collect(),
+                        None => ex.iter().map(|(l, _)| *l).collect(),
+                    }
+                }
                 None => ex.iter().map(|(l, _)| *l).collect(),
             };
             exits.insert(*r, keep);
