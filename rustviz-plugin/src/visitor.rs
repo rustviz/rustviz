@@ -2523,7 +2523,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       .any(|m| place_within(m, rap.name()) && m != rap.name());
     // (What the value moves on some paths only gets its own dot below.)
     let handed_on: BTreeSet<String> = moved.union(&moved_some).cloned().collect();
-    let droppable: Vec<(usize, ResourceAccessPoint)> = self.droppable_locals_at(from, end, &handed_on, true, line, false)
+    let droppable: Vec<(usize, ResourceAccessPoint)> = self.droppable_locals_at(from, end, &handed_on, true, line,
+      |rap| self.ownership_here(*rap.hash(), false) != OwnHere::No)
       .into_iter().filter(|(_, rap)| !declared_outside(rap)).collect();
     // A Copy value or a reference declared in the branch the exit is in
     // (in the outermost one, if they nest) has nothing to drop, but its
@@ -2707,7 +2708,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// non-`Copy` references (`&mut T`). A temporary whose scope ended
   /// before `line` was dropped already. Each comes with its index in
   /// `in_scope`.
-  fn droppable_locals_at(&self, from: usize, end: usize, moved: &BTreeSet<String>, refs: bool, line: usize, binds: bool) -> Vec<(usize, ResourceAccessPoint)> {
+  fn droppable_locals_at(&self, from: usize, end: usize, moved: &BTreeSet<String>, refs: bool, line: usize, may_hold: impl Fn(&ResourceAccessPoint) -> bool) -> Vec<(usize, ResourceAccessPoint)> {
     if from >= end {
       return Vec::new();
     }
@@ -2728,7 +2729,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // One its drop flag decides about (moved, or given a value, on
       // some paths only) is included too: the exit drops it if it
       // still holds a value (#1194).
-      if self.ownership_here(*rd.rap.hash(), binds) == OwnHere::No {
+      if !may_hold(&rd.rap) {
         continue;
       }
       out.push((idx, rd.rap.clone()));
@@ -2807,7 +2808,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // An outer `let x;` first assigned inside the block also registered
     // a column inside it. Its declaration still owns its drop scope.
     let outer = self.scope_names(0, locals_from).into_iter().map(|(_, name)| name.to_owned()).collect();
-    for (idx, rap) in self.droppable_locals_at(locals_from, end, &outer, false, line, true) {
+    let maybe = self.maybe_initialized_at_try(try_expr.span);
+    for (idx, rap) in self.droppable_locals_at(locals_from, end, &outer, false, line,
+      |rap| maybe.contains(rap.name()) || self.ownership_here(*rap.hash(), true) != OwnHere::No) {
       while tuples.last().is_some_and(|t| idx < t.len) {
         let t = tuples.pop().unwrap();
         self.drop_tuple_if_try_returns(&t, line);
@@ -2820,14 +2823,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if rap.drops_nothing() {
         continue;
       }
-      let dup = self.preprocessed_events.iter().any(|(l, e)| *l == line
-        && matches!(e, ExternalEvent::OwnerDropIfTryReturns { ro, .. } if *ro == rap));
-      if dup {
+      let conditional = maybe.contains(rap.name());
+      if let Some((_, ExternalEvent::OwnerDropIfTryReturns { maybe_init, .. })) =
+        self.preprocessed_events.iter_mut().find(|(l, e)| *l == line
+          && matches!(e, ExternalEvent::OwnerDropIfTryReturns { ro, .. } if *ro == rap)) {
+        *maybe_init |= conditional;
         continue;
       }
       let id = *self.unique_id;
       *self.unique_id += 1;
-      self.add_external_event(line, ExternalEvent::OwnerDropIfTryReturns { ro: rap, id });
+      self.add_external_event(line, ExternalEvent::OwnerDropIfTryReturns { ro: rap, maybe_init: conditional, id });
     }
     while let Some(t) = tuples.pop() {
       self.drop_tuple_if_try_returns(&t, line);
@@ -4380,35 +4385,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ExprKind::Loop(_, _, rustc_hir::LoopSource::Loop, _) => exits_loop_before(loop_expr, at),
       _ => true,
     }
-  }
-
-  /// Of `live`, the variables (and field columns) that a loop this is
-  /// inside, and that they were declared before, gives a new value
-  /// somewhere in its body (#1026): at a join here that leaves one
-  /// maybe-moved, the value the branches that didn't move it left is
-  /// dropped by that assignment when the loop comes back round, not at
-  /// the scope end.
-  fn loop_assigned_now(&self, live: &HashSet<ResourceAccessPoint>) -> HashSet<ResourceAccessPoint> {
-    let mut out = HashSet::new();
-    for f in &self.exit_frames {
-      let ExitFrame::Loop { id, len, .. } = f else { continue };
-      let rustc_hir::Node::Expr(loop_expr) = self.tcx.hir_node(*id) else { continue };
-      let assigned = assigned_names(&self.tcx, loop_expr);
-      if assigned.is_empty() {
-        continue;
-      }
-      let outer = &self.in_scope[..(*len).min(self.in_scope.len())];
-      #[expect(clippy::iter_over_hash_type, reason = "only collects into a set; order doesn't matter")]
-      for r in live {
-        let name = r.name();
-        let root = name.split('.').next().unwrap_or("");
-        if outer.iter().any(|o| o == root)
-          && assigned.iter().any(|a| a == name || name.starts_with(&format!("{}.", a))) {
-          out.insert(r.clone());
-        }
-      }
-    }
-    out
   }
 
   /// Whether an assignment to `rap` here, which holds no value on the
@@ -7829,15 +7805,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           };
         }
       }
-      // `s = …` in a loop's body that the drawing reaches with s
-      // holding a value, where rustc says it only may (#1027): a loop
-      // above, inside this one, may have ended before giving s one
-      // after a branch above moved it, and on a later time round the
-      // value it holds may be one the time round before gave it. Only
-      // the drop flag knows. (A struct's field columns go with it.)
+      // HIR may draw a definite assignment even when an earlier loop or
+      // conditional skipped it. Check rustc's state at the overwrite itself.
       if drop_target.as_ref() == Some(rap) && maybe_init.is_none()
         && maybe_moved.iter().all(|m| !*m) && parts.iter().all(|p| p.is_none())
-        && self.exit_frames.iter().any(|f| matches!(f, ExitFrame::Loop { .. }))
         && drop_target.iter().chain(field_drop_targets.iter())
           .all(|r| self.ownership_before_assign(r.name(), lhs_expr.span, expr.span) == Some(Ownership::Maybe)) {
         maybe_init = Some(InitBy::DropFlag);
@@ -8897,7 +8868,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     let b_ty = BranchType::If(b_labels, b_slices);
     self.note_exit_scope(expr);
-    let loop_assigned = self.loop_assigned_now(&liveness);
     // (The arms' events are out of the global timeline by now: what
     // it says is the state where the `if` starts.)
     let reaching: Vec<&[(usize, ExternalEvent)]> = b_branches.iter()
@@ -8911,7 +8881,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         split_point: split,
         merge_point: merge,
         maybe_init,
-        loop_assigned,
         maybe_held,
         id: *self.unique_id });
         *self.unique_id += 1;
@@ -9750,7 +9719,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.note_all_paths_exit(expr);
     }
     self.note_exit_scope(expr);
-    let loop_assigned = self.loop_assigned_now(&liveness);
     let reaching: Vec<&[(usize, ExternalEvent)]> = branch_data.iter()
       .filter(|b| !b.diverges).map(|b| b.e_data.as_slice()).collect();
     let maybe_held = self.maybe_held_after(&liveness, &reaching, &maybe_init, &held_before, |name| self.rap_ownership_now(name));
@@ -9761,7 +9729,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       split_point: split,
       merge_point: merge,
       maybe_init,
-      loop_assigned,
       maybe_held,
       id: *self.unique_id });
     *self.unique_id += 1;
@@ -12980,7 +12947,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       .unwrap_or_else(|| get_name_of_pat(pat, &self.tcx));
     let labels = vec!["Else".to_owned(), pat_text];
     self.note_exit_scope(init);
-    let loop_assigned = self.loop_assigned_now(&liveness);
     // What the pattern takes its borrows out of, for the `else` path's
     // end of them (`end_let_else_scrutinee_borrows`, #1458).
     let holder = match init.kind {
@@ -13000,7 +12966,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       split_point: split,
       merge_point: merge,
       maybe_init: HashSet::new(),
-      loop_assigned,
       maybe_held: HashSet::new(),
       id: *self.unique_id,
     });

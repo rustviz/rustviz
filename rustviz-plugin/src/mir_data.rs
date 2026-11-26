@@ -1214,6 +1214,35 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         })
     }
 
+    /// Places that can both hold and lack a value when `?` branches, after
+    /// evaluating its operand. This fact supplements the drawn history:
+    /// divergence and short-circuiting need not have their own timeline.
+    pub fn maybe_initialized_at_try(&self, span: Span) -> BTreeSet<String> {
+        use rustc_mir_dataflow::impls::{MaybeInitializedPlaces, MaybeUninitializedPlaces};
+        use rustc_mir_dataflow::move_paths::MoveData;
+        let body = &self.bwf.body;
+        let mut calls = body.basic_blocks.iter_enumerated().filter_map(|(bb, data)| {
+            let term = data.terminator();
+            let TerminatorKind::Call { func, .. } = &term.kind else { return None };
+            let (id, _) = func.const_fn_def()?;
+            (term.source_info.span.source_equal(span)
+                && self.tcx.is_lang_item(id, rustc_hir::LangItem::TryTraitBranch))
+                .then_some(Location { block: bb, statement_index: data.statements.len() })
+        });
+        let Some(at) = calls.next() else { return BTreeSet::new() };
+        if calls.next().is_some() { return BTreeSet::new() }
+        let moves = MoveData::gather_moves(body, self.tcx, |_| true);
+        let mut init = MaybeInitializedPlaces::new(self.tcx, body, &moves)
+            .iterate_to_fixpoint(self.tcx, body, None).into_results_cursor(body);
+        let mut uninit = MaybeUninitializedPlaces::new(self.tcx, body, &moves)
+            .iterate_to_fixpoint(self.tcx, body, None).into_results_cursor(body);
+        init.seek_before_primary_effect(at);
+        uninit.seek_before_primary_effect(at);
+        self.move_path_names(&moves).into_iter()
+            .filter(|(path, _)| init.get().contains(*path) && uninit.get().contains(*path))
+            .map(|(_, name)| name).collect()
+    }
+
     /// Fill in, on the scope ends among `preprocessed_events[from..]`
     /// (this body's events, also those in a conditional's arms), what
     /// rustc's move data says the variable holds there

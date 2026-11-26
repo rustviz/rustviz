@@ -184,7 +184,7 @@ pub fn event_name(e: &Event) -> &'static str {
         Event::LoopMaybeInit { .. } => "loop_maybe_init",
         Event::LoopExitKept { .. } => "loop_exit_kept",
         Event::LoopExitMove { .. } => "loop_exit_move",
-        Event::OwnerDropIfTryReturns => "owner_drop_if_try_returns",
+        Event::OwnerDropIfTryReturns { .. } => "owner_drop_if_try_returns",
         Event::OwnerDropUnlessReturned => "owner_drop_unless_returned",
         Event::TupleTempDrop { .. } => "tuple_temp_drop",
         Event::OrAltMove { .. } => "or_alt_move",
@@ -257,6 +257,7 @@ pub fn state_name(s: &State) -> String {
         State::FullPrivilege { s } => ("full_privilege", Some(s)),
         State::PartialPrivilege { s } => ("partial_privilege", Some(s)),
         State::RevokedPrivilege { .. } => ("revoked_privilege", None),
+        State::MaybeUninit => ("maybe_uninit", None),
         State::Invalid => ("invalid", None),
     };
     match ls {

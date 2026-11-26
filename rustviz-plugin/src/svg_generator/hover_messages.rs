@@ -4089,23 +4089,13 @@ fn exits_verb(exits: &[BranchExit], plural: bool) -> String {
     }
 }
 
-/// Some-moved-some-alive case: at least one branch consumed the
-/// variable, at least one didn't. Rust treats the variable as
-/// possibly-moved after the conditional (so it can't be used) and
-/// inserts an *implicit drop* at the end of every branch where the
-/// variable wasn't moved — this keeps the merged state consistent
-/// across branches. The drop dot at the join makes that semantics
-/// visible; the tooltip names it.
-//
-// Rust doesn't drop the value at the end of the non-moving branches: it
-// keeps a runtime "drop flag" and, at the end of the variable's scope,
-// drops the value only if it wasn't moved (#179). The scope-end dot
-// says that (`event_dot_go_out_of_scope_maybe_moved`). `value`: it holds
-// a value or a reference, which owns nothing to drop.
-// `mutable`: only a `let mut` binding can be assigned again (a second
-// assignment to an immutable one is E0384). `by_cond`: a let-chain's
-// condition, not only a branch, may have moved it (`if let … && { let
-// w = s; … }`, #953); see `branch_merge_moved`.
+// A join can explain the drop rule without predicting which assignment or
+// scope exit will run. A mutable binding may be overwritten first, even
+// inside a short-circuit operand or on a later pass through a loop.
+fn drop_time(mutable: bool) -> &'static str {
+    if mutable { "is assigned again or goes out of scope, whichever happens first" } else { "goes out of scope" }
+}
+
 pub fn event_dot_branch_merge_moved_with_drop(my_name: &String, value: bool, mutable: bool, note: &str, by_cond: Option<&str>) -> String {
     let my_name_fmt = styled_name_html(my_name);
     let again = if mutable { " (until it's assigned again)" } else { "" };
@@ -4115,8 +4105,8 @@ pub fn event_dot_branch_merge_moved_with_drop(my_name: &String, value: bool, mut
     }
     let (holds, rest) = split_drop_note(note);
     format!(
-        "{0}{3}. {4}, its resource{1} is dropped{2} when {5} goes out of scope.",
-        moved, holds, rest, again, branch_merge_unless(by_cond.is_some()), my_name_fmt
+        "{0}{3}. {4}, its resource{1} is dropped{2} when {5} {6}.",
+        moved, holds, rest, again, branch_merge_unless(by_cond.is_some()), my_name_fmt, drop_time(mutable)
     )
 }
 
@@ -4175,32 +4165,21 @@ pub fn event_dot_branch_merge_box_contents_moved(my_name: &str, mutable: bool) -
     format!("{0}'s contents may have been moved out above, so {0} can't be used from here on{1}.", name, until)
 }
 
-// `event_dot_branch_merge_moved_with_drop` when the variable is assigned
-// again before it goes out of scope: the old value, if it's still there,
-// is dropped at that assignment instead (#335). `in_loop`: that
-// assignment is in a loop's body, which may end before it runs (#1012).
-pub fn event_dot_branch_merge_moved_then_reassigned(my_name: &String, by_cond: Option<&str>, in_loop: bool) -> String {
-    let name = styled_name_html(my_name);
-    format!(
-        "{} until it's assigned again. {}, its resource is dropped when {} is assigned again{}.",
-        branch_merge_moved(&name, by_cond), branch_merge_unless(by_cond.is_some()), name,
-        if in_loop { " (or, if it isn't, when it goes out of scope)" } else { "" }
-    )
-}
-
 // The join of a conditional that gives a new value, in only some of its
 // branches, to a variable that may have held none where it started
 // (#1034): `if c { drop(s); } if x { s = String::from("b"); }`. After
 // it, s holds the new value, the old one (if nothing moved it), or
 // nothing: rustc rejects a read of s there (E0382), and a drop flag
 // decides what is dropped. `value`, `mutable`: as for
-// `event_dot_branch_merge_maybe_init`. `reassigned`: as for
-// `event_dot_loop_maybe_init`.
-pub fn event_dot_branch_merge_maybe_held(my_name: &String, value: bool, mutable: bool, reassigned: Option<bool>) -> String {
+// `event_dot_branch_merge_maybe_init`. An arm ending after a loop may itself
+// leave different values on different paths.
+pub fn event_dot_branch_merge_maybe_held(my_name: &String, value: bool, mutable: bool, uncertain_arm: bool) -> String {
     let my_name_fmt = styled_name_html(my_name);
+    let why = if uncertain_arm { "" } else {
+        ": it may have had none where they start, and only some of them assign it"
+    };
     let mut out = format!(
-        "{0} may have no value after the branches: it may have had none where they start, and only some \
-         of them assign it, so it can't be used after the branches{1}.",
+        "{0} may have no value after the branches{why}, so it can't be used after the branches{1}.",
         my_name_fmt,
         if mutable { " (until it's assigned again)" } else { "" },
     );
@@ -4208,11 +4187,7 @@ pub fn event_dot_branch_merge_maybe_held(my_name: &String, value: bool, mutable:
         out.push_str(&format!(
             " If it has one, its resource is dropped when {0} {1}.",
             my_name_fmt,
-            match reassigned {
-                Some(true) => "is assigned again",
-                Some(false) => "is assigned again (or, if it isn't, when it goes out of scope)",
-                None => "goes out of scope",
-            },
+            drop_time(mutable),
         ));
     }
     out
@@ -4248,8 +4223,8 @@ pub fn event_dot_branch_merge_maybe_init(my_name: &String, value: bool, mutable:
     if !value {
         let (holds, rest) = split_drop_note(note);
         out.push_str(&format!(
-            " If the branch that ran {3}, its resource{1} is dropped{2} when {0} goes out of scope.",
-            my_name_fmt, holds, rest, assigned_in_branch_that_ran(moved)
+            " If the branch that ran {3}, its resource{1} is dropped{2} when {0} {4}.",
+            my_name_fmt, holds, rest, assigned_in_branch_that_ran(moved), drop_time(mutable)
         ));
     }
     out
@@ -4289,22 +4264,7 @@ pub fn event_dot_go_out_of_scope_temp_made(my_name: &String, made_at: Option<usi
     )
 }
 
-// `event_dot_branch_merge_maybe_init` when s is assigned again before it
-// goes out of scope: the old value, if there is one, is dropped at that
-// assignment instead. `maybe`: the next assignment is in a branch of a
-// later conditional, so on the other paths it's dropped at scope end.
-pub fn event_dot_branch_merge_maybe_init_then_reassigned(my_name: &String, maybe: bool, moved: bool) -> String {
-    format!(
-        "{0} was assigned a value in only some of the branches above, so it can't be used after \
-         the branches until it's assigned again. If the branch that ran {2}, its resource \
-         is dropped when {0} is assigned again{1}.",
-        styled_name_html(my_name),
-        if maybe { " (or, if it isn't, when it goes out of scope)" } else { "" },
-        assigned_in_branch_that_ran(moved)
-    )
-}
-
-// That next assignment (`event_dot_owner_drop_at_reassign_maybe_moved`'s
+// The next assignment (`event_dot_owner_drop_at_reassign_maybe_moved`'s
 // counterpart).
 pub fn event_dot_owner_drop_at_reassign_maybe_init(my_name: &String, note: &str, moved: bool) -> String {
     let (holds, rest) = split_drop_note(note);
@@ -4367,15 +4327,13 @@ pub fn event_dot_init_drops_earlier_iteration(my_name: &String) -> String {
 }
 
 // Where the loop ends. `value`, `mutable`: as for
-// `event_dot_branch_merge_maybe_init`. `reassigned`: s is assigned
-// again before its scope ends, on every path (`Some(true)`) or only in
-// a branch of a later conditional (`Some(false)`).
+// `event_dot_branch_merge_maybe_init`.
 //
 // `before_loop`: s only may have held a value as the loop started (a
 // branch above moved it on some paths, #1012), `Some(by_cond)` (see
 // `moved_above`): after the loop s holds one if the loop assigned it or
 // if nothing moved it before.
-pub fn event_dot_loop_maybe_init(my_name: &String, value: bool, mutable: bool, reassigned: Option<bool>, before_loop: Option<bool>) -> String {
+pub fn event_dot_loop_maybe_init(my_name: &String, value: bool, mutable: bool, before_loop: Option<bool>) -> String {
     let my_name_fmt = styled_name_html(my_name);
     let mut out = format!(
         "{0} may have no value after the loop: {2}the loop may end before assigning it, so it can't be \
@@ -4391,11 +4349,7 @@ pub fn event_dot_loop_maybe_init(my_name: &String, value: bool, mutable: bool, r
         out.push_str(&format!(
             " If the loop assigned it{2}, its resource is dropped when {0} {1}.",
             my_name_fmt,
-            match reassigned {
-                Some(true) => "is assigned again",
-                Some(false) => "is assigned again (or, if it isn't, when it goes out of scope)",
-                None => "goes out of scope",
-            },
+            drop_time(mutable),
             or_not_moved_above(before_loop)
         ));
     }
@@ -4765,10 +4719,10 @@ pub fn event_dot_branch_merge_borrow_ended(my_name: &String) -> String {
     format!("{0}'s borrow ended in each branch above", styled_name_html(my_name))
 }
 
-// Merge dot for a reference whose borrow ended before the conditional,
-// given a new one in some arms that ended there (#1524).
-pub fn event_dot_branch_merge_borrow_ended_before(my_name: &String) -> String {
-    format!("{0}'s borrow ended before the branches above, and each borrow a branch gave {0} ended in that branch", styled_name_html(my_name))
+// Some arms gave the reference a loan that ended there (#1524). The
+// reference need not have held an earlier loan on the same path (#1710).
+pub fn event_dot_branch_merge_no_live_borrow(my_name: &String) -> String {
+    format!("No borrow through {0} is live here. On paths that reach this point, each borrow a branch gave {0} ended in that branch.", styled_name_html(my_name))
 }
 
 // Dot where a conditional ends whose branches all diverge, some by
@@ -4787,6 +4741,10 @@ pub fn event_dot_branch_merge_after_break(my_name: &String, breaking: usize) -> 
 // before the conditional, until an arm gives it a new one, #1393).
 pub fn state_ref_borrow_ended(my_name: &String) -> String {
     format!("{0}'s borrow has ended on this path", styled_name_html(my_name))
+}
+
+pub fn state_no_live_borrow(my_name: &String) -> String {
+    format!("No borrow through {0} is live here.", styled_name_html(my_name))
 }
 
 // Merge dot for a variable that was moved only in branches of type `!`
@@ -5164,8 +5122,8 @@ pub fn event_dot_owner_drop_at_reassign_chain_new_value(my_name: &String, note: 
 
 // The join of the conditional whose condition it was (`kw`: "if" or
 // "match"). `value`: what it holds has nothing to drop. `mutable`: it
-// can be assigned again. `reassigned`: it is, before its scope ends.
-pub fn event_dot_branch_merge_chain_new_value(my_name: &String, kw: &str, value: bool, mutable: bool, reassigned: bool, note: &str) -> String {
+// can be assigned again.
+pub fn event_dot_branch_merge_chain_new_value(my_name: &String, kw: &str, value: bool, mutable: bool, note: &str) -> String {
     let name = styled_name_html(my_name);
     let kw = styled_name_html(&kw.to_owned());
     let mut out = format!(
@@ -5175,7 +5133,7 @@ pub fn event_dot_branch_merge_chain_new_value(my_name: &String, kw: &str, value:
         let (holds, rest) = split_drop_note(note);
         out.push_str(&format!(
             " If it has one, its resource{0} is dropped{1} when {2} {3}.",
-            holds, rest, name, if reassigned { "is assigned again" } else { "goes out of scope" }));
+            holds, rest, name, drop_time(mutable)));
     }
     out
 }

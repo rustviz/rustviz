@@ -2318,11 +2318,11 @@ pub enum ExternalEvent {
         at: MaybeMovedAt,
         id: usize
     },
-    // The `?` operator returns early on `Err` / `None`, dropping what
-    // the function owns at that point (#430). Only on that path: the
+    // When `?` returns early it drops what the scopes it leaves still own (#430). Only on that path: the
     // owner stays alive here, so this is a dot on its column, like
     // `OwnerDropAtReassign`.
     OwnerDropIfTryReturns {
+        maybe_init: bool,
         ro: ResourceAccessPoint,
         id: usize
     },
@@ -2531,10 +2531,6 @@ pub enum ExternalEvent {
       // flag decides whether their scope end or next assignment drops
       // anything).
       maybe_init: HashSet<ResourceAccessPoint>,
-      // Variables (and field columns) that a loop the conditional is
-      // inside, and that they were declared before, gives a new value
-      // somewhere in its body (#1026).
-      loop_assigned: HashSet<ResourceAccessPoint>,
       // Variables (and field columns) declared before the conditional
       // that may hold no value where it starts (something above moved
       // them, on some paths or on all) and that only some of the branches reaching the
@@ -2797,11 +2793,6 @@ pub enum Event {
       // This column is a `let x;` local initialized in only some of the
       // branches that reach the merge (#244).
       maybe_init: bool,
-      // A loop this conditional is inside, and that this column was
-      // declared before, gives it a new value somewhere in its body
-      // (#1026): when the loop comes back round, that assignment drops
-      // what the join leaves it holding.
-      loop_assigned: bool,
       // This column is one of the ExternalEvent's `maybe_held` (#1034).
       maybe_held: bool,
       id: usize
@@ -2901,7 +2892,7 @@ pub enum Event {
     LoopExitMove { definite: bool, at: MaybeMovedAt },
     // The owner's resource is dropped here only if the `?` returns
     // early (#430). The owner's state is unchanged.
-    OwnerDropIfTryReturns,
+    OwnerDropIfTryReturns { maybe_init: bool },
     // See ExternalEvent::OwnerDropUnlessReturned.
     OwnerDropUnlessReturned,
     // See ExternalEvent::TupleTempDrop.
@@ -3005,6 +2996,9 @@ pub enum LineState {
 // We think of this as what read/write access we have to its resource.
 #[derive(Clone, Debug)]
 pub enum State {
+    /// A loop or conditional may have left this place uninitialized. Like
+    /// a moved place it has no usable owner line, but it can still hold a value.
+    MaybeUninit,
     // The viable is no longer in the scope after this line.
     OutOfScope,
     // The resource is transferred on this line or before this line,
@@ -3053,6 +3047,7 @@ pub fn breaks_out_only(exits: &[BranchExit]) -> bool {
 impl std::fmt::Display for State {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result {
         match self {
+            State::MaybeUninit => write!(f, "MaybeUninit"),
             State::OutOfScope => write!(f, "OutOfScope"),
             State::ResourceMoved { .. } => write!(f, "ResourceMoved"),
             State::FullPrivilege { .. } => write!(f, "FullPrivilege"),
@@ -3166,6 +3161,7 @@ fn target_name(some_target: &ResourceTy) -> String {
 impl State {
     pub fn print_message_with_name(&self, my_name: &String) -> String {
         match self {
+            State::MaybeUninit => format!("{} may have no value here", hover_messages::styled_name_html(my_name)),
             State::OutOfScope => {
                 hover_messages::state_out_of_scope(my_name)
             }
@@ -3202,8 +3198,7 @@ pub(crate) fn leaves_maybe_held(e: &Event) -> bool {
     match e {
         Event::Branch { maybe_held: true, .. } => true,
         Event::Branch { branch_history, .. } => branch_history.iter()
-            .any(|b| !b.diverges && b.e_data.last().is_some_and(|(_, e)|
-                leaves_maybe_held(e) || matches!(e, Event::LoopMaybeInit { .. }))),
+            .any(|b| !b.diverges && b.states.last().is_some_and(|s| matches!(s.2, State::MaybeUninit))),
         _ => false,
     }
 }
@@ -3227,12 +3222,13 @@ impl Ord for State {
         // "the owner" when the borrow ended.
         fn rank(s: &State) -> u8 {
             match s {
-                FullPrivilege { s: LineState::Uninit } => 4,
-                ResourceMoved { .. } => 0,
-                RevokedPrivilege { .. } => 1,
-                PartialPrivilege { .. } => 2,
-                FullPrivilege {..} => 3,
-                Invalid | OutOfScope => 4,
+                FullPrivilege { s: LineState::Uninit } => 5,
+                MaybeUninit => 0,
+                ResourceMoved { .. } => 1,
+                RevokedPrivilege { .. } => 2,
+                PartialPrivilege { .. } => 3,
+                FullPrivilege {..} => 4,
+                Invalid | OutOfScope => 5,
             }
         }
 
@@ -3246,7 +3242,7 @@ impl Ord for State {
 impl PartialEq for State {
     fn eq(&self, other: &State) -> bool {
         match (self, other) {
-            (State::OutOfScope, State::OutOfScope) => true,
+            (State::MaybeUninit, State::MaybeUninit) | (State::OutOfScope, State::OutOfScope) => true,
             (State::PartialPrivilege { s }, State::PartialPrivilege { s: s2 }) => s == s2,
             (State::FullPrivilege { s }, State::FullPrivilege { s: s2 }) => s == s2,
             (State::ResourceMoved { .. }, State::ResourceMoved { .. }) => true,
@@ -3303,7 +3299,7 @@ pub enum InitBy {
     /// the loops may also move it, so only "if it still holds one" is
     /// sure.
     OuterLoop { moves: bool },
-    /// An assignment in a loop's body to a variable that rustc says
+    /// An assignment to a variable that rustc says
     /// only may hold a value here (#1027): a loop above, inside this
     /// one, may have ended before giving it a value (`if c { drop(s); }
     /// for … { while … { s = …; } s = …; }`), drawn as a `LoopMaybeInit`
@@ -3359,7 +3355,7 @@ pub fn init_join<'a>(maybe_init: bool, ends: impl IntoIterator<Item = &'a State>
     }
     let moved = ends.clone().into_iter().any(|s| matches!(s, State::ResourceMoved { .. }));
     let holds = ends.into_iter().any(|s| matches!(s,
-        State::FullPrivilege { .. } | State::PartialPrivilege { .. } | State::RevokedPrivilege { .. })
+        State::MaybeUninit | State::FullPrivilege { .. } | State::PartialPrivilege { .. } | State::RevokedPrivilege { .. })
         && !unassigned(s));
     match (holds, moved) {
         (true, _) => Some(InitJoin::Maybe { moved }),
@@ -3714,7 +3710,7 @@ impl Display for Event {
             Event::LoopExitMove { .. } => {
                 write!(f, "May have been moved when the loop ends")
             },
-            Event::OwnerDropIfTryReturns => {
+            Event::OwnerDropIfTryReturns { .. } => {
                 write!(f, "Resource is dropped if the `?` returns early")
             },
             Event::OwnerDropUnlessReturned => {
@@ -3997,7 +3993,10 @@ impl Event {
             Event::TemporaryDrop { ty: Some(ty), when, literal, part: None, assign, .. } => {
                 hover_messages::event_dot_temporary_drop(ty, when, *literal, *assign)
             }
-            Event::OwnerDropIfTryReturns => {
+            Event::OwnerDropIfTryReturns { maybe_init: true } => {
+                hover_messages::event_dot_owner_drop_if_try_returns_maybe(my_name, "")
+            }
+            Event::OwnerDropIfTryReturns { maybe_init: false } => {
                 hover_messages::event_dot_owner_drop_if_try_returns(my_name, "")
             }
             Event::OwnerDropUnlessReturned => {
@@ -4021,7 +4020,7 @@ impl Event {
                 hover_messages::event_dot_loop_maybe_init_nested(my_name, true, true)
             }
             Event::LoopMaybeInit { before_loop, .. } => {
-                hover_messages::event_dot_loop_maybe_init(my_name, true, true, None, *before_loop)
+                hover_messages::event_dot_loop_maybe_init(my_name, true, true, *before_loop)
             }
             Event::TemporaryDrop { ty: Some(ty), when, part: Some(part), .. } => {
                 hover_messages::event_dot_temporary_part_drop(ty, when, part)
@@ -5167,7 +5166,7 @@ impl Visualizable for VisualizationData {
                 (*previous_state).clone(),
 
             // The current RAP reaquires a resource 
-            (State::ResourceMoved{ .. }, Event::Acquire{ .. }) => {
+            (State::MaybeUninit | State::ResourceMoved{ .. }, Event::Acquire{ .. }) => {
                 if self.is_mut(hash) {
                     State::FullPrivilege{ s: LineState::Full }
                 }
@@ -5405,7 +5404,7 @@ impl Visualizable for VisualizationData {
             (_, Event::TemporaryDrop { .. }) => State::OutOfScope,
             // Dropped only on the path that returns; the code after the
             // `?` runs on the other one.
-            (_, Event::OwnerDropIfTryReturns) => (*previous_state).clone(),
+            (_, Event::OwnerDropIfTryReturns { .. }) => (*previous_state).clone(),
             (_, Event::OwnerDropUnlessReturned) => (*previous_state).clone(),
             // A dot on a column whose value already went into the tuple:
             // no change.
@@ -5631,10 +5630,9 @@ impl Visualizable for VisualizationData {
                     // this conditional (`if c { take(p); if d { p = … } }`,
                     // #1413) is drawn as after a move: nothing for the rest
                     // of the branch (not "no value yet"), and the
-                    // conditional the branch is in joins as one that may
-                    // have moved it.
-                    if *maybe_held {
-                        previous_state = State::ResourceMoved { move_to: ResourceTy::Anonymous, move_at_line: *merge_point, dropped_by_hand: false };
+                    // enclosing conditional can still have a value to drop.
+                    if *maybe_held || ending_states.contains(&State::MaybeUninit) {
+                        previous_state = State::MaybeUninit;
                     }
                     // Every branch leaves the function (#515): nothing
                     // follows the conditional, and the column ends in
@@ -5664,7 +5662,7 @@ impl Visualizable for VisualizationData {
                 // the branch (not "no value yet", and no gap before that),
                 // and the conditional joins as one that may have moved it.
                 Event::LoopMaybeInit { .. } => {
-                    previous_state = State::ResourceMoved { move_to: ResourceTy::Anonymous, move_at_line: *l, dropped_by_hand: false };
+                    previous_state = State::MaybeUninit;
                     previous_line = *l;
                 }
                 _ => {
@@ -6014,8 +6012,8 @@ impl Visualizable for VisualizationData {
         ExternalEvent::LoopExitMove{definite, at, ..} => {
           vec![(line_num, Event::LoopExitMove { definite: *definite, at: at.clone() })]
         },
-        ExternalEvent::OwnerDropIfTryReturns{..} => {
-          vec![(line_num, Event::OwnerDropIfTryReturns)]
+        ExternalEvent::OwnerDropIfTryReturns{ maybe_init, .. } => {
+          vec![(line_num, Event::OwnerDropIfTryReturns { maybe_init: *maybe_init })]
         },
         ExternalEvent::OwnerDropUnlessReturned{..} => {
           vec![(line_num, Event::OwnerDropUnlessReturned)]
@@ -6061,7 +6059,7 @@ impl Visualizable for VisualizationData {
     fn append_branch_event(&self, event: &ExternalEvent, line_number: usize, is: &ResourceTy, b_history: &mut Vec<(usize, Event)>) {
         let rap = is.extract_rap().unwrap();
         match event {
-            ExternalEvent::Branch { live_vars, branches, branch_type, split_point, merge_point, maybe_init, loop_assigned, maybe_held, id } => {
+            ExternalEvent::Branch { live_vars, branches, branch_type, split_point, merge_point, maybe_init, maybe_held, id } => {
                 if live_vars.contains(rap) {
                     let mut new_branches: Vec<BranchData> = Vec::new();
                     for b in branches.iter() {
@@ -6087,7 +6085,6 @@ impl Visualizable for VisualizationData {
                                         split_point: *split_point, 
                                         merge_point: *merge_point,
                                         maybe_init: maybe_init.contains(rap),
-                                        loop_assigned: loop_assigned.contains(rap),
                                         maybe_held: maybe_held.contains(rap),
                                         id: *id}));
                 }
@@ -6306,7 +6303,7 @@ impl Visualizable for VisualizationData {
                 maybe_append_event(self, &to_ro.clone(), Event::Copy{from : from_ro.to_owned(), is: to_ro.clone(), of, id: id, break_alt: break_alt.clone()}, line_number);
                 maybe_append_event(self, &from_ro.clone(), Event::Duplicate{to : to_ro.to_owned(), is: from_ro, into_closure, of: source_of, id: id, break_alt}, line_number);
             },
-            ExternalEvent::Branch { live_vars, branches, branch_type, split_point, merge_point, maybe_init, loop_assigned, maybe_held, id } => {
+            ExternalEvent::Branch { live_vars, branches, branch_type, split_point, merge_point, maybe_init, maybe_held, id } => {
                 // need to add events with more granularity for Branches
                 for var in in_decl_order(&live_vars) { // for all the live variables in the branch (declaration order, #211)
                     let is = ResourceTy::Value(var.clone());
@@ -6346,7 +6343,6 @@ impl Visualizable for VisualizationData {
                                         split_point: split_point, 
                                         merge_point: merge_point, 
                                         maybe_init: maybe_init.contains(var),
-                                        loop_assigned: loop_assigned.contains(var),
                                         maybe_held: maybe_held.contains(var),
                                         id: id}, line_number);
                 }
@@ -6523,8 +6519,8 @@ impl Visualizable for VisualizationData {
             ExternalEvent::LoopExitMove{ro, definite, at, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopExitMove { definite, at }, line_number);
             },
-            ExternalEvent::OwnerDropIfTryReturns{ro, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropIfTryReturns, line_number);
+            ExternalEvent::OwnerDropIfTryReturns{ro, maybe_init, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropIfTryReturns { maybe_init }, line_number);
             },
             ExternalEvent::OwnerDropUnlessReturned{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropUnlessReturned, line_number);
