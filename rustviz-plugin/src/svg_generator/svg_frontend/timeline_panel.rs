@@ -321,26 +321,39 @@ fn merged_dot_title(lines: &[(Option<usize>, String)]) -> String {
         k += 1;
     }
     if merged_any {
-        // A `?` after an assignment on this line (`b = f(o?); p?;`,
-        // #1590): not "the `?` here", which the first one says.
-        for k in 1..texts.len() {
-            if texts[..k].iter().any(|t| t.contains(" acquires ownership of a new resource")) {
-                if let Some(r) = hover_messages::try_drop_after_assignment(&texts[k]) {
-                    texts[k] = r;
-                }
+        // Each `?` after the first on this line says which one it is
+        // ("the second `?` on this line"), not "the `?` here", which the
+        // first one says (#1590); a first `?` after an assignment on this
+        // line (`b = …; o?;`) is "the `?` after the assignment".
+        let mut nth = 0;
+        for k in 0..texts.len() {
+            if !is_try(&texts[k]) {
+                continue;
+            }
+            nth += 1;
+            let r = if nth > 1 {
+                hover_messages::try_drop_nth_on_line(&texts[k], nth)
+            } else if texts[..k].iter().any(|t| t.contains(" acquires ownership of a new resource")) {
+                hover_messages::try_drop_after_assignment(&texts[k])
+            } else {
+                None
+            };
+            if let Some(r) = r {
+                texts[k] = r;
             }
         }
     } else if texts.len() > 1 {
-        // (A second `?` on the line, `o?; …; p?;`: "the later `?`".)
-        let mut seen_try = false;
+        // (A second `?` on the line, `o?; …; p?;`: "the second `?` on
+        // this line".)
+        let mut nth = 0;
         for t in texts.iter_mut() {
-            let later = seen_try && is_try(t);
-            seen_try |= is_try(t);
+            let this_try = is_try(t);
+            nth += usize::from(this_try);
             if let Some(r) = hover_messages::try_drop_with_other_events(t) {
                 *t = r;
             }
-            if later {
-                if let Some(r) = hover_messages::try_drop_later_on_line(t) {
+            if this_try && nth > 1 {
+                if let Some(r) = hover_messages::try_drop_nth_on_line(t, nth) {
                     *t = r;
                 }
             }

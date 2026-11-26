@@ -1238,13 +1238,19 @@ pub fn try_drop_after_assignment(drop_text: &str) -> Option<String> {
     Some(format!("Only if the `?` after the assignment returns early{}", rest.replacen("If the `?` succeeds", "If that `?` succeeds", 1)))
 }
 
-// A second `?` on a line with no assignment between them that it goes
-// with (`o?; drop(a); a = …; p?;`, #1590): "the later `?`", not "the `?`
-// here", which the first one says.
-pub fn try_drop_later_on_line(drop_text: &str) -> Option<String> {
+// The `nth` (2 or more) `?` on a line (`o?; drop(a); a = …; p?;`,
+// `s = f(a?); s = g(b?); c?;`, #1590): "the second `?` on this line",
+// not "the `?` here", which the first one says.
+pub fn try_drop_nth_on_line(drop_text: &str, nth: usize) -> Option<String> {
     let rest = drop_text.strip_prefix("Only if the `?` here returns early")?;
     let rest = rest.strip_prefix(" (on an `Err` or `None`)").unwrap_or(rest);
-    Some(format!("Only if the later `?` on this line returns early{}", rest.replacen("If the `?` succeeds", "If that `?` succeeds", 1)))
+    let which = match nth {
+        2 => "the second",
+        3 => "the third",
+        4 => "the fourth",
+        _ => "a later",
+    };
+    Some(format!("Only if {which} `?` on this line returns early{}", rest.replacen("If the `?` succeeds", "If that `?` succeeds", 1)))
 }
 
 pub fn try_drop_then_reassign(drop_text: &str, reassign: &str) -> Option<String> {
