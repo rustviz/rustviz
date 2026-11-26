@@ -41,6 +41,9 @@ pub struct HolderEnd {
   /// The last row any of the loans ends on, whoever holds it there (the
   /// borrow's last row, as 2.x's single end line has it).
   pub last_end: Option<usize>,
+  /// The last row the holder itself holds the loans on, not counting a
+  /// loop's exit from its head (its last use, in the loop body).
+  pub last_held: Option<usize>,
 }
 
 /// `n` names the holder `k`, a field of it, or the variable it is a field of
@@ -151,6 +154,44 @@ impl<'a> BodyEnds<'a> {
       .any(|e| matches!(&e.fact, Fact::Move { path, .. } if path == k))
   }
 
+  /// Whether `k` is in scope after `row` (a variable an arm declares is
+  /// not on a row past the arm: `let m2 = m;` in an arm that returns,
+  /// with the loan ending later on the other path). A row the facts give
+  /// no state is taken as in scope. (Moved there is no answer: it may be
+  /// moved on that row's path only.)
+  pub fn in_scope_after(&self, k: &str, row: usize) -> bool {
+    let Some(r) = self.facts.rows.iter().find(|r| r.line == row && !r.after.state.is_empty()) else { return true };
+    r.after.state.contains_key(k) || r.after.state.contains_key(root(k))
+  }
+
+  /// Whether a part of `k` is moved or copied out (`if let Some(e) = o`:
+  /// `(o as Some).0`): `k` is a pattern's scrutinee.
+  pub fn part_taken_from(&self, k: &str) -> bool {
+    // (Not a call's result, `(it.next() as Some).0`.)
+    let of_k = |path: &str| {
+      let inner = path.trim_start_matches('(');
+      let inner = inner.split(" as ").next().unwrap_or(inner);
+      path != k && !inner.contains('(') && (inner == k || inner.strip_prefix(k).is_some_and(|r| r.starts_with('.')))
+    };
+    self.facts.rows.iter().flat_map(|r| r.facts.iter()).any(|e| matches!(&e.fact,
+      Fact::Move { path, .. } | Fact::Copy { path, .. } if of_k(path)))
+  }
+
+  /// The last row `k`'s variable still holds one of `loans` coming into
+  /// (the facts' `holds`: the row after the last one it holds them past).
+  pub fn held_into(&self, k: &str, loans: &[usize]) -> Option<usize> {
+    let var = root(k);
+    let mut out = None;
+    for (i, r) in self.facts.rows.iter().enumerate() {
+      if r.after.holds.get(var).is_some_and(|h| h.iter().any(|l| loans.contains(l))) {
+        if let Some(next) = self.facts.rows[i + 1..].iter().find(|n| n.line > r.line) {
+          out = Some(out.map_or(next.line, |o: usize| o.max(next.line)));
+        }
+      }
+    }
+    out
+  }
+
   /// Whether `k` itself is moved anywhere in the body.
   pub fn moved_anywhere(&self, k: &str) -> bool {
     self.facts.rows.iter().flat_map(|r| r.facts.iter()).any(|e| matches!(&e.fact, Fact::Move { path, .. } if path == k))
@@ -227,6 +268,8 @@ impl<'a> BodyEnds<'a> {
       }
       let Some(m) = self.facts.loans.iter().find(|x| x.loan == id) else { continue };
       if (name == "Caller" && m.source == "caller")
+        // (A borrowed temporary's column, `Some(&String::from("x"))`.)
+        || (name == "(temporary)" && m.source == "temporary")
         || root(&m.lender) == name
         || m.through.as_deref().is_some_and(|t| root(t) == name)
       {
@@ -285,10 +328,14 @@ impl<'a> BodyEnds<'a> {
             if mine && holder.split('|').any(|h| names_match(k, h)) {
               out.gives_back = Some(out.gives_back.map_or(row, |g| g.max(row)));
               out.only_loop_exits &= exit;
+              if !exit {
+                out.last_held = Some(out.last_held.map_or(row, |g| g.max(row)));
+              }
             }
           }
           Fact::HoldEnd { loan, holder, .. } if mine && loans.contains(loan) && names_match(k, holder) => {
             out.stops = Some(out.stops.map_or(r.line, |s| s.max(r.line)));
+            out.last_held = Some(out.last_held.map_or(r.line, |s| s.max(r.line)));
           }
           _ => {}
         }

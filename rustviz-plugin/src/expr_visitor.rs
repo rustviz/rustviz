@@ -11819,21 +11819,25 @@ pub fn print_out_of_scope(&mut self){
       /// Its own end, if another slot gives the loans back.
       own: Option<(usize, usize)>,
       /// A value holding the borrow (`o: Option<&mut T>`) that also stops
-      /// holding it while the loan goes on.
-      holder_stops: bool,
+      /// holding it while the loan goes on: the last row it does.
+      holder_stops: Option<usize>,
+      /// The walk's line (no fact loan of this lender): an arrow unless
+      /// another slot gives its loans back later.
+      walk: bool,
     }
     // The loans a pattern's binding gives back (`if let Some(e) = o`).
     let mut pattern_gives: BTreeSet<usize> = BTreeSet::new();
     let mut pending: Vec<Vec<Pending>> = Vec::new();
     // The loans an arrow gives back, with the lender each arrow goes to.
-    let mut given_back: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+    // (lender, row, giver)
+    let mut given_back: BTreeMap<usize, Vec<(String, usize, String)>> = BTreeMap::new();
     for (slot, loans) in slots.iter().zip(slot_loans.iter()) {
       let lenders = lends_to(&slot.rd);
       let lender_names: Vec<String> = lenders.iter().map(|l| l.real_name()).collect();
       let mut ends = Vec::new();
       for (i, l) in lenders.iter().enumerate() {
         let Some(ix) = ix.as_ref() else {
-          ends.push(Pending { lender: l.clone(), end: End::Arrow(slot.rd.lifetime), loans: Vec::new(), own: None, holder_stops: false });
+          ends.push(Pending { lender: l.clone(), end: End::Arrow(slot.rd.lifetime), loans: Vec::new(), own: None, holder_stops: None, walk: false });
           continue;
         };
         // With several lenders, each gives back the loans of its own;
@@ -11864,7 +11868,20 @@ pub fn print_out_of_scope(&mut self){
         // walk's line.)
         let own_column = matches!(l, ResourceTy::Value(x) if self.raps.get(x.name().as_str()).is_some_and(|r| r.fn_start_line == self.current_fn_start && !r.rap.is_fn()));
         if i == 0 && mine.is_empty() && own_column && !loans.is_empty() {
-          ends.push(Pending { lender: l.clone(), end: End::Arrow(slot.rd.lifetime), loans: Vec::new(), own: None, holder_stops: false });
+          // (Its arrow gives back k's loans that went through the lender, so
+          // copies made before it end on their own, `let m = s; let o =
+          // Some(m);` with x out of o giving back to m; and k is a copy
+          // that ends on its own if another slot gives them back later.
+          // Not `r8`'s old loan of h after `mem::swap(&mut r7, &mut r8)`.)
+          let through_l: Vec<usize> = loans.iter().copied()
+            .filter(|id| info(id).is_some_and(|f| f.holders.iter().any(|h| crate::borrow_ends::names_match(&l.real_name(), h))))
+            .collect();
+          for id in &through_l {
+            given_back.entry(*id).or_default().push((l.real_name(), slot.rd.lifetime, slot.key.clone()));
+          }
+          let at = slot.rd.lifetime;
+          let walk = !through_l.is_empty();
+          ends.push(Pending { lender: l.clone(), end: End::Arrow(at), loans: through_l, own: walk.then_some((at, at)), holder_stops: None, walk });
           continue;
         }
         if i == 0 && mine.is_empty() {
@@ -11873,9 +11890,15 @@ pub fn print_out_of_scope(&mut self){
             .collect();
         }
         if mine.is_empty() {
-          // No loan the facts know of: the walk's line.
-          let end = if loans.is_empty() && i == 0 { End::Arrow(slot.rd.lifetime) } else { End::None };
-          ends.push(Pending { lender: l.clone(), end, loans: Vec::new(), own: None, holder_stops: false });
+          // No loan the facts know of: the walk's line. (Also for a
+          // reference parameter k took a copy of, `vr.push(r)`: the facts
+          // track no loan of a caller's borrow into k.)
+          let caller_ref = own_column && {
+            let mut own = ix.facts.loans.iter().filter(|f| f.direct_holders.iter().any(|h| *h == l.real_name())).peekable();
+            own.peek().is_some() && own.all(|f| f.source == "caller")
+          };
+          let end = if (loans.is_empty() && i == 0) || (i > 0 && caller_ref) { End::Arrow(slot.rd.lifetime) } else { End::None };
+          ends.push(Pending { lender: l.clone(), end, loans: Vec::new(), own: None, holder_stops: None, walk: false });
           continue;
         }
         // A let-chain's (or guard's) new loan that doesn't outlive the
@@ -11883,15 +11906,30 @@ pub fn print_out_of_scope(&mut self){
         let then = (!slot.arm).then(|| self.chain_then.iter()
           .find(|(n, _, whole)| *n == slot.key && ix.last_end_of(&mine).is_some_and(|e| e <= *whole))
           .map(|(_, t, _)| *t)).flatten();
-        let e = match then {
+        let mut e = match then {
           Some(t) => ix.holder_end_within(&slot.key, &mine, slot.rows, t),
           None => ix.holder_end(&slot.key, &mine, slot.rows),
         };
-        // A reference to a string literal or a `static` (its loan never ends):
-        // its own end at its last use (Q7).
+        // (A local's loan k still holds past every end, on a path that
+        // diverges, `if c { panic!("{}", r1); }`: the borrow ends there too,
+        // before the lender is dropped while unwinding.)
+        if mine.iter().all(|id| info(id).is_some_and(|f| f.source == "borrow" && !f.columns.is_empty())) {
+          if let (Some(back), Some(held)) = (e.last_end, e.last_held) {
+            if held > back {
+              e.last_end = Some(held);
+            }
+          }
+        }
+        // A reference to a string literal or a `static` (its loan never ends;
+        // a copy, `longest(.., string2)`, may hold it on): its own end at
+        // its last use (Q7).
         let all_static = mine.iter().all(|id| info(id).is_some_and(|f| f.source == "static"));
         let (end, own) = match (e.last_end, e.gives_back, e.stops) {
-          (None, _, Some(own)) if all_static => (End::Own(own), None),
+          (_, _, Some(_)) if all_static => (End::Own(e.last_held.unwrap_or(slot.rd.lifetime)), None),
+          // (A local's loan with no end on any path: the path that still
+          // holds it diverges, `panic!("{}", r)`; the lender is dropped
+          // while unwinding, after the borrow ends where r is last used.)
+          (None, _, Some(own)) if mine.iter().all(|id| info(id).is_some_and(|f| f.source == "borrow" && !f.columns.is_empty())) => (End::Arrow(own), None),
           (None, _, _) => (End::None, None),
           (Some(back), Some(_), Some(own)) if e.only_loop_exits && own < back => (End::LoopExit { own, back }, None),
           // (A field moved away with its part before then, `o.inner =
@@ -11899,6 +11937,10 @@ pub fn print_out_of_scope(&mut self){
           // end is at the move.)
           (Some(back), Some(_), _) if ix.moved_between(&slot.key, slot.rd.assigned_at, back).is_some() =>
             (End::Own(ix.moved_between(&slot.key, slot.rd.assigned_at, back).unwrap_or(back)), None),
+          // (Out of scope by the loan's last row, `let m2 = m;` in an arm
+          // that returns while the loan goes on on the other path: it
+          // gives the lender back where it last holds it, on its own path.)
+          (Some(back), Some(g), _) if g < back && g >= slot.rd.assigned_at && !ix.in_scope_after(&slot.key, back) => (End::Arrow(g), None),
           (Some(back), Some(_), _) => (End::Arrow(back), None),
           // (Moved away where it stops holding, `Some(q)`: its column ends
           // there, so its end is there.)
@@ -11907,7 +11949,12 @@ pub fn print_out_of_scope(&mut self){
           // Neither named where the loan ends nor seen to stop (on the row
           // the loan ends, or a name two variables share): its own end on
           // the walk's line if another slot gives the loan back.
-          (Some(back), None, None) => (End::Arrow(back), Some((slot.rd.lifetime.min(back), back))),
+          // (Its value still holding them into a later row, `e` of `let e =
+          // (Some(r), 3);` read with the loan's last holder: there.)
+          (Some(back), None, None) => {
+            let own = ix.held_into(&slot.key, &mine).map_or(slot.rd.lifetime, |h| h.max(slot.rd.lifetime));
+            (End::Arrow(back), Some((own.min(back), back)))
+          }
         };
         // The lender stays lent after the end if another loan of it goes on
         // (2.x's "ultimate" reference): then this end gives nothing back.
@@ -11915,15 +11962,24 @@ pub fn print_out_of_scope(&mut self){
           ResourceTy::Value(x) | ResourceTy::Deref(x) | ResourceTy::Index(x, _, _) | ResourceTy::DerefField(x, _, _, _) => Some(x.name().to_owned()),
           _ => None,
         };
+        // (A loop binding with no lender to give back to, `for y in
+        // v.iter()`, ends where it last holds the loan; the loop's iterator
+        // holds it on to where the loop ends, and what it was copied into
+        // to their last use.)
+        let end = match (end, e.last_held) {
+          (End::Arrow(back), Some(o)) if matches!(l, ResourceTy::Anonymous) && o < back
+            && ix.loops.iter().any(|(h, c)| *h < o && o <= *c && *c <= back) => End::Own(o),
+          (e, _) => e,
+        };
         let still_lent = |row: usize| column.as_ref().is_some_and(|c| ix.lent_after(row, c, &mine, &slot_keys));
         let (end, own) = match end {
           End::Arrow(back) if still_lent(back) => (End::Own(own.map_or(back, |(o, _)| o)), None),
           End::LoopExit { own, back } if still_lent(back) => (End::Own(own), None),
           e => (e, own),
         };
-        if own.is_none() && matches!(end, End::Arrow(_) | End::LoopExit { .. }) {
+        if let (None, End::Arrow(row) | End::LoopExit { back: row, .. }) = (own, end) {
           for id in mine.iter().copied().chain(ix.sources_lending(&mine, &l.real_name())) {
-            given_back.entry(id).or_default().push(l.real_name());
+            given_back.entry(id).or_default().push((l.real_name(), row, slot.key.clone()));
           }
         }
         // (A binding of the payload itself, `Some(e)`: `end_scrutinee_borrows_in_other_arms`
@@ -11935,12 +11991,23 @@ pub fn print_out_of_scope(&mut self){
         // (Only for a lender with a column of its own, as that pass draws.)
         // (And only a call's result: `o = refs.iter_mut().next()`, the
         // borrow that pass finds; not `Some(if c { &mut a } else { .. })`.)
-        let holder_stops = e.stops.is_some() && matches!(l, ResourceTy::Value(_))
+        // (Not the scrutinee itself, `if let Some(e) = o`: on the paths
+        // that bind nothing o is the last holder, and gives the lender back.)
+        let holder_stops = e.stops.filter(|_| matches!(l, ResourceTy::Value(_)) && !ix.part_taken_from(&slot.key)
           && self.raps.get(&slot.key).is_some_and(|r| !r.rap.is_ref() && r.rap.holds_borrow())
           && mine.iter().all(|id| ix.facts.loans.iter().any(|f| f.loan == *id
             && f.via_call.iter().any(|h| crate::borrow_ends::names_match(&slot.key, h))
-            && !f.direct_holders.iter().any(|h| crate::borrow_ends::names_match(&slot.key, h))));
-        ends.push(Pending { lender: l.clone(), end, loans: mine, own, holder_stops });
+            && !f.direct_holders.iter().any(|h| crate::borrow_ends::names_match(&slot.key, h)))));
+        ends.push(Pending { lender: l.clone(), end, loans: mine, own, holder_stops, walk: false });
+      }
+      // Several lenders in the source order of their borrows (`t = if c {
+      // (&mut a, 1) } else { (&mut b, 2) }`: "a or b"), not the order the
+      // walk last set them in.
+      if let Some(ix) = ix.as_ref() {
+        let first = |p: &Pending| p.loans.iter().filter_map(|id| ix.facts.loans.iter().find(|f| f.loan == *id)).map(|f| (f.line, f.col)).min();
+        if ends.len() > 1 && ends.iter().all(|p| first(p).is_some()) {
+          ends.sort_by_key(|p| first(p));
+        }
       }
       pending.push(ends);
     }
@@ -11953,7 +12020,7 @@ pub fn print_out_of_scope(&mut self){
     walk_ends.extend(self.late_old_ends.iter().cloned());
     // A loan the walk gives back where the facts end it, from the holder
     // they name (`c.r` re-pointed while the copy `c2.r` held its old loan).
-    let walk_gives = |id: usize, k: &str| ix.as_ref().is_some_and(|ix| ix.end_holders(id).iter().any(|(row, h)|
+    let walk_gives = |id: usize, k: &str, from: usize| ix.as_ref().is_some_and(|ix| ix.end_holders(id).iter().filter(|(row, _)| *row >= from).any(|(row, h)|
       walk_ends.iter().any(|(l, e)| *l == *row && !matches!(e, ExternalEvent::RefDie { .. })
         && borrow_end_of(e).is_some_and(|(from, to)| from.name() != k && crate::borrow_ends::names_match(from.name(), h)
           // (Back to the loan's lender: a closure's end gives `*r` back to
@@ -11962,10 +12029,10 @@ pub fn print_out_of_scope(&mut self){
     // Or another slot gives it back where the facts end it, from the holder
     // they name (`c.r`'s arrow when `c` holds the loan c2.r copied).
     let slot_arrows: Vec<(String, String)> = slots.iter().zip(pending.iter())
-      .flat_map(|(s, ends)| ends.iter().filter(|p| p.own.is_none() && matches!(p.end, End::Arrow(_) | End::LoopExit { .. }))
+      .flat_map(|(s, ends)| ends.iter().filter(|p| (p.own.is_none() || p.walk) && matches!(p.end, End::Arrow(_) | End::LoopExit { .. }))
         .map(|p| (s.key.clone(), p.lender.real_name())))
       .collect();
-    let other_gives = |id: usize, k: &str| ix.as_ref().is_some_and(|ix| ix.end_holders(id).iter().any(|(_, h)|
+    let other_gives = |id: usize, k: &str, from: usize| ix.as_ref().is_some_and(|ix| ix.end_holders(id).iter().filter(|(row, _)| *row >= from).any(|(_, h)|
       // (Not an arrow back to k itself: k still gives its lender back.)
       slot_arrows.iter().any(|(key, ln)| key != k && ln != k && crate::borrow_ends::names_match(key, h)
         && ix.facts.loans.iter().any(|f| f.loan == id && ix.lends(f, ln)))));
@@ -11973,11 +12040,14 @@ pub fn print_out_of_scope(&mut self){
       let end = match p.own {
         // A value whose loan a pattern's binding took over (#1447): the
         // binding gives it back on its arm, the scrutinee's temporary on
-        // the others (`end_scrutinee_borrows_in_other_arms`).
-        _ if p.holder_stops && p.loans.iter().any(|l| pattern_gives.contains(l)) => End::None,
+        // the others (`end_scrutinee_borrows_in_other_arms`); the value's
+        // own end is its last use (`it.next()`), with no arrow.
+        _ if p.holder_stops.is_some() && p.loans.iter().any(|l| pattern_gives.contains(l)) => End::Own(p.holder_stops.unwrap_or_default()),
         // (Not by an arrow back to this reference itself, `k = [s]` giving
         // back to s: s still gives its own lender back.)
-        Some((own, _)) if p.loans.iter().any(|l| given_back.get(l).is_some_and(|to| to.iter().any(|t| *t != slot.key)) || walk_gives(*l, &slot.key) || other_gives(*l, &slot.key)) => End::Own(own),
+        // (One on an earlier row gives it back on another path, `let m2 =
+        // m;` in an arm that returns: not the end of this one's.)
+        Some((own, back)) if p.loans.iter().any(|l| given_back.get(l).is_some_and(|to| to.iter().any(|(t, row, giver)| *t != slot.key && *giver != slot.key && *row >= back)) || walk_gives(*l, &slot.key, back) || other_gives(*l, &slot.key, back)) => End::Own(own),
         _ => p.end,
       };
       // (A `&mut` parameter moved away on some path, `let y = z;` in an
@@ -11999,9 +12069,14 @@ pub fn print_out_of_scope(&mut self){
     // arrow to it, `k = [s]`, or the walk's end of a re-pointed holder's
     // old loan, `h3.r = r3;` after `h3 = holder(&*m3)`) is still lent until
     // then: its own end comes after that, not at its own last use (#1538).
+    // (Also an anonymous holder's give-back, the `for` loop's iterator
+    // giving back `text` it borrowed through a copy of it.)
+    let mut anon_backs = Vec::new();
+    anonymous_gives_in(self.preprocessed_events, &mut anon_backs);
     let back_to = |name: &str, decided: &[Vec<(ResourceTy, End)>]| -> Option<usize> {
       let walk = walk_ends.iter().filter(|(_, e)| !matches!(e, ExternalEvent::RefDie { .. }))
-        .filter_map(|(l, e)| borrow_end_of(e).and_then(|(_, to)| to.extract_rap()).filter(|t| t.name() == name).map(|_| *l));
+        .filter_map(|(l, e)| borrow_end_of(e).and_then(|(_, to)| to.extract_rap()).filter(|t| t.name() == name).map(|_| *l))
+        .chain(anon_backs.iter().filter(|(_, to)| to == name).map(|(l, _)| *l));
       let emitted = slots.iter().zip(decided.iter()).filter(|(s, _)| s.key != name)
         .flat_map(|(_, ends)| ends.iter()).filter(|(l, _)| l.real_name() == name)
         .filter_map(|(_, e)| match e { End::Arrow(l) | End::LoopExit { back: l, .. } => Some(*l), _ => None });
@@ -14012,6 +14087,26 @@ fn borrow_end_of(e: &ExternalEvent) -> Option<(&ResourceAccessPoint, &ResourceTy
   }
 }
 
+/// The give-backs from an anonymous holder (a loop's iterator) among
+/// `events` and inside their arms: (row, the lender's name).
+fn anonymous_gives_in(events: &[(usize, ExternalEvent)], out: &mut Vec<(usize, String)>) {
+  for (line, e) in events {
+    match e {
+      ExternalEvent::Branch { branches, .. } => {
+        for b in branches {
+          anonymous_gives_in(&b.e_data, out);
+        }
+      }
+      ExternalEvent::StaticDie { from: ResourceTy::Anonymous, to, .. } | ExternalEvent::MutableDie { from: ResourceTy::Anonymous, to, .. } => {
+        if let Some(t) = to.extract_rap() {
+          out.push((*line, t.name().to_owned()));
+        }
+      }
+      _ => {}
+    }
+  }
+}
+
 /// The borrow ends among `events` and inside their conditionals' arms,
 /// in order.
 fn borrow_ends_in(events: &[(usize, ExternalEvent)], out: &mut Vec<(usize, ExternalEvent)>) {
@@ -14149,6 +14244,10 @@ fn end_borrows_at_exits_in(
         {
           continue;
         }
+        // (A mutable borrow the arm already gives back from what it was
+        // moved into, `let m2 = m; return;`: one loan, one return; r's own
+        // borrow just ends.)
+        let own_only = matches!(e, ExternalEvent::MutableDie { .. }) && gives_back_on_every_path(&arm.e_data, to);
         // After the arm's last use of r. An exit's own drop of r (a
         // `&mut` reference) isn't a use: the borrow ends before it.
         let last = arm.e_data.iter().rposition(|(_, ev)|
@@ -14173,6 +14272,9 @@ fn end_borrows_at_exits_in(
             *from = ResourceTy::Value(r.clone());
           }
           _ => unreachable!("borrow_end_of matched"),
+        }
+        if own_only {
+          copy = ExternalEvent::RefDie { from: ResourceTy::Value(r.clone()), to: to.clone(), num_curr_borrowers: 0, id: copy.get_id() };
         }
         added.insert(r.clone());
         if let ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. } = copy {
