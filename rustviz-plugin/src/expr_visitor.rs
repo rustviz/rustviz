@@ -11658,6 +11658,17 @@ pub fn print_out_of_scope(&mut self){
     self.nest_borrow_ends_in_arms_with(false);
   }
 
+  /// Whether a reference other than the one `ev` ends holds a loan of
+  /// `lender` (or a holder a loan of part of it), made at or before
+  /// `line` and lasting past it.
+  #[expect(clippy::disallowed_methods, reason = "`any` over the map: order never observed")]
+  fn lender_held_past(&self, ev: &ExternalEvent, lender: &ResourceAccessPoint, line: usize) -> bool {
+    borrow_end_of(ev).is_some_and(|(r, _)| self.borrow_map.iter().any(|(n, d)|
+      n != r.name() && d.all_lenders().iter().any(|l| l.extract_rap() == Some(lender))
+        && loan_line_of(self.preprocessed_events, n, lender).unwrap_or(d.assigned_at) <= line
+        && d.lifetime > line))
+  }
+
   /// `nest_borrow_ends_in_arms`; `after_exits`: called after
   /// `end_borrows_at_exits`, see `end_lender_in_other_arms`.
   fn nest_borrow_ends_in_arms_with(&mut self, after_exits: bool) {
@@ -11672,12 +11683,23 @@ pub fn print_out_of_scope(&mut self){
         // the top level, it was drawn on a row of a later arm, after the
         // reference's scope end (#1566).
         ExternalEvent::RefDie { from: ResourceTy::Value(r), to, .. } => to.extract_rap()
-          .and_then(|lender| arm_declaring(self.preprocessed_events, r, Some(lender), *line, false).map(|path| (path, Some(lender.clone()))))
-          .or_else(|| arm_declaring(self.preprocessed_events, r, None, *line, false).map(|path| (path, None))),
+          .and_then(|lender| arm_declaring(self.preprocessed_events, r, Some(lender), *line, false, false).map(|path| (path, Some(lender.clone()))))
+          .or_else(|| arm_declaring(self.preprocessed_events, r, None, *line, false, false).map(|path| (path, None))),
         ExternalEvent::StaticDie { from: ResourceTy::Value(r), to, .. }
         | ExternalEvent::MutableDie { from: ResourceTy::Value(r), to, .. } => match to.extract_rap() {
-          Some(lender) => arm_declaring(self.preprocessed_events, r, Some(lender), *line, false)
+          Some(lender) => arm_declaring(self.preprocessed_events, r, Some(lender), *line, false, false)
             .map(|path| (path, Some(lender.clone())))
+            // In a conditional nested in the arm declaring r, the lender
+            // having no column there (#1574): only when nothing else holds
+            // a loan of the lender past the end, and no other arm on the
+            // way declares a variable of r's name (which shares r's
+            // column, and would get no give-back). Otherwise the end stays
+            // where main drew it (#1602).
+            .or_else(|| (!self.lender_held_past(ev, lender, *line))
+              .then(|| arm_declaring(self.preprocessed_events, r, Some(lender), *line, false, true))
+              .flatten()
+              .filter(|path| !sibling_declares(self.preprocessed_events, path, r))
+              .map(|path| (path, Some(lender.clone()))))
             // An end that gives nothing back (another reference still
             // holds the loan: `Holder { r }` in an arm of a loop's body,
             // with r used again next time round) needs no lender column
@@ -11685,19 +11707,19 @@ pub fn print_out_of_scope(&mut self){
             // the reference's scope end in the arm, and its column ran
             // on past the struct's move (#1568).
             .or_else(|| matches!(ev, ExternalEvent::RefDie { .. })
-              .then(|| arm_declaring(self.preprocessed_events, r, None, *line, false))
+              .then(|| arm_declaring(self.preprocessed_events, r, None, *line, false, false))
               .flatten()
               .map(|path| (path, None))),
           // A borrow from the caller (`let m2 = m;` in an arm, m a `&mut`
           // parameter) has no lender column: it ends in the arm that
           // declares its reference (#1502). Left at the top level, it was
           // drawn on a row of a later arm, after the reference's scope end.
-          None => arm_declaring(self.preprocessed_events, r, None, *line, false).map(|path| (path, None)),
+          None => arm_declaring(self.preprocessed_events, r, None, *line, false, false).map(|path| (path, None)),
         },
         // An or-pattern reference's (#734), with each place it may
         // borrow.
         ExternalEvent::OrAltBorrow { ro, into, end: true, .. } =>
-          arm_declaring(self.preprocessed_events, into, Some(ro), *line, false).map(|path| (path, Some(ro.clone()))),
+          arm_declaring(self.preprocessed_events, into, Some(ro), *line, false, false).map(|path| (path, Some(ro.clone()))),
         _ => None,
       };
       match path {
@@ -11717,13 +11739,7 @@ pub fn print_out_of_scope(&mut self){
             // (Nor while another reference still borrows the lender past
             // this end, `let other = v.first();` used after: on those
             // paths v isn't given back, #1602.)
-            #[expect(clippy::disallowed_methods, reason = "`any` over the map: order never observed")]
-            // (A loan of the lender, or a holder's loan of part of it, made
-            // before this end and lasting past it.)
-            let others = made.as_ref().is_some_and(|(r, _)| self.borrow_map.iter().any(|(n, d)|
-              n != r.name() && d.all_lenders().iter().any(|l| l.extract_rap() == Some(&lender))
-                && loan_line_of(self.preprocessed_events, n, &lender).unwrap_or(d.assigned_at) <= *line
-                && d.lifetime > *line));
+            let others = self.lender_held_past(ev, &lender, *line);
             let new_column = !matches!(ev, ExternalEvent::RefDie { .. }) && !others
               && lender_new_on_path(self.preprocessed_events, &path, &lender);
             if let (true, Some((r, made))) = (after_exits || new_column, made) {
@@ -12935,7 +12951,7 @@ pub fn print_out_of_scope(&mut self){
       let (Some(bd), Some(brap)) = (self.borrow_map.get(b), self.raps.get(b)) else { continue };
       let lenders = bd.all_lenders();
       let Some(lrap) = lenders.iter().filter_map(|l| l.extract_rap()).find(|l| l.name() == lender) else { continue };
-      let Some(path) = arm_declaring(self.preprocessed_events, &brap.rap, Some(lrap), bd.lifetime, false) else { continue };
+      let Some(path) = arm_declaring(self.preprocessed_events, &brap.rap, Some(lrap), bd.lifetime, false, false) else { continue };
       let Some(ExternalEvent::Branch { live_vars, branches, .. }) = branch_on_path(self.preprocessed_events, &path) else { continue };
       let arm = &branches[path.last().map_or(0, |p| p.1)];
       #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "collected into a Vec and sorted below")]
@@ -14359,7 +14375,7 @@ fn touches(e: &ExternalEvent, r: &ResourceAccessPoint) -> bool {
 /// doesn't use it (its scope ends at a `return` there, `if c { return;
 /// }`), isn't drawn in it, as one whose borrow ended before the
 /// conditional was visited isn't: forked there, its join said it "still
-/// has no value here" (#1569, #1585). `ended`: the references whose
+/// has no value here" (#1585, #1602). `ended`: the references whose
 /// borrow ended before `events` (an arm's) start. Only references: a
 /// value holding a borrow is dropped at that `return`, which is drawn.
 /// Returns the references whose borrow has ended where `events` end: a
@@ -14464,27 +14480,6 @@ fn uses_within(e: &ExternalEvent, r: &ResourceAccessPoint) -> bool {
   }
 }
 
-/// Whether the conditional `e` certainly doesn't use `r`, though r is
-/// live in it (`if c { return; }`, where r's scope ends): its arms hold
-/// only scope ends and plain moves/copies/borrows that don't involve r,
-/// and no closure is live in it (a call of an `Fn` closure, which may
-/// read what it captured, records no event). Anything else counts as a
-/// use, as before #1602 (a reborrow `r = &mut *r`, a closure call).
-#[expect(clippy::disallowed_methods, reason = "any() makes order irrelevant")]
-fn quiet_within(e: &ExternalEvent, r: &ResourceAccessPoint) -> bool {
-  let ExternalEvent::Branch { branches, live_vars, .. } = e else { return false };
-  !r.is_closure() && !live_vars.iter().any(|v| v.is_closure())
-    && branches.iter().all(|b| b.e_data.iter().all(|(_, e)| match e {
-      ExternalEvent::Branch { .. } => quiet_within(e, r),
-      ExternalEvent::GoOutOfScope { .. } => true,
-      ExternalEvent::Bind { .. } | ExternalEvent::Copy { .. } | ExternalEvent::Move { .. }
-      | ExternalEvent::StaticBorrow { .. } | ExternalEvent::StaticDie { .. }
-      | ExternalEvent::MutableBorrow { .. } | ExternalEvent::MutableDie { .. } | ExternalEvent::RefDie { .. }
-      | ExternalEvent::PassByStaticReference { .. } | ExternalEvent::PassByMutableReference { .. } => !touches(e, r),
-      _ => false,
-    }))
-}
-
 /// Whether `events` give `r` a new value after moving it out (`let z =
 /// r; .. r = &mut b;`).
 fn new_value_after_move(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint) -> bool {
@@ -14497,17 +14492,12 @@ fn new_value_after_move(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoi
 }
 
 /// Where `r` is last used in `events` (one arm's): (line, index just
-/// after that event). A nested conditional r is live in counts up to its
-/// join, unless it certainly doesn't use r (`quiet_within`: `if c {
-/// return; }`, where r's scope ends), which doesn't keep its borrow
-/// alive: that ends before it (#1569).
+/// after that event). A nested conditional counts up to its join.
 fn last_use_in(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint) -> Option<(usize, usize)> {
   // (Also a dot saying the condition may have moved r, which the arm
   // starts with: r's column runs to it, and not always further, #1279.)
-  let i = events.iter().rposition(|(_, e)| match e {
-    ExternalEvent::Branch { .. } => touches(e, r) && !quiet_within(e, r),
-    _ => touches(e, r) || matches!(e, ExternalEvent::LoopExitMove { ro, .. } if ro == r),
-  })?;
+  let i = events.iter().rposition(|(_, e)| touches(e, r)
+    || matches!(e, ExternalEvent::LoopExitMove { ro, .. } if ro == r))?;
   let line = match &events[i].1 {
     ExternalEvent::Branch { merge_point, .. } => *merge_point,
     _ => events[i].0,
@@ -15145,12 +15135,17 @@ fn ownership_after(events: &[(usize, ExternalEvent)], rap_name: &str, start: Opt
 /// lender being one of the variables that conditional draws
 /// (`nest_borrow_ends_in_arms` adds it): the reference doesn't exist
 /// after that arm.
+///
+/// `nested`: also the arm declaring r when the lender has no column, if
+/// the end is in a conditional nested there (#1574, see below); only
+/// `nest_borrow_ends_in_arms` asks, when nothing else borrows the lender.
 fn arm_declaring(
   events: &[(usize, ExternalEvent)],
   r: &ResourceAccessPoint,
   lender: Option<&ResourceAccessPoint>,
   line: usize,
   outer: bool,
+  nested: bool,
 ) -> Option<Vec<(usize, usize)>> {
   for (k, (_, ev)) in events.iter().enumerate() {
     let ExternalEvent::Branch { branches, live_vars, split_point, merge_point, branch_type, .. } = ev else { continue };
@@ -15162,7 +15157,7 @@ fn arm_declaring(
     for a in order {
       let b = &branches[a];
       let has_lender = outer || lender.is_none_or(|l| live_vars.contains(l) || b.decl_vars.contains(l));
-      if let Some(mut path) = arm_declaring(&b.e_data, r, lender, line, has_lender) {
+      if let Some(mut path) = arm_declaring(&b.e_data, r, lender, line, has_lender, nested) {
         path.insert(0, (k, a));
         return Some(path);
       }
@@ -15172,7 +15167,7 @@ fn arm_declaring(
       // both conditionals for it. `if let Some(x) = v.first() { if c {
       // .. x.clone(); } }`: x's end was drawn on its column between the
       // nested arms' legs, and none on the other path, #1574.)
-      if b.decl_vars.contains(r) && (has_lender || branch_ending_borrow(&b.e_data, r, None, line).is_some()) {
+      if b.decl_vars.contains(r) && (has_lender || nested && branch_ending_borrow(&b.e_data, r, None, line).is_some()) {
         return Some(vec![(k, a)]);
       }
     }
@@ -15233,6 +15228,16 @@ fn loan_line_of(events: &[(usize, ExternalEvent)], holder: &str, lender: &Resour
     ExternalEvent::Branch { branches, .. } => branches.iter().filter_map(|b| loan_line_of(&b.e_data, holder, lender)).min(),
     _ => None,
   }).min()
+}
+
+/// Whether an arm other than the one `path` (see `arm_declaring`) takes
+/// through a conditional declares a variable of `r`'s name.
+#[expect(clippy::disallowed_methods, reason = "any() makes order irrelevant")]
+fn sibling_declares(events: &[(usize, ExternalEvent)], path: &[(usize, usize)], r: &ResourceAccessPoint) -> bool {
+  let Some(((k, a), rest)) = path.split_first() else { return false };
+  let ExternalEvent::Branch { branches, .. } = &events[*k].1 else { return false };
+  branches.iter().enumerate().any(|(b, arm)| b != *a && arm.decl_vars.iter().any(|v| v.name() == r.name()))
+    || sibling_declares(&branches[*a].e_data, rest, r)
 }
 
 /// Whether some conditional along `path` (see `arm_declaring`) doesn't

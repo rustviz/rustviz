@@ -48,6 +48,10 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // Geometric (`geometry.rs`), from here on.
     // Two references copied into each other in one arm: no join dot (on main too).
     ("arm_ends_review_1602", "fork-without-dot", 1615),
+    // `if let Some(x17) = v17.first()` with x17 last used in a nested `if`
+    // while other17 still borrows v17: x17's end on its trunk between the
+    // nested legs, as on main (the #1574 fix is held back there).
+    ("arm_ends_review_1602", "event-on-dead-column", 1694),
     // Tuple column goes on after its fields were moved out.
     ("edition2024/if_let_chain_irrefutable_move", "line-ends-nowhere", 1157),
     // A borrow arrow leaving an arm's dot along the fork leg, its track

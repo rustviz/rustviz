@@ -175,3 +175,47 @@ fn unrelated_fnonce_in_nested_return(a: bool, c: bool) {
     }
     drop(s15);
 }
+
+// Round 6: the nested `if`'s condition reads the reference (`*r16`, no
+// event), so its borrow doesn't end before it; and an `if let Some(x) =
+// v.first()` whose x is last used in a nested `if` keeps main's drawing
+// (no v column there) when another reference still borrows v, or when
+// the `else` declares another `x` (an earlier head gave v back on the
+// `Some` path while other17 held it, and drew v18 "being shared"
+// through the `else`).
+fn condition_reads_ref(a: bool, d: bool, owned16: String) {
+    let mut s16 = true;
+    if a {
+        let r16 = &mut s16;
+        if d {
+            drop(owned16);
+            if *r16 { return; }
+        } else {
+            *r16 = false;
+        }
+    }
+    s16 = false;
+}
+
+fn other_borrower_of_lender(v17: Vec<String>, c: bool, s17: String) {
+    let other17 = &v17[0];
+    if let Some(x17) = v17.first() {
+        if c {
+            drop(s17);
+            let o = x17.clone();
+        }
+    }
+    other17.len();
+}
+
+fn same_name_in_else(v18: Vec<String>, c: bool, s18: String, t18: String) {
+    if let Some(x18) = v18.first() {
+        if c {
+            drop(s18);
+            let o = x18.clone();
+        }
+    } else {
+        let x18 = &t18;
+        let y = x18.len();
+    }
+}

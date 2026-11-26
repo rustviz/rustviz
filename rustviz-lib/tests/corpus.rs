@@ -28010,23 +28010,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
     },
     TooltipExpect {
-        name: "borrow_end_before_nested_return_1569",
-        // #1569: the borrow ends as the arm that doesn't use it starts,
-        // not at a nested `return` (the borrower's scope end there isn't
-        // a use). Main read s2 while it was still mutably borrowed and
-        // said its drop at the `return` dropped nothing. The borrower `m`
-        // isn't drawn in the nested `if` after its borrow ended: its join
-        // said "m still has no value here".
-        must_contain: &[
-            "s2 goes out of scope. Its resource is dropped.",
-            "vr goes out of scope. Its resource is dropped, but not the data it borrowed.",
-        ],
-        must_not_contain: &[
-            "s2 goes out of scope. No resource is dropped.",
-            "m still has no value here",
-        ],
-    },
-    TooltipExpect {
         name: "if_let_call_copy_nested_end_1574",
         // #1574: x (copied out of `v.first()`'s result) ends its borrow in
         // each arm of the nested conditional, and v gets a column there.
@@ -28083,6 +28066,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "b9's borrow ended in each branch above",
             "r10's borrow ended in each branch above",
             "r11's borrow ended in each branch above",
+            // Round 6: v17/v18 get no column in the `if let` (main's
+            // drawing): an earlier head drew one, giving v17 back on the
+            // `Some` path while other17 still borrowed it, and v18 "being
+            // shared" through the `else`, which holds no loan of it. These
+            // joins only exist on that column.
+            "v17 isn't moved in any of the branches above",
+            "v18 isn't moved in any of the branches above",
         ],
     },
 ];
@@ -38422,6 +38412,14 @@ fn arm_ends_review_1602_lender_and_copy_cycle() {
     assert_eq!(reslice.len(), 1, "r14's reborrow: {reslice:?}");
     assert!(!r14_ends.is_empty() && r14_ends.iter().all(|e| e.1 >= reslice[0].1),
         "r14's borrow ends above its reborrow {:?}: {r14_ends:?}", reslice[0]);
+    // Round 6: `if *r16 { return; }` reads r16 in its condition (which
+    // records no event): r16's borrow doesn't end on the row above it,
+    // `drop(owned16)`'s (an earlier head ended it there).
+    let dropped = dots_where(&tl, |l| l.iter().any(|x| x.starts_with("owned16's resource is moved into drop")));
+    let r16_ends = dots_listing_tooltip(&tl, "r16's mutable borrow ends");
+    assert_eq!(dropped.len(), 1, "owned16's drop: {dropped:?}");
+    assert!(!r16_ends.is_empty() && r16_ends.iter().all(|e| e.1 > dropped[0].1),
+        "r16's borrow ends on or above drop(owned16)'s row {:?}: {r16_ends:?}", dropped[0]);
     // (The unrelated `FnOnce` call: rendering at all is the check.)
     assert!(!dots_listing_tooltip(&tl, "r15's immutable borrow ends").is_empty(), "unrelated_fnonce_in_nested_return rendered");
 }
