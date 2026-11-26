@@ -14066,6 +14066,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       return;
     }
     *v = Some(BorrowVia {
+      shared: false,
       func: part,
       lenders: vec![whole.clone()],
       also_unnamed: false,
@@ -14095,6 +14096,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       return;
     }
     let via = BorrowVia {
+      shared: false,
       func: part,
       lenders: vec![whole.clone()],
       also_unnamed: false,

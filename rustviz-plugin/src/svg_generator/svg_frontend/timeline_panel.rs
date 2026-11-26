@@ -4178,7 +4178,7 @@ fn timeline_segment_title(
             }
             if parts.none_usable {
                 let surely: Vec<String> = parts.moved.iter().filter(|m| !parts.maybe_moved.contains(m)).cloned().collect();
-                return hover_messages::state_fields_maybe_all_moved(rap.name(), &surely, &parts.maybe_moved);
+                return hover_messages::state_fields_maybe_all_moved(rap.name(), &surely, &parts.maybe_moved, rap.is_mut());
             }
             return hover_messages::state_partly_moved(rap.name(), &parts.moved, parts.maybe);
         }
@@ -9730,9 +9730,12 @@ fn parts_moved_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
     let mut maybe = false;
     // The fields moved in some branches of a conditional above only.
     let mut maybe_moved: Vec<String> = Vec::new();
+    // The direct parts nothing can be used of.
+    let mut unusable: Vec<&String> = Vec::new();
     for t in &parts {
         let r = &t.resource_access_point;
         if moved_at(t, line) {
+            unusable.push(r.name());
             moved.push(r.name().clone());
             // Moved in some branches of a conditional above only.
             let before: Vec<(usize, Event)> = t.history.iter().filter(|(l, _)| *l <= line).cloned().collect();
@@ -9744,13 +9747,18 @@ fn parts_moved_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
         }
         if let Some(inner) = parts_moved_at(r, visualization_data, line) {
             maybe |= inner.maybe;
-            // (A field whose own fields are all moved, some on some paths
-            // only, is maybe-moved as a whole: nothing in it can be used.)
-            if inner.all || inner.none_usable {
+            if inner.all {
+                unusable.push(r.name());
                 moved.push(r.name().clone());
-                if inner.none_usable {
-                    maybe_moved.push(r.name().clone());
-                }
+            } else if inner.none_usable {
+                // A field whose own fields are all moved, some on some
+                // paths only: nothing in it can be used, but it wasn't
+                // moved as a whole (`if c { drop(z.pair.a) } else {
+                // drop(z.pair.b) }` leaves one of them in it on every
+                // path), so its fields are named (#1599).
+                unusable.push(r.name());
+                moved.extend(inner.moved);
+                maybe_moved.extend(inner.maybe_moved);
             } else {
                 moved.extend(inner.moved);
                 maybe_moved.extend(inner.maybe_moved);
@@ -9760,7 +9768,7 @@ fn parts_moved_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
     if moved.is_empty() {
         return None;
     }
-    let mut all = parts.iter().all(|t| moved.contains(t.resource_access_point.name()));
+    let mut all = parts.iter().all(|t| unusable.contains(&t.resource_access_point.name()));
     // A field moved on some paths only is still in the struct on the
     // others, which drop it at the struct's scope end: the struct's line
     // goes on (`let s2 = p.b; if c { drop(p.a); } else if d { drop(p.a);
@@ -9773,8 +9781,10 @@ fn parts_moved_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
     // `line` is in (`let s3 = p.b; if c { drop(p.a) } else { drop(p.a) }`,
     // #1541): their arm legs carry what's left of the struct, whose line
     // stops where they split (it can't say its other fields still can be
-    // used there).
-    if !all && !none_usable && parts.iter().all(|t| moved.contains(t.resource_access_point.name()) || moved_in_every_arm(t, line).is_some()) {
+    // used there). Not while a field moved on some paths only may still
+    // be in it: on those paths it goes on through the conditional (`if c
+    // { drop(p.a); } if d { drop(p.b) } else { drop(p.b) }`, #1599).
+    if !all && !none_usable && maybe_moved.is_empty() && parts.iter().all(|t| unusable.contains(&t.resource_access_point.name()) || moved_in_every_arm(t, line).is_some()) {
         all = true;
     }
     Some(PartsMoved { moved, maybe, all, maybe_moved, none_usable })

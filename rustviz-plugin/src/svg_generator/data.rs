@@ -740,7 +740,7 @@ fn element_update_holds_value(r: &ResourceAccessPoint, place: &str, write: &Plac
 fn append_decl_ref_die(vd: &VisualizationData, e: &ExternalEvent, line: usize, var: &ResourceAccessPoint, b_history: &mut Vec<(usize, Event)>) {
     if let ExternalEvent::RefDie { from: from_ro @ ResourceTy::Value(r), id, .. } = e {
         if r == var {
-            if !r.is_mutref() && history_holds_mut_borrow(vd, b_history, r, line, 4) {
+            if !r.is_mutref() && history_holds_mut_borrow(vd, b_history, r, line, COPY_CHAIN_DEPTH) {
                 b_history.push((line, Event::MutableDie { to: ResourceTy::Anonymous, is: from_ro.clone(), id: *id }));
             } else {
                 b_history.extend(vd.event_of_external_event(line, e, false));
@@ -1474,6 +1474,11 @@ pub struct CapturedFate {
 /// (#171).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct BorrowVia {
+    /// A mutable borrow that the holder (not a reference itself) gets
+    /// only as a shared reference made from it (`vr.push(r)` with `r:
+    /// &String = &mut s`): it can only read, but the loan stays mutable
+    /// (#1599). (A shared reference's own column says so by its type.)
+    pub shared: bool,
     /// The call whose result holds the borrow (`first_word`).
     pub func: String,
     /// Every variable the result borrows from, in argument order.
@@ -1581,6 +1586,9 @@ pub enum ViaCarrier {
     /// borrow in, through a `&mut` to it (`store_s(&mut r, &b)` with
     /// `dst: &mut &'a String`; #1353). `func` names the call.
     StoredThrough,
+    /// No call: only carries `BorrowVia::shared` (`Some(if c { r } else
+    /// { &b })` with `r: &String = &mut a`, #1599). No suffix.
+    Plain,
 }
 
 /// Where the tuple an `if let` / `match` scrutinee `(x, y)` builds is
@@ -2821,6 +2829,9 @@ pub enum Event {
         is: ResourceTy,
         id: usize,
         of_ref_var: bool,
+        /// A holder gets the borrow only as a shared reference made
+        /// from it (`BorrowVia::shared`).
+        shared: bool,
     },
     MutableDie {
         to: ResourceTy,
@@ -3797,7 +3808,7 @@ impl Event {
                 let is = is.clone();
                 Some(match (*mutable, *end) {
                     (false, false) => Event::StaticBorrow { from: other, is, id, of_ref_var: false },
-                    (true, false) => Event::MutableBorrow { from: other, is, id, of_ref_var: false },
+                    (true, false) => Event::MutableBorrow { from: other, is, id, of_ref_var: false, shared: false },
                     (false, true) => Event::StaticDie { to: other, is, id },
                     (true, true) => Event::MutableDie { to: other, is, id },
                 })
@@ -4270,6 +4281,13 @@ impl Event {
             Event::StaticDie{ .. } => {
                 hover_messages::event_dot_static_return(&self.deref_name(my_name))
             }
+            // A shared reference made from a mutable borrow, ending
+            // without giving it back (`let r = r0;` with `r0: &String =
+            // &mut s`, r0 used again): r stops holding the loan, which
+            // goes on while another reference holds it (#1599).
+            Event::MutableDie{ to: ResourceTy::Anonymous, is: ResourceTy::Value(r) | ResourceTy::Deref(r), .. } if r.is_ref() && !r.is_mutref() => {
+                hover_messages::event_dot_shared_ref_of_mut_return(&self.deref_name(my_name))
+            }
             Event::MutableDie{ .. } => {
                 hover_messages::event_dot_mut_return(&self.deref_name(my_name))
             }
@@ -4549,9 +4567,12 @@ impl Event {
             Event::Copy{ from ,..} => {
                 hover_messages::event_dot_copy_from(&self.deref_name(my_name), &target_name(from))
             }
-            Event::MutableBorrow{ from, is, of_ref_var, ..} => {
+            Event::MutableBorrow{ from, is, of_ref_var, shared, ..} => {
                 if is.is_closure() {
                     hover_messages::event_dot_closure_capture_mut_borrow(&self.deref_name(my_name), &from.name())
+                } else if is.holds_borrow() && *shared && !*of_ref_var {
+                    // `vr.push(r)` with `r: &String = &mut s` (#1599).
+                    hover_messages::event_dot_holder_shared_ref_of_mut(&self.deref_name(my_name), &from.name(), holder_lender_kind(from), holds_copy_value(from))
                 } else if is.holds_borrow() && matches!(from, ResourceTy::Caller) {
                     // `let k = Box::new(r);` with r a `&mut` parameter (#1289).
                     hover_messages::event_dot_holder_borrow_caller(&self.deref_name(my_name))
@@ -5922,8 +5943,8 @@ impl Visualizable for VisualizationData {
           }
           else { vec![(line_num, Event::StaticDie{to : to_ro.to_owned(), is: from_ro.clone(), id: *id})] }
         },
-        ExternalEvent::MutableBorrow{from: from_ro, to: to_ro, id, of_ref_var, ..} => {
-          if to_o { vec![(line_num,  Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id, of_ref_var: *of_ref_var})] }
+        ExternalEvent::MutableBorrow{from: from_ro, to: to_ro, id, of_ref_var, via, ..} => {
+          if to_o { vec![(line_num,  Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id, of_ref_var: *of_ref_var, shared: via.as_ref().is_some_and(|v| v.shared)})] }
           else { vec![(line_num, Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: *id, of_ref_var: *of_ref_var})] }
         },
         ExternalEvent::MutableDie{from: from_ro, to: to_ro, id, still_borrowed_by, of_ref_var, ..} => {
@@ -5963,7 +5984,7 @@ impl Visualizable for VisualizationData {
         },
         ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro, id, stored_in, result_keeps_borrow, of_ref_var, ..} => {
           if to_o { 
-            vec![(line_num,  Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id, of_ref_var: *of_ref_var}),
+            vec![(line_num,  Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id, of_ref_var: *of_ref_var, shared: false}),
             (line_num,  Event::MutableDie{to : from_ro.to_owned(), is: to_ro.clone(), id: *id})]
           }
           else if stored_in.0.is_some() || *result_keeps_borrow {
@@ -6423,10 +6444,11 @@ impl Visualizable for VisualizationData {
                     maybe_append_event(self, &from_ro.clone(), Event::StaticDie{to : to_ro.to_owned(), is: from_ro, id: id}, line_number);
                 }
             },
-            ExternalEvent::MutableBorrow{from: from_ro, to: to_ro, id, of_ref_var, ..} => {
+            ExternalEvent::MutableBorrow{from: from_ro, to: to_ro, id, of_ref_var, via, ..} => {
                 maybe_append_event(self, &from_ro, Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: id, of_ref_var}, line_number);
                 if !matches!(to_ro, ResourceTy::Index(..)) {
-                    maybe_append_event(self, &to_ro.clone(), Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro, id: id, of_ref_var}, line_number);
+                    let shared = via.as_ref().is_some_and(|v| v.shared);
+                    maybe_append_event(self, &to_ro.clone(), Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro, id: id, of_ref_var, shared}, line_number);
                 }
 
             },
@@ -6473,7 +6495,7 @@ impl Visualizable for VisualizationData {
             },
             ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro, id, stored_in, result_keeps_borrow, of_ref_var, ..} => {
                 maybe_append_event(self, &from_ro.clone(), Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: id, of_ref_var}, line_number);
-                maybe_append_event(self, &to_ro.clone(), Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: id, of_ref_var}, line_number);
+                maybe_append_event(self, &to_ro.clone(), Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: id, of_ref_var, shared: false}, line_number);
                 if stored_in.0.is_none() && !result_keeps_borrow {
                     maybe_append_event(self, &from_ro.clone(), Event::MutableReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: id, still_borrowed_by: Vec::new(), of_ref_var}, line_number);
                 }
@@ -6579,8 +6601,14 @@ impl Visualizable for VisualizationData {
 /// nothing back (another reference still holds the loan) ended it as an
 /// immutable one.
 fn holds_mut_borrow(vd: &VisualizationData, ro: &ResourceAccessPoint) -> bool {
-    holds_mut_borrow_by(vd, ro, usize::MAX, 4)
+    holds_mut_borrow_by(vd, ro, usize::MAX, COPY_CHAIN_DEPTH)
 }
+
+/// How far `holds_mut_borrow_by` follows a chain of copies (`let r1 =
+/// r0; let r2 = r1; ...`): far enough for any chain a program writes
+/// out (a bound of 4 left the fifth copy's end immutable, #1599), and
+/// a bound for copies that go round a loop.
+const COPY_CHAIN_DEPTH: usize = 64;
 
 /// `holds_mut_borrow` for `ro`'s value as of line `by`. A copy of another
 /// reference (`h.r = r4;`, `let Holder { r: r4, .. } = h;` with h.r from

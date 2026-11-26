@@ -2020,6 +2020,17 @@ pub fn event_dot_mut_return(my_name: &String) -> String {
     )
 }
 
+// The end of a shared reference made from a mutable borrow that gives
+// nothing back (#1599): r's use of the loan ends, the loan itself only
+// when no reference holding it (a copy r came from, a holder it was
+// stored in) is used again.
+pub fn event_dot_shared_ref_of_mut_return(my_name: &String) -> String {
+    format!(
+        "{0}'s borrow ends; the mutable borrow {0} was made from lasts until nothing that holds it is used again",
+        styled_name_html(my_name)
+    )
+}
+
 // A dot that ends more than one of a reference's loans (`c = &y;` ends
 // c's loan of `x` and its unused new loan of `y`, #803): name the lender
 // of each, or the dot would say the same sentence twice.
@@ -2901,6 +2912,9 @@ pub const TRY_PASSES_ON: &str = "\u{1d}?";
 pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[String], also_unnamed: bool, tie: &ArgTie, carrier: ViaCarrier, passed_on: &[String]) -> String {
     let func_fmt = styled_name_html(func);
     let to_fmt = styled_name_html(to_name);
+    if carrier == ViaCarrier::Plain {
+        return String::new();
+    }
     if carrier == ViaCarrier::StoredBy {
         // `refs.push(&s)` (#392): `func` is the method.
         return format!(
@@ -3008,7 +3022,7 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
         ViaCarrier::Value => ("value", format!("; {0} isn't a reference, but its value holds one", to_fmt)),
         ViaCarrier::StructField => ("struct", String::new()),
         ViaCarrier::TupleField => ("tuple", String::new()),
-        ViaCarrier::Element | ViaCarrier::StoredBy | ViaCarrier::PatternBinding { .. } | ViaCarrier::PatternRef | ViaCarrier::ReturnedClosure { .. } | ViaCarrier::Part | ViaCarrier::StoredThrough => unreachable!(),
+        ViaCarrier::Element | ViaCarrier::StoredBy | ViaCarrier::PatternBinding { .. } | ViaCarrier::PatternRef | ViaCarrier::ReturnedClosure { .. } | ViaCarrier::Part | ViaCarrier::StoredThrough | ViaCarrier::Plain => unreachable!(),
     };
     // A value can hold borrows of several of them at once (`map` over
     // `v.iter()` with a closure that borrows `extra`).
@@ -3442,10 +3456,12 @@ pub fn state_partly_moved(my_name: &String, moved: &[String], maybe: bool) -> St
 
 // The line of a struct every field of which was moved out, some of them
 // on some paths through a conditional above only (`let s2 = p.b; if c {
-// drop(p.a); }`, #1583): on the other paths it still holds those, and
-// drops them at its scope end, but neither it nor any field of it can
-// be used (E0382).
-pub fn state_fields_maybe_all_moved(my_name: &String, surely: &[String], maybe: &[String]) -> String {
+// drop(p.a); }`, #1583): on the other paths it still holds those, but
+// neither it nor any field of it can be used (E0382). It isn't
+// "partially moved" on every path (each arm may move all of it, #1599);
+// what is left is dropped when it is overwritten (a `mut` binding) or at
+// its scope end, as those dots say.
+pub fn state_fields_maybe_all_moved(my_name: &String, surely: &[String], maybe: &[String], mutable: bool) -> String {
     fn list(names: &[String]) -> String {
         let fmt: Vec<String> = names.iter().map(|m| styled_name_html(m)).collect();
         match fmt.as_slice() {
@@ -3457,9 +3473,14 @@ pub fn state_fields_maybe_all_moved(my_name: &String, surely: &[String], maybe: 
         0 => format!("{} may have been moved out", list(maybe)),
         n => format!("{} {} moved out and {} may have been", list(surely), if n > 1 { "were" } else { "was" }, list(maybe)),
     };
+    let (until, dropped) = if mutable {
+        (" until they are assigned new values", format!("when it is overwritten or {} goes out of scope", styled_name_html(my_name)))
+    } else {
+        ("", String::from("when it goes out of scope"))
+    };
     format!(
-        "{0} is partially moved: {1}, so neither {0} nor any of its fields can be used; what is left in {0} is dropped when it goes out of scope",
-        styled_name_html(my_name), moved
+        "{1}, so neither {0} nor any of its fields can be used{2}; what is left in {0} is dropped {3}",
+        styled_name_html(my_name), moved, until, dropped
     )
 }
 
@@ -3594,6 +3615,21 @@ pub fn event_dot_holder_borrow(my_name: &String, from_name: &String, is_mut: boo
         styled_name_html(my_name),
         if is_mut { "mutably" } else { "immutably" },
         what
+    )
+}
+
+// `vr.push(r)` / `let o = Some(r);` with `r: &String = &mut s` (#1599):
+// vr's value holds a shared reference, which can only read s, but keeps
+// the mutable loan it was made from, so s stays mutably borrowed.
+pub fn event_dot_holder_shared_ref_of_mut(my_name: &String, from_name: &String, from: HolderLender, holds_value: bool) -> String {
+    let what = match from {
+        HolderLender::Pointee => format!("the data {} points to", styled_name_html(from_name)),
+        HolderLender::FieldThroughRef => styled_name_html(from_name),
+        HolderLender::Own => format!("{}'s {}", styled_name_html(from_name), if holds_value { "value" } else { "resource" }),
+    };
+    format!(
+        "{0}'s value holds a shared reference made from a mutable borrow of {1}: through it {0} can only read, but the borrow stays mutable while {0} holds it ({0} isn't a reference itself)",
+        styled_name_html(my_name), what
     )
 }
 
@@ -6014,6 +6050,20 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
     } else {
         format!("{} to {}", title, styled_to_string)
     };
+    // A mutable borrow passed on as a shared reference (`let r2 =
+    // id(r);`, `vr.push(r)`, `let o = Some(r);` with `r: &String = &mut
+    // s`): what r2 / vr / o gets can only read s, though s stays mutably
+    // borrowed while it is held (#1599).
+    if let ExternalEvent::MutableBorrow { via: Some(via), is_partial: false, is_reborrow: false, .. } = external_event {
+        let shared_ref = matches!(to, ResourceTy::Value(r) if r.is_ref() && !r.is_mutref());
+        if (via.shared || shared_ref) && !to.is_closure() {
+            title = if via.carrier == ViaCarrier::StoredBy {
+                format!("Shared reference made from a mutable borrow of {}", styled_from_string)
+            } else {
+                format!("Shared reference made from a mutable borrow of {}, to {}", styled_from_string, styled_to_string)
+            };
+        }
+    }
     // `for w in words`: the arrow into the loop variable moves one
     // element out of the collection, not the collection (#850).
     if let ExternalEvent::Move { loop_head: LoopHead::Collection, .. } = external_event {
