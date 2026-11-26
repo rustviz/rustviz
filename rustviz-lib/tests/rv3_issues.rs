@@ -527,7 +527,8 @@ struct RowF {
     /// column -> (fields moved on every path, fields moved on some paths)
     parts: BTreeMap<String, (Vec<String>, Vec<String>)>,
     lent: BTreeMap<String, Vec<Lent>>,
-    /// column -> why it is "maybe" ("moved" | "unassigned"), if the dump says.
+    /// column -> why it is "maybe" ("moved" | "unassigned" | "imaginary"),
+    /// if the dump says.
     cause: BTreeMap<String, String>,
     facts: Vec<Value>,
     /// The row's arms (several arms of branches on one row): each one's
@@ -1122,8 +1123,10 @@ fn check(a: &Assertion, facts: &[BodyF], shape: &Shape, hand: &[(String, u32, St
                 "shared" => st == Some("own") && !lent.is_empty() && !excl,
                 "mut" => matches!(st, Some("own" | "partly")) && excl,
                 "moved" => st == Some("moved"),
-                "maybe-moved" => maybe && cause == Some("moved"),
-                "moved*" => st == Some("moved") || (maybe && cause == Some("moved")),
+                // (`imaginary`: moved only on an edge borrowck checks but that
+                // never runs; rustc treats it as possibly moved.)
+                "maybe-moved" => maybe && matches!(cause, Some("moved" | "imaginary")),
+                "moved*" => st == Some("moved") || (maybe && matches!(cause, Some("moved" | "imaginary"))),
                 "partly" => st == Some("partly"),
                 "partly*" => st == Some("partly") || any_parts,
                 "unassigned" => st == Some("unassigned"),

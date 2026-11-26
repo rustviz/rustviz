@@ -2203,7 +2203,38 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 if cx.is_user(*place) {
                     let path = cx.name(*place).unwrap_or_default();
                     let how = match rt_md.rev_lookup.find(place.as_ref()) {
-                        LookupResult::Exact(mpi) => drop_how(&rt.state(&[loc], false, mpi)),
+                        LookupResult::Exact(mpi) => {
+                            let st = rt.state(&[loc], false, mpi);
+                            let how = drop_how(&st);
+                            // What is left needs no drop (every field that does was
+                            // moved out on every path; `(bool, String, String)`
+                            // with both Strings moved): nothing is dropped.
+                            let left_needs_drop = || {
+                                if !st.sub_maybe.is_empty() || st.payload_moved || st.payload_maybe {
+                                    return true;
+                                }
+                                let mut moved: BTreeSet<usize> = BTreeSet::new();
+                                for m in &st.sub_moved {
+                                    let mp = &rt_md.move_paths[*m];
+                                    match (mp.parent, mp.place.projection.last()) {
+                                        (Some(p), Some(ProjectionElem::Field(f, _))) if p == mpi => {
+                                            moved.insert(f.index());
+                                        }
+                                        _ => return true,
+                                    }
+                                }
+                                let pty = place.ty(&body.local_decls, tcx).ty;
+                                let fields: Vec<rustc_middle::ty::Ty<'tcx>> = match pty.kind() {
+                                    TyKind::Tuple(tys) => tys.iter().collect(),
+                                    TyKind::Adt(def, args) if def.is_struct() && !pty.is_box() => {
+                                        def.non_enum_variant().fields.iter().map(|fd| fd.ty(tcx, args)).collect()
+                                    }
+                                    _ => return true,
+                                };
+                                fields.iter().enumerate().any(|(i, fty)| !moved.contains(&i) && ty_info(*fty).1)
+                            };
+                            if how == "drops_rest" && !left_needs_drop() { "nothing_to_drop" } else { how }
+                        }
                         LookupResult::Parent(_) => "drops",
                     };
                     let shared = cx.rows.shared_exits.get(&loc).cloned().unwrap_or_default();
@@ -2346,7 +2377,18 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         let mut st = State::default();
         for (mpi, place, name) in &columns {
             let s = flow.state(exits, true, *mpi);
-            let w = s.word();
+            // What runs, for the words (Q5 refined): moved on every real
+            // execution, though borrowck's imaginary edges skip the move (an
+            // or-pattern's second alternative after an irrefutable first,
+            // `(x, _) | (_, x)`), reads "moved".
+            let rt_here = match rt_md.rev_lookup.find(place.as_ref()) {
+                LookupResult::Exact(rm) => Some(rt.state(exits, true, rm)),
+                LookupResult::Parent(_) => None,
+            };
+            let w = match s.word() {
+                "maybe" if rt_here.as_ref().is_some_and(|r| r.may_uninit && !r.may_init && r.ever_init) => "moved",
+                w => w,
+            };
             // A variable not assigned yet (and its fields): no column yet.
             let mut root_unassigned = || {
                 columns.iter().any(|(m, rp, _)| {
@@ -2380,7 +2422,10 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     let (anc, desc) = (ancestors(&move_data, *mpi), descendants(&move_data, *mpi));
                     set.iter().any(|m| anc.contains(m) || desc.contains(m))
                 });
-                st.cause.insert(name.clone(), if moved { "moved" } else { "unassigned" });
+                // Never moved at runtime, only on borrowck's imaginary edges
+                // (the unreachable alternative): it still can't be used.
+                let imaginary = rt_here.as_ref().is_some_and(|r| r.may_init && !r.may_uninit);
+                st.cause.insert(name.clone(), if imaginary { "imaginary" } else if moved { "moved" } else { "unassigned" });
             }
             if (w == "partly" || w == "own") && (!s.sub_moved.is_empty() || !s.sub_maybe.is_empty()) {
                 // A part borrowck counts as moved on some paths only is moved

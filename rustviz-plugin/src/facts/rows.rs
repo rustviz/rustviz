@@ -118,6 +118,29 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
                 }
             }
         }
+        // A binding a `let .. else { .. };` makes (`x2 = (o2 as Some).0`)
+        // takes effect when the statement is done, past its `else` block: on
+        // its `};` row, which so shows the path that goes on (rule 4).
+        if let Some(StatementKind::Assign(asg)) = data.statements.get(l.statement_index).map(|s| &s.kind) {
+            let hir_id = self.body.location_to_hir_id(l);
+            let binding = asg.0.projection.is_empty() && self.body.local_decls[asg.0.local].is_user_variable();
+            if binding && matches!(self.tcx.hir_node(hir_id), hir::Node::LetStmt(ls) if ls.els.is_some() && !ls.span.from_expansion()) {
+                if let hir::Node::LetStmt(ls) = self.tcx.hir_node(hir_id) {
+                    return self.line_hi(ls.span).max(self.line_lo(sp));
+                }
+            }
+            if binding && matches!(self.tcx.hir_node(hir_id), hir::Node::Pat(_)) {
+                for (_, n) in self.tcx.hir_parent_iter(hir_id).take(16) {
+                    match n {
+                        hir::Node::LetStmt(ls) if ls.els.is_some() && !ls.span.from_expansion() => {
+                            return self.line_hi(ls.span).max(self.line_lo(sp));
+                        }
+                        hir::Node::Pat(_) | hir::Node::PatField(_) | hir::Node::PatExpr(_) => {}
+                        _ => break,
+                    }
+                }
+            }
+        }
         // An assignment takes effect when its whole expression is done:
         // MIR gives `h = move tmp` (and the drop of the old `h` before it)
         // the span of `h`, but in `h = if c {..} else {..};` it runs

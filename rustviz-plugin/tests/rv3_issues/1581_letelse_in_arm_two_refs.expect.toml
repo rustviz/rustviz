@@ -1,10 +1,9 @@
 issue = 1581
-xfail = "P1"
 cluster = "C04"
 title = "let-else inside a match arm, with a second reference parameter: m's reborrow end drawn only in the `_` arm; the let-else join and match join are wrong"
 fn = "run"
 beyond_facts = "P3: the let-else join (row 7) and the match join (row 10) titles/dots"
-note = "Gap: spike gives o2 `own` (rustc: partly moved: x2 binds o2.0) and no state for the let-else binding x2 at row 7. No local lender is involved: the facts are m's reborrow by `replace(m, ..)` (ends on its own row) and that m is never moved."
+note = "Passes since rv3 P1-4: a binding a `let .. else { .. };` makes takes effect on the statement's last row (its `};`), so that row has the state of the path that goes on (x2 own, o2 partly), as rule 4 intends; m is reborrowed by `replace(m, ..)`, never moved."
 
 [[loan]]
 row = 5

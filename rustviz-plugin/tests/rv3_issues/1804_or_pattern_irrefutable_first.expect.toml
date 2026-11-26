@@ -1,8 +1,7 @@
 issue = 1804
 cluster = "C99"
 title = "`(x, _) | (_, x)`: the first alternative is irrefutable, so t.0 always moves into x and t.1 stays in t and is dropped at scope end"
-xfail = "P1"
-note = "Spike gap: t.0 is `maybe` moved after the arm: the unreachable second alternative is treated as taken (MIR drop elaboration drops (t.1) unconditionally, so t.0 is definitely moved)."
+note = "Passes since rv3 P1-4 (Q5 refined): moved on every real execution, though borrowck's imaginary edge to the unreachable second alternative skips the move, so the word is `moved`; usability still follows borrowck."
 fn = "g"
 places = ["t.0", "t.1"]
 beyond_facts = "P3: 2.x draws `x is bound from t.0 or t.1` and says each field is dropped only if no branch moved it (fixtures pin it)"

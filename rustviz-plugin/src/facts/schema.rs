@@ -191,8 +191,10 @@ pub struct State {
     pub parts: BTreeMap<String, Parts>,
     /// column -> loans in scope that restrict it.
     pub lent: BTreeMap<String, Vec<Lent>>,
-    /// For a "maybe" column: "moved" (moved out on some way here) or
-    /// "unassigned" (never given a value on some way here).
+    /// For a "maybe" column: "moved" (moved out on some way here),
+    /// "unassigned" (never given a value on some way here) or "imaginary"
+    /// (moved only on a way borrowck checks but that never runs: an
+    /// or-pattern's unreachable alternative; still not usable).
     pub cause: BTreeMap<String, &'static str>,
 }
 
