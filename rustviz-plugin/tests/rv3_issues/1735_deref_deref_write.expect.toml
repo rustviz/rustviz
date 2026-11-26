@@ -42,7 +42,7 @@ source_hash = "b678b064051fa93f"
 states = [
   "f2 2 b own",
   "f2 2 c own",
-  "f2 4 b moved*",
+  "f2 4 b partly*",
   "f2 4 c own",
   "f2 6 b own",
   "f2 6 c own",

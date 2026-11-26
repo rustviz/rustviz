@@ -5,7 +5,7 @@ fn = "f5"
 places = ["*b"]
 beyond_facts = "P3: the join text says 'the branch that moved b returned before reaching this point'"
 xfail = "P0"
-note = "Gap (expected): no state for the place `*b`; oracle `b is moved*` vs dump `partly` (harness)."
+note = "Gap (expected): no state for the place `*b`."
 
 [[state]]
 row = 4
@@ -41,7 +41,7 @@ source_hash = "7595b0e6c7c7ba0f"
 states = [
   "f5 2 b own",
   "f5 2 c own",
-  "f5 4 b moved*",
+  "f5 4 b partly*",
   "f5 4 c own",
   "f5 6 b own",
   "f5 6 c own",

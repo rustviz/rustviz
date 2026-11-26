@@ -31,5 +31,5 @@ toolchain = "nightly-2026-05-01"
 source_hash = "b20610da23788705"
 states = [
   "main 2 b own",
-  "main 3 b moved*",
+  "main 3 b partly*",
 ]

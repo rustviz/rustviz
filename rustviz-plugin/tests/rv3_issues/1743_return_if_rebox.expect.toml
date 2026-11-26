@@ -36,10 +36,10 @@ states = [
   "f 2 b own",
   "f 2 c own",
   "f 2 q own",
-  "f 3 b moved*",
+  "f 3 b partly*",
   "f 3 c own",
   "f 3 q own",
-  "f 6 b moved*",
+  "f 6 b partly*",
   "f 6 c own",
   "f 6 q own",
 ]

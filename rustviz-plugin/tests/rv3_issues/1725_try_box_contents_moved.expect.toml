@@ -42,10 +42,10 @@ source_hash = "68c49e27d44efcb3"
 states = [
   "run 2 b own",
   "run 2 o own",
-  "run 3 b moved*",
+  "run 3 b partly*",
   "run 3 o own",
   "run 3 s own",
-  "run 4 b moved*",
+  "run 4 b partly*",
   "run 4 o own",
   "run 4 s own",
 ]
