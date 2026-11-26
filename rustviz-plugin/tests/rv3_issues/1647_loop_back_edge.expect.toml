@@ -1,8 +1,9 @@
 issue = 1647
 cluster = "C01"
 title = "Reference read in a one-line conditional inside a `for` loop: r's loan drawn ending at row 6's join, though the next iteration reads r"
+xfail = "P0"
 fn = "run"
-note = "The issue comment's shape (`fn lp(v: &mut Vec<i32>, ..)`, `continue` in one arm) is not a case: v is a parameter, so no local loan's end states it."
+note = "The issue comment's shape (`fn lp(v: &mut Vec<i32>, ..)`, `continue` in one arm) is not a case: v is a parameter, so no local loan's end states it. Gap (spike): the loop-exit end's `to_line` is the loop head (row 5) itself, not row 8, the row the exit path runs next."
 beyond_facts = "P3: row 6 holds three arms on one row; r's line runs through the loop body with no end on row 6 and ends where the loop exits"
 
 # r's loan is live at every point of the loop (a later iteration may read
@@ -12,9 +13,9 @@ row = 4
 lender = "s"
 holder = "r"
 kind = "shared"
-ends = [5]
+ends = [[5, 8]]
 src = "issue"
-why = "with q removed (it keeps s borrowed past the loop): `let _ = &mut s;` is E0502 at the start of the loop body, in the `if c` arm, after `r.len()` and at the end of the body; it compiles after the loop"
+why = "only the loop-exit edge ends it (a later iteration reads r): with q removed and `let mut s`, `let _ = &mut s;` is E0502 at the start of the loop body, in the `if c` arm, after `r.len()` and at the end of the body, and has no conflict after the loop"
 
 [[event]]
 row = 6

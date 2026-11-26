@@ -38,9 +38,10 @@ why = "..."                    # optional, recommended: the rustc check that pro
 
 [[lent]]                       # a loan restricts the place after the row
 row = 8
-place = "x"
+place = "x"                    # a column: a variable or field path (`a`, not `*a`)
 kind = "shared"                # shared | mut | unique | exclusive (= mut or unique); optional
 holder = "c"                   # the reference/variable holding the loan; optional; "_" = any
+lender = "*a"                  # optional: the loan's borrowed place (a reborrow through a)
 absent = false                 # true: no such loan
 src = "issue"
 
@@ -50,7 +51,9 @@ lender = "x"                   # the borrowed place as written: x, p.a, *b, v[_]
 kind = "shared"                # optional: shared | mut | unique | exclusive
 holder = "c"                   # optional; must be among the loan's holders
 ends = [[5, 6], 9]             # optional: exactly these ends, one per CFG edge that ends the loan:
-                               #   [5, 6] = on row 5, on the path that next runs row 6; 9 = on row 9 (any edge)
+                               #   [5, 6] = on row 5, on the path that next runs row 6 (any row: a loop's
+                               #   back edge goes up); 9 = on row 9 (any edge). The loan record's
+                               #   end rows must be the same set.
 ends_include = [5]             # optional
 ends_exclude = [8]             # optional
 absent = false                 # true: no such loan
@@ -88,7 +91,11 @@ doesn't follow the paths, so these accept either.
 
 **Kinds.** The dump's spellings are normalised (`mut(two-phase)` is
 `mut`); `unique` (a closure's unique immutable capture) is not `mut`.
-`exclusive` matches either.
+`exclusive` matches either. A row's `lent` entry takes its kind from the
+loan's record. A two-phase loan counts as exclusive (state `mut`) only
+from its activation row (`activation_line` in the loan record); before
+that, or when the dump doesn't say, it is a reservation and counts as
+shared.
 
 **Events** (`ev`): `<kind> <place>[ -> <target>]`, `_` matches anything.
 Kinds: `init`, `reassign`, `move`, `copy` (place `-> to`), `borrow`,
@@ -104,7 +111,9 @@ for row L. A row the dump gives no state is "no state": the harness never
 borrows a state from a textually earlier row (it can be another path's: a
 loop body, a sibling arm). A drop the dump marks `early_exit = N` (MIR span
 `}`, run only by the exit on row N) counts on row N and not on the `}` row;
-one marked `also_on_exits` counts on its row and on each exit's row. When
+one marked `also_on_exits` counts on its row and on each exit's row. An
+`[[order]]` must hold on one path through the row: events outside any arm
+plus one arm's (and its parents'), by the dump's `arm` index. When
 a row has several paths (an `if` row), state the path the issue is about
 with a row inside that arm, or use `[[loan]] ends` with `[row, next]`
 edges. In an edge, `next` is the first row that path runs after the end;
@@ -118,6 +127,14 @@ Drop-printing type for drop timing, `--emit=mir` for moves and drops).
 Give the check in `why` (not every case has one yet; new ones should). Write `issue` assertions only for what the oracle can't decide, or
 for the exact point the issue is about (repeat it even if the oracle has it:
 it names the bug).
+
+**`[[oracle_skip]]`** (`place`, optional `row` / `fn`, `why`) leaves
+matching generated states unchecked, for a rustc verdict that isn't what
+the program does (borrowck's view of an unreachable or-pattern
+alternative). Pin what MIR does with `issue` assertions next to it.
+
+**Producer errors.** A dump whose top-level `errors` isn't empty is a read
+failure: the case fails in strict mode whatever its `xfail`.
 
 ## The generated block
 
@@ -134,6 +151,9 @@ everything below the `# ---- generated ...` marker. `own` means the
 `&mut x` probe raised no borrow conflict and no missing value (E0596, x
 not declared `mut`, is ignored). It prints
 `CONTRADICTED` for a hand-written state rustc disagrees with: fix the case.
+If rustc or a probe fails on a case that already has states, the old block
+is kept and the run fails. A method's states are named `Type::name`, a trait
+impl's `<Type as Trait>::name`, a module's fn `module::name`.
 `rv3_issue_cases_well_formed` (always run) fails when the block is stale
 (the program, `places` or the toolchain changed) or has a malformed line.
 

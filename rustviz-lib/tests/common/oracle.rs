@@ -436,8 +436,11 @@ struct Points {
     items: HashSet<String>,
     /// Per function: its name (`main`, `Foo::bar` for a method).
     names: Vec<String>,
-    /// The `impl` / `trait` blocks being visited: their type's name.
+    /// The `impl` / `trait` blocks being visited: the method path prefix
+    /// (`Foo`, `<D as Drop>`, `Trait`).
     impls: Vec<String>,
+    /// The modules being visited.
+    mods: Vec<String>,
 }
 
 fn line_of(s: proc_macro2::Span) -> (u32, u32) {
@@ -450,10 +453,15 @@ impl Points {
     }
     fn enter_fn(&mut self, name: &syn::Ident, sig: proc_macro2::Span, body: Option<&syn::Block>) {
         self.bindings.push(HashMap::new());
+        let mods: String = self.mods.iter().map(|m| format!("{m}::")).collect();
         self.names.push(match self.impls.last() {
-            // A method; not a fn nested in a method's body.
-            Some(ty) if self.func().is_none() => format!("{ty}::{name}"),
-            _ => name.to_string(),
+            // A trait impl's method: `<D as Drop>::drop` (no module path;
+            // the harness compares last segments of its types).
+            Some(p) if self.func().is_none() && p.starts_with('<') => format!("{p}::{name}"),
+            // An inherent or a trait's default method; not a fn nested in a
+            // method's body.
+            Some(p) if self.func().is_none() => format!("{mods}{p}::{name}"),
+            _ => format!("{mods}{name}"),
         });
         let open = body.and_then(|b| {
             let o = b.brace_token.span.open().start().line as u32;
@@ -517,9 +525,18 @@ impl<'ast> Visit<'ast> for Points {
             syn::Type::Path(p) => p.path.segments.last().map_or(String::new(), |s| s.ident.to_string()),
             _ => String::new(),
         };
-        self.impls.push(ty);
+        let prefix = match &i.trait_ {
+            Some((_, tr, _)) => format!("<{} as {}>", ty, tr.segments.last().map_or(String::new(), |s| s.ident.to_string())),
+            None => ty,
+        };
+        self.impls.push(prefix);
         visit::visit_item_impl(self, i);
         self.impls.pop();
+    }
+    fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
+        self.mods.push(m.ident.to_string());
+        visit::visit_item_mod(self, m);
+        self.mods.pop();
     }
     fn visit_item_trait(&mut self, t: &'ast syn::ItemTrait) {
         self.impls.push(t.ident.to_string());
