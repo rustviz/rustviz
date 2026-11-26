@@ -436,7 +436,13 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
         // Rule 3.
         let mut row_exits_all: BTreeMap<usize, Vec<(Location, Vec<usize>)>> = BTreeMap::new();
         for (&loc, &r) in &row {
-            let succ_rows: Vec<usize> = self.succs(loc).iter().filter_map(|s| row.get(s).copied()).collect();
+            // Not into code only a `break` / `continue` runs (its drops keep
+            // the `}` row for states, rule 4): that path leaves the row's
+            // scope, it doesn't go on to the next row (`if c { break l.name; }`).
+            let succ_rows: Vec<usize> = self.succs(loc).iter()
+                .filter(|s| early_exit.contains_key(&loc) || !early_exit.contains_key(*s))
+                .filter_map(|s| row.get(s).copied())
+                .collect();
             if succ_rows.is_empty() || succ_rows.iter().any(|x| *x != r) {
                 row_exits_all.entry(r).or_default().push((loc, succ_rows));
             }

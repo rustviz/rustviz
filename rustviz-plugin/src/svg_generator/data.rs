@@ -4737,8 +4737,15 @@ pub struct VisualizationData {
     pub raised_headers: HashSet<u64>,
 
     /// RustViz 3: each column's state on each row, from MIR
-    /// (`crate::facts::table`). Not drawn from yet.
+    /// (`crate::facts::table`). Struct columns' line text is drawn from it.
     pub state_table: crate::facts::table::StateTable,
+
+    /// Each RAP's fn's first source line (`fn_start_lines` before the
+    /// renderer moves it to visual rows): the state table's key.
+    pub fn_source_lines: HashMap<u64, usize>,
+
+    /// The source, by line (1-based line `l` is `source_lines[l - 1]`).
+    pub source_lines: Vec<String>,
 }
 
 impl VisualizationData {

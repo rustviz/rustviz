@@ -109,6 +109,8 @@ struct BodyTable {
     rows: BTreeMap<usize, RowCells>,
     /// Column names, in the facts' order.
     columns: Vec<String>,
+    /// Each loan's kind ("shared", "mut", "unique").
+    loan_kinds: BTreeMap<usize, &'static str>,
 }
 
 /// The state table of a crate: per fn body, per row (and arm), per
@@ -188,6 +190,58 @@ impl StateTable {
             .map_or(Vec::new(), |r| r.arms.iter().map(|(a, _)| a.clone()).collect())
     }
 
+    /// The direct field columns of `column` (`p.a`, `p.b` of `p`).
+    pub fn fields_of(&self, fn_line: usize, column: &str) -> Vec<String> {
+        let prefix = format!("{}.", column);
+        self.body(fn_line, column).map_or(Vec::new(), |b| {
+            b.columns
+                .iter()
+                .filter(|n| n.strip_prefix(&prefix).is_some_and(|rest| !rest.is_empty() && !rest.contains('.')))
+                .cloned()
+                .collect()
+        })
+    }
+
+    /// The first row below `row` with a state of its own, in the body of
+    /// the fn starting on `fn_line` that has `column`.
+    pub fn next_state_row(&self, fn_line: usize, column: &str, row: usize) -> Option<usize> {
+        let body = self.body(fn_line, column)?;
+        if row >= body.last_line {
+            return None;
+        }
+        body.rows.range(row + 1..=body.last_line).find(|(_, r)| r.snapshot).map(|(l, _)| *l)
+    }
+
+    /// Whether `row` has no event about any place of `column`'s variable
+    /// (`p`, `p.a`, `*b`): its state before the row is then its state
+    /// after it. `values_only`: only events that change what it holds
+    /// count (a move, an assignment, a drop), not its loans.
+    pub fn quiet(&self, fn_line: usize, column: &str, row: usize, values_only: bool) -> bool {
+        let Some(body) = self.body(fn_line, column) else { return false };
+        let Some(r) = body.rows.get(&row) else { return true };
+        let root = |c: &str| c.trim_start_matches('*').split(['.', '[']).next().unwrap_or_default().to_owned();
+        r.why.iter().filter(|(c, _)| root(c) == root(column)).all(|(_, ws)| {
+            ws.iter().all(|(_, w)| values_only && matches!(w, Why::Lent { .. } | Why::LoanEnded { .. }))
+        })
+    }
+
+    /// Whether `row` gives no place of `column`'s variable a new value,
+    /// moves or drops one, or starts or ends an exclusive (`&mut`, unique)
+    /// loan of one: what can be used of it is the same before the row as
+    /// after it (shared loans starting or ending there don't change that).
+    pub fn usable_same(&self, fn_line: usize, column: &str, row: usize) -> bool {
+        let Some(body) = self.body(fn_line, column) else { return false };
+        let Some(r) = body.rows.get(&row) else { return true };
+        let root = |c: &str| c.trim_start_matches('*').split(['.', '[']).next().unwrap_or_default().to_owned();
+        let shared = |loan: &usize| body.loan_kinds.get(loan).is_some_and(|k| matches!(*k, "shared" | "reserved"));
+        r.why.iter().filter(|(c, _)| root(c) == root(column)).all(|(_, ws)| {
+            ws.iter().all(|(_, w)| match w {
+                Why::Lent { loan } | Why::LoanEnded { loan, .. } => shared(loan),
+                _ => false,
+            })
+        })
+    }
+
     /// Whether the table has a fn starting on `fn_line`.
     pub fn has_fn(&self, fn_line: usize) -> bool {
         self.bodies.contains_key(&fn_line)
@@ -247,7 +301,8 @@ fn body_table(b: &BodyFacts) -> BodyTable {
         }
         rows.insert(r.line, rc);
     }
-    BodyTable { first_line: b.first_line, last_line: b.last_line, rows, columns }
+    let loan_kinds = b.loans.iter().map(|l| (l.loan, l.kind)).collect();
+    BodyTable { first_line: b.first_line, last_line: b.last_line, rows, columns, loan_kinds }
 }
 
 #[cfg(test)]

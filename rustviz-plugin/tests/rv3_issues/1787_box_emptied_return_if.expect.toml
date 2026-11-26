@@ -1,8 +1,7 @@
 issue = 1787
-xfail = "P1"
 cluster = "C10"
 title = "Box emptied by `let x = *b;`, then `if early { return if c { b = ..; b } else { q }; }`: b's line stops before its scope-end drop"
-note = "Gap (P1): after a move out of a Box's contents (`let _old = *b;`) the dump marks the Box binding `moved`; only the payload moved, the Box allocation is still owned until scope end, so the state is `partly` (rustc: E0382 with the note that the move occurs because of `*b`). Both [issue] state assertions fail for this reason. Review fix: the earlier note claimed the harness and dump agree and no xfail was needed; the xfail is needed."
+note = "Passes since rv3 P1-2: a move out of a Box's contents leaves the Box `partly` moved, not `moved`: the Box's own move path stays initialized and it still owns its allocation, which is freed when the Box is dropped (at its scope end, on an early exit, or when it is given a new Box). rustc reports a later use of the Box as E0382 \"use of moved value\", with a note that the move was of `*b`."
 fn = "returns_other"
 beyond_facts = "P3: b's column after the outer if on the path that skipped it must reach the scope-end dot; renderer-level"
 
