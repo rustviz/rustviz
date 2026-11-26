@@ -11960,7 +11960,20 @@ pub fn print_out_of_scope(&mut self){
         let co = lender != rd.lender;
         // A reference no one lent to (#1095) gives nothing back.
         let unlent = matches!(rd.lender, ResourceTy::Anonymous) && self.unlent_refs.contains(k);
+        // Q6 (the binding's own end each time round, the iterator's arrow
+        // where the loop ends) needs the renderer to keep the binding's
+        // column after its end: until then the binding gives the lender
+        // back where the loop ends, as 2.x draws it.
         let end = match end {
+          End::LoopExit { back, .. } => End::Arrow(back),
+          e => e,
+        };
+        // An end past the reference's scope end (a copy of it outlives it,
+        // #913): its own end there, before the scope end.
+        let scope_end = (from_ro.is_ref() && self.raps.get(k).is_some_and(|r| r.extra_scopes.is_empty()))
+          .then(|| gos_line_from(self.preprocessed_events, &from_ro, rd.assigned_at)).flatten();
+        let end = match end {
+          End::Arrow(l) | End::Own(l) if scope_end.is_some_and(|s| s < l) => End::Own(scope_end.unwrap_or(l)),
           End::Arrow(l) if unlent => End::Own(l),
           e => e,
         };
