@@ -264,13 +264,52 @@ impl DotLayer {
 /// event, in order. Empty texts (the structural merge dot of an
 /// unchanged variable) are left out, and so is a line that repeats the
 /// one before it (two borrows of `s` ending on one line both say "s's
-/// resource is no longer immutably borrowed").
+/// resource is no longer immutably borrowed"). Not a reassignment's
+/// drop: two assignments on one line drop two values (#1620).
 fn merged_dot_title(lines: &[(Option<usize>, String)]) -> String {
-    let mut texts: Vec<&str> = lines.iter()
+    let texts: Vec<&str> = lines.iter()
         .map(|(_, t)| t.as_str())
         .filter(|t| !t.is_empty())
         .collect();
-    texts.dedup();
+    // `s = String::from(..)` says "acquires ownership of a new resource;
+    // its previous resource is dropped": the plain "acquires ownership of
+    // a resource" of the same assignment, next to it, adds nothing (#506,
+    // #519). Only that one: on `let mut s = a(); s = b();` or `drop(s); s
+    // = b(); s = c();` the first value's own line stays, or the dot reads
+    // as if the moved value were dropped (#1645, #1620). Each assignment's
+    // acquire comes just before its drop. (Drops that come before any
+    // acquire are one assignment's alternatives, a `break` value each,
+    // #1253: one line says them all, as before.)
+    let is_reassign = |r: &str| texts.iter().any(|t| hover_messages::reassign_subsumes_acquire(r, t));
+    let reassigns: Vec<bool> = texts.iter().map(|r| is_reassign(r)).collect();
+    // Only where the lines come in that order, each drop right after its
+    // own acquire (`let mut s = a(); s = b();`); a dot whose events came
+    // in another order (a move from another column, `s = b; s = c;`) says
+    // what main says.
+    let acquires = |j: usize| !reassigns[j] && (0..texts.len()).any(|k| reassigns[k] && hover_messages::reassign_subsumes_acquire(texts[k], texts[j]));
+    let sequential = reassigns.iter().any(|r| *r)
+        && (0..texts.len()).find(|&j| reassigns[j] || acquires(j)).is_some_and(|j| !reassigns[j])
+        && (0..texts.len()).filter(|&j| reassigns[j]).all(|j| j > 0 && !reassigns[j - 1]
+            && hover_messages::reassign_subsumes_acquire(texts[j], texts[j - 1]))
+        // (and no acquire left over after the last drop)
+        && (0..texts.len()).rev().find(|&j| reassigns[j] || acquires(j)).is_some_and(|j| reassigns[j]);
+    let texts: Vec<&str> = if sequential {
+        let mut gone = vec![false; texts.len()];
+        for j in (0..texts.len()).filter(|&j| reassigns[j]) {
+            let pairs = |i: &usize| !gone[*i] && !reassigns[*i] && hover_messages::reassign_subsumes_acquire(texts[j], texts[*i]);
+            if let Some(i) = (0..j).rev().find(pairs).or_else(|| (j + 1..texts.len()).find(pairs)) {
+                gone[i] = true;
+            }
+        }
+        let mut kept: Vec<&str> = texts.iter().zip(&gone).filter(|(_, g)| !**g).map(|(t, _)| *t).collect();
+        kept.dedup_by(|b, a| a == b && !hover_messages::is_reassign_drop(a));
+        kept
+    } else {
+        let all = texts.clone();
+        let mut kept: Vec<&str> = texts.into_iter().filter(|t| !all.iter().any(|r| hover_messages::reassign_subsumes_acquire(r, t))).collect();
+        kept.dedup();
+        kept
+    };
     // Two `?` on a line: the drop at the first `?` is not about the
     // second `?`'s move of the same variable (#668).
     let moves_into_try = texts.iter().any(|t| t.contains("is moved into the `?`."));
@@ -280,12 +319,7 @@ fn merged_dot_title(lines: &[(Option<usize>, String)]) -> String {
     let texts_owned: Vec<String> = texts.iter().zip(&rewritten)
         .map(|(t, r)| r.clone().unwrap_or_else(|| (*t).to_owned()))
         .collect();
-    let mut texts: Vec<&str> = texts_owned.iter().map(String::as_str).collect();
-    // `s = String::from(..)` says "acquires ownership of a new resource;
-    // its previous resource is dropped": the plain "acquires ownership of
-    // a resource" next to it adds nothing (#506, #519).
-    let all = texts.clone();
-    texts.retain(|t| !all.iter().any(|r| hover_messages::reassign_subsumes_acquire(r, t)));
+    let texts: Vec<&str> = texts_owned.iter().map(String::as_str).collect();
     // The same for a value one of several `break`s carried (#586).
     let mut texts: Vec<String> = texts.iter().map(|t| t.to_string()).collect();
     if let Some((i, j, merged)) = (0..texts.len()).find_map(|i| (0..texts.len())
@@ -3823,9 +3857,10 @@ fn collect_closure_captures(
                     out.push((name, hover_messages::capture_verb_immutably_borrowed()));
                 }
             }
-            ExternalEvent::MutableBorrow { from, to, .. } if matches_closure(to, closure_hash) => {
+            ExternalEvent::MutableBorrow { from, to, of_ref_var, .. } if matches_closure(to, closure_hash) => {
                 if let Some(name) = upvar_name(from) {
-                    out.push((name, hover_messages::capture_verb_mutably_borrowed()));
+                    // (A reference variable itself: mutable or unique, #1627.)
+                    out.push((name, if *of_ref_var { hover_messages::capture_verb_borrowed() } else { hover_messages::capture_verb_mutably_borrowed() }));
                 }
             }
             _ => {}
@@ -6440,6 +6475,24 @@ fn marks_on_others(drawn: &[Drawn], ends: &Ends) -> Vec<(usize, usize)> {
             let Some(mat) = m.logo else { continue };
             let c = logo_box(mat);
             if l.tip != m.tip && bx.0.max(c.0) < bx.2.min(c.2) - 1.0 && bx.1.max(c.1) < bx.3.min(c.3) - 1.0 {
+                out.push((i, j));
+            }
+            // Two calls' logos with one tooltip on one spot (#1620),
+            // as `events-drawn-as-one` finds them.
+            if l.tip == m.tip && l.key != m.key && (at.0 - mat.0).abs() < 2.0 && (at.1 - mat.1).abs() < 2.0 {
+                out.push((i, j));
+            }
+        }
+    }
+    // Two arrows of different events with one tooltip, their heads on one
+    // spot (#1620, `events-drawn-as-one`; not copies of one column into the
+    // value returned to the caller).
+    for (n, &i) in arrows.iter().enumerate() {
+        for &j in &arrows[n + 1..] {
+            let (a, b) = (&drawn[i], &drawn[j]);
+            let copy = |d: &Drawn| d.tip.contains("copied") || d.tip.starts_with("Copy");
+            if a.key != b.key && a.tip == b.tip && !(a.to == "caller" && b.to == "caller" && a.var == b.var && copy(a) && copy(b)) && a.tri.len() == 3 && b.tri.len() == 3
+                && a.tri.iter().zip(&b.tri).all(|(p, q)| dist(*p, *q) < 2.0) {
                 out.push((i, j));
             }
         }

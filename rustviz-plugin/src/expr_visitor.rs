@@ -2257,7 +2257,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         let ev = if is_copy {
           ExternalEvent::Copy { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, break_alt: None, closure_value: false, into_ctor: None, pointee: None, of_const: None }
         } else {
-          ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: None, closure_value: false }
+          ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: None, closure_value: false, taken_by_call: None }
         };
         self.add_external_event(line_num, ev);
         // A nested struct field moved into a function / closure
@@ -2329,7 +2329,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       self.add_external_event(line_num, if is_copy {
         ExternalEvent::Copy { from, to, id: ev_id, is_partial: false, into_closure: false, break_alt: None, closure_value: false, into_ctor: None, pointee: None, of_const: None }
       } else {
-        ExternalEvent::Move { from, to, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: None, closure_value: false }
+        ExternalEvent::Move { from, to, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: None, closure_value: false, taken_by_call: None }
       });
     }
   }
@@ -2515,6 +2515,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         id: ev_id,
         is_partial: false,
         into_closure: false,
+        taken_by_call: None,
         loop_head: LoopHead::No,
         break_alt: None,
         break_out: false,
@@ -2930,7 +2931,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         let is_partial = is_partial && pointee.is_none();
         ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial, into_closure: false, break_alt: None, closure_value: false, into_ctor: None, pointee, of_const: None }
       }
-      Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: self.try_move, closure_value: false },
+      Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: self.try_move, closure_value: false, taken_by_call: None },
       Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None, of_ref_var: false },
       Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None, of_ref_var: false },
       Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, pointee_interior_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new(), of_ref_var: false, deep: None },
@@ -3881,6 +3882,45 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   ///
   /// The same for an `FnOnce` closure stored in a struct field (`(h.f)()`,
   /// #725): the call moves `h.f` out of `h`.
+  /// `f()` with `f` a local (an `impl FnOnce` / `F: FnOnce` parameter,
+  /// a `Box<dyn FnOnce>`) whose type isn't a closure written here, called
+  /// through `FnOnce::call_once` (#1623): the call consumes `f`. What it
+  /// holds isn't known, so nothing is said about it; the call's result
+  /// comes from the call (`local_callee_result_key`), not from `f`.
+  fn opaque_fn_once_call(&mut self, callee: &'tcx Expr<'tcx>, name: &str, line_num: usize) {
+    if !matches!(callee.kind, ExprKind::Path(_)) {
+      return;
+    }
+    let rustc_hir::Node::Expr(call) = self.tcx.parent_hir_node(callee.hir_id) else { return };
+    let ExprKind::Call(c, args) = call.kind else { return };
+    if c.hir_id != callee.hir_id {
+      return;
+    }
+    // An argument that uses (or reassigns) the callee (`f({ f = g; 0 })`):
+    // the callee was moved out before the argument ran, which isn't drawn;
+    // nothing is said, as on main.
+    if let Some(id) = local_of_path(callee) {
+      if args.iter().any(|a| locals_in(a, ClosureLocals::Captures(self.tcx)).iter().any(|m| m.id == id)) {
+        return;
+      }
+    }
+    let typeck = self.tcx.typeck(callee.hir_id.owner);
+    let Some(method) = typeck.type_dependent_def_id(call.hir_id) else { return };
+    if self.tcx.trait_of_assoc(method) != self.tcx.lang_items().fn_once_trait() {
+      return;
+    }
+    // An `F: FnOnce + Copy` is copied into each call, not moved; nor is
+    // a callee reached by auto-deref (`w()` with `w: Rc<F>`) moved.
+    if self.tcx.type_is_copy_modulo_regions(typing_env(self.tcx, callee.hir_id.owner), typeck.expr_ty(callee))
+      || typeck.adjustments().get(callee.hir_id).is_some_and(|a| !a.is_empty()) {
+      return;
+    }
+    let Some(rap) = self.raps.get(name).map(|rd| rd.rap.to_owned()).filter(|r| !r.is_ref()) else { return };
+    let id = *self.unique_id;
+    *self.unique_id += 1;
+    self.add_external_event(line_num, ExternalEvent::ClosureCall { closure: ResourceTy::Value(rap), fates: Vec::new(), opaque: true, id });
+  }
+
   pub fn closure_call_events(&mut self, callee: &'tcx Expr<'tcx>, line_num: usize) {
     let name = match callee.kind {
       ExprKind::Path(QPath::Resolved(None, path)) if matches!(path.res, Res::Local(_)) => path_name(path, &self.tcx),
@@ -3891,8 +3931,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       _ => return,
     };
     let typeck = self.tcx.typeck(callee.hir_id.owner);
-    let rustc_middle::ty::Closure(closure_def_id, closure_args) = typeck.expr_ty(callee).kind() else { return };
+    let rustc_middle::ty::Closure(closure_def_id, closure_args) = typeck.expr_ty(callee).kind() else {
+      self.opaque_fn_once_call(callee, &name, line_num);
+      return;
+    };
     if closure_args.as_closure().kind() != rustc_middle::ty::ClosureKind::FnOnce {
+      return;
+    }
+    // A Copy closure (`let f = pass(|| {}); f(); f();`) is copied into
+    // each call, not moved.
+    if self.tcx.type_is_copy_modulo_regions(typing_env(self.tcx, callee.hir_id.owner), typeck.expr_ty(callee)) {
       return;
     }
     let Some(closure_local) = closure_def_id.as_local() else { return };
@@ -3940,6 +3988,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     self.add_external_event(line_num, ExternalEvent::ClosureCall {
       closure: ResourceTy::Value(closure_rap),
       fates,
+      opaque: false,
       id,
     });
   }
@@ -4135,7 +4184,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let env = typing_env(self.tcx, arg.hir_id.owner);
     let mut mir_b_data = None;
     let mut drew_any = false;
-    for capture in typeck.closure_min_captures_flattened(closure.def_id) {
+    // An `FnOnce` closure's call may move a by-value capture out again
+    // (`run(move || s)`, #1622).
+    let fn_once = matches!(self.tcx.typeck(arg.hir_id.owner).expr_ty(arg).kind(),
+      rustc_middle::ty::Closure(_, args) if args.as_closure().kind() == rustc_middle::ty::ClosureKind::FnOnce);
+    // Whether each capture's body moves it out (`closure_capture_ends`):
+    // only those may leave the closure when it's called.
+    let n_captures = typeck.closure_min_captures_flattened(closure.def_id).count();
+    let ends = fn_once.then(|| {
+      let bwf = rustc_utils::mir::borrowck_facts::get_body_with_borrowck_facts(self.tcx, closure.def_id);
+      closure_capture_ends(self.tcx, &bwf.body, n_captures)
+    });
+    for (idx, capture) in typeck.closure_min_captures_flattened(closure.def_id).enumerate() {
       let upvar_hir_id = match capture.place.base {
         rustc_middle::hir::place::PlaceBase::Upvar(upvar_id) => upvar_id.var_path.hir_id,
         _ => continue,
@@ -4149,6 +4209,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           let mut ev = self.ext_ev_of_evt(evt, to_ro.clone(), ResourceTy::Value(from_rap), *self.unique_id, false);
           if let ExternalEvent::Move { into_closure, .. } | ExternalEvent::Copy { into_closure, .. } = &mut ev {
             *into_closure = true;
+          }
+          if let ExternalEvent::Move { taken_by_call, .. } = &mut ev {
+            *taken_by_call = ends.as_ref().and_then(|e| e.get(idx))
+              .map(|e| !matches!(e, crate::svg_generator::data::CapturedEnd::Dropped));
           }
           self.add_external_event(line_num, ev);
           *self.unique_id += 1;
@@ -4173,10 +4237,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           }
           let target = ResourceTy::Value(self.raps.get(&fn_key(&target_name)).unwrap().rap.to_owned());
           self.update_rap(&from_rap, line_num);
+          // A unique immutable borrow of a reference the body writes
+          // through: a borrow of r that leaves it unusable, as for `let
+          // f = || ..` (#1627).
+          let unique = from_rap.is_ref() && matches!(kind, rustc_middle::ty::BorrowKind::UniqueImmutable)
+            && !capture.place.projections.iter().any(|p| matches!(p.kind, rustc_middle::hir::place::ProjectionKind::Deref));
           // The reference variable itself, not what it points to (#1180).
-          let of_ref_var = from_rap.is_ref() && capture.place.projections.is_empty();
+          let of_ref_var = from_rap.is_ref() && (capture.place.projections.is_empty() || unique);
           match kind {
             rustc_middle::ty::BorrowKind::Mutable =>
+              self.add_pass_by_mref_ev(line_num, target, ResourceTy::Value(from_rap), false, false, ImplicitRef::No, of_ref_var),
+            _ if unique =>
               self.add_pass_by_mref_ev(line_num, target, ResourceTy::Value(from_rap), false, false, ImplicitRef::No, of_ref_var),
             _ => self.add_pass_by_sref_ev(line_num, target, ResourceTy::Value(from_rap), ImplicitRef::No, false, of_ref_var),
           }
@@ -11490,13 +11561,24 @@ pub fn match_rhs_closure(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, clos
     // (`|| r.push('a')`, `|| r.len()`) captures the place `*r`,
     // i.e. it reborrows what r points to rather than borrowing r
     // itself (#277). Tagged like `&mut *r` (`is_reborrow`).
+    // A `&mut` reference variable the body both writes through and uses
+    // itself (`|| { println!("{}", r); *r += 1; }`) is captured by a
+    // *unique* immutable borrow of r (#1627): nothing else may use r,
+    // not even to read, while the closure lives (E0501). It's drawn as a
+    // borrow of r that leaves it unusable ("needs unique access to r").
+    // (Only of a reference place itself, `r` / `s.r`; one reached through a
+    // reference, `(*s).r`, keeps main's drawing.)
+    let unique = upvar_rap.is_ref() && matches!(capture.info.capture_kind,
+      rustc_middle::ty::UpvarCapture::ByRef(rustc_middle::ty::BorrowKind::UniqueImmutable))
+      && !capture.place.projections.iter().any(|p| matches!(p.kind, rustc_middle::hir::place::ProjectionKind::Deref));
     let through_ref = upvar_rap.is_ref()
       && matches!(capture.place.projections.first(),
                   Some(p) if matches!(p.kind, rustc_middle::hir::place::ProjectionKind::Deref));
     // A reference variable captured itself (`|| println!("{}", r)`:
     // the macro takes `&r`), not the place it points to: the closure
     // borrows r, as `&r` does (#1180, #914).
-    let of_ref_var = upvar_rap.is_ref() && !through_ref && capture.place.projections.is_empty();
+    // (A unique capture is of the reference place itself, `r` or `s.r`.)
+    let of_ref_var = upvar_rap.is_ref() && !through_ref && (capture.place.projections.is_empty() || unique);
     let from = ResourceTy::Value(upvar_rap);
     let to = lhs.clone();
     let evt_kind = match capture.info.capture_kind {
@@ -11505,11 +11587,9 @@ pub fn match_rhs_closure(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, clos
       | rustc_middle::ty::UpvarCapture::ByUse => Evt::Move,
       rustc_middle::ty::UpvarCapture::ByRef(kind) => match kind {
         rustc_middle::ty::BorrowKind::Mutable => Evt::MBorrow,
-        // Immutable + UniqueImmBorrow both render as a static
-        // (immutable) borrow from the user's perspective —
-        // UniqueImmBorrow is an internal closure-borrow flavor
-        // they can't write, and the visualization shouldn't
-        // distinguish it.
+        // A unique immutable borrow, a flavor the user can't write, of a
+        // reference the body writes through (see `unique` above).
+        rustc_middle::ty::BorrowKind::UniqueImmutable if unique => Evt::MBorrow,
         _ => Evt::SBorrow,
       },
     };

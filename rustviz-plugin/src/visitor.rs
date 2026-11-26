@@ -568,13 +568,34 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
     }
     before_pass(self);
-    for (arg, branched) in args.iter().zip(&in_branches) {
+    // A `&mut` argument reborrowed by a two-phase borrow that a later
+    // argument reads (`add_len(r, r.len())`, #1621) is passed once the
+    // arguments after it have run (and a `?` among them has gone on),
+    // where the last of them ends.
+    let mut late = Vec::new();
+    for (i, (arg, branched)) in args.iter().zip(&in_branches).enumerate() {
       if !defer {
         self.visit_expr(arg);
       }
       if !branched {
+        if two_phase_borrow_read_later(self.tcx, arg, &args[i + 1..]) {
+          late.push(arg);
+        } else {
+          self.match_arg(arg, fn_name.to_owned());
+        }
+      }
+    }
+    if let Some(last) = args.last().filter(|_| !late.is_empty()) {
+      let saved = self.line_override;
+      self.line_override = saved.or(Some(span_end_line(&last.span, &self.tcx)));
+      for arg in late {
+        // (The reference is used by the call, there.)
+        if let (Some(rap), Some(line)) = (fetch_rap(arg, &self.tcx, &self.raps), self.line_override) {
+          self.update_rap(&rap, line);
+        }
         self.match_arg(arg, fn_name.to_owned());
       }
+      self.line_override = saved;
     }
   }
 
@@ -2076,6 +2097,69 @@ fn borrows_its_args(span: rustc_span::Span) -> bool {
   )
 }
 
+/// Whether `e`, a method call's receiver or a call's argument, is
+/// borrowed mutably by a *two-phase* borrow that something evaluated
+/// after it (`later`: the call's other arguments) reads, all on one line
+/// (#1621): the
+/// `&mut v` rustc inserts for `v.push(v.len())`, or the implicit
+/// reborrow `&mut *r` of a `&mut` argument in `add_len(r, r.len())`.
+/// rustc only reserves such a borrow where it is written; the arguments
+/// after it run first (`v.len()` takes and gives back its shared borrow),
+/// and the mutable borrow starts when the call does. A written `&mut v`
+/// isn't one (`f(&mut v, v.len())` is E0502).
+fn two_phase_borrow_read_later<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, e: &'tcx Expr<'tcx>, later: &'tcx [Expr<'tcx>]) -> bool {
+  let two_phase = tcx.typeck(e.hir_id.owner).adjustments().get(e.hir_id).is_some_and(|adjs| adjs.iter().any(|a| matches!(a.kind,
+    Adjust::Borrow(AutoBorrow::Ref(AutoBorrowMutability::Mut { allow_two_phase_borrow: AllowTwoPhase::Yes })))));
+  if !two_phase {
+    return false;
+  }
+  // The variable the borrowed place starts from (`v` for `v`, `s.v`,
+  // `*r`).
+  let mut root = e;
+  while let ExprKind::Field(inner, _) | ExprKind::Index(inner, ..) | ExprKind::Unary(UnOp::Deref, inner) = root.kind {
+    root = inner;
+  }
+  let Some(id) = local_of_path(root) else { return false };
+  // Only where the drawing can say it truly: the call on one line (over
+  // several, the call's events and its result's would land on different
+  // rows), and no argument assigning the variable (`r.push({ r = b;
+  // r.len() })` reserves the old r's referent first). Elsewhere main's
+  // order stands (#1717).
+  let Some(last) = later.last() else { return false };
+  let sm = tcx.sess.source_map();
+  // (From where the call starts: `let n = pop(\n r, r.len())` has its
+  // result on the first line.)
+  let start = match tcx.parent_hir_node(e.hir_id) {
+    rustc_hir::Node::Expr(call) => call.span.lo(),
+    _ => e.span.lo(),
+  };
+  if sm.lookup_char_pos(start.min(e.span.lo())).line != sm.lookup_char_pos(last.span.hi()).line {
+    return false;
+  }
+  struct Assigns(HirId, bool);
+  impl<'v> rustc_hir::intravisit::Visitor<'v> for Assigns {
+    fn visit_expr(&mut self, x: &'v Expr<'v>) {
+      if let ExprKind::Assign(lhs, ..) | ExprKind::AssignOp(_, lhs, _) = x.kind {
+        let mut r = lhs;
+        while let ExprKind::Field(inner, _) | ExprKind::Index(inner, ..) | ExprKind::Unary(UnOp::Deref, inner) = r.kind {
+          r = inner;
+        }
+        // (Any write rooted at it, `r = ..`, `*rr = ..`, `s.n = ..`: main's
+        // order is kept rather than tell them apart.)
+        if local_of_path(r) == Some(self.0) {
+          self.1 = true;
+        }
+      }
+      rustc_hir::intravisit::walk_expr(self, x);
+    }
+  }
+  let mut assigns = Assigns(id, false);
+  for a in later {
+    rustc_hir::intravisit::Visitor::visit_expr(&mut assigns, a);
+  }
+  !assigns.1 && later.iter().any(|a| locals_in(a, ClosureLocals::Captures(tcx)).iter().any(|m| m.id == id))
+}
+
 /// Whether `e` holds a `?` that can return from the function `e` is in
 /// (not one in a closure, which returns from the closure).
 fn holds_try(e: &Expr<'_>) -> bool {
@@ -2763,6 +2847,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           to: ResourceTy::Anonymous,
           is_partial: false,
           into_closure: false,
+          taken_by_call: None,
           loop_head: LoopHead::No,
           break_alt: None,
           break_out: false,
@@ -5429,19 +5514,36 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // the call only once a `?` in the arguments has gone on (#1195).
         let by_value = !self.tcx.typeck(expr.hir_id.owner).expr_ty_adjusted(rcvr).is_ref();
         let defer = args.iter().skip(1).any(|a| holds_try(a)) || (by_value && args.iter().any(|a| holds_try(a)));
-        if !(defer && by_value) {
+        // `v.push(v.len())` (#1621): the `&mut v` rustc inserts is a
+        // two-phase borrow. `v.len()` runs first, and push's mutable
+        // borrow starts (and ends) once the arguments have run, where
+        // the last of them ends.
+        let two_phase = two_phase_borrow_read_later(self.tcx, rcvr, args);
+        if !(defer && by_value) && !two_phase {
           self.method_receiver_events(expr, name_and_generic_args, rcvr, &fn_name, line_num);
         }
         self.visit_call_args(args, &fn_name, defer, |this| if defer && by_value {
           this.method_receiver_events(expr, name_and_generic_args, rcvr, &fn_name, line_num);
         });
+        // (The call, and what it stores in the receiver, happen there.)
+        let call_line = if two_phase {
+          args.last().map_or(line_num, |a| span_end_line(&a.span, &self.tcx)).max(line_num)
+        } else {
+          line_num
+        };
+        if two_phase {
+          let saved = self.line_override;
+          self.line_override = saved.or(Some(call_line));
+          self.method_receiver_events(expr, name_and_generic_args, rcvr, &fn_name, call_line);
+          self.line_override = saved;
+        }
         // `refs.push(&s)`: the receiver now holds s's borrow (#392).
         if !matches!(rcvr.kind, ExprKind::MethodCall(..)) {
           let rcvr_rap = expr_to_rap_name(rcvr, &self.tcx)
             .and_then(|n| self.raps.get(&n))
             .map(|rd| rd.rap.to_owned());
           if let Some(rcvr_rap) = rcvr_rap {
-            self.record_receiver_store(expr, &rcvr_rap, line_num);
+            self.record_receiver_store(expr, &rcvr_rap, call_line);
           }
         }
         // A method of the user's that never returns (#1553).
@@ -8771,6 +8873,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           id: *self.unique_id,
           is_partial: false,
           into_closure: false,
+          taken_by_call: None,
           loop_head: LoopHead::No,
           break_alt: None,
           break_out: false,

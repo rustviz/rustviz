@@ -22,7 +22,7 @@ The plugin only writes these attributes. It records and sends nothing.
 |---|---|---|
 | `data-rv-id` | every element below | The element's id. Unique within one figure (one timeline panel, or one code panel). See [Ids](#ids). |
 | `data-rv-kind` | every element | One of the [kinds](#kinds). |
-| `data-rv-event` | `dot`, `call`, `fn`, `arrow` | The ownership events drawn there, space-separated, in the order they happen. See [Events](#events). |
+| `data-rv-event` | `dot`, `call`, `fn`, `arrow` | The ownership events drawn there, space-separated, in the order the plugin records them (an assignment's `acquire` comes before its `owner_drop_at_reassign`); an event that happens twice there is listed twice (`s = f(); s = f();` on one line). See [Events](#events). |
 | `data-rv-state` | `line`, `branch_line`, `bracket` | The column's state over those rows. See [States](#states). |
 | `data-rv-var` | all but `code_line` | The column, by the name its header shows (`s`, `s₂`, `p.x`, `String::from`). For an arrow or `fn`, the column it starts at. |
 | `data-rv-to` | `arrow`, `fn` | The column an arrow points to. `caller` for a value returned to the function's caller. |
@@ -65,7 +65,7 @@ element := base [ "#" n ]                 n >= 2
 base    := "hdr:" var                                        (header)
          | "code:L" line                                     (code_line)
          | var [ ">" to ] "@L" line [ "-" end ] ":" kind [ ":" detail ]
-detail  := event { "+" event }            (dot, call, fn, arrow)
+detail  := event { "+" event }            (dot, call, fn, arrow; each event kind once)
          | state                          (line, branch_line, bracket)
 ```
 
@@ -153,7 +153,7 @@ On dots (`Event`):
 | `chain_fail_assign` / `chain_fail_use` | what a let-chain condition did before it failed |
 | `tied_param_note` / `dead_else_note` / `dead_loan_note` / `resliced_in_place` / `pass_rest_drop` | notes: nothing about ownership changes (`pass_rest_drop`: what a `for` pattern leaves of each element is dropped at the end of each pass) |
 | `init_ref_param` | a function parameter gets its value from the caller |
-| `closure_call` | an `FnOnce` closure is moved into its call |
+| `closure_call` | an `FnOnce` closure (or an `impl FnOnce` / `Box<dyn FnOnce>` value) is moved into its call |
 
 On arrows, call icons and function logos (`ExternalEvent`):
 

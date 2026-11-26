@@ -1792,7 +1792,15 @@ pub fn local_callee_result_key(call: &Expr, tcx: &TyCtxt) -> LocalCallee {
   // callee by value.
   let typeck = tcx.typeck(call.hir_id.owner);
   if let Some(method) = typeck.type_dependent_def_id(call.hir_id) {
-    if matches!(tcx.trait_of_assoc(method), Some(t) if Some(t) == tcx.lang_items().fn_once_trait()) {
+    // Only a closure written in this program: what it returns may be
+    // what it captured (`move || s`), which came out of the variable.
+    // Any other `FnOnce` (an `impl FnOnce` / `F: FnOnce` parameter, a
+    // `Box<dyn FnOnce>`) is consumed by the call too, but its result
+    // is what the call returns, not the variable's value (#1623).
+    // (Nor a Copy closure, copied into each call.)
+    if matches!(tcx.trait_of_assoc(method), Some(t) if Some(t) == tcx.lang_items().fn_once_trait())
+      && matches!(typeck.expr_ty(callee).kind(), rustc_middle::ty::Closure(..))
+      && !tcx.type_is_copy_modulo_regions(typing_env(*tcx, call.hir_id.owner), typeck.expr_ty(callee)) {
       return LocalCallee::Consumed;
     }
   }

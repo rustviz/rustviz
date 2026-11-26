@@ -45,6 +45,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 /// the ones in those directories. One entry covers every violation of
 /// that invariant in that snippet.
 pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
+    // A two-phase borrow in a call written over several lines keeps main's
+    // order: the call's borrow on its first line, the argument's read below.
+    ("two_phase_multiline_1717", "two-phase-borrow-order", 1717),
     // Geometric (`geometry.rs`), from here on.
     // Tuple column goes on after its fields were moved out.
     ("edition2024/if_let_chain_irrefutable_move", "line-ends-nowhere", 1157),
@@ -110,6 +113,10 @@ pub const INVARIANTS: &[(&str, &str)] = &[
     ("drop-of-moved-value-at-reassign",
      "one dot moves a column's value out and then says its previous value is dropped when it's \
       assigned: the right-hand side runs first, so there's nothing left to drop"),
+    ("two-phase-borrow-order",
+     "a call that borrows a variable mutably for its receiver or a `&mut` argument (`v.push(v.len())`, \
+      `add(r, r.len())`) is drawn borrowing it before an argument after it reads the variable: rustc \
+      only reserves that borrow there, runs the arguments first, and starts the mutable borrow at the call"),
     ("column-ends-without-scope-end",
      "an owner's column ends on a dot that neither moves it nor ends its scope, so its drop \
       (or that nothing is dropped) is never stated"),
@@ -144,6 +151,9 @@ pub const INVARIANTS: &[(&str, &str)] = &[
     ("arrows-end-to-end",
      "one arrow leaves the dot another points at straight on in the same direction: the two read as \
       one arrow through the dot"),
+    ("events-drawn-as-one",
+     "two arrows' heads, or two function logos, of different events drawn on one spot, even with one \
+      tooltip: the picture shows one transfer where the tooltips say there were several"),
     ("arrow-along-leg",
      "an arrow's head or shaft lies along a column's slanted leg into or out of a conditional's arm \
       (the head coming into a dot at about the leg's angle, or the shaft leaving one along it), or \
@@ -395,6 +405,40 @@ fn temp_keeps_rest(d: &Dot) -> bool {
     d.tip.contains("'s value into ") && d.tip.contains(" keeps the rest")
 }
 
+/// Whether one of the dot's assignments says it drops the previous value
+/// when, as the dot's events run in order, a move left nothing to drop.
+/// Each assignment's `acquire` comes right before its
+/// `owner_drop_at_reassign`, and the drop is of what the column held
+/// before that acquire: `s = f(s)` (move, acquire, drop) has nothing to
+/// drop, `drop(s); s = a(); s = b();` (move, acquire, acquire, drop) drops
+/// `a()`'s value (#1645). (An event that happens twice on a dot is listed
+/// twice in `data-rv-event`.)
+fn drops_moved_value_at_reassign(d: &Dot) -> bool {
+    // None: whatever the column held coming into the dot.
+    let mut held: Option<bool> = None;
+    // What the column held before each acquire not yet paired with a drop.
+    let mut unpaired: Vec<Option<bool>> = Vec::new();
+    for e in &d.events {
+        match e.as_str() {
+            "move" | "closure_call" => held = Some(false),
+            "acquire" | "copy" => {
+                unpaired.push(held);
+                held = Some(true);
+            }
+            // Each drop pairs with the latest unpaired acquire (drops before
+            // any acquire are one assignment's alternatives, #1253); with no
+            // acquire since a move, nothing is there to drop.
+            "owner_drop_at_reassign" => match unpaired.pop() {
+                Some(Some(false)) => return true,
+                None if held == Some(false) => return true,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    false
+}
+
 fn says_maybe_moved(d: &Dot) -> bool {
     MAYBE_PHRASES.iter().any(|p| d.tip.contains(p))
 }
@@ -444,6 +488,134 @@ fn block_local_break_move(d: &Dot) -> bool {
 fn loop_break_alt_move(d: &Dot) -> bool {
     d.has("move") && d.tip.contains("if the loop ended with")
         && !d.tip.contains("may have been moved")
+}
+
+/// A call in the source that may borrow `var` mutably by a two-phase
+/// borrow (`var.callee(..)`, or `callee(.., var, ..)` with `var` a bare
+/// argument, which rustc reborrows if it's a `&mut`) while an argument
+/// after it reads `var` (#1621). Whether it does borrow mutably is up to
+/// the drawing: a call drawn reading `var` only puts no order on it.
+/// Calls are matched to their lines in `var`'s tooltips by occurrence:
+/// `nth` is how many calls of `callee` on `var` come before this one on
+/// its lines, and each read is (name, how many calls of that name on `var`
+/// come before it).
+struct TwoPhaseCall {
+    var: String,
+    callee: String,
+    nth: usize,
+    reads: Vec<(String, usize)>,
+    /// The call's first and last lines.
+    lines: (u32, u32),
+}
+
+/// One call in the source: its name, where its `(` and `)` are, its
+/// receiver path (a method call's), and its top-level arguments' spans.
+struct Site {
+    name: String,
+    open: usize,
+    close: usize,
+    recv: Option<String>,
+    args: Vec<(usize, usize)>,
+}
+
+fn call_sites(src: &str) -> Vec<Site> {
+    let b = src.as_bytes();
+    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut out = Vec::new();
+    for (open, _) in src.match_indices('(') {
+        let mut j = open;
+        while j > 0 && word(b[j - 1]) { j -= 1; }
+        if j == open || b[j].is_ascii_digit() {
+            continue;
+        }
+        let (mut depth, mut k, mut in_str) = (0i32, open, false);
+        let mut args = Vec::new();
+        let mut arg_start = open + 1;
+        while k < b.len() {
+            let c = b[k];
+            if in_str {
+                if c == b'\\' { k += 1; } else if c == b'"' { in_str = false; }
+            } else {
+                match c {
+                    b'"' => in_str = true,
+                    b'(' | b'[' | b'{' => depth += 1,
+                    b')' | b']' | b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            args.push((arg_start, k));
+                            break;
+                        }
+                    }
+                    b',' if depth == 1 => {
+                        args.push((arg_start, k));
+                        arg_start = k + 1;
+                    }
+                    _ => {}
+                }
+            }
+            k += 1;
+        }
+        if k >= b.len() {
+            continue;
+        }
+        let recv = (j > 0 && b[j - 1] == b'.').then(|| {
+            let mut r = j - 1;
+            while r > 0 && (word(b[r - 1]) || b[r - 1] == b'.') { r -= 1; }
+            src[r..j - 1].to_owned()
+        }).filter(|r| !r.is_empty() && !r.starts_with('.') && !r.as_bytes()[0].is_ascii_digit());
+        out.push(Site { name: src[j..open].to_owned(), open, close: k, recv, args });
+    }
+    out
+}
+
+fn two_phase_calls(src: &str) -> Vec<TwoPhaseCall> {
+    let line_at = |i: usize| 1 + src[..i].matches('\n').count() as u32;
+    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    // `x` named in `text` as a path, or the start of one (`x.len()`,
+    // `&x`, `x.f`), not as part of another name (`xs`, `a.x`).
+    let mentions = |text: &str, x: &str| text.match_indices(x).any(|(i, _)| {
+        let before = text[..i].bytes().last();
+        let after = text[i + x.len()..].bytes().next();
+        !before.is_some_and(|c| word(c) || c == b'.') && !after.is_some_and(word)
+    });
+    let sites = call_sites(src);
+    // The calls that act on `var`: a method of it, or one it's an argument of.
+    let on = |s: &Site, var: &str| s.recv.as_deref() == Some(var)
+        || s.args.iter().any(|&(a, e)| mentions(&src[a..e], var));
+    let mut out = Vec::new();
+    for c in &sites {
+        let lines = (line_at(c.open), line_at(c.close));
+        // (Counted among the calls on `var` on the call's lines.)
+        let before = |name: &str, var: &str, at: usize| sites.iter()
+            .filter(|s| s.name == name && s.open < at && line_at(s.open) >= lines.0 && on(s, var)).count();
+        let mut push = |var: &str, later: &[(usize, usize)]| {
+            let Some(&(lo, _)) = later.first() else { return };
+            let hi = later.last().unwrap().1;
+            let text = &src[lo..hi];
+            // (Not one whose arguments write to it, `r.push({ r = b; ..
+            // })`: the drawing keeps main's order there.)
+            let assigns = text.match_indices(var).any(|(i, _)| {
+                let rest = text[i + var.len()..].trim_start();
+                rest.starts_with('=') && !rest.starts_with("==")
+            });
+            if !mentions(text, var) || assigns {
+                return;
+            }
+            let reads = sites.iter().filter(|s| s.open > lo && s.open < hi && s.name != c.name && on(s, var))
+                .map(|s| (s.name.clone(), before(&s.name, var, s.open))).collect();
+            out.push(TwoPhaseCall { var: var.to_owned(), callee: c.name.clone(), nth: before(&c.name, var, c.open), reads, lines });
+        };
+        match &c.recv {
+            Some(r) => push(r, &c.args),
+            None => for (n, &(a, e)) in c.args.iter().enumerate() {
+                let t = src[a..e].trim();
+                if !t.is_empty() && t.bytes().all(word) && !t.as_bytes()[0].is_ascii_digit() {
+                    push(t, &c.args[n + 1..]);
+                }
+            },
+        }
+    }
+    out
 }
 
 /// Line `line` of `src` is a `for` loop's head (`for x in r {`,
@@ -542,10 +714,8 @@ pub fn check(fig: &Fig, src: &str) -> Vec<(&'static str, String)> {
         if d.has("branch_join") && says_maybe_moved(d) && continues && !inits && !elems_moved(d) {
             out.push(("owner-after-maybe-moved-join", d.describe()));
         }
-        if let (Some(m), Some(r)) = (d.pos("move"), d.pos("owner_drop_at_reassign")) {
-            if m < r && !reboxes_contents(d) {
-                out.push(("drop-of-moved-value-at-reassign", d.describe()));
-            }
+        if drops_moved_value_at_reassign(d) && !reboxes_contents(d) {
+            out.push(("drop-of-moved-value-at-reassign", d.describe()));
         }
         // A whole struct moved away from its own column (not in an arm).
         if d.has("move") && !inits && !continues && on_main(d) && !contents_moved(d) && !d.var.contains('.') {
@@ -629,6 +799,32 @@ pub fn check(fig: &Fig, src: &str) -> Vec<(&'static str, String)> {
                 && last.tip.contains("what the temporary holds is dropped with it");
             if !last.has_any(END) && !last.has_any(&["tuple_temp_drop", "temporary_drop", "dead_else_note"]) && !taken_temp {
                 out.push(("column-ends-without-scope-end", last.describe()));
+            }
+        }
+    }
+
+    // A two-phase borrow starts after the arguments that read its place:
+    // the call's own mutable-borrow line comes after each of its arguments'
+    // reads, matched by occurrence on the call's lines.
+    for c in two_phase_calls(src) {
+        let mut bullets: Vec<(f64, usize, &str)> = Vec::new();
+        for d in fig.dots.iter().filter(|d| d.var == c.var && (c.lines.0..=c.lines.1).contains(&d.line)) {
+            for (k, b) in d.tip.split(" / ").enumerate() {
+                bullets.push((d.y, k, b.trim().trim_start_matches("• ")));
+            }
+        }
+        bullets.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        let f = c.callee.as_str();
+        let nth = |needle: String, k: usize| bullets.iter().enumerate()
+            .filter(|(_, (_, _, b))| b.contains(&needle)).nth(k).map(|(i, _)| i);
+        let Some(m) = nth(format!(" mutably borrowed by {f}"), c.nth) else { continue };
+        for (n, k) in &c.reads {
+            // (Its "borrowed by n" line; `mutably borrowed by` lines of
+            // another mutable call count as its too.)
+            if let Some(r) = nth(format!(" borrowed by {n}"), *k).filter(|&r| m < r) {
+                out.push(("two-phase-borrow-order", format!("{}@L{}: {}'s mutable borrow drawn before `{}`: {}",
+                    c.var, c.lines.0, f, bullets[r].2, short(bullets[m].2))));
+                break;
             }
         }
     }
@@ -911,6 +1107,64 @@ mod unit {
         // And so is a contents move whose drop text says the old value is dropped.
         let wrong = b.replace("Its previous contents were moved out earlier, so the previous Box doesn't drop them; only its heap allocation, if it has one, is freed here.", "Its previous resource is dropped.");
         assert_eq!(invs(&wrong), vec!["drop-of-moved-value-at-reassign"]);
+    }
+
+    #[test]
+    fn a_reassignment_after_a_move_and_a_new_value_drops_that_value() {
+        // `drop(s); s = String::from("b"); s = String::from("c");` (#1645):
+        // the second assignment drops "b".
+        let tip = "• s's resource is moved into drop, which drops it / • s acquires ownership of a resource / • s acquires ownership of a new resource; its previous resource is dropped";
+        let s = |evs: &str| [header("s", 1), line("s", 1, 95, 215, "full_privilege"), dot("s", 1, 95, "acquire", false, "a"),
+                             dot("s", 1, 155, evs, true, tip), dot("s", 1, 215, "owner_go_out_of_scope", true, "o")].concat();
+        assert_eq!(invs(&s("move acquire acquire owner_drop_at_reassign")), Vec::<&str>::new());
+        // `s = f(s)` saying the moved value is dropped is still caught.
+        assert_eq!(invs(&s("move acquire owner_drop_at_reassign")), vec!["drop-of-moved-value-at-reassign"]);
+        // And so is a drop after a second move (`drop(s); s = a(); take(s);
+        // s = b();` on one line: b() finds s empty).
+        assert_eq!(invs(&s("move acquire move acquire owner_drop_at_reassign")), vec!["drop-of-moved-value-at-reassign"]);
+        // Two drops after a move and two assignments: only the second
+        // assignment had something to drop.
+        assert_eq!(invs(&s("move acquire acquire owner_drop_at_reassign owner_drop_at_reassign")), vec!["drop-of-moved-value-at-reassign"]);
+    }
+
+    /// `v.push(v.len())` (#1621): len's read is drawn before push's
+    /// mutable borrow, on one dot or across the lines of a call written
+    /// over several.
+    #[test]
+    fn a_two_phase_borrow_starts_after_the_arguments() {
+        let dot = |y: u32, line: u32, tip: &str| dot("v", 1, y, "static_lend", false, tip)
+            .replace("/>", &format!(" data-rv-line=\"{line}\"/>"));
+        let push = "• v's resource is mutably borrowed by push; v can't be used while the borrow is live / • push reads from/writes to v (implicitly mutably borrowed) / • v's resource is no longer mutably borrowed";
+        let len = "• v's resource is immutably borrowed by len; v is read-only while the borrow is live / • len reads from v (implicitly borrowed) / • v's resource is no longer immutably borrowed";
+        let order = |body: String, src: &str| check(&parse(&svg(&body, "")), src).into_iter()
+            .filter(|(i, _)| *i == "two-phase-borrow-order").count();
+        let one_line = "fn main() {\n    let mut v = Vec::new();\n    v.push(v.len());\n}\n";
+        assert_eq!(order(dot(125, 3, &format!("{len} / {push}")), one_line), 0);
+        assert_eq!(order(dot(125, 3, &format!("{push} / {len}")), one_line), 1);
+        // Over two lines: push's borrow on the receiver's line, len below.
+        let two_lines = "fn main() {\n    let mut v = Vec::new();\n    v.push(\n        v.len());\n}\n";
+        assert_eq!(order([dot(125, 3, push), dot(155, 4, len)].concat(), two_lines), 1);
+        assert_eq!(order(dot(155, 4, &format!("{len} / {push}")), two_lines), 0);
+        // Not a call whose arguments don't read v, nor a `&self` call.
+        assert_eq!(order(dot(125, 3, &format!("{push} / {len}")), "fn main() {\n    let mut v = Vec::new();\n    v.push(w.len()); v.len();\n}\n"), 0);
+        assert_eq!(order(dot(125, 3, &format!("{len} / {len}")), "fn main() {\n    let v = Vec::new();\n    v.get(v.len());\n}\n"), 0);
+        // Calls matched by occurrence (#1696's review): a correct second
+        // call after a first one, a wrong one after a lone `v.len()`, and a
+        // borrow drawn between two argument reads.
+        let cap = "• v's resource is immutably borrowed by capacity; v is read-only while the borrow is live / • capacity reads from v (implicitly borrowed)";
+        let line = |code: &str| format!("fn main() {{\n    let mut v = Vec::new();\n    {code}\n}}\n");
+        assert_eq!(order(dot(125, 3, &format!("{push} / {len} / {push}")), &line("v.push(1); v.push(v.len());")), 0);
+        assert_eq!(order(dot(125, 3, &format!("{len} / {push} / {len}")), &line("v.len(); v.push(v.len());")), 1);
+        assert_eq!(order(dot(125, 3, &format!("{len} / {len} / {push}")), &line("v.len(); v.push(v.len());")), 0);
+        assert_eq!(order(dot(125, 3, &format!("{len} / {push} / {cap}")), &line("v.push(v.len() + v.capacity());")), 1);
+        assert_eq!(order(dot(125, 3, &format!("{len} / {cap} / {push}")), &line("v.push(v.len() + v.capacity());")), 0);
+        // A `&mut` argument reborrowed (`add(r, r.len())`).
+        let add = "• the resource r points to is mutably borrowed by add through r; r can't be used while the borrow is live / • add can read and write through r (mutable reborrow — r can't be used until add returns)";
+        let rlen = "• the resource r points to is immutably borrowed by len through r; r is read-only while the borrow is live / • len reads from r";
+        let r = |tip: &str| dot(125, 3, tip).replace("\"v\"", "\"r\"").replace("v@", "r@");
+        let call = "fn main() {\n    let r = &mut v;\n    add(r, r.len());\n}\n";
+        assert_eq!(order(r(&format!("{add} / {rlen}")), call), 1);
+        assert_eq!(order(r(&format!("{rlen} / {add}")), call), 0);
     }
 
     #[test]

@@ -24,7 +24,7 @@ pub const INVARIANTS: &[&str] = &[
     "line-starts-nowhere", "line-ends-nowhere", "line-through-fork", "arrows-overlap",
     "marks-on-one-spot", "arrow-misses-target", "outside-figure", "heads-or-logos-overlap",
     "shaft-through-mark", "arrows-end-to-end",
-    "fork-without-dot", "arrow-along-leg",
+    "fork-without-dot", "arrow-along-leg", "events-drawn-as-one",
 ];
 
 /// How far apart two points the drawing means to be one may be.
@@ -455,6 +455,31 @@ pub fn check(g: &Geo) -> Vec<(&'static str, String)> {
         for e in &g.logos[i + 1..] {
             if (f.x - e.x).abs() < 2.0 && (f.y - e.y).abs() < 2.0 && f.tip != e.tip {
                 out.push(("marks-on-one-spot", format!("{} and {} at {}", f.id, e.id, fmt((f.x, f.y)))));
+            }
+        }
+    }
+    // Two arrows, or two function logos, of different events (each its
+    // own element, its own id) drawn on one spot, even with one tooltip
+    // (#1620: three `String::from` calls into `s` on one line drawn as
+    // two): the picture shows fewer transfers than the tooltips say.
+    // (An arrow and its call's logo share an event; `one_arrow` is about
+    // telling arrows apart by tooltip, which this doesn't. Not copies of
+    // one column into the value returned to the caller, `S { a: n, b: n }`:
+    // one arrow says it.)
+    for (i, f) in g.logos.iter().enumerate() {
+        for e in &g.logos[i + 1..] {
+            if f.id != e.id && f.tip == e.tip && (f.x - e.x).abs() < 2.0 && (f.y - e.y).abs() < 2.0 {
+                out.push(("events-drawn-as-one", format!("logos {} and {} at {}", f.id, e.id, fmt((f.x, f.y)))));
+            }
+        }
+    }
+    for (i, a) in g.arrows.iter().enumerate() {
+        for b in &g.arrows[i + 1..] {
+            let copies = |x: &Arrow| x.id.contains(":arrow:copy");
+            if a.id != b.id && a.tip == b.tip && !(a.to == "caller" && b.to == "caller" && a.var == b.var && copies(a) && copies(b))
+                && a.tri.len() == 3 && b.tri.len() == 3
+                && a.tri.iter().zip(&b.tri).all(|(p, q)| len(*p, *q) < 2.0) {
+                out.push(("events-drawn-as-one", format!("heads of {} and {} at {}", a.id, b.id, fmt(a.tri[1]))));
             }
         }
     }
@@ -914,7 +939,13 @@ mod unit {
         let hit = arrow("f>a", "f", "a", "200 95 88 95", "88,101 75.25,95 88,89");
         assert_eq!(invs(&[to_a.clone(), hit].concat()), Vec::<&str>::new());
         let miss = arrow("f>a", "f", "a", "200 125 88 125", "88,131 75.25,125 88,119");
-        assert_eq!(invs(&[to_a, miss].concat()), vec!["arrow-misses-target"]);
+        assert_eq!(invs(&[to_a.clone(), miss].concat()), vec!["arrow-misses-target"]);
+        // Two calls' arrows and logos, one tooltip each, on one spot
+        // (`s = f(); s = f();` on one line, #1620): drawn as one.
+        let again = |m: &str| m.replacen("data-rv-id=\"", "data-rv-id=\"2nd:", 1);
+        let hit = arrow("f>a", "f", "a", "200 95 88 95", "88,101 75.25,95 88,89");
+        assert_eq!(invs(&[to_a, hit.clone(), again(&hit)].concat()), vec!["events-drawn-as-one"]);
+        assert_eq!(invs(&[logo("make"), again(&logo("make"))].concat()), vec!["events-drawn-as-one"]);
         assert_eq!(invs(&dot("s", 70.0, 520.0, "acquire")), vec!["outside-figure"]);
     }
 }

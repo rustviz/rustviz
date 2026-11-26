@@ -1584,7 +1584,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if let Some(rd) = self.raps.get(&name) {
         let l = ResourceTy::Value(rd.rap.to_owned());
         if !out.iter().any(|(x, _)| *x == l) {
-          out.push((l, matches!(kind, ty::BorrowKind::Mutable)));
+          // (A unique immutable borrow of a `&mut` the body writes
+          // through is drawn as a mutable one, #1627.)
+          out.push((l, matches!(kind, ty::BorrowKind::Mutable | ty::BorrowKind::UniqueImmutable)));
         }
       }
     }

@@ -59,12 +59,11 @@ impl Rv {
         self
     }
 
+    /// Every event, in order, one that happens twice listed twice (`s =
+    /// f(); s = f();` on one line: acquire, drop, acquire, drop, #1645).
+    /// The id names each kind once (`finalize`).
     pub fn events(mut self, es: &[&'static str]) -> Self {
-        for e in es {
-            if !self.events.contains(e) {
-                self.events.push(e);
-            }
-        }
+        self.events.extend_from_slice(es);
         self
     }
 
@@ -296,7 +295,7 @@ pub fn code_line_attrs(line: usize) -> String {
 ///
 ///   * `hdr:<var>` for a column header;
 ///   * else `<var>[><to>]@L<line>[-<end>]:<kind>[:<detail>]`, the detail
-///     being the events joined by `+`, or the state.
+///     being the events joined by `+` (each kind once), or the state.
 ///
 /// When several elements would get the same id, the second gets `#2`
 /// appended, the third `#3`, in document order (so the same program
@@ -329,7 +328,15 @@ pub fn finalize(svg: &str, row_lines: &[Option<usize>]) -> String {
             let (a, b) = (it.next()?, it.next()?);
             Some((line_of(a, row_lines)?, line_of(b, row_lines)?))
         });
-        let detail = get("event").map(|e| e.replace(' ', "+")).or_else(|| get("state").map(str::to_owned));
+        let detail = get("event").map(|e| {
+            let mut kinds: Vec<&str> = Vec::new();
+            for k in e.split(' ') {
+                if !kinds.contains(&k) {
+                    kinds.push(k);
+                }
+            }
+            kinds.join("+")
+        }).or_else(|| get("state").map(str::to_owned));
         let base = if kind == HEADER {
             format!("hdr:{}", get("var").unwrap_or(""))
         } else {

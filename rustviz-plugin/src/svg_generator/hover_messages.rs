@@ -923,6 +923,12 @@ fn what_pattern_left(part: &TempPart) -> String {
     }
 }
 
+/// Whether `t` is a reassignment's line (`event_dot_owner_drop_at_reassign`
+/// and its variants): "x acquires ownership of a new resource…".
+pub fn is_reassign_drop(t: &str) -> bool {
+    t.contains(" acquires ownership of a new resource")
+}
+
 /// Whether `acquire` is the plain "acquires ownership of a resource" line
 /// that `reassign` (`event_dot_owner_drop_at_reassign`) already says, for
 /// the same variable, with more (#506, #519). `*b = (..)` on a Box drawn
@@ -1418,7 +1424,18 @@ pub fn event_dot_loop_iterator_drop(my_name: &String, left: LoopLeft, early: &[u
 // Source dot for a by-value capture of a closure literal passed to a
 // call (`thread::spawn(move || ..v..)`). The resource goes into the
 // closure, and is dropped when the closure is, not when the call returns.
-pub fn event_dot_move_into_closure_arg(my_name: &String, callee: &String, value: bool) -> String {
+// `taken_by_call`: an `FnOnce` closure whose body moves it out when
+// called (`run(move || s)`, #1622), or `reference`: a `&mut` moved in
+// (`keep(move || r)`, #1701); for those only who owns it is said.
+pub fn event_dot_move_into_closure_arg(my_name: &String, callee: &String, value: bool, taken_by_call: Option<bool>, reference: bool) -> String {
+    if reference || (taken_by_call == Some(true) && !value) {
+        return format!(
+            "{0}{1} is moved into a closure passed to {2}; the closure owns it from here",
+            styled_name_html(my_name),
+            if reference { "" } else { "'s resource" },
+            styled_name_html(callee)
+        );
+    }
     if value {
         return format!(
             "{0}'s value is moved into a closure passed to {1}",
@@ -1762,6 +1779,20 @@ pub fn event_dot_mut_lend_ref_var(ref_name: &String, target_name: &String) -> St
     format!(
         "{0} is mutably borrowed by {1}; {0} can't be used while the borrow is live",
         styled_name_html(ref_name), styled_name_html(target_name))
+}
+
+/// A reference variable r captured itself by a closure passed to a call,
+/// by a mutable or a unique immutable borrow
+/// (`apply(|| { println!("{}", r); *r += 1; })`, #1627): worded for
+/// either kind.
+pub fn event_dot_unique_lend_ref_var_to_closure_arg(ref_name: &String, target_name: &String) -> String {
+    format!("{0} is borrowed by {1}; {0} can't be used while the borrow is live", styled_name_html(ref_name), styled_name_html(target_name))
+}
+
+/// Where the borrow of `event_dot_capture_ref_var_to_closure` /
+/// `event_dot_unique_lend_ref_var_to_closure_arg` ends.
+pub fn event_dot_unique_reacquire_ref_var(ref_name: &String) -> String {
+    format!("{0} is no longer borrowed", styled_name_html(ref_name))
 }
 
 // Where the borrow of event_dot_mut_lend_ref_var ends.
@@ -2685,7 +2716,9 @@ pub fn event_dot_capture_ref_var_to_closure(ref_name: &String, target_name: &Str
     let r = styled_name_html(ref_name);
     let c = styled_name_html(target_name);
     if mutable {
-        format!("{0} is captured (mutably borrowed) by closure {1}; {0} can't be used while the borrow is live", r, c)
+        // A mutable borrow of r, or the unique immutable borrow a closure
+        // takes of a `&mut` it writes through (#1627): worded for either.
+        format!("{0} is captured (borrowed) by closure {1}; {0} can't be used while the borrow is live", r, c)
     } else {
         format!("{0} is captured (immutably borrowed) by closure {1}; {0} is read-only while the borrow is live", r, c)
     }
@@ -3707,6 +3740,9 @@ pub fn state_lent_out(my_name: &String, to: LentTo, through_ref: Option<bool>, r
     };
     let until = if matches!(to, LentTo::LoopIterator) { "the loop ends" } else { "the borrow ends" };
     let subject = match through_ref {
+        // (A closure's borrow of a reference variable itself: mutable or
+        // unique immutable, #1627.)
+        _ if ref_itself && matches!(to, LentTo::Closure(_)) => format!("{} is borrowed{}", me, by),
         _ if ref_itself => format!("{} is mutably borrowed{}", me, by),
         Some(pointee_copy) => format!("the {} {} points to is mutably borrowed{} through {}", held(pointee_copy), me, by, me),
         None => format!("{}'s {} is mutably borrowed{}", me, held(holds_value), by),
@@ -5750,11 +5786,15 @@ pub fn event_dot_break_alt_move_to_caller(my_name: &String, alt: &crate::svg_gen
 pub fn event_dot_closure_call_once(
     my_name: &String,
     fates: &[crate::svg_generator::data::CapturedFate],
+    closure: bool,
 ) -> String {
     use crate::svg_generator::data::CapturedEnd;
     let f = styled_name_html(my_name);
+    // A parameter of type `impl FnOnce` (or `Box<dyn FnOnce>`) needn't
+    // be a closure: `run(String::new)` passes a function (#1623).
     let mut msg = format!(
-        "{0} is moved into the call (an FnOnce closure can only be called once)", f);
+        "{0} is moved into the call ({1})", f,
+        if closure { "an FnOnce closure can only be called once" } else { "calling an FnOnce consumes it" });
     for fate in fates {
         let s = styled_name_html(&fate.name);
         let tail = match fate.end {
@@ -5856,9 +5896,11 @@ pub fn arrow_title(e: &ExternalEvent) -> String {
         ExternalEvent::StaticDie{ to, of_ref_var, .. } => {
             format!("Return immutably borrowed {}", if *of_ref_var || holds_copy_value(to) { "value" } else { "resource" })
         },
-        ExternalEvent::MutableBorrow{ is_partial, is_reborrow, to, via, .. } => {
+        ExternalEvent::MutableBorrow{ is_partial, is_reborrow, to, via, of_ref_var, .. } => {
             if *is_partial { String::from("Partial mutable borrow") }
             else if to.is_closure() && *is_reborrow && !returned_closure(via) { String::from("Closure capture (mutable reborrow)") }
+            // A reference variable itself: mutable or unique (#1627).
+            else if to.is_closure() && *of_ref_var && !returned_closure(via) { String::from("Closure capture (borrow)") }
             else if to.is_closure() && !returned_closure(via) { String::from("Closure capture (mutable borrow)") }
             // Reborrow: `let r2 = &mut *r;` with r: `&mut T` borrows
             // *through* r — r can't be used while r2 is live and usable
@@ -5868,6 +5910,9 @@ pub fn arrow_title(e: &ExternalEvent) -> String {
             else { String::from("Mutable borrow") }
         },
         // `&mut r` borrowed the reference r itself, a value (#914).
+        // (A closure's borrow of a reference variable itself: mutable or
+        // unique, #1627.)
+        ExternalEvent::MutableDie{ from, of_ref_var: true, .. } if from.is_closure() => String::from("Return borrowed value"),
         ExternalEvent::MutableDie{ to, of_ref_var, .. } => {
            format!("Return mutably borrowed {}", if *of_ref_var || holds_copy_value(to) { "value" } else { "resource" })
         },
@@ -6064,7 +6109,10 @@ pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, fro
             // `r` is itself a `&mut` reference (#812): f
             // reads and writes the value r points to, not r,
             // so say "through" like the other `&mut` writes.
-            ExternalEvent::PassByMutableReference { is_reborrow: true, .. } => " reads and writes through ",
+            ExternalEvent::PassByMutableReference { is_reborrow: true, .. } => " can read and write through ",
+            // A closure passed to a call that captures the reference variable
+            // itself, mutably or uniquely (#1627).
+            ExternalEvent::PassByMutableReference { of_ref_var: true, .. } if function.name.starts_with("the closure passed to ") => " uses ",
             ExternalEvent::PassByMutableReference { .. } => " reads from/writes to ",
             _ => panic!("internal state: expected a pass-by-reference event here")
         };
@@ -6353,6 +6401,7 @@ pub fn capture_verb_moved() -> &'static str { "moved" }
 pub fn capture_verb_copied() -> &'static str { "copied" }
 pub fn capture_verb_immutably_borrowed() -> &'static str { "immutably borrowed" }
 pub fn capture_verb_mutably_borrowed() -> &'static str { "mutably borrowed" }
+pub fn capture_verb_borrowed() -> &'static str { "borrowed" }
 pub fn capture_verb_immutably_reborrowed() -> &'static str { "immutably reborrowed" }
 pub fn capture_verb_mutably_reborrowed() -> &'static str { "mutably reborrowed" }
 

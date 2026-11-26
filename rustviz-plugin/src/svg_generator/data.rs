@@ -2045,6 +2045,12 @@ pub enum ExternalEvent {
         break_alt: Option<BreakAlt>,
         break_out: bool,
         closure_value: bool,
+        // `taken_by_call`: for an `into_closure` move into an `FnOnce`
+        // closure, whether its body may move the value out when called
+        // (`run(move || s)`, #1622: where it's dropped isn't certain) or
+        // not (it goes with the closure, consumed by a call or dropped).
+        // `None` for any other move.
+        taken_by_call: Option<bool>,
     },
     // `is_reborrow`: the borrow was written `&*r` / `&mut *r` with
     // `r` a reference — a reborrow through `r`, as opposed to a fresh
@@ -2512,9 +2518,13 @@ pub enum ExternalEvent {
     // into it, the body runs, and what `f` captured by value is dropped
     // or moved out inside the call. `fates` has one entry per by-value
     // capture, in capture order. No arrow; the event is a dot on `f`.
+    // `opaque`: `f` is an `FnOnce` that isn't a closure written here (an
+    // `impl FnOnce` parameter, a `Box<dyn FnOnce>`, #1623); what it
+    // holds isn't known (`fates` is empty).
     ClosureCall {
         closure: ResourceTy,
         fates: Vec<CapturedFate>,
+        opaque: bool,
         id: usize
     },
 
@@ -2785,6 +2795,8 @@ pub enum Event {
         // A move out of a split scrutinee temporary that leaves nothing
         // that needs drop in it (`temp_emptying_moves`, #1386).
         empties_temp: bool,
+        // See ExternalEvent::Move.
+        taken_by_call: Option<bool>,
     },
 
     // Mirrors the ExternalEvent Branch
@@ -2958,6 +2970,7 @@ pub enum Event {
     ClosureCall {
         is: ResourceTy,
         fates: Vec<CapturedFate>,
+        opaque: bool,
         id: usize
     },
 }
@@ -3873,8 +3886,8 @@ impl Event {
     pub fn print_message_with_name(&self, my_name: &mut String) -> String {
         match self {
             // no arrow involved
-            Event::ClosureCall { fates, .. } => {
-                hover_messages::event_dot_closure_call_once(my_name, fates)
+            Event::ClosureCall { fates, opaque, .. } => {
+                hover_messages::event_dot_closure_call_once(my_name, fates, !*opaque)
             }
             Event::OwnerGoOutOfScope { .. } => {
                 hover_messages::event_dot_owner_go_out_of_scope(my_name)
@@ -4081,8 +4094,8 @@ impl Event {
             Event::Duplicate{ to, into_closure: true, ..} => {
                 hover_messages::event_dot_copy_into_closure_arg(&self.deref_name(my_name), &to.name())
             }
-            Event::Move{ to, is, into_closure: true, ..} => {
-                hover_messages::event_dot_move_into_closure_arg(&self.deref_name(my_name), &to.name(), is_plain(is))
+            Event::Move{ to, is, into_closure: true, taken_by_call, ..} => {
+                hover_messages::event_dot_move_into_closure_arg(&self.deref_name(my_name), &to.name(), is_plain(is), *taken_by_call, is.extract_rap().is_some_and(|r| r.is_ref()))
             }
             Event::Duplicate{ is: ResourceTy::Index(_, place, _), ..} if place.starts_with('*') => {
                 // `let n = *slots[0];`: what is read is the resource
@@ -4256,6 +4269,8 @@ impl Event {
                     hover_messages::event_dot_capture_ref_var_to_closure(r.name(), &target_name, true)
                 } else if to.is_closure() {
                     hover_messages::event_dot_capture_mut_lend_to_closure(&self.deref_name(my_name), &target_name, holds_value)
+                } else if let (true, Some(r), true) = (*of_ref_var, ref_lender(is), target_name.starts_with("the closure passed to ")) {
+                    hover_messages::event_dot_unique_lend_ref_var_to_closure_arg(r.name(), &target_name)
                 } else if let (true, Some(r)) = (*of_ref_var, ref_lender(is)) {
                     hover_messages::event_dot_mut_lend_ref_var(r.name(), &target_name)
                 } else if let Some(r) = ref_lender(is) {
@@ -4592,6 +4607,10 @@ impl Event {
                     return hover_messages::event_dot_reacquire_through_ref_still_borrowed(r.name(), &from_name, still_borrowed_by, mutable, r.points_to_copy());
                 }
                 hover_messages::event_dot_reacquire_still_borrowed(&self.deref_name(my_name), &from_name, still_borrowed_by, mutable, holds_copy_value(is), of_ref_var)
+            }
+            Event::MutableReacquire{ is, from, of_ref_var: true, ..} if ref_lender(is).is_some()
+                && (from.is_closure() || from.name().starts_with("the closure passed to ")) => {
+                hover_messages::event_dot_unique_reacquire_ref_var(ref_lender(is).unwrap().name())
             }
             Event::MutableReacquire{ is, of_ref_var: true, ..} if ref_lender(is).is_some() => {
                 hover_messages::event_dot_mut_reacquire_ref_var(ref_lender(is).unwrap().name())
@@ -5905,12 +5924,12 @@ impl Visualizable for VisualizationData {
           if to_o { vec![(line_num,  Event::Copy{from : from_ro.to_owned(), is: to_ro.clone(), of, id: *id, break_alt: break_alt.clone()})] }
           else { vec![(line_num, Event::Duplicate{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: *into_closure, of: source_copy_of(of), id: *id, break_alt: break_alt.clone()})] }
         },
-        ExternalEvent::Move{from: from_ro, to: to_ro, id, into_closure, loop_head, break_alt, break_out, via_try, ..} => {
+        ExternalEvent::Move{from: from_ro, to: to_ro, id, into_closure, loop_head, break_alt, break_out, via_try, taken_by_call, ..} => {
           if to_o { vec![(line_num,  Event::Acquire{from : from_ro.to_owned(), is: to_ro.clone(), via_try: *via_try, id: *id, break_alt: break_alt.clone(), loop_head: loop_head.clone()})] }
           // A destructuring `for` head borrowed by the loop: a value
           // inside it is copied (#1390).
           else if matches!(loop_head, LoopHead::Part { moved: false, .. }) { vec![(line_num, Event::Duplicate{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: false, of: CopyOf::Inside, id: *id, break_alt: break_alt.clone()})] }
-          else { vec![(line_num, Event::Move{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: *into_closure, loop_head: loop_head.clone(), via_try: *via_try, id: *id, break_alt: break_alt.clone(), break_out: *break_out, empties_temp: self.temp_emptying_moves.contains(id)})] }
+          else { vec![(line_num, Event::Move{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: *into_closure, loop_head: loop_head.clone(), via_try: *via_try, id: *id, break_alt: break_alt.clone(), break_out: *break_out, empties_temp: self.temp_emptying_moves.contains(id), taken_by_call: *taken_by_call})] }
         },
         ExternalEvent::StaticBorrow{from: from_ro, to: to_ro, id, of_ref_var, ..} => {
           if to_o { vec![(line_num,  Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id, of_ref_var: *of_ref_var})] }
@@ -6144,9 +6163,9 @@ impl Visualizable for VisualizationData {
                     b_history.extend(borrow.map(|e| (line_number, e)));
                 }
             }
-            ExternalEvent::ClosureCall { closure, fates, id } => {
+            ExternalEvent::ClosureCall { closure, fates, opaque, id } => {
                 if closure.extract_rap() == Some(rap) {
-                    b_history.push((line_number, Event::ClosureCall { is: closure.clone(), fates: fates.clone(), id: *id }));
+                    b_history.push((line_number, Event::ClosureCall { is: closure.clone(), fates: fates.clone(), opaque: *opaque, id: *id }));
                 }
             }
             _ => {
@@ -6269,7 +6288,7 @@ impl Visualizable for VisualizationData {
 
         match event {
             // eg let ro_to = String::from("");
-            ExternalEvent::Move{from: from_ro, to: to_ro, id, into_closure, loop_head, break_alt, break_out, via_try, ..} => {
+            ExternalEvent::Move{from: from_ro, to: to_ro, id, into_closure, loop_head, break_alt, break_out, via_try, taken_by_call, ..} => {
                 maybe_append_event(self, &to_ro.clone(), Event::Acquire{from : from_ro.to_owned(), is: to_ro.clone(), via_try, id: id, break_alt: break_alt.clone(), loop_head: loop_head.clone()}, line_number);
                 let out_first = self.moves_out_first.contains(&id);
                 let source = from_ro.extract_rap().map(|r| *r.hash());
@@ -6278,7 +6297,7 @@ impl Visualizable for VisualizationData {
                 if matches!(loop_head, LoopHead::Part { moved: false, .. }) {
                     maybe_append_event(self, &from_ro.clone(), Event::Duplicate{to : to_ro.to_owned(), is: from_ro, into_closure: false, of: CopyOf::Inside, id: id, break_alt}, line_number);
                 } else {
-                    maybe_append_event(self, &from_ro.clone(), Event::Move{to : to_ro.to_owned(), is: from_ro, into_closure, loop_head, via_try, id: id, break_alt, break_out, empties_temp: self.temp_emptying_moves.contains(&id)}, line_number);
+                    maybe_append_event(self, &from_ro.clone(), Event::Move{to : to_ro.to_owned(), is: from_ro, into_closure, loop_head, via_try, id: id, break_alt, break_out, empties_temp: self.temp_emptying_moves.contains(&id), taken_by_call}, line_number);
                 }
                 // A destructuring assignment's cycle (#1343): the source's
                 // move goes before the new value it got on this line.
@@ -6479,8 +6498,8 @@ impl Visualizable for VisualizationData {
                 }
                 maybe_append_event(self, &to_ro.clone(), Event::MutableDie{to : from_ro.to_owned(), is: to_ro, id: id}, line_number);
             },
-            ExternalEvent::ClosureCall { closure, fates, id } => {
-                maybe_append_event(self, &closure, Event::ClosureCall { is: closure.clone(), fates, id }, line_number);
+            ExternalEvent::ClosureCall { closure, fates, opaque, id } => {
+                maybe_append_event(self, &closure, Event::ClosureCall { is: closure.clone(), fates, opaque, id }, line_number);
             },
             ExternalEvent::InitRefParam{param: ro, id, own_param, in_pattern, rest} => {
                 maybe_append_event(self, &ResourceTy::Value(ro.clone()), Event::InitRefParam{param : ro.to_owned(), id: id, own_param, in_pattern, rest}, line_number);
