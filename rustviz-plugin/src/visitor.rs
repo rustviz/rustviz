@@ -786,6 +786,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // Out of a `Box`: `take(*b)` (#579).
         ExternalEvent::Move { from: from @ ResourceTy::Deref(rap), to, .. } if is_outer(from) =>
           push(ChainEffectKind::Move { rap: rap.clone(), to: to.clone(), binding, how: ChainFailHow::Out(format!("*{}", rap.name())) }),
+        // The failure note groups moves by column. The bindings from an
+        // array member can each have taken from a different element.
+        ExternalEvent::Move { from: from @ ResourceTy::Index(rap @ ResourceAccessPoint::Struct(Struct { is_member: true, array_len: Some(_), .. }), ..), to, .. }
+          if binding && is_outer(from) =>
+          push(ChainEffectKind::Move { rap: rap.clone(), to: to.clone(), binding, how: ChainFailHow::Out(format!("part of {}", rap.name())) }),
         ExternalEvent::Move { from, .. } if is_outer(from) =>
           push(ChainEffectKind::Other { name: from.real_name(), what: CHAIN_MOVE_THROUGH, lasts: "the move lasts" }),
         _ => {}

@@ -265,8 +265,8 @@ impl DotLayer {
 /// unchanged variable) are left out, and so is a line that repeats the
 /// one before it (two borrows of `s` ending on one line both say "s's
 /// resource is no longer immutably borrowed").
-fn merged_dot_title(lines: &[(Option<usize>, String)]) -> String {
-    let mut texts: Vec<&str> = lines.iter()
+fn merged_dot_title(dot: &PendingDot) -> String {
+    let mut texts: Vec<&str> = dot.lines.iter()
         .map(|(_, t)| t.as_str())
         .filter(|t| !t.is_empty())
         .collect();
@@ -327,10 +327,19 @@ fn merged_dot_title(lines: &[(Option<usize>, String)]) -> String {
     if texts.len() <= 1 {
         return texts.first().cloned().unwrap_or_default();
     }
-    texts.iter()
+    let bullets = texts.iter()
         .map(|t| format!("• {}", t))
         .collect::<Vec<_>>()
-        .join("&lt;br&gt;")
+        .join("&lt;br&gt;");
+    // The write and another loan share the dot (#1752). The loan note
+    // describes the write, while the bullets describe events on the row.
+    // The row doesn't establish where the other loan belongs in the order.
+    if dot.events.contains(&"dead_loan_note")
+        && dot.events.iter().filter(|&&e| matches!(e, "static_lend" | "mutable_lend")).count() > 1 {
+        format!("{}&lt;br&gt;{bullets}", hover_messages::SHARED_ROW_EVENTS)
+    } else {
+        bullets
+    }
 }
 
 /// A dot's tooltip with its approximation notes, each on a line of its
@@ -353,7 +362,7 @@ struct WithRv<'a, T: Serialize> {
 }
 
 fn render_pending_dot(dot: &PendingDot, registry: &Handlebars) -> String {
-    let title = with_approx_notes(merged_dot_title(&dot.lines), &dot.notes);
+    let title = with_approx_notes(merged_dot_title(dot), &dot.notes);
     let (cx, cy) = (dot.x, dot.y);
     let kind = if dot.event { rv_attrs::DOT } else { rv_attrs::CALL };
     let rv = Rv::new(kind).events(&dot.events).var(&dot.var).row(dot.row).drop(dot.drop).attrs();
@@ -1600,6 +1609,8 @@ fn render_branch_dots(
                 // its value out of (#1386): its drop, on this dot or
                 // below, says what is dropped.
                 hover_messages::event_dot_branch_merge_temp_moved_out(&is.real_name())
+            } else if has_projected_member_move(history, *merge_point) {
+                hover_messages::event_dot_branch_merge_projected_move(&is.real_name())
             } else if rap.box_contents_moved() && moves_only_box_contents(branch_history) {
                 hover_messages::event_dot_branch_merge_box_contents_moved(&is.real_name(), rap.is_mut())
             } else if let Some(kw) = by_cond.filter(|_| chain_condition_assigned_here(branch_history)) {
@@ -1865,6 +1876,10 @@ fn render_scope_end_dot(
             } else {
                 hover_messages::event_dot_manually_drop_go_out_of_scope(&name)
             };
+        } else if !never_drops && has_projected_move_in_parts(ro, visualization_data, *line_number) {
+            // The member column can end at a projected move. State the
+            // residual drop on the scope dot without marking a definite drop.
+            data.title = hover_messages::event_dot_parts_go_out_of_scope(&name);
         } else if is_plain {
             // Never a resource: going out of scope drops
             // nothing, whether or not it was moved earlier.
@@ -2027,7 +2042,7 @@ fn render_scope_end_dot(
                 hash: *hash as u64,
                 dot_x: cx,
                 dot_y: cy,
-                title: hover_messages::event_dot_box_paths_go_out_of_scope(&name),
+                title: hover_messages::event_dot_parts_go_out_of_scope(&name),
                 p1x: cx - 3, p1y: cy - 1,
                 p2x: cx + 3, p2y: cy - 1,
                 p3x: cx,     p3y: cy + 3,
@@ -2081,7 +2096,7 @@ fn render_scope_end_dot(
                 && last_branch.is_some_and(|b| moves_only_box_contents(b)) {
                 hover_messages::event_dot_go_out_of_scope_box_plain_contents_maybe_moved(&name)
             } else if ro.box_contents_moved() {
-                hover_messages::event_dot_box_paths_go_out_of_scope(&name)
+                hover_messages::event_dot_parts_go_out_of_scope(&name)
             } else if maybe_moved_by_kept_round(history.iter()) {
                 // After a loop that moves it on some time rounds only
                 // (#1019).
@@ -2458,12 +2473,19 @@ fn render_dot(
                     let box_paths = matches!(event, Event::OwnerDropAtReassign { parts: None, payload: false, .. })
                         && mixed_box_paths(&visualization_data.timelines[hash].resource_access_point,
                             &history[..i].iter().filter(|(l, _)| l < line_number).cloned().collect::<Vec<_>>());
-                    let title = if box_paths {
+                    let projected = matches!(event, Event::OwnerDropAtReassign { payload: false, .. } | Event::OwnerDropIfTryReturns)
+                        && has_projected_move_in_parts(&visualization_data.timelines[hash].resource_access_point, visualization_data, *line_number);
+                    let title = if projected {
+                        match event {
+                            Event::OwnerDropAtReassign { .. } => hover_messages::event_dot_owner_drop_at_reassign_parts(&name),
+                            _ => hover_messages::event_dot_parts_drop_if_try_returns(&name),
+                        }
+                    } else if box_paths {
                         // A Box whose contents were moved out, given a
                         // new Box or moved away on some paths only
                         // (#1220): what the old value drops depends on
                         // the path.
-                        hover_messages::event_dot_owner_drop_at_reassign_box_paths(&name)
+                        hover_messages::event_dot_owner_drop_at_reassign_parts(&name)
                     } else if matches!(event, Event::OwnerDropAtReassign { maybe_init: Some(InitBy::Branch | InitBy::Loop), .. })
                         // (Before the new value's Acquire on this line.)
                         && init_by_maybe_held(history[..i].iter().filter(|(l, _)| l < line_number)) {
@@ -2529,7 +2551,7 @@ fn render_dot(
                             _ => None,
                         });
                         if rap.box_contents_moved() && last_branch.is_some_and(|b| moves_only_box_contents(b)) {
-                            hover_messages::event_dot_owner_drop_at_reassign_box_paths(&name)
+                            hover_messages::event_dot_owner_drop_at_reassign_parts(&name)
                         } else {
                             hover_messages::event_dot_owner_drop_at_reassign_maybe_moved(&name, &note, *by_cond)
                         }
@@ -2555,7 +2577,7 @@ fn render_dot(
                         hover_messages::event_dot_owner_drop_if_try_returns_partial(&name, &scope_end)
                     } else if matches!(event, Event::OwnerDropIfTryReturns)
                         && visualization_data.timelines[hash].resource_access_point.box_contents_moved() {
-                        hover_messages::event_dot_box_drop_if_try_returns(&name)
+                        hover_messages::event_dot_parts_drop_if_try_returns(&name)
                     } else if let (Event::OwnerDropIfTryReturns, Some(InitJoin::Maybe { moved })) = (event,
                         history_path(&visualization_data.timelines[hash].history, history, i)
                             .filter(|path| !init_by_maybe_held(path.iter()))
@@ -4141,14 +4163,13 @@ fn timeline_segment_title(
     // (an empty title, #1157).
     if let (State::FullPrivilege { .. }, Some(line), ResourceAccessPoint::Struct(_)) = (state, line, rap) {
         if let Some(parts) = parts_moved_at(rap, visualization_data, line) {
-            if parts.all {
+            if parts.all || parts.hide_at_split {
                 return String::new();
             }
-            if parts.none_usable {
-                let surely: Vec<String> = parts.moved.iter().filter(|m| !parts.maybe_moved.contains(m)).cloned().collect();
-                return hover_messages::state_fields_maybe_all_moved(rap.name(), &surely, &parts.maybe_moved);
+            if parts.projected {
+                return hover_messages::state_struct_projected_move(rap.name());
             }
-            return hover_messages::state_partly_moved(rap.name(), &parts.moved, parts.maybe);
+            return hover_messages::state_struct_parts_moved(rap.name(), &parts.moved, &parts.maybe_moved, parts.none_usable);
         }
     }
     // An array a slice pattern moved some elements out of (#1285): the
@@ -9684,68 +9705,68 @@ fn moved_in_every_arm(timeline: &Timeline, line: usize) -> Option<(usize, usize)
     })
 }
 
-/// The fields of the struct column `rap` moved out of it by the row
-/// `line` (a field all of whose own fields were counts as moved), and
-/// whether that is all of them. `None` when none is (#1157). Not for a
-/// Box drawn as its payload's parts: moving them out leaves it its heap
-/// allocation (#898).
+/// Whether the events record a move through a member column, such as
+/// an array element or a Box payload. A column's moved state alone
+/// cannot tell whether the whole member moved.
+fn has_projected_member_move(history: &[(usize, Event)], through: usize) -> bool {
+    history.iter().any(|(line, event)| *line <= through && match event {
+        Event::Move { is: ResourceTy::Deref(r) | ResourceTy::Index(r, ..), .. } => r.is_member(),
+        Event::Branch { branch_history, .. } =>
+            branch_history.iter().any(|arm| has_projected_member_move(&arm.e_data, through)),
+        _ => false,
+    })
+}
+
+/// Whether this column or a member below it has a recorded projected move.
+/// This is a reason to qualify the text, even if a later operation may
+/// have moved or refilled the entire place.
+fn has_projected_move_in_parts(rap: &ResourceAccessPoint, vis: &VisualizationData, through: usize) -> bool {
+    matches!(rap, ResourceAccessPoint::Struct(_))
+        && (vis.timelines.get(rap.hash()).is_some_and(|t| has_projected_member_move(&t.history, through))
+            || direct_parts(rap, vis).iter().any(|t| has_projected_move_in_parts(&t.resource_access_point, vis, through)))
+}
+
+/// The moved places under a struct as of the given row. Keep the names
+/// of descendants for the tooltip, independently of whether anything
+/// remains in their parent. The split rule is only about where the
+/// line ends: moves in the arms haven't happened at the split.
 fn parts_moved_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, line: usize) -> Option<PartsMoved> {
     if matches!(rap, ResourceAccessPoint::Struct(Struct { is_box: true, .. })) {
         return None;
     }
     let parts = direct_parts(rap, visualization_data);
-    let mut moved = Vec::new();
-    let mut maybe = false;
-    // The fields moved in some branches of a conditional above only.
-    let mut maybe_moved: Vec<String> = Vec::new();
+    let mut result = PartsMoved::default();
+    let mut every_part_unavailable = true;
+    let mut ends_at_split = true;
     for t in &parts {
         let r = &t.resource_access_point;
-        if moved_at(t, line) {
-            moved.push(r.name().clone());
-            // Moved in some branches of a conditional above only.
-            let before: Vec<(usize, Event)> = t.history.iter().filter(|(l, _)| *l <= line).cloned().collect();
-            if maybe_moved_at_end(&before) {
-                maybe = true;
-                maybe_moved.push(r.name().clone());
+        let projected = has_projected_member_move(&t.history, line);
+        let unavailable = if moved_at(t, line) {
+            result.projected |= projected;
+            if !projected {
+                let before: Vec<_> = t.history.iter().filter(|(l, _)| *l <= line).cloned().collect();
+                let names = if maybe_moved_at_end(&before) { &mut result.maybe_moved } else { &mut result.moved };
+                names.push(r.name().clone());
             }
-            continue;
-        }
-        if let Some(inner) = parts_moved_at(r, visualization_data, line) {
-            maybe |= inner.maybe;
-            // (A field whose own fields are all moved, some on some paths
-            // only, is maybe-moved as a whole: nothing in it can be used.)
-            if inner.all || inner.none_usable {
-                moved.push(r.name().clone());
-                if inner.none_usable {
-                    maybe_moved.push(r.name().clone());
-                }
-            } else {
-                moved.extend(inner.moved);
-                maybe_moved.extend(inner.maybe_moved);
-            }
-        }
+            !projected
+        } else if let Some(inner) = parts_moved_at(r, visualization_data, line) {
+            result.moved.extend(inner.moved);
+            result.maybe_moved.extend(inner.maybe_moved);
+            result.projected |= inner.projected;
+            inner.all || inner.none_usable
+        } else {
+            false
+        };
+        every_part_unavailable &= unavailable;
+        ends_at_split &= unavailable || (!projected && moved_in_every_arm(t, line).is_some());
     }
-    if moved.is_empty() {
+    if !result.projected && result.moved.is_empty() && result.maybe_moved.is_empty() {
         return None;
     }
-    let mut all = parts.iter().all(|t| moved.contains(t.resource_access_point.name()));
-    // A field moved on some paths only is still in the struct on the
-    // others, which drop it at the struct's scope end: the struct's line
-    // goes on (`let s2 = p.b; if c { drop(p.a); } else if d { drop(p.a);
-    // }`, #1583). Nothing in it can be used, though.
-    let none_usable = all && !maybe_moved.is_empty();
-    if none_usable {
-        all = false;
-    }
-    // The fields still in it are moved in every arm of the conditional
-    // `line` is in (`let s3 = p.b; if c { drop(p.a) } else { drop(p.a) }`,
-    // #1541): their arm legs carry what's left of the struct, whose line
-    // stops where they split (it can't say its other fields still can be
-    // used there).
-    if !all && !none_usable && parts.iter().all(|t| moved.contains(t.resource_access_point.name()) || moved_in_every_arm(t, line).is_some()) {
-        all = true;
-    }
-    Some(PartsMoved { moved, maybe, all, maybe_moved, none_usable })
+    result.none_usable = every_part_unavailable && !result.maybe_moved.is_empty();
+    result.all = every_part_unavailable && !result.none_usable;
+    result.hide_at_split = ends_at_split && result.maybe_moved.is_empty();
+    Some(result)
 }
 
 /// The elements (`pair[0]`) a slice pattern moved out of an array's
@@ -9811,15 +9832,14 @@ fn elems_split(history: &[(usize, Event)], el: &ElemsLeft) -> (Vec<String>, Vec<
 }
 
 /// See `parts_moved_at`.
+#[derive(Default)]
 struct PartsMoved {
     moved: Vec<String>,
-    /// Some of them were moved on some paths through a conditional only.
-    maybe: bool,
-    all: bool,
-    /// Those of `moved` (at any depth) moved on some paths only.
     maybe_moved: Vec<String>,
-    /// Every field is moved, some on some paths only (#1583).
+    projected: bool,
+    all: bool,
     none_usable: bool,
+    hide_at_split: bool,
 }
 
 /// The rows where a borrow of a field of what the `&mut` reference

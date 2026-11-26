@@ -140,15 +140,15 @@ pub fn event_dot_box_contents_moved_go_out_of_scope(my_name: &String) -> String 
 
 // A Box can be empty, refilled, replaced, or moved away on different paths.
 // Only the value still present at the actual drop or overwrite is dropped.
-pub fn event_dot_box_paths_go_out_of_scope(my_name: &str) -> String {
+pub fn event_dot_parts_go_out_of_scope(my_name: &str) -> String {
     format!("{} goes out of scope. Whatever it still holds (if anything) is dropped here.", styled_name_html(my_name))
 }
 
-pub fn event_dot_owner_drop_at_reassign_box_paths(my_name: &str) -> String {
+pub fn event_dot_owner_drop_at_reassign_parts(my_name: &str) -> String {
     format!("{} acquires ownership of a new resource. Whatever it still held (if anything) is dropped here.", styled_name_html(my_name))
 }
 
-pub fn event_dot_box_drop_if_try_returns(my_name: &str) -> String {
+pub fn event_dot_parts_drop_if_try_returns(my_name: &str) -> String {
     format!("If the `?` here returns early, whatever {} still holds (if anything) is dropped here.", styled_name_html(my_name))
 }
 
@@ -3376,31 +3376,9 @@ pub fn state_arm_join(label: &str) -> String {
 // values, not heap-backed resources. Used for the timeline-stripe
 // tooltip and the vertical lifeline.
 // A non-Copy owner with nothing to drop: also a value, not a resource (#484).
-// The line of a struct some of whose fields were moved out (#1157):
-// it can't be used as a whole any more, only the fields still in it.
-// `maybe`: on some paths through a conditional above only; Rust still
-// rejects using the struct as a whole after it.
-pub fn state_partly_moved(my_name: &String, moved: &[String], maybe: bool) -> String {
-    let names: Vec<String> = moved.iter().map(|m| styled_name_html(m)).collect();
-    let (list, verb) = match (names.as_slice(), maybe) {
-        ([one], false) => (one.clone(), "was"),
-        ([one], true) => (one.clone(), "may have been"),
-        ([init @ .., last], false) => (format!("{} and {}", init.join(", "), last), "were"),
-        ([init @ .., last], true) => (format!("{} and {}", init.join(", "), last), "may have been"),
-        ([], _) => (String::new(), "was"),
-    };
-    format!(
-        "{0} is partially moved: {1} {2} moved out, so {0} can't be used as a whole; its other fields still can",
-        styled_name_html(my_name), list, verb
-    )
-}
-
-// The line of a struct every field of which was moved out, some of them
-// on some paths through a conditional above only (`let s2 = p.b; if c {
-// drop(p.a); }`, #1583): on the other paths it still holds those, and
-// drops them at its scope end, but neither it nor any field of it can
-// be used (E0382).
-pub fn state_fields_maybe_all_moved(my_name: &String, surely: &[String], maybe: &[String]) -> String {
+// A move can leave other fields available subject to Rust's usual
+// initialization and borrowing rules.
+pub fn state_struct_parts_moved(my_name: &str, surely: &[String], maybe: &[String], maybe_all: bool) -> String {
     fn list(names: &[String]) -> String {
         let fmt: Vec<String> = names.iter().map(|m| styled_name_html(m)).collect();
         match fmt.as_slice() {
@@ -3408,14 +3386,28 @@ pub fn state_fields_maybe_all_moved(my_name: &String, surely: &[String], maybe: 
             _ => fmt.concat(),
         }
     }
-    let moved = match surely.len() {
-        0 => format!("{} may have been moved out", list(maybe)),
-        n => format!("{} {} moved out and {} may have been", list(surely), if n > 1 { "were" } else { "was" }, list(maybe)),
+    let sure = || format!("{} {} moved out", list(surely), if surely.len() > 1 { "were" } else { "was" });
+    let moved = match (surely.is_empty(), maybe.is_empty()) {
+        (true, _) => format!("{} may have been moved out", list(maybe)),
+        (false, true) => sure(),
+        (false, false) => format!("{} and {} may have been", sure(), list(maybe)),
     };
-    format!(
-        "{0} is partially moved: {1}, so neither {0} nor any of its fields can be used; what is left in {0} is dropped when it goes out of scope",
-        styled_name_html(my_name), moved
-    )
+    let name = styled_name_html(my_name);
+    let suffix = if maybe_all {
+        format!("Whatever {name} still holds (if anything) is dropped when it goes out of scope.")
+    } else {
+        "Its intact fields may still be usable.".to_owned()
+    };
+    format!("{name} can't be used as a whole here because {moved}. {suffix}")
+}
+
+pub fn state_struct_projected_move(my_name: &str) -> String {
+    let name = styled_name_html(my_name);
+    format!("Parts of {name} may have been moved out, so {name} can't be used as a whole here. Its intact fields may still be usable.")
+}
+
+pub fn event_dot_branch_merge_projected_move(my_name: &str) -> String {
+    format!("Parts of {} may have been moved out above. Rust drops whatever is still there when the value is replaced or goes out of scope.", styled_name_html(my_name))
 }
 
 // The line of an array a slice pattern moved some elements out of
@@ -4684,27 +4676,13 @@ pub fn event_dot_pass_rest_drop(parts: &[String]) -> String {
     format!("At the end of each pass, the {0} of that pass's element {1} dropped: the pattern doesn't move {2} out", list, verb, pron)
 }
 
-/// A write to `lender` drawn inside its borrow by `borrower`, on a path
-/// where that loan is already dead (#796): `let mut c = &x; if cond { x
-/// = 2; c = &y; } println!("{}", c);`. The diagram gives a loan one end,
-/// the latest over the paths, as the borrow checker does; on the write's
-/// path `borrower` gets a new reference (`repoint`: its line, and whether
-/// that is before the write) before it is used again, or isn't used
-/// again (None). Starts with DEAD_LOAN_NOTE_START (see merged_dot_title).
-pub fn event_dot_dead_loan_note(lender: &String, borrower: &String, repoint: Option<(usize, bool)>) -> String {
+/// The write can run because the earlier loan has ended on this path.
+pub fn event_dot_dead_loan_note(lender: &str, borrower: &str) -> String {
     let (x, c) = (styled_name_html(lender), styled_name_html(borrower));
-    match repoint {
-        Some((n, true)) => format!(
-            "{DEAD_LOAN_NOTE_START} {c} was given a new reference on line {n}, so {c}'s borrow of {x} is already over here; {x} stays borrowed only on paths that skip line {n}"
-        ),
-        Some((n, false)) => format!(
-            "{DEAD_LOAN_NOTE_START} {c} is given a new reference on line {n} before it is used again, so {c}'s borrow of {x} is already over here; {x} stays borrowed only on paths that skip line {n}"
-        ),
-        None => format!(
-            "{DEAD_LOAN_NOTE_START} {c} isn't used again, so {c}'s borrow of {x} is already over here; {x} stays borrowed only on the other paths"
-        ),
-    }
+    format!("{DEAD_LOAN_NOTE_START} {c}'s earlier borrow of {x} is already over when mutable access starts")
 }
+
+pub const SHARED_ROW_EVENTS: &str = "These events share a source line and may be listed out of order.";
 
 pub const DEAD_LOAN_NOTE_START: &str = "On this path";
 

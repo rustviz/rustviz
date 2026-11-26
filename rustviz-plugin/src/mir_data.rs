@@ -25,18 +25,6 @@ type Loan = <RustcFacts as FactTypes>::Loan;
 type Point = <RustcFacts as FactTypes>::Point;
 type Origin = <RustcFacts as FactTypes>::Origin;
 
-/// Why a write to a lender is allowed at a line where a loan of it is
-/// drawn live (#796): on the write's path the loan is already dead.
-#[derive(Clone, Debug)]
-pub struct DeadLoanWrite {
-    /// RAP name of the reference that held the loan.
-    pub borrower: String,
-    /// Where `borrower` is given a new reference on the write's path,
-    /// and whether that is before the write; None when it isn't used
-    /// again on that path.
-    pub repoint: Option<(usize, bool)>,
-}
-
 /// Finds a use of `local` (not a `StorageLive` / `StorageDead`).
 struct LocalUse { local: Local, found: bool }
 
@@ -524,12 +512,10 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     /// where a loan of it is dead though the borrow checker keeps it in
     /// scope on another path, past the write (#796): `let mut c = &x; if
     /// cond { x = 2; c = &y; } println!("{}", c);` compiles because on
-    /// the path through the `if`, `c` is given a new reference before it
-    /// is used again. The diagram gives each loan one end (#778), so x is
-    /// drawn borrowed across the write; this says why rustc accepts it.
-    /// None when no such loan, or no reference variable holding it, is
-    /// found.
-    pub fn dead_loan_at_write(&self, lender: &str, line: usize) -> Option<DeadLoanWrite> {
+    /// the path through the `if`, the earlier borrow is already over. The
+    /// diagram gives each loan one end (#778), so x is drawn borrowed
+    /// across the write. Return the holder of the earlier loan.
+    pub fn dead_loan_at_write(&self, lender: &str, line: usize) -> Option<String> {
         let bwf = self.bwf;
         let body = &bwf.body;
         let names = self.mir_local_names(bwf);
@@ -674,22 +660,25 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
             };
             let mut seen: std::collections::HashSet<Location> = std::collections::HashSet::new();
             let mut work: Vec<Location> = writes.iter().flat_map(|(l, _)| pred(*l)).collect();
-            let (mut earlier, mut old_value) = (BTreeSet::new(), false);
+            let mut old_value = false;
             while let Some(l) = work.pop() {
                 if !seen.insert(l) { continue; }
                 if stmt_assigns(l, holder) {
-                    if l == holder_at { old_value = true; } else { earlier.insert(self.location_to_line(l, bwf)); }
+                    old_value |= l == holder_at;
                     continue;
                 }
                 let before = pred(l);
                 if before.is_empty() { old_value = true; }
                 work.extend(before);
             }
-            // Else forward from the writes: is the reference given a new
-            // value before its next use, or not used again?
+            if !old_value {
+                return Some(borrower.clone());
+            }
+            // Look for a use of the old reference after the write. A
+            // continuation may overwrite it or may simply never use it.
             let mut seen: std::collections::HashSet<Location> = std::collections::HashSet::new();
             let mut work: Vec<Location> = writes.iter().flat_map(|(l, _)| succ(*l)).collect();
-            let (mut later, mut used) = (BTreeSet::new(), false);
+            let mut used = false;
             while let Some(l) = work.pop() {
                 if !seen.insert(l) { continue; }
                 let data = &body.basic_blocks[l.block];
@@ -697,24 +686,17 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                     if matches!(st.kind, StatementKind::StorageDead(d) if d == holder) { continue; }
                 }
                 if stmt_assigns(l, holder) {
-                    later.insert(self.location_to_line(l, bwf));
                     continue;
                 }
                 if uses(l) {
                     used = true;
-                    continue;
+                    break;
                 }
                 work.extend(succ(l));
             }
-            // Only a single line is named: with several (`if a { c = &y; }
-            // else { c = &z; }`) no one line is the reason.
-            let repoint = match (old_value, earlier.len(), used, later.len()) {
-                (false, 1, _, _) => Some((*earlier.first()?, true)),
-                (true, _, false, 0) => None,
-                (true, _, false, 1) => Some((*later.first()?, false)),
-                _ => continue,
-            };
-            return Some(DeadLoanWrite { borrower: borrower.clone(), repoint });
+            if !used {
+                return Some(borrower.clone());
+            }
         }
         None
     }

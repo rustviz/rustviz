@@ -453,6 +453,8 @@ pub struct Struct {
     /// moved. Whatever fields remain, and the box's own heap
     /// allocation, are still freed when it goes out of scope.
     pub is_box: bool,
+    /// Length of an array-typed member, for a slice pattern's move source.
+    pub array_len: Option<u64>,
     /// Same as `Owner::holds_borrow`, for a member that isn't a
     /// reference but whose value holds a borrow (`items: Vec<&'a str>`
     /// initialised with `vec![w.as_str()]`, #1088).
@@ -2483,7 +2485,6 @@ pub enum ExternalEvent {
         ro: ResourceAccessPoint,
         lender: String,
         borrower: String,
-        repoint: Option<(usize, bool)>,
         id: usize
     },
     // only use this event to initialize fn parameters
@@ -2942,7 +2943,7 @@ pub enum Event {
     // See ExternalEvent::DeadLoanNote. `shown`: the column is drawn
     // borrowed at the write (set while computing its states); a note
     // on a column that isn't is dropped then.
-    DeadLoanNote { lender: String, borrower: String, repoint: Option<(usize, bool)>, shown: bool },
+    DeadLoanNote { lender: String, borrower: String, shown: bool },
     // SPECIAL CASE: use only to initialize a fn's paramter
     // Requires param to be Owner, StaticRef, or MutRef (cannot be Function)
     // (`own_param`, `in_pattern`: see ExternalEvent::InitRefParam)
@@ -3985,8 +3986,8 @@ impl Event {
             Event::ReslicedInPlace { lender, mutable, part } => {
                 hover_messages::event_dot_resliced_in_place(my_name, lender, *mutable, *part)
             }
-            Event::DeadLoanNote { lender, borrower, repoint, .. } => {
-                hover_messages::event_dot_dead_loan_note(lender, borrower, *repoint)
+            Event::DeadLoanNote { lender, borrower, .. } => {
+                hover_messages::event_dot_dead_loan_note(lender, borrower)
             }
             Event::InitRefParam{ param, own_param: Some(own), .. } => {
                 hover_messages::event_dot_ref_init_own_param(my_name, &own.fn_name, own.whole, matches!(param, ResourceAccessPoint::MutRef(_)), own.drops)
@@ -4181,7 +4182,8 @@ impl Event {
                 hover_messages::event_dot_move_out_of_temporary(&self.deref_name(my_name), &to.name(), part, *empties_temp)
             }
             // `[c, _] => …`: only the element `pair[0]` moves out (#1285).
-            Event::Move{ is: is @ ResourceTy::Index(r, place, _), ..} if r.elems_left().is_some() => {
+            Event::Move{ is: is @ ResourceTy::Index(r, place, _), ..}
+                if r.elems_left().is_some() || r.is_member() => {
                 if r.elems_left().is_some_and(|e| e.empties_last(place)) {
                     hover_messages::event_dot_move_last_elems(place, &self.deref_name(my_name), is_plain(is))
                 } else {
@@ -4209,9 +4211,16 @@ impl Event {
                         hover_messages::event_dot_move_to_scrutinee_temporary(&self.deref_name(my_name), what, when),
                     ResourceTy::Value(rap) if rap.is_unbound_temporary() && !rap.is_let_literal_temporary() =>
                         hover_messages::event_dot_move_to_temporary(&self.deref_name(my_name), false),
-                    ResourceTy::Value(ResourceAccessPoint::Function(f)) if f.drops_arg.0 =>
-                        hover_messages::event_dot_move_to_drop(&self.deref_name(my_name), &f.name, v,
-                            &is.extract_rap().map_or(String::new(), |r| r.drop_note())),
+                    ResourceTy::Value(ResourceAccessPoint::Function(f)) if f.drops_arg.0 => {
+                        // On a field's column, the Box's drop note describes the
+                        // Box. A move through the Box drops the payload here.
+                        let note = if matches!(is, ResourceTy::Deref(r) if r.is_member()) {
+                            String::new()
+                        } else {
+                            is.extract_rap().map_or(String::new(), |r| r.drop_note())
+                        };
+                        hover_messages::event_dot_move_to_drop(&self.deref_name(my_name), &f.name, v, &note)
+                    }
                     // `move || r.push('!')` with `r: &mut String` moves the
                     // reference, not what it points to (#1148).
                     _ if to.is_closure() && is.extract_rap().is_some_and(|r| r.is_ref()) =>
@@ -6042,8 +6051,8 @@ impl Visualizable for VisualizationData {
         ExternalEvent::ReslicedInPlace{ lender, mutable, part, .. } => {
           vec![(line_num, Event::ReslicedInPlace { lender: lender.clone(), mutable: *mutable, part: *part })]
         },
-        ExternalEvent::DeadLoanNote{ lender, borrower, repoint, .. } => {
-          vec![(line_num, Event::DeadLoanNote { lender: lender.clone(), borrower: borrower.clone(), repoint: *repoint, shown: false })]
+        ExternalEvent::DeadLoanNote{ lender, borrower, .. } => {
+          vec![(line_num, Event::DeadLoanNote { lender: lender.clone(), borrower: borrower.clone(), shown: false })]
         },
         ExternalEvent::ChainFailUse{ro, uses, definite, path, ..} => {
           vec![(line_num, Event::ChainFailUse { uses: uses.clone(), definite: *definite, path: *path, is_ref: ro.is_ref(), pointee_value: ro.points_to_copy() })]
@@ -6559,8 +6568,8 @@ impl Visualizable for VisualizationData {
             ExternalEvent::PassRestDrop{ro, parts, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::PassRestDrop { parts }, line_number);
             },
-            ExternalEvent::DeadLoanNote{ro, lender, borrower, repoint, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::DeadLoanNote { lender, borrower, repoint, shown: false }, line_number);
+            ExternalEvent::DeadLoanNote{ro, lender, borrower, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::DeadLoanNote { lender, borrower, shown: false }, line_number);
             },
             ExternalEvent::ChainFailUse{ro, uses, definite, path, ..} => {
                 let (is_ref, pointee_value) = (ro.is_ref(), ro.points_to_copy());

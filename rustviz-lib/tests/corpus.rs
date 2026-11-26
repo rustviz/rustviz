@@ -13121,7 +13121,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "c immutably borrows a value",
             // A bullet of the `x += 1;` dot (after "x's value is copied" and
             // "x is assigned a new value").
-            "On this path c is given a new reference on line 11 before it is used again, so c's borrow of x is already over here; x stays borrowed only on paths that skip line 11",
+            "On this path c's earlier borrow of x is already over when mutable access starts",
         ],
         must_not_contain: &[
             "c's immutable borrow ends• c immutably borrows a value",
@@ -20588,16 +20588,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "dead_loan_write_796",
         must_contain: &[
-            "x is assigned a new value. On this path c is given a new reference on line 19 before it is used again, so c's borrow of x is already over here; x stays borrowed only on paths that skip line 19",
+            "x is assigned a new value. On this path c's earlier borrow of x is already over when mutable access starts",
             // A bullet of its dot, after "a is assigned a new value".
-            "On this path r was given a new reference on line 30, so r's borrow of a is already over here; a stays borrowed only on paths that skip line 30",
-            "d is assigned a new value. On this path q is given a new reference on line 45 before it is used again, so q's borrow of d is already over here; d stays borrowed only on paths that skip line 45",
+            "On this path r's earlier borrow of a is already over when mutable access starts",
+            "d is assigned a new value. On this path q's earlier borrow of d is already over when mutable access starts",
             // (m's "m is live in a conditional expression" is on the
             // match's split dot now, #1371, so the note is the write's only
             // bullet.)
-            "m is assigned a new value. On this path p is given a new reference on line 59 before it is used again, so p's borrow of m is already over here; m stays borrowed only on paths that skip line 59",
-            "s.n is assigned a new value. On this path f is given a new reference on line 75 before it is used again, so f's borrow of s is already over here; s stays borrowed only on paths that skip line 75",
-            "v[0] is assigned a new value. On this path g is given a new reference on line 77 before it is used again, so g's borrow of v is already over here; v stays borrowed only on paths that skip line 77",
+            "m is assigned a new value. On this path p's earlier borrow of m is already over when mutable access starts",
+            "s.n is assigned a new value. On this path f's earlier borrow of s is already over when mutable access starts",
+            "v[0] is assigned a new value. On this path g's earlier borrow of v is already over when mutable access starts",
             // The single span is kept (borrow-checker view, #778).
             "x's value is no longer immutably borrowed",
             "s's value is no longer immutably borrowed",
@@ -20610,14 +20610,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "but is still immutably borrowed by u",
         ],
     },
-    // #796: `x += 8;` follows `c = &y;` on its path, so c's loan of x
-    // ended there (line 8), not at the later `c = &z;` / `c = &s;`: the
-    // note names the earlier line, and x is borrowed only on the path that
-    // skips the outer `if`.
+    // #796: `x += 8;` follows the end of c's old loan of x on this path.
     TooltipExpect {
         name: "basic_if12",
         must_contain: &[
-            "On this path c was given a new reference on line 8, so c's borrow of x is already over here; x stays borrowed only on paths that skip line 8",
+            "On this path c's earlier borrow of x is already over when mutable access starts",
         ],
         must_not_contain: &[
             "skip line 11",
@@ -20635,7 +20632,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "On this path",
-            "is already over here",
+            "is already over when mutable access starts",
         ],
     },
     TooltipExpect {
@@ -21083,13 +21080,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // A Copy field (`u.1`) stays, so u stays partially moved; refilling
         // the field (`r.a = ra`) makes r whole again.
         must_contain: &[
-            "p is partially moved: p.a was moved out, so p can't be used as a whole; its other fields still can",
-            "u is partially moved: u.0 was moved out, so u can't be used as a whole; its other fields still can",
-            "o is partially moved: o.inner.x was moved out, so o can't be used as a whole; its other fields still can",
-            "o is partially moved: o.inner was moved out, so o can't be used as a whole; its other fields still can",
-            "o.inner is partially moved: o.inner.x was moved out, so o.inner can't be used as a whole; its other fields still can",
-            "q is partially moved: q.a may have been moved out, so q can't be used as a whole; its other fields still can",
-            "r is partially moved: r.a was moved out, so r can't be used as a whole; its other fields still can",
+            "p can't be used as a whole here because p.a was moved out. Its intact fields may still be usable.",
+            "u can't be used as a whole here because u.0 was moved out. Its intact fields may still be usable.",
+            "o can't be used as a whole here because o.inner.x was moved out. Its intact fields may still be usable.",
+            "o can't be used as a whole here because o.inner.x and o.inner.y were moved out. Its intact fields may still be usable.",
+            "o.inner can't be used as a whole here because o.inner.x was moved out. Its intact fields may still be usable.",
+            "q can't be used as a whole here because q.a may have been moved out. Its intact fields may still be usable.",
+            "r can't be used as a whole here because r.a was moved out. Its intact fields may still be usable.",
             "r is the owner of the resource",
         ],
         must_not_contain: &[],
@@ -23156,12 +23153,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s's resource is mutably borrowed by r; s can't be used while the borrow is live",
             "p.n is assigned a new value",
             "t's resource is mutably borrowed by w; t can't be used while the borrow is live",
-            "x is assigned a new value. On this path z is given a new reference on line 55 before it is used again, so z's borrow of x is already over here; x stays borrowed only on paths that skip line 55",
+            "x is assigned a new value. On this path z's earlier borrow of x is already over when mutable access starts",
         ],
         must_not_contain: &[
-            "r's borrow of s is already over here",
-            "q's borrow of p is already over here",
-            "w's borrow of t is already over here",
+            "r's earlier borrow of s is already over when mutable access starts",
+            "q's earlier borrow of p is already over when mutable access starts",
+            "w's earlier borrow of t is already over when mutable access starts",
         ],
     },
     TooltipExpect {
@@ -25347,7 +25344,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "=s's resource is mutably borrowed; s can't be used until the borrow ends",
             "=o's resource is mutably borrowed; o can't be used until the borrow ends",
-            "r's borrow of s is already over here; s stays borrowed only on the other paths",
+            "r's earlier borrow of s is already over when mutable access starts",
         ],
     },
     TooltipExpect {
@@ -25523,8 +25520,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // stretch drawn up to it. `dead_loan_note_on_write_row_1443` checks
         // it's on the write's dot.
         must_contain: &[
-            "On this path r8 isn't used again, so r8's borrow of s8 is already over here; s8 stays borrowed only on the other paths",
-            "On this path r9 isn't used again, so r9's borrow of s9 is already over here; s9 stays borrowed only on the other paths",
+            "On this path r8's earlier borrow of s8 is already over when mutable access starts",
+            "On this path r9's earlier borrow of s9 is already over when mutable access starts",
         ],
         must_not_contain: &[
             "s8's resource is mutably borrowed; s8 can't be used until the borrow ends",
@@ -26995,9 +26992,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // after the write. An assignment there (`s8 = ..`, rb) still gets
         // none, as #796's near misses: its dot shows rb's loan ending.
         must_contain: &[
-            "On this path r8 isn't used again, so r8's borrow of s8 is already over here; s8 stays borrowed only on the other paths",
-            "On this path r9 isn't used again, so r9's borrow of s8 is already over here; s8 stays borrowed only on the other paths",
-            "On this path ra isn't used again, so ra's borrow of s8 is already over here; s8 stays borrowed only on the other paths",
+            "On this path r8's earlier borrow of s8 is already over when mutable access starts",
+            "On this path r9's earlier borrow of s8 is already over when mutable access starts",
+            "On this path ra's earlier borrow of s8 is already over when mutable access starts",
         ],
         must_not_contain: &[
             "On this path rb",
@@ -27996,12 +27993,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the join; `struct_lines_after_maybe_moves_1568_1583` checks the
         // rows). Moved in every arm (u), it stops where they split (#1541).
         must_contain: &[
-            "p is partially moved: p.b was moved out and p.a may have been, so neither p nor any of its fields can be used; what is left in p is dropped when it goes out of scope",
-            "x is partially moved: x.a and x.b may have been moved out, so neither x nor any of its fields can be used; what is left in x is dropped when it goes out of scope",
-            "y is partially moved: y.a and y.b may have been moved out, so neither y nor any of its fields can be used; what is left in y is dropped when it goes out of scope",
+            "p can't be used as a whole here because p.b was moved out and p.a may have been. Whatever p still holds (if anything) is dropped when it goes out of scope.",
+            "x can't be used as a whole here because x.a and x.b may have been moved out. Whatever x still holds (if anything) is dropped when it goes out of scope.",
+            "y can't be used as a whole here because y.a and y.b may have been moved out. Whatever y still holds (if anything) is dropped when it goes out of scope.",
         ],
         must_not_contain: &[
-            "what is left in u",
+            "Whatever u still holds",
         ],
     },
     TooltipExpect {
@@ -28069,7 +28066,107 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "A temporary holds the value that String::from returns",
         ],
     },
+    TooltipExpect {
+        name: "dead_loan_maybe_repoint_1796",
+        must_contain: &[
+            "On this path r's earlier borrow of x is already over when mutable access starts",
+            "a acquires ownership of a new resource; its previous resource is dropped. On this path q's earlier borrow of a is already over when mutable access starts",
+        ],
+        must_not_contain: &["is given a new reference on line", "stays borrowed only on paths that skip"],
+    },
+    TooltipExpect {
+        name: "dead_loan_one_line_1752",
+        must_contain: &[
+            "These events share a source line and may be listed out of order.",
+            "On this path r's earlier borrow of s is already over when mutable access starts",
+            "push reads from/writes to s (implicitly mutably borrowed)",
+            "s's resource is immutably borrowed by r; s is read-only while the borrow is live",
+        ],
+        must_not_contain: &["was given a new reference on line 3", "stays borrowed only on paths that skip"],
+    },
+    TooltipExpect {
+        name: "struct_inner_moves_1711",
+        must_contain: &[
+            "Parts of p may have been moved out, so p can't be used as a whole here. Its intact fields may still be usable.",
+            "Move from p.a[0] to x",
+            "p.a goes out of scope. Whatever it still holds (if anything) is dropped here.",
+            "p.q goes out of scope. Whatever it still holds (if anything) is dropped here.",
+            "Parts of p.a may have been moved out above. Rust drops whatever is still there when the value is replaced or goes out of scope.",
+            "*p.q's resource is moved into drop, which drops it",
+            "p acquires ownership of a new resource. Whatever it still held (if anything) is dropped here.",
+            "If the `?` here returns early, whatever p still holds (if anything) is dropped here.",
+        ],
+        must_not_contain: &[
+            "p.a was moved out",
+            "p.a and p.q were moved out",
+            "p.a and p.q may have been moved out",
+            "p.a goes out of scope. No resource is dropped",
+            "p.q goes out of scope. No resource is dropped",
+            "*p.q's resource is moved into drop, which drops it (including the String it holds)",
+            "Its previous p.a and p.q were moved out earlier",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/struct_inner_move_chain_1711",
+        must_contain: &[
+            "Move from part of q.a[0] to s",
+            "q.a goes out of scope. Whatever it still holds (if anything) is dropped here.",
+            "Move from r.pair[0] to x",
+            "Move from r.pair[1] to y",
+            "part of r.pair may have been moved: when the condition moves part of r.pair to x and y and then turns out false, the body is skipped but the move has happened, so part of r.pair can't be used after the if. When the condition fails after that move, x and y go out of scope and their resources are dropped.",
+        ],
+        must_not_contain: &[
+            "=Move from q.a to s",
+            "q.a was moved out",
+            "because q.a may have been moved out",
+            ". q.a may have been moved out above",
+            "the condition moves r.pair to x and y",
+            "the condition moves r.pair[0] to x and y",
+        ],
+    },
+    TooltipExpect {
+        name: "struct_last_move_in_arms_1666",
+        must_contain: &[
+            "o can't be used as a whole here because o.x and o.p.a may have been moved out. Its intact fields may still be usable.",
+            "o can't be used as a whole here because o.p.a was moved out and o.x may have been. Its intact fields may still be usable.",
+            "p can't be used as a whole here because p.a was moved out. Its intact fields may still be usable.",
+        ],
+        must_not_contain: &["neither o nor any of its fields can be used", "what is left in o is dropped", "its other fields still can"],
+    },
+    TooltipExpect {
+        name: "struct_nested_maybe_moves_1728",
+        must_contain: &[
+            "p can't be used as a whole here because p.i.a and p.i.b may have been moved out. Its intact fields may still be usable.",
+            "p can't be used as a whole here because p.i.a and p.i.b were moved out. Its intact fields may still be usable.",
+            "p can't be used as a whole here because p.i.a, p.i.b and p.z may have been moved out. Whatever p still holds (if anything) is dropped when it goes out of scope.",
+        ],
+        must_not_contain: &["p.i may have been moved out", "p.i was moved out", "p.i and p.z may have been moved out", "is partially moved:"],
+    },
 ];
+
+#[test]
+fn struct_title_during_last_move_in_arms_1666() {
+    let rv = run_with_local_backend("struct_last_move_in_arms_1666");
+    let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let rows = code_rows_y(&code, "println!(\"{}\", o.p.b);");
+    assert_eq!(rows.len(), 2);
+    let before_move = "o can't be used as a whole here because o.x and o.p.a may have been moved out. Its intact fields may still be usable.";
+    let lines = state_lines_with_tooltip(&timeline, before_move);
+    for y in rows {
+        let row = y - 5.0;
+        assert!(lines.iter().any(|(start, end)| *start <= row && row <= *end), "o's title during the read at {row}: {lines:?}");
+    }
+}
+
+#[test]
+fn one_line_dead_loan_note_stays_with_the_write_1752() {
+    let timeline = run_with_local_backend("dead_loan_one_line_1752").timeline_panel_string();
+    assert!(tooltip_lines(&timeline).iter().any(|dot| {
+        dot.first().is_some_and(|line| line == "These events share a source line and may be listed out of order.")
+            && dot.iter().any(|line| line == "push reads from/writes to s (implicitly mutably borrowed)")
+            && dot.iter().any(|line| line == "On this path r's earlier borrow of s is already over when mutable access starts")
+    }));
+}
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws
 /// nothing), and s is given back once, at r's last use. Main ended the
@@ -28117,7 +28214,7 @@ fn dead_loan_note_on_write_row_1443() {
     let rv = run_with_local_backend("dead_loan_note_row_1443");
     let timeline = rv.timeline_panel_string();
     for (r, s, m) in [("r8", "s8", "m8"), ("r9", "s9", "m9")] {
-        let note = format!("On this path {r} isn't used again, so {r}'s borrow of {s} is already over here; {s} stays borrowed only on the other paths");
+        let note = format!("On this path {r}'s earlier borrow of {s} is already over when mutable access starts");
         let lend = format!("{s}'s resource is mutably borrowed by {m}; {s} can't be used while the borrow is live");
         let at_note = dots_listing_tooltip(&timeline, &note);
         let at_write = dots_listing_tooltip(&timeline, &lend);
@@ -36803,8 +36900,8 @@ fn a_struct_whose_fields_are_all_moved_out_has_no_line_after() {
     ] {
         let row = code_row_y(&code, last_move);
         let mut lines = state_lines_with_tooltip(&timeline, &format!("{var} is the owner of the resource"));
-        lines.extend(state_lines_with_tooltip(&timeline, &format!("{var} is partially moved: {var}.a was moved out, so {var} can't be used as a whole; its other fields still can")));
-        lines.extend(state_lines_with_tooltip(&timeline, &format!("{var} is partially moved: {var}.x was moved out, so {var} can't be used as a whole; its other fields still can")));
+        lines.extend(state_lines_with_tooltip(&timeline, &format!("{var} can't be used as a whole here because {var}.a was moved out. Its intact fields may still be usable.")));
+        lines.extend(state_lines_with_tooltip(&timeline, &format!("{var} can't be used as a whole here because {var}.x was moved out. Its intact fields may still be usable.")));
         assert!(!lines.is_empty(), "{name}: no line for {var}");
         let below: Vec<&(f64, f64)> = lines.iter().filter(|(_, y2)| *y2 > row + 1.0).collect();
         assert!(below.is_empty(), "{name}: {var}'s line goes on below `{last_move}` (y={row}): {below:?}");

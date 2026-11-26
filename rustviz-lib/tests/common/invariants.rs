@@ -77,6 +77,8 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("store_through_mut_ref_1124", "arrow-along-leg", 1542),
     ("tuple_scrutinee_nested", "arrow-along-leg", 1542),
     ("two_field_borrow_through_ref_1080", "arrow-along-leg", 1542),
+    // Same-row loans: the fresh borrow arrow covers r's column below the dot.
+    ("dead_loan_one_line_1752", "arrow-along-leg", 1752),
 ];
 
 /// The invariants, by the name the failure list and messages use.

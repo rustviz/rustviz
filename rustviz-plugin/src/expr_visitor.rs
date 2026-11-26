@@ -1702,7 +1702,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let holds = if rc.is_some() || rc_fields.is_some() || rc_inside.is_some() || manually_drop { None } else { self.holds_phrase(ty) };
     let box_contents_moved = self.box_contents_moved_out(name, ty);
     let elems_left = self.array_elems_left(name, ty);
-    if rc.is_none() && !manually_drop && !maybe_uninit && !union && rc_fields.is_none() && rc_inside.is_none() && holds.is_none() && !box_contents_moved && elems_left.is_none() {
+    let array_len = match ty.kind() {
+      TyKind::Array(_, len) => len.try_to_target_usize(self.tcx),
+      _ => None,
+    };
+    if rc.is_none() && !manually_drop && !maybe_uninit && !union && rc_fields.is_none() && rc_inside.is_none() && holds.is_none() && !box_contents_moved && elems_left.is_none() && array_len.is_none() {
       return;
     }
     let Some(just_added) = (self.rap_hashes as u64).checked_sub(1) else { return };
@@ -1727,6 +1731,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         s.rc_fields = rc_fields;
         s.rc_inside = rc_inside;
         s.holds = holds;
+        s.array_len = array_len;
       }
       _ => {}
     }
@@ -1863,7 +1868,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       is_copy,
       is_plain_value,
       interior_mut,
-      is_manually_drop: false, is_union: false, union_drop: false, is_maybe_uninit: false, rc: None, rc_fields: None, rc_inside: None, holds: None, is_box: false, holds_borrow: false }),
+      is_manually_drop: false, is_union: false, union_drop: false, is_maybe_uninit: false, rc: None, rc_fields: None, rc_inside: None, holds: None, is_box: false, array_len: None, holds_borrow: false }),
       scope, is_global);
   }
 
@@ -2086,7 +2091,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       return;
     }
     let lender = r.name().split('.').next().unwrap_or(r.name()).to_owned();
-    let Some(dead) = self.dead_loan_at_write(&lender, line) else { return };
+    let Some(borrower) = self.dead_loan_at_write(&lender, line) else { return };
     // Keep ids unique, as in `propagate_struct_transfer`: most callers
     // bump unique_id after handing us the event, so the note took the
     // write's own id. Placement then treated the note as the write,
@@ -2098,7 +2103,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let id = *self.unique_id;
     *self.unique_id += 1;
     self.add_external_event(line, ExternalEvent::DeadLoanNote {
-      ro: r.clone(), lender, borrower: dead.borrower, repoint: dead.repoint, id,
+      ro: r.clone(), lender, borrower, id,
     });
   }
 
@@ -8216,12 +8221,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   pub fn slice_elem_source(&self, hirid: rustc_hir::HirId, from: &ResourceTy) -> Option<ResourceTy> {
     use rustc_hir::Node;
     let ResourceTy::Value(arr) = from else { return None };
-    let elems = arr.elems_left()?;
+    let len = match arr {
+      ResourceAccessPoint::Struct(Struct { is_member: true, array_len, .. }) => (*array_len)?,
+      _ => {
+        let elems = arr.elems_left()?;
+        (elems.moved.len() + elems.left.len()) as u64
+      }
+    };
     let typeck = self.tcx.typeck(hirid.owner);
     if matches!(typeck.pat_binding_modes().get(hirid).map(|m| m.0), Some(rustc_hir::ByRef::Yes(..))) {
       return None;
     }
-    let len = (elems.moved.len() + elems.left.len()) as u64;
     let mut child = hirid;
     let mut place = None;
     for (_, node) in self.tcx.hir_parent_iter(hirid) {
@@ -8246,6 +8256,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             } else {
               return None;
             };
+            if arr.is_member() && child != hirid {
+              // A nested pattern (such as Some(x)) can leave part of the
+              // selected element in the array.
+              place = place.map(|p| format!("part of {p}"));
+            }
           }
           child = p.hir_id;
         }
