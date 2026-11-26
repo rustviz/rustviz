@@ -21,6 +21,14 @@ fn hold(s: &String) -> H<'_> {
     H { v: vec![s] }
 }
 
+fn choose<'a>(x: &'a mut String, y: &'a String, flag: bool) -> &'a String {
+    if flag { x } else { y }
+}
+
+fn id(s: &String) -> &String {
+    s
+}
+
 // A real `&mut i32` stored by `extend`: v can write through it.
 fn extended() {
     let mut a1 = 1;
@@ -110,7 +118,39 @@ fn through_refs(flag: bool) {
     println!("{:?}", o12);
 }
 
+// Each argument's own kind; a `&mut` coerced into a `&String` parameter;
+// an element reborrowed through a `&mut`-derived `&`; a copy of a
+// reference re-pointed on its binding row.
+fn per_argument(flag: bool) {
+    let mut a13 = String::from("a");
+    let b13 = String::from("b");
+    let mut v13: Vec<&String> = Vec::new();
+    v13.push(choose(&mut a13, &b13, flag));
+    println!("{} {:?}", b13, v13);
+    let a14 = String::from("a");
+    let mut b14 = String::from("b");
+    let mut v14: Vec<(&String, &mut String)> = Vec::new();
+    v14.extend([(&a14, &mut b14)]);
+    println!("{}", a14);
+    v14[0].1.push('x');
+    let mut a15 = String::from("a");
+    let mut v15: Vec<&String> = Vec::new();
+    v15.push(id(&mut a15));
+    println!("{:?}", v15);
+    let mut a16 = [1, 2];
+    let r16: &[i32; 2] = &mut a16;
+    let mut v16: Vec<&i32> = Vec::new();
+    v16.push(&r16[0]);
+    println!("{:?}", v16);
+    let mut a17 = String::from("a");
+    let b17 = String::from("b");
+    let mut r17: &String = &mut a17; r17 = &b17;
+    let k17 = r17;
+    println!("{} {}", k17, a17);
+}
+
 fn main() {
+    per_argument(true);
     extended();
     mixed_store();
     copied_out(true);

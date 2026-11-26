@@ -27949,7 +27949,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // borrow from s to vr" read as if vr could write s).
         must_contain: &[
             "Shared reference made from a mutable borrow of s, stored in vr by push; vr isn't a reference, but its value now holds one",
-            "vr's value holds a shared reference made from a mutable borrow of s's resource; the borrow stays mutable while vr is live (vr isn't a reference itself)",
+            "vr's value holds a shared reference made from a mutable borrow of s's resource; the borrow stays mutable until that reference's last use (vr isn't a reference itself)",
             "s's resource is mutably borrowed by vr; s can't be used while the borrow is live",
             "Return mutably borrowed resource from vr to s",
             "Shared reference made from a mutable borrow of s1, stored in vs by push; vs isn't a reference, but its value now holds one",
@@ -28053,7 +28053,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Shared reference made from a mutable borrow of c, stored in u by push; u isn't a reference, but its value now holds one",
             "c's resource is mutably borrowed by u; c can't be used while the borrow is live",
             "Shared reference made from a mutable borrow of d, to o",
-            "o's value holds a shared reference made from a mutable borrow of d's resource; the borrow stays mutable while o is live (o isn't a reference itself)",
+            "o's value holds a shared reference made from a mutable borrow of d's resource; the borrow stays mutable until that reference's last use (o isn't a reference itself)",
             "Return mutably borrowed resource from o to d",
             "Immutable borrow from e to o",
             "Return immutably borrowed resource from o to e",
@@ -28134,9 +28134,20 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Shared reference made from a mutable reborrow through p10, to o10",
             "Shared reference made from a mutable reborrow through p10, to r10: downgrade's signature gives the reference it returns the same lifetime as its argument",
             "Shared reference made from a mutable borrow of a11, to h11.v: hold's signature gives the struct it returns the same lifetime as its argument",
-            "h11.v's value holds a shared reference made from a mutable borrow of a11's resource; the borrow stays mutable while h11.v is live (h11.v isn't a reference itself)",
+            "h11.v's value holds a shared reference made from a mutable borrow of a11's resource; the borrow stays mutable until that reference's last use (h11.v isn't a reference itself)",
             "Shared reference made from a mutable borrow of a12, to o12: Some's signature gives the value it returns the same lifetime as its argument; o12 isn't a reference, but its value holds one",
             "Immutable borrow from b12 to o12: Some's signature gives the value it returns the same lifetime as its argument; o12 isn't a reference, but its value holds one",
+            // (per_argument, third Codex round: `choose(&mut a13, &b13)`
+            // lends b13 shared; `extend([(&a14, &mut b14)])` keeps each
+            // loan's kind; `id(&mut a15)` and `&r16[0]` keep the mutable
+            // loan; k17 copies r17's re-pointed shared loan of b17.)
+            "Immutable borrow from b13 to v13, stored in v13 by push; v13 isn't a reference, but its value now holds one",
+            "Shared reference made from a mutable borrow of a13, stored in v13 by push; v13 isn't a reference, but its value now holds one",
+            "Immutable borrow from a14 to v14, stored in v14 by extend; v14 isn't a reference, but its value now holds one",
+            "Mutable borrow from b14 to v14, stored in v14 by extend; v14 isn't a reference, but its value now holds one",
+            "Shared reference made from a mutable borrow of a15, stored in v15 by push; v15 isn't a reference, but its value now holds one",
+            "Shared reference made from a mutable borrow of a16, stored in v16 by push; v16 isn't a reference, but its value now holds one",
+            "k17's immutable borrow ends",
         ],
         must_not_contain: &[
             "Shared reference made from a mutable borrow of a1, ",
@@ -28157,6 +28168,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from a11 to h11.v",
             "Mutable borrow from b12 to o12",
             "b12's resource is mutably borrowed by o12",
+            "made from a mutable borrow of b13",
+            "b13's resource is mutably borrowed by v13",
+            "Mutable borrow from a14 to v14",
+            "Immutable borrow from a15 to v15",
+            "Immutable borrow from a16 to v16",
+            "the mutable borrow k17 was made from",
         ],
     },
 ];

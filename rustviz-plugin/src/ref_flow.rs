@@ -540,9 +540,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let written_out = !flows.is_empty() && flows.iter().all(|f| f.by_value && f.content && !f.place_mut
       && self.collect_lender_muts(f.arg, &mut out)
       && self.lender_shared_of_mut(f.arg).map(|v| shared_of.extend(v)).is_some());
+    // (No flows: each kept loan's own kind, `extend([(&a, &mut b)])`.)
+    let kept: Vec<crate::mir_data::KeptLoan> = if flows.is_empty() { self.receiver_kept_loans(call) } else { Vec::new() };
     let kinds = lenders.iter()
       .map(|l| match out.iter().find(|(x, _)| x == l) {
         Some((_, m)) if written_out => *m,
+        _ if !kept.is_empty() => kept.iter().filter(|k| !k.through_ref && *k.lender == l.real_name()).any(|k| k.is_mut)
+          || !kept.iter().any(|k| !k.through_ref && *k.lender == l.real_name()) && is_mut,
         _ => is_mut,
       })
       .collect();
@@ -1150,7 +1154,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         return true;
       }
     }
-    !strict && flow.place && self.shared_ref_with_mut_loan(flow.arg)
+    // (`&mut a` passed where `&String` is expected, `id(&mut a)`: the
+    // loan rustc issues is a mutable one, coerced, #1619.)
+    !strict && flow.place && (self.shared_ref_with_mut_loan(flow.arg)
+      || matches!(flow.arg.kind, ExprKind::AddrOf(_, m, _) if m.is_mut()))
   }
 
   /// `r`, `*r` or `&*r` with r a shared reference holding a mutable
@@ -1414,7 +1421,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // Any other call: what its signature ties the result to, with one
       // kind (`a.as_str()` in `v.push((a.as_str(), r))`, #1599).
       ExprKind::Call(..) | ExprKind::MethodCall(..) => {
-        add(self.call_lenders(e), self.call_borrow_is_mut_k(e, strict));
+        match self.call_lender_kinds(e, strict) {
+          // Each argument's lenders with that argument's kind
+          // (`choose(&mut a, &b)`: a mutable, b shared, #1619).
+          Some(kinds) => {
+            for (l, m) in kinds {
+              add(vec![l], m);
+            }
+          }
+          None => add(self.call_lenders(e), self.call_borrow_is_mut_k(e, strict)),
+        }
         true
       }
       ExprKind::AddrOf(_, m, inner) => {
@@ -1462,6 +1478,28 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         (l, m && !real)
       })
       .collect())
+  }
+
+  /// The lenders a call's result holds, each with the kind of the
+  /// argument it came through (`flow_is_mut`); None for a call with
+  /// fewer than two argument flows (one kind for all) or no signature.
+  fn call_lender_kinds(&self, call: &'tcx Expr<'tcx>, strict: bool) -> Option<Vec<(ResourceTy, bool)>> {
+    let n = self.call_arg_flows(call)?.len();
+    if n < 2 {
+      return None;
+    }
+    let mut out: Vec<(ResourceTy, bool)> = Vec::new();
+    for i in 0..n {
+      let f = self.call_arg_flows(call)?.into_iter().nth(i)?;
+      let m = self.flow_is_mut(&f, strict);
+      for l in self.lenders_of_flows(vec![f]).0 {
+        match out.iter_mut().find(|(x, _)| *x == l) {
+          Some(entry) => entry.1 |= m,
+          None => out.push((l, m)),
+        }
+      }
+    }
+    Some(out)
   }
 
   /// `e`'s value, as the place it goes to sees it (after coercions), is
@@ -1977,6 +2015,9 @@ fn peel_shared_reborrow<'tcx>(e: &'tcx Expr<'tcx>, tcx: rustc_middle::ty::TyCtxt
       ExprKind::Unary(rustc_hir::UnOp::Deref, inner) => Some(inner),
       ExprKind::Field(base, _) if tcx.typeck(base.hir_id.owner).expr_ty(base).is_ref() => Some(base),
       ExprKind::Field(base, _) => through_ref(base, tcx),
+      // `r[0]` with `r: &[i32; 2]` (#1619).
+      ExprKind::Index(base, _, _) if tcx.typeck(base.hir_id.owner).expr_ty(base).is_ref() => Some(base),
+      ExprKind::Index(base, _, _) => through_ref(base, tcx),
       _ => None,
     }
   }

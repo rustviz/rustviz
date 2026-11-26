@@ -6631,19 +6631,21 @@ fn history_holds_mut_borrow(vd: &VisualizationData, history: &[(usize, Event)], 
         // copied in, `n` in `if let Some(n) = Some(id(r))`, comes with the
         // borrow drawn into it.)
         let from_column = |f: &ResourceTy| f.extract_rap().is_some_and(|r| !r.is_fn());
-        let latest = history.iter().rev()
-            .filter(|(l, _)| *l <= by)
-            .find(|(_, e)| match e {
+        let before: Vec<&(usize, Event)> = history.iter().filter(|(l, _)| *l <= by).collect();
+        let pos = before.iter().rposition(|(_, e)| match e {
                 Event::MutableBorrow { .. } | Event::StaticBorrow { .. } | Event::Acquire { .. } => true,
                 Event::Copy { from, .. } => from_column(from),
                 _ => false,
             });
+        let latest = pos.map(|i| before[i]);
         return latest.is_some_and(|(l, e)| match e {
-            // Any of the loans it got on that row (`choose(&mut a, &b)`
-            // gives it a's mutable loan and b's shared one, in argument
-            // order, #1599).
-            Event::MutableBorrow { .. } | Event::StaticBorrow { .. } => history.iter()
-                .any(|(l2, e2)| l2 == l && matches!(e2, Event::MutableBorrow { .. })),
+            // Any of the loans it got together, on that row (`choose(&mut
+            // a, &b)` gives it a's mutable loan and b's shared one, in
+            // argument order, #1599); not one an earlier re-point on the
+            // row gave it (`let mut r = &mut a; r = &b;`, #1619).
+            Event::MutableBorrow { .. } | Event::StaticBorrow { .. } => before[..=pos.unwrap_or(0)].iter().rev()
+                .take_while(|(l2, e2)| l2 == l && matches!(e2, Event::MutableBorrow { .. } | Event::StaticBorrow { .. }))
+                .any(|(_, e2)| matches!(e2, Event::MutableBorrow { .. })),
             Event::Copy { from, .. } => from.extract_rap()
                 .is_some_and(|src| src.hash() != ro.hash() && holds_mut_borrow_by(vd, src, *l, seen)),
             _ => false,

@@ -3620,7 +3620,8 @@ pub fn event_dot_holder_borrow(my_name: &String, from_name: &String, is_mut: boo
 
 // `vr.push(r)` / `let o = Some(r);` with `r: &String = &mut s` (#1599):
 // vr's value holds a shared reference, which keeps the mutable loan it
-// was made from until vr's last use, so s stays mutably borrowed. (Not
+// was made from until that reference's last use (through vr or a copy;
+// vr may be overwritten first), so s stays mutably borrowed. (Not
 // "can only read": a `&Cell<i32>` can write.)
 pub fn event_dot_holder_shared_ref_of_mut(my_name: &String, from_name: &String, from: HolderLender, holds_value: bool) -> String {
     let what = match from {
@@ -3629,7 +3630,7 @@ pub fn event_dot_holder_shared_ref_of_mut(my_name: &String, from_name: &String, 
         HolderLender::Own => format!("{}'s {}", styled_name_html(from_name), if holds_value { "value" } else { "resource" }),
     };
     format!(
-        "{0}'s value holds a shared reference made from a mutable borrow of {1}; the borrow stays mutable while {0} is live ({0} isn't a reference itself)",
+        "{0}'s value holds a shared reference made from a mutable borrow of {1}; the borrow stays mutable until that reference's last use ({0} isn't a reference itself)",
         styled_name_html(my_name), what
     )
 }

@@ -9753,6 +9753,7 @@ fn parts_moved_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
                 // #1599.)
                 unusable.push(r.name());
                 moved.extend(inner.moved);
+                maybe_moved.extend(inner.maybe_moved);
             } else if inner.none_usable {
                 // A field whose own fields are all moved, some on some
                 // paths only: nothing in it can be used, but it wasn't
