@@ -255,7 +255,8 @@ impl RV1Helper {
     temp_emptying_moves: Vec<usize>,
     hidden_source_lines: HashSet<usize>,
     approx_notes: Vec<ApproxNote>,
-    write_to_cwd: bool) -> Result<()> {
+    write_to_cwd: bool,
+    facts: Option<serde_json::Value>) -> Result<()> {
     let mut keys_to_remove: Vec<usize> = Vec::new();
     for (k, v) in line_map.iter() {
       if v.is_empty() {
@@ -272,7 +273,7 @@ impl RV1Helper {
 
 
     // send stuff to RV1
-    let rv = Rustviz::new(&annotated_source_str, &self.source_str, p_events, line_map, num_raps, fn_start_lines, shadow_notes, binding_columns, moves_out_first, temp_emptying_moves, hidden_source_lines, approx_notes)?;
+    let mut rv = Rustviz::new(&annotated_source_str, &self.source_str, p_events, line_map, num_raps, fn_start_lines, shadow_notes, binding_columns, moves_out_first, temp_emptying_moves, hidden_source_lines, approx_notes)?;
 
     if write_to_cwd { // write the SVG files
       self.source_path.pop(); // just write to inside cwd
@@ -289,9 +290,13 @@ impl RV1Helper {
   
       fs::write(code_panel_path, &rv.code_panel)?;
       fs::write(timeline_panel_path, &rv.timeline_panel)?;
+      if let Some(f) = &facts {
+        fs::write(self.source_path.join("vis_facts.json"), serde_json::to_string_pretty(f)?)?;
+      }
     }
     else {
       // One JSON object on stdout, read by rustviz-lib's `parse_output`.
+      rv.facts = facts;
       println!("{}", serde_json::to_string(&rv)?);
     }
     Ok(())

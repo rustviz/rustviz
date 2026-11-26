@@ -17,6 +17,9 @@ pub struct Rustviz {
   pub timeline_panel: String,
   /// Height in px shared by both panels.
   pub height: i32,
+  /// RustViz 3 facts (`RV3_FACTS`, see `crate::facts`); absent otherwise.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub facts: Option<serde_json::Value>,
 }
 
 impl Rustviz {
@@ -63,6 +66,6 @@ impl Rustviz {
     // scope is named with marks the output doesn't show (#598).
     let code_panel = crate::expr_visitor_utils::display_text(&code_panel);
     let timeline_panel = crate::expr_visitor_utils::display_text(&timeline_panel);
-    Ok(Rustviz { code_panel, timeline_panel, height })
+    Ok(Rustviz { code_panel, timeline_panel, height, facts: None })
   }
 }

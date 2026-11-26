@@ -1,0 +1,95 @@
+//! RustViz 3 fact layer: what is true about each place on each source
+//! row, from rustc's MIR and borrow-check facts only.
+//!
+//! Per body (fns, methods, closures), one pass computes:
+//!
+//! - ownership state per column (variable, field path, Box payload):
+//!   owns / moved / maybe-moved / partly moved / unassigned
+//!   (`MaybeInitializedPlaces`, `MaybeUninitializedPlaces`,
+//!   `EverInitializedPlaces`);
+//! - lent state per column: the loans in scope (NLL `Borrows`, the
+//!   dataflow rustc's borrowck checks) whose place conflicts with the
+//!   column's (rustc's own `places_conflict`), so a loan of `v[_]`, `*b`
+//!   or `(o as Some).0` restricts `v`, `b`, `o`;
+//! - events: init / reassign, move, copy, borrow (lender → holder, kind,
+//!   two-phase, reborrow "through", macro argument), borrow end per CFG
+//!   edge, re-point, drop (definite / drop flag / rest / nothing, early
+//!   exits), scope end, temporary drop (lifetime-extended or not).
+//!
+//! Locations become rows through the row model (`rows.rs`). The HIR is
+//! used for names (the 2.x column names) and to recognise early exits.
+//!
+//! `RV3_FACTS=1` adds the facts to the plugin's JSON output (`facts`);
+//! any other non-empty value (other than `0`) is a file to write them to
+//! as well. Unset, nothing is computed.
+
+mod body;
+mod places;
+mod rows;
+pub mod schema;
+
+use rustc_hir::def::DefKind;
+use rustc_middle::ty::TyCtxt;
+use rustc_span::Span;
+pub use schema::*;
+
+/// `RV3_FACTS` is set (and not `0`).
+pub fn enabled() -> bool {
+    std::env::var_os("RV3_FACTS").is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// Facts of every fn, method and closure body in the visualized file.
+pub fn collect_crate(tcx: TyCtxt<'_>, in_target: &dyn Fn(Span) -> bool) -> CrateFacts {
+    let mut bodies = Vec::new();
+    let mut errors = Vec::new();
+    let mut owners: Vec<_> = tcx
+        .hir_body_owners()
+        .filter(|d| matches!(tcx.def_kind(*d), DefKind::Fn | DefKind::AssocFn | DefKind::Closure))
+        .filter(|d| {
+            let sp = tcx.def_span(*d);
+            !sp.from_expansion() && in_target(sp)
+        })
+        .collect();
+    // Source order; a closure after the body it is in.
+    owners.sort_by_key(|d| {
+        let sp = tcx.def_span(*d);
+        (tcx.is_closure_like(d.to_def_id()), sp.lo())
+    });
+    for def_id in owners {
+        let func = tcx.def_path_str(def_id.to_def_id());
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let bwf = rustc_utils::mir::borrowck_facts::get_body_with_borrowck_facts(tcx, def_id);
+            body::body_facts(tcx, bwf, func.clone())
+        }));
+        match r {
+            Ok(b) => bodies.push(b),
+            Err(e) => {
+                let msg = e
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "panic".into());
+                errors.push(format!("{}: {}", func, msg));
+            }
+        }
+    }
+    CrateFacts { version: VERSION, bodies, errors }
+}
+
+/// Compute the facts if `RV3_FACTS` asks for them, and write them to its
+/// file if it names one.
+pub fn from_env(tcx: TyCtxt<'_>, in_target: &dyn Fn(Span) -> bool) -> Option<serde_json::Value> {
+    if !enabled() {
+        return None;
+    }
+    let facts = collect_crate(tcx, in_target);
+    let v = serde_json::to_value(&facts).ok()?;
+    if let Some(path) = std::env::var_os("RV3_FACTS").filter(|p| p != "1") {
+        let written = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())
+            .and_then(|s| std::fs::write(&path, s).map_err(|e| e.to_string()));
+        if let Err(e) = written {
+            eprintln!("rustviz: couldn't write the RV3_FACTS dump to {:?}: {}", path, e);
+        }
+    }
+    Some(v)
+}

@@ -442,8 +442,12 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   note_pairs.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
   let shadow_notes: HashMap<u64, ShadowNote> = note_pairs.into_iter().map(|(h, _, n)| (h, n)).collect();
 
+  // RustViz 3 fact layer (`RV3_FACTS`): computed beside the 2.x events,
+  // added to the output; nothing reads it for drawing yet.
+  let facts = crate::facts::from_env(tcx, &in_target);
+
   // Pass information to svg-generator
-  match testing_helper.generate_vis(line_map2, pre_events, & mut a_line_map, rap_map.len() + 1, fn_start_lines, shadow_notes, binding_columns, moves_out_first, temp_emptying_moves, hidden_source_lines, approx_notes, args.write_to_cwd) {
+  match testing_helper.generate_vis(line_map2, pre_events, & mut a_line_map, rap_map.len() + 1, fn_start_lines, shadow_notes, binding_columns, moves_out_first, temp_emptying_moves, hidden_source_lines, approx_notes, args.write_to_cwd, facts) {
     Ok(_) => {}
     Err(e) => {
       eprintln!("{}", e);
