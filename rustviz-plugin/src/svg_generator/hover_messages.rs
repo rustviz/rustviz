@@ -177,11 +177,11 @@ pub fn event_dot_box_maybe_emptied_go_out_of_scope(my_name: &String) -> String {
 pub fn event_dot_box_join(my_name: &String, mutable: bool, boxed: Option<bool>, contents: Option<bool>) -> Option<String> {
     let name = styled_name_html(my_name);
     let deref = styled_name_html(&format!("*{}", my_name));
+    // (Only "may", also where rustc says on every path: nothing here
+    // needs more.)
     let (what, until) = match (boxed, contents) {
-        (Some(false), _) => (format!("{} has no value", name), format!(" until {} is given a value", name)),
-        (None, _) => (format!("{} may have no value on some path", name), format!(" until {} is given a value", name)),
-        (Some(true), Some(false)) => (format!("{} was moved out", deref), format!(" until {} or {} is given a value", deref, name)),
-        (Some(true), None) => (format!("{} may have been moved out on some path", deref), format!(" until {} or {} is given a value", deref, name)),
+        (Some(false) | None, _) => (format!("{} may have no value on some path", name), format!(" until {} is given a value", name)),
+        (Some(true), Some(false) | None) => (format!("{} may have been moved out on some path", deref), format!(" until {} or {} is given a value", deref, name)),
         (Some(true), Some(true)) => return None,
     };
     Some(format!(
