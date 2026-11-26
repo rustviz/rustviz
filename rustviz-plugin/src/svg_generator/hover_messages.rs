@@ -138,36 +138,56 @@ pub fn event_dot_box_contents_moved_go_out_of_scope(my_name: &String) -> String 
     )
 }
 
-// A Box whose contents were moved out (`let s = *b;`) on some paths and
-// that, on the others, was given a new Box since (`whole`) or moved away
-// whole (`nothing`) goes out of scope (#1220): drop flags decide what is
-// dropped.
-pub fn event_dot_box_paths_go_out_of_scope(my_name: &String, note: &str, kept: bool, reboxed: bool, nothing: bool) -> String {
-    let (holds, rest) = split_drop_note(note);
-    let name = styled_name_html(my_name);
-    let parts: Vec<String> = [
-        Some(format!("where {0} still holds the Box whose contents were moved out earlier, only its heap allocation is freed", name)),
-        kept.then(|| format!("where {0} still holds its first Box whole, its resource{1} is dropped{2}", name, holds, rest)),
-        reboxed.then(|| format!("where {0} was given a new Box, its resource{1} is dropped{2}", name, holds, rest)),
-        nothing.then(|| format!("where {0} was moved away, nothing is dropped", name)),
-    ].into_iter().flatten().collect();
+// The Box family (#1220, #1590): a Box whose contents the body moves out
+// somewhere (`let s = *b;`). What it holds at a point depends on the path
+// in ways only rustc's move data settles, so its drops say one thing that
+// is true on every path, and its joins say only what rustc says may be
+// uninitialized there. No drop timing, and nothing about a heap allocation
+// (a zero-sized payload has none).
+
+// Its new value at `b = …` (`my_name` "b") or `*b = …` ("*b").
+pub fn event_dot_box_maybe_emptied_reassign(my_name: &String) -> String {
     format!(
-        "{0} goes out of scope. What is dropped here depends on the path (Rust tracks this with runtime drop flags): {1}.",
-        name, parts.join("; ")
+        "{0} acquires ownership of a new resource. Whatever {0} still held here (if anything) is dropped.",
+        styled_name_html(my_name)
     )
 }
 
-// The same where the Box is given a new value (#1220): what its old value
-// drops depends on the path.
-pub fn event_dot_owner_drop_at_reassign_box_paths(my_name: &String, note: &str, kept: bool, reboxed: bool, nothing: bool) -> String {
-    let scope_end = event_dot_box_paths_go_out_of_scope(my_name, note, kept, reboxed, nothing);
-    let name = styled_name_html(my_name);
-    let rest = scope_end.strip_prefix(&format!("{} goes out of scope. What is dropped here depends on the path (Rust tracks this with runtime drop flags): ", name))
-        .unwrap_or(&scope_end);
+// A `?` that may return early.
+pub fn event_dot_box_maybe_emptied_try(my_name: &String) -> String {
     format!(
-        "{0} acquires ownership of a new resource. What its previous value drops here depends on the path (Rust tracks this with runtime drop flags): {1}",
-        name, rest
+        "Only if the `?` here returns early: whatever {0} still holds here (if anything) is dropped. If the `?` \
+         succeeds, nothing happens to {0} here.",
+        styled_name_html(my_name)
     )
+}
+
+// Its scope end, or an exit that leaves it.
+pub fn event_dot_box_maybe_emptied_go_out_of_scope(my_name: &String) -> String {
+    format!(
+        "{} goes out of scope. Whatever it still holds here (if anything) is dropped.",
+        styled_name_html(my_name)
+    )
+}
+
+// A conditional's join, from what rustc says the Box (`boxed`) and its
+// contents (`contents`) hold there: `Some(true)` on every path, `None`
+// on some, `Some(false)` on none. Only what may be uninitialized, and
+// what that keeps from being used. `mutable`: it can be given a value.
+pub fn event_dot_box_join(my_name: &String, mutable: bool, boxed: Option<bool>, contents: Option<bool>) -> Option<String> {
+    let name = styled_name_html(my_name);
+    let deref = styled_name_html(&format!("*{}", my_name));
+    let (what, until) = match (boxed, contents) {
+        (Some(false), _) => (format!("{} has no value", name), format!(" until {} is given a value", name)),
+        (None, _) => (format!("{} may have no value on some path", name), format!(" until {} is given a value", name)),
+        (Some(true), Some(false)) => (format!("{} was moved out", deref), format!(" until {} or {} is given a value", deref, name)),
+        (Some(true), None) => (format!("{} may have been moved out on some path", deref), format!(" until {} or {} is given a value", deref, name)),
+        (Some(true), Some(true)) => return None,
+    };
+    Some(format!(
+        "{} can't be used after the branches{}: {}.",
+        name, if mutable { until.as_str() } else { "" }, what
+    ))
 }
 
 // A struct whose fields were partly moved out goes out of scope. Rust
@@ -560,29 +580,6 @@ pub fn event_dot_owner_drop_at_reassign_box_contents_maybe_moved(my_name: &Strin
     out
 }
 
-// `*b = v` on a Box whose old contents were moved out before (`let w =
-// *b;`, #928): `maybe` None when they were moved on every path (nothing
-// is dropped), `Some(by_cond)` when on some paths only (a drop flag
-// decides). The Box keeps its heap allocation either way. `holds`: the
-// Box's `Owner::holds` (`the String it holds`).
-pub fn event_dot_box_contents_write_after_move(deref_name: &String, holds: Option<&str>, maybe: Option<bool>) -> String {
-    // (Starts ". Its previous ", so it subsumes the line's plain
-    // acquire: `reassign_subsumes_acquire`.)
-    let ty = holds.and_then(|h| h.strip_suffix(" it holds")).and_then(|t| t.strip_prefix("the "));
-    let what = ty.map_or_else(|| String::from("contents"), escape_tooltip_name);
-    let plural = ty.is_none();
-    let rest = match maybe {
-        None => format!(
-            "Its previous {} {} moved out earlier, so nothing is dropped.",
-            what, if plural { "were" } else { "was" }
-        ),
-        Some(by_cond) => format!(
-            "Its previous {} {} dropped here only if {} moved {} out (Rust tracks this with a runtime drop flag).",
-            what, if plural { "are" } else { "is" }, moved_above(by_cond), if plural { "them" } else { "it" }
-        ),
-    };
-    format!("{} acquires ownership of a new resource. {}", styled_name_html(deref_name), rest)
-}
 
 // Scope end of a Box whose contents need no drop (`Box<P>`, P with no
 // drop glue) and were moved out in some branches only (#929): nothing of
@@ -995,8 +992,8 @@ pub fn reassign_subsumes_acquire(reassign: &str, acquire: &str) -> bool {
             rest.strip_prefix("; its previous resource")
                 .is_some_and(|tail| tail.starts_with(" is dropped") || tail.starts_with(" (including "))
                 || rest.starts_with(". Its previous ")
-                // A re-boxed Box's path-dependent drop (#1220).
-                || rest.starts_with(". What its previous value drops ")
+                // A Box whose contents may have been moved out (#1590).
+                || rest.starts_with(". Whatever ")
         })
 }
 
@@ -4171,18 +4168,6 @@ pub fn event_dot_branch_merge_moved_with_drop(my_name: &String, value: bool, mut
     )
 }
 
-// `event_dot_branch_merge_moved_with_drop` for a Box whose contents were
-// moved out before the branches, some of which gave it a new Box or moved
-// it away (#1220): on the paths that didn't move it, it may hold only the
-// emptied Box, so what its scope end drops depends on the path.
-pub fn event_dot_branch_merge_moved_box_paths(my_name: &String, mutable: bool, by_cond: Option<&str>) -> String {
-    let my_name_fmt = styled_name_html(my_name);
-    let again = if mutable { " (until it's assigned again)" } else { "" };
-    format!(
-        "{0}{1}. What is dropped when {2} goes out of scope depends on the path: its contents were moved out before the branches.",
-        branch_merge_moved(&my_name_fmt, by_cond), again, my_name_fmt
-    )
-}
 
 // The start of a join's text for a variable moved on some paths into it:
 // "s was moved in at least one branch above, so it can't be used after

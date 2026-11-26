@@ -2542,6 +2542,11 @@ pub enum ExternalEvent {
       // (#1034): after the merge they may hold a value or not, and only
       // a drop flag knows which.
       maybe_held: HashSet<ResourceAccessPoint>,
+      // For Boxes whose contents the body moves out somewhere (`let s =
+      // *b;`), what rustc's move data says the Box and its contents hold
+      // right after the conditional (`box_state_after`, #1590): (hash,
+      // Box, contents).
+      box_states: Vec<(u64, ScopeEndHolds, ScopeEndHolds)>,
       id: usize
     }
 }
@@ -2804,6 +2809,8 @@ pub enum Event {
       loop_assigned: bool,
       // This column is one of the ExternalEvent's `maybe_held` (#1034).
       maybe_held: bool,
+      // This column's entry in the ExternalEvent's `box_states` (#1590).
+      box_state: Option<(ScopeEndHolds, ScopeEndHolds)>,
       id: usize
     },
 
@@ -4384,13 +4391,17 @@ impl Event {
                     };
                     match write {
                         PlaceWrite::AssignCopy => place_assign_copy_message(&self.deref_name(my_name), from),
+                        // `*b = v` on a Box whose contents the body moves out
+                        // somewhere (#928, #1590): what is still there may
+                        // depend on the path (a loop's earlier time round,
+                        // a branch, a new Box since): rustc's drop flags
+                        // decide.
+                        PlaceWrite::AssignDropsOld | PlaceWrite::AssignOverMoved | PlaceWrite::AssignMaybeMoved { .. }
+                            if r.box_contents_moved() =>
+                            hover_messages::event_dot_box_maybe_emptied_reassign(&self.deref_name(my_name)),
                         PlaceWrite::AssignDropsOld => hover_messages::event_dot_owner_drop_at_reassign(&self.deref_name(my_name), ""),
-                        // `*b = v` after b's contents were moved out
-                        // (#928), on every path or some only.
-                        PlaceWrite::AssignOverMoved =>
-                            hover_messages::event_dot_box_contents_write_after_move(&self.deref_name(my_name), r.holds_phrase(), None),
-                        PlaceWrite::AssignMaybeMoved { by_cond } =>
-                            hover_messages::event_dot_box_contents_write_after_move(&self.deref_name(my_name), r.holds_phrase(), Some(by_cond)),
+                        PlaceWrite::AssignOverMoved | PlaceWrite::AssignMaybeMoved { .. } =>
+                            hover_messages::event_dot_box_maybe_emptied_reassign(&self.deref_name(my_name)),
                         // The old value has nothing to drop (that's what
                         // makes it AssignOwned): a plain assignment (#484).
                         PlaceWrite::AssignOwned => hover_messages::event_dot_copyable_assign(&self.deref_name(my_name)),
@@ -6074,7 +6085,7 @@ impl Visualizable for VisualizationData {
     fn append_branch_event(&self, event: &ExternalEvent, line_number: usize, is: &ResourceTy, b_history: &mut Vec<(usize, Event)>) {
         let rap = is.extract_rap().unwrap();
         match event {
-            ExternalEvent::Branch { live_vars, branches, branch_type, split_point, merge_point, maybe_init, loop_assigned, maybe_held, id } => {
+            ExternalEvent::Branch { live_vars, branches, branch_type, split_point, merge_point, maybe_init, loop_assigned, maybe_held, box_states, id } => {
                 if live_vars.contains(rap) {
                     let mut new_branches: Vec<BranchData> = Vec::new();
                     for b in branches.iter() {
@@ -6102,6 +6113,7 @@ impl Visualizable for VisualizationData {
                                         maybe_init: maybe_init.contains(rap),
                                         loop_assigned: loop_assigned.contains(rap),
                                         maybe_held: maybe_held.contains(rap),
+                                        box_state: box_states.iter().find(|(h, _, _)| h == rap.hash()).map(|(_, b, c)| (*b, *c)),
                                         id: *id}));
                 }
                 // rap has no column in this conditional, but the end of
@@ -6319,7 +6331,7 @@ impl Visualizable for VisualizationData {
                 maybe_append_event(self, &to_ro.clone(), Event::Copy{from : from_ro.to_owned(), is: to_ro.clone(), of, id: id, break_alt: break_alt.clone()}, line_number);
                 maybe_append_event(self, &from_ro.clone(), Event::Duplicate{to : to_ro.to_owned(), is: from_ro, into_closure, of: source_of, id: id, break_alt}, line_number);
             },
-            ExternalEvent::Branch { live_vars, branches, branch_type, split_point, merge_point, maybe_init, loop_assigned, maybe_held, id } => {
+            ExternalEvent::Branch { live_vars, branches, branch_type, split_point, merge_point, maybe_init, loop_assigned, maybe_held, box_states, id } => {
                 // need to add events with more granularity for Branches
                 for var in in_decl_order(&live_vars) { // for all the live variables in the branch (declaration order, #211)
                     let is = ResourceTy::Value(var.clone());
@@ -6361,6 +6373,7 @@ impl Visualizable for VisualizationData {
                                         maybe_init: maybe_init.contains(var),
                                         loop_assigned: loop_assigned.contains(var),
                                         maybe_held: maybe_held.contains(var),
+                                        box_state: box_states.iter().find(|(h, _, _)| h == var.hash()).map(|(_, b, c)| (*b, *c)),
                                         id: id}, line_number);
                 }
 

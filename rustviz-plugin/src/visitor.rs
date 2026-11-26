@@ -4443,6 +4443,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     None
   }
 
+  /// For each Box in `live` whose contents the body moves out somewhere
+  /// (`Owner::box_contents_moved`), what rustc's move data says it and its
+  /// contents hold right after the conditional at `span` (#1590), in
+  /// declaration order.
+  fn box_states_after(&self, live: &HashSet<ResourceAccessPoint>, span: rustc_span::Span) -> Vec<(u64, crate::svg_generator::data::ScopeEndHolds, crate::svg_generator::data::ScopeEndHolds)> {
+    use crate::svg_generator::data::{in_decl_order, ScopeEndHolds};
+    let holds = |o: Ownership| match o {
+      Ownership::Held => ScopeEndHolds::Value,
+      Ownership::Maybe => ScopeEndHolds::Maybe,
+      Ownership::None => ScopeEndHolds::Nothing,
+    };
+    in_decl_order(live).into_iter()
+      .filter(|r| r.box_contents_moved())
+      .filter_map(|r| self.box_state_after(r.name(), span).map(|(b, c)| (*r.hash(), holds(b), holds(c))))
+      .collect()
+  }
+
   /// Where in `preprocessed_events` the conditional is, if what last
   /// changed `rap`'s state, in the events so far, is a conditional that
   /// gives it a new value in only some of its branches where it may
@@ -7637,10 +7654,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               && self.reassign_parts(rap.name()).is_some_and(|p| p.dropped.is_empty() && p.maybe_moved.is_empty());
             // A Box whose contents only were moved out still has its
             // heap allocation, which the assignment frees (#1145).
-            let gone = rap.box_contents_moved() && self.box_contents_only_moved_now(rap.name());
-            if gone {
+            // Or its contents were moved out on some paths and the Box
+            // moved away whole on the others (#1590): on the first, the
+            // Box is still there (rustc's move data says it may hold a
+            // value), and the assignment frees its heap allocation.
+            let gone_everywhere = rap.box_contents_moved() && self.box_contents_only_moved_now(rap.name());
+            let gone = gone_everywhere || rap.box_contents_moved()
+              && !self.rap_holds_resource_now(rap.name())
+              && self.ownership_before_assign(rap.name(), lhs_expr.span, expr.span).is_some_and(|o| o != Ownership::None);
+            if gone_everywhere {
               contents_gone = Some(*rap.hash());
             }
+
             if (self.rap_holds_resource_now(rap.name()) || gone)
               && !self.destructure_moved.contains(rap.name()) && !all_moved_by_rhs {
               Some(rap.clone())
@@ -8888,8 +8913,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let reaching: Vec<&[(usize, ExternalEvent)]> = b_branches.iter()
       .filter(|b| !b.diverges).map(|b| b.e_data.as_slice()).collect();
     let maybe_held = self.maybe_held_after(&liveness, &reaching, &maybe_init, &self.deferred_cols(&maybe_init_before), |name| self.rap_ownership_now(name));
+    let box_states = self.box_states_after(&liveness, expr.span);
     self.add_external_event(line_num,
       ExternalEvent::Branch {
+        box_states,
         live_vars: liveness,
         branches: b_branches,
         branch_type: b_ty,
@@ -9740,7 +9767,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let reaching: Vec<&[(usize, ExternalEvent)]> = branch_data.iter()
       .filter(|b| !b.diverges).map(|b| b.e_data.as_slice()).collect();
     let maybe_held = self.maybe_held_after(&liveness, &reaching, &maybe_init, &held_before, |name| self.rap_ownership_now(name));
+    let box_states = self.box_states_after(&liveness, expr.span);
     self.add_external_event(split, ExternalEvent::Branch {
+      box_states,
       live_vars: liveness,
       branches: branch_data,
       branch_type,
@@ -12988,6 +13017,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       maybe_init: HashSet::new(),
       loop_assigned,
       maybe_held: HashSet::new(),
+      box_states: Vec::new(),
       id: *self.unique_id,
     });
     *self.unique_id += 1;

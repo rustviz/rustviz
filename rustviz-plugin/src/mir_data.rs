@@ -1214,6 +1214,67 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         })
     }
 
+    /// What rustc's move data says a Box `name` and its contents (`*name`)
+    /// hold right after the conditional at `within`, where its arms join
+    /// (#1590): `(Box, contents)`, each Held, Maybe or None. `None` if
+    /// no such place (every arm leaves).
+    pub fn box_state_after(&self, name: &str, within: Span) -> Option<(Ownership, Ownership)> {
+        use rustc_mir_dataflow::impls::{MaybeInitializedPlaces, MaybeUninitializedPlaces};
+        use rustc_mir_dataflow::move_paths::MoveData;
+        let body = &self.bwf.body;
+        let move_data = MoveData::gather_moves(body, self.tcx, |_| true);
+        let paths = self.move_path_names(&move_data);
+        let mpi = paths.iter().find(|(_, n)| n == name)?.0;
+        let local = move_data.move_paths[mpi].place.local;
+        let contents = move_data.move_paths.iter_enumerated().find(|(_, p)| p.place.local == local
+            && p.place.projection.len() == 1 && matches!(p.place.projection[0], ProjectionElem::Deref)).map(|(m, _)| m);
+        // The block the arms flow into: the first block (in the source)
+        // that ends outside the conditional and is entered from a block
+        // that ends inside it (not cleanup; a `return`'s way out comes
+        // later in the source than the code that follows).
+        // (Spans from a macro's expansion, `println!`, count where the
+        // macro is called.)
+        let preds = body.basic_blocks.predecessors();
+        let user = |sp: Span| sp.source_callsite();
+        let first_lo = |bb: rustc_middle::mir::BasicBlock| {
+            let data = &body.basic_blocks[bb];
+            user(data.statements.first().map(|st| st.source_info.span).unwrap_or(data.terminator().source_info.span)).lo()
+        };
+        let mut after: Vec<rustc_middle::mir::BasicBlock> = body.basic_blocks.iter_enumerated()
+            .filter(|(bb, data)| !data.is_cleanup && !within.contains(user(data.terminator().source_info.span))
+                && preds[*bb].iter().any(|p| {
+                    let pd = &body.basic_blocks[*p];
+                    !pd.is_cleanup && within.contains(user(pd.terminator().source_info.span))
+                }))
+            .map(|(bb, _)| bb)
+            .collect();
+        let lo = after.iter().map(|bb| first_lo(*bb)).min()?;
+        after.retain(|bb| first_lo(*bb) == lo);
+        let mut init = MaybeInitializedPlaces::new(self.tcx, body, &move_data)
+            .iterate_to_fixpoint(self.tcx, body, None)
+            .into_results_cursor(body);
+        let mut uninit = MaybeUninitializedPlaces::new(self.tcx, body, &move_data)
+            .iterate_to_fixpoint(self.tcx, body, None)
+            .into_results_cursor(body);
+        let (mut b, mut c) = ((false, false), (false, false));
+        for bb in &after {
+            let at = Location { block: *bb, statement_index: 0 };
+            init.seek_before_primary_effect(at);
+            uninit.seek_before_primary_effect(at);
+            b = (b.0 || init.get().contains(mpi), b.1 || uninit.get().contains(mpi));
+            if let Some(cm) = contents {
+                c = (c.0 || init.get().contains(cm), c.1 || uninit.get().contains(cm));
+            }
+        }
+        let own = |(i, u): (bool, bool)| match (i, u) {
+            (true, false) => Ownership::Held,
+            (false, _) => Ownership::None,
+            (true, true) => Ownership::Maybe,
+        };
+        // (No `*name` move path: its contents are never moved out.)
+        Some((own(b), if contents.is_some() { own(c) } else { own(b) }))
+    }
+
     /// Fill in, on the scope ends among `preprocessed_events[from..]`
     /// (this body's events, also those in a conditional's arms), what
     /// rustc's move data says the variable holds there

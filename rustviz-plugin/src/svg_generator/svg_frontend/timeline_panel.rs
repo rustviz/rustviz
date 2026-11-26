@@ -1481,11 +1481,26 @@ fn render_branch_dots(
                     .and_then(|t| history_path(&t.history, history, k));
                 matches!(init_after(None, path.as_deref().unwrap_or(&history[..k])), Some(InitJoin::Maybe { .. } | InitJoin::Loop))
             });
+        // A Box whose contents the body moves out somewhere (#1590): only
+        // what rustc's move data says may be uninitialized after the
+        // join, and that it can't be used (no drop timing).
+        let held = |h: &ScopeEndHolds| match h {
+            ScopeEndHolds::Value => Some(true),
+            ScopeEndHolds::Maybe => None,
+            ScopeEndHolds::Nothing => Some(false),
+        };
+        let box_join = match event {
+            Event::Branch { box_state: Some((b, c)), .. } if rap.box_contents_moved() =>
+                hover_messages::event_dot_box_join(&is.real_name(), rap.is_mut(), held(b), held(c)),
+            _ => None,
+        };
         // `None`: no join dot at all (the all-moved case below).
         let title = if borrow_ended_in_every_arm {
             Some(hover_messages::event_dot_branch_merge_borrow_ended(&is.real_name()))
         } else if ended_before() {
             Some(hover_messages::event_dot_branch_merge_borrow_ended_before(&is.real_name()))
+        } else if let Some(t) = box_join {
+            Some(t)
         } else if let Some(InitJoin::AllMoved) = init {
             Some(if entry_maybe_init() && !moves_in_some_branch(branch_history) {
                 // (No branch moves it, #1590 review: it may hold the new
@@ -1713,13 +1728,6 @@ fn render_branch_dots(
                 // drops it; if it doesn't, a later one or the scope
                 // end does.
                 hover_messages::event_dot_branch_merge_moved_then_reassigned(&is.real_name(), by_cond, true)
-            } else if box_paths_at_end(rap, &history.iter()
-                .take_while(|(_, e)| !std::ptr::eq(e, event)).cloned()
-                .chain(std::iter::once((*line_number, event.clone()))).collect::<Vec<_>>()).is_some() {
-                // A Box whose contents were moved out before (#1220):
-                // what the paths that didn't move it still hold isn't
-                // the whole Box on all of them.
-                hover_messages::event_dot_branch_merge_moved_box_paths(&is.real_name(), rap.is_mut(), by_cond)
             } else if let Some(el) = rap.elems_left() {
                 // A slice pattern in a branch took the last elements
                 // left in the array (#1302): the others were moved
@@ -2069,9 +2077,7 @@ fn render_scope_end_dot(
             Some(path) => init_at_end(path),
             None if exit.is_some() => None,
             None => init_at_end(history),
-        // (A Box whose contents were moved out says what each path holds,
-        // below.)
-        }).filter(|_| box_paths_at_end(ro, history).is_none())) {
+        })) {
             // Assigned in some branches of a conditional but
             // not others (#244): the drop flag decides here.
             // Whether it holds a value isn't only up to the branch
@@ -2091,23 +2097,6 @@ fn render_scope_end_dot(
                 } else {
                     hover_messages::event_dot_go_out_of_scope_maybe_init(&name, &ro.drop_note(), moved)
                 },
-                p1x: cx - 3, p1y: cy - 1,
-                p2x: cx + 3, p2y: cy - 1,
-                p3x: cx,     p3y: cy + 3,
-            };
-            append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
-            return true;
-        } else if let Some(paths) = box_paths_at_end(ro, history) {
-            // A Box whose contents were moved out, given a new Box
-            // or moved away whole on some paths only (#1220): what is
-            // dropped here depends on the path.
-            let cx = timeline_data.x_val;
-            let cy = event_y;
-            let drop_data = DropDotData {
-                hash: *hash as u64,
-                dot_x: cx,
-                dot_y: cy,
-                title: hover_messages::event_dot_box_paths_go_out_of_scope(&name, &ro.drop_note(), paths.kept, paths.reboxed, paths.nothing),
                 p1x: cx - 3, p1y: cy - 1,
                 p2x: cx + 3, p2y: cy - 1,
                 p3x: cx,     p3y: cy + 3,
@@ -2486,7 +2475,20 @@ fn render_dot(
                     continue;
                 }
                 Event::OwnerGoOutOfScope { early, .. } => {
+                let name_here = name.clone();
                 if render_scope_end_dot(hash, history, event, line_number, event_y, resource_hold, name, &mut data, timeline_data, visualization_data, dots) {
+                    // A drop of a Box whose contents the body moves out
+                    // somewhere (#1590): what it still holds here may
+                    // depend on the path (a branch, a loop's earlier time
+                    // round, a new Box since), so one sentence true on
+                    // every one of them, whatever the drop's own text said.
+                    if visualization_data.timelines[hash].resource_access_point.box_contents_moved() {
+                        dots.edit_last_line(*hash, timeline_data.x_val, event_y, |t| if t.contains(" goes out of scope.") {
+                            hover_messages::event_dot_box_maybe_emptied_go_out_of_scope(&name_here)
+                        } else {
+                            t.to_owned()
+                        });
+                    }
                     // A drop: `return`s in a loop body may drop it
                     // first (#1020).
                     if let Some(e) = early {
@@ -2560,16 +2562,20 @@ fn render_dot(
                     } else {
                         Vec::new()
                     };
-                    let box_paths = matches!(event, Event::OwnerDropAtReassign { parts: None, payload: false, .. })
-                        .then(|| box_paths_at_end(&visualization_data.timelines[hash].resource_access_point,
-                            &history[..i].iter().filter(|(l, _)| l < line_number).cloned().collect::<Vec<_>>()))
-                        .flatten();
-                    let title = if let Some(paths) = box_paths {
-                        // A Box whose contents were moved out, given a
-                        // new Box or moved away on some paths only
-                        // (#1220): what the old value drops depends on
-                        // the path.
-                        hover_messages::event_dot_owner_drop_at_reassign_box_paths(&name, &note, paths.kept, paths.reboxed, paths.nothing)
+                    let title = if visualization_data.timelines[hash].resource_access_point.box_contents_moved()
+                        && matches!(event, Event::OwnerDropAtReassign { parts: None, .. } | Event::OwnerDropIfTryReturns)
+                        // (Not where its contents were moved out on every
+                        // path before and the Box is there: #1145 says so.)
+                        && !matches!(event, Event::OwnerDropAtReassign { maybe_moved: false, maybe_init: None, contents_gone: true, .. }) {
+                        // A Box whose contents the body moves out somewhere
+                        // (#1590): what it still holds here may depend on
+                        // the path (a branch, a loop's earlier time round, a
+                        // new Box since), so one sentence true on all of them.
+                        if matches!(event, Event::OwnerDropIfTryReturns) {
+                            hover_messages::event_dot_box_maybe_emptied_try(&name)
+                        } else {
+                            hover_messages::event_dot_box_maybe_emptied_reassign(&name)
+                        }
                     } else if matches!(event, Event::OwnerDropAtReassign { maybe_init: Some(InitBy::Branch | InitBy::Loop), .. })
                         // (Before the new value's Acquire on this line.)
                         && init_by_maybe_held(before.iter()) {
@@ -3819,57 +3825,6 @@ fn box_contents_moved_last(history: &[(usize, Event)]) -> Option<bool> {
         }
     }
     None
-}
-
-// What a Box column holds at its scope end on the paths that reach it
-// (#1220), when its contents were moved out (`let s = *b;`) on some of
-// them, and on others it was given a new Box since or moved away whole:
-// on the first it still holds the emptied Box, whose heap allocation
-// alone is freed; `kept`, on some it still holds its first Box whole;
-// `reboxed`, on some it holds a new Box; `nothing`, on some it holds
-// none. None when every path agrees, or when the only other paths keep
-// the first Box whole (the maybe-moved wording says that already).
-struct BoxPaths {
-    kept: bool,
-    reboxed: bool,
-    nothing: bool,
-}
-
-fn box_paths_at_end(ro: &ResourceAccessPoint, history: &[(usize, Event)]) -> Option<BoxPaths> {
-    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-    enum Holds { Kept, Reboxed, Emptied, Nothing }
-    fn walk(history: &[(usize, Event)], mut cur: BTreeSet<Holds>) -> Option<BTreeSet<Holds>> {
-        for (_, e) in history {
-            cur = match e {
-                Event::Move { is: ResourceTy::Deref(_), .. } => BTreeSet::from([Holds::Emptied]),
-                Event::Move { .. } | Event::ClosureCall { .. } => BTreeSet::from([Holds::Nothing]),
-                Event::Acquire { is: ResourceTy::Value(_), .. } | Event::Copy { is: ResourceTy::Value(_), .. }
-                | Event::InitRefParam { .. } => BTreeSet::from([if cur.is_empty() { Holds::Kept } else { Holds::Reboxed }]),
-                Event::Branch { branch_history, ty, .. } => {
-                    let mut out = BTreeSet::new();
-                    for b in branch_history.iter().filter(|b| !b.diverges) {
-                        out.extend(walk(&b.e_data, cur.clone())?);
-                    }
-                    // The path past an `if` without `else` leaves it as it was.
-                    if !all_paths_present(ty, branch_history.len()) || out.is_empty() {
-                        out.extend(cur.iter().copied());
-                    }
-                    out
-                }
-                // Anything else this doesn't follow: no answer.
-                Event::OrAltMove { .. } | Event::LoopExitMove { .. } | Event::LoopMaybeInit { .. } | Event::LoopExitKept { .. } => return None,
-                _ => cur,
-            };
-        }
-        Some(cur)
-    }
-    if !ro.box_contents_moved() {
-        return None;
-    }
-    let ends = walk(history, BTreeSet::new())?;
-    let (reboxed, nothing) = (ends.contains(&Holds::Reboxed), ends.contains(&Holds::Nothing));
-    (ends.contains(&Holds::Emptied) && (reboxed || nothing))
-        .then(|| BoxPaths { kept: ends.contains(&Holds::Kept), reboxed, nothing })
 }
 
 fn moves_only_box_contents_impl(branch_history: &[BranchData]) -> bool {
@@ -10513,6 +10468,7 @@ mod tests {
             maybe_init: false,
             loop_assigned: false,
             maybe_held: false,
+            box_state: None,
             id: 0,
         })];
         compute_width(&mut events);
