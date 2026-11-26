@@ -100,6 +100,32 @@ impl<'a> BodyEnds<'a> {
       .collect()
   }
 
+  /// The loans `k`'s new value on `row` still holds (`m = if c { &mut t }
+  /// else { m };` keeps m's loan on the `else` path).
+  pub fn renewed_at(&self, k: &str, row: usize) -> BTreeSet<usize> {
+    self.facts.rows.iter().filter(|r| r.line == row).flat_map(|r| r.facts.iter()).filter_map(|e| match &e.fact {
+      Fact::Repoint { holder, new, .. } if names_match(k, holder) => Some(new.iter().copied()),
+      _ => None,
+    }).flatten().collect()
+  }
+
+  /// `loans` and the loans they are made through that `k` holds too (`v2 =
+  /// vec![r]` reborrows `*r` but keeps r's loan of b, which v2 gives back).
+  pub fn with_held_sources(&self, k: &str, loans: &[usize]) -> Vec<usize> {
+    let mut out: Vec<usize> = loans.to_vec();
+    let mut work: Vec<usize> = loans.to_vec();
+    while let Some(id) = work.pop() {
+      let Some(l) = self.facts.loans.iter().find(|x| x.loan == id) else { continue };
+      for m in &l.made_through {
+        if !out.contains(m) && self.facts.loans.iter().any(|x| x.loan == *m && x.holders.iter().any(|h| names_match(k, h))) {
+          out.push(*m);
+          work.push(*m);
+        }
+      }
+    }
+    out
+  }
+
   /// The loans `k` holds in any way (also through a reborrow stored in it,
   /// `refs[0] = tr`), for a lender none of its own loans lends.
   pub fn loans_reaching(&self, k: &str) -> Vec<&'a LoanInfo> {

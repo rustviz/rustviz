@@ -11777,9 +11777,11 @@ pub fn print_out_of_scope(&mut self){
       let mut held: Vec<&crate::facts::schema::LoanInfo> = ix.as_ref().map(|ix| ix.loans_held_by(&k).into_iter()
         .filter(|l| !claimed.get(&k).is_some_and(|c| c.contains(&l.loan))).collect()).unwrap_or_default();
       // A loan taken into k before k got its current value (`r = &s;` in
-      // an arm after `let mut r = &s;`) is the walk's to end.
+      // an arm after `let mut r = &s;`) is the walk's to end, unless the
+      // new value still holds it (`m = if c { &mut t } else { m };`).
       if held.iter().any(|l| l.line >= rd.assigned_at) {
-        held.retain(|l| l.line >= rd.assigned_at || l.direct_holders.first() != Some(&k));
+        let renewed = ix.as_ref().map(|ix| ix.renewed_at(&k, rd.assigned_at)).unwrap_or_default();
+        held.retain(|l| l.line >= rd.assigned_at || l.direct_holders.first() != Some(&k) || renewed.contains(&l.loan));
       }
       let loans: Vec<usize> = held.into_iter().map(|l| l.loan).collect();
       slot_loans.push(loans);
@@ -11823,7 +11825,7 @@ pub fn print_out_of_scope(&mut self){
         // (A reference's earlier loan of another lender, `c = &y` after
         // `c = &x`, is the walk's to end.)
         let info = |id: &usize| ix.facts.loans.iter().find(|x| x.loan == *id);
-        let mut mine: Vec<usize> = loans.iter().copied()
+        let mut mine: Vec<usize> = ix.with_held_sources(&slot.key, loans).into_iter()
           .filter(|id| info(id).is_some_and(|f| ix.lends(f, &l.real_name())))
           .collect();
         if mine.is_empty() && !loans.is_empty() && i > 0 {
