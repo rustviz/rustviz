@@ -23,6 +23,29 @@ ends = [15]
 src = "issue"
 why = "`s.push(..)` between the if and row 15 is E0502 (other is read on row 15)"
 
+[[loan]]
+row = 9
+lender = "s"
+holder = "h"
+kind = "shared"
+ends = [11, 13]
+src = "issue"
+why = "the same old loan, for the other lender: `s.push(..)` before the write (row 11) or the read (row 13) is E0502 (also because other holds s); the second loan of s (row 8, held by other) lives to row 15"
+
+[[lent]]
+row = 11
+place = "t"
+absent = true
+src = "issue"
+why = "in the if arm, after the write, `t.push(..)` compiles (h now points at u); with `h.r = &u; u.push(..)` also compiling: h.r is never read"
+
+[[lent]]
+row = 13
+place = "u"
+absent = true
+src = "issue"
+why = "u is borrowed only on the if path (row 11): in the else arm `u.push(..)` compiles (u made `mut`), before and after the read of h.r"
+
 [[lent]]
 row = 14
 place = "t"

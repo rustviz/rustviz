@@ -25,7 +25,7 @@ row = 5
 place = "o.p.b"
 is = "own"
 src = "issue"
-why = "both `println!(\"{}\", o.p.b);` reads (rows 7 and 10) compile; `let _ = &mut o.p.b;` after row 5 compiles"
+why = "both `println!(\"{}\", o.p.b);` reads (rows 7 and 10) compile; `let _ = &mut o.p.b;` after row 5 gives no borrow conflict (only E0596: o is not declared `mut`), and `let _ = &o.p.b;` compiles"
 
 [[state]]
 row = 7

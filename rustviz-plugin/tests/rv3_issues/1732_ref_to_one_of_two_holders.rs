@@ -4,7 +4,7 @@ fn first<'a>(v: &Vec<&'a String>) -> &'a String {
 fn main() {
     let mut a = String::from("a");
     let b = String::from("b");
-    let flag = true;
+    let flag = std::env::args().count() > 1;
     let r: &String = &mut a;
     let x = vec![r];
     let y = vec![&b];

@@ -31,7 +31,7 @@ row = 13
 place = "b"
 is = "shared"
 src = "issue"
-why = "`let _ = &b;` after row 13 compiles, `let _ = &mut b;` doesn't"
+why = "`let _ = &b;` after row 13 compiles; `let _ = &mut b;` is E0502 (and E0596, b isn't `mut`)"
 
 [[state]]
 row = 13

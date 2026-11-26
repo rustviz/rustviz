@@ -7,7 +7,7 @@ fn = "main"
 row = 4
 lender = "b"
 holder = "r"
-ends_include = [9]
+ends = [9]
 src = "issue"
 why = "`let _ = &mut b;` after rows 4, 6, 7, 8 fails, after row 9 compiles; with only row 6 and `println!(\"{r}\")` kept the probe after row 6 still fails: r holds the copied p's loan"
 
@@ -15,7 +15,7 @@ why = "`let _ = &mut b;` after rows 4, 6, 7, 8 fails, after row 9 compiles; with
 row = 7
 lender = "b"
 holder = "r2"
-ends_include = [9]
+ends = [9]
 src = "issue"
 why = "`let f = || &b;` captures b by shared reference; the probe after row 8 fails (r2 used on row 9)"
 

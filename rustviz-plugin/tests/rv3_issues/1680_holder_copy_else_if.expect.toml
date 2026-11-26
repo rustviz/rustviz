@@ -22,10 +22,9 @@ why = "`let _ = &mut t;` after row 7 is E0502, `let _ = &t;` compiles"
 row = 4
 lender = "t"
 holder = "g"
-ends_include = [8]
-ends_exclude = [7]
+ends = [5, 6, 8]
 src = "issue"
-why = "the loan lives on through g2 to its read on row 8; `t.push(..)` after row 8 compiles"
+why = "three ends, one per path (the dump gives each with next = its own row, so they are rows): row 5 for the empty then arm (g is dead there: `t.push(..)` at its start compiles), row 6 for the last else arm (same, probed), row 8 for the middle arm, where the loan lives on through g2 to its read (`t.push(..)` before that read is E0502, after row 8 it compiles)"
 
 [[lent]]
 row = 8

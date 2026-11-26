@@ -7,24 +7,24 @@ fn = "run"
 row = 4
 lender = "s2"
 holder = "vr"
-ends_include = [6]
+ends = [6, 10]
 src = "issue"
-why = "`let _ = &mut s2;` after row 6 fails: vr holds s2 on the path that returns"
+why = "two ends: row 6 (the dump puts the end on row 6; it is the `return None` arm, where vr is dead: `let _ = &mut s2;` before `return None;` raises only E0596, no E0502) and row 10 (vr's last use on the other path: `let _ = &mut s2;` after row 7's `break` fails E0502)"
 
 [[loan]]
 row = 9
 lender = "s3"
 holder = "r2"
-ends_exclude = [6]
+ends = [10]
 src = "issue"
-why = "the borrow of s3 is taken on row 9, after the loop; `let _ = &mut s3;` after row 6 compiles"
+why = "the borrow of s3 is taken on row 9, after the loop, so it can't end on row 6; vr holds it until its last use on row 10 (`let _ = &mut s3;` after row 10 compiles)"
 
 [[lent]]
 row = 6
 place = "s3"
 absent = true
 src = "issue"
-why = "`let _ = &mut s3;` after row 6 compiles: nothing borrows s3 yet"
+why = "`let _ = &mut s3;` inside the `return None` arm (s3 is `mut`) compiles: nothing borrows s3 yet"
 
 [[event]]
 row = 6

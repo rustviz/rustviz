@@ -17,7 +17,7 @@ src = "issue"
 row = 5
 events = ["reassign p.a", "reassign p"]
 src = "issue"
-why = "evaluation order: x? then the field assignment, then p = pair(); Drop-printing run of f6 shows old a dropped, then old a2 and old b"
+why = "evaluation order: x? then the field assignment, then p = pair(); Drop-printing run of f6 shows the old a dropped, then the replacement a and the old b (p = pair() drops the whole old p)"
 
 [[drop]]
 row = 5

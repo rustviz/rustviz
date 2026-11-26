@@ -4,7 +4,7 @@ title = "`return if c { b = Box::new(..); b } else { q }` after `let _old = *b;`
 fn = "f"
 places = ["*b"]
 xfail = "P0"
-note = "Gap (expected): drops inside a `return` expression's arms"
+note = "Gap (expected): drops inside a `return` expression's arms. Rows 5 and 3 do not depend on the constant `if true` (rustc's MIR keeps both successors; the assertions are about the return path)."
 beyond_facts = "P3: b's dot says 'b's resource (including the String it holds) is dropped here'"
 
 [[state]]

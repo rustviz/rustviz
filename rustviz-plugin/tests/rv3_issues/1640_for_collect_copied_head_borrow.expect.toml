@@ -15,7 +15,7 @@ why = "the body's `v.clear()` (a write through v) compiles: the shared borrow of
 row = 3
 lender = "*v"
 kind = "shared"
-ends_exclude = [4, 5]
+ends_exclude = [4, 5, 6, 7]
 src = "issue"
 why = "the loan of *v is not live inside the body (`v.clear()` on row 4 compiles), so it ends no later than row 3"
 

@@ -2,7 +2,7 @@ issue = 1747
 cluster = "C32"
 title = "Holder overwritten in one `if` arm only: a's loan drawn given back at the overwrite; the path that skips it still reads the old reference"
 fn = "cond"
-note = "On the path through the overwrite the loan is dead from the overwrite on (a.push right after it compiles), so an end at row 7 on that path is right; the issue is the path that skips it: the loan stays live to row 9."
+note = "On the path through the overwrite the loan is already dead inside the arm/body (hold's old value is never read there: `a.push` before the overwrite compiles too), so an end on that path at or before row 7 is right; the issue is the path that skips it: the loan stays live to row 9."
 beyond_facts = "P2: the give-back arrow at row 7"
 
 [[loan]]

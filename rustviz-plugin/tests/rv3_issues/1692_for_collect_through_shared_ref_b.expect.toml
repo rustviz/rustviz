@@ -17,7 +17,7 @@ row = 3
 lender = "w"
 kind = "shared"
 holder = "v"
-ends_exclude = [9, 10]
+ends_exclude = [8, 9, 10, 11, 12]
 src = "issue"
 why = "not live inside the body (`w.clear()` compiles), so it ends within the head's rows 4-7"
 

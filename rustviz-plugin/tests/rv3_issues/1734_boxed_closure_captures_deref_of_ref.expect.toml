@@ -1,6 +1,6 @@
 issue = 1734
 cluster = "C25"
-title = "Boxed closure capturing `*r` (through a shared reference): the capture is a copy of what r points to, so r can be re-pointed while m is live"
+title = "Boxed closure capturing `*r` (through a shared reference): the closure holds a reborrow of `*r` (what r points to), not r itself, so r can be re-pointed while m is live"
 xfail = "P0"
 note = "Gap: the closure's capture of `*r` (a reborrow through a shared reference) is not a loan in the dump at all (only s's loan, held by r and m); the re-point and s's lent state are right."
 beyond_facts = "P3: the arrow should start at s (or say 'the data r points to'), not at r"

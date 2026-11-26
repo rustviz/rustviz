@@ -1,10 +1,9 @@
 issue = 1814
 cluster = "C99"
 title = "`drop(*b)` with `b: Box<String>`: the argument is the String itself; the Box's allocation is a separate, later cleanup at scope end"
-xfail = "P1"
 fn = "main"
 places = ["b"]
-note = "The issue's one-line program is split over three lines so rows can tell the call from the scope end. Spike gap: b is `partly` where rustc says `moved` (borrow of moved value: `b`)."
+note = "The issue's one-line program is split over three lines so rows can tell the call from the scope end."
 beyond_facts = "P4: the call's tooltip says drop frees `the String it holds`; the String is the argument"
 
 [[event]]
@@ -12,6 +11,13 @@ row = 3
 ev = "move *b"
 src = "issue"
 why = "the moved place is `*b` (the String); E0382 `borrow of moved value: b` after row 3"
+
+[[state]]
+row = 3
+place = "b"
+is = "partly"
+src = "issue"
+why = "`let _ = &b;` after row 3 is E0382 (`borrow of moved value: b`: rustc words a Box-content move like a whole move); but the Box itself still owns its allocation, freed at the scope end (counting allocator, below), so b is partly moved (the nested `**boxed` of #1809 is worded `partially moved`)"
 
 [[drop]]
 row = 4

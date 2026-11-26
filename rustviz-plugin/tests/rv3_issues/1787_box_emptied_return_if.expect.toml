@@ -1,8 +1,7 @@
 issue = 1787
 cluster = "C10"
 title = "Box emptied by `let x = *b;`, then `if early { return if c { b = ..; b } else { q }; }`: b's line stops before its scope-end drop"
-xfail = "P4"
-note = "harness mismatch, not a fact gap: the dump says `partly` for a Box whose content moved (arguably more exact), the oracle `moved*` and my hand `moved` don't accept it; widen the oracle for Box content moves"
+note = "A Box whose content moved out is `partly` (the Box itself still exists and is dropped at the end); the harness and the dump agree, so no xfail."
 fn = "returns_other"
 beyond_facts = "P3: b's column after the outer if on the path that skipped it must reach the scope-end dot; renderer-level"
 

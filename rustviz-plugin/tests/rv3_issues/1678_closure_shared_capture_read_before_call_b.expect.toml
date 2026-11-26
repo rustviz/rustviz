@@ -1,8 +1,6 @@
 issue = 1678
 cluster = "C25"
 title = "Shared-capturing closure moved to another binding (`let g = f;`): s still lent at the read while g holds the capture"
-xfail = "P0"
-note = "Gap: the loan and its end are right; the holder set at row 6 is `f|g` although f was moved into g on row 5."
 beyond_facts = "P3: s is drawn fully owned at the read on row 6"
 
 [[loan]]

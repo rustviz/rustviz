@@ -2,6 +2,8 @@ issue = 1688
 cluster = "C20"
 title = "`[&a, s.p]` with `s.p: &mut i32` coerced to `&i32`: 'Mutable borrow from b to h' (field not recognised as a reborrow)"
 places = ["*s.p"]
+xfail = "P0"
+note = "Gap (spike): the shared reborrow of *s.p held by h restricts s itself (`&mut s` after row 6 conflicts, so s is `shared`), but the dump lends only *s.p and leaves s own"
 beyond_facts = "P4: the arrow kind is presentation"
 
 [[loan]]

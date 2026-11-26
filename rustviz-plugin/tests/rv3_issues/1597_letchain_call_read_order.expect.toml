@@ -18,9 +18,9 @@ row = 3
 lender = "o"
 holder = "x"
 kind = "shared"
-ends = [3]
+ends = [[3, 4], 3]
 src = "issue"
-why = "x is last used by `x.len()` on row 3; a probe `let _ = &mut o;` after row 3 compiles"
+why = "two ends: where `Some(x)` does not match, the loan of `&o` is dead on that edge to the join (row 4); where it matches, x is last used by `x.len()` and the loan ends after that call, before the condition's branch (row 3, one line, so no next row to name). A probe `let _ = &mut o;` after row 3 compiles"
 
 [[lent]]
 row = 3

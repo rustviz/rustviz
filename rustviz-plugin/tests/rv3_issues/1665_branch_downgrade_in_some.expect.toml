@@ -2,6 +2,7 @@ issue = 1665
 cluster = "C21"
 title = "`Some(if c { downgrade(&mut a) } else { &e })`: a's loan given back at the call, but it passes into o9"
 fn = "made_shared"
+note = "both arms are on row 5 (as in the issue), so 'a9 is free in the else arm / e9 is free in the then arm' can't be pinned by row; `flag` is a parameter, so both arms can run"
 
 [[loan]]
 row = 5
@@ -18,7 +19,7 @@ lender = "e9"
 holder = "o9"
 ends = [6]
 src = "issue"
-why = "`let _ = &mut e9;` after row 5 fails, after row 6 compiles"
+why = "`let _ = &mut e9;` after row 5 raises E0502 (plus E0596: e9 is not `mut`); after row 6 only E0596, i.e. no borrow conflict"
 
 [[lent]]
 row = 5

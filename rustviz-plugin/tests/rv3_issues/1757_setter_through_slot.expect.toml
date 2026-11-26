@@ -2,6 +2,7 @@ issue = 1757
 cluster = "C21"
 title = "Setter writing through a returned slot of a reference variable (`set(slot(&mut r), &t)`): t never drawn borrowed by r"
 fn = "main"
+note = "row 7 of the repro is the comment `// t.clear();`: the dump has no row for it, so the state is pinned after row 6 (the same probe fails there; with the comment un-commented, t.clear() is E0502)"
 
 [[loan]]
 row = 6
@@ -12,14 +13,14 @@ src = "issue"
 why = "`let _ = &mut t;` after rows 6 and 7 fails (the `t.clear()` of the comment is E0502), after row 8 compiles"
 
 [[lent]]
-row = 7
+row = 6
 place = "t"
 kind = "shared"
 holder = "r"
 src = "issue"
 
 [[state]]
-row = 7
+row = 6
 place = "t"
 is = "shared"
 src = "issue"

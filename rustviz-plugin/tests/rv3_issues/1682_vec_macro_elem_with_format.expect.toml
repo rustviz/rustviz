@@ -7,7 +7,7 @@ places = []
 row = 4
 ev = "move s2 -> _"
 src = "issue"
-why = "`let _ = &mut s2;` after row 4 is E0382: s2 was moved into the vec's element"
+why = "`let _ = &mut s2;` after row 4 is E0382 (plus E0596, s2 is not `mut`): s2 was moved into the vec's element"
 
 [[state]]
 row = 4
@@ -20,7 +20,7 @@ row = 4
 place = "r"
 is = "own"
 src = "issue"
-why = "`format!` only borrows r; `let _ = &mut r;` after row 4 compiles"
+why = "`format!` only borrows r; `let _ = &mut r;` after row 4 gives no borrow conflict (only E0596: r is not declared `mut`)"
 
 [[drop]]
 row = 6

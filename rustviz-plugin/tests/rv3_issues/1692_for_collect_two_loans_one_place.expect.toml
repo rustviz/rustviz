@@ -22,7 +22,7 @@ why = "the exclusive iter_mut loan ended at collect: `v.len()` in the body compi
 row = 3
 lender = "v"
 kind = "mut"
-ends_exclude = [4, 5]
+ends_exclude = [4, 5, 6, 7]
 src = "issue"
 why = "not live in the body (`v.len()` compiles), so it ends within the head"
 

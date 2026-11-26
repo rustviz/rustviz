@@ -2,6 +2,8 @@ issue = 1648
 cluster = "C03"
 title = "match on a reborrow read in both arms of an inner if: the parameter's end comes before the reads, the inner join says r 'still has no value'"
 fn = "run"
+xfail = "P2"
+note = "Gap (spike): the dump lists a second end for the edge into the `_` arm (on row 4, as in #1567_b), so the ends are [3,4,6,8] not [3,6,8]. `c` is unused; `d` and `n` are parameters, so both inner arms and both match arms can run."
 beyond_facts = "P3: the inner join (row 9) titled 'r still has no value here'"
 
 [[loan]]
@@ -9,10 +11,9 @@ row = 2
 lender = "*r"
 holder = "u"
 kind = "shared"
-ends_include = [6, 8]
-ends_exclude = [5, 7]
+ends = [6, 8, [3, 12]]
 src = "issue"
-why = "`r.push(..)` before `u.len()` at row 6 or row 8 is E0502 (also at the start of arm 1, before the `if d`), after either read compiles; arm 2 uses r freely. Rows 3 and 4 also list an end: the edge into the `_` arm, where u is dead"
+why = "three ends, one per path: row 6 and row 8 (the reads in the two inner-if arms; `r.push(..)` before either read is E0502, after it compiles) and the edge from the match row 3 into the `_` arm (row 12), where u is dead (`r.push(..)` at the start of that arm compiles); the match is one `switchInt` in MIR, so there is one edge into arm 2"
 
 [[state]]
 row = 5

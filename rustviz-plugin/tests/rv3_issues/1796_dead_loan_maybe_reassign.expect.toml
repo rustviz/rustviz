@@ -12,9 +12,9 @@ row = 2
 lender = "x"
 holder = "r"
 kind = "shared"
-ends = [3, 10]
+ends = [[3, 4], 10]
 src = "issue"
-why = "rustc accepts the push on row 4 (a &mut use of x) with r's old reference live only on the else path; probes after rows 4 and 5 compile"
+why = "on the c path (edge 3 -> 4) the old reference is never read again, so the loan ends there; on the else path r is read on row 10, so it lives until then. Probe: `let _ = &mut x;` inside the c arm compiles, in the else arm before the println it is E0502"
 
 [[state]]
 row = 4

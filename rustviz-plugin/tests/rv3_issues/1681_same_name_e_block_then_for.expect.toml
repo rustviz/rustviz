@@ -8,7 +8,7 @@ row = 4
 lender = "v"
 kind = "mut"
 ends_include = [6]
-ends_exclude = [8, 9]
+ends_exclude = [7, 8, 9]
 src = "issue"
 why = "o's loan flows into the first e, last used on row 6; `let _ = &v;` after row 8 compiles (issue's oracle probe)"
 
