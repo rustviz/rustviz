@@ -43,6 +43,8 @@ fn params(p: &String, m: &mut String, a: bool, b: bool) {
     }
 }
 
+// All on one line: the end stays on the join row, as on main (a one-line
+// conditional's per-arm ends need analysis RustViz doesn't do, #1572).
 fn params_one_line(p2: &String, m2: &mut String, a: bool, b: bool) { if a { } else if b { } else { let n = m2.len(); } }
 
 fn let_else_in_arm(r: &String, m3: &mut String, o2: Option<String>, k: u8) {

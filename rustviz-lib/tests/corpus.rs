@@ -23419,23 +23419,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },    TooltipExpect {
         name: "one_line_arm_ref_end_1277",
         // #1277: a reference declared in a one-line arm with a row of its
-        // own ends its borrow on that row. #1572 replaces #1277's join-row
-        // end of the reference declared before the conditional (ra): rustc
-        // ends the loan ra and its copy x share at x's last use, in the
-        // arm, so the lender is free there, not "still immutably borrowed
-        // by ra". Where each end sits is pinned by
+        // own ends its borrow on that row. Its lender is then still
+        // borrowed by the reference declared before the conditional, whose
+        // end stays on the join row: the lender's dot on the arm's row
+        // says so. Where each end sits is pinned by
         // `a_reference_declared_in_a_one_line_arm_ends_its_borrow_there`.
         must_contain: &[
-            "ra's borrow ended in each branch above",
-            "rb's borrow ended in each branch above",
-            "rd's borrow ended in each branch above",
+            "a's resource is no longer borrowed by x, but is still immutably borrowed by ra",
+            "b's resource is no longer borrowed by y, but is still immutably borrowed by rb",
+            "d's resource is no longer borrowed by w, but is still immutably borrowed by rd",
         ],
-        must_not_contain: &[
-            "but is still immutably borrowed by ra",
-            "but is still immutably borrowed by rb",
-            "but is still immutably borrowed by rd",
-            "ra isn't moved in any of the branches above",
-        ],
+        must_not_contain: &[],
     },
     TooltipExpect {
         name: "break_field_out_1280",
@@ -28025,13 +28019,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "r2's borrow ended in each branch above",
             "m's borrow ended in each branch above",
-            "m2's borrow ended in each branch above",
             "m3's borrow ended in each branch above",
         ],
         must_not_contain: &[
             "r2 isn't moved in any of the branches above",
             "=m isn't moved in any of the branches above",
-            "m2 isn't moved in any of the branches above",
             "m3 isn't moved in any of the branches above",
         ],
     },
@@ -28079,23 +28071,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t goes out of scope. No resource is dropped.",
             "=a isn't moved in any of the branches above",
             "a3 isn't moved in any of the branches above",
-        ],
-    },
-    TooltipExpect {
-        name: "one_line_if_arm_ends_1572",
-        // #1572: in a one-line `if`/`else`, a borrow last used in one arm
-        // ends in that arm (and as the other starts), as in the multi-line
-        // form, not on the join dot after the other arm read the lender.
-        must_contain: &[
-            "m2's borrow ended in each branch above",
-            "m3's borrow ended in each branch above",
-            "m5's borrow ended in each branch above",
-            "r6's borrow ended before the branches above, and each borrow a branch gave r6 ended in that branch",
-        ],
-        must_not_contain: &[
-            "m2 isn't moved in any of the branches above",
-            "m3 isn't moved in any of the branches above",
-            "m5 isn't moved in any of the branches above",
         ],
     },
     TooltipExpect {
@@ -37311,13 +37286,9 @@ fn a_one_line_else_if_leg_ends_at_the_inner_fork() {
 /// conditional; that put "x's immutable borrow ends" on the join row,
 /// below x's scope end in the arm, on a row where x no longer exists.
 /// It now ends with x's last use, on the arm's row, listed before x's
-/// scope end. The reference declared before the conditional (ra) ends
-/// its borrow in the arms too (#1572): rustc ends the loan ra and its
-/// copy x share at x's last use on that path, and as the other arm
-/// starts. #1277 had left ra's end on the join row, with the lender
-/// "still immutably borrowed by ra" after x's end; now the lender is
-/// free on x's end row and ra's join says its borrow ended in each
-/// branch. A copy of the reference (`let z = w;`) ends where it's last
+/// scope end, and the lender's dot there says the reference declared
+/// before the conditional still borrows it (its end stays on the join
+/// row). A copy of the reference (`let z = w;`) ends where it's last
 /// used, the copy where it is; inside a `for` too. Where the plugin
 /// already nested the end in the arm (the lender is used in the
 /// conditional), the end now also comes before the scope end.
@@ -37329,10 +37300,10 @@ fn a_reference_declared_in_a_one_line_arm_ends_its_borrow_there() {
     // arm's other arrows on that line (a row below them), not along them.
     assert_eq!(arrow_row_problems(&tl), Vec::<String>::new());
     for (r, kind, first, join) in [
-        ("x", "immutable", "x is initialized with a copy of ra", "ra's borrow ended in each branch above"),
-        ("y", "immutable", "y is initialized with a copy of rb", "rb's borrow ended in each branch above"),
-        ("w", "immutable", "w is initialized with a copy of rd", "rd's borrow ended in each branch above"),
-        ("z", "immutable", "z is initialized with a copy of w", "rd's borrow ended in each branch above"),
+        ("x", "immutable", "x is initialized with a copy of ra", "ra isn't moved in any of the branches above"),
+        ("y", "immutable", "y is initialized with a copy of rb", "rb isn't moved in any of the branches above"),
+        ("w", "immutable", "w is initialized with a copy of rd", "rd isn't moved in any of the branches above"),
+        ("z", "immutable", "z is initialized with a copy of w", "rd isn't moved in any of the branches above"),
         ("q", "immutable", "q is initialized with a copy of re", "re isn't moved in any of the branches above"),
         ("p", "mutable", "push reads and writes through p (mutable reborrow — p can't be used until push returns)", "m isn't moved in any of the branches above"),
     ] {
@@ -37351,21 +37322,12 @@ fn a_reference_declared_in_a_one_line_arm_ends_its_borrow_there() {
             (Some(e), Some(s)) if e > s));
         assert_eq!(late, Vec::<(f64, f64)>::new(), "{:?} listed after {:?}", end, scope_end);
     }
-    // The lender is free on the copy's end row: no tooltip says the
-    // outer reference still borrows it. The outer reference ends in the
-    // arm, on the dot of its copy, above its join.
-    let tips = timeline_tooltips(&tl);
     for (lender, r, outer) in [("a", "x", "ra"), ("b", "y", "rb"), ("d", "w", "rd")] {
-        let stale = format!("but is still immutably borrowed by {}", outer);
-        assert!(!tips.iter().any(|t| t.contains(&stale)), "{:?} still said", stale);
-        let free = dots_listing_tooltip(&tl, &format!("{}'s resource is no longer immutably borrowed", lender));
+        let text = format!("{}'s resource is no longer borrowed by {}, but is still immutably borrowed by {}", lender, r, outer);
+        let at = dots_listing_tooltip(&tl, &text);
+        assert_eq!(at.len(), 1, "{:?}: {:?}", text, at);
         let end = dots_listing_tooltip(&tl, &format!("{}'s immutable borrow ends", r));
-        assert!(free.iter().any(|f| f.1 == end[0].1), "{} free on {}'s end's row: {:?} vs {:?}", lender, r, free, end);
-        let copied = dots_where(&tl, |lines| lines.iter().any(|l| *l == format!("{}'s reference is copied (not the resource it points to)", outer))
-            && lines.iter().any(|l| *l == format!("{}'s immutable borrow ends", outer)));
-        let joins = dots_listing_tooltip(&tl, &format!("{}'s borrow ended in each branch above", outer));
-        assert!(!copied.is_empty() && joins.iter().any(|j| j.1 > copied[0].1),
-            "{}'s end on its copy's dot in the arm, above the join: {:?}, joins {:?}", outer, copied, joins);
+        assert_eq!(at[0].1, end[0].1, "{:?} on {}'s end's row", text, r);
     }
 }
 
@@ -38241,11 +38203,9 @@ fn assert_dot_lines_in_order(name: &str, want: &[&str]) {
 /// that arm moves the reference (#1537).
 #[test]
 fn arm_borrow_ends_in_order_1512_1513_1537() {
-    // (r is a copy of h.r declared in the arm: it holds the same loan, so
-    // h.r's end follows r's, as a copy's does in a one-line arm, #1572.)
     assert_dot_lines_in_order("match_binding_end_in_nested_arm_1513", &[
-        "r no longer borrows the resource m points to",
         "h.r no longer borrows the resource m points to",
+        "r no longer borrows the resource m points to",
         "m's mutable borrow ends",
     ]);
     assert_dot_lines_in_order("param_pushed_into_vec_in_arm_1512", &[
