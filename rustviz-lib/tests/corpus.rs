@@ -13802,8 +13802,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "r4.n is assigned a new value",
             "c.n is assigned a new value",
             "s.a acquires ownership of a new resource; its previous resource is dropped",
+            // A field's line under a whole-struct loan (#1672): a loan taken
+            // after an earlier `if` names its holder (an off-path conditional
+            // above doesn't make it ambiguous); inside the arms the column
+            // that doesn't fork says only what holds on every path.
+            "@s.n:31 s.n is mutably borrowed along with s by r2; s.n can't be used until the borrow ends",
+            "@s.n:36 s.n is mutably borrowed along with s by r3; s.n can't be used until the borrow ends",
+            "@s.inner:26 A borrow of all of s also covers s.inner. While that borrow is live, you can't move the field or take a mutable borrow of it directly through s.",
         ],
         must_not_contain: &[
+            // Main drew s.inner free inside the `if` while r1 was live (#1672).
+            "@s.inner:26 s.inner is the owner of the resource",
+            "@s.n:31 A borrow of all of s also covers s.n",
             // An assignment is not an in-place update.
             "modified through r.n",
             "modified through r1.n",
@@ -28116,6 +28126,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "@first:22 first is the owner of the resource",
         ],
         must_not_contain: &["@a:5 a's resource is being shared by one or more variables"],
+    },
+    TooltipExpect {
+        name: "struct_ref_field_lent_1641",
+        must_contain: &[
+            "@p.n:7 p.n is mutably borrowed along with p by r; p.n can't be used until the borrow ends",
+            "@p.n:8 p.n holds a mutable reference; it can read and write the borrowed value",
+            "@q.n:16 A borrow of all of q also covers q.n. While that borrow is live, you can't move the field or take a mutable borrow of it directly through q.",
+        ],
+        // Main drew the reference fields free while their struct was lent.
+        must_not_contain: &["@p.n:7 p.n holds a mutable reference", "@q.n:16 q.n holds a mutable reference"],
     },
 ];
 

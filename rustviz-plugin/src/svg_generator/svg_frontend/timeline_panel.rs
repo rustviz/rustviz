@@ -4250,10 +4250,15 @@ fn parent_loan_title(parent: &Timeline, field: &ResourceAccessPoint, state: &Sta
     let mutable = matches!(state, State::RevokedPrivilege { .. });
     let mut events = Vec::new();
     flat_history(&parent.history, path, &mut events);
+    // The last row of a conditional off `path` that ended before `row`:
+    // a loan from before its join may summarize several paths. A loan
+    // taken after it (`let r2 = &mut s;` below an earlier `if`) doesn't.
+    let mut joined: Option<usize> = None;
     for (l, e) in events.into_iter().filter(|(l, _)| *l <= row) {
         match e {
             Event::Branch { split_point, .. } if path.iter().filter(|(s, _)| s == split_point).count() == 1 => {}
-            Event::Branch { .. } | Event::OrAltLend { .. } => {
+            Event::Branch { merge_point, .. } => joined = joined.max(Some(*merge_point)),
+            Event::OrAltLend { .. } => {
                 return hover_messages::state_field_under_parent_loan(field.name(), name);
             }
             Event::MutableLend { to, .. } | Event::StaticLend { to, .. } => holders.push((l, to)),
@@ -4263,6 +4268,11 @@ fn parent_loan_title(parent: &Timeline, field: &ResourceAccessPoint, state: &Sta
                 }
             }
             _ => {}
+        }
+    }
+    if let Some(join) = joined {
+        if holders.is_empty() || holders.iter().any(|(l, _)| *l <= join) {
+            return hover_messages::state_field_under_parent_loan(field.name(), name);
         }
     }
     let by = match holders.as_slice() {
