@@ -31,7 +31,7 @@ use rustviz_lib::{HELPERS_JS, Rustviz, toolchain_channel, toolchain_components};
 /// fork or a different branch.
 const DEFAULT_PLUGIN_GIT: &str = "https://github.com/rustviz/rustviz";
 
-/// Git tag matching this CLI's own release (e.g. `v2.1.0`). With the
+/// Git tag matching this CLI's own release (e.g. `v2.1.1`). With the
 /// default `--plugin-git` and no `--plugin-rev`, the plugin is installed
 /// from this tag so it matches the `rustviz-lib` output format and the
 /// nightly this CLI installs, instead of drifting with `main`.
@@ -83,7 +83,7 @@ enum Commands {
         #[arg(long, default_value = DEFAULT_PLUGIN_GIT, value_name = "URL")]
         plugin_git: String,
         /// Git branch / tag / commit to install the plugin from.
-        /// Defaults to this release's tag (e.g. v2.1.0) when --plugin-git
+        /// Defaults to this release's tag (e.g. v2.1.1) when --plugin-git
         /// is the canonical repo, otherwise to the repo's default branch.
         #[arg(long, value_name = "REF")]
         plugin_rev: Option<String>,

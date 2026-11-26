@@ -1,6 +1,6 @@
 [package]
 name = "rustviz-lib"
-version = "2.1.0"
+version = "2.1.1"
 edition = "2021"
 authors = ["Cyrus Omar <comar@umich.edu>", "Andrew Mahler <mahleran@umich.edu>"]
 repository = "https://github.com/rustviz/rustviz"
