@@ -131,25 +131,24 @@ impl<'a> BodyEnds<'a> {
     }
   }
 
-  /// The ends of `k`'s hold on `loans`, on rows in `rows` (from, to: to
-  /// exclusive).
+  /// The ends of `k`'s hold on `loans`: `k`'s own facts on rows in `rows`
+  /// (from, to: to exclusive; two variables of one name are told apart by
+  /// their rows), the loans' ends anywhere.
   pub fn holder_end(&self, k: &str, loans: &[usize], rows: (usize, usize)) -> HolderEnd {
     let mut out = HolderEnd { only_loop_exits: true, ..HolderEnd::default() };
     for r in &self.facts.rows {
-      if r.line < rows.0 || r.line >= rows.1 {
-        continue;
-      }
+      let mine = r.line >= rows.0 && r.line < rows.1;
       for e in &r.facts {
         match &e.fact {
           Fact::BorrowEnd { loan, holder, to_line, .. } if loans.contains(loan) => {
             let (row, exit) = self.drawn_row(r.line, *to_line);
             out.last_end = Some(out.last_end.map_or(row, |g| g.max(row)));
-            if holder.split('|').any(|h| names_match(k, h)) {
+            if mine && holder.split('|').any(|h| names_match(k, h)) {
               out.gives_back = Some(out.gives_back.map_or(row, |g| g.max(row)));
               out.only_loop_exits &= exit;
             }
           }
-          Fact::HoldEnd { loan, holder, .. } if loans.contains(loan) && names_match(k, holder) => {
+          Fact::HoldEnd { loan, holder, .. } if mine && loans.contains(loan) && names_match(k, holder) => {
             out.stops = Some(out.stops.map_or(r.line, |s| s.max(r.line)));
           }
           _ => {}

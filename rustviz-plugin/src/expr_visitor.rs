@@ -11758,9 +11758,9 @@ pub fn print_out_of_scope(&mut self){
       slots.push(Slot { key: k, rd, rows: (0, usize::MAX), arm: true });
     }
     for r in retired {
+      // (Its loans are those taken before the later variable is declared.)
       let loans: Vec<usize> = ix.as_ref().map(|ix| ix.loans_held_by(&r.name).into_iter()
-        .filter(|l| !claimed.contains(&l.loan))
-        .filter(|l| { let e = ix.holder_end(&r.name, &[l.loan], (0, r.until)); e.gives_back.is_some() || e.stops.is_some() })
+        .filter(|l| !claimed.contains(&l.loan) && l.line < r.until)
         .map(|l| l.loan).collect()).unwrap_or_default();
       claimed.extend(loans.iter().copied());
       slot_loans.push(loans);
@@ -11827,8 +11827,12 @@ pub fn print_out_of_scope(&mut self){
         let (end, own) = match (e.last_end, e.gives_back, e.stops) {
           (None, _, _) => (End::None, None),
           (Some(back), Some(_), Some(own)) if e.only_loop_exits && own < back => (End::LoopExit { own, back }, None),
-          (Some(back), Some(_), _) | (Some(back), None, None) => (End::Arrow(back), None),
+          (Some(back), Some(_), _) => (End::Arrow(back), None),
           (Some(back), None, Some(own)) => (End::Arrow(back), Some((own, back))),
+          // Neither named where the loan ends nor seen to stop (on the row
+          // the loan ends, or a name two variables share): its own end on
+          // the walk's line if another slot gives the loan back.
+          (Some(back), None, None) => (End::Arrow(back), Some((slot.rd.lifetime.min(back), back))),
         };
         if own.is_none() && matches!(end, End::Arrow(_) | End::LoopExit { .. }) {
           given_back.extend(mine.iter().copied());
