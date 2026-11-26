@@ -28352,6 +28352,33 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
     },
 
+    // P2-1b review round (#1869): ends the first P2-1b push lost, restored
+    // from the facts.
+    TooltipExpect {
+        name: "known_bugs/1694_nested_overlapping_loans",
+        // `direct`: x17's own end in the nested `if c` arms (other17 still
+        // holds v17, so no give-back).
+        must_contain: &["x17's immutable borrow ends"],
+        must_not_contain: &["Return immutably borrowed resource from x17 to v17"],
+    },
+    TooltipExpect {
+        name: "arm_local_ref_caller_end_1502",
+        // m (a `&mut` parameter) moved in one arm: on the other arms its
+        // borrow of the caller's value ends.
+        must_contain: &["m's mutable borrow ends"],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "rv3_issues/1606_two_bindings_one_arm_dot",
+        must_contain: &["m's mutable borrow ends"],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "borrow_stored_through_local_ref",
+        // ri = &mut o.inner ends after `(*ri).r = &b;`: o.inner is given back.
+        must_contain: &["o.inner's value is no longer mutably borrowed"],
+        must_not_contain: &[],
+    },
 ];
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws
@@ -39959,6 +39986,12 @@ fn ref_old_loan_and_never_fn_ids_1486_1556_1557_1553() {
     for (snippet, present, absent) in [
         // A reference a block declares, reborrowed into its value, has its
         // borrow end with its scope; nothing is drawn on it after.
+        // `swapped` (#1249, P2-1b review): after `mem::swap(&mut r7, &mut
+        // r8)` one lifetime covers both, so g stays borrowed to r7's last use
+        // (`let _ = &mut g;` before L43 is E0502): r8 gives g back on L43.
+        ("exchange_two_mut_refs_1249",
+         &["r8@L43:dot:static_die", "g@L43:dot:static_reacquire"][..],
+         &["r8@L42:dot:static_die", "g@L42:dot:static_reacquire"][..]),
         ("assign_block_reborrow_1486",
          // Q7 (P2-1b): each r's own borrow ends at its last use, where the
          // holder reborrows it, above its scope end.

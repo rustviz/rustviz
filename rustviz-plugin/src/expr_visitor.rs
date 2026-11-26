@@ -11879,8 +11879,16 @@ pub fn print_out_of_scope(&mut self){
           for id in &through_l {
             given_back.entry(*id).or_default().push((l.real_name(), slot.rd.lifetime, slot.key.clone()));
           }
-          let at = slot.rd.lifetime;
           let walk = !through_l.is_empty();
+          // (Not before the lender's loan ends: after `mem::swap(&mut r7, &mut
+          // r8)` r8 points to g, but r7 keeps g borrowed to its last use,
+          // one lifetime for both; rustc's end row.)
+          let lender_loans: Vec<usize> = ix.facts.loans.iter()
+            .filter(|f| f.source == "borrow" && ix.lends(f, &l.real_name()) && f.line <= slot.rd.lifetime)
+            .map(|f| f.loan).collect();
+          let at = if walk { slot.rd.lifetime } else {
+            ix.last_end_of(&lender_loans).map_or(slot.rd.lifetime, |e| e.max(slot.rd.lifetime))
+          };
           ends.push(Pending { lender: l.clone(), end: End::Arrow(at), loans: through_l, own: walk.then_some((at, at)), holder_stops: None, walk });
           continue;
         }
@@ -11953,6 +11961,12 @@ pub fn print_out_of_scope(&mut self){
           // that returns while the loan goes on on the other path: it
           // gives the lender back where it last holds it, on its own path.)
           (Some(back), Some(g), _) if g < back && g >= slot.rd.assigned_at && !ix.in_scope_after(&slot.key, back) => (End::Arrow(g), None),
+          // (Moved away on one path before the loan's last row, `let m2 = m;`
+          // in an arm of `m: &mut String`: on the paths that don't move it,
+          // where it gives the caller's loan back.)
+          // (A parameter's caller loan only: a local's end there sits on the
+          // conditional's own row, through the fork, 1128 / 1282.)
+          (Some(back), Some(g), _) if g < back && matches!(l, ResourceTy::Caller) && ix.moved_in(&slot.key, g, back) => (End::Arrow(g), None),
           (Some(back), Some(_), _) => (End::Arrow(back), None),
           // (Moved away where it stops holding, `Some(q)`: its column ends
           // there, so its end is there.)

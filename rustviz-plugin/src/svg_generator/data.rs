@@ -6081,6 +6081,13 @@ impl Visualizable for VisualizationData {
                         let mut new_b_history: Vec<(usize, Event)> = Vec::new();
                         for (l, e) in b.e_data.iter() {
                             self.append_branch_event(e, *l, is, & mut new_b_history);
+                            // rap's own borrow end with no arrow in a
+                            // nested arm (a copy ending while another
+                            // reference holds the loan, Q7): on its column
+                            // here, as in a top-level arm.
+                            if !matches!(branch_type, BranchType::Loop(..)) {
+                                append_decl_ref_die(self, e, *l, rap, &mut new_b_history);
+                            }
                         }
                         new_branches.push(BranchData { source_span: b.source_span, t_data: TimelineColumnData { // produce some dummy timeline data for now
                             name: "".to_owned(),

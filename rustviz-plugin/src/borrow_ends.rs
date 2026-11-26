@@ -192,6 +192,12 @@ impl<'a> BodyEnds<'a> {
     out
   }
 
+  /// Whether `k` itself is moved on a row in `from+1..=to`.
+  pub fn moved_in(&self, k: &str, from: usize, to: usize) -> bool {
+    self.facts.rows.iter().filter(|r| r.line > from && r.line <= to).flat_map(|r| r.facts.iter())
+      .any(|e| matches!(&e.fact, Fact::Move { path, .. } if path == k))
+  }
+
   /// Whether `k` itself is moved anywhere in the body.
   pub fn moved_anywhere(&self, k: &str) -> bool {
     self.facts.rows.iter().flat_map(|r| r.facts.iter()).any(|e| matches!(&e.fact, Fact::Move { path, .. } if path == k))
@@ -271,6 +277,8 @@ impl<'a> BodyEnds<'a> {
         // (A borrowed temporary's column, `Some(&String::from("x"))`.)
         || (name == "(temporary)" && m.source == "temporary")
         || root(&m.lender) == name
+        // (A field lender, `&mut o.inner`.)
+        || m.lender == name
         || m.through.as_deref().is_some_and(|t| root(t) == name)
       {
         return true;
