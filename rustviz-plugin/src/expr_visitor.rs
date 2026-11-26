@@ -11776,6 +11776,12 @@ pub fn print_out_of_scope(&mut self){
       let from = later_from.get(&k).copied().unwrap_or(0);
       let mut held: Vec<&crate::facts::schema::LoanInfo> = ix.as_ref().map(|ix| ix.loans_held_by(&k).into_iter()
         .filter(|l| !claimed.get(&k).is_some_and(|c| c.contains(&l.loan))).collect()).unwrap_or_default();
+      // A pattern's binding moved out of a value holding the borrow (`if
+      // let Some(x) = y`) holds what y held.
+      if held.is_empty() {
+        held = ix.as_ref().map(|ix| ix.loans_reaching(&k).into_iter()
+          .filter(|l| !claimed.get(&k).is_some_and(|c| c.contains(&l.loan))).collect()).unwrap_or_default();
+      }
       // A loan taken into k before k got its current value (`r = &s;` in
       // an arm after `let mut r = &s;`) is the walk's to end, unless the
       // new value still holds it (`m = if c { &mut t } else { m };`).
@@ -11828,7 +11834,9 @@ pub fn print_out_of_scope(&mut self){
         let mut mine: Vec<usize> = ix.with_held_sources(&slot.key, loans).into_iter()
           .filter(|id| info(id).is_some_and(|f| ix.lends(f, &l.real_name())))
           .collect();
-        if mine.is_empty() && !loans.is_empty() && i > 0 {
+        // (Or that k holds through what it holds: `v = if c { let r = &mut
+        // a; vec![r] } else { .. }` keeps r's loan of a in v.)
+        if mine.is_empty() && !loans.is_empty() {
           mine = ix.loans_reaching(&slot.key).into_iter()
             .filter(|f| !claimed.get(&slot.key).is_some_and(|c| c.contains(&f.loan)) && ix.lends(f, &l.real_name()))
             .map(|f| f.loan).collect();
