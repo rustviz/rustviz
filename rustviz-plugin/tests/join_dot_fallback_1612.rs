@@ -79,10 +79,27 @@ fn returns(s: String, t: String, a: bool, b: bool) {
     }
 }
 
+// A real re-point in one arm: p is given a new reference, to t; the
+// other arm leaves it pointing at s.
+fn repointed(c: bool) {
+    let s = String::from("a");
+    let t = String::from("b");
+    let mut p = &s;
+    if c {
+        println!("{}", p);
+        p = &t;
+        p.len();
+    } else {
+        println!("{}", t);
+    }
+    println!("{}", s);
+}
+
 fn main() {
     nested(String::new(), String::new(), true, false);
     arms(String::new(), String::new(), 1);
     copied_both_ways(true);
     in_loop(String::new(), String::new(), false, true);
     returns(String::new(), String::new(), false, false);
+    repointed(true);
 }

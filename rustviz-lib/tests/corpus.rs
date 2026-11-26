@@ -28842,8 +28842,9 @@ fn off_canvas_ys(svg: &str) -> Vec<String> {
 /// The `data-rv-id`s of reference brackets (`M x y l dx dy v V l -dx
 /// dy`) whose vertical run `V` is zero or less (#1611).
 fn flat_brackets(svg: &str) -> Vec<String> {
+    // (By `data-rv-kind`: the id is cut short for long names.)
     start_tags(svg, "path").into_iter()
-        .filter(|t| t.contains(":bracket:"))
+        .filter(|t| t.contains("data-rv-kind=\"bracket\""))
         .filter(|t| t.split(" d=\"").nth(1).and_then(|d| d.split(" v ").nth(1))
             .and_then(|v| v.split_whitespace().next()).and_then(|v| v.parse::<f64>().ok())
             .is_some_and(|v| v <= 0.0))
@@ -38537,6 +38538,7 @@ fn fallback_join_dots_1612() {
         "a5@L44:dot:branch_join",
         "w@L61:dot:branch_join", "w@L62:dot:branch_join",
         "v@L78:dot:branch_join", "v@L79:dot:branch_join",
+        "p@L94:dot:branch_join",
     ] {
         assert_eq!(tip(id).as_deref(), Some("The conditional above ends here"), "{id}");
     }
