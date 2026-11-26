@@ -1607,6 +1607,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           self.descend_through_expansion(e);
         }
       }
+      // A try block's implicit success conversion wraps the user-written
+      // tail. Visit it normally, including a tail that is itself desugared
+      // (for example, a for loop whose body contains another `?`).
+      ExprKind::Call(_, [tail]) if self.try_block.is_some()
+        && callee_def_id(self.tcx, expr).is_some_and(|id| self.tcx.is_lang_item(id, rustc_hir::LangItem::TryTraitFromOutput)) =>
+      {
+        self.visit_expr(tail);
+      }
       ExprKind::Call(_, args) => {
         for a in args {
           self.descend_through_expansion(a);
@@ -1693,7 +1701,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           return;
         }
         self.descend_through_expansion(scrutinee);
-        // `e?`: the `Err` / `None` arm returns from the function.
+        // `e?`: draw drops on the residual path.
         if let rustc_hir::MatchSource::TryDesugar(_) = source {
           self.note_try(expr);
         }
@@ -2728,9 +2736,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     out
   }
 
-  /// The `?` operator `e?` returns early on `Err` / `None`, dropping
-  /// every value the function owns at that point (#430). That happens
-  /// on the error path only, so it isn't a drop that ends a column:
+  /// When `e?` returns early, Rust drops what the scopes it leaves still
+  /// own (#430, #1656). This is conditional, so it isn't a drop that ends a column:
   /// each such owner gets a dot saying so, on the line of the `?`.
   ///
   /// `r?` with `r` a non-`Copy` variable (or field) moves `r` first, on
@@ -2766,8 +2773,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.try_moves.insert(try_expr.hir_id, Some(id));
       }
     }
-    if !self.in_closure(try_expr) {
-      self.note_try_loop_iterators(line);
+    // rustc lowers the residual arm to either a return or a break to the
+    // exact enclosing try block. The operand move above happens in both cases.
+    let ExprKind::Match(_, arms, _) = try_expr.kind else { return };
+    let block = arms.iter().find_map(|arm| match arm.body.kind {
+      ExprKind::Break(dest, _) => dest.target_id.ok(),
+      _ => None,
+    });
+    let (locals_from, tuples_from, iterators_from) = if let Some(id) = block {
+      let Some(scope) = self.try_block.filter(|s| s.id == id) else { return };
+      (scope.locals, scope.tuples, scope.iterators)
+    } else {
+      (0, 0, 0)
+    };
+    if !self.in_closure(try_expr) || block.is_some() {
+      self.note_try_loop_iterators(line, iterators_from);
+    }
+    if block.is_none() && !self.in_closure(try_expr) {
       // What it leaves in scope if it returns early, for the scope ends
       // said to happen at a later `return` (#1044).
       let vars = self.scope_names(0, self.in_scope.len()).into_iter().filter_map(|(_, name)| self.raps.get(name))
@@ -2776,13 +2798,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.fn_tries.push((line, vars));
     }
     let end = self.in_scope.len();
-    let mut tuples: Vec<LiveTuple<'tcx>> = self.live_tuples.clone();
+    let mut tuples = self.live_tuples[tuples_from..].to_vec();
     let tuple_dup = self.preprocessed_events.iter().any(|(l, e)| *l == line
       && matches!(e, ExternalEvent::TupleTempDrop { at: TupleDropAt::TryReturns, .. }));
     if tuple_dup {
       tuples.clear();
     }
-    for (idx, rap) in self.droppable_locals_at(0, end, &BTreeSet::new(), false, line, true) {
+    // An outer `let x;` first assigned inside the block also registered
+    // a column inside it. Its declaration still owns its drop scope.
+    let outer = self.scope_names(0, locals_from).into_iter().map(|(_, name)| name.to_owned()).collect();
+    for (idx, rap) in self.droppable_locals_at(locals_from, end, &outer, false, line, true) {
       while tuples.last().is_some_and(|t| idx < t.len) {
         let t = tuples.pop().unwrap();
         self.drop_tuple_if_try_returns(&t, line);
@@ -3362,8 +3387,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// A `?` inside a `for` loop over an iterator variable returns early
   /// on `Err` / `None`, dropping that iterator with the rest (#649).
   /// Conditional, so it ends no column (like `note_try`'s dots).
-  fn note_try_loop_iterators(&mut self, line: usize) {
-    for (_, ro) in self.loop_iterators.clone() {
+  fn note_try_loop_iterators(&mut self, line: usize, from: usize) {
+    for (_, ro) in self.loop_iterators[from..].to_vec() {
       let dup = self.preprocessed_events.iter().any(|(l, e)| *l == line
         && matches!(e, ExternalEvent::LoopIteratorDrop { ro: r, left: LoopLeft::Try, .. } if *r == ro));
       if !dup {
@@ -5616,7 +5641,15 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           });
         }
         let exited_before = self.all_paths_exit;
-        self.visit_live_stmts(block); // visit the statements in the block
+        let outer_try = self.try_block;
+        if block.targeted_by_break && label.is_none() {
+          self.try_block = Some(TryBlockScope {
+            id: block.hir_id, locals: entry_len,
+            tuples: self.live_tuples.len(), iterators: self.loop_iterators.len(),
+          });
+        }
+        self.visit_live_stmts(block);
+        self.try_block = outer_try;
         // An exit in it that every path leaves the function at (a
         // `return` or panic in a `loop` that never ends, #1545) dropped
         // what it declares.
@@ -8920,8 +8953,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // A normal match (not desugared)
       rustc_hir::MatchSource::Normal => self.visit_match_normal(expr, guard_expr, arms),
       rustc_hir::MatchSource::ForLoopDesugar => self.visit_for_desugar(expr, guard_expr, arms),
-      // `e?`: the `Err` / `None` arm returns from the function
-      // (#430). The scrutinee `Try::branch(e)` was visited above.
+      // The scrutinee `Try::branch(e)` was visited above.
       rustc_hir::MatchSource::TryDesugar(_) => self.note_try(expr),
       _ => {}
     }

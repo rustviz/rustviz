@@ -28031,6 +28031,19 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &["r can only read it", "r is read-only", "through the shared reference r"],
     },
+    TooltipExpect {
+        name: "try_block_drops_1656",
+        must_contain: &[
+            "If the `?` here returns early, inner's resource is dropped. If the `?` succeeds, nothing happens to inner here.",
+            "If the `?` here returns early, deepest's resource is dropped. If the `?` succeeds, nothing happens to deepest here.",
+            "If the `?` here returns early, middle's resource is dropped. If the `?` succeeds, nothing happens to middle here.",
+            "Move from outer to drop",
+            "If the `?` here returns early, in_loop's resource is dropped. If the `?` succeeds, nothing happens to in_loop here.",
+            "If the `?` here returns early, element's resource is dropped. If the `?` succeeds, nothing happens to element here.",
+            "If the `?` here returns early, nested_iter's former resource, the loop's iterator, is dropped, along with whatever it still owns (such as elements it hasn't handed out yet). If the `?` succeeds, nothing happens to the iterator here.",
+        ],
+        must_not_contain: &["nothing happens to outer here", "nothing happens to keep here", "nothing happens to late here", "nothing happens to carried here", "the function returns and"],
+    },
 ];
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws
@@ -38302,5 +38315,23 @@ fn ref_old_loan_and_never_fn_ids_1486_1556_1557_1553() {
         for id in absent {
             assert!(!tl.contains(&format!("data-rv-id=\"{}", id)), "{}: unexpected {}", snippet, id);
         }
+    }
+}
+
+/// A middle local survives the innermost `?` and drops at the outer one.
+/// Checking only a bag of tooltips would accept a drop on both lines.
+#[test]
+fn try_block_drops_on_the_residual_target_1656() {
+    let name = "try_block_drops_1656";
+    let svg = run_with_local_backend(name).timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    let source = read_corpus(name);
+    for (statement, variable) in [("first?;", "deepest"), ("second?;", "middle")] {
+        let line = source.lines().position(|l| l.trim() == statement).unwrap() + 1;
+        let owners: Vec<_> = doc.descendants().filter(|n|
+            n.attribute("data-rv-event").is_some_and(|e| e.split_whitespace().any(|s| s == "owner_drop_if_try_returns"))
+            && n.attribute("data-rv-line").and_then(|s| s.parse::<usize>().ok()) == Some(line)
+        ).filter_map(|n| n.attribute("data-rv-var")).collect();
+        assert_eq!(owners, [variable], "conditional drops at {statement}");
     }
 }

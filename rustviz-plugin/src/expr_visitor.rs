@@ -905,6 +905,8 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // loop truncate it back when they end, which takes their own
   // variables (pattern bindings included) out of scope.
   pub in_scope: Vec<String>,
+  // The nearest active unlabeled block targeted by a desugared break.
+  pub try_block: Option<TryBlockScope>,
 
   // The constructs a `return`, `break`, `continue` or panic leaves,
   // innermost last, each with `in_scope.len()` where it began: an
@@ -972,6 +974,16 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // Where the arms of each if/else and match leave to when they exit
   // early, by the Branch event's id (see `end_borrows_at_exits`).
   pub exit_scopes: HashMap<usize, ExitScope>,
+}
+
+/// Boundaries of the drop scopes a residual leaves when it targets this
+/// block. Outer locals, match temporaries and iterators survive the `?`.
+#[derive(Clone, Copy)]
+pub struct TryBlockScope {
+  pub id: rustc_hir::HirId,
+  pub locals: usize,
+  pub tuples: usize,
+  pub iterators: usize,
 }
 
 /// See `ExprVisitor::live_tuples`.
@@ -1257,6 +1269,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       for_loop_iter_loans: Vec::new(),
       for_loop_moved_bindings: Vec::new(),
       in_scope: Vec::new(),
+      try_block: None,
       exit_frames: Vec::new(),
       literal_temps: HashMap::new(),
       premoved: HashSet::new(),
