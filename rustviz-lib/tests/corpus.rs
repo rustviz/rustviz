@@ -31000,6 +31000,13 @@ fn corpus_oracle_holds() {
             Err(e) => failed.push(e),
         }
     }
+    failed.sort();
+    if env::var("RV_ORACLE_VERBOSE").is_ok_and(|v| !v.is_empty()) {
+        // Every violation, listed or not, in the NEW format.
+        for ((snippet, check), whats) in &found {
+            eprintln!("\nALL  {snippet}: {check} (\n       {}", whats.join("\n       "));
+        }
+    }
     let checked: std::collections::HashSet<String> = names.iter().cloned().collect();
     let diff = report(&found, &checked);
     eprintln!(

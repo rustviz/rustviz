@@ -33,13 +33,15 @@
 //! timeline; if the plugin added rows there (stacked arrows, a one-line
 //! conditional), the point is skipped.
 //!
-//! **What is skipped** (counted, never reported): a column whose name
+//! **What is skipped** (counted, never reported): points inside closures
+//! aren't collected at all; of the rest, a column whose name
 //! isn't a variable or field path (`*r`, `v[0]`, `String::from`); a name
 //! bound more than once in the function (shadowing: the probe could name
 //! the other binding); a gap where only another arm's dashed line runs,
 //! or the column is drawn in two states at once; a program with
 //! `// rustviz: hide` / `skip` (its gutter or events differ from the
-//! source); and a probe rustc can't type-check (the variable is out of
+//! source) or a `macro_rules!` (a macro can bind names syn can't see);
+//! a `&mut` probe of a place behind a `&` reference; and a probe rustc can't type-check (the variable is out of
 //! scope there). A claim inside a loop is checked like any other (the
 //! probe is still one point of the program) and its message says
 //! "in a loop".
@@ -100,11 +102,11 @@ pub const KNOWN_ORACLE_FAILURES: &[(&str, &str, u32)] = &[
     ("loop_drop_flags_1026", "oracle-usable", 1674),
     ("loop_struct_line_1031", "oracle-usable", 1674),
     ("or_pattern_if_let_different_places", "oracle-usable", 1674),
+    ("scrutinee_temp_taken_1367", "oracle-usable", 1674),
     ("or_pattern_if_let_different_values_else", "oracle-usable", 1674),
     ("or_pattern_if_let_struct_different_places", "oracle-usable", 1674),
     ("or_pattern_let_shadowed_name", "oracle-usable", 1674),
     ("or_pattern_nested_if_let", "oracle-usable", 1674),
-    ("scrutinee_temp_taken_1367", "oracle-usable", 1674),
     // A reference re-pointed in an arm: the old lender drawn borrowed on that path.
     ("basic_if7", "oracle-borrowed", 1675),
     ("borrow_end_join_one_branch", "oracle-borrowed", 1675),
@@ -183,9 +185,13 @@ pub const ORACLE_CHECKS: &[(&str, &str)] = &[
       it is mutably borrowed, or has no value"),
     ("oracle-borrowed",
      "the column is drawn borrowed after this line (read only, or lent out mutably), but rustc accepts \
-      the use the drawing forbids: nothing borrows it there"),
+      there the use the drawing forbids (`&mut x` for read only, `&x` for lent out mutably)"),
     ("oracle-moved",
-     "the column is drawn moved, or with no value yet, after this line, but rustc accepts `&x` there"),
+     "the column is drawn moved (or not assigned yet) after this line, but rustc accepts `&x` there, or \
+      says it was never assigned (or moved)"),
+    ("oracle-error",
+     "the probe programs couldn't be built or compiled (an error in the oracle or its setup, not in the \
+      drawing); never listed as known"),
 ];
 
 /// Borrow conflicts: the place is borrowed where the probe uses it.
@@ -194,6 +200,22 @@ const CONFLICT: &[&str] = &["E0499", "E0500", "E0501", "E0502", "E0503", "E0505"
 const NO_VALUE: &[&str] = &["E0381", "E0382"];
 /// Mutability of the binding, not a borrow: says nothing either way.
 const IGNORED: &[&str] = &["E0596", "E0594"];
+/// Recorded for a `&mut` probe of a place behind a `&` reference.
+const BEHIND_REF: &str = "E0596-behind-ref";
+
+/// `// rustviz: skip` / `// rustviz: hide` (the colon's spacing is free),
+/// as the plugin reads them (`rustviz-plugin/src/utils.rs`).
+fn has_marker(src: &str) -> bool {
+    src.lines().any(|line| {
+        let Some(at) = line.find("//") else { return false };
+        let Some(rest) = line[at + 2..].trim_start().strip_prefix("rustviz") else { return false };
+        let Some(rest) = rest.trim_start().strip_prefix(':') else { return false };
+        let rest = rest.trim_start();
+        ["skip", "hide"].iter().any(|kw| {
+            rest.strip_prefix(kw).is_some_and(|a| a.is_empty() || a.starts_with(char::is_whitespace))
+        })
+    })
+}
 
 // ─── Statement boundaries (syn) ─────────────────────────────────────
 
@@ -203,10 +225,28 @@ struct Point {
     line: u32,
     func: usize,
     in_loop: bool,
-    /// Lines of the innermost block's `{` and `}`.
-    block: (u32, u32),
+    /// The blocks the statement is in (indices into `Points::blocks`),
+    /// outermost first.
+    ancestors: Vec<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct BlockSpan {
+    open: u32,
+    close: u32,
     /// The `{` line starts with the arm before it (`} else {`).
     shared_open: bool,
+    func: usize,
+    /// (first, last) line of each statement.
+    stmts: Vec<(u32, u32)>,
+}
+
+impl BlockSpan {
+    /// Whether line `l`'s events belong inside this block: not on a
+    /// `} else {` line, which is the arm above's too.
+    fn holds(&self, l: u32) -> bool {
+        (l > self.open || (l == self.open && !self.shared_open)) && l <= self.close
+    }
 }
 
 #[derive(Default)]
@@ -214,8 +254,9 @@ struct Points {
     points: Vec<Point>,
     /// Per function: binding name -> how many patterns bind it.
     bindings: Vec<HashMap<String, u32>>,
-    /// Per function: (first line, last line, line of the body's `{` if
-    /// nothing follows it on that line).
+    /// Per function: (first line, last line, the line after which a
+    /// declaration starts the body, if its first statement starts on a
+    /// later line than the `{`).
     spans: Vec<(u32, u32, Option<u32>)>,
     /// The function (index) each item level is in; None in a const,
     /// static or other non-fn item.
@@ -224,6 +265,8 @@ struct Points {
     closures: u32,
     /// The source's lines.
     src: Vec<String>,
+    blocks: Vec<BlockSpan>,
+    block_stack: Vec<usize>,
 }
 
 fn line_of(s: proc_macro2::Span) -> (u32, u32) {
@@ -239,7 +282,9 @@ impl Points {
         let open = body.and_then(|b| {
             let o = b.brace_token.span.open().start().line as u32;
             let first = b.stmts.first().map_or(b.brace_token.span.close().start().line as u32, |s| line_of(s.span()).0);
-            (first > o).then_some(o)
+            // Declarations go before the first statement (after any
+            // inner attribute such as `#![allow(..)]`).
+            (first > o).then_some(first - 1)
         });
         let end = body.map_or(line_of(sig).1, |b| b.brace_token.span.close().start().line as u32);
         self.spans.push((line_of(sig).0, end, open));
@@ -327,12 +372,19 @@ impl<'ast> Visit<'ast> for Points {
         self.loops -= 1;
     }
     fn visit_block(&mut self, b: &'ast syn::Block) {
-        if let (Some(func), 0) = (self.func(), self.closures) {
-            let close = b.brace_token.span.close().start().line as u32;
-            let open_at = b.brace_token.span.open().start();
-            let open = open_at.line as u32;
-            let shared_open = self.src.get(open as usize - 1)
-                .is_some_and(|l| l.chars().take(open_at.column).any(|c| c == '}'));
+        let Some(func) = self.func() else {
+            visit::visit_block(self, b);
+            return;
+        };
+        let close = b.brace_token.span.close().start().line as u32;
+        let open_at = b.brace_token.span.open().start();
+        let open = open_at.line as u32;
+        let shared_open = self.src.get(open as usize - 1)
+            .is_some_and(|l| l.chars().take(open_at.column).any(|c| c == '}'));
+        let stmts = b.stmts.iter().map(|st| line_of(st.span())).collect();
+        self.blocks.push(BlockSpan { open, close, shared_open, func, stmts });
+        self.block_stack.push(self.blocks.len() - 1);
+        if self.closures == 0 {
             let n = b.stmts.len();
             for (i, st) in b.stmts.iter().enumerate() {
                 let tail = i + 1 == n && matches!(st, syn::Stmt::Expr(_, None) | syn::Stmt::Macro(syn::StmtMacro { semi_token: None, .. }));
@@ -342,11 +394,54 @@ impl<'ast> Visit<'ast> for Points {
                 let (_, end) = line_of(st.span());
                 let next = b.stmts.get(i + 1).map_or(close, |s| line_of(s.span()).0);
                 if next > end {
-                    self.points.push(Point { line: end, func, in_loop: self.loops > 0, block: (open, close), shared_open });
+                    self.points.push(Point { line: end, func, in_loop: self.loops > 0, ancestors: self.block_stack.clone() });
                 }
             }
         }
         visit::visit_block(self, b);
+        self.block_stack.pop();
+    }
+    /// The alternatives of an or-pattern bind the same names once.
+    fn visit_pat_or(&mut self, p: &'ast syn::PatOr) {
+        let Some(f) = self.func() else {
+            visit::visit_pat_or(self, p);
+            return;
+        };
+        let before = self.bindings[f].clone();
+        let mut merged = before.clone();
+        for case in &p.cases {
+            self.bindings[f] = before.clone();
+            self.visit_pat(case);
+            for (k, v) in &self.bindings[f] {
+                let m = merged.entry(k.clone()).or_default();
+                *m = (*m).max(*v);
+            }
+        }
+        self.bindings[f] = merged;
+    }
+}
+
+impl Points {
+    /// Whether line `l`'s events happen on every path to point `p`: they
+    /// are in a block `p` is in, and not in the statement of that block
+    /// that holds `p`'s nested block (a sibling arm, a pattern on the
+    /// `match` / `if let` line).
+    fn on_path(&self, p: &Point, l: u32) -> bool {
+        let Some(b) = self.block_of(p.func, l) else { return false };
+        let Some(at) = p.ancestors.iter().position(|&a| a == b) else { return false };
+        match p.ancestors.get(at + 1) {
+            None => true,
+            Some(&child) => {
+                let open = self.blocks[child].open;
+                !self.blocks[b].stmts.iter().any(|&(s, e)| s <= open && open <= e && s <= l && l <= e)
+            }
+        }
+    }
+    /// The innermost block of function `f` that line `l`'s events are in.
+    fn block_of(&self, f: usize, l: u32) -> Option<usize> {
+        (0..self.blocks.len())
+            .filter(|&i| self.blocks[i].func == f && self.blocks[i].holds(l))
+            .min_by_key(|&i| self.blocks[i].close - self.blocks[i].open)
     }
 }
 
@@ -542,10 +637,7 @@ fn claims(pts: &Points, d: &Drawing, skips: &mut Skips) -> Vec<Claim> {
                 .filter(|x| &x.hash == hash && x.line >= fn_start && x.line <= p.line && x.y <= ya + 1.0)
                 .max_by(|a, b| a.y.total_cmp(&b.y));
             let in_arm = last.is_some_and(|l| d.header_x.get(hash).is_some_and(|hx| (hx - l.x).abs() > 1.0));
-            // (Not on a `} else {` line: that is the arm above's too.)
-            let local = last.is_some_and(|l| {
-                (l.line > p.block.0 || (l.line == p.block.0 && !p.shared_open)) && l.line <= p.block.1
-            });
+            let local = last.is_some_and(|l| pts.on_path(p, l.line));
             let segs: Vec<&Seg> = d.segs.iter()
                 .filter(|s| &s.hash == hash)
                 .filter(|s| match (crossing(s, y), last) {
@@ -610,12 +702,16 @@ fn claims(pts: &Points, d: &Drawing, skips: &mut Skips) -> Vec<Claim> {
                 if in_arm && !local {
                     continue;
                 }
-                let pos = |es: &[&str]| last.events.iter().rposition(|e| es.contains(&e.as_str()));
-                let moved = match (pos(MOVE_EVENTS), pos(VALUE_EVENTS)) {
-                    (Some(m), Some(v)) => m > v,
-                    (Some(_), None) => true,
-                    _ => last.events.iter().any(|e| e == "branch_join") && MAYBE_MOVED.iter().any(|m| last.tip.contains(m)),
-                };
+                // `data-rv-event` lists each event name once, so a dot that
+                // moves, gets a value and moves again reads `move acquire`:
+                // with both kinds on the dot, the order says nothing.
+                let has = |es: &[&str]| last.events.iter().any(|e| es.contains(&e.as_str()));
+                if has(MOVE_EVENTS) && has(VALUE_EVENTS) {
+                    *skips.entry("a dot that both moves and gives a value").or_default() += 1;
+                    continue;
+                }
+                let moved = has(MOVE_EVENTS)
+                    || (last.events.iter().any(|e| e == "branch_join") && MAYBE_MOVED.iter().any(|m| last.tip.contains(m)));
                 if !moved {
                     continue;
                 }
@@ -837,9 +933,16 @@ fn run_probes(src: &str, probes: &[&Probe], claims: &[Claim]) -> Result<Vec<Outc
         let mut bad = HashSet::new();
         let mut elsewhere = false;
         for (code, line, msg) in errs {
-            // E0596's span is the binding (with a `mut` suggestion) when
-            // it was reported for several uses.
+            // E0596 for a binding not declared `mut` says nothing about
+            // borrows (its span is the binding when reported for several
+            // uses). For a place behind a `&` reference (`&mut p.a` with
+            // `p: &S`) the `&mut` probe can't test anything: noted.
             if code.as_deref().is_some_and(|c| IGNORED.contains(&c)) {
+                if msg.contains("behind a") {
+                    if let Some(&k) = line.and_then(|l| lines.get(&l)) {
+                        got.entry(k).or_default().insert((BEHIND_REF.to_owned(), msg));
+                    }
+                }
                 continue;
             }
             match line.and_then(|l| lines.get(&l)) {
@@ -917,14 +1020,20 @@ fn describe(d: Drawn) -> &'static str {
 pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<(&'static str, String)>, Stats) {
     let mut st = Stats { programs: 1, ..Default::default() };
     let mut out = Vec::new();
-    if src.contains("rustviz: hide") || src.contains("rustviz: skip") {
+    if has_marker(src) {
         *st.skips.entry("program: rustviz: hide/skip").or_default() += 1;
+        return (out, st);
+    }
+    if src.contains("macro_rules!") {
+        // A macro can bind a name syn never sees, so "bound once" can't
+        // be trusted.
+        *st.skips.entry("program: defines a macro").or_default() += 1;
         return (out, st);
     }
     let d = match drawing(timeline, code) {
         Ok(d) => d,
         Err(e) => {
-            out.push(("oracle-usable", format!("couldn't read the panels: {}", e)));
+            out.push(("oracle-error", format!("couldn't read the panels: {}", e)));
             return (out, st);
         }
     };
@@ -937,8 +1046,12 @@ pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<(&'static str, Strin
     let claims = claims(&pts, &d, &mut st.skips);
     match rustc_errors(src) {
         Ok(e) if e.is_empty() => {}
-        _ => {
+        Ok(_) => {
             *st.skips.entry("program: doesn't compile as an edition-2024 lib").or_default() += 1;
+            return (out, st);
+        }
+        Err(e) => {
+            out.push(("oracle-error", e));
             return (out, st);
         }
     }
@@ -946,7 +1059,7 @@ pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<(&'static str, Strin
     let live = match reachable(src, &pts, &lines) {
         Ok(r) => r,
         Err(e) => {
-            out.push(("oracle-usable", format!("probe program failed: {}", e)));
+            out.push(("oracle-error", format!("probe program failed: {}", e)));
             return (out, st);
         }
     };
@@ -981,7 +1094,7 @@ pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<(&'static str, Strin
                 }
             }
             Err(e) => {
-                out.push(("oracle-usable", format!("probe program failed: {}", e)));
+                out.push(("oracle-error", format!("probe program failed: {}", e)));
                 return (out, st);
             }
         }
@@ -1000,7 +1113,26 @@ pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<(&'static str, Strin
             match run_probes(src, &[&probes[i]], &claims) {
                 Ok(r) => res[i] = r.into_iter().next().unwrap(),
                 Err(e) => {
-                    out.push(("oracle-usable", format!("probe program failed: {}", e)));
+                    out.push(("oracle-error", format!("probe program failed: {}", e)));
+                    return (out, st);
+                }
+            }
+        }
+    }
+    // rustc also reports a use of a moved value once per move across
+    // different probes: once a probe of a variable came back moved, its
+    // probes that came back clean are compiled alone too.
+    let root = |p: &Probe| claims[p.claim].var.split('.').next().unwrap().to_owned();
+    let moved_roots: HashSet<String> = probes.iter().zip(&res)
+        .filter(|(_, r)| matches!(r, Outcome::Errors(e) if e.iter().any(|(c, _)| NO_VALUE.contains(&c.as_str()))))
+        .map(|(p, _)| root(p))
+        .collect();
+    for i in 0..probes.len() {
+        if matches!(&res[i], Outcome::Errors(e) if e.is_empty()) && moved_roots.contains(&root(&probes[i])) {
+            match run_probes(src, &[&probes[i]], &claims) {
+                Ok(r) => res[i] = r.into_iter().next().unwrap(),
+                Err(e) => {
+                    out.push(("oracle-error", format!("probe program failed: {}", e)));
                     return (out, st);
                 }
             }
@@ -1021,6 +1153,10 @@ pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<(&'static str, Strin
                 continue;
             }
         };
+        if errs.iter().any(|(c, _)| c == BEHIND_REF) {
+            untestable[p.claim] = Some("`&mut` probe of a place behind a `&` reference");
+            continue;
+        }
         tested[p.claim] = true;
         let conflict = errs.iter().find(|(c, _)| CONFLICT.contains(&c.as_str()));
         let novalue = errs.iter().find(|(c, _)| NO_VALUE.contains(&c.as_str()));
@@ -1037,14 +1173,23 @@ pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<(&'static str, Strin
                 (None, Some(e)) => Some(("oracle-borrowed", verdict(Some(e)))),
                 _ => None,
             },
-            (Drawn::Moved | Drawn::Unassigned, _) => novalue.is_none().then(|| ("oracle-moved", verdict(conflict))),
+            // Moved must be E0382 ("use of moved value"), not E0381
+            // ("used binding isn't initialized": nothing was ever there).
+            (Drawn::Moved, _) => (!errs.iter().any(|(c, _)| c == "E0382")).then(|| ("oracle-moved", verdict(novalue.or(conflict)))),
+            // "May have no value" (moved, reassigned on some paths only)
+            // is E0382 as well.
+            (Drawn::Unassigned, _) => novalue.is_none().then(|| ("oracle-moved", verdict(conflict))),
         };
         if let Some((check, v)) = wrong {
             bad.entry(p.claim).or_insert((check, v));
         }
     }
+    // A claim counts as tested only if every one of its probes gave a
+    // verdict.
     for i in 0..claims.len() {
-        if let (false, Some(why)) = (tested[i], untestable[i]) {
+        if let Some(why) = untestable[i] {
+            tested[i] = false;
+            bad.remove(&i);
             *st.skips.entry(why).or_default() += 1;
         }
     }
@@ -1108,6 +1253,9 @@ pub fn known_list_problems() -> Vec<String> {
         if !names.contains(c) {
             out.push(format!("({s}, {c}) names no check"));
         }
+        if c == "oracle-error" {
+            out.push(format!("({s}, {c}): an oracle error is fixed, not listed"));
+        }
         if !seen.insert((s, c)) {
             out.push(format!("({s}, {c}) is listed twice"));
         }
@@ -1133,6 +1281,22 @@ mod unit {
         // Not after `let a` (b starts on its line), not in the closure,
         // not after a tail (`5`, `d`).
         assert_eq!(points(src), vec![(2, false), (3, false), (5, false), (6, false), (8, true), (9, false), (12, false), (15, false)]);
+    }
+
+    #[test]
+    fn or_pattern_binds_once() {
+        let src = "fn main() {\n    let u = (1, 2);\n    if let (x, _) | (_, x) = u {\n        let _ = x;\n    }\n}\n";
+        let mut p = Points { src: src.lines().map(str::to_owned).collect(), ..Default::default() };
+        p.visit_file(&syn::parse_file(src).unwrap());
+        assert_eq!(p.bindings[0].get("x"), Some(&1));
+    }
+
+    #[test]
+    fn markers_as_the_plugin_reads_them() {
+        assert!(has_marker("fn f() {} // rustviz:hide"));
+        assert!(has_marker("// rustviz : skip — see #42"));
+        assert!(!has_marker("fn f() { println!(\"rustviz: hide\"); }"));
+        assert!(!has_marker("// rustviz: hidden"));
     }
 
     #[test]

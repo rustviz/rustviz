@@ -117,14 +117,15 @@ both in one invocation fails with LNK1104 (CI does the same).
 knows, for every point of a program, whether a variable is borrowed,
 moved or free, so it can check what each timeline draws. After every
 statement, for every variable whose state is drawn there, the test
-inserts a use and compiles: `let _ = &mut x;` must compile where `x` is
-drawn holding its value with nothing borrowing it, `let _ = &x;` must
-compile where it's drawn read-only and fail where it's drawn mutably
-borrowed, moved or not assigned yet (E0502, E0382, ...). The check
-skips (and counts) what it can't probe soundly: points inside closures
-or dead code, shadowed names, places like `*r` or `v[0]`, rows where the
-plugin added extra rows. It compiles a few probe programs per snippet,
-so it's opt-in:
+inserts a use and compiles: where `x` is drawn holding its value with
+nothing borrowing it, `let _ = &mut x;` must not fail with a borrow
+conflict or a move error (E0596 for a binding not declared `mut` is
+ignored); `let _ = &x;` must compile where it's drawn read-only and fail
+where it's drawn mutably borrowed (E0502), moved (E0382) or not assigned
+yet (E0381). It skips (and counts) what it can't probe soundly: dead
+code, shadowed names, places like `*r` or `v[0]`, rows where the plugin
+added extra rows; points inside closures aren't collected at all. It
+compiles a few probe programs per snippet, so it's opt-in:
 
 ```sh
 RV_ORACLE=1 cargo test -p rustviz-lib --test corpus --locked corpus_oracle_holds -- --nocapture
@@ -132,7 +133,7 @@ RV_ORACLE=1 cargo test -p rustviz-lib --test corpus --locked corpus_oracle_holds
 
 It runs on every fixture, Book snippet and known-bug repro (narrow it
 with `RV_INVARIANTS_ONLY=book/,known_bugs/`, add a directory with
-`RV_INVARIANTS_EXTRA=<dir>`), caches each compile under
+`RV_INVARIANTS_EXTRA=<dir>`; `RV_ORACLE_VERBOSE=1` prints every violation, listed or not), caches each compile under
 `target/tmp/rv-oracle-cache` (or `$RV_ORACLE_CACHE`), and fails on a
 violation that isn't in `KNOWN_ORACLE_FAILURES`
 (`rustviz-lib/tests/common/oracle.rs`, one issue per entry) or on a

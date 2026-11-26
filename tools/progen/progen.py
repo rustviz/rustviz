@@ -216,6 +216,8 @@ def run_checks(paths, exe, plugin_env, workdir):
         p = subprocess.run([exe, test, "--exact", "--nocapture", "--test-threads=1"],
                            env=dict(env, RV_ORACLE="1"), capture_output=True, text=True, cwd=REPO)
         out = p.stdout + p.stderr
+        if "running 0 tests" in out:
+            raise RuntimeError("%s isn't in %s (a stale PROGEN_TEST_BIN?)" % (test, exe))
         got = parse_check_output(out, lambda name: copies.get(name, name))
         if p.returncode != 0 and not got and "violations differ" not in out and "Snippets the plugin" not in out:
             raise RuntimeError("check run failed:\n" + out[-3000:])
