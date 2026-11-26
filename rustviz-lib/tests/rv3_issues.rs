@@ -289,6 +289,8 @@ fn cases() -> Vec<(String, String, String)> {
 /// FNV-1a 64 of what the oracle block is derived from (the program, the
 /// extra places, the toolchain): stable across Rust versions.
 fn source_hash(src: &str, places: &[String], toolchain: &str) -> String {
+    // Rustc treats CRLF as LF, so Windows checkouts share the same hash.
+    let src = src.replace("\r\n", "\n");
     let mut h: u64 = 0xcbf29ce484222325;
     for b in src.bytes().chain([0]).chain(places.join(",").into_bytes()).chain([0]).chain(toolchain.bytes()) {
         h ^= b as u64;
@@ -505,6 +507,29 @@ fn rv3_issue_cases_well_formed() {
     }
     assert!(bad.is_empty(), "malformed RV3 issue cases:\n{bad}");
     eprintln!("rv3_issue_cases_well_formed: {} cases", all.len());
+}
+
+#[test]
+fn rv3_issue_case_freshness_accepts_crlf() {
+    let name = "1675_repoint_in_arm";
+    let dir = cases_dir();
+    let crlf = |file: &str| {
+        std::fs::read_to_string(dir.join(file))
+            .unwrap()
+            .replace("\r\n", "\n")
+            .replace('\n', "\r\n")
+    };
+    let src = crlf("1675_repoint_in_arm.rs");
+    let text = crlf("1675_repoint_in_arm.expect.toml");
+    let fresh = problems(name, &src, &text);
+    assert!(fresh.is_empty(), "CRLF checkout rejected: {fresh:?}");
+
+    let edited = src.replace("let mut c = &x;", "let mut c = &y;");
+    let stale = problems(name, &edited, &text);
+    assert!(
+        stale.iter().any(|p| p.starts_with("[oracle] is stale")),
+        "edited program accepted: {stale:?}"
+    );
 }
 
 // ─── Facts (adapter) ────────────────────────────────────────────────
