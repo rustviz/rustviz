@@ -45,6 +45,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 /// the ones in those directories. One entry covers every violation of
 /// that invariant in that snippet.
 pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
+    // A guard whose call stores a borrow and turns out false: the later
+    // arm's legs start where the columns have no dot.
+    ("guard_stores_borrow_1769", "line-starts-nowhere", 1786),
     // Geometric (`geometry.rs`), from here on.
     // Tuple column goes on after its fields were moved out.
     ("edition2024/if_let_chain_irrefutable_move", "line-ends-nowhere", 1157),
@@ -409,7 +412,10 @@ fn says_maybe_moved(d: &Dot) -> bool {
 /// line reaches. (A Box whose contents were moved out says "Its
 /// contents were moved out earlier";
 /// `contents_moved` covers it.)
-const PARTIAL_DROP_PHRASES: &[&str] = &["drop flag", "moved out earlier, so only", "Whatever it still holds (if anything)"];
+// (A conditional drop says "drop flag" or "... here only if ...": not the
+// Rc note's "the shared value is dropped only if that was its last Rc",
+// which is about the pointee, not whether the handle is dropped.)
+const PARTIAL_DROP_PHRASES: &[&str] = &["drop flag", "here only if", "moved out earlier, so only", "Whatever it still holds (if anything)"];
 /// A move drawn on the column's own line that says it happens on some
 /// paths only (`break f` in a loop whose value is returned, #1171).
 const CONDITIONAL_MOVE_PHRASES: &[&str] = &["if the loop ended with"];

@@ -1188,8 +1188,8 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "Rc::clone reads from a",
             "Move from Rc::new to a",
-            "a goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
-            "b goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
+            "a goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is dropped only if that was its last Rc).",
+            "b goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is dropped only if that was its last Rc).",
             "Rc::clone makes another Rc to the same value (nothing is copied), now owned by b",
             "b is another Rc to the same value (Rc::clone increases the reference count; nothing is copied)",
         ],
@@ -1201,7 +1201,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "clone reads from a (implicitly borrowed)",
             "Move from Rc::new to a",
-            "b goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
+            "b goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is dropped only if that was its last Rc).",
             "clone makes another Rc to the same value (nothing is copied), now owned by b",
             "b is another Rc to the same value (Rc::clone increases the reference count; nothing is copied)",
         ],
@@ -1230,8 +1230,8 @@ const BOOK: &[Snippet] = &[
             "borrow_mut borrows value immutably (a shared borrow); exclusive access to its contents is checked at runtime (a second borrow_mut while this one is live would panic)",
             "Rc::clone makes another Rc to the same value (nothing is copied), now owned by a",
             "println! reads from a through an implicit reference, so a isn't moved",
-            "a goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
-            "value goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
+            "a goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is dropped only if that was its last Rc).",
+            "value goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is dropped only if that was its last Rc).",
         ],
         must_not_contain: &[
             "borrow_mut reads from value",

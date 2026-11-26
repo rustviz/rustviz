@@ -865,7 +865,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from Rc::new to r",
             "Rc::clone makes another Rc to the same value (nothing is copied), now owned by r2",
             "r2 is another Rc to the same value (Rc::clone increases the reference count; nothing is copied)",
-            "r2 goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
+            "r2 goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is dropped only if that was its last Rc).",
             "Rc::clone reads from r",
         ],
         must_not_contain: &[
@@ -1719,8 +1719,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Rc::clone borrows value immutably (a shared borrow); value has interior mutability, so its contents can change even through a shared borrow", // #203
             "Rc::clone makes another Rc to the same value (nothing is copied), now owned by a",
             "borrow_mut borrows value immutably (a shared borrow); exclusive access to its contents is checked at runtime (a second borrow_mut while this one is live would panic)", // #203
-            "value goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
-            "a goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
+            "value goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is dropped only if that was its last Rc).",
+            "a goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is dropped only if that was its last Rc).",
         ],
         must_not_contain: &[
             "value's resource is moved",
@@ -2143,7 +2143,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Partial copy from opt to n",
             // #248: the later arms may run after the guard lent s and
             // turned out false.
-            "s may have been immutably borrowed: when the guard on line 6 lends s to check and then turns out false, matching goes on with the later arms after that borrow has ended",
+            "s may have been immutably borrowed: when the guard on line 6 lends s to check and then turns out false, matching goes on with the next pattern",
         ],
         must_not_contain: &[
             "s's resource is moved",
@@ -2197,8 +2197,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s goes out of scope. Its resource is dropped.",
             // #248: the `_` arm may run after the guard lent both and
             // turned out false.
-            "s may have been immutably borrowed: when the guard on line 7 lends s to check and then turns out false, matching goes on with the later arms after that borrow has ended",
-            "words may have been immutably borrowed: when the guard on line 7 lends words to last and w and then turns out false, w goes out of scope, so matching goes on with the later arms after those borrows have ended",
+            "s may have been immutably borrowed: when the guard on line 7 lends s to check and then turns out false, matching goes on with the next pattern",
+            "words may have been immutably borrowed: when the guard on line 7 lends words to last and w and then turns out false, w goes out of scope, and matching goes on with the next pattern",
         ],
         must_not_contain: &[
             "words's resource is moved",
@@ -5241,14 +5241,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "(temporary) acquires ownership of a resource. This temporary value is borrowed by a let, so it lives until the end of the enclosing block, not just to the end of the statement",
             "Immutable borrow from (temporary) to r",
             "Return immutably borrowed resource from r to (temporary)",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
             "Move from Vec::new to (temporary 2)",
             "Mutable borrow from (temporary 2) to m",
-            "(temporary 2) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+            "(temporary 2) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
             "Immutable borrow from (temporary 3) to s",
-            "(temporary 3) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+            "(temporary 3) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
             "Immutable borrow from (temporary 5) to inner",
-            "(temporary 5) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+            "(temporary 5) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
         ],
         must_not_contain: &[
             "Return immutably borrowed resource from r to String::from",
@@ -5517,16 +5517,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from String::from to (temporary 9)",
             "Move from make to (temporary 10)",
             "Move from make to (temporary 11)",
-            "A temporary holds the value that make returns. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
-            "A temporary holds the value that String::from returns. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
+            "A temporary holds the value that make returns. Rust drops it as soon as its statement (or enclosing expression) is done",
+            "A temporary holds the value that String::from returns. Rust drops it as soon as its statement (or enclosing expression) is done",
             // `Some(make())`: the temporary takes what the call returned
             // (#783), not "the value that Some returns".
-            "This temporary takes the value that String::from returns, which is moved into it. Nothing binds the temporary to a variable or moves it on, so Rust drops it, and what it holds, as soon as its statement (or enclosing expression) is done",
-            "This temporary takes the value that make returns, which is moved into it. Nothing binds the temporary to a variable or moves it on, so Rust drops it, and what it holds, as soon as its statement (or enclosing expression) is done",
-            "This temporary String is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary String is dropped at the end of the block's final expression: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary String is dropped at the end of the condition: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary Option<String> is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary takes the value that String::from returns, which is moved into it. Rust drops the temporary as soon as its statement (or enclosing expression) is done",
+            "This temporary takes the value that make returns, which is moved into it. Rust drops the temporary as soon as its statement (or enclosing expression) is done",
+            "This temporary String is dropped at the end of this statement",
+            "This temporary String is dropped at the end of the block's final expression",
+            "This temporary String is dropped at the end of the condition",
+            "This temporary Option<String> is dropped at the end of this statement",
         ],
         must_not_contain: &[
             "unbound temporary",
@@ -5873,8 +5873,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // match (#469): the `return` in the first branch drops it
             // (#410), and the `else` path drops it before the `else` block.
             // Its column forks at the `if let`, one drop per path (#1360).
-            "This temporary IntoIter<String> is dropped here, where `return` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary IntoIter<String> is dropped before the `else` block of this `if let` runs: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary IntoIter<String> is dropped here, where `return` leaves early",
+            "This temporary IntoIter<String> is dropped before the `else` block of this `if let` runs",
             "(temporary) is live in a conditional expression ",
         ],
         must_not_contain: &[
@@ -5890,7 +5890,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "is left early, while this temporary is still alive",
             // One straight column with both drops on it, the else path's
             // after the `return`'s (#1360).
-            "This temporary IntoIter<String> is dropped before the `else` block of this `if let` runs, or when the block it matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary IntoIter<String> is dropped before the `else` block of this `if let` runs, or when the block it matched ends",
         ],
     },
     TooltipExpect {
@@ -7547,13 +7547,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "rc_handles",
         must_contain: &[
-            "a goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
-            "b goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
-            "c goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
-            "s goes out of scope. Its resource is dropped (for an Arc, that lowers the reference count; the shared value is freed only when its last Arc is dropped).",
-            "t goes out of scope. Its resource is dropped (for an Arc, that lowers the reference count; the shared value is freed only when its last Arc is dropped).",
-            "w goes out of scope. Its resource is dropped (a Weak doesn't keep the value alive; dropping it frees only the Weak itself).",
-            "t acquires ownership of a new resource; its previous resource is dropped (for an Arc, that lowers the reference count; the shared value is freed only when its last Arc is dropped)",
+            "a goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is dropped only if that was its last Rc).",
+            "b goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is dropped only if that was its last Rc).",
+            "c goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is dropped only if that was its last Rc).",
+            "s goes out of scope. Its resource is dropped (for an Arc, that lowers the reference count; the shared value is dropped only if that was its last Arc).",
+            "t goes out of scope. Its resource is dropped (for an Arc, that lowers the reference count; the shared value is dropped only if that was its last Arc).",
+            "w goes out of scope. Its resource is dropped (a Weak doesn't keep the value alive).",
+            "t acquires ownership of a new resource; its previous resource is dropped (for an Arc, that lowers the reference count; the shared value is dropped only if that was its last Arc)",
             "b is another Rc to the same value (Rc::clone increases the reference count; nothing is copied)",
             "c is another Rc to the same value (Rc::clone increases the reference count; nothing is copied)",
             "t is another Arc to the same value (Arc::clone increases the reference count; nothing is copied)",
@@ -7584,9 +7584,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "rc_branch",
         must_contain: &[
-            "a was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped) when a goes out of scope.",
-            "a goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped) here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "r goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
+            "a was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped (for an Rc, that lowers the reference count; the shared value is dropped only if that was its last Rc) when a goes out of scope.",
+            "a goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is dropped only if that was its last Rc) here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "r goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is dropped only if that was its last Rc).",
         ],
         must_not_contain: &[
             "its resource is dropped when a goes out of scope.",
@@ -7600,12 +7600,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `Maker::clone` and `String::clone` aren't `Rc::clone`, even
         // though a method named `clone` returns an `Rc` in one of them.
         must_contain: &[
-            "r goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
+            "r goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is dropped only if that was its last Rc).",
             "s goes out of scope. Its resource is dropped.",
             "t goes out of scope. Its resource is dropped.",
             "Move from clone to r",
             "Move from clone to t",
-            "a's resource is moved into drop, which drops it (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped)",
+            "a's resource is moved into drop, which drops it (for an Rc, that lowers the reference count; the shared value is dropped only if that was its last Rc)",
         ],
         must_not_contain: &[
             // #873: a constructor is not an actor.
@@ -7621,11 +7621,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // a struct whose only droppable fields are Rcs says so; a struct
         // that also owns a String keeps main's sentence.
         must_contain: &[
-            "p.shared goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
-            "m.shared goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is freed only when its last Rc is dropped).",
-            "c.hits goes out of scope. Its resource is dropped (for an Arc, that lowers the reference count; the shared value is freed only when its last Arc is dropped).",
-            "p goes out of scope. Its resource is dropped (its Rc fields only lower their reference counts).",
-            "c goes out of scope. Its resource is dropped (its Arc fields only lower their reference counts).",
+            "p.shared goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is dropped only if that was its last Rc).",
+            "m.shared goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is dropped only if that was its last Rc).",
+            "c.hits goes out of scope. Its resource is dropped (for an Arc, that lowers the reference count; the shared value is dropped only if that was its last Arc).",
+            "p goes out of scope. Its resource is dropped (dropping an Rc lowers its reference count, and drops the shared value only if it was the last Rc).",
+            "c goes out of scope. Its resource is dropped (dropping an Arc lowers its reference count, and drops the shared value only if it was the last Arc).",
             "m goes out of scope. Its resource is dropped.",
             "m.name goes out of scope. Its resource is dropped.",
             "p.shared is another Rc to the same value (Rc::clone increases the reference count; nothing is copied)",
@@ -7659,7 +7659,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "w3 is another Weak pointing to the same value (Weak::clone increases the weak count; nothing is copied)",
             "clone makes another Weak pointing to the same value (nothing is copied), now owned by w2",
             "Weak::clone makes another Weak pointing to the same value (nothing is copied), now owned by w3",
-            "w2 goes out of scope. Its resource is dropped (a Weak doesn't keep the value alive; dropping it frees only the Weak itself).",
+            "w2 goes out of scope. Its resource is dropped (a Weak doesn't keep the value alive).",
         ],
         must_not_contain: &[
             "Move from clone to w2",
@@ -7677,14 +7677,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // struct with its own Drop impl also own other data, so they get no
         // Rc sentence (the Vec and HashMap say what they hold instead, #542).
         must_contain: &[
-            "o goes out of scope. Its resource is dropped (the Rc inside only lowers its reference count).",
-            "b goes out of scope. Its resource is dropped (the Rc inside only lowers its reference count).",
-            "c goes out of scope. Its resource is dropped (the Rc inside only lowers its reference count).",
-            "ao goes out of scope. Its resource is dropped (the Arc inside only lowers its reference count).",
-            "wo goes out of scope. Its resource is dropped (the Weak inside doesn't keep its value alive).",
-            "v goes out of scope. Its resource is dropped (each Rc in it only lowers its reference count; its own buffer is freed).",
-            "h goes out of scope. Its resource is dropped (each Rc in it only lowers its reference count; its own buffer is freed).",
-            "d's resource is moved into drop, which drops it (the Rc inside only lowers its reference count)",
+            "o goes out of scope. Its resource is dropped (dropping an Rc lowers its reference count, and drops the shared value only if it was the last Rc).",
+            "b goes out of scope. Its resource is dropped (dropping an Rc lowers its reference count, and drops the shared value only if it was the last Rc).",
+            "c goes out of scope. Its resource is dropped (dropping an Rc lowers its reference count, and drops the shared value only if it was the last Rc).",
+            "ao goes out of scope. Its resource is dropped (dropping an Arc lowers its reference count, and drops the shared value only if it was the last Arc).",
+            "wo goes out of scope. Its resource is dropped (a Weak doesn't keep its value alive).",
+            "v goes out of scope. Its resource is dropped (dropping an Rc lowers its reference count, and drops the shared value only if it was the last Rc; the collection's own buffer, if it has one, is freed).",
+            "h goes out of scope. Its resource is dropped (dropping an Rc lowers its reference count, and drops the shared value only if it was the last Rc; the collection's own buffer, if it has one, is freed).",
+            "d's resource is moved into drop, which drops it (dropping an Rc lowers its reference count, and drops the shared value only if it was the last Rc)",
             "mixed goes out of scope. Its resource is dropped (including every (Rc<i32>, String) it holds).",
             "keyed goes out of scope. Its resource is dropped (including every key and value it holds).",
             "n goes out of scope. Its resource is dropped.",
@@ -7699,9 +7699,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "h goes out of scope. Its resource is dropped.",
             "d's resource is moved into drop, which drops it.",
             "mixed goes out of scope. Its resource is dropped.",
-            "mixed goes out of scope. Its resource is dropped (the Rc inside only lowers its reference count).",
+            "mixed goes out of scope. Its resource is dropped (dropping an Rc lowers its reference count, and drops the shared value only if it was the last Rc).",
             "keyed goes out of scope. Its resource is dropped.",
-            "keyed goes out of scope. Its resource is dropped (the Rc inside only lowers its reference count).",
+            "keyed goes out of scope. Its resource is dropped (dropping an Rc lowers its reference count, and drops the shared value only if it was the last Rc).",
             "n goes out of scope. Its resource is dropped (",
         ],
     },
@@ -7710,12 +7710,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // The moved-on-some-paths wording (drop flag) and `drop(x)` carry
         // the same parenthetical.
         must_contain: &[
-            "o goes out of scope. Its resource is dropped (the Rc inside only lowers its reference count) here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "v goes out of scope. Its resource is dropped (each Rc in it only lowers its reference count; its own buffer is freed) here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "o was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped (the Rc inside only lowers its reference count) when o goes out of scope.",
-            "v was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped (each Rc in it only lowers its reference count; its own buffer is freed) when v goes out of scope.",
-            "o's resource is moved into drop, which drops it (the Rc inside only lowers its reference count)",
-            "v's resource is moved into drop, which drops it (each Rc in it only lowers its reference count; its own buffer is freed)",
+            "o goes out of scope. Its resource is dropped (dropping an Rc lowers its reference count, and drops the shared value only if it was the last Rc) here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "v goes out of scope. Its resource is dropped (dropping an Rc lowers its reference count, and drops the shared value only if it was the last Rc; the collection's own buffer, if it has one, is freed) here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "o was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped (dropping an Rc lowers its reference count, and drops the shared value only if it was the last Rc) when o goes out of scope.",
+            "v was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is dropped (dropping an Rc lowers its reference count, and drops the shared value only if it was the last Rc; the collection's own buffer, if it has one, is freed) when v goes out of scope.",
+            "o's resource is moved into drop, which drops it (dropping an Rc lowers its reference count, and drops the shared value only if it was the last Rc)",
+            "v's resource is moved into drop, which drops it (dropping an Rc lowers its reference count, and drops the shared value only if it was the last Rc; the collection's own buffer, if it has one, is freed)",
         ],
         must_not_contain: &[
             "o goes out of scope. Its resource is dropped here only if",
@@ -7730,7 +7730,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "rc_inside_tuple",
         // A tuple parameter whose only droppable part is an Rc.
         must_contain: &[
-            "t goes out of scope. Its resource is dropped (the Rc inside only lowers its reference count).",
+            "t goes out of scope. Its resource is dropped (dropping an Rc lowers its reference count, and drops the shared value only if it was the last Rc).",
         ],
         must_not_contain: &[
             "t goes out of scope. Its resource is dropped.",
@@ -8286,15 +8286,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "exit_continue_in_match",
         must_contain: &[
             "guess goes out of scope. Its resource is dropped.",
-            "This temporary Result<u32, String> is dropped here, where `continue` leaves early: \
-             nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Result<u32, String> is dropped here, where `continue` leaves early",
         ],
         // The Result is an unbound temporary, dropped at the `continue`
         // or at the end of its statement; no `let` borrowed it, and it
         // isn't dropped again at the end of the loop body.
         must_not_contain: &[
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it \
-             was kept alive past the end of its statement. Its resource is dropped.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
         ],
     },
     // #410: `return s.len()` / `return format!("{}!", u)` drop `s` / `u`.
@@ -8337,16 +8335,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "exit_temporary_drops",
         must_contain: &[
-            "This temporary Result<u32, String> is dropped here, where `return` leaves early: \
-             nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary Result<u32, String> is dropped at the end of this statement: \
-             nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary String is dropped at the end of this statement: nothing bound it \
-             to a variable or moved it on. Its resource is dropped",
+            "This temporary Result<u32, String> is dropped here, where `return` leaves early",
+            "This temporary Result<u32, String> is dropped at the end of this statement",
+            "This temporary String is dropped at the end of this statement",
         ],
         must_not_contain: &[
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it \
-             was kept alive past the end of its statement. Its resource is dropped.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
         ],
     },
     TooltipExpect {
@@ -8646,13 +8640,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // and its tooltips say which. It holds what was moved into it,
         // so its drop is "Its resource is dropped", never "No resource".
         must_contain: &[
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
-            "(temporary 2) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
-            "(temporary 6) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
+            "(temporary 2) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
+            "(temporary 6) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
             "The temporary that the literal on the right of this let builds takes the value of s. A `ref` binding borrows from it, so it lives until the end of the enclosing block, not just to the end of the statement",
             "The temporary that the literal on the right of this let builds takes the value of t. A `ref` binding borrows from it, so it lives until the end of the enclosing block, not just to the end of the statement",
             "The temporary that the literal on the right of this let builds takes the value of n. No `ref` binding borrows from it, so Rust drops it at the end of this statement",
-            "This temporary (String, String), built by the literal on the right of the let, is dropped at the end of this statement. What the pattern didn't bind by value stays in it and is dropped with it. Its resource is dropped",
+            "This temporary (String, String), built by the literal on the right of the let, is dropped at the end of this statement. What the pattern didn't bind by value stays in it and is dropped with it",
             "Move from s to (temporary)",
             "Move from t to (temporary)",
             "Move from n to (temporary 4)",
@@ -8716,7 +8710,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "The temporary that the literal on the right of this let builds takes the value of b. No `ref` binding borrows from it, so Rust drops it at the end of this statement",
             "Move from c to (temporary 2)",
             "Move from d to (temporary 2)",
-            "(temporary 2) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+            "(temporary 2) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
             "j's value is copied",
         ],
         must_not_contain: &[
@@ -8852,9 +8846,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from (temporary) to t",
             "Mutable borrow from (temporary 2) to m",
             "Immutable borrow from (temporary 3) to name",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
-            "(temporary 2) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
-            "(temporary 3) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
+            "(temporary 2) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
+            "(temporary 3) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
         ],
         must_not_contain: &[
             "t's immutable borrow ends (what it borrows from isn't shown)",
@@ -8873,9 +8867,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Immutable borrow from (temporary) to a",
             "Immutable borrow from (temporary 3) to k",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
-            "(temporary 3) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
-            "This temporary (String, String), built by the literal on the right of the let, is dropped at the end of this statement. What the pattern didn't bind by value stays in it and is dropped with it. Its resource is dropped",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
+            "(temporary 3) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
+            "This temporary (String, String), built by the literal on the right of the let, is dropped at the end of this statement. What the pattern didn't bind by value stays in it and is dropped with it",
             // #1376: what the calls return is drawn moving into it.
             "Move from make to (temporary)",
             "Move from make to (temporary 2)",
@@ -8897,10 +8891,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the block still says so (the tooltips are told apart by
         // position; the second fixture has no such path).
         must_contain: &[
-            "(temporary) goes out of scope here, where `return` leaves early: a let borrowed it, so it \
-             lived past its statement. Its resource is dropped.",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept \
-             alive past the end of its statement. Its resource is dropped.",
+            "(temporary) goes out of scope here, where `return` leaves early: a let borrowed it, so it lived past its statement. It is dropped here.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
         ],
         must_not_contain: &[],
     },
@@ -8909,8 +8901,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Every path out of `f` is a `return`: the temporary is never
         // dropped at the end of the block.
         must_contain: &[
-            "(temporary) goes out of scope here, where `return` leaves early: a let borrowed it, so it \
-             lived past its statement. Its resource is dropped.",
+            "(temporary) goes out of scope here, where `return` leaves early: a let borrowed it, so it lived past its statement. It is dropped here.",
         ],
         must_not_contain: &["goes out of scope at the end of the block"],
     },
@@ -8921,12 +8912,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // path reaches the end of the body (that drop keeps "at the end
         // of the block", so it can't be forbidden by text here).
         must_contain: &[
-            "(temporary) goes out of scope here, where `break` leaves early: a let borrowed it, so it \
-             lived past its statement. Its resource is dropped.",
-            "(temporary) goes out of scope here, where `continue` leaves early: a let borrowed it, so it \
-             lived past its statement. Its resource is dropped.",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept \
-             alive past the end of its statement. Its resource is dropped.",
+            "(temporary) goes out of scope here, where `break` leaves early: a let borrowed it, so it lived past its statement. It is dropped here.",
+            "(temporary) goes out of scope here, where `continue` leaves early: a let borrowed it, so it lived past its statement. It is dropped here.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
         ],
         must_not_contain: &[],
     },
@@ -8935,10 +8923,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Every path out of `g` panics or returns: the temporary is
         // dropped as the panic unwinds, or at the `return`.
         must_contain: &[
-            "(temporary) goes out of scope here, as the panic unwinds: a let borrowed it, so it lived \
-             past its statement. Its resource is dropped.",
-            "(temporary) goes out of scope here, where `return` leaves early: a let borrowed it, so it \
-             lived past its statement. Its resource is dropped.",
+            "(temporary) goes out of scope here, as the panic unwinds: a let borrowed it, so it lived past its statement. It is dropped here.",
+            "(temporary) goes out of scope here, where `return` leaves early: a let borrowed it, so it lived past its statement. It is dropped here.",
         ],
         must_not_contain: &["goes out of scope at the end of the block"],
     },
@@ -10126,9 +10112,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from label to (temporary 2)",
             "Move from make to (temporary 3)",
             "Move from make to (temporary 4)",
-            "This temporary Option<String> is dropped before the `else` block of this `if` runs, or when the block its let chain matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary Option<String> is dropped at the end of each iteration of this `while let` loop: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary String is dropped at the end of this `&&` / `||` operand: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Option<String> is dropped before the `else` block of this `if` runs, or when the block its let chain matched ends",
+            "This temporary Option<String> is dropped at the end of each iteration of this `while let` loop",
+            "This temporary String is dropped at the end of this `&&` / `||` operand",
         ],
         must_not_contain: &[
             "This temporary Option<String> is dropped at the end of this `&&` / `||` operand",
@@ -10150,16 +10136,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from format! to (temporary 4)",
             "Move from (..) to (temporary 5)",
             "Move from [..] to (temporary 6)",
-            "A temporary holds the value that the vec! macro produces. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
-            "A temporary holds the value that the format! macro produces. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
-            "A temporary holds the value that the literal P { .. } builds. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
-            "A temporary holds the value that the literal (..) builds. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
-            "A temporary holds the value that the literal [..] builds. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
-            "This temporary Vec<String> is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary P is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary String is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary (String, i32) is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary [String; 2] is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "A temporary holds the value that the vec! macro produces. Rust drops it as soon as its statement (or enclosing expression) is done",
+            "A temporary holds the value that the format! macro produces. Rust drops it as soon as its statement (or enclosing expression) is done",
+            "A temporary holds the value that the literal P { .. } builds. Rust drops it as soon as its statement (or enclosing expression) is done",
+            "A temporary holds the value that the literal (..) builds. Rust drops it as soon as its statement (or enclosing expression) is done",
+            "A temporary holds the value that the literal [..] builds. Rust drops it as soon as its statement (or enclosing expression) is done",
+            "This temporary Vec<String> is dropped at the end of this statement",
+            "This temporary P is dropped at the end of this statement",
+            "This temporary String is dropped at the end of this statement",
+            "This temporary (String, i32) is dropped at the end of this statement",
+            "This temporary [String; 2] is dropped at the end of this statement",
         ],
         must_not_contain: &[
             "the value that vec! returns",
@@ -10185,12 +10171,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from into_iter to (temporary 4)",
             "Move from into_iter to (temporary 5)",
             "Move from make to (temporary 6)",
-            "This temporary Option<String> is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), or when the block it matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary Option<String> is dropped before the `else` block of this `if let` runs, or when the block it matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary Option<String> is dropped at the end of each iteration of this `while let` loop: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary IntoIter<String> is dropped when the `for` loop ends: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary String is dropped when the `for` loop ends: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "A temporary holds the value that into_iter returns. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
+            "This temporary Option<String> is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), or when the block it matched ends",
+            "This temporary Option<String> is dropped before the `else` block of this `if let` runs, or when the block it matched ends",
+            "This temporary Option<String> is dropped at the end of each iteration of this `while let` loop",
+            "This temporary IntoIter<String> is dropped when the `for` loop ends",
+            "This temporary String is dropped when the `for` loop ends",
+            "A temporary holds the value that into_iter returns. Rust drops it as soon as its statement (or enclosing expression) is done",
         ],
         must_not_contain: &[
             "Move from Some to",
@@ -10208,23 +10194,23 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // is dropped there on its column, stated once with the exit's
         // wording (#410), and again where it ends on the other paths.
         must_contain: &[
-            "This temporary IntoIter<String> is dropped here, where `return` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary IntoIter<String> is dropped here, where `break` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary IntoIter<String> is dropped at the end of each iteration of this `while let` loop: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary IntoIter<String> is dropped when the `for` loop ends: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary Vec<String> is dropped here, where `return` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary IntoIter<String> is dropped here, where `return` leaves early",
+            "This temporary IntoIter<String> is dropped here, where `break` leaves early",
+            "This temporary IntoIter<String> is dropped at the end of each iteration of this `while let` loop",
+            "This temporary IntoIter<String> is dropped when the `for` loop ends",
+            "This temporary Vec<String> is dropped here, where `return` leaves early",
             // The `if let` scrutinee's column forks at the `if let` (#1360):
             // one drop per path that reaches the `else` line.
-            "This temporary Vec<String> is dropped before the `else` block of this `if let` runs: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary Vec<String> is dropped when the block of this `if let` ends (its pattern matched): nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary (String, usize) is dropped here, where `return` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Vec<String> is dropped before the `else` block of this `if let` runs",
+            "This temporary Vec<String> is dropped when the block of this `if let` ends (its pattern matched)",
+            "This temporary (String, usize) is dropped here, where `return` leaves early",
         ],
         must_not_contain: &[
             // #469's own wording for the same drop, before #410 merged.
             "is left early, while this temporary is still alive",
             // #1360: one straight column, the `return`'s drop and then this
             // one on it.
-            "This temporary Vec<String> is dropped before the `else` block of this `if let` runs, or when the block it matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Vec<String> is dropped before the `else` block of this `if let` runs, or when the block it matched ends",
             "(temporary) goes out of scope at the end of the block: a let borrowed it",
             "(temporary 2) goes out of scope at the end of the block: a let borrowed it",
         ],
@@ -10486,11 +10472,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "a's resource is moved into a temporary that is dropped at the end of this statement",
             "s goes out of scope. No resource is dropped.",
             "u goes out of scope. No resource is dropped.",
-            "This temporary takes the value of s, which is moved into it. Nothing binds the temporary to a variable or moves it on, so Rust drops it, and what it holds, as soon as its statement (or enclosing expression) is done",
-            "This temporary Vec<String> is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary P is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary (String, i32) is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary [String; 2] is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary takes the value of s, which is moved into it. Rust drops the temporary as soon as its statement (or enclosing expression) is done",
+            "This temporary Vec<String> is dropped at the end of this statement",
+            "This temporary P is dropped at the end of this statement",
+            "This temporary (String, i32) is dropped at the end of this statement",
+            "This temporary [String; 2] is dropped at the end of this statement",
         ],
         must_not_contain: &[
             "=s goes out of scope. Its resource is dropped.",
@@ -10524,8 +10510,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "v's resource is moved into the `for` loop's iterator",
             "n's resource is moved into the `for` loop's iterator",
-            "This temporary IntoIter<String> is dropped when the `for` loop ends: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary IntoIter<i32> is dropped when the `for` loop ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary IntoIter<String> is dropped when the `for` loop ends",
+            "This temporary IntoIter<i32> is dropped when the `for` loop ends",
             "it3's resource is moved into the `for` loop, which uses it as its iterator",
             "it3's former resource, the `for` loop's iterator, is dropped when the `for` loop ends, along with whatever it still owns (such as elements it hasn't handed out yet)",
             "words's resource is moved into the `for` loop, which uses it as its iterator",
@@ -10655,8 +10641,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "ids's resource is moved into the `for` loop's iterator",
             "it's resource is moved into the `for` loop, which uses it as its iterator",
             "it's former resource, the `for` loop's iterator, is dropped when the `for` loop ends, along with whatever it still owns (such as elements it hasn't handed out yet)",
-            "This temporary IntoIter<(i32, String)> is dropped when the `for` loop ends: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary IntoIter<(i32, i32)> is dropped when the `for` loop ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary IntoIter<(i32, String)> is dropped when the `for` loop ends",
+            "This temporary IntoIter<(i32, i32)> is dropped when the `for` loop ends",
             "pairs goes out of scope. No resource is dropped.",
             "ids goes out of scope. No resource is dropped.",
         ],
@@ -10696,13 +10682,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // branch that leaves (a `break` in an `if` without `else` isn't
         // drawn, like a `return`).
         must_contain: &[
-            "This temporary IntoIter<String> is dropped here, where `break` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary IntoIter<String> is dropped here, where `break` leaves early",
             "it's former resource, the `for` loop's iterator, is dropped here: this `break` leaves the `for` loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
             // #596: `break 'outer` leaves the target loop too, so its own
             // iterator is dropped there as well: the `(temporary)` of
             // `for row in rows` (still holding `vec!["b"]`), and the
             // variable `outer_it` of the third function.
-            "This temporary IntoIter<Vec<String>> is dropped here, where `break` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary IntoIter<Vec<String>> is dropped here, where `break` leaves early",
             "outer_it's former resource, the `for` loop's iterator, is dropped here: this `break` leaves the `for` loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
         ],
         must_not_contain: &[
@@ -11628,8 +11614,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "edition2024/if_let_chain_else_borrows",
         must_contain: &[
-            "x may have been immutably borrowed: when the condition lends x to a and then turns out false, a goes out of scope, so the else branch runs after that borrow has ended",
-            "y may have been mutably borrowed: when the condition lends y to take and then turns out false, the else branch runs after that borrow has ended. By then, y may have been changed by take.",
+            "x may have been immutably borrowed: when the condition lends x to a and then turns out false, a goes out of scope, and the else branch runs",
+            "y may have been mutably borrowed: when the condition lends y to take and then turns out false, the else branch runs. By then, y may have been changed by take.",
         ],
         must_not_contain: &[
             // Borrowed, not moved or assigned.
@@ -11641,8 +11627,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "edition2024/if_let_chain_else_reads",
         must_contain: &[
-            "s may have been immutably borrowed: when the condition lends s to len and contains and then turns out false, the else branch runs after those borrows have ended",
-            "the resource r points to may have been immutably borrowed: when the condition lends it to len and then turns out false, the else branch runs after that borrow has ended",
+            "s may have been immutably borrowed: when the condition lends s to len and contains and then turns out false, the else branch runs",
+            "the resource r points to may have been immutably borrowed: when the condition lends it to len and then turns out false, the else branch runs",
         ],
         must_not_contain: &[
             // An immutable borrow changes nothing; `r` itself isn't borrowed.
@@ -11653,16 +11639,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "edition2024/if_let_chain_else_write_through",
         must_contain: &[
-            "x may have been mutably borrowed: when the condition lends x to a and then turns out false, a goes out of scope, so the else branch runs after that borrow has ended. By then, x may have been changed through a.",
+            "x may have been mutably borrowed: when the condition lends x to a and then turns out false, a goes out of scope, and the else branch runs. By then, x may have been changed through a.",
             // Nothing writes through `b` before `n > 0`.
-            "y may have been mutably borrowed: when the condition lends y to b and then turns out false, b goes out of scope, so the else branch runs after that borrow has ended",
+            "y may have been mutably borrowed: when the condition lends y to b and then turns out false, b goes out of scope, and the else branch runs",
         ],
         must_not_contain: &["y may have been changed"],
     },
     TooltipExpect {
         name: "edition2024/if_let_chain_no_else_borrow",
         must_contain: &[
-            "t may have been immutably borrowed: when the condition lends t to len and then turns out false, the body is skipped after that borrow has ended",
+            "t may have been immutably borrowed: when the condition lends t to len and then turns out false, the body is skipped",
             "s goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &["the else branch runs"],
@@ -12006,7 +11992,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "n is bound to a copyable value",
             "Move from t to adder",
             "m is bound to a copyable value",
-            "A temporary holds the value that adder returns. Nothing binds it to a variable or moves it on, so Rust drops it as soon as its statement (or enclosing expression) is done",
+            "A temporary holds the value that adder returns. Rust drops it as soon as its statement (or enclosing expression) is done",
             "t goes out of scope. No resource is dropped.",
             // The closure in w.f holds its borrow of s until `(w.f)()`
             // (#1088; rustc rejects `drop(s)` before it).
@@ -12206,8 +12192,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p.name's resource is moved into a temporary that is dropped at the end of this statement",
             "p.tag's resource is moved into a temporary that is dropped at the end of this statement",
             "q.tag's resource is moved into a temporary that is dropped at the end of this statement",
-            "This temporary takes the value of p.name, which is moved into it. Nothing binds the temporary to a variable or moves it on, so Rust drops it, and what it holds, as soon as its statement (or enclosing expression) is done",
-            "This temporary P is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary takes the value of p.name, which is moved into it. Rust drops the temporary as soon as its statement (or enclosing expression) is done",
+            "This temporary P is dropped at the end of this statement",
             "p.name goes out of scope. No resource is dropped.",
             "p.tag goes out of scope. No resource is dropped.",
             "p goes out of scope. p.name and p.tag were moved out earlier, so no resource is dropped.",
@@ -12280,7 +12266,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "first goes out of scope. Its resource is dropped.",
             "Move from make_p to s",
             "Move from make_q to (temporary 4)",
-            "This temporary Q is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Q is dropped at the end of this statement",
         ],
         must_not_contain: &[
             "=t goes out of scope. No resource is dropped.",
@@ -12357,7 +12343,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // in row`, and the variable iterator `it` of `named`. An unlabeled
         // `continue` stays in the inner loop: no drop (inner_continue).
         must_contain: &[
-            "This temporary IntoIter<String> is dropped here, where `continue` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary IntoIter<String> is dropped here, where `continue` leaves early",
             "it's former resource, the `for` loop's iterator, is dropped here: this `continue` leaves the `for` loop and goes on to the next iteration of the outer loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)",
         ],
         must_not_contain: &[
@@ -12403,7 +12389,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "The struct update `..` moves (temporary 4)'s field tag to q.tag",
             "This temporary P is dropped at the end of this statement, and with it everything in it but its field tag, which the struct update moved out of it",
             "Move from make_k to (temporary 5)",
-            "This temporary K is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary K is dropped at the end of this statement",
             "Move from make_p to (temporary 6)",
             "A temporary holds the value that make_p returns, for the match to inspect its field name. The pattern of the arm that runs can move that field, or parts of it, into its bindings; what is left in the temporary is dropped with it after the match",
             "This temporary P is dropped when the match ends, after the arm that ran, and with it everything in it but what that arm's pattern moved out of its field name",
@@ -12428,8 +12414,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "(temporary 11)",
             // #571's wording would deny the moves out of these temporaries.
             "=This temporary P is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "=This temporary P is dropped at the end of this statement",
             "=This temporary Result<String, String> is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "=This temporary Result<String, String> is dropped at the end of this statement",
             "=This temporary O is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "=This temporary O is dropped at the end of this statement",
             // A struct update's base keeps the fields the literal names:
             // "which was moved out of it" for the whole base would be false.
             "everything in it but its field name",
@@ -13046,10 +13035,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // 2024; checked with a Drop-printing program). With an `else`,
         // the `else` wording stays.
         must_contain: &[
-            "This temporary Vec<String> is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), or when the block it matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary Option<Box<i32>> is dropped when the condition of this `if` fails (before the code after the `if` runs), or when the block its let chain matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary Option<String> is dropped before the `else` block of this `if let` runs, or when the block it matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary Option<Box<f64>> is dropped before the `else` block of this `if` runs, or when the block its let chain matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Vec<String> is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), or when the block it matched ends",
+            "This temporary Option<Box<i32>> is dropped when the condition of this `if` fails (before the code after the `if` runs), or when the block its let chain matched ends",
+            "This temporary Option<String> is dropped before the `else` block of this `if let` runs, or when the block it matched ends",
+            "This temporary Option<Box<f64>> is dropped before the `else` block of this `if` runs, or when the block its let chain matched ends",
         ],
         must_not_contain: &[
             // No `else` exists for these two.
@@ -13443,7 +13432,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from make to the caller",
             "Move from Box::new to the caller",
             "Move from make to (temporary)",
-            "This temporary takes the value that make returns, which is moved into it. Nothing binds the temporary to a variable or moves it on, so Rust drops it, and what it holds, as soon as its statement (or enclosing expression) is done",
+            "This temporary takes the value that make returns, which is moved into it. Rust drops the temporary as soon as its statement (or enclosing expression) is done",
         ],
         must_not_contain: &[
             "Move from Some to",
@@ -16494,23 +16483,19 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from String::from to (temporary)",
             "Immutable borrow from (temporary) to k.r",
             "Return immutably borrowed resource from k.r to (temporary)",
-            "(temporary) goes out of scope here, where `return` leaves early: a let borrowed it, so it \
-             lived past its statement. Its resource is dropped.",
+            "(temporary) goes out of scope here, where `return` leaves early: a let borrowed it, so it lived past its statement. It is dropped here.",
             "Move from String::new to (temporary)",
             "Immutable borrow from (temporary) to w.r",
             "Return immutably borrowed resource from w.r to (temporary)",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept \
-             alive past the end of its statement. Its resource is dropped.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
             "Move from String::from to (temporary 2)",
             "Immutable borrow from (temporary 2) to t.0",
             "Return immutably borrowed resource from t.0 to (temporary 2)",
-            "(temporary 2) goes out of scope at the end of the block: a let borrowed it, so it was kept \
-             alive past the end of its statement. Its resource is dropped.",
+            "(temporary 2) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
             "Move from String::from to (temporary 3)",
             "(temporary 3) acquires ownership of a resource. This temporary value is borrowed by a let, \
              so it lives until the end of the enclosing block, not just to the end of the statement",
-            "(temporary 3) goes out of scope at the end of the block: a let borrowed it, so it was kept \
-             alive past the end of its statement. Its resource is dropped.",
+            "(temporary 3) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
             "Move from String::from to (temporary 4)",
         ],
         must_not_contain: &[
@@ -16538,9 +16523,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // before that, both owned it.)
         must_contain: &[
             "Move from make to (temporary)",
-            "This temporary String is dropped before the `else` block of this `if let` runs, or when the block it matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary String is dropped before the `else` block of this `if let` runs, or when the block it matched ends",
             "Move from make to (temporary 2)",
-            "This temporary String is dropped at the end of this statement: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary String is dropped at the end of this statement",
             "Move from make to (temporary 3)",
             "Move from (temporary 3) to m",
             "The pattern moves what (temporary 3) holds into m; nothing that needs dropping is left in (temporary 3)",
@@ -16557,7 +16542,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // m takes all of it: nothing is left on the matched path.
             "This temporary String is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), or when the block it matched ends",
             "=This temporary String is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), or when the block it matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "=This temporary String is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), or when the block it matched ends",
             "=This temporary String is dropped at the end of the block's final expression: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "=This temporary String is dropped at the end of the block's final expression",
         ],
     },
     TooltipExpect {
@@ -18065,7 +18052,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // pins that the escaping did not double up (`&amp;amp;` would show
         // a student "&amp;&amp;").
         must_contain: &[
-            "This temporary String is dropped at the end of this `&&` / `||` operand: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary String is dropped at the end of this `&&` / `||` operand",
         ],
         must_not_contain: &[
             "&amp;",
@@ -19422,7 +19409,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from k to (temporary 2)",
             "The temporary that the literal on the right of this let builds takes the value of g. No `ref` binding borrows from it, so Rust drops it at the end of this statement",
             "The temporary that the literal on the right of this let builds takes the value of k. No `ref` binding borrows from it, so Rust drops it at the end of this statement",
-            "This temporary (String, String), built by the literal on the right of the let, is dropped at the end of this statement. What the pattern didn't bind by value stays in it and is dropped with it. Its resource is dropped",
+            "This temporary (String, String), built by the literal on the right of the let, is dropped at the end of this statement. What the pattern didn't bind by value stays in it and is dropped with it",
             "g goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "k goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "Move from q to b",
@@ -19535,7 +19522,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "return_in_loop_1020",
         must_contain: &[
             "s goes out of scope at the `return` on line 12. Its resource is dropped.",
-            "This temporary IntoIter<String> is dropped when the `for` loop ends (or at the `return` on line 12, if that runs first): nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary IntoIter<String> is dropped when the `for` loop ends (or at the `return` on line 12, if that runs first)",
             "g goes out of scope. Its resource is dropped. If the `return` on line 12 runs first, this happens there instead.",
             "it's former resource, the `for` loop's iterator, is dropped when the `for` loop ends (or at the `return` on line 23, if that runs first), along with whatever it still owns (such as elements it hasn't handed out yet)",
             "s goes out of scope at the `return` on line 23. No resource is dropped.",
@@ -19547,7 +19534,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "g goes out of scope. Its resource is dropped. If the `return` on line 36 runs first, this happens there instead.",
             "a goes out of scope at the `return` on line 49. Its resource is dropped. If the `return` on line 47 runs first, this happens there instead.",
             "row goes out of scope at the `return` on line 49. No resource is dropped.",
-            "This temporary IntoIter<Vec<String>> is dropped when the `for` loop ends (or at the `return` on line 47 or 49, if one of them runs first): nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary IntoIter<Vec<String>> is dropped when the `for` loop ends (or at the `return` on line 47 or 49, if one of them runs first)",
             "s goes out of scope at the `return` on line 47. Its resource is dropped.",
             "g goes out of scope. Its resource is dropped. If the `return` on line 47 or 49 runs first, this happens there instead.",
             "s goes out of scope at the `return` on line 57. Its resource is dropped.",
@@ -19577,7 +19564,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t goes out of scope at the `return` on line 64. Its resource is dropped.",
             "s goes out of scope at the `return` on line 64. No resource is dropped.",
             "h goes out of scope. Its resource is dropped. If the `return` on line 64 runs first, this happens there instead.",
-            "This temporary IntoIter<String> is dropped when the `for` loop ends (or at the `return` on line 64, if that runs first): nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary IntoIter<String> is dropped when the `for` loop ends (or at the `return` on line 64, if that runs first)",
         ],
         must_not_contain: &[
             "=t goes out of scope. Its resource is dropped.",
@@ -19603,7 +19590,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "v goes out of scope. Its resource is dropped (including every String it holds). If the `return` on line 21 runs first, this happens there instead.",
             "g goes out of scope. Its resource is dropped. If the `return` on line 21 runs first, this happens there instead.",
             "a goes out of scope. Its resource is dropped.",
-            "(temporary) goes out of scope here, where `return` leaves early: a let borrowed it, so it lived past its statement. Its resource is dropped.",
+            "(temporary) goes out of scope here, where `return` leaves early: a let borrowed it, so it lived past its statement. It is dropped here.",
             "u goes out of scope at the `return` on line 80. Its resource is dropped.",
             // Controls: the code after these loops can run.
             "b goes out of scope. Its resource is dropped. If the `return` on line 46 runs first, this happens there instead.",
@@ -19762,7 +19749,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // dropped s unconditionally. Checked with a `Drop`-printing type:
         // with `Some(5)` s is dropped inside consume, not at scope end.
         must_contain: &[
-            "s may have been moved: when the guard on line 6 moves s to consume and then turns out false, matching goes on with the later arms after that move, so s can't be used here (the borrow checker counts every later arm as one that may run after a failed guard)",
+            "s may have been moved: when the guard on line 6 moves s to consume and then turns out false, matching goes on with the next pattern after that move, so s can't be used here (the borrow checker counts every later arm as one that may run after a failed guard)",
             "s may have been moved above, so it can't be used after the match. If nothing above moved it, its resource is dropped when s goes out of scope.",
             "s goes out of scope. Its resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
         ],
@@ -19794,7 +19781,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // when the guard is then false (#579's wording for a let-chain).
         // main refused the program.
         must_contain: &[
-            "f may have been moved: when the guard on line 6 calls f (it can only be called once, so the call moves it) and then turns out false, matching goes on with the later arms after that call, so f can't be used here (the borrow checker counts every later arm as one that may run after a failed guard)",
+            "f may have been moved: when the guard on line 6 calls f (it can only be called once, so the call moves it) and then turns out false, matching goes on with the next pattern after that call, so f can't be used here (the borrow checker counts every later arm as one that may run after a failed guard)",
             "f may have been moved above, so it can't be used after the match. If nothing above moved it, its resource is dropped when f goes out of scope.",
             "f goes out of scope. Its captured resource is dropped here only if nothing above called it (Rust tracks this with a runtime drop flag).",
         ],
@@ -19813,7 +19800,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // scope end). Checked with a `Drop`-printing type. main refused the
         // program.
         must_contain: &[
-            "s may have been moved: when the guard on line 6 moves s to consume and then turns out false, matching goes on with the later arms after that move, so s can't be used here (the borrow checker counts every later arm as one that may run after a failed guard)",
+            "s may have been moved: when the guard on line 6 moves s to consume and then turns out false, matching goes on with the next pattern after that move, so s can't be used here (the borrow checker counts every later arm as one that may run after a failed guard)",
             "s acquires ownership of a new resource. Its previous resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
             "s was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, its resource is dropped when s goes out of scope.",
             "s goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
@@ -19830,7 +19817,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // and matching goes on with x moved (a `Drop`-printing type prints
         // the drop before the `_` arm runs). main refused the program.
         must_contain: &[
-            "x may have been moved: when the guard on line 5 moves x to a and then turns out false, matching goes on with the later arms after that move, so x can't be used here (the borrow checker counts every later arm as one that may run after a failed guard). When the guard fails after that move, a goes out of scope and its resource is dropped.",
+            "x may have been moved: when the guard on line 5 moves x to a and then turns out false, matching goes on with the next pattern after that move, so x can't be used here (the borrow checker counts every later arm as one that may run after a failed guard). When the guard fails after that move, a goes out of scope and its resource is dropped.",
             "x may have been moved above, so it can't be used after the match. If nothing above moved it, its resource (including the String it holds, if any) is dropped when x goes out of scope.",
             "x goes out of scope. Its resource (including the String it holds, if any) is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
         ],
@@ -19866,7 +19853,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // says so, as at a let-chain's else branch (#688). main drew the
         // guard's events in its own arm only.
         must_contain: &[
-            "v may have been borrowed: when the guard on line 5 lends v to push and len and then turns out false, matching goes on with the later arms after those borrows have ended. By then, v may have been changed by push.",
+            "v may have been borrowed: when the guard on line 5 lends v to push and len and then turns out false, matching goes on with the next pattern. By then, v may have been changed by push.",
             "v goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
@@ -19941,7 +19928,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s's resource may be immutably borrowed by r (r points to s or to t); either way, s is read-only until r's borrow ends",
             "t's resource may be immutably borrowed by r (r points to s or to t); either way, t is read-only until r's borrow ends",
             "r's borrow ends here, so t's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whether or not the condition had assigned &s to r)",
-            "a may have been immutably borrowed: when the condition lends a to q and then turns out false, the else branch runs after that borrow has ended",
+            "a may have been immutably borrowed: when the condition lends a to q and then turns out false, the else branch runs",
             "b's resource is no longer immutably borrowed",
         ],
         must_not_contain: &[
@@ -20091,7 +20078,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // it into `take`; every later arm starts with z maybe-moved. main
         // refused the program.
         must_contain: &[
-            "z may have been moved: when the guard on line 9 assigns z a new value (dropping its previous one), then moves z to take and turns out false, matching goes on with the later arms after that move, so z can't be used here (the borrow checker counts every later arm as one that may run after a failed guard)",
+            "z may have been moved: when the guard on line 9 assigns z a new value (dropping its previous one), then moves z to take and turns out false, matching goes on with the next pattern after that move, so z can't be used here (the borrow checker counts every later arm as one that may run after a failed guard)",
             "z may have been moved above, so it can't be used after the match (until it's assigned again). If nothing above moved it, its resource is dropped when z goes out of scope.",
         ],
         must_not_contain: &[
@@ -20926,7 +20913,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "match_guard_temporary_1167",
         must_contain: &[
-            "This temporary String is dropped at the end of the match guard: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary String is dropped at the end of the match guard",
         ],
         must_not_contain: &[
             "This temporary String is dropped at the end of the block's final expression",
@@ -20975,7 +20962,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // literal, a constructor, a branch's literal, a nested literal, and
         // next to a fresh value). With a String left over it is still drawn.
         must_contain: &[
-            "This temporary (String, String), built by the literal on the right of the let, is dropped at the end of this statement. What the pattern didn't bind by value stays in it and is dropped with it. Its resource is dropped",
+            "This temporary (String, String), built by the literal on the right of the let, is dropped at the end of this statement. What the pattern didn't bind by value stays in it and is dropped with it",
             "the value slots[0] points to is copied",
             "the value r points to is captured by closure f (a mutable reborrow through r); r can't be used while the borrow is live",
         ],
@@ -20999,7 +20986,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // #1163: a let-chain's else branch after the condition lent `*r`, an
         // i32, to bump: "the value r points to", as r's other dots say.
         must_contain: &[
-            "the value r points to may have been mutably borrowed: when the condition lends it to bump and then turns out false, the else branch runs after that borrow has ended. By then, the value r points to may have been changed by bump.",
+            "the value r points to may have been mutably borrowed: when the condition lends it to bump and then turns out false, the else branch runs. By then, the value r points to may have been changed by bump.",
         ],
         must_not_contain: &[
             "the resource r points to",
@@ -22664,7 +22651,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from String::from to (temporary)",
             "Immutable borrow from (temporary) to s",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
             "Move from make_user to (temporary 2)",
             "Immutable borrow from (temporary 2).name to name",
             "(temporary 2).name goes out of scope. Its resource is dropped.",
@@ -22673,7 +22660,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // #1346: the field, as for `name` above (was: the whole temporary).
             "Immutable borrow from (temporary 5).name to h.r",
             "Immutable borrow from (temporary 6) to inner",
-            "(temporary 6) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+            "(temporary 6) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
         ],
         must_not_contain: &[
             "Return immutably borrowed resource from s to String::from",
@@ -24453,18 +24440,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // levels down, or in an `if let` without `else`, wasn't stated at
         // all, nor was the drop at a `?` in the block.
         must_contain: &[
-            "This temporary Vec<String> is dropped here, where `return` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary Vec<String> is dropped here, where `break` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary Vec<String> is dropped before the `else` block of this `if let` runs: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary Vec<String> is dropped when the block of this `if let` ends (its pattern matched): nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary Vec<String> is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs): nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Vec<String> is dropped here, where `return` leaves early",
+            "This temporary Vec<String> is dropped here, where `break` leaves early",
+            "This temporary Vec<String> is dropped before the `else` block of this `if let` runs",
+            "This temporary Vec<String> is dropped when the block of this `if let` ends (its pattern matched)",
+            "This temporary Vec<String> is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs)",
             "If the `?` here returns early, (temporary)'s resource is dropped. If the `?` succeeds, nothing happens to (temporary) here.",
             "(temporary) is live in a conditional expression ",
         ],
         must_not_contain: &[
             // Each said both paths, on a column that also had the exit's
             // drop on it.
-            "This temporary Vec<String> is dropped before the `else` block of this `if let` runs, or when the block it matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Vec<String> is dropped before the `else` block of this `if let` runs, or when the block it matched ends",
             "(temporary) still has no value here",
             "(temporary) may have no value after the branches",
         ],
@@ -24473,13 +24460,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "edition2024/if_let_chain_temp_exit_fork_1360",
         // #1360 in a let chain (see `if_let_temp_exit_fork_1360`).
         must_contain: &[
-            "This temporary Vec<String> is dropped here, where `return` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary Vec<String> is dropped before the `else` block of this `if` runs: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary Vec<String> is dropped when the block its let chain matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Vec<String> is dropped here, where `return` leaves early",
+            "This temporary Vec<String> is dropped before the `else` block of this `if` runs",
+            "This temporary Vec<String> is dropped when the block its let chain matched ends",
             "(temporary) is live in a conditional expression ",
         ],
         must_not_contain: &[
-            "This temporary Vec<String> is dropped before the `else` block of this `if` runs, or when the block its let chain matched ends: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary Vec<String> is dropped before the `else` block of this `if` runs, or when the block its let chain matched ends",
             "(temporary) still has no value here",
         ],
     },
@@ -24698,7 +24685,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return mutably borrowed value from m to (temporary).age",
             "Immutable borrow from (temporary) to x: x is a reference copied out of m",
             "Mutable borrow from (temporary) to x: x is a reference moved out of m",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
         ],
         must_not_contain: &[
             "t is initialized with a Some value",
@@ -24892,7 +24879,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Mutable borrow from p to s",
             "(temporary) is assigned a new value",
             // A P holds nothing to drop.
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
         ],
     },
     TooltipExpect {
@@ -25000,15 +24987,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from r to (temporary)",
             "Immutable borrow from (temporary) to t: Some's signature gives the value it returns the same lifetime as its argument; t isn't a reference, but its value holds one",
             "Return immutably borrowed resource from t to (temporary)",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
             "(temporary) exists after the branches only if the branch that made it (line 9) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
             "(temporary) exists after the branches only if the branch that made it (line 14) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
             "(temporary) exists after the branches only if the branch that made it (line 40) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
             "(temporary) exists after the branches only if the branch that made it (line 51) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 9) ran (Rust tracks this with a runtime drop flag).",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 14) ran (Rust tracks this with a runtime drop flag).",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 40) ran (Rust tracks this with a runtime drop flag).",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 51) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here only if the branch that made it (line 9) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here only if the branch that made it (line 14) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here only if the branch that made it (line 40) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here only if the branch that made it (line 51) ran (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             "r's immutable borrow ends (what it borrows from isn't shown)",
@@ -25051,8 +25038,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // form (#1376).
             "Move from make to (temporary)",
             "The temporary that the literal on the right of this destructuring assignment builds takes the value that make returns. Rust drops it, with whatever the pattern doesn't assign to a place, as soon as the assignment has taken it apart, before the places on the left get their new values",
-            "This temporary (String, String), built by the literal on the right of the destructuring assignment, is dropped as soon as the assignment has taken it apart (before the places on the left get their new values), and with it whatever the pattern didn't assign to a place. Its resource is dropped",
-            "This temporary P, built by the literal on the right of the destructuring assignment, is dropped as soon as the assignment has taken it apart (before the places on the left get their new values), and with it whatever the pattern didn't assign to a place. Its resource is dropped",
+            "This temporary (String, String), built by the literal on the right of the destructuring assignment, is dropped as soon as the assignment has taken it apart (before the places on the left get their new values), and with it whatever the pattern didn't assign to a place",
+            "This temporary P, built by the literal on the right of the destructuring assignment, is dropped as soon as the assignment has taken it apart (before the places on the left get their new values), and with it whatever the pattern didn't assign to a place",
             "Move from s to (temporary)",
             "The temporary that the literal on the right of this destructuring assignment builds takes the value of s. Rust drops it, with that value, as soon as the assignment has taken it apart, before the places on the left get their new values",
             "(temporary 2), immutable",
@@ -25797,7 +25784,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Immutable borrow from (temporary) to t: Some's signature gives the value it returns the same lifetime as its argument; t isn't a reference, but its value holds one",
             "Immutable borrow from (temporary) to a",
-            "(temporary) goes out of scope here, where `return` leaves early: a let borrowed it, so it lived past its statement. Its resource is dropped only if the branch that made it (line 189) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope here, where `return` leaves early: a let borrowed it, so it lived past its statement. It is dropped here only if the branch that made it (line 189) ran (Rust tracks this with a runtime drop flag).",
             "Move from String::from to (temporary)",
             "Move from String::from to (temporary 2)",
             "Move from make_u to (temporary)",
@@ -25813,47 +25800,47 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "(temporary) may not exist here: only some of the branches above make it",
             "s may have no value here: it was assigned in only some of the branches above",
             "(temporary) exists after the branches only if the branch that made it (line 30) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 30) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here only if the branch that made it (line 30) ran (Rust tracks this with a runtime drop flag).",
             "(temporary) exists after the branches only if the branch that made it (line 37) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 37) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here only if the branch that made it (line 37) ran (Rust tracks this with a runtime drop flag).",
             "(temporary) exists after the branches only if the branch that made it (line 49) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 49) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here only if the branch that made it (line 49) ran (Rust tracks this with a runtime drop flag).",
             "(temporary) exists after the branches only if the branch that made it (line 59) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 59) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here only if the branch that made it (line 59) ran (Rust tracks this with a runtime drop flag).",
             "(temporary) exists after the branches only if the branch that made it (line 68) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 68) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here only if the branch that made it (line 68) ran (Rust tracks this with a runtime drop flag).",
             "(temporary) exists after the branches only if the branch that made it (line 78) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 78) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here only if the branch that made it (line 78) ran (Rust tracks this with a runtime drop flag).",
             "(temporary) exists after the branches only if the branch that made it (line 88) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 88) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here only if the branch that made it (line 88) ran (Rust tracks this with a runtime drop flag).",
             "(temporary) exists after the branches only if the branch that made it (line 99) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 99) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here only if the branch that made it (line 99) ran (Rust tracks this with a runtime drop flag).",
             "(temporary) exists after the branches only if the branch that made it (line 111) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 111) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here only if the branch that made it (line 111) ran (Rust tracks this with a runtime drop flag).",
             "(temporary 2) exists after the branches only if the branch that made it (line 113) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
-            "(temporary 2) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 113) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary 2) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here only if the branch that made it (line 113) ran (Rust tracks this with a runtime drop flag).",
             "(temporary) exists after the branches only if the branch that made it (line 123) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 123) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here only if the branch that made it (line 123) ran (Rust tracks this with a runtime drop flag).",
             "(temporary) exists after the branches only if the branch that made it (line 133) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 133) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here only if the branch that made it (line 133) ran (Rust tracks this with a runtime drop flag).",
             "(temporary) exists after the branches only if the branch that made it (line 142) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 142) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here only if the branch that made it (line 142) ran (Rust tracks this with a runtime drop flag).",
             "(temporary) exists after the branches only if the branch that made it (line 148) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 148) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here only if the branch that made it (line 148) ran (Rust tracks this with a runtime drop flag).",
             "(temporary) exists after the branches only if the branch that made it (line 155) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 155) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here only if the branch that made it (line 155) ran (Rust tracks this with a runtime drop flag).",
             "(temporary).name exists after the branches only if the branch that made it (line 155) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
-            "(temporary).name goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 155) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary).name goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here only if the branch that made it (line 155) ran (Rust tracks this with a runtime drop flag).",
             "(temporary) exists after the branches only if the branch that made it (line 165) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 165) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here only if the branch that made it (line 165) ran (Rust tracks this with a runtime drop flag).",
             "(temporary) exists after the branches only if the branch that made it (line 177) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 177) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here only if the branch that made it (line 177) ran (Rust tracks this with a runtime drop flag).",
             "(temporary) exists after the branches only if the branch that made it (line 189) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 189) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here only if the branch that made it (line 189) ran (Rust tracks this with a runtime drop flag).",
             "(temporary) exists after the branches only if the branch that made it (line 201) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 201) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here only if the branch that made it (line 201) ran (Rust tracks this with a runtime drop flag).",
             "(temporary) exists after the branches only if the branch that made it (line 212) ran. If it did, it lives until the end of the enclosing block: a let borrowed it, so it is kept alive past the end of its statement.",
-            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped here only if the branch that made it (line 212) ran (Rust tracks this with a runtime drop flag).",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here only if the branch that made it (line 212) ran (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             "RustViz doesn't draw a column for this temporary",
@@ -25951,8 +25938,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p goes out of scope. Its resource is dropped here only if p was assigned in the branch that ran (Rust tracks this with a runtime drop flag).",
             "p.name goes out of scope. Its resource is dropped here only if p.name was assigned in the branch that ran (Rust tracks this with a runtime drop flag).",
             "s goes out of scope. Its resource is dropped.",
-            "If the `?` here returns early, (temporary)'s resource is dropped if the branch that made it (line 108) ran (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to (temporary) here.",
-            "(temporary 2) goes out of scope here, where `break` leaves early: a let borrowed it, so it lived past its statement. Its resource is dropped only if the branch that made it (line 117) ran (Rust tracks this with a runtime drop flag).",
+            "If the `?` here returns early, (temporary) is dropped if the branch that made it (line 108) ran (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to (temporary) here.",
+            "(temporary 2) goes out of scope here, where `break` leaves early: a let borrowed it, so it lived past its statement. It is dropped here only if the branch that made it (line 117) ran (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             "s goes out of scope. No resource is dropped.",
@@ -25961,6 +25948,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "if s still holds it",
             "only if s still holds it",
             "=(temporary 2) goes out of scope here, where `break` leaves early: a let borrowed it, so it lived past its statement. Its resource is dropped.",
+            "=(temporary 2) goes out of scope here, where `break` leaves early: a let borrowed it, so it lived past its statement. It is dropped here.",
         ],
     },
     TooltipExpect {
@@ -27247,8 +27235,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "for_head_temp_in_arm_1535",
         must_contain: &[
             "(temporary) isn't moved in any of the branches above",
-            "This temporary IntoIter<i32> is dropped here, where `break` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
-            "This temporary IntoIter<i32> is dropped here, where `return` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped",
+            "This temporary IntoIter<i32> is dropped here, where `break` leaves early",
+            "This temporary IntoIter<i32> is dropped here, where `return` leaves early",
         ],
         must_not_contain: &[
             "(temporary) hasn't been made yet",
@@ -28068,6 +28056,65 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=Move from bytes to String::from",
             "A temporary holds the value that String::from returns",
         ],
+    },
+    TooltipExpect {
+        name: "temporary_cow_drop_1780",
+        // #1780: a temporary Cow is often `Cow::Borrowed` (an Option may be
+        // `None`), which owns nothing: "Its resource is dropped" was false.
+        // The drop texts say only that the temporary is dropped (a
+        // `ManuallyDrop` part isn't, a value with its own Drop may hand its
+        // fields on), and not "nothing bound it to a variable" (a `for`
+        // loop binds its iterator, #1793).
+        must_contain: &[
+            "This temporary Cow<'_, str> is dropped at the end of this statement",
+            "This temporary Option<String> is dropped at the end of this statement",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
+            "This temporary (String, Cow<'_, str>), built by the literal on the right of the let, is dropped at the end of this statement. What the pattern didn't bind by value stays in it and is dropped with it",
+            "A temporary holds the value that String::from_utf8_lossy returns. Rust drops it as soon as its statement (or enclosing expression) is done",
+            "This temporary takes the value that String::new returns, which is moved into it. Rust drops the temporary as soon as its statement (or enclosing expression) is done",
+        ],
+        must_not_contain: &[
+            "moved it on. Its resource is dropped",
+            "past the end of its statement. Its resource is dropped",
+            "dropped with it. Its resource is dropped",
+            "nothing bound it to a variable",
+            "Nothing binds",
+            "and what it holds",
+        ],
+    },
+    TooltipExpect {
+        name: "guard_stores_borrow_1769",
+        // #1769: store_false keeps &guard_t in guard_refs, so the borrow
+        // hasn't ended when the guard turns out false. "The next pattern":
+        // with an or-pattern, a false guard can send matching to the same
+        // arm's next alternative.
+        must_contain: &[
+            "guard_t may have been immutably borrowed: when the guard on line 13 lends guard_t to store_false and then turns out false, matching goes on with the next pattern",
+        ],
+        must_not_contain: &["that borrow has ended", "those borrows have ended", "with the later arms"],
+    },
+    TooltipExpect {
+        name: "edition2024/chain_stores_borrow_1769",
+        // #1769, the let-chain form: the else branch runs with t still
+        // borrowed by refs.
+        must_contain: &[
+            "t may have been immutably borrowed: when the condition lends t to store_false and then turns out false, the else branch runs",
+        ],
+        must_not_contain: &["that borrow has ended", "those borrows have ended"],
+    },
+    TooltipExpect {
+        name: "rc_inside_drop_1629",
+        // #1629: o holds the only Rc (dropping it drops the String), the
+        // empty Vec holds no Rc and has no buffer, w holds no Weak. Not
+        // "freed only when its last Rc is dropped" either: a Weak can keep
+        // the allocation, `Rc::into_inner` can take the value out.
+        must_contain: &[
+            "o's resource is moved into drop, which drops it (dropping an Rc lowers its reference count, and drops the shared value only if it was the last Rc)",
+            "v's resource is moved into drop, which drops it (dropping an Rc lowers its reference count, and drops the shared value only if it was the last Rc; the collection's own buffer, if it has one, is freed)",
+            "w's resource is moved into drop, which drops it (a Weak doesn't keep its value alive)",
+            "t's resource is moved into drop, which drops it (dropping an Rc lowers its reference count, and drops the shared value only if it was the last Rc)",
+        ],
+        must_not_contain: &["only lowers", "only lower their", "its own buffer is freed", "the Weak inside", "freed only when"],
     },
 ];
 
@@ -32113,7 +32160,7 @@ fn breakless_loop_drops_are_on_the_return_row() {
         (format!("v goes out of scope. Its resource is dropped (including every String it holds).{if_inner}"), two),
         ("a goes out of scope. Its resource is dropped.".to_owned(), nest),
         ("g goes out of scope. Its resource is dropped.".to_owned(), nest),
-        ("(temporary) goes out of scope here, where `return` leaves early: a let borrowed it, so it lived past its statement. Its resource is dropped.".to_owned(), nest),
+        ("(temporary) goes out of scope here, where `return` leaves early: a let borrowed it, so it lived past its statement. It is dropped here.".to_owned(), nest),
     ] {
         let ok = dots_where(&timeline, |lines| lines.iter().any(|l| *l == drop));
         assert!(ok.iter().any(|(_, dy)| on_row(*dy, row)),
@@ -32819,7 +32866,7 @@ fn break_outer_iterator_drops_sit_on_the_break() {
     let rows: Vec<f64> = code_rows_y(&code, "break 'outer;");
     assert_eq!(rows.len(), 2, "two `break 'outer;` rows: {:?}", rows);
     for (text, row) in [
-        ("This temporary IntoIter<String> is dropped here, where `break` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped", rows[0]),
+        ("This temporary IntoIter<String> is dropped here, where `break` leaves early", rows[0]),
         ("it's former resource, the `for` loop's iterator, is dropped here: this `break` leaves the `for` loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)", code_row_y(&code, "break 'scan;")),
     ] {
         let ys = dots_with_tooltip(&timeline, text);
@@ -32831,7 +32878,7 @@ fn break_outer_iterator_drops_sit_on_the_break() {
     // variable `outer_it`'s), and its column ends there on the break path:
     // the end-of-loop drop stays for the paths that don't break.
     for (text, row) in [
-        ("This temporary IntoIter<Vec<String>> is dropped here, where `break` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped", rows[0]),
+        ("This temporary IntoIter<Vec<String>> is dropped here, where `break` leaves early", rows[0]),
         ("outer_it's former resource, the `for` loop's iterator, is dropped here: this `break` leaves the `for` loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)", rows[1]),
     ] {
         let ys = dots_with_tooltip(&timeline, text);
@@ -32847,7 +32894,7 @@ fn continue_outer_iterator_drops_sit_on_the_continue() {
     let rv = run_with_local_backend("for_iterator_continue_outer");
     let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
     for (text, row) in [
-        ("This temporary IntoIter<String> is dropped here, where `continue` leaves early: nothing bound it to a variable or moved it on. Its resource is dropped", "continue 'outer;"),
+        ("This temporary IntoIter<String> is dropped here, where `continue` leaves early", "continue 'outer;"),
         ("it's former resource, the `for` loop's iterator, is dropped here: this `continue` leaves the `for` loop and goes on to the next iteration of the outer loop. Whatever the iterator still owns is dropped with it (such as elements it hasn't handed out yet)", "continue 'scan;"),
     ] {
         let ys = dots_with_tooltip(&timeline, text);
