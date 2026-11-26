@@ -1735,7 +1735,7 @@ pub fn event_dot_lend_through_ref(ref_name: &String, target_name: &String, mutab
             r, t, noun),
         (true, false) => event_dot_mut_lend_ref_var(ref_name, target_name),
         (false, true) => format!(
-            "the {2} {0} points to is immutably borrowed by {1} through {0}; {0} is read-only while the borrow is live",
+            "the {2} {0} points to is immutably borrowed by {1} through {0}",
             r, t, noun),
         (false, false) => format!(
             "the {2} {0} points to is immutably borrowed by {1}",
@@ -1817,8 +1817,8 @@ pub fn event_dot_lend_deep(ref_name: &String, pointer: &str, via: &str, target_n
             "the {3} {0} points to is mutably borrowed by {1} through {4}; {2} can't be used while the borrow is live",
             place, t, r, noun, via),
         (false, true) => format!(
-            "the {3} {0} points to is immutably borrowed by {1} through {4}; {2} is read-only while the borrow is live",
-            place, t, r, noun, via),
+            "the {2} {0} points to is immutably borrowed by {1} through {3}",
+            place, t, noun, via),
         (false, false) => format!("the {2} {0} points to is immutably borrowed by {1}", place, t, noun),
     }
 }
@@ -1930,7 +1930,7 @@ pub fn event_dot_lend_to_undrawn_place(my_name: &String, is_mut: bool, omit_read
     );
     if is_mut {
         format!("{0}; {1} can't be used while the borrow is live", base, my_name_fmt)
-    } else if omit_read_only {
+    } else if omit_read_only || through_ref.is_some() {
         base
     } else {
         format!("{0}; {1} is read-only while the borrow is live", base, my_name_fmt)
@@ -2569,7 +2569,7 @@ pub fn event_dot_mut_borrow(my_name: &String, holds_value: bool) -> String {
 // (#1122).
 pub fn event_dot_mut_borrow_by_shared_ref(my_name: &String, holds_value: bool) -> String {
     format!(
-        "{0} is a shared reference made from a mutable borrow of a {1}: {0} can only read it, but the borrow stays mutable while {0} is live",
+        "{0} is a shared reference made from a mutable borrow of a {1}. It gives shared access to the borrowed {1}",
         styled_name_html(my_name), held(holds_value)
     )
 }
@@ -2698,7 +2698,7 @@ pub fn event_dot_capture_mut_lend_to_closure(my_name: &String, target_name: &Str
 // read-only during a shared one; a `&T` r was read-only already.
 // `pointee_value`: what r points to is a value (Copy, or nothing to
 // drop; #1163).
-pub fn event_dot_capture_reborrow_through_ref(ref_name: &String, closure_name: &String, mutable: bool, ref_is_mut: bool, pointee_value: bool) -> String {
+pub fn event_dot_capture_reborrow_through_ref(ref_name: &String, closure_name: &String, mutable: bool, pointee_value: bool) -> String {
     let base = format!(
         "the {3} {0} points to is captured by closure {1} ({2} reborrow through {0})",
         styled_name_html(ref_name),
@@ -2708,8 +2708,6 @@ pub fn event_dot_capture_reborrow_through_ref(ref_name: &String, closure_name: &
     );
     if mutable {
         format!("{0}; {1} can't be used while the borrow is live", base, styled_name_html(ref_name))
-    } else if ref_is_mut {
-        format!("{0}; {1} is read-only while the borrow is live", base, styled_name_html(ref_name))
     } else {
         base
     }
@@ -3182,12 +3180,12 @@ pub fn fn_dot_shared_ref_interior_mut(fn_name: &String, my_name: &String, refcel
     let r = styled_name_html(my_name);
     if refcell_borrow_mut {
         format!(
-            "{0} uses what {1} points to, through the shared reference {1}; exclusive access to its contents is checked at runtime (a second {0} while this one is live would panic)",
+            "{0} takes a shared borrow through {1}. Exclusive access to its contents is checked at runtime (a second {0} while this one is live would panic)",
             f, r
         )
     } else {
         format!(
-            "{0} uses what {1} points to, through the shared reference {1}; that has interior mutability, so its contents can change even through a shared reference",
+            "{0} takes a shared borrow through {1}. The borrowed value has interior mutability, so its contents can change",
             f, r
         )
     }
@@ -3731,7 +3729,7 @@ pub fn event_dot_lend_through_ref_to_loop_iterator(ref_name: &String, is_mut: bo
         )
     } else {
         format!(
-            "the {1} {0} points to is immutably borrowed by the `for` loop's iterator through {0}; {0} is read-only until the loop ends",
+            "the {1} {0} points to is immutably borrowed by the `for` loop's iterator through {0} until the loop ends",
             styled_name_html(ref_name), held(pointee_copy)
         )
     }
@@ -3763,7 +3761,7 @@ pub fn event_dot_lend_field_through_ref_to_loop_iterator(place: &String, is_mut:
         )
     } else {
         format!(
-            "{0} is immutably borrowed by the `for` loop's iterator; {0} is read-only until the loop ends",
+            "{0} is immutably borrowed by the `for` loop's iterator until the loop ends",
             styled_name_html(place)
         )
     }
@@ -3785,12 +3783,12 @@ pub fn state_borrowed_by_loop_iterator(my_name: &String, holds_value: bool) -> S
 }
 
 // PartialPrivilege on a `&mut` reference's lifeline: what it points to
-// is shared through it (`let r3 = &*r;`), so r can only read until
+// is shared through it (`let r3 = &*r;`), preventing exclusive access until
 // those shared borrows end (#313). r owns nothing, so the owner's
 // "r's resource is being shared" was wrong.
 pub fn state_mut_ref_partial_privilege(my_name: &String, pointee_copy: bool) -> String {
     format!(
-        "{0} holds a mutable reference, but the {1} it points to is currently shared through it, so {0} can only read it",
+        "{0} holds a mutable reference. While the {1} it points to is shared, {0} can't overwrite it",
         styled_name_html(my_name), held(pointee_copy)
     )
 }
@@ -3806,7 +3804,7 @@ pub fn state_mut_ref_field_borrowed_by_loop_iterator(my_name: &String, place: &S
         )
     } else {
         format!(
-            "{0} holds a mutable reference, but {1} is immutably borrowed by the `for` loop's iterator, so {1} is read-only until the loop ends",
+            "{0} holds a mutable reference, but {1} is immutably borrowed by the `for` loop's iterator until the loop ends",
             styled_name_html(my_name), styled_name_html(place)
         )
     }
@@ -3824,7 +3822,7 @@ pub fn state_mut_ref_field_borrowed_by(my_name: &String, place: &String, borrowe
         )
     } else {
         format!(
-            "{0} holds a mutable reference, but {1} is immutably borrowed by {2}, so {1} is read-only while the borrow is live",
+            "{0} holds a mutable reference, but {1} is immutably borrowed by {2} while the borrow is live",
             styled_name_html(my_name), styled_name_html(place), styled_name_html(borrower)
         )
     }
@@ -3865,14 +3863,14 @@ fn fields_borrowed(my_name: &String, places: &[(String, bool)], borrower: &str, 
         )
     } else if muts.is_empty() {
         format!(
-            "{} holds a mutable reference, but {} are immutably borrowed by {}, so they are read-only {}",
+            "{} holds a mutable reference, but {} are immutably borrowed by {} {}",
             me, join_and(&shared), borrower, until
         )
     } else {
         let verb = |v: &Vec<String>| if v.len() == 1 { "is" } else { "are" };
         format!(
-            "{0} holds a mutable reference, but {1} {2} mutably borrowed and {3} immutably borrowed by {4}, so {1} can't be used and {3} {5} read-only {6}",
-            me, join_and(&muts), verb(&muts), join_and(&shared), borrower, verb(&shared), until
+            "{0} holds a mutable reference, but {1} {2} mutably borrowed and {3} immutably borrowed by {4} {5}, so {1} can't be used during that borrow",
+            me, join_and(&muts), verb(&muts), join_and(&shared), borrower, until
         )
     }
 }

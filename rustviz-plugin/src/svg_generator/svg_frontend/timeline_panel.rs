@@ -3870,7 +3870,7 @@ fn closure_reborrow_lend_title(event: &Event, visualization_data: &Visualization
         return None;
     }
     let r = is.extract_rap()?;
-    Some(hover_messages::event_dot_capture_reborrow_through_ref(r.name(), &to.name(), mutable, r.is_mutref(), r.points_to_copy()))
+    Some(hover_messages::event_dot_capture_reborrow_through_ref(r.name(), &to.name(), mutable, r.points_to_copy()))
 }
 
 // Lender-side dots of a method call whose receiver r is a reference to
