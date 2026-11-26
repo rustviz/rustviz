@@ -1691,8 +1691,13 @@ fn render_branch_dots(
             let unchanged = hover_messages::event_dot_branch_merge_unchanged(&is.real_name());
             let within = |n: &String, f: &String| n == f || n.starts_with(&format!("{}.", f));
             let moved_in_branches = || {
+                // (Only on a join line holding just its `}`: code there may
+                // run before the join or after it.)
+                if !mir_brace_line(rap, visualization_data, *merge_point) { return false; }
                 let (Some(at), Some(split)) = (mir_parts_entering(rap, visualization_data, *merge_point), mir_parts_at_switch(rap, visualization_data, *split_point)) else { return false };
-                at.certain.iter().chain(at.maybe.iter()).any(|n| !split.certain.iter().chain(split.maybe.iter()).any(|f| within(n, f)))
+                let lacking = |f: &PartsFacts| f.certain.iter().chain(&f.maybe).chain(&f.part).chain(&f.unsure).cloned().collect::<Vec<String>>();
+                let before = lacking(&split);
+                lacking(&at).iter().any(|n| !before.iter().any(|f| within(n, f)))
             };
             if title == unchanged && matches!(rap, ResourceAccessPoint::Struct(_)) && moved_in_branches() {
                 Some(hover_messages::event_dot_branch_merge_parts_maybe_moved(&is.real_name()))
@@ -4168,7 +4173,16 @@ fn timeline_segment_title(
             // rustc says every field holds a value here.
             (Some(_), _) => {}
             (None, Some(parts)) => return parts.title(rap),
-            (None, None) => {}
+            // Where rustc's facts on a row with a conditional's test (every
+            // way through it runs its code) aren't clear but say part of it
+            // may lack a value as control leaves the row, not "the owner".
+            (None, None) => if let Some(f) = mir_parts_leaving(rap, visualization_data, line).filter(|f| f.moved()) {
+                return if f.certain.is_empty() && f.maybe.is_empty() && f.unsure.is_empty() {
+                    hover_messages::state_part_maybe_moved(rap.name())
+                } else {
+                    hover_messages::state_fields_maybe_moved(rap.name())
+                };
+            },
         }
     }
     // An array a slice pattern moved some elements out of (#1285): the
@@ -9280,48 +9294,23 @@ fn push_seg_if_renderable(
         State::FullPrivilege { s: LineState::Gray } | State::PartialPrivilege { s: LineState::Gray }
     );
     let split_row = path.last().map_or(row, |(split, _)| *split);
-    // rustc's facts on a struct's fields (#1595) on this segment's way.
-    // The lines of the arm's own rows (no other arm's code, nor the split's
-    // or the join's, is on them).
-    let own_lines = match (rv_attrs::line_of(arm_rows.0, &visualization_data.row_lines), rv_attrs::line_of(arm_rows.1, &visualization_data.row_lines)) {
-        (Some(lo), Some(hi)) if arm_rows.0 <= arm_rows.1 => Some((lo, hi)),
-        _ => None,
-    };
+    // rustc's facts on a struct's fields (#1595) on this segment's way:
+    // into the arm, where the conditional branches; on the arm's rows, the
+    // row's own (where they're clear: `mir_parts_at`); out of it, what this
+    // arm's own rows leave at a join line holding just its `}`. Where they
+    // aren't known, main's text.
     let facts = || match leg {
-        // Into the arm: where the conditional branches.
         Leg::Split => mir_parts_at_switch(rap, visualization_data, split_row),
-        Leg::Column => {
-            let line = rv_attrs::line_of(row, &visualization_data.row_lines);
-            let own = |l: usize| own_lines.is_some_and(|(lo, hi)| l >= lo && l <= hi);
-            match line {
-                Some(l) if own(l) => mir_parts_at(rap, visualization_data, row),
-                // A row other code is on too (the split's, `} else {`): what
-                // this row's code leaves on the way to the arm's own first
-                // line with code; else what the arm starts with, where the
-                // conditional branches.
-                Some(l) => {
-                    let into = mir_parts(rap, visualization_data)
-                        .filter(|p| p.at == PartsAt::Entry && p.from == Some(l) && own(p.line))
-                        .min_by_key(|p| p.line);
-                    match into {
-                        Some(p) => Some(PartsFacts::from(p)),
-                        None if row <= arm_first.max(split_row) => mir_parts_at_switch(rap, visualization_data, split_row),
-                        None => mir_parts_at(rap, visualization_data, row),
-                    }
-                }
-                None => None,
-            }
+        Leg::Column if row <= arm_first.max(split_row) => None,
+        Leg::Column => mir_parts_at(rap, visualization_data, row),
+        Leg::Join => {
+            let own = match (rv_attrs::line_of(arm_rows.0, &visualization_data.row_lines), rv_attrs::line_of(arm_rows.1, &visualization_data.row_lines)) {
+                (Some(lo), Some(hi)) if arm_rows.0 <= arm_rows.1 => Some((lo, hi)),
+                _ => None,
+            };
+            own.filter(|_| mir_brace_line(rap, visualization_data, row))
+                .and_then(|lines| mir_parts_entering_from(rap, visualization_data, row, lines))
         }
-        // Out of it: what this arm's own code leaves at the join (not the
-        // other arms'). Where that isn't known (the arm has no rows of its
-        // own), what every arm leaves: the fields lacking on every way in
-        // are on this one; those that may lack one are neither named nor
-        // said to hold their value.
-        Leg::Join => own_lines.and_then(|lines| mir_parts_entering_from(rap, visualization_data, row, lines))
-            .or_else(|| mir_parts_entering(rap, visualization_data, row).map(|f| PartsFacts {
-                unsure: f.maybe.iter().chain(f.unsure.iter()).cloned().collect(),
-                maybe: f.partly, certain: f.certain, partly: Vec::new(),
-            })),
     };
     let title = match (inactive, leg) {
         (true, Leg::Split) => hover_messages::state_arm_split(arm_label),
@@ -9335,12 +9324,23 @@ fn push_seg_if_renderable(
         }
         // `row`: the first source row the segment covers, for a `for`
         // loop around the conditional (#871).
-        // A struct's arm: rustc's facts on its fields where they're
-        // known for this way (else main's text).
+        // A struct's arm: rustc's facts on its fields where they're known
+        // for this way. Where they aren't and part of it may be moved out
+        // around the conditional (so "the owner" may be false), the leg
+        // says only where it leads, and a row of the arm what main's walk
+        // of its events says; else main's text.
         (false, _) if matches!((&state, rap), (State::FullPrivilege { .. }, ResourceAccessPoint::Struct(_)))
-            && facts().is_some_and(|f| f.moved()) => {
-            mir_parts_title(rap, visualization_data, &facts().unwrap_or_default())
-        }
+            && facts().is_none_or(|f| f.moved()) => match facts() {
+            Some(f) => mir_parts_title(rap, visualization_data, &f),
+            None if mir_moves_between(rap, visualization_data, split_row, if leg == Leg::Split { split_row } else { row }) => match leg {
+                Leg::Split => hover_messages::state_arm_split(arm_label),
+                Leg::Join => hover_messages::state_arm_join(arm_label),
+                Leg::Column if row <= arm_first.max(split_row) => hover_messages::state_inactive_arm_unlit(arm_label),
+                Leg::Column => timeline_segment_title(&state, rap, visualization_data, Some(row)),
+            },
+            None => loop_iterator_title(&state, rap, visualization_data, row)
+                .unwrap_or_else(|| timeline_segment_title(&state, rap, visualization_data, None)),
+        },
         (false, _) => loop_iterator_title(&state, rap, visualization_data, row)
             .unwrap_or_else(|| timeline_segment_title(&state, rap, visualization_data, None)),
     };
@@ -9942,21 +9942,24 @@ impl PartsMoved {
 /// surely moved are named; where any may be, no more than that some of
 /// its fields may have been (which, and on which paths, isn't said).
 fn mir_parts_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, facts: &PartsFacts) -> String {
-    let PartsFacts { certain, maybe, unsure, .. } = facts;
+    let PartsFacts { certain, maybe, part, unsure, unlisted } = facts;
     let parts = direct_parts(rap, visualization_data);
     // (Every field out on this path isn't "partially" moved: no more than
     // that some may be, as #1619 says it.)
     let every = parts.iter().all(|t| certain.iter().any(|c| c == t.resource_access_point.name()));
     // The direct fields rustc says surely hold a value here, with all
-    // their own fields: none of them, nor a field inside, may lack one
-    // (nor does the borrow checker think one may: `unsure`).
+    // their own fields: none of them, nor a part inside, may lack one (nor
+    // does the borrow checker think one may), and no `&mut` is taken of it.
     let usable: Vec<String> = parts.iter().map(|t| t.resource_access_point.name().clone())
-        .filter(|f| !certain.iter().chain(maybe.iter()).chain(unsure.iter()).any(|m| m == f || m.starts_with(&format!("{}.", f))))
+        .filter(|f| !certain.iter().chain(maybe).chain(part).chain(unsure).chain(unlisted).any(|m| m == f || m.starts_with(&format!("{}.", f))))
         .collect();
-    let text = if !maybe.is_empty() || certain.is_empty() || every {
+    let text = if !certain.is_empty() && maybe.is_empty() && part.is_empty() && unsure.is_empty() && !every {
+        PartsMoved { moved: certain.to_vec(), maybe: false, all: false, maybe_moved: Vec::new(), none_usable: false }.title(rap)
+    } else if !certain.is_empty() || !maybe.is_empty() || !unsure.is_empty() {
         hover_messages::state_fields_maybe_moved(rap.name())
     } else {
-        PartsMoved { moved: certain.to_vec(), maybe: false, all: false, maybe_moved: Vec::new(), none_usable: false }.title(rap)
+        // Only parts of fields (a payload inside a field, an element).
+        hover_messages::state_part_maybe_moved(rap.name())
     };
     hover_messages::with_usable_fields(text, &usable)
 }
@@ -9966,23 +9969,26 @@ fn mir_parts_title(rap: &ResourceAccessPoint, visualization_data: &Visualization
 struct PartsFacts {
     /// Surely moved out.
     certain: Vec<String>,
-    /// May be (or part of it is).
+    /// May be.
     maybe: Vec<String>,
-    /// Those of `maybe` part of which surely is.
-    partly: Vec<String>,
+    /// Part of which may be.
+    part: Vec<String>,
     /// Hold a value, but the borrow checker counts a way they may not.
     unsure: Vec<String>,
+    /// A `&mut` is taken of them somewhere.
+    unlisted: Vec<String>,
 }
 
 impl PartsFacts {
+    /// Whether anything of it may lack a value (as rustc sees it).
     fn moved(&self) -> bool {
-        !self.certain.is_empty() || !self.maybe.is_empty()
+        !self.certain.is_empty() || !self.maybe.is_empty() || !self.part.is_empty() || !self.unsure.is_empty()
     }
 }
 
 impl From<&PartsUninit> for PartsFacts {
     fn from(p: &PartsUninit) -> Self {
-        PartsFacts { certain: p.certain.clone(), maybe: p.maybe.clone(), partly: p.partly.clone(), unsure: p.unsure.clone() }
+        PartsFacts { certain: p.certain.clone(), maybe: p.maybe.clone(), part: p.part.clone(), unsure: p.unsure.clone(), unlisted: p.unlisted.clone() }
     }
 }
 
@@ -10000,38 +10006,67 @@ fn merge_parts<'a>(recs: impl IntoIterator<Item = &'a PartsUninit>) -> Option<Pa
         [one] => Some(PartsFacts::from(*one)),
         _ => {
             let within = |n: &str, f: &str| n == f || n.starts_with(&format!("{}.", f));
-            let all: BTreeSet<String> = recs.iter().flat_map(|r| r.certain.iter().chain(r.maybe.iter())).cloned().collect();
-            let outer: Vec<String> = all.iter().filter(|n| !all.iter().any(|a| a != *n && within(n, a))).cloned().collect();
-            let (certain, maybe): (Vec<String>, Vec<String>) = outer.into_iter().partition(|n| recs.iter().all(|r| r.certain.iter().any(|c| within(n, c))));
-            // (Part of it on every way: whole on some, or part on each.)
-            let partly = maybe.iter().filter(|n| recs.iter().all(|r| r.certain.iter().chain(r.partly.iter()).any(|c| within(n, c) || within(c, n)))).cloned().collect();
-            let unsure: BTreeSet<String> = recs.iter().flat_map(|r| r.unsure.iter()).cloned().collect();
-            Some(PartsFacts { certain, maybe, partly, unsure: unsure.into_iter().collect() })
+            let union = |get: fn(&PartsUninit) -> &Vec<String>| -> BTreeSet<String> { recs.iter().flat_map(|r| get(r).iter()).cloned().collect() };
+            let whole: BTreeSet<String> = recs.iter().flat_map(|r| r.certain.iter().chain(r.maybe.iter())).cloned().collect();
+            let all: BTreeSet<String> = whole.iter().cloned().chain(union(|r| &r.part)).chain(union(|r| &r.unsure)).collect();
+            let outer = |n: &String| !all.iter().any(|a| a != n && within(n, a));
+            let (certain, maybe): (Vec<String>, Vec<String>) = whole.iter().filter(|n| outer(n)).cloned()
+                .partition(|n| recs.iter().all(|r| r.certain.iter().any(|c| within(n, c))));
+            let taken: Vec<String> = certain.iter().chain(&maybe).cloned().collect();
+            let part: Vec<String> = union(|r| &r.part).into_iter().filter(|n| outer(n) && !taken.contains(n)).collect();
+            let unsure: Vec<String> = union(|r| &r.unsure).into_iter().filter(|n| outer(n) && !taken.contains(n) && !part.contains(n)).collect();
+            Some(PartsFacts { certain, maybe, part, unsure, unlisted: union(|r| &r.unlisted).into_iter().collect() })
         }
     }
 }
 
 /// rustc's facts on the fields of the struct column `rap` after the code
-/// on the source line of row `row` (`PartsUninit`, #1595): the fields
-/// surely moved out, and those that may have been. On a line with no code
-/// (a comment, an arm's `} else {`), what the code above left, where
-/// control goes on from there to the next line with code and enters that
-/// from no other line; else (an `else` arm's comment, below another arm's
-/// move) which way control came isn't known here: `None`, as without
-/// facts (no part of it is ever moved out).
+/// on the source line of row `row` (`PartsUninit`, #1595): only where
+/// that's clear. On a line of one statement (`PartsAt::After` is only
+/// there), after it; on a line of only a closing brace, as control enters
+/// the next line with code, where it comes from one line above only; on
+/// any other line (two statements, a brace and code, a conditional's test,
+/// a comment), `None`: main's text.
 fn mir_parts_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, row: usize) -> Option<PartsFacts> {
     let line = rv_attrs::line_of(row, &visualization_data.row_lines)?;
     let ours = || mir_parts(rap, visualization_data);
     if let Some(p) = ours().find(|p| p.at == PartsAt::After && p.line == line) {
         return Some(PartsFacts::from(p));
     }
-    let prev = ours().filter(|p| p.at == PartsAt::After && p.line < line).map(|p| p.line).max()?;
-    let next = ours().filter(|p| p.at == PartsAt::Entry && p.line > line).map(|p| p.line).min()?;
-    let from: BTreeSet<Option<usize>> = ours().filter(|p| p.at == PartsAt::Entry && p.line == next && p.from.is_some()).map(|p| p.from).collect();
-    if from != BTreeSet::from([Some(prev)]) {
+    if !ours().any(|p| p.at == PartsAt::Brace && p.line == line) {
         return None;
     }
-    merge_parts(ours().filter(|p| p.at == PartsAt::Entry && p.line == next && p.from.is_none()))
+    let next = ours().filter(|p| p.at == PartsAt::Entry && p.line > line).map(|p| p.line).min()?;
+    let from: BTreeSet<Option<usize>> = ours().filter(|p| p.at == PartsAt::Entry && p.line == next && p.from.is_some()).map(|p| p.from).collect();
+    match from.iter().collect::<Vec<_>>().as_slice() {
+        [Some(f)] if *f < line => merge_parts(ours().filter(|p| p.at == PartsAt::Entry && p.line == next && p.from.is_none())),
+        _ => None,
+    }
+}
+
+/// Whether rustc says part of the struct column `rap` may lack a value
+/// anywhere on the lines of rows `from..=to`: as control enters them, after
+/// them, or as it leaves them for another line.
+fn mir_moves_between(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, from: usize, to: usize) -> bool {
+    let (Some(lo), Some(hi)) = (rv_attrs::line_of(from, &visualization_data.row_lines), rv_attrs::line_of(to, &visualization_data.row_lines)) else { return true };
+    let within = |l: usize| l >= lo && l <= hi;
+    mir_parts(rap, visualization_data).any(|p| (within(p.line) || p.from.is_some_and(within)) && PartsFacts::from(p).moved())
+}
+
+/// As control leaves row `row`'s line for another (from every way), where
+/// the line holds a conditional's test.
+fn mir_parts_leaving(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, row: usize) -> Option<PartsFacts> {
+    let line = rv_attrs::line_of(row, &visualization_data.row_lines)?;
+    if !mir_parts(rap, visualization_data).any(|p| p.at == PartsAt::Tests && p.line == line) {
+        return None;
+    }
+    merge_parts(mir_parts(rap, visualization_data).filter(|p| p.at == PartsAt::Entry && p.from == Some(line)))
+}
+
+/// Whether row `row`'s line holds only a closing brace.
+fn mir_brace_line(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, row: usize) -> bool {
+    rv_attrs::line_of(row, &visualization_data.row_lines)
+        .is_some_and(|line| mir_parts(rap, visualization_data).any(|p| p.at == PartsAt::Brace && p.line == line))
 }
 
 /// As control enters the code on row `row`'s line, from every way in (a

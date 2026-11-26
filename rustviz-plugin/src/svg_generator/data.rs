@@ -4757,25 +4757,35 @@ pub struct PartsUninit {
     pub from: Option<usize>,
     pub certain: Vec<String>,
     pub maybe: Vec<String>,
-    /// Those of `maybe` part of which (an array element, an enum field's
-    /// payload) is surely moved out.
-    pub partly: Vec<String>,
+    /// Fields part of which (an array element, an enum field's payload)
+    /// may be moved out, the field itself not.
+    pub part: Vec<String>,
     /// Fields that hold a value on every way that runs, but not on every
     /// way the borrow checker counts (its imaginary edges into the second
     /// alternative of `(x, _) | (_, x)`, or the `else` of `if let _ = ..`):
-    /// rustc won't let them be used, so they aren't said to hold their value.
+    /// rustc won't let them, or the struct as a whole, be used.
     pub unsure: Vec<String>,
+    /// Fields a `&mut` is taken of somewhere (`ManuallyDrop::drop(&mut
+    /// h.a)`): never said to hold their value.
+    pub unlisted: Vec<String>,
 }
 
 /// Where on its line a `PartsUninit` holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PartsAt {
-    /// As control leaves the line's code.
+    /// As control leaves the line's code. Only on lines facts are read on:
+    /// one statement and nothing else, or only a closing brace, with no
+    /// conditional's test.
     After,
     /// As control enters it.
     Entry,
-    /// Where a conditional on the line branches (before its test).
+    /// Where the one conditional on the line branches (before its test).
     Switch,
+    /// The line holds only a closing brace (no facts of its own).
+    Brace,
+    /// The line holds a conditional's test (no facts of its own): every way
+    /// through the line runs code on it.
+    Tests,
 }
 
 impl VisualizationData {

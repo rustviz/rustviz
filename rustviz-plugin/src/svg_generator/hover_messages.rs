@@ -3417,6 +3417,13 @@ pub fn state_fields_maybe_moved(my_name: &String) -> String {
     format!("Some of {0}'s fields may have been moved out, so {0} can't be used as a whole", styled_name_html(my_name))
 }
 
+// The line of a struct only part of a field of which (an element of an
+// array field, an `Option` field's payload) may have been moved out
+// (#1595): no field as a whole was.
+pub fn state_part_maybe_moved(my_name: &String) -> String {
+    format!("Part of {0} may have been moved out, so {0} can't be used as a whole", styled_name_html(my_name))
+}
+
 // The line of a struct every field of which was moved out, some of them
 // on some paths through a conditional above only (`let s2 = p.b; if c {
 // drop(p.a); }`, #1583): on the other paths it still holds those, and

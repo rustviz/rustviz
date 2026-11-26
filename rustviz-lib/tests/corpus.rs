@@ -28083,7 +28083,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "v is partially moved: v.a was moved out, so v can't be used as a whole; v.b still holds its value",
             "Some of v's fields may have been moved out, so v can't be used as a whole; v.b still holds its value",
             "f is partially moved: f.a was moved out, so f can't be used as a whole; f.b still holds its value",
-            "Some of y's fields may have been moved out, so y can't be used as a whole; y.b still holds its value",
+            "Some of y's fields may have been moved out, so y can't be used as a whole",
             "Some of z's fields may have been moved out, so z can't be used as a whole",
             "d is partially moved: d.a was moved out, so d can't be used as a whole; d.b still holds its value",
             "Some of d's fields may have been moved out, so d can't be used as a whole; d.b still holds its value",
@@ -28092,7 +28092,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // v forks for its own borrow; its join is where rustc says v.a
             // may be moved out.
             "v as a whole isn't moved in the branches above, but some of its fields may have been",
-            "Some of ta's fields may have been moved out, so ta can't be used as a whole",
+            // A payload inside a field, not a field (#1646 review).
+            "Part of ta may have been moved out, so ta can't be used as a whole",
             // A field part of which is moved out isn't listed as holding its
             // value (#1646 review).
             "Some of ap's fields may have been moved out, so ap can't be used as a whole; ap.tag still holds its value",
@@ -28108,9 +28109,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=v isn't moved in any of the branches above",
             // The second bp's facts given to the first (#1646 review).
             "Some of bp's fields may have been moved out",
-            // A dead `else`'s move (an imaginary edge).
-            "Some of de's fields may have been moved out",
+            // A dead `else`'s move (an imaginary edge): the borrow checker
+            // still counts it ("Some of de's fields may have been moved
+            // out"), but it never happens.
             "de is partially moved",
+            "ta's fields",
+            // `ManuallyDrop::drop(&mut md.a)` destroyed it.
+            "md.a still holds its value",
             // A move after the join, on its line, taken for the branches'.
             "aj as a whole isn't moved in the branches above",
         ],
@@ -29792,11 +29797,22 @@ fn state_lines_with_tooltip(svg: &str, text: &str) -> Vec<(f64, f64)> {
 
 /// The same, for the lines whose tooltip `keep` accepts.
 fn state_lines_where(svg: &str, keep: impl Fn(&str) -> bool) -> Vec<(f64, f64)> {
+    state_lines_by(svg, |open| matches!(timeline_tooltips(open).as_slice(), [t] if keep(t)))
+}
+
+/// The y-ranges of the state lines (`data-rv-kind="line"`) of column
+/// `var`, whatever they say.
+fn var_state_lines(svg: &str, var: &str) -> Vec<(f64, f64)> {
+    let tag = format!("data-rv-var=\"{}\"", var);
+    state_lines_by(svg, |open| open.contains(&tag) && open.contains("data-rv-kind=\"line\""))
+}
+
+fn state_lines_by(svg: &str, keep: impl Fn(&str) -> bool) -> Vec<(f64, f64)> {
     let mut out = Vec::new();
     for (i, _) in svg.match_indices("<g class=\"tooltip-trigger\" data-tooltip-text=\"") {
         let group = &svg[i..i + svg[i..].find("</g>").unwrap_or(svg.len() - i)];
         let open = &group[..group.find('>').unwrap_or(group.len()) + 1];
-        if !matches!(timeline_tooltips(open).as_slice(), [t] if keep(t)) {
+        if !keep(open) {
             continue;
         }
         for l in start_tags(group, "line") {
@@ -36774,10 +36790,10 @@ fn a_struct_whose_fields_are_all_moved_out_has_no_line_after() {
         ("o.inner", "let oy = o.inner.y;", true),
     ] {
         let row = code_row_y(&code, last_move);
-        // Every line of var's (whatever still-held fields its partly-moved
-        // text lists), and among them a partly-moved one.
+        // Every line of var's, by its id, whatever it says ("Some of p's
+        // fields ...", "Part of p ..."), and among them a partly-moved one.
         let partly = format!("{var} is partially moved: ");
-        let lines = state_lines_where(&timeline, |t| t == format!("{var} is the owner of the resource") || t.starts_with(&partly));
+        let lines = var_state_lines(&timeline, var);
         assert!(!lines.is_empty(), "{name}: no line for {var}");
         assert_eq!(!state_lines_where(&timeline, |t| t.starts_with(&partly)).is_empty(), partly_moved, "{name}: a partly-moved line for {var}");
         let below: Vec<&(f64, f64)> = lines.iter().filter(|(_, y2)| *y2 > row + 1.0).collect();
@@ -38201,7 +38217,7 @@ fn struct_field_moves_and_ends() {
         // that all move them; u keeps u.c, so its line goes on.
         ("struct_last_field_moved_in_arms_1541",
          // (u's text changes where rustc says u.b is moved out, #1595.)
-         &["p@L17-18:line", "q@L27-28:line", "t@L36-37:line", "u@L50-52:line", "u@L52-57:line"][..],
+         &["p@L17-18:line", "q@L27-28:line", "t@L36-37:line", "u@L50-51:line", "u@L54-57:line"][..],
          &["p@L17-22:line", "q@L27-31:line", "t@L36-43:line"][..]),
     ] {
         let tl = run_with_local_backend(snippet).timeline_panel_string();
@@ -38449,10 +38465,10 @@ fn struct_line_text_follows_rustc_1595() {
         ("p", 23, some("p", "")),
         ("q", 29, partly("q", "a", "q.b still holds its value")),
         ("q", 32, some("q", "; q.b still holds its value")),
-        ("w", 39, some("w", "")),
+        // (Row 39 holds a conditional's test: main's text.)
+        ("w", 39, "w is partially moved: w.b was moved out, so w can't be used as a whole".to_owned()),
         ("t", 48, partly("t", "0", "t.1 still holds its value")),
         ("t", 49, some("t", "; t.1 still holds its value")),
-        ("m", 54, partly("m", "a", "m.b still holds its value")),
         ("m", 57, partly("m", "b", "m.a still holds its value")),
         ("m", 60, some("m", "")),
         ("l", 66, partly("l", "a", "l.b still holds its value")),
@@ -38468,9 +38484,9 @@ fn struct_line_text_follows_rustc_1595() {
         ("d", 158, partly("d", "a", "d.b still holds its value")),
         ("d", 160, some("d", "; d.b still holds its value")),
         ("hh", 166, partly("hh", "r", "hh.n still holds its value")),
-        // An or-pattern binding moves an enum field's payload: ta.0 / ta.1
-        // aren't whole.
-        ("ta", 172, some("ta", "")),
+        // An or-pattern binding moves an enum field's payload: part of ta.0
+        // or ta.1, not a field.
+        ("ta", 172, "Part of ta may have been moved out, so ta can't be used as a whole".to_owned()),
         // Where every field holds a value again (else rows, after a refill,
         // the other match arms), it does own it.
         ("q", 31, "q is the owner of the resource".to_owned()),
@@ -38513,8 +38529,10 @@ fn struct_facts_per_way_1646() {
         ("v@L128:dot:branch_join", "v as a whole isn't moved in the branches above, but some of its fields may have been".to_owned()),
         // `let [head, _] = ap.xs;` ("ap.tag and ap.xs still hold their values").
         ("ap@L191-193:line:full_privilege", "Some of ap's fields may have been moved out, so ap can't be used as a whole; ap.tag still holds its value".to_owned()),
-        // `if let Some(s) = op.opt` ("op.opt still holds its value").
-        ("op@L197-200:line:full_privilege", "Some of op's fields may have been moved out, so op can't be used as a whole".to_owned()),
+        // `if let Some(s) = op.opt` ("op.opt still holds its value"): on
+        // its row (a test) main's text; below, op.opt's payload may be out.
+        ("op@L197-198:line:full_privilege", "op is partially moved: op.a was moved out, so op can't be used as a whole".to_owned()),
+        ("op@L198-200:line:full_privilege", "Some of op's fields may have been moved out, so op can't be used as a whole".to_owned()),
         // The first bp, before its own move ("bp.b was moved out": the
         // second bp's).
         ("bp@L205-207:line:full_privilege", owner("bp")),
@@ -38523,15 +38541,27 @@ fn struct_facts_per_way_1646() {
         // `} drop(aj.a);` ("aj as a whole isn't moved in the branches
         // above, but some of its fields may have been").
         ("aj@L233:dot:branch_join", "aj isn't moved in any of the branches above".to_owned()),
-        ("aj@L233:branch_line:full_privilege", owner("aj")),
+        // (Its join line holds code: which side of the join it runs on isn't
+        // clear, so the leg says only where it leads.)
+        ("aj@L233:branch_line:full_privilege", "This segment leads from the else branch to where the branches join.".to_owned()),
         // `if c { let r = &sl; use_ref(r); drop(sl.a);`: the leg in, where
         // the `if` branches, still owns ("Some of sl's fields may have been
-        // moved out"); the arm, after its move, is partly moved; of the legs
-        // out, the then arm's is partly moved and the else arm's owns.
+        // moved out"); the arm's split row holds the test and its code
+        // (unclear: where it leads only); of the legs out, the then arm's is
+        // partly moved, and the else arm's, which has no rows of its own,
+        // says only where it leads (not "the owner").
         ("sl@L238:branch_line:full_privilege", owner("sl")),
-        ("sl@L238-239:branch_line:full_privilege", partly("sl", "a", "b")),
+        ("sl@L238-239:branch_line:full_privilege", "This segment is for the if branch.".to_owned()),
         ("sl@L240:branch_line:full_privilege", partly("sl", "a", "b")),
-        ("sl@L240:branch_line:full_privilege#2", owner("sl")),
+        ("sl@L240:branch_line:full_privilege#2", "This segment leads from the else branch to where the branches join.".to_owned()),
+        // Round 5. `drop(jl.a); }`: the then arm's leg into the join isn't
+        // "the owner".
+        ("jl@L270:branch_line:full_privilege", "This segment leads from the if branch to where the branches join.".to_owned()),
+        // `if c { drop(ti.a); } if d { ti = ..; }`: two tests on a row; the
+        // second's leg in isn't given the first's state ("the owner").
+        ("ti@L275:branch_line:full_privilege", "This segment leads into the if branch.".to_owned()),
+        // Its `if d` arm gives ti a new value: that arm's leg out owns.
+        ("ti@L277:branch_line:full_privilege", owner("ti")),
     ];
     for (id, want) in by_id {
         assert_eq!(tip_of(&svg, id).unwrap_or_else(|| panic!("no {}", id)), want, "{}", id);
@@ -38544,9 +38574,16 @@ fn struct_facts_per_way_1646() {
         // rows taken for the loop's closing brace's).
         ("lr", 247, partly("lr", "a", "b")),
         ("lr", 249, owner("lr")),
-        // After an `else` that never runs ("Some of de's fields may have
-        // been moved out").
-        ("de", 261, owner("de")),
+        // After an `else` that never runs: rustc's borrow checker still
+        // counts its move, so de can't be used as a whole (not "the owner").
+        ("de", 261, "Some of de's fields may have been moved out, so de can't be used as a whole; de.b still holds its value".to_owned()),
+        // A path that panics doesn't reach the row below the `if`.
+        ("pa", 287, owner("pa")),
+        // rf.b refilled: it holds its new value (the state before the row
+        // isn't mixed in).
+        ("rf", 294, partly("rf", "a", "b")),
+        // md.a destroyed by `ManuallyDrop::drop`: not listed.
+        ("md", 307, "md is partially moved: md.b was moved out, so md can't be used as a whole; md.c still holds its value".to_owned()),
     ] {
         let tip = line_tip_at(&svg, var, row).unwrap_or_else(|| panic!("no line of {} on row {}", var, row));
         assert_eq!(tip, want, "{} on row {}", var, row);

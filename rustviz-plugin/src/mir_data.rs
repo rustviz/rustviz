@@ -1634,7 +1634,9 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                     work.push(Location { block: l.block, statement_index: l.statement_index + 1 });
                 } else {
                     let succ: Vec<_> = data.terminator().successors().filter(|b| runs(b)).collect();
-                    if succ.is_empty() { out.insert(None); }
+                    // (Out of the body by its return; a panic, a call that
+                    // never returns, leads nowhere.)
+                    if succ.is_empty() && matches!(data.terminator().kind, TerminatorKind::Return) { out.insert(None); }
                     work.extend(succ.into_iter().map(|b| Location { block: b, statement_index: 0 }));
                 }
             }
@@ -1745,20 +1747,95 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 }
             }
         }
-        // Where a conditional on the line branches: its first test (`a` of
-        // `if a && b`, not a conditional nested in an arm on the line).
-        let switches: BTreeMap<usize, Vec<Location>> = switches.into_iter().map(|(line, bbs)| {
-            let first: Vec<Location> = bbs.iter()
-                .filter(|b| !bbs.iter().any(|o| o != *b && doms.dominates(*o, **b)))
-                .map(|b| Location { block: *b, statement_index: body.basic_blocks[*b].statements.len() })
-                .collect();
-            (line, first)
+        // The lines rustc's facts are read on: those holding exactly one
+        // statement (or the end of one) and nothing else, and those holding
+        // only a closing brace, with no conditional's test on them. On any
+        // other (two statements, a brace and code, two tests), which code a
+        // fact is after isn't clear: main's text shows there.
+        struct Stmts { spans: Vec<Span> }
+        impl<'tcx> intravisit::Visitor<'tcx> for Stmts {
+            fn visit_stmt(&mut self, st: &'tcx rustc_hir::Stmt<'tcx>) {
+                self.spans.push(st.span);
+                intravisit::walk_stmt(self, st);
+            }
+            fn visit_block(&mut self, b: &'tcx rustc_hir::Block<'tcx>) {
+                if let Some(e) = b.expr { self.spans.push(e.span); }
+                intravisit::walk_block(self, b);
+            }
+        }
+        let mut stmts = Stmts { spans: Vec::new() };
+        intravisit::Visitor::visit_expr(&mut stmts, self.hir_body.value);
+        // (A macro's statements count as its call's: one, unless the call
+        // starts a statement written out already: `println!(..);`.)
+        let written: Vec<Span> = stmts.spans.iter().filter(|sp| !sp.from_expansion()).copied().collect();
+        let stmt_spans: BTreeSet<(rustc_span::BytePos, rustc_span::BytePos)> = stmts.spans.iter()
+            .map(|sp| sp.source_callsite())
+            .filter(|sp| !sp.is_dummy() && (written.contains(sp) || !written.iter().any(|w| w.lo() == sp.lo() && w.contains(*sp))))
+            .map(|sp| (sp.lo(), sp.hi()))
+            .collect();
+        let stmt_lines: Vec<(usize, usize)> = stmt_spans.iter()
+            .map(|(lo, hi)| (sm.lookup_char_pos(*lo).line, sm.lookup_char_pos(*hi).line)).collect();
+        let src = sm.lookup_char_pos(self.hir_body.value.span.lo()).file;
+        let body_start = sm.lookup_char_pos(self.hir_body.value.span.lo()).line;
+        let brace_only = |line: usize| -> bool {
+            let Some(text) = src.get_line(line - 1) else { return false };
+            let text = text.split("//").next().unwrap_or("").trim().to_owned();
+            text == "}" || text == "};" || text == "},"
+        };
+        let mut brace_lines: BTreeSet<usize> = BTreeSet::new();
+        let mut clean: BTreeSet<usize> = BTreeSet::new();
+        for line in body_start..=body_end {
+            if switches.contains_key(&line) {
+                continue;
+            }
+            let on: Vec<&(usize, usize)> = stmt_lines.iter().filter(|(a, z)| *a == line || *z == line).collect();
+            if brace_only(line) {
+                brace_lines.insert(line);
+                clean.insert(line);
+            } else if let [(_, z)] = on.as_slice() {
+                if *z == line { clean.insert(line); }
+            }
+        }
+        let test_lines: Vec<usize> = switches.keys().copied().collect();
+        // Where the one conditional on the line branches (none where two
+        // share it: `if c { .. } if d {`, `if a && b`).
+        let switches: BTreeMap<usize, Vec<Location>> = switches.into_iter().filter(|(_, bbs)| bbs.len() == 1).map(|(line, bbs)| {
+            (line, vec![Location { block: bbs[0], statement_index: body.basic_blocks[bbs[0]].statements.len() }])
         }).collect();
+        // The fields a `&mut` is taken of anywhere (`ManuallyDrop::drop(&mut
+        // h.a)` destroys its value; a method may take it): never said to
+        // hold their value.
+        let names_l = self.mir_local_names(self.bwf);
+        let mut mut_borrowed: BTreeSet<(Local, String)> = BTreeSet::new();
+        for data in body.basic_blocks.iter() {
+            for st in &data.statements {
+                let StatementKind::Assign(b) = &st.kind else { continue };
+                let Rvalue::Ref(_, BorrowKind::Mut { .. }, place) = &b.1 else { continue };
+                let Some(mut name) = names_l.get(&place.local).cloned() else { continue };
+                let mut ty = body.local_decls[place.local].ty;
+                for elem in place.projection {
+                    let ProjectionElem::Field(f, fty) = elem else { break };
+                    match ty.kind() {
+                        TyKind::Adt(def, _) if def.is_struct() => name = format!("{}.{}", name, def.non_enum_variant().fields[f].name),
+                        TyKind::Tuple(_) => name = format!("{}.{}", name, f.index()),
+                        _ => break,
+                    }
+                    ty = fty;
+                }
+                mut_borrowed.insert((place.local, name));
+            }
+        }
         // Every place made of fields of the record's struct (rustc's facts on
         // them, all at once).
         let mut sets: Vec<(PartsAt, usize, Option<usize>, Vec<Location>)> = Vec::new();
-        for (line, locs) in &exits {
+        for (line, locs) in exits.iter().filter(|(l, _)| clean.contains(l)) {
             sets.push((PartsAt::After, *line, None, locs.clone()));
+        }
+        for line in &brace_lines {
+            sets.push((PartsAt::Brace, *line, None, Vec::new()));
+        }
+        for line in &test_lines {
+            sets.push((PartsAt::Tests, *line, None, Vec::new()));
         }
         for (line, from) in &entries {
             if from.is_empty() { continue; }
@@ -1788,18 +1865,22 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
             let below: Vec<&(MovePathIndex, Local, String, bool)> = paths.iter()
                 .filter(|(_, l, n, _)| l == local && n.starts_with(&prefix)).collect();
             let below_b: Vec<Option<MovePathIndex>> = below.iter().map(|(m, ..)| path_b(*m)).collect();
+            let unlisted: Vec<String> = mut_borrowed.iter().filter(|(l, n)| l == local && n.starts_with(&prefix)).map(|(_, n)| n.clone()).collect();
             for (kind, line, from, locs) in &sets {
                 let mut whole = false;
                 // Per path: may lack a value after some location; lacks one after all.
                 let mut may: Vec<bool> = vec![false; below.len()];
                 let mut sure: Vec<bool> = vec![true; below.len()];
                 let mut may_b: Vec<bool> = vec![false; below.len()];
-                // As the borrow checker sees the line: where control enters
-                // it, and after its code, on every way it counts.
+                // As the borrow checker sees the same point, on every way it
+                // counts: after the line's code (also its imaginary ways'),
+                // or as control enters the line.
                 let none = Vec::new();
-                let before_b = entry_at.get(line).unwrap_or(&none).iter().map(|l| (*l, false));
-                let after_b = locs.iter().chain(dead_at.get(line).unwrap_or(&none)).map(|l| (*l, true));
-                for (loc, after) in before_b.chain(after_b) {
+                let before_b = entry_at.get(line).unwrap_or(&none).iter()
+                    .filter(|_| *kind == PartsAt::Entry && from.is_none()).map(|l| (*l, false));
+                let dead_b = dead_at.get(line).unwrap_or(&none).iter()
+                    .filter(|_| *kind == PartsAt::After).map(|l| (*l, true));
+                for (loc, after) in before_b.chain(dead_b).chain(locs.iter().map(|l| (*l, true))) {
                     if after { uninit_b.seek_after_primary_effect(loc) } else { uninit_b.seek_before_primary_effect(loc) }
                     for (k, b) in below_b.iter().enumerate() {
                         // (A path it doesn't know: unknown, so not held.)
@@ -1824,27 +1905,33 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 }
                 let mut certain: BTreeSet<String> = BTreeSet::new();
                 let mut maybe: BTreeSet<String> = BTreeSet::new();
+                let mut part: BTreeSet<String> = BTreeSet::new();
+                let mut unsure: BTreeSet<String> = BTreeSet::new();
                 for (k, (_, _, n, partial)) in below.iter().enumerate() {
-                    if !may[k] { continue; }
                     // (Part of a field moved isn't the field moved.)
-                    if sure[k] && !partial { certain.insert(n.clone()); } else { maybe.insert(n.clone()); }
+                    match (may[k], *partial) {
+                        (true, false) if sure[k] => { certain.insert(n.clone()); }
+                        (true, false) => { maybe.insert(n.clone()); }
+                        (true, true) => { part.insert(n.clone()); }
+                        // Only on the borrow checker's imaginary ways.
+                        (false, true) if may_b[k] => { part.insert(n.clone()); }
+                        (false, false) if may_b[k] => { unsure.insert(n.clone()); }
+                        (false, _) => {}
+                    }
                 }
                 maybe.retain(|n| !certain.contains(n));
-                let partly: BTreeSet<String> = below.iter().enumerate()
-                    .filter(|(k, (_, _, n, partial))| *partial && may[*k] && sure[*k] && maybe.contains(n))
-                    .map(|(_, (_, _, n, _))| n.clone()).collect();
-                let unsure: Vec<String> = below.iter().enumerate()
-                    .filter(|(k, (_, _, n, _))| may_b[*k] && !may[*k] && !certain.contains(n) && !maybe.contains(n))
-                    .map(|(_, (_, _, n, _))| n.clone()).collect::<BTreeSet<String>>().into_iter().collect();
+                part.retain(|n| !certain.contains(n) && !maybe.contains(n));
+                unsure.retain(|n| !certain.contains(n) && !maybe.contains(n) && !part.contains(n));
                 // The outermost fields that may lack a value.
-                let all: BTreeSet<String> = certain.union(&maybe).cloned().collect();
-                let outer = |n: &String| !all.iter().any(|a| n.starts_with(&format!("{}.", a)));
+                let all: BTreeSet<String> = certain.iter().chain(&maybe).chain(&part).chain(&unsure).cloned().collect();
+                let outer = |n: &&String| !all.iter().any(|a| n.starts_with(&format!("{}.", a)));
                 let rec = PartsUninit {
                     hash, line: *line, at: *kind, from: *from,
-                    certain: certain.iter().filter(|n| outer(n)).cloned().collect(),
-                    maybe: maybe.iter().filter(|n| outer(n)).cloned().collect(),
-                    partly: partly.iter().filter(|n| outer(n)).cloned().collect(),
-                    unsure,
+                    certain: certain.iter().filter(outer).cloned().collect(),
+                    maybe: maybe.iter().filter(outer).cloned().collect(),
+                    part: part.iter().filter(outer).cloned().collect(),
+                    unsure: unsure.iter().filter(outer).cloned().collect(),
+                    unlisted: unlisted.clone(),
                 };
                 match out.entry((hash, *line, *kind, *from)) {
                     std::collections::btree_map::Entry::Vacant(v) => { v.insert(Some((*local, rec))); }

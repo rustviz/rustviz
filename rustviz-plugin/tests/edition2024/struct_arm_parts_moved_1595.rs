@@ -261,6 +261,52 @@ fn dead_else(de: Pair) {
     let n = de.b.len();
 }
 
+// Round 5 (#1646): rustc's facts show only on rows where they're clear (one
+// statement, or only a closing brace, and no conditional's test); else main's
+// text. A leg whose arm state isn't known says only where it leads.
+fn brace_code(jl: Pair, c: bool) {
+    if c {
+        use_ref(&jl);
+        drop(jl.a); }
+    let n = 1;
+}
+
+fn two_tests(mut ti: Pair, c: bool, d: bool) {
+    if c { drop(ti.a); } if d {
+        ti = Pair { a: String::new(), b: String::new() };
+    }
+    let n = 1;
+}
+
+// A panic's path doesn't reach the code below.
+fn panics(pa: Pair, c: bool) {
+    if c {
+        drop(pa.a);
+        panic!();
+    }
+    let n = 1;
+}
+
+fn refilled(mut rf: Pair) {
+    drop(rf.a);
+    drop(rf.b);
+    rf.b = String::new();
+    let n = 1;
+}
+
+struct Md {
+    a: std::mem::ManuallyDrop<String>,
+    b: String,
+    c: String,
+}
+
+// `ManuallyDrop::drop` destroys md.a's String: never "md.a still holds its value".
+fn manual(mut md: Md) {
+    unsafe { std::mem::ManuallyDrop::drop(&mut md.a); }
+    drop(md.b);
+    let n = 1;
+}
+
 fn main() {
     let mk = || Pair { a: String::from("a"), b: String::from("b") };
     whole(mk(), true);
@@ -291,4 +337,9 @@ fn main() {
     split_line(mk(), true);
     loop_refill(mk());
     dead_else(mk());
+    brace_code(mk(), true);
+    two_tests(mk(), true, false);
+    panics(mk(), false);
+    refilled(mk());
+    manual(Md { a: std::mem::ManuallyDrop::new(String::new()), b: String::new(), c: String::new() });
 }
