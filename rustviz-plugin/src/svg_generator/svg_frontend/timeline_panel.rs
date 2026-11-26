@@ -9890,14 +9890,17 @@ fn table_lent_state(state: &State, rap: &ResourceAccessPoint, visualization_data
         };
         let title = if !every_path && !unique {
             hover_messages::state_maybe_lent_out(rap.name())
-        } else if unique {
+        } else if unique && !rap.is_ref() {
             hover_messages::state_unique_lent(rap.name(), lent_to)
         } else if rap.is_ref() {
+            // (A closure's unique borrow of a `&mut` writes what it points
+            // to through it, as a reborrow does.)
             // What it points to is borrowed through it (`&mut *r`), or the
             // reference itself is (`&mut r`, or the struct it is a field
             // of: `&mut p` for `p.n`; always so for a `&T`).
+            // (A unique borrow only writes through it, whatever its place.)
             let ref_itself = !rap.is_mutref()
-                || exclusive.iter().all(|l| table.loan_lender(fn_line, rap.name(), l.loan)
+                || exclusive.iter().all(|l| l.kind != "unique" && table.loan_lender(fn_line, rap.name(), l.loan)
                     .is_some_and(|p| p == rap.name() || rap.name().starts_with(&format!("{p}."))));
             hover_messages::state_lent_out(rap.name(), lent_to, rap.is_mutref().then(|| rap.points_to_copy()), ref_itself, rap.holds_value())
         } else {

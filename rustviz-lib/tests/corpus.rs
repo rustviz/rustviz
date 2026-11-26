@@ -28128,6 +28128,43 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &["only lowers", "only lower their", "its own buffer is freed", "the Weak inside", "freed only when"],
     },
+    // RustViz 3 P1-4b: a reference column's segment style follows what the
+    // state table says is borrowed through it (or of it). The must_contain
+    // texts are new (2.x drew these segments as plain holding); the first
+    // two must_not are 2.x's text there, which rustc contradicts.
+    TooltipExpect {
+        name: "aliasing2",
+        must_contain: &[],
+        // `b = &mut c;` re-points b before any use: its loan of a is dead
+        // after row 6 (`let _ = &mut a;` there compiles).
+        must_not_contain: &["a is mutably borrowed by b; a can't be used until the borrow ends"],
+    },
+    TooltipExpect {
+        name: "basic_ref5",
+        must_contain: &[],
+        // z is never used: `&mut y` doesn't restrict y after its row.
+        must_not_contain: &["y is mutably borrowed by z; y can't be used until the borrow ends"],
+    },
+    TooltipExpect {
+        name: "downgrade_ends_1414",
+        // `s` returned as `&String` is a shared reborrow of *s held by the
+        // caller: s can't write through itself after that row.
+        must_contain: &["s holds a mutable reference, but the resource it points to is currently shared through it, so s can only use it the way a shared reference can"],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "borrow_stored_through_local_ref",
+        // `let rh = &mut hold.r;` borrows the reference itself.
+        must_contain: &["hold.r is mutably borrowed by rh; hold.r can't be used until the borrow ends"],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
+        name: "return_elem_reborrow",
+        // A reborrow returned to the caller: held by the caller's
+        // reference, not by v.
+        must_contain: &["the resource v points to is mutably borrowed through v; v can't be used until the borrow ends"],
+        must_not_contain: &["mutably borrowed by v through v"],
+    },
 ];
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws
