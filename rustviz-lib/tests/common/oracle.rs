@@ -329,6 +329,12 @@ pub const ORACLE_EXEMPT: &[(&str, &str, u32, &str, &str)] = &[
 ];
 
 
+/// RustViz 3: states of the fact layer (`check_states`) that rustc
+/// contradicts on the `rv3` branch, each with its issue. The
+/// target is none; an entry needs a reason the fact can't be fixed from
+/// MIR yet. Same shape as `KNOWN_ORACLE_FAILURES`.
+pub const KNOWN_FACT_FAILURES: &[(&str, &str, u32, &str, u32)] = &[];
+
 pub const ORACLE_CHECKS: &[(&str, &str)] = &[
     ("oracle-usable",
      "the column is drawn holding its value with no borrow of it after this line, but rustc reports a \
@@ -883,6 +889,10 @@ struct Claim {
     in_loop: bool,
     /// The tooltip that says it: the segment's, or the moving dot's.
     tip: String,
+    /// A fact (`check_states`), not a drawing: rustc's verdict decides
+    /// more (a whole move against "partially moved", a maybe-moved
+    /// against "possibly-uninitialized").
+    strict: bool,
 }
 
 /// A variable or a field path (`s`, `p.x`, `t.0`), as a probe can name it.
@@ -1081,7 +1091,7 @@ fn claims(pts: &Points, d: &Drawing, skips: &mut Skips) -> Vec<Claim> {
                 }
             }
             let drawn = *drawn.iter().next().unwrap();
-            out.push(Claim { line: p.line, func: p.func, var: name, drawn, in_loop: p.in_loop, tip });
+            out.push(Claim { line: p.line, func: p.func, var: name, drawn, in_loop: p.in_loop, tip, strict: false });
         }
     }
     out
@@ -1382,18 +1392,8 @@ pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<Violation>, Vec<(u32
         *st.skips.entry("program: rustviz: hide/skip").or_default() += 1;
         return (out, Vec::new(), st);
     }
-    if ["line!", "column!", "file!", "env!", "option_env!", "include!", "include_str!", "include_bytes!", "module_path!"]
-        .iter().any(|m| src.contains(m))
-    {
-        // Inserting lines changes what these expand to anywhere in the
-        // file (and `env!` makes the program depend on the environment).
-        *st.skips.entry("program: uses line!/column!/file!/env!/include!").or_default() += 1;
-        return (out, Vec::new(), st);
-    }
-    if src.contains("macro_rules") {
-        // A macro can bind a name syn never sees, so "bound once" can't
-        // be trusted.
-        *st.skips.entry("program: defines a macro").or_default() += 1;
+    if let Some(why) = unprobeable_program(src) {
+        *st.skips.entry(why).or_default() += 1;
         return (out, Vec::new(), st);
     }
     let d = match drawing(timeline, code) {
@@ -1410,6 +1410,98 @@ pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<Violation>, Vec<(u32
     let mut pts = Points { src: src.lines().map(str::to_owned).collect(), ..Default::default() };
     pts.visit_file(&file);
     let claims = claims(&pts, &d, &mut st.skips);
+    verify(src, &pts, claims, st, out)
+}
+
+/// A state the RustViz 3 fact layer gives a column after a row of the fn
+/// whose signature starts on `fn_line`: `state` is one of `own`, `moved`,
+/// `maybe`, `partly`, `unassigned`; `lent` is `""`, `"shared"` or
+/// `"mut"` (the strongest loan in scope that restricts the column);
+/// `cause`, for `maybe`: `moved` or `unassigned`.
+#[derive(Debug, Clone)]
+pub struct FactState {
+    pub line: u32,
+    pub fn_line: u32,
+    pub column: String,
+    pub state: String,
+    pub lent: String,
+    pub cause: Option<String>,
+}
+
+/// The rustc oracle on states given directly (the fact layer's) instead
+/// of read from a drawing: the same probes, after the same statements, of
+/// the same fn (a nested fn's facts are its own). rustc's verdict decides
+/// more than for a drawing: a whole move against "partially moved", a
+/// maybe-moved against "possibly-uninitialized" and back. Unlike `check`,
+/// no `// rustviz: hide/skip` skip: the facts are of the source as
+/// compiled.
+pub fn check_states(src: &str, states: &[FactState]) -> (Vec<Violation>, Vec<(u32, String, &'static str)>, Stats) {
+    let mut st = Stats { programs: 1, ..Default::default() };
+    let out = Vec::new();
+    if let Some(why) = unprobeable_program(src) {
+        *st.skips.entry(why).or_default() += 1;
+        return (out, Vec::new(), st);
+    }
+    let Ok(file) = syn::parse_file(src) else {
+        *st.skips.entry("program: syn can't parse it").or_default() += 1;
+        return (out, Vec::new(), st);
+    };
+    let mut pts = Points { src: src.lines().map(str::to_owned).collect(), ..Default::default() };
+    pts.visit_file(&file);
+    let mut claims = Vec::new();
+    let mut seen = HashSet::new();
+    for p in &pts.points {
+        if !seen.insert((p.func, p.line)) {
+            continue;
+        }
+        for f in states {
+            if f.line != p.line || pts.spans[p.func].0 != f.fn_line {
+                continue;
+            }
+            let (drawn, tip) = match (f.state.as_str(), f.lent.as_str(), f.cause.as_deref()) {
+                ("own", "mut", _) => (Drawn::MutLent, "mutably borrowed"),
+                ("own", "shared", _) => (Drawn::Shared, "being shared"),
+                ("own", _, _) => (Drawn::Usable, "owner"),
+                ("moved", _, _) => (Drawn::Moved, "moved"),
+                ("maybe", _, Some("unassigned")) => (Drawn::Unassigned, "may have no value"),
+                ("maybe", _, _) => (Drawn::Moved, "may have been moved"),
+                ("partly", _, _) => (Drawn::PartlyMoved, "partially moved"),
+                ("unassigned", _, _) => (Drawn::Unassigned, "has no value yet"),
+                _ => continue,
+            };
+            let Some(name) = place_name(&f.column) else {
+                *st.skips.entry("column: not a variable or field path").or_default() += 1;
+                continue;
+            };
+            let root = name.split('.').next().unwrap();
+            if pts.items.contains(root) || pts.bindings[p.func].get(root) != Some(&1) {
+                *st.skips.entry("name bound more than once / not bound / an item").or_default() += 1;
+                continue;
+            }
+            claims.push(Claim { line: p.line, func: p.func, var: name, drawn, in_loop: p.in_loop, tip: tip.to_string(), strict: true });
+        }
+    }
+    verify(src, &pts, claims, st, out)
+}
+
+/// Why a whole program can't be probed, if it can't: inserting lines
+/// changes what `line!` and friends expand to anywhere in the file (and
+/// `env!` makes the program depend on the environment); a macro can bind
+/// a name syn never sees, so "bound once" can't be trusted.
+fn unprobeable_program(src: &str) -> Option<&'static str> {
+    if ["line!", "column!", "file!", "env!", "option_env!", "include!", "include_str!", "include_bytes!", "module_path!"]
+        .iter().any(|m| src.contains(m))
+    {
+        return Some("program: uses line!/column!/file!/env!/include!");
+    }
+    if src.contains("macro_rules") {
+        return Some("program: defines a macro");
+    }
+    None
+}
+
+/// Compile the probes for `claims` and judge them.
+fn verify(src: &str, pts: &Points, claims: Vec<Claim>, mut st: Stats, mut out: Vec<Violation>) -> (Vec<Violation>, Vec<(u32, String, &'static str)>, Stats) {
     match rustc_errors(src) {
         Ok(e) if e.is_empty() => {}
         Ok(_) => {
@@ -1422,7 +1514,7 @@ pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<Violation>, Vec<(u32
         }
     }
     let lines: BTreeSet<(usize, u32)> = claims.iter().map(|c| (c.func, c.line)).collect();
-    let live = match reachable(src, &pts, &lines) {
+    let live = match reachable(src, pts, &lines) {
         Ok(r) => r,
         Err(e) => {
             out.push(infra(format!("probe program failed: {}", e)));
@@ -1555,7 +1647,8 @@ pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<Violation>, Vec<(u32
                 (None, Some(_), _) | (None, None, Some(_)) => Err(None),
                 (None, None, None) => Err(Some(("oracle-borrowed", none.clone()))),
             },
-            (Drawn::MutLent, _) => match (code_is(errs, &["E0502", "E0503", "E0505"]), conflict, novalue) {
+            // (E0501: a closure's unique borrow of it is live: exclusive too.)
+            (Drawn::MutLent, _) => match (code_is(errs, &["E0502", "E0503", "E0505", "E0501"]), conflict, novalue) {
                 (Some(_), _, _) => Ok(()),
                 (None, Some(_), _) | (None, None, Some(_)) => Err(None),
                 (None, None, None) => Err(Some(("oracle-borrowed", none.clone()))),
@@ -1570,6 +1663,13 @@ pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<Violation>, Vec<(u32
                 let partly = c.drawn == Drawn::PartlyMoved;
                 match (&e0382, &e0381) {
                     (Some(e), _) if maybe && e.1.contains("partially") == partly => Ok(()),
+                    // A fact: a whole move rustc calls partial is wrong; a
+                    // maybe-moved place rustc only calls never assigned on
+                    // some path is wrong.
+                    (Some(e), _) if c.strict && !partly && !maybe && e.1.contains("partially") => {
+                        Err(Some(("oracle-moved", format!("{}: only partly moved", said(e)))))
+                    }
+                    (None, Some(e)) if c.strict && maybe => Err(Some(("oracle-moved", format!("{}: never assigned, not moved", said(e))))),
                     (Some(_), _) | (None, Some(_)) => Err(None),
                     (None, None) => Err(Some(("oracle-moved", conflict.as_ref().map_or(none.clone(), said)))),
                 }
@@ -1579,6 +1679,9 @@ pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<Violation>, Vec<(u32
             (Drawn::Unassigned, _) => {
                 let maybe = c.tip.contains("may have no value");
                 match (&e0381, &e0382) {
+                    // A fact that it may have no value: rustc must say so
+                    // (possibly-uninitialized), not that it was moved.
+                    (None, Some(e)) if c.strict && maybe => Err(Some(("oracle-moved", format!("{}: moved, not unassigned", said(e))))),
                     (Some(e), _) if maybe || !e.1.contains("possibly") => Ok(()),
                     (_, Some(_)) if maybe => Ok(()),
                     (Some(_), _) | (_, Some(_)) => Err(None),
@@ -1659,8 +1762,21 @@ pub type Checked = (Vec<Violation>, Vec<(u32, String, &'static str)>);
 /// An entry is GONE only when its (line, column) claim was tested and
 /// passed; one whose claim wasn't tested this run is neither.
 pub fn report(results: &BTreeMap<String, Checked>) -> String {
-    let listed: HashSet<(&str, &str, u32, &str)> = KNOWN_ORACLE_FAILURES.iter().map(|(s, c, l, v, _)| (*s, *c, *l, *v))
-        .chain(ORACLE_EXEMPT.iter().map(|(s, c, l, v, _)| (*s, *c, *l, *v)))
+    report_against(results, KNOWN_ORACLE_FAILURES, ORACLE_EXEMPT, "KNOWN_ORACLE_FAILURES", "ORACLE_EXEMPT")
+}
+
+/// `report` for the RustViz 3 fact layer's states (`check_states`),
+/// against `KNOWN_FACT_FAILURES`.
+pub fn report_facts(results: &BTreeMap<String, Checked>) -> String {
+    report_against(results, KNOWN_FACT_FAILURES, &[], "KNOWN_FACT_FAILURES", "-")
+}
+
+type Known = (&'static str, &'static str, u32, &'static str, u32);
+type Exempt = (&'static str, &'static str, u32, &'static str, &'static str);
+
+fn report_against(results: &BTreeMap<String, Checked>, known: &[Known], exempt: &[Exempt], known_name: &str, exempt_name: &str) -> String {
+    let listed: HashSet<(&str, &str, u32, &str)> = known.iter().map(|(s, c, l, v, _)| (*s, *c, *l, *v))
+        .chain(exempt.iter().map(|(s, c, l, v, _)| (*s, *c, *l, *v)))
         .collect();
     let mut out = String::new();
     let mut new: BTreeMap<(&str, &str), Vec<&str>> = BTreeMap::new();
@@ -1684,17 +1800,17 @@ pub fn report(results: &BTreeMap<String, Checked>) -> String {
                 && !vs.iter().any(|x| x.check == c && x.line == l && x.var == v)
         })
     };
-    for (s, c, l, v, issue) in KNOWN_ORACLE_FAILURES {
+    for (s, c, l, v, issue) in known {
         if gone(s, c, *l, v) {
             out.push_str(&format!(
                 "\nGONE {s}: {c} {v} after L{l} (#{issue}) no longer happens. Fixed? Delete its entry from \
-                 KNOWN_ORACLE_FAILURES (and check #{issue}).\n"));
+                 {known_name} (and check #{issue}).\n"));
         }
     }
-    for (s, c, l, v, why) in ORACLE_EXEMPT {
+    for (s, c, l, v, why) in exempt {
         if gone(s, c, *l, v) {
             out.push_str(&format!(
-                "\nGONE {s}: {c} {v} after L{l} (exempt: {why}) no longer happens. Delete its entry from ORACLE_EXEMPT.\n"));
+                "\nGONE {s}: {c} {v} after L{l} (exempt: {why}) no longer happens. Delete its entry from {exempt_name}.\n"));
         }
     }
     out
@@ -1703,8 +1819,17 @@ pub fn report(results: &BTreeMap<String, Checked>) -> String {
 /// Listed entries whose claim wasn't tested this run (neither found nor
 /// gone): reported, not failed.
 pub fn untested_listed(results: &BTreeMap<String, Checked>) -> usize {
-    KNOWN_ORACLE_FAILURES.iter().map(|(s, c, l, v, _)| (*s, *c, *l, *v))
-        .chain(ORACLE_EXEMPT.iter().map(|(s, c, l, v, _)| (*s, *c, *l, *v)))
+    untested_in(results, KNOWN_ORACLE_FAILURES.iter().map(|(s, c, l, v, _)| (*s, *c, *l, *v))
+        .chain(ORACLE_EXEMPT.iter().map(|(s, c, l, v, _)| (*s, *c, *l, *v))))
+}
+
+/// `untested_listed` for `KNOWN_FACT_FAILURES`.
+pub fn untested_facts_listed(results: &BTreeMap<String, Checked>) -> usize {
+    untested_in(results, KNOWN_FACT_FAILURES.iter().map(|(s, c, l, v, _)| (*s, *c, *l, *v)))
+}
+
+fn untested_in<'a>(results: &BTreeMap<String, Checked>, entries: impl Iterator<Item = (&'a str, &'a str, u32, &'a str)>) -> usize {
+    entries
         .filter(|(s, c, l, v)| results.get(*s).is_none_or(|(vs, passed)| {
             !passed.iter().any(|(pl, pv, pc)| pl == l && pv == v && pc == c)
                 && !vs.iter().any(|x| x.check == *c && x.line == *l && x.var == *v)
@@ -1714,12 +1839,21 @@ pub fn untested_listed(results: &BTreeMap<String, Checked>) -> usize {
 
 /// Every entry names a check, and none is listed twice.
 pub fn known_list_problems() -> Vec<String> {
+    let both = KNOWN_ORACLE_FAILURES.iter().map(|(s, c, l, v, _)| (*s, *c, *l, *v))
+        .chain(ORACLE_EXEMPT.iter().map(|(s, c, l, v, _)| (*s, *c, *l, *v)));
+    list_problems(both)
+}
+
+/// `known_list_problems` for `KNOWN_FACT_FAILURES`.
+pub fn known_facts_list_problems() -> Vec<String> {
+    list_problems(KNOWN_FACT_FAILURES.iter().map(|(s, c, l, v, _)| (*s, *c, *l, *v)))
+}
+
+fn list_problems<'a>(entries: impl Iterator<Item = (&'a str, &'a str, u32, &'a str)>) -> Vec<String> {
     let names: HashSet<&str> = ORACLE_CHECKS.iter().map(|(n, _)| *n).collect();
     let mut seen = HashSet::new();
     let mut out = Vec::new();
-    let both = KNOWN_ORACLE_FAILURES.iter().map(|(s, c, l, v, _)| (*s, *c, *l, *v))
-        .chain(ORACLE_EXEMPT.iter().map(|(s, c, l, v, _)| (*s, *c, *l, *v)));
-    for e @ (s, c, l, v) in both {
+    for e @ (s, c, l, v) in entries {
         if !names.contains(c) {
             out.push(format!("({s}, {c}, {l}, {v}) names no check"));
         }
@@ -1861,7 +1995,7 @@ pub fn derive_states(src: &str, extra: &[String]) -> Result<Vec<Derived>, String
         names.sort();
         names.dedup();
         for n in names {
-            claims.push(Claim { line: p.line, func: p.func, var: n, drawn: Drawn::Usable, in_loop: p.in_loop, tip: String::new() });
+            claims.push(Claim { line: p.line, func: p.func, var: n, drawn: Drawn::Usable, in_loop: p.in_loop, tip: String::new(), strict: false });
         }
     }
     let lines: BTreeSet<(usize, u32)> = claims.iter().map(|c| (c.func, c.line)).collect();

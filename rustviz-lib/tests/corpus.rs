@@ -31091,6 +31091,139 @@ fn corpus_oracle_holds() {
     );
 }
 
+fn rv3_oracle_on() -> bool {
+    env::var("RV3_ORACLE").is_ok_and(|v| !v.is_empty() && v != "0")
+}
+
+/// The fact layer's claims about owner columns: (line, column, state,
+/// strongest loan restricting it). Closure bodies are left out (the
+/// oracle never probes inside a closure), and so are reference columns
+/// (as the drawing oracle leaves them out).
+fn fact_states(facts: &serde_json::Value) -> Result<Vec<common::oracle::FactState>, String> {
+    const STATES: &[&str] = &["own", "moved", "maybe", "partly", "unassigned"];
+    let mut out = Vec::new();
+    for body in facts["bodies"].as_array().into_iter().flatten() {
+        if body["kind"] != "fn" {
+            continue;
+        }
+        let fn_line = body["first_line"].as_u64().ok_or("a body without first_line")? as u32;
+        let owners: Vec<&str> = body["vars"].as_array().into_iter().flatten()
+            .filter(|v| v["kind"] == "owner").filter_map(|v| v["name"].as_str()).collect();
+        let root_of = |col: &str| -> Option<String> {
+            body["columns"].as_array().into_iter().flatten()
+                .find(|c| c["name"] == col).and_then(|c| c["root"].as_str()).map(str::to_owned)
+        };
+        for row in body["rows"].as_array().into_iter().flatten() {
+            let line = row["line"].as_u64().ok_or("a row without line")? as u32;
+            for (col, st) in row["state"].as_object().into_iter().flatten() {
+                let st = st.as_str().unwrap_or("");
+                if !STATES.contains(&st) {
+                    return Err(format!("{}: row {line}: unknown state {st:?} of {col}", body["func"]));
+                }
+                if !root_of(col).is_some_and(|r| owners.contains(&r.as_str())) {
+                    continue;
+                }
+                // `unique` restricts like `mut`; a `reserved` two-phase
+                // borrow (not activated yet) like `shared`.
+                let lent = row["lent"][col].as_array().map_or("", |ls| {
+                    if ls.iter().any(|l| l["kind"] == "mut" || l["kind"] == "unique") { "mut" } else if ls.is_empty() { "" } else { "shared" }
+                });
+                let cause = row["cause"][col].as_str().map(str::to_owned);
+                if st == "maybe" && cause.is_none() {
+                    return Err(format!("{}: row {line}: `maybe` {col} without a cause", body["func"]));
+                }
+                out.push(common::oracle::FactState {
+                    line, fn_line, column: col.clone(), state: st.to_owned(), lent: lent.to_owned(), cause,
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// RustViz 3: rustc as ground truth for the fact layer
+/// (`rustviz-plugin/src/facts/`). Every state it gives an owner column
+/// after a statement is probed like a drawn state (`common/oracle.rs`,
+/// `check_states`): the facts must never be contradicted. Opt-in, like
+/// `corpus_oracle_holds` (`RV3_ORACLE=1`, with `RV_INVARIANTS_EXTRA` /
+/// `RV_INVARIANTS_ONLY`); CI runs it. Contradictions that can't be fixed
+/// yet are listed in `KNOWN_FACT_FAILURES`, each with its issue.
+#[test]
+fn corpus_facts_oracle_holds() {
+    use common::oracle::{check_states, known_facts_list_problems, report_facts, untested_facts_listed, Checked, Stats};
+    let problems = known_facts_list_problems();
+    assert!(problems.is_empty(), "KNOWN_FACT_FAILURES: {:#?}", problems);
+    if !rv3_oracle_on() {
+        eprintln!("corpus_facts_oracle_holds: skipped (set RV3_ORACLE=1 to run it)");
+        return;
+    }
+    let names = property_snippets();
+    prerender(names.iter().map(|n| n.as_str()));
+    let results: Mutex<Vec<(String, Result<(Checked, Stats), String>)>> = Mutex::new(Vec::new());
+    let next = AtomicUsize::new(0);
+    let workers = std::thread::available_parallelism().map_or(2, |n| n.get()).min(names.len().max(1));
+    std::thread::scope(|sc| {
+        for _ in 0..workers {
+            sc.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(name) = names.get(i) else { break };
+                let r = render_cell(name).and_then(|rv| {
+                    let facts = rv.facts().ok_or_else(|| format!("{name}: the plugin gave no facts (RV3_FACTS)"))?;
+                    if let Some(e) = facts["errors"].as_array().filter(|e| !e.is_empty()) {
+                        return Err(format!("{name}: the fact layer failed: {e:?}"));
+                    }
+                    let src = read_corpus(name);
+                    // A program with a fn has facts (none at all is a broken
+                    // dump, not a pass).
+                    if src.contains("fn ") && facts["bodies"].as_array().is_none_or(|b| b.is_empty()) {
+                        return Err(format!("{name}: the fact dump has no bodies"));
+                    }
+                    let states = fact_states(facts).map_err(|e| format!("{name}: {e}"))?;
+                    let (v, tested, st) = check_states(&src, &states);
+                    Ok(((v, tested), st))
+                });
+                results.lock().unwrap().push((name.clone(), r));
+            });
+        }
+    });
+    let mut checked: BTreeMap<String, Checked> = BTreeMap::new();
+    let mut failed = Vec::new();
+    let mut total = Stats::default();
+    for (name, r) in results.into_inner().unwrap() {
+        match r {
+            Ok((c, st)) => {
+                total.add(&st);
+                checked.insert(name, c);
+            }
+            Err(e) => failed.push(e),
+        }
+    }
+    failed.sort();
+    if env::var("RV_ORACLE_VERBOSE").is_ok_and(|v| !v.is_empty()) {
+        for (snippet, (vs, _)) in &checked {
+            for v in vs {
+                eprintln!("ALL\t{snippet}\t{}\t{}\t{}\t{}", v.check, v.line, v.var, v.text);
+            }
+        }
+    }
+    let diff = report_facts(&checked);
+    eprintln!(
+        "fact oracle: {} snippets, {} claims, {} tested, {} violations ({} in loops), {} listed entries not tested this run; skipped: {:?}",
+        total.programs, total.claims, total.tested, total.violations, total.in_loop_violations,
+        untested_facts_listed(&checked), total.skips
+    );
+    // A run that tested nothing proves nothing.
+    assert!(total.tested > 0, "the fact oracle tested no state");
+    assert!(
+        diff.is_empty() && failed.is_empty(),
+        "rustc contradicts the RustViz 3 fact layer (rustviz-plugin/src/facts/). A NEW one is a wrong fact: \
+         fix it from MIR (or, if it can't be fixed yet, file an issue and list it in KNOWN_FACT_FAILURES, \
+         rustviz-lib/tests/common/oracle.rs); a GONE one was tested and passed (delete its entry).\n{}\n\
+         Snippets the plugin failed on: {:#?}",
+        diff, failed
+    );
+}
+
 /// The body `func` of a fixture's facts.
 fn fact_body<'a>(facts: &'a serde_json::Value, func: &str) -> &'a serde_json::Value {
     facts["bodies"].as_array().unwrap().iter().find(|b| b["func"] == func)

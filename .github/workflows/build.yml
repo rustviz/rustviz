@@ -101,6 +101,16 @@ jobs:
       - name: cargo build -p rustviz
         run: cargo build -p rustviz --locked
 
+      # The rustc oracle compiles probe programs; its verdicts are cached
+      # by source + toolchain hash, so keep the cache between runs.
+      - name: Cache the fact oracle's rustc verdicts
+        if: runner.os == 'Linux'
+        uses: actions/cache@v5
+        with:
+          path: target/tmp/rv-oracle-cache
+          key: rv-fact-oracle-${{ hashFiles('rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: rv-fact-oracle-${{ hashFiles('rust-toolchain.toml') }}-
+
       - name: cargo test (workspace minus rustviz)
         env:
           # Corpus tests use the in-process plugin path (faster than
@@ -108,6 +118,10 @@ jobs:
           # not testing sandboxing here). The plugin itself was
           # installed by xtask setup.
           RV_RUNNER: local
+          # RustViz 3: rustc checks the fact layer's states over the whole
+          # corpus (`corpus_facts_oracle_holds`), on the renders the other
+          # corpus tests make anyway. Linux only: once is enough.
+          RV3_ORACLE: ${{ runner.os == 'Linux' && '1' || '' }}
         run: cargo test --workspace --exclude rustviz --locked
 
       - name: cargo test -p rustviz
