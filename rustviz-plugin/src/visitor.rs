@@ -1214,6 +1214,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     (evs, ends)
   }
 
+  /// Notes the references `fail` says a condition (or guard) gave a new
+  /// loan (#603), for `emit_borrow_ends`: on the path into the body
+  /// (`then`: the condition and the body, or the guarded arm) the loan
+  /// ends where the facts end it there; the failing paths end it with
+  /// their own events (`chain_fail_events`).
+  fn note_chain_then(&mut self, fail: &ChainFail, then: rustc_span::Span, whole: rustc_span::Span) {
+    let sm = self.tcx.sess.source_map();
+    let line = |p: rustc_span::BytePos| sm.lookup_char_pos(p).line;
+    for r in &fail.refs {
+      self.chain_then.push((r.rap.name().to_owned(), (line(then.lo()), line(then.hi())), line(whole.hi())));
+    }
+  }
+
   /// Whether `id` is inside the body of a loop (`loop`, `while`, `for`)
   /// of its own function or closure.
   fn in_loop_body(&self, id: HirId) -> bool {
@@ -8330,6 +8343,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     };
     let path = if else_expr.is_some() { FailPath::Else } else { FailPath::NoElse };
     // Borrows it made that have ended by then (#688) come last.
+    self.note_chain_then(&chain_fail, guard_expr.span.to(if_expr.span), expr.span);
     let (fail_events, fail_ends) = self.chain_fail_events(std::mem::take(&mut chain_fail), path,
       else_expr.map(|e| e.span), expr.span, fail_line);
     let fail_lo = fail_events.first().map(|ev| ev.get_id());
@@ -9123,6 +9137,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
 
       let failed = self.match_arm_guard(arm, inline, &mut pat_decls, &mut branch_e_data);
+      if let Some((fail, _)) = &failed {
+        self.note_chain_then(fail, arm.span, expr.span);
+      }
       failed_guards.extend(failed);
       // While the body is visited, the pattern's and the guard's
       // events are on the global list too, so that an exit in it

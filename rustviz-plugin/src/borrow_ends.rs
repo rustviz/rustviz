@@ -110,20 +110,60 @@ impl<'a> BodyEnds<'a> {
   }
 
   /// `loans` and the loans they are made through that `k` holds too (`v2 =
-  /// vec![r]` reborrows `*r` but keeps r's loan of b, which v2 gives back).
-  pub fn with_held_sources(&self, k: &str, loans: &[usize]) -> Vec<usize> {
+  /// vec![r]` reborrows `*r` but keeps r's loan of b, which v2 gives back),
+  /// except through a reference in `lenders`: k gives back to that one,
+  /// which ends its own loan (`w = &*s`).
+  pub fn with_held_sources(&self, k: &str, loans: &[usize], lenders: &[String]) -> Vec<usize> {
     let mut out: Vec<usize> = loans.to_vec();
     let mut work: Vec<usize> = loans.to_vec();
     while let Some(id) = work.pop() {
       let Some(l) = self.facts.loans.iter().find(|x| x.loan == id) else { continue };
+      if l.through.as_deref().is_some_and(|t| lenders.iter().any(|n| n == root(t))) {
+        continue;
+      }
       for m in &l.made_through {
-        if !out.contains(m) && self.facts.loans.iter().any(|x| x.loan == *m && x.holders.iter().any(|h| names_match(k, h))) {
+        // (One k is the last holder of somewhere: a field holding a copy,
+        // `Holder { r }`, holds r's loan but r gives it back.)
+        if !out.contains(m) && self.gives_back_somewhere(k, *m) {
           out.push(*m);
           work.push(*m);
         }
       }
     }
     out
+  }
+
+  /// The last row any of `loans` ends on.
+  pub fn last_end_of(&self, loans: &[usize]) -> Option<usize> {
+    self.holder_end_within("", loans, (0, 0), (0, usize::MAX)).last_end
+  }
+
+  /// Whether `k` itself is moved on `row` (`Some(r)` with r a `&mut`):
+  /// the move hands its loan on, and its column ends there.
+  pub fn moved_on(&self, k: &str, row: usize) -> bool {
+    self.facts.rows.iter().filter(|r| r.line == row).flat_map(|r| r.facts.iter())
+      .any(|e| matches!(&e.fact, Fact::Move { path, .. } if path == k))
+  }
+
+  /// The (row, holder) of each `BorrowEnd` of `loan`.
+  pub fn end_holders(&self, loan: usize) -> Vec<(usize, &'a str)> {
+    let mut out = Vec::new();
+    for r in &self.facts.rows {
+      for e in &r.facts {
+        if let Fact::BorrowEnd { loan: l, holder, .. } = &e.fact {
+          if *l == loan {
+            out.extend(holder.split('|').map(|h| (r.line, h)));
+          }
+        }
+      }
+    }
+    out
+  }
+
+  /// Whether some `BorrowEnd` of `loan` names `k` as its last holder.
+  fn gives_back_somewhere(&self, k: &str, loan: usize) -> bool {
+    self.facts.rows.iter().flat_map(|r| r.facts.iter()).any(|e| matches!(&e.fact,
+      Fact::BorrowEnd { loan: l, holder, .. } if *l == loan && holder.split('|').any(|h| names_match(k, h))))
   }
 
   /// The loans `k` holds in any way (also through a reborrow stored in it,
@@ -168,8 +208,8 @@ impl<'a> BodyEnds<'a> {
   /// The row an end on the edge from `row` to `to_line` is drawn on: the
   /// loop's closing row for a path that leaves a loop from its head.
   fn drawn_row(&self, row: usize, to_line: usize) -> (usize, bool) {
-    if to_line > row && self.loops.iter().any(|(h, e)| *h == row && to_line >= *e) {
-      (to_line, true)
+    if let Some((_, e)) = self.loops.iter().find(|(h, e)| *h == row && to_line > row && to_line >= *e) {
+      (*e, true)
     } else {
       (row, false)
     }
@@ -179,8 +219,15 @@ impl<'a> BodyEnds<'a> {
   /// (from, to: to exclusive; two variables of one name are told apart by
   /// their rows), the loans' ends anywhere.
   pub fn holder_end(&self, k: &str, loans: &[usize], rows: (usize, usize)) -> HolderEnd {
+    self.holder_end_within(k, loans, rows, (0, usize::MAX))
+  }
+
+  /// `holder_end` counting only the facts on rows in `within` (inclusive):
+  /// the path into a let-chain's body, whose failing paths end the loan
+  /// with events of their own.
+  pub fn holder_end_within(&self, k: &str, loans: &[usize], rows: (usize, usize), within: (usize, usize)) -> HolderEnd {
     let mut out = HolderEnd { only_loop_exits: true, ..HolderEnd::default() };
-    for r in &self.facts.rows {
+    for r in self.facts.rows.iter().filter(|r| r.line >= within.0 && r.line <= within.1) {
       let mine = r.line >= rows.0 && r.line < rows.1;
       for e in &r.facts {
         match &e.fact {
