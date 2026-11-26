@@ -99,6 +99,7 @@ pub const KNOWN_ORACLE_FAILURES: &[(&str, &str, u32)] = &[
     ("tuple_scrutinee_var_field_977", "oracle-usable", 1673),
     // Partial moves in arms that #1646 doesn't cover (or-patterns, destructuring assignment, loops, tuple scrutinees).
     ("destructure_assign_parts_1412", "oracle-usable", 1674),
+    ("edition2024/loop_always_breaks_1467", "oracle-usable", 1674),
     ("loop_drop_flags_1026", "oracle-usable", 1674),
     ("loop_struct_line_1031", "oracle-usable", 1674),
     ("or_pattern_if_let_different_places", "oracle-usable", 1674),
@@ -145,7 +146,6 @@ pub const KNOWN_ORACLE_FAILURES: &[(&str, &str, u32)] = &[
     ("assign_branch_reborrow_holder_1482", "oracle-usable", 1595),
     ("edition2024/if_let_chain_field_move", "oracle-usable", 1595),
     ("edition2024/if_let_chain_irrefutable_move", "oracle-usable", 1595),
-    ("edition2024/loop_always_breaks_1467", "oracle-usable", 1595),
     ("fields_maybe_all_moved_1583", "oracle-usable", 1595),
     ("if_no_else_partial_move", "oracle-usable", 1595),
     ("manually_drop_maybe_moved_1147", "oracle-usable", 1595),
@@ -200,7 +200,8 @@ const CONFLICT: &[&str] = &["E0499", "E0500", "E0501", "E0502", "E0503", "E0505"
 const NO_VALUE: &[&str] = &["E0381", "E0382"];
 /// Mutability of the binding, not a borrow: says nothing either way.
 const IGNORED: &[&str] = &["E0596", "E0594"];
-/// Recorded for a `&mut` probe of a place behind a `&` reference.
+/// Recorded for a `&mut` probe rustc refuses for another reason than the
+/// binding's mutability (behind a `&` reference, inside an `Rc`).
 const BEHIND_REF: &str = "E0596-behind-ref";
 
 /// `// rustviz: skip` / `// rustviz: hide` (the colon's spacing is free),
@@ -393,7 +394,11 @@ impl<'ast> Visit<'ast> for Points {
                 }
                 let (_, end) = line_of(st.span());
                 let next = b.stmts.get(i + 1).map_or(close, |s| line_of(s.span()).0);
-                if next > end {
+                // A probe goes on a new line after `end`: not if a block
+                // comment opened on that line runs on past it.
+                let open_comment = self.src.get(end as usize - 1)
+                    .is_some_and(|l| l.rfind("/*").is_some_and(|a| !l[a..].contains("*/")));
+                if next > end && !open_comment {
                     self.points.push(Point { line: end, func, in_loop: self.loops > 0, ancestors: self.block_stack.clone() });
                 }
             }
@@ -687,7 +692,8 @@ fn claims(pts: &Points, d: &Drawing, skips: &mut Skips) -> Vec<Claim> {
                 // the line is every path's, the probe one path's.
                 let noted = d.dots.iter().any(|x| &x.hash == hash && x.y < y
                     && x.events.iter().any(|e| e == "dead_loan_note")
-                    && s.lines.iter().any(|&(_, y1, _, y2)| y1.min(y2) - 1.0 <= x.y && x.y <= y1.max(y2) + 1.0));
+                    && s.lines.iter().any(|&(x1, y1, x2, y2)| y1.min(y2) - 1.0 <= x.y && x.y <= y1.max(y2) + 1.0
+                        && x1.min(x2) - 3.0 <= x.x && x.x <= x1.max(x2) + 3.0));
                 if noted && matches!(k, Drawn::Shared | Drawn::MutLent) {
                     skip = Some("loan dead on this path only, with a note saying so");
                     continue;
@@ -877,6 +883,9 @@ fn rustc_errors(src: &str) -> Result<Vec<Diag>, String> {
         }
         diags.push((code, line, msg));
     }
+    if !out.status.success() && diags.is_empty() {
+        return Err(format!("rustc failed: {}", stderr.chars().take(400).collect::<String>()));
+    }
     let _ = std::fs::create_dir_all(&dir);
     let part = dir.join(format!("{}.{}.{:?}.tmp", key, std::process::id(), std::thread::current().id()));
     if serde_json::to_string(&diags).is_ok_and(|j| std::fs::write(&part, j).is_ok()) {
@@ -938,7 +947,7 @@ fn run_probes(src: &str, probes: &[&Probe], claims: &[Claim]) -> Result<Vec<Outc
             // uses). For a place behind a `&` reference (`&mut p.a` with
             // `p: &S`) the `&mut` probe can't test anything: noted.
             if code.as_deref().is_some_and(|c| IGNORED.contains(&c)) {
-                if msg.contains("behind a") {
+                if !msg.contains("is not declared as mutable") {
                     if let Some(&k) = line.and_then(|l| lines.get(&l)) {
                         got.entry(k).or_default().insert((BEHIND_REF.to_owned(), msg));
                     }
@@ -986,6 +995,9 @@ fn run_probes(src: &str, probes: &[&Probe], claims: &[Claim]) -> Result<Vec<Outc
 #[derive(Debug, Default, Clone)]
 pub struct Stats {
     pub programs: usize,
+    /// Programs the probes ran on (not skipped whole): only these can
+    /// report a listed violation GONE.
+    pub probed: usize,
     pub claims: usize,
     pub tested: usize,
     pub violations: usize,
@@ -996,6 +1008,7 @@ pub struct Stats {
 impl Stats {
     pub fn add(&mut self, o: &Stats) {
         self.programs += o.programs;
+        self.probed += o.probed;
         self.claims += o.claims;
         self.tested += o.tested;
         self.violations += o.violations;
@@ -1024,7 +1037,7 @@ pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<(&'static str, Strin
         *st.skips.entry("program: rustviz: hide/skip").or_default() += 1;
         return (out, st);
     }
-    if src.contains("macro_rules!") {
+    if src.contains("macro_rules") {
         // A macro can bind a name syn never sees, so "bound once" can't
         // be trusted.
         *st.skips.entry("program: defines a macro").or_default() += 1;
@@ -1055,6 +1068,7 @@ pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<(&'static str, Strin
             return (out, st);
         }
     }
+    st.probed = 1;
     let lines: BTreeSet<(usize, u32)> = claims.iter().map(|c| (c.func, c.line)).collect();
     let live = match reachable(src, &pts, &lines) {
         Ok(r) => r,
@@ -1163,7 +1177,7 @@ pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<(&'static str, Strin
         let c = &claims[p.claim];
         let verdict = |e: Option<&(String, String)>| match e {
             Some((code, msg)) => format!("rustc: error[{}]: {}", code, msg),
-            None => format!("rustc accepts `{}`", p.text(&claims).trim_end_matches(" // rv-oracle")),
+            None => format!("rustc reports no borrow conflict or move for `{}`", p.text(&claims).trim_end_matches(" // rv-oracle")),
         };
         let wrong: Option<(&'static str, String)> = match (c.drawn, p.mutable) {
             (Drawn::Usable, _) => conflict.or(novalue).map(|e| ("oracle-usable", verdict(Some(e)))),
@@ -1176,9 +1190,12 @@ pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<(&'static str, Strin
             // Moved must be E0382 ("use of moved value"), not E0381
             // ("used binding isn't initialized": nothing was ever there).
             (Drawn::Moved, _) => (!errs.iter().any(|(c, _)| c == "E0382")).then(|| ("oracle-moved", verdict(novalue.or(conflict)))),
-            // "May have no value" (moved, reassigned on some paths only)
-            // is E0382 as well.
-            (Drawn::Unassigned, _) => novalue.is_none().then(|| ("oracle-moved", verdict(conflict))),
+            // "Has no value yet" is E0381; "may have no value" (moved,
+            // reassigned on some paths only) may be E0382 as well.
+            (Drawn::Unassigned, _) => {
+                let ok = errs.iter().any(|(code, _)| code == "E0381" || (code == "E0382" && c.tip.contains("may have no value")));
+                (!ok).then(|| ("oracle-moved", verdict(novalue.or(conflict))))
+            }
         };
         if let Some((check, v)) = wrong {
             bad.entry(p.claim).or_insert((check, v));

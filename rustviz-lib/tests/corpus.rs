@@ -30989,10 +30989,15 @@ fn corpus_oracle_holds() {
     let mut found: BTreeMap<(String, &'static str), Vec<String>> = BTreeMap::new();
     let mut failed = Vec::new();
     let mut total = Stats::default();
+    // Only snippets the probes ran on can show a listed violation gone.
+    let mut checked = std::collections::HashSet::new();
     for (name, r) in results.into_inner().unwrap() {
         match r {
             Ok((v, st)) => {
                 total.add(&st);
+                if st.probed > 0 {
+                    checked.insert(name.clone());
+                }
                 for (c, what) in v {
                     found.entry((name.clone(), c)).or_default().push(what);
                 }
@@ -31007,7 +31012,6 @@ fn corpus_oracle_holds() {
             eprintln!("\nALL  {snippet}: {check} (\n       {}", whats.join("\n       "));
         }
     }
-    let checked: std::collections::HashSet<String> = names.iter().cloned().collect();
     let diff = report(&found, &checked);
     eprintln!(
         "oracle: {} snippets, {} claims, {} tested, {} violations ({} in loops), {} known; skipped: {:?}",

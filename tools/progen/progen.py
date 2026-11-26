@@ -175,7 +175,7 @@ def parse_check_output(out, key=lambda n: n):
     found = defaultdict(list)
     cur = None
     for line in out.splitlines():
-        m = re.match(r"^NEW  (\S+): ([a-z-]+) \(", line)
+        m = re.match(r"^NEW  (.+?): ([a-z-]+) \(", line)
         if m:
             cur = (key(m.group(1)), m.group(2))
             continue
