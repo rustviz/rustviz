@@ -28047,6 +28047,82 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &["nothing happens to outer here", "nothing happens to keep here", "nothing happens to late here", "nothing happens to carried here", "the function returns and"],
     },
+    TooltipExpect {
+        name: "maybe_held_reassign_after_loop_1587",
+        // #1587: a loop that may end before assigning s, then an `if` that
+        // assigns it in some branches only: each later assignment drops the
+        // old value only if s still holds it (rustc's drop flag), in an `if`
+        // arm, a `match` arm or after the `if`. Main said it is dropped, on
+        // every path. After an `if` alone, "no branch above moved it" was
+        // false (none did: `drop(w)` came before it). The loops run `n`
+        // times, which may be 0: then s, m, u have no value there.
+        must_contain: &[
+            "s acquires ownership of a new resource. Its previous resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
+            "m acquires ownership of a new resource. Its previous resource is dropped here only if m still holds it (Rust tracks this with a runtime drop flag).",
+            "u acquires ownership of a new resource. Its previous resource is dropped here only if u still holds it (Rust tracks this with a runtime drop flag).",
+            "w acquires ownership of a new resource. Its previous resource is dropped here only if w still holds it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "s acquires ownership of a new resource; its previous resource is dropped",
+            "m acquires ownership of a new resource; its previous resource is dropped",
+            "u acquires ownership of a new resource; its previous resource is dropped",
+            "w acquires ownership of a new resource. Its previous resource is dropped here only if no branch above moved it",
+        ],
+    },
+    TooltipExpect {
+        name: "maybe_held_assign_move_join_1582",
+        // #1582: s holds a value after the first `if` only if c was true;
+        // the second conditional's arm assigns it and moves that away, or
+        // runs a `?`; the others leave it as it was. Each join has a dot
+        // (the legs reach it, `maybe_held_joins_and_splits_have_dots`), and
+        // the drops before and after it go by the drop flag: "only if s
+        // still holds it", not "only if no branch above moved it" (none
+        // did on the path that leaves s empty). For a `let x;` local main
+        // said each branch that assigned x moved it, "so x holds nothing",
+        // and the `?` after it that x's resource is dropped (only if c and
+        // not d). In `may_move` the arm only may move y (d && !e keeps the
+        // new String). Only "may move" (finish mode: no "each branch …
+        // moves"). In `no_move` nothing moves z: no "move" at all.
+        must_contain: &[
+            "z may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when z goes out of scope.",
+            "y may have no value here: it may have had none before the branches, and a branch that gets here and assigns it may move the new value away again",
+            "If the `?` here returns early, x's resource is dropped if x still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to x here.",
+            "s may have no value here: it may have had none before the branches, and a branch that gets here and assigns it may move the new value away again",
+            "m may have no value here: it may have had none before the branches, and a branch that gets here and assigns it may move the new value away again",
+            "x may have no value here: it may have had none before the branches, and a branch that gets here and assigns it may move the new value away again",
+            "t may have no value here, as before the branches: none of the branches that get here assigns it",
+            "e may have no value here, as before the branches: none of the branches that get here assigns it",
+            "s acquires ownership of a new resource. Its previous resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
+            "m acquires ownership of a new resource. Its previous resource is dropped here only if m still holds it (Rust tracks this with a runtime drop flag).",
+            "s goes out of scope. Its resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
+            "m goes out of scope. Its resource is dropped here only if m still holds it (Rust tracks this with a runtime drop flag).",
+            "x goes out of scope. Its resource is dropped here only if x still holds it (Rust tracks this with a runtime drop flag).",
+        ],
+        must_not_contain: &[
+            "=z may have no value here: it may have had none before the branches, and a branch that gets here and assigns it may move the new value away again",
+            "each branch that gets here and assigns it moves the new value away again",
+            "=If the `?` here returns early, x's resource is dropped. If the `?` succeeds, nothing happens to x here.",
+            "no branch above moved it",
+            "holds nothing after the branches",
+        ],
+    },
+    TooltipExpect {
+        name: "maybe_held_second_returning_if_1584",
+        // #1584: the second returning `if` in the `if d` arm splits s's
+        // column at its own dot; the split's text is on that dot alone, not
+        // carried onto the `return`'s drop or the join
+        // (`maybe_held_joins_and_splits_have_dots` checks that no dot lists
+        // it with another line).
+        must_contain: &[
+            "s is live in a conditional expression ",
+            "m is live in a conditional expression ",
+            "s goes out of scope. Its resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
+            "m goes out of scope. Its resource is dropped here only if m still holds it (Rust tracks this with a runtime drop flag).",
+            "s may have no value here, as before the branches: none of the branches that get here assigns it",
+            "m may have no value here, as before the branches: none of the branches that get here assigns it",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws
@@ -38337,4 +38413,40 @@ fn try_block_drops_on_the_residual_target_1656() {
         ).filter_map(|n| n.attribute("data-rv-var")).collect();
         assert_eq!(owners, [variable], "conditional drops at {statement}");
     }
+}
+
+/// #1582, #1584: on a variable that may hold a value or not (`drop(s);
+/// if c { s = …; }`), a later conditional whose arm assigns it and moves
+/// that away, or runs a `?`, has a join dot; and a second `if` in an arm,
+/// after one that returns, has a split dot. Main drew neither: the legs
+/// started or ended in mid-air, and the split's text went onto the next
+/// dots ("• s is live in a conditional expression" on the `return`'s drop).
+#[test]
+fn maybe_held_joins_and_splits_have_dots() {
+    let has_dot = |tl: &str, id: &str| start_tags(tl, "circle").into_iter().any(|t| attr(t, "data-rv-id") == Some(id));
+    let mut missing = Vec::new();
+    for (name, ids) in [
+        ("maybe_held_assign_move_join_1582", &["s@L21:dot:branch_join", "m@L36:dot:branch_join", "t@L50:dot:branch_join", "e@L63:dot:branch_join", "x@L76:dot:branch_join", "y@L93:dot:branch_join"][..]),
+        ("maybe_held_second_returning_if_1584", &["s@L16:dot:branch", "m@L34:dot:branch"][..]),
+    ] {
+        let tl = run_with_local_backend(name).timeline_panel_string();
+        for id in ids {
+            if !has_dot(&tl, id) {
+                missing.push(format!("{}: {}", name, id));
+            }
+        }
+        for leg in branch_legs_in_mid_air(&tl) {
+            missing.push(format!("{}: {}", name, leg));
+        }
+    }
+    // #1584: the split's text is on its own dot, not merged into a drop's
+    // or a join's (main: "• s is live in a conditional expression" on the
+    // `return`'s dot).
+    let tips = tooltip_lines(&run_with_local_backend("maybe_held_second_returning_if_1584").timeline_panel_string());
+    for t in tips.iter().filter(|t| t.len() > 1) {
+        if t.iter().any(|l| l.trim_end().ends_with(" is live in a conditional expression")) {
+            missing.push(format!("maybe_held_second_returning_if_1584: merged dot {:?}", t));
+        }
+    }
+    assert_eq!(missing, Vec::<String>::new());
 }

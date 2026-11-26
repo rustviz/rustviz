@@ -7835,12 +7835,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // after a branch above moved it, and on a later time round the
       // value it holds may be one the time round before gave it. Only
       // the drop flag knows. (A struct's field columns go with it.)
+      // Outside a loop too (#1587): a loop above that may have ended
+      // before giving s a value, then a conditional that gives it one in
+      // some branches only (`for … { s = …; } if c { s = …; } s = …;`):
+      // what the drawing tracks says s holds a value on every path, rustc
+      // that it only may (`MaybeHeld`).
       if drop_target.as_ref() == Some(rap) && maybe_init.is_none()
         && maybe_moved.iter().all(|m| !*m) && parts.iter().all(|p| p.is_none())
-        && self.exit_frames.iter().any(|f| matches!(f, ExitFrame::Loop { .. }))
         && drop_target.iter().chain(field_drop_targets.iter())
           .all(|r| self.ownership_before_assign(r.name(), lhs_expr.span, expr.span) == Some(Ownership::Maybe)) {
-        maybe_init = Some(InitBy::DropFlag);
+        maybe_init = Some(if self.exit_frames.iter().any(|f| matches!(f, ExitFrame::Loop { .. })) {
+          InitBy::DropFlag
+        } else {
+          InitBy::MaybeHeld
+        });
         maybe_moved.iter_mut().for_each(|m| *m = true);
       }
     }

@@ -4863,6 +4863,19 @@ pub fn event_dot_branch_merge_maybe_init_unchanged(my_name: &String, temp: bool)
     }
 }
 
+// The same where a branch that gets here gives it a new value and moves
+// that away again (`drop(s); if c { s = …; } if d { s = …; drop(s); }
+// else { }`, #1582): after that branch it has none; after the others, what
+// it had before the branches, if anything. Only "may": a branch may move
+// it in a conditional of its own (`if e { drop(s); }`).
+pub fn event_dot_branch_merge_maybe_init_assigned_moved(my_name: &String) -> String {
+    format!(
+        "{} may have no value here: it may have had none before the branches, and a branch that gets here and \
+         assigns it may move the new value away again",
+        styled_name_html(my_name)
+    )
+}
+
 // At the end of a loop, for a variable declared outside it that a
 // branch inside moved before a `break` out of the loop. `definite`:
 // every way out of the loop is such a `break`.

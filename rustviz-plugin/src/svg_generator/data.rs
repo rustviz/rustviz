@@ -3316,6 +3316,12 @@ pub enum InitBy {
     /// run, a `break` before it): then the old value, if any, is still
     /// there after the loop (a `LoopMaybeInit` at its end says so).
     FirstPass,
+    /// An assignment outside a loop to a variable that rustc says only
+    /// may hold a value here, where nothing drawn above makes it
+    /// maybe-moved (#1587): a loop above may have ended before giving it
+    /// a value, and a conditional after it gave it one in some branches
+    /// only. As `DropFlag`, but not in a loop's body: it runs once.
+    MaybeHeld,
 }
 
 /// What a variable holds where it goes out of scope at the `}` of its
@@ -5681,6 +5687,13 @@ impl Visualizable for VisualizationData {
                     // reference (`ends_kept_alive`) doesn't end its line.
                     if !(kept[i] && holds_reference(&previous_state)) {
                         previous_state = self.calc_state(&previous_state, e, *l, hash);
+                    }
+                    // A `?` on a value the arm got with none or maybe one
+                    // (`OutOfScope` here, drawn as "may have no value" up
+                    // to the `?`, #1582): so is the rest of the arm, from
+                    // the `?`'s dot, not from mid-air rows below it.
+                    if matches!(e, Event::OwnerDropIfTryReturns) && matches!(previous_state, State::OutOfScope) {
+                        previous_state = branch_state_converter(&previous_state);
                     }
                     previous_line = *l;
                 }
