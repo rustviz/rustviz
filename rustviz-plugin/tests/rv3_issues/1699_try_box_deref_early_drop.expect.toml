@@ -5,7 +5,7 @@ fn = "run"
 places = ["*b"]
 beyond_facts = "P3: no dot for the conditional drop of b at the `?` (after #1661 it is not drawn at all)"
 xfail = "P1"
-note = "Gap (expected): early-exit drop rows: the `?` exit has no drop of the Box param."
+note = "Gap (P1): the dump marks the Box param `moved` after `(*b)?` moves its payload; it is `partly` (only the payload moved, the allocation is still owned and freed on both the Err and Ok paths). Only the generated [oracle] state (`partly*`) fails; the issue assertions (move *b, rest drop of b on row 2) hold. Review fix: the earlier note named missing early-exit drop rows, which the dump already has."
 
 [[event]]
 row = 2

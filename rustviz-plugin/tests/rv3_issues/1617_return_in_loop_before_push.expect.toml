@@ -9,7 +9,7 @@ lender = "s2"
 holder = "vr"
 ends = [6, 10]
 src = "issue"
-why = "two ends: row 6 (the dump puts the end on row 6; it is the `return None` arm, where vr is dead: `let _ = &mut s2;` before `return None;` raises only E0596, no E0502) and row 10 (vr's last use on the other path: `let _ = &mut s2;` after row 7's `break` fails E0502)"
+why = "two ends: row 6 (the dump puts the end on row 6; it is the `return None` arm, where vr is dead: `let _ = &mut s2;` before `return None;` raises only E0596, no E0502) and row 10 (vr's last use on the other path: `let _ = &mut s2;` right after the loop, before row 9, fails E0502; a probe directly after `break;` is unreachable code and proves nothing)"
 
 [[loan]]
 row = 9

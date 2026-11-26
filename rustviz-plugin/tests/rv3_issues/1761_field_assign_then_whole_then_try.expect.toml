@@ -24,6 +24,15 @@ how = "any"
 src = "issue"
 why = "Drop-printing run: f6(Some, None) drops the replacement p (`drop new` twice) at the y? return"
 
+# Review fix (weak-test): `how = "any"` above is also met by the drops the
+# two assignments themselves run. A drop of p AFTER `reassign p` can only be
+# the `y?` exit dropping the replacement p (`drop a2`, `drop b2`).
+[[order]]
+row = 5
+events = ["reassign p", "drop p"]
+src = "issue"
+why = "Drop-printing run f6(Some, None): `drop a1` (p.a assignment), `drop a-new`, `drop b1` (p = pair()), then `drop a2`, `drop b2` at the y? return"
+
 [[state]]
 row = 5
 place = "p"

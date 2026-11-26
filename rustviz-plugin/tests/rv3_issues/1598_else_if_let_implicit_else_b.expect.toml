@@ -4,7 +4,7 @@ title = "Two local references (the issue's second shape): r2's loan ends per pat
 fn = "run"
 places = ["o"]
 xfail = "P0"
-note = "Gap (spike): the empty `a` arm's end is dumped as 5 -> 6, the else-if line, which that path never runs (it goes to the println on row 9)."
+note = "Gap (spike): the empty `a` arm's end is dumped as 5 -> 6, the else-if line, which that path never runs (it goes to the rejoin `}` on row 8)."
 beyond_facts = "P3: r2's end in the implicit else gives nothing back (r still borrows s); leg/dot placement is renderer-level"
 
 # r2 is read only in the `else if let` arm: one end per path: the `a` arm
@@ -15,9 +15,9 @@ row = 4
 lender = "s"
 holder = "r2"
 kind = "shared"
-ends = [[5, 9], [6, 9], 7]
+ends = [[5, 8], [6, 8], 7]
 src = "issue"
-why = "one end per path: the empty `a` arm (edge 5 -> 9), the `if let` not matching (edge 6 -> 9, the implicit else), and after `r2.len()` in the match arm (row 7). Probe `let _ = &mut s;` (s made mut) with r removed: compiles after row 5 (in the `a` arm) and in an added `else {}` of the `if let` (the no-match path), is E0502 at the start of the match arm (after row 6, before row 7), compiles after row 7"
+why = "one end per path: the empty `a` arm (edge 5 -> 8, the `}` row where the if rejoins), the `if let` not matching (edge 6 -> 8, the implicit else), and after `r2.len()` in the match arm (row 7). Probe `let _ = &mut s;` (s made mut) with r removed: compiles after row 5 (in the `a` arm) and in an added `else {}` of the `if let` (the no-match path), is E0502 at the start of the match arm (after row 6, before row 7), compiles after row 7"
 
 # r is read on row 9, after the if, on every path.
 [[loan]]

@@ -1,8 +1,7 @@
 issue = 1734
 cluster = "C25"
 title = "Boxed closure capturing `*r` (through a shared reference): the closure holds a reborrow of `*r` (what r points to), not r itself, so r can be re-pointed while m is live"
-xfail = "P0"
-note = "Gap: the closure's capture of `*r` (a reborrow through a shared reference) is not a loan in the dump at all (only s's loan, held by r and m); the re-point and s's lent state are right."
+note = "Corrected (review of #1843): an earlier version expected a second loan with lender `*r`. rustc's borrow checker records no loan for a reborrow through a shared reference (`&*r` where r: &T); the closure captures the referent and the loan that is live is the original loan of s (row 5), now held by r and m. Compare 1567_match_reborrow_param_end."
 beyond_facts = "P3: the arrow should start at s (or say 'the data r points to'), not at r"
 
 [[lent]]
@@ -22,15 +21,15 @@ why = "`let _ = &mut s;` after row 7 is E0502: m (holding the capture of *r, whi
 [[loan]]
 row = 6
 lender = "*r"
-kind = "shared"
-holder = "m"
+absent = true
 src = "issue"
-why = "capture precision truncates at the shared reference: the closure borrows `*r`, as the issue says; the lender is what r pointed to, not r"
+why = "no loan of `*r`: borrowck ignores a reborrow through a shared reference (`&*r`); m's capture of `*r` is held by the original loan of s (next assertion)"
 
 [[loan]]
 row = 5
 lender = "s"
 kind = "shared"
+holder = "m"
 ends = [9]
 src = "issue"
 why = "`let _ = &mut s;` after row 8 is still E0502 (checked): m is a Box<dyn Fn + 'a>, which has drop glue, so the borrow lasts to m's drop at the end of main on row 9; after row 9 nothing"

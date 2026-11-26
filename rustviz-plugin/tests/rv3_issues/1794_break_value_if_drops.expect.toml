@@ -1,6 +1,6 @@
 issue = 1794
 cluster = "C13"
-title = "`break 'outer if c { a } else { b };`: a and b are dropped as the loop is left, not as the function returns"
+title = "`break 'outer if c { a } else { b };`: the unselected value is dropped as the loop is left; the selected one moves into n and is dropped when the function returns"
 fn = "g"
 note = "Deviation from the issue repro (rows unchanged): the inner `if c` is `if d` with a new parameter `d`; with the same `c` tested twice the inner condition is always true on the break path, so `b` would never be the break value and the two moves would be correlated."
 beyond_facts = "P3: the dots on the break line say 'The `return` here hands the caller one of the values'"

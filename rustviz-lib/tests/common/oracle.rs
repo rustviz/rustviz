@@ -1181,6 +1181,13 @@ fn rustc_version() -> &'static str {
 
 /// rustc's errors for `src` as an edition-2024 lib, cached as a JSON list
 /// of `[code, line, message]` keyed by the toolchain and source.
+/// Whether an E0382 message says the place is only partly moved: rustc's own
+/// "partially moved", or a move out of a Box's contents (`let s = *b;`),
+/// which it words as a whole move of `b` while the allocation is still owned.
+fn partly_msg(msg: &str, var: &str) -> bool {
+    msg.contains("partially") || (msg.contains("[moves out of a deref]") && !var.contains('.') && !var.starts_with('*'))
+}
+
 fn rustc_errors(src: &str) -> Result<Vec<Diag>, String> {
     let tc = toolchain();
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1670,11 +1677,11 @@ fn verify(src: &str, pts: &Points, claims: Vec<Claim>, mut st: Stats, mut out: V
                 let maybe = MAYBE_MOVED.iter().chain(["may have been moved", "may have no value"].iter()).any(|m| c.tip.contains(m));
                 let partly = c.drawn == Drawn::PartlyMoved;
                 match (&e0382, &e0381) {
-                    (Some(e), _) if maybe && e.1.contains("partially") == partly => Ok(()),
+                    (Some(e), _) if maybe && partly_msg(&e.1, &c.var) == partly => Ok(()),
                     // A fact: a whole move rustc calls partial is wrong; a
                     // maybe-moved place rustc only calls never assigned on
                     // some path is wrong.
-                    (Some(e), _) if c.strict && !partly && !maybe && e.1.contains("partially") => {
+                    (Some(e), _) if c.strict && !partly && !maybe && partly_msg(&e.1, &c.var) => {
                         Err(Some(("oracle-moved", format!("{}: only partly moved", said(e)))))
                     }
                     (None, Some(e)) if c.strict && maybe => Err(Some(("oracle-moved", format!("{}: never assigned, not moved", said(e))))),
@@ -2056,7 +2063,7 @@ pub fn derive_states(src: &str, extra: &[String]) -> Result<Vec<Derived>, String
         let is = if has(shared, &["E0381"]).is_some() {
             "unassigned*"
         } else if let Some((_, msg)) = has(shared, &["E0382"]) {
-            if msg.contains("partially") || (msg.contains("[moves out of a deref]") && !c.var.contains('.') && !c.var.starts_with('*')) { "partly*" } else { "moved*" }
+            if partly_msg(&msg, &c.var) { "partly*" } else { "moved*" }
         } else if has(shared, &["E0501", "E0502", "E0503", "E0505"]).is_some() {
             // E0501: a closure's unique borrow (`|| *r += 1` holds r).
             "mut"

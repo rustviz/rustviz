@@ -10,6 +10,11 @@ place = "s"
 is = "own"
 src = "issue"
 
+# Review fix note (weak-test): the `how = "any"` drop below is met by the
+# assignment's own drop as well as by the `?` exits; the harness has no field
+# (early_exit / at_reassign) or order that separates them here (nothing runs
+# after the exits), so this is a known-weak pin. The facts the case is about
+# (no assignment on either `?` path) rest on the reassign event and states.
 # Both `?`s return with the old s still owned: the return drops it. Checked
 # with a Drop-printing s: o = None and p = None each print "drop old" and
 # never run the assignment.

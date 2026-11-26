@@ -25,6 +25,17 @@ how = "any"
 src = "issue"
 why = "Drop-printing run: run(false, Some(1), None) and run(true, None, _) drop the old s at the `?` return"
 
+# Review fix (weak-test): the `how = "any"` drop above also passes on the
+# assignment's own drop alone, with every `?`-exit drop removed. The order
+# below can only be met by the `p?` exit: a drop of s AFTER the assignment
+# (the harness has no field to tell the `o?` exit's drop apart from the
+# assignment's drop, so that exit is not pinned separately).
+[[order]]
+row = 3
+events = ["reassign s", "drop s"]
+src = "issue"
+why = "Drop-printing run: run(true, Some(1), None) prints `drop old` (assignment) then `drop new` (the `p?` return drops the replacement); a drop of s after the reassignment can only be that exit"
+
 [[state]]
 row = 3
 place = "s"

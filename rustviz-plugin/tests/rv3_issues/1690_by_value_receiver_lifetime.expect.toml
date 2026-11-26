@@ -2,6 +2,7 @@ issue = 1690
 cluster = "C22"
 title = "`unwrap_or_else` on a by-value receiver: the result has the lifetime of the reference inside the Option, not of the Option"
 fn = "main"
+note = "Review fix: the why said r holds the &a that o held; the filter always returns false, so at run time o is None and r is &b. The pin is rustc's conservative loan, as the why now says."
 beyond_facts = "P3: wording: the result has the lifetime of the reference(s) the Option holds, not of the Option value"
 
 [[loan]]
@@ -11,7 +12,7 @@ holder = "r"
 kind = "shared"
 ends = [9]
 src = "issue"
-why = "`let _ = &mut a;` (a made `mut`) after rows 6, 7, 8 fails, after row 9 compiles: r holds the &a that o held, after o's scope ended"
+why = "`let _ = &mut a;` (a made `mut`) after rows 6, 7, 8 fails, after row 9 compiles: borrowck keeps the loan of a live through r (o's reference could flow into the result; the lifetime is the reference's, not o's, so it outlives o's scope). At run time the filter returns None, so r is really &b: this pins rustc's conservative view, not which reference r holds"
 
 [[loan]]
 row = 7

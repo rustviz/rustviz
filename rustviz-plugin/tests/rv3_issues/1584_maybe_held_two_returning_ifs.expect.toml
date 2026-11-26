@@ -2,7 +2,7 @@ issue = 1584
 cluster = "C10"
 title = "Second of two returning `if`s inside an arm, on a maybe-held value: no split dot, the `then` leg starts in mid-air"
 xfail = "P0"
-note = "early-exit (`return`) drop rows are missing from the fact dump: no drops of s or t on rows 9 and 13"
+note = "Review fix: the earlier note (no drops of s or t on rows 9 and 13) was wrong: the dump has both drops on row 13 (early_exit 13) and s's on row 9. The failing assertion is the ORDER on row 13: the dump lists `drop s` before `drop t`, but the return drops t (inner scope) first."
 fn = "run"
 beyond_facts = "P3: line 11 should have a split dot on s's column with both legs leaving it; renderer-level"
 

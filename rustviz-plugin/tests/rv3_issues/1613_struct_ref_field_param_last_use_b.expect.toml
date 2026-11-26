@@ -3,7 +3,7 @@ cluster = "C34"
 title = "Lender with a column (`let p = &*m;`): k.r ends on k's line, which matters (`m.push` after it compiles)"
 fn = "in_loop_lent"
 beyond_facts = "P3: k.r's end dot on row 9 (k's last use)"
-note = "Not the issue's repro: the issue's 'Compare' shape (a reborrow of an &mut parameter) written out, to pin the loan's end where the field copy's last use is."
+note = "Review fix: the why for row 9 wrongly said that a later `let _ = k.n;` still compiles; it is E0502 (any later use of k keeps the loan live). Not the issue's repro: the issue's 'Compare' shape (a reborrow of an &mut parameter) written out, to pin the loan's end where the field copy's last use is."
 
 [[loan]]
 row = 8
@@ -20,7 +20,7 @@ place = "m"
 lender = "*m"
 absent = true
 src = "issue"
-why = "after row 9 (k built from p, neither used again) the loan is gone: `m.push('x')` there compiles; with `let _ = k.n;` after the push it still compiles, with a read of k.r it would not"
+why = "after row 9 (k built from p, neither used again) the loan is gone: `m.push('x')` there compiles; a later read of k.n or k.r (`let _ = k.n;` after the push is E0502, checked) would keep k's lifetime parameter, hence the shared reborrow, live across the push"
 
 [[lent]]
 row = 10

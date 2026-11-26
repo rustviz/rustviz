@@ -4,7 +4,7 @@ cluster = "C32"
 title = "Unread holder overwritten, with a second loan (of p.1) on the same row: p.0's loan drawn live through the push"
 fn = "same_row"
 places = ["p.0", "p.1"]
-note = "Gap: spike has the lent fact for p.1 but no per-row state for the field paths p.0 / p.1."
+note = "Review fix: the why said `other` moves into h; it is a shared reference and is copied. Gap: spike has the lent fact for p.1 but no per-row state for the field paths p.0 / p.1."
 beyond_facts = "P2: p.0's dot title on rows 4-6"
 
 [[loan]]
@@ -23,7 +23,7 @@ holder = "other"
 kind = "shared"
 ends = [7]
 src = "issue"
-why = "other moves into h at row 6; h.a is read on row 7; `p.1.push('y')` after row 6 is E0502"
+why = "`other` is a `&String` (Copy): row 6 copies it into h.a (reading `other` after row 6 compiles, checked), so the loan of p.1 is held by other and h.a; h.a is read on row 7; `p.1.push('y')` after row 6 is E0502"
 
 [[state]]
 row = 4
