@@ -363,7 +363,7 @@ fn maybe_moved_entry(body: &Body<'_>, md: &MoveData<'_>) -> BTreeMap<rustc_middl
             }
             let mut set = entry.get(&bb).cloned().unwrap_or_default();
             for i in 0..=data.statements.len() {
-                moved_transfer(md, &mut set, Location { block: bb, statement_index: i });
+                moved_transfer(md, body, &mut set, Location { block: bb, statement_index: i });
             }
             for succ in data.terminator().successors() {
                 let e = entry.entry(succ).or_default();
@@ -376,7 +376,15 @@ fn maybe_moved_entry(body: &Body<'_>, md: &MoveData<'_>) -> BTreeMap<rustc_middl
     entry
 }
 
-fn moved_transfer(md: &MoveData<'_>, set: &mut BTreeSet<MovePathIndex>, loc: Location) {
+fn moved_transfer(md: &MoveData<'_>, body: &Body<'_>, set: &mut BTreeSet<MovePathIndex>, loc: Location) {
+    // A variable's storage starting or ending forgets its moves: a `let`
+    // in a loop body starts each iteration unassigned, not "moved" by the
+    // previous iteration's scope end.
+    if let Some(StatementKind::StorageLive(l) | StatementKind::StorageDead(l)) =
+        body.basic_blocks[loc.block].statements.get(loc.statement_index).map(|s| &s.kind)
+    {
+        set.retain(|m| md.move_paths[*m].place.local != *l);
+    }
     for mo in md.loc_map[loc].iter() {
         set.insert(md.moves[*mo].path);
     }
@@ -1366,7 +1374,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 let moved = exits.iter().any(|e| {
                     let mut set = moved_entry.get(&e.block).cloned().unwrap_or_default();
                     for i in 0..=e.statement_index {
-                        moved_transfer(&move_data, &mut set, Location { block: e.block, statement_index: i });
+                        moved_transfer(&move_data, body, &mut set, Location { block: e.block, statement_index: i });
                     }
                     let (anc, desc) = (ancestors(&move_data, *mpi), descendants(&move_data, *mpi));
                     set.iter().any(|m| anc.contains(m) || desc.contains(m))

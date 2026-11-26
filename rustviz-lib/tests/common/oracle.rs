@@ -889,6 +889,10 @@ struct Claim {
     in_loop: bool,
     /// The tooltip that says it: the segment's, or the moving dot's.
     tip: String,
+    /// A fact (`check_states`), not a drawing: rustc's verdict decides
+    /// more (a whole move against "partially moved", a maybe-moved
+    /// against "possibly-uninitialized").
+    strict: bool,
 }
 
 /// A variable or a field path (`s`, `p.x`, `t.0`), as a probe can name it.
@@ -1087,7 +1091,7 @@ fn claims(pts: &Points, d: &Drawing, skips: &mut Skips) -> Vec<Claim> {
                 }
             }
             let drawn = *drawn.iter().next().unwrap();
-            out.push(Claim { line: p.line, func: p.func, var: name, drawn, in_loop: p.in_loop, tip });
+            out.push(Claim { line: p.line, func: p.func, var: name, drawn, in_loop: p.in_loop, tip, strict: false });
         }
     }
     out
@@ -1409,15 +1413,28 @@ pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<Violation>, Vec<(u32
     verify(src, &pts, claims, st, out)
 }
 
-/// A state the RustViz 3 fact layer gives a column after a row:
-/// (line, column, state, lent), where state is one of `own`, `moved`,
-/// `maybe`, `partly`, `unassigned` and lent is `""`, `"shared"` or `"mut"`
-/// (the strongest loan in scope that restricts the column).
-pub type FactState = (u32, String, String, String);
+/// A state the RustViz 3 fact layer gives a column after a row of the fn
+/// whose signature starts on `fn_line`: `state` is one of `own`, `moved`,
+/// `maybe`, `partly`, `unassigned`; `lent` is `""`, `"shared"` or
+/// `"mut"` (the strongest loan in scope that restricts the column);
+/// `cause`, for `maybe`: `moved` or `unassigned`.
+#[derive(Debug, Clone)]
+pub struct FactState {
+    pub line: u32,
+    pub fn_line: u32,
+    pub column: String,
+    pub state: String,
+    pub lent: String,
+    pub cause: Option<String>,
+}
 
 /// The rustc oracle on states given directly (the fact layer's) instead
-/// of read from a drawing: the same probes, after the same statements,
-/// judged the same way.
+/// of read from a drawing: the same probes, after the same statements, of
+/// the same fn (a nested fn's facts are its own). rustc's verdict decides
+/// more than for a drawing: a whole move against "partially moved", a
+/// maybe-moved against "possibly-uninitialized" and back. Unlike `check`,
+/// no `// rustviz: hide/skip` skip: the facts are of the source as
+/// compiled.
 pub fn check_states(src: &str, states: &[FactState]) -> (Vec<Violation>, Vec<(u32, String, &'static str)>, Stats) {
     let mut st = Stats { programs: 1, ..Default::default() };
     let out = Vec::new();
@@ -1434,24 +1451,25 @@ pub fn check_states(src: &str, states: &[FactState]) -> (Vec<Violation>, Vec<(u3
     let mut claims = Vec::new();
     let mut seen = HashSet::new();
     for p in &pts.points {
-        if !seen.insert(p.line) {
+        if !seen.insert((p.func, p.line)) {
             continue;
         }
-        for (line, var, state, lent) in states {
-            if *line != p.line {
+        for f in states {
+            if f.line != p.line || pts.spans[p.func].0 != f.fn_line {
                 continue;
             }
-            let (drawn, tip) = match (state.as_str(), lent.as_str()) {
-                ("own", "mut") => (Drawn::MutLent, "mutably borrowed"),
-                ("own", "shared") => (Drawn::Shared, "being shared"),
-                ("own", _) => (Drawn::Usable, "owner"),
-                ("moved", _) => (Drawn::Moved, "moved"),
-                ("maybe", _) => (Drawn::Moved, "may have been moved"),
-                ("partly", _) => (Drawn::PartlyMoved, "partially moved"),
-                ("unassigned", _) => (Drawn::Unassigned, "has no value yet"),
+            let (drawn, tip) = match (f.state.as_str(), f.lent.as_str(), f.cause.as_deref()) {
+                ("own", "mut", _) => (Drawn::MutLent, "mutably borrowed"),
+                ("own", "shared", _) => (Drawn::Shared, "being shared"),
+                ("own", _, _) => (Drawn::Usable, "owner"),
+                ("moved", _, _) => (Drawn::Moved, "moved"),
+                ("maybe", _, Some("unassigned")) => (Drawn::Unassigned, "may have no value"),
+                ("maybe", _, _) => (Drawn::Moved, "may have been moved"),
+                ("partly", _, _) => (Drawn::PartlyMoved, "partially moved"),
+                ("unassigned", _, _) => (Drawn::Unassigned, "has no value yet"),
                 _ => continue,
             };
-            let Some(name) = place_name(var) else {
+            let Some(name) = place_name(&f.column) else {
                 *st.skips.entry("column: not a variable or field path").or_default() += 1;
                 continue;
             };
@@ -1460,7 +1478,7 @@ pub fn check_states(src: &str, states: &[FactState]) -> (Vec<Violation>, Vec<(u3
                 *st.skips.entry("name bound more than once / not bound / an item").or_default() += 1;
                 continue;
             }
-            claims.push(Claim { line: p.line, func: p.func, var: name, drawn, in_loop: p.in_loop, tip: tip.to_string() });
+            claims.push(Claim { line: p.line, func: p.func, var: name, drawn, in_loop: p.in_loop, tip: tip.to_string(), strict: true });
         }
     }
     verify(src, &pts, claims, st, out)
@@ -1629,7 +1647,8 @@ fn verify(src: &str, pts: &Points, claims: Vec<Claim>, mut st: Stats, mut out: V
                 (None, Some(_), _) | (None, None, Some(_)) => Err(None),
                 (None, None, None) => Err(Some(("oracle-borrowed", none.clone()))),
             },
-            (Drawn::MutLent, _) => match (code_is(errs, &["E0502", "E0503", "E0505"]), conflict, novalue) {
+            // (E0501: a closure's unique borrow of it is live: exclusive too.)
+            (Drawn::MutLent, _) => match (code_is(errs, &["E0502", "E0503", "E0505", "E0501"]), conflict, novalue) {
                 (Some(_), _, _) => Ok(()),
                 (None, Some(_), _) | (None, None, Some(_)) => Err(None),
                 (None, None, None) => Err(Some(("oracle-borrowed", none.clone()))),
@@ -1644,6 +1663,13 @@ fn verify(src: &str, pts: &Points, claims: Vec<Claim>, mut st: Stats, mut out: V
                 let partly = c.drawn == Drawn::PartlyMoved;
                 match (&e0382, &e0381) {
                     (Some(e), _) if maybe && e.1.contains("partially") == partly => Ok(()),
+                    // A fact: a whole move rustc calls partial is wrong; a
+                    // maybe-moved place rustc only calls never assigned on
+                    // some path is wrong.
+                    (Some(e), _) if c.strict && !partly && !maybe && e.1.contains("partially") => {
+                        Err(Some(("oracle-moved", format!("{}: only partly moved", said(e)))))
+                    }
+                    (None, Some(e)) if c.strict && maybe => Err(Some(("oracle-moved", format!("{}: never assigned, not moved", said(e))))),
                     (Some(_), _) | (None, Some(_)) => Err(None),
                     (None, None) => Err(Some(("oracle-moved", conflict.as_ref().map_or(none.clone(), said)))),
                 }
@@ -1653,6 +1679,9 @@ fn verify(src: &str, pts: &Points, claims: Vec<Claim>, mut st: Stats, mut out: V
             (Drawn::Unassigned, _) => {
                 let maybe = c.tip.contains("may have no value");
                 match (&e0381, &e0382) {
+                    // A fact that it may have no value: rustc must say so
+                    // (possibly-uninitialized), not that it was moved.
+                    (None, Some(e)) if c.strict && maybe => Err(Some(("oracle-moved", format!("{}: moved, not unassigned", said(e))))),
                     (Some(e), _) if maybe || !e.1.contains("possibly") => Ok(()),
                     (_, Some(_)) if maybe => Ok(()),
                     (Some(_), _) | (_, Some(_)) => Err(None),
@@ -1966,7 +1995,7 @@ pub fn derive_states(src: &str, extra: &[String]) -> Result<Vec<Derived>, String
         names.sort();
         names.dedup();
         for n in names {
-            claims.push(Claim { line: p.line, func: p.func, var: n, drawn: Drawn::Usable, in_loop: p.in_loop, tip: String::new() });
+            claims.push(Claim { line: p.line, func: p.func, var: n, drawn: Drawn::Usable, in_loop: p.in_loop, tip: String::new(), strict: false });
         }
     }
     let lines: BTreeSet<(usize, u32)> = claims.iter().map(|c| (c.func, c.line)).collect();

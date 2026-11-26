@@ -31099,12 +31099,14 @@ fn rv3_oracle_on() -> bool {
 /// strongest loan restricting it). Closure bodies are left out (the
 /// oracle never probes inside a closure), and so are reference columns
 /// (as the drawing oracle leaves them out).
-fn fact_states(facts: &serde_json::Value) -> Vec<common::oracle::FactState> {
+fn fact_states(facts: &serde_json::Value) -> Result<Vec<common::oracle::FactState>, String> {
+    const STATES: &[&str] = &["own", "moved", "maybe", "partly", "unassigned"];
     let mut out = Vec::new();
     for body in facts["bodies"].as_array().into_iter().flatten() {
         if body["kind"] != "fn" {
             continue;
         }
+        let fn_line = body["first_line"].as_u64().ok_or("a body without first_line")? as u32;
         let owners: Vec<&str> = body["vars"].as_array().into_iter().flatten()
             .filter(|v| v["kind"] == "owner").filter_map(|v| v["name"].as_str()).collect();
         let root_of = |col: &str| -> Option<String> {
@@ -31112,8 +31114,12 @@ fn fact_states(facts: &serde_json::Value) -> Vec<common::oracle::FactState> {
                 .find(|c| c["name"] == col).and_then(|c| c["root"].as_str()).map(str::to_owned)
         };
         for row in body["rows"].as_array().into_iter().flatten() {
-            let line = row["line"].as_u64().unwrap() as u32;
+            let line = row["line"].as_u64().ok_or("a row without line")? as u32;
             for (col, st) in row["state"].as_object().into_iter().flatten() {
+                let st = st.as_str().unwrap_or("");
+                if !STATES.contains(&st) {
+                    return Err(format!("{}: row {line}: unknown state {st:?} of {col}", body["func"]));
+                }
                 if !root_of(col).is_some_and(|r| owners.contains(&r.as_str())) {
                     continue;
                 }
@@ -31122,11 +31128,17 @@ fn fact_states(facts: &serde_json::Value) -> Vec<common::oracle::FactState> {
                 let lent = row["lent"][col].as_array().map_or("", |ls| {
                     if ls.iter().any(|l| l["kind"] == "mut" || l["kind"] == "unique") { "mut" } else if ls.is_empty() { "" } else { "shared" }
                 });
-                out.push((line, col.clone(), st.as_str().unwrap_or("").to_owned(), lent.to_owned()));
+                let cause = row["cause"][col].as_str().map(str::to_owned);
+                if st == "maybe" && cause.is_none() {
+                    return Err(format!("{}: row {line}: `maybe` {col} without a cause", body["func"]));
+                }
+                out.push(common::oracle::FactState {
+                    line, fn_line, column: col.clone(), state: st.to_owned(), lent: lent.to_owned(), cause,
+                });
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// RustViz 3: rustc as ground truth for the fact layer
@@ -31160,7 +31172,14 @@ fn corpus_facts_oracle_holds() {
                     if let Some(e) = facts["errors"].as_array().filter(|e| !e.is_empty()) {
                         return Err(format!("{name}: the fact layer failed: {e:?}"));
                     }
-                    let (v, tested, st) = check_states(&read_corpus(name), &fact_states(facts));
+                    let src = read_corpus(name);
+                    // A program with a fn has facts (none at all is a broken
+                    // dump, not a pass).
+                    if src.contains("fn ") && facts["bodies"].as_array().is_none_or(|b| b.is_empty()) {
+                        return Err(format!("{name}: the fact dump has no bodies"));
+                    }
+                    let states = fact_states(facts).map_err(|e| format!("{name}: {e}"))?;
+                    let (v, tested, st) = check_states(&src, &states);
                     Ok(((v, tested), st))
                 });
                 results.lock().unwrap().push((name.clone(), r));
@@ -31193,6 +31212,8 @@ fn corpus_facts_oracle_holds() {
         total.programs, total.claims, total.tested, total.violations, total.in_loop_violations,
         untested_facts_listed(&checked), total.skips
     );
+    // A run that tested nothing proves nothing.
+    assert!(total.tested > 0, "the fact oracle tested no state");
     assert!(
         diff.is_empty() && failed.is_empty(),
         "rustc contradicts the RustViz 3 fact layer (rustviz-plugin/src/facts/). A NEW one is a wrong fact: \
