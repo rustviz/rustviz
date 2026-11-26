@@ -7240,8 +7240,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // still in use when r got it. An arm-local `let m2 = &mut s;`
           // used up before `let mut r3 = &s;` gives s back itself, #1515.)
           if !self.ref_handed_off(lhs_rap.name()) && !taken_over {
+            // (Nor one made after r's old loan had ended: `let m3 = &mut
+            // s;` in an `if` after r's unread `&s`, #1575. Counted as a
+            // copy r took, its end was put off to its scope end and gave
+            // nothing back. Nor one made on the old loan's last line,
+            // after its last use there: `let n = r2.len(); let m3 = &mut
+            // s;`, Codex on #1603.)
             let carried: Vec<String> = gone.iter()
-              .filter(|g| self.borrow_map.get(*g).is_none_or(|d| d.lifetime >= ref_data.assigned_at))
+              .filter(|g| self.borrow_map.get(*g).is_none_or(|d| d.lifetime >= ref_data.assigned_at
+                && old_end.is_none_or(|e| d.assigned_at < e)))
               .cloned().collect();
             self.loans_carried_on.extend(carried);
           }
@@ -7351,7 +7358,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // An end past the write (#778) is added once the whole
             // body is visited, at the top level (`late_old_ends`).
             self.defer_old_ends = end_line > line_num;
+            let end_lo = *self.unique_id;
             self.add_borrow_end_ev(end_line, to_ro.clone(), lhs_rty.clone(), &ref_data, Vec::new());
+            // (At the write: a new borrow of the same lender there is taken
+            // first, `after_same_lender_borrow`, Codex on #1603.)
+            if end_line == line_num {
+              self.at_write_end_ids.extend(end_lo..*self.unique_id);
+            }
             self.defer_old_ends = false;
             if let ResourceTy::Value(l) = &to_ro {
               self.repointed_ends.push((l.name().to_owned(), ref_data.assigned_at, end_line));
@@ -7387,7 +7400,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 continue;
               }
               self.defer_old_ends = co_end > line_num;
+              let co_lo = *self.unique_id;
               self.add_ev(co_end, evt, co.clone(), lhs_rty.clone(), false);
+              if co_end == line_num {
+                self.at_write_end_ids.extend(co_lo..*self.unique_id);
+              }
               self.defer_old_ends = false;
             }
           }

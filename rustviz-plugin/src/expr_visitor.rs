@@ -754,6 +754,11 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// `note_sharers_across_calls` didn't see r share b before the write:
   /// a read of b in between said b was no longer borrowed (#1492).
   pub repointed_loans: Vec<(String, Vec<String>, usize, usize)>,
+  /// Ids of old-loan ends drawn at the write that re-points the
+  /// reference: a new shared borrow of the same lender on that line ends
+  /// no old loan (`h.r = &s;`: `&s` is taken before the write, so s is
+  /// never free in between; `after_same_lender_borrow`).
+  pub at_write_end_ids: Vec<usize>,
   /// References whose borrow lasts at least until a line, whatever the
   /// MIR loan matched to them says: one a re-pointed reborrow gave back
   /// to (m in `h.r = r;` after `h = Holder { r: &*m }`, #1538), and one
@@ -1247,6 +1252,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       loans_carried_on: Vec::new(),
       repointed_ends: Vec::new(),
       repointed_loans: Vec::new(),
+      at_write_end_ids: Vec::new(),
       min_lifetimes: Vec::new(),
       pre_split_end_ids: Vec::new(),
       retired_until: HashMap::new(),
@@ -12566,6 +12572,7 @@ pub fn print_out_of_scope(&mut self){
     dedupe_borrow_ends(self.preprocessed_events, self.event_line_map);
     self.nest_borrow_ends_in_arms();
     end_scrutinee_borrows_in_other_arms(self.preprocessed_events, self.event_line_map, self.unique_id);
+    after_same_lender_borrow(self.preprocessed_events, self.event_line_map, &std::mem::take(&mut self.at_write_end_ids));
     self.end_outer_borrows_in_arms();
     self.end_arm_borrows_in_nested_arms();
     // A lender that got a column in a conditional just now (its borrow
@@ -13170,7 +13177,11 @@ fn ends_in_condition_before_split(events: &mut Vec<(usize, ExternalEvent)>) {
         // end of a reborrow through r, `let r2 = &*m;`, gives r its
         // loan back and is no use of r: r's own end, on the split line,
         // comes after it, #1525.)
-        let used_after = |r: &ResourceAccessPoint| events[k + 1..].iter().any(|(_, e)| uses_beyond_drop(e, r)
+        // (Up to a later line's new value for r, `r = &s;` after the
+        // `if`: what follows uses that one, #1586.)
+        let used_after = |r: &ResourceAccessPoint| events[k + 1..].iter()
+          .take_while(|(l, e)| !(*l > *split_point && gives_new_value(e, r)))
+          .any(|(_, e)| uses_beyond_drop(e, r)
           && !matches!(e, ExternalEvent::StaticDie { from: ResourceTy::Value(f), .. }
             | ExternalEvent::MutableDie { from: ResourceTy::Value(f), .. }
             | ExternalEvent::RefDie { from: ResourceTy::Value(f), .. } if f == r)
@@ -13194,6 +13205,23 @@ fn ends_in_condition_before_split(events: &mut Vec<(usize, ExternalEvent)>) {
     }
     k += moved.len() + 1;
   }
+}
+
+/// Shared loans only: a new `&mut s` can't be taken while the old loan
+/// lives, so that one ended first (Codex r2 on #1603).
+fn reborrows_lender(new_value: &ExternalEvent, end: &ExternalEvent) -> bool {
+  let Some(l) = borrow_end_of(end).and_then(|(_, to)| to.extract_rap()) else { return false };
+  matches!(end, ExternalEvent::StaticDie { .. })
+    && matches!(new_value, ExternalEvent::StaticBorrow { from, .. } if from.extract_rap() == Some(l))
+}
+
+/// Whether `e` gives the reference `r` a new value (`r = &s;`, `r = x;`).
+fn gives_new_value(e: &ExternalEvent, r: &ResourceAccessPoint) -> bool {
+  matches!(e,
+    ExternalEvent::StaticBorrow { to: ResourceTy::Value(t), .. }
+    | ExternalEvent::MutableBorrow { to: ResourceTy::Value(t), .. }
+    | ExternalEvent::Move { to: ResourceTy::Value(t), .. }
+    | ExternalEvent::Copy { to: ResourceTy::Value(t), .. } if t == r)
 }
 
 /// Whether `e` uses `r` other than by dropping it (an exit's drop of r
@@ -14182,11 +14210,18 @@ fn note_sharers_in(events: &mut [(usize, ExternalEvent)], sharers: &[Sharer], no
 /// line's arrows from: left there, each was drawn as another identical
 /// arrow (#1479).
 fn dedupe_borrow_ends(events: &mut Vec<(usize, ExternalEvent)>, line_map: &mut BTreeMap<usize, Vec<ExternalEvent>>) {
-  let mut seen: Vec<(usize, std::mem::Discriminant<ExternalEvent>, ResourceAccessPoint, ResourceTy)> = Vec::new();
+  // (Not the ends of two loans of one lender on the line r is given the
+  // second: `h.r = &t;` after `Holder { r: longest(&s, &t) }` ends the
+  // old loan of t and, unread, the new one, #1588.)
+  let older: Vec<bool> = events.iter().map(|(line, e)| borrow_end_of(e)
+    .is_some_and(|(r, _)| ends_earlier_loan(events, r, *line, e))).collect();
+  let mut seen: Vec<(usize, std::mem::Discriminant<ExternalEvent>, ResourceAccessPoint, ResourceTy, bool)> = Vec::new();
   let mut dropped: HashSet<usize> = HashSet::new();
+  let mut i = 0;
   events.retain(|(line, e)| {
+    i += 1;
     let Some((r, to)) = borrow_end_of(e) else { return true };
-    let key = (*line, std::mem::discriminant(e), r.clone(), to.clone());
+    let key = (*line, std::mem::discriminant(e), r.clone(), to.clone(), older[i - 1]);
     if seen.contains(&key) {
       dropped.insert(e.get_id());
       return false;
@@ -14199,6 +14234,21 @@ fn dedupe_borrow_ends(events: &mut Vec<(usize, ExternalEvent)>, line_map: &mut B
       evs.retain(|e| !dropped.contains(&e.get_id()));
     }
   }
+}
+
+/// Whether `end`, an end of `r`'s borrow, ends a loan older than the one
+/// `r` was given on line `at` (by the same lender, `h.r = &s;` after
+/// `Holder { r: &s }`): it was made before the event that gave r that
+/// one (a reassignment ends the old loan first), #1576, #1588.
+fn ends_earlier_loan(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint, at: usize, end: &ExternalEvent) -> bool {
+  fn given_at(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint, at: usize) -> Option<usize> {
+    events.iter().find_map(|(l, e)| match e {
+      ExternalEvent::Branch { branches, .. } => branches.iter().find_map(|b| given_at(&b.e_data, r, at)),
+      _ if *l == at && gives_new_value(e, r) => Some(e.get_id()),
+      _ => None,
+    })
+  }
+  given_at(events, r, at).is_some_and(|id| end.get_id() < id)
 }
 
 /// Whether `e`, the end of a borrow `d` describes the reference of,
@@ -14422,6 +14472,54 @@ pub(crate) fn end_borrow_in_arms(
       continue;
     }
     end_after_last_use(&mut arm.e_data, branch_type.get_start_end(b).0, copy, r, lender, unique_id);
+  }
+}
+
+/// The old-loan ends among `events` (and their line map, `line_map`;
+/// conditionals' arms too) whose ids are in `ids`, each listed after a
+/// later-listed new borrow of the same lender into the same reference on
+/// its line: `&s` in `h.r = &s;` is taken before the write ends the old
+/// loan, so the lender is never free in between (Codex on #1603, #1610).
+fn after_same_lender_borrow(events: &mut Vec<(usize, ExternalEvent)>, line_map: &mut BTreeMap<usize, Vec<ExternalEvent>>, ids: &[usize]) {
+  if ids.is_empty() {
+    return;
+  }
+  for (_, e) in events.iter_mut() {
+    if let ExternalEvent::Branch { branches, .. } = e {
+      for b in branches.iter_mut() {
+        after_same_lender_borrow(&mut b.e_data, &mut b.line_map, ids);
+      }
+    }
+  }
+  // (The first new value r gets after the end, on its line: not a later
+  // one, `r = &t; s.push('x'); r = &s;` on one line, Codex on #1603.)
+  fn first_new<'e>(end: &ExternalEvent, mut rest: impl Iterator<Item = &'e ExternalEvent>) -> bool {
+    borrow_end_of(end).and_then(|(r, _)| rest.find(|e| gives_new_value(e, r)).map(|e| reborrows_lender(e, end)))
+      .unwrap_or(false)
+  }
+  let mut i = 0;
+  while i < events.len() {
+    if ids.contains(&events[i].1.get_id()) {
+      let line = events[i].0;
+      let rest = events[i + 1..].iter().take_while(|(l, _)| *l == line).map(|(_, e)| e);
+      if first_new(&events[i].1, rest) {
+        events.remove(i);
+        continue;
+      }
+    }
+    i += 1;
+  }
+  for evs in line_map.values_mut() {
+    let mut i = 0;
+    while i < evs.len() {
+      if ids.contains(&evs[i].get_id()) {
+        if first_new(&evs[i], evs[i + 1..].iter()) {
+          evs.remove(i);
+          continue;
+        }
+      }
+      i += 1;
+    }
   }
 }
 

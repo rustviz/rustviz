@@ -28047,6 +28047,29 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &["nothing happens to outer here", "nothing happens to keep here", "nothing happens to late here", "nothing happens to carried here", "the function returns and"],
     },
+    TooltipExpect {
+        name: "repoint_nested_arm_dead_loan_1580",
+        // #1580: r's old loan ended before the outer `if`; an arm of a
+        // conditional nested in one of its arms re-points r. Both joins say
+        // so; on main the inner join said r had never been assigned (false:
+        // it held a reference since its `let`), and the outer one had no dot.
+        must_contain: &[
+            "r's borrow ended before the branches above, and each borrow a branch gave r ended in that branch",
+        ],
+        must_not_contain: &[
+            "r still has no value here",
+        ],
+    },
+    TooltipExpect {
+        name: "dead_loan_then_mut_borrow_1575",
+        // #1575: m3's loan ends at its last use and gives s back; main put
+        // the end off to m3's scope end with no return arrow.
+        must_contain: &[
+            "Return mutably borrowed resource from m3 to s",
+            "s's resource is no longer mutably borrowed",
+        ],
+        must_not_contain: &[],
+    },
 ];
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws
@@ -28064,6 +28087,54 @@ fn same_loan_write_ends_nothing_1497() {
         let ends = format!("{r}'s immutable borrow ends");
         let wrong = dots_where(&timeline, |lines| lines.iter().any(|l| *l == copy) && lines.iter().any(|l| *l == ends));
         assert!(wrong.is_empty(), "{r}'s write ends its borrow: {:?}", wrong);
+    }
+}
+
+/// A field re-pointed at the same lender (`h.r = &s;`): `&s` is taken
+/// before the write ends the old loan, so s's dot never says it is free
+/// before saying it is borrowed by h.r again (Codex review of #1603). Main
+/// listed "no longer immutably borrowed" first.
+#[test]
+fn same_lender_rewrite_keeps_lender_borrowed_1603() {
+    let rv = run_with_local_backend("repoint_later_use_1603");
+    let timeline = rv.timeline_panel_string();
+    let free = "s's resource is no longer immutably borrowed";
+    let again = "s's resource is immutably borrowed by h.r; s is read-only while the borrow is live";
+    let lines = tooltip_lines(&timeline);
+    assert!(lines.iter().flatten().any(|l| l == again), "s is borrowed by h.r again: {:?}", lines);
+    let wrong: Vec<&Vec<String>> = lines.iter().filter(|d| {
+        d.windows(2).any(|w| w[0] == free && w[1] == again)
+    }).collect();
+    assert!(wrong.is_empty(), "s said free just before h.r borrows it again: {:?}", wrong);
+}
+
+
+/// #1586: r's last use is the `if` / `match` condition, so s is given back
+/// before the split and owned (not "being shared") on every arm's leg.
+/// The line-through-fork invariant only checks the trunk's geometry
+/// (Codex r4 on #1603).
+#[test]
+fn lender_owned_in_arms_after_condition_last_use_1586() {
+    let rv = run_with_local_backend("cond_last_use_repointed_after_1586");
+    let timeline = rv.timeline_panel_string();
+    let ids: Vec<&str> = timeline.match_indices("data-rv-id=\"s@L").map(|(i, _)| {
+        &timeline[i + 12..i + 12 + timeline[i + 12..].find('"').unwrap_or(0)]
+    }).collect();
+    let shared_legs = ids.iter().filter(|id| id.contains(":branch_line:partial_privilege")).count();
+    assert_eq!(shared_legs, 0, "an arm leg of s says it is being shared");
+    // Each conditional's legs out of its split (lines 8, 17, 28) and the
+    // `else` arm's push (21) are drawn as s's owner: a plain (not gray,
+    // not a part) owner segment over that line (Codex r5/r6).
+    let rows = |id: &str| -> Option<(usize, usize)> {
+        let l = id.strip_prefix("s@L")?.split(':').next()?;
+        let mut it = l.split('-').map(|x| x.parse::<usize>().ok());
+        let a = it.next()??;
+        Some((a, it.next().flatten().unwrap_or(a)))
+    };
+    for arm_line in [8, 17, 21, 28] {
+        let owned = ids.iter().filter(|id| id.ends_with(":branch_line:full_privilege"))
+            .filter_map(|id| rows(id)).any(|(a, b)| a <= arm_line && arm_line <= b);
+        assert!(owned, "no owner leg of s over line {arm_line}: {:?}", ids);
     }
 }
 
