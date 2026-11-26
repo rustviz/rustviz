@@ -21078,7 +21078,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "o is partially moved: o.inner.x was moved out, so o can't be used as a whole; its other fields still can",
             "o is partially moved: o.inner.x and o.inner.y were moved out, so o can't be used as a whole; its other fields still can",
             "o.inner is partially moved: o.inner.x was moved out, so o.inner can't be used as a whole; its other fields still can",
-            "q is partially moved: q.a may have been moved out, so q can't be used as a whole",
+            "q may be partially moved: q.a may have been moved out, so q can't be used as a whole",
             "r is partially moved: r.a was moved out, so r can't be used as a whole; its other fields still can",
             "r is the owner of the resource",
         ],
@@ -31692,7 +31692,7 @@ fn tooltip_of_id(timeline_svg: &str, id: &str) -> Option<String> {
 fn owner_line_reads_the_state_table() {
     for (snippet, id, want, not) in [
         ("box_partial_move_890", "b2@L22-40:line", "b2.0 was moved out, so b2 can't be used as a whole", "owner of the resource"),
-        ("box_partial_move_890", "b4@L34-40:line", "b4's contents were moved out, so b4 can't be used as a whole; the Box still owns its heap allocation", "owner of the resource"),
+        ("box_partial_move_890", "b4@L34-40:line", "b4's contents were moved out, so b4 can't be used as a whole; the Box itself wasn't moved: its heap allocation, if it has one, is freed when b4 is dropped", "owner of the resource"),
         // `match *b1 { (s, 0) => .., x => .. }`: b1.0 moves on every path,
         // the whole payload (b1.1 too) only in the `x` arm.
         ("box_payload_whole_move_898", "b1@L14-39:line", "b1.0 was moved out and b1.1 may have been, so b1 can't be used as a whole", "owner of the resource"),
@@ -31705,6 +31705,29 @@ fn owner_line_reads_the_state_table() {
         // `list.sort_by_key(|r| { .. });` keeps list mutably borrowed for the
         // whole call, its closure's rows too.
         ("book/c13_11_sort_by_key_fnmut", "list@L4-7:line:revoked_privilege", "list's value is mutably borrowed", "holds a copyable value"),
+        // #1852 review. A zero-sized payload has no allocation to free.
+        ("rv3_owner_lines_1852", "b@L58-61:line", "its heap allocation, if it has one, is freed when b is dropped", "still owns its heap allocation"),
+        // `let s = *b;` on a Box<String>: b still owns the Box (2.x drew no
+        // line after the move).
+        ("box_contents_move_string", "b@L3-5:line", "b's contents were moved out, so b can't be used as a whole", "owner of the resource"),
+        // A field private to another module has no column: the moved public
+        // one isn't all of it.
+        ("rv3_owner_lines_1852", "p@L18-20:line", "p.a was moved out, so p can't be used as a whole", "contents"),
+        ("rv3_owner_lines_1852", "s@L16-20:line", "s.a was moved out, so s can't be used as a whole", "still can"),
+        // Moved on some paths only: b may be partially moved.
+        ("rv3_owner_lines_1852", "b@L28-30:line", "b may be partially moved: b.0 and b.1 may have been moved out", "b is partially moved"),
+        // Each path lends x to a different holder; then only one path's loan
+        // is left.
+        ("rv3_owner_lines_1852", "x@L44-45:line:revoked_privilege", "x's resource is mutably borrowed; x can't be used", " by "),
+        ("rv3_owner_lines_1852", "x@L45-46:line:revoked_privilege", "x may be mutably borrowed here", "by s"),
+        // A closure's unique immutable borrow isn't a mutable borrow.
+        ("rv3_issues/1716_closure_unique_capture_of_struct", "h@L6-7:line:revoked_privilege", "h is uniquely borrowed by closure f", "mutably borrowed"),
+        // A two-phase reservation: v can still be read.
+        ("rv3_issues/1717_two_phase_multiline_remove", "v@L3-4:line", "v is reserved for a mutable borrow by the call to remove", "shared by"),
+        // `**boxed` moved out: the inner Box stays in boxed.
+        ("rv3_issues/1809_nested_box_move_out", "boxed@L3-5:line", "**boxed was moved out, so boxed can't be used as a whole", "contents"),
+        // `let t = r;` moves the `&mut`: t holds the loan now.
+        ("rv3_issues/1764_moved_mut_ref_holder", "p@L4-6:line:revoked_privilege", "mutably borrowed by t", "by r"),
     ] {
         let tl = run_with_local_backend(snippet).timeline_panel_string();
         let tip = tooltip_of_id(&tl, id).unwrap_or_else(|| panic!("{snippet}: no {id}"));
@@ -31744,7 +31767,7 @@ fn struct_line_text_reads_the_state_table() {
         ("loop_struct_line_1031", "y@L111-112:line", "y.a and y.b were moved out, so neither y nor any of its fields can be used", "owner of the resource"),
         // On some paths only: what may be left isn't said to drop at the
         // scope end (the loop gives x.name a new value first).
-        ("loop_struct_line_1031", "x@L88-89:line", "x.name may have been moved out, so neither x nor any of its fields can be used", "dropped"),
+        ("loop_struct_line_1031", "x@L88-89:line", "x.name may have been moved out, so x can't be used as a whole, nor can any of its fields", "dropped"),
         // One arm moves o.inner.x, the other o.inner.y: o.inner never moved
         // out whole.
         ("rv3_table_titles_1848", "o@L26-28:line", "o.inner.x and o.inner.y may have been moved out", "o.inner may have been"),

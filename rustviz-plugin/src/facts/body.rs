@@ -627,7 +627,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         } else {
             "field"
         };
-        column_info.push(ColumnInfo { name: n.clone(), root, kind, copy, needs_drop });
+        column_info.push(ColumnInfo { name: n.clone(), root, kind, copy, needs_drop, hidden_fields: false });
         columns.push((mpi, mp.place, n));
     }
     // Fields with no move path of their own (nothing moves or assigns them
@@ -659,6 +659,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 c = move_data.move_paths[ch].next_sibling;
             }
         }
+        let parent_name = cx.name(place);
         let mut pty = place.ty(&body.local_decls, tcx).ty;
         let mut place = place;
         // Auto-deref, as the source's `x.f` does: through a reference
@@ -697,6 +698,11 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             TyKind::Tuple(tys) => tys.iter().map(|t| (t, true)).collect(),
             _ => continue,
         };
+        if fields.iter().enumerate().any(|(i, (_, visible))| !visible && !kids.contains(&i)) {
+            if let Some(c) = parent_name.as_ref().and_then(|pn| column_info.iter_mut().find(|c| c.name == *pn)) {
+                c.hidden_fields = true;
+            }
+        }
         for (i, (fty, visible)) in fields.into_iter().enumerate() {
             if kids.contains(&i) || !visible {
                 continue;
@@ -708,7 +714,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             // name; each keeps its own places.)
             if !column_info.iter().any(|c| c.name == n) {
                 let (copy, needs_drop, _) = ty_info(fty);
-                column_info.push(ColumnInfo { name: n.clone(), root, kind: "field", copy, needs_drop });
+                column_info.push(ColumnInfo { name: n.clone(), root, kind: "field", copy, needs_drop, hidden_fields: false });
             }
             synth.push((mpi, fp, n));
             // (Nested structs and tuples; never through a reference or a

@@ -102,7 +102,6 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("known_bugs/1637_drop_holder_return", "field-outlives-moved-struct", 1637),
     ("known_bugs/1638_borrow_ref_scrutinee", "event-on-dead-column", 1638),
     ("known_bugs/1638_borrow_ref_scrutinee", "invalid-state", 1638),
-    ("known_bugs/1638_borrow_ref_scrutinee", "line-ends-nowhere", 1853), // rv3 regression after the main merge
     ("known_bugs/1638_chain_ref_scrutinee", "line-starts-nowhere", 1638),
     ("known_bugs/1645_move_then_two_reassigns", "drop-of-moved-value-at-reassign", 1645),
     ("known_bugs/1662_arm_loan_kinds", "invalid-state", 1662),

@@ -66,6 +66,10 @@ pub struct ColumnInfo {
     pub kind: &'static str,
     pub copy: bool,
     pub needs_drop: bool,
+    /// It has fields this body can't name (private to another module):
+    /// they have no columns, so its field columns aren't all of it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hidden_fields: bool,
 }
 
 #[derive(Serialize, Clone)]
