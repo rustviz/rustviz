@@ -31254,7 +31254,7 @@ fn fact_loan<'a>(body: &'a serde_json::Value, line: u64, lender: &str) -> &'a se
 fn facts_pin_constructs() {
     let rv = run_with_local_backend("rv3_facts_constructs");
     let facts = rv.facts().expect("the plugin gave no facts (RV3_FACTS)");
-    assert_eq!(facts["version"], 2);
+    assert_eq!(facts["version"], 3);
     assert_eq!(facts["errors"].as_array().map(Vec::len), Some(0), "{:#}", facts["errors"]);
     let main = fact_body(facts, "main");
     let s = |v: &serde_json::Value| v.as_str().unwrap_or_default().to_owned();
@@ -31409,6 +31409,254 @@ fn facts_pin_review_1850() {
     assert!(columns(body("double_ref")).contains(&"r.a".to_owned()));
     let q = columns(body("private_field"));
     assert!(q.contains(&"q.x".to_owned()) && !q.iter().any(|c| c == "q.secret"), "{q:?}");
+}
+
+/// Loans borrowck doesn't track, reborrow chains and holders
+/// (`rv3_facts_untracked_loans.rs`, RustViz 3 P2-1a): what Rust says about
+/// each, checked by hand.
+#[test]
+fn facts_pin_untracked_loans() {
+    let src = read_corpus("rv3_facts_untracked_loans");
+    let rv = run_with_local_backend("rv3_facts_untracked_loans");
+    let facts = rv.facts().expect("the plugin gave no facts (RV3_FACTS)");
+    assert_eq!(facts["errors"].as_array().map(Vec::len), Some(0), "{:#}", facts["errors"]);
+    let body = |f: &str| fact_body(facts, f);
+    let row = |b: &serde_json::Value, needle: &str| src_row_in(&src, b, needle);
+    let strs = |v: &serde_json::Value| -> Vec<String> { v.as_array().unwrap().iter().map(|x| x.as_str().unwrap().to_owned()).collect() };
+    let ends = |b: &serde_json::Value, loan: &serde_json::Value| -> Vec<(u64, serde_json::Value)> {
+        b["rows"].as_array().unwrap().iter().flat_map(|r| {
+            r["facts"].as_array().unwrap().iter().filter(|f| f["ev"] == "BorrowEnd" && f["loan"] == loan["loan"])
+                .map(|f| (r["line"].as_u64().unwrap(), f.clone())).collect::<Vec<_>>()
+        }).collect()
+    };
+    let hold_end = |b: &serde_json::Value, r: u64, holder: &str, loan: &serde_json::Value| {
+        row_facts(b, r).iter().any(|f| f["ev"] == "HoldEnd" && f["holder"] == holder && f["loan"] == loan["loan"])
+    };
+    // A loan restricts nothing borrowck checks unless it is borrowck's own.
+    for b in facts["bodies"].as_array().unwrap() {
+        for l in b["loans"].as_array().unwrap() {
+            if l["source"] != "borrow" {
+                assert_eq!(l["columns"], serde_json::json!([]), "{l:#}");
+                assert!(!b["rows"].as_array().unwrap().iter().any(|r| r["lent"].as_object().unwrap().values()
+                    .any(|ls| ls.as_array().unwrap().iter().any(|x| x["loan"] == l["loan"]))), "{l:#}");
+            }
+        }
+    }
+
+    // `p: &String` holds the caller's loan; `let q = p;` copies the
+    // reference, so q holds it too. p's last use is `let q = p;`, q's is
+    // `q.len()`: the function is done with the caller's String there.
+    let b = body("copy_param");
+    let c = fact_loan(b, row(b, "fn copy_param"), "*p");
+    assert_eq!((c["source"].as_str(), c["kind"].as_str()), (Some("caller"), Some("shared")));
+    assert_eq!(strs(&c["direct_holders"]), ["p", "q"]);
+    assert_eq!(c["end_lines"], serde_json::json!([row(b, "q.len() + k")]));
+    assert!(hold_end(b, row(b, "let q = p;"), "p", c), "{:#}", b["rows"]);
+
+    // `&*s` with `s: &String` is a reborrow borrowck ignores (two shared
+    // references can't conflict); it is made through s, which holds the
+    // caller's loan. `s.as_bytes()`'s result keeps a reborrow of `*s`: b
+    // holds it through the call. The caller's String is used through b
+    // until `n + b.len()`.
+    let b = body("reborrow_shared");
+    let caller = fact_loan(b, row(b, "fn reborrow_shared"), "*s");
+    let r = fact_loan(b, row(b, "let r = &*s;"), "*s");
+    assert_eq!((r["source"].as_str(), r["through"].as_str(), r["implicit"].as_bool()), (Some("untracked"), Some("s"), Some(false)));
+    assert_eq!(r["made_through"], serde_json::json!([caller["loan"]]));
+    assert_eq!(strs(&r["direct_holders"]), ["r"]);
+    assert_eq!(r["end_lines"], serde_json::json!([row(b, "let n = r.len();")]));
+    let bytes = fact_loan(b, row(b, "let b = s.as_bytes();"), "*s");
+    assert_eq!(strs(&bytes["via_call"]), ["b"]);
+    assert_eq!(bytes["implicit"], true);
+    assert_eq!(bytes["end_lines"], serde_json::json!([row(b, "n + b.len()")]));
+    assert_eq!(caller["end_lines"], serde_json::json!([row(b, "n + b.len()")]));
+
+    // A returned parameter goes back to the caller with the return value:
+    // its loan doesn't end in the body.
+    let b = body("id");
+    assert_eq!(fact_loan(b, row(b, "fn id"), "*s")["end_lines"], serde_json::json!([]));
+
+    // A parameter the body never uses: the body is done with what it was
+    // lent when it returns (the caller's own reference may go on after the
+    // call; that is the caller's body's fact).
+    let b = body("unused");
+    let c = fact_loan(b, row(b, "fn unused"), "*p");
+    let e = ends(b, c);
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert_eq!(e[0].0, b["last_line"].as_u64().unwrap());
+    assert_eq!((e[0].1["why"].as_str(), e[0].1["to_line"].as_u64()), (Some("unused, the function returns"), Some(0)));
+
+    // On the early `return 0;` path p is never used after the condition;
+    // on the other it is used by `*p`.
+    let b = body("early");
+    let c = fact_loan(b, row(b, "fn early"), "*p");
+    let mut e: Vec<(u64, u64)> = ends(b, c).iter().map(|(r, f)| (*r, f["to_line"].as_u64().unwrap())).collect();
+    e.sort();
+    assert_eq!(e, [(row(b, "if c {"), row(b, "return 0;")), (row(b, "    *p"), b["last_line"].as_u64().unwrap())]);
+
+    let b = body("main");
+    // `let z = y;` copies the reference: both are the loan's own holders; y
+    // is done with it on that row while z keeps it.
+    let x = fact_loan(b, row(b, "let y = &x;"), "x");
+    assert_eq!(strs(&x["direct_holders"]), ["y", "z"]);
+    assert!(hold_end(b, row(b, "let z = y;"), "y", x));
+    // A string literal is a reference to a constant, copied into u.
+    let hi = b["loans"].as_array().unwrap().iter().find(|l| l["source"] == "static" && l["lender"] == "\"hi\"").expect("the literal's loan");
+    assert_eq!(strs(&hi["direct_holders"]), ["t", "u"]);
+    // `&mut *a` is made through a, which holds the loan of s: giving it
+    // back gives it to a.
+    let a = fact_loan(b, row(b, "let a = &mut s;"), "s");
+    let rb = fact_loan(b, row(b, "let b = &mut *a;"), "*a");
+    assert_eq!((rb["made_through"].clone(), rb["implicit"].as_bool()), (serde_json::json!([a["loan"]]), Some(false)));
+    // `holder(m)` passes a reborrow of `*m` the source doesn't write; the
+    // result's field h.r keeps it. `Some(m)` copies m into o.0.
+    let m = fact_loan(b, row(b, "let m = &s;"), "s");
+    let pass = fact_loan(b, row(b, "let h = holder(m);"), "*m");
+    assert_eq!((pass["implicit"].as_bool(), pass["made_through"].clone()), (Some(true), serde_json::json!([m["loan"]])));
+    assert_eq!(strs(&pass["via_call"]), ["h.r"]);
+    assert!(strs(&m["direct_holders"]).contains(&"o.0".to_owned()), "{m:#}");
+    // `w.as_bytes()`'s result keeps the loan of w.
+    let w = fact_loan(b, row(b, "let bytes = w.as_bytes();"), "w");
+    assert_eq!(strs(&w["via_call"]), ["bytes"]);
+}
+
+/// What the review of #1854 (P2-1a) found wrong in the loan facts, each
+/// fixed from MIR (`rv3_facts_review_1854.rs`).
+#[test]
+fn facts_pin_review_1854() {
+    let src = read_corpus("rv3_facts_review_1854");
+    let rv = run_with_local_backend("rv3_facts_review_1854");
+    let facts = rv.facts().expect("the plugin gave no facts (RV3_FACTS)");
+    assert_eq!(facts["errors"].as_array().map(Vec::len), Some(0), "{:#}", facts["errors"]);
+    let body = |f: &str| fact_body(facts, f);
+    let row = |b: &serde_json::Value, needle: &str| src_row_in(&src, b, needle);
+    let strs = |v: &serde_json::Value| -> Vec<String> { v.as_array().unwrap().iter().map(|x| x.as_str().unwrap().to_owned()).collect() };
+    let all = |b: &serde_json::Value| -> Vec<(u64, serde_json::Value)> {
+        b["rows"].as_array().unwrap().iter().flat_map(|r| {
+            r["facts"].as_array().unwrap().iter().map(|f| (r["line"].as_u64().unwrap(), f.clone())).collect::<Vec<_>>()
+        }).collect()
+    };
+    let ends_of = |b: &serde_json::Value, loan: &serde_json::Value| -> Vec<u64> {
+        let mut v: Vec<u64> = all(b).into_iter().filter(|(_, f)| f["ev"] == "BorrowEnd" && f["loan"] == loan["loan"]).map(|(r, _)| r).collect();
+        v.sort();
+        v
+    };
+    let loan_ids = |b: &serde_json::Value| -> Vec<serde_json::Value> { b["loans"].as_array().unwrap().iter().map(|l| l["loan"].clone()).collect() };
+
+    // `k.1.push('!')` reborrows through k.1, which holds b's reference (a
+    // went into k.0): its chain is b's loan only.
+    let b = body("pair_field");
+    let lb = fact_loan(b, row(b, "fn pair_field"), "*b");
+    let push = fact_loan(b, row(b, "k.1.push"), "*k.1");
+    assert_eq!(push["made_through"], serde_json::json!([lb["loan"]]), "{push:#}");
+
+    // `*z = &c` stores the loan in y, through z: z's own value is still
+    // `&mut y`, so z is not a holder of c's loan.
+    let b = body("store_through");
+    let c = fact_loan(b, row(b, "*z = &c;"), "c");
+    assert_eq!(strs(&c["direct_holders"]), ["*z"], "{c:#}");
+
+    // Guard's `Drop` reads `self.r`: the caller's loan is in use until g is
+    // dropped at the end of the body, not given back at `let g`.
+    let b = body("guard");
+    let p = fact_loan(b, row(b, "fn guard"), "*p");
+    assert_eq!(ends_of(b, p), [b["last_line"].as_u64().unwrap()], "{:#}", b["rows"]);
+
+    // A reference stored where the caller can reach it (pushed into the
+    // caller's vector, written into the caller's struct) goes back with
+    // the call: the caller's loan doesn't end in the body.
+    let b = body("keep");
+    let r = fact_loan(b, row(b, "fn keep"), "*r");
+    assert_eq!(ends_of(b, r), Vec::<u64>::new(), "{:#}", b["rows"]);
+    let b = body("point");
+    let t = fact_loan(b, row(b, "fn point"), "*t");
+    assert_eq!(ends_of(b, t), Vec::<u64>::new(), "{:#}", b["rows"]);
+
+    // `("left", "right")`: each literal is held by its own field, and `let q
+    // = p.0;` copies "left" only.
+    let b = body("consts");
+    let lit = |text: &str| b["loans"].as_array().unwrap().iter().find(|l| l["source"] == "static" && l["lender"] == text).unwrap_or_else(|| panic!("no loan of {text}")).clone();
+    assert_eq!(strs(&lit("\"left\"")["direct_holders"]), ["p.0", "q"]);
+    assert_eq!(strs(&lit("\"right\"")["direct_holders"]), ["p.1"]);
+
+    // `h.r = "y"` replaces "x" in the field: the Repoint says so.
+    let b = body("overwrite");
+    let lit = |text: &str| b["loans"].as_array().unwrap().iter().find(|l| l["source"] == "static" && l["lender"] == text).unwrap_or_else(|| panic!("no loan of {text}"))["loan"].clone();
+    let rp: Vec<serde_json::Value> = row_facts(b, row(b, "h.r = \"y\";")).into_iter().filter(|f| f["ev"] == "Repoint").collect();
+    assert_eq!(rp.len(), 1, "{rp:#?}");
+    assert_eq!((rp[0]["old"].clone(), rp[0]["new"].clone()), (serde_json::json!([lit("\"x\"")]), serde_json::json!([lit("\"y\"")])));
+    // And `h.0 = b`: h.0 held a's reference, now a reborrow of b's.
+    let b = body("hold_fields");
+    let la = fact_loan(b, row(b, "fn hold_fields"), "*a");
+    let rb = fact_loan(b, row(b, "h.0 = b;"), "*b");
+    let rp: Vec<serde_json::Value> = row_facts(b, row(b, "h.0 = b;")).into_iter().filter(|f| f["ev"] == "Repoint").collect();
+    assert_eq!(rp.len(), 1, "{rp:#?}");
+    assert_eq!(rp[0]["old"], serde_json::json!([la["loan"]]));
+    assert!(rp[0]["new"].as_array().unwrap().contains(&rb["loan"]), "{rp:#?}");
+
+    // `if y.len() > 3 { break; }`: on the way round again y is done with its
+    // element while the iterator keeps the loan (a HoldEnd); on the `break`
+    // way the loan ends. Both on one row.
+    let b = body("first_long");
+    let brk = row(b, "{ break; }");
+    let it = fact_loan(b, row(b, "for y in v.iter()"), "*v");
+    assert!(row_facts(b, brk).iter().any(|f| f["ev"] == "HoldEnd" && f["holder"] == "y" && f["loan"] == it["loan"]), "{:#?}", row_facts(b, brk));
+    assert!(row_facts(b, brk).iter().any(|f| f["ev"] == "BorrowEnd" && f["loan"] == it["loan"]), "{:#?}", row_facts(b, brk));
+
+    // p is never used: one end on each way out, the early `return 1;` and
+    // the end of the body.
+    let b = body("unused_two");
+    let p = fact_loan(b, row(b, "fn unused_two"), "*p");
+    assert_eq!(ends_of(b, p), [row(b, "return 1;"), b["last_line"].as_u64().unwrap()]);
+
+    // The loan of `*r0` (`Some(r0)`) reaches o6.0 on the sixth time round.
+    let b = body("chain");
+    let r0 = fact_loan(b, row(b, "o1 = Some(r0);"), "*r0");
+    assert!(strs(&r0["direct_holders"]).contains(&"o6.0".to_owned()), "{r0:#}");
+
+    // The `for` loop's hidden iterator keeps the caller's slice, though xs
+    // holds it too.
+    let b = body("sum");
+    let xs = fact_loan(b, row(b, "fn sum"), "*xs");
+    assert!(strs(&xs["via_call"]).contains(&"<temp>".to_owned()), "{xs:#}");
+
+    // `addr_of_book.len()`: the receiver's auto-ref isn't written.
+    let b = body("addr");
+    assert_eq!(fact_loan(b, row(b, "addr_of_book.len()"), "addr_of_book")["implicit"], true);
+
+    // A `&mut` constant kept by b is a mutable reference.
+    let b = body("mut_const");
+    assert_eq!(fact_loan(b, row(b, "let b = BUF;"), "BUF")["kind"], "mut");
+
+    // `ref s` borrows the `Ok` payload of the temporary `make_res()`.
+    let b = body("temp_name");
+    let t = fact_loan(b, row(b, "if let Ok(ref s)"), "(make_res() as Ok).0");
+    assert_eq!(t["source"], "temporary");
+
+    // Every loan a chain names is listed.
+    for f in ["get_mut_else", "pair_field", "hold_fields", "chain", "reborrow_field"] {
+        let b = body(f);
+        let ids = loan_ids(b);
+        for l in b["loans"].as_array().unwrap() {
+            for m in l["made_through"].as_array().unwrap() {
+                assert!(ids.contains(m), "{f}: {l:#}");
+            }
+        }
+    }
+
+    // `Holder { r: &*m }`: the source writes one borrow; rustc's reborrow of
+    // it to pass it on is not written.
+    let b = body("reborrow_field");
+    let at = row(b, "Hold { r: &*m }");
+    let mut written: Vec<bool> = b["loans"].as_array().unwrap().iter().filter(|l| l["line"] == at && l["lender"] == "*m")
+        .map(|l| l["implicit"].as_bool().unwrap()).collect();
+    written.sort();
+    assert_eq!(written, [false, true], "{:#}", b["loans"]);
+
+    // `if let Some(x) = o` copies m's reference out of o.0 into x.
+    let b = body("pattern_copy");
+    let s = fact_loan(b, row(b, "fn pattern_copy"), "*s");
+    assert_eq!(strs(&s["direct_holders"]), ["s", "m", "o.0", "x"]);
 }
 
 /// What the review of #1851 found wrong in the facts, each fixed from MIR
@@ -31596,7 +31844,14 @@ fn facts_pin_review_1833() {
     let b = body("field_repoint_from_var");
     let lb = fact_loan(b, src_row_in(&src, b, "let s = &b;"), "b")["loan"].clone();
     let rp = row_facts(b, src_row_in(&src, b, "h.r = s;")).into_iter().find(|f| ev(f, "Repoint")).unwrap();
-    assert_eq!(rp["new"], serde_json::json!([lb]));
+    // (Plus rustc's reborrow `&*s` of the assignment, an untracked loan made
+    // through s, since #1854's review: the Repoint lists those too.)
+    let new = rp["new"].as_array().unwrap();
+    assert!(new.contains(&lb), "{rp:#}");
+    for l in new.iter().filter(|l| **l != lb) {
+        let info = b["loans"].as_array().unwrap().iter().find(|x| x["loan"] == *l).unwrap();
+        assert!(info["source"] == "untracked" && info["made_through"].as_array().unwrap().contains(&lb), "{info:#}");
+    }
     // The fields left in a tuple drop in index order, each behind its own
     // flag; a field with no move path holds a value only where its
     // parent does; a Box whose payload moved out still frees its memory.

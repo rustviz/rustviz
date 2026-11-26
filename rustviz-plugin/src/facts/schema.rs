@@ -8,8 +8,12 @@ use std::collections::BTreeMap;
 
 /// Bumped whenever a field changes meaning or goes away. 2: `Lent.kind`
 /// tells `unique` and `reserved` from `mut`; `Lent.holder` is who holds
-/// the loan on that row.
-pub const VERSION: u32 = 2;
+/// the loan on that row. 3: `loans` also lists the loans borrowck doesn't
+/// track (`LoanInfo.source`: a reference parameter's, a constant's, an
+/// untracked shared borrow, a kept temporary's), with their `BorrowEnd`s;
+/// `LoanInfo.made_through`, `direct_holders`, `via_call`, `implicit`; the
+/// `HoldEnd` fact.
+pub const VERSION: u32 = 3;
 
 #[derive(Serialize)]
 pub struct CrateFacts {
@@ -75,6 +79,24 @@ pub struct ColumnInfo {
 #[derive(Serialize, Clone)]
 pub struct LoanInfo {
     pub loan: usize,
+    /// "borrow": a borrow borrowck tracks (its `BorrowIndex`) of a user
+    /// place. The others restrict no column (`columns` is empty, no `lent`
+    /// entry); all but "temporary" have ids after borrowck's:
+    /// - "caller": what a reference parameter holds (`self` of `&mut
+    ///   self`): the caller's loan, `lender` `*p`, on the signature's row.
+    ///   It is in use while the parameter is used or anything made from it
+    ///   (a copy, a reborrow, a call's result) holds it; it ends where
+    ///   nothing does, and doesn't end on a path that returns it.
+    /// - "static": a reference to a constant (`"hi"`, a promoted `&5`) that
+    ///   a variable keeps; `lender` is the constant as written.
+    /// - "temporary": a borrow (tracked) of a MIR temporary that a variable
+    ///   keeps (`let t = &String::from("x");`, `&make().0`): `lender` is the
+    ///   temporary's code in parentheses, then the borrowed field.
+    /// - "untracked": a borrow borrowck ignores because nothing can
+    ///   conflict with it: a shared reborrow through a shared reference
+    ///   (`&*r`, `&r.f`, the auto-ref of `r.len()`), or a borrow of an
+    ///   immutable parameter that is never moved.
+    pub source: &'static str,
     pub line: usize,
     pub col: usize,
     /// The borrowed place as the source writes it (`s`, `p.a`, `v[_]`,
@@ -109,6 +131,32 @@ pub struct LoanInfo {
     /// Rows where the loan goes out of scope on some CFG edge, sorted and
     /// deduplicated (the edges themselves: the `BorrowEnd` events).
     pub end_lines: Vec<usize>,
+    /// For a borrow through a reference (`through`: `&mut *a`, `&a.f` of a
+    /// reference `a`, a caller's `&*self`): the loans that reference held
+    /// where this one was taken, sorted. Giving this loan back gives it to
+    /// `through`, which still holds those (the reborrow chain).
+    pub made_through: Vec<usize>,
+    /// The places whose own reference value is this loan: where it was
+    /// stored (`r`, a field `h.r`, the parameter of a "caller" loan) and
+    /// every copy or move of that reference (`let z = y;`, `S { ..s1 }`,
+    /// `Holder { r: y }`), in the order the body makes them. `holders`
+    /// also has those that hold it only through a reborrow of it, a call's
+    /// result or a reference to a holder.
+    pub direct_holders: Vec<String>,
+    /// Variables that hold it through a call's result: the call was given
+    /// the loan, or a reference to something holding it, and its result
+    /// carries it (`let b = s.as_bytes();`, `let m = v.iter().max();`, `for
+    /// item in list`), and copies of those. Named by the fields whose types
+    /// carry the loan as rustc's lifetimes say: `pair<'a>(x: &'a mut A, y:
+    /// &'a mut A) -> (&'a mut A, &'a mut A)` gives both loans to `t.0` and
+    /// `t.1`, as borrowck counts them (which referent each field points to
+    /// is in the callee's body, not this one's).
+    pub via_call: Vec<String>,
+    /// The borrow isn't written in the source: a method call's auto-ref
+    /// (`v.len()`), the reborrow of a reference that is passed on (`G(r)`,
+    /// `Holder { r }`, `f(m)` with `m: &mut T`), a macro's. (Not for a
+    /// parameter's, a constant's or a temporary's loan.)
+    pub implicit: bool,
 }
 
 /// One place's state after a row (or an arm of a row).
@@ -215,10 +263,20 @@ pub enum Fact {
     /// The loan is no longer in scope for rustc's borrowck after this
     /// row, on the CFG edge to `to_line` (the next row of that path, past
     /// temporaries' drops) at source column `to_col` (one event per edge:
-    /// two arms on one row are two). `holder`: who holds it as it ends.
+    /// two arms on one row are two; `to_line` 0: the path returns from the
+    /// function here). `holder`: who holds it as it ends.
     /// `why`: "no further use" (nothing uses the loan on this path any
-    /// more), "holder overwritten", "<x> out of scope", "<x> dropped".
+    /// more), "holder overwritten", "<x> out of scope", "<x> dropped",
+    /// "unused, the function returns" (a reference parameter the body
+    /// never uses: the caller's loan ends with the call).
     BorrowEnd { loan: usize, lender: String, holder: String, why: String, to_line: usize, to_col: usize },
+    /// `holder`, which holds the loan as its own reference (one of the
+    /// loan's `direct_holders` or `via_call`), no longer holds it after
+    /// this row, on the CFG edge to `to_line`, while someone else still
+    /// does (else it is the loan's `BorrowEnd`): a loop binding at its last
+    /// use in each iteration while the iterator keeps the loan, a copied
+    /// reference at its last use while the copy goes on.
+    HoldEnd { loan: usize, holder: String, to_line: usize, to_col: usize },
     /// `holder` (a reference) gets a new loan while it held `old`.
     Repoint { holder: String, old: Vec<usize>, new: Vec<usize> },
     /// A `Drop` of `path`. `how` (what runs, as drop elaboration decides:

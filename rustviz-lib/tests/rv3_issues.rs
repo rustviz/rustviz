@@ -544,6 +544,11 @@ struct LoanF {
     holders: Vec<String>,
     /// The loan record's end rows, when the dump gives them.
     end_lines: Option<Vec<u32>>,
+    /// A loan of rustc's borrow set (v3 `source` "borrow" / "temporary"; every
+    /// loan of an older dump). `[[loan]]` speaks about these only: a reference
+    /// parameter's, a constant's or an untracked shared reborrow's loan isn't
+    /// one rustc's borrow checker has.
+    tracked: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -660,7 +665,7 @@ fn load_facts(v: &Value) -> Result<Vec<BodyF>, String> {
     let (bodies, spike) = match v {
         Value::Array(a) => (a.clone(), true),
         Value::Object(o) => match (o.get("version").and_then(Value::as_u64), o.get("bodies")) {
-            (Some(1 | 2), Some(Value::Array(b))) => {
+            (Some(1 | 2 | 3), Some(Value::Array(b))) => {
                 // A body the producer failed on has no facts: that's a
                 // failure to read, never an expected (xfail) result.
                 let errs = o.get("errors").map(strs).unwrap_or_default();
@@ -730,6 +735,7 @@ fn load_facts(v: &Value) -> Result<Vec<BodyF>, String> {
             kind: norm_kind(l["kind"].as_str().unwrap_or("")),
             holders: strs(&l["holders"]).iter().flat_map(|h| holder_set(h)).collect(),
             end_lines: l.get("end_lines").map(nums),
+            tracked: l.get("source").and_then(Value::as_str).is_none_or(|s| s == "borrow" || s == "temporary"),
         }).collect();
         // A spike row says `mut` for a closure's unique capture: its `lent`
         // entries take the kind from the loan's record. RustViz 3 rows
@@ -1147,7 +1153,7 @@ fn check(a: &Assertion, facts: &[BodyF], shape: &Shape, hand: &[(String, u32, St
         }
         Check::Loan(l) => {
             let cands: Vec<&LoanF> = b.loans.iter()
-                .filter(|x| x.line == l.row && x.lender == l.lender && kind_ok(&l.kind, &x.kind)
+                .filter(|x| x.tracked && x.line == l.row && x.lender == l.lender && kind_ok(&l.kind, &x.kind)
                     && l.holder.as_deref().is_none_or(|h| h == "_" || x.holders.iter().any(|y| y == h)))
                 .collect();
             // Ends per CFG edge, from the dump's BorrowEnd facts: (row, next row).
@@ -1502,6 +1508,27 @@ fn rv3_harness_catches_wrong_facts() {
     assert!(f.iter().any(|w| w.starts_with("loan of x on row 4")), "{f:?}");
     assert!(f.iter().any(|w| w == "after row 6: x is own"), "{f:?}");
     assert!(f.iter().any(|w| w == "after row 7: x is own"), "{f:?}");
+}
+
+/// `[[loan]]` is about rustc's borrow set: a v3 dump's loans borrowck
+/// doesn't track (`source` "untracked", "caller", "static") don't satisfy or
+/// contradict it (1567's "no loan of `*p`" stays true).
+#[test]
+fn rv3_harness_loan_checks_skip_untracked() {
+    let text = std::fs::read_to_string(cases_dir().join("1567_match_reborrow_param_end.expect.toml")).unwrap();
+    let src = std::fs::read_to_string(cases_dir().join("1567_match_reborrow_param_end.rs")).unwrap();
+    let shape = Shape::of(&src);
+    let case: Case = toml::from_str(&text).unwrap();
+    let dump = |source: &str| -> Vec<BodyF> {
+        let v: Value = serde_json::from_str(&format!(r#"{{"version": 3, "errors": [], "bodies": [{{"func": "run",
+            "loans": [{{"loan": 0, "line": 2, "lender": "*p", "kind": "shared", "holders": ["r"], "end_lines": [5], "source": "{source}"}}],
+            "rows": [{{"line": 2, "state": {{"n": "own", "p": "own", "r": "own"}}, "lent": {{}}, "facts": []}}]}}]}}"#)).unwrap();
+        load_facts(&v).unwrap()
+    };
+    let issue: Vec<Assertion> = assertions(&case).into_iter().filter(|a| a.src == "issue").collect();
+    let failing = |f: &[BodyF]| issue.iter().filter(|a| check(a, f, &shape, &[]).is_err()).map(|a| a.what.clone()).collect::<Vec<_>>();
+    assert!(failing(&dump("untracked")).is_empty(), "{:?}", failing(&dump("untracked")));
+    assert!(!failing(&dump("borrow")).is_empty(), "a tracked loan of *p must still contradict it");
 }
 
 /// The adapter's reading of a dump: kinds, holder sets, `*` loans, ends
