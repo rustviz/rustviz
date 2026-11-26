@@ -8477,6 +8477,7 @@ const BRANCH_HALF_W: f64 = 1.75;
 
 /// One centerline segment of a branch's strip. The state drives
 /// rendering style via `determine_owner_line_styles`.
+#[derive(Clone)]
 struct BranchSeg {
     p1: (f64, f64),
     p2: (f64, f64),
@@ -9052,6 +9053,9 @@ fn render_branches(
                 }
             }
             let mut segs = trim_dashes_under_solid(segs);
+            if let Some(span) = branch.source_span {
+                segs = part_loans_in_arm(segs, rap, visualization_data, span, branch_x);
+            }
 
             // The arm's own source lines, as the y-range that hovering
             // its column underlines (#369). The column is also drawn
@@ -9328,6 +9332,79 @@ fn code_text(line: &str) -> String {
 /// on it (`if d {`, `let x = match y {`, `while let Some(v) = it.next() {`).
 fn opens_conditional(code: &str) -> bool {
     code.ends_with('{') && code.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| matches!(w, "if" | "match" | "while" | "for" | "loop"))
+}
+
+/// Restrict active stretches of this leg only. The split precedes the
+/// arm, the join leaves it. A one-line arm has a MIR exit snapshot, but
+/// no snapshots between the events stacked inside it.
+fn part_loans_in_arm(
+    segments: Vec<BranchSeg>, rap: &ResourceAccessPoint, data: &VisualizationData,
+    span: crate::facts::table::ArmSpan, branch_x: f64,
+) -> Vec<BranchSeg> {
+    let Some(&fn_line) = data.fn_source_lines.get(rap.hash()) else { return segments };
+    if rap.is_ref() || rap.is_closure() || !data.state_table.has_part_loans(fn_line, rap.name()) { return segments; }
+    // (A part named as the owner itself keeps the leg's own title.)
+    let on_row = |row, state: &State, title: &String| {
+        let (cell, arm) = data.state_table.arm_loan_cell(fn_line, rap.name(), row, span)?;
+        part_loan_state(state, rap, data, fn_line, &cell, arm).map(|(st, t)| (st, t.unwrap_or_else(|| title.clone())))
+    };
+    let mut out = Vec::new();
+    for mut seg in segments {
+        if seg.p1.0 != branch_x || state_is_dashed(&seg.state) {
+            out.push(seg);
+            continue;
+        }
+        if seg.p2.0 != branch_x {
+            // The join diagonal: the state the arm leaves with. A one-line
+            // arm's is its row's own (a MIR arm snapshot); a longer arm's
+            // `}` row has none, so it's its last row with a state of its
+            // own (a loan taken there, `&mut p.b` as the arm's value, is
+            // still live past the `}`).
+            let exit = (span.start.0 + 1..span.end.0).rev()
+                .find(|r| data.state_table.arm_loan_cell(fn_line, rap.name(), *r, span).is_some());
+            let at = if span.start.0 == span.end.0 || data.state_table.arm_loan_cell(fn_line, rap.name(), span.end.0, span).is_some() {
+                Some(span.end.0)
+            } else {
+                exit
+            };
+            if let Some((state, title)) = at.and_then(|r| on_row(r, &seg.state, &seg.title)) {
+                (seg.state, seg.title) = (state, title);
+            }
+            out.push(seg);
+            continue;
+        }
+        let (first, last) = seg.rows;
+        let mut piece = seg.clone();
+        for row in first..last {
+            let y = get_y_axis_pos(row) as f64;
+            if y >= seg.p2.1 { break; }
+            // (Between dots stacked under one source line the state after
+            // the whole line doesn't hold yet: `let q = &p; ..; let r = &mut
+            // p.a;` lends p.a after q's loan; it applies from the last.)
+            if data.row_lines.get(row + 1).is_some_and(Option::is_none) {
+                continue;
+            }
+            let change = rv_attrs::line_of(row, &data.row_lines)
+                .filter(|_| span.start.0 != span.end.0)
+                .and_then(|src| on_row(src, &seg.state, &seg.title));
+            let (state, title) = change.as_ref().map_or((&seg.state, &seg.title), |(s, t)| (s, t));
+            if piece.title == *title && std::mem::discriminant(&piece.state) == std::mem::discriminant(state) {
+                continue;
+            }
+            if piece.p1.1 < y {
+                let mut before = piece.clone();
+                before.p2.1 = y;
+                before.rows.1 = row;
+                out.push(before);
+                piece.p1.1 = y;
+            }
+            piece.rows.0 = row;
+            piece.state = state.clone();
+            piece.title = title.clone();
+        }
+        out.push(piece);
+    }
+    out
 }
 
 /// Push a `BranchSeg` for the given centerline endpoints + state
@@ -9887,6 +9964,18 @@ fn owner_segment_of(rap: &ResourceAccessPoint, vd: &VisualizationData, row: usiz
         }
         Init::Own | Init::Partly => {}
     }
+    // A live loan of a part (a field, an element, a capture of one) restricts
+    // the whole owner column, worded by the part (P1-3b).
+    let part_loan = owner_part_loan_state(if matches!(layout, State::ResourceMoved { .. }) { &full } else { layout }, rap, vd, row);
+    let part_loan_style = match part_loan {
+        Some((st, PartLoanTitle::Text(title))) => return Some((st, title)),
+        Some((st, PartLoanTitle::Legacy)) => {
+            let title = timeline_segment_title(&st, rap, vd, Some(row));
+            return Some((st, title));
+        }
+        Some((st, PartLoanTitle::OwnerLoan)) => Some(st),
+        None => None,
+    };
     let parts = table_partly_moved_title(rap, table, fn_line, src, &cell);
     let whole_title = parts.is_none() && cell.init == Init::Own;
     let mut title = parts.unwrap_or_else(|| {
@@ -9908,7 +9997,7 @@ fn owner_segment_of(rap: &ResourceAccessPoint, vd: &VisualizationData, row: usiz
         }
     });
     if cell.lent.is_empty() {
-        return Some((full, title));
+        return Some((part_loan_style.unwrap_or(full), title));
     }
     let (state, loan_title, whole) = owner_loan_title(rap, vd, fn_line, &cell, layout, row);
     if !whole_title || !whole {
@@ -9918,7 +10007,8 @@ fn owner_segment_of(rap: &ResourceAccessPoint, vd: &VisualizationData, row: usiz
     } else {
         title = loan_title;
     }
-    Some((state, title))
+    // (A loan of an enum's payload restricts the owner's line, P1-3b.)
+    Some((part_loan_style.unwrap_or(state), title))
 }
 
 /// Whether the layout draws a direct field of the struct column `name`
@@ -10191,6 +10281,187 @@ fn table_row(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, 
     table.quiet(fn_line, rap.name(), r, values_only).then_some((fn_line, r))
 }
 
+/// A field or element loan restricts access to its enclosing owner. Read
+/// both the restriction and its holder at the same MIR boundary. A
+/// reservation restricts like a shared loan until the call activates the
+/// borrow. The title is None where every lent part is named as the owner
+/// itself (an enum's payload): the owner's own loan title says it.
+fn part_loan_state(
+    state: &State,
+    rap: &ResourceAccessPoint,
+    data: &VisualizationData,
+    fn_line: usize,
+    cell: &crate::facts::table::Cell,
+    arm: Option<usize>,
+) -> Option<(State, Option<String>)> {
+    use crate::facts::table::Init;
+    if rap.is_ref() || rap.is_fn() || rap.is_closure() || !matches!(cell.init, Init::Own | Init::Partly) {
+        return None;
+    }
+    let s = match state {
+        State::FullPrivilege { s: LineState::Full } | State::PartialPrivilege { s: LineState::Full } |
+        State::RevokedPrivilege { .. } => LineState::Full,
+        _ => return None,
+    };
+    let table = &data.state_table;
+    let col = rap.name();
+    let rank = |kind: &str| match kind {
+        "mut" | "unique" => 2,
+        "reserved" => 1,
+        _ => 0,
+    };
+    let strongest = cell.lent.iter().map(|l| rank(l.kind)).max()?;
+    let cell_for = |name: &str| match arm {
+        Some(a) => table.cell_in_arm(fn_line, name, cell.from_row, a),
+        None => table.cell(fn_line, name, cell.from_row, cell.from_row),
+    };
+    let strongest_loans = || cell.lent.iter().filter(|l| rank(l.kind) == strongest);
+    if !strongest_loans().any(|l| table.loan(fn_line, col, l.loan).is_some_and(|loan| loan.part_of.contains(col))) {
+        return None;
+    }
+    // The loans, as the title says them: every part loan of the column
+    // live here (the strongest sets the line's style; a weaker one, `y`
+    // keeping `e.0` shared beside `e.1` mutable, is said too), each part
+    // named as 2.x's columns name it (`(t.0 as Some).0` is `t.0`), never as
+    // a MIR place.
+    let mut parts: Vec<(String, &str, Option<String>, bool)> = Vec::new();
+    let lenders: BTreeSet<&str> = cell.lent.iter().filter_map(|l| Some(table.loan(fn_line, col, l.loan)?.lender.as_str())).collect();
+    for lent in &cell.lent {
+        let loan = table.loan(fn_line, col, lent.loan)?;
+        // The eventual result of a call doesn't exist during reservation.
+        // Name a holder only when its value keeps this loan on this path.
+        let holder = (lent.kind != "reserved" && lent.holder != *col
+            && cell_for(&lent.holder).is_some_and(|h| h.holds.contains(&lent.loan)))
+            .then_some(lent.holder.as_str());
+        // Said to hold the borrow itself ("p.a is borrowed by r") only where
+        // the facts prove it, as `owner_loan_title` does: r took this loan
+        // itself, it runs, and r can point to nothing else here (not after
+        // `r = &other` on some path, not a `&T` keeping a `&mut` live).
+        let exact = holder.is_some_and(|h| {
+            loan.runs && loan.direct_holders.iter().any(|d| d == h)
+                && cell.holder_sources.get(h).is_some_and(|src| !src.is_empty() && src.iter().all(|x| lenders.contains(x.as_str())))
+                && !(rank(lent.kind) == 2 && data.timelines.values().map(|t| &t.resource_access_point)
+                    .any(|r| r.name() == h && r.is_ref() && !r.is_mutref() && data.fn_source_lines.get(r.hash()) == Some(&fn_line)))
+        });
+        let shown = holder.and_then(|h| display_place(data, fn_line, col, h));
+        parts.push((part_display_name(data, fn_line, col, &loan.lender), lent.kind, shown, exact && loan.runs));
+    }
+    // A loan of a part 2.x's columns don't name (an enum's payload, shown
+    // as the owner itself): the owner's own loan title says it.
+    let whole_named = parts.iter().all(|(p, ..)| p == col);
+    let behind_ref = strongest_loans().all(|l| table.loan(fn_line, col, l.loan).is_some_and(|i| i.through.is_some()));
+    // One loan held by a variable the facts prove holds it: who holds it.
+    // Otherwise (several loans, which need not all be taken on one path: an
+    // or-pattern's alternatives, arms lending different fields; a holder
+    // that may hold something else; a loan on some paths only or on none
+    // that runs): what the borrow checker counts, and while what is in use.
+    let holders: BTreeSet<Option<&str>> = parts.iter().map(|(_, _, h, _)| h.as_deref()).collect();
+    let holder = holders.first().copied().flatten().filter(|_| holders.len() == 1);
+    let runs = cell.lent.iter().all(|l| table.loan(fn_line, col, l.loan).is_some_and(|i| i.runs));
+    let reason = match parts.as_slice() {
+        [(place, kind, Some(h), true)] if !cell.may_lend => hover_messages::part_loan(place, kind, Some(h)),
+        [(place, kind, None, _)] if !cell.may_lend && runs => hover_messages::part_loan(place, kind, None),
+        [(place, kind, ..)] if cell.may_lend && runs => hover_messages::part_loan_maybe(place, kind, holder),
+        _ => {
+            let mut by_kind: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+            for (place, kind, ..) in &parts {
+                by_kind.entry(*kind).or_default().insert(place.clone());
+            }
+            // (Strongest first: "e.1 as mutably borrowed and e.0 as immutably borrowed".)
+            let mut groups: Vec<(&str, Vec<String>)> = by_kind.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();
+            groups.sort_by_key(|(k, _)| std::cmp::Reverse(rank(k)));
+            hover_messages::part_loans_counted(&groups, holder)
+        }
+    };
+    // The owner's own clause first, as where nothing is lent: what was
+    // moved out of it, or that it owns its value (holds a copyable value,
+    // borrows from ..).
+    let partly = partly_moved_cell_title(rap, table, fn_line, cell.from_row, cell, &|name| match arm {
+        Some(_) => cell_for(name),
+        None => table.segment_cell(fn_line, name, cell.from_row),
+    });
+    let moved = partly.is_some() || cell.init == Init::Partly;
+    let teaching = partly.unwrap_or_else(|| {
+        if cell.init == Init::Partly {
+            hover_messages::state_unnamed_part(col, cell.unnamed_maybe || cell.may)
+        } else {
+            let from = if rap.holds_borrow() { display_places(data, fn_line, col, &cell.borrowed_from) } else { Vec::new() };
+            if from.is_empty() {
+                timeline_segment_title(&State::FullPrivilege { s: LineState::Full }, rap, data, None)
+            } else {
+                hover_messages::state_holder_borrows_from(col, &from)
+            }
+        }
+    });
+    let mut title = hover_messages::state_part_lent(&teaching, col, &reason, strongest == 2, behind_ref, moved);
+    // Keep the teaching clause where every restricting loan is a reborrow
+    // through one reference (`*h.r`, taken through `h.r`).
+    let through: BTreeSet<_> = strongest_loans().filter_map(|l| table.loan(fn_line, col, l.loan)?.through.as_deref()).collect();
+    if let Some(r) = through.first().filter(|_| through.len() == 1 && behind_ref).and_then(|r| display_place(data, fn_line, col, r)) {
+        title.push_str(&hover_messages::state_through(&r));
+    }
+    let st = if strongest == 2 {
+        State::RevokedPrivilege { to: ResourceTy::Anonymous, borrow_to: ResourceTy::Anonymous,
+            prev_state: Box::new(State::FullPrivilege { s }) }
+    } else {
+        State::PartialPrivilege { s }
+    };
+    Some((st, (!whole_named).then_some(title)))
+}
+
+/// A lent part's name in an owner's title: as 2.x's columns name it
+/// (`display_place`). A place behind a reference held in an enum's payload
+/// (`*(s.v as Some).0`) has no such name: it's what that reference points to.
+fn part_display_name(vd: &VisualizationData, fn_line: usize, column: &str, lender: &str) -> String {
+    if let Some(inner) = lender.strip_prefix('*').filter(|i| i.starts_with('(')) {
+        if let Some(shown) = display_place(vd, fn_line, column, inner).filter(|d| d != inner) {
+            return format!("what the reference in {shown} points to");
+        }
+    }
+    display_place(vd, fn_line, column, lender).filter(|d| !d.contains(" as ")).unwrap_or_else(|| format!("a part of {column}"))
+}
+
+/// Restrict the owner trunk at its own MIR boundary, including a Box
+/// that still owns its allocation after part of the payload moved.
+fn owner_part_loan_state(state: &State, rap: &ResourceAccessPoint, data: &VisualizationData, row: usize) -> Option<(State, PartLoanTitle)> {
+    let table = &data.state_table;
+    let fn_line = *data.fn_source_lines.get(rap.hash())?;
+    if !table.has_part_loans(fn_line, rap.name()) { return None; }
+    // (Not between dots stacked under one source line: the state after the
+    // whole line holds from its last one, as in `part_loans_in_arm`.)
+    if data.row_lines.get(row + 1).is_some_and(Option::is_none) {
+        return None;
+    }
+    let src = rv_attrs::line_of(row, &data.row_lines)?;
+    let cell = table.loan_cell(fn_line, rap.name(), src, 0)?;
+    let (st, title) = part_loan_state(state, rap, data, fn_line, &cell, None)?;
+    // Keep the or-pattern's teaching clause when its named holder really
+    // does keep the loans live. Only the matched alternative ran.
+    let alt = std::mem::discriminant(state) == std::mem::discriminant(&st)
+        && or_alt_lend_at(data, rap, Some(row)).is_some_and(|(h, mutable, _)| {
+            mutable == matches!(st, State::RevokedPrivilege { .. }) &&
+                table.cell(fn_line, h.name(), cell.from_row, cell.from_row)
+                    .is_some_and(|h| cell.lent.iter().all(|l| h.holds.contains(&l.loan)))
+        });
+    let title = match title {
+        _ if alt => PartLoanTitle::Legacy,
+        Some(t) => PartLoanTitle::Text(t),
+        None => PartLoanTitle::OwnerLoan,
+    };
+    Some((st, title))
+}
+
+/// How an owner column's title says a live loan of a part of it.
+enum PartLoanTitle {
+    /// `part_loan_state`'s.
+    Text(String),
+    /// 2.x's for the drawn state (an or-pattern's alternatives).
+    Legacy,
+    /// The owner's own loan title (`owner_loan_title`): the part is named
+    /// as the owner itself.
+    OwnerLoan,
+}
+
 /// RustViz 3: the style of a column's line after the visual row `row`
 /// from the state table's loans, where it differs from 2.x's `state` (a
 /// loan 2.x missed, or one it keeps after the borrow checker ended it):
@@ -10249,9 +10520,6 @@ fn table_lent_state(state: &State, rap: &ResourceAccessPoint, visualization_data
     if matches!(s, LineState::Uninit) {
         return None;
     }
-    // Only a loan of the column itself (or of a place it is in) changes its
-    // line's style: one of a field leaves a struct's line as it is (#1073;
-    // how to word that is #1671).
     // (Through a `&T`, a shared reborrow restricts nothing: it is `Copy`
     // and only reads.)
     let own_loans: Vec<_> = cell.lent.iter()
@@ -10385,7 +10653,7 @@ fn table_lent_state(state: &State, rap: &ResourceAccessPoint, visualization_data
         // while its arguments run): it can still be read.
         (false, Some(l), _) => Some((State::PartialPrivilege { s }, Some(hover_messages::state_reserved(rap.name(), l.holder.strip_suffix("()"))))),
         (false, None, State::FullPrivilege { .. }) => None,
-        // Only a part of it is lent (a field, an element): 2.x's style stands.
+        // No confirmed part-loan boundary here (for example, a skipped arm).
         (false, None, _) if !cell.lent.is_empty() => None,
         (false, None, _) => Some((State::FullPrivilege { s }, None)),
     }
@@ -10430,9 +10698,17 @@ fn trunk_ends_at_fields(vd: &VisualizationData, func: usize, name: &str, row: us
 
 fn table_partly_moved_title(rap: &ResourceAccessPoint, table: &crate::facts::table::StateTable,
     fn_line: usize, r: usize, cell: &crate::facts::table::Cell) -> Option<String> {
+    partly_moved_cell_title(rap, table, fn_line, r, cell, &|name| table.segment_cell(fn_line, name, r))
+}
+
+/// `table_partly_moved_title` with the other columns' cells read by
+/// `cell_for` (an arm's own cells, for a leg of a one-line branch).
+fn partly_moved_cell_title(rap: &ResourceAccessPoint, table: &crate::facts::table::StateTable,
+    fn_line: usize, r: usize, cell: &crate::facts::table::Cell,
+    cell_for: &impl Fn(&str) -> Option<crate::facts::table::Cell>) -> Option<String> {
     use crate::facts::table::Init;
     let mut parts = cell.parts.as_ref().cloned().unwrap_or_default();
-    let imaginary: Vec<_> = parts.maybe.iter().filter(|p| table.segment_cell(fn_line, p, r)
+    let imaginary: Vec<_> = parts.maybe.iter().filter(|p| cell_for(p)
         .is_some_and(|c| c.cause == Some("imaginary"))).cloned().collect();
     if !imaginary.is_empty() {
         parts.maybe.retain(|p| !imaginary.contains(p));
@@ -10487,7 +10763,7 @@ fn table_partly_moved_title(rap: &ResourceAccessPoint, table: &crate::facts::tab
             } else if parts.moved.iter().chain(parts.maybe.iter()).any(|n| covers(&f, n)) {
                 Init::Partly
             } else {
-                table.segment_cell(fn_line, &f, r)?.init
+                cell_for(&f)?.init
             };
             Some((f, init))
         })
@@ -10537,7 +10813,7 @@ fn table_partly_moved_title(rap: &ResourceAccessPoint, table: &crate::facts::tab
             Init::Maybe => maybe.push(f.clone()),
             // (Its own cell knows whether what is gone from it is gone on
             // every path: `p.a[0]` of an array field, an enum payload.)
-            Init::Partly if table.segment_cell(fn_line, f, r).is_none_or(|c| c.unnamed_maybe || c.may) => partly_maybe.push(f.clone()),
+            Init::Partly if cell_for(f).is_none_or(|c| c.unnamed_maybe || c.may) => partly_maybe.push(f.clone()),
             Init::Partly => partly.push(f.clone()),
             _ => {}
         }
@@ -10554,7 +10830,7 @@ fn table_partly_moved_title(rap: &ResourceAccessPoint, table: &crate::facts::tab
             let others: Vec<&String> = field_init.iter().map(|(f, _)| f)
                 .filter(|f| !surely.iter().any(|n| n.trim_start_matches('*') == f.as_str() || covers(f, n)))
                 .collect();
-            !others.is_empty() && others.iter().all(|f| table.segment_cell(fn_line, f, r).is_some_and(|c| {
+            !others.is_empty() && others.iter().all(|f| cell_for(f).is_some_and(|c| {
                 c.init == Init::Own
                     && c.parts.as_ref().is_none_or(|p| p.moved.is_empty() && p.maybe.is_empty())
                     && c.lent.iter().all(|l| matches!(l.kind, "shared" | "reserved"))
@@ -11124,6 +11400,7 @@ mod tests {
 
     fn arm(e_data: Vec<(usize, Event)>) -> BranchData {
         BranchData {
+            source_span: None,
             t_data: TimelineColumnData {
                 name: String::new(),
                 x_val: 0,

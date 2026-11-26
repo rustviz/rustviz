@@ -1257,6 +1257,7 @@ impl BranchType {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtBranchData {
+    pub source_span: Option<crate::facts::table::ArmSpan>,
     // Event Data: a list of External Events
     pub e_data: Vec<(usize, ExternalEvent)>,
 
@@ -2638,6 +2639,7 @@ impl ExternalEvent {
 // as well as the state changes
 #[derive(Debug, Clone)]
 pub struct BranchData {
+  pub source_span: Option<crate::facts::table::ArmSpan>,
   pub t_data: TimelineColumnData,
   pub e_data: Vec<(usize, Event)>,
   pub width: usize,
@@ -6080,7 +6082,7 @@ impl Visualizable for VisualizationData {
                         for (l, e) in b.e_data.iter() {
                             self.append_branch_event(e, *l, is, & mut new_b_history);
                         }
-                        new_branches.push(BranchData { t_data: TimelineColumnData { // produce some dummy timeline data for now
+                        new_branches.push(BranchData { source_span: b.source_span, t_data: TimelineColumnData { // produce some dummy timeline data for now
                             name: "".to_owned(),
                             x_val: -1,
                             title: "".to_owned(),
@@ -6340,7 +6342,7 @@ impl Visualizable for VisualizationData {
                             }
                         }
 
-                        branch_history.push(BranchData { t_data: TimelineColumnData { // produce some dummy timeline data for now
+                        branch_history.push(BranchData { source_span: branch.source_span, t_data: TimelineColumnData { // produce some dummy timeline data for now
                             name: "".to_owned(),
                             x_val: -1,
                             title: "".to_owned(),

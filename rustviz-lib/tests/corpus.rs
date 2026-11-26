@@ -32205,7 +32205,7 @@ fn owner_titles_explain_cell_qualifiers() {
     let snippet = "rv3_segment_qualifiers";
     for (var, from, until, want, forbidden) in [
         ("pair", 8, 9, "pair.word was moved out", "its other fields still can"),
-        ("pair", 8, 9, "pair.count is borrowed by r", "its other fields still can"),
+        ("pair", 8, 9, "pair.count is mutably borrowed by r", "its other fields still can"),
         ("pair", 14, 16, "pair.1 still holds its value at runtime", "pair.1 may have been"),
         ("pair", 14, 16, "move on an unreachable path", "its other fields still can"),
         ("pair", 20, 21, "r holds a shared borrow", "owner of the resource"),
@@ -32244,8 +32244,6 @@ fn owner_titles_explain_cell_qualifiers() {
 /// the state table: what is moved out of a Box (its payload's fields, or
 /// its contents: the Box itself still owns its allocation), and whether a
 /// loan of the column is live where 2.x's replay ended it or never saw it.
-/// (A loan of only a part, a field or an element, leaves the style as 2.x
-/// draws it: #1073, wording #1671.)
 #[test]
 fn owner_line_reads_the_state_table() {
     for (snippet, var, from, until, state, want, not) in [
@@ -32288,6 +32286,164 @@ fn owner_line_reads_the_state_table() {
         ("rv3_issues/1764_moved_mut_ref_holder", "p", 4, 6, Some("revoked_privilege"), "mutably borrowed by t", "by r"),
     ] {
         assert_owner_title(snippet, var, from, until, state, want, not);
+    }
+}
+
+/// The accepted reads and rejected whole-place borrows are pinned by
+/// rustc probes in these fixtures' .expect.toml files. The line must
+/// change privilege on precisely those rows, even without a dot on it.
+#[test]
+fn part_loans_restrict_the_owner_line() {
+    let mut failures = Vec::new();
+    for (snippet, col, row, state, want, forbidden) in [
+        // The owner's own clause stays first (2.x's "p is the owner of the
+        // resource"); the part loan and what it forbids follow.
+        ("1671_field_borrow_parent_restricted", "p", 4, "revoked_privilege", "p is the owner of the resource; p.a is mutably borrowed by r, so you can't use p as a whole", "While"),
+        ("1671_field_borrow_parent_restricted", "p", 6, "revoked_privilege", "so you can't use p as a whole", "While"),
+        ("1671_field_borrow_parent_restricted", "p.n", 6, "full_privilege", "copyable", "mutably borrowed"),
+        ("1671_field_borrow_parent_restricted", "p", 7, "full_privilege", "owner", "mutably borrowed"),
+        ("1666_struct_last_field_moved_in_every_arm_b", "p", 3, "revoked_privilege", "p is the owner of the resource; p.b is mutably borrowed by r, so you can't use p as a whole", "While"),
+        ("1666_struct_last_field_moved_in_every_arm_b", "p", 4, "revoked_privilege", "p.a was moved out, so p can't be used as a whole. p.b is mutably borrowed by r", "other fields still can"),
+        // While h holds `&*s.p`, rustc (pinned nightly) accepts `&s`, and, with
+        // `let mut s` (the fixture's s isn't `mut`, so assigning it is E0384),
+        // `s = S { .. }` and `s.p = &mut c`; it rejects moving s (E0505) and
+        // `&mut s` (E0502). The loan doesn't make s read-only.
+        ("1688_field_mut_ref_coerced_shared_array", "s", 6, "partial_privilege", "s holds a value; the borrow checker counts *s.p as immutably borrowed while h is in use, so you can't move or mutably borrow s as a whole", "read-only"),
+        ("1688_field_mut_ref_coerced_shared_array", "s", 7, "full_privilege", "holds a value", "read-only"),
+        ("1689_extend_field_receiver", "p", 7, "partial_privilege", "p holds a copyable value; the borrow checker counts p.0 as immutably borrowed while s is in use", "keeps"),
+        // g captures both fields: they're borrowed together, not "p.a or p.b".
+        ("1758_closure_two_field_captures", "p", 4, "partial_privilege", "p is the owner of the resource; the borrow checker counts p.a and p.b as immutably borrowed while g is in use", " or p.b"),
+        ("1758_closure_two_field_captures", "p", 5, "partial_privilege", "p is the owner of the resource; the borrow checker counts p.a as immutably borrowed while r is in use", "p.b"),
+        ("1762_ref_valued_field_borrows", "h", 3, "partial_privilege", "h is the owner of the resource; h.s is immutably borrowed by s, so you can't change or move h as a whole", "While"),
+        ("1762_ref_valued_field_borrows", "h", 8, "partial_privilege", "h is the owner of the resource; h.s is immutably borrowed by c", "While"),
+        ("1762_ref_valued_field_borrows", "b", 13, "partial_privilege", "b is the owner of the resource; b.s is immutably borrowed by x", "While"),
+        ("1765_two_phase_multiline_insert", "p", 4, "partial_privilege", "p is the owner of the resource; p.a is reserved for a mutable borrow, so you can't change or move p as a whole", "by r"),
+        ("1765_two_phase_multiline_insert", "p", 6, "revoked_privilege", "p is the owner of the resource; the borrow checker counts p.a as mutably borrowed while r is in use, so you can't use p as a whole", "reserved"),
+        ("1766_overwrite_sibling_field_same_row", "p", 4, "partial_privilege", "p is the owner of the resource; p.1 is immutably borrowed by other", "p.0 is immutably borrowed"),
+        ("1766_overwrite_sibling_field_same_row", "p", 6, "partial_privilege", "p is the owner of the resource; the borrow checker counts p.1 as immutably borrowed while h is in use", "borrowed by other"),
+    ] {
+        let tl = run_with_local_backend(&format!("rv3_issues/{snippet}")).timeline_panel_string();
+        let line = tl.split('<').filter(|tag| attr(tag, "data-rv-kind") == Some("line") && attr(tag, "data-rv-var") == Some(col))
+            .find(|tag| {
+                let number = |key| attr(tag, key).and_then(|n| n.parse::<usize>().ok());
+                number("data-rv-line").is_some_and(|lo| lo <= row) && number("data-rv-line-end").is_some_and(|hi| row < hi)
+            });
+        let tip = line.and_then(|tag| tooltip_of_id(&tl, attr(tag, "data-rv-id")?)).unwrap_or_default();
+        if line.and_then(|tag| attr(tag, "data-rv-state")) != Some(state) || !tip.contains(want) || tip.contains(forbidden) {
+            failures.push(format!("{snippet} {col} after L{row}: expected {state} / {want:?}, got {tip:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Each one-line arm returns a different field. Rustc accepts a mutable
+/// borrow of its sibling inside either arm, and rejects one of the same
+/// field there. Both fields conflict after the join while r is live.
+#[test]
+fn part_loans_follow_the_drawn_arm() {
+    let tl = run_with_local_backend("rv3_part_loan_arms").timeline_panel_string();
+    let mut exits = Vec::new();
+    for tag in start_tags(&tl, "line").into_iter().filter(|t| attr(t, "data-rv-var") == Some("p")
+        && attr(t, "data-rv-kind") == Some("branch_line") && attr(t, "data-rv-line") == Some("5")
+        && num_attr(t, "y2") > num_attr(t, "y1") && attr(t, "data-rv-state") == Some("revoked_privilege")) {
+        // Join diagonals point from an arm back to the parent column.
+        let (x1, x2) = (num_attr(tag, "x1"), num_attr(tag, "x2"));
+        if x1 != x2 {
+            exits.push((x1 < x2, timeline_tooltips(&format!("<{tag}>")).join(" ")));
+        }
+    }
+    exits.sort();
+    assert_eq!(exits.len(), 2, "each arm should leave with its own part borrowed: {exits:?}");
+    for ((left, tip), (expected_left, field, sibling)) in exits.iter().zip([(false, "p.b", "p.a"), (true, "p.a", "p.b")]) {
+        assert_eq!(*left, expected_left);
+        assert!(tip.contains(field) && !tip.contains(sibling), "{tip}");
+    }
+    let between = tooltip_of_id(&tl, "p@L13-15:branch_line:revoked_privilege").unwrap();
+    assert!(between.contains("p is the owner of the resource; p.b is mutably borrowed by r, so you can't use p as a whole"), "{between}");
+    assert!(tooltip_of_id(&tl, "p@L15-16:branch_line:full_privilege").is_some());
+    // A loan through a raw pointer or a shared reference stored in h
+    // doesn't conflict with borrowing h as a whole (line 26 compiles).
+    assert!(tooltip_of_id(&tl, "h@L23-28:line:full_privilege").is_some());
+    // Moving the &mut transfers it to next, with the same loan identity.
+    let moved = tooltip_of_id(&tl, "p@L32-34:line:revoked_privilege").unwrap();
+    assert!(moved.contains("by next") && !moved.contains("by r"), "{moved}");
+    // Either the whole place or p.b is borrowed (one per path): said as
+    // the borrow checker counts them, not as both borrowed by r. The same
+    // loan boundary spans the blank row before the use.
+    let joined = tooltip_of_id(&tl, "p@L40-42:line:revoked_privilege").unwrap();
+    assert!(joined.contains("the borrow checker counts p and p.b as mutably borrowed while r is in use, so you can't use p as a whole")
+        && !joined.contains("borrowed by r"), "{joined}");
+    // A multi-line arm's join diagonal leaves with its own field lent (`&mut
+    // p.b` is the arm's value, used by `r.clear()` after the join); the first
+    // version drew it unrestricted.
+    let exit = tooltip_of_id(&tl, "p@L54:branch_line:revoked_privilege").unwrap_or_default();
+    assert!(exit.contains("p.b is mutably borrowed by r") && !exit.contains("p.a"), "{exit}");
+    // Between p's stacked dots on `let q = &p; inspect(q); let r = &mut
+    // p.a;`, p is lent to q only: shared, not yet the line's mutable loan
+    // of p.a.
+    assert!(tooltip_of_id(&tl, "p@L63:line:partial_privilege").is_some(), "p between its stacked dots");
+    assert!(tooltip_of_id(&tl, "p@L63:line:revoked_privilege").is_none(), "p revoked between its stacked dots");
+    assert!(tooltip_of_id(&tl, "p@L63-64:line:revoked_privilege").is_some_and(|t| t.contains("p.a is mutably borrowed by r")));
+}
+
+/// #1870's Codex review: an owner's title says a part is "borrowed by r"
+/// only where the facts prove r took that loan and holds nothing else;
+/// otherwise what the borrow checker counts while r is in use (rustc
+/// probes on the pinned nightly in each comment). The first version said
+/// "p.0 is immutably borrowed by r" after `r = &other` on one path, "a
+/// branch above borrowed it" for an arm that can't run, "s.r and s.x as
+/// mutably borrowed" for a unique capture, "by a method call" for
+/// `mem::replace`'s argument, named only e.1 of y's two loans, and printed
+/// `*(s.v as Some).0`.
+#[test]
+fn part_loan_titles_say_what_rustc_counts() {
+    let tl = run_with_local_backend("rv3_part_loan_titles").timeline_panel_string();
+    let mut failures = Vec::new();
+    for (id, want, forbidden) in [
+        // `p.0.clear()` in the arm after `r = &other` compiles; after the `if`, E0502.
+        ("p@L18-19:line:partial_privilege", "p is the owner of the resource; p.0 is immutably borrowed by r, so you can't change or move p as a whole", "counts"),
+        ("p@L19-20:line:partial_privilege", "p is the owner of the resource; the borrow checker counts p.0 as immutably borrowed while r is in use, so you can't change or move p as a whole", "borrowed by r"),
+        // No arm that runs borrows p.0, yet `p.0.clear()` is E0502.
+        ("p@L27-28:line:partial_privilege", "the borrow checker counts p.0 as immutably borrowed while r is in use", "branch above"),
+        // g writes through s.r (a unique immutable capture) and pushes to s.x.
+        ("s@L35-36:line:revoked_privilege", "the borrow checker counts s.x as mutably borrowed and s.r as uniquely borrowed while g is in use, so you can't use s as a whole", "s.r and s.x"),
+        // r is a `&String`: it holds neither `&mut` loan itself.
+        ("p@L43-44:line:revoked_privilege", "the borrow checker counts p.a and p.b as mutably borrowed while r is in use", "borrowed by r"),
+        // A free function's argument; the multiline call compiles.
+        ("p@L52-53:line:partial_privilege", "p holds a value; *p.r is reserved for a mutable borrow, so you can't move or mutably borrow p as a whole", "method call"),
+        // `let a = e.0;` compiles; `&mut e.0` there is E0502.
+        ("e@L61-63:line:revoked_privilege", "the borrow checker counts e.1 as mutably borrowed and e.0 as immutably borrowed while y is in use, so you can't use e as a whole", "keeps"),
+        // `&mut s` while x is live is E0502.
+        ("s@L70-71:line:partial_privilege", "the borrow checker counts what the reference in s.v points to as immutably borrowed while x is in use", " as Some)"),
+        // `&p` before `r.clear()` is E0502, whichever arm ran.
+        ("p@L79-80:line:revoked_privilege", "p is the owner of the resource; p.a may be mutably borrowed; the borrow checker counts it as borrowed while r is in use, so you can't use p as a whole", "p.a is mutably borrowed by r"),
+    ] {
+        let tip = tooltip_of_id(&tl, id).unwrap_or_default();
+        if !tip.contains(want) || tip.contains(forbidden) {
+            failures.push(format!("{id}: expected {want:?} without {forbidden:?}, got {tip:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// P1-3b titles name a lent part as 2.x's columns do, never as MIR's place
+/// (`(o2 as Some).0`), and keep 2.x's hedge where the loan is live on some
+/// paths only (#1327's o2: r2 borrows it only if the `Some` arm ran).
+#[test]
+fn part_loan_titles_keep_names_and_hedges() {
+    for (snippet, want, forbidden) in [
+        ("arm_ref_binding_value_1327", Some("o2's resource may be immutably borrowed here (a branch above borrowed it on some paths only)"), "o2 is read-only as a whole"),
+        ("arm_ref_binding_value_1327", None, " as Some)"),
+        ("ref_binding_borrows_owned", Some("name's resource is mutably borrowed by n"), " as Some)"),
+        ("rv3_facts_constructs", None, " as Some)"),
+        ("or_pattern_if_let_ref_different_places", Some("t is the owner of the resource; the borrow checker counts t.0 and t.1 as immutably borrowed while x is in use, so you can't change or move t as a whole"), " as Some)"),
+        ("or_pattern_ref_mut_different_places", Some("t is the owner of the resource; the borrow checker counts t.0 and t.1 as mutably borrowed while x is in use, so you can't use t as a whole"), "t.0 is mutably borrowed by x or"),
+    ] {
+        let tips = timeline_tooltips(&run_with_local_backend(snippet).timeline_panel_string());
+        if let Some(want) = want {
+            assert!(tips.iter().any(|t| t.contains(want)), "{snippet}: no tooltip with {want:?}: {tips:#?}");
+        }
+        assert!(!tips.iter().any(|t| t.contains(forbidden)), "{snippet}: a tooltip has {forbidden:?}: {tips:#?}");
     }
 }
 
@@ -37131,7 +37287,7 @@ fn a_field_borrow_through_a_reference_keeps_its_line() {
     // line) as (top, bottom, class).
     let column = |x: f64| -> Vec<(f64, f64, String)> {
         start_tags(&tl, "line").into_iter()
-            .filter(|t| attr(t, "class").is_some_and(|c| c.starts_with("hollow") || c.starts_with("solid")))
+            .filter(|t| attr(t, "class").is_some_and(|c| c.starts_with("hollow") || c.starts_with("solid") || c == "lent"))
             .filter(|t| (num_attr(t, "x1") - x).abs() <= 2.0 && num_attr(t, "x1") == num_attr(t, "x2"))
             .map(|t| {
                 let (a, b) = (num_attr(t, "y1"), num_attr(t, "y2"));
@@ -37185,15 +37341,18 @@ fn a_field_borrow_through_a_reference_keeps_its_line() {
         let back = dots_where(&tl, |lines| lines.iter().any(|l| l == back_text));
         assert!(!back.contains(&at), "{:?} on `{}`: {:?}", back_text, src, back);
     }
-    // The local struct whose field is lent the same way keeps its line.
-    let owner = column(label_x(&tl, "s"));
+    // The local owner keeps a dotted line across the loop. Borrowing
+    // all of s in the body is E0502, even though writing s.n compiles.
     let (from, to) = (code_row_y(&code, "for e in s.items.iter_mut() {"), closes[12]);
-    // A change of the field loan's title can split the solid column.
     let mut reached = from;
-    for (a, b, class) in &owner {
-        if *a <= reached && class.starts_with("solid") { reached = reached.max(*b); }
+    let mut owner = column(label_x(&tl, "s"));
+    owner.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for (top, bottom, class) in owner {
+        if class == "lent" && top <= reached {
+            reached = reached.max(bottom);
+        }
     }
-    assert!(reached >= to, "s's solid line doesn't span its loop: {owner:?}");
+    assert!(reached >= to, "s's mutable part loan stops at {reached}, before the loop ends at {to}");
 }
 
 /// #1080 (`two_field_borrow_through_ref_1080`): while a value or reference
