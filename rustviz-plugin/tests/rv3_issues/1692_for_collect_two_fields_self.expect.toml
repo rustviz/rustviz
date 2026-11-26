@@ -4,8 +4,7 @@ title = "zip of a collected copy of self.a with self.b.iter(): only self.b's bor
 fn = "f"
 places = ["self.a", "self.b"]
 beyond_facts = "P4: the 'self.a and self.b are borrowed by the for loop's iterator' wording is presentation"
-xfail = "P0"
-note = "The spike dump has no lent / state for the field places self.a and self.b through &mut self (no loan of self.b held by the zip iterator)."
+note = "Passes since rv3-p0b: every field the source can name gets a column (a tuple's, or a struct's of this crate, nested ones too), so the fields of what `self: &mut T` points to (`self.a`, `self.b`, state: self's) have per-row states; a field with no move path of its own takes the state of its nearest ancestor that has one (moved with the whole, `own` beside a moved sibling), and its loans are the ones rustc's `places_conflict` says restrict it."
 
 [[lent]]
 row = 5

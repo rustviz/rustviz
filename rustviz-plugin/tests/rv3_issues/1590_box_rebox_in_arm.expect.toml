@@ -4,8 +4,7 @@ title = "Box re-boxed in an arm after `let s = *b;` in an earlier branch: the re
 fn = "run"
 places = ["*b"]
 beyond_facts = "P3: the dot on row 7 says the whole previous resource is dropped only if no branch above moved it"
-xfail = "P0"
-note = "Review fix: the drop of `b` is pinned `definite` (the allocation is freed on every path; only the contents are conditional); the dump currently says `drops_rest`. Gap (expected): no state for the place `*b` (Box contents) and no conditional drop of `*b` at the reassignment."
+note = "Passes since rv3-p0b: the drop of a Box whose contents may have been moved out lists the contents `*b` as their own drop (drop elaboration: `drop((*b))` behind the drop flag, then the Box's allocation freed unconditionally), and the Box is `partly` moved after `let s = *b;` (the rv3-p1-2 rule). The drop of `b` itself is `rest` (what is left after a move out of it: its allocation), as in 1639 / 1725 for contents moved on every path; the review's `definite` would say the whole Box with its String is dropped on every path."
 
 [[state]]
 row = 4
@@ -31,9 +30,9 @@ why = "Drop-printing run (D in the Box, nightly-2026-05-01), D(\"ab\") in the Bo
 [[drop]]
 row = 7
 place = "b"
-how = "definite"
+how = "rest"
 src = "issue"
-why = "review fix (was `any`, which also accepted a conditional drop): the Box allocation is freed unconditionally on every path that reaches row 7 (its allocation is freed even when the contents were moved: MIR after ElaborateDrops (--emit=mir) switches on the drop flag only for `drop((*_16))`, the String, then calls `<Box<String> as Drop>::drop` unconditionally); only the `*b` drop above is conditional"
+why = "rv3-p0b: `rest`, not `definite` (the vocabulary of 1639 / 1725: what's left after a move out of the Box), and not `conditional` (the review fix's point): the Box allocation is freed unconditionally on every path that reaches row 7 (its allocation is freed even when the contents were moved: MIR after ElaborateDrops (--emit=mir) switches on the drop flag only for `drop((*_16))`, the String, then calls `<Box<String> as Drop>::drop` unconditionally); only the `*b` drop above is conditional"
 
 [[state]]
 row = 7

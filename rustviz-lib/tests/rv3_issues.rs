@@ -628,6 +628,11 @@ fn derefs_restrict(ty: &str, n: usize) -> bool {
 }
 
 fn load_facts(v: &Value) -> Result<Vec<BodyF>, String> {
+    // Column names are the 2.x ones, which mark a variable that can't share
+    // a column with a same-named one (the `iter` of a `for` desugaring) with
+    // invisible `SCOPE_MARK`s (U+E000); cases name what is shown.
+    let unmarked: Value = serde_json::from_str(&v.to_string().replace('\u{E000}', "")).map_err(|e| e.to_string())?;
+    let v = &unmarked;
     let (bodies, spike) = match v {
         Value::Array(a) => (a.clone(), true),
         Value::Object(o) => match (o.get("version").and_then(Value::as_u64), o.get("bodies")) {

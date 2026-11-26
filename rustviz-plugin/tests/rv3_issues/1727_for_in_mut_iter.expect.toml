@@ -3,8 +3,7 @@ cluster = "C24"
 title = "`for item in &mut iter`: item drawn as mutably borrowing iter's resource, and iter's borrow drawn past the loop"
 places = ["iter"]
 beyond_facts = "P4: the 'item mutably borrows a resource' line and the revoked stretch are presentation"
-xfail = "P0"
-note = "The spike dump has no lent / state for iter: the `&mut iter` loan held by the for loop's iterator is not in the facts."
+note = "Passes since rv3-p0b. The facts were right: iter's column is named `iter` + an invisible U+E000 scope mark (2.x gives it a column of its own, apart from the `for` desugaring's own `iter`), which the harness now strips (`load_facts`), since cases name what is shown. The loop's `&mut iter` loan is held by the loop's hidden iterator (holder `into_iter()`), not by item."
 
 [[lent]]
 row = 4

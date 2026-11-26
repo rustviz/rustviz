@@ -3,8 +3,7 @@ cluster = "C22"
 title = "`extend` from rustc's kept loans says the receiver \"now holds\" a reference it may not hold"
 fn = "main"
 places = ["p.0"]
-xfail = "P0"
-note = "the fact dump has no state for the field place p.0 (field place naming)"
+note = "Passes since rv3-p0b: every field the source can name gets a column (a tuple's, or a struct's of this crate, nested ones too), so `p.0` have per-row states; a field with no move path of its own takes the state of its nearest ancestor that has one (moved with the whole, `own` beside a moved sibling), and its loans are the ones rustc's `places_conflict` says restrict it."
 beyond_facts = "P3: wording: v MAY hold a reference after extend; v is empty at run time"
 
 [[loan]]

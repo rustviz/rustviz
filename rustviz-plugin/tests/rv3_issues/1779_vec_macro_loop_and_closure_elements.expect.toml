@@ -2,9 +2,9 @@ issue = 1779
 cluster = "C35"
 title = "`vec![s, format!(..), loop {..}]`: s's move isn't drawn; `vec![.., closure_that_panics(), s]`: s's drop claimed wrongly"
 fn = "loop_element"
-xfail = "P0"
+xfail = "P2"
 beyond_facts = "P3: closure_call_element's scope-end title (\"No resource is dropped\")"
-note = "closure_call_element: the closure's body panics, but the caller's MIR does not know that, so on the normal-return path call_s is moved into the vec (borrowck: moved after row 8). The runtime truth the issue is about is the unwind path, where call_s is dropped; that drop is not in the spike's fact dump (no unwind-path drops)."
+note = "loop_element passes on the P0 facts. closure_call_element stays open (re-tagged P2 by rv3-p0b): the caller's MIR doesn't know the closure always panics, so on every path MIR treats as returning, call_s is moved into the vec (borrowck: moved after row 8, which the facts give). The drop the issue is about happens only on the unwind path (a cleanup block), which the fact layer doesn't read: stating it needs (1) knowing from the closure's own MIR that its body never returns, so the call's return edge is dead, and (2) drop events on unwind paths. Whether RustViz shows panics and unwinding at all is a presentation decision, so this belongs with P2's drop events, not the P0 fact layer."
 
 [[event]]
 row = 3

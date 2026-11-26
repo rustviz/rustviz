@@ -627,33 +627,48 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         column_info.push(ColumnInfo { name: n.clone(), root, kind, copy, needs_drop });
         columns.push((mpi, mp.place, n));
     }
-    // The other fields of a struct or tuple column some of whose fields
-    // have move paths (`p.b` once `p.a` was moved): rustc tracks them
-    // with their parent, so their state follows it.
+    // Fields with no move path of their own (nothing moves or assigns them
+    // alone): rustc tracks them with the nearest ancestor that has one, so
+    // their state follows it (`p.b` once `p.a` was moved is `own`; `h.r` is
+    // moved with `h`). Every field the source can name gets a column: of a
+    // tuple or a struct of this crate (any struct some of whose fields have
+    // move paths), nested ones too, and the fields of a struct a reference
+    // variable points to (`self.a` through `&mut self`: its loans restrict
+    // `self.a` alone, its state is the reference's).
     let mut synth: Vec<(MovePathIndex, Place<'tcx>, String)> = Vec::new();
-    for (mpi, place, _) in &columns {
+    let mut work: Vec<(MovePathIndex, Place<'tcx>, bool, usize)> = columns.iter().map(|(m, p, _)| (*m, *p, true, 0)).collect();
+    while let Some((mpi, place, real, depth)) = work.pop() {
         let mut kids: BTreeSet<usize> = BTreeSet::new();
-        let mut c = move_data.move_paths[*mpi].first_child;
-        while let Some(ch) = c {
-            if let Some(ProjectionElem::Field(f, _)) = move_data.move_paths[ch].place.projection.last() {
-                kids.insert(f.index());
+        if real {
+            let mut c = move_data.move_paths[mpi].first_child;
+            while let Some(ch) = c {
+                if let Some(ProjectionElem::Field(f, _)) = move_data.move_paths[ch].place.projection.last() {
+                    kids.insert(f.index());
+                }
+                c = move_data.move_paths[ch].next_sibling;
             }
-            c = move_data.move_paths[ch].next_sibling;
         }
-        // (A Box's payload `*b` gets its fields whenever it is a column, if
-        // the source can name them `b.a`: a tuple or a struct of this crate.)
-        let pty0 = place.ty(&body.local_decls, tcx).ty;
-        let own_type = match pty0.kind() {
-            TyKind::Adt(def, _) => def.did().is_local(),
+        let mut pty = place.ty(&body.local_decls, tcx).ty;
+        let mut place = place;
+        // A reference variable: the fields of what it points to.
+        if real && place.projection.is_empty() && cx.names.locals.contains_key(&place.local) {
+            if let TyKind::Ref(_, inner, _) = pty.kind() {
+                if matches!(inner.kind(), TyKind::Adt(def, _) if def.is_struct() && def.did().is_local()) || matches!(inner.kind(), TyKind::Tuple(_)) {
+                    place = tcx.mk_place_deref(place);
+                    pty = *inner;
+                }
+            }
+        }
+        let nameable = match pty.kind() {
+            TyKind::Adt(def, _) => def.is_struct() && (def.did().is_local() || !kids.is_empty()),
             TyKind::Tuple(_) => true,
             _ => false,
         };
-        if kids.is_empty() && !(place.projection.last() == Some(&ProjectionElem::Deref) && own_type) {
+        if !nameable || depth > 3 {
             continue;
         }
-        let pty = place.ty(&body.local_decls, tcx).ty;
         let fields: Vec<rustc_middle::ty::Ty<'tcx>> = match pty.kind() {
-            TyKind::Adt(def, args) if def.is_struct() => def.non_enum_variant().fields.iter().map(|fd| fd.ty(tcx, args)).collect(),
+            TyKind::Adt(def, args) => def.non_enum_variant().fields.iter().map(|fd| fd.ty(tcx, args)).collect(),
             TyKind::Tuple(tys) => tys.iter().collect(),
             _ => continue,
         };
@@ -661,12 +676,16 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             if kids.contains(&i) {
                 continue;
             }
-            let fp = tcx.mk_place_field(*place, rustc_abi::FieldIdx::from_usize(i), fty);
+            let fp = tcx.mk_place_field(place, rustc_abi::FieldIdx::from_usize(i), fty);
             let Some(n) = cx.name(fp) else { continue };
             let Some((root, _, _)) = cx.names.root(fp) else { continue };
+            if column_info.iter().any(|c| c.name == n) {
+                continue;
+            }
             let (copy, needs_drop, _) = ty_info(fty);
             column_info.push(ColumnInfo { name: n.clone(), root, kind: "field", copy, needs_drop });
-            synth.push((*mpi, fp, n));
+            synth.push((mpi, fp, n));
+            work.push((mpi, fp, false, depth + 1));
         }
     }
     let column_name = |mpi: MovePathIndex| columns.iter().find(|(m, _, _)| *m == mpi).map(|(_, _, n)| n.clone());
@@ -696,6 +715,36 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
         }
         out
+    };
+    // Who held the loan last on the way to `loc`: the nearest locations
+    // before it (breadth first, backwards over the CFG) where some
+    // variable's origin contains it.
+    let preds_all = body.basic_blocks.predecessors();
+    let last_holders = |loc: Location, loan: BorrowIndex| -> Vec<String> {
+        let Some(t) = table else { return Vec::new() };
+        let mut seen: BTreeSet<Location> = BTreeSet::new();
+        let mut queue = std::collections::VecDeque::from([loc]);
+        while let Some(l) = queue.pop_front() {
+            if !seen.insert(l) || seen.len() > 512 {
+                continue;
+            }
+            for p in [t.mid_index(l), t.start_index(l)] {
+                let hs = holders_at(p, loan);
+                if !hs.is_empty() {
+                    return hs;
+                }
+            }
+            if l.statement_index > 0 {
+                queue.push_back(Location { block: l.block, statement_index: l.statement_index - 1 });
+            } else {
+                for p in &preds_all[l.block] {
+                    if !body.basic_blocks[*p].is_cleanup {
+                        queue.push_back(Location { block: *p, statement_index: body.basic_blocks[*p].statements.len() });
+                    }
+                }
+            }
+        }
+        Vec::new()
     };
     // Anyone whose type holds the loan at some point, with the first row.
     let mut holders_any: BTreeMap<BorrowIndex, Vec<(usize, String)>> = BTreeMap::new();
@@ -886,8 +935,14 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     .filter(|n| now.contains(n) || li.holders.contains(n))
                     .collect();
                 let first = loan_holder(li);
+                // Nobody's origin holds it here (its last holder's last use
+                // is behind): who held it last on the way here, not whoever
+                // held it first (`vr` after `vr.push(r)`, not the dead `r`).
+                let last = if now.is_empty() && used.is_empty() { last_holders(loc, *b) } else { Vec::new() };
                 let holder = if let Some(u) = used.first() {
                     u.clone()
+                } else if !last.is_empty() && !last.contains(&first) {
+                    last[0].clone()
                 } else if now.is_empty() || now.contains(&first) {
                     first
                 } else {
@@ -1258,8 +1313,11 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                                     continue;
                                 }
                                 let cst = rt.state(&[loc], false, ch);
-                                // (A Box's payload: its fields, inside.)
-                                if !cst.sub_moved.is_empty() || !cst.sub_maybe.is_empty() || cp.projection.last() == Some(&ProjectionElem::Deref) {
+                                // (A Box's payload whose own fields were moved: its
+                                // fields, inside. A payload moved out as a whole
+                                // (on some path) is dropped on its own, before the
+                                // allocation is freed: `*b`, behind a flag.)
+                                if !cst.sub_moved.is_empty() || !cst.sub_maybe.is_empty() {
                                     work.push(ch);
                                     continue;
                                 }
@@ -1273,8 +1331,13 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                                 _ => None,
                             };
                             let mname = cx.name(rt_md.move_paths[m].place);
+                            // (Its own fields: not a field's fields, nor fields
+                            // behind a reference.)
+                            let mplace = rt_md.move_paths[m].place;
                             for (parent, fp, n) in &synth {
-                                if column_name(*parent) == mname && ty_info(fp.ty(&body.local_decls, tcx).ty).1 {
+                                let direct = fp.projection.len() == mplace.projection.len() + 1
+                                    && fp.projection[..mplace.projection.len()] == mplace.projection[..];
+                                if direct && column_name(*parent) == mname && ty_info(fp.ty(&body.local_decls, tcx).ty).1 {
                                     if let Some(h) = parent_how {
                                         field_drops.push((key(fp), n.clone(), h));
                                     }

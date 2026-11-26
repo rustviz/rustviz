@@ -1,8 +1,7 @@
 issue = 1762
 cluster = "C17"
 title = "Borrow of a reference-valued field by `ref` pattern, closure capture or through a Box (`&b.s`): the struct is lent (can't be moved), drawn free"
-xfail = "P0"
-note = "Gap: the `ref` pattern and closure cases are right as loans; through the Box the dump names the lender `*b.s` where it should be `b.s` (place naming), and there are no per-field states (P1 part)."
+note = "Passes since rv3-p0b: every field the source can name gets a column (a tuple's, or a struct's of this crate, nested ones too), so `h.s` and `h.t` have per-row states; a field with no move path of its own takes the state of its nearest ancestor that has one (moved with the whole, `own` beside a moved sibling), and its loans are the ones rustc's `places_conflict` says restrict it. The boxed case's lender is named `b.s` (auto-deref)."
 fn = "refpat"
 places = ["h.s", "h.t"]
 beyond_facts = "P3: 'is the owner of the resource' wording on h / b"
