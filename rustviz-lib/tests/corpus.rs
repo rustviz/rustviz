@@ -2566,11 +2566,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // be false (the call doesn't initialise add_one).
         must_contain: &[
             // Point holds only an i32: nothing to drop, so a value (#867).
+            // (No "r holds an immutable reference": that was the bracket
+            // of a borrow with no rows, a stub off the dot, #1611.)
             "r immutably borrows a value",
-            "r holds an immutable reference",
             "r's immutable borrow ends",
             "m mutably borrows a value",
-            "m holds a mutable reference",
             "m's mutable borrow ends",
         ],
         must_not_contain: &[
@@ -28116,6 +28116,26 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &["only lowers", "only lower their", "its own buffer is freed", "the Weak inside", "freed only when"],
     },
+    TooltipExpect {
+        name: "join_dot_fallback_1612",
+        // #1612, #1615: a reference whose arms leave it in different
+        // states (assigned in some, re-pointed in one) had no dot where
+        // its legs join. The dot claims nothing about any path: only
+        // rustc's liveness, that it isn't read after the join. In a loop
+        // (the next pass may read it) it says only that the branches join.
+        must_contain: &[
+            "r isn't used after the branches above",
+            "q isn't used after the branches above",
+            "a5 isn't used after the branches above",
+            "The branches above join here",
+        ],
+        must_not_contain: &[
+            "w isn't used after the branches above",
+            "r's borrow ended in each branch above",
+            "q's borrow ended in each branch above",
+            "a5's borrow ended in each branch above",
+        ],
+    },
 ];
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws
@@ -28311,6 +28331,10 @@ fn assert_well_formed(name: &str, rv: &Rustviz) {
         let problems = common::svg::rv_problems(svg);
         assert!(problems.is_empty(), "{}: {} panel's data-rv-* attributes: {:#?}", name, panel, problems);
     }
+    // A reference bound and ended on one dot has no span to bracket:
+    // drawn, its bracket was a 15 px stub off the dot (#1611).
+    let flat = flat_brackets(&timeline);
+    assert!(flat.is_empty(), "{}: zero-height reference bracket(s): {:?}", name, flat);
     let crossed = arrows_crossing_dots(&timeline);
     assert!(
         crossed.is_empty(),
@@ -28835,6 +28859,18 @@ fn off_canvas_ys(svg: &str) -> Vec<String> {
 }
 
 /// Start tags of every `<kind ...>` element in `svg`.
+/// The `data-rv-id`s of reference brackets (`M x y l dx dy v V l -dx
+/// dy`) whose vertical run `V` is zero or less (#1611).
+fn flat_brackets(svg: &str) -> Vec<String> {
+    start_tags(svg, "path").into_iter()
+        .filter(|t| t.contains(":bracket:"))
+        .filter(|t| t.split(" d=\"").nth(1).and_then(|d| d.split(" v ").nth(1))
+            .and_then(|v| v.split_whitespace().next()).and_then(|v| v.parse::<f64>().ok())
+            .is_some_and(|v| v <= 0.0))
+        .map(|t| t.split("data-rv-id=\"").nth(1).and_then(|i| i.split('"').next()).unwrap_or(t).to_owned())
+        .collect()
+}
+
 fn start_tags<'a>(svg: &'a str, kind: &str) -> Vec<&'a str> {
     let open = format!("<{} ", kind);
     svg.match_indices(&open)

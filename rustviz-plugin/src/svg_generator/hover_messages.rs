@@ -4771,6 +4771,20 @@ pub fn event_dot_branch_merge_borrow_ended_before(my_name: &String) -> String {
     format!("{0}'s borrow ended before the branches above, and each borrow a branch gave {0} ended in that branch", styled_name_html(my_name))
 }
 
+// Merge dot for a reference whose branches above leave it in different
+// states (its borrow ended in some, `let r;` assigned in some, #1612;
+// re-pointed in one, #1615), that rustc's liveness says isn't used from
+// here on. Nothing is said about what each path left in it.
+pub fn event_dot_branch_merge_not_used_after(my_name: &String) -> String {
+    format!("{0} isn't used after the branches above", styled_name_html(my_name))
+}
+
+// The same where it may be used later: its legs meet here, and nothing
+// is said about what each path left in it.
+pub fn event_dot_branch_merge_join() -> String {
+    String::from("The branches above join here")
+}
+
 // Dot where a conditional ends whose branches all diverge, some by
 // `break`ing out of the loop around it (#1296): nothing gets here, but the
 // column goes on after the loop, from the branches that break.
