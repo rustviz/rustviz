@@ -29,6 +29,10 @@ fn id(s: &String) -> &String {
     s
 }
 
+fn fixed() -> Option<&'static String> {
+    None
+}
+
 // A real `&mut i32` stored by `extend`: v can write through it.
 fn extended() {
     let mut a1 = 1;
@@ -149,7 +153,39 @@ fn per_argument(flag: bool) {
     println!("{} {}", k17, a17);
 }
 
+// Third Codex round: an arm lending nothing; a reference copied out of
+// a holder of mixed loans, or reborrowed from a result that may hold
+// either, keeps a loan of unknown kind; a copy taken before its source
+// is re-pointed on the same row.
+fn hedged(f: bool, g: bool) {
+    let mut a18 = String::from("a");
+    let b18 = String::from("b");
+    let r18: &String = &mut a18;
+    let o18 = if f { Some(r18) } else if g { Some(&b18) } else { fixed() };
+    println!("{:?}", o18);
+    let mut a19 = String::from("a");
+    let b19 = String::from("b");
+    let r19: &String = &mut a19;
+    let x19 = vec![r19, &b19];
+    let mut w19: Vec<&String> = Vec::new();
+    w19.push(first(&x19));
+    println!("{:?}", w19);
+    let mut a20 = String::from("a");
+    let b20 = String::from("b");
+    let r20 = choose(&mut a20, &b20, f);
+    let mut v20: Vec<&String> = Vec::new();
+    v20.push(&*r20);
+    println!("{:?}", v20);
+    let mut a21 = String::from("a");
+    let b21 = String::from("b");
+    let mut r21: &String = &mut a21;
+    let keep21 = r21;
+    let k21 = r21; r21 = &b21;
+    println!("{} {} {}", k21, keep21, r21);
+}
+
 fn main() {
+    hedged(true, false);
     per_argument(true);
     extended();
     mixed_store();

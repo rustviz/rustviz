@@ -2721,6 +2721,8 @@ fn render_dot(
                         data.title = title;
                     } else if let Some(title) = loop_iterator_ref_title(event, *line_number, rap, visualization_data) {
                         data.title = title;
+                    } else if let Some(title) = uncertain_loan_title(event, &name, visualization_data) {
+                        data.title = title;
                     } else if let Some(title) = kept_closure_lend_title(event, &name, visualization_data) {
                         data.title = title;
                     } else if let Some(title) = closure_reborrow_lend_title(event, visualization_data) {
@@ -3944,6 +3946,71 @@ fn deep_lend_title(event: &Event, visualization_data: &VisualizationData) -> Opt
 // literal did, or it borrows s through a reference it captured), so
 // this reads like any other lend to g rather than "captured by closure
 // g".
+/// Whether `holder`'s loan of `lender` isn't known exactly (a borrow
+/// event into it marked `uncertain`, #1619's hedge).
+fn uncertain_loan(visualization_data: &VisualizationData, holder: &ResourceTy, lender: &ResourceTy) -> bool {
+    fn key(r: &ResourceTy) -> Option<u64> {
+        match r {
+            ResourceTy::Value(x) | ResourceTy::Deref(x) => Some(*x.hash()),
+            _ => None,
+        }
+    }
+    let (Some(h), Some(l)) = (key(holder), key(lender)) else { return false };
+    fn find(events: &[(usize, ExternalEvent)], h: u64, l: u64) -> bool {
+        events.iter().any(|(_, ev)| match ev {
+            ExternalEvent::MutableBorrow { from, to, via: Some(v), .. } | ExternalEvent::StaticBorrow { from, to, via: Some(v), .. } => v.uncertain
+                && matches!(from, ResourceTy::Value(x) | ResourceTy::Deref(x) if *x.hash() == l)
+                && matches!(to, ResourceTy::Value(x) if *x.hash() == h),
+            ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| find(&b.e_data, h, l)),
+            _ => false,
+        })
+    }
+    find(&visualization_data.external_events, h, l)
+}
+
+/// The holder of a live loan of `rap` whose kind isn't known exactly,
+/// on `line`: lent at or before it and not given back before it.
+fn uncertain_lend_live_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, line: usize) -> Option<String> {
+    let t = visualization_data.timelines.get(rap.hash())?;
+    let me = ResourceTy::Value(rap.clone());
+    let mut live: Vec<ResourceTy> = Vec::new();
+    for (l, e) in t.history.iter().filter(|(l, _)| *l <= line) {
+        match e {
+            Event::StaticLend { to, .. } | Event::MutableLend { to, .. } if uncertain_loan(visualization_data, to, &me) => live.push(to.clone()),
+            Event::StaticReacquire { from, .. } | Event::MutableReacquire { from, .. } if *l < line => live.retain(|x| x != from),
+            _ => {}
+        }
+    }
+    live.first().map(|h| h.name())
+}
+
+/// The dots of a loan whose kind isn't known exactly (`uncertain_loan`):
+/// the holder's borrow and end, the lender's lend and give-back.
+fn uncertain_loan_title(event: &Event, name: &String, visualization_data: &VisualizationData) -> Option<String> {
+    match event {
+        Event::MutableBorrow { from, is, .. } | Event::StaticBorrow { from, is, .. } if is.holds_borrow() && uncertain_loan(visualization_data, is, from) => {
+            let holder_ref = find_uncertain_via(&visualization_data.external_events, is, from).and_then(|v| v.holder_ref);
+            Some(hover_messages::event_dot_holder_uncertain_borrow(name, &from.name(), crate::svg_generator::data::holder_lender_kind(from), crate::svg_generator::data::holds_copy_value(from), holder_ref))
+        }
+        Event::MutableLend { to, is, .. } | Event::StaticLend { to, is, .. } if uncertain_loan(visualization_data, to, is) =>
+            Some(hover_messages::event_dot_uncertain_lend(name, &to.name(), crate::svg_generator::data::lender_holds_value(is))),
+        Event::MutableReacquire { from, is, .. } | Event::StaticReacquire { from, is, .. } if uncertain_loan(visualization_data, from, is) =>
+            Some(hover_messages::event_dot_uncertain_reacquire(name, &from.name(), crate::svg_generator::data::lender_holds_value(is))),
+        Event::MutableDie { to, is, .. } | Event::StaticDie { to, is, .. } if is.holds_borrow() && uncertain_loan(visualization_data, is, to) =>
+            Some(hover_messages::event_dot_uncertain_return(name)),
+        _ => None,
+    }
+}
+
+fn find_uncertain_via<'a>(events: &'a [(usize, ExternalEvent)], holder: &ResourceTy, lender: &ResourceTy) -> Option<&'a crate::svg_generator::data::BorrowVia> {
+    events.iter().find_map(|(_, ev)| match ev {
+        ExternalEvent::MutableBorrow { from, to, via: Some(v), .. } | ExternalEvent::StaticBorrow { from, to, via: Some(v), .. } if v.uncertain && to == holder
+            && (from == lender || matches!((from, lender), (ResourceTy::Deref(a), ResourceTy::Value(b)) | (ResourceTy::Value(a), ResourceTy::Deref(b)) if a.hash() == b.hash())) => Some(v),
+        ExternalEvent::Branch { branches, .. } => branches.iter().find_map(|b| find_uncertain_via(&b.e_data, holder, lender)),
+        _ => None,
+    })
+}
+
 fn kept_closure_lend_title(event: &Event, name: &String, visualization_data: &VisualizationData) -> Option<String> {
     let (to, is, id, mutable) = match event {
         Event::StaticLend { to, is, id, .. } => (to, is, *id, false),
@@ -4153,6 +4220,11 @@ fn timeline_segment_title(
         if let Some(title) = lent_with_parent_title(state, rap, visualization_data, line) {
             return title;
         }
+        // Lent to a holder whose loan kind isn't known exactly (#1619's
+        // hedge): neither "read-only" nor "can't be used" is said.
+        if let Some(holder) = uncertain_lend_live_at(rap, visualization_data, line) {
+            return hover_messages::event_dot_uncertain_lend(rap.name(), &holder, rap.holds_value());
+        }
     }
     // A place an or-pattern's reference may borrow (#565): borrowed
     // only if its alternative matched, though the borrow checker treats
@@ -4180,7 +4252,7 @@ fn timeline_segment_title(
                 let surely: Vec<String> = parts.moved.iter().filter(|m| !parts.maybe_moved.contains(m)).cloned().collect();
                 return hover_messages::state_fields_maybe_all_moved(rap.name(), &surely, &parts.maybe_moved, rap.is_mut());
             }
-            return hover_messages::state_partly_moved(rap.name(), &parts.moved, parts.maybe);
+            return hover_messages::state_partly_moved(rap.name(), &parts.moved, parts.maybe, !parts.nested);
         }
     }
     // An array a slice pattern moved some elements out of (#1285): the
@@ -4497,6 +4569,13 @@ fn lent_out_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
         .collect();
     holders.sort();
     holders.dedup();
+    // (A loan whose kind isn't known exactly, #1619's hedge.)
+    if let [(name, false)] = holders.as_slice() {
+        let holder = visualization_data.timelines.values().map(|t| &t.resource_access_point).find(|r| r.name() == name);
+        if holder.is_some_and(|h| uncertain_loan(visualization_data, &ResourceTy::Value(h.clone()), &ResourceTy::Value(rap.clone()))) {
+            return hover_messages::event_dot_uncertain_lend(rap.name(), name, rap.holds_value());
+        }
+    }
     match holders.as_slice() {
         [(name, true)] if !name.is_empty() => text(hover_messages::LentTo::Closure(name), of_ref_var),
         [(name, false)] if !name.is_empty() => text(hover_messages::LentTo::Var(name), of_ref_var),
@@ -6889,6 +6968,9 @@ fn render_generic_arrow(
     }
     let title = match visualization_data.field_lenders.get(&external_event.get_id()) {
         Some(f) => hover_messages::arrow_field_lenders_title(external_event, from, to, &f.lenders, f.end),
+        // A loan whose kind isn't known exactly (#1619's hedge).
+        None if matches!(external_event, ExternalEvent::MutableDie { .. } | ExternalEvent::StaticDie { .. }) && uncertain_loan(visualization_data, from, to) =>
+            hover_messages::arrow_uncertain_return(&from.name(), &to.name()),
         None => hover_messages::arrow_full_title(external_event, from, to),
     };
 
@@ -9732,6 +9814,7 @@ fn parts_moved_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
     let mut maybe_moved: Vec<String> = Vec::new();
     // The direct parts nothing can be used of.
     let mut unusable: Vec<&String> = Vec::new();
+    let mut nested = false;
     for t in &parts {
         let r = &t.resource_access_point;
         if moved_at(t, line) {
@@ -9746,6 +9829,7 @@ fn parts_moved_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
             continue;
         }
         if let Some(inner) = parts_moved_at(r, visualization_data, line) {
+            nested = true;
             maybe |= inner.maybe;
             if inner.all {
                 // (Its fields moved one by one, `drop(z.pair.a);
@@ -9789,7 +9873,7 @@ fn parts_moved_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
     if !all && !none_usable && parts.iter().all(|t| unusable.contains(&t.resource_access_point.name()) || moved_in_every_arm(t, line).is_some()) {
         all = true;
     }
-    Some(PartsMoved { moved, maybe, all, maybe_moved, none_usable })
+    Some(PartsMoved { moved, maybe, all, maybe_moved, none_usable, nested })
 }
 
 /// The elements (`pair[0]`) a slice pattern moved out of an array's
@@ -9864,6 +9948,9 @@ struct PartsMoved {
     maybe_moved: Vec<String>,
     /// Every field is moved, some on some paths only (#1583).
     none_usable: bool,
+    /// Some of `moved` are fields of a field (`o.inner.x`): which of the
+    /// struct's own fields can still be used isn't said (#1619).
+    nested: bool,
 }
 
 /// The rows where a borrow of a field of what the `&mut` reference

@@ -6096,6 +6096,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           Some(p) => {
             let via = BorrowVia {
               shared: false,
+              uncertain: false,
+              holder_ref: None,
               func: fn_name.clone(),
               lenders: vec![from_ro.name()],
               also_unnamed: false,
@@ -7407,14 +7409,29 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let to = ResourceTy::Value(rap);
     let shared = self.value_borrow_is_mut_k(init, false) && !self.value_borrow_is_mut_k(init, true);
     let shared_of = self.lender_shared_of_mut(init);
-    for l in rd.all_lenders().into_iter().filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_))) {
-      let evt = if rd.mut_of(&l) { Evt::MBorrow } else { Evt::SBorrow };
-      let shared = shared_of.as_ref().and_then(|v| v.iter().find(|(x, _)| *x == l)).map_or(shared, |(_, sh)| *sh);
+    self.emit_holder_literal_lenders(line, &to, &rd, &rd.all_lenders(), init, shared, shared_of);
+  }
+
+  /// The borrow arrows of a holder literal (`emit_holder_literal_borrows`)
+  /// from `lenders`, each with its kind, whether it is a shared reference
+  /// made from a mutable borrow, and whether its kind is exact (#1599,
+  /// #1619).
+  fn emit_holder_literal_lenders(&mut self, line: usize, to: &ResourceTy, rd: &RefData, lenders: &[ResourceTy], v: &'tcx Expr<'tcx>, shared: bool, shared_of: Option<Vec<(ResourceTy, bool)>>) {
+    let holder_ref = self.tcx.typeck(v.hir_id.owner).expr_ty_opt(v).and_then(|t| self.stored_ref_kind(t));
+    let certainty = self.lender_certainty(v);
+    let lenders: Vec<ResourceTy> = lenders.iter().filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_))).cloned().collect();
+    let any_mut = lenders.iter().any(|l| rd.mut_of(l));
+    for l in lenders {
+      let uncertain = any_mut && certainty.iter().any(|(x, c)| *x == l && !*c);
+      let m = rd.mut_of(&l);
+      let evt = if m { Evt::MBorrow } else { Evt::SBorrow };
+      let shared = m && (holder_ref == Some(false) || shared_of.as_ref().and_then(|v| v.iter().find(|(x, _)| *x == l)).map_or(shared, |(_, sh)| *sh));
       match l {
         // `[a, b]` with b a local `&mut` (#1330): a reborrow through b,
         // drawn from b's column as `let k = &mut *b;` is.
-        ResourceTy::Deref(r) => self.add_borrow_ev(line, evt, to.clone(), ResourceTy::Value(r), true),
-        l => self.add_holder_literal_borrow_ev(line, evt, to.clone(), l, shared),
+        ResourceTy::Deref(r) if !shared && !uncertain => self.add_borrow_ev(line, evt, to.clone(), ResourceTy::Value(r), true),
+        ResourceTy::Deref(r) => self.add_holder_literal_borrow_ev(line, evt, to.clone(), ResourceTy::Value(r), shared, uncertain, holder_ref, true),
+        l => self.add_holder_literal_borrow_ev(line, evt, to.clone(), l, shared, uncertain, holder_ref, false),
       }
     }
   }
@@ -7423,11 +7440,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// because the value holds a shared reference made from a mutable
   /// borrow (`vec![r.as_str()]` with `r: &String = &mut s`, `shared`)
   /// says so (#1599).
-  fn add_holder_literal_borrow_ev(&mut self, line: usize, evt: Evt, to: ResourceTy, l: ResourceTy, shared: bool) {
+  #[expect(clippy::too_many_arguments)]
+  fn add_holder_literal_borrow_ev(&mut self, line: usize, evt: Evt, to: ResourceTy, l: ResourceTy, shared: bool, uncertain: bool, holder_ref: Option<bool>, through: bool) {
     let mut ev = self.ext_ev_of_evt(evt, to, l, *self.unique_id, false);
-    if let ExternalEvent::MutableBorrow { via, .. } = &mut ev {
-      if shared {
-        *via = Some(BorrowVia { shared: true, func: String::new(), lenders: Vec::new(), also_unnamed: false, tie: ArgTie::default(), carrier: ViaCarrier::Plain, passed_on: Vec::new() });
+    if let ExternalEvent::MutableBorrow { via, is_reborrow, .. } | ExternalEvent::StaticBorrow { via, is_reborrow, .. } = &mut ev {
+      *is_reborrow = through;
+      if shared || uncertain {
+        *via = Some(BorrowVia { shared: shared && !uncertain, uncertain, holder_ref, func: String::new(), lenders: Vec::new(), also_unnamed: false, tie: ArgTie::default(), carrier: ViaCarrier::Plain, passed_on: Vec::new() });
       }
     }
     self.add_external_event(line, ev);
@@ -7455,14 +7474,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let to = ResourceTy::Value(rap);
     let shared = self.value_borrow_is_mut_k(v, false) && !self.value_borrow_is_mut_k(v, true);
     let shared_of = self.lender_shared_of_mut(v);
-    for l in rd.all_lenders().into_iter().filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)) && own.contains(l)) {
-      let evt = if rd.mut_of(&l) { Evt::MBorrow } else { Evt::SBorrow };
-      let shared = shared_of.as_ref().and_then(|v| v.iter().find(|(x, _)| *x == l)).map_or(shared, |(_, sh)| *sh);
-      match l {
-        ResourceTy::Deref(r) => self.add_borrow_ev(line, evt, to.clone(), ResourceTy::Value(r), true),
-        l => self.add_holder_literal_borrow_ev(line, evt, to.clone(), l, shared),
-      }
-    }
+    let lenders: Vec<ResourceTy> = rd.all_lenders().into_iter().filter(|l| own.contains(l)).collect();
+    self.emit_holder_literal_lenders(line, &to, &rd, &lenders, v, shared, shared_of);
   }
 
   /// `name` was just registered as an owner bound to `init`. If its
@@ -7799,6 +7812,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let from = ResourceTy::Value(lender.clone());
       let via = BorrowVia {
         shared: false,
+        uncertain: false,
+        holder_ref: None,
         func: func.clone(),
         lenders: vec![lender.name().to_owned()],
         also_unnamed: false,
@@ -7902,7 +7917,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
     // Each lender with its own kind (`v.push((&a, r))` with `r: &String
     // = &mut b` stores a shared loan of a and b's mutable one, #1599).
-    let (kinds, shared) = self.receiver_store_kinds(call, &lenders, is_mut);
+    let (kinds, shared, certain, holder_ref) = self.receiver_store_kinds(call, &lenders, is_mut);
+    // A lender whose loan kind isn't exact while some loan of the store
+    // may be mutable: drawn as a mutable loan, worded "possibly mutably"
+    // (#1619's hedge).
+    let any_mut = kinds.iter().any(|m| *m);
+    let uncertain: Vec<bool> = certain.iter().map(|c| !c && any_mut).collect();
     let name = rcvr.name().to_owned();
     // `refs.push(&x)` with x a reference variable and `refs:
     // Vec<&&String>` stores a borrow of x itself, a value, not of what
@@ -7960,6 +7980,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
     let via = BorrowVia {
       shared: false,
+      uncertain: false,
+      holder_ref: None,
       func: seg.ident.as_str().to_owned(),
       lenders: lenders.iter().map(|l| l.name()).collect(),
       also_unnamed: false,
@@ -7968,15 +7990,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       passed_on: Vec::new(),
     };
     let to = ResourceTy::Value(rcvr.clone());
-    for ((lender, is_mut), shared) in lenders.iter().zip(kinds).zip(shared) {
+    for (((lender, is_mut), shared), uncertain) in lenders.iter().zip(kinds).zip(shared).zip(uncertain) {
       let id = *self.unique_id;
       *self.unique_id += 1;
       let of_ref_var = lends_ref_var(lender);
       let ev = if is_mut {
-        let via = BorrowVia { shared, ..via.clone() };
+        let via = BorrowVia { shared: shared && !uncertain, uncertain, holder_ref, ..via.clone() };
         ExternalEvent::MutableBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via), id, of_ref_var }
       } else {
-        ExternalEvent::StaticBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id, of_ref_var }
+        let via = BorrowVia { uncertain, holder_ref, ..via.clone() };
+        ExternalEvent::StaticBorrow { from: lender.clone(), to: to.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via), id, of_ref_var }
       };
       self.add_external_event(line, ev);
     }
@@ -8940,6 +8963,8 @@ fn pattern_ref_borrows(
   let one_lifetime = from_call && self.call_result_has_one_lifetime(scrutinee);
   let via = BorrowVia {
     shared: false,
+    uncertain: false,
+    holder_ref: None,
     func,
     lenders: lenders.iter().map(|l| l.name()).collect(),
     also_unnamed: one_lifetime && self.call_lenders_full(scrutinee).1,
@@ -9016,7 +9041,9 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
     Some(rd) if !rd.lender_muts.is_empty() => {
       let mixed: Vec<ResourceTy> = rd.lender_muts.iter().map(|(l, _)| l.clone()).collect();
       let mine = self.call_lenders(call);
-      if mine.is_empty() || !mixed.iter().any(|l| mine.contains(l)) { mixed } else { mixed.into_iter().filter(|l| mine.contains(l)).collect() }
+      // (A call lending nothing, `fixed()` in a third arm, lends none of
+      // them.)
+      if mine.is_empty() { mine } else if !mixed.iter().any(|l| mine.contains(l)) { mixed } else { mixed.into_iter().filter(|l| mine.contains(l)).collect() }
     }
     _ => self.call_lenders(call),
   };
@@ -9043,6 +9070,12 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
   let shared = !lhs_rap.is_ref() && self.call_borrow_is_mut_k(call, false) && !self.call_borrow_is_mut_k(call, true);
   // (Each lender its own: `Some((r, &mut b))` with `r: &i32 = &mut a`.)
   let shared_of = if lhs_rap.is_ref() { None } else { self.lender_shared_of_mut(call) };
+  // What the holder stores, by its type, and whether each lender's kind
+  // is exact (#1619's hedge).
+  let holder_ref = if lhs_rap.is_ref() { None } else {
+    self.tcx.typeck(call.hir_id.owner).expr_ty_opt(call).and_then(|t| self.stored_ref_kind(t))
+  };
+  let certainty = if lhs_rap.is_ref() { Vec::new() } else { self.lender_certainty(call) };
   // `w.last_mut().unwrap()` (#1266): the borrow comes from `last_mut`;
   // `unwrap` only passes it on.
   // `refs.iter_mut().next().unwrap()` (#1395): from `iter_mut`; `next`
@@ -9061,6 +9094,8 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
   let via = match self.copied_out_of(call) {
     Some(inner) if lhs_rap.is_ref() => BorrowVia {
       shared: false,
+      uncertain: false,
+      holder_ref: None,
       func: match inner.kind {
         ExprKind::MethodCall(seg, ..) => seg.ident.to_string(),
         _ => func,
@@ -9073,6 +9108,8 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
     },
     _ => BorrowVia {
       shared,
+      uncertain: false,
+      holder_ref: None,
       func,
       lenders: lenders.iter().map(|l| l.name()).collect(),
       also_unnamed: self.call_lenders_full(call).1,
@@ -9081,8 +9118,10 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
       passed_on,
     },
   };
+  let any_mut = lenders.iter().any(|l| muts.iter().find(|(x, _)| x == l).map_or(is_mut, |(_, m)| *m));
   for lender in lenders.iter() {
     let id = *self.unique_id;
+    let uncertain = any_mut && certainty.iter().any(|(l, c)| l == lender && !*c);
     let is_mut = muts.iter().find(|(l, _)| l == lender).map_or(is_mut, |(_, m)| *m);
     // `r.first_mut()` with r a local `&mut`: a reborrow through r, drawn
     // like `&mut *r` (#1152).
@@ -9090,14 +9129,16 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
       ResourceTy::Deref(r) if r.is_mutref() => (ResourceTy::Value(r.clone()), true),
       l => (l.clone(), false),
     };
-    let shared = match shared_of.as_ref().and_then(|v| v.iter().find(|(l, _)| l == lender)) {
+    let shared = holder_ref == Some(false) || match shared_of.as_ref().and_then(|v| v.iter().find(|(l, _)| l == lender)) {
       Some((_, sh)) => *sh,
       None => via.shared,
     };
     let ev = if is_mut {
-      ExternalEvent::MutableBorrow { from, to: lhs.clone(), is_partial: false, is_reborrow, break_alt: None, via: Some(BorrowVia { shared, ..via.clone() }), id, of_ref_var: false }
+      let via = BorrowVia { shared: shared && !uncertain && !lhs_rap.is_ref(), uncertain, holder_ref, ..via.clone() };
+      ExternalEvent::MutableBorrow { from, to: lhs.clone(), is_partial: false, is_reborrow, break_alt: None, via: Some(via), id, of_ref_var: false }
     } else {
-      ExternalEvent::StaticBorrow { from, to: lhs.clone(), is_partial: false, is_reborrow, break_alt: None, via: Some(via.clone()), id, of_ref_var: false }
+      let via = BorrowVia { uncertain, holder_ref, ..via.clone() };
+      ExternalEvent::StaticBorrow { from, to: lhs.clone(), is_partial: false, is_reborrow, break_alt: None, via: Some(via), id, of_ref_var: false }
     };
     self.add_external_event(line_num, ev);
     *self.unique_id += 1;
@@ -9135,7 +9176,7 @@ pub fn emit_struct_field_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'
   let mut all: Vec<ResourceTy> = Vec::new();
   let mut unlent: Vec<(String, ResourceAccessPoint, String)> = Vec::new();
   // A tuple's elements too (`let q = pair(&s);`, #1341).
-  for (field_name, _) in self.member_fields(ty) {
+  for (field_name, field_ty) in self.member_fields(ty) {
     let fname = format!("{}.{}", st.name, field_name);
     let (Some(rd), Some(frap)) = (self.borrow_map.get(&fname), self.raps.get(&fname)) else { continue };
     let frap = frap.rap.to_owned();
@@ -9158,9 +9199,13 @@ pub fn emit_struct_field_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'
     let kinds: Vec<bool> = lenders.iter().map(|l| if rd.lender_muts.is_empty() { is_mut } else { rd.mut_of(l) }).collect();
     // A holder field getting a shared reference made from a mutable
     // borrow (`H { v: vec![r] }` returned, #1599).
-    let shared = !frap.is_ref() && is_mut && self.call_field_flows_mut(call, &field_name, false) && !self.call_field_flows_mut(call, &field_name, true);
+    let holder_ref = if frap.is_ref() { None } else { self.stored_ref_kind(field_ty) };
+    let shared = !frap.is_ref() && is_mut && (holder_ref == Some(false)
+      || self.call_field_flows_mut(call, &field_name, false) && !self.call_field_flows_mut(call, &field_name, true));
     let via = BorrowVia {
       shared,
+      uncertain: false,
+      holder_ref,
       func: func.clone(),
       lenders: lenders.iter().map(|l| l.name()).collect(),
       also_unnamed: self.call_field_lenders(call, &field_name).1,
@@ -10782,6 +10827,8 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       let Some(coll) = expr_to_rap_name(base, &self.tcx) else { return };
       let via = BorrowVia {
         shared: false,
+        uncertain: false,
+        holder_ref: None,
         func: coll,
         lenders: lenders.iter().map(|l| l.name()).collect(),
         also_unnamed: false,
@@ -10943,20 +10990,25 @@ fn ref_into_holder_value(&mut self, lhs: &ResourceTy, r: &ResourceAccessPoint, r
   // mutably, b not).
   let kind_of = |v: &Self, l: &ResourceTy| is_mut || (v.shared_ref_with_mut_loan(rhs)
     && v.borrow_map.get(r.name()).is_some_and(|rd| rd.mut_of(l)));
+  // (r with several lenders of different kinds, `choose(&mut a, &b)`:
+  // which loan the value keeps isn't known, #1619's hedge.)
+  let certain = self.borrow_map.get(r.name()).is_none_or(|rd| rd.all_lenders().len() <= 1 || rd.lender_muts.is_empty());
+  let any_mut = lenders.iter().any(|l| kind_of(self, l));
+  let uncertain = !certain && any_mut;
   for l in lenders {
     let m = kind_of(self, &l);
     let evt = if m { Evt::MBorrow } else { Evt::SBorrow };
-    if m && !is_mut && matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)) {
+    if (m || uncertain) && !is_mut && matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)) {
       // (Through another reference, `r = downgrade(p)` with p a `&mut`:
       // drawn from p's column, as below.)
       let (from, through) = match l {
         ResourceTy::Deref(p) => (ResourceTy::Value(p), true),
         l => (l, false),
       };
-      let mut ev = self.ext_ev_of_evt(Evt::MBorrow, lhs.clone(), from, *self.unique_id, false);
-      if let ExternalEvent::MutableBorrow { via, is_reborrow, .. } = &mut ev {
+      let mut ev = self.ext_ev_of_evt(evt.clone(), lhs.clone(), from, *self.unique_id, false);
+      if let ExternalEvent::MutableBorrow { via, is_reborrow, .. } | ExternalEvent::StaticBorrow { via, is_reborrow, .. } = &mut ev {
         *is_reborrow = through;
-        *via = Some(BorrowVia { shared: true, func: String::new(), lenders: Vec::new(), also_unnamed: false, tie: ArgTie::default(), carrier: ViaCarrier::Plain, passed_on: Vec::new() });
+        *via = Some(BorrowVia { shared: m && !uncertain, uncertain, holder_ref: Some(false), func: String::new(), lenders: Vec::new(), also_unnamed: false, tie: ArgTie::default(), carrier: ViaCarrier::Plain, passed_on: Vec::new() });
       }
       self.add_external_event(line_num, ev);
       *self.unique_id += 1;

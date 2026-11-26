@@ -21084,16 +21084,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "p is partially moved: p.a was moved out, so p can't be used as a whole; its other fields still can",
             "u is partially moved: u.0 was moved out, so u can't be used as a whole; its other fields still can",
-            "o is partially moved: o.inner.x was moved out, so o can't be used as a whole; its other fields still can",
+            "o is partially moved: o.inner.x was moved out, so o can't be used as a whole",
             // (o.inner's fields were moved one by one: o.inner itself never
             // was, #1619.)
-            "o is partially moved: o.inner.x and o.inner.y were moved out, so o can't be used as a whole; its other fields still can",
+            "o is partially moved: o.inner.x and o.inner.y were moved out, so o can't be used as a whole",
             "o.inner is partially moved: o.inner.x was moved out, so o.inner can't be used as a whole; its other fields still can",
             "q is partially moved: q.a may have been moved out, so q can't be used as a whole; its other fields still can",
             "r is partially moved: r.a was moved out, so r can't be used as a whole; its other fields still can",
             "r is the owner of the resource",
         ],
-        must_not_contain: &["o is partially moved: o.inner was moved out"],
+        // (o.inner can't be used as a whole once o.inner.x is out, so
+        // "its other fields still can" isn't said, #1619.)
+        must_not_contain: &["o is partially moved: o.inner was moved out", "o is partially moved: o.inner.x was moved out, so o can't be used as a whole; its other fields still can"],
     },
     TooltipExpect {
         name: "non_ascii_names_1160",
@@ -27949,7 +27951,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // borrow from s to vr" read as if vr could write s).
         must_contain: &[
             "Shared reference made from a mutable borrow of s, stored in vr by push; vr isn't a reference, but its value now holds one",
-            "vr's value holds a shared reference made from a mutable borrow of s's resource; the borrow stays mutable until that reference's last use (vr isn't a reference itself)",
+            "vr's value holds a shared reference made from a mutable borrow of s's resource; the mutable loan lasts while anything that holds it is still used (vr isn't a reference itself)",
             "s's resource is mutably borrowed by vr; s can't be used while the borrow is live",
             "Return mutably borrowed resource from vr to s",
             "Shared reference made from a mutable borrow of s1, stored in vs by push; vs isn't a reference, but its value now holds one",
@@ -28001,7 +28003,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // it ends. (r3's end isn't pinned beyond "not immutable": #1596
         // gives s2 back there.)
         must_contain: &[
-            "r's borrow ends; the mutable borrow r was made from lasts until nothing that holds it is used again",
+            "r's borrow ends; a mutable loan behind it lasts while anything that holds it is still used",
         ],
         must_not_contain: &[
             "=r3's immutable borrow ends",
@@ -28020,9 +28022,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Not "y is partially moved" (#1599's Codex review): each arm
         // that runs moves all of y, the others none of it.
         must_contain: &[
-            "p.b was moved out and p.a may have been, so neither p nor any of its fields can be used; what is left in p is dropped when it goes out of scope",
-            "x.a and x.b may have been moved out, so neither x nor any of its fields can be used; what is left in x is dropped when it goes out of scope",
-            "y.a and y.b may have been moved out, so neither y nor any of its fields can be used; what is left in y is dropped when it goes out of scope",
+            "p.b was moved out and p.a may have been, so neither p as a whole nor those fields can be used; what is left in p is dropped when it goes out of scope",
+            "x.a and x.b may have been moved out, so neither x as a whole nor those fields can be used; what is left in x is dropped when it goes out of scope",
+            "y.a and y.b may have been moved out, so neither y as a whole nor those fields can be used; what is left in y is dropped when it goes out of scope",
         ],
         must_not_contain: &[
             "what is left in u",
@@ -28053,13 +28055,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Shared reference made from a mutable borrow of c, stored in u by push; u isn't a reference, but its value now holds one",
             "c's resource is mutably borrowed by u; c can't be used while the borrow is live",
             "Shared reference made from a mutable borrow of d, to o",
-            "o's value holds a shared reference made from a mutable borrow of d's resource; the borrow stays mutable until that reference's last use (o isn't a reference itself)",
+            "o's value holds a shared reference made from a mutable borrow of d's resource; the mutable loan lasts while anything that holds it is still used (o isn't a reference itself)",
             "Return mutably borrowed resource from o to d",
             "Immutable borrow from e to o",
             "Return immutably borrowed resource from o to e",
-            "r1's borrow ends; the mutable borrow r1 was made from lasts until nothing that holds it is used again",
-            "q5's borrow ends; the mutable borrow q5 was made from lasts until nothing that holds it is used again",
-            "q6's borrow ends; the mutable borrow q6 was made from lasts until nothing that holds it is used again",
+            "r1's borrow ends; a mutable loan behind it lasts while anything that holds it is still used",
+            "q5's borrow ends; a mutable loan behind it lasts while anything that holds it is still used",
+            "q6's borrow ends; a mutable loan behind it lasts while anything that holds it is still used",
         ],
         must_not_contain: &[
             "Mutable borrow from a to v",
@@ -28088,10 +28090,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // conditional, as on main: drawn, its title would say p.b can
         // still be used after its drop, #1595.)
         must_contain: &[
-            "z.t was moved out and z.pair.a and z.pair.b may have been, so neither z nor any of its fields can be used; what is left in z is dropped when it goes out of scope",
-            "m.b was moved out and m.a may have been, so neither m nor any of its fields can be used until they are assigned new values; what is left in m is dropped when it is overwritten or m goes out of scope",
-            "p.b was moved out and p.a may have been, so neither p nor any of its fields can be used; what is left in p is dropped when it goes out of scope",
-            "y.pair.a and y.pair.b were moved out and y.t may have been, so neither y nor any of its fields can be used; what is left in y is dropped when it goes out of scope",
+            "z.t was moved out and z.pair.a and z.pair.b may have been, so neither z as a whole nor those fields can be used; what is left in z is dropped when it goes out of scope",
+            "m.b was moved out and m.a may have been, so neither m as a whole nor those fields can be used until they are assigned new values; what is left in m is dropped when it is overwritten or m goes out of scope",
+            "p.b was moved out and p.a may have been, so neither p as a whole nor those fields can be used; what is left in p is dropped when it goes out of scope",
+            "y.pair.a and y.pair.b were moved out and y.t may have been, so neither y as a whole nor those fields can be used; what is left in y is dropped when it goes out of scope",
         ],
         must_not_contain: &[
             "z.pair may have been",
@@ -28134,20 +28136,34 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Shared reference made from a mutable reborrow through p10, to o10",
             "Shared reference made from a mutable reborrow through p10, to r10: downgrade's signature gives the reference it returns the same lifetime as its argument",
             "Shared reference made from a mutable borrow of a11, to h11.v: hold's signature gives the struct it returns the same lifetime as its argument",
-            "h11.v's value holds a shared reference made from a mutable borrow of a11's resource; the borrow stays mutable until that reference's last use (h11.v isn't a reference itself)",
+            "h11.v's value holds a shared reference made from a mutable borrow of a11's resource; the mutable loan lasts while anything that holds it is still used (h11.v isn't a reference itself)",
             "Shared reference made from a mutable borrow of a12, to o12: Some's signature gives the value it returns the same lifetime as its argument; o12 isn't a reference, but its value holds one",
             "Immutable borrow from b12 to o12: Some's signature gives the value it returns the same lifetime as its argument; o12 isn't a reference, but its value holds one",
             // (per_argument, third Codex round: `choose(&mut a13, &b13)`
             // lends b13 shared; `extend([(&a14, &mut b14)])` keeps each
             // loan's kind; `id(&mut a15)` and `&r16[0]` keep the mutable
             // loan; k17 copies r17's re-pointed shared loan of b17.)
-            "Immutable borrow from b13 to v13, stored in v13 by push; v13 isn't a reference, but its value now holds one",
-            "Shared reference made from a mutable borrow of a13, stored in v13 by push; v13 isn't a reference, but its value now holds one",
+            // (choose may return either reference: which loan v13 keeps
+            // isn't known, so neither lender's kind is stated, #1619.)
+            "Borrow from b13 to v13, stored in v13 by push; v13 isn't a reference, but its value now holds one",
+            "Borrow from a13 to v13, stored in v13 by push; v13 isn't a reference, but its value now holds one",
+            "b13's resource is borrowed by v13 (possibly mutably, so b13 may not be readable while the borrow is live)",
+            "v13 holds a shared reference that may point into b13's resource (v13 isn't a reference itself)",
             "Immutable borrow from a14 to v14, stored in v14 by extend; v14 isn't a reference, but its value now holds one",
             "Mutable borrow from b14 to v14, stored in v14 by extend; v14 isn't a reference, but its value now holds one",
             "Shared reference made from a mutable borrow of a15, stored in v15 by push; v15 isn't a reference, but its value now holds one",
             "Shared reference made from a mutable borrow of a16, stored in v16 by push; v16 isn't a reference, but its value now holds one",
             "k17's immutable borrow ends",
+            // (hedged, third Codex round: `fixed()` lends nothing; w19 and
+            // v20 keep a loan of a19/b19, a20/b20 of unknown kind; k21
+            // copied r21's mutable loan before r21 was re-pointed.)
+            "Copy of the value fixed() returns to o18",
+            "Borrow from b19 to w19, stored in w19 by push; w19 isn't a reference, but its value now holds one",
+            "b19's resource is borrowed by w19 (possibly mutably, so b19 may not be readable while the borrow is live)",
+            "w19 holds a shared reference that may point into b19's resource (w19 isn't a reference itself)",
+            "Borrow from b20 to v20, stored in v20 by push; v20 isn't a reference, but its value now holds one",
+            "b20's resource is no longer borrowed by v20",
+            "k21's mutable borrow ends",
         ],
         must_not_contain: &[
             "Shared reference made from a mutable borrow of a1, ",
@@ -28170,10 +28186,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "b12's resource is mutably borrowed by o12",
             "made from a mutable borrow of b13",
             "b13's resource is mutably borrowed by v13",
+            "Immutable borrow from b13 to v13",
             "Mutable borrow from a14 to v14",
             "Immutable borrow from a15 to v15",
             "Immutable borrow from a16 to v16",
-            "the mutable borrow k17 was made from",
+            "k17's borrow ends; a mutable loan behind it",
+            "fixed's signature",
+            "Mutable borrow from b18 to o18",
+            "Shared reference made from a mutable borrow of b19",
+            "b19's resource is mutably borrowed by w19",
+            "Shared reference made from a mutable borrow of b20",
+            "k21's immutable borrow ends",
         ],
     },
 ];
@@ -38386,7 +38409,9 @@ fn struct_lines_after_maybe_moves_1568_1583() {
     assert!(svg.contains("data-rv-id=\"c2.r@L31:dot:static_die\""), "copied_ref_field_end_1568: no element c2.r@L31:dot:static_die");
     // k.r's end comes by row 41, the loop body's scope end (main today);
     // k's last use is row 39, where it belongs (#1613): either passes.
-    assert!(svg.contains("data-rv-id=\"k.r@L39:dot:static_die") || svg.contains("data-rv-id=\"k.r@L41:dot:static_die"),
+    let k_end = |row: u32| svg.match_indices(&format!("data-rv-id=\"k.r@L{}:dot:", row))
+        .any(|(i, m)| svg[i + m.len()..].split('"').next().is_some_and(|ev| ev.split('+').any(|e| e == "static_die")));
+    assert!(k_end(39) || k_end(41),
         "copied_ref_field_end_1568: k.r's end isn't on row 39 or 41");
     assert!(!svg.contains("data-rv-id=\"k.r@L42:"), "k.r's end is drawn below its column");
     let svg = run_with_local_backend("fields_maybe_all_moved_1583").timeline_panel_string();

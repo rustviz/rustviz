@@ -80,6 +80,9 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // `second_conditional`: p's line stops where the second `if` splits,
     // though p.a may still be in it (as on main; #1595).
     ("fields_maybe_moved_1599", "line-starts-nowhere", 1595),
+    // `let r20 = choose(&mut a20, &b20, f);`: a20's arrow head along r20's
+    // line, as other two-lender call results draw it (#1542).
+    ("shared_ref_of_mut_siblings_1599", "arrow-along-leg", 1542),
 ];
 
 /// The invariants, by the name the failure list and messages use.
@@ -579,16 +582,21 @@ pub fn check(fig: &Fig, src: &str) -> Vec<(&'static str, String)> {
     // A reference re-pointed by a copy of another one (`r = r2;`) holds
     // that one's loan from then on, of its kind (#1521): the kinds of the
     // borrows the source's column last drew, at or before the copy.
+    // (On the copy's own row, only what the source drew before it was
+    // copied: `let k = r; r = &b;` copies r's old loan, #1619.)
     let last_borrow_kinds = |var: &str, line: u32| -> BTreeSet<&'static str> {
         let mut ds: Vec<&Dot> = fig.dots.iter().filter(|d| d.var == var && d.line <= line).collect();
         ds.sort_by(|a, b| a.y.total_cmp(&b.y));
         ds.iter().rev()
-            .find(|d| d.has_any(&["static_borrow", "mutable_borrow"]))
-            .map(|d| d.events.iter().filter_map(|e| match e.as_str() {
-                "static_borrow" => Some("static"),
-                "mutable_borrow" => Some("mutable"),
-                _ => None,
-            }).collect())
+            .map(|d| {
+                let upto = if d.line == line { d.events.iter().position(|e| e == "duplicate").unwrap_or(d.events.len()) } else { d.events.len() };
+                d.events[..upto].iter().filter_map(|e| match e.as_str() {
+                    "static_borrow" => Some("static"),
+                    "mutable_borrow" => Some("mutable"),
+                    _ => None,
+                }).collect::<BTreeSet<&'static str>>()
+            })
+            .find(|k| !k.is_empty())
             .unwrap_or_default()
     };
     for ds in dots_of.values() {

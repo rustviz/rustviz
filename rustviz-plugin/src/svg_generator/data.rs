@@ -1479,6 +1479,13 @@ pub struct BorrowVia {
     /// &String = &mut s`): it can only read, but the loan stays mutable
     /// (#1599). (A shared reference's own column says so by its type.)
     pub shared: bool,
+    /// The kind of this lender's loan isn't known exactly, and may be
+    /// mutable (`v.push(choose(&mut a, &b))`): the lender's text says it
+    /// is borrowed, "possibly mutably" (#1619's hedge).
+    pub uncertain: bool,
+    /// What the holder stores, from its type: shared references
+    /// (`Some(false)`), `&mut`s (`Some(true)`), or unknown.
+    pub holder_ref: Option<bool>,
     /// The call whose result holds the borrow (`first_word`).
     pub func: String,
     /// Every variable the result borrows from, in argument order.
@@ -6646,8 +6653,15 @@ fn history_holds_mut_borrow(vd: &VisualizationData, history: &[(usize, Event)], 
             Event::MutableBorrow { .. } | Event::StaticBorrow { .. } => before[..=pos.unwrap_or(0)].iter().rev()
                 .take_while(|(l2, e2)| l2 == l && matches!(e2, Event::MutableBorrow { .. } | Event::StaticBorrow { .. }))
                 .any(|(_, e2)| matches!(e2, Event::MutableBorrow { .. })),
+            // (The source as of the copy: not a re-point after it on the
+            // same row, `let k = r; r = &b;`, #1619.)
             Event::Copy { from, .. } => from.extract_rap()
-                .is_some_and(|src| src.hash() != ro.hash() && holds_mut_borrow_by(vd, src, *l, seen)),
+                .is_some_and(|src| src.hash() != ro.hash() && vd.timelines.get(src.hash()).is_some_and(|t| {
+                    let cut = t.history.iter()
+                        .position(|(l2, e2)| l2 == l && matches!(e2, Event::Duplicate { to, .. } if to.extract_rap().is_some_and(|x| x.hash() == ro.hash())))
+                        .unwrap_or(t.history.len());
+                    history_holds_mut_borrow(vd, &t.history[..cut], src, *l, seen)
+                })),
             _ => false,
         });
     }

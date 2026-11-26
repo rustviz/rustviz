@@ -2026,7 +2026,7 @@ pub fn event_dot_mut_return(my_name: &String) -> String {
 // stored in) is used again.
 pub fn event_dot_shared_ref_of_mut_return(my_name: &String) -> String {
     format!(
-        "{0}'s borrow ends; the mutable borrow {0} was made from lasts until nothing that holds it is used again",
+        "{0}'s borrow ends; a mutable loan behind it lasts while anything that holds it is still used",
         styled_name_html(my_name)
     )
 }
@@ -3439,7 +3439,7 @@ pub fn state_arm_join(label: &str) -> String {
 // it can't be used as a whole any more, only the fields still in it.
 // `maybe`: on some paths through a conditional above only; Rust still
 // rejects using the struct as a whole after it.
-pub fn state_partly_moved(my_name: &String, moved: &[String], maybe: bool) -> String {
+pub fn state_partly_moved(my_name: &String, moved: &[String], maybe: bool, others_usable: bool) -> String {
     let names: Vec<String> = moved.iter().map(|m| styled_name_html(m)).collect();
     let (list, verb) = match (names.as_slice(), maybe) {
         ([one], false) => (one.clone(), "was"),
@@ -3449,8 +3449,11 @@ pub fn state_partly_moved(my_name: &String, moved: &[String], maybe: bool) -> St
         ([], _) => (String::new(), "was"),
     };
     format!(
-        "{0} is partially moved: {1} {2} moved out, so {0} can't be used as a whole; its other fields still can",
-        styled_name_html(my_name), list, verb
+        "{0} is partially moved: {1} {2} moved out, so {0} can't be used as a whole{3}",
+        styled_name_html(my_name), list, verb,
+        // (Not when fields of a field were moved: `o.inner` can't be
+        // used as a whole either, #1619.)
+        if others_usable { "; its other fields still can" } else { "" }
     )
 }
 
@@ -3479,7 +3482,7 @@ pub fn state_fields_maybe_all_moved(my_name: &String, surely: &[String], maybe: 
         ("", String::from("when it goes out of scope"))
     };
     format!(
-        "{1}, so neither {0} nor any of its fields can be used{2}; what is left in {0} is dropped {3}",
+        "{1}, so neither {0} as a whole nor those fields can be used{2}; what is left in {0} is dropped {3}",
         styled_name_html(my_name), moved, until, dropped
     )
 }
@@ -3605,11 +3608,7 @@ pub enum HolderLender {
 // self.items.iter();` with `self: &mut Self`; #1080) is named as the
 // place it is.
 pub fn event_dot_holder_borrow(my_name: &String, from_name: &String, is_mut: bool, from: HolderLender, holds_value: bool) -> String {
-    let what = match from {
-        HolderLender::Pointee => format!("the data {} points to", styled_name_html(from_name)),
-        HolderLender::FieldThroughRef => styled_name_html(from_name),
-        HolderLender::Own => format!("{}'s {}", styled_name_html(from_name), if holds_value { "value" } else { "resource" }),
-    };
+    let what = holder_lender_phrase(from_name, from, holds_value);
     format!(
         "{0} holds a value that {1} borrows {2} ({0} isn't a reference itself)",
         styled_name_html(my_name),
@@ -3624,15 +3623,55 @@ pub fn event_dot_holder_borrow(my_name: &String, from_name: &String, is_mut: boo
 // vr may be overwritten first), so s stays mutably borrowed. (Not
 // "can only read": a `&Cell<i32>` can write.)
 pub fn event_dot_holder_shared_ref_of_mut(my_name: &String, from_name: &String, from: HolderLender, holds_value: bool) -> String {
-    let what = match from {
-        HolderLender::Pointee => format!("the data {} points to", styled_name_html(from_name)),
+    format!(
+        "{0}'s value holds a shared reference made from a mutable borrow of {1}; the mutable loan lasts while anything that holds it is still used ({0} isn't a reference itself)",
+        styled_name_html(my_name), holder_lender_phrase(from_name, from, holds_value)
+    )
+}
+
+/// What a holder borrows, named: "s's resource", "the data p points to"
+/// (`*p`'s name is p's: the place is what p points to, #1619), a field.
+fn holder_lender_phrase(from_name: &String, from: HolderLender, holds_value: bool) -> String {
+    match from {
+        HolderLender::Pointee => format!("the data {} points to", styled_name_html(&from_name.trim_start_matches('*').to_owned())),
         HolderLender::FieldThroughRef => styled_name_html(from_name),
         HolderLender::Own => format!("{}'s {}", styled_name_html(from_name), if holds_value { "value" } else { "resource" }),
-    };
+    }
+}
+
+// A holder whose loan of `from` isn't known exactly (#1619's hedge:
+// `v.push(choose(&mut a, &b))` may keep either loan): what it stores is
+// known from its type, which lender it points into isn't.
+pub fn event_dot_holder_uncertain_borrow(my_name: &String, from_name: &String, from: HolderLender, holds_value: bool, holder_ref: Option<bool>) -> String {
+    let what = holder_lender_phrase(from_name, from, holds_value);
+    match holder_ref {
+        Some(false) => format!("{0} holds a shared reference that may point into {1} ({0} isn't a reference itself)", styled_name_html(my_name), what),
+        Some(true) => format!("{0} holds a mutable reference that may point into {1} ({0} isn't a reference itself)", styled_name_html(my_name), what),
+        None => format!("{0} holds a value that borrows {1} ({0} isn't a reference itself)", styled_name_html(my_name), what),
+    }
+}
+
+// The lender of such a loan: borrowed, but the kind isn't known.
+pub fn event_dot_uncertain_lend(my_name: &String, target_name: &String, holds_value: bool) -> String {
     format!(
-        "{0}'s value holds a shared reference made from a mutable borrow of {1}; the borrow stays mutable until that reference's last use ({0} isn't a reference itself)",
-        styled_name_html(my_name), what
+        "{0}'s {2} is borrowed by {1} (possibly mutably, so {0} may not be readable while the borrow is live)",
+        styled_name_html(my_name), styled_name_html(target_name), held(holds_value)
     )
+}
+
+// Where it ends.
+pub fn event_dot_uncertain_reacquire(my_name: &String, target_name: &String, holds_value: bool) -> String {
+    format!("{0}'s {2} is no longer borrowed by {1}", styled_name_html(my_name), styled_name_html(target_name), held(holds_value))
+}
+
+// The give-back arrow of such a loan.
+pub fn arrow_uncertain_return(holder: &String, lender: &String) -> String {
+    format!("Return borrowed resource from {} to {}", styled_name_html(holder), styled_name_html(lender))
+}
+
+// The holder's end of such a loan.
+pub fn event_dot_uncertain_return(my_name: &String) -> String {
+    format!("{0}'s borrow ends", styled_name_html(my_name))
 }
 
 // `let k = Box::new(r);` with r a `&mut` parameter (#1289): k's value
@@ -6056,11 +6095,17 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
     // id(r);`, `vr.push(r)`, `let o = Some(r);` with `r: &String = &mut
     // s`): what r2 / vr / o gets can only read s, though s stays mutably
     // borrowed while it is held (#1599).
+    if let ExternalEvent::MutableBorrow { via: Some(via), is_partial: false, .. } | ExternalEvent::StaticBorrow { via: Some(via), is_partial: false, .. } = external_event {
+        // (A loan whose kind isn't known exactly, #1619's hedge.)
+        if via.uncertain && !to.is_closure() {
+            title = format!("Borrow from {} to {}", styled_from_string, styled_to_string);
+        }
+    }
     if let ExternalEvent::MutableBorrow { via: Some(via), is_partial: false, is_reborrow, .. } = external_event {
         let shared_ref = matches!(to, ResourceTy::Value(r) if r.is_ref() && !r.is_mutref());
-        if (via.shared || shared_ref) && !to.is_closure() {
+        if (via.shared || shared_ref) && !via.uncertain && !to.is_closure() {
             // (`downgrade(p)` with p a `&mut`: through p, #1599.)
-            let what = if *is_reborrow {
+            let what = if *is_reborrow || matches!(from, ResourceTy::Deref(_)) {
                 format!("a mutable reborrow through {}", styled_from_string)
             } else {
                 format!("a mutable borrow of {}", styled_from_string)
