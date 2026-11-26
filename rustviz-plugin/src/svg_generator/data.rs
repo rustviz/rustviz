@@ -2186,6 +2186,8 @@ pub enum ExternalEvent {
     // this scope end (#1020).
     GoOutOfScope {
         ro: ResourceAccessPoint,
+        // References whose lifetimes dropck requires at this exit.
+        drop_uses: Vec<ResourceAccessPoint>,
         // What rustc's move data says the variable holds at this `}`,
         // on the paths that get there through the code before it
         // (`ownership_at_scope_ends`, #1036, #1037); `None` when it
@@ -3036,7 +3038,9 @@ pub enum State {
     // temporarily no read or write access right to the resource, but eventually
     // the privilege will come back. Occurs when mutably borrowed
     RevokedPrivilege {
-        to: ResourceTy,
+        // A loan of the reference variable survives a write through its borrower.
+        // A loan of its old referent cannot restrict a new reference stored here.
+        of_ref_var: bool,
         borrow_to: ResourceTy,
         prev_state: Box<State>
     },
@@ -3184,7 +3188,7 @@ impl State {
             State::PartialPrivilege { .. } => {
                 hover_messages::state_partial_privilege(my_name, false)
             }
-            State::RevokedPrivilege { to: _, borrow_to: _, prev_state: _} => {
+            State::RevokedPrivilege { .. } => {
                 hover_messages::state_resource_revoked(my_name)
             }
             State::Invalid => {
@@ -3471,8 +3475,8 @@ fn lend_struct_borrows_to_members(timelines: &mut BTreeMap<u64, Timeline>) {
                         continue;
                     }
                     let lent_state = match pstate {
-                        State::RevokedPrivilege { to, borrow_to, .. } =>
-                            State::RevokedPrivilege { to: to.clone(), borrow_to: borrow_to.clone(), prev_state: Box::new(s.clone()) },
+                        State::RevokedPrivilege { of_ref_var, borrow_to, .. } =>
+                            State::RevokedPrivilege { of_ref_var: *of_ref_var, borrow_to: borrow_to.clone(), prev_state: Box::new(s.clone()) },
                         _ => State::PartialPrivilege { s: LineState::Full },
                     };
                     if x < lo { out.push((x, lo, s.clone())); }
@@ -5206,14 +5210,14 @@ impl Visualizable for VisualizationData {
             (State::PartialPrivilege{ .. }, Event::Copy{ .. }) if self.is_ref(hash) && !self.is_mutref(hash) =>
                 State::PartialPrivilege { s: LineState::Full },
 
-            (State::FullPrivilege{..}, Event::MutableLend{ to: to_ro ,..}) => {
+            (State::FullPrivilege{..}, Event::MutableLend{ to: to_ro, of_ref_var, ..}) => {
             // Assumption: variables can lend mutably if
             // 1) variable instance is mutable or 2) variable is a mutable reference
             // Use cases: 'mutable_borrow' & 'nll_lexical_scope_different'
             // 3) or it holds a `&mut` the call reborrows through: `k.push('!')`
             // with `k: Box<&mut String>`, k not `mut` (#1282).
                 if self.is_mut(hash) | self.is_mutref(hash) | holder | self.lends_through_held_ref(event) {
-                    State::RevokedPrivilege{ to: ResourceTy::Anonymous, borrow_to: to_ro.to_owned(), prev_state: Box::from(previous_state.to_owned()) }
+                    State::RevokedPrivilege{ of_ref_var: *of_ref_var, borrow_to: to_ro.to_owned(), prev_state: Box::from(previous_state.to_owned()) }
                 } else {
                     State::Invalid
                 }
@@ -5280,8 +5284,8 @@ impl Visualizable for VisualizationData {
             (State::FullPrivilege{..}, Event::StaticLend{ ..}) =>
                 State::PartialPrivilege { s: LineState::Full },
 
-            (State::PartialPrivilege{ .. }, Event::MutableLend{ to: to_ro, .. }) => 
-            State::RevokedPrivilege { to: ResourceTy::Anonymous, borrow_to: to_ro.to_owned(), prev_state: Box::from(previous_state.to_owned()) },
+            (State::PartialPrivilege{ .. }, Event::MutableLend{ to: to_ro, of_ref_var, .. }) =>
+            State::RevokedPrivilege { of_ref_var: *of_ref_var, borrow_to: to_ro.to_owned(), prev_state: Box::from(previous_state.to_owned()) },
 
             (State::PartialPrivilege{ .. }, Event::StaticLend{ ..}) => {
                 State::PartialPrivilege { s: LineState::Full }
@@ -5302,24 +5306,24 @@ impl Visualizable for VisualizationData {
             // same revocation rather than starting a second one.
             (State::RevokedPrivilege{ .. }, Event::MutableLend{ .. }) => (*previous_state).clone(),
 
-            // A reference variable re-pointed through the `&mut` that
-            // borrows it (`*r = &t` with `r = &mut x`, #904): x still
-            // can't be used while r's borrow is live, and holds the new
-            // reference (or none, after the old one's end) once it is
-            // given back.
-            (State::RevokedPrivilege{ to, borrow_to, .. }, Event::StaticBorrow{ .. })
-            | (State::RevokedPrivilege{ to, borrow_to, .. }, Event::MutableBorrow{ .. })
-            | (State::RevokedPrivilege{ to, borrow_to, .. }, Event::StaticDie{ .. })
-            | (State::RevokedPrivilege{ to, borrow_to, .. }, Event::MutableDie{ .. }) if self.is_ref(hash) => {
-                // (By the reference's own type, as above.)
+            // Replacing the reference leaves a reborrow pointing into the old
+            // referent (#1625). A write *through* a borrow of the variable
+            // itself (#904) leaves that borrow of the variable in place.
+            (State::RevokedPrivilege { of_ref_var, borrow_to, .. },
+                Event::StaticBorrow { .. } | Event::MutableBorrow { .. }
+                | Event::StaticDie { .. } | Event::MutableDie { .. }) if self.is_ref(hash) => {
                 let holds = match event {
                     Event::StaticBorrow { .. } | Event::MutableBorrow { .. } if self.is_mutref(hash) => State::FullPrivilege { s: LineState::Full },
                     Event::StaticBorrow { .. } | Event::MutableBorrow { .. } => State::PartialPrivilege { s: LineState::Full },
                     _ => State::OutOfScope,
                 };
-                State::RevokedPrivilege { to: to.clone(), borrow_to: borrow_to.clone(), prev_state: Box::new(holds) }
+                if *of_ref_var {
+                    State::RevokedPrivilege { of_ref_var: true, borrow_to: borrow_to.clone(), prev_state: Box::new(holds) }
+                } else {
+                    holds
+                }
             }
-                
+
             // self statically borrowed resource, and it returns; TODO what about references to self?
             (State::PartialPrivilege{ .. }, Event::StaticDie{ .. }) =>
                 State::OutOfScope,

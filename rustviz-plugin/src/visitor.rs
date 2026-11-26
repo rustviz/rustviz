@@ -2577,7 +2577,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         *self.unique_id += 1;
         self.exit_drops.insert(id);
         let early = Some(EarlyReturns { process_exit: process_exit.clone(), ..EarlyReturns::default() });
-        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, holds: None, id, early });
+        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, drop_uses: Vec::new(), holds: None, id, early });
       }
       for rap in scoped {
         let id = *self.unique_id;
@@ -2585,7 +2585,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.exit_drops.insert(id);
         self.exit_scope_ended.insert(rap.name().to_string());
         let early = Some(EarlyReturns { process_exit: process_exit.clone(), ..EarlyReturns::default() });
-        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, holds: None, id, early });
+        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, drop_uses: Vec::new(), holds: None, id, early });
       }
       return;
     }
@@ -2623,7 +2623,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           self.add_external_event(line, ExternalEvent::TemporaryDrop { ro: rap, ty: Some(ty), when, literal, early, part, id })
         }
         None if extended_temp => self.add_external_event(line, ExternalEvent::TemporaryDrop { ro: rap, ty: None, when, literal: false, early: false, part: None, id }),
-        None => self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, holds: None, id, early: None }),
+        None => self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, drop_uses: Vec::new(), holds: None, id, early: None }),
       }
     }
     while let Some(t) = tuples.pop() {
@@ -2634,7 +2634,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       *self.unique_id += 1;
       self.exit_drops.insert(id);
       self.exit_scope_ended.insert(rap.name().to_string());
-      self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, holds: None, id, early: None });
+      self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, drop_uses: Vec::new(), holds: None, id, early: None });
     }
     // Innermost first, like the drops above. Not `exit_drops`: the
     // column doesn't end in this dot, whose drop happens on some paths
@@ -3506,6 +3506,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       _ => false,
     }
+  }
+
+  // A return cannot carry a re-point into later code. A break or continue
+  // can, via its loop or block, so keep that alternative (#1626).
+  fn arm_leaves_function(&self, body: BranchBody<'tcx>) -> bool {
+    if matches!(body, BranchBody::Expr(e) if !self.expr_diverges(e)) { return false; }
+    branch_leaves(self.tcx, body).exits.iter().all(|e| matches!(e, BranchExit::Return | BranchExit::Panic | BranchExit::Other))
   }
 
   /// Record what an exit in the conditional `expr`, whose Branch event
@@ -5609,6 +5616,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
         // a branch, those drops are drawn on the branch's columns, at
         // the `return`.
         // (Or one directly in a `loop` that never ends, #1041.)
+        let first_drop = *self.unique_id;
         let breakless = self.returns_from_breakless_loop(expr);
         if breakless || self.returns_before_body_end(expr) {
           self.drop_locals_at_fn_return(expr, ret);
@@ -5616,6 +5624,8 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           self.drop_locals_on_exit(expr_to_line(expr, &self.tcx), ret, None, false, "return");
         }
         if !self.in_closure(expr) {
+          self.return_drops.extend((first_drop..*self.unique_id)
+            .filter(|id| self.exit_drops.contains(id)).map(|id| (id, expr.span)));
           self.drop_loop_iterators_on_return(expr_to_line(expr, &self.tcx));
         }
         if !breakless {
@@ -7454,6 +7464,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           }
           let r = self.borrow_map.get_mut(&lhs_rty.real_name()).unwrap();
           r.assigned_at = line_num;
+          r.ambiguous_target = false;
           r.aliasing = new_aliasing;
           r.lender = new_lender;
           r.static_lender = new_static_lender;
@@ -7554,6 +7565,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           let (new_lender, new_aliasing, new_static_lender, new_co_lenders) = self.get_ref_data_full(&rhs_expr);
           let r = self.borrow_map.get_mut(&modified_ref_name).unwrap();
           r.assigned_at = line_num;
+          r.ambiguous_target = false;
           r.aliasing = new_aliasing.clone();
           r.lender = new_lender;
           r.static_lender = new_static_lender;
@@ -8422,7 +8434,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           dead_else_notes = self.discard_dead_else(lo..*self.unique_id, e, &outer);
           HashSet::new()
         } else {
-          self.arm_borrows_next(&mut arm_borrows);
+          self.arm_borrows_next(&mut arm_borrows, self.arm_leaves_function(BranchBody::Expr(if_expr)));
           self.arm_frames.push(arm_lines(self, e));
           self.visit_expr(e);
           self.arm_frames.pop();
@@ -8454,7 +8466,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if let Some(e) = else_expr {
       else_inner = &else_inner | &bindings_within(e, &self.tcx, &self.raps);
     }
-    self.arm_borrows_end(arm_borrows);
+    // The implicit else keeps the incoming reference on its path.
+    if else_expr.is_none() && !always_matches {
+      self.record_reaching_targets(&mut arm_borrows, true);
+    }
+    // A dead else has already been discarded. The if body is then
+    // the last arm whose assignments were visited.
+    let last = else_expr.filter(|_| !dead_else).unwrap_or(if_expr);
+    self.arm_borrows_end(arm_borrows, self.arm_leaves_function(BranchBody::Expr(last)));
     let uninit_after_else = std::mem::take(&mut self.uninit_locals);
     let maybe_init_after_else = std::mem::take(&mut self.maybe_init_locals);
     #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
@@ -8643,7 +8662,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v) && !left.contains(v)) {
                 self.preprocessed_events.push((
                     if_end,
-                    ExternalEvent::GoOutOfScope { ro: var.clone(), holds: None, id: *self.unique_id, early: None },
+                    ExternalEvent::GoOutOfScope { ro: var.clone(), drop_uses: Vec::new(), holds: None, id: *self.unique_id, early: None },
                 ));
                 *self.unique_id += 1;
             }
@@ -8729,12 +8748,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let if_left = self.left_at_exits(self.ends_at_exits(if_expr, true), &if_decl);
     let else_left = self.left_at_exits(else_expr.is_some_and(|e| self.ends_at_exits(e, true)), &else_decl);
     for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v) && !if_scoped.contains(v) && !if_left.contains(v)) {
-      if_ev.push((if_end, ExternalEvent::GoOutOfScope { ro: var.clone(), holds: None, id: *self.unique_id, early: None }));
+      if_ev.push((if_end, ExternalEvent::GoOutOfScope { ro: var.clone(), drop_uses: Vec::new(), holds: None, id: *self.unique_id, early: None }));
       *self.unique_id += 1;
     }
 
     for var in in_decl_order(&else_decl).into_iter().filter(|v| needs_scope_end(v) && !else_scoped.contains(v) && !else_left.contains(v)) {
-      else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), holds: None, id: *self.unique_id, early: None }));
+      else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), drop_uses: Vec::new(), holds: None, id: *self.unique_id, early: None }));
       *self.unique_id += 1;
     }
     if_decl.extend(if_inner);
@@ -9056,7 +9075,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let mut failed_guards: Vec<(ChainFail, FailPath)> = Vec::new();
     for (arm_idx, arm) in arms.iter().enumerate() {
       if arm_idx > 0 {
-        self.arm_borrows_next(&mut arm_borrows);
+        self.arm_borrows_next(&mut arm_borrows, self.arm_leaves_function(BranchBody::Expr(arms[arm_idx - 1].body)));
       }
       // An arm's pattern bindings are out of scope in the next.
       self.in_scope.truncate(entry_len);
@@ -9271,7 +9290,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       for r in in_decl_order(&arm_decls).into_iter().filter(|v| needs_scope_end(v) && !arm_scoped.contains(v) && !arm_left.contains(v)) {
         let id = *self.unique_id;
         *self.unique_id += 1;
-        let gos = ExternalEvent::GoOutOfScope { ro: r.clone(), holds: None, id, early: None };
+        let gos = ExternalEvent::GoOutOfScope { ro: r.clone(), drop_uses: Vec::new(), holds: None, id, early: None };
         if inline {
           self.add_external_event(end, gos);
         } else {
@@ -9322,7 +9341,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         branch_data.push(ExtBranchData { e_data: branch_e_data, line_map: branch_line_map, decl_vars: arm_decls, diverges, exits, break_carries });
       }
     }
-    self.arm_borrows_end(arm_borrows);
+    self.arm_borrows_end(arm_borrows, arms.last().is_some_and(|a| self.arm_leaves_function(BranchBody::Expr(a.body))));
     #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
     let known: HashSet<HirId> = uninit_before.keys().chain(maybe_init_before.iter()).copied().collect();
     self.maybe_init_by_loop = by_loop_ends;
@@ -12903,11 +12922,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let maybe_init_before = self.maybe_init_locals.clone();
     let prev_inside_branch = std::mem::replace(&mut self.inside_branch, true);
     self.exit_frames.push(ExitFrame::Branch { len: entry_len, hide: Vec::new(), binds: Vec::new(), binds_at: 0, fn_level: false });
-    let arm_borrows = self.arm_borrows_begin();
+    let mut arm_borrows = self.arm_borrows_begin();
     self.arm_frames.push((split, merge, block_lo, merge));
     self.visit_block(els);
     self.arm_frames.pop();
-    self.arm_borrows_end(arm_borrows);
+    self.arm_borrows_next(&mut arm_borrows, self.arm_leaves_function(BranchBody::LetElse(els)));
+    self.arm_borrows_end(arm_borrows, false);
     let inner = self.raps_declared_since(hash_lo, &uninit_before);
     self.exit_frames.pop();
     self.in_scope = saved_scope;
@@ -12957,7 +12977,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     let left = self.left_at_exits(self.block_ends_at_exits(els, true), &decl);
     for var in in_decl_order(&decl).into_iter().filter(|v| needs_scope_end(v) && !scoped.contains(v) && !left.contains(v)) {
-      else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), holds: None, id: *self.unique_id, early: None }));
+      else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), drop_uses: Vec::new(), holds: None, id: *self.unique_id, early: None }));
       *self.unique_id += 1;
     }
     decl_vars.extend(decl);

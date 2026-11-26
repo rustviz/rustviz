@@ -63,6 +63,8 @@ fn all_fixtures() -> Vec<String> {
     names
 }
 
+/// A pin prefixed with a data-rv-id and a tab applies only to that mark.
+/// This distinguishes a true loan end from the same words on the wrong path.
 /// Tooltip-level expectations per snippet. `must_contain` strings have to
 /// appear verbatim as a `data-tooltip-text` value somewhere in the rendered
 /// timeline; `must_not_contain` strings must not appear *anywhere inside*
@@ -28069,6 +28071,64 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "A temporary holds the value that String::from returns",
         ],
     },
+    TooltipExpect {
+        name: "repoint_live_reborrow_1625",
+        must_contain: &[
+            "r@L6-8:line:full_privilege\tr holds a mutable reference; it can read and write the borrowed value",
+            // rustc rejects a direct write to either x or y before the use of a.
+            "x@L4-8:line:revoked_privilege\tx's value is mutably borrowed; x can't be used until the borrow ends",
+            "cursor@L19-21:line:full_privilege\tcursor holds a mutable reference; it can read and write the borrowed value",
+            "x@L8:dot:mutable_reacquire\tx's value is no longer mutably borrowed",
+            "y@L8:dot:mutable_reacquire\ty's value is no longer mutably borrowed",
+        ],
+        must_not_contain: &[
+            "x@L4-8:line:revoked_privilege\tmutably borrowed by r",
+            "r@L6-7:line:revoked_privilege\tr can't be used until the borrow ends",
+            "y@L7:dot:mutable_reacquire\ty's value is no longer mutably borrowed",
+        ],
+    },
+    TooltipExpect {
+        name: "drop_holder_return_1637",
+        must_contain: &[
+            "n@L10:dot:mutable_reacquire\tn's value is no longer mutably borrowed",
+            "d.0@L10:dot:mutable_die\td.0's mutable borrow ends",
+            "n@L12:dot:mutable_reacquire\tn's value is no longer mutably borrowed",
+            "d.0@L12:dot:mutable_die\td.0's mutable borrow ends",
+            "value@L31:dot:mutable_reacquire\tvalue's value is no longer mutably borrowed",
+            "value@L34:dot:mutable_reacquire\tvalue's value is no longer mutably borrowed",
+            "d2.0>n2@L21:arrow:mutable_die\tReturn mutably borrowed value from d2.0 to n2",
+            "d goes out of scope. Its resource is dropped.",
+            "d's resource is moved into drop, which drops it",
+        ],
+        must_not_contain: &[
+            "value@L30:dot:mutable_reacquire\tno longer mutably borrowed",
+            "value@L32:dot:mutable_reacquire\tno longer mutably borrowed",
+            "n@L9:dot:mutable_reacquire\tno longer mutably borrowed",
+            "d.0@L9:dot:mutable_die\td.0's mutable borrow ends",
+            "d2.0>n2@L23:arrow:mutable_die\tReturn mutably borrowed value from d2.0 to n2",
+            "d.0@L11-13:line:full_privilege\tit can read and write",
+        ],
+    },
+    TooltipExpect {
+        name: "repoint_return_let_else_1626",
+        must_contain: &[
+            "a acquires ownership of a new resource; its previous resource is dropped",
+            "*cursor acquires ownership of a new resource; its previous resource is dropped",
+            "left@L25-26:line:revoked_privilege\tcursor may point into left. You can't use left directly until the mutable borrow ends",
+            "Return mutably borrowed resource from cursor to left or right (cursor may point into either; its borrow of both ends here)",
+            "a@L7:dot:owner_go_out_of_scope\ta goes out of scope. Its resource is dropped.",
+            "r>a@L9:arrow:mutable_die\tReturn mutably borrowed resource from r to a",
+        ],
+        must_not_contain: &[
+            "b acquires ownership of a new resource; its previous resource is dropped",
+            "left acquires ownership of a new resource",
+            "right acquires ownership of a new resource",
+            "leaving acquires ownership of a new resource",
+            "right@L25-26:line:revoked_privilege\tmutably borrowed by cursor",
+            "=Return mutably borrowed resource from cursor to right",
+            "a goes out of scope. No resource is dropped.",
+        ],
+    },
 ];
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws
@@ -31090,8 +31150,9 @@ fn corpus_expected_tooltips_present() {
         let label = entry_label(idx);
         let res = std::panic::catch_unwind(|| {
             let rv = run_with_local_backend(expect.name);
-            assert_no_negative_sizes(expect.name, &rv.timeline_panel_string());
-            let actual = timeline_tooltips(&rv.timeline_panel_string());
+            let svg = rv.timeline_panel_string();
+            assert_no_negative_sizes(expect.name, &svg);
+            let actual = timeline_tooltips(&svg);
             // #308: a numbered header stops at "declared on line N"; the
             // long "While s₂ is in scope the name s refers to s₂ ..."
             // sentence was dropped as noise.
@@ -31100,17 +31161,30 @@ fn corpus_expected_tooltips_present() {
                 "{}: numbered header still has the trailing scope sentence: {:#?}", expect.name, actual
             );
 
+            let matches_pin = |pin: &str, forbidden: bool| {
+                let scoped;
+                let (needle, tooltips) = if let Some((id, needle)) = pin.split_once('\t') {
+                    scoped = svg.split('<').filter(|tag| attr(tag, "data-rv-id") == Some(id))
+                        .flat_map(timeline_tooltips).collect::<Vec<_>>();
+                    (needle, &scoped)
+                } else {
+                    (pin, &actual)
+                };
+                if forbidden { forbidden_present(needle, tooltips) }
+                else { tooltips.iter().any(|t| t == needle) }
+            };
+
             let missing: Vec<&str> = expect
                 .must_contain
                 .iter()
                 .copied()
-                .filter(|want| !actual.iter().any(|a| a == want))
+                .filter(|want| !matches_pin(want, false))
                 .collect();
             let unexpected: Vec<&str> = expect
                 .must_not_contain
                 .iter()
                 .copied()
-                .filter(|forbid| forbidden_present(forbid, &actual))
+                .filter(|forbid| matches_pin(forbid, true))
                 .collect();
 
             if !missing.is_empty() || !unexpected.is_empty() {

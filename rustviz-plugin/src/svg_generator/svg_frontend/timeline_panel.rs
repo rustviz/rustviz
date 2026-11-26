@@ -1942,7 +1942,7 @@ fn render_scope_end_dot(
             };
             append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
             return true;
-        } else if let Some((title, dropped)) = scope_end_by_rustc(event, ro, history, resource_hold, &name) {
+        } else if let Some((title, dropped)) = scope_end_by_rustc(event, ro, exit_path.as_deref().unwrap_or(history), resource_hold, &name) {
             // What's drawn above says something else about what's
             // dropped here than rustc does (#1036, #1037).
             if !dropped {
@@ -4412,9 +4412,28 @@ fn lent_out_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
     let Some(timeline) = visualization_data.timelines.get(rap.hash()) else {
         return text(hover_messages::LentTo::Unknown, false);
     };
+    // A RefDie ends this reference's part without giving the lender
+    // back (e.g. a reborrow survives a re-point, #1625). One lender
+    // segment can cover both holders. Its dot names the initial one.
+    fn handed_on(events: &[(usize, ExternalEvent)], holder: &ResourceAccessPoint, lender: &ResourceAccessPoint) -> bool {
+        events.iter().any(|(_, ev)| match ev {
+            ExternalEvent::RefDie { from: ResourceTy::Value(h), to: ResourceTy::Value(l), .. } =>
+                h.hash() == holder.hash() && l.hash() == lender.hash(),
+            ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| handed_on(&b.e_data, holder, lender)),
+            _ => false,
+        })
+    }
     let mut history = Vec::new();
     flat_history(&timeline.history, path, &mut history);
     history.sort_by_key(|(l, _)| *l);
+    // On a merged segment the reference may hold either of the loans
+    // that end together. Rust prevents direct use of either possible lender.
+    if let Some((_, Event::MutableReacquire { from: ResourceTy::Value(r), id, .. })) = history.iter().find(|(l, e)|
+        *l > line && matches!(e, Event::MutableLend { .. } | Event::MutableReacquire { .. })) {
+        if !r.is_member() && r.is_ref() && visualization_data.field_lenders.get(id).is_some_and(|f| f.end) {
+            return hover_messages::state_possible_mutable_lender(rap.name(), r.name());
+        }
+    }
     // Who holds a `&mut` borrow of it after the events up to `line`.
     let key = |to: &ResourceTy| match to {
         ResourceTy::Value(r) => Some((r.name().to_owned(), r.is_closure(), r.is_fn())),
@@ -4440,6 +4459,9 @@ fn lent_out_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
                     holders.push((k, *of_ref_var));
                 }
             }
+            Event::MutableLend { to: ResourceTy::Value(r), of_ref_var, .. }
+                if r.is_mutref() && r.is_mut() && handed_on(&visualization_data.external_events, r, rap) =>
+                holders.push((None, *of_ref_var)),
             Event::MutableLend { to, of_ref_var, .. } => holders.push((key(to), *of_ref_var)),
             Event::MutableReacquire { from, .. } => {
                 let k = key(from);
@@ -7815,9 +7837,9 @@ fn arrows_with_rows<'a>(events: &'a [(usize, ExternalEvent)], out: &mut Vec<(usi
 
 /// A reference field's column (`d.a` with `a: &'p str`): it holds one
 /// reference, so it points into one place at a time.
-fn ref_field(ty: &ResourceTy) -> Option<&ResourceAccessPoint> {
+fn tracked_reference(ty: &ResourceTy) -> Option<&ResourceAccessPoint> {
     match ty {
-        ResourceTy::Value(r) if r.is_member() && r.is_ref() => Some(r),
+        ResourceTy::Value(r) if r.is_ref() && (r.is_member() || r.is_mutref() && r.is_mut()) => Some(r),
         _ => None,
     }
 }
@@ -7865,6 +7887,18 @@ fn field_lender_walk(
     let mut borrows: Vec<((u64, usize, bool), Vec<(usize, String, usize)>)> = Vec::new();
     // (field, row, mutable) -> (lenders before the row, [(id, lender)])
     let mut ends: Vec<((u64, usize, bool), Vec<String>, Vec<(usize, String)>)> = Vec::new();
+    // For local bindings this pass explains a write through a reference
+    // that has different targets at the join (#1626). A write's end can
+    // also be drawn later, after another use of the same reference.
+    let writes: BTreeSet<_> = events.iter().filter_map(|(row, e)| {
+        let (_, to) = ResourceAccessPoint_extract(e);
+        match to {
+            ResourceTy::Deref(r) if r.is_mutref()
+                && matches!(e, ExternalEvent::Move { .. } | ExternalEvent::Copy { .. } | ExternalEvent::Bind { .. }) =>
+                    Some((*r.hash(), *row)),
+            _ => None,
+        }
+    }).collect();
     for (row, ev) in events {
         match ev {
             ExternalEvent::Branch { branches, .. } => {
@@ -7899,7 +7933,7 @@ fn field_lender_walk(
             }
             ExternalEvent::StaticBorrow { from, to, id, via, is_partial: false, .. }
             | ExternalEvent::MutableBorrow { from, to, id, via, is_partial: false, .. } => {
-                let (Some(field), Some(lender)) = (ref_field(to), column_lender(from)) else { continue };
+                let (Some(field), Some(lender)) = (tracked_reference(to), column_lender(from)) else { continue };
                 let name = from.name();
                 let list = pending.entry(*field.hash()).or_default();
                 // A new assignment replaces what it pointed into (the
@@ -7911,6 +7945,7 @@ fn field_lender_walk(
                 if !lender.is_ref() && !list.iter().any(|(n, _)| *n == name) {
                     list.push((name.clone(), *row));
                 }
+                if !field.is_member() { continue; }
                 let key = (*field.hash(), *row, matches!(ev, ExternalEvent::MutableBorrow { .. }));
                 let order = via.as_ref().and_then(|v| v.lenders.iter().position(|l| l == lender.name())).unwrap_or(usize::MAX);
                 match borrows.iter_mut().find(|(k, _)| *k == key) {
@@ -7921,18 +7956,31 @@ fn field_lender_walk(
             // A reference moved or copied into it (`o.inner = other;`,
             // `hold.r = tr;`) replaces what it pointed into too.
             ExternalEvent::Move { to, .. } | ExternalEvent::Copy { to, .. } => {
-                if let Some(list) = ref_field(to).and_then(|f| pending.get_mut(f.hash())) {
+                if let Some(list) = tracked_reference(to).and_then(|f| pending.get_mut(f.hash())) {
                     list.retain(|(_, r)| r == row);
                 }
             }
             ExternalEvent::StaticDie { from, to, id, .. } | ExternalEvent::MutableDie { from, to, id, .. } => {
-                let (Some(field), Some(_)) = (ref_field(from), column_lender(to)) else { continue };
+                let (Some(field), Some(_)) = (tracked_reference(from), column_lender(to)) else { continue };
                 if from.is_same_underlying(to) {
                     continue;
                 }
                 let key = (*field.hash(), *row, matches!(ev, ExternalEvent::MutableDie { .. }));
                 let before: Vec<String> = pending.get(field.hash()).into_iter().flatten()
                     .filter(|(_, r)| r != row).map(|(n, _)| n.clone()).collect();
+                // For a re-pointable binding, group only alternatives
+                // established by different assignments reaching this row.
+                // Other same-row loans can be independent reborrows.
+                if !field.is_member() && !ends.iter().any(|(k, ..)| *k == key) {
+                    let mut rows = pending.get(field.hash()).into_iter().flatten().map(|(_, r)| r).filter(|r| *r != row);
+                    let last_assignment = pending.get(field.hash()).into_iter().flatten().map(|(_, r)| *r).max();
+                    let wrote = last_assignment.is_some_and(|start| start <= *row
+                        && writes.range((*field.hash(), start)..=(*field.hash(), *row)).next().is_some());
+                    if !wrote || !rows.next().is_some_and(|first| rows.any(|r| r != first)) {
+                        if let Some(list) = pending.get_mut(field.hash()) { list.retain(|(_, r)| r == row); }
+                        continue;
+                    }
+                }
                 match ends.iter_mut().find(|(k, ..)| *k == key) {
                     Some((_, _, g)) => g.push((*id, to.name())),
                     None => ends.push((key, before, vec![(*id, to.name())])),

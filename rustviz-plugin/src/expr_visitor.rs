@@ -89,6 +89,8 @@ pub struct PatternElem {
 
 pub struct ArmBorrows {
   before: HashMap<String, RefData>,
+  // A concrete lender only while all the continuing arms agree.
+  reaching: BTreeMap<String, Option<ResourceTy>>,
   /// Variables declared before the conditional that held no loan when
   /// it began (`let r;`, #1069): an arm that gives one its first loan
   /// (`r = &t;`) doesn't give it to the next arm, which starts with r
@@ -182,6 +184,9 @@ pub struct StoredBorrow {
 #[derive(Debug, Clone)]
 pub struct RefData {
   pub lender: ResourceTy, // who this reference borrowed from
+  // Loan ends are drawn per arm, but a write through a reference with
+  // different reaching lenders can only name the dereferenced place.
+  pub ambiguous_target: bool,
   pub assigned_at: usize, // gen point
   pub lifetime: usize, // kill point
   pub ref_mutability: bool, // type
@@ -330,6 +335,8 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   pub mir_body: &'a Body<'tcx>, 
   pub hir_body: &'a rustc_hir::Body<'tcx>,
   pub bwf: &'a BodyWithBorrowckFacts<'tcx>,
+  pub return_cleanup: BTreeMap<rustc_middle::mir::Location, rustc_span::Span>,
+  pub return_drops: BTreeMap<usize, rustc_span::Span>,
 
   // Data structure used to represent active loans
   // borrower name -> RefData
@@ -1161,6 +1168,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       mir_body,
       hir_body,
       bwf,
+      return_cleanup: crate::mir_data::return_cleanup(hir_body, &bwf.body),
+      return_drops: BTreeMap::new(),
       current_scope: 0,
       current_fn_start,
       borrow_map: HashMap::new(),
@@ -1760,7 +1769,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       return;
     }
     self.retire_loan(&name, line_num);
-    self.borrow_map.insert(name.clone(), RefData { lender: lender.clone(), assigned_at: line_num, lifetime: line_num, ref_mutability: ref_mutability, aliasing: alia, static_lender: None, borrow_span: None, loan_line: None, co_lenders: Vec::new(), lender_muts: Vec::new(), through: Vec::new() });
+    self.borrow_map.insert(name.clone(), RefData { ambiguous_target: false, lender: lender.clone(), assigned_at: line_num, lifetime: line_num, ref_mutability: ref_mutability, aliasing: alia, static_lender: None, borrow_span: None, loan_line: None, co_lenders: Vec::new(), lender_muts: Vec::new(), through: Vec::new() });
   }
   /// A variable named `name` declared on `line` takes over the column
   /// of an earlier one of that name, which is out of scope by now
@@ -3336,6 +3345,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             _ => None,
           };
           self.borrow_map.insert(name.to_owned(), RefData {
+            ambiguous_target: false,
             lender: l,
             assigned_at: line,
             lifetime: line,
@@ -3561,7 +3571,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       .chain(self.uninit_locals.keys().chain(self.maybe_init_locals.iter()).map(|h| self.deferred_ident(*h)))
       .filter(|n| !self.borrow_map.contains_key(n))
       .collect();
-    ArmBorrows { before: self.borrow_map.clone(), unlent, done: Vec::new(), outer_value_binds, last_use: std::collections::BTreeMap::new() }
+    ArmBorrows { before: self.borrow_map.clone(), reaching: BTreeMap::new(), unlent, done: Vec::new(), outer_value_binds, last_use: std::collections::BTreeMap::new() }
+  }
+
+  pub(crate) fn record_reaching_targets(&self, ab: &mut ArmBorrows, incoming: bool) {
+    let loans = if incoming { &ab.before } else { &self.borrow_map };
+    #[expect(clippy::iter_over_hash_type, reason = "independent agreement check for each reference")]
+    for (k, rd) in loans {
+      if !(ab.before.contains_key(k) || ab.unlent.contains(k)) || !self.raps.get(k).is_some_and(|r| r.rap.is_ref()) {
+        continue;
+      }
+      let target = (!rd.ambiguous_target && rd.co_lenders.is_empty()).then(|| rd.lender.clone());
+      ab.reaching.entry(k.clone()).and_modify(|other| {
+        if *other != target { *other = None; }
+      }).or_insert(target);
+    }
   }
 
   /// Called before each arm but the first is visited. The arms are
@@ -3569,7 +3593,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// when another starts (still `x`, #806), so that arm's `c = &z;` ends
   /// `x`'s loan, not `y`'s. Every reference starts the arm with the loan
   /// it held before the conditional.
-  pub fn arm_borrows_next(&mut self, ab: &mut ArmBorrows) {
+  pub fn arm_borrows_next(&mut self, ab: &mut ArmBorrows, diverges: bool) {
+    // A diverging arm still needs its loan ends drawn, but the loans it
+    // assigned cannot reach the join (#1626).
+    if !diverges { self.record_reaching_targets(ab, false); }
+    let done = if diverges { &mut self.arm_loans } else { &mut ab.done };
     #[expect(clippy::disallowed_methods, reason = "sorted below")]
     let mut keys: Vec<&String> = ab.before.keys().collect();
     keys.sort();
@@ -3583,7 +3611,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             ab.last_use.insert(k.clone(), cur.lifetime);
           }
         } else {
-          ab.done.push((k.clone(), cur.clone()));
+          done.push((k.clone(), cur.clone()));
         }
       }
       self.borrow_map.insert(k.clone(), old.clone());
@@ -3593,7 +3621,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let unlent = self.unlent_keys(ab, self.borrow_map.keys());
     for k in unlent {
       if let Some(cur) = self.borrow_map.remove(&k) {
-        ab.done.push((k, cur));
+        let done = if diverges { &mut self.arm_loans } else { &mut ab.done };
+        done.push((k, cur));
       }
     }
   }
@@ -3620,7 +3649,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// loans; the other arms' loans are ended by `emit_borrow_ends`
   /// (`arm_loans`). A loan held from before keeps the last use seen in
   /// source order.
-  pub fn arm_borrows_end(&mut self, mut ab: ArmBorrows) {
+  pub fn arm_borrows_end(&mut self, mut ab: ArmBorrows, diverges: bool) {
+    if diverges {
+      self.arm_borrows_next(&mut ab, true);
+    } else {
+      self.record_reaching_targets(&mut ab, false);
+    }
     let mut done = std::mem::take(&mut ab.done);
     // A reference (or holder) the branches give their values to (`let y
     // = match n { 0 => { let r = &s1; r } _ => { let r = &s2; r } };`,
@@ -3684,6 +3718,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       done.remove(i);
     }
     self.arm_loans.extend(done);
+    for (name, target) in ab.reaching {
+      if let Some(rd) = self.borrow_map.get_mut(&name) {
+        rd.ambiguous_target |= target.as_ref() != Some(&rd.lender);
+      }
+    }
   }
 
   /// The end of reference `from`'s borrow (StaticDie / MutableDie),
@@ -5791,7 +5830,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if depth > 16 {
       return None;
     }
-    match &self.borrow_map.get(r.name())?.lender {
+    let rd = self.borrow_map.get(r.name())?;
+    if rd.ambiguous_target || !rd.co_lenders.is_empty() { return None; }
+    match &rd.lender {
       ResourceTy::Value(l) if !l.is_ref() => {
         if suffix.is_empty() {
           return Some(l.clone());
@@ -6888,6 +6929,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let Some(last) = self.last_live_line(&n, (line, usize::MAX)).filter(|&l| l > line) else { continue };
       let Some(rd) = self.borrow_map.get_mut(&n) else { continue };
       rd.lender = old.lender.clone();
+      rd.aliasing = old.aliasing.clone();
+      rd.ambiguous_target = old.ambiguous_target;
       rd.lender_muts = if old_mut == rd.ref_mutability { Vec::new() } else { vec![(old.lender.clone(), old_mut)] };
       let floor = self.borrow_floor.entry(n).or_insert(last);
       *floor = (*floor).max(last);
@@ -7192,6 +7235,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         self.mark_holder(&fname);
         let line = expr_to_line(&init, &self.tcx);
         self.borrow_map.insert(fname, RefData {
+          ambiguous_target: false,
           lender,
           assigned_at: line,
           lifetime: line,
@@ -7247,6 +7291,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let lender = lenders.remove(0);
     let aliasing = get_aliasing_data(&lender, &self.borrow_map);
     self.borrow_map.insert(name, RefData {
+      ambiguous_target: false,
       lender,
       assigned_at: line,
       lifetime: line,
@@ -7521,6 +7566,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       _ => None,
     };
     self.borrow_map.insert(name.clone(), RefData {
+      ambiguous_target: false,
       lender,
       assigned_at: line,
       lifetime: line,
@@ -7931,6 +7977,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       None => {
         let aliasing = get_aliasing_data(&lenders[0], &self.borrow_map);
         self.borrow_map.insert(name, RefData {
+          ambiguous_target: false,
           lender: lenders[0].clone(),
           assigned_at: line,
           lifetime: line,
@@ -8017,6 +8064,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         // statement, so stretch the loan to the enclosing scope so
         // the ref-line trapezoid actually has a non-degenerate range.
         self.borrow_map.insert(field_name, RefData {
+          ambiguous_target: false,
           lender: ref_lender.clone(),
           assigned_at: site.assigned_at,
           lifetime: site.scope,
@@ -8533,7 +8581,7 @@ pub fn emit_scope_end(&mut self, vars: HashSet<ResourceAccessPoint>, line: usize
     vars.sort_by_key(|r| *r.hash());
     vars.dedup_by_key(|r| *r.hash());
     for var in vars {
-        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: var, holds: None, id: *self.unique_id, early: None });
+        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: var, drop_uses: Vec::new(), holds: None, id: *self.unique_id, early: None });
         *self.unique_id += 1;
     }
 }
@@ -8693,7 +8741,7 @@ pub fn register_iflet_let_bindings(
             if let Some(body_end) = emit_gos_at {
                 self.add_external_event(body_end, ExternalEvent::GoOutOfScope {
                     ro: r.clone(),
-                    holds: None,
+                    drop_uses: Vec::new(), holds: None,
                     id: *self.unique_id,
                     early: None,
                 });
@@ -11645,12 +11693,12 @@ pub fn print_out_of_scope(&mut self){
         }
       }
       if rap.is_global && !duplicate && !left_at(rap.scope) {
-        self.add_external_event(rap.scope, ExternalEvent::GoOutOfScope { ro: rap.rap.clone(), holds: None, id: *self.unique_id, early: None });
+        self.add_external_event(rap.scope, ExternalEvent::GoOutOfScope { ro: rap.rap.clone(), drop_uses: Vec::new(), holds: None, id: *self.unique_id, early: None });
         *self.unique_id += 1;
       }
       // The later variables that share this column (#589).
       for &scope in rap.extra_scopes.iter().filter(|s| !left_at(**s)) {
-        self.add_external_event(scope, ExternalEvent::GoOutOfScope { ro: rap.rap.clone(), holds: None, id: *self.unique_id, early: None });
+        self.add_external_event(scope, ExternalEvent::GoOutOfScope { ro: rap.rap.clone(), drop_uses: Vec::new(), holds: None, id: *self.unique_id, early: None });
         *self.unique_id += 1;
       }
     }
@@ -12564,6 +12612,7 @@ pub fn print_out_of_scope(&mut self){
     hoist_ends_before_split(self.preprocessed_events, self.event_line_map, true, &self.pre_split_end_ids);
     hoist_ends_on_other_arms_lines(self.preprocessed_events);
     dedupe_borrow_ends(self.preprocessed_events, self.event_line_map);
+    self.mark_return_drop_uses();
     self.nest_borrow_ends_in_arms();
     end_scrutinee_borrows_in_other_arms(self.preprocessed_events, self.event_line_map, self.unique_id);
     self.end_outer_borrows_in_arms();
@@ -12862,6 +12911,48 @@ pub fn print_out_of_scope(&mut self){
       })
     }
     find(self.preprocessed_events, *r.hash())
+  }
+
+  // An implicit destructor is a use, including when several exits share
+  // its MIR block. Make that use visible to every pass that places ends
+  // on the different arms of a conditional.
+  fn mark_return_drop_uses(&mut self) {
+    fn mark(events: &mut [(usize, ExternalEvent)], uses: &BTreeMap<usize, Vec<ResourceAccessPoint>>) -> HashSet<ResourceAccessPoint> {
+      let mut used = HashSet::new();
+      for (_, ev) in events {
+        match ev {
+          ExternalEvent::GoOutOfScope { ro, id, drop_uses, .. } => {
+            if let Some(fields) = uses.get(id) {
+              drop_uses.extend(fields.iter().filter(|r| r.name().split('.').next() == Some(ro.name().as_str())).cloned());
+              used.extend(drop_uses.iter().cloned());
+            }
+          }
+          ExternalEvent::Branch { branches, live_vars, .. } => {
+            for arm in branches {
+              let fields = mark(&mut arm.e_data, uses);
+              #[expect(clippy::iter_over_hash_type, reason = "only inserts into sets")]
+              for field in fields {
+                if !arm.decl_vars.contains(&field) {
+                  live_vars.insert(field.clone());
+                  used.insert(field);
+                }
+              }
+            }
+          }
+          _ => {}
+        }
+      }
+      used
+    }
+    let mut uses = BTreeMap::<usize, Vec<ResourceAccessPoint>>::new();
+    for (id, name) in self.return_drop_uses() {
+      if let Some(rd) = self.raps.get(&name) {
+        uses.entry(id).or_default().push(rd.rap.clone());
+      }
+    }
+    if !uses.is_empty() {
+      mark(self.preprocessed_events, &uses);
+    }
   }
 
   fn end_borrows_at_exits(&mut self) {
@@ -14302,6 +14393,7 @@ fn handed_off_in(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint, mov
 fn touches(e: &ExternalEvent, r: &ResourceAccessPoint) -> bool {
   match e {
     ExternalEvent::Branch { live_vars, .. } => live_vars.contains(r),
+    ExternalEvent::GoOutOfScope { drop_uses, .. } if drop_uses.contains(r) => true,
     _ => {
       let (from, to) = ResourceAccessPoint_extract(e);
       from.extract_rap() == Some(r) || to.extract_rap() == Some(r)
@@ -14696,7 +14788,7 @@ fn end_borrows_at_exits_in(
         // After the arm's last use of r. An exit's own drop of r (a
         // `&mut` reference) isn't a use: the borrow ends before it.
         let last = arm.e_data.iter().rposition(|(_, ev)|
-          !matches!(ev, ExternalEvent::GoOutOfScope { ro, .. } if ro == r) && touches(ev, r));
+          !matches!(ev, ExternalEvent::GoOutOfScope { ro, drop_uses, .. } if ro == r && !drop_uses.contains(r)) && touches(ev, r));
         let (at_line, at) = match last {
           Some(i) => (match &arm.e_data[i].1 {
             ExternalEvent::Branch { merge_point, .. } => *merge_point,

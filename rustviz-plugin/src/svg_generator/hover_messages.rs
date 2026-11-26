@@ -3714,6 +3714,11 @@ pub fn state_lent_out(my_name: &String, to: LentTo, through_ref: Option<bool>, r
     format!("{}; {} can't be used until {}", subject, me, until)
 }
 
+pub fn state_possible_mutable_lender(name: &str, borrower: &str) -> String {
+    format!("{} may point into {}. You can't use {} directly until the mutable borrow ends",
+        styled_name_html(borrower), styled_name_html(name), styled_name_html(name))
+}
+
 // The dots of a `&mut` reference whose pointee a `for` loop's iterator
 // reborrows (`for e in v.iter_mut()` with `v: &mut Vec<_>`; #1046, or
 // `v.iter()`, shared; #1059): where the head's call lends it, and where

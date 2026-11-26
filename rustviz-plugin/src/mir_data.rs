@@ -25,6 +25,63 @@ type Loan = <RustcFacts as FactTypes>::Loan;
 type Point = <RustcFacts as FactTypes>::Point;
 type Origin = <RustcFacts as FactTypes>::Origin;
 
+/// MIR gives the implicit drops after an explicit return the spans of
+/// closing braces. Attribute the epilogue to the return that enters it.
+/// Stop at a shared successor: its drops can be reached other ways.
+pub(crate) fn return_cleanup(hir: &rustc_hir::Body<'_>, body: &rustc_middle::mir::Body<'_>) -> BTreeMap<Location, Span> {
+    struct Returns(Vec<Span>);
+    impl<'tcx> intravisit::Visitor<'tcx> for Returns {
+        fn visit_expr(&mut self, e: &'tcx rustc_hir::Expr<'tcx>) {
+            if matches!(e.kind, rustc_hir::ExprKind::Ret(_)) && !e.span.from_expansion()
+                || matches!(e.kind, rustc_hir::ExprKind::Match(_, arms, rustc_hir::MatchSource::TryDesugar(_))
+                    if arms.iter().any(|a| matches!(a.body.kind, rustc_hir::ExprKind::Ret(_)))) {
+                self.0.push(e.span);
+            }
+            intravisit::walk_expr(self, e);
+        }
+    }
+    let mut returns = Returns(Vec::new());
+    intravisit::Visitor::visit_expr(&mut returns, hir.value);
+    let mut result = BTreeMap::new();
+    if returns.0.is_empty() {
+        return result;
+    }
+    let preds = body.basic_blocks.predecessors();
+    for (bb, data) in body.basic_blocks.iter_enumerated().filter(|(_, d)| !d.is_cleanup) {
+        // A write directly to the return place, after evaluating the
+        // operand. For a returned call, start at its normal successor.
+        let t = data.terminator();
+        let seed = data.statements.iter().enumerate().rev().find_map(|(i, st)| {
+            matches!(&st.kind, StatementKind::Assign(a) if a.0.as_local() == Some(rustc_middle::mir::RETURN_PLACE))
+                .then_some((bb, i + 1, st.source_info.span))
+        }).or_else(|| match t.kind {
+            TerminatorKind::Call { destination, target: Some(to), .. }
+                if destination.as_local() == Some(rustc_middle::mir::RETURN_PLACE) && preds[to].len() == 1 =>
+                    Some((to, 0, t.source_info.span)),
+            _ => None,
+        });
+        let Some((mut block, mut index, span)) = seed else { continue };
+        let Some(&ret) = returns.0.iter().filter(|r| r.contains(span)).min_by_key(|r| r.hi() - r.lo()) else { continue };
+        loop {
+            let data = &body.basic_blocks[block];
+            while index < data.statements.len() && matches!(data.statements[index].kind,
+                StatementKind::StorageDead(_) | StatementKind::Nop) {
+                result.insert(Location { block, statement_index: index }, ret);
+                index += 1;
+            }
+            if index != data.statements.len() { break; }
+            let target = match data.terminator().kind {
+                TerminatorKind::Drop { target, .. } | TerminatorKind::Goto { target } => target,
+                _ => break,
+            };
+            if result.insert(Location { block, statement_index: index }, ret).is_some() || preds[target].len() != 1 { break; }
+            block = target;
+            index = 0;
+        }
+    }
+    result
+}
+
 /// Why a write to a lender is allowed at a line where a loan of it is
 /// drawn live (#796): on the write's path the loan is already dead.
 #[derive(Clone, Debug)]
@@ -400,7 +457,8 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 let location = Location { block, statement_index };
                 cursor.seek_before_primary_effect(location);
                 if cursor.get().is_empty() { continue; }
-                let line = self.location_to_line(location, body_with_facts);
+                let line = self.return_cleanup.get(&location)
+                    .map_or_else(|| self.location_to_line(location, body_with_facts), |sp| span_end_line(sp, &self.tcx));
                 for b in cursor.get().iter() {
                     let e = ends.entry(b).or_insert(line);
                     if line > *e { *e = line; }
@@ -1221,25 +1279,22 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     /// not a struct's (its fields are drawn on their own), nor a
     /// reference's.
     pub fn fill_scope_end_holds(&mut self, from: usize) {
-        fn queries(events: &[(usize, ExternalEvent)], out: &mut Vec<(String, usize)>) {
+        fn queries(events: &[(usize, ExternalEvent)], out: &mut Vec<(usize, String, usize)>) {
             for (line, e) in events {
                 match e {
-                    ExternalEvent::GoOutOfScope { ro: ro @ ResourceAccessPoint::Owner(_), .. } => {
-                        let q = (ro.name().clone(), *line);
-                        if !out.contains(&q) {
-                            out.push(q);
-                        }
+                    ExternalEvent::GoOutOfScope { ro: ro @ ResourceAccessPoint::Owner(_), id, .. } => {
+                        out.push((*id, ro.name().clone(), *line));
                     }
                     ExternalEvent::Branch { branches, .. } => branches.iter().for_each(|b| queries(&b.e_data, out)),
                     _ => {}
                 }
             }
         }
-        fn fill(events: &mut [(usize, ExternalEvent)], answers: &BTreeMap<(String, usize), ScopeEndHolds>) {
-            for (line, e) in events.iter_mut() {
+        fn fill(events: &mut [(usize, ExternalEvent)], answers: &BTreeMap<usize, ScopeEndHolds>) {
+            for (_, e) in events.iter_mut() {
                 match e {
-                    ExternalEvent::GoOutOfScope { ro: ro @ ResourceAccessPoint::Owner(_), holds, .. } => {
-                        *holds = answers.get(&(ro.name().clone(), *line)).copied();
+                    ExternalEvent::GoOutOfScope { ro: ResourceAccessPoint::Owner(_), id, holds, .. } => {
+                        *holds = answers.get(id).copied();
                     }
                     ExternalEvent::Branch { branches, .. } => branches.iter_mut().for_each(|b| fill(&mut b.e_data, answers)),
                     _ => {}
@@ -1249,8 +1304,8 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let mut qs = Vec::new();
         queries(&self.preprocessed_events[from..], &mut qs);
         let found = self.ownership_at_scope_ends(&qs);
-        let answers: BTreeMap<(String, usize), ScopeEndHolds> = qs.into_iter().zip(found)
-            .filter_map(|(q, own)| own.map(|o| (q, match o {
+        let answers: BTreeMap<usize, ScopeEndHolds> = qs.into_iter().zip(found)
+            .filter_map(|((id, _, _), own)| own.map(|o| (id, match o {
                 Ownership::Held => ScopeEndHolds::Value,
                 Ownership::Maybe => ScopeEndHolds::Maybe,
                 Ownership::None => ScopeEndHolds::Nothing,
@@ -1259,7 +1314,8 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         fill(&mut self.preprocessed_events[from..], &answers);
     }
 
-    /// What each variable of `queries` (its RAP name, and the line of
+    /// An explicit return uses its MIR epilogue, identified by the drop event ID.
+    /// At other scope ends, what each variable (its RAP name, and the line of
     /// the `}` where it goes out of scope) holds there, on the paths
     /// that get to that `}` through the code of the block it closes
     /// (#1036, #1037): rustc's dataflow just before the `Drop`s of it
@@ -1275,7 +1331,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     /// that name is dropped there, something was moved out of a part of
     /// it (a field, a Box's contents), or a `Drop` there is reached both
     /// ways.
-    pub fn ownership_at_scope_ends(&self, queries: &[(String, usize)]) -> Vec<Option<Ownership>> {
+    fn ownership_at_scope_ends(&self, queries: &[(usize, String, usize)]) -> Vec<Option<Ownership>> {
         use rustc_middle::mir::{BasicBlock, RETURN_PLACE, StatementKind};
         use rustc_mir_dataflow::impls::{MaybeInitializedPlaces, MaybeUninitializedPlaces};
         use rustc_mir_dataflow::move_paths::MoveData;
@@ -1384,16 +1440,21 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let mut uninit = MaybeUninitializedPlaces::new(self.tcx, real, &move_data)
             .iterate_to_fixpoint(self.tcx, real, None)
             .into_results_cursor(real);
-        queries.iter().map(|(name, line)| {
+        queries.iter().map(|(id, name, line)| {
+            let ret = self.return_drops.get(id);
             // The `Drop`s of a variable named `name` on that line.
             let drops: Vec<(BasicBlock, Local, Span)> = body.basic_blocks.iter_enumerated()
                 .filter(|(_, data)| !data.is_cleanup)
                 .filter_map(|(bb, data)| {
                     let t = data.terminator();
+                    let at_end = match ret {
+                        Some(span) => self.return_cleanup.get(&body.terminator_loc(bb)) == Some(span),
+                        None => span_to_line(&t.source_info.span, &self.tcx) == *line,
+                    };
                     match &t.kind {
                         TerminatorKind::Drop { place, .. } if place.projection.is_empty()
                             && names.get(&place.local).is_some_and(|n| n == name)
-                            && span_to_line(&t.source_info.span, &self.tcx) == *line => Some((bb, place.local, t.source_info.span)),
+                            && at_end => Some((bb, place.local, t.source_info.span)),
                         _ => None,
                     }
                 })
@@ -1408,27 +1469,31 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 return None;
             }
             let decl = body.local_decls[local].source_info.span;
-            let (mut may_hold, mut may_lack, mut found) = (false, false, false);
+            let (mut may_hold, mut may_lack) = (false, false);
             for (bb, _, sp) in drops {
-                // The innermost block whose `}` this is.
-                let closes = hir.blocks.iter().filter(|b| b.hi() == sp.hi()).min_by_key(|b| b.hi() - b.lo())?;
-                match reached(bb, decl, *closes) {
-                    (true, true) => return None,
-                    (true, false) => {}
-                    (false, _) => continue,
+                if ret.is_none() {
+                    // The innermost block whose `}` this is.
+                    let closes = hir.blocks.iter().filter(|b| b.hi() == sp.hi()).min_by_key(|b| b.hi() - b.lo())?;
+                    match reached(bb, decl, *closes) {
+                        (true, true) => return None,
+                        (true, false) => {}
+                        (false, _) => continue,
+                    }
                 }
                 let at = Location { block: bb, statement_index: body.basic_blocks[bb].statements.len() };
                 init.seek_before_primary_effect(at);
                 uninit.seek_before_primary_effect(at);
                 may_hold |= init.get().contains(mpi);
                 may_lack |= uninit.get().contains(mpi);
-                found = true;
             }
-            found.then_some(match (may_hold, may_lack) {
-                (true, false) => Ownership::Held,
-                (false, _) => Ownership::None,
-                (true, true) => Ownership::Maybe,
-            })
+            match (may_hold, may_lack) {
+                (true, false) => Some(Ownership::Held),
+                (false, true) => Some(Ownership::None),
+                (true, true) => Some(Ownership::Maybe),
+                // Neither fact reaches an unreachable return (e.g. the
+                // else of an irrefutable let), or a missing drop.
+                (false, false) => None,
+            }
         }).collect()
     }
 
@@ -1578,9 +1643,42 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
             .filter(|(_, vars)| vars.iter().any(|v| locals.contains(v)))
             .map(|(p, _)| self.point_to_location(*p, bwf))
             .filter(|l| !bwf.body.basic_blocks[l.block].is_cleanup)
-            .map(|l| self.location_to_line(l, bwf))
+            .map(|l| self.return_cleanup.get(&l)
+                .map_or_else(|| self.location_to_line(l, bwf), |sp| span_end_line(sp, &self.tcx)))
             .max();
         last
+    }
+
+    /// At each return, the field origins that dropck requires to be live
+    /// when an initialized holder is dropped. Key by exit span and local,
+    /// so a move on another path cannot keep the field borrowed here.
+    pub(crate) fn return_drop_uses(&self) -> BTreeSet<(usize, String)> {
+        let mut uses = BTreeSet::new();
+        if self.return_cleanup.is_empty() || self.return_drops.is_empty() { return uses; }
+        let bwf = self.bwf;
+        let facts = bwf.input_facts.as_ref().unwrap();
+        if facts.drop_of_var_derefs_origin.is_empty() { return uses; }
+        let names = self.mir_local_names(bwf);
+        let out = Output::compute(facts, Algorithm::Naive, true);
+        let table = bwf.location_table.as_ref().unwrap();
+        for (&loc, ret) in &self.return_cleanup {
+            let point = table.start_index(loc);
+            let Some(locals) = out.var_drop_live_on_entry.get(&point) else { continue };
+            for &local in locals {
+                let Some(root) = names.get(&local) else { continue };
+                #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "collected into a sorted set")]
+                for name in self.borrow_map.keys() {
+                    let mut parts = name.split('.');
+                    if parts.next() != Some(root.as_str()) { continue; }
+                    let Some(ty) = parts.try_fold(bwf.body.local_decls[local].ty, |ty, f| self.field_ty_named(ty, f)) else { continue };
+                    if ty.walk().any(|arg| matches!(arg.kind(), GenericArgKind::Lifetime(r) if r.is_var()
+                        && facts.drop_of_var_derefs_origin.contains(&(local, r.as_var().into())))) {
+                        uses.extend(self.return_drops.iter().filter(|(_, span)| *span == ret).map(|(&id, _)| (id, name.clone())));
+                    }
+                }
+            }
+        }
+        uses
     }
 
     /// The variables whose loans rustc's borrow checker puts in the
