@@ -28155,8 +28155,10 @@ fn match_scrutinee_loan_over_before_other_arm_1578() {
         let uses = dots_listing_tooltip(&timeline, using);
         assert_eq!(uses.len(), 1, "one dot for {using:?}: {:?}", uses);
         let (x, y) = uses[0];
+        // (Within the arm: a few rows above the use, not a give-back
+        // anywhere above it in the fixture, Codex r3 on #1603.)
         let before = dots_with_tooltip(&timeline, back).into_iter()
-            .filter(|&(bx, by)| (bx - x).abs() < 0.5 && by < y).count();
+            .filter(|&(bx, by)| (bx - x).abs() < 0.5 && by < y && y - by <= 90.0).count();
         assert!(before >= 1, "{back:?} on the `_` arm's leg above {using:?} at ({x}, {y})");
     }
 }

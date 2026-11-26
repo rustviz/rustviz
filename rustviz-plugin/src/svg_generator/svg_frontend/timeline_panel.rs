@@ -2953,10 +2953,12 @@ fn ends_borrow(history: &[(usize, Event)]) -> bool {
 // the `else`, Codex on #1603.)
 fn started_before(history: &[(usize, Event)], line: usize) -> bool {
     history.iter().any(|(l, e)| match e {
-        Event::Branch { branch_history, ty, merge_point, .. } => branch_history.iter().enumerate().any(|(i, b)| {
+        Event::Branch { branch_history, ty, .. } => branch_history.iter().enumerate().any(|(i, b)| {
             let (start, end) = ty.get_start_end(i);
-            // (Not an arm that returns before the merge, Codex r2 on #1603.)
-            ((*merge_point <= line && !b.diverges) || (start <= line && line <= end)) && started_before(&b.e_data, line)
+            // (Only the arm `line` is in: an assignment in an earlier
+            // conditional's arm may be on another path than this one,
+            // Codex r2/r3 on #1603.)
+            (start <= line && line <= end) && started_before(&b.e_data, line)
         }),
         Event::StaticBorrow { .. } | Event::MutableBorrow { .. } | Event::Copy { .. } | Event::Acquire { .. } => *l < line,
         _ => false,

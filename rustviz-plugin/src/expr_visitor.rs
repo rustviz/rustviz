@@ -3565,12 +3565,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// Whether `r` is used after `end` on `end`'s path: not in the arm
   /// being visited when `end` is in another arm of its conditional
   /// (`x` read only where r is re-pointed, Codex r2 on #1603).
+  /// (Polonius liveness at the points of `end`'s line: live there only if
+  /// used later on a path through it, Codex r3 on #1603.)
   pub fn live_after_on_path(&self, r: &str, end: usize) -> bool {
-    match self.arm_frames.iter().rev().find(|&&(split, merge, lo, hi)| split < end && end < merge && !(lo <= end && end <= hi)) {
-      Some(&(_, _, lo, hi)) if end < lo => self.last_live_line(r, (end + 1, lo - 1)).is_some()
-        || self.last_live_line(r, (hi + 1, usize::MAX)).is_some(),
-      _ => self.last_live_line(r, (end + 1, usize::MAX)).is_some(),
-    }
+    self.last_live_line(r, (end, end)).is_some()
   }
 
   /// The last line `r` is used on in an arm of an enclosing `if` /
@@ -14543,8 +14541,11 @@ pub(crate) fn end_borrow_in_arms(
     // (After it, if it borrows from the same lender, `h.r = &s;`: Rust
     // evaluates `&s` before the write ends the old loan, so s is never
     // free in between, Codex on #1603.)
+    // (None at all for a new shared loan of the same lender, `h.r = &s;`:
+    // `&s` is taken before the write, so s stays borrowed throughout, by
+    // the new loan from then on, Codex r3 on #1603.)
     let at = match events.iter().position(|(l, e)| *l == ev.0 && gives_new_value(e, r) && ev.1.get_id() < e.get_id()) {
-      Some(i) if reborrows_lender(&events[i].1, &ev.1) => i + 1,
+      Some(i) if reborrows_lender(&events[i].1, &ev.1) => return,
       Some(i) => i.min(at),
       None => at,
     };
@@ -14588,7 +14589,7 @@ pub(crate) fn end_borrow_in_arms(
         // (An older loan's end before r's new value on its line, as in
         // the arm's events, #1588.)
         match evs.iter().position(|e| gives_new_value(e, r) && ev.1.get_id() < e.get_id()) {
-          Some(i) if reborrows_lender(&evs[i], &ev.1) => evs.insert(i + 1, ev.1.clone()),
+          Some(i) if reborrows_lender(&evs[i], &ev.1) => {}
           Some(i) => evs.insert(i, ev.1.clone()),
           None => evs.push(ev.1.clone()),
         }
@@ -14618,7 +14619,12 @@ pub(crate) fn end_borrow_in_arms(
     // (Unless the arm doesn't read r's old value before it: then the old
     // loan is over as the arm starts, and the lender is free for the
     // arm's own uses of it, `s.push('a'); r = &t;`, Codex r2 on #1603.)
+    // (Only when the arm uses the lender before the write; otherwise the
+    // end stays on the write's row, #806's drawing. Not for a field: a
+    // write to it uses its struct, which keeps the old loan live up to the
+    // write, Codex r3 on #1603.)
     if let Some(i) = new_value.filter(|&i| last_use_in(&arm.e_data, r).is_some() && !reads_before_new_value(&arm.e_data[..i], r)
+      && !r.name().contains('.') && !reborrows_lender(&arm.e_data[i].1, &copy)
       && arm.e_data[..i].iter().any(|(_, e)| !matches!(e, ExternalEvent::Branch { .. }) && borrow_end_of(&copy).is_some_and(|(_, to)| {
         let (f, t) = ResourceAccessPoint_extract(e);
         to.extract_rap().is_some_and(|l| f.extract_rap() == Some(l) || t.extract_rap() == Some(l))
@@ -14632,8 +14638,9 @@ pub(crate) fn end_borrow_in_arms(
       let line = arm.e_data[i].0;
       // (After a new borrow of the same lender, `r = &s;`: `&s` is taken
       // before the write ends the old loan, Codex on #1603.)
-      let i = if reborrows_lender(&arm.e_data[i].1, &copy) { i + 1 } else { i };
-      arm.e_data.insert(i, (line, copy));
+      if !reborrows_lender(&arm.e_data[i].1, &copy) {
+        arm.e_data.insert(i, (line, copy));
+      }
       continue;
     }
     end_after_last_use(&mut arm.e_data, branch_type.get_start_end(b).0, copy, r, lender, unique_id);
@@ -14697,9 +14704,8 @@ fn after_same_lender_borrow(events: &mut Vec<(usize, ExternalEvent)>, line_map: 
   while i < events.len() {
     if ids.contains(&events[i].1.get_id()) {
       let line = events[i].0;
-      if let Some(j) = (i + 1..events.len()).find(|&j| events[j].0 == line && new_borrow(&events[i].1, &events[j].1)) {
-        let ev = events.remove(i);
-        events.insert(j, ev);
+      if (i + 1..events.len()).any(|j| events[j].0 == line && new_borrow(&events[i].1, &events[j].1)) {
+        events.remove(i);
         continue;
       }
     }
@@ -14709,9 +14715,8 @@ fn after_same_lender_borrow(events: &mut Vec<(usize, ExternalEvent)>, line_map: 
     let mut i = 0;
     while i < evs.len() {
       if ids.contains(&evs[i].get_id()) {
-        if let Some(j) = (i + 1..evs.len()).find(|&j| new_borrow(&evs[i], &evs[j])) {
-          let ev = evs.remove(i);
-          evs.insert(j, ev);
+        if (i + 1..evs.len()).any(|j| new_borrow(&evs[i], &evs[j])) {
+          evs.remove(i);
           continue;
         }
       }
@@ -14757,10 +14762,18 @@ fn end_in_other_arms(events: &mut Vec<(usize, ExternalEvent)>, ev: &(usize, Exte
     // (A field's struct used in the arm, `read(&h)`, uses the field's
     // loan too: the end goes after that, Codex r2 on #1603.)
     let root = r.name().split('.').next().unwrap_or(r.name());
-    let root_use = (root != r.name()).then(|| arm.e_data.iter().rposition(|(_, e)| {
-      let (f, t) = ResourceAccessPoint_extract(e);
-      [f, t].iter().any(|x| x.extract_rap().is_some_and(|x| x.name() == root))
-    })).flatten();
+    // (In a conditional nested in the arm too, `if d { read(&h); }`,
+    // Codex r3 on #1603: then after that conditional.)
+    fn uses_root(e: &ExternalEvent, root: &str) -> bool {
+      match e {
+        ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| b.e_data.iter().any(|(_, x)| uses_root(x, root))),
+        _ => {
+          let (f, t) = ResourceAccessPoint_extract(e);
+          [f, t].iter().any(|x| x.extract_rap().is_some_and(|x| x.name() == root))
+        }
+      }
+    }
+    let root_use = (root != r.name()).then(|| arm.e_data.iter().rposition(|(_, e)| uses_root(e, root))).flatten();
     match root_use {
       Some(i) if last_use_in(&arm.e_data, &r).is_none_or(|(_, j)| j <= i) => {
         let line = arm.e_data[i].0;
