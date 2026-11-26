@@ -331,9 +331,18 @@ fn merged_dot_title(lines: &[(Option<usize>, String)]) -> String {
             }
         }
     } else if texts.len() > 1 {
+        // (A second `?` on the line, `o?; …; p?;`: "the later `?`".)
+        let mut seen_try = false;
         for t in texts.iter_mut() {
+            let later = seen_try && is_try(t);
+            seen_try |= is_try(t);
             if let Some(r) = hover_messages::try_drop_with_other_events(t) {
                 *t = r;
+            }
+            if later {
+                if let Some(r) = hover_messages::try_drop_later_on_line(t) {
+                    *t = r;
+                }
             }
         }
     }

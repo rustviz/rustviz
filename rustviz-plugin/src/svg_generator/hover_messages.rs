@@ -1231,6 +1231,15 @@ pub fn try_drop_after_assignment(drop_text: &str) -> Option<String> {
     Some(format!("Only if the `?` after the assignment returns early{}", rest.replacen("If the `?` succeeds", "If that `?` succeeds", 1)))
 }
 
+// A second `?` on a line with no assignment between them that it goes
+// with (`o?; drop(a); a = …; p?;`, #1590): "the later `?`", not "the `?`
+// here", which the first one says.
+pub fn try_drop_later_on_line(drop_text: &str) -> Option<String> {
+    let rest = drop_text.strip_prefix("Only if the `?` here returns early")?;
+    let rest = rest.strip_prefix(" (on an `Err` or `None`)").unwrap_or(rest);
+    Some(format!("Only if the later `?` on this line returns early{}", rest.replacen("If the `?` succeeds", "If that `?` succeeds", 1)))
+}
+
 pub fn try_drop_then_reassign(drop_text: &str, reassign: &str) -> Option<String> {
     let (head, owner) = drop_text.split_once(". If the `?` succeeds, nothing happens to ")?;
     owner.strip_suffix(" here.")?;
