@@ -19,14 +19,16 @@
 //! Locations become rows through the row model (`rows.rs`). The HIR is
 //! used for names (the 2.x column names) and to recognise early exits.
 //!
-//! `RV3_FACTS=1` adds the facts to the plugin's JSON output (`facts`);
-//! any other non-empty value (other than `0`) is a file to write them to
-//! as well. Unset, nothing is computed.
+//! The facts are computed on every run and feed the state table
+//! (`table.rs`). `RV3_FACTS=1` also adds them to the plugin's JSON output
+//! (`facts`); any other non-empty value (other than `0`) is a file to
+//! write them to as well.
 
 mod body;
 mod places;
 mod rows;
 pub mod schema;
+pub mod table;
 
 use rustc_hir::def::DefKind;
 use rustc_middle::ty::TyCtxt;
@@ -76,14 +78,13 @@ pub fn collect_crate(tcx: TyCtxt<'_>, in_target: &dyn Fn(Span) -> bool) -> Crate
     CrateFacts { version: VERSION, bodies, errors }
 }
 
-/// Compute the facts if `RV3_FACTS` asks for them, and write them to its
+/// The facts as JSON if `RV3_FACTS` asks for them, also written to its
 /// file if it names one.
-pub fn from_env(tcx: TyCtxt<'_>, in_target: &dyn Fn(Span) -> bool) -> Option<serde_json::Value> {
+pub fn dump(facts: &CrateFacts) -> Option<serde_json::Value> {
     if !enabled() {
         return None;
     }
-    let facts = collect_crate(tcx, in_target);
-    let v = serde_json::to_value(&facts).ok()?;
+    let v = serde_json::to_value(facts).ok()?;
     if let Some(path) = std::env::var_os("RV3_FACTS").filter(|p| p != "1") {
         let written = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())
             .and_then(|s| std::fs::write(&path, s).map_err(|e| e.to_string()));

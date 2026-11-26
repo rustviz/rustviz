@@ -36,6 +36,7 @@ impl Rustviz {
     temp_emptying_moves: Vec<usize>,
     hidden_source_lines: HashSet<usize>,
     approx_notes: Vec<ApproxNote>,
+    state_table: crate::facts::table::StateTable,
   ) -> Result<Rustviz>{
     /* ******************************************
             --- Build VisualizationData ---
@@ -56,6 +57,7 @@ impl Rustviz {
       approx_notes,
       row_lines: Vec::new(),
       raised_headers: HashSet::new(),
+      state_table,
     };
     /* ******************************************
             --- Render SVG images ---
