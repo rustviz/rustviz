@@ -1546,24 +1546,6 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         last
     }
 
-    /// Whether the variable `name` is used (read: Polonius' `var_used_at`)
-    /// at a point on `line` that isn't after `upto` (a statement on it): on
-    /// that line before, or by, that statement (`println!("{}", r); r = &b;`
-    /// on one line, or `r = if r.is_empty() { .. }`). (Not its liveness: the
-    /// points that end the statement, after its store, have it live for its
-    /// new value.)
-    pub fn used_on_line_upto(&self, name: &str, line: usize, upto: Span) -> bool {
-        let bwf = self.bwf;
-        let Some(facts) = bwf.input_facts.as_ref() else { return false };
-        let names = self.mir_local_names(bwf);
-        #[expect(clippy::disallowed_methods, reason = "only collects the locals named `name`; order doesn't matter")]
-        let locals: Vec<Local> = names.iter().filter(|(_, n)| n.as_str() == name).map(|(l, _)| *l).collect();
-        facts.var_used_at.iter()
-            .filter(|(v, _)| locals.contains(v))
-            .map(|(_, p)| self.point_to_location(*p, bwf))
-            .any(|l| self.location_to_line(l, bwf) == line && self.location_to_span(l, bwf).lo() < upto.hi())
-    }
-
     /// The last line on which dropping the variable `name` (its RAP
     /// name) may use a borrow its value holds, from rustc's own facts:
     /// the drop check says its drop reads a lifetime of its type (a

@@ -71,10 +71,24 @@ fn same_line() {
     }
 }
 
+// o read on the `if`'s closing line, after it.
+fn outer_read_on_join_line() {
+    let s = String::from("a");
+    let o = &s;
+    if o.len() > 0 {
+        let n = o.len();
+        let r = &s;
+        println!("{}", r);
+    } else {
+        println!("{}", o);
+    } println!("{}", o.len());
+}
+
 fn main() {
     through_call();
     plain_mut();
     unused_before();
     outer_read_after_join();
     same_line();
+    outer_read_on_join_line();
 }

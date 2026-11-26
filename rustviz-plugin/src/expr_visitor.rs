@@ -13343,11 +13343,12 @@ fn on_other_path(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint, o: 
       }
       let (start, end) = branch_type.get_start_end(a);
       // (Nor when o is used after the conditional, `println!("{}", o)`
-      // after the `if` whose arm declares r: that use is on r's path too,
-      // and keeps o's loan live through r's. It ended r's borrow giving
-      // the lender back, #1610's review.)
+      // after the `if` whose arm declares r, or on its closing line (`}
+      // println!("{}", o);`): that use is on r's path too, and keeps o's
+      // loan live through r's. It ended r's borrow giving the lender back,
+      // #1610's review.)
       !branches.iter().any(|b| declares(b, o))
-        && o_end <= *merge_point
+        && o_end < *merge_point
         && !(start <= o_end && o_end <= end)
         && {
           // From r's loan on: the first of the arm's events on or after

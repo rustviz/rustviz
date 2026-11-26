@@ -137,9 +137,13 @@ fn grouped_field_ends(front: &[ExternalEvent]) -> usize {
     let gives_field = |e: &ExternalEvent, f: u64| matches!(e, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }
         | ExternalEvent::Move { .. } | ExternalEvent::Copy { .. })
         && ResourceAccessPoint_extract(e).1.extract_rap().is_some_and(|r| *r.hash() == f);
+    // (Nor a second end to a lender already ended: a later loan's, drawn
+    // as an arrow of its own, `h.r = &t;`'s new loan of t after the old
+    // one's ends to s and t.)
     (0..front.len()).filter(|&k| end_of(&front[k]).is_some_and(|(f, m, t)| (0..k)
         .any(|j| end_of(&front[j]).is_some_and(|(f2, m2, t2)| f2 == f && m2 == m && t2 != t)
-            && !front[j + 1..k].iter().any(|o| gives_field(o, f))))).count()
+            && !front[j + 1..k].iter().any(|o| gives_field(o, f)))
+        && !(0..k).any(|j| end_of(&front[j]).is_some_and(|(f2, _, t2)| f2 == f && t2 == t)))).count()
 }
 
 /// Splits the arrows that share one source line (and so get stacked

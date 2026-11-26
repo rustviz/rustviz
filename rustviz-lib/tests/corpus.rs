@@ -38476,19 +38476,29 @@ fn dot_y_by_id(timeline_svg: &str, id: &str) -> f64 {
 fn repoint_old_loan_rows_1592_1604_1596() {
     let tl = run_with_local_backend("repoint_unread_arm_binding_1592").timeline_panel_string();
     for id in ["x@L10:dot:static_die\"", "v@L10:dot:static_reacquire\"", "x@L23:dot:static_lend+static_reacquire+static_die",
-        "x@L36:dot:static_lend+static_reacquire+static_die", "x@L49:dot:static_die\"", "x@L61:dot:copy+static_borrow+static_die",
+        "x@L36:dot:static_lend+static_reacquire+static_die", "x@L49:dot:static_die\"",
         "r@L71:dot:copy+static_die", "x@L81:dot:static_die\"",
         // (#1610's review) through z; on the write's line; both lenders.
         "x@L94:dot:static_reacquire+static_die\"", "v@L94:dot:static_reacquire\"",
-        "r@L109:dot:static_lend+static_reacquire+static_die+static_borrow", "r@L121:dot:static_die+", "r@L132:dot:copy+static_die\""] {
+        "r@L109:dot:static_lend+static_reacquire+static_die+static_borrow", "r@L132:dot:copy+static_die\""] {
         assert!(tl.contains(&format!("data-rv-id=\"{}", id)), "#1592: no {}", id);
     }
     for id in ["x@L11:dot:static_die+static_borrow", "v@L11:dot:static_reacquire", "x@L25:dot:static_die+static_borrow",
-        "x@L37:dot:static_die+static_borrow", "x@L50:dot:static_die+static_borrow", "x@L62:dot:static_die+static_borrow",
+        "x@L37:dot:static_die+static_borrow", "x@L50:dot:static_die+static_borrow",
         "r@L73:dot:static_die+static_borrow", "x@L93:dot:static_die", "v@L93:dot:static_reacquire", "r@L108:dot:static_die",
-        "r@L120:dot:static_die", "r@L134:dot:static_die+static_borrow"] {
+        "r@L120:dot:static_die", "r@L134:dot:static_die+static_borrow",
+        // (#1610's review, round 2) the Option read after the `match`, a
+        // call result that may be r, a struct holding `&r`: no end before.
+        "v@L145:dot:static_reacquire", "v@L146:dot:static_reacquire", "r@L164:dot:static_die", "r@L180:dot:static_die"] {
         assert!(!tl.contains(&format!("data-rv-id=\"{}", id)), "#1592: unexpected {}", id);
     }
+    // `read_by_rhs`: the old loan ends on the write's line (where on its dot
+    // is #1618), not the line above.
+    assert!(tl.split("data-rv-id=\"r@L121:dot:").skip(1).any(|c| c.split('"').next().is_some_and(|id| id.contains("static_die"))),
+        "#1592: read_by_rhs: no end of r's old loan on the write's line");
+    // (`while_let_binding`: x's value comes out of `it`, whose loan of v
+    // lives on; with rustc's loan facts saying no more, x's old borrow ends
+    // at the write, as on main.)
     let tips = timeline_tooltips(&tl);
     for to in ["s", "t"] {
         assert_eq!(tips.iter().filter(|t| **t == format!("Return immutably borrowed resource from r to {}", to)).count(), 1,
@@ -38541,13 +38551,17 @@ fn repoint_old_loan_rows_1592_1604_1596() {
     let tips = timeline_tooltips(&tl);
     let grouped = |from: &str, kind: &str| tips.iter().filter(|t| t.starts_with(&format!("Return {} borrowed resource from {} to ", kind, from))
         && t.ends_with(&format!("({} may point into either; its borrow of both ends here)", from))).count();
-    assert_eq!(grouped("h.r", "immutably"), 4);
+    assert_eq!(grouped("h.r", "immutably"), 5, "(and third_then_old's first write)");
     assert_eq!(grouped("h.0", "immutably"), 1);
     assert_eq!(grouped("h.r", "mutably"), 1);
     assert_eq!(tips.iter().filter(|t| *t == "Return immutably borrowed resource from h.0 to t").count(), 1, "#1604: returns from h.0 to t");
+    // One lender re-pointed to itself: the new borrow, then (a row below)
+    // the old loan's end and the new one's, two returns to s.
+    assert!(dot_y_by_id(&tl, "h.r@L40:dot:static_borrow") < dot_y_by_id(&tl, "h.r@L40:dot:static_die"), "#1604: same_lender order");
     // Two writes on one line: one loan of t, then one of u (not one that may
     // point into either).
-    assert!(!tips.iter().any(|t| t.contains("t or u") || t.contains("u or t")), "#1604: two writes merged into one loan");
+    assert!(!tips.iter().any(|t| ["t or u", "u or t", "u or v", "v or u", "u, t or s", "t, u"].iter().any(|x| t.contains(x))),
+        "#1604: successive writes merged into one loan");
     let two = rows("h.r@L55:dot:").concat();
     for l in ["h.r's immutable borrow of t ends", "h.r's immutable borrow of u ends"] {
         assert!(two.iter().any(|x| x == l), "#1604: two_writes_one_line: no {:?} in {:?}", l, two);
@@ -38570,6 +38584,8 @@ fn repoint_old_loan_rows_1592_1604_1596() {
     let same = dot_lines_by_id(&tl, "s2@L67:dot:mutable_reacquire+mutable_lend+dead_loan_note");
     assert!(same.iter().any(|d| d.iter().skip_while(|l| !l.contains("mutably borrowed by r3")).any(|l| l == "s2's resource is no longer mutably borrowed")),
         "#1596: same_line: {:?}", same);
-    // o read after the `if`: s stays borrowed by o at r's end.
+    // o read after the `if` (or on its closing line): s stays borrowed by o
+    // at r's end.
     assert!(!tl.contains("data-rv-id=\"s@L55:dot:static_reacquire"), "#1596: s given back while o is still live");
+    assert!(!tl.contains("data-rv-id=\"s@L81:dot:static_reacquire"), "#1596: s given back while o is still live (join line)");
 }

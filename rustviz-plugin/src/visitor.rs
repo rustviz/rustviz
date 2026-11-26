@@ -7167,33 +7167,32 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // arm re-points h.r, with its lenders free in that arm, and a
           // co-lender ended twice (#1588).
           let field_write = matches!(lhs_expr.kind, ExprKind::Field(..));
-          // The last line before the write that uses r's old value: r
-          // itself, or a reference to r (`let z = &x; println!("{}", z);`
-          // reads x's lender through z). None when it is used on the
-          // write's own line, before or by the write (`println!("{}", r);
-          // r = &b;`, `r = if r.is_empty() { &b } else { &c };`): then the
-          // old loan lives up to the write. (#1610's review: the end was
-          // drawn above those uses, with the lender free while they read
-          // it.)
+          // Where rustc ends the loans r's old value may hold, when that is
+          // before the write: the latest end of the loans of its lenders
+          // live where r was given that value (r has no loan of its own; the
+          // one it copied, `v.first()`'s for `Some(mut x)`, or x's for `let
+          // mut r = x;`, is among them). A later read of the value through
+          // anything (r itself, `let z = &r;`, a struct holding `&r`, the
+          // matched Option, the write's own right-hand side) keeps that loan
+          // live, so the end is never drawn before a use (#1610's review).
+          // None when a loan is still live at the write: the old loan then
+          // ends at the write, as before.
           let old_value_last_use = (ref_data.loan().is_none() && !field_write).then(|| {
-            let mut names = vec![me.clone()];
-            let mut k = 0;
-            while k < names.len() {
-              #[expect(clippy::disallowed_methods, reason = "filtered into a sorted Vec")]
-              let mut refs: Vec<String> = self.borrow_map.iter()
-                .filter(|(n, d)| d.lender.real_name() == names[k] && !names.contains(n))
-                .map(|(n, _)| n.clone()).collect();
-              refs.sort();
-              names.extend(refs);
-              k += 1;
-            }
-            if names.iter().any(|n| self.used_on_line_upto(n, line_num, expr.span)) {
-              return None;
-            }
-            Some(names.iter().filter_map(|n| self.last_live_line(n, (ref_data.assigned_at, line_num.saturating_sub(1))))
-              .max().unwrap_or(ref_data.assigned_at))
+            let loans = self.gather_borrow_data(self.bwf);
+            let roots: Vec<String> = ref_data.all_lenders().iter()
+              .filter_map(|l| match l { ResourceTy::Value(r) if !r.is_fn() => Some(r.name().split('.').next().unwrap_or(r.name()).to_owned()), _ => None })
+              .collect();
+            let at = ref_data.assigned_at;
+            let end = loans.iter()
+              .filter(|b| b.borrowed_place.as_ref().is_some_and(|p| roots.contains(p)) && b.region.0 <= at && at <= b.region.1)
+              .map(|b| b.region.1).max()?;
+            (end < line_num).then_some(end.max(at))
           }).flatten();
-          let dead_before_arms = old_value_last_use.filter(|_| !matches!(ref_data.lender, ResourceTy::Anonymous))
+          // (Before the split, r's own last use, as #1524 has it: x3 in `let
+          // mut r3 = x3;` may keep the lender borrowed in another arm, and
+          // its own end says so.)
+          let dead_before_arms = (ref_data.loan().is_none() && !matches!(ref_data.lender, ResourceTy::Anonymous) && !field_write)
+            .then(|| self.last_live_line(&me, (ref_data.assigned_at, line_num.saturating_sub(1))).unwrap_or(ref_data.assigned_at))
             .filter(|&l| l >= ref_data.assigned_at && self.arm_frames.last().is_some_and(|&(split, _, _, _)| l < split));
           // Such a reference dead before the write on the write's own path
           // (never read since it was bound, or last read a few lines up)
@@ -7205,7 +7204,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // (#1592); likewise `let mut r = x;` and a `while let` binding.
           // (Not a last use in another arm than the write's, which is on
           // another path.)
-          let dead_since = old_value_last_use.filter(|_| matches!(ref_data.lender, ResourceTy::Value(_)))
+          // (Not where #1524's end before the split applies: that one stays
+          // as it was.)
+          let dead_since = old_value_last_use.filter(|_| dead_before_arms.is_none() && matches!(ref_data.lender, ResourceTy::Value(_)))
             .filter(|&l| l >= ref_data.assigned_at && l < line_num
               && self.arm_frames.iter().all(|&(split, _, lo, hi)| l < split || (lo <= l && l <= hi)));
           // A let-else binding drawn as a branch is bound on the join row

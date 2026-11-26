@@ -134,6 +134,55 @@ fn copy_two_lenders(s: String, t: String, u: String) {
     r = &u;
 }
 
+// The matched Option is printed after the `match`: it still holds v's
+// loan, so v stays borrowed through the arm (#1610's review).
+fn held_read_after() {
+    let s2 = String::from("abc");
+    let v: Vec<String> = Vec::new();
+    let o = v.first();
+    match o {
+        Some(mut x) => {
+            x = &s2;
+        }
+        None => {}
+    }
+    println!("{:?}", o);
+}
+
+fn pick<'a>(a: &'a &'a String, b: &'a &'a String) -> &'a &'a String {
+    if a.len() > 1 { a } else { b }
+}
+
+// Read through a call result that may be either argument.
+fn through_call_result() {
+    let a = String::from("a");
+    let b = String::from("b");
+    let c = String::from("c");
+    let x = &a;
+    let y = &b;
+    let mut r = x;
+    let z = pick(&y, &r);
+    println!("{}", z);
+    r = &c;
+    println!("{}", r);
+}
+
+struct Holder<'a> {
+    r: &'a &'a String,
+}
+
+// Read through a struct holding `&r`.
+fn through_struct() {
+    let a = String::from("a");
+    let b = String::from("b");
+    let x = &a;
+    let mut r = x;
+    let h = Holder { r: &r };
+    println!("{}", h.r);
+    r = &b;
+    println!("{}", r);
+}
+
 fn main() {
     arm_binding();
     arm_binding_read();
@@ -146,4 +195,7 @@ fn main() {
     read_on_write_line();
     read_by_rhs();
     copy_two_lenders(String::from("a"), String::from("b"), String::from("c"));
+    held_read_after();
+    through_call_result();
+    through_struct();
 }
