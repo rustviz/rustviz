@@ -28088,8 +28088,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "@h:31 While h.shared is borrowed, h can't be moved or mutably borrowed as a whole.",
             "@h:33 h holds a value",
             // `&*h.unique` borrows what h.unique points to, not h.unique.
-            "@h:35 While h.unique or the value it points to is borrowed, h can't be moved or mutably borrowed as a whole.",
-            // The slot loan passed through `id` ends with x.
+            // Whether that restricts h depends on what lies behind h.unique
+            // (`&**h.r` through a `&mut &i32` doesn't), so the line makes no
+            // claim: deliberately weak, not the full truth for `&mut i32`.
+            "@h:35 h holds a value",
+            // The slot loan passed through `id` lasts while x is used, and
+            // ends with it.
+            "@h:44 While h.s is borrowed, h can't be moved or mutably borrowed as a whole.",
             "@h:46 h holds a value",
             "@g:53 While g.s is mutably borrowed, you can't use g directly as a whole.",
         ],

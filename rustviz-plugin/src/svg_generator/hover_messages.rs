@@ -3648,7 +3648,10 @@ pub fn state_field_under_parent_loan(field: &str, parent: &str) -> String {
 // `through_ref`: the field is a reference, and the loan may be of what
 // it points to (`&*h.r`), not of the field itself (`&h.r`).
 pub fn state_field_borrowed(name: &str, field: &str, mutable: bool, through_ref: bool) -> String {
-    let what = if through_ref {
+    let what = if field.is_empty() {
+        // Different fields on different paths, or several at once.
+        format!("part of {}", styled_name_html(name))
+    } else if through_ref {
         format!("{} or the value it points to", styled_name_html(field))
     } else {
         styled_name_html(field)
