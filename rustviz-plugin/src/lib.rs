@@ -158,6 +158,12 @@ const ISSUES_URL: &str = "https://github.com/rustviz/rustviz/issues";
 /// Panic message and location captured by the hook in `catch_plugin_panic`.
 static LAST_PANIC: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
+/// Forget a panic that was caught and handled inside the plugin run (a
+/// fact-layer body), so a later panic is the one reported.
+pub fn forget_last_panic() {
+  LAST_PANIC.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+}
+
 /// Developers get the stock panic output (and a backtrace, with
 /// `RUST_BACKTRACE=1`) by setting `RUSTVIZ_DEBUG=1` or `RUST_BACKTRACE`.
 fn want_full_panic_output() -> bool {

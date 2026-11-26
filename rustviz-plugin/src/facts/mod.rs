@@ -66,6 +66,8 @@ pub fn collect_crate(tcx: TyCtxt<'_>, in_target: &dyn Fn(Span) -> bool) -> Crate
         match r {
             Ok(b) => bodies.push(b),
             Err(e) => {
+                // Handled here: not the panic a later failure reports.
+                crate::forget_last_panic();
                 let msg = e
                     .downcast_ref::<String>()
                     .cloned()
