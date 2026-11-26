@@ -221,13 +221,15 @@ impl StateTable {
                 // a value, so does the line.
                 if own.init == Init::Maybe {
                     let next = b.rows.range(row + 1..).find(|(_, c)| c.before.is_some()).and_then(|(_, c)| c.before.as_ref()?.get(column));
-                    // (All of that boundary's state: its loans and holders go
-                    // with its init.)
+                    // (Its init, as at a block's end below; loans are this
+                    // row's, read where its own path leaves it.)
                     if let Some(n) = next.filter(|n| n.init == Init::Own) {
-                        let mut n = n.clone();
-                        n.from_row = own.from_row;
-                        n.why = own.why;
-                        return Some(n);
+                        own.init = n.init;
+                        own.parts = n.parts.clone();
+                        own.unnamed_maybe = n.unnamed_maybe;
+                        own.may = n.may;
+                        own.cause = n.cause;
+                        own.always_assigned = n.always_assigned;
                     }
                 }
                 return Some(own);
@@ -247,8 +249,15 @@ impl StateTable {
                 || (cell.cause == Some("unassigned") && !boundary.cells.contains_key(column)) {
                 return Some(here);
             }
-            // (The boundary's loans and holders go with its init: they
-            // describe the same incoming edges.)
+            // Loans are read where the row's own path leaves it: the next
+            // row's incoming edges can include a jump's target (`break 'blk
+            // &h` lands on the block's value, past the next row), whose
+            // loans aren't on this path. (Init still comes from the edges
+            // into the next row: a block-local's scope end is there.)
+            cell.lent = here.lent;
+            cell.may_lend = here.may_lend;
+            cell.borrowed_from = here.borrowed_from;
+            cell.holder_sources = here.holder_sources;
         }
         cell.from_row = next;
         Some(cell)
