@@ -28376,7 +28376,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "v's resource may be immutably borrowed here (a branch above borrowed it on some paths only), so v is read-only until that borrow ends",
         ],
         must_not_contain: &[
-            "v's resource is being shared by one or more variables",
+            // (The PR's first version also said "v's resource is being
+            // shared by one or more variables" in the `if e` arm. Since
+            // design Q1 the true text appears on line 10's `if choose` arm,
+            // whose own row shows v borrowed by maybe, so that pin moved to
+            // `one_line_arm_cell_and_maybe_shared_leg_1866`, by row.)
             // A `/* => */` comment doesn't make the row a match arm: r3 is
             // never used, so s2 is free after it (r3's own dot says it
             // borrows s2 "while the borrow is live").
@@ -28420,6 +28424,36 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[],
     },
 ];
+
+/// #1866's review, after design Q1 (P1-6B): `let maybe = if choose {
+/// v.first() } else { None };` gets a row per arm, and the `if choose`
+/// arm's leg reads its own cell after the arm's code: v is borrowed by
+/// maybe there (true on that path). The `if e` arm below (lines 12-14) is
+/// on both paths, so v is only maybe borrowed there, not surely shared.
+#[test]
+fn one_line_arm_cell_and_maybe_shared_leg_1866() {
+    let tl = run_with_local_backend("branch_legs_table_review_1866").timeline_panel_string();
+    let doc = roxmltree::Document::parse(&tl).expect("timeline svg parses");
+    let tips = |prefix: &str| -> Vec<String> {
+        doc.descendants()
+            .filter(|n| n.attribute("data-rv-id").is_some_and(|id| id.starts_with(prefix)))
+            .filter_map(|n| n.attribute("data-tooltip-text"))
+            .map(|t| {
+                let mut out = String::new();
+                let mut tag = false;
+                for c in t.chars() {
+                    match c { '<' => tag = true, '>' => tag = false, c if !tag => out.push(c), _ => {} }
+                }
+                out
+            })
+            .collect()
+    };
+    let shared = "v's resource is being shared by one or more variables";
+    let arm = tips("v@L10:branch_line:partial_privilege");
+    assert!(arm.iter().any(|t| t.contains(shared) && t.contains("while maybe is in use")), "the `if choose` arm: v shared with maybe, got {arm:?}");
+    let later = tips("v@L12-14:branch_line");
+    assert!(!later.is_empty() && later.iter().all(|t| !t.contains(shared)), "the `if e` arm: v only maybe borrowed, got {later:?}");
+}
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws
 /// nothing), and s is given back once, at r's last use. Main ended the
@@ -38823,9 +38857,22 @@ fn each_lender_given_back_once_after_a_repointing_chain() {
 /// could be hovered there. Moves, borrows (and their ends), copies, an
 /// `else if`, a `match`, arrows pointing left, and arrows into different
 /// variables: each arm whose arrow would run along another arm's now gets
-/// a row of its own (#1187's rows). Where the arrows don't overlap (from
-/// opposite sides, one past the other, into calls), the arms stay side
-/// by side on one row, so those figures keep their height.
+/// a row of its own (#1187's rows).
+///
+/// RustViz 3, design Q1: so does each arm of a one-line conditional whose
+/// arms leave some column in different states, even where the arrows
+/// don't overlap: `opposite_sides`, `apart` and `into_calls` (f moved on
+/// one arm, h on the other) were one-row diamonds before Q1 and are pinned
+/// here as rows of their own now. Arms that agree and whose arrows don't
+/// overlap keep the one row (the Book's `longest`, as line 11 of
+/// `one_line_diamond_1306_1308_1309`: x and y are copied, nothing changes
+/// state), so that figure keeps its height.
+///
+/// Design Q9(a): a conditional whose arms got rows of their own forks a
+/// row above its line, every column on that one row, with its first
+/// arm's dots on the line's row: each arm's leg comes down a full row.
+/// (Before, a column with an event of the first arm forked half a row up
+/// and one without forked on the line's row, a row lower.)
 #[test]
 fn one_line_arms_whose_arrows_overlap_get_rows_of_their_own() {
     let rv = run_with_local_backend("one_line_arm_overlap_1264");
@@ -38847,32 +38894,52 @@ fn one_line_arms_whose_arrows_overlap_get_rows_of_their_own() {
         &["f>r@L34:arrow:static_borrow", "g>r@L34:arrow:static_borrow"],
         &["f>a@L43:arrow:move", "h>a@L43:arrow:move"],
         &["f>b@L50:arrow:move", "h>a@L50:arrow:move"],
+        // Q1: f and h each moved on one arm only.
+        &["f>a@L57:arrow:move", "h>a@L57:arrow:move"],
+        &["f>a@L64:arrow:move", "h>b@L64:arrow:move"],
     ] {
         let ys: Vec<f64> = arms.iter().map(|id| row(id)).collect();
         assert!(ys.windows(2).all(|w| w[0] + 25.0 < w[1]), "{:?}: each arm's arrow a row below the previous arm's, got {:?}", arms, ys);
     }
-    for arms in [
-        ["f>a@L57:arrow:move", "h>a@L57:arrow:move"],
-        ["f>a@L64:arrow:move", "h>b@L64:arrow:move"],
-        ["f>take@L73:arrow:move", "h>take@L73:arrow:move"],
-    ] {
-        assert_eq!(row(arms[0]), row(arms[1]), "{:?}: arrows that don't overlap stay on the one row", arms);
-    }
-    // ... and the code row after each of those three conditionals is two
-    // below it (the one-row diamond's split and join rows, #117), as
-    // before; after an arm-per-row conditional it is four below.
-    let code = rv.code_panel_string();
-    let code_y = |line: usize| -> f64 {
+    // Q1 again: the two calls' logos on rows of their own.
+    let doc = roxmltree::Document::parse(&tl).expect("timeline svg parses");
+    let logo_y = |id: &str| -> f64 {
+        doc.descendants().find(|n| n.attribute("data-rv-id") == Some(id))
+            .and_then(|n| n.attribute("y")?.parse().ok())
+            .unwrap_or_else(|| panic!("no {}", id))
+    };
+    assert!(logo_y("f>take@L73:fn:move") + 25.0 < logo_y("h>take@L73:fn:move"), "into_calls: each arm on a row of its own");
+    // The code row after a one-row diamond is two below it (the diamond's
+    // split and join rows, #117); after an arm-per-row conditional it is
+    // four below (the two arms' rows, the join's, and the blank row below).
+    let code_y = |code: &str, line: usize| -> f64 {
         let id = format!("code:L{}", line);
-        start_tags(&code, "text").into_iter()
+        start_tags(code, "text").into_iter()
             .find(|t| attr(t, "data-rv-id") == Some(id.as_str()))
             .and_then(|t| attr(t, "y")?.parse().ok())
             .unwrap_or_else(|| panic!("no code row for line {}", line))
     };
-    for line in [57, 64, 73] {
-        assert_eq!(code_y(line + 1) - code_y(line), 60.0, "line {}: a one-row diamond", line);
+    let longest = run_with_local_backend("one_line_diamond_1306_1308_1309").code_panel_string();
+    assert_eq!(code_y(&longest, 12) - code_y(&longest, 11), 60.0, "`longest`: arms that agree, a one-row diamond");
+    let code = rv.code_panel_string();
+    let code_y = |line: usize| code_y(&code, line);
+    for line in [9, 57, 64] {
+        assert_eq!(code_y(line + 1) - code_y(line), 120.0, "line {}: two arms' rows and the join's", line);
     }
-    assert_eq!(code_y(10) - code_y(9), 120.0, "line 9: two arms' rows and the join's");
+    // Q9(a): every column of a conditional with rows per arm forks on one
+    // row, a row above its line; the first arm's arrow is on the line's row.
+    for (line, first) in [(9, "f>a@L9:arrow:move"), (14, "f>r@L14:arrow:static_borrow"), (57, "f>a@L57:arrow:move"), (64, "f>a@L64:arrow:move")] {
+        let forks: Vec<(String, f64)> = doc.descendants()
+            .filter(|n| n.attribute("data-rv-id").is_some_and(|id| id.ends_with(&format!("@L{line}:dot:branch"))))
+            .filter_map(|n| {
+                let c = if n.has_tag_name("circle") { n } else { n.descendants().find(|d| d.has_tag_name("circle"))? };
+                Some((n.attribute("data-rv-id")?.to_owned(), c.attribute("cy")?.parse().ok()?))
+            })
+            .collect();
+        assert!(forks.len() >= 2, "line {line}: forks {forks:?}");
+        assert!(forks.iter().all(|(_, y)| (y - forks[0].1).abs() < 0.5), "line {line}: every column forks on one row, got {forks:?}");
+        assert_eq!(row(first) - forks[0].1, 30.0, "line {line}: the fork a full row above the first arm's row");
+    }
 }
 
 /// The legs of a column's conditionals, as centrelines: each
@@ -39258,17 +39325,20 @@ fn one_line_diamonds_end_brackets_at_forks_and_return_outward() {
     }
     // A left arm's L and a call's result to the caller in the gutter on
     // one row (`if c { *b } else { String::new() }`): their heads apart.
-    let tip_x = |id: &str| -> f64 {
+    // (Since design Q1 the two arms are on rows of their own, b moved on
+    // one arm only, so the heads are a row apart; on one row they'd have
+    // to be apart sideways.)
+    let tip = |id: &str| -> (f64, f64) {
         let doc = roxmltree::Document::parse(&tl).expect("timeline svg parses");
         let g = doc.descendants().find(|n| n.attribute("data-rv-id") == Some(id))
             .unwrap_or_else(|| panic!("no arrow {id}"));
         let p: Vec<f64> = g.descendants().find(|n| n.has_tag_name("polygon")).and_then(|n| n.attribute("points"))
             .unwrap_or("").split([' ', ',']).filter_map(|w| w.parse().ok()).collect();
-        p[2]
+        (p[2], p[3])
     };
-    let (b, new) = (tip_x("b>caller@L66:arrow:move"), tip_x("String::new>caller@L66:arrow:move"));
-    if (b - new).abs() < 16.0 {
-        bad.push(format!("{fixture}: the heads of b's and String::new's returns are {}px apart", (b - new).abs()));
+    let (b, new) = (tip("b>caller@L66:arrow:move"), tip("String::new>caller@L66:arrow:move"));
+    if (b.0 - new.0).abs() < 16.0 && (b.1 - new.1).abs() < 16.0 {
+        bad.push(format!("{fixture}: the heads of b's and String::new's returns are {:?} apart", (b.0 - new.0, b.1 - new.1)));
     }
     // A call's logo on an arm's diagonal (or the bend below the fork)
     // goes on the arm's outer side, not into the diamond on the other

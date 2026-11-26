@@ -40,7 +40,9 @@
 //! the other binding); a gap where only another arm's dashed line runs,
 //! or the column is drawn in two states at once; a program with
 //! `// rustviz: hide` / `skip` (its gutter or events differ from the
-//! source) or a `macro_rules!` (a macro can bind names syn can't see);
+//! source); a row of code that never runs drawn inline (the dead `else`
+//! of an irrefutable `if let`, `data-rv-dead-rows`, one count per row,
+//! until #1873) or a `macro_rules!` (a macro can bind names syn can't see);
 //! a `&mut` probe of a place behind a `&` reference; and a probe rustc can't type-check (the variable is out of
 //! scope there). A claim inside a loop is checked like any other (the
 //! probe is still one point of the program) and its message says
@@ -970,6 +972,9 @@ struct Drawing {
     refs: HashSet<String>,
     /// Source line -> y of its timeline row.
     row: HashMap<u32, f64>,
+    /// Rows of code that never runs drawn inline (`data-rv-dead-rows`: the
+    /// dead `else` of an irrefutable `if let`, #987).
+    dead: HashSet<u32>,
 }
 
 fn plain(t: &str) -> String {
@@ -993,7 +998,9 @@ fn num(n: roxmltree::Node, a: &str) -> f64 {
 
 fn drawing(timeline: &str, code: &str) -> Result<Drawing, String> {
     let doc = roxmltree::Document::parse(timeline).map_err(|e| e.to_string())?;
-    let mut d = Drawing { dots: vec![], segs: vec![], columns: BTreeMap::new(), header_x: HashMap::new(), refs: HashSet::new(), row: HashMap::new() };
+    let dead = doc.root_element().attribute("data-rv-dead-rows").unwrap_or("")
+        .split_whitespace().filter_map(|w| w.parse().ok()).collect();
+    let mut d = Drawing { dots: vec![], segs: vec![], columns: BTreeMap::new(), header_x: HashMap::new(), refs: HashSet::new(), row: HashMap::new(), dead };
     for n in doc.descendants().filter(|n| n.attribute("data-rv-id").is_some()) {
         let a = |k: &str| n.attribute(k).unwrap_or("").to_owned();
         let hash = n.descendants().find_map(|c| c.attribute("data-hash")).unwrap_or("").to_owned();
@@ -1129,6 +1136,14 @@ fn claims(pts: &Points, d: &Drawing, skips: &mut Skips) -> Vec<Claim> {
         }
         let y = (ya + yb) / 2.0;
         let added_rows = d.dots.iter().any(|x| x.y > ya + 1.0 && x.y < yb - 1.0);
+        // Code that never runs, drawn inline as 2.x draws it (the dead
+        // `else` of an irrefutable `if let`): rustc checks it on an imaginary
+        // path the drawing doesn't show. Not checked until that `else` is
+        // drawn as a branch of its own (#1873); counted.
+        if d.dead.contains(&p.line) {
+            *skips.entry("dead-arm rows (code that never runs, drawn inline, #1873), not checked").or_default() += 1;
+            continue;
+        }
         for (hash, var) in &d.columns {
             // The column's last dot so far in this function. When it is
             // in a conditional's arm and in the point's own block, the

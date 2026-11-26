@@ -7,7 +7,7 @@
 //! we should use when rendering it's respective timeline in the frontend).
 
 
-use std::collections::{HashMap, HashSet, BTreeMap};
+use std::collections::{HashMap, HashSet, BTreeMap, BTreeSet};
 use std::vec::Vec;
 use std::fmt::{Formatter, Result, Display};
 use std::hash::{Hash, Hasher};
@@ -2806,6 +2806,9 @@ pub enum Event {
       loop_assigned: bool,
       // This column is one of the ExternalEvent's `maybe_held` (#1034).
       maybe_held: bool,
+      // A one-line conditional whose arms got rows of their own
+      // (`VisualizationData::fork_above`): it forks a row above its line.
+      fork_above: bool,
       id: usize
     },
 
@@ -4738,6 +4741,22 @@ pub struct VisualizationData {
     /// sit on (#1342).
     pub raised_headers: HashSet<u64>,
 
+    /// The conditionals (their events' ids) written on one line whose arms
+    /// got rows of their own (`OneLineArmGaps`), set by `render_svg`: each
+    /// forks a row above its line, onto the blank row there, with its
+    /// first arm on the line's row and the others on rows below, so every
+    /// column forks on one row and each arm's diagonal is a full row
+    /// (design Q9). Not one with another one-line conditional in an arm
+    /// (#1306's layout).
+    pub fork_above: HashSet<usize>,
+
+    /// Source rows of code that never runs (reached only by borrowck's
+    /// imaginary edges, `StateTable::dead_row`) that 2.x draws inline, in no
+    /// conditional's arms: the dead `else` of an irrefutable `if let`
+    /// (#987). Set by `render_svg`; `data-rv-dead-rows` on the timeline.
+    /// (Until that `else` is drawn as a branch of its own, #1873.)
+    pub inline_dead_rows: BTreeSet<usize>,
+
     /// RustViz 3: each column's state on each row, from MIR
     /// (`crate::facts::table`). Struct columns' line text is drawn from it.
     pub state_table: crate::facts::table::StateTable,
@@ -6109,6 +6128,7 @@ impl Visualizable for VisualizationData {
                                         maybe_init: maybe_init.contains(rap),
                                         loop_assigned: loop_assigned.contains(rap),
                                         maybe_held: maybe_held.contains(rap),
+                                        fork_above: self.fork_above.contains(id),
                                         id: *id}));
                 }
                 // rap has no column in this conditional, but the end of
@@ -6368,6 +6388,7 @@ impl Visualizable for VisualizationData {
                                         maybe_init: maybe_init.contains(var),
                                         loop_assigned: loop_assigned.contains(var),
                                         maybe_held: maybe_held.contains(var),
+                                        fork_above: self.fork_above.contains(&id),
                                         id: id}, line_number);
                 }
 

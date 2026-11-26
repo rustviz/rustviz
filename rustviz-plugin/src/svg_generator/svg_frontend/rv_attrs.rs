@@ -444,6 +444,18 @@ pub fn invalid_states_attr(vd: &VisualizationData, row_lines: &[Option<usize>]) 
     }
 }
 
+/// ` data-rv-dead-rows="…"` for the timeline's root `<svg>`, or `""`: the
+/// source rows of code that never runs drawn inline
+/// (`VisualizationData::inline_dead_rows`), space-separated. The drawing
+/// oracle doesn't check them (#1873); it changes nothing drawn.
+pub fn dead_rows_attr(rows: &std::collections::BTreeSet<usize>) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let rows: Vec<String> = rows.iter().map(usize::to_string).collect();
+    format!(" data-rv-dead-rows=\"{}\"", rows.join(" "))
+}
+
 /// Longest `data-rv-id` before the `#n` and `/part` suffixes, so that an
 /// id stays within 128 characters (a telemetry event's `element_id`).
 /// Longer ones are cut; making ids unique comes after, so a cut id is

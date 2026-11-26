@@ -8789,8 +8789,11 @@ fn render_branches(
                 let n = segs.len();
                 // RustViz 3: on the arm's own rows, the state table's.
                 // (Not a one-line conditional's: its row's state is every arm's.)
-                let own = if branch_is_collapsed(*split_point, *merge_point) { (1, 0) } else { ty.get_start_end(i) };
-                let pieces = leg_table_pieces(rap, visualization_data, &state, *top, bot, own, *split_point);
+                let own = ty.get_start_end(i);
+                // (A one-line arm's own cell is its state after its code: from its
+                // last dot on.)
+                let last_event = branch.e_data.iter().map(|(l, _)| *l).max().unwrap_or(0);
+                let pieces = leg_table_pieces(rap, visualization_data, &state, *top, bot, own, *split_point, (i, branch_history.len(), *merge_point, last_event));
                 if pieces.is_empty() {
                     push_seg_if_renderable(
                         &mut segs, rap,
@@ -9134,6 +9137,7 @@ fn leg_table_pieces(
     bot: usize,
     own: (usize, usize),
     split: usize,
+    arm: (usize, usize, usize, usize),
 ) -> Vec<(usize, usize, State, Option<String>)> {
     let lined = match state {
         State::FullPrivilege { s } | State::PartialPrivilege { s } => !matches!(s, LineState::Gray | LineState::Uninit),
@@ -9170,9 +9174,15 @@ fn leg_table_pieces(
                 continue;
             }
         }
-        let (st, title, table) = match leg_table_row(rap, visualization_data, w[0], own, split) {
-            None => (state.clone(), None, false),
-            Some(at) => match leg_lent_state(state, rap, visualization_data, at) {
+        let one_line = leg_one_line_arm_cell(rap, visualization_data, w[0], own, split, arm);
+        let (st, title, table) = match (one_line, leg_table_row(rap, visualization_data, w[0], own, split)) {
+            // A one-line conditional's arm: its own cell (design Q1).
+            (Some(cell), _) => match leg_lent_state_of(state, rap, visualization_data, w[0], Some(cell)) {
+                Some((st, t)) => (st, t, true),
+                None => (state.clone(), None, true),
+            },
+            (None, None) => (state.clone(), None, false),
+            (None, Some(at)) => match leg_lent_state(state, rap, visualization_data, at) {
                 Some((st, t)) => (st, t, true),
                 None => (state.clone(), None, true),
             },
@@ -9275,15 +9285,24 @@ fn leg_table_row(rap: &ResourceAccessPoint, visualization_data: &VisualizationDa
 /// `leg_table_row` chose), as a straight column's: `owner_segment` for an
 /// owner or a field, `table_lent_state` for a reference.
 fn leg_lent_state(state: &State, rap: &ResourceAccessPoint, visualization_data: &VisualizationData, at: usize) -> Option<(State, Option<String>)> {
-    if rap.is_ref() {
-        return table_lent_state(state, rap, visualization_data, at);
-    }
     // (The row's own state: `segment_cell` reads the line below a row that
     // jumps or ends a block from the next row, which is another path's
     // here, Q3.)
     let fn_line = *visualization_data.fn_source_lines.get(rap.hash())?;
     let src = rv_attrs::line_of(at, &visualization_data.row_lines)?;
     let cell = visualization_data.state_table.cell(fn_line, rap.name(), src, src);
+    leg_lent_state_of(state, rap, visualization_data, at, cell)
+}
+
+/// `leg_lent_state` from the cell `cell` (a row's own, or one arm's of a
+/// one-line conditional).
+fn leg_lent_state_of(state: &State, rap: &ResourceAccessPoint, visualization_data: &VisualizationData, at: usize, cell: Option<crate::facts::table::Cell>) -> Option<(State, Option<String>)> {
+    if rap.is_ref() {
+        let fn_line = *visualization_data.fn_source_lines.get(rap.hash())?;
+        let src = rv_attrs::line_of(at, &visualization_data.row_lines)?;
+        let cell = cell.filter(|c| matches!(c.init, crate::facts::table::Init::Own | crate::facts::table::Init::Partly))?;
+        return table_lent_state_of(state, rap, visualization_data, fn_line, src, &cell);
+    }
     // No value yet on the arm's path (`let y = Some(if c { .. } else { ..
     // });` is assigned after the arms): an arm's leg is dashed then, as
     // 2.x draws a `let s;` local in an arm.
@@ -9293,9 +9312,53 @@ fn leg_lent_state(state: &State, rap: &ResourceAccessPoint, visualization_data: 
     })
 }
 
+/// The state-table cell an arm (`arm`: its index and the number of arms)
+/// of a conditional written on one line shows below visual row `row`:
+/// its own arm's, from the facts' arms of that row
+/// (`StateTable::arm_order`), on the arm's own rows (`own`; one row, or
+/// the conditional's row when the arms share it). None for another row,
+/// or where the row's arms can't be matched with the conditional's (a
+/// nested one on the line).
+fn leg_one_line_arm_cell(
+    rap: &ResourceAccessPoint,
+    visualization_data: &VisualizationData,
+    row: usize,
+    own: (usize, usize),
+    split: usize,
+    (i, n, merge, last_event): (usize, usize, usize, usize),
+) -> Option<crate::facts::table::Cell> {
+    // (Its cell is the state after the arm's code: not above its last dot.)
+    if row < last_event {
+        return None;
+    }
+    if rap.is_fn() || rap.is_closure() {
+        return None;
+    }
+    let rl = &visualization_data.row_lines;
+    let table = &visualization_data.state_table;
+    let fn_line = *visualization_data.fn_source_lines.get(rap.hash())?;
+    let split_src = rl.get(split..).and_then(|v| v.iter().find_map(|l| *l))?;
+    let src = rv_attrs::line_of(row, rl)?;
+    let (first, last) = own;
+    // (A conditional written on one line: it joins on that line too, or
+    // on a row added below it.)
+    if src != split_src || rv_attrs::line_of(merge, rl) != Some(split_src)
+        || (first <= last && (row < first || row > last) && row != split)
+    {
+        return None;
+    }
+    let order = table.arm_order(fn_line, rap.name(), src, n)?;
+    let arm = *order.get(i)?;
+    let mut cell = table.cell_in_arm(fn_line, rap.name(), src, arm)?;
+    // After the arm's code: not a loan that dies on its way out.
+    let ends = table.arm_loan_ends(fn_line, rap.name(), src, arm);
+    cell.lent.retain(|l| !ends.contains(&l.loan));
+    Some(cell)
+}
+
 /// A source line's code: without comments and string or char literals'
 /// contents (`println!("=>")` reads `println!("")`), trimmed.
-fn code_text(line: &str) -> String {
+pub(crate) fn code_text(line: &str) -> String {
     let mut out = String::new();
     let mut chars = line.chars().peekable();
     let mut in_str = false;
@@ -9878,7 +9941,20 @@ fn render_timeline(
 fn owner_segment(rap: &ResourceAccessPoint, vd: &VisualizationData, row: usize, layout: &State) -> Option<(State, String)> {
     let fn_line = *vd.fn_source_lines.get(rap.hash())?;
     let src = rv_attrs::line_of(row, &vd.row_lines)?;
-    owner_segment_of(rap, vd, row, layout, vd.state_table.segment_cell(fn_line, rap.name(), src))
+    let cell = vd.state_table.segment_cell(fn_line, rap.name(), src);
+    // Code that never runs, drawn inline (the dead `else` of an irrefutable
+    // `if let`, #987): its cell is the borrow checker's imaginary path's.
+    // Where that path has no value for a column the path that runs fills,
+    // the line is dashed on the dead rows and says so (design Q9(b)); the
+    // rest stays the drawing of what runs, until that `else` is drawn as a
+    // branch of its own (#1873).
+    let held = matches!(layout, State::FullPrivilege { s: LineState::Full } | State::PartialPrivilege { .. } | State::RevokedPrivilege { .. });
+    if held && vd.inline_dead_rows.contains(&src)
+        && cell.as_ref().is_some_and(|c| c.init == crate::facts::table::Init::Unassigned)
+    {
+        return Some((State::FullPrivilege { s: LineState::Uninit }, hover_messages::state_dead_else_unassigned(rap.name())));
+    }
+    owner_segment_of(rap, vd, row, layout, cell)
 }
 
 /// `owner_segment` from the cell `cell` (the one `segment_cell` reads, or
@@ -9960,6 +10036,13 @@ fn owner_segment_of(rap: &ResourceAccessPoint, vd: &VisualizationData, row: usiz
             } else {
                 hover_messages::state_maybe(name, cell.cause)
             };
+            // May have no value (the borrow checker's view, Q5: `let value;`
+            // assigned only in an irrefutable `if let`'s arm, #1867): it
+            // can't be used, so its line is dashed, as 2.x draws a local
+            // some branches leave unassigned, not solid.
+            if cell.cause == Some("unassigned") && held {
+                return Some((State::FullPrivilege { s: LineState::Uninit }, title));
+            }
             return Some((layout.clone(), title));
         }
         Init::Own | Init::Partly => {}
@@ -10509,6 +10592,21 @@ fn table_lent_state(state: &State, rap: &ResourceAccessPoint, visualization_data
             table.cell(fn_line, rap.name(), r, r)?
         }
     };
+    table_lent_state_of(state, rap, visualization_data, fn_line, src, &cell)
+}
+
+/// `table_lent_state` from the cell `cell` the column shows after source
+/// row `src` (a branch leg's: one arm's of a one-line conditional, P1-6).
+fn table_lent_state_of(
+    state: &State,
+    rap: &ResourceAccessPoint,
+    visualization_data: &VisualizationData,
+    fn_line: usize,
+    src: usize,
+    cell: &crate::facts::table::Cell,
+) -> Option<(State, Option<String>)> {
+    use crate::facts::table::Init;
+    let table = &visualization_data.state_table;
     let s = match state {
         State::FullPrivilege { s } | State::PartialPrivilege { s } => s.clone(),
         State::RevokedPrivilege { prev_state, .. } => match prev_state.as_ref() {
@@ -10961,7 +11059,12 @@ const PATTERN_SPLIT_RISE: i64 = 15;
 /// either arm: it goes on the raised split dot (`event_dot_y`), not
 /// between the arms (#509).
 fn binds_at_split(history: &[(usize, Event)], i: usize) -> bool {
-    let Event::Branch { branch_history, split_point, merge_point, .. } = &history[i].1 else { return false };
+    let Event::Branch { branch_history, split_point, merge_point, fork_above, .. } = &history[i].1 else { return false };
+    // (Or a one-line conditional whose arms got rows of their own, on every
+    // column: it forks a full row up, `split_rise`, design Q9.)
+    if *fork_above {
+        return true;
+    }
     // (Or a later arm of a one-line conditional whose arms got rows of
     // their own, `if n > 2 { } else if let Some(x) = v.first() { let r =
     // x; }`: that arm's column starts on the split row too, #1426. Its
@@ -11017,6 +11120,9 @@ fn arm_first_fork_rise(branch_history: &[BranchData], split_point: usize) -> Opt
 /// (`arm_first_fork_rise`).
 fn split_rise(history: &[(usize, Event)], i: usize) -> i64 {
     match &history[i].1 {
+        // A one-line conditional whose arms got rows of their own: on the
+        // blank row above its line, its first arm on the line's row (Q9).
+        Event::Branch { fork_above: true, .. } => COLLAPSED_APEX,
         Event::Branch { branch_history, split_point, .. } =>
             arm_first_fork_rise(branch_history, *split_point).unwrap_or(0) + PATTERN_SPLIT_RISE,
         _ => PATTERN_SPLIT_RISE,
@@ -11430,6 +11536,7 @@ mod tests {
             maybe_init: false,
             loop_assigned: false,
             maybe_held: false,
+            fork_above: false,
             id: 0,
         })];
         compute_width(&mut events);

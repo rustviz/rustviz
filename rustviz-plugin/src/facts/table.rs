@@ -143,6 +143,8 @@ struct BodyTable {
     part_lenders: BTreeSet<String>,
     /// Columns with fields this body can't name (no columns of their own).
     hidden_fields: BTreeSet<String>,
+    /// Rows whose code never runs (`BodyFacts::dead_lines`).
+    dead_lines: BTreeSet<usize>,
 }
 
 /// The state table of a crate: per fn body, per row (and arm), per
@@ -367,6 +369,86 @@ impl StateTable {
             .map_or(Vec::new(), |r| r.arms.iter().map(|(a, _)| a.clone()).collect())
     }
 
+    /// Whether the arms of a one-line branch on source row `row` leave one
+    /// of `columns` in different states (its value, the kinds and holders
+    /// of the loans restricting it, the parts moved out of it): design Q1,
+    /// such a branch gets a row per arm.
+    pub fn arms_disagree(&self, row: usize, columns: &BTreeSet<String>) -> bool {
+        // (Loans that die on an arm's way out don't count: after its code
+        // they are over, `arm_loan_ends`.)
+        let key = |c: &Cell, ends: &[usize]| {
+            let mut lent: Vec<(&'static str, String)> =
+                c.lent.iter().filter(|l| !ends.contains(&l.loan)).map(|l| (l.kind, l.holder.clone())).collect();
+            lent.sort_unstable();
+            lent.dedup();
+            (c.init, lent, c.parts.clone())
+        };
+        self.bodies.values().flatten().filter(|b| b.first_line <= row && row <= b.last_line).any(|b| {
+            let Some(r) = b.rows.get(&row) else { return false };
+            let branches: BTreeSet<usize> = r.arms.iter().map(|(a, _)| a.branch).collect();
+            branches.iter().any(|br| {
+                let arms: Vec<(usize, &Cells)> =
+                    r.arms.iter().enumerate().filter(|(_, (a, _))| a.branch == *br).map(|(i, (_, c))| (i, c)).collect();
+                columns.iter().any(|col| {
+                    let ends = |i: usize| -> Vec<usize> {
+                        r.why.get(col).map_or(Vec::new(), |ws| ws.iter().filter_map(|(a, w)| match w {
+                            Why::LoanEnded { loan, .. } if *a == Some(i) => Some(*loan),
+                            _ => None,
+                        }).collect())
+                    };
+                    let mut seen = arms.iter().map(|(i, c)| c.get(col).map(|c| key(c, &ends(*i))));
+                    let first = seen.next();
+                    first.is_some_and(|f| seen.any(|o| o != f))
+                })
+            })
+        })
+    }
+
+    /// The loans of `column` whose end is one of arm `arm`'s own events on
+    /// source row `row` (a loan its code last uses, dying on the arm's way
+    /// out to the join): the arm's state, read at its exits, still has
+    /// them.
+    pub fn arm_loan_ends(&self, fn_line: usize, column: &str, row: usize, arm: usize) -> Vec<usize> {
+        self.body(fn_line, column)
+            .and_then(|b| b.rows.get(&row))
+            .and_then(|r| r.why.get(column))
+            .map_or(Vec::new(), |ws| ws.iter().filter_map(|(a, w)| match w {
+                Why::LoanEnded { loan, .. } if *a == Some(arm) => Some(*loan),
+                _ => None,
+            }).collect())
+    }
+
+    /// The arms of the one branch on source row `row` (in the body of the
+    /// fn starting on `fn_line` that has `column`), as indices into the
+    /// row's arms in source order (an arm with no code of its own, an
+    /// implicit `else`, last), when the row has exactly one branch (no
+    /// nested one) and it has `n` arms. Its arm `i` is a renderer's `i`th.
+    pub fn arm_order(&self, fn_line: usize, column: &str, row: usize, n: usize) -> Option<Vec<usize>> {
+        let r = self.body(fn_line, column)?.rows.get(&row)?;
+        if r.arms.is_empty() || r.arms.iter().any(|(a, _)| a.branch != 0 || a.parent.is_some()) || r.arms.len() != n {
+            return None;
+        }
+        let mut idx: Vec<usize> = (0..r.arms.len()).collect();
+        idx.sort_by_key(|&i| {
+            let a = &r.arms[i].0;
+            (a.col_lo == 0, a.col_lo, a.col_hi)
+        });
+        Some(idx)
+    }
+
+    /// Whether source row `row` of the fn starting on `fn_line` is code that
+    /// never runs, reached only by borrowck's imaginary edges (the dead
+    /// `else` of an irrefutable `if let`): its cells are that imaginary
+    /// path's (design Q9(b)).
+    pub fn dead_row(&self, fn_line: usize, row: usize) -> bool {
+        self.bodies.get(&fn_line).is_some_and(|bs| bs.iter().any(|b| b.dead_lines.contains(&row)))
+    }
+
+    /// Every row of code that never runs (`dead_row`), over all fn bodies.
+    pub fn dead_rows(&self) -> BTreeSet<usize> {
+        self.bodies.values().flatten().flat_map(|b| b.dead_lines.iter().copied()).collect()
+    }
+
     /// The direct field columns of `column` (`p.a`, `p.b` of `p`).
     pub fn fields_of(&self, fn_line: usize, column: &str) -> Vec<String> {
         let prefix = format!("{}.", column);
@@ -546,7 +628,7 @@ fn body_table(b: &BodyFacts) -> BodyTable {
     let part_lenders = b.loans.iter().flat_map(|l| l.part_of.iter().cloned()).collect();
     let loans = b.loans.iter().map(|l| (l.loan, l.clone())).collect();
     let hidden_fields = b.columns.iter().filter(|c| c.hidden_fields).map(|c| c.name.clone()).collect();
-    BodyTable { first_line: b.first_line, last_line: b.last_line, rows, columns, array_lengths, boxes, loans, part_lenders, hidden_fields }
+    BodyTable { first_line: b.first_line, last_line: b.last_line, rows, columns, array_lengths, boxes, loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
 }
 
 #[cfg(test)]
@@ -609,6 +691,7 @@ mod tests {
             rows,
             temps: Vec::new(),
             notes: Vec::new(),
+            dead_lines: BTreeSet::new(),
         }
     }
 

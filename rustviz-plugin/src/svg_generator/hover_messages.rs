@@ -3392,6 +3392,14 @@ pub fn state_maybe(name: &str, cause: Option<&str>) -> String {
     }
 }
 
+/// A row of the dead `else` of an irrefutable `if let`, drawn inline
+/// (#987), where the borrow checker's imaginary path through it leaves
+/// `name` with no value (Q9(b), #1873).
+pub fn state_dead_else_unassigned(name: &str) -> String {
+    let me = styled_name_html(name);
+    format!("This else never runs (the pattern always matches). On the path the borrow checker imagines through it, {me} has no value")
+}
+
 pub fn state_imaginary_unassigned(name: &str) -> String {
     let me = styled_name_html(name);
     format!("{me} is assigned on every path that runs. The borrow checker also checks an unreachable path that skips the assignment, so {me} can't be used here")

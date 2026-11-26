@@ -48,6 +48,11 @@ pub struct BodyFacts {
     /// Temporaries that hold a value needing drop.
     pub temps: Vec<TempInfo>,
     pub notes: Vec<String>,
+    /// Source lines whose code borrowck checks but that never runs: reached
+    /// only by borrowck's imaginary edges (the dead `else` of an irrefutable
+    /// `if let`). Their rows' states are that imaginary path's.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub dead_lines: BTreeSet<usize>,
 }
 
 #[derive(Serialize)]

@@ -3108,6 +3108,23 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     for (line, fs) in evs {
         notes.push(format!("{} facts on row {} outside the body's rows", fs.len(), line));
     }
+    // Lines whose code only borrowck's imaginary edges reach: reachable in
+    // the CFG borrowck checks, but not in what runs (`runs`).
+    let mut checked: BTreeSet<rustc_middle::mir::BasicBlock> = BTreeSet::new();
+    {
+        let mut work = vec![rustc_middle::mir::START_BLOCK];
+        while let Some(bb) = work.pop() {
+            if !is_unreachable(body, bb) && !body.basic_blocks[bb].is_cleanup && checked.insert(bb) {
+                work.extend(body.basic_blocks[bb].terminator().successors());
+            }
+        }
+    }
+    let run_lines: BTreeSet<usize> = cx.rows.row.iter().filter(|(l, _)| runs.contains(&l.block)).map(|(_, r)| *r).collect();
+    let dead_lines: BTreeSet<usize> = cx.rows.row.iter()
+        .filter(|(l, r)| checked.contains(&l.block) && !runs.contains(&l.block) && !run_lines.contains(*r))
+        .map(|(_, r)| *r)
+        .filter(|r| *r >= first_line && *r <= last_line)
+        .collect();
     BodyFacts {
         func,
         kind: if tcx.is_closure_like(def_id) { "closure" } else { "fn" },
@@ -3120,6 +3137,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         rows: out_rows,
         temps,
         notes,
+        dead_lines,
     }
 }
 
