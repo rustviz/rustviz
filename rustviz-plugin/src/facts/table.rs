@@ -261,6 +261,11 @@ impl StateTable {
     /// Whether `loan` (restricting `column`) borrows the column itself, a
     /// place it is in (`p` for `p.a`) or, for a Box, its contents (`*b`),
     /// rather than a part of it (`p.a` for `p`, an element `v[_]`).
+    /// The place `loan` borrows, as the facts name it (`x`, `*r`).
+    pub fn loan_lender(&self, fn_line: usize, column: &str, loan: usize) -> Option<&str> {
+        self.body(fn_line, column).and_then(|b| b.loan_lenders.get(&loan)).map(String::as_str)
+    }
+
     pub fn lends_whole(&self, fn_line: usize, column: &str, loan: usize) -> bool {
         let Some(lender) = self.body(fn_line, column).and_then(|b| b.loan_lenders.get(&loan)) else { return false };
         // The facts name a Box payload's fields without the deref (`b.0` for
