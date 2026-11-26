@@ -73,13 +73,16 @@ pub struct Cell {
     pub may: bool,
     /// For `Maybe`: "moved" or "unassigned".
     pub cause: Option<&'static str>,
+    /// The loans its references hold here (by loan id): none for a
+    /// reference that is dead (no later use) or holds no loan.
+    pub holds: Vec<usize>,
     pub why: Vec<Why>,
     /// The row this state was read on (the row asked for, or the row
     /// above it that the state carries over from).
     pub from_row: usize,
 }
 
-type Cells = BTreeMap<String, (Init, Vec<Lent>, Option<Parts>, Option<&'static str>)>;
+type Cells = BTreeMap<String, (Init, Vec<Lent>, Option<Parts>, Option<&'static str>, Vec<usize>)>;
 
 /// An arm of a one-line branch on a row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,9 +186,9 @@ impl StateTable {
             }
             out
         };
-        let (from_row, (init, lent, parts, cause)) = found?;
+        let (from_row, (init, lent, parts, cause, holds)) = found?;
         let may = init == Init::Maybe || parts.as_ref().is_some_and(|p| !p.maybe.is_empty());
-        Some(Cell { init, lent, parts, may, cause, why, from_row })
+        Some(Cell { init, lent, parts, may, cause, holds, why, from_row })
     }
 
     /// The arms of a one-line branch on `row` of the fn starting on
@@ -297,7 +300,8 @@ fn cells_of(st: &State) -> Cells {
         let Some(init) = Init::parse(s) else { continue };
         let lent = st.lent.get(col).cloned().unwrap_or_default();
         let parts = st.parts.get(col).cloned();
-        cells.insert(col.clone(), (init, lent, parts, st.cause.get(col).copied()));
+        let holds = st.holds.get(col).cloned().unwrap_or_default();
+        cells.insert(col.clone(), (init, lent, parts, st.cause.get(col).copied(), holds));
     }
     cells
 }

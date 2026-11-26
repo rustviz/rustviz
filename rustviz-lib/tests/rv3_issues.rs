@@ -96,6 +96,8 @@ struct Case {
     #[serde(default)]
     lent: Vec<LentA>,
     #[serde(default)]
+    holds: Vec<HoldsA>,
+    #[serde(default)]
     loan: Vec<LoanA>,
     #[serde(default)]
     drop: Vec<DropA>,
@@ -148,6 +150,25 @@ struct LentA {
     holder: Option<String>,
     /// The loan's borrowed place (`*a` for a reborrow through a).
     lender: Option<String>,
+    #[serde(default)]
+    absent: bool,
+    src: String,
+    #[serde(default, rename = "fn")]
+    func: Option<String>,
+    #[serde(default)]
+    why: Option<String>,
+}
+
+/// A reference column holds a loan after the row (the loans its origins
+/// contain where the next row starts; a dead reference holds none).
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+struct HoldsA {
+    row: u32,
+    /// The column whose references hold it (`r`, `h.r`'s variable `h`).
+    place: String,
+    /// The loan's borrowed place as the dump names it (`x`, `*a`); `_`: any.
+    lender: String,
     #[serde(default)]
     absent: bool,
     src: String,
@@ -317,6 +338,7 @@ fn toolchain() -> String {
 enum Check {
     State { row: u32, place: String, is: String },
     Lent { row: u32, place: String, kind: Option<String>, holder: Option<String>, lender: Option<String>, absent: bool },
+    Holds { row: u32, place: String, lender: String, absent: bool },
     Loan(LoanA),
     Drop { row: u32, place: String, how: String, absent: bool },
     Event { row: u32, ev: String, absent: bool },
@@ -344,6 +366,14 @@ fn assertions(c: &Case) -> Vec<Assertion> {
             what: format!("after row {}: {} {}lent{}{}", l.row, l.place, if l.absent { "not " } else { "" },
                 l.kind.as_ref().map_or(String::new(), |k| format!(" {k}")), l.holder.as_ref().map_or(String::new(), |h| format!(" to {h}"))),
             check: Check::Lent { row: l.row, place: l.place.clone(), kind: l.kind.clone(), holder: l.holder.clone(), lender: l.lender.clone(), absent: l.absent },
+        });
+    }
+    for h in &c.holds {
+        out.push(Assertion {
+            src: h.src.clone(),
+            func: f(&h.func),
+            what: format!("after row {}: {} {}holds a loan of {}", h.row, h.place, if h.absent { "no longer " } else { "" }, h.lender),
+            check: Check::Holds { row: h.row, place: h.place.clone(), lender: h.lender.clone(), absent: h.absent },
         });
     }
     for l in &c.loan {
@@ -583,6 +613,8 @@ struct RowF {
     /// column -> (fields moved on every path, fields moved on some paths)
     parts: BTreeMap<String, (Vec<String>, Vec<String>)>,
     lent: BTreeMap<String, Vec<Lent>>,
+    /// column -> loans its references hold (v4 `holds`).
+    holds: BTreeMap<String, Vec<usize>>,
     /// column -> why it is "maybe" ("moved" | "unassigned" | "imaginary"),
     /// if the dump says.
     cause: BTreeMap<String, String>,
@@ -725,7 +757,7 @@ fn load_facts(v: &Value) -> Result<Vec<BodyF>, String> {
     let (bodies, spike) = match v {
         Value::Array(a) => (a.clone(), true),
         Value::Object(o) => match (version, o.get("bodies")) {
-            (Some(1 | 2 | 3), Some(Value::Array(b))) => {
+            (Some(1..=4), Some(Value::Array(b))) => {
                 // A body the producer failed on has no facts: that's a
                 // failure to read, never an expected (xfail) result.
                 let errs = o.get("errors").map(strs).unwrap_or_default();
@@ -791,7 +823,9 @@ fn load_facts(v: &Value) -> Result<Vec<BodyF>, String> {
                 .map(|a| (a["branch"].as_u64().unwrap_or(0) as usize, a["parent"].as_u64().map(|p| p as usize))).collect();
             let cause = r["cause"].as_object().into_iter().flatten()
                 .filter_map(|(k, c)| c.as_str().map(|c| (k.clone(), c.to_owned()))).collect();
-            rows.insert(line, RowF { state, parts, lent, cause, facts, arms });
+            let holds = r["holds"].as_object().into_iter().flatten()
+                .map(|(k, v)| (k.clone(), v.as_array().into_iter().flatten().filter_map(Value::as_u64).map(|x| x as usize).collect())).collect();
+            rows.insert(line, RowF { state, parts, lent, cause, holds, facts, arms });
         }
         let loans: Vec<LoanF> = b["loans"].as_array().into_iter().flatten().map(|l| LoanF {
             id: l["loan"].as_u64().unwrap_or(u64::MAX) as usize,
@@ -1223,6 +1257,13 @@ fn check(a: &Assertion, facts: &[BodyF]) -> Result<(), String> {
             let got = format!("lent {:?}", lent.iter().map(|l| format!("{}:L{}->{}", l.kind.as_deref().unwrap_or("phase unknown"), l.loan, l.holders.join("|"))).collect::<Vec<_>>());
             if hit != *absent { Ok(()) } else { Err(got) }
         }
+        Check::Holds { row, place, lender, absent } => {
+            let Some(r) = row_after(b, *row) else { return Err("(no state for this row)".into()) };
+            let held: Vec<&LoanF> = r.holds.get(place).into_iter().flatten().filter_map(|id| b.loans.iter().find(|x| x.id == *id)).collect();
+            let hit = held.iter().any(|x| lender == "_" || x.lender == *lender);
+            let got = format!("holds {:?}", held.iter().map(|x| format!("L{} {}", x.id, x.lender)).collect::<Vec<_>>());
+            if hit != *absent { Ok(()) } else { Err(got) }
+        }
         Check::Loan(l) => {
             let cands: Vec<&LoanF> = b.loans.iter()
                 .filter(|x| x.tracked && x.line == l.row && x.lender == l.lender && kind_ok(&l.kind, &x.kind)
@@ -1591,7 +1632,9 @@ fn rv3_harness_catches_wrong_facts() {
             ]}}]}}"#)).unwrap();
         load_facts(&v).unwrap()
     };
-    let issue: Vec<Assertion> = assertions(&case).into_iter().filter(|a| a.src == "issue").collect();
+    // (The synthetic dumps have no `holds`: the case's `[[holds]]` pins are
+    // checked against the plugin's facts only.)
+    let issue: Vec<Assertion> = assertions(&case).into_iter().filter(|a| a.src == "issue" && !matches!(a.check, Check::Holds { .. })).collect();
     let failing = |f: &[BodyF]| issue.iter().filter(|a| check(a, f).is_err()).map(|a| a.what.clone()).collect::<Vec<_>>();
     let right = dump(true, "[]");
     assert!(failing(&right).is_empty(), "right facts fail: {:?}", failing(&right));

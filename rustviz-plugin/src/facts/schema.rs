@@ -12,8 +12,9 @@ use std::collections::BTreeMap;
 /// track (`LoanInfo.source`: a reference parameter's, a constant's, an
 /// untracked shared borrow, a kept temporary's), with their `BorrowEnd`s;
 /// `LoanInfo.made_through`, `direct_holders`, `via_call`, `implicit`; the
-/// `HoldEnd` fact.
-pub const VERSION: u32 = 3;
+/// `HoldEnd` fact. 4: `State.holds` (the loans each column's references
+/// hold after the row).
+pub const VERSION: u32 = 4;
 
 #[derive(Serialize)]
 pub struct CrateFacts {
@@ -196,6 +197,11 @@ pub struct State {
     /// (moved only on a way borrowck checks but that never runs: an
     /// or-pattern's unreachable alternative; still not usable).
     pub cause: BTreeMap<String, &'static str>,
+    /// column -> the loans its references hold where the next row of the
+    /// same path starts (Polonius: the loans its variable's origins
+    /// contain there, so a reference that is dead holds none), by loan id,
+    /// sorted. Columns that hold none are left out.
+    pub holds: BTreeMap<String, Vec<usize>>,
 }
 
 #[derive(Serialize, Default)]

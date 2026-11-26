@@ -31263,7 +31263,7 @@ fn fact_loan<'a>(body: &'a serde_json::Value, line: u64, lender: &str) -> &'a se
 fn facts_pin_constructs() {
     let rv = run_with_local_backend("rv3_facts_constructs");
     let facts = rv.facts().expect("the plugin gave no facts (RV3_FACTS)");
-    assert_eq!(facts["version"], 3);
+    assert_eq!(facts["version"], 4);
     assert_eq!(facts["errors"].as_array().map(Vec::len), Some(0), "{:#}", facts["errors"]);
     let main = fact_body(facts, "main");
     let s = |v: &serde_json::Value| v.as_str().unwrap_or_default().to_owned();

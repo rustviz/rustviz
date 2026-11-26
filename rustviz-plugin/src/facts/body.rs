@@ -2690,6 +2690,72 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 st.lent.entry(l.lender.clone()).or_default().push(Lent { loan: l.loan, kind, holder: holder.clone() });
             }
         }
+        // What each variable's references hold where the next row of the
+        // same path starts: the loans its origins contain there (a loan
+        // its last use on this row ends is gone; the start of a later
+        // row, or the exit itself where the path leaves the function).
+        if let Some(t) = table {
+            let known: BTreeSet<usize> = loans.iter().map(|l| l.loan).collect();
+            let mut holds: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+            let succs_of = |l: Location| -> Vec<Location> {
+                let data = &body.basic_blocks[l.block];
+                if l.statement_index < data.statements.len() {
+                    vec![l.successor_within_block()]
+                } else {
+                    data.terminator()
+                        .successors()
+                        .filter(|s| !body.basic_blocks[*s].is_cleanup && !is_unreachable(body, *s))
+                        .map(|s| Location { block: s, statement_index: 0 })
+                        .collect()
+                }
+            };
+            for e in exits {
+                let line = cx.row_of(*e);
+                // Where each path from the exit reaches another row (MIR's
+                // jumps that carry the branch's own span stay on this row:
+                // a skipped `if`'s goto); a path that ends on the row (a
+                // return) is read at its last location.
+                let mut points: Vec<Point> = Vec::new();
+                let mut seen: BTreeSet<Location> = BTreeSet::new();
+                let mut work: Vec<Location> = succs_of(*e);
+                if work.is_empty() {
+                    points.push(t.mid_index(*e));
+                }
+                while let Some(l) = work.pop() {
+                    if !seen.insert(l) || seen.len() > 256 {
+                        continue;
+                    }
+                    if cx.rows.row.get(&l).is_some_and(|r| *r != line) {
+                        points.push(t.start_index(l));
+                        continue;
+                    }
+                    let next = succs_of(l);
+                    if next.is_empty() {
+                        points.push(t.mid_index(l));
+                    }
+                    work.extend(next);
+                }
+                for p in points {
+                    for (o, untracked) in [(pol.as_ref(), false), (spol.as_ref(), true)] {
+                        let Some(m) = o.and_then(|o| o.origin_contains_loan_at.get(&p)) else { continue };
+                        for (local, os) in &origins_of {
+                            let name = &cx.names.locals[local];
+                            if !st.state.contains_key(name) {
+                                continue;
+                            }
+                            for l in os.iter().filter_map(|o| m.get(o)).flatten() {
+                                // (Each run's own loans: the untracked run's
+                                // placeholders share ids with tracked ones.)
+                                if (l.index() >= base) == untracked && known.contains(&l.index()) {
+                                    holds.entry(name.clone()).or_default().insert(l.index());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            st.holds = holds.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();
+        }
         st
     };
     let mut out_rows: Vec<Row> = Vec::new();
