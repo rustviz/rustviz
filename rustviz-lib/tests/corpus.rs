@@ -21538,13 +21538,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "b goes out of scope. Whatever it still holds here (if anything) is dropped.",
             "f goes out of scope. Whatever it still holds here (if anything) is dropped.",
             "g goes out of scope. Whatever it still holds here (if anything) is dropped.",
-            "g can't be read or moved here: it or its contents may have been moved out above, or it may never have been given a value, and Rust can't be sure it holds a whole Box again",
-            "j acquires ownership of a new resource. Whatever j still held here (if anything) is dropped.",
+            "g can't be read or moved here: on some path to here it may not hold a whole Box, and Rust can't be sure it does",
+            // (Both of j's reassignments: by id in `maybe_held_joins_and_splits_have_dots`.)
             "j acquires ownership of a new resource. Whatever j still held here (if anything) is dropped.",
         ],
         must_not_contain: &[
             "=b goes out of scope. Its contents were moved out earlier, so only the Box's heap allocation is freed.",
-            "=b goes out of scope. Its contents were moved out earlier, so only what is left of the Box is freed.",
+            "=b goes out of scope. Its contents were moved out earlier, so they aren't dropped here; only the Box itself is.",
+            "g can't be read or moved here: it or its contents may have been moved out above, or it may never have been given a value",
             "f goes out of scope. Its resource (including the String it holds) is dropped here only if no branch above moved it",
             "g goes out of scope. Its resource (including the String it holds) is dropped here only if no branch above moved it",
             "If the branch that ran didn't move it, its resource (including the String it holds) is dropped when g goes out of scope",
@@ -28059,7 +28060,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "b goes out of scope. Whatever it still holds here (if anything) is dropped.",
             "b2 goes out of scope. Its resource is dropped (including the String it holds).",
             "bd acquires ownership of a new resource. Whatever bd still held here (if anything) is dropped.",
-            "bd can't be read or moved here: it or its contents may have been moved out above, or it may never have been given a value, and Rust can't be sure it holds a whole Box again",
+            "bd can't be read or moved here: on some path to here it may not hold a whole Box, and Rust can't be sure it does",
             "bd goes out of scope. Whatever it still holds here (if anything) is dropped.",
             "be acquires ownership of a new resource. Whatever be still held here (if anything) is dropped.",
             "be can't be read or moved here: its contents may have been moved out above, and Rust can't be sure they were put back",
@@ -28094,9 +28095,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "bu can't be read or moved here: its contents may have been moved out above, and Rust can't be sure they were put back",
             "bu goes out of scope. Whatever it still holds here (if anything) is dropped.",
             "bw acquires ownership of a new resource. Whatever bw still held here (if anything) is dropped.",
-            "bw can't be read or moved here: it or its contents may have been moved out above, or it may never have been given a value, and Rust can't be sure it holds a whole Box again",
+            "bw can't be read or moved here: on some path to here it may not hold a whole Box, and Rust can't be sure it does",
             "bw goes out of scope. Whatever it still holds here (if anything) is dropped.",
-            "Only if the `?` after the assignment returns early: the function returns and b2's resource (including the String it holds) is dropped. If that `?` succeeds, nothing happens to b2 here.",
+            "Only if the second `?` on this line returns early: the function returns and b2's resource (including the String it holds) is dropped. If that `?` succeeds, nothing happens to b2 here.",
+            // (#1600 review: three `?`s on a line, each named by its place.)
+            "Only if the second `?` on this line returns early: the function returns and s3's resource is dropped. If that `?` succeeds, the assignment runs: s3 acquires ownership of a new resource; its previous resource is dropped.",
+            "Only if the third `?` on this line returns early: the function returns and s3's resource is dropped. If that `?` succeeds, nothing happens to s3 here.",
+            // (The join before `bz = Box::new(*bz);`: nothing moved yet.)
+            "bz isn't moved in any of the branches above",
+            "bz acquires ownership of a new resource. Its previous contents were moved out earlier, so they aren't dropped here; only the old Box itself is.",
             "Only if the `?` here returns early: whatever bo still holds here (if anything) is dropped. If the `?` succeeds, nothing happens to bo here.",
             "Only if the `?` here returns early: whatever bq still holds here (if anything) is dropped. If the `?` succeeds, nothing happens to bq here.",
             "Only if the `?` here returns early: whatever bs still holds here (if anything) is dropped. If the `?` succeeds, bs's resource isn't dropped here.",
@@ -28120,6 +28127,27 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "dropped if bq still holds it",
             "(on an `Err` or `None`): the function returns, and what is dropped depends on the path",
             "depends on the path",
+            "may never have been given a value",
+            "Only if the `?` after the assignment returns early: the function returns and s3",
+            "Only if the `?` after the assignment returns early: the function returns and b2",
+            "bz can't be read or moved here",
+            "heap allocation",
+            "what is left of its previous Box is freed",
+        ],
+    },
+    // #1423 (and #1145's same-line case): `b = Box::new(*b);` moves the
+    // String into the new Box first; the old Box's contents aren't dropped,
+    // only the old Box itself. No "heap allocation" or "freed": a
+    // zero-sized payload has none (#1608, #1600 review).
+    TooltipExpect {
+        name: "box_rebox_contents_1423",
+        must_contain: &[
+            "b acquires ownership of a new resource. Its previous contents were moved out earlier, so they aren't dropped here; only the old Box itself is.",
+        ],
+        must_not_contain: &[
+            "heap allocation",
+            "what is left of its previous Box is freed",
+            "Its previous resource is dropped",
         ],
     },
     TooltipExpect {
@@ -38476,12 +38504,20 @@ fn maybe_held_joins_and_splits_have_dots() {
     }
     // #1590: the join after the re-boxing arm (b on line 19, bm on line 30)
     // says what may be uninitialized, not only the first join.
-    let tl = run_with_local_backend("box_reboxed_in_arm_1590").timeline_panel_string();
-    for (id, text) in [("b@L19:dot:branch+branch_join", " can't be read or moved here"), ("bm@L30:dot:branch+branch_join", " can't be read or moved here")] {
-        let found = start_tags(&tl, "circle").into_iter().any(|t| attr(t, "data-rv-id") == Some(id)
+    // #1220's j (#1600 review): both reassignments, the one in the arm
+    // (line 44) and the one after the join (line 46), each on its own dot.
+    for (name, id, text) in [
+        ("box_reboxed_in_arm_1590", "b@L19:dot:branch+branch_join", " can't be read or moved here"),
+        ("box_reboxed_in_arm_1590", "bm@L30:dot:branch+branch_join", " can't be read or moved here"),
+        ("box_rebox_branch_1220", "j@L44:dot:acquire+owner_drop_at_reassign", " still held here (if anything) is dropped."),
+        ("box_rebox_branch_1220", "j@L46:dot:acquire+owner_drop_at_reassign", " still held here (if anything) is dropped."),
+    ] {
+        let tl = run_with_local_backend(name).timeline_panel_string();
+        // (A drop dot is a `<g>`.)
+        let found = ["circle", "g"].into_iter().flat_map(|tag| start_tags(&tl, tag)).any(|t| attr(t, "data-rv-id") == Some(id)
             && attr(t, "data-tooltip-text").is_some_and(|tip| tip.contains(text)));
         if !found {
-            missing.push(format!("box_reboxed_in_arm_1590: {} without {:?}", id, text));
+            missing.push(format!("{}: {} without {:?}", name, id, text));
         }
     }
     // #1584: the split's text is on its own dot, not merged into a drop's

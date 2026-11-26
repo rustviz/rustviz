@@ -129,12 +129,12 @@ pub fn event_dot_closure_go_out_of_scope(my_name: &String, move_capture_count: u
 }
 
 // A `Box` whose whole contents were moved out (`take(*b)`, #609) goes
-// out of scope: the contents' drop isn't the box's; what is left of
-// the Box is freed (no "heap allocation": a zero-sized payload has none,
-// #1608).
+// out of scope: the contents' drop isn't the box's; only the Box itself
+// is dropped (no "heap allocation" or "freed": a zero-sized payload has
+// none, #1608).
 pub fn event_dot_box_contents_moved_go_out_of_scope(my_name: &String) -> String {
     format!(
-        "{} goes out of scope. Its contents were moved out earlier, so only what is left of the Box is freed.",
+        "{} goes out of scope. Its contents were moved out earlier, so they aren't dropped here; only the Box itself is.",
         styled_name_html(my_name)
     )
 }
@@ -182,9 +182,11 @@ pub fn event_dot_box_join(my_name: &String, mutable: bool, boxed: Option<bool>, 
     // more; and no "until it's assigned again": rustc may still reject a
     // read after an assignment it can't follow, so only "can't be sure".)
     match (boxed, contents) {
+        // (Not why: moved whole, contents moved, or never given a value
+        // on some path; rustc's data doesn't tell which, #1600 review.)
         (Some(false) | None, _) => Some(format!(
-            "{} can't be read or moved here: it or its contents may have been moved out above, or it may never \
-             have been given a value, and Rust can't be sure it holds a whole Box again",
+            "{} can't be read or moved here: on some path to here it may not hold a whole Box, and Rust \
+             can't be sure it does",
             name
         )),
         (Some(true), Some(false) | None) => Some(format!(
@@ -549,13 +551,13 @@ pub fn event_dot_owner_drop_at_reassign_maybe_moved(my_name: &String, note: &str
 
 // `b = Box::new(…)` after the old Box's whole contents were moved out
 // (`let s = *b;`): the old contents aren't the Box's to drop any more,
-// but what is left of the Box is freed here (#1145; no "heap allocation":
-// a zero-sized payload has none). (Starts ". Its
+// only the old Box itself is dropped here (#1145; nothing "freed": a
+// zero-sized payload has no allocation, #1608). (Starts ". Its
 // previous", so it subsumes the line's plain acquire.)
 pub fn event_dot_owner_drop_at_reassign_box_contents_moved(my_name: &String) -> String {
     format!(
         "{} acquires ownership of a new resource. Its previous contents were moved out earlier, \
-         so only what is left of its previous Box is freed here.",
+         so they aren't dropped here; only the old Box itself is.",
         styled_name_html(my_name)
     )
 }
@@ -563,7 +565,7 @@ pub fn event_dot_owner_drop_at_reassign_box_contents_moved(my_name: &String) -> 
 // `event_dot_owner_drop_at_reassign_maybe_moved` for a Box whose
 // contents (`*b`), not the Box itself, were moved out in some branches
 // above (#921): the drop flag decides only whether the old contents are
-// dropped; what is left of the old Box is freed either way. `holds`:
+// dropped; the old Box itself is dropped either way. `holds`:
 // the Box's `Owner::holds` (`the String it holds`), `None` when the
 // contents need no drop.
 pub fn event_dot_owner_drop_at_reassign_box_contents_maybe_moved(my_name: &String, holds: Option<&str>, by_cond: bool) -> String {
@@ -574,15 +576,15 @@ pub fn event_dot_owner_drop_at_reassign_box_contents_maybe_moved(my_name: &Strin
     match holds.map(|h| h.strip_suffix(" it holds").and_then(|t| t.strip_prefix("the "))) {
         Some(Some(ty)) => out.push_str(&format!(
             " Its previous {} is dropped here only if {} moved it out (Rust tracks this with a runtime \
-             drop flag). What is left of its previous Box is freed here either way.",
+             drop flag). The old Box itself is dropped here either way.",
             escape_tooltip_name(ty), moved_above(by_cond)
         )),
         Some(None) => out.push_str(&format!(
             " Its previous contents are dropped here only if {} moved them out (Rust tracks this with \
-             a runtime drop flag). What is left of its previous Box is freed here either way.",
+             a runtime drop flag). The old Box itself is dropped here either way.",
             moved_above(by_cond)
         )),
-        None => out.push_str(" Only what is left of its previous Box is freed here."),
+        None => out.push_str(" Its previous contents were moved out, so only the old Box itself is dropped here."),
     }
     out
 }
@@ -590,11 +592,11 @@ pub fn event_dot_owner_drop_at_reassign_box_contents_maybe_moved(my_name: &Strin
 
 // Scope end of a Box whose contents need no drop (`Box<P>`, P with no
 // drop glue) and were moved out in some branches only (#929): nothing of
-// the contents is dropped on any path, so no drop flag matters; what
-// is left of the Box is freed on every path.
+// the contents is dropped on any path, so no drop flag matters; the Box
+// itself is dropped on every path.
 pub fn event_dot_go_out_of_scope_box_plain_contents_maybe_moved(my_name: &String, by_cond: bool) -> String {
     format!(
-        "{} goes out of scope. Its contents {}; what is left of the Box is freed here either way.",
+        "{} goes out of scope. Its contents {}; the Box itself is dropped here either way.",
         styled_name_html(my_name),
         if by_cond { "may have been moved out above" } else { "were moved out in at least one branch above" }
     )
@@ -4575,14 +4577,14 @@ pub fn event_dot_owner_drop_at_reassign_maybe_entry(my_name: &String, note: &str
 //
 // `boxed` (#736): a `Box` whose contents (`*b`) are moved out on some
 // path. The drop flag decides only whether the contents are dropped;
-// what is left of the Box is freed either way.
+// the Box itself is dropped either way.
 pub fn event_dot_go_out_of_scope_maybe_moved(my_name: &String, note: &str, by_cond: bool, boxed: bool) -> String {
     let (holds, rest) = split_drop_note(note);
     format!(
         "{0} goes out of scope. Its resource{1} is dropped{2} here only if {3} moved it \
          (Rust tracks this with a runtime drop flag).{4}",
         styled_name_html(my_name), holds, rest, moved_above(by_cond),
-        if boxed { " What is left of the Box is freed either way." } else { "" }
+        if boxed { " The Box itself is dropped either way." } else { "" }
     )
 }
 

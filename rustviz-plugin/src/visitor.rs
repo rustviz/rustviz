@@ -4455,16 +4455,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if !in_decl_order(live).into_iter().any(|r| r.box_contents_moved()) {
       return Vec::new();
     }
-    // Where the code after the conditional starts: the next statement of
-    // the block it is in, or else the rest of that block.
+    // The code after the conditional: the rest of the statement it is
+    // part of (`f(if c { .. } else { .. }, *b)`: the join comes before
+    // `*b` is moved, #1600 review) and the next statement of the block it
+    // is in, or else the rest of that block. (Not further: an arm that
+    // returns runs the function's scope-end drops, which the join
+    // doesn't reach.) `box_state_after` takes the first of it to run.
     let span = expr.span;
     let mut region = None;
     let mut child = expr.hir_id;
     for (id, node) in self.tcx.hir_parent_iter(expr.hir_id) {
       if let rustc_hir::Node::Block(b) = node {
         let pos = b.stmts.iter().position(|st| st.hir_id == child);
-        region = Some(match pos.and_then(|i| b.stmts.get(i + 1)) {
-          Some(next) => next.span,
+        region = Some(match pos.and_then(|i| b.stmts.get(i + 1).map(|next| (b.stmts[i].span, next.span))) {
+          Some((own, next)) => own.with_lo(span.hi()).to(next),
           None => b.span,
         });
         break;

@@ -380,7 +380,7 @@ fn contents_moved(d: &Dot) -> bool {
 /// drop says only the allocation is freed.
 fn reboxes_contents(d: &Dot) -> bool {
     d.tip.split(" / ").any(|part| part.trim_start_matches("• ").starts_with(&format!("*{}'s ", d.var)))
-        && d.tip.contains("contents were moved out earlier, so only what is left of its previous Box is freed")
+        && d.tip.contains("contents were moved out earlier, so they aren't dropped here; only the old Box itself is")
 }
 
 /// A slice pattern's move of some elements out of an array that keeps
@@ -409,9 +409,9 @@ fn says_maybe_moved(d: &Dot) -> bool {
 /// stops where the (partial or maybe) move made the whole unusable, and
 /// the drop of what's left is stated on its own dot below, which no
 /// line reaches. (A Box whose contents were moved out says "Its
-/// contents were moved out earlier, so only what is left of the Box";
+/// contents were moved out earlier, so they aren't dropped here";
 /// `contents_moved` covers it.)
-const PARTIAL_DROP_PHRASES: &[&str] = &["drop flag", "moved out earlier, so only"];
+const PARTIAL_DROP_PHRASES: &[&str] = &["drop flag", "moved out earlier, so only", "moved out earlier, so they aren't dropped"];
 /// A move drawn on the column's own line that says it happens on some
 /// paths only (`break f` in a loop whose value is returned, #1171).
 const CONDITIONAL_MOVE_PHRASES: &[&str] = &["if the loop ended with"];
@@ -902,7 +902,7 @@ mod unit {
     fn a_box_reboxing_its_own_contents_is_allowed() {
         // `b = Box::new(*b);` (#1423): `*b` moves out, then only the old
         // Box's allocation is freed.
-        let tip = "• *b's resource is moved / • b acquires ownership of a new resource. Its previous contents were moved out earlier, so only what is left of its previous Box is freed here.";
+        let tip = "• *b's resource is moved / • b acquires ownership of a new resource. Its previous contents were moved out earlier, so they aren't dropped here; only the old Box itself is.";
         let b = [header("b", 1), line("b", 1, 95, 215, "full_privilege"), dot("b", 1, 95, "acquire", false, "a"),
                  dot("b", 1, 155, "move acquire owner_drop_at_reassign", false, tip),
                  dot("b", 1, 215, "owner_go_out_of_scope", true, "o")].concat();
@@ -912,7 +912,7 @@ mod unit {
         let whole = b.replace(tip, "• b's resource is moved / • b acquires ownership of a new resource; its previous resource is dropped");
         assert_eq!(invs(&whole), vec!["drop-of-moved-value-at-reassign"]);
         // And so is a contents move whose drop text says the old value is dropped.
-        let wrong = b.replace("Its previous contents were moved out earlier, so only what is left of its previous Box is freed here.", "Its previous resource is dropped.");
+        let wrong = b.replace("Its previous contents were moved out earlier, so they aren't dropped here; only the old Box itself is.", "Its previous resource is dropped.");
         assert_eq!(invs(&wrong), vec!["drop-of-moved-value-at-reassign"]);
     }
 

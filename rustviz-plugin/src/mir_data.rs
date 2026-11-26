@@ -1248,19 +1248,24 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 }
             }
         }
-        // (At the entry of the block that place is in: a statement before
-        // it in the block may already belong to the code after, `drop(b)`'s
-        // `move b` before the call that has the earliest span.)
-        let lo = places.iter().map(|(_, lo)| *lo).min()?;
-        places.retain(|(_, l)| *l == lo);
-        for (at, _) in places.iter_mut() {
-            at.statement_index = 0;
+        // The first of them to run, in MIR order, not source order: in
+        // `b = Box::new(*b);` the right-hand side's `move *b` runs before
+        // the assignment, whose span starts first (#1600 review). So, per
+        // block, its first such statement; then only the blocks no other
+        // of them dominates.
+        if places.is_empty() {
+            return None;
         }
-        // (Of those, the first ones run: not a block another of them
-        // dominates, `f = …`'s assignment after its old value's drop.)
+        places.sort_by_key(|(at, _)| (at.block, at.statement_index));
+        places.dedup_by_key(|(at, _)| at.block);
         let doms = body.basic_blocks.dominators();
         let blocks: Vec<rustc_middle::mir::BasicBlock> = places.iter().map(|(at, _)| at.block).collect();
         places.retain(|(at, _)| !blocks.iter().any(|b| *b != at.block && doms.dominates(*b, at.block)));
+        // (Of those, the ones that start first in the source: a function's
+        // scope-end drops, shared with an arm's `return`, come after the
+        // tail expression that the join runs into.)
+        let lo = places.iter().map(|(_, lo)| *lo).min()?;
+        places.retain(|(_, l)| *l == lo);
         let mut init = MaybeInitializedPlaces::new(self.tcx, body, &move_data)
             .iterate_to_fixpoint(self.tcx, body, None)
             .into_results_cursor(body);

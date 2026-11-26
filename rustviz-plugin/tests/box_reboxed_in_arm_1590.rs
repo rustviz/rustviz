@@ -183,3 +183,24 @@ fn two_tries(o: Option<u8>, p: Option<u8>) -> Option<u8> {
     println!("{}", b2);
     Some(0)
 }
+
+// The join before `bz = Box::new(*bz);`: the right-hand side moves the
+// contents out after it, not above it.
+fn refilled_then_reboxed(c: bool) {
+    let mut bz = Box::new(String::from("a"));
+    if c {
+        *bz = String::new();
+    } else {
+    }
+    bz = Box::new(*bz);
+    println!("{}", bz);
+}
+
+// Three `?`s on one line: each says which one it is.
+fn three_tries(a: Option<u8>, b: Option<u8>, c: Option<u8>) -> Option<u8> {
+    let mut s3 = String::new();
+    println!("{}", s3);
+    s3 = a?.to_string(); s3 = b?.to_string(); c?;
+    println!("{}", s3);
+    Some(0)
+}
