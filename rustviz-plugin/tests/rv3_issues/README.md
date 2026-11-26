@@ -46,6 +46,15 @@ absent = false                 # true: no such loan
 src = "issue"
 why = "Borrowck rejects a write through a (E0506) while c, a shared reborrow of *a, is still used; reads through a stay allowed."
 
+[[holds]]                      # a variable's value keeps a loan borrowed after the row, as the
+                               #   borrow checker counts it (v4 dumps; can be more than what it
+                               #   points to: `h.r = &b` leaves `a`'s loan in `h`)
+row = 6
+place = "c"                    # a variable column (a reference, or a struct holding one: `h`, not `h.r`)
+lender = "y"                   # the loan's borrowed place as the dump names it; "_" = any
+absent = false                 # true: holds no such loan (a dead or moved-out reference holds none)
+src = "issue"
+
 [[loan]]                       # a borrow taken on `row` (a loan of rustc's borrow set: not the dump's
                                #   v3 `source` "caller" / "static" / "untracked" loans)
 row = 4

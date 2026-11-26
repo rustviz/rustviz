@@ -12,8 +12,9 @@ use std::collections::BTreeMap;
 /// track (`LoanInfo.source`: a reference parameter's, a constant's, an
 /// untracked shared borrow, a kept temporary's), with their `BorrowEnd`s;
 /// `LoanInfo.made_through`, `direct_holders`, `via_call`, `implicit`; the
-/// `HoldEnd` fact.
-pub const VERSION: u32 = 3;
+/// `HoldEnd` fact. 4: `State.holds` (the loans each variable's value
+/// keeps borrowed after the row, as the borrow checker counts them).
+pub const VERSION: u32 = 4;
 
 #[derive(Serialize)]
 pub struct CrateFacts {
@@ -196,6 +197,18 @@ pub struct State {
     /// (moved only on a way borrowck checks but that never runs: an
     /// or-pattern's unreachable alternative; still not usable).
     pub cause: BTreeMap<String, &'static str>,
+    /// variable column (a whole local: `r`, `h`; not a field column such
+    /// as `h.r` or `p.0`) -> the loans its value keeps borrowed where the
+    /// next row of the same path starts, as the borrow checker counts
+    /// them: the loans its origins contain at the last point of the row's
+    /// path and at the next row's first point (Polonius
+    /// `origin_contains_loan_at`), by loan id, sorted. A dead reference
+    /// (no later use), a moved-out or unassigned variable, holds none;
+    /// columns that hold none are left out. This can be more than what it
+    /// points to when it runs: a field overwrite (`h.r = &b`) leaves `a`'s
+    /// loan in `h`, and a copy made before it (`let old = h.r`) gets `b`'s
+    /// too, as rustc counts them.
+    pub holds: BTreeMap<String, Vec<usize>>,
 }
 
 #[derive(Serialize, Default)]
