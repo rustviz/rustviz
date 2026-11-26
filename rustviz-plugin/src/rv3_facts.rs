@@ -297,7 +297,11 @@ fn local_names<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> BTreeMap<Local, St
         if span.from_expansion() && span.desugaring_kind().is_none() || span.desugaring_kind().is_some_and(|k| !matches!(k, rustc_span::DesugaringKind::ForLoop) ) {
             continue;
         }
-        if span.desugaring_kind().is_some() && vdi.name.as_str() == "iter" {
+        // Only bindings the user wrote (`val` of a `?`, `iter` of a `for`,
+        // `args` of `format_args!` are MIR's).
+        let written = tcx.sess.source_map().span_to_snippet(span).unwrap_or_default();
+        let w = written.trim_start_matches("ref ").trim_start_matches("mut ").trim();
+        if w != vdi.name.as_str() && !(w == "self" || w.ends_with("self")) {
             continue;
         }
         let ident = vdi.name.as_str();
@@ -412,7 +416,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     // A row's exits: its locations with a successor on another row (or a
     // `return`). The state shown for a row is the union over its exits,
     // so rows inside an arm only see that arm's paths.
-    let mut row_exits: BTreeMap<usize, Vec<Location>> = BTreeMap::new();
+    let mut row_exits_all: BTreeMap<usize, Vec<(Location, Vec<usize>)>> = BTreeMap::new();
     let mut all_rows: BTreeSet<usize> = BTreeSet::new();
     for (bb, data) in body.basic_blocks.iter_enumerated() {
         if data.is_cleanup {
@@ -431,10 +435,24 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     .map(|s| cx.row_of(Location { block: s, statement_index: 0 }))
                     .collect()
             };
-            if (succ_rows.is_empty() || succ_rows.iter().any(|r| *r != row)) {
-                row_exits.entry(row).or_default().push(loc);
+            if succ_rows.is_empty() || succ_rows.iter().any(|r| *r != row) {
+                row_exits_all.entry(row).or_default().push((loc, succ_rows));
             }
         }
+    }
+    // The state shown after a row is the one the next row sees (as the
+    // oracle's probe inserted after it would): only the exits that go on to
+    // the nearest later row, not a `?`'s or `break`'s jump further down,
+    // nor the way out of a loop head. If every exit goes back up (a loop's
+    // last row), all of them.
+    let mut row_exits: BTreeMap<usize, Vec<Location>> = BTreeMap::new();
+    for (row, exits) in &row_exits_all {
+        let nxt = exits.iter().flat_map(|(_, rs)| rs.iter().copied()).filter(|r| *r > *row).min();
+        let keep: Vec<Location> = match nxt {
+            Some(n) => exits.iter().filter(|(_, rs)| rs.contains(&n)).map(|(l, _)| *l).collect(),
+            None => exits.iter().map(|(l, _)| *l).collect(),
+        };
+        row_exits.insert(*row, keep);
     }
     let first_line = cx.line_lo(body.span);
     let last_line = cx.line_hi(body.span);

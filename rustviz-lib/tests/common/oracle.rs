@@ -1366,6 +1366,69 @@ pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<Violation>, Vec<(u32
     let mut pts = Points { src: src.lines().map(str::to_owned).collect(), ..Default::default() };
     pts.visit_file(&file);
     let claims = claims(&pts, &d, &mut st.skips);
+    verify(src, &pts, claims, st, out)
+}
+
+/// RustViz 3 spike: the drawn states of today's timeline, as the oracle
+/// reads them: (line, place, state, tooltip).
+pub fn drawn_states(src: &str, timeline: &str, code: &str) -> Vec<(u32, String, String, String)> {
+    let Ok(d) = drawing(timeline, code) else { return Vec::new() };
+    let Ok(file) = syn::parse_file(src) else { return Vec::new() };
+    let mut pts = Points { src: src.lines().map(str::to_owned).collect(), ..Default::default() };
+    pts.visit_file(&file);
+    let mut skips = Skips::default();
+    claims(&pts, &d, &mut skips).into_iter().map(|c| (c.line, c.var, format!("{:?}", c.drawn), c.tip)).collect()
+}
+
+/// RustViz 3 spike: check a list of states (line, place, state) given
+/// directly instead of read from a drawing. `state` is one of the MIR
+/// fact layer's: own, shared, mut, moved, maybe, partly, unassigned.
+pub fn check_states(src: &str, states: &[(u32, String, String)]) -> (Vec<Violation>, Vec<(u32, String, &'static str)>, Stats) {
+    let mut st = Stats { programs: 1, ..Default::default() };
+    let out = Vec::new();
+    let Ok(file) = syn::parse_file(src) else {
+        *st.skips.entry("program: syn can't parse it").or_default() += 1;
+        return (out, Vec::new(), st);
+    };
+    let mut pts = Points { src: src.lines().map(str::to_owned).collect(), ..Default::default() };
+    pts.visit_file(&file);
+    let mut claims = Vec::new();
+    let mut seen = HashSet::new();
+    for p in &pts.points {
+        if !seen.insert(p.line) {
+            continue;
+        }
+        let next_text = pts.src.get(p.line as usize).map_or("", |l| l.trim());
+        if next_text.is_empty() || next_text.starts_with("//") {
+            continue;
+        }
+        for (line, var, state) in states {
+            if *line != p.line {
+                continue;
+            }
+            let (drawn, tip) = match state.as_str() {
+                "own" => (Drawn::Usable, "owner"),
+                "shared" => (Drawn::Shared, "being shared"),
+                "mut" => (Drawn::MutLent, "mutably borrowed"),
+                "moved" => (Drawn::Moved, "moved"),
+                "maybe" => (Drawn::Moved, "may have been moved"),
+                "partly" => (Drawn::PartlyMoved, "partially moved"),
+                "unassigned" => (Drawn::Unassigned, "has no value yet"),
+                _ => continue,
+            };
+            let Some(name) = place_name(var) else { continue };
+            let root = name.split('.').next().unwrap();
+            if pts.items.contains(root) || pts.bindings[p.func].get(root) != Some(&1) {
+                *st.skips.entry("name bound more than once / not bound / an item").or_default() += 1;
+                continue;
+            }
+            claims.push(Claim { line: p.line, func: p.func, var: name, drawn, in_loop: p.in_loop, tip: tip.to_string() });
+        }
+    }
+    verify(src, &pts, claims, st, out)
+}
+
+fn verify(src: &str, pts: &Points, claims: Vec<Claim>, mut st: Stats, mut out: Vec<Violation>) -> (Vec<Violation>, Vec<(u32, String, &'static str)>, Stats) {
     match rustc_errors(src) {
         Ok(e) if e.is_empty() => {}
         Ok(_) => {
@@ -1378,7 +1441,7 @@ pub fn check(src: &str, timeline: &str, code: &str) -> (Vec<Violation>, Vec<(u32
         }
     }
     let lines: BTreeSet<(usize, u32)> = claims.iter().map(|c| (c.func, c.line)).collect();
-    let live = match reachable(src, &pts, &lines) {
+    let live = match reachable(src, pts, &lines) {
         Ok(r) => r,
         Err(e) => {
             out.push(infra(format!("probe program failed: {}", e)));
