@@ -143,6 +143,18 @@ matching generated states unchecked, for a rustc verdict that isn't what
 the program does (borrowck's view of an unreachable or-pattern
 alternative). Pin what MIR does with `issue` assertions next to it.
 
+**Known crashes** (`[known_crash]`: `issue`, `panic_at`, `phase`). For a
+crash issue whose program makes the plugin as a whole exit nonzero (a panic
+in the 2.x drawing path) while the fact layer still writes its dump. In
+strict mode the case passes only if the plugin fails with `panic_at` (a
+substring of its stderr, e.g. `data.rs:5179`) AND the written dump satisfies
+the assertions. If the plugin no longer fails, or fails somewhere else, the
+case fails (remove the marker, or update `panic_at`). It never covers a
+missing or unreadable dump, and it excludes `xfail`. `phase` is the PLAN.md
+phase whose work replaces the crashing code (P2 for the drawing path). With
+`RV3_FACTS_DIR` the plugin's stderr is read from `<case>.err` (what
+`issue-facts.sh` writes).
+
 **Producer errors.** A dump whose top-level `errors` isn't empty is a read
 failure: the case fails in strict mode whatever its `xfail`.
 
