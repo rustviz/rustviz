@@ -2334,60 +2334,47 @@ pub fn vec_macro_elems<'tcx>(expr: &'tcx Expr<'tcx>) -> Option<&'tcx [Expr<'tcx>
   if elems.iter().all(|x| !x.span.from_expansion()) {
     return Some(elems);
   }
-  // With a macro element (`vec![s, format!(..)]`, #1682): unless an
-  // element may stop the evaluation (`panic!(..)`, `f(return)`, `{
-  // quit(); x }`), when the elements after it are never moved into the
-  // Vec. Then draw none of them, as before (#1746 review).
+  // With a macro element (`vec![s, format!(..)]`, #1682): only when
+  // every element is plain, with no closure call, loop, `break`,
+  // `continue`, `return`, labeled block or expression of type `!`
+  // anywhere in it, so the elements are surely evaluated one after
+  // another into the Vec. Otherwise main's drawing (#1746 review).
   rustc_middle::ty::tls::with_opt(|tcx| {
     let tcx = tcx?;
-    (!elems.iter().any(|e| may_diverge_in(tcx, e, true))).then_some(elems)
+    elems.iter().all(|e| plain_element(tcx, e)).then_some(elems)
   })
 }
 
-/// Whether evaluating `e` may stop at an expression of type `!`
-/// (`return`, `panic!(..)`, a call to a `fn … -> !`), not counting
-/// closure bodies. `conditional`: also inside a branch, a loop, a
-/// labeled block or the right side of `&&` / `||`; otherwise only
-/// where `e` reaches it every time it runs (it then never completes).
-pub fn may_diverge_in<'t, 'v>(tcx: TyCtxt<'t>, e: &'v Expr<'v>, conditional: bool) -> bool {
+/// See `vec_macro_elems`.
+fn plain_element<'t, 'v>(tcx: TyCtxt<'t>, e: &'v Expr<'v>) -> bool {
   use rustc_hir::intravisit::{self, Visitor};
-  struct Find<'t> { tcx: TyCtxt<'t>, conditional: bool, found: bool }
+  struct Find<'t> { tcx: TyCtxt<'t>, plain: bool }
   impl<'t, 'v> Visitor<'v> for Find<'t> {
     fn visit_expr(&mut self, e: &'v Expr<'v>) {
-      if self.found {
+      if !self.plain {
         return;
       }
-      if matches!(e.kind, ExprKind::Ret(..) | ExprKind::Break(..) | ExprKind::Continue(..))
-        || self.tcx.typeck(e.hir_id.owner.def_id).node_type_opt(e.hir_id).is_some_and(|t| t.is_never())
-      {
-        self.found = true;
+      let callee_is_fn = |f: &Expr<'_>| match f.kind {
+        ExprKind::Path(QPath::Resolved(_, p)) => matches!(p.res, Res::Def(..)),
+        ExprKind::Path(QPath::TypeRelative(..)) => true,
+        _ => false,
+      };
+      let bad = match e.kind {
+        ExprKind::Closure(..) | ExprKind::Loop(..) | ExprKind::Break(..) | ExprKind::Continue(..)
+        | ExprKind::Ret(..) | ExprKind::Block(_, Some(_)) => true,
+        ExprKind::Call(f, _) => !callee_is_fn(f),
+        _ => false,
+      } || self.tcx.typeck(e.hir_id.owner.def_id).node_type_opt(e.hir_id).is_some_and(|t| t.is_never());
+      if bad {
+        self.plain = false;
         return;
       }
-      match e.kind {
-        ExprKind::Closure(..) => {}
-        _ if self.conditional => intravisit::walk_expr(self, e),
-        ExprKind::If(cond, ..) => self.visit_expr(cond),
-        ExprKind::Match(scrutinee, ..) => self.visit_expr(scrutinee),
-        ExprKind::Loop(..) | ExprKind::Block(_, Some(_)) => {}
-        ExprKind::Binary(op, lhs, _) if matches!(op.node, rustc_hir::BinOpKind::And | rustc_hir::BinOpKind::Or) => self.visit_expr(lhs),
-        _ => intravisit::walk_expr(self, e),
-      }
-    }
-    fn visit_local(&mut self, l: &'v rustc_hir::LetStmt<'v>) {
-      // (A let-else's `else` runs only when the pattern fails.)
-      if let Some(init) = l.init {
-        self.visit_expr(init);
-      }
-      if self.conditional {
-        if let Some(els) = l.els {
-          self.visit_block(els);
-        }
-      }
+      intravisit::walk_expr(self, e);
     }
   }
-  let mut f = Find { tcx, conditional, found: false };
+  let mut f = Find { tcx, plain: true };
   f.visit_expr(e);
-  f.found
+  f.plain
 }
 
 /// The typing environment for judging types that occur in the body of

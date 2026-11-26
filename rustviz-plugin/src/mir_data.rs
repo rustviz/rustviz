@@ -396,18 +396,6 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         ends
     }
 
-    /// The rows on which each requested loan is live. Its last line
-    /// alone would include rows in other branches where it is dead.
-    pub(crate) fn loan_live_lines(&self, loans: &[usize]) -> BTreeMap<usize, BTreeSet<usize>> {
-        let mut lines: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-        self.for_each_live_loan(self.bwf, |b, line| {
-            if loans.contains(&b.index()) {
-                lines.entry(b.index()).or_default().insert(line);
-            }
-        });
-        lines
-    }
-
     /// The rows on which each requested loan is live at every MIR
     /// point of the row. A row where it is live at some points only (a
     /// one-line `if` whose arms differ, the closure's last call next to

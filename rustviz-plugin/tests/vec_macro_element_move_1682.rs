@@ -59,3 +59,17 @@ fn nested_divergence(c: bool) {
         println!("{}", bv.len());
     }
 }
+
+// A closure called in an element panics before call_s is reached.
+fn closure_call_element() {
+    let call_s = String::from("s");
+    let cv = vec![format!("first"), (|| -> String { panic!("stop") })(), call_s];
+    println!("{}", cv.len());
+}
+
+// An element with a loop isn't plain: the drawing stays as on main.
+fn loop_element() {
+    let loop_s = String::from("s");
+    let lv = vec![loop_s, format!("x"), loop { break String::from("done"); }];
+    println!("{}", lv.len());
+}

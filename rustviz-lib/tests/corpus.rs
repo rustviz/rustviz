@@ -6054,8 +6054,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // can't store its argument: u's borrow ends at that call.
         must_contain: &[
             "t's resource is immutably borrowed by point; t is read-only while the borrow is live",
-            "point gets a shared reference to t; point's signature lets it store this reference in hold, so t stays borrowed while hold is in use",
-            "set gets a shared reference to s; set's signature lets it store this reference in h2, so s stays borrowed while h2 is in use",
+            "point reads from t; point's signature lets it store this reference in hold, so t stays borrowed while hold is in use",
+            "set reads from s; set's signature lets it store this reference in h2, so s stays borrowed while h2 is in use",
             "put reads from/writes to b; put's signature lets it store this reference in m, so b stays borrowed while m is in use",
             "look reads from u",
             "t's resource is no longer immutably borrowed",
@@ -17310,7 +17310,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // row is checked by `stored_borrow_of_a_reference_variable_ends_at_the_holders_last_use`.
         must_contain: &[
             "x is immutably borrowed by keep; x is read-only while the borrow is live",
-            "keep gets a shared reference to x; keep's signature lets it store this reference in v, so x stays borrowed while v is in use",
+            "keep reads from x; keep's signature lets it store this reference in v, so x stays borrowed while v is in use",
             "x is no longer immutably borrowed",
             "m is mutably borrowed by keep_mut; m can't be used while the borrow is live",
             "keep_mut reads from/writes to m; keep_mut's signature lets it store this reference in w, so m stays borrowed while w is in use",
@@ -17468,7 +17468,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the real end rows, so the rows are checked by
         // `a_stored_borrow_keeps_its_lender_shared_until_the_holders_last_use`.
         must_contain: &[
-            "keep gets a shared reference to s; keep's signature lets it store this reference in v, so s stays borrowed while v is in use",
+            "keep reads from s; keep's signature lets it store this reference in v, so s stays borrowed while v is in use",
             "s's resource is no longer borrowed by look, but is still immutably borrowed by v",
             "s's resource is no longer borrowed by r, but is still immutably borrowed by v",
             "t's resource is no longer borrowed by u, but is still immutably borrowed by q",
@@ -17625,10 +17625,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // also right on the real end rows, so the rows are checked by
         // `a_stored_borrow_moves_on_with_its_holders_value`.
         must_contain: &[
-            "keep gets a shared reference to s; keep's signature lets it store this reference in v, so s stays borrowed while v is in use, and after the borrow moves on to w, while w is in use",
+            "keep reads from s; keep's signature lets it store this reference in v, so s stays borrowed while v is in use, and after the borrow moves on to w, while w is in use",
             "s's resource is no longer borrowed by look, but is still immutably borrowed by w",
             "t's resource is no longer borrowed by r, but is still immutably borrowed by w2",
-            "keep gets a shared reference to a; keep's signature lets it store this reference in va, so a stays borrowed while va is in use, and after the borrow moves on to wa, then xa, while each of them is in use",
+            "keep reads from a; keep's signature lets it store this reference in va, so a stays borrowed while va is in use, and after the borrow moves on to wa, then xa, while each of them is in use",
             "a's resource is no longer borrowed by look, but is still immutably borrowed by xa",
             "b's resource is no longer borrowed by look, but is still immutably borrowed by h.v",
             "c's resource is no longer borrowed by look, but is still immutably borrowed by wc",
@@ -17637,7 +17637,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             // The holder's value moved on: the old name no longer
             // holds the borrow.
-            "=keep gets a shared reference to s; keep's signature lets it store this reference in v, so s stays borrowed while v is in use",
+            "=keep reads from s; keep's signature lets it store this reference in v, so s stays borrowed while v is in use",
             "but is still immutably borrowed by v",
             "but is still immutably borrowed by va",
             "but is still immutably borrowed by wa",
@@ -17657,29 +17657,29 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the other arm) are checked by row in
         // `a_stored_borrow_is_held_by_its_live_holders_on_each_path`.
         must_contain: &[
-            "keep gets a shared reference to s; keep's signature lets it store this reference in v, so s stays borrowed while v is in use, and while w, a copy of v, is in use",
+            "keep reads from s; keep's signature lets it store this reference in v, so s stays borrowed while v is in use, and while w, a copy of v, is in use",
             "s's resource is no longer borrowed by look, but is still immutably borrowed by w",
-            "keep gets a shared reference to a; keep's signature lets it store this reference in va, so a stays borrowed while va is in use, and while wa, a copy of va, is in use",
+            "keep reads from a; keep's signature lets it store this reference in va, so a stays borrowed while va is in use, and while wa, a copy of va, is in use",
             "a's resource is no longer borrowed by look, but is still immutably borrowed by va and wa",
             "a's resource is no longer borrowed by look, but is still immutably borrowed by va",
-            "keep gets a shared reference to b; keep's signature lets it store this reference in vb, so b stays borrowed while vb is in use, and while wb and xb, copies of vb, are in use",
+            "keep reads from b; keep's signature lets it store this reference in vb, so b stays borrowed while vb is in use, and while wb and xb, copies of vb, are in use",
             "b's resource is no longer borrowed by look, but is still immutably borrowed by xb",
-            "keepv gets a shared reference to t; keepv's signature lets it store this reference in u, so t stays borrowed while u is in use, and after the borrow moves on to x, while x is in use",
+            "keepv reads from t; keepv's signature lets it store this reference in u, so t stays borrowed while u is in use, and after the borrow moves on to x, while x is in use",
             "t's resource is no longer borrowed by look, but is still immutably borrowed by x",
             "t's resource is no longer borrowed by look, but is still immutably borrowed by u",
-            "keepv gets a shared reference to d; keepv's signature lets it store this reference in vd, so d stays borrowed while vd is in use, and after the borrow moves on to wd or xd (whichever branch runs), while that variable is in use",
+            "keepv reads from d; keepv's signature lets it store this reference in vd, so d stays borrowed while vd is in use, and after the borrow moves on to wd or xd (whichever branch runs), while that variable is in use",
             "d's resource is no longer borrowed by look, but is still immutably borrowed by wd",
             "d's resource is no longer borrowed by look, but is still immutably borrowed by xd",
             "d's resource is no longer borrowed by look, but is still immutably borrowed by vd",
-            "keep gets a shared reference to e; keep's signature lets it store this reference in ve, so e stays borrowed while ve is in use, and while we, a copy of ve, is in use",
+            "keep reads from e; keep's signature lets it store this reference in ve, so e stays borrowed while ve is in use, and while we, a copy of ve, is in use",
             "e's resource is no longer borrowed by look, but is still immutably borrowed by we",
             "e's resource is no longer borrowed by look, but is still immutably borrowed by ve",
             "f's resource is no longer borrowed by look, but is still immutably borrowed by vf",
         ],
         must_not_contain: &[
             // Copies hold the borrow too.
-            "=keep gets a shared reference to s; keep's signature lets it store this reference in v, so s stays borrowed while v is in use",
-            "=keep gets a shared reference to b; keep's signature lets it store this reference in vb, so b stays borrowed while vb is in use",
+            "=keep reads from s; keep's signature lets it store this reference in v, so s stays borrowed while v is in use",
+            "=keep reads from b; keep's signature lets it store this reference in vb, so b stays borrowed while vb is in use",
             // v / vb / wb aren't used after the copy: they hold nothing.
             "s's resource is no longer borrowed by look, but is still immutably borrowed by v",
             "b's resource is no longer borrowed by look, but is still immutably borrowed by vb",
@@ -17697,17 +17697,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // borrow ends in each arm is checked by row in
         // `a_stored_borrow_is_held_by_its_live_holders_on_each_path`.
         must_contain: &[
-            "keepv gets a shared reference to t; keepv's signature lets it store this reference in u, so t stays borrowed while u is in use, and after the borrow moves on to x, while x is in use",
+            "keepv reads from t; keepv's signature lets it store this reference in u, so t stays borrowed while u is in use, and after the borrow moves on to x, while x is in use",
             "t's resource is no longer borrowed by look, but is still immutably borrowed by u",
             "keep_mut reads from/writes to m; keep_mut's signature lets it store this reference in w, so m stays borrowed while w is in use, and after the borrow moves on to y, while y is in use",
             "a's resource is no longer borrowed by look, but is still immutably borrowed by va",
             "s's resource is no longer borrowed by look, but is still immutably borrowed by v",
-            "keepv gets a shared reference to b; keepv's signature lets it store this reference in vb, so b stays borrowed while vb is in use, and after the borrow moves on to wb, then yb, while each of them is in use",
+            "keepv reads from b; keepv's signature lets it store this reference in vb, so b stays borrowed while vb is in use, and after the borrow moves on to wb, then yb, while each of them is in use",
             "b's resource is no longer borrowed by look, but is still immutably borrowed by yb",
         ],
         must_not_contain: &[
             "(whichever branch runs)",
-            "=keepv gets a shared reference to t; keepv's signature lets it store this reference in u, so t stays borrowed while u is in use",
+            "=keepv reads from t; keepv's signature lets it store this reference in u, so t stays borrowed while u is in use",
             "=keep_mut reads from/writes to m; keep_mut's signature lets it store this reference in w, so m stays borrowed while w is in use",
         ],
     },
@@ -17721,30 +17721,30 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // used by the clone). Rows are checked in
         // `a_stored_borrow_is_held_by_clones_of_its_holder`.
         must_contain: &[
-            "keepv gets a shared reference to s; keepv's signature lets it store this reference in v, so s stays borrowed while v is in use, and while w, a clone of v, is in use",
+            "keepv reads from s; keepv's signature lets it store this reference in v, so s stays borrowed while v is in use, and while w, a clone of v, is in use",
             "s's resource is no longer borrowed by look, but is still immutably borrowed by w",
-            "keepv gets a shared reference to a; keepv's signature lets it store this reference in va, so a stays borrowed while va is in use, and while wa, a clone of va, is in use",
+            "keepv reads from a; keepv's signature lets it store this reference in va, so a stays borrowed while va is in use, and while wa, a clone of va, is in use",
             "a's resource is no longer borrowed by look, but is still immutably borrowed by va and wa",
-            "keepv gets a shared reference to b; keepv's signature lets it store this reference in vb, so b stays borrowed while vb is in use, and while wb, a clone of vb, is in use",
+            "keepv reads from b; keepv's signature lets it store this reference in vb, so b stays borrowed while vb is in use, and while wb, a clone of vb, is in use",
             "b's resource is no longer borrowed by look, but is still immutably borrowed by wb",
-            "keepv gets a shared reference to c; keepv's signature lets it store this reference in vc, so c stays borrowed while vc is in use, and while wc, a clone of vc, is in use",
+            "keepv reads from c; keepv's signature lets it store this reference in vc, so c stays borrowed while vc is in use, and while wc, a clone of vc, is in use",
             "c's resource is no longer borrowed by look, but is still immutably borrowed by wc",
-            "keepv gets a shared reference to t; keepv's signature lets it store this reference in h.v, so t stays borrowed while h.v is in use, and while h2.v, a clone of h.v, is in use",
+            "keepv reads from t; keepv's signature lets it store this reference in h.v, so t stays borrowed while h.v is in use, and while h2.v, a clone of h.v, is in use",
             "t's resource is no longer borrowed by look, but is still immutably borrowed by h2.v",
-            "keepv gets a shared reference to m; keepv's signature lets it store this reference in vm, so m stays borrowed while vm is in use, and while wm, a clone of vm, is in use, and after the borrow moves on to xm, while xm is in use",
+            "keepv reads from m; keepv's signature lets it store this reference in vm, so m stays borrowed while vm is in use, and while wm, a clone of vm, is in use, and after the borrow moves on to xm, while xm is in use",
             "m's resource is no longer borrowed by look, but is still immutably borrowed by xm",
-            "keepd gets a shared reference to g; keepd's signature lets it store this reference in d, so g stays borrowed while d is in use, and while e, a clone of d, is in use",
+            "keepd reads from g; keepd's signature lets it store this reference in d, so g stays borrowed while d is in use, and while e, a clone of d, is in use",
             "g's resource is no longer borrowed by look, but is still immutably borrowed by d and e",
         ],
         must_not_contain: &[
             // The clone holds the borrow too.
-            "=keepv gets a shared reference to s; keepv's signature lets it store this reference in v, so s stays borrowed while v is in use",
-            "=keepv gets a shared reference to a; keepv's signature lets it store this reference in va, so a stays borrowed while va is in use",
-            "=keepv gets a shared reference to b; keepv's signature lets it store this reference in vb, so b stays borrowed while vb is in use",
-            "=keepv gets a shared reference to c; keepv's signature lets it store this reference in vc, so c stays borrowed while vc is in use",
-            "=keepv gets a shared reference to t; keepv's signature lets it store this reference in h.v, so t stays borrowed while h.v is in use",
-            "=keepv gets a shared reference to m; keepv's signature lets it store this reference in vm, so m stays borrowed while vm is in use",
-            "=keepd gets a shared reference to g; keepd's signature lets it store this reference in d, so g stays borrowed while d is in use",
+            "=keepv reads from s; keepv's signature lets it store this reference in v, so s stays borrowed while v is in use",
+            "=keepv reads from a; keepv's signature lets it store this reference in va, so a stays borrowed while va is in use",
+            "=keepv reads from b; keepv's signature lets it store this reference in vb, so b stays borrowed while vb is in use",
+            "=keepv reads from c; keepv's signature lets it store this reference in vc, so c stays borrowed while vc is in use",
+            "=keepv reads from t; keepv's signature lets it store this reference in h.v, so t stays borrowed while h.v is in use",
+            "=keepv reads from m; keepv's signature lets it store this reference in vm, so m stays borrowed while vm is in use",
+            "=keepd reads from g; keepd's signature lets it store this reference in d, so g stays borrowed while d is in use",
             // The original isn't used after the clone: it holds nothing.
             "=s's resource is no longer borrowed by look, but is still immutably borrowed by v",
             "=a's resource is no longer borrowed by look, but is still immutably borrowed by va",
@@ -17776,35 +17776,35 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // into_drop). Rows are checked in
         // `a_stored_borrow_is_held_by_values_made_from_its_holder`.
         must_contain: &[
-            "keepv gets a shared reference to s; keepv's signature lets it store this reference in v, so s stays borrowed while v is in use, and while w, made from v, is in use",
+            "keepv reads from s; keepv's signature lets it store this reference in v, so s stays borrowed while v is in use, and while w, made from v, is in use",
             "s's resource is no longer borrowed by look, but is still immutably borrowed by w",
-            "keepv gets a shared reference to a; keepv's signature lets it store this reference in va, so a stays borrowed while va is in use, and while it, made from va, is in use",
+            "keepv reads from a; keepv's signature lets it store this reference in va, so a stays borrowed while va is in use, and while it, made from va, is in use",
             "a's resource is no longer borrowed by look, but is still immutably borrowed by it",
-            "keepv gets a shared reference to b; keepv's signature lets it store this reference in vb, so b stays borrowed while vb is in use, and while fb, made from vb, is in use",
+            "keepv reads from b; keepv's signature lets it store this reference in vb, so b stays borrowed while vb is in use, and while fb, made from vb, is in use",
             "b's resource is no longer borrowed by look, but is still immutably borrowed by fb",
-            "keepv gets a shared reference to c; keepv's signature lets it store this reference in vc, so c stays borrowed while vc is in use, and while rc, made from vc, is in use",
+            "keepv reads from c; keepv's signature lets it store this reference in vc, so c stays borrowed while vc is in use, and while rc, made from vc, is in use",
             "c's resource is no longer borrowed by look, but is still immutably borrowed by rc",
-            "keepv gets a shared reference to d; keepv's signature lets it store this reference in vd, so d stays borrowed while vd is in use, and while wd, made from vd, is in use",
+            "keepv reads from d; keepv's signature lets it store this reference in vd, so d stays borrowed while vd is in use, and while wd, made from vd, is in use",
             "d's resource is no longer borrowed by look, but is still immutably borrowed by wd",
-            "keepv gets a shared reference to e; keepv's signature lets it store this reference in ve, so e stays borrowed while ve is in use, and while we, made from ve, is in use",
+            "keepv reads from e; keepv's signature lets it store this reference in ve, so e stays borrowed while ve is in use, and while we, made from ve, is in use",
             "e's resource is no longer borrowed by look, but is still immutably borrowed by ve and we",
-            "keepv gets a shared reference to f; keepv's signature lets it store this reference in vf, so f stays borrowed while vf is in use, and while wf, a clone of vf, is in use, and while xf, made from wf, is in use",
+            "keepv reads from f; keepv's signature lets it store this reference in vf, so f stays borrowed while vf is in use, and while wf, a clone of vf, is in use, and while xf, made from wf, is in use",
             "f's resource is no longer borrowed by look, but is still immutably borrowed by xf",
-            "keepv gets a shared reference to g; keepv's signature lets it store this reference in vg, so g stays borrowed while vg is in use, and while dg.v, made from vg, is in use",
+            "keepv reads from g; keepv's signature lets it store this reference in vg, so g stays borrowed while vg is in use, and while dg.v, made from vg, is in use",
             "g's resource is no longer borrowed by look, but is still immutably borrowed by dg.v",
             // lens (a Vec<usize>) holds no reference.
-            "keepv gets a shared reference to k; keepv's signature lets it store this reference in vk, so k stays borrowed while vk is in use",
+            "keepv reads from k; keepv's signature lets it store this reference in vk, so k stays borrowed while vk is in use",
         ],
         must_not_contain: &[
             // The value made from the holder holds the borrow too.
-            "=keepv gets a shared reference to s; keepv's signature lets it store this reference in v, so s stays borrowed while v is in use",
-            "=keepv gets a shared reference to a; keepv's signature lets it store this reference in va, so a stays borrowed while va is in use",
-            "=keepv gets a shared reference to b; keepv's signature lets it store this reference in vb, so b stays borrowed while vb is in use",
-            "=keepv gets a shared reference to c; keepv's signature lets it store this reference in vc, so c stays borrowed while vc is in use",
-            "=keepv gets a shared reference to d; keepv's signature lets it store this reference in vd, so d stays borrowed while vd is in use",
-            "=keepv gets a shared reference to e; keepv's signature lets it store this reference in ve, so e stays borrowed while ve is in use",
-            "=keepv gets a shared reference to f; keepv's signature lets it store this reference in vf, so f stays borrowed while vf is in use, and while wf, a clone of vf, is in use",
-            "=keepv gets a shared reference to g; keepv's signature lets it store this reference in vg, so g stays borrowed while vg is in use",
+            "=keepv reads from s; keepv's signature lets it store this reference in v, so s stays borrowed while v is in use",
+            "=keepv reads from a; keepv's signature lets it store this reference in va, so a stays borrowed while va is in use",
+            "=keepv reads from b; keepv's signature lets it store this reference in vb, so b stays borrowed while vb is in use",
+            "=keepv reads from c; keepv's signature lets it store this reference in vc, so c stays borrowed while vc is in use",
+            "=keepv reads from d; keepv's signature lets it store this reference in vd, so d stays borrowed while vd is in use",
+            "=keepv reads from e; keepv's signature lets it store this reference in ve, so e stays borrowed while ve is in use",
+            "=keepv reads from f; keepv's signature lets it store this reference in vf, so f stays borrowed while vf is in use, and while wf, a clone of vf, is in use",
+            "=keepv reads from g; keepv's signature lets it store this reference in vg, so g stays borrowed while vg is in use",
             // The holder isn't used after the value is made from it.
             "=s's resource is no longer borrowed by look, but is still immutably borrowed by v",
             "=a's resource is no longer borrowed by look, but is still immutably borrowed by va",
@@ -20418,7 +20418,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "holder_borrows_1094",
         must_contain: &[
             // #1094: s's borrow is still held by w, made from v.
-            "keepv gets a shared reference to s; keepv's signature lets it store this reference in v, so s stays borrowed while v is in use, and while w, made from v, is in use",
+            "keepv reads from s; keepv's signature lets it store this reference in v, so s stays borrowed while v is in use, and while w, made from v, is in use",
             "v's resource is moved into drop, which drops it",
             // #1095
             "Immutable borrow from a to o",
@@ -22743,12 +22743,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // container (`keep(&mut v, &b)`) was already right (#513).
         name: "store_through_mut_ref_1124",
         must_contain: &[
-            "store_s gets a shared reference to b1; store_s's signature lets it store this reference in r1, so b1 stays borrowed while r1 is in use",
-            "store gets a shared reference to b2; store's signature lets it store this reference in r2, so b2 stays borrowed while r2 is in use",
-            "store gets a shared reference to b3; store's signature lets it store this reference in r3, so b3 stays borrowed while r3 is in use",
-            "std::mem::replace gets a shared reference to b4; std::mem::replace's signature lets it store this reference in r4, so b4 stays borrowed while r4 is in use",
-            "store_s gets a shared reference to b5; store_s's signature lets it store this reference in r5, so b5 stays borrowed while r5 is in use",
-            "std::mem::replace gets a shared reference to b6; std::mem::replace's signature lets it store this reference in r6, so b6 stays borrowed while r6 is in use",
+            "store_s reads from b1; store_s's signature lets it store this reference in r1, so b1 stays borrowed while r1 is in use",
+            "store reads from b2; store's signature lets it store this reference in r2, so b2 stays borrowed while r2 is in use",
+            "store reads from b3; store's signature lets it store this reference in r3, so b3 stays borrowed while r3 is in use",
+            "std::mem::replace reads from b4; std::mem::replace's signature lets it store this reference in r4, so b4 stays borrowed while r4 is in use",
+            "store_s reads from b5; store_s's signature lets it store this reference in r5, so b5 stays borrowed while r5 is in use",
+            "std::mem::replace reads from b6; std::mem::replace's signature lets it store this reference in r6, so b6 stays borrowed while r6 is in use",
             "b6's resource is no longer borrowed by _old, but is still immutably borrowed by r6",
         ],
         must_not_contain: &[
@@ -24427,7 +24427,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed resource from r to a",
             "Mutable borrow from d to m: store_m's signature lets it store this reference in m",
             "Return mutably borrowed resource from m to d",
-            "store_s gets a shared reference to b; store_s's signature lets it store this reference in r, so b stays borrowed while r is in use",
+            "store_s reads from b; store_s's signature lets it store this reference in r, so b stays borrowed while r is in use",
         ],
         must_not_contain: &[
             "Immutable borrow from e to v",
@@ -25344,9 +25344,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "c's mutable borrow ends",
             "b's resource is no longer immutably borrowed",
             "b's resource is no longer mutably borrowed",
-            // The condition's read (row 11): c, called in the else arm,
-            // still holds its capture there (#1678 in #1746).
-            "@11 =b's resource is no longer borrowed by len, but is still immutably borrowed by c",
         ],
         must_not_contain: &[],
     },
@@ -28081,35 +28078,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "@4 =list is the owner of the resource",
             "@12 =branch_list's resource is no longer immutably borrowed",
             "same_row_list's resource is no longer borrowed by println!, but is still immutably borrowed by read",
-            // One row, two arms: the capture is live in one only.
-            "still immutably borrowed by line_g",
-        ],
-    },
-    TooltipExpect {
-        name: "iter_mut_store_1679",
-        must_contain: &[
-            "set gets a shared reference to t; set's signature lets it store this reference in refs, so t stays borrowed while refs is in use",
-            "t's resource is no longer borrowed by println!, but is still immutably borrowed by refs",
-            "new_value's resource is no longer borrowed by println!, but is still immutably borrowed by slots",
-            "indexed's resource is no longer borrowed by println!, but is still immutably borrowed by slots",
-            "set gets a shared reference to other_arm; set's signature lets it store this reference in arm_refs, so other_arm stays borrowed while arm_refs is in use",
-            "row_t's resource is no longer borrowed by println!, but is still immutably borrowed by r",
-            // A later pass, or a guard that turned out false, brings the
-            // loan to the other arm: rustc's loan is live there.
-            "loop_t's resource is no longer borrowed by println!, but is still immutably borrowed by loop_refs",
-        ],
-        must_not_contain: &[
-            "@9 =t's resource is no longer immutably borrowed",
-            "@10 =t's resource is no longer immutably borrowed",
-            "@10 =t is the owner of the resource",
-            "@29 =indexed's resource is no longer immutably borrowed",
-            // The setter ran in the other arm (review of #1746).
-            "other_arm's resource is no longer borrowed by println!, but is still immutably borrowed by arm_refs",
-            "kept_arm's resource is no longer borrowed by println!, but is still immutably borrowed by kept",
-            // row_slots is gone by then; only r holds row_t.
-            "still immutably borrowed by row_slots",
-            // The setter only stores the reference (review of #1746).
-            "set reads from t;",
         ],
     },
     TooltipExpect {
@@ -28120,19 +28088,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // The if-let arm's return (row 6); main has a return from
             // the later `for e` only.
             "@6 =v's resource is no longer mutably borrowed",
+            "@6 =e's mutable borrow ends",
             "v is the owner of the resource",
         ],
         must_not_contain: &[
             "@8 v's resource is mutably borrowed",
             "@9 v's resource is mutably borrowed",
         ],
-    },
-    TooltipExpect {
-        name: "setter_in_guard_1769",
-        must_contain: &[
-            "guard_t's resource is no longer borrowed by println!, but is still immutably borrowed by guard_refs",
-        ],
-        must_not_contain: &["@18 =guard_t's resource is no longer immutably borrowed"],
     },
     TooltipExpect {
         name: "vec_macro_element_move_1682",
@@ -28151,46 +28113,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from quit_s to qv",
             "Move from wrap_s to wv",
             "Move from block_s to bv",
-            // Known wrong, as on main (#1774): pv, qv, wv and bv are
+            "Move from call_s to cv",
+            // Known wrong, as on main (#1774): pv, qv, wv, bv and cv are
             // still drawn acquiring a Vec and dropping it.
-        ],
-    },
-    TooltipExpect {
-        name: "labeled_block_skips_assignment_1685",
-        must_contain: &[
-            "s2 may be left without a value when this block ends, so s2 can't be used until it's assigned again",
-            "pair_a may be left without a value when this block ends, so pair_a can't be used until it's assigned again",
-            "pair_b may be left without a value when this block ends, so pair_b can't be used until it's assigned again",
-            "either may be left without a value when this block ends, so either can't be used until it's assigned again",
-            "both_old's resource is moved into drop, which drops it",
-            "later acquires ownership of a new resource. Its previous resource is dropped here only if later still holds it (Rust tracks this with a runtime drop flag).",
-            "If the `?` here returns early, pending's resource is dropped if pending still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to pending here.",
-            "s2 goes out of scope. Its resource is dropped here only if s2 still holds it (Rust tracks this with a runtime drop flag).",
-            "immut_s may be left without a value when this block ends, so immut_s can't be used after the block",
-            "return_s owns a resource here: the code after the block is reached only through a break, and every break comes after return_s gets a new resource",
-            "arg_s owns a resource here: the code after the block is reached only through a break, and every break comes after arg_s gets a new resource",
-            "nested_s owns a resource here: the code after the block is reached only through a break, and every break comes after nested_s gets a new resource",
-            "unit_s may be left without a value when this block ends, so unit_s can't be used until it's assigned again",
-            "unit_s acquires ownership of a new resource. Its previous resource is dropped here only if unit_s still holds it (Rust tracks this with a runtime drop flag).",
-        ],
-        must_not_contain: &[
-            "@9 =s2 is the owner of the resource",
-            "@20 =pair_a is the owner of the resource",
-            "@20 =pair_b is the owner of the resource",
-            "@33 =either is the owner of the resource",
-            "later acquires ownership of a new resource; its previous resource is dropped",
-            "the function returns and pending's resource is dropped.",
-            // Every way out assigns them (review of #1746).
-            "operand_s may be left without a value",
-            "return_s may be left without a value",
-            // An immutable binding can't be assigned again (E0384).
-            "immut_s can't be used until it's assigned again",
-            "read_s may be left without a value",
-            "arg_s may be left without a value",
-            "nested_s may be left without a value",
-            "unit_s acquires ownership of a new resource; its previous resource is dropped",
-            // A field's join stays as on main (review of #1746).
-            "p.0 was moved out in at least one branch above",
         ],
     },
 ];

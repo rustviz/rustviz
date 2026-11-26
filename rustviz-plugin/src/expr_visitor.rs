@@ -4709,8 +4709,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       ExprKind::Index(base, _, _) => holder_of(base),
       ExprKind::Unary(UnOp::Deref, inner) if matches!(inner.kind, ExprKind::Call(..) | ExprKind::MethodCall(..))
         && !inner.span.from_expansion() => {
-        let holder = self.call_pointer_lender(inner)?;
-        (holder.holds_borrow() && self.borrow_map.contains_key(holder.name())).then_some(holder)
+        let lenders = self.pointer_lenders(inner).unwrap_or_else(|| self.call_lenders(inner));
+        let [ResourceTy::Value(h)] = lenders.as_slice() else { return None };
+        (h.holds_borrow() && self.borrow_map.contains_key(h.name())).then(|| h.to_owned())
       }
       ExprKind::Unary(UnOp::Deref, inner) => {
         if !matches!(inner.kind, ExprKind::Path(QPath::Resolved(None, _))) || self.is_ref_param(inner) {
@@ -4965,16 +4966,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// (auto-referenced), and for a local reference `rh` that borrows
   /// `hold`.
   fn mut_arg_place(&self, target: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
-    if !target.span.from_expansion() && matches!(target.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) {
-      return self.call_pointer_lender(target).filter(|place| place.holds_borrow());
-    }
     let place = match target.kind {
-      ExprKind::AddrOf(_, _, inner) => {
-        if let Some(holder) = self.element_holder(inner) {
-          return Some(holder);
-        }
-        inner
-      }
+      ExprKind::AddrOf(_, _, inner) => inner,
       _ => target,
     };
     if !matches!(place.kind, ExprKind::Path(_) | ExprKind::Field(..)) {
@@ -12726,7 +12719,7 @@ pub fn print_out_of_scope(&mut self){
         first_and_moved(self.preprocessed_events, base, rd.assigned_at, &mut seen);
         let from = seen.0.unwrap_or(rd.assigned_at);
         let moved = seen.1;
-        Some(Sharer { name: name.clone(), hash, from, to: rd.lifetime, moved, lenders, from_kept_call: false, stored: false, gaps: Vec::new(), loan_lines: None, mixed: BTreeSet::new() })
+        Some(Sharer { name: name.clone(), hash, from, to: rd.lifetime, moved, lenders, from_kept_call: false, stored: false, gaps: Vec::new(), loan_lines: None })
       })
       .collect();
     // A re-pointed reference shares its old lenders until its old loan
@@ -12735,22 +12728,26 @@ pub fn print_out_of_scope(&mut self){
       let Some(rap) = self.raps.get(name).map(|r| &r.rap) else { continue };
       sharers.push(Sharer {
         name: name.clone(), hash: *rap.hash(), from: *from, to: *to, moved: None, lenders: lenders.clone(),
-        from_kept_call: false, stored: false, gaps: Vec::new(), loan_lines: None, mixed: BTreeSet::new(),
+        from_kept_call: false, stored: false, gaps: Vec::new(), loan_lines: None,
       });
     }
     // An arm whose path ends the reference's loan (it returns, or the
     // last use is in another arm) doesn't hold it after that end (#796).
     if !self.closure_sharers.is_empty() {
       let loans: Vec<usize> = self.closure_sharers.iter().map(|(_, loan)| *loan).collect();
-      let lines = self.loan_live_lines(&loans);
-      let full = self.loan_fully_live_lines(&loans);
+      // The rows where rustc's loan for the capture is live at every
+      // point: a row where it is live at some points only (the
+      // closure's last call next to a read, a one-line `if`) keeps
+      // main's text.
+      let lines = self.loan_fully_live_lines(&loans);
       for (mut sharer, loan) in self.closure_sharers.drain(..) {
-        let mut seen = (None, None);
-        first_and_moved(self.preprocessed_events, &sharer.name, sharer.from, &mut seen);
-        sharer.moved = seen.1;
-        let any = lines.get(&loan).cloned().unwrap_or_default();
-        sharer.mixed = any.difference(&full.get(&loan).cloned().unwrap_or_default()).copied().collect();
-        sharer.loan_lines = Some(any);
+        // A closure moved or copied to another variable passes its
+        // capture on: the read would name the wrong holder. Keep
+        // main's text then (#1746 review).
+        if handed_on(self.preprocessed_events, &sharer.name, sharer.from) {
+          continue;
+        }
+        sharer.loan_lines = Some(lines.get(&loan).cloned().unwrap_or_default());
         sharers.push(sharer);
       }
     }
@@ -12786,15 +12783,6 @@ pub fn print_out_of_scope(&mut self){
         lender: sb.lender.clone(), hash_of: &hash_of, derived: &derived, seen: vec![sb.holder.clone()], holders: Vec::new(), hops: Vec::new(),
       };
       walk.follow(list, &sb.holder, hash, sb.at, sb.until, false);
-      // Where rustc's loan isn't live, nothing holds it: the other arm
-      // of the `if` the call is in, unless a loop or a match guard that
-      // falls through brings the loan there (#1679 review).
-      if !sb.loans.is_empty() {
-        let live: BTreeSet<usize> = self.loan_live_lines(&sb.loans).into_values().flatten().collect();
-        for h in walk.holders.iter_mut() {
-          h.gaps.extend((h.from + 1..=h.to).filter(|l| !live.contains(l)).map(|l| (l, l)));
-        }
-      }
       // The call's borrow end is the event after it (see
       // `stored_borrow`).
       ends.push((sb.id + 1, walk.holders.clone()));
@@ -12860,7 +12848,7 @@ pub fn print_out_of_scope(&mut self){
         from_kept_call: *head_call,
         stored: false,
         gaps: Vec::new(),
-        loan_lines: None, mixed: BTreeSet::new(),
+        loan_lines: None,
       });
     }
     let mut noted: HashMap<usize, Vec<String>> = HashMap::new();
@@ -12883,7 +12871,7 @@ pub fn print_out_of_scope(&mut self){
       self.closure_sharers.push((Sharer {
         name: closure.name().to_owned(), hash: *closure.hash(), from, to,
         moved: None, lenders: vec![lender.name().to_owned()],
-        from_kept_call: false, stored: true, gaps: Vec::new(), loan_lines: None, mixed: BTreeSet::new(),
+        from_kept_call: false, stored: true, gaps: Vec::new(), loan_lines: None,
       }, loan));
     }
   }
@@ -13649,12 +13637,9 @@ struct Sharer {
   /// Lines (first, last) it doesn't hold the loan on: the rest of an
   /// arm that moved its value on (`if c { let w = v; .. }`, #997).
   gaps: Vec<(usize, usize)>,
-  // Capture loans use MIR liveness as well as the drawn branch ends.
+  /// A closure's capture loan: the rows rustc's loan is live on at
+  /// every point (#1678). Outside them it holds nothing.
   loan_lines: Option<BTreeSet<usize>>,
-  /// Rows where that loan is live at some MIR points only. On a row two
-  /// arms of a conditional share (`if c { …; } else { …; ` on one
-  /// line) the row can't say which arm holds it, so neither does.
-  mixed: BTreeSet<usize>,
 }
 
 impl Sharer {
@@ -13897,7 +13882,7 @@ impl HolderWalk<'_> {
     };
     dead_arm_gaps(list, holder, from, to, &mut gaps);
     self.holders.push(Sharer {
-      name: holder.to_owned(), hash, from, to, moved: cut, lenders: vec![self.lender.clone()], from_kept_call: false, stored: true, gaps, loan_lines: None, mixed: BTreeSet::new(),
+      name: holder.to_owned(), hash, from, to, moved: cut, lenders: vec![self.lender.clone()], from_kept_call: false, stored: true, gaps, loan_lines: None,
     });
     for h in hops {
       let Some(dest) = h.dest else { continue };
@@ -13936,6 +13921,18 @@ fn dead_arm_gaps(list: &[(usize, ExternalEvent)], holder: &str, from: usize, to:
       }
     }
   }
+}
+
+/// Whether the value of `name` (a closure) is moved, copied or bound
+/// to another place after line `from`, on any path.
+fn handed_on(events: &[(usize, ExternalEvent)], name: &str, from: usize) -> bool {
+  events.iter().any(|(line, e)| match e {
+    ExternalEvent::Move { from: ResourceTy::Value(r), .. }
+    | ExternalEvent::Copy { from: ResourceTy::Value(r), .. }
+    | ExternalEvent::Bind { from: ResourceTy::Value(r), .. } => *line > from && r.name() == name,
+    ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| handed_on(&b.e_data, name, from)),
+    _ => false,
+  })
 }
 
 /// The lines of the arms of an `if` / `match` in `list` that come after
@@ -14209,7 +14206,7 @@ fn note_sharers_in(events: &mut [(usize, ExternalEvent)], sharers: &[Sharer], no
         if still_borrowed_by.is_empty() && (!lender.is_ref() || *of_ref_var) =>
       {
         let (holder, stored_end) = match from {
-          ResourceTy::Value(r) => (r.name().to_owned(), r.is_closure()),
+          ResourceTy::Value(r) => (r.name().to_owned(), false),
           ResourceTy::Index(_, place, PlaceWrite::Update) => (place.clone(), true),
           _ => continue,
         };
@@ -14228,18 +14225,8 @@ fn note_sharers_in(events: &mut [(usize, ExternalEvent)], sharers: &[Sharer], no
         }
       }
       ExternalEvent::Branch { branches, .. } => {
-        // Rows two arms both have events on (#1746 review).
-        let rows: Vec<BTreeSet<usize>> = branches.iter().map(|b| b.e_data.iter().map(|(l, _)| *l).collect()).collect();
-        let shared: BTreeSet<usize> = rows.iter().enumerate()
-          .flat_map(|(i, r)| r.iter().filter(|l| rows.iter().enumerate().any(|(j, o)| j != i && o.contains(l))).copied().collect::<Vec<_>>())
-          .collect();
-        let arm_sharers: Vec<Sharer> = sharers.iter().map(|s| {
-          let mut s = s.clone();
-          s.gaps.extend(s.mixed.intersection(&shared).map(|&l| (l, l)));
-          s
-        }).collect();
         for b in branches.iter_mut() {
-          note_sharers_in(&mut b.e_data, &arm_sharers, noted);
+          note_sharers_in(&mut b.e_data, sharers, noted);
         }
       }
       _ => {}
@@ -14909,8 +14896,7 @@ fn ownership_after(events: &[(usize, ExternalEvent)], rap_name: &str, start: Opt
       // The start of an `else` branch that a let-chain condition may
       // have moved it before (#281). It held the value before the
       // condition, which moved it.
-      ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::ChainFail { .. } | MaybeMovedAt::LabeledBlockAssignment { .. }, .. }
-        if ro.name() == rap_name => {
+      ExternalEvent::LoopExitMove { ro, at: MaybeMovedAt::ChainFail { .. }, .. } if ro.name() == rap_name => {
         return Some(Ownership::Maybe);
       }
       // The end of a `while` loop whose condition may have moved it

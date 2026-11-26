@@ -1666,10 +1666,6 @@ pub enum MaybeMovedAt {
     /// 'a; } drop(s); }`, #1286); otherwise a `break` comes after it.
     /// `carried`: as for `Loop`.
     LabeledBlock { skipped: bool, carried: bool },
-    /// A labeled block may end without a value in a binding it assigns.
-    /// `mutable`: the binding can be assigned again (an immutable
-    /// deferred `let s;` can't: a second assignment is E0384).
-    LabeledBlockAssignment { mutable: bool },
     /// The start of the `else` branch (`path`: or the implicit empty
     /// one) of an `if` whose let-chain condition moves the variable in
     /// a part that a part which can be false comes after
@@ -2307,9 +2303,6 @@ pub enum ExternalEvent {
     LoopExitKept {
         ro: ResourceAccessPoint,
         reassigned: bool,
-        /// The end of a labeled block, not a loop, whose only way out
-        /// is a `break` (the way to its end returns or panics, #1685).
-        block: bool,
         id: usize
     },
     // At the end of a loop: `ro` (declared outside the loop) was moved
@@ -2903,7 +2896,7 @@ pub enum Event {
     // See ExternalEvent::LoopMaybeInit.
     LoopMaybeInit { before_loop: Option<bool>, nested: bool },
     // See ExternalEvent::LoopExitKept.
-    LoopExitKept { reassigned: bool, block: bool },
+    LoopExitKept { reassigned: bool },
     // See ExternalEvent::LoopExitMove.
     LoopExitMove { definite: bool, at: MaybeMovedAt },
     // The owner's resource is dropped here only if the `?` returns
@@ -3913,9 +3906,6 @@ impl Event {
             Event::LoopExitMove { definite, at: MaybeMovedAt::LabeledBlock { skipped: false, carried } } => {
                 hover_messages::event_dot_loop_exit_move(my_name, *definite, true, *carried)
             }
-            Event::LoopExitMove { at: MaybeMovedAt::LabeledBlockAssignment { mutable }, .. } => {
-                hover_messages::event_dot_block_maybe_assigned(my_name, *mutable)
-            }
             Event::LoopExitMove { definite, at: MaybeMovedAt::ChainFail { to, dropped, path, how } } => {
                 hover_messages::event_dot_chain_fail_move(my_name, *definite, to, dropped, *path, how)
             }
@@ -4023,8 +4013,8 @@ impl Event {
                 hover_messages::event_dot_loop_iterator_drop(my_name, *left, early)
             }
             // (The timeline panel says "value" for a value.)
-            Event::LoopExitKept { reassigned, block } => {
-                hover_messages::event_dot_loop_exit_kept(my_name, *reassigned, false, *block)
+            Event::LoopExitKept { reassigned } => {
+                hover_messages::event_dot_loop_exit_kept(my_name, *reassigned, false)
             }
             // (The timeline panel words it with what follows.)
             Event::LoopMaybeInit { nested: true, .. } => {
@@ -6018,8 +6008,8 @@ impl Visualizable for VisualizationData {
         ExternalEvent::LoopMaybeInit{ before_loop, nested, .. } => {
           vec![(line_num, Event::LoopMaybeInit { before_loop: *before_loop, nested: *nested })]
         },
-        ExternalEvent::LoopExitKept{ reassigned, block, .. } => {
-          vec![(line_num, Event::LoopExitKept { reassigned: *reassigned, block: *block })]
+        ExternalEvent::LoopExitKept{ reassigned, .. } => {
+          vec![(line_num, Event::LoopExitKept { reassigned: *reassigned })]
         },
         ExternalEvent::LoopExitMove{definite, at, ..} => {
           vec![(line_num, Event::LoopExitMove { definite: *definite, at: at.clone() })]
@@ -6527,8 +6517,8 @@ impl Visualizable for VisualizationData {
             ExternalEvent::LoopMaybeInit{ro, before_loop, nested, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopMaybeInit { before_loop, nested }, line_number);
             },
-            ExternalEvent::LoopExitKept{ro, reassigned, block, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopExitKept { reassigned, block }, line_number);
+            ExternalEvent::LoopExitKept{ro, reassigned, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopExitKept { reassigned }, line_number);
             },
             ExternalEvent::LoopExitMove{ro, definite, at, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopExitMove { definite, at }, line_number);
