@@ -2795,8 +2795,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if rap.drops_nothing() {
         continue;
       }
-      let dup = self.preprocessed_events.iter().any(|(l, e)| *l == line
-        && matches!(e, ExternalEvent::OwnerDropIfTryReturns { ro, .. } if *ro == rap));
+      // (Unless it was given a new value since, on this line: `b =
+      // f(o?); p?;` drops the old value at the first `?` and the new one
+      // at the second, #1590.)
+      let dup = self.preprocessed_events.iter().rposition(|(l, e)| *l == line
+        && matches!(e, ExternalEvent::OwnerDropIfTryReturns { ro, .. } if *ro == rap))
+        .is_some_and(|k| !self.preprocessed_events[k + 1..].iter().any(|(_, e)| match e {
+          ExternalEvent::OwnerDropAtReassign { ro, .. } => *ro == rap,
+          // (Also `*b = …`, which gives b new contents.)
+          ExternalEvent::Move { to, .. } | ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. } =>
+            to.extract_rap().is_some_and(|r| *r == rap),
+          _ => false,
+        }));
       if dup {
         continue;
       }
@@ -7802,12 +7812,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // after a branch above moved it, and on a later time round the
       // value it holds may be one the time round before gave it. Only
       // the drop flag knows. (A struct's field columns go with it.)
+      // Outside a loop too (#1587): a loop above that may have ended
+      // before giving s a value, then a conditional that gives it one in
+      // some branches only (`for … { s = …; } if c { s = …; } s = …;`):
+      // what the drawing tracks says s holds a value on every path, rustc
+      // that it only may (`MaybeHeld`).
       if drop_target.as_ref() == Some(rap) && maybe_init.is_none()
         && maybe_moved.iter().all(|m| !*m) && parts.iter().all(|p| p.is_none())
-        && self.exit_frames.iter().any(|f| matches!(f, ExitFrame::Loop { .. }))
         && drop_target.iter().chain(field_drop_targets.iter())
           .all(|r| self.ownership_before_assign(r.name(), lhs_expr.span, expr.span) == Some(Ownership::Maybe)) {
-        maybe_init = Some(InitBy::DropFlag);
+        maybe_init = Some(if self.exit_frames.iter().any(|f| matches!(f, ExitFrame::Loop { .. })) {
+          InitBy::DropFlag
+        } else {
+          InitBy::MaybeHeld
+        });
         maybe_moved.iter_mut().for_each(|m| *m = true);
       }
     }

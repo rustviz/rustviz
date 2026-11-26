@@ -1226,6 +1226,14 @@ pub fn try_drop_before_own_try(drop_text: &str) -> Option<String> {
 // drop text (event_dot_owner_drop_if_try_returns) and the reassignment's
 // own text; this says the reassignment happens only on success, in place
 // of "nothing happens to s here".
+// A later `?` on the line of `s = f()?; …` (#1590): it comes after that
+// assignment. Not "the `?` here", which the merged first one says.
+pub fn try_drop_after_assignment(drop_text: &str) -> Option<String> {
+    let rest = drop_text.strip_prefix("Only if the `?` here returns early")?;
+    let rest = rest.strip_prefix(" (on an `Err` or `None`)").unwrap_or(rest);
+    Some(format!("Only if the `?` after the assignment returns early{}", rest.replacen("If the `?` succeeds", "If that `?` succeeds", 1)))
+}
+
 pub fn try_drop_then_reassign(drop_text: &str, reassign: &str) -> Option<String> {
     let (head, owner) = drop_text.split_once(". If the `?` succeeds, nothing happens to ")?;
     owner.strip_suffix(" here.")?;
@@ -4957,6 +4965,19 @@ pub fn event_dot_branch_merge_maybe_init_unchanged(my_name: &String, temp: bool)
     } else {
         format!("{} may have no value here, as before the branches: none of the branches that get here assigns it", name)
     }
+}
+
+// The same where a branch that gets here gives it a new value and moves
+// that away again (`drop(s); if c { s = …; } if d { s = …; drop(s); }
+// else { }`, #1582): after that branch it has none; after the others, what
+// it had before the branches, if anything. Only "may": a branch may move
+// it in a conditional of its own (`if e { drop(s); }`).
+pub fn event_dot_branch_merge_maybe_init_assigned_moved(my_name: &String) -> String {
+    format!(
+        "{} may have no value here: it may have had none before the branches, and a branch that gets here and \
+         assigns it may move the new value away again",
+        styled_name_html(my_name)
+    )
 }
 
 // At the end of a loop, for a variable declared outside it that a
