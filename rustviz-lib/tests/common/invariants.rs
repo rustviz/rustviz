@@ -50,7 +50,6 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("guard_stores_borrow_1769", "line-starts-nowhere", 1786),
     // Geometric (`geometry.rs`), from here on.
     // Tuple column goes on after its fields were moved out.
-    ("edition2024/if_let_chain_irrefutable_move", "line-ends-nowhere", 1157),
     // A borrow arrow leaving an arm's dot along the fork leg, its track
     // crossing other columns' legs at ~22 degrees; a copy leaving a dot
     // beside the leg into it.
@@ -92,8 +91,6 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("known_bugs/1586_cond_last_use_repointed_after", "line-through-fork", 1586),
     ("known_bugs/1587_loop_two_conditionals", "owner-after-maybe-moved-join", 1587),
     ("known_bugs/1587_maybe_held_reassign_after_loop", "owner-after-maybe-moved-join", 1587),
-    ("known_bugs/1597_chain_call_use_before_end", "drop-without-value", 1597),
-    ("known_bugs/1597_chain_call_use_before_end", "event-on-dead-column", 1597),
     ("known_bugs/1597_chain_call_use_before_end", "invalid-state", 1597),
     ("known_bugs/1598_else_if_let_implicit_else_join", "fork-without-dot", 1598),
     ("known_bugs/1625_repoint_live_reborrow", "event-on-dead-column", 1625),
@@ -106,29 +103,17 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("known_bugs/1645_move_then_two_reassigns", "drop-of-moved-value-at-reassign", 1645),
     ("known_bugs/1662_arm_loan_kinds", "invalid-state", 1662),
     ("known_bugs/1664_stored_reference_slot", "invalid-state", 1664),
-    ("known_bugs/1666_struct_last_move_in_arms", "line-starts-nowhere", 1666),
-    ("known_bugs/1681_reused_element", "drop-without-value", 1681),
-    ("known_bugs/1681_reused_element", "event-on-dead-column", 1681),
     ("known_bugs/1681_reused_element", "invalid-state", 1681),
     ("known_bugs/1694_nested_overlapping_loans", "arrow-along-leg", 1694),
     ("known_bugs/1694_nested_overlapping_loans", "event-on-dead-column", 1694),
-    ("known_bugs/1715_nested_downgrade", "event-on-dead-column", 1715),
     ("known_bugs/1715_nested_downgrade", "invalid-state", 1715),
     ("known_bugs/1732_stored_loan_kinds", "arrow-along-leg", 1732),
-    ("known_bugs/1732_stored_loan_kinds", "drop-without-value", 1732),
-    ("known_bugs/1732_stored_loan_kinds", "event-on-dead-column", 1732),
     ("known_bugs/1732_stored_loan_kinds", "invalid-state", 1732),
     ("known_bugs/1750_mixed_arm_holder", "invalid-state", 1750),
     ("known_bugs/1752_dead_loan_one_line", "arrow-along-leg", 1752),
     ("known_bugs/1823_shared_ref_of_mut_hedge", "arrow-along-leg", 1823),
-    ("known_bugs/1823_shared_ref_of_mut_hedge", "drop-without-value", 1823),
-    ("known_bugs/1823_shared_ref_of_mut_hedge", "event-on-dead-column", 1823),
     ("known_bugs/1823_shared_ref_of_mut_hedge", "invalid-state", 1823),
-    ("known_bugs/1823_shared_ref_of_mut_kinds", "drop-without-value", 1823),
-    ("known_bugs/1823_shared_ref_of_mut_kinds", "event-on-dead-column", 1823),
     ("known_bugs/1823_shared_ref_of_mut_kinds", "invalid-state", 1823),
-    ("known_bugs/1823_shared_ref_of_mut_siblings", "drop-without-value", 1823),
-    ("known_bugs/1823_shared_ref_of_mut_siblings", "event-on-dead-column", 1823),
     ("known_bugs/1823_shared_ref_of_mut_siblings", "invalid-state", 1823),
 ];
 

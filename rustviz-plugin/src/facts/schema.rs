@@ -4,7 +4,7 @@
 //! evaluation order or sorted, so the dump is deterministic.
 
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Bumped whenever a field changes meaning or goes away. 2: `Lent.kind`
 /// tells `unique` and `reserved` from `mut`; `Lent.holder` is who holds
@@ -15,6 +15,10 @@ use std::collections::BTreeMap;
 /// `HoldEnd` fact. 4: `State.holds` (the loans each variable's value
 /// keeps borrowed after the row, as the borrow checker counts them).
 pub const VERSION: u32 = 4;
+
+/// Bound the space used to enumerate individual elements of an array
+/// pattern. Larger arrays still have their partial-move state.
+pub const MAX_NAMED_ARRAY_LEN: usize = 64;
 
 #[derive(Serialize)]
 pub struct CrateFacts {
@@ -75,9 +79,13 @@ pub struct ColumnInfo {
     /// they have no columns, so its field columns aren't all of it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub hidden_fields: bool,
+    #[serde(skip)]
+    pub array_len: Option<usize>,
+    #[serde(skip)]
+    pub is_box: bool,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 pub struct LoanInfo {
     pub loan: usize,
     /// "borrow": a borrow borrowck tracks (its `BorrowIndex`) of a user
@@ -107,6 +115,14 @@ pub struct LoanInfo {
     /// overlaps the borrowed place: `v` for `v[_]`, `p` and `p.a` for
     /// `p.a`).
     pub columns: Vec<String>,
+    /// Overlapping columns covered by the entire borrow, including a
+    /// Box that lends its whole payload.
+    #[serde(skip)]
+    pub whole: BTreeSet<String>,
+    #[serde(skip)]
+    pub direct_holder: Option<String>,
+    #[serde(skip)]
+    pub runs: bool,
     /// "shared" | "mut" | "unique" (a closure's unique immutable
     /// capture: the closure may not mutate it, but nobody else may use it)
     pub kind: &'static str,
@@ -172,6 +188,13 @@ pub struct Lent {
     /// for a field `h.r`; `s` once `let s = r;` ran), or the call / macro
     /// it was passed to.
     pub holder: String,
+    /// The hidden iterator carries this loan at this boundary.
+    #[serde(skip)]
+    pub iterator: bool,
+    /// Named places proven to carry this loan here. Multiple independent
+    /// holders need not denote the same borrow on every incoming path.
+    #[serde(skip)]
+    pub current: BTreeSet<String>,
 }
 
 #[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -209,6 +232,21 @@ pub struct State {
     /// loan in `h`, and a copy made before it (`let old = h.r`) gets `b`'s
     /// too, as rustc counts them.
     pub holds: BTreeMap<String, Vec<usize>>,
+    /// Borrow checking includes an unreachable path skipping initialization.
+    /// The place is initialized on every executable path to this boundary.
+    #[serde(skip)]
+    pub always_assigned: BTreeSet<String>,
+    /// A real CFG path to this boundary can bypass all the live loans
+    /// of the strongest kind restricting the column.
+    #[serde(skip)]
+    pub may_lend: BTreeSet<String>,
+    /// Columns a part of which, with no name of its own (an enum payload),
+    /// was moved out on some paths only (`parts` can't list it).
+    #[serde(skip)]
+    pub unnamed_maybe: BTreeSet<String>,
+    /// Named values whose origins contain a live loan at this boundary.
+    #[serde(skip)]
+    pub holder_sources: BTreeMap<String, BTreeSet<String>>,
 }
 
 #[derive(Serialize, Default)]
@@ -220,6 +258,16 @@ pub struct Row {
     /// absent or has empty maps: the previous row's state holds.
     #[serde(flatten)]
     pub after: State,
+    /// State on forward edges entering this row, before its first effect.
+    /// Used for the straight segment that meets it, including at CFG joins.
+    #[serde(skip)]
+    pub before: Option<State>,
+    #[serde(skip)]
+    pub block_end: bool,
+    /// The row's code that runs leaves it only by jumps past the next row
+    /// the paths come into (`break k;`, `return i;`).
+    #[serde(skip)]
+    pub jumps: bool,
     /// Events on the row, in MIR evaluation order.
     pub facts: Vec<Ev>,
     /// Several arms of one branch on this row (`if c { a } else { b }`

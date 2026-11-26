@@ -3301,7 +3301,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "m's value is copied",
             "m's value is immutably borrowed by r; m is read-only while the borrow is live",
-            "m's value is being shared by one or more variables",
+            "m's value is being shared by one or more variables. r holds a shared borrow",
             "m's value is no longer immutably borrowed",
             "r immutably borrows a value",
             "Return immutably borrowed value from r to m",
@@ -5116,7 +5116,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // it2 holds an `Iter`, a value that borrows `w` (#336): its
             // column says so instead of the plain-value wording.
             "it2 holds a value that immutably borrows w's resource (it2 isn't a reference itself)",
-            "it2 holds a value that contains a reference (it2 isn't a reference itself)",
+            "it2 holds a value that borrows from w (it2 isn't a reference itself)",
             "it2 goes out of scope",
             "it2's value is immutably borrowed by len; it2 is read-only while the borrow is live",
             "w acquires ownership of a resource",
@@ -6880,7 +6880,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from v to third: get's signature gives the value it returns the same lifetime as the value it was called on; third isn't a reference, but its value holds one",
             "Immutable borrow from v to x: next's signature gives the value it returns the same lifetime as the references stored in it; unwrap passes the borrow on",
             "it holds a value that immutably borrows v's resource (it isn't a reference itself)",
-            "it holds a value that contains a reference (it isn't a reference itself)",
+            "it holds a value that borrows from v (it isn't a reference itself)",
             "Return immutably borrowed resource from it to v",
             "Return immutably borrowed resource from third to v",
             "Return immutably borrowed resource from x to v",
@@ -9720,7 +9720,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // compiles. They end on that line, not at the end of the arm.
         must_contain: &[
             "x's borrow ends here, so t.1's resource is no longer immutably borrowed (the borrow checker counted it as borrowed whichever alternative of the pattern matched)",
-            "t.1's resource is immutably borrowed by x if the alternative that binds x from t.1 matched; either way, t.1 is read-only until x's borrow ends",
+            "The borrow checker treats t.1 as immutably borrowed here, even though the alternative that takes the borrow never runs",
             "t.1's resource is mutably borrowed by push_str; t.1 can't be used while the borrow is live",
             "x's immutable borrow ends",
         ],
@@ -24340,7 +24340,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from q.items to s",
             "Return immutably borrowed resource from s to q.items",
             "Mutable borrow from v to z",
-            "v's resource is mutably borrowed by x; v can't be used until the borrow ends",
+            "v's resource is mutably borrowed by the `for` loop's iterator; v can't be used until the borrow ends",
         ],
         must_not_contain: &[
             "x is bound to a mutable reference",
@@ -27217,7 +27217,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "a's resource is mutably borrowed by the `for` loop's iterator; a can't be used until the loop ends",
         ],
         must_not_contain: &[
-            "=v's resource is mutably borrowed by e; v can't be used until the borrow ends",
+            "=v's resource is mutably borrowed by e; v can't be used until the loop ends",
             "=w's resource is mutably borrowed by f; w can't be used until the borrow ends",
             "=u's resource is mutably borrowed by g; u can't be used until the borrow ends",
             "=a's resource is mutably borrowed by h; a can't be used until the borrow ends",
@@ -28000,9 +28000,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the join; `struct_lines_after_maybe_moves_1568_1583` checks the
         // rows). Moved in every arm (u), it stops where they split (#1541).
         must_contain: &[
-            "p is partially moved: p.b was moved out and p.a may have been, so neither p nor any of its fields can be used; what is left in p is dropped when it goes out of scope",
-            "x is partially moved: x.a and x.b may have been moved out, so neither x nor any of its fields can be used; what is left in x is dropped when it goes out of scope",
-            "y is partially moved: y.a and y.b may have been moved out, so neither y nor any of its fields can be used; what is left in y is dropped when it goes out of scope",
+            "p is partially moved: p.b was moved out and p.a may have been, so p can't be used as a whole, nor can any of its fields; what is left in p is dropped when it goes out of scope",
+            "x may be partially moved: x.a and x.b may have been moved out, so x can't be used as a whole, nor can any of its fields; what is left in x is dropped when it goes out of scope",
+            "y may be partially moved: y.a and y.b may have been moved out, so y can't be used as a whole, nor can any of its fields; what is left in y is dropped when it goes out of scope",
         ],
         must_not_contain: &[
             "what is left in u",
@@ -28183,6 +28183,114 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "ra2 may be mutably borrowed here",
             "the value p points to is mutably borrowed by closure f through p",
         ],
+    },
+    // #1859 (rv3 P1-5): a line the state table has no cell for (an async
+    // fn's parameter, a temporary, a static) keeps 2.x's title; the first
+    // P1-5 draft titled it "The timeline for s".
+    TooltipExpect {
+        name: "approx_async_135",
+        must_contain: &["s is the owner of the resource"],
+        must_not_contain: &["The timeline for"],
+    },
+    TooltipExpect {
+        name: "book/c8_15_vec_for_by_value",
+        must_contain: &["(temporary) is the owner of the resource"],
+        must_not_contain: &["The timeline for"],
+    },
+    TooltipExpect {
+        name: "book/x09_static_item",
+        must_contain: &["GREETING holds a copyable value"],
+        must_not_contain: &["The timeline for"],
+    },
+    // #1859: `i` and `item` are Copy and never moved; the cell at the end
+    // of the loop body (their `StorageDead`, which MIR's move data counts
+    // as a move) isn't a move, and `return i;` leaves the row only on the
+    // exit path (Q3: the line below it is on the paths that skip it).
+    TooltipExpect {
+        name: "book/c4_07_first_word_loop",
+        must_contain: &["i holds a copyable value", "item holds a copyable value"],
+        must_not_contain: &["may have been moved out", "The timeline for"],
+    },
+    // #1859: `break k;` leaves its row only by the break; the line below it
+    // is on the iterations that go on, where k still holds its value.
+    TooltipExpect {
+        name: "break_out_after_move_1156",
+        must_contain: &["k is the owner of the resource"],
+        must_not_contain: &["k's value was moved out, so it can't be used here", "m's value was moved out, so it can't be used here"],
+    },
+    // #1859: a lender the facts name by the temporary's code is named by
+    // 2.x's `(temporary)` column; borrowed on some paths only says so.
+    TooltipExpect {
+        name: "branch_extended_temp_1397",
+        must_contain: &[
+            "s's resource may be immutably borrowed here (a branch above borrowed it on some paths only), so s is read-only until that borrow ends. The borrow checker tracks borrowed data from (temporary) and s through r",
+        ],
+        must_not_contain: &["String::from(", "On every path"],
+    },
+    TooltipExpect {
+        name: "arm_binding_value_1327",
+        must_contain: &[
+            "a6's resource may be immutably borrowed here (a branch above borrowed it on some paths only), so a6 is read-only until that borrow ends. The borrow checker tracks borrowed data from a6 and b6 through r6",
+        ],
+        must_not_contain: &["On every path"],
+    },
+    // #1859: x mutably borrowed on some paths only (both arms borrow x, one
+    // into r, one into s; only s's loan is live after `r.push('a')`): the
+    // hedge, never "on every path" (`assert_owner_title` pins the hedge).
+    TooltipExpect {
+        name: "rv3_owner_lines_1852",
+        must_contain: &[],
+        must_not_contain: &["On every path"],
+    },
+    // #1859 review round: titles the facts can't back exactly keep 2.x's
+    // clause. A write to the reference holding a loan (`r2 = r2`, `r =
+    // &mut y` with a reborrow of r live) doesn't end the loan.
+    TooltipExpect {
+        name: "reassign_same_loan_1497_1517",
+        must_contain: &[],
+        must_not_contain: &["what held the borrow was given another value"],
+    },
+    TooltipExpect {
+        name: "reborrow_outlives_repoint_1182",
+        must_contain: &[],
+        must_not_contain: &["what held the borrow was given another value"],
+    },
+    // `(ref x, _) | (_, ref x)`: x borrows t.0 or t.1, never both.
+    TooltipExpect {
+        name: "or_pattern_ref_last_use",
+        must_contain: &[],
+        must_not_contain: &["t.0, t.1 are borrowed"],
+    },
+    // `longest(string1, string2)` returns one of them: result isn't said
+    // to hold a borrow of each (2.x's title stands).
+    TooltipExpect {
+        name: "book/c10_07_longest_inner_scope",
+        must_contain: &["string2's resource is being shared by one or more variables"],
+        must_not_contain: &["result holds a shared borrow"],
+    },
+    // e is one element; the loop's iterator holds the loan of s.items.
+    TooltipExpect {
+        name: "field_borrow_through_ref_1073",
+        must_contain: &[],
+        must_not_contain: &["s.items is borrowed by e"],
+    },
+    // The reserved / uniquely borrowed place is a field: the title names it.
+    TooltipExpect {
+        name: "rv3_issues/1765_two_phase_multiline_insert",
+        must_contain: &[],
+        must_not_contain: &["p is reserved for a mutable borrow"],
+    },
+    TooltipExpect {
+        name: "known_bugs/1627_closure_captures_review",
+        must_contain: &[],
+        must_not_contain: &["s is uniquely borrowed by closure g"],
+    },
+    // A `for` loop over `&v`: not "until the loop ends" (a `break` ends
+    // the borrow sooner; a `Cell` inside can still be set).
+    TooltipExpect {
+        name: "book/c8_04_vec_for_ref",
+        must_contain: &["v's resource is being shared by one or more variables. The `for` loop's iterator holds a shared borrow"],
+        must_not_contain: &["until the loop ends"],
     },
 ];
 
@@ -32053,6 +32161,68 @@ fn tooltip_of_id(timeline_svg: &str, id: &str) -> Option<String> {
     tooltip_lines(&timeline_svg[lo..=hi]).into_iter().next().map(|l| l.join(" "))
 }
 
+/// Adjacent rows with the same facts share one SVG segment. A title pin
+/// checks every source interval it covers, irrespective of coalescing.
+fn assert_owner_title(snippet: &str, var: &str, from: usize, until: usize, state: Option<&str>, want: &str, forbidden: &str) {
+    let svg = run_with_local_backend(snippet).timeline_panel_string();
+    let lines = common::svg::rv_elements(&svg);
+    for row in from..until {
+        let line = lines.iter().find(|e| e.kind == "line" && e.var.as_deref() == Some(var)
+            && e.line.as_ref().and_then(|l| l.parse::<usize>().ok()).is_some_and(|l| l <= row)
+            && e.line_end.as_ref().and_then(|l| l.parse::<usize>().ok()).is_some_and(|l| row < l))
+            .unwrap_or_else(|| panic!("{snippet}: no {var} line on row {row}"));
+        if let Some(state) = state {
+            assert_eq!(line.state.as_deref(), Some(state), "{snippet}: {}", line.id);
+        }
+        let title = tooltip_of_id(&svg, &line.id).unwrap();
+        assert!(title.contains(want), "{snippet} {}: {title:?} lacks {want:?}", line.id);
+        assert!(!title.contains(forbidden), "{snippet} {}: {title:?} says {forbidden:?}", line.id);
+    }
+}
+
+/// A moved field and a live loan of its sibling coexist. Borrow checking
+/// rejects a use of the parent. For the irrefutable or-pattern rustc
+/// rejects a use of .1 even though the executable MIR moves only .0.
+#[test]
+fn owner_titles_explain_cell_qualifiers() {
+    let snippet = "rv3_segment_qualifiers";
+    for (var, from, until, want, forbidden) in [
+        ("pair", 8, 9, "pair.word was moved out", "its other fields still can"),
+        ("pair", 8, 9, "pair.count is borrowed by r", "its other fields still can"),
+        ("pair", 14, 16, "pair.1 still holds its value at runtime", "pair.1 may have been"),
+        ("pair", 14, 16, "move on an unreachable path", "its other fields still can"),
+        ("pair", 20, 21, "r holds a shared borrow", "owner of the resource"),
+        // E0381, with no move from `value` on either path.
+        ("value", 32, 34, "unreachable path that skips the assignment", "move"),
+    ] {
+        assert_owner_title(snippet, var, from, until, None, want, forbidden);
+    }
+    // (h holds a value, and *h.r, not h, is what q borrows.)
+    assert_owner_title("rv3_facts_review_1833", "h", 56, 57, None, "This borrow was taken through h.r", "h's value is mutably borrowed");
+    assert_owner_title("known_bugs/1587_maybe_held_reassign_after_loop", "s", 24, 25, None,
+        "s may have been moved out", "hasn't been assigned");
+    // #1859 review: the struct literal is assigned at its `};` (MIR); the
+    // line from the `let` row says so, and owns it from the `};` on.
+    assert_owner_title("book/c5_01_struct_field_read", "user1", 9, 14, None, "user1 has no value yet", "owner of the resource");
+    assert_owner_title("book/c5_01_struct_field_read", "user1", 14, 16, None, "user1 is the owner of the resource", "no value");
+    // `match (s, u)` moves both into the scrutinee's tuple before the arm
+    // binds p.
+    assert_owner_title("tuple_scrutinee_part_columns", "s", 9, 10, None, "s's value was moved out", "owner of the resource");
+    // #1859 review: an enum payload moved in an if-let chain is gone only on
+    // the path that matched: "may have been" after the `if`, never "was"...
+    assert_owner_title("known_bugs/1711_struct_inner_move_chain", "q", 9, 10, None, "part of q.a may have been moved out", "part of q.a was moved out");
+    // ... and inside the block the match enters, it was.
+    assert_owner_title("known_bugs/1711_struct_inner_move_chain", "q", 7, 9, None, "part of q.a was moved out", "may have been");
+    // r2 = id(r) is a `&String`: it keeps s's mutable loan live but can't
+    // write to s.
+    assert_owner_title("downgrade_through_call_1510", "s", 25, 26, None, "s's resource is mutably borrowed", "by r2");
+    // `[Some(a), _]` moves opts[0]'s payload, not opts[0]; when only an
+    // `if let` matched, it may have been.
+    assert_owner_title("slice_elem_moves_1285", "opts", 21, 22, None, "Part of opts may have been moved out", "opts[0]");
+    // `(Some(x), _) | (_, Some(x))` moves at most one payload.
+    assert_owner_title("or_pattern_if_let_different_values_else", "t", 3, 5, None, "may have been moved out", "were moved out");
+}
+
 /// RustViz 3 P1-3: an owner column's line reads its state on each row from
 /// the state table: what is moved out of a Box (its payload's fields, or
 /// its contents: the Box itself still owns its allocation), and whether a
@@ -32061,49 +32231,46 @@ fn tooltip_of_id(timeline_svg: &str, id: &str) -> Option<String> {
 /// draws it: #1073, wording #1671.)
 #[test]
 fn owner_line_reads_the_state_table() {
-    for (snippet, id, want, not) in [
-        ("box_partial_move_890", "b2@L22-40:line", "b2.0 was moved out, so b2 can't be used as a whole", "owner of the resource"),
-        ("box_partial_move_890", "b4@L34-40:line", "b4's contents were moved out, so b4 can't be used as a whole; the Box itself wasn't moved: its heap allocation, if it has one, is freed when b4 is dropped", "owner of the resource"),
+    for (snippet, var, from, until, state, want, not) in [
+        ("box_partial_move_890", "b2", 22, 40, None, "b2.0 was moved out, so b2 can't be used as a whole", "owner of the resource"),
+        ("box_partial_move_890", "b4", 34, 40, None, "b4's contents were moved out, so b4 can't be used as a whole; the Box itself wasn't moved: its heap allocation, if it has one, is freed when b4 is dropped", "owner of the resource"),
         // `match *b1 { (s, 0) => .., x => .. }`: b1.0 moves on every path,
         // the whole payload (b1.1 too) only in the `x` arm.
-        ("box_payload_whole_move_898", "b1@L14-39:line", "b1.0 was moved out and b1.1 may have been, so b1 can't be used as a whole", "owner of the resource"),
-        ("box_field_move", "b@L5-6:line", "b.name was moved out, so b can't be used as a whole", "owner of the resource"),
-        ("let_else_nested_part_899", "b@L18-22:line", "part of b.0 was moved out", "owner of the resource"),
+        ("box_payload_whole_move_898", "b1", 14, 39, None, "b1.0 was moved out and b1.1 may have been, so b1 can't be used as a whole", "owner of the resource"),
+        ("box_field_move", "b", 5, 6, None, "b.name was moved out, so b can't be used as a whole", "owner of the resource"),
+        ("let_else_nested_part_899", "b", 18, 22, None, "part of b.0 was moved out", "owner of the resource"),
         // `r = &b;` overwrites the holder of a's loan: a is free again.
-        ("dead_loan_write_796", "a@L29-32:line:full_privilege", "a holds a copyable value", "shared"),
+        ("dead_loan_write_796", "a", 29, 32, Some("full_privilege"), "a holds a copyable value", "shared"),
         // The closure holds its borrow of list until its last call (L5).
-        ("book/c13_12_closure_borrow_then_use", "list@L4-5:line:partial_privilege", "list's resource is being shared", "owner of the resource"),
+        ("book/c13_12_closure_borrow_then_use", "list", 4, 5, Some("partial_privilege"), "list's resource is being shared", "owner of the resource"),
         // `list.sort_by_key(|r| { .. });` keeps list mutably borrowed for the
         // whole call, its closure's rows too.
-        ("book/c13_11_sort_by_key_fnmut", "list@L4-7:line:revoked_privilege", "list's value is mutably borrowed", "holds a copyable value"),
+        ("book/c13_11_sort_by_key_fnmut", "list", 4, 7, Some("revoked_privilege"), "list's value is mutably borrowed", "holds a copyable value"),
         // #1852 review. A zero-sized payload has no allocation to free.
-        ("rv3_owner_lines_1852", "b@L58-61:line", "its heap allocation, if it has one, is freed when b is dropped", "still owns its heap allocation"),
+        ("rv3_owner_lines_1852", "b", 58, 61, None, "its heap allocation, if it has one, is freed when b is dropped", "still owns its heap allocation"),
         // `let s = *b;` on a Box<String>: b still owns the Box (2.x drew no
         // line after the move).
-        ("box_contents_move_string", "b@L3-5:line", "b's contents were moved out, so b can't be used as a whole", "owner of the resource"),
+        ("box_contents_move_string", "b", 3, 5, None, "b's contents were moved out, so b can't be used as a whole", "owner of the resource"),
         // A field private to another module has no column: the moved public
         // one isn't all of it.
-        ("rv3_owner_lines_1852", "p@L18-20:line", "p.a was moved out, so p can't be used as a whole", "contents"),
-        ("rv3_owner_lines_1852", "s@L16-20:line", "s.a was moved out, so s can't be used as a whole", "still can"),
+        ("rv3_owner_lines_1852", "p", 18, 20, None, "p.a was moved out, so p can't be used as a whole", "contents"),
+        ("rv3_owner_lines_1852", "s", 16, 20, None, "s.a was moved out, so s can't be used as a whole", "still can"),
         // Moved on some paths only: b may be partially moved.
-        ("rv3_owner_lines_1852", "b@L28-30:line", "b may be partially moved: b.0 and b.1 may have been moved out", "b is partially moved"),
+        ("rv3_owner_lines_1852", "b", 28, 30, None, "b may be partially moved: b.0 and b.1 may have been moved out", "b is partially moved"),
         // Each path lends x to a different holder; then only one path's loan
         // is left.
-        ("rv3_owner_lines_1852", "x@L44-45:line:revoked_privilege", "x's resource is mutably borrowed; x can't be used", " by "),
-        ("rv3_owner_lines_1852", "x@L45-46:line:revoked_privilege", "x may be mutably borrowed here", "by s"),
+        ("rv3_owner_lines_1852", "x", 44, 45, Some("revoked_privilege"), "x's resource is mutably borrowed; x can't be used", " by "),
+        ("rv3_owner_lines_1852", "x", 45, 46, Some("revoked_privilege"), "x may be mutably borrowed here", "by s"),
         // A closure's unique immutable borrow isn't a mutable borrow.
-        ("rv3_issues/1716_closure_unique_capture_of_struct", "h@L6-7:line:revoked_privilege", "h is uniquely borrowed by closure f", "mutably borrowed"),
+        ("rv3_issues/1716_closure_unique_capture_of_struct", "h", 6, 7, Some("revoked_privilege"), "h is uniquely borrowed by closure f", "mutably borrowed"),
         // A two-phase reservation: v can still be read.
-        ("rv3_issues/1717_two_phase_multiline_remove", "v@L3-4:line", "v is reserved for a mutable borrow by the call to remove", "shared by"),
+        ("rv3_issues/1717_two_phase_multiline_remove", "v", 3, 4, None, "v is reserved for a mutable borrow by the call to remove", "shared by"),
         // `**boxed` moved out: the inner Box stays in boxed.
-        ("rv3_issues/1809_nested_box_move_out", "boxed@L3-5:line", "**boxed was moved out, so boxed can't be used as a whole", "contents"),
+        ("rv3_issues/1809_nested_box_move_out", "boxed", 3, 5, None, "**boxed was moved out, so boxed can't be used as a whole", "contents"),
         // `let t = r;` moves the `&mut`: t holds the loan now.
-        ("rv3_issues/1764_moved_mut_ref_holder", "p@L4-6:line:revoked_privilege", "mutably borrowed by t", "by r"),
+        ("rv3_issues/1764_moved_mut_ref_holder", "p", 4, 6, Some("revoked_privilege"), "mutably borrowed by t", "by r"),
     ] {
-        let tl = run_with_local_backend(snippet).timeline_panel_string();
-        let tip = tooltip_of_id(&tl, id).unwrap_or_else(|| panic!("{snippet}: no {id}"));
-        assert!(tip.contains(want), "{snippet} {id}: {tip:?} lacks {want:?}");
-        assert!(!tip.contains(not), "{snippet} {id}: {tip:?} says {not:?}");
+        assert_owner_title(snippet, var, from, until, state, want, not);
     }
 }
 
@@ -32114,54 +32281,51 @@ fn owner_line_reads_the_state_table() {
 /// been" on a path that surely moved it.
 #[test]
 fn struct_line_text_reads_the_state_table() {
-    for (snippet, id, want, not) in [
+    for (snippet, var, from, until, state, want, not) in [
         // In the arm, after `let n = p.name;`: moved, surely (old: p@L9-14
         // said "owner of the resource" through the arm).
-        ("if_no_else_partial_move", "p@L12-14:line", "p.name was moved out", "may have been"),
+        ("if_no_else_partial_move", "p", 12, 14, None, "p.name was moved out", "may have been"),
         // Each arm has its own move: after `take(p.a);` p.a is moved; the
         // else arm starts with p whole.
-        ("partial_move_if_branches", "p@L19-20:line", "p.a was moved out", "owner of the resource"),
-        ("partial_move_if_branches", "p@L20-21:line", "owner of the resource", "moved out"),
-        ("partial_move_if_branches", "r@L38-39:line", "r.a was moved out", "owner of the resource"),
-        ("struct_parts_moved_out_1157", "q@L42-44:line", "q.a was moved out", "may have been"),
-        ("manually_drop_maybe_moved_1147", "t@L80-81:line", "t.a was moved out", "may have been"),
+        ("partial_move_if_branches", "p", 19, 20, None, "p.a was moved out", "owner of the resource"),
+        ("partial_move_if_branches", "p", 20, 21, None, "owner of the resource", "moved out"),
+        ("partial_move_if_branches", "r", 38, 39, None, "r.a was moved out", "owner of the resource"),
+        ("struct_parts_moved_out_1157", "q", 42, 44, None, "q.a was moved out", "may have been"),
+        ("manually_drop_maybe_moved_1147", "t", 80, 81, None, "t.a was moved out", "may have been"),
         // `if c { break l.name; }`: the break leaves l's scope (what is left
         // in l is dropped as it goes), so the line going on is the other
         // path's, where l is whole (#1848 review).
-        ("break_field_out_1280", "l@L14-15:line", "l is the owner of the resource", "moved out"),
-        ("break_field_out_1280", "o@L39-40:line", "o is the owner of the resource", "moved out"),
-        ("early_return_field_1141", "l@L64-65:line", "l is the owner of the resource", "moved out"),
+        ("break_field_out_1280", "l", 14, 15, None, "l is the owner of the resource", "moved out"),
+        ("break_field_out_1280", "o", 39, 40, None, "o is the owner of the resource", "moved out"),
+        ("early_return_field_1141", "l", 64, 65, None, "l is the owner of the resource", "moved out"),
         // After a `}` the paths join: p.a may still be moved (only the arm
         // refilled it).
-        ("rv3_facts_review_1833", "p@L127-129:line", "p.a may have been moved out", "owner of the resource"),
+        ("rv3_facts_review_1833", "p", 127, 129, None, "p.a may have been moved out", "owner of the resource"),
         // Every field moved out, where 2.x draws the line on.
-        ("loop_struct_line_1031", "y@L111-112:line", "y.a and y.b were moved out, so neither y nor any of its fields can be used", "owner of the resource"),
+        ("loop_struct_line_1031", "y", 111, 112, None, "y.a and y.b were moved out, so neither y nor any of its fields can be used", "owner of the resource"),
         // On some paths only: what may be left isn't said to drop at the
         // scope end (the loop gives x.name a new value first).
-        ("loop_struct_line_1031", "x@L88-89:line", "x.name may have been moved out, so x can't be used as a whole, nor can any of its fields", "dropped"),
+        ("loop_struct_line_1031", "x", 88, 89, None, "x.name may have been moved out, so x can't be used as a whole, nor can any of its fields", "dropped"),
         // One arm moves o.inner.x, the other o.inner.y: o.inner never moved
         // out whole.
-        ("rv3_table_titles_1848", "o@L26-28:line", "o.inner.x and o.inner.y may have been moved out", "o.inner may have been"),
+        ("rv3_table_titles_1848", "o", 26, 28, None, "o.inner.x and o.inner.y may have been moved out", "o.inner may have been"),
         // Both payload fields of a Box moved: the Box wasn't.
-        ("rv3_table_titles_1848", "b@L35-37:line", "b.inner.x and b.inner.y were moved out", "b.inner was moved out"),
+        ("rv3_table_titles_1848", "b", 35, 37, None, "b.inner.x and b.inner.y were moved out", "b.inner was moved out"),
         // A move on the `} else { .. }` row, then a comment row.
-        ("rv3_table_titles_1848", "p@L44-47:line", "p.x may have been moved out, so p can't be used as a whole", "still can"),
+        ("rv3_table_titles_1848", "p", 44, 47, None, "p.x may have been moved out, so p can't be used as a whole", "still can"),
         // "Its other fields still can" where the facts show every field not
         // surely moved out whole and not lent `&mut` (the Book's shapes);
         // not where a sibling may have been moved, or is mutably borrowed.
-        ("book/c4_14_partial_move_field", "p@L8-10:line", "p.name was moved out, so p can't be used as a whole; its other fields still can", "may have been"),
-        ("book/c5_04_struct_update", "user1@L15-18:line", "user1.username was moved out, so user1 can't be used as a whole; its other fields still can", "may have been"),
-        ("rv3_table_titles_1848", "t@L74-76:line", "t.a was moved out and t.b may have been moved out, so t can't be used as a whole", "still can"),
-        ("rv3_table_titles_1848", "t@L81-82:line", "t.a was moved out, so t can't be used as a whole", "still can"),
-        ("rv3_table_titles_1848", "t@L82-84:line", "t.a was moved out, so t can't be used as a whole; its other fields still can", "may have been"),
+        ("book/c4_14_partial_move_field", "p", 8, 10, None, "p.name was moved out, so p can't be used as a whole; its other fields still can", "may have been"),
+        ("book/c5_04_struct_update", "user1", 15, 18, None, "user1.username was moved out, so user1 can't be used as a whole; its other fields still can", "may have been"),
+        ("rv3_table_titles_1848", "t", 74, 76, None, "t.a was moved out and t.b may have been moved out, so t can't be used as a whole", "still can"),
+        ("rv3_table_titles_1848", "t", 81, 82, None, "t.a was moved out, so t can't be used as a whole", "still can"),
+        ("rv3_table_titles_1848", "t", 82, 84, None, "t.a was moved out, so t can't be used as a whole; its other fields still can", "may have been"),
         // An array element has no column: its field is named "part of", and
         // nothing claims the fields left can be used.
-        ("rv3_table_titles_1848", "p@L58-60:line", "*p.q was moved out and part of p.a was moved out", "still can"),
+        ("rv3_table_titles_1848", "p", 58, 60, None, "*p.q was moved out and part of p.a was moved out", "still can"),
     ] {
-        let tl = run_with_local_backend(snippet).timeline_panel_string();
-        let tip = tooltip_of_id(&tl, id).unwrap_or_else(|| panic!("{snippet}: no {id}"));
-        assert!(tip.contains(want), "{snippet} {id}: {tip:?} lacks {want:?}");
-        assert!(!tip.contains(not), "{snippet} {id}: {tip:?} says {not:?}");
+        assert_owner_title(snippet, var, from, until, state, want, not);
     }
     // A move out of a Box's contents moves only the payload: the Box's own
     // move path stays initialized and it still owns its allocation, freed
@@ -37007,7 +37171,12 @@ fn a_field_borrow_through_a_reference_keeps_its_line() {
     // The local struct whose field is lent the same way keeps its line.
     let owner = column(label_x(&tl, "s"));
     let (from, to) = (code_row_y(&code, "for e in s.items.iter_mut() {"), closes[12]);
-    assert!(owner.iter().any(|(a, b, c)| *a <= from && *b >= to && c.starts_with("solid")), "s's line doesn't span its loop: {:?}", owner);
+    // A change of the field loan's title can split the solid column.
+    let mut reached = from;
+    for (a, b, class) in &owner {
+        if *a <= reached && class.starts_with("solid") { reached = reached.max(*b); }
+    }
+    assert!(reached >= to, "s's solid line doesn't span its loop: {owner:?}");
 }
 
 /// #1080 (`two_field_borrow_through_ref_1080`): while a value or reference
