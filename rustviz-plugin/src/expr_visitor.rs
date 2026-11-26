@@ -12019,14 +12019,6 @@ pub fn print_out_of_scope(&mut self){
         }
       }
     }
-    if std::env::var_os("RV3_P2B_DEBUG").is_some() {
-      for ((slot, loans), ends) in slots.iter().zip(slot_loans.iter()).zip(decided.iter()) {
-        let e: Vec<String> = ends.iter().map(|(l, e)| format!("{}:{}", l.real_name(), match e {
-          End::Arrow(x) => format!("arrow@{x}"), End::Own(x) => format!("own@{x}"),
-          End::LoopExit { own, back } => format!("loop{own}/{back}"), End::None => "none".into() })).collect();
-        eprintln!("P2B fn{} slot {} rows {:?} arm {} at {} lender {} loans {:?} -> {:?}", self.current_fn_start, slot.key, slot.rows, slot.arm, slot.rd.assigned_at, slot.rd.lender.real_name(), loans, e);
-      }
-    }
     // Later passes read a reference's end line from `borrow_map`.
     for (slot, ends) in slots.iter().zip(decided.iter()) {
       if slot.arm {
