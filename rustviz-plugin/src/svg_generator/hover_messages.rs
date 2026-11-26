@@ -3395,6 +3395,40 @@ pub fn state_partly_moved(my_name: &String, moved: &[String], maybe: bool) -> St
     )
 }
 
+// RustViz 3: the line of a Box whose contents were moved out (`let s =
+// *b;`, or every field of its payload): the Box itself wasn't moved and
+// still owns its heap allocation, freed when it is dropped, but it can't
+// be used as a whole (E0382) until it gets new contents. `maybe`: on some
+// paths only.
+pub fn state_box_contents_moved(my_name: &String, maybe: bool) -> String {
+    let me = styled_name_html(my_name);
+    format!(
+        "{0}'s contents {1} moved out, so {0} can't be used as a whole; the Box still owns its heap allocation, which is freed when {0} is dropped",
+        me, if maybe { "may have been" } else { "were" }
+    )
+}
+
+// RustViz 3: the line of a Box every field of whose payload was moved out,
+// some of them on some paths only (`surely` / `maybe`): it can't be used as
+// a whole (E0382), and it still owns its heap allocation.
+pub fn state_box_fields_maybe_gone(my_name: &String, surely: &[String], maybe: &[String]) -> String {
+    fn list(names: &[String]) -> String {
+        let fmt: Vec<String> = names.iter().map(|m| styled_name_html(m)).collect();
+        match fmt.as_slice() {
+            [init @ .., last] if !init.is_empty() => format!("{} and {}", init.join(", "), last),
+            _ => fmt.concat(),
+        }
+    }
+    let moved = match surely.len() {
+        0 => format!("{} may have been moved out", list(maybe)),
+        n => format!("{} {} moved out and {} may have been", list(surely), if n > 1 { "were" } else { "was" }, list(maybe)),
+    };
+    format!(
+        "{0} is partially moved: {1}, so {0} can't be used as a whole; the Box still owns its heap allocation, which is freed when {0} is dropped",
+        styled_name_html(my_name), moved
+    )
+}
+
 // RustViz 3: the line of a struct some of whose fields were moved out, as
 // the state table (MIR) knows it: `surely` moved out on every path,
 // `maybe` on some, and `partly` fields with a part of them moved out that

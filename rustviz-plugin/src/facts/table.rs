@@ -111,6 +111,8 @@ struct BodyTable {
     columns: Vec<String>,
     /// Each loan's kind ("shared", "mut", "unique").
     loan_kinds: BTreeMap<usize, &'static str>,
+    /// Each loan's borrowed place (`s`, `p.a`, `*b`, `v[_]`).
+    loan_lenders: BTreeMap<usize, String>,
 }
 
 /// The state table of a crate: per fn body, per row (and arm), per
@@ -242,6 +244,17 @@ impl StateTable {
         })
     }
 
+    /// Whether `loan` (restricting `column`) borrows the column itself, a
+    /// place it is in (`p` for `p.a`) or, for a Box, its contents (`*b`),
+    /// rather than a part of it (`p.a` for `p`, an element `v[_]`).
+    pub fn lends_whole(&self, fn_line: usize, column: &str, loan: usize) -> bool {
+        let Some(lender) = self.body(fn_line, column).and_then(|b| b.loan_lenders.get(&loan)) else { return false };
+        lender == column
+            || *lender == format!("*{column}")
+            || column.starts_with(&format!("{lender}."))
+            || column.starts_with(&format!("{lender}["))
+    }
+
     /// Whether the table has a fn starting on `fn_line`.
     pub fn has_fn(&self, fn_line: usize) -> bool {
         self.bodies.contains_key(&fn_line)
@@ -302,7 +315,8 @@ fn body_table(b: &BodyFacts) -> BodyTable {
         rows.insert(r.line, rc);
     }
     let loan_kinds = b.loans.iter().map(|l| (l.loan, l.kind)).collect();
-    BodyTable { first_line: b.first_line, last_line: b.last_line, rows, columns, loan_kinds }
+    let loan_lenders = b.loans.iter().map(|l| (l.loan, l.lender.clone())).collect();
+    BodyTable { first_line: b.first_line, last_line: b.last_line, rows, columns, loan_kinds, loan_lenders }
 }
 
 #[cfg(test)]

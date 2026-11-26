@@ -31682,6 +31682,37 @@ fn tooltip_of_id(timeline_svg: &str, id: &str) -> Option<String> {
     tooltip_lines(&timeline_svg[lo..=hi]).into_iter().next().map(|l| l.join(" "))
 }
 
+/// RustViz 3 P1-3: an owner column's line reads its state on each row from
+/// the state table: what is moved out of a Box (its payload's fields, or
+/// its contents: the Box itself still owns its allocation), and whether a
+/// loan of the column is live where 2.x's replay ended it or never saw it.
+/// (A loan of only a part, a field or an element, leaves the style as 2.x
+/// draws it: #1073, wording #1671.)
+#[test]
+fn owner_line_reads_the_state_table() {
+    for (snippet, id, want, not) in [
+        ("box_partial_move_890", "b2@L22-40:line", "b2.0 was moved out, so b2 can't be used as a whole", "owner of the resource"),
+        ("box_partial_move_890", "b4@L34-40:line", "b4's contents were moved out, so b4 can't be used as a whole; the Box still owns its heap allocation", "owner of the resource"),
+        // `match *b1 { (s, 0) => .., x => .. }`: b1.0 moves on every path,
+        // the whole payload (b1.1 too) only in the `x` arm.
+        ("box_payload_whole_move_898", "b1@L14-39:line", "b1.0 was moved out and b1.1 may have been, so b1 can't be used as a whole", "owner of the resource"),
+        ("box_field_move", "b@L5-6:line", "b.name was moved out, so b can't be used as a whole", "owner of the resource"),
+        ("let_else_nested_part_899", "b@L18-22:line", "part of b.0 was moved out", "owner of the resource"),
+        // `r = &b;` overwrites the holder of a's loan: a is free again.
+        ("dead_loan_write_796", "a@L29-32:line:full_privilege", "a holds a copyable value", "shared"),
+        // The closure holds its borrow of list until its last call (L5).
+        ("book/c13_12_closure_borrow_then_use", "list@L4-5:line:partial_privilege", "list's resource is being shared", "owner of the resource"),
+        // `list.sort_by_key(|r| { .. });` keeps list mutably borrowed for the
+        // whole call, its closure's rows too.
+        ("book/c13_11_sort_by_key_fnmut", "list@L4-7:line:revoked_privilege", "list's value is mutably borrowed", "holds a copyable value"),
+    ] {
+        let tl = run_with_local_backend(snippet).timeline_panel_string();
+        let tip = tooltip_of_id(&tl, id).unwrap_or_else(|| panic!("{snippet}: no {id}"));
+        assert!(tip.contains(want), "{snippet} {id}: {tip:?} lacks {want:?}");
+        assert!(!tip.contains(not), "{snippet} {id}: {tip:?} says {not:?}");
+    }
+}
+
 /// RustViz 3 P1-2: a struct's line reads what is moved out of it on each
 /// row from the state table (MIR's move paths), where 2.x replayed field
 /// histories and kept the trunk's text through a conditional's arms (in an
