@@ -17927,14 +17927,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "reborrow_kinds",
         must_contain: &[
             "a's resource is mutably borrowed by ra; a can't be used until the borrow ends",
-            "the resource ra points to is mutably borrowed by ra2 through ra; ra can't be used until the borrow ends",
+            "the resource ra points to is mutably borrowed by ra2 through ra. Until the borrow ends, the reference in ra can't be read, moved, or used to access the resource. A mutable binding can still be assigned a new reference",
             // rb2 = &mut rb borrows rb itself, not what rb points to (#914).
             "rb is mutably borrowed by rb2; rb can't be used until the borrow ends",
         ],
         // A reference owns nothing.
         must_not_contain: &[
             "ra's resource is mutably borrowed",
-            "the resource rb points to is mutably borrowed by rb2 through rb; rb can't be used until",
+            "the resource rb points to is mutably borrowed by rb2 through rb",
         ],
     },
     TooltipExpect {
@@ -22779,7 +22779,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "reborrow_through_local_mut_ref_1152",
         must_contain: &[
             "Mutable reborrow from r1 to it: iter_mut's signature gives the value it returns the same lifetime as the value it was called on; it isn't a reference, but its value holds one",
-            "the resource r1 points to is mutably borrowed by it through r1; r1 can't be used until the borrow ends",
+            "the resource r1 points to is mutably borrowed by it through r1. Until the borrow ends, the reference in r1 can't be read, moved, or used to access the resource. A mutable binding can still be assigned a new reference",
             "it's mutable borrow ends",
             "_x's mutable borrow ends",
             "Mutable reborrow from r2 to x: first_mut's signature gives the value it returns the same lifetime as the value it was called on; unwrap passes the borrow on",
@@ -28242,7 +28242,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "return_elem_reborrow",
         // A reborrow returned to the caller: held by the caller's
         // reference, not by v.
-        must_contain: &["the resource v points to is mutably borrowed through v; v can't be used until the borrow ends"],
+        must_contain: &["the resource v points to is mutably borrowed through v. Until the borrow ends, the reference in v can't be read, moved, or used to access the resource. A mutable binding can still be assigned a new reference"],
         must_not_contain: &["mutably borrowed by v through v"],
     },
     // #1860's review: where the table can't word a reference's loan, 2.x's
@@ -28564,6 +28564,60 @@ fn one_line_arms_review_1871() {
     // arms' rows is partly moved, not "the owner".
     let p = tip_of("one_line_if_on_header_row_1342", "p@L9:line:full_privilege");
     assert!(p.contains("p.a and p.b may have been moved out"), "got {p}");
+}
+
+/// The line on a straight column immediately below a source row.
+fn column_line_at(svg: &str, column: &str, row: usize) -> (String, Vec<String>) {
+    let doc = roxmltree::Document::parse(svg).expect("well-formed timeline");
+    let lines: Vec<_> = doc.descendants()
+        .filter(|n| n.attribute("data-rv-kind") == Some("line") && n.attribute("data-rv-var") == Some(column))
+        .filter(|n| {
+            let line = |key| n.attribute(key).and_then(|n| n.parse::<usize>().ok());
+            line("data-rv-line").is_some_and(|start| start <= row)
+                && line("data-rv-line-end").is_some_and(|end| row < end)
+        })
+        .collect();
+    assert_eq!(lines.len(), 1, "{column} below row {row}: {lines:?}");
+    (lines[0].attribute("data-rv-state").unwrap().to_owned(), timeline_tooltips(&svg[lines[0].range()]))
+}
+
+#[test]
+fn reference_reservation_shows_shared_access_1861() {
+    let rv = run_with_local_backend("reference_two_phase_reservation_1861");
+    let svg = rv.timeline_panel_string();
+    // r.len() compiles during the reservation. Replacing it with a call
+    // to r.clear() followed by an integer is E0499. After push, clear compiles.
+    for row in [4, 5] {
+        let (state, tips) = column_line_at(&svg, "r", row);
+        assert_eq!(state, "partial_privilege", "row {row}: {tips:?}");
+        assert_eq!(tips, ["Access through r is reserved for a mutable borrow by the call to push. Until the call starts, shared reads through r are allowed. The reservation blocks moving the reference or borrowing through it mutably again"]);
+    }
+    let (state, _) = column_line_at(&svg, "r", 6);
+    assert_eq!(state, "full_privilege");
+}
+
+#[test]
+fn initialized_reference_can_stop_holding_a_loan_1862() {
+    let rv = run_with_local_backend("known_bugs/1823_shared_ref_of_mut_siblings");
+    let svg = rv.timeline_panel_string();
+    // r10 is still initialized after the copy, but the rustc loan is
+    // live through o10's later use. o10 may contain the other arm's reference.
+    let (_, tips) = column_line_at(&svg, "p10", 108);
+    assert!(tips.iter().any(|t| t.contains("The borrow checker tracks this borrow through o10")), "{tips:?}");
+    assert!(!tips.iter().any(|t| t.contains("mutably borrowed by r10") || t.contains("mutably borrowed by o10")), "{tips:?}");
+}
+
+#[test]
+fn reborrow_allows_reassigning_the_reference_1863() {
+    let rv = run_with_local_backend("rv3_issues/1625_repoint_with_live_reborrow");
+    let svg = rv.timeline_panel_string();
+    // A shared read of r or *r, a move of r, and a write through r fail
+    // before the reassignment while a is live. The reassignment compiles.
+    let (state, tips) = column_line_at(&svg, "r", 5);
+    assert_eq!(state, "revoked_privilege");
+    assert_eq!(tips, ["the value r points to is mutably borrowed by a through r. Until the borrow ends, the reference in r can't be read, moved, or used to access the value. A mutable binding can still be assigned a new reference"]);
+    let (state, _) = column_line_at(&svg, "r", 6);
+    assert_eq!(state, "full_privilege");
 }
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws

@@ -4062,6 +4062,19 @@ pub fn state_reserved(my_name: &String, call: Option<&str>) -> String {
     format!("{0} is reserved for a mutable borrow{1}: until that call starts, {0} can still be read, but not changed or moved", me, by)
 }
 
+/// A two-phase reservation on a reference column. Reserving the referent
+/// still allows shared access through the reference and can allow replacing
+/// the binding. A reservation on the binding itself restricts that too.
+pub fn state_ref_reserved(my_name: &String, call: Option<&str>, through_ref: bool) -> String {
+    let me = styled_name_html(my_name);
+    let by = call.map_or(" by a call".to_owned(), |c| format!(" by the call to {}", styled_name_html(&c.to_owned())));
+    if through_ref {
+        format!("Access through {me} is reserved for a mutable borrow{by}. Until the call starts, shared reads through {me} are allowed. The reservation blocks moving the reference or borrowing through it mutably again")
+    } else {
+        format!("The reference {me} is reserved for a mutable borrow{by}. Until the call starts, shared reads of {me} are allowed. The reservation blocks moving, replacing, or mutably borrowing the reserved reference")
+    }
+}
+
 /// The faint dotted segment of a column while it is mutably lent out
 /// (RevokedPrivilege, #722): the column can't be used until the `&mut`
 /// borrow ends. Worded like the lender's dot (`event_dot_mut_lend`,
@@ -4080,10 +4093,14 @@ pub fn state_lent_out(my_name: &String, to: LentTo, through_ref: Option<bool>, r
         LentTo::Unknown => String::new(),
     };
     let until = if matches!(to, LentTo::LoopIterator) { "the loop ends" } else { "the borrow ends" };
-    let subject = match through_ref {
-        _ if ref_itself => format!("{} is mutably borrowed{}", me, by),
-        Some(pointee_copy) => format!("the {} {} points to is mutably borrowed{} through {}", held(pointee_copy), me, by, me),
-        None => format!("{}'s {} is mutably borrowed{}", me, held(holds_value), by),
+    if let Some(pointee_copy) = through_ref.filter(|_| !ref_itself) {
+        let pointee = held(pointee_copy);
+        return format!("the {pointee} {me} points to is mutably borrowed{by} through {me}. Until {until}, the reference in {me} can't be read, moved, or used to access the {pointee}. A mutable binding can still be assigned a new reference");
+    }
+    let subject = if ref_itself {
+        format!("{} is mutably borrowed{}", me, by)
+    } else {
+        format!("{}'s {} is mutably borrowed{}", me, held(holds_value), by)
     };
     format!("{}; {} can't be used until {}", subject, me, until)
 }
