@@ -14641,14 +14641,21 @@ fn end_scrutinee_borrows_in_other_arms(events: &mut Vec<(usize, ExternalEvent)>,
       // back and the binding borrows it again, in that order.)
       let bound_back = branches.iter().zip(&binds).filter(|(_, b)| **b)
         .filter_map(|(arm, _)| give_back_line(&arm.e_data, &lender)).max();
+      // (Whether a binding arm moved the holder out, `Some(e)` of an
+      // `Option<&mut T>`: then it holds nothing after the scrutinee there.)
+      let moved_out = holder.as_ref().is_some_and(|h| branches.iter().zip(&binds).any(|(arm, b)| *b
+        && arm.e_data.iter().any(|(_, e)| matches!(e, ExternalEvent::Move { from: ResourceTy::Value(f), .. } if f == h))));
       let holder_end: Option<usize> = holder.filter(|h| live_vars.contains(h)).and_then(|h| {
         let j = after.iter().position(|(_, e)| touches(e, &h))?;
         match &after[j] {
           (l, ExternalEvent::StaticDie { from: ResourceTy::Value(f), to: ResourceTy::Value(t), still_borrowed_by, .. }
             | ExternalEvent::MutableDie { from: ResourceTy::Value(f), to: ResourceTy::Value(t), still_borrowed_by, .. })
-            // (Or on the binding arm's row where the loan ends, as the
-            // facts put it: `if let Some(e) = o { e.push('x'); }`.)
-            if *f == h && *t == lender && still_borrowed_by.is_empty() && (*split_point..=*merge_point).contains(l)
+            // (Or, when the binding moved it out, on a row of the binding
+            // arm where the loan ends, as the facts put it: `if let Some(e)
+            // = o { e.push('x'); }`. A copied-out holder holds its copy on
+            // to its own end there, below.)
+            if *f == h && *t == lender && still_borrowed_by.is_empty()
+              && (*l == *merge_point || (moved_out && *l > *split_point && *l < *merge_point))
               && bound_back.is_some_and(|b| *l >= b) => Some(j),
           _ => None,
         }
