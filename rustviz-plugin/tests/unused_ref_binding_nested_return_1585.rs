@@ -40,13 +40,15 @@ fn ref_mut(mut t: String, o2: Option<String>, c: bool) {
     }
 }
 
-// An unused or-pattern binding: its possible borrows end where the
-// pattern binds it, so it isn't drawn in the nested `if` either (its join
-// said "a8 still has no value here").
-fn or_pattern(t8: (String, String, bool), c: bool) {
-    match t8 {
-        (ref a8, _, true) | (_, ref a8, false) => {
-            if c { return; }
+
+// The nested `if` on the pattern's line: the binding's loan ends right
+// after the pattern binds it, before the `if`.
+fn same_line(s5: String, o5: Option<String>, c: bool) {
+    if let Some(x5) = o5 {
+        match s5 {
+            ref a5 => { if c {
+                return;
+            } }
         }
     }
 }

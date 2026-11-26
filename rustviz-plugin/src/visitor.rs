@@ -9591,23 +9591,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.borrow_map.remove(into.name());
       }
       if inline {
-        let id = ev.get_id();
         self.add_external_event(line, ev);
-        // In line order, as for an arm of its own: not after the body's
-        // later lines (a nested `if c { return; }`, #1585, #1602).
-        let evs = &mut *self.preprocessed_events;
-        if evs.last().is_some_and(|(_, e)| e.get_id() == id) {
-          let at = evs[..evs.len() - 1].iter().rposition(|(l, _)| *l <= line).map_or(0, |i| i + 1);
-          let e = evs.pop().expect("just added");
-          let ended = match &e.1 {
-            ExternalEvent::OrAltBorrow { into, end: true, .. } if into.is_ref() => Some(into.clone()),
-            _ => None,
-          };
-          evs.insert(at, e);
-          if let Some(r) = ended {
-            drop_from_later_conditionals(&mut evs[at + 1..], &r, line);
-          }
-        }
       } else {
         let at = branch_e_data.iter().rposition(|(l, _)| *l <= line).map_or(0, |i| i + 1);
         branch_e_data.insert(at, (line, ev));
@@ -9695,25 +9679,32 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let after_pat = |evs: &[(usize, ExternalEvent)]| evs.iter().rposition(|(l, e)| *l == ends_at && placed(e.get_id())).map(|i| i + 1);
         if inline {
           self.add_external_event(ends_at, ext_ev);
-          // (Otherwise after the arm's events up to that line, as for an
-          // arm of its own below: not after the body's later lines, a
-          // nested `if c { return; }` or a `&mut p.a`, which then saw the
-          // lender still shared, #1585.)
-          let in_order = |evs: &[(usize, ExternalEvent)]| evs[..evs.len().saturating_sub(1)].iter()
-            .rposition(|(l, _)| *l <= ends_at).map_or(0, |i| i + 1);
-          let at = if unused { after_pat(self.preprocessed_events) } else { None }
-            .or_else(|| Some(in_order(self.preprocessed_events)));
+          // (Or, with no pattern event on that line to follow, right
+          // after the binding's own borrow: not after the body's later
+          // lines, a nested `if c { return; }` or a `&mut p.a`, which then
+          // saw the lender still shared, #1585. Likewise for a binding
+          // whose loan rustc ends on the pattern's own lines: the body
+          // doesn't use it either.)
+          let binding = from.extract_rap().filter(|r| r.is_ref());
+          let unused = unused || (binding.is_some() && self.is_body_local(&name)
+            && live_end.is_some_and(|l| (pat_line..=pat_end).contains(&l)));
+          let after_borrow = |evs: &[(usize, ExternalEvent)]| binding.and_then(|b| evs[..evs.len().saturating_sub(1)].iter()
+            .rposition(|(l, e)| *l <= ends_at && matches!(e,
+              ExternalEvent::StaticBorrow { to: ResourceTy::Value(t), .. } | ExternalEvent::MutableBorrow { to: ResourceTy::Value(t), .. } if t == b))
+            .map(|i| i + 1));
+          let at = if unused { after_pat(self.preprocessed_events).or_else(|| after_borrow(self.preprocessed_events)) } else { None };
           if let Some(at) = at.filter(|_| self.preprocessed_events.last().is_some_and(|(_, e)| e.get_id() == id)) {
             let ev = self.preprocessed_events.pop().expect("just added");
             self.preprocessed_events.insert(at, ev);
-            // rustc ends the binding's loan here, so a conditional after
-            // it in the arm (`if c { return; }`) doesn't draw it: its join
-            // said "a still has no value here" (#1585).
-            if let Some(r) = from.extract_rap().filter(|r| r.is_ref()) {
-              drop_from_later_conditionals(&mut self.preprocessed_events[at + 1..], r, ends_at);
+            // Nothing uses the binding (rustc never has it live), so a
+            // conditional after its end in the arm (`if c { return; }`)
+            // doesn't draw it: its join said "a still has no value here"
+            // (#1585). (Not if the arm gives it a new value.)
+            if let Some(r) = binding.filter(|r| !gets_value(&self.preprocessed_events[at + 1..], r)) {
+              drop_from_later_conditionals(&mut self.preprocessed_events[at + 1..], r);
             }
             // And among the arrows stacked on its line.
-            if let Some(evs) = self.event_line_map.get_mut(&ends_at).filter(|_| unused) {
+            if let Some(evs) = self.event_line_map.get_mut(&ends_at) {
               if let (Some(k), Some(lo)) = (evs.iter().position(|e| e.get_id() == id), evs.iter().rposition(|e| placed(e.get_id()))) {
                 let e = evs.remove(k);
                 evs.insert((lo + 1).min(evs.len()), e);
@@ -16908,18 +16899,27 @@ fn may_panic_or_leave<'tcx>(b: &'tcx Block<'tcx>) -> bool {
   v.found
 }
 
-/// Take `r`, a reference whose loan rustc ends on line `after`, off the
-/// variables drawn by the conditionals in `events` that start after that
-/// line (and those nested in them): nothing there uses it (#1585).
-fn drop_from_later_conditionals(events: &mut [(usize, ExternalEvent)], r: &ResourceAccessPoint, after: usize) {
+/// Take `r`, an unused binding whose loan has ended, off the variables
+/// drawn by the conditionals in `events` (and those nested in them):
+/// nothing there uses it (#1585).
+fn drop_from_later_conditionals(events: &mut [(usize, ExternalEvent)], r: &ResourceAccessPoint) {
   for (_, e) in events.iter_mut() {
-    if let ExternalEvent::Branch { live_vars, branches, split_point, .. } = e {
-      if *split_point > after {
-        live_vars.remove(r);
-      }
+    if let ExternalEvent::Branch { live_vars, branches, .. } = e {
+      live_vars.remove(r);
       for b in branches.iter_mut() {
-        drop_from_later_conditionals(&mut b.e_data, r, after);
+        drop_from_later_conditionals(&mut b.e_data, r);
       }
     }
   }
+}
+
+/// Whether `events` (looking into conditionals) give `r` a value.
+fn gets_value(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint) -> bool {
+  events.iter().any(|(_, e)| match e {
+    ExternalEvent::StaticBorrow { to: ResourceTy::Value(t), .. } | ExternalEvent::MutableBorrow { to: ResourceTy::Value(t), .. }
+    | ExternalEvent::Move { to: ResourceTy::Value(t), .. } | ExternalEvent::Copy { to: ResourceTy::Value(t), .. }
+    | ExternalEvent::Bind { to: ResourceTy::Value(t), .. } => t == r,
+    ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| gets_value(&b.e_data, r)),
+    _ => false,
+  })
 }

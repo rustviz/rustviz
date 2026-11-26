@@ -28011,12 +28011,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "unused_ref_binding_nested_return_1585",
-        // #1585: an unused `ref` binding's borrow ends where the pattern
-        // binds it, before the nested `if .. { return; }`; the lender is
-        // free on both of its legs and its drop at the `return` is stated.
-        // The binding isn't drawn in the nested `if` after its end (for an
-        // or-pattern binding, main's join there said "a8 still has no
-        // value here").
+        // #1585: an unused `ref` binding's loan ends where the pattern
+        // binds it (rustc's region ends there), before the nested `if ..
+        // { return; }`; the lender is free on both of its legs and its
+        // drop at the `return` is stated (the return dots are pinned in
+        // `unused_ref_binding_drops_at_return_1585`). The binding isn't
+        // drawn in the nested `if` after its end. In the struct form p.a
+        // was drawn mutably borrowed before `&mut p.a` existed.
         must_contain: &[
             "t goes out of scope. Its resource is dropped.",
             "s goes out of scope. Its resource is dropped.",
@@ -28025,12 +28026,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t goes out of scope. No resource is dropped.",
             "=a isn't moved in any of the branches above",
             "a3 isn't moved in any of the branches above",
-            // (Ending the loan before the nested `if` must not leave a
-            // drawn there either: its join then said this.)
-            "a still has no value here",
-            "a3 still has no value here",
-            // The or-pattern binding a8: main said this at the join.
-            "a8 still has no value here",
+            "a5 still has no value here",
+            "p.a's resource is mutably borrowed; p.a can't be used until the borrow ends",
         ],
     },
 ];
@@ -38308,20 +38305,32 @@ fn ref_old_loan_and_never_fn_ids_1486_1556_1557_1553() {
 }
 
 /// #1566: an unused copy of a shared reference made in an arm (`let h =
-/// r;`, a struct literal's field) ends its borrow on its `let` line, in
-/// its arm, above its scope end. Main drew the end in a later arm, after
-/// "h goes out of scope" (right on main since #1599; kept as a pin).
+/// r;`, a struct literal's field) ends its borrow in its arm, above its
+/// scope end. Main drew the end in a later arm, after "h goes out of
+/// scope" (right on main since #1599; kept as a pin).
 #[test]
 fn arm_borrow_ends_follow_their_last_use() {
     let tl = run_with_local_backend("arm_ref_copy_end_1566").timeline_panel_string();
-    for (r, from) in [("h", "r"), ("r3", "r2"), ("hh.r", "r4")] {
+    for r in ["h", "r3", "hh.r"] {
         let end = dots_listing_tooltip(&tl, &format!("{r}'s immutable borrow ends"));
-        let made = dots_listing_tooltip(&tl, &format!("{r} is initialized with a copy of {from}"));
         let gone = dots_listing_tooltip(&tl, &format!("{r} goes out of scope"));
         assert_eq!((end.len(), gone.len()), (1, 1), "{r}: ends {end:?}, scope ends {gone:?}");
-        // On its own `let` dot, in its arm, above its scope end.
-        assert_eq!(made, end, "{r}'s borrow ends on the dot of its `let`");
+        // In its arm, above its scope end. (h and r3 are copies of r and
+        // r2, whose own loans go on, so the copy's end isn't pinned to a
+        // particular dot.)
         assert!(end[0].1 < gone[0].1, "{r}'s borrow ends at {:?}, after its scope end at {:?}", end[0], gone[0]);
     }
 }
 
+/// #1585: t's and s's drops at the nested `return` are stated (main said
+/// "No resource is dropped" there for t): each is dropped twice in the
+/// fixture, at that `return` and at the function's end, on two rows.
+#[test]
+fn unused_ref_binding_drops_at_return_1585() {
+    let tl = run_with_local_backend("unused_ref_binding_nested_return_1585").timeline_panel_string();
+    for v in ["t", "s", "s5"] {
+        let dropped = dots_listing_tooltip(&tl, &format!("{v} goes out of scope. Its resource is dropped."));
+        assert_eq!(dropped.len(), 2, "{v} dropped at the return and at the end: {dropped:?}");
+        assert!(dropped[0].1 != dropped[1].1, "{v}'s two drops on one row: {dropped:?}");
+    }
+}
