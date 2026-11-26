@@ -98,4 +98,59 @@ fn same_lender_again(s: String) {
     h.r = &s;
 }
 
+// (Codex r2 on #1603.) Another reference to t read after the `if`: t
+// stays borrowed by it where the field's loan ends.
+fn other_ref_read_after(s: String, t: String, u: String, c: bool) {
+    let other = &t;
+    let mut h = Holder { r: longest(&s, &t) };
+    if c {
+        h.r = &u;
+    } else {
+        println!("{}", h.r);
+    }
+    println!("{}", other);
+}
+
+// h.r re-pointed in a nested arm, read after the nested `if`: on the
+// nested `else` path it still points to s there.
+fn read_after_nested_join(s: String, t: String, a: bool, b: bool) {
+    let mut h = Holder { r: &s };
+    if a {
+        if b {
+            h.r = &t;
+        } else {
+        }
+        println!("{}", h.r);
+    } else {
+        println!("{}", h.r);
+    }
+}
+
+// x read only on the path that re-points r: the other path's print is
+// the shared loan's last use, and s is free for its push.
+fn original_read_on_other_path(mut s: String, t: String, c: bool) {
+    let x = &s;
+    let mut r = x;
+    if c {
+        println!("{}", r);
+        s.push('a');
+    } else {
+        r = &t;
+        println!("{}", x);
+    }
+}
+
+// r's old value unread in the arm that re-points it: its loan is over as
+// the arm starts, before the arm's push.
+fn lender_used_before_repoint(mut s: String, t: String, c: bool) {
+    let x = &s;
+    let mut r = x;
+    if c {
+        s.push('a');
+        r = &t;
+    } else {
+        println!("{}", r);
+    }
+}
+
 fn main() {}

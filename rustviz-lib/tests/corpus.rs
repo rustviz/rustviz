@@ -28108,8 +28108,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s's resource is no longer borrowed by r, but is still immutably borrowed by x",
             "Return immutably borrowed resource from h.r to s",
             "h.r's immutable borrow of s or t ends",
+            "t's resource is no longer borrowed by h.r, but is still immutably borrowed by other",
         ],
-        must_not_contain: &[],
+        // (Codex r2: s was said to be still borrowed by x on the path that
+        // never reads x again, and by r before the push that r's write
+        // follows.)
+        must_not_contain: &[
+            "s's resource is no longer borrowed by x, but is still immutably borrowed by r",
+        ],
     },
 ];
 
@@ -28128,6 +28134,30 @@ fn same_loan_write_ends_nothing_1497() {
         let ends = format!("{r}'s immutable borrow ends");
         let wrong = dots_where(&timeline, |lines| lines.iter().any(|l| *l == copy) && lines.iter().any(|l| *l == ends));
         assert!(wrong.is_empty(), "{r}'s write ends its borrow: {:?}", wrong);
+    }
+}
+
+/// #1578: `match r.as_str()` with r re-pointed in one arm. r's loan of s
+/// is over before any arm's body runs, so on the `_` path s is given back
+/// on that arm's leg (same column) above its own use of s: the println!,
+/// the move into `drop`, the `push`. Main ended the loan in the re-pointing
+/// arm only, and the `_` arm used s while drawn borrowed (Codex r2 on #1603:
+/// the join text alone didn't pin this).
+#[test]
+fn match_scrutinee_loan_over_before_other_arm_1578() {
+    let rv = run_with_local_backend("match_scrutinee_ref_repointed_1578");
+    let timeline = rv.timeline_panel_string();
+    for (back, using) in [
+        ("s's resource is no longer mutably borrowed", "s's resource is immutably borrowed by println!; s is read-only while the borrow is live"),
+        ("s's resource is no longer immutably borrowed", "s's resource is moved into drop, which drops it"),
+        ("s's resource is no longer mutably borrowed", "s's resource is mutably borrowed by push; s can't be used while the borrow is live"),
+    ] {
+        let uses = dots_listing_tooltip(&timeline, using);
+        assert_eq!(uses.len(), 1, "one dot for {using:?}: {:?}", uses);
+        let (x, y) = uses[0];
+        let before = dots_with_tooltip(&timeline, back).into_iter()
+            .filter(|&(bx, by)| (bx - x).abs() < 0.5 && by < y).count();
+        assert!(before >= 1, "{back:?} on the `_` arm's leg above {using:?} at ({x}, {y})");
     }
 }
 

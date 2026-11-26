@@ -3551,10 +3551,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   /// The last line after `line` in the arm being visited where the
   /// struct whose field `field` is (`h` for `h.r`) is used.
-  pub fn struct_used_later_in_arm(&self, field: &ResourceAccessPoint, line: usize) -> Option<usize> {
+  /// (`end`: the loan's last use elsewhere; the arm is that of the
+  /// conditional whose other arm holds it, so a use after a conditional
+  /// nested in this arm counts too, Codex r2 on #1603.)
+  pub fn struct_used_later_in_arm(&self, field: &ResourceAccessPoint, line: usize, end: usize) -> Option<usize> {
     let root = field.name().split('.').next()?;
-    let &(_, _, _, hi) = self.arm_frames.last()?;
+    let &(_, _, _, hi) = self.arm_frames.iter().rev()
+      .find(|&&(split, merge, lo, hi)| split < end && end < merge && !(lo <= end && end <= hi))
+      .or(self.arm_frames.last())?;
     self.last_live_line(root, (line + 1, hi))
+  }
+
+  /// Whether `r` is used after `end` on `end`'s path: not in the arm
+  /// being visited when `end` is in another arm of its conditional
+  /// (`x` read only where r is re-pointed, Codex r2 on #1603).
+  pub fn live_after_on_path(&self, r: &str, end: usize) -> bool {
+    match self.arm_frames.iter().rev().find(|&&(split, merge, lo, hi)| split < end && end < merge && !(lo <= end && end <= hi)) {
+      Some(&(_, _, lo, hi)) if end < lo => self.last_live_line(r, (end + 1, lo - 1)).is_some()
+        || self.last_live_line(r, (hi + 1, usize::MAX)).is_some(),
+      _ => self.last_live_line(r, (end + 1, usize::MAX)).is_some(),
+    }
   }
 
   /// The last line `r` is used on in an arm of an enclosing `if` /
@@ -13275,10 +13291,11 @@ fn first_read_or_write(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoin
   for (_, e) in events {
     match e {
       ExternalEvent::Branch { branches, branch_type, .. } => {
-        let arms: Vec<Option<bool>> = branches.iter().filter(|b| !b.diverges).map(|b| first_read_or_write(&b.e_data, r)).collect();
-        if arms.iter().any(|a| *a == Some(true)) {
+        // (An arm that returns reads r first too, Codex r2 on #1603.)
+        if branches.iter().any(|b| first_read_or_write(&b.e_data, r) == Some(true)) {
           return Some(true);
         }
+        let arms: Vec<Option<bool>> = branches.iter().filter(|b| !b.diverges).map(|b| first_read_or_write(&b.e_data, r)).collect();
         let every_path = match branch_type {
           BranchType::If(labels, _) => labels.len() >= 2 && branches.len() >= 2,
           BranchType::Match(labels, _) => labels.len() == branches.len(),
@@ -13298,10 +13315,12 @@ fn first_read_or_write(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoin
 
 /// Whether `new_value` borrows from what `end` gives back (`h.r = &s;`
 /// ending h.r's old loan of s).
+/// Shared loans only: a new `&mut s` can't be taken while the old loan
+/// lives, so that one ended first (Codex r2 on #1603).
 fn reborrows_lender(new_value: &ExternalEvent, end: &ExternalEvent) -> bool {
   let Some(l) = borrow_end_of(end).and_then(|(_, to)| to.extract_rap()) else { return false };
-  matches!(new_value, ExternalEvent::StaticBorrow { from, .. } | ExternalEvent::MutableBorrow { from, .. }
-    if from.extract_rap() == Some(l))
+  matches!(end, ExternalEvent::StaticDie { .. })
+    && matches!(new_value, ExternalEvent::StaticBorrow { from, .. } if from.extract_rap() == Some(l))
 }
 
 /// Whether `e` gives the reference `r` a new value (`r = &s;`, `r = x;`).
@@ -14596,6 +14615,19 @@ pub(crate) fn end_borrow_in_arms(
       | ExternalEvent::MutableBorrow { to: ResourceTy::Value(t), .. }
       | ExternalEvent::Move { to: ResourceTy::Value(t), .. }
       | ExternalEvent::Copy { to: ResourceTy::Value(t), .. } if t == r));
+    // (Unless the arm doesn't read r's old value before it: then the old
+    // loan is over as the arm starts, and the lender is free for the
+    // arm's own uses of it, `s.push('a'); r = &t;`, Codex r2 on #1603.)
+    if let Some(i) = new_value.filter(|&i| last_use_in(&arm.e_data, r).is_some() && !reads_before_new_value(&arm.e_data[..i], r)
+      && arm.e_data[..i].iter().any(|(_, e)| !matches!(e, ExternalEvent::Branch { .. }) && borrow_end_of(&copy).is_some_and(|(_, to)| {
+        let (f, t) = ResourceAccessPoint_extract(e);
+        to.extract_rap().is_some_and(|l| f.extract_rap() == Some(l) || t.extract_rap() == Some(l))
+      }))) {
+      let start = branch_type.get_start_end(b).0;
+      let at = arm.e_data.iter().position(|(el, _)| *el >= start).unwrap_or(arm.e_data.len()).min(i);
+      arm.e_data.insert(at, (start, copy));
+      continue;
+    }
     if let Some(i) = new_value.filter(|_| last_use_in(&arm.e_data, r).is_some()) {
       let line = arm.e_data[i].0;
       // (After a new borrow of the same lender, `r = &s;`: `&s` is taken
@@ -14635,8 +14667,10 @@ fn in_line_order(events: &mut Vec<(usize, ExternalEvent)>, ids: &[usize]) {
       i += 1;
     }
   }
+  // (After the events of its own line: the use that ends the loan reads
+  // the field first, Codex r2 on #1603.)
   for ev in moving {
-    let at = events.iter().position(|(l, _)| *l >= ev.0).unwrap_or(events.len());
+    let at = events.iter().position(|(l, _)| *l > ev.0).unwrap_or(events.len());
     events.insert(at, ev);
   }
 }
@@ -14720,7 +14754,20 @@ fn end_in_other_arms(events: &mut Vec<(usize, ExternalEvent)>, ev: &(usize, Exte
       *id = *unique_id;
       *unique_id += 1;
     }
-    end_after_last_use(&mut arm.e_data, branch_type.get_start_end(b).0, copy, &r, lender.as_ref(), unique_id);
+    // (A field's struct used in the arm, `read(&h)`, uses the field's
+    // loan too: the end goes after that, Codex r2 on #1603.)
+    let root = r.name().split('.').next().unwrap_or(r.name());
+    let root_use = (root != r.name()).then(|| arm.e_data.iter().rposition(|(_, e)| {
+      let (f, t) = ResourceAccessPoint_extract(e);
+      [f, t].iter().any(|x| x.extract_rap().is_some_and(|x| x.name() == root))
+    })).flatten();
+    match root_use {
+      Some(i) if last_use_in(&arm.e_data, &r).is_none_or(|(_, j)| j <= i) => {
+        let line = arm.e_data[i].0;
+        arm.e_data.insert(i + 1, (line, copy));
+      }
+      _ => end_after_last_use(&mut arm.e_data, branch_type.get_start_end(b).0, copy, &r, lender.as_ref(), unique_id),
+    }
   }
 }
 
