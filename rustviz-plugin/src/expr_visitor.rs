@@ -11934,7 +11934,9 @@ pub fn print_out_of_scope(&mut self){
           // the caller, `largest = item;`: its own end where it last holds
           // it (Q7); a loop's binding where the loop ends, as 2.x draws it
           // until Q6's per-iteration ends are drawn, #1864.)
-          (None, _, Some(_)) => {
+          // (Not the parameter itself, `list` returned through `largest`:
+          // its borrow doesn't end in this body.)
+          (None, _, Some(_)) if !mine.iter().any(|id| info(id).is_some_and(|f| f.source == "caller" && f.direct_holders.first() == Some(&slot.key))) => {
             let at = e.last_held.unwrap_or(slot.rd.lifetime);
             let at = ix.loops.iter().filter(|(h, c)| *h <= slot.rd.assigned_at && slot.rd.assigned_at <= *c && at <= *c)
               .map(|(_, c)| *c).min().unwrap_or(at);
@@ -12070,9 +12072,7 @@ pub fn print_out_of_scope(&mut self){
       // (Its own end on the row it is moved on, `Some(r)`: the move hands
       // the loan on and ends its column; nothing more to draw.)
       let end = match end {
-        // (Moved on that row on every path: on paths that don't move it,
-        // the own end stays, `let m2 = m;` in one arm of a `match`.)
-        End::Own(row) if ix.as_ref().is_some_and(|ix| ix.moved_on(&slot.key, row) && ix.moved_on_every_path(&slot.key)) => End::None,
+        End::Own(row) if ix.as_ref().is_some_and(|ix| ix.moved_on(&slot.key, row)) => End::None,
         e => e,
       };
       (p.lender, end)
