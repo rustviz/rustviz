@@ -219,3 +219,51 @@ fn same_name_in_else(v18: Vec<String>, c: bool, s18: String, t18: String) {
         let y = x18.len();
     }
 }
+
+// Round 7: r20 re-pointed (`r20 = &mut b20;`) before it is moved on
+// (`let next20 = r20;`): its loan of a20 ends at the re-pointing, so
+// `drop(a20)` is fine (an earlier head kept a20 lent down to it). An
+// `if let` on the same line as the outer `if`'s split: v21 is given back
+// on the `if let`'s None path, not in the outer `else`, where
+// `v21.first()` never ran. A closure capturing v22 holds its loan through
+// its `Fn` call: v22 isn't given back on the None path.
+fn repointed_then_moved(c: bool) {
+    let mut a20 = String::from("a");
+    let mut b20 = String::from("b");
+    let mut r20 = &mut a20;
+    if c {
+        r20 = &mut b20;
+        let next20 = r20;
+        drop(a20);
+        next20.push('x');
+    } else {
+        r20.len();
+    }
+}
+
+fn if_let_on_split_line(v21: Vec<String>, c: bool, e: bool, s21: String) {
+    if e { if let Some(x21) = v21.first() {
+            if c {
+                drop(s21);
+                let o = x21.clone();
+            }
+        }
+    } else {
+        v21.len();
+    }
+}
+
+fn closure_holds_lender(v22: Vec<String>, c: bool, e: bool, s22: String) {
+    let other22 = || v22.len();
+    if e {
+        if let Some(x22) = v22.first() {
+            if c {
+                drop(s22);
+                let o = x22.clone();
+            }
+        }
+    } else {
+        v22.len();
+    }
+    other22();
+}

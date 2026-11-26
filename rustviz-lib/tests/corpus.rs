@@ -28010,19 +28010,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
     },
     TooltipExpect {
-        name: "if_let_call_copy_nested_end_1574",
-        // #1574: x (copied out of `v.first()`'s result) ends its borrow in
-        // each arm of the nested conditional, and v gets a column there.
-        must_contain: &[
-            "x's borrow ended in each branch above",
-            "y's borrow ended in each branch above",
-        ],
-        must_not_contain: &[
-            "x isn't moved in any of the branches above",
-            "y isn't moved in any of the branches above",
-        ],
-    },
-    TooltipExpect {
         name: "unused_ref_binding_nested_return_1585",
         // #1585: an unused `ref` binding's borrow ends where the pattern
         // binds it, before the nested `if .. { return; }`; the lender is
@@ -38420,6 +38407,20 @@ fn arm_ends_review_1602_lender_and_copy_cycle() {
     assert_eq!(dropped.len(), 1, "owned16's drop: {dropped:?}");
     assert!(!r16_ends.is_empty() && r16_ends.iter().all(|e| e.1 > dropped[0].1),
         "r16's borrow ends on or above drop(owned16)'s row {:?}: {r16_ends:?}", dropped[0]);
+    // Round 7: r20's loan of a20 ends at `r20 = &mut b20;`, above
+    // `drop(a20)` (an earlier head drew a20 lent down to the drop).
+    let a20_dropped = dots_where(&tl, |l| l.iter().any(|x| x.starts_with("a20's resource is moved into drop")));
+    let a20_back = dots_listing_tooltip(&tl, "a20's resource is no longer mutably borrowed");
+    assert_eq!(a20_dropped.len(), 1, "a20's drop: {a20_dropped:?}");
+    assert!(a20_back.iter().any(|b| b.1 < a20_dropped[0].1), "a20 not given back above its drop {:?}: {a20_back:?}", a20_dropped[0]);
+    // v21: given back in both nested arms, on the `if let`'s None path and
+    // after `v21.len()`; not also as the outer `else` starts (an earlier
+    // head: 5). v22: a closure holds it, so not on the None path (an
+    // earlier head: 5; the other ends are main's, #1694).
+    for (v, n) in [("v21", 4), ("v22", 4)] {
+        let back = dots_listing_tooltip(&tl, &format!("{v}'s resource is no longer immutably borrowed"));
+        assert_eq!(back.len(), n, "{v} given back: {back:?}");
+    }
     // (The unrelated `FnOnce` call: rendering at all is the check.)
     assert!(!dots_listing_tooltip(&tl, "r15's immutable borrow ends").is_empty(), "unrelated_fnonce_in_nested_return rendered");
 }
