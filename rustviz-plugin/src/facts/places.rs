@@ -17,6 +17,10 @@ pub enum Capture {
     ByValue,
     ByRef,
     ByMutRef,
+    /// A unique immutable borrow (`*p = 1` in a closure, `p: &mut i32`
+    /// not `mut`): the closure may not mutate `p`, but nobody else may
+    /// use it meanwhile.
+    ByUniqueRef,
 }
 
 pub struct Names<'tcx> {
@@ -42,7 +46,7 @@ impl<'tcx> Names<'tcx> {
                 // A closure's captured variable: its debug info names the
                 // place in the closure's environment.
                 if place.local.as_usize() == 1 && is_closure_env(tcx, body) {
-                    let cap = capture_kind(body, place);
+                    let cap = capture_kind(tcx, body, place);
                     let name = names
                         .by_span
                         .iter()
@@ -83,17 +87,21 @@ impl<'tcx> Names<'tcx> {
         }
         // Two locals named alike (the 2.x name table numbers shadowing
         // in fn bodies, not in closure bodies): number them by position.
+        // A captured variable (an alias) comes first: `let x = x;` in a
+        // `move` closure makes the local `x₂`.
         let mut by_name: BTreeMap<String, Vec<(rustc_span::BytePos, Local)>> = BTreeMap::new();
         for (l, n) in &locals {
             by_name.entry(n.clone()).or_default().push((body.local_decls[*l].source_info.span.lo(), *l));
         }
         for (n, mut ls) in by_name {
-            if ls.len() < 2 || !is_closure_env(tcx, body) {
+            let captured = aliases.iter().any(|(_, a, _): &(Place<'tcx>, String, Capture)| *a == n);
+            if (ls.len() < 2 && !captured) || !is_closure_env(tcx, body) {
                 continue;
             }
             ls.sort();
-            for (k, (_, l)) in ls.into_iter().enumerate().skip(1) {
-                locals.insert(l, crate::expr_visitor_utils::numbered_name(written_name(&n), k + 1));
+            let skip = if captured { 0 } else { 1 };
+            for (k, (_, l)) in ls.into_iter().enumerate().skip(skip) {
+                locals.insert(l, crate::expr_visitor_utils::numbered_name(written_name(&n), k + 1 + (1 - skip)));
             }
         }
         // Longest alias first, so the most specific one names a place.
@@ -160,22 +168,21 @@ fn is_closure_env<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> bool {
     tcx.is_closure_like(body.source.def_id())
 }
 
-fn capture_kind<'tcx>(body: &Body<'tcx>, place: Place<'tcx>) -> Capture {
-    // `(*_1).0` / `_1.0`: by value; `*((*_1).0)`: through a captured
-    // reference, whose type says shared or mutable.
-    if place.projection.last() == Some(&ProjectionElem::Deref) {
-        let mut ty = body.local_decls[place.local].ty;
-        for (i, e) in place.projection.iter().enumerate() {
-            if i + 1 == place.projection.len() {
-                return match ty.kind() {
-                    TyKind::Ref(_, _, rustc_middle::mir::Mutability::Mut) => Capture::ByMutRef,
-                    _ => Capture::ByRef,
-                };
-            }
-            ty = project_ty(ty, &e);
-        }
+/// How the closure captured the variable at `place` (an environment
+/// field, perhaps dereferenced): rustc's own capture analysis (the field's
+/// type can't tell a unique immutable borrow from a mutable one).
+fn capture_kind<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'tcx>) -> Capture {
+    let field = place.projection.iter().find_map(|e| match e {
+        ProjectionElem::Field(f, _) => Some(f.index()),
+        _ => None,
+    });
+    let caps = tcx.closure_captures(body.source.def_id().expect_local());
+    match field.and_then(|f| caps.get(f)).map(|c| c.info.capture_kind) {
+        Some(rustc_middle::ty::UpvarCapture::ByRef(rustc_middle::ty::BorrowKind::Immutable)) => Capture::ByRef,
+        Some(rustc_middle::ty::UpvarCapture::ByRef(rustc_middle::ty::BorrowKind::Mutable)) => Capture::ByMutRef,
+        Some(rustc_middle::ty::UpvarCapture::ByRef(rustc_middle::ty::BorrowKind::UniqueImmutable)) => Capture::ByUniqueRef,
+        _ => Capture::ByValue,
     }
-    Capture::ByValue
 }
 
 /// The type after the first `n` projections of `place`.

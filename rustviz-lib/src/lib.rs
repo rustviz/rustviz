@@ -479,9 +479,9 @@ impl Rustviz {
     }
 
     /// The RustViz 3 fact layer's output (per body: columns, loans, and
-    /// each row's states and events), when the plugin ran with
-    /// `RV3_FACTS=1` in its environment; `None` otherwise. Its schema is
-    /// `rustviz-plugin/src/facts/schema.rs`.
+    /// each row's states and events), when the plugin ran with `RV3_FACTS`
+    /// set (to `1`, or to a file path, which also gets a copy) and not `0`;
+    /// `None` otherwise. Its schema is `rustviz-plugin/src/facts/schema.rs`.
     pub fn facts(&self) -> Option<&serde_json::Value> {
         self.facts.as_ref()
     }

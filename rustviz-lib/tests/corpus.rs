@@ -31159,9 +31159,9 @@ fn facts_pin_constructs() {
     // moved in one, still owned in the other, maybe moved after the row.
     let one = fact_row(main, 28);
     assert_eq!(one["arms"].as_array().map(Vec::len), Some(2), "{:#}", one["arms"]);
-    let mut arm_states: Vec<String> = one["arms"].as_array().unwrap().iter().map(|a| s(&a["state"]["v"])).collect();
-    arm_states.sort();
-    assert_eq!(arm_states, ["moved", "own"]);
+    let src = read_corpus("rv3_facts_constructs");
+    assert_eq!(arm_at(&src, one, 28, "drop(v)")["state"]["v"], "moved");
+    assert_eq!(arm_at(&src, one, 28, "v.push(1)")["state"]["v"], "own");
     assert_eq!(one["state"]["v"], "maybe");
     // `let x = b.a;` moves a field out of the Box: `b` is partly moved.
     let bx = fact_row(main, 30);
@@ -31203,6 +31203,16 @@ fn src_row_in(src: &str, body: &serde_json::Value, needle: &str) -> u64 {
         .unwrap_or_else(|| panic!("no line with {needle:?} in {}", body["func"])).0
 }
 
+/// The arm of `row` whose source columns contain the (1-based) column
+/// where `needle` starts on that line.
+fn arm_at<'a>(src: &str, row: &'a serde_json::Value, line: u64, needle: &str) -> &'a serde_json::Value {
+    let col = src.lines().nth(line as usize - 1).and_then(|l| l.find(needle)).expect("needle on the line") as u64 + 1;
+    row["arms"].as_array().unwrap().iter()
+        .filter(|a| a["col_lo"].as_u64().unwrap() <= col && col <= a["col_hi"].as_u64().unwrap())
+        .min_by_key(|a| a["col_hi"].as_u64().unwrap() - a["col_lo"].as_u64().unwrap())
+        .unwrap_or_else(|| panic!("no arm at {needle:?}: {:#}", row["arms"]))
+}
+
 /// The facts of `row` of a body, or an empty list.
 fn row_facts(body: &serde_json::Value, row: u64) -> Vec<serde_json::Value> {
     body["rows"].as_array().unwrap().iter().find(|r| r["line"] == row)
@@ -31218,6 +31228,7 @@ fn facts_pin_review_1833() {
     let facts = rv.facts().expect("the plugin gave no facts (RV3_FACTS)");
     let body = |f: &str| fact_body(facts, f);
     let ev = |f: &serde_json::Value, e: &str| f["ev"] == e;
+    let s = |v: &serde_json::Value| v.as_str().unwrap_or_default().to_owned();
     // A borrow end's reason names the loan's holder, never an unrelated
     // local that happens to die next: `*r` is r's last use.
     let b = body("why_unrelated");
@@ -31227,11 +31238,12 @@ fn facts_pin_review_1833() {
     // a loan never used (`let _unused = &mut x;`) ends too.
     let b = body("both_arms");
     let row = src_row_in(&src, b, "if c { black_box(*r); } else { black_box(*r); }");
-    let mut arms: Vec<i64> = row_facts(b, row).iter().filter(|f| ev(f, "BorrowEnd") && f["lender"] == "x")
+    // Exactly one end in each of the row's two arms.
+    let mut ends: Vec<i64> = row_facts(b, row).iter().filter(|f| ev(f, "BorrowEnd") && f["lender"] == "x")
         .map(|f| f["arm"].as_i64().unwrap_or(-1)).collect();
-    arms.sort();
-    arms.dedup();
-    assert_eq!(arms.len(), 2, "{:#?}", row_facts(b, row));
+    ends.sort();
+    assert_eq!(fact_row(b, row)["arms"].as_array().unwrap().len(), 2);
+    assert_eq!(ends, [0, 1], "{:#?}", row_facts(b, row));
     assert!(!fact_loan(b, src_row_in(&src, b, "let _unused = &mut x;"), "x")["end_lines"].as_array().unwrap().is_empty());
     // `let k = *r;` as r's last use: the copy happens, then the loan ends.
     let b = body("copy_then_end");
@@ -31281,11 +31293,12 @@ fn facts_pin_review_1833() {
     // Lifetime extension doesn't depend on line breaks.
     let b = body("ext_one_line");
     assert!(b["temps"].as_array().unwrap().iter().any(|t| t["what"] == "String::from(\"e\")" && t["extended"] == true));
-    // `let c = a + b;` copies both operands into c.
+    // `let c = a + b;` copies both operands to compute the sum (only the
+    // sum goes into c).
     let b = body("add_copies");
     let fs = row_facts(b, src_row_in(&src, b, "let c = a + b;"));
     for x in ["a", "b"] {
-        assert!(fs.iter().any(|f| ev(f, "Copy") && f["path"] == x && f["to"] == "c"), "{x}: {fs:#?}");
+        assert!(fs.iter().any(|f| ev(f, "Copy") && f["path"] == x && f["to"] == "<operand>"), "{x}: {fs:#?}");
     }
     // A declared variable with no value yet is a column: unassigned.
     let b = body("declared_later");
@@ -31293,14 +31306,17 @@ fn facts_pin_review_1833() {
     // One-line arms: each arm has only its own loan; a call assigning in
     // an arm leaves the variable owned there.
     let b = body("arm_loans");
-    let arms = fact_row(b, src_row_in(&src, b, "if c { r = &x; } else { r = &y; }"))["arms"].as_array().unwrap().clone();
-    assert_eq!(arms.len(), 2);
-    for a in &arms {
-        let lent: Vec<&String> = a["lent"].as_object().unwrap().keys().collect();
-        assert_eq!(lent.len(), 1, "{a:#}");
+    let line = src_row_in(&src, b, "if c { r = &x; } else { r = &y; }");
+    let row = fact_row(b, line);
+    for (needle, lender) in [("r = &x", "x"), ("r = &y", "y")] {
+        let lent: Vec<&String> = arm_at(&src, row, line, needle)["lent"].as_object().unwrap().keys().collect();
+        assert_eq!(lent, [lender], "{needle}");
     }
     let b = body("call_arm");
-    for a in fact_row(b, src_row_in(&src, b, "if c { n = 1usize.max(2) }"))["arms"].as_array().unwrap() {
+    let line = src_row_in(&src, b, "if c { n = 1usize.max(2) }");
+    let arms = fact_row(b, line)["arms"].as_array().unwrap().clone();
+    assert_eq!(arms.len(), 2);
+    for a in &arms {
         assert_eq!(a["state"]["n"], "own", "{a:#}");
     }
     // Closure bodies: shadowing gets numbered names; a closure in a closure
@@ -31317,6 +31333,95 @@ fn facts_pin_review_1833() {
     let fs = row_facts(b, end);
     assert!(fs.iter().any(|f| ev(f, "Drop") && f["path"] == "p.a" && f["how"] == "drops_if_init"), "{fs:#?}");
     assert!(fs.iter().any(|f| ev(f, "Drop") && f["path"] == "p.b" && f["how"] == "drops"), "{fs:#?}");
+    // Round 2. A shared reference copied (`let s = r;`): the loan ends
+    // with s, its holder there. A loan nothing uses ends for "no further
+    // use", not at a "last use".
+    let b = body("copied_holder");
+    let e = row_facts(b, src_row_in(&src, b, "n + s.len()")).into_iter().find(|f| ev(f, "BorrowEnd") && f["lender"] == "x").unwrap();
+    assert_eq!(e["holder"], "s");
+    let b = body("both_arms");
+    let r = src_row_in(&src, b, "let _unused = &mut x;");
+    let ends: Vec<serde_json::Value> = b["rows"].as_array().unwrap().iter().flat_map(|row| row["facts"].as_array().unwrap().clone())
+        .filter(|f| ev(f, "BorrowEnd") && f["holder"] == "_unused").collect();
+    assert!(!ends.is_empty() && ends.iter().all(|f| f["why"] == "no further use"), "{ends:#?} (row {r})");
+    // A field's old loans are those stored in it, not every live loan it
+    // once held; `h.r = s` stores the loan s holds.
+    let b = body("field_repoint_live");
+    let la = fact_loan(b, src_row_in(&src, b, "let mut h = R { r: &a };"), "a")["loan"].clone();
+    let lb = fact_loan(b, src_row_in(&src, b, "h.r = &b;"), "b")["loan"].clone();
+    let lc = fact_loan(b, src_row_in(&src, b, "h.r = &c;"), "c")["loan"].clone();
+    let rp = |needle: &str| row_facts(b, src_row_in(&src, b, needle)).into_iter().find(|f| ev(f, "Repoint")).unwrap();
+    assert_eq!((rp("h.r = &b;")["old"].clone(), rp("h.r = &b;")["new"].clone()), (serde_json::json!([la]), serde_json::json!([lb])));
+    assert_eq!((rp("h.r = &c;")["old"].clone(), rp("h.r = &c;")["new"].clone()), (serde_json::json!([lb]), serde_json::json!([lc])));
+    let b = body("field_repoint_from_var");
+    let lb = fact_loan(b, src_row_in(&src, b, "let s = &b;"), "b")["loan"].clone();
+    let rp = row_facts(b, src_row_in(&src, b, "h.r = s;")).into_iter().find(|f| ev(f, "Repoint")).unwrap();
+    assert_eq!(rp["new"], serde_json::json!([lb]));
+    // The fields left in a tuple drop in index order, each behind its own
+    // flag; a field with no move path holds a value only where its
+    // parent does; a Box whose payload moved out still frees its memory.
+    let b = body("drop_order");
+    let fs = row_facts(b, b["last_line"].as_u64().unwrap());
+    let order: Vec<(String, String)> = fs.iter().filter(|f| ev(f, "Drop") && f["path"].as_str().unwrap().starts_with("t."))
+        .map(|f| (s(&f["path"]), s(&f["how"]))).collect();
+    assert_eq!(order[..2], [("t.0".to_owned(), "drops".to_owned()), ("t.1".to_owned(), "drops_if_init".to_owned())], "{order:?}");
+    let b = body("synth_cond");
+    assert!(row_facts(b, b["last_line"].as_u64().unwrap()).iter().any(|f| ev(f, "Drop") && f["path"] == "p.b" && f["how"] == "drops_if_init"));
+    // After the `if`, p is "maybe" because it may have been moved (not
+    // because it may never have been assigned).
+    let after_if = fact_row(b, b["last_line"].as_u64().unwrap() - 1);
+    assert_eq!((after_if["state"]["p"].clone(), after_if["cause"]["p"].clone()), (serde_json::json!("maybe"), serde_json::json!("moved")));
+    let b = body("box_payload_moved");
+    assert!(row_facts(b, b["last_line"].as_u64().unwrap()).iter().any(|f| ev(f, "Drop") && f["path"] == "b" && f["how"] == "drops_rest"));
+    assert!(b["columns"].as_array().unwrap().iter().all(|c| c["name"] != "b.vec"), "String's private field is no column");
+    // `*r = ..` gives the place behind r a new value.
+    let b = body("write_through");
+    assert!(row_facts(b, src_row_in(&src, b, "*r = String::from")).iter().any(|f| ev(f, "Init") && f["path"] == "*r" && f["reassign"] == true));
+    // Two returns on one row both drop s, each in its arm; nothing at `}`.
+    let b = body("two_returns");
+    let line = src_row_in(&src, b, "if c { return 0; }");
+    let drops: Vec<serde_json::Value> = row_facts(b, line).into_iter().filter(|f| ev(f, "Drop") && f["path"] == "s").collect();
+    assert_eq!(drops.len(), 2, "{drops:#?}");
+    assert!(drops[0]["arm"] != drops[1]["arm"] && drops.iter().all(|d| d["how"] == "drops" && d["early_exit"] == line));
+    assert!(!row_facts(b, b["last_line"].as_u64().unwrap()).iter().any(|f| ev(f, "Drop") && f["path"] == "s"));
+    // A two-phase loan activated on one way into a join is a mutable
+    // borrow at the join.
+    let b = body("activated_join");
+    let line = src_row_in(&src, b, "let r = if flag");
+    assert!(fact_row(b, line)["lent"]["x"].as_array().unwrap().iter().any(|l| l["kind"] == "mut"));
+    // `let n = *&x;` copies the value: n holds no loan.
+    let b = body("deref_copy");
+    assert!(b["loans"].as_array().unwrap().iter().all(|l| !l["holders"].as_array().unwrap().contains(&serde_json::json!("n"))));
+    // `|| *p = 1` with `p: &mut i32` not `mut`: the closure captures the
+    // place `*p` by mutable borrow (rustc's capture analysis, edition 2021
+    // precise captures), and holds a unique borrow of it in the fn (p
+    // can't be used meanwhile, though p isn't `mut`).
+    let by_func = |f: &str| facts["bodies"].as_array().unwrap().iter().find(|b| b["func"] == f).unwrap();
+    let v = &by_func("unique_capture::{closure#0}")["vars"];
+    assert!(v.as_array().unwrap().iter().any(|x| x["name"] == "p" && x["capture"] == "by_mut_ref"), "{v:#}");
+    let b = body("unique_capture");
+    assert_eq!(fact_loan(b, src_row_in(&src, b, "let mut f = || *p = 1;"), "*p")["kind"], "unique");
+    // A captured `x` and a local `let x = x;` in a `move` closure.
+    let v = &by_func("shadow_capture::{closure#0}")["vars"];
+    let names: Vec<&str> = v.as_array().unwrap().iter().filter_map(|x| x["name"].as_str()).collect();
+    assert!(names.contains(&"x") && names.contains(&"x₂"), "{names:?}");
+    // `factory()(s)`: s goes to the function `factory()` returns.
+    let b = body("call_returned");
+    assert!(row_facts(b, src_row_in(&src, b, "factory()(s)")).iter().any(|f| ev(f, "Move") && f["path"] == "s" && f["to"] == "factory()()"));
+    // `let _ = &String::from(..)` extends the temporary too; `&make_pair().0`
+    // is held by r.
+    let b = body("ext_unnamed");
+    let t = b["temps"].as_array().unwrap();
+    assert!(t.iter().any(|t| t["what"] == "String::from(\"u\")" && t["extended"] == true));
+    assert!(t.iter().any(|t| t["what"] == "make_pair()" && t["held_by"] == serde_json::json!(["r"])));
+    // An exhaustive match on one row: three arms, none for MIR's
+    // unreachable `otherwise`.
+    let b = body("three_arms");
+    assert_eq!(fact_row(b, src_row_in(&src, b, "let n = match e"))["arms"].as_array().unwrap().len(), 3);
+    // Out of its block, a struct is no column, whatever its fields did.
+    let b = body("inner_scope");
+    let st = &fact_row(b, src_row_in(&src, b, "let z = 1;"))["state"];
+    assert!(st.get("p").is_none() && st.get("p.a").is_none(), "{st:#}");
     // An irrefutable `if let`'s `else` never runs: borrowck still counts it
     // (g may be moved, as rustc's E0382 says), but drop elaboration doesn't:
     // g's drop at the end is unconditional.
@@ -31325,6 +31430,8 @@ fn facts_pin_review_1833() {
     let src = read_corpus("edition2024/dead_else_987");
     let end = src_row_in(&src, b, "fn var_else") + 6;
     assert!(row_facts(b, end).iter().any(|f| ev(f, "Drop") && f["path"] == "g" && f["how"] == "drops"), "{:#?}", row_facts(b, end));
+    // ... and its `drop(g)` is no event: it never runs.
+    assert!(!b["rows"].as_array().unwrap().iter().flat_map(|r| r["facts"].as_array().unwrap()).any(|f| ev(f, "Move") && f["path"] == "g"));
 }
 
 /// A match guard sees its bindings through references of its own; they

@@ -102,8 +102,8 @@ pub struct LoanInfo {
     /// `macro_rules!` that pastes its argument unchanged leaves it
     /// ordinary code (rustc's MIR has no trace of the macro there).
     pub in_macro: Option<String>,
-    /// Rows where the loan goes out of scope (one per CFG edge where it
-    /// leaves NLL's `Borrows`), sorted.
+    /// Rows where the loan goes out of scope on some CFG edge, sorted and
+    /// deduplicated (the edges themselves: the `BorrowEnd` events).
     pub end_lines: Vec<usize>,
 }
 
@@ -139,6 +139,9 @@ pub struct State {
     pub parts: BTreeMap<String, Parts>,
     /// column -> loans in scope that restrict it.
     pub lent: BTreeMap<String, Vec<Lent>>,
+    /// For a "maybe" column: "moved" (moved out on some way here) or
+    /// "unassigned" (never given a value on some way here).
+    pub cause: BTreeMap<String, &'static str>,
 }
 
 #[derive(Serialize, Default)]
@@ -202,10 +205,12 @@ pub enum Fact {
     Copy { path: String, to: String, in_macro: Option<String> },
     Borrow { loan: usize, lender: String, kind: &'static str, holder: String },
     /// The loan is no longer in scope for rustc's borrowck after this
-    /// row, on the path through `to_line` (the next row of that path).
-    /// `why`: "last use", "holder overwritten", "<x> out of scope",
-    /// "<x> dropped".
-    BorrowEnd { loan: usize, lender: String, holder: String, why: String, to_line: usize },
+    /// row, on the CFG edge to `to_line` (the next row of that path, past
+    /// temporaries' drops) at source column `to_col` (one event per edge:
+    /// two arms on one row are two). `holder`: who holds it as it ends.
+    /// `why`: "no further use" (nothing uses the loan on this path any
+    /// more), "holder overwritten", "<x> out of scope", "<x> dropped".
+    BorrowEnd { loan: usize, lender: String, holder: String, why: String, to_line: usize, to_col: usize },
     /// `holder` (a reference) gets a new loan while it held `old`.
     Repoint { holder: String, old: Vec<usize>, new: Vec<usize> },
     /// A `Drop` of `path`. `how` (what runs, as drop elaboration decides:

@@ -59,6 +59,9 @@ pub struct RowModel {
     /// location with the normal path or with each other: the drop runs
     /// on each of those paths too.
     pub shared_exits: BTreeMap<Location, Vec<(usize, Location)>>,
+    /// Locations only early exits reach (several of them): no event of
+    /// their own on the `}` row, only each exit's.
+    pub exit_only: BTreeSet<Location>,
     /// Source column (1-based) the location's span starts at.
     pub col: BTreeMap<Location, usize>,
     /// Per row: the locations its state is read after (rule 3).
@@ -147,6 +150,50 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
         }
     }
 
+    /// A location that shows nothing of its own on a row: a `StorageDead`
+    /// / `StorageLive`, or the drop of a temporary.
+    pub fn is_quiet(&self, l: Location) -> bool {
+        let body = self.body;
+        let data = &body.basic_blocks[l.block];
+        match data.statements.get(l.statement_index) {
+            Some(st) => matches!(st.kind, StatementKind::StorageDead(_) | StatementKind::StorageLive(_) | StatementKind::Nop),
+            None => matches!(&data.terminator().kind, TerminatorKind::Drop { place, .. }
+                if place.projection.is_empty() && !body.local_decls[place.local].is_user_variable()
+                    && place.local.index() > body.arg_count),
+        }
+    }
+
+    /// The next row of the path from `start` (a successor of a location
+    /// on row `from`): the first row other than `from` its code reaches,
+    /// past quiet locations (temporaries' drops, `StorageDead`s); `from`
+    /// if the path never leaves it.
+    pub fn next_row(&self, rows: &RowModel, start: Location, from: usize) -> usize {
+        // A quiet location counts unless it is out of order: the let-else
+        // scrutinee's temporaries die at `};` before the `else` block's
+        // first row runs; a `} else {` row's StorageDead is in order.
+        let any = self.next_row_by(rows, start, from, false);
+        let loud = self.next_row_by(rows, start, from, true);
+        if any != from && (any <= loud || loud == from) { any } else { loud }
+    }
+
+    fn next_row_by(&self, rows: &RowModel, start: Location, from: usize, skip_quiet: bool) -> usize {
+        let mut seen: BTreeSet<Location> = BTreeSet::new();
+        let mut work = vec![start];
+        let mut best: Option<usize> = None;
+        while let Some(l) = work.pop() {
+            if !seen.insert(l) || seen.len() > 4096 {
+                continue;
+            }
+            let Some(&r) = rows.row.get(&l) else { continue };
+            if r != from && !(skip_quiet && self.is_quiet(l)) {
+                best = Some(best.map_or(r, |b: usize| if (r > from) == (b > from) { b.min(r) } else if r > from { r } else { b }));
+                continue;
+            }
+            work.extend(self.succs(l));
+        }
+        best.unwrap_or(from)
+    }
+
     /// A location that only ends scopes: `StorageDead`, a `Drop`, a
     /// `Goto` or the `return` (what MIR runs on the way out of a scope).
     fn is_scope_end(&self, l: Location) -> bool {
@@ -164,9 +211,27 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
     /// `break` / `continue`.
     fn exit_kind(&self, l: Location) -> Option<bool> {
         let sp = self.body.source_info(l).span;
-        // (`?` desugars to `match Try::branch(x) { .., Break(r) => return
-        // from_residual(r) }`: only the `return` arm exits, found below by
-        // its `Ret` node; in a `try` block it is a `break` instead.)
+        // `?` desugars to `match Try::branch(x) { .., Break(r) => return
+        // from_residual(r) }`: only its `from_residual` arm exits (the
+        // `branch` call runs on both paths), leaving the function when its
+        // value goes to the return place, or a `try` block otherwise.
+        if sp.desugaring_kind() == Some(rustc_span::DesugaringKind::QuestionMark) {
+            let data = &self.body.basic_blocks[l.block];
+            return match data.statements.get(l.statement_index) {
+                Some(st) => match &st.kind {
+                    StatementKind::Assign(asg) if asg.0.local == rustc_middle::mir::RETURN_PLACE => Some(true),
+                    _ => None,
+                },
+                None => match &data.terminator().kind {
+                    TerminatorKind::Call { func, destination, .. }
+                        if func.const_fn_def().is_some_and(|(d, _)| self.tcx.item_name(d).as_str() == "from_residual") =>
+                    {
+                        Some(destination.local == rustc_middle::mir::RETURN_PLACE)
+                    }
+                    _ => None,
+                },
+            };
+        }
         // The location computes a `return` / `break` value or is the jump:
         // its HIR node is, or is inside, the `return` / `break` /
         // `continue` expression (before any statement or block).
@@ -305,7 +370,12 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
                         if let Some(leaves) = self.exit_kind(p) {
                             if let Some(r) = row.get(&p) {
                                 set.insert(if leaves { *r } else { *r + LOOP_EXIT });
-                                at.insert((*r, p));
+                                // One location per exit: its first (`_0 = ..`
+                                // of `return 0`, not also the jump after it).
+                                let inherited = self.is_scope_end(p) && origin_at.get(&p).is_some_and(|a| !a.is_empty());
+                                if !inherited {
+                                    at.insert((*r, p));
+                                }
                             }
                         } else if !self.is_scope_end(p) {
                             set.insert(NORMAL);
@@ -326,18 +396,27 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
         // state is not what the `}` row shows (`let ... else { return }`).
         // A `break`'s path goes on after the loop, so only its events move.
         let mut leaves_fn: BTreeSet<Location> = BTreeSet::new();
+        let mut exit_only: BTreeSet<Location> = BTreeSet::new();
         for (loc, set) in &origin {
             let exits: Vec<usize> = set.iter().copied().filter(|r| *r != NORMAL).map(|r| r % LOOP_EXIT).collect();
             if exits.is_empty() {
                 continue;
             }
-            if set.contains(&NORMAL) || exits.len() > 1 {
-                // One exit location per exit row (its first).
-                let mut per_row: BTreeMap<usize, Location> = BTreeMap::new();
-                for (r, l) in origin_at.get(loc).into_iter().flatten() {
-                    per_row.entry(*r).or_insert(*l);
+            let all_at: Vec<(usize, Location)> = origin_at.get(loc).into_iter().flatten().copied().collect();
+            if set.contains(&NORMAL) || all_at.len() > 1 {
+                // Every exit that runs it (two returns on one row are two).
+                shared_exits.insert(*loc, all_at.clone());
+                if !set.contains(&NORMAL) {
+                    // Only exits run it: no path reaches it otherwise. Its
+                    // events go on the exits' rows (`exit_only`); its state
+                    // row stays (moving it onto one exit's row would put
+                    // another exit's path into that row's state).
+                    let last = exits.iter().copied().max().unwrap_or(row[loc]);
+                    exit_only.insert(*loc);
+                    if last < row[loc] {
+                        event_row.insert(*loc, last);
+                    }
                 }
-                shared_exits.insert(*loc, per_row.into_iter().collect());
             } else if exits[0] < row[loc] {
                 event_row.insert(*loc, exits[0]);
                 // The exit's first location (`_0 = ..` of `return`, the
@@ -383,7 +462,7 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
             let TerminatorKind::SwitchInt { .. } = data.terminator().kind else { continue };
             let mut targets: Vec<BasicBlock> = Vec::new();
             for s in data.terminator().successors() {
-                if !body.basic_blocks[s].is_cleanup && !targets.contains(&s) {
+                if !body.basic_blocks[s].is_cleanup && !is_unreachable(body, s) && !targets.contains(&s) {
                     targets.push(s);
                 }
             }
@@ -393,7 +472,14 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
             let sw_span = self.span_of(loc);
             let mut specs: Vec<ArmSpec> = Vec::new();
             for (i, t) in targets.iter().enumerate() {
-                if preds[*t].len() != 1 {
+                // Entered from this switch only (an earlier arm's imaginary
+                // `FalseEdge` into a match arm doesn't run).
+                let real_preds = preds[*t]
+                    .iter()
+                    .filter(|p| !matches!(&body.basic_blocks[**p].terminator().kind,
+                        TerminatorKind::FalseEdge { imaginary_target, .. } if imaginary_target == t))
+                    .count();
+                if real_preds != 1 {
                     continue;
                 }
                 let locs: BTreeSet<Location> = row
@@ -454,21 +540,33 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
             }
         }
 
-        RowModel { rpo, row, event_row, early_exit, shared_exits, col, exits, arms }
+        RowModel { rpo, row, event_row, early_exit, shared_exits, exit_only, col, exits, arms }
     }
 }
 
-/// A block MIR marks unreachable (the fall-through of a slice pattern's
-/// length test): no path runs it.
+/// A block from which every path ends in MIR's `unreachable` (the
+/// fall-through of a slice pattern's length test, a match's impossible
+/// `otherwise`), with nothing on the way but bookkeeping: no path runs it.
 pub fn is_unreachable(body: &Body<'_>, bb: BasicBlock) -> bool {
-    let data = &body.basic_blocks[bb];
-    matches!(data.terminator().kind, TerminatorKind::Unreachable)
-        && data.statements.iter().all(|s| {
+    fn dead(body: &Body<'_>, bb: BasicBlock, depth: usize) -> bool {
+        let data = &body.basic_blocks[bb];
+        let quiet = data.statements.iter().all(|s| {
             matches!(
                 s.kind,
                 StatementKind::StorageDead(_) | StatementKind::StorageLive(_) | StatementKind::Nop | StatementKind::FakeRead(..) | StatementKind::PlaceMention(..)
             )
-        })
+        });
+        if !quiet || depth > 8 {
+            return false;
+        }
+        match &data.terminator().kind {
+            TerminatorKind::Unreachable => true,
+            TerminatorKind::Goto { target } => dead(body, *target, depth + 1),
+            TerminatorKind::FalseEdge { real_target, .. } => dead(body, *real_target, depth + 1),
+            _ => false,
+        }
+    }
+    dead(body, bb, 0)
 }
 
 impl RowModel {
