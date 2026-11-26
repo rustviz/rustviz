@@ -412,7 +412,10 @@ fn says_maybe_moved(d: &Dot) -> bool {
 /// line reaches. (A Box whose contents were moved out says "Its
 /// contents were moved out earlier";
 /// `contents_moved` covers it.)
-const PARTIAL_DROP_PHRASES: &[&str] = &["drop flag", "dropped here only if", "dropped only if", "dropped if the branch", "moved out earlier, so only", "Whatever it still holds (if anything)"];
+// (A conditional drop says "drop flag" or "... here only if ...": not the
+// Rc note's "the shared value is dropped only if that was its last Rc",
+// which is about the pointee, not whether the handle is dropped.)
+const PARTIAL_DROP_PHRASES: &[&str] = &["drop flag", "here only if", "moved out earlier, so only", "Whatever it still holds (if anything)"];
 /// A move drawn on the column's own line that says it happens on some
 /// paths only (`break f` in a loop whose value is returned, #1171).
 const CONDITIONAL_MOVE_PHRASES: &[&str] = &["if the loop ended with"];

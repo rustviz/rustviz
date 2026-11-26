@@ -25948,6 +25948,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "if s still holds it",
             "only if s still holds it",
             "=(temporary 2) goes out of scope here, where `break` leaves early: a let borrowed it, so it lived past its statement. Its resource is dropped.",
+            "=(temporary 2) goes out of scope here, where `break` leaves early: a let borrowed it, so it lived past its statement. It is dropped here.",
         ],
     },
     TooltipExpect {
