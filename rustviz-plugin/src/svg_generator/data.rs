@@ -1342,6 +1342,8 @@ pub enum StaticLender {
     /// interior mutability: Rust promotes the borrowed copy to a
     /// `'static`.
     PromotedConst(String),
+    /// A borrowed expression (such as `&Ok(N)`) promoted into static storage.
+    PromotedValue,
     /// A `ref` / `ref mut` binding out of a tuple-literal scrutinee's
     /// element (`(Some(ref mut s), _)` on `(p, q)`) borrows the
     /// temporary tuple, which has no column: the borrow's end is a

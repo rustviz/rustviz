@@ -963,7 +963,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // "lit";`) is said by what it points to.
           let old_static = match (&old.lender, &old.static_lender) {
             (ResourceTy::Anonymous, Some(sl @ (StaticLender::Literal { .. } | StaticLender::Static(_)
-              | StaticLender::PointeeOfStatic(_) | StaticLender::PointeeOfConst(_) | StaticLender::PromotedConst(_))))
+              | StaticLender::PointeeOfStatic(_) | StaticLender::PointeeOfConst(_) | StaticLender::PromotedConst(_) | StaticLender::PromotedValue)))
               if old.co_lenders.is_empty() => Some(sl.clone()),
             _ => None,
           };
@@ -2310,6 +2310,24 @@ pub(crate) fn place_within(name: &str, of: &str) -> bool {
   name == of || name.strip_prefix(of).is_some_and(|rest| rest.starts_with('.'))
 }
 
+/// Request MIR field initialization for a struct update even when the
+/// update is inside a branch, a call argument or a loop's break value.
+fn contains_struct_update(expr: &Expr<'_>) -> bool {
+  struct Find(bool);
+  impl<'v> Visitor<'v> for Find {
+    fn visit_expr(&mut self, e: &'v Expr<'v>) {
+      if matches!(e.kind, ExprKind::Struct(_, _, rustc_hir::StructTailExpr::Base(_))) {
+        self.0 = true;
+      } else if !self.0 {
+        intravisit::walk_expr(self, e);
+      }
+    }
+  }
+  let mut find = Find(false);
+  find.visit_expr(expr);
+  find.0
+}
+
 fn locals_moved_by<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, e: &'tcx Expr<'tcx>) -> BTreeSet<String> {
   struct Scan<'tcx> {
     tcx: rustc_middle::ty::TyCtxt<'tcx>,
@@ -2395,7 +2413,21 @@ fn locals_moved_by<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, e: &'tcx Expr<'tcx
         // (#1138). `..base` takes the rest of base.
         ExprKind::Struct(_, fields, tail) => {
           for f in fields.iter() { self.scan(f.expr, true); }
-          if let rustc_hir::StructTailExpr::Base(b) = tail { self.scan(b, true); }
+          if let rustc_hir::StructTailExpr::Base(base) = tail {
+            if let (Some(place), Some(adt)) = (self.field_place(base), ty.ty_adt_def().filter(|def| def.is_struct())) {
+              // rustc supplies the source type of each field, including for
+              // type-changing updates. Only unlisted, non-Copy fields move.
+              let types = self.typeck.fru_field_types();
+              for (field, &ty) in adt.non_enum_variant().fields.iter().zip(&types[e.hir_id]) {
+                if !fields.iter().any(|f| f.ident.name == field.name)
+                  && !self.tcx.type_is_copy_modulo_regions(self.env, ty) {
+                  self.moved.insert(format!("{}.{}", place, field.name));
+                }
+              }
+            } else {
+              self.scan(base, true);
+            }
+          }
         }
         // A macro's own blocks, e.g. `format!`'s: its arguments are
         // borrowed (`(&s,)`) in a `let` inside.
@@ -7627,19 +7659,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // by the assignment (#1138). Seen by `reassign_parts` as moved.
     // `p = Pair { a: s2, b: p.into_a() }` moves all of p, so each of
     // its fields (#1509).
+    let mut before_overwrite = BTreeMap::new();
     self.rhs_self_moved = match (&lhs_rty, expr.kind) {
       (ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)), ExprKind::Assign(..)) => {
         let moved = locals_moved_by(self.tcx, rhs_expr);
-        let whole = moved.contains(rap.name());
-        #[expect(clippy::disallowed_methods, reason = "collected into a BTreeSet")]
-        let parts: BTreeSet<String> = self.raps.keys()
-          .filter(|m| *m != rap.name() && place_within(m, rap.name()) && (whole || moved.contains(*m)))
-          .cloned()
-          .collect();
-        parts
+        let members = self.struct_members_deep(rap.name());
+        if contains_struct_update(rhs_expr) {
+          let columns: Vec<_> = std::iter::once(rap.name().as_str())
+            .chain(members.iter().map(|m| m.name().as_str())).collect();
+          before_overwrite = self.ownership_at_assignment(rap.name(), lhs_expr.span, expr.span, &columns);
+        }
+        members.iter().filter(|m| moved.iter().any(|p| place_within(m.name(), p))
+            && before_overwrite.get(m.name()).is_none_or(|s| *s == Ownership::None))
+          .map(|m| m.name().clone()).collect()
       }
       _ => BTreeSet::new(),
     };
+    let ownership = |this: &Self, name: &str| before_overwrite.get(name).copied().unwrap_or_else(|| this.rap_ownership_now(name));
     let drops_old = !lhs_ty.is_ref() && !is_copyable && !lhs_is_union_field && !union_without_drop && !lhs_is_manually_drop && self.needs_drop(lhs_ty, lhs_expr.hir_id.owner);
     let mut contents_gone: Option<u64> = None;
     let drop_target: Option<ResourceAccessPoint> =
@@ -7657,14 +7693,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // value out (`(a, b) = (b, a)`) doesn't drop it, even
             // if that move is drawn after y's new value arrives.
             let all_moved_by_rhs = !self.rhs_self_moved.is_empty()
-              && self.reassign_parts(rap.name()).is_some_and(|p| p.dropped.is_empty() && p.maybe_moved.is_empty());
+              && self.reassign_parts(rap.name(), &before_overwrite).is_some_and(|p| p.dropped.is_empty() && p.maybe_moved.is_empty());
             // A Box whose contents only were moved out still has its
             // heap allocation, which the assignment frees (#1145).
             let gone = rap.box_contents_moved() && self.box_contents_only_moved_now(rap.name());
             if gone {
               contents_gone = Some(*rap.hash());
             }
-            if (self.rap_holds_resource_now(rap.name()) || gone)
+            if (ownership(self, rap.name()) != Ownership::None || gone)
               && !self.destructure_moved.contains(rap.name()) && !all_moved_by_rhs {
               Some(rap.clone())
             } else {
@@ -7737,7 +7773,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let field_drop_targets: Vec<ResourceAccessPoint> = match (&drop_target, &lhs_rty) {
       (Some(rap @ ResourceAccessPoint::Struct(_)),
        ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..)) => {
-        self.struct_fields_holding_resource(rap.name()).into_iter()
+        self.struct_members_deep(rap.name()).into_iter()
+          .filter(|f| !f.never_drops() && ownership(self, f.name()) != Ownership::None)
           .filter(|f| !self.rhs_self_moved.iter().any(|m| place_within(f.name(), m)))
           .collect()
       }
@@ -7749,7 +7786,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // live `&mut`, so its lender holds a value.
     let mut maybe_moved: Vec<bool> = drop_target.iter().chain(field_drop_targets.iter())
       .map(|rap| matches!(lhs_rty, ResourceTy::Value(_))
-        && self.rap_ownership_now(rap.name()) == Ownership::Maybe)
+        && ownership(self, rap.name()) == Ownership::Maybe)
       .collect();
     // Of those, the ones maybe-moved only because the loop can come
     // back round with them moved (#992).
@@ -7770,7 +7807,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let parts: Vec<Option<ReassignParts>> = drop_target.iter().chain(field_drop_targets.iter())
       .zip(maybe_moved.iter())
       .map(|(rap, maybe)| match rap {
-        ResourceAccessPoint::Struct(_) if !maybe && matches!(lhs_rty, ResourceTy::Value(_)) => self.reassign_parts(rap.name()),
+        ResourceAccessPoint::Struct(_) if !maybe && matches!(lhs_rty, ResourceTy::Value(_)) => self.reassign_parts(rap.name(), &before_overwrite),
         _ => None,
       })
       .collect();
@@ -7901,7 +7938,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       _ => Vec::new(),
     };
-    let mut drop_line = line_num;
+    // An update can be chosen by the RHS. At its end the path has been
+    // chosen and the old fields that remain are dropped.
+    let mut drop_line = if before_overwrite.is_empty() { line_num } else { span_end_line(&rhs_expr.span, &self.tcx) };
     let mut drop_at: Option<usize> = None;
     let mut late_holder_borrows: Vec<(String, &'tcx Expr<'tcx>)> = Vec::new();
     if let (ResourceTy::Index(..), ExprKind::AssignOp(..)) = (&lhs_rty, expr.kind) {
@@ -8112,6 +8151,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let hash = *rap.hash();
       let payload = box_payload.as_ref().is_some_and(|b| b.hash() == rap.hash())
         || (payload_behind_ref && payload_target.is_some_and(|h| h == *rap.hash()));
+      // MIR says which fields can still be present, without attributing
+      // an individual move to a particular branch or loop iteration.
+      let maybe_init = if before_overwrite.get(rap.name()) == Some(&Ownership::Maybe)
+        || (!before_overwrite.is_empty() && parts.as_ref().is_some_and(|p| !p.maybe_moved.is_empty())) {
+        Some(InitBy::DropFlag)
+      } else { maybe_init };
       self.add_external_event(drop_line, ExternalEvent::OwnerDropAtReassign {
         ro: rap,
         id: *self.unique_id,
@@ -9449,7 +9494,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let is_partial = partial.unwrap_or(!(parent_ty == typeck_res.node_type(p.hir_id)));
         let id = *self.unique_id;
         *self.unique_id += 1;
-        let mut ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), from.clone(), id, is_partial);
+        let mut ext_ev = self.pattern_binding_event(e.clone(), to_ro, from.clone(), id, is_partial);
         self.arm_part_borrow(guard_expr, arm_pat, to_ro, from, &mut ext_ev);
         // A reference copied out of a value that holds a
         // borrow also borrows what that value borrows (#391).
@@ -9525,7 +9570,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
         let id = *self.unique_id;
         *self.unique_id += 1;
-        let mut ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), from.clone(), id, partial.unwrap_or(false));
+        let mut ext_ev = self.pattern_binding_event(e.clone(), to_ro, from.clone(), id, partial.unwrap_or(false));
         self.arm_part_borrow(guard_expr, arm_pat, to_ro, from, &mut ext_ev);
         let scrutinee = match self.literal_elems(guard_expr) {
           Some(fields) if fields.len() == parents.len() => &fields[i],
@@ -9704,7 +9749,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       for to in lenders {
         let id = *self.unique_id;
         *self.unique_id += 1;
-        let ext_ev = self.ext_ev_of_evt(e.clone(), to, from.clone(), id, false);
+        let mut ext_ev = self.ext_ev_of_evt(e.clone(), to, from.clone(), id, false);
+        if let ExternalEvent::StaticDie { of_ref_var, .. } | ExternalEvent::MutableDie { of_ref_var, .. } = &mut ext_ev {
+          *of_ref_var = whole_loan.is_some_and(|sp| self.ref_var_borrows.contains(&sp));
+        }
         // An unused binding's end follows the pattern's (and guard's)
         // events, before the body's on the same line.
         let placed = |i: usize| pat_ids.contains(&i) || early.contains(&i);
@@ -11712,7 +11760,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       Node::Expr(p) => match p.kind {
         // `make().len()` autorefs the receiver; `make().into_iter()` moves it.
         ExprKind::MethodCall(_, rcvr, _, _) if is_me(rcvr) => typeck.expr_ty_adjusted(rcvr).is_ref(),
-        ExprKind::AddrOf(..) => self.borrowed_as_argument(p, typeck),
+        ExprKind::AddrOf(..) => !self.is_promoted_borrow(p.span) && self.borrowed_as_argument(p, typeck),
         ExprKind::Index(base, _, _) if is_me(base) => !self.extended_by_let(p),
         // A Copy field read, or a field that is itself borrowed or
         // discarded (`make_q().a.len()`), leaves the whole temporary to
@@ -13151,7 +13199,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let typeck = self.tcx.typeck(hirid.owner);
     let lhs_ty = typeck.node_type(hirid);
     let tmp_ty = typeck.expr_ty(operand);
-    if !lhs_ty.is_ref() || !self.needs_drop(tmp_ty, hirid.owner) {
+    if !lhs_ty.is_ref() || !self.needs_drop(tmp_ty, hirid.owner) || self.is_promoted_borrow(init.span) {
       return false;
     }
     self.visit_expr(init);
@@ -13333,6 +13381,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ExprKind::AddrOf(rustc_hir::BorrowKind::Ref, borrow_mut, operand) => {
         // `&x`, `&v[0]`, `&p.f`, `&*r` borrow a place, not a temporary;
         // `&make().name` borrows part of the temporary `make()` (#1165).
+        if self.is_promoted_borrow(e.span) { return; }
         let place = operand;
         let operand = match extended_temp_operand(operand) {
           Some(o) => o,

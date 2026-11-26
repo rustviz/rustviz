@@ -37,6 +37,20 @@ pub fn hirid_to_var_name(id: HirId, tcx: &TyCtxt) -> Option<String> {
       _ => None,
     }
   }
+  // Segment identifiers omit generic arguments and qualified self types.
+  // Keep the spelling of a written callee. Generated or unavailable
+  // source falls back to the resolved path below.
+  if let rustc_hir::Node::Expr(call) = tcx.parent_hir_node(id) {
+    if let ExprKind::Call(callee, _) = call.kind {
+      if callee.hir_id == id && !callee.span.from_expansion()
+        && matches!(callee.kind, ExprKind::Path(ref p) if matches!(tcx.typeck(id.owner).qpath_res(p, id),
+          Res::Def(rustc_hir::def::DefKind::Fn | rustc_hir::def::DefKind::AssocFn, _))) {
+        if let Ok(spelling) = tcx.sess.source_map().span_to_snippet(callee.span) {
+          return Some(spelling);
+        }
+      }
+    }
+  }
   let raw = match tcx.hir_node(id) {
     rustc_hir::Node::Expr(e) => match e.kind {
       ExprKind::Path(QPath::Resolved(_, path)) => name_of_path(path),
@@ -51,7 +65,7 @@ pub fn hirid_to_var_name(id: HirId, tcx: &TyCtxt) -> Option<String> {
     n => n.ident().map(|i| i.as_str().to_owned())?,
   };
   // Preserve the historical normalization: the path String::from is
-  // collapsed to the bare String::from so callers don't see e.g. <String as From<&str>>::from.
+  // collapsed to the bare String::from for generated paths.
   if is_string_from(&raw) {
     Some(String::from("String::from"))
   } else {
@@ -1243,7 +1257,15 @@ pub fn innermost_addr_of_operand<'tcx>(expr: &'tcx Expr<'tcx>) -> &'tcx Expr<'tc
 /// at the adjusted type.
 pub fn ref_var_borrow(addr_of: &Expr, typeck: &TypeckResults) -> bool {
   let ExprKind::AddrOf(rustc_hir::BorrowKind::Ref, _, inner) = addr_of.kind else { return false };
-  matches!(inner.kind, ExprKind::Path(QPath::Resolved(_, Path { res: Res::Local(_), .. })))
+  // A reference stored in a field of a local (`&mut h.r`) is a
+  // reference place too. A field projected *through* a reference is
+  // handled by the reborrow logic.
+  let mut base = inner;
+  while let ExprKind::Field(parent, _) = base.kind {
+    if !typeck.expr_adjustments(parent).is_empty() { return false; }
+    base = parent;
+  }
+  matches!(base.kind, ExprKind::Path(QPath::Resolved(_, Path { res: Res::Local(_), .. })))
     && typeck.expr_ty(inner).is_ref()
     && typeck.expr_adjustments(addr_of).iter().filter(|a| matches!(a.kind, Adjust::Deref(_))).count() < 2
 }

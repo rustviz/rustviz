@@ -195,6 +195,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let typeck = self.tcx.typeck(e.hir_id.owner);
     match e.kind {
       ExprKind::AddrOf(rustc_hir::BorrowKind::Ref, _, operand) => {
+        if self.is_promoted_borrow(e.span) { return; }
         let Some(tmp) = crate::visitor::extended_temp_operand(operand) else { return };
         self.branch_extended_temps(tmp, in_branch, out);
         if in_branch && !matches!(tmp.kind, ExprKind::AddrOf(..)) && self.needs_drop(typeck.expr_ty(tmp), e.hir_id.owner) {

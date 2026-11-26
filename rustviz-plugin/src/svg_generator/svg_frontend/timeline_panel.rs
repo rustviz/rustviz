@@ -2458,12 +2458,12 @@ fn render_dot(
                     let box_paths = matches!(event, Event::OwnerDropAtReassign { parts: None, payload: false, .. })
                         && mixed_box_paths(&visualization_data.timelines[hash].resource_access_point,
                             &history[..i].iter().filter(|(l, _)| l < line_number).cloned().collect::<Vec<_>>());
-                    let title = if box_paths {
-                        // A Box whose contents were moved out, given a
-                        // new Box or moved away on some paths only
-                        // (#1220): what the old value drops depends on
-                        // the path.
-                        hover_messages::event_dot_owner_drop_at_reassign_box_paths(&name)
+                    let uncertain_parts = matches!(event, Event::OwnerDropAtReassign {
+                        maybe_init: Some(InitBy::DropFlag), parts: Some(_), ..
+                    });
+                    let title = if box_paths || uncertain_parts {
+                        // Which parts of the old value remain depends on the path.
+                        hover_messages::event_dot_owner_drop_at_reassign_remaining(&name)
                     } else if matches!(event, Event::OwnerDropAtReassign { maybe_init: Some(InitBy::Branch | InitBy::Loop), .. })
                         // (Before the new value's Acquire on this line.)
                         && init_by_maybe_held(history[..i].iter().filter(|(l, _)| l < line_number)) {
@@ -2529,7 +2529,7 @@ fn render_dot(
                             _ => None,
                         });
                         if rap.box_contents_moved() && last_branch.is_some_and(|b| moves_only_box_contents(b)) {
-                            hover_messages::event_dot_owner_drop_at_reassign_box_paths(&name)
+                            hover_messages::event_dot_owner_drop_at_reassign_remaining(&name)
                         } else {
                             hover_messages::event_dot_owner_drop_at_reassign_maybe_moved(&name, &note, *by_cond)
                         }
@@ -4241,6 +4241,19 @@ fn timeline_segment_title(
     // A `&mut` whose referent is shared through it (`let r3 = &*r;`)
     // is read-only meanwhile; it has no resource of its own (#313).
     if let (State::PartialPrivilege { .. }, ResourceAccessPoint::MutRef(_)) = (state, rap) {
+        // The state alone doesn't distinguish sharing *r from sharing r.
+        // If the column has lent the reference itself, describe only the
+        // access guaranteed in either case.
+        fn lends_reference(history: &[(usize, Event)]) -> bool {
+            history.iter().any(|(_, e)| match e {
+                Event::StaticLend { of_ref_var: true, .. } => true,
+                Event::Branch { branch_history, .. } => branch_history.iter().any(|b| lends_reference(&b.e_data)),
+                _ => false,
+            })
+        }
+        if visualization_data.timelines.get(rap.hash()).is_some_and(|t| lends_reference(&t.history)) {
+            return hover_messages::state_mut_ref_shared_access(rap.name(), rap.points_to_copy());
+        }
         return hover_messages::state_mut_ref_partial_privilege(rap.name(), rap.points_to_copy());
     }
     state.print_message_with_name(rap.name())

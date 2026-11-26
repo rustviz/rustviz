@@ -2525,20 +2525,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
-  /// Non-Copy fields of `parent` (recursively) that currently own a
-  /// resource, i.e. what dropping `parent` right now would drop.
-  pub fn struct_fields_holding_resource(&self, parent: &str) -> Vec<ResourceAccessPoint> {
-    let mut out = Vec::new();
-    for child in self.struct_children(parent) {
-      let name = child.name().clone();
-      if !child.never_drops() && self.rap_holds_resource_now(&name) {
-        out.push(child);
-      }
-      out.extend(self.struct_fields_holding_resource(&name));
-    }
-    out
-  }
-
   /// `to` just received a whole struct value from a source that has
   /// no per-field columns of its own (a call result, the caller, a
   /// dereference): every field now holds its part of that value.
@@ -2743,13 +2729,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// What reassigning the struct or tuple `parent` drops of its
   /// previous value, when some of its parts were moved out before, on
   /// every path or on some only (#628): `None` when none were.
-  pub fn reassign_parts(&self, parent: &str) -> Option<ReassignParts> {
+  pub fn reassign_parts(&self, parent: &str, before: &BTreeMap<String, Ownership>) -> Option<ReassignParts> {
     let mut out = ReassignParts::default();
-    self.collect_reassign_parts(parent, &mut out);
+    self.collect_reassign_parts(parent, before, &mut out);
     (!out.moved.is_empty() || !out.maybe_moved.is_empty()).then_some(out)
   }
 
-  fn collect_reassign_parts(&self, parent: &str, out: &mut ReassignParts) {
+  fn collect_reassign_parts(&self, parent: &str, before: &BTreeMap<String, Ownership>, out: &mut ReassignParts) {
     for c in self.struct_children(parent) {
       if c.never_drops() || c.is_plain_value() {
         continue;
@@ -2759,7 +2745,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         out.moved.push(name);
         continue;
       }
-      match self.rap_ownership_now(&name) {
+      match before.get(&name).copied().unwrap_or_else(|| self.rap_ownership_now(&name)) {
         Ownership::None => out.moved.push(name),
         Ownership::Maybe => {
           out.by_cond |= self.maybe_moved_by_let_now(&name) || self.moved_by_chain_condition(&c);
@@ -2769,7 +2755,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           if self.struct_children(&name).is_empty() {
             out.dropped.push(name);
           } else {
-            self.collect_reassign_parts(&name, out);
+            self.collect_reassign_parts(&name, before, out);
           }
         }
       }
@@ -6268,6 +6254,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             }
             _ => None,
           },
+        // A borrow that would otherwise be drawn as a dropped temporary.
+        // Its value can live in static storage even if its type needs drop.
+        _ if self.is_promoted_borrow(expr.span)
+          && self.needs_drop(self.tcx.typeck(inner.hir_id.owner).expr_ty(inner), inner.hir_id.owner) =>
+          Some(StaticLender::PromotedValue),
         _ => None,
       },
       // `if c { "a" } else { "b" }`, `match n { 0 => "zero", _ => "many" }`:
@@ -8669,9 +8660,9 @@ pub fn register_iflet_let_bindings(
             moved_by_pattern.push(from.clone());
         }
         let evt_kind = evt.clone();
-        let event = self.ext_ev_of_evt(
+        let event = self.pattern_binding_event(
             evt,
-            ResourceTy::Value(binding_rap.clone()),
+            &binding_rap,
             from,
             *self.unique_id,
             // (None: an or-pattern's name, bound as a new value.)
@@ -9649,7 +9640,7 @@ fn call_result_lender(&self, scrutinee: &'tcx Expr<'tcx>, evt: &Evt, from: Resou
 /// a copy of t. Returns the borrow event and points the binding's loan
 /// (registered with no lender by `collect_pat_binding_events`) at t.
 pub fn addr_of_scrutinee_borrow(&mut self, scrutinee: &'tcx Expr<'tcx>, pat: &'tcx Pat<'tcx>, binding: &ResourceAccessPoint, evt: &Evt, from: &ResourceTy) -> Option<Evt> {
-  if !matches!(evt, Evt::Copy | Evt::Move) || !binding.is_ref() || from.is_ref() {
+  if !matches!(evt, Evt::Copy | Evt::Move) || !binding.is_ref() {
     return None;
   }
   if !matches!(pat.kind, PatKind::Binding(ann, _, _, None) if matches!(ann.0, rustc_hir::ByRef::No)) {
@@ -9663,11 +9654,36 @@ pub fn addr_of_scrutinee_borrow(&mut self, scrutinee: &'tcx Expr<'tcx>, pat: &'t
   if !matches!(from, ResourceTy::Value(r) if !r.is_fn()) {
     return None;
   }
-  let aliasing = get_aliasing_data(from, &self.borrow_map);
+  let typeck = self.tcx.typeck(e.hir_id.owner);
+  let of_ref_var = ref_var_borrow(e, typeck);
+  if from.is_ref() && !of_ref_var {
+    return None;
+  }
+  let aliasing = if of_ref_var {
+    self.get_ref_data_single(e).1
+  } else {
+    get_aliasing_data(from, &self.borrow_map)
+  };
   let rd = self.borrow_map.get_mut(binding.name())?;
+  if of_ref_var {
+    self.ref_var_borrows.insert(e.span);
+    rd.borrow_span = Some(e.span);
+  }
   rd.lender = from.clone();
   rd.aliasing = aliasing;
   Some(if mutbl == Mutability::Mut { Evt::MBorrow } else { Evt::SBorrow })
+}
+
+/// Carry the place of an explicit scrutinee loan into the drawing, just
+/// as for a plain let. Borrowing a reference variable restricts the
+/// variable itself while the pattern binding is live.
+pub fn pattern_binding_event(&self, evt: Evt, binding: &ResourceAccessPoint, from: ResourceTy, id: usize, partial: bool) -> ExternalEvent {
+  let mut ev = self.ext_ev_of_evt(evt, ResourceTy::Value(binding.clone()), from, id, partial);
+  if let ExternalEvent::StaticBorrow { of_ref_var, .. } | ExternalEvent::MutableBorrow { of_ref_var, .. } = &mut ev {
+    *of_ref_var = self.borrow_map.get(binding.name()).and_then(|rd| rd.borrow_span)
+      .is_some_and(|sp| self.ref_var_borrows.contains(&sp));
+  }
+  ev
 }
 
 /// `tuple_elem_lender` for the binding `binding`, also pointing the

@@ -28060,13 +28060,72 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from String::from to w",
             // `::std::string::String::from_utf8_lossy(..)`: the path root
             // `{{root}}` is not part of the name.
-            "Move from std::string::String::from_utf8_lossy to (temporary 2)",
+            "Move from ::std::string::String::from_utf8_lossy to (temporary 2)",
         ],
         must_not_contain: &[
             "{{root}}",
             "=Move from String::from to (temporary)",
             "=Move from bytes to String::from",
             "A temporary holds the value that String::from returns",
+        ],
+    },
+    TooltipExpect {
+        name: "self_struct_update_1636",
+        must_contain: &[
+            "p.a acquires ownership of a new resource; its previous resource is dropped",
+            "p.b gets the same resource back, as part of the new value assigned here",
+            "p acquires ownership of a new resource. Its previous p.b was moved out earlier, so only its previous p.a is dropped.",
+            "outer.pair.a acquires ownership of a new resource; its previous resource is dropped",
+            "pair acquires ownership of a new resource. Whatever it still held (if anything) is dropped here.",
+            "pair.a acquires ownership of a new resource. Its previous resource is dropped here only if pair.a still holds it (Rust tracks this with a runtime drop flag).",
+            "pair.b acquires ownership of a new resource. Its previous resource is dropped here only if pair.b still holds it (Rust tracks this with a runtime drop flag).",
+        ],
+        // The bare acquisition is correct at declaration. The row test
+        // below forbids it specifically at the overwrite.
+        must_not_contain: &[
+            "=p.b acquires ownership of a new resource; its previous resource is dropped",
+            "=outer.pair.b acquires ownership of a new resource; its previous resource is dropped",
+            "=pair.a acquires ownership of a new resource; its previous resource is dropped",
+            "=pair.b acquires ownership of a new resource; its previous resource is dropped",
+        ],
+    },
+    TooltipExpect {
+        name: "borrow_ref_scrutinee_1638",
+        must_contain: &[
+            "Mutable borrow from r to s",
+            "r is mutably borrowed by s; r can't be used while the borrow is live",
+            "Return mutably borrowed value from s to r",
+            "Immutable borrow from r to shared",
+            "Return immutably borrowed value from shared to r",
+            "Mutable borrow from r to arm",
+            "Mutable borrow from r to round",
+            "Mutable borrow from r to last",
+            "Mutable borrow from h.r to field",
+            "r is no longer mutably borrowed",
+        ],
+        must_not_contain: &[
+            "Move from r to", "Copy from r to shared", "r's mutable reference is moved",
+            "r's mutable reference was moved out", "n's value is mutably borrowed by s", "Move from h.r to field",
+            "s no longer borrows the value r points to", "shared no longer borrows the value r points to",
+        ],
+    },
+    TooltipExpect {
+        name: "edition2024/chain_ref_scrutinee_1638",
+        must_contain: &["Mutable borrow from reference to link", "Return mutably borrowed value from link to reference"],
+        must_not_contain: &["Move from reference to link", "reference's mutable reference is moved"],
+    },
+    TooltipExpect {
+        name: "promoted_named_constant_1700",
+        must_contain: &[
+            "q's borrow of a promoted value ends (Rust stores the value for the whole program)",
+            "Move from <String as From<&str>>::from to n", "Move from Vec::<String>::new to v",
+            "Immutable borrow from (temporary) to local",
+            "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. Its resource is dropped.",
+        ],
+        must_not_contain: &[
+            "Immutable borrow from (temporary) to q", "Immutable borrow from (temporary) to branch",
+            "Immutable borrow from (temporary 3) to tuple.0", "branch that made it", "A temporary holds the value that Ok returns",
+            "Move from From::from to n", "Move from Vec::new to v",
         ],
     },
 ];
@@ -38453,4 +38512,36 @@ fn code_panel_names_from_utf8_1631() {
     assert!(!code.contains("{{root}}"), "path root shown: {code}");
     // Only `w`'s `String::from(..)` is shown by that name.
     assert_eq!(code.matches(">String::from</tspan>(").count(), 1, "{code}");
+}
+
+#[test]
+fn self_update_drops_only_the_replaced_field_1636() {
+    let name = "self_struct_update_1636";
+    let svg = run_with_local_backend(name).timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    let source = read_corpus(name);
+    for (place, row) in [("p.a", "p = Pair"), ("outer.pair.a", "outer.pair = Pair")] {
+        let row = source.lines().position(|l| l.trim_start().starts_with(row)).unwrap() + 1;
+        let id = format!("{place}@L{row}:dot:");
+        let dot = doc.descendants().find(|n| n.attribute("data-rv-id").is_some_and(|s| s.starts_with(&id))).unwrap();
+        assert!(dot.attribute("data-rv-event").unwrap().contains("owner_drop_at_reassign"), "{id} omits the old field's drop");
+        assert!(!dot.attribute("data-tooltip-text").unwrap().split("<br>").any(|line|
+            line.ends_with(" acquires ownership of a resource")), "{id} still has the bare acquisition");
+    }
+}
+
+#[test]
+fn reference_usable_after_pattern_borrow_1638() {
+    let name = "borrow_ref_scrutinee_1638";
+    let svg = run_with_local_backend(name).timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    let source = read_corpus(name);
+    let last_use = source.lines().position(|l| l.contains("s => **s += 1")).unwrap() + 1;
+    let write = source.lines().position(|l| l.trim() == "*r += 1;").unwrap() + 1;
+    assert!(doc.descendants().any(|n|
+        n.attribute("data-rv-var") == Some("r")
+            && n.attribute("data-rv-state") == Some("full_privilege")
+            && n.attribute("data-rv-line").and_then(|s| s.parse().ok()) == Some(last_use)
+            && n.attribute("data-rv-line-end").and_then(|s| s.parse::<usize>().ok()).is_some_and(|end| end >= write)
+    ), "r should be usable from s's last use through the next write");
 }

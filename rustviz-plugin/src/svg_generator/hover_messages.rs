@@ -144,7 +144,7 @@ pub fn event_dot_box_paths_go_out_of_scope(my_name: &str) -> String {
     format!("{} goes out of scope. Whatever it still holds (if anything) is dropped here.", styled_name_html(my_name))
 }
 
-pub fn event_dot_owner_drop_at_reassign_box_paths(my_name: &str) -> String {
+pub fn event_dot_owner_drop_at_reassign_remaining(my_name: &str) -> String {
     format!("{} acquires ownership of a new resource. Whatever it still held (if anything) is dropped here.", styled_name_html(my_name))
 }
 
@@ -3141,6 +3141,7 @@ pub fn arrow_borrow_of_static_ends(from_name: &String, is_mut: bool, lender: &St
         // Never drawn as an arrow (see the renderer).
         StaticLender::TupleTemporary =>
             "the temporary tuple ends".to_string(),
+        StaticLender::PromotedValue => "a promoted value ends (Rust stores the value for the whole program)".to_owned(),
         StaticLender::PromotedConst(name) =>
             format!("the constant {} ends (Rust stores the borrowed value for the whole program)", styled_name_html(name)),
         // Never drawn as an arrow (the end has no reference to start from).
@@ -3801,6 +3802,13 @@ pub fn state_borrowed_by_loop_iterator(my_name: &String, holds_value: bool) -> S
 pub fn state_mut_ref_partial_privilege(my_name: &String, pointee_copy: bool) -> String {
     format!(
         "{0} holds a mutable reference, but the {1} it points to is currently shared through it, so {0} can only use it the way a shared reference can",
+        styled_name_html(my_name), held(pointee_copy)
+    )
+}
+
+pub fn state_mut_ref_shared_access(my_name: &String, pointee_copy: bool) -> String {
+    format!(
+        "{0} holds a mutable reference. While the shared borrow is live, {0} can only use the {1} it points to the way a shared reference can",
         styled_name_html(my_name), held(pointee_copy)
     )
 }
@@ -5427,6 +5435,7 @@ fn chain_ref_alts(sources: &[String], chain: &ChainRef) -> String {
         Some(StaticLender::Static(n)) => Some(format!("the static {}", styled_name_html(n))),
         Some(StaticLender::PointeeOfStatic(n)) => Some(format!("what the static {} points to", styled_name_html(n))),
         Some(StaticLender::PointeeOfConst(n)) => Some(format!("what the constant {} points to", styled_name_html(n))),
+        Some(StaticLender::PromotedValue) => Some("a promoted value".to_owned()),
         Some(StaticLender::PromotedConst(n)) => Some(format!("the constant {}", styled_name_html(n))),
         _ => None,
     };

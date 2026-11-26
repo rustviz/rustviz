@@ -177,6 +177,13 @@ impl<'tcx> Visitor<'tcx> for OnlyReborrowedThrough {
 }
 
 impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
+    /// rustc puts the span of the original borrow on its promoted MIR
+    /// body. Even a type with drop glue can have a promotable value
+    /// (for example the Ok variant of Result<i32, String>).
+    pub(crate) fn is_promoted_borrow(&self, span: Span) -> bool {
+        self.bwf.promoted.iter().any(|body| body.span == span)
+    }
+
     /// Whether the loan `b` is the borrow of a shared reference variable
     /// x that `&x` coerced to `&T` (x: `&T`) makes only to reborrow `*x`
     /// through it (`&**(&x)`, #939): `_4 = &x; _3 = &(*(*_4));`. That
@@ -1178,27 +1185,39 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     /// left-hand side's span), or, failing that, the write itself.
     /// `None` when no such place in the MIR is found.
     pub fn ownership_before_assign(&self, name: &str, lhs: Span, assign: Span) -> Option<Ownership> {
-        use rustc_middle::mir::StatementKind;
+        self.ownership_at_assignment(name, lhs, assign, &[name]).get(name).copied()
+    }
+
+    /// Initialization of the requested columns just before an overwrite.
+    /// A field without a separate move path is initialized with its closest
+    /// tracked parent. The drop span identifies the particular MIR local
+    /// even when bindings in sibling scopes share a display name.
+    pub fn ownership_at_assignment(&self, dest: &str, lhs: Span, assign: Span, columns: &[&str]) -> BTreeMap<String, Ownership> {
         use rustc_mir_dataflow::impls::{MaybeInitializedPlaces, MaybeUninitializedPlaces};
         use rustc_mir_dataflow::move_paths::MoveData;
         let body = &self.bwf.body;
-        let move_data = MoveData::gather_moves(body, self.tcx, |_| true);
-        let paths = self.move_path_names(&move_data);
-        let root = name.split('.').next().unwrap_or(name);
-        let mpi = paths.iter().find(|(_, n)| n == name).or_else(|| paths.iter().find(|(_, n)| n == root))?.0;
-        let local = move_data.move_paths[mpi].place.local;
-        let blocks = || body.basic_blocks.iter_enumerated();
+        let root = dest.split('.').next().unwrap_or(dest);
+        let locals = self.mir_local_names(self.bwf);
+        let blocks = || body.basic_blocks.iter_enumerated().filter(|(_, bb)| !bb.is_cleanup);
         let dropped = blocks().find_map(|(bb, data)| {
-            let t = data.terminator.as_ref()?;
-            matches!(&t.kind, TerminatorKind::Drop { place, .. } if place.local == local && t.source_info.span == lhs)
-                .then(|| Location { block: bb, statement_index: data.statements.len() })
+            let t = data.terminator();
+            if let TerminatorKind::Drop { place, .. } = &t.kind {
+                if t.source_info.span == lhs && locals.get(&place.local).is_some_and(|n| n == root) {
+                    return Some((place.local, Location { block: bb, statement_index: data.statements.len() }));
+                }
+            }
+            None
         });
         let at = dropped.or_else(|| blocks().find_map(|(bb, data)| {
-            data.statements.iter().position(|st| matches!(&st.kind,
-                StatementKind::Assign(b) if b.0.local == local && st.source_info.span == assign))
-                .map(|i| Location { block: bb, statement_index: i })
+            data.statements.iter().enumerate().find_map(|(i, st)| {
+                let StatementKind::Assign(b) = &st.kind else { return None };
+                ((st.source_info.span == assign || st.source_info.span == lhs)
+                    && locals.get(&b.0.local).is_some_and(|n| n == root))
+                    .then_some((b.0.local, Location { block: bb, statement_index: i }))
+            })
         }));
-        let at = at?;
+        let Some((local, at)) = at else { return BTreeMap::new() };
+        let move_data = MoveData::gather_moves(body, self.tcx, |_| true);
         let mut init = MaybeInitializedPlaces::new(self.tcx, body, &move_data)
             .iterate_to_fixpoint(self.tcx, body, None)
             .into_results_cursor(body);
@@ -1207,11 +1226,19 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
             .into_results_cursor(body);
         init.seek_before_primary_effect(at);
         uninit.seek_before_primary_effect(at);
-        Some(match (init.get().contains(mpi), uninit.get().contains(mpi)) {
-            (true, false) => Ownership::Held,
-            (false, _) => Ownership::None,
-            (true, true) => Ownership::Maybe,
-        })
+        let paths = self.move_path_names(&move_data);
+        columns.iter().filter_map(|&name| {
+            let (mpi, _) = paths.iter()
+                .filter(|(mpi, path)| move_data.move_paths[*mpi].place.local == local
+                    && crate::visitor::place_within(name, path))
+                .max_by_key(|(_, path)| path.len())?;
+            let holds = match (init.get().contains(*mpi), uninit.get().contains(*mpi)) {
+                (true, false) => Ownership::Held,
+                (false, _) => Ownership::None,
+                (true, true) => Ownership::Maybe,
+            };
+            Some((name.to_owned(), holds))
+        }).collect()
     }
 
     /// Fill in, on the scope ends among `preprocessed_events[from..]`
