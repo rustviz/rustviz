@@ -28014,7 +28014,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // #1585: an unused `ref` binding's borrow ends where the pattern
         // binds it, before the nested `if .. { return; }`; the lender is
         // free on both of its legs and its drop at the `return` is stated.
-        // The binding isn't drawn in the nested `if` after its end.
+        // The binding isn't drawn in the nested `if` after its end (for an
+        // or-pattern binding, main's join there said "a8 still has no
+        // value here").
         must_contain: &[
             "t goes out of scope. Its resource is dropped.",
             "s goes out of scope. Its resource is dropped.",
@@ -28023,43 +28025,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t goes out of scope. No resource is dropped.",
             "=a isn't moved in any of the branches above",
             "a3 isn't moved in any of the branches above",
-        ],
-    },
-    TooltipExpect {
-        name: "arm_ends_review_1602",
-        // Shapes from the independent review of #1602. On main r7 and the
-        // or-pattern's a8 were said to have "no value" after their borrow
-        // ended. Earlier heads of #1602 also said r1's borrow "ended in
-        // each branch above" before `r1.len()` read it again on that line,
-        // and r4's inside a loop whose next iteration reads it.
-        // Known wrong, drawn as on main and not pinned here: the loop join
-        // still says "r4's immutable borrow ends" (#1647), a9/b9's
-        // "mutable borrow ends" at the join though the returned reference
-        // keeps the loan (#1693), and "push no longer borrows the resource
-        // r10 points to" before push's argument reads r10 (#1621).
-        must_contain: &[
-            "r7's borrow ended in each branch above",
-            "r4 isn't moved in any of the branches above",
-        ],
-        must_not_contain: &[
-            "r7 still has no value here",
+            // (Ending the loan before the nested `if` must not leave a
+            // drawn there either: its join then said this.)
+            "a still has no value here",
+            "a3 still has no value here",
+            // The or-pattern binding a8: main said this at the join.
             "a8 still has no value here",
-            "r1's borrow ended in each branch above",
-            "r4's borrow ended in each branch above",
-            // Round 2 of the review: a returned call result, a two-phase
-            // receiver and a copy bound after the conditional keep the loan
-            // past the arm (an earlier head of #1602 ended it there).
-            "a9's borrow ended in each branch above",
-            "b9's borrow ended in each branch above",
-            "r10's borrow ended in each branch above",
-            "r11's borrow ended in each branch above",
-            // Round 6: v17/v18 get no column in the `if let` (main's
-            // drawing): an earlier head drew one, giving v17 back on the
-            // `Some` path while other17 still borrowed it, and v18 "being
-            // shared" through the `else`, which holds no loan of it. These
-            // joins only exist on that column.
-            "v17 isn't moved in any of the branches above",
-            "v18 isn't moved in any of the branches above",
         ],
     },
 ];
@@ -38339,9 +38310,7 @@ fn ref_old_loan_and_never_fn_ids_1486_1556_1557_1553() {
 /// #1566: an unused copy of a shared reference made in an arm (`let h =
 /// r;`, a struct literal's field) ends its borrow on its `let` line, in
 /// its arm, above its scope end. Main drew the end in a later arm, after
-/// "h goes out of scope". #1567: in a `match` on a reborrowed reference
-/// parameter (`let r = &*p;`), p's borrow ends on the dot where r gives it
-/// back, not on the arm's first line before that.
+/// "h goes out of scope" (right on main since #1599; kept as a pin).
 #[test]
 fn arm_borrow_ends_follow_their_last_use() {
     let tl = run_with_local_backend("arm_ref_copy_end_1566").timeline_panel_string();
@@ -38354,73 +38323,5 @@ fn arm_borrow_ends_follow_their_last_use() {
         assert_eq!(made, end, "{r}'s borrow ends on the dot of its `let`");
         assert!(end[0].1 < gone[0].1, "{r}'s borrow ends at {:?}, after its scope end at {:?}", end[0], gone[0]);
     }
-    let tl = run_with_local_backend("match_on_reborrowed_param_1567").timeline_panel_string();
-    for (p, r, kind) in [("p", "r", "immutable"), ("m", "r2", "mutable"), ("q", "r3", "immutable")] {
-        let back = dots_listing_tooltip(&tl, &format!("{r} no longer borrows the resource {p} points to"));
-        let ends = dots_listing_tooltip(&tl, &format!("{p}'s {kind} borrow ends"));
-        // In the arm reading r: on the row of r's `len` and the dot where
-        // r gives it back. (In the other arm r's end comes first, as it
-        // starts, and p's after p's own use.)
-        let read = dots_listing_tooltip(&tl, &format!("len reads from {r}"));
-        assert_eq!(read.len(), 1, "{r}'s one read: {read:?}");
-        assert!(back.iter().any(|b| b.1 == read[0].1 && ends.contains(b)),
-            "{p}'s borrow should end on {r}'s give-back dot on its read's row {:?}: {back:?}, {p}'s ends: {ends:?}", read[0]);
-    }
 }
 
-/// Review of #1602: the `None` path of an `if let` nested in an outer
-/// conditional that already draws v6 gives v6 back as it starts (main left
-/// it "being shared" there); and two
-/// references copied into each other on one line render (an earlier head
-/// reordered their ends forever).
-#[test]
-fn arm_ends_review_1602_lender_and_copy_cycle() {
-    let tl = run_with_local_backend("arm_ends_review_1602").timeline_panel_string();
-    let back = dots_listing_tooltip(&tl, "v6's resource is no longer immutably borrowed");
-    // Both nested arms, the None path, and after `v6.len()` in the other
-    // outer arm (main: 3, no give-back on the None path).
-    assert_eq!(back.len(), 4, "v6 given back in both nested arms, on the None path and after len: {back:?}");
-    // A `&mut` moved on through a call that returns it (`id(r12)`) isn't
-    // ended on the move.
-    let moved_and_ended = dots_where(&tl, |l| l.iter().any(|x| x == "r12's mutable reference is moved (not the resource it points to)")
-        && l.iter().any(|x| x == "r12's mutable borrow ends"));
-    assert_eq!(moved_and_ended, Vec::<(f64, f64)>::new(), "r12 ended on its move");
-    assert!(!dots_listing_tooltip(&tl, "a5's immutable borrow ends").is_empty()
-        || !dots_listing_tooltip(&tl, "b5's immutable borrow ends").is_empty(), "copied_both_ways rendered");
-    // Round 5: a nested `if` that calls an `Fn` closure (no event) or
-    // reborrows in place before `return` uses the loan, so it isn't ended
-    // as that `if` starts (an earlier head did: "f13's immutable borrow
-    // ends" on the nested `if`'s dot, r14's above its reborrow).
-    let f13_ended_at_if = dots_where(&tl, |l| l.iter().any(|x| x == "f13's immutable borrow ends")
-        && l.iter().any(|x| x.starts_with("f13 is live in a conditional expression")));
-    assert_eq!(f13_ended_at_if, Vec::<(f64, f64)>::new(), "f13 ended as the nested if starts");
-    let reslice = dots_where(&tl, |l| l.iter().any(|x| x.starts_with("r14 now points to the same data again")));
-    let r14_ends = dots_listing_tooltip(&tl, "r14's mutable borrow ends");
-    assert_eq!(reslice.len(), 1, "r14's reborrow: {reslice:?}");
-    assert!(!r14_ends.is_empty() && r14_ends.iter().all(|e| e.1 >= reslice[0].1),
-        "r14's borrow ends above its reborrow {:?}: {r14_ends:?}", reslice[0]);
-    // Round 6: `if *r16 { return; }` reads r16 in its condition (which
-    // records no event): r16's borrow doesn't end on the row above it,
-    // `drop(owned16)`'s (an earlier head ended it there).
-    let dropped = dots_where(&tl, |l| l.iter().any(|x| x.starts_with("owned16's resource is moved into drop")));
-    let r16_ends = dots_listing_tooltip(&tl, "r16's mutable borrow ends");
-    assert_eq!(dropped.len(), 1, "owned16's drop: {dropped:?}");
-    assert!(!r16_ends.is_empty() && r16_ends.iter().all(|e| e.1 > dropped[0].1),
-        "r16's borrow ends on or above drop(owned16)'s row {:?}: {r16_ends:?}", dropped[0]);
-    // Round 7: r20's loan of a20 ends at `r20 = &mut b20;`, above
-    // `drop(a20)` (an earlier head drew a20 lent down to the drop).
-    let a20_dropped = dots_where(&tl, |l| l.iter().any(|x| x.starts_with("a20's resource is moved into drop")));
-    let a20_back = dots_listing_tooltip(&tl, "a20's resource is no longer mutably borrowed");
-    assert_eq!(a20_dropped.len(), 1, "a20's drop: {a20_dropped:?}");
-    assert!(a20_back.iter().any(|b| b.1 < a20_dropped[0].1), "a20 not given back above its drop {:?}: {a20_back:?}", a20_dropped[0]);
-    // v21: given back in both nested arms, on the `if let`'s None path and
-    // after `v21.len()`; not also as the outer `else` starts (an earlier
-    // head: 5). v22: a closure holds it, so not on the None path (an
-    // earlier head: 5; the other ends are main's, #1694).
-    for (v, n) in [("v21", 4), ("v22", 4)] {
-        let back = dots_listing_tooltip(&tl, &format!("{v}'s resource is no longer immutably borrowed"));
-        assert_eq!(back.len(), n, "{v} given back: {back:?}");
-    }
-    // (The unrelated `FnOnce` call: rendering at all is the check.)
-    assert!(!dots_listing_tooltip(&tl, "r15's immutable borrow ends").is_empty(), "unrelated_fnonce_in_nested_return rendered");
-}

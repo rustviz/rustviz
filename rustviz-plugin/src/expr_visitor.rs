@@ -11658,17 +11658,6 @@ pub fn print_out_of_scope(&mut self){
     self.nest_borrow_ends_in_arms_with(false);
   }
 
-  /// Whether a reference other than the one `ev` ends holds a loan of
-  /// `lender` (or a holder a loan of part of it), made at or before
-  /// `line` and lasting past it.
-  #[expect(clippy::disallowed_methods, reason = "`any` over the map: order never observed")]
-  fn lender_held_past(&self, ev: &ExternalEvent, lender: &ResourceAccessPoint, line: usize) -> bool {
-    borrow_end_of(ev).is_some_and(|(r, _)| self.borrow_map.iter().any(|(n, d)|
-      n != r.name() && d.all_lenders().iter().any(|l| l.extract_rap() == Some(lender))
-        && loan_line_of(self.preprocessed_events, n, lender).unwrap_or(d.assigned_at) <= line
-        && d.lifetime > line))
-  }
-
   /// `nest_borrow_ends_in_arms`; `after_exits`: called after
   /// `end_borrows_at_exits`, see `end_lender_in_other_arms`.
   fn nest_borrow_ends_in_arms_with(&mut self, after_exits: bool) {
@@ -11676,17 +11665,9 @@ pub fn print_out_of_scope(&mut self){
     while i < self.preprocessed_events.len() {
       let (line, ev) = &self.preprocessed_events[i];
       let path = match ev {
-        // An end that gives nothing back (another reference to the same
-        // lender outlives it, `let h = r;` copying r in an arm) draws
-        // nothing on the lender, so it goes into the arm declaring its
-        // reference also when the lender has no column there. Left at
-        // the top level, it was drawn on a row of a later arm, after the
-        // reference's scope end (#1566).
-        ExternalEvent::RefDie { from: ResourceTy::Value(r), to, .. } => to.extract_rap()
-          .and_then(|lender| arm_declaring(self.preprocessed_events, r, Some(lender), *line, false).map(|path| (path, Some(lender.clone()))))
-          .or_else(|| arm_declaring(self.preprocessed_events, r, None, *line, false).map(|path| (path, None))),
         ExternalEvent::StaticDie { from: ResourceTy::Value(r), to, .. }
-        | ExternalEvent::MutableDie { from: ResourceTy::Value(r), to, .. } => match to.extract_rap() {
+        | ExternalEvent::MutableDie { from: ResourceTy::Value(r), to, .. }
+        | ExternalEvent::RefDie { from: ResourceTy::Value(r), to, .. } => match to.extract_rap() {
           Some(lender) => arm_declaring(self.preprocessed_events, r, Some(lender), *line, false)
             .map(|path| (path, Some(lender.clone())))
             // An end that gives nothing back (another reference still
@@ -11715,27 +11696,9 @@ pub fn print_out_of_scope(&mut self){
         Some((mut path, lender)) => {
           if let Some(lender) = lender {
             let made = borrow_end_of(ev).and_then(|(r, _)| Some((r.clone(), self.borrow_map.get(r.name())?.assigned_at)));
-            // (Likewise a lender that gets its column only now in the
-            // conditional whose arm declares r: v drawn in an outer `if`,
-            // `if let Some(x) = v.first()` nested in its arm, gives v back
-            // in the `if let`'s `else` as it starts. Only in that
-            // conditional: the loan was made inside the outer arm, #1602.)
-            // (Not for an end that gives nothing back: another reference
-            // still borrows the lender.)
-            // (Nor while another reference still borrows the lender past
-            // this end, `let other = v.first();` used after: on those
-            // paths v isn't given back, #1602.)
-            // (Nor when anything else borrowed the lender on or before this
-            // line, however long it seems to last: a closure capturing it
-            // or a `ref` pattern holds the loan through uses that record
-            // no event, an `Fn` call, #1602.)
-            let others = self.lender_held_past(ev, &lender, *line)
-              || borrow_end_of(ev).is_some_and(|(r, _)| lent_to_other(self.preprocessed_events, &lender, r, *line));
-            let new_column = !matches!(ev, ExternalEvent::RefDie { .. }) && !others
-              && lender_new_on_path(self.preprocessed_events, &path, &lender);
-            if let (true, Some((r, made))) = (after_exits || new_column, made) {
+            if let (true, Some((r, made))) = (after_exits, made) {
               let (line, mutable) = (*line, matches!(ev, ExternalEvent::MutableDie { .. }));
-              end_lender_in_other_arms(self.preprocessed_events, &path, &lender, &r, made, line, mutable, self.unique_id, !after_exits);
+              end_lender_in_other_arms(self.preprocessed_events, &path, &lender, &r, made, line, mutable, self.unique_id);
             }
             draw_lender_along(self.preprocessed_events, &path, &lender);
           }
@@ -12614,7 +12577,6 @@ pub fn print_out_of_scope(&mut self){
     self.note_sharers_across_calls();
     self.note_loop_iterator_keeps_moved();
     self.drop_arm_ref_ends_live_after();
-    drop_ended_refs_from_conditionals(self.preprocessed_events, &[]);
   }
 
   /// The end of a moved `for` binding's borrow (#1511) gives nothing back
@@ -12671,18 +12633,15 @@ pub fn print_out_of_scope(&mut self){
       if self.exit_scopes.get(id).is_some_and(|s| s.loop_lines.is_some()) {
         in_loop.push(k);
       }
-      // (Also one in the arms of a conditional nested in an arm, which
-      // the renderer draws too: in a loop the next iteration uses r again,
-      // so its borrow doesn't end there either, #1602.)
-      let mut found: Vec<ResourceAccessPoint> = Vec::new();
       for b in branches.iter() {
-        arm_ref_dies(&b.e_data, &mut found);
-      }
-      for r in found {
-        #[expect(clippy::disallowed_methods, reason = "`any` over the set: order never observed")]
-        let declared = branches.iter().any(|x| x.decl_vars.iter().any(|d| d.hash() == r.hash()));
-        if !declared && !checks.iter().any(|(i, _, n)| *i == k && n == r.name()) {
-          checks.push((k, *merge_point, r.name().to_owned()));
+        for (_, e) in b.e_data.iter() {
+          if let ExternalEvent::RefDie { from: ResourceTy::Value(r), .. } = e {
+            #[expect(clippy::disallowed_methods, reason = "`any` over the set: order never observed")]
+            let declared = branches.iter().any(|x| x.decl_vars.iter().any(|d| d.hash() == r.hash()));
+            if !declared && !checks.iter().any(|(i, _, n)| *i == k && n == r.name()) {
+              checks.push((k, *merge_point, r.name().to_owned()));
+            }
+          }
         }
       }
     }
@@ -12692,7 +12651,7 @@ pub fn print_out_of_scope(&mut self){
       }
       if let ExternalEvent::Branch { branches, .. } = &mut self.preprocessed_events[k].1 {
         for b in branches.iter_mut() {
-          drop_ref_dies_of(&mut b.e_data, &name);
+          b.e_data.retain(|(_, e)| !matches!(e, ExternalEvent::RefDie { from: ResourceTy::Value(r), .. } if *r.name() == name));
         }
       }
     }
@@ -13474,41 +13433,16 @@ fn ends_after_their_reborrows_in(events: &mut [(usize, ExternalEvent)], in_arm: 
   if !in_arm {
     return;
   }
-  // Each end moves at most once, so the pass always ends (#1602).
-  let mut moved: Vec<usize> = Vec::new();
   let mut j = 0;
   while j < events.len() {
     let Some((r, _)) = borrow_end_of(&events[j].1) else { j += 1; continue };
-    if moved.contains(&events[j].1.get_id()) {
-      j += 1;
-      continue;
-    }
     let (line, r) = (events[j].0, r.clone());
-    let reborrow_end = |k: usize| matches!(&events[k].1, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. })
-      && borrow_end_of(&events[k].1).is_some_and(|(f, to)| *f != r && to.extract_rap() == Some(&r));
-    let last = (j + 1..events.len()).rev().find(|&k| events[k].0 == line && reborrow_end(k));
-    // Or on a later line of the arm: r's end placed where the arm starts,
-    // as the arm doesn't use r itself, while a reborrow of it (`let r =
-    // &*p;` before a `match`, read in this arm) is last used further
-    // down. r's loan lasts as long as the reborrow's: it ends with it, on
-    // its line (#1567). (Not past a new value of r, whose end this isn't.)
-    let later = || (j + 1..events.len()).rev().find(|&k| events[k].0 > line && reborrow_end(k))
-      .filter(|&k| !events[j + 1..k].iter().any(|(_, e)| matches!(e,
-        ExternalEvent::StaticBorrow { to: ResourceTy::Value(t), .. } | ExternalEvent::MutableBorrow { to: ResourceTy::Value(t), .. }
-        | ExternalEvent::Move { to: ResourceTy::Value(t), .. } | ExternalEvent::Copy { to: ResourceTy::Value(t), .. } if *t == r)));
+    let last = (j + 1..events.len()).rev().find(|&k| events[k].0 == line
+      && matches!(&events[k].1, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. })
+      && borrow_end_of(&events[k].1).is_some_and(|(f, to)| *f != r && to.extract_rap() == Some(&r)));
     match last {
-      Some(k) => {
-        moved.push(events[j].1.get_id());
-        events[j..=k].rotate_left(1);
-      }
-      None => match later() {
-        Some(k) => {
-          moved.push(events[j].1.get_id());
-          events[j].0 = events[k].0;
-          events[j..=k].rotate_left(1);
-        }
-        None => j += 1,
-      },
+      Some(k) => events[j..=k].rotate_left(1),
+      None => j += 1,
     }
   }
 }
@@ -14362,124 +14296,6 @@ fn touches(e: &ExternalEvent, r: &ResourceAccessPoint) -> bool {
   }
 }
 
-/// A reference whose borrow has ended, live in a later conditional that
-/// doesn't use it (its scope ends at a `return` there, `if c { return;
-/// }`), isn't drawn in it, as one whose borrow ended before the
-/// conditional was visited isn't: forked there, its join said it "still
-/// has no value here" (#1585, #1602). `ended`: the references whose
-/// borrow ended before `events` (an arm's) start. Only references: a
-/// value holding a borrow is dropped at that `return`, which is drawn.
-/// Returns the references whose borrow has ended where `events` end: a
-/// conditional whose every arm that gets to its join ended one ends it
-/// too (`if d { r.push('x'); } else { r.len(); }`, then `if e { return;
-/// }`: its join said "r still has no value here", #1602).
-fn drop_ended_refs_from_conditionals(events: &mut [(usize, ExternalEvent)], ended: &[ResourceAccessPoint]) -> Vec<ResourceAccessPoint> {
-  let mut ended = ended.to_vec();
-  for (_, e) in events.iter_mut() {
-    if let ExternalEvent::Branch { branch_type, .. } = e {
-      if !matches!(branch_type, BranchType::Loop(..)) {
-        let unused: Vec<ResourceAccessPoint> = ended.iter().filter(|r| !uses_within(e, r)).cloned().collect();
-        if let ExternalEvent::Branch { live_vars, branches, .. } = e {
-          for r in &unused {
-            live_vars.remove(r);
-          }
-          let mut common: Option<Vec<ResourceAccessPoint>> = None;
-          for b in branches.iter_mut() {
-            let after = drop_ended_refs_from_conditionals(&mut b.e_data, &ended);
-            if b.diverges {
-              continue;
-            }
-            common = Some(match common {
-              None => after,
-              Some(c) => c.into_iter().filter(|r| after.contains(r)).collect(),
-            });
-          }
-          // After the join: what every arm that reaches it left ended (an
-          // implicit `else` has no events, so it ends nothing new; an arm
-          // that gives r a new loan, `r = &b;`, takes r off the list).
-          // With no arm reaching the join, what came before stays.
-          if let Some(common) = common {
-            ended = common.into_iter().filter(|r| !branches.iter().any(|b| b.decl_vars.contains(r))).collect();
-          }
-        }
-      }
-      continue;
-    }
-    match e {
-      ExternalEvent::StaticDie { from: ResourceTy::Value(r), .. }
-      | ExternalEvent::MutableDie { from: ResourceTy::Value(r), .. }
-      | ExternalEvent::RefDie { from: ResourceTy::Value(r), .. } if r.is_ref() && !ended.contains(r) => ended.push(r.clone()),
-      // An or-pattern reference's borrow, ended where the pattern binds
-      // it when it's never used (#734, #1602).
-      ExternalEvent::OrAltBorrow { into: r, end: true, .. } if r.is_ref() && !ended.contains(r) => ended.push(r.clone()),
-      ExternalEvent::StaticBorrow { to: ResourceTy::Value(t), .. } | ExternalEvent::MutableBorrow { to: ResourceTy::Value(t), .. }
-      | ExternalEvent::Move { to: ResourceTy::Value(t), .. } | ExternalEvent::Copy { to: ResourceTy::Value(t), .. } => ended.retain(|r| r != t),
-      _ => {}
-    }
-  }
-  ended
-}
-
-/// The references whose borrow an arm's events end with no arrow
-/// (`RefDie`), looking into the conditionals nested there, in order.
-fn arm_ref_dies(events: &[(usize, ExternalEvent)], out: &mut Vec<ResourceAccessPoint>) {
-  for (_, e) in events {
-    match e {
-      ExternalEvent::RefDie { from: ResourceTy::Value(r), .. } if !out.contains(r) => out.push(r.clone()),
-      ExternalEvent::Branch { branches, branch_type, .. } if !matches!(branch_type, BranchType::Loop(..)) => {
-        for b in branches {
-          // (Not of a reference that nested conditional's arms declare.)
-          let before = out.len();
-          arm_ref_dies(&b.e_data, out);
-          let declared: Vec<usize> = (before..out.len()).filter(|&i| b.decl_vars.contains(&out[i])).collect();
-          for i in declared.into_iter().rev() {
-            out.remove(i);
-          }
-        }
-      }
-      _ => {}
-    }
-  }
-}
-
-/// Remove the ends with no arrow of the reference `name` from `events`
-/// and the arms of the conditionals nested there.
-fn drop_ref_dies_of(events: &mut Vec<(usize, ExternalEvent)>, name: &str) {
-  events.retain(|(_, e)| !matches!(e, ExternalEvent::RefDie { from: ResourceTy::Value(r), .. } if *r.name() == name));
-  for (_, e) in events.iter_mut() {
-    if let ExternalEvent::Branch { branches, branch_type, .. } = e {
-      if !matches!(branch_type, BranchType::Loop(..)) {
-        for b in branches.iter_mut() {
-          drop_ref_dies_of(&mut b.e_data, name);
-        }
-      }
-    }
-  }
-}
-
-/// Whether `e` uses `r`, looking into a conditional's arms: unlike
-/// `touches`, a conditional r is merely live in (its scope ends at a
-/// `return` there, `if c { return; }`) doesn't use it.
-fn uses_within(e: &ExternalEvent, r: &ResourceAccessPoint) -> bool {
-  match e {
-    ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| b.e_data.iter().any(|(_, e)| uses_within(e, r))),
-    ExternalEvent::LoopExitMove { ro, .. } => ro == r,
-    // (A closure call may use what the closure captured; which captures
-    // isn't known here, so it counts, as before #1602.)
-    ExternalEvent::ClosureCall { .. } => true,
-    _ => touches(e, r),
-  }
-}
-
-/// Whether `events` give `r` a new value, before or after moving it out
-/// (`r = &mut b; let z = r;`: z holds the new loan, and the old one ended
-/// at the assignment, #1602).
-fn gets_new_value(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint) -> bool {
-  events.iter().any(|(_, e)| matches!(e,
-    ExternalEvent::StaticBorrow { to: ResourceTy::Value(t), .. } | ExternalEvent::MutableBorrow { to: ResourceTy::Value(t), .. }
-    | ExternalEvent::Move { to: ResourceTy::Value(t), .. } | ExternalEvent::Copy { to: ResourceTy::Value(t), .. } if t == r))
-}
-
 /// Where `r` is last used in `events` (one arm's): (line, index just
 /// after that event). A nested conditional counts up to its join.
 fn last_use_in(events: &[(usize, ExternalEvent)], r: &ResourceAccessPoint) -> Option<(usize, usize)> {
@@ -14571,12 +14387,6 @@ pub(crate) fn end_borrow_in_arms(
     if made_in_arm {
       continue;
     }
-    // (Nor in another arm that moves r's reference on, `let moved = r;`:
-    // what holds it there ends the borrow, at its own last use, #1602.
-    // Unless the arm gives r a new value: the old loan ends there.)
-    if handed_off_in(&arm.e_data, r, moved_into_result, holders) && !gets_new_value(&arm.e_data, r) {
-      continue;
-    }
     let mut copy = ev.1.clone();
     match &mut copy {
       ExternalEvent::StaticDie { id, .. } | ExternalEvent::MutableDie { id, .. } | ExternalEvent::RefDie { id, .. } => {
@@ -14598,7 +14408,7 @@ pub(crate) fn end_borrow_in_arms(
       arm.e_data.insert(i, (line, copy));
       continue;
     }
-    end_after_last_use(&mut arm.e_data, branch_type.get_start_end(b).0, copy, r, lender, unique_id, moved_into_result);
+    end_after_last_use(&mut arm.e_data, branch_type.get_start_end(b).0, copy, r, lender, unique_id);
   }
 }
 
@@ -14618,19 +14428,7 @@ fn end_after_last_use(
   r: &ResourceAccessPoint,
   lender: Option<&ResourceAccessPoint>,
   unique_id: &mut usize,
-  moved_into_result: &HashSet<usize>,
 ) {
-  // An arm that moves r's reference into another (`let moved = r;`), or
-  // into a call whose result keeps it (`let moved = id(r);`), hands the
-  // borrow on: that one ends it, not r (#1602).
-  // (Unless the arm gives r a new value, `r = &mut b;`: the old loan
-  // ends there.)
-  if events.iter().any(|(_, e)| matches!(e,
-    ExternalEvent::Move { from: ResourceTy::Value(f), to: ResourceTy::Value(t), id, .. }
-      if f == r && (t.is_ref() || (t.is_fn() && moved_into_result.contains(id)))))
-    && !gets_new_value(events, r) {
-    return;
-  }
   let at = match last_use_in(events, r) {
     Some((_, i)) if matches!(&events[i - 1].1, ExternalEvent::Branch { branches, branch_type, .. }
       if !matches!(branch_type, BranchType::Loop(..)) && !branches.iter().any(|b| b.decl_vars.contains(r))) => {
@@ -14649,7 +14447,7 @@ fn end_after_last_use(
             _ => unreachable!("only a borrow's end is moved into arms"),
           }
         }
-        end_after_last_use(&mut arm.e_data, branch_type.get_start_end(b).0, copy, r, lender, unique_id, moved_into_result);
+        end_after_last_use(&mut arm.e_data, branch_type.get_start_end(b).0, copy, r, lender, unique_id);
       }
       return;
     }
@@ -15161,10 +14959,6 @@ fn arm_declaring(
 /// ended as each starts, as `end_scrutinee_borrows_in_other_arms` says
 /// for one drawn from the start (#1525). Without it the `else` arm and
 /// the join after it were drawn still lent.
-/// `deepest_only`: only in the conditional whose arm declares r (the
-/// last on `path`): r's loan, made in an arm of each conditional above
-/// it (`if e { if let Some(x) = v.first() {`, on one line), never
-/// existed in their other arms (#1602).
 #[expect(clippy::too_many_arguments, reason = "the end's parts")]
 fn end_lender_in_other_arms(
   events: &mut [(usize, ExternalEvent)],
@@ -15175,11 +14969,10 @@ fn end_lender_in_other_arms(
   line: usize,
   mutable: bool,
   unique_id: &mut usize,
-  deepest_only: bool,
 ) {
   let Some(((k, a), rest)) = path.split_first() else { return };
   let ExternalEvent::Branch { branches, branch_type, split_point, merge_point, .. } = &mut events[*k].1 else { return };
-  if (!deepest_only || rest.is_empty()) && !branches.iter().any(|b| b.decl_vars.contains(lender)) && made <= *split_point && line < *merge_point && !matches!(branch_type, BranchType::Loop(..)) {
+  if !branches.iter().any(|b| b.decl_vars.contains(lender)) && made <= *split_point && line < *merge_point && !matches!(branch_type, BranchType::Loop(..)) {
     for (b, arm) in branches.iter_mut().enumerate() {
       if b == *a || arm.decl_vars.contains(r) || gives_back(&arm.e_data, lender) {
         continue;
@@ -15197,43 +14990,7 @@ fn end_lender_in_other_arms(
       arm.e_data.insert(at, (start, ev));
     }
   }
-  end_lender_in_other_arms(&mut branches[*a].e_data, rest, lender, r, made, line, mutable, unique_id, deepest_only);
-}
-
-/// Whether `events` (looking into conditionals) lend `lender` to a
-/// variable other than `r` on or before `line`.
-fn lent_to_other(events: &[(usize, ExternalEvent)], lender: &ResourceAccessPoint, r: &ResourceAccessPoint, line: usize) -> bool {
-  events.iter().any(|(l, e)| match e {
-    ExternalEvent::StaticBorrow { from, to: ResourceTy::Value(t), .. }
-    | ExternalEvent::MutableBorrow { from, to: ResourceTy::Value(t), .. } =>
-      *l <= line && from.extract_rap() == Some(lender) && t.name() != r.name() && !t.is_fn(),
-    ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| lent_to_other(&b.e_data, lender, r, line)),
-    _ => false,
-  })
-}
-
-/// The first line where `events` (looking into conditionals) lend
-/// `lender` to the variable `holder`, for a holder that borrows several
-/// lenders from different lines (`holder.push(&v[0])` after `vec![&w]`).
-fn loan_line_of(events: &[(usize, ExternalEvent)], holder: &str, lender: &ResourceAccessPoint) -> Option<usize> {
-  events.iter().filter_map(|(l, e)| match e {
-    ExternalEvent::StaticBorrow { from, to: ResourceTy::Value(t), .. }
-    | ExternalEvent::MutableBorrow { from, to: ResourceTy::Value(t), .. }
-      if from.extract_rap() == Some(lender) && t.name() == holder => Some(*l),
-    ExternalEvent::Branch { branches, .. } => branches.iter().filter_map(|b| loan_line_of(&b.e_data, holder, lender)).min(),
-    _ => None,
-  }).min()
-}
-
-/// Whether some conditional along `path` (see `arm_declaring`) doesn't
-/// draw `lender` yet, nor declares it in an arm.
-fn lender_new_on_path(events: &[(usize, ExternalEvent)], path: &[(usize, usize)], lender: &ResourceAccessPoint) -> bool {
-  let Some(((k, a), rest)) = path.split_first() else { return false };
-  let ExternalEvent::Branch { branches, live_vars, .. } = &events[*k].1 else { return false };
-  if branches.iter().any(|b| b.decl_vars.contains(lender)) {
-    return false;
-  }
-  !live_vars.contains(lender) || lender_new_on_path(&branches[*a].e_data, rest, lender)
+  end_lender_in_other_arms(&mut branches[*a].e_data, rest, lender, r, made, line, mutable, unique_id);
 }
 
 /// Make `lender` one of the variables drawn by each conditional along
@@ -15590,17 +15347,6 @@ fn insert_in_arm(
       && matches!(e, ExternalEvent::GoOutOfScope { ro, .. } if ro == lender))
     {
       at = i;
-    }
-  }
-  // Nor after the reference's own scope end on that line, a one-line
-  // arm's `let x = ra; (x.to_string(), h)`: listed after it, x's column
-  // was drawn holding its reference down to a scope-end dot on a row
-  // below (#1572).
-  if let Some((r, _)) = borrow_end_of(&ev.1) {
-    if let Some(i) = arm.e_data[..at].iter().position(|(l, e)| *l == ev.0
-      && matches!(e, ExternalEvent::GoOutOfScope { ro, .. } if ro == r))
-    {
-      at = at.min(i);
     }
   }
   if in_line_map && ev.1.is_var_arrow_ev() {

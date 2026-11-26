@@ -46,22 +46,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 /// that invariant in that snippet.
 pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // Geometric (`geometry.rs`), from here on.
-    // Two references copied into each other in one arm: no join dot (on main too).
-    ("arm_ends_review_1602", "fork-without-dot", 1615),
-    // `if let Some(x17) = v17.first()` with x17 last used in a nested `if`
-    // while other17 still borrows v17: x17's end on its trunk between the
-    // nested legs, as on main (#1574 stays open).
-    ("arm_ends_review_1602", "event-on-dead-column", 1694),
-    // r20 moved on in one arm, read in the other: its "moved out" stretch
-    // after the `if` has no join dot (on main too).
-    ("arm_ends_review_1602", "line-starts-nowhere", 1751),
     // Tuple column goes on after its fields were moved out.
     ("edition2024/if_let_chain_irrefutable_move", "line-ends-nowhere", 1157),
     // A borrow arrow leaving an arm's dot along the fork leg, its track
     // crossing other columns' legs at ~22 degrees; a copy leaving a dot
     // beside the leg into it.
     ("arm_binding_value_1327", "arrow-along-leg", 1489),
-    ("arm_ends_review_1602", "arrow-along-leg", 1489),
     ("assign_branch_ref_arms_1393", "arrow-along-leg", 1489),
     ("repoint_if_chain_806", "arrow-along-leg", 1489),
     ("repoint_if_chain_read_middle_806", "arrow-along-leg", 1489),

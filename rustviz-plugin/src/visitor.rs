@@ -9599,7 +9599,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         if evs.last().is_some_and(|(_, e)| e.get_id() == id) {
           let at = evs[..evs.len() - 1].iter().rposition(|(l, _)| *l <= line).map_or(0, |i| i + 1);
           let e = evs.pop().expect("just added");
+          let ended = match &e.1 {
+            ExternalEvent::OrAltBorrow { into, end: true, .. } if into.is_ref() => Some(into.clone()),
+            _ => None,
+          };
           evs.insert(at, e);
+          if let Some(r) = ended {
+            drop_from_later_conditionals(&mut evs[at + 1..], &r, line);
+          }
         }
       } else {
         let at = branch_e_data.iter().rposition(|(l, _)| *l <= line).map_or(0, |i| i + 1);
@@ -9699,6 +9706,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           if let Some(at) = at.filter(|_| self.preprocessed_events.last().is_some_and(|(_, e)| e.get_id() == id)) {
             let ev = self.preprocessed_events.pop().expect("just added");
             self.preprocessed_events.insert(at, ev);
+            // rustc ends the binding's loan here, so a conditional after
+            // it in the arm (`if c { return; }`) doesn't draw it: its join
+            // said "a still has no value here" (#1585).
+            if let Some(r) = from.extract_rap().filter(|r| r.is_ref()) {
+              drop_from_later_conditionals(&mut self.preprocessed_events[at + 1..], r, ends_at);
+            }
             // And among the arrows stacked on its line.
             if let Some(evs) = self.event_line_map.get_mut(&ends_at).filter(|_| unused) {
               if let (Some(k), Some(lo)) = (evs.iter().position(|e| e.get_id() == id), evs.iter().rposition(|e| placed(e.get_id()))) {
@@ -16893,4 +16906,20 @@ fn may_panic_or_leave<'tcx>(b: &'tcx Block<'tcx>) -> bool {
   let mut v = V { found: false };
   v.visit_block(b);
   v.found
+}
+
+/// Take `r`, a reference whose loan rustc ends on line `after`, off the
+/// variables drawn by the conditionals in `events` that start after that
+/// line (and those nested in them): nothing there uses it (#1585).
+fn drop_from_later_conditionals(events: &mut [(usize, ExternalEvent)], r: &ResourceAccessPoint, after: usize) {
+  for (_, e) in events.iter_mut() {
+    if let ExternalEvent::Branch { live_vars, branches, split_point, .. } = e {
+      if *split_point > after {
+        live_vars.remove(r);
+      }
+      for b in branches.iter_mut() {
+        drop_from_later_conditionals(&mut b.e_data, r, after);
+      }
+    }
+  }
 }
