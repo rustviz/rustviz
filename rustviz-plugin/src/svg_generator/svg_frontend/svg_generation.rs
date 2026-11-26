@@ -2344,16 +2344,27 @@ pub fn render_svg(
     // the blank lines below their line), which changes nothing.
     let start = visualization_data.clone();
     let mut extra: Vec<usize> = Vec::new();
-    let mut best: Option<(usize, usize, usize, (String, String, i32))> = None;
-    for _ in 0..4 {
+    let mut best: Option<(usize, usize, usize, (String, String, i32), usize)> = None;
+    timeline_panel::reset_work();
+    let mut first = 0;
+    for pass in 0..3 {
+        // (One pass with rows; a third, where the stacked arrows took the
+        // row, only within the layout work budget,
+        // `timeline_panel::within_budget`.)
+        if pass == 1 {
+            first = timeline_panel::work_done();
+        }
+        if pass > 1 && !timeline_panel::within_budget(first) {
+            break;
+        }
         let mut vd = start.clone();
         let (out, left, rows) = render_pass(annotated_src_str, source_rs_str, &mut vd, &extra);
         // (Fewer arrows on legs or columns, and no more other marks.)
-        let improves = best.as_ref().is_none_or(|b| left.count < b.0 && left.others <= b.1);
+        let improves = best.as_ref().is_none_or(|b| left.count < b.0 && left.others <= b.1 && left.fan_crossings <= b.4);
         let same_rows = best.as_ref().is_some_and(|b| b.2 == rows);
         if improves {
             *visualization_data = vd;
-            best = Some((left.count, left.others, rows, out));
+            best = Some((left.count, left.others, rows, out, left.fan_crossings));
         } else if !same_rows {
             break;
         }
@@ -2378,8 +2389,10 @@ pub fn render_svg(
 struct LeftOn {
     count: usize,
     lines: Vec<usize>,
-    /// The other marks the arrows make (`timeline_panel::ArrowsLeftOn`).
+    /// The other marks the arrows make, and the fans' crossings
+    /// (`timeline_panel::ArrowsLeftOn`).
     others: usize,
+    fan_crossings: usize,
 }
 
 /// One pass of `render_svg`, with a blank row added before the line after
@@ -2438,7 +2451,7 @@ fn render_pass(
         .filter_map(|&r| row_lines.get(..=r)?.iter().rev().find_map(|l| *l))
         .collect();
     lines.dedup();
-    let left = LeftOn { count: rows_wanted.count, lines, others: rows_wanted.others };
+    let left = LeftOn { count: rows_wanted.count, lines, others: rows_wanted.others, fan_crossings: rows_wanted.fan_crossings };
     let rows = row_lines.len();
     // Each element's `data-rv-id`, and its rows as code-panel lines.
     let timeline_panel_string = rv_attrs::finalize(&timeline_panel_string, &row_lines);

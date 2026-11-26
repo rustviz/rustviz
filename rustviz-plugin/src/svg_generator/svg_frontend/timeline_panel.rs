@@ -109,6 +109,10 @@ struct DotLayer {
     rows_added: bool,
     /// The ends of the slanted legs that no dot covers.
     corners: Vec<(f64, f64)>,
+    /// Laying the arrows out as main's router did, before #1605 (no fan
+    /// rule, dashed legs weighed as solid ones, none of `review_marks`):
+    /// a figure's fallback (`render_arrows_string_external_events_version`).
+    legacy: bool,
     /// Every column's lines and legs (`cols`, `legs`, `dashed_legs`): an
     /// arrow mustn't bend on one (`through_bends`).
     bend_lines: Vec<Piece>,
@@ -126,6 +130,8 @@ pub struct ArrowsLeftOn {
     /// The other marks `untangle` weighs (`untangle_cost`): a row added
     /// mustn't make more of them.
     pub others: usize,
+    /// The fans' crossings (`all_fan_crossings`): nor more of those.
+    pub fan_crossings: usize,
 }
 
 /// The rendered timeline panel.
@@ -5721,7 +5727,7 @@ enum LaneKind {
 /// line don't cross (#1312). The arrows are drawn twice: a first pass
 /// records what each covers (`items`) without drawing; `resolve` then
 /// picks the tracks, and the second pass draws with them.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 struct ArrowLanes {
     recording: bool,
     items: Vec<LaneItem>,
@@ -5765,6 +5771,14 @@ struct ArrowLanes {
     /// Tracks a row and a half off a dot may be tried too
     /// (`DotLayer::rows_added`).
     deep: bool,
+    /// #1542's fans (`spread_legs`): drawn as before #1542 everywhere
+    /// (`fan_rule_off`), or at these dots (`fan_old`); another order of
+    /// approaches at a dot (`fan_variant`); and the dots the rule drew, with
+    /// how many orders there are (`fans_seen`). See `lay_out_arrows`.
+    fan_rule_off: bool,
+    fan_old: BTreeSet<(i64, i64)>,
+    fan_variant: BTreeMap<(i64, i64), usize>,
+    fans_seen: BTreeMap<(i64, i64), usize>,
 }
 
 /// A straight piece of an arrow's shaft.
@@ -5974,7 +5988,7 @@ impl ArrowLanes {
             }
             placed.push(it);
         }
-        self.spread_legs(&placed, legs);
+        self.spread_legs(&placed, legs, dots);
         self.recording = false;
     }
 
@@ -5985,7 +5999,7 @@ impl ArrowLanes {
     /// dot). A head is about 36 degrees wide seen from the dot, so the
     /// legs go 42 and 84 degrees below (or above) a level arrow there,
     /// else 28 and 72 (20, 55 and 85 for three).
-    fn spread_legs(&mut self, placed: &[LaneItem], col_legs: &[Piece]) {
+    fn spread_legs(&mut self, placed: &[LaneItem], col_legs: &[Piece], dot_xy: &DotPositions) {
         // (dot's y, its x, goes right) -> (item, is its head, depth).
         let mut at: BTreeMap<(i64, i64, bool), Vec<(usize, bool, i64)>> = BTreeMap::new();
         for (i, it) in placed.iter().enumerate() {
@@ -6014,28 +6028,52 @@ impl ArrowLanes {
                 // dot's row (`level_in`) from a side no other arrow
                 // reaches or passes the dot on; one with no side left
                 // fans out as below.
-                if side.iter().filter(|l| l.1).count() >= 2 {
+                let fan_key = (key.0, key.1);
+                if side.iter().filter(|l| l.1).count() >= 2 && !self.fan_rule_off && !self.fan_old.contains(&fan_key) {
                     let &(_, dot_x, right) = key;
                     let (dot_y, x) = (key.0, dot_x as f64);
                     // A side is taken by an arrow or logo on the row at the
                     // dot on that side, or an arrow running past the dot.
-                    // (Columns' legs: `col_legs`, solid and dashed.)
-                    // So is one where a column's leg leaves the dot less
-                    // than 40 degrees off level: a level head would lie
-                    // beside it.
+                    // So is one where a column's leg (`col_legs`, solid and
+                    // dashed) leaves the dot less than 40 degrees off level:
+                    // a level head would lie beside it.
                     let leg_on = |right: bool| col_legs.iter().any(|&(p, q)| [(p, q), (q, p)].iter().any(|&(a, b)|
                         dist(a, (x, dot_y as f64)) < 1.0 && (b.0 > a.0) == right
                             && (b.1 - a.1).abs() < (b.0 - a.0).abs() * 40f64.to_radians().tan()));
-                    let taken = |right: bool| leg_on(right) || placed.iter().any(|o| o.y == dot_y && !matches!(o.kind, LaneKind::FnResult)
+                    // (Or a dot on the row there, which a level head's leg
+                    // would run through.)
+                    let reach = (LEVEL_IN_DX * 2 + 20) as f64;
+                    let dot_on = |right: bool| dot_xy.iter().any(|&(dx, dy)| dy == dot_y
+                        && if right { (dx as f64) > x + 2.0 && (dx as f64) < x + reach } else { (dx as f64) < x - 2.0 && (dx as f64) > x - reach });
+                    let taken = |right: bool| leg_on(right) || dot_on(right) || placed.iter().any(|o| o.y == dot_y && !matches!(o.kind, LaneKind::FnResult)
                         && if right { o.hi > x + 2.0 && o.lo < x + LEVEL_IN_DX as f64 * 2.0 } else { o.lo < x - 2.0 && o.hi > x - LEVEL_IN_DX as f64 * 2.0 });
-                    // (The tail's side first, then the far one.)
-                    let mut free: Vec<bool> = [false, true].into_iter().filter(|&far| !taken(right != far)).collect();
-                    let heads: Vec<&(usize, bool, i64)> = side.iter().copied().filter(|l| l.1).collect();
+                    // The free sides: level on the tail's side, level from
+                    // past the dot, then (for heads from below) from a track
+                    // half a row above the dot (the maintainer's ruling on
+                    // #1605: above is a side too).
+                    let mut free: Vec<FanSide> = [FanSide::Level { far: false }, FanSide::Level { far: true }].into_iter()
+                        .filter(|s| matches!(s, FanSide::Level { far } if !taken(right != *far)))
+                        .chain(down.then_some(FanSide::Above))
+                        .collect();
+                    let mut heads: Vec<&(usize, bool, i64)> = side.iter().copied().filter(|l| l.1).collect();
+                    // Another order (`fan_variant`, when the first one adds
+                    // crossings): which head comes in first, and the sides
+                    // tried the other way round.
+                    let variant = self.fan_variant.get(&fan_key).copied().unwrap_or(0);
+                    let n = heads.len();
+                    self.fans_seen.insert(fan_key, 2 * n);
+                    heads.rotate_left(variant % n);
+                    if (variant / n) % 2 == 1 {
+                        free.reverse();
+                    }
                     let mut rest: Vec<&(usize, bool, i64)> = side.iter().copied().filter(|l| !l.1).collect();
                     let dip_leg = |it: &LaneItem, depth: i64| ((depth.abs() as f64 / 56f64.to_radians().tan()).round() as i64)
                         .clamp(2, (((it.hi - it.lo) / 2.0) as i64).max(2));
-                    // (With both sides of the row taken, one more from below
-                    // on the dot's far side, at the same angle.)
+                    // A track half a row above the dot that lies on nothing.
+                    let above_free = |it: &LaneItem| placed.iter().all(|o| o.y != dot_y - LANE_STEP || !stretches_overlap((it.lo, it.hi), (o.lo, o.hi)))
+                        && !dot_xy.iter().any(|&(dx, dy)| (dy - (dot_y - LANE_STEP)).abs() < 8 && (dx as f64) > it.lo - 8.0 && (dx as f64) < it.hi + 8.0);
+                    // (With no side left, one more from below on the dot's
+                    // far side, at the same angle.)
                     let mut far_below = true;
                     for (k, &&(i, _, depth)) in heads.iter().enumerate() {
                         let it = &placed[i];
@@ -6043,7 +6081,8 @@ impl ArrowLanes {
                             self.leg_dx.insert((it.key, true), dip_leg(it, depth));
                             continue;
                         }
-                        if free.is_empty() {
+                        let pick = free.iter().position(|s| *s != FanSide::Above || above_free(it));
+                        let Some(at) = pick else {
                             // (Not off the figure's left edge.)
                             let d = dip_leg(it, depth);
                             let past_x = if right { x - d as f64 } else { x + d as f64 };
@@ -6051,17 +6090,24 @@ impl ArrowLanes {
                                 self.leg_dx.insert((it.key, true), d);
                                 self.far.insert(it.key);
                             } else {
-                                rest.push(&heads[k]);
+                                rest.push(heads[k]);
                             }
                             continue;
-                        }
-                        let far = free.remove(0);
-                        // (From past the dot, a few degrees off level: level,
-                        // it would read as one arrow with any leaving the dot
-                        // straight on, #1349.)
-                        self.level_in.insert(it.key, if far { LEVEL_IN_SLANT } else { 0 });
-                        if far {
-                            self.far.insert(it.key);
+                        };
+                        match free.remove(at) {
+                            // (From past the dot, a few degrees off level: level,
+                            // it would read as one arrow with any leaving the dot
+                            // straight on, #1349.)
+                            FanSide::Level { far } => {
+                                self.level_in.insert(it.key, if far { LEVEL_IN_SLANT } else { 0 });
+                                if far {
+                                    self.far.insert(it.key);
+                                }
+                            }
+                            FanSide::Above => {
+                                self.lane_y.insert(it.key, dot_y - LANE_STEP);
+                                self.leg_dx.insert((it.key, true), dip_leg(it, LANE_STEP));
+                            }
                         }
                     }
                     if rest.is_empty() {
@@ -6337,6 +6383,16 @@ impl ArrowLanes {
     }
 }
 
+/// A way into a dot for one of several heads coming into it from one side
+/// (`ArrowLanes::spread_legs`, #1542).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum FanSide {
+    /// Level along the dot's row, from the tail's side or from past the dot.
+    Level { far: bool },
+    /// From a track half a row above the dot.
+    Above,
+}
+
 /// The ways `ArrowLanes::alternatives` brings a head in level (#1499):
 /// on the tail's side or past its dot (`far`), level or at
 /// `LEVEL_IN_SLANT` degrees. (Coming in level from past its dot, it can
@@ -6585,7 +6641,7 @@ fn marks_on_others(drawn: &[Drawn], ends: &Ends) -> Vec<(usize, usize)> {
 /// arrow's index into `drawn`) per mark: a dot not its own end (#1316's
 /// `y -> a` past z's dot), or a column's stop bar (#1344). A hop's arc
 /// isn't a shaft.
-fn through_marks(drawn: &[Drawn], dots: &DotPositions, bars: &[(f64, f64)]) -> Vec<usize> {
+fn through_marks(drawn: &[Drawn], dots: &DotPositions, bars: &[(f64, f64)], legacy: bool) -> Vec<usize> {
     let off = |c: (f64, f64), (p, q): Piece| {
         let l = dist(p, q);
         let t = if l < 1e-9 { 0.0 } else { (((c.0 - p.0) * (q.0 - p.0) + (c.1 - p.1) * (q.1 - p.1)) / (l * l)).clamp(0.0, 1.0) };
@@ -6600,7 +6656,7 @@ fn through_marks(drawn: &[Drawn], dots: &DotPositions, bars: &[(f64, f64)]) -> V
             let c = (x as f64, y as f64);
             // Through its centre, or the 5 px stroke touching the dot's rim
             // (or within half a px of it, #1605's review).
-            let reach = if ends.iter().any(|&e| dist(e, c) < 6.0) { 4.5 } else { 5.0 + 2.5 + 0.5 };
+            let reach = if ends.iter().any(|&e| dist(e, c) < 6.0) { 4.5 } else if legacy { 5.0 + 2.5 } else { 5.0 + 2.5 + 0.5 };
             if d.pieces.iter().any(|&p| off(c, p) < reach) {
                 out.push(i);
             }
@@ -6609,7 +6665,7 @@ fn through_marks(drawn: &[Drawn], dots: &DotPositions, bars: &[(f64, f64)]) -> V
         // stroke over the sine of half the angle between its pieces (a
         // track turning back up at 56 degrees stopped 9 px from n's dot,
         // its corner on the dot's rim, #1605's review).
-        for w in d.pieces.windows(2) {
+        for w in d.pieces.windows(2).filter(|_| !legacy) {
             let (v, a, b) = if dist(w[0].1, w[1].0) < 0.5 { (w[0].1, w[0].0, w[1].1) }
                 else if dist(w[0].0, w[1].1) < 0.5 { (w[0].0, w[0].1, w[1].0) } else { continue };
             let (la, lb) = (dist(v, a), dist(v, b));
@@ -6839,6 +6895,36 @@ fn heads_on_heads(drawn: &[Drawn], touching: bool) -> Vec<usize> {
     out
 }
 
+/// The arrows whose shaft runs through another arrow's hop (within 3 px of
+/// its arc): the hop no longer reads as passing over a dot (#1605's review:
+/// a track leaving t's dot upward through the hop over it). One entry per
+/// pair.
+fn shafts_on_arcs(drawn: &[Drawn]) -> Vec<usize> {
+    let off = |c: (f64, f64), (p, q): Piece| {
+        let l = dist(p, q);
+        let t = if l < 1e-9 { 0.0 } else { (((c.0 - p.0) * (q.0 - p.0) + (c.1 - p.1) * (q.1 - p.1)) / (l * l)).clamp(0.0, 1.0) };
+        dist(c, (p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t))
+    };
+    // (Each hop's box, to skip the shafts nowhere near it.)
+    let hops: Vec<(&Drawn, (f64, f64, f64, f64))> = drawn.iter().filter(|b| b.logo.is_none() && !b.arcs.is_empty())
+        .map(|b| (b, b.arcs.iter().fold((f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+            |m, &(x, y)| (m.0.min(x - 3.0), m.1.min(y - 3.0), m.2.max(x + 3.0), m.3.max(y + 3.0)))))
+        .collect();
+    let mut out = Vec::new();
+    for (i, a) in drawn.iter().enumerate().filter(|(_, d)| d.logo.is_none()) {
+        for &(b, bx) in &hops {
+            if b.tip == a.tip {
+                continue;
+            }
+            let near = a.pieces.iter().filter(|&&(p, q)| p.0.max(q.0) >= bx.0 && p.0.min(q.0) <= bx.2 && p.1.max(q.1) >= bx.1 && p.1.min(q.1) <= bx.3);
+            if near.into_iter().any(|&piece| b.arcs.iter().any(|&c| off(c, piece) < 3.0)) {
+                out.push(i);
+            }
+        }
+    }
+    out
+}
+
 /// The arrows between two columns that run off the figure's left edge (a
 /// piece within 8 px of it), where they are cut off.
 fn off_left(drawn: &[Drawn], ends: &Ends) -> Vec<usize> {
@@ -6868,19 +6954,35 @@ fn through_corners(drawn: &[Drawn], corners: &[(f64, f64)], ends: &Ends) -> Vec<
     out
 }
 
+/// The marks this PR's review added (#1605): a track through a leg's joint
+/// (`through_corners`), a shaft through another arrow's bend or a bend on a
+/// column (`through_bends`), a head from above touching another
+/// (`heads_on_heads`), a shaft through a hop (`shafts_on_arcs`); and, apart,
+/// an arrow off the left edge (`off_left`, weighed like a shaft through a
+/// dot). None in a `legacy` layout (main's router, `lay_out_arrows`).
+fn review_marks(drawn: &[Drawn], dots: &DotLayer) -> (Vec<usize>, Vec<usize>) {
+    if dots.legacy {
+        return (Vec::new(), Vec::new());
+    }
+    let mut marks = through_corners(drawn, &dots.corners, &dots.lanes.ends);
+    marks.extend(through_bends(drawn, &dots.lanes.ends, &dots.bend_lines, &|k| dots.lanes.far.contains(k) || dots.lanes.level_in.contains_key(k)));
+    marks.extend(heads_on_heads(drawn, true));
+    marks.extend(shafts_on_arcs(drawn));
+    (marks, off_left(drawn, &dots.lanes.ends))
+}
+
 /// What `untangle` tries to draw another way: the marks on others
 /// (`marks_on_others`), the shafts through marks (`through_marks`, as
 /// `(i, i)`), the tracks hopping dots (`track_hops`; another track that
 /// passes none is better) and the arrows end to end (`end_to_end`).
 fn defects(drawn: &[Drawn], dots: &DotLayer) -> Vec<(usize, usize)> {
     let mut out = marks_on_others(drawn, &dots.lanes.ends);
-    out.extend(through_marks(drawn, &dots.positions, &dots.bars).into_iter().map(|i| (i, i)));
+    out.extend(through_marks(drawn, &dots.positions, &dots.bars, dots.legacy).into_iter().map(|i| (i, i)));
     out.extend(on_legs(drawn, &dots.legs).into_iter().map(|i| (i, i)));
     out.extend(on_dashed_legs(drawn, &dots.dashed_legs).into_iter().map(|i| (i, i)));
-    out.extend(through_corners(drawn, &dots.corners, &dots.lanes.ends).into_iter().map(|i| (i, i)));
-    out.extend(through_bends(drawn, &dots.lanes.ends, &dots.bend_lines, &|k| dots.lanes.far.contains(k) || dots.lanes.level_in.contains_key(k)).into_iter().map(|i| (i, i)));
-    out.extend(heads_on_heads(drawn, true).into_iter().map(|i| (i, i)));
-    out.extend(off_left(drawn, &dots.lanes.ends).into_iter().map(|i| (i, i)));
+    // (Not `review_marks`: they weigh in `untangle_cost`, so a search started
+    // for another mark avoids them, but don't start or prolong one: an
+    // unavoidable one made the search run its whole budget, #1605's timing.)
     out.extend((0..drawn.len()).filter(|&i| drawn[i].track_hops > 0).map(|i| (i, i)));
     out.extend(end_to_end(drawn, &dots.lanes.ends));
     out
@@ -6892,7 +6994,7 @@ fn defects(drawn: &[Drawn], dots: &DotLayer) -> Vec<(usize, usize)> {
 /// Second, to choose between drawings with as few of those: how many
 /// times two arrows cross.
 fn untangle_cost(drawn: &[Drawn], dots: &DotLayer) -> (usize, usize) {
-    let through = through_marks(drawn, &dots.positions, &dots.bars).len() + end_to_end(drawn, &dots.lanes.ends).len();
+    let through = through_marks(drawn, &dots.positions, &dots.bars, dots.legacy).len() + end_to_end(drawn, &dots.lanes.ends).len();
     let cross = |(p, q): Piece, (r, t): Piece| {
         let d = (q.0 - p.0) * (t.1 - r.1) - (q.1 - p.1) * (t.0 - r.0);
         if d.abs() < 1e-9 {
@@ -6941,11 +7043,15 @@ fn untangle_cost(drawn: &[Drawn], dots: &DotLayer) -> (usize, usize) {
     // A head on another arrow's hop.
     let on_arcs = arrows.iter().filter(|a| a.tri.len() == 3 && arrows.iter()
         .any(|b| b.tip != a.tip && b.arcs.iter().any(|&p| inside_tri(&a.tri, p) > -1.5))).count();
-    let hops: usize = drawn.iter().map(|d| d.track_hops).sum::<usize>() + through_corners(drawn, &dots.corners, &dots.lanes.ends).len()
-        + through_bends(drawn, &dots.lanes.ends, &dots.bend_lines, &|k| dots.lanes.far.contains(k) || dots.lanes.level_in.contains_key(k)).len() + heads_on_heads(drawn, true).len();
-    let through = through + off_left(drawn, &dots.lanes.ends).len();
+    let (marks, off) = review_marks(drawn, dots);
+    let hops: usize = drawn.iter().map(|d| d.track_hops).sum();
+    let through = through + off.len();
     (marks_on_others(drawn, &dots.lanes.ends).len() + on_legs(drawn, &dots.legs).len()
-        + on_dashed_legs(drawn, &dots.dashed_legs).len() + on_arcs + hops + 10 * (through + touching + stacked), crossings)
+        + on_dashed_legs(drawn, &dots.dashed_legs).len() + on_arcs + hops + 10 * (through + touching + stacked),
+     // (`review_marks` weigh with the crossings: they choose between
+     // drawings with as few of the rest, but never block a search's step,
+     // which made it try every pair of moves, #1605's timing.)
+     crossings + 2 * marks.len())
 }
 
 /// One of a field's arrows from or to several lenders other than the one
@@ -8282,19 +8388,63 @@ fn render_arrows_string_external_events_version(
             }
         }
     }
-    // First only recording what each arrow covers, into a scratch
-    // output, so that the tracks can be picked (`ArrowLanes`); then
-    // probing passes (`untangle`); then for real.
-    let mut scratch: BTreeMap<i64, (TimelinePanelData, TimelinePanelData)> = BTreeMap::new();
-    scratch.insert(-1, (TimelinePanelData::empty(), TimelinePanelData::empty()));
-    dots.lanes = ArrowLanes { recording: true, deep: dots.rows_added, ..Default::default() };
-    render_all_arrows(&mut scratch, visualization_data, resource_owners_layout, dots, registry);
-    let positions = dots.positions.clone();
-    let legs: Vec<Piece> = dots.legs.iter().chain(&dots.dashed_legs).copied().collect();
-    dots.lanes.resolve(&positions, &legs);
-    untangle(visualization_data, resource_owners_layout, dots, registry);
-    // What is still on a solid leg or a column, for `render_svg`.
-    let drawn = probe_arrows(visualization_data, resource_owners_layout, dots, registry);
+    // #1542's fans: drawn with the rule's approaches, unless that adds
+    // crossings at a fan (arrow-arrow crossings of its arrows, counted as
+    // `fan_crossings`) over the drawing without the rule; then the fan's
+    // other orders of approaches are tried, and if each adds one too, the
+    // fan is drawn as without the rule (the maintainer's ruling on #1605).
+    let fan_old: BTreeSet<(i64, i64)> = BTreeSet::new();
+    let mut fan_variant: BTreeMap<(i64, i64), usize> = BTreeMap::new();
+    let mut drawn = lay_out_arrows(visualization_data, resource_owners_layout, dots, registry, false, &fan_old, &fan_variant);
+    let first = work_done();
+    let seen = dots.lanes.fans_seen.clone();
+    // No fan may cross other arrows more than it does in main's drawing
+    // (the maintainer's ruling on #1605). Only where a fan's arrows cross
+    // any: the arrows laid out as main's router did (`legacy`); if a fan
+    // crosses more here, up to two other orders of approaches at the
+    // rule's fans (within the work budget, `within_budget`), else the
+    // figure keeps main's drawing.
+    if all_fan_crossings(&drawn) > 0 || !heads_on_heads(&drawn, false).is_empty() {
+        let kept = dots.lanes.clone();
+        let (legs, dashed) = (dots.legs.clone(), std::mem::take(&mut dots.dashed_legs));
+        dots.legs.extend(dashed.iter().copied());
+        dots.legacy = true;
+        let old = lay_out_arrows(visualization_data, resource_owners_layout, dots, registry, true, &fan_old, &BTreeMap::new());
+        let old_lanes = dots.lanes.clone();
+        dots.legacy = false;
+        dots.legs = legs;
+        dots.dashed_legs = dashed;
+        // (Or two heads into one dot on each other where main's drawing has
+        // none.)
+        let worse = |d: &[Drawn]| fan_dots(d).into_iter().any(|c| fan_crossings_at(d, c) > fan_crossings_at(&old, c))
+            || heads_on_heads(d, false).len() > heads_on_heads(&old, false).len();
+        dots.lanes = kept;
+        if worse(&drawn) {
+            let marks = untangle_cost(&drawn, dots).0;
+            let mut fixed = false;
+            let tries: Vec<((i64, i64), usize)> = seen.iter()
+                .filter(|&(&(y, x), _)| fan_crossings_at(&drawn, (x as f64, y as f64)) > 0)
+                .flat_map(|(&f, &n)| (1..n.min(3)).map(move |v| (f, v)))
+                .take(2).collect();
+            for (f, v) in tries {
+                if !within_budget(first) {
+                    break;
+                }
+                fan_variant.insert(f, v);
+                let d = lay_out_arrows(visualization_data, resource_owners_layout, dots, registry, false, &fan_old, &fan_variant);
+                if !worse(&d) && untangle_cost(&d, dots).0 <= marks {
+                    drawn = d;
+                    fixed = true;
+                    break;
+                }
+                fan_variant.remove(&f);
+            }
+            if !fixed {
+                drawn = old;
+                dots.lanes = old_lanes;
+            }
+        }
+    }
     let legs = on_legs(&drawn, &dots.legs);
     // (And two heads into one dot on each other, #1542: a fan with no side
     // left for one of its heads.)
@@ -8304,8 +8454,122 @@ fn render_arrows_string_external_events_version(
     let mut rows: Vec<usize> = left.iter().map(|&i| drawn[i].key.1).collect();
     rows.sort_unstable();
     rows.dedup();
-    dots.left_on = ArrowsLeftOn { rows, count: left.len(), others };
+    dots.left_on = ArrowsLeftOn { rows, count: left.len(), others, fan_crossings: all_fan_crossings(&drawn) };
     render_all_arrows(output, visualization_data, resource_owners_layout, dots, registry);
+}
+
+thread_local! {
+    /// The work the arrow layouts of the figure being drawn have done:
+    /// arrows drawn by probing passes (`probe_arrows`), summed. Deterministic,
+    /// unlike a clock. Reset by `render_svg` (`reset_work`).
+    static WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Starts counting the layout work of a figure afresh.
+pub fn reset_work() {
+    WORK.with(|w| w.set(0));
+}
+
+/// The layout work done so far for this figure (`WORK`).
+pub fn work_done() -> usize {
+    WORK.with(|w| w.get())
+}
+
+/// Whether another layout fits the budget: at most half again the work the
+/// figure's first layout did (`first`). The
+/// playground renders on every request (#1605: the extra layouts must not
+/// make a figure much slower).
+pub fn within_budget(first: usize) -> bool {
+    work_done() < first + first / 2
+}
+
+/// Picks every arrow's track (`ArrowLanes`): a recording pass of the
+/// arrows into a scratch output, `resolve`, then probing passes
+/// (`untangle`); `dots.lanes` is left set for the final drawing. #1542's
+/// fan rule off everywhere (`fan_rule_off`) or at the dots `fan_old`, with
+/// the orders `fan_variant`. Returns what the arrows are drawn as.
+fn lay_out_arrows(
+    visualization_data: &VisualizationData,
+    resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
+    dots: &mut DotLayer,
+    registry: &Handlebars,
+    fan_rule_off: bool,
+    fan_old: &BTreeSet<(i64, i64)>,
+    fan_variant: &BTreeMap<(i64, i64), usize>,
+) -> Vec<Drawn> {
+    let mut scratch: BTreeMap<i64, (TimelinePanelData, TimelinePanelData)> = BTreeMap::new();
+    scratch.insert(-1, (TimelinePanelData::empty(), TimelinePanelData::empty()));
+    dots.lanes = ArrowLanes {
+        recording: true, deep: dots.rows_added, fan_rule_off, fan_old: fan_old.clone(), fan_variant: fan_variant.clone(),
+        ..Default::default()
+    };
+    render_all_arrows(&mut scratch, visualization_data, resource_owners_layout, dots, registry);
+    let positions = dots.positions.clone();
+    let legs: Vec<Piece> = dots.legs.iter().chain(&dots.dashed_legs).copied().collect();
+    dots.lanes.resolve(&positions, &legs);
+    untangle(visualization_data, resource_owners_layout, dots, registry);
+    probe_arrows(visualization_data, resource_owners_layout, dots, registry)
+}
+
+/// How many times the arrows into the dot at `(y, x)` (a fan) cross other
+/// arrows, each crossing of two of them counted once.
+fn fan_crossings(drawn: &[Drawn], (y, x): (i64, i64)) -> usize {
+    fan_crossings_at(drawn, (x as f64, y as f64))
+}
+
+/// The centre of the dot an arrow's head points at: 5.25 px on from its
+/// tip.
+fn head_dot(d: &Drawn) -> Option<(f64, f64)> {
+    if d.logo.is_some() || d.tri.len() != 3 {
+        return None;
+    }
+    let (tip, mid) = (d.tri[1], ((d.tri[0].0 + d.tri[2].0) / 2.0, (d.tri[0].1 + d.tri[2].1) / 2.0));
+    let l = dist(tip, mid).max(1e-9);
+    Some((tip.0 + (tip.0 - mid.0) / l * 5.25, tip.1 + (tip.1 - mid.1) / l * 5.25))
+}
+
+/// `fan_crossings` for the heads into the dot at `c` (within 3 px).
+fn fan_crossings_at(drawn: &[Drawn], c: (f64, f64)) -> usize {
+    let fan: Vec<usize> = (0..drawn.len()).filter(|&i| head_dot(&drawn[i]).is_some_and(|h| dist(h, c) < 3.0)).collect();
+    let mut n = 0;
+    for &i in &fan {
+        for (j, b) in drawn.iter().enumerate().filter(|(_, b)| b.logo.is_none()) {
+            if j == i || (j < i && fan.contains(&j)) {
+                continue;
+            }
+            n += drawn[i].pieces.iter().map(|&p| b.pieces.iter().filter(|&&q| pieces_cross(p, q)).count()).sum::<usize>();
+        }
+    }
+    n
+}
+
+/// `fan_crossings` summed over every fan of the figure (2 or more heads
+/// within 8 px of each other).
+fn all_fan_crossings(drawn: &[Drawn]) -> usize {
+    fan_dots(drawn).into_iter().map(|c| fan_crossings_at(drawn, c)).sum()
+}
+
+/// Where the figure's fans are: a dot two or more heads point at.
+fn fan_dots(drawn: &[Drawn]) -> Vec<(f64, f64)> {
+    let tips: Vec<(f64, f64)> = drawn.iter().filter_map(head_dot).collect();
+    let mut dots: Vec<(f64, f64)> = Vec::new();
+    for &t in &tips {
+        if !dots.iter().any(|&d| dist(d, t) < 3.0) && tips.iter().filter(|&&u| dist(u, t) < 3.0).count() >= 2 {
+            dots.push(t);
+        }
+    }
+    dots
+}
+
+/// Whether two straight pieces cross (not just touch at an end).
+fn pieces_cross((p, q): Piece, (r, t): Piece) -> bool {
+    let d = (q.0 - p.0) * (t.1 - r.1) - (q.1 - p.1) * (t.0 - r.0);
+    if d.abs() < 1e-9 {
+        return false;
+    }
+    let u = ((r.0 - p.0) * (t.1 - r.1) - (r.1 - p.1) * (t.0 - r.0)) / d;
+    let v = ((r.0 - p.0) * (q.1 - p.1) - (r.1 - p.1) * (q.0 - p.0)) / d;
+    u > 0.0 && u < 1.0 && v > 0.0 && v < 1.0
 }
 
 fn render_all_arrows(
@@ -8348,6 +8612,7 @@ fn probe_arrows(
     dots.lanes.drawn.clear();
     render_all_arrows(&mut scratch, visualization_data, resource_owners_layout, dots, registry);
     dots.lanes.probing = false;
+    WORK.with(|w| w.set(w.get() + dots.lanes.drawn.len().max(1)));
     std::mem::take(&mut dots.lanes.drawn)
 }
 
@@ -8377,27 +8642,15 @@ fn untangle(
 ) {
     let start = dots.lanes.settings();
     let mut results = Vec::new();
-    // The search also runs with the dashed legs weighed as solid ones
-    // (as it did before #1489 made them background): from there the
-    // greedy search can reach a drawing it misses without them. Every
-    // drawing is then judged with the dashed legs as background, the
-    // first on a tie.
-    let solid = dots.legs.clone();
-    for dashed_weighed in [true, false] {
-        for hops in [false, true] {
-            if dashed_weighed {
-                dots.legs.extend(dots.dashed_legs.iter().copied());
-            }
-            dots.lanes.set(start.clone());
-            dots.lanes.probe_hops = hops;
-            untangle_search(visualization_data, resource_owners_layout, dots, registry);
-            dots.legs = solid.clone();
-            dots.lanes.probe_hops = true;
-            let drawn = probe_arrows(visualization_data, resource_owners_layout, dots, registry);
-            // (On a tie, the one with fewer heads along a column, #1488.)
-            let c = untangle_cost(&drawn, dots);
-            results.push(((c.0, c.1, on_cols(&drawn, &dots.cols).len()), dots.lanes.settings()));
-        }
+    for hops in [false, true] {
+        dots.lanes.set(start.clone());
+        dots.lanes.probe_hops = hops;
+        untangle_search(visualization_data, resource_owners_layout, dots, registry);
+        dots.lanes.probe_hops = true;
+        let drawn = probe_arrows(visualization_data, resource_owners_layout, dots, registry);
+        // (On a tie, the one with fewer heads along a column, #1488.)
+        let c = untangle_cost(&drawn, dots);
+        results.push(((c.0, c.1, on_cols(&drawn, &dots.cols).len()), dots.lanes.settings()));
     }
     // (The first on a tie: no hops weighed.)
     let best = results.into_iter().min_by_key(|(c, _)| *c).map(|(_, s)| s).unwrap_or(start);
@@ -8539,7 +8792,7 @@ fn untangle_search(
         let mut cands = Vec::new();
         // (Or from below on the dot's far side, at the angle a head
         // lengthened off a column comes in at, #1542.)
-        if !now.leg_dx.contains_key(&(key, true)) && dots.lanes.ends.get(&key).is_some_and(|&(t, f, _)| t != f) {
+        if !dots.legacy && !now.leg_dx.contains_key(&(key, true)) && dots.lanes.ends.get(&key).is_some_and(|&(t, f, _)| t != f) {
             let mut s = now.clone();
             if !s.far.remove(&key) {
                 s.far.insert(key);
@@ -8560,7 +8813,7 @@ fn untangle_search(
         // (Or, where it runs on a track, its head coming in level along
         // its dot's row from either side, or nearly (#1542): the next
         // arrow into a dot after one from below, on a side track.)
-        let level_ways: Vec<LaneSettings> = if dots.lanes.ends.get(&key).is_some_and(|&(t, f, _)| t != f) {
+        let level_ways: Vec<LaneSettings> = if !dots.legacy && dots.lanes.ends.get(&key).is_some_and(|&(t, f, _)| t != f) {
             level_in_ways().into_iter().map(|(past, angle)| {
                 let mut s = now.clone();
                 s.leg_dx.remove(&(key, true));
@@ -8582,7 +8835,7 @@ fn untangle_search(
             // arrows.)
             // (Two arrows crossing are a plain crossing: a head along a
             // column is worth two of them, #1542.)
-            if c.0 <= cost.0 && c.1 <= cost.1 + 2 && cc.0 < now_cost.0 && best.as_ref().is_none_or(|b| cc < b.0) && heads_touching(&d) <= heads_touching(&drawn) && inside(&d)
+            if c.0 <= cost.0 && c.1 <= cost.1 + if dots.legacy { 0 } else { 2 } && cc.0 < now_cost.0 && best.as_ref().is_none_or(|b| cc < b.0) && heads_touching(&d) <= heads_touching(&drawn) && inside(&d)
                 && brackets_hit(&d) <= brackets_hit(&drawn) {
                 best = Some((cc, s, d));
             }

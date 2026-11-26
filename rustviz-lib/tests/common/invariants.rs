@@ -58,11 +58,21 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // its column instead.
     ("arm_binding_value_1327", "arrow-along-leg", 1489),
     ("assign_branch_ref_arms_1393", "arrow-along-leg", 1489),
-    // Five returns into the first column's dot (q>a1@L19): level from the
-    // right, two fanned from below; the far side would run off the
-    // figure's left edge and the row added below gives no free side
-    // (#1606).
+    // Fans that keep main's drawing (one head still along the column
+    // under the dot): each order of #1542's approaches added a crossing,
+    // or two heads on each other, there, and no fan may have more
+    // crossings than on main (the maintainer's ruling on #1605).
+    ("cond_holder_local_ref_1475", "arrow-along-leg", 1542),
+    ("cond_holder_moved_1464", "arrow-along-leg", 1542),
+    ("field_lenders_1354", "arrow-along-leg", 1542),
+    ("holder_return_clear_of_leg_1476", "arrow-along-leg", 1542),
+    ("holder_tuple_literal_1459", "arrow-along-leg", 1542),
     ("iter_holder_copied_1399", "arrow-along-leg", 1542),
+    ("iter_mut_holder_1399", "arrow-along-leg", 1542),
+    ("let_else_holder_return_1458", "arrow-along-leg", 1542),
+    ("let_pattern_literal_unbound_moves", "arrow-along-leg", 1542),
+    ("pattern_ref_several_lenders", "arrow-along-leg", 1542),
+    ("store_through_mut_ref_1124", "arrow-along-leg", 1542),
 ];
 
 /// The invariants, by the name the failure list and messages use.
