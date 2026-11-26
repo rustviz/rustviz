@@ -3,7 +3,7 @@
 // v's type is known, so rustc reborrows r there (`&mut *r`; `let v = if ..`
 // moves r instead). r goes out of scope at its branch's end, and what v
 // holds from then on is r's loan of a (or b), until v's last use on line 23:
-// v gives a and b back there, and r's own borrow ends with its scope. main
+// v gives a and b back there; each r goes out of scope still lent to v. main
 // ended v's borrow at the join ("v's mutable borrow ends", v used on the
 // next line) and r's after r was out of scope.
 fn main() {

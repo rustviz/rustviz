@@ -1546,43 +1546,6 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         last
     }
 
-    /// The last line on which dropping the variable `name` (its RAP
-    /// name) may use a borrow its value holds, from rustc's own facts:
-    /// the drop check says its drop reads a lifetime of its type (a
-    /// `Box<dyn Fn() + 'a>` does: its destructor can't be checked, so
-    /// it may use what the closure borrowed; a `Vec<&T>` doesn't), and
-    /// Polonius' drop-liveness says where it's dropped while still
-    /// initialized: the end of its scope, or nowhere after `drop(m)`
-    /// moved it. Cleanup blocks are left out, as in
-    /// `nll_loan_end_lines`. None when its drop uses no lifetime.
-    ///
-    /// rustc keeps a holder's borrow until then even when it records no
-    /// loan for it: `boxed(|x| r.len() …)` reborrows `*r` through the
-    /// shared reference r, which is a copy of r's lifetime, not a loan
-    /// (#1107).
-    pub fn last_drop_use_line(&self, name: &str) -> Option<usize> {
-        let bwf = self.bwf;
-        let facts = bwf.input_facts.as_ref()?;
-        let names = self.mir_local_names(bwf);
-        #[expect(clippy::disallowed_methods, reason = "only collects the locals named `name`; order doesn't matter")]
-        let locals: Vec<Local> = names.iter()
-            .filter(|(l, n)| n.as_str() == name && facts.drop_of_var_derefs_origin.iter().any(|(v, _)| v == *l))
-            .map(|(l, _)| *l)
-            .collect();
-        if locals.is_empty() {
-            return None;
-        }
-        let out = Output::compute(facts, Algorithm::Naive, true);
-        #[expect(clippy::disallowed_methods, reason = "only takes the greatest line")]
-        let last = out.var_drop_live_on_entry.iter()
-            .filter(|(_, vars)| vars.iter().any(|v| locals.contains(v)))
-            .map(|(p, _)| self.point_to_location(*p, bwf))
-            .filter(|l| !bwf.body.basic_blocks[l.block].is_cleanup)
-            .map(|l| self.location_to_line(l, bwf))
-            .max();
-        last
-    }
-
     /// The variables whose loans rustc's borrow checker puts in the
     /// lifetimes of `name`'s type, or of its field `name.f.g` when
     /// `fields` is `["f", "g"]`: what a reference stored there may

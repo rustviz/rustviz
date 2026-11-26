@@ -4,7 +4,7 @@
 // in that branch, while `r` is still that branch's: h.0 borrows a or b.
 // h's `impl Drop` reads h.0 when h is dropped, at main's end (line 37), so
 // h.0 keeps that loan until then and gives a and b back there; each r's
-// own borrow ends with its scope. The old value's loan of b ends where it
+// own borrow ends where `H(r)` copies it (Q7). The old value's loan of b ends where it
 // is dropped, at the assignment. main drew h.0 borrowing b only, "Copy
 // from r to H" next to "Copy from r to h.0", and r's borrow ending on line
 // 37, after r was out of scope.

@@ -4,9 +4,9 @@
 // visit order, r's ends first: m's states ran back up from the lower
 // row, its column stopped at the lower dot and its dashed "borrow has
 // ended" rest began a row further down, in mid-air. Now the rest starts
-// at that dot, and between the two dots m is still shared with r: r2's
-// end says so ("... is no longer borrowed by r2, but is still immutably
-// borrowed by r").
+// at that dot. r2 is a copy of r and the last holder of their loan on the
+// `0` path (r isn't used on it again), so between the two dots m is no
+// longer shared: rustc accepts `m.clear()` right after `let _r2 = r;`.
 fn mutable() {
     let c = 1;
     let mut s = String::from("hi");

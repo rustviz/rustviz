@@ -177,8 +177,7 @@ struct ChainFailRef {
   /// What the old reference points to when that has no column (a
   /// string literal, a static); `old` is then empty.
   old_static: Option<StaticLender>,
-  /// The new reference's loan as `borrow_map` holds it, for
-  /// `loan_end_overrides`.
+  /// The new reference's loan as `borrow_map` holds it.
   new_id: (LoanId, ResourceTy),
   /// The condition's writes through `rap` (for "may have been changed").
   changes: bool,
@@ -1215,27 +1214,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     (evs, ends)
   }
 
-  /// For each new reference `fail` says a condition (or guard) assigned
-  /// (#603): on the path into its body (`then`: the condition and the
-  /// body, or the guarded arm), the new loan ends where rustc ends it
-  /// there, unless it's in scope after the conditional `whole` (see
-  /// `loan_end_overrides`). The failing paths end it on their own
-  /// (`chain_fail_events`).
-  fn chain_ref_then_ends(&mut self, fail: &ChainFail, then: rustc_span::Span, whole: rustc_span::Span) {
-    for r in fail.refs.iter() {
-      // (A call's lenders share the result's lifetime: one end.)
-      let mut end = None;
-      for (_, loan) in r.new.iter() {
-        let (last, past) = self.loan_scope_in(loan.0, &[then], whole);
-        if past {
-          end = None;
-          break;
-        }
-        end = end.max(last[0]);
-      }
-      if let Some(line) = end {
-        self.loan_end_overrides.push((r.new_id.0, r.new_id.1.clone(), line));
-      }
+  /// Notes the references `fail` says a condition (or guard) gave a new
+  /// loan (#603), for `emit_borrow_ends`: on the path into the body
+  /// (`then`: the condition and the body, or the guarded arm) the loan
+  /// ends where the facts end it there; the failing paths end it with
+  /// their own events (`chain_fail_events`).
+  fn note_chain_then(&mut self, fail: &ChainFail, then: rustc_span::Span, whole: rustc_span::Span) {
+    let sm = self.tcx.sess.source_map();
+    let line = |p: rustc_span::BytePos| sm.lookup_char_pos(p).line;
+    for r in &fail.refs {
+      self.chain_then.push((r.rap.name().to_owned(), (line(then.lo()), line(then.hi())), line(whole.hi())));
     }
   }
 
@@ -7155,9 +7143,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                       ExternalEvent::Copy { from: ResourceTy::Value(f), to: ResourceTy::Value(t), .. }
                         if f.name() == lhs_rap.name() && *t.name() == n))))));
           let keeps_old_loan = keeps_old_loan || same_value;
-          if same_value {
-            self.min_lifetimes.push((lhs_rap.name().to_owned(), line_num));
-          }
           self.hand_loan_to_carriers(lhs_rap.name(), &ref_data);
           self.hand_loan_to_reborrows(lhs_rap.name(), &ref_data, line_num);
           let to_ro = match ref_data.lender {
@@ -7249,12 +7234,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // (Only one whose borrow r's old value could be a copy of: one
           // still in use when r got it. An arm-local `let m2 = &mut s;`
           // used up before `let mut r3 = &s;` gives s back itself, #1515.)
-          if !self.ref_handed_off(lhs_rap.name()) && !taken_over {
-            let carried: Vec<String> = gone.iter()
-              .filter(|g| self.borrow_map.get(*g).is_none_or(|d| d.lifetime >= ref_data.assigned_at))
-              .cloned().collect();
-            self.loans_carried_on.extend(carried);
-          }
           // Reads of the old lenders before the old loan ends (`println!("{}",
           // b);` between `let mut r = &b;` and `r = &t;`) leave them shared
           // by r (#1492).
@@ -7363,18 +7342,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             self.defer_old_ends = end_line > line_num;
             self.add_borrow_end_ev(end_line, to_ro.clone(), lhs_rty.clone(), &ref_data, Vec::new());
             self.defer_old_ends = false;
-            if let ResourceTy::Value(l) = &to_ro {
-              self.repointed_ends.push((l.name().to_owned(), ref_data.assigned_at, end_line));
-            }
-            // A reborrow through a reference (`h.r` from `&*m`, m a `&mut`
-            // parameter) keeps that reference's borrow live until the
-            // reborrow ends here: m's own end comes after the give-back,
-            // not at its last use before it (#1538).
-            if let ResourceTy::Value(l) | ResourceTy::Deref(l) = &to_ro {
-              if l.is_ref() && self.borrow_map.contains_key(l.name()) {
-                self.min_lifetimes.push((l.name().to_owned(), end_line));
-              }
-            }
             // ...and to each further lender (#171), unless another
             // reference still borrows it there (`x = &b` with `r = if c {
             // &a } else { &b };`, #1493), as in the branch above (#1432):
@@ -7539,11 +7506,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           over.sort();
           for o in &over {
             borrowers.remove(o);
-          }
-          if borrowers.len() == 1 {
-            if let ResourceTy::Value(l) = &to_ro {
-              self.repointed_ends.push((l.name().to_owned(), modified_ref_data.assigned_at, o_end));
-            }
           }
           if borrowers.len() > 1 {
             // Another reference keeps the lender borrowed and gives
@@ -8381,7 +8343,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     };
     let path = if else_expr.is_some() { FailPath::Else } else { FailPath::NoElse };
     // Borrows it made that have ended by then (#688) come last.
-    self.chain_ref_then_ends(&chain_fail, guard_expr.span.to(if_expr.span), expr.span);
+    self.note_chain_then(&chain_fail, guard_expr.span.to(if_expr.span), expr.span);
     let (fail_events, fail_ends) = self.chain_fail_events(std::mem::take(&mut chain_fail), path,
       else_expr.map(|e| e.span), expr.span, fail_line);
     let fail_lo = fail_events.first().map(|ev| ev.get_id());
@@ -9176,7 +9138,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
       let failed = self.match_arm_guard(arm, inline, &mut pat_decls, &mut branch_e_data);
       if let Some((fail, _)) = &failed {
-        self.chain_ref_then_ends(fail, arm.span, expr.span);
+        self.note_chain_then(fail, arm.span, expr.span);
       }
       failed_guards.extend(failed);
       // While the body is visited, the pattern's and the guard's

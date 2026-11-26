@@ -1,5 +1,5 @@
 
-use std::{cmp::max, collections::{HashMap, HashSet, VecDeque}};
+use std::collections::{HashMap, HashSet, VecDeque};
 use log::warn;
 use rustc_hir::Mutability;
 use crate::svg_generator::data::{ShadowNote, ExternalEvent, RcCall, RcKind, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, MutRef, StaticRef};
@@ -1531,47 +1531,6 @@ pub fn fetch_mutability(expr: & Expr) -> Option<Mutability> {
 
 
 // BORROWING LOGIC HELPERS
-
-// Group loans for a certain lender into regions
-// A region is defined as an area where multiple loans on the same local are active at the same time
-//
-// Each loan is the line interval [assigned_at, lifetime]; a loan joins
-// the current region when it starts strictly before the region's end,
-// and extends that end. This is a sort-then-sweep merge: the loans are
-// visited by start line (then end line, then name). The previous
-// version merged them one at a time in `h`'s HashSet order, which is
-// random per process, so overlapping chains (a: 3-5, c: 4-7, b: 6-8)
-// came out as one region on some runs and two on others, and the
-// plugin drew or omitted the `c` -> lender return arrow at random
-// (#211). It also overwrote an existing region that started on the
-// same line as a new one that couldn't join it.
-pub fn get_regions(h: &HashSet<String>, borrow_map: &HashMap<String, RefData>) -> Vec<HashSet<String>> {
-  #[expect(clippy::disallowed_methods, reason = "sorted on a total key (names are unique) below")]
-  let mut loans: Vec<(usize, usize, &String)> = h
-    .iter()
-    .map(|borrower| {
-      let b_data = borrow_map.get(borrower).unwrap();
-      (b_data.assigned_at, b_data.lifetime, borrower)
-    })
-    .collect();
-  loans.sort();
-
-  // (region end, borrowers in the region)
-  let mut regions: Vec<(usize, HashSet<String>)> = Vec::new();
-  for (a_place, k_place, borrower) in loans {
-    match regions.last_mut() {
-      // `<=`: a borrow handed over on the line where the previous
-      // one ends (`r2 = t;` as t's last use) keeps the lender
-      // borrowed; it isn't returned in between (#291).
-      Some((k, members)) if a_place <= *k => {
-        *k = max(*k, k_place);
-        members.insert(borrower.clone());
-      }
-      _ => regions.push((k_place, HashSet::from([borrower.clone()]))),
-    }
-  }
-  regions.into_iter().map(|(_, members)| members).collect()
-}
 
 
 // get the non anonymous lenders and their respective 'active' borrowers

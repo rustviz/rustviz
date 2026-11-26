@@ -180,6 +180,15 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   // new value (#1343).
   let mut moves_out_first: Vec<usize> = Vec::new();
   let mut temp_emptying_moves: Vec<usize> = Vec::new();
+  // RustViz 3 fact layer: computed first, since the borrow ends come from
+  // it (`emit_borrow_ends`); it also feeds the state table and, if
+  // `RV3_FACTS` asks for them, the JSON dump.
+  let crate_facts = crate::facts::collect_crate(tcx, &in_target);
+  // (By the body's own path, `Foo::bar`: two fns can start on one line.)
+  let body_facts = |def_id: rustc_hir::def_id::LocalDefId| {
+    let func = tcx.def_path_str(def_id.to_def_id());
+    crate_facts.bodies.iter().find(|b| b.kind == "fn" && b.func == func)
+  };
 
   
   
@@ -283,7 +292,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
               &mut a_line_map, &mut owner_to_hash, &mut ids, output, &skip_lines,
             );
             visitor.visit_body(hir_body);
-            visitor.emit_borrow_ends();
+            visitor.emit_borrow_ends(body_facts(local_def_id));
             visitor.print_out_of_scope();
             visitor.fill_scope_end_holds(0);
             visitor.mark_temp_emptying_moves(0);
@@ -354,7 +363,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
           &mut a_line_map, &mut owner_to_hash, &mut ids, output, &skip_lines,
         );
         visitor.visit_body(hir_body);
-        visitor.emit_borrow_ends();
+        visitor.emit_borrow_ends(body_facts(def_id));
         visitor.print_out_of_scope();
         visitor.fill_scope_end_holds(0);
         visitor.mark_temp_emptying_moves(0);
@@ -442,10 +451,6 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   note_pairs.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
   let shadow_notes: HashMap<u64, ShadowNote> = note_pairs.into_iter().map(|(h, _, n)| (h, n)).collect();
 
-  // RustViz 3 fact layer, computed beside the 2.x events: the state
-  // table (nothing draws from it yet), and the JSON dump if `RV3_FACTS`
-  // asks for it.
-  let crate_facts = crate::facts::collect_crate(tcx, &in_target);
   let state_table = crate::facts::table::StateTable::from_facts(&crate_facts);
   let facts = crate::facts::dump(&crate_facts);
 
