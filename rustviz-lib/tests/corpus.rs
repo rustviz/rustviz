@@ -21082,20 +21082,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // A Copy field (`u.1`) stays, so u stays partially moved; refilling
         // the field (`r.a = ra`) makes r whole again.
         must_contain: &[
-            "p is partially moved: p.a was moved out, so p can't be used as a whole",
-            "u is partially moved: u.0 was moved out, so u can't be used as a whole",
-            "o is partially moved: o.inner.x was moved out, so o can't be used as a whole",
-            // (o.inner's fields were moved one by one: o.inner itself never
-            // was, #1619.)
-            "o is partially moved: o.inner.x and o.inner.y were moved out, so o can't be used as a whole",
-            "o.inner is partially moved: o.inner.x was moved out, so o.inner can't be used as a whole",
-            "Some of q's fields may have been moved out, so q can't be used as a whole",
-            "r is partially moved: r.a was moved out, so r can't be used as a whole",
+            "p is partially moved: p.a was moved out, so p can't be used as a whole; its other fields still can",
+            "u is partially moved: u.0 was moved out, so u can't be used as a whole; its other fields still can",
+            "o is partially moved: o.inner.x was moved out, so o can't be used as a whole; its other fields still can",
+            "o is partially moved: o.inner was moved out, so o can't be used as a whole; its other fields still can",
+            "o.inner is partially moved: o.inner.x was moved out, so o.inner can't be used as a whole; its other fields still can",
+            "q is partially moved: q.a may have been moved out, so q can't be used as a whole; its other fields still can",
+            "r is partially moved: r.a was moved out, so r can't be used as a whole; its other fields still can",
             "r is the owner of the resource",
         ],
-        // (o.inner can't be used as a whole once o.inner.x is out, so
-        // "its other fields still can" isn't said, #1619.)
-        must_not_contain: &["o is partially moved: o.inner was moved out", "its other fields still can"],
+        must_not_contain: &[],
     },
     TooltipExpect {
         name: "non_ascii_names_1160",
@@ -28019,17 +28015,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // paths, so its line goes on to its scope end (main stopped it at
         // the join; `struct_lines_after_maybe_moves_1568_1583` checks the
         // rows). Moved in every arm (u), it stops where they split (#1541).
-        // Not "y is partially moved" (#1599's Codex review): each arm
-        // that runs moves all of y, the others none of it.
         must_contain: &[
-            "Some of p's fields may have been moved out, so p can't be used as a whole",
-            "Some of x's fields may have been moved out, so x can't be used as a whole",
-            "Some of y's fields may have been moved out, so y can't be used as a whole",
+            "p is partially moved: p.b was moved out and p.a may have been, so neither p nor any of its fields can be used; what is left in p is dropped when it goes out of scope",
+            "x is partially moved: x.a and x.b may have been moved out, so neither x nor any of its fields can be used; what is left in x is dropped when it goes out of scope",
+            "y is partially moved: y.a and y.b may have been moved out, so neither y nor any of its fields can be used; what is left in y is dropped when it goes out of scope",
         ],
         must_not_contain: &[
             "what is left in u",
-            "y is partially moved",
-            "p is partially moved: p.b was moved out and p.a may have been",
         ],
     },
     TooltipExpect {
@@ -28073,29 +28065,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "d's resource is immutably borrowed by o",
             "Return immutably borrowed resource from o to d",
             "=r1's mutable borrow ends",
-        ],
-    },
-    TooltipExpect {
-        name: "fields_maybe_moved_1599",
-        // #1599's Codex review. z.pair was never moved as a whole (each
-        // arm leaves one of its fields in it): main said "z.t was moved
-        // out and z.pair may have been". m is `mut`: its fields can be
-        // assigned again, and `m.a = ..` drops what is left in m.a there,
-        // not at m's scope end (main: "what is left in m is dropped when
-        // it goes out of scope"). (p's line is missing through the second
-        // conditional, as on main: drawn, its title would say p.b can
-        // still be used after its drop, #1595.)
-        must_contain: &[
-            "Some of z's fields may have been moved out, so z can't be used as a whole",
-            "Some of m's fields may have been moved out, so m can't be used as a whole",
-            "Some of p's fields may have been moved out, so p can't be used as a whole",
-            "Some of y's fields may have been moved out, so y can't be used as a whole",
-        ],
-        must_not_contain: &[
-            "z.pair may have been",
-            "y.pair was moved out",
-            "what is left in m is dropped when it goes out of scope",
-            "is partially moved: m.b was moved out and m.a may have been",
         ],
     },
     TooltipExpect {

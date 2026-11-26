@@ -4253,9 +4253,9 @@ fn timeline_segment_title(
             }
             if parts.none_usable {
                 let surely: Vec<String> = parts.moved.iter().filter(|m| !parts.maybe_moved.contains(m)).cloned().collect();
-                return hover_messages::state_fields_maybe_all_moved(rap.name(), &surely, &parts.maybe_moved, rap.is_mut());
+                return hover_messages::state_fields_maybe_all_moved(rap.name(), &surely, &parts.maybe_moved);
             }
-            return hover_messages::state_partly_moved(rap.name(), &parts.moved, parts.maybe, !parts.nested);
+            return hover_messages::state_partly_moved(rap.name(), &parts.moved, parts.maybe);
         }
     }
     // An array a slice pattern moved some elements out of (#1285): the
@@ -9807,13 +9807,9 @@ fn parts_moved_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
     let mut maybe = false;
     // The fields moved in some branches of a conditional above only.
     let mut maybe_moved: Vec<String> = Vec::new();
-    // The direct parts nothing can be used of.
-    let mut unusable: Vec<&String> = Vec::new();
-    let mut nested = false;
     for t in &parts {
         let r = &t.resource_access_point;
         if moved_at(t, line) {
-            unusable.push(r.name());
             moved.push(r.name().clone());
             // Moved in some branches of a conditional above only.
             let before: Vec<(usize, Event)> = t.history.iter().filter(|(l, _)| *l <= line).cloned().collect();
@@ -9824,24 +9820,14 @@ fn parts_moved_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
             continue;
         }
         if let Some(inner) = parts_moved_at(r, visualization_data, line) {
-            nested = true;
             maybe |= inner.maybe;
-            if inner.all {
-                // (Its fields moved one by one, `drop(z.pair.a);
-                // drop(z.pair.b);`, are named: z.pair itself never moved,
-                // #1599.)
-                unusable.push(r.name());
-                moved.extend(inner.moved);
-                maybe_moved.extend(inner.maybe_moved);
-            } else if inner.none_usable {
-                // A field whose own fields are all moved, some on some
-                // paths only: nothing in it can be used, but it wasn't
-                // moved as a whole (`if c { drop(z.pair.a) } else {
-                // drop(z.pair.b) }` leaves one of them in it on every
-                // path), so its fields are named (#1599).
-                unusable.push(r.name());
-                moved.extend(inner.moved);
-                maybe_moved.extend(inner.maybe_moved);
+            // (A field whose own fields are all moved, some on some paths
+            // only, is maybe-moved as a whole: nothing in it can be used.)
+            if inner.all || inner.none_usable {
+                moved.push(r.name().clone());
+                if inner.none_usable {
+                    maybe_moved.push(r.name().clone());
+                }
             } else {
                 moved.extend(inner.moved);
                 maybe_moved.extend(inner.maybe_moved);
@@ -9851,7 +9837,7 @@ fn parts_moved_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
     if moved.is_empty() {
         return None;
     }
-    let mut all = parts.iter().all(|t| unusable.contains(&t.resource_access_point.name()));
+    let mut all = parts.iter().all(|t| moved.contains(t.resource_access_point.name()));
     // A field moved on some paths only is still in the struct on the
     // others, which drop it at the struct's scope end: the struct's line
     // goes on (`let s2 = p.b; if c { drop(p.a); } else if d { drop(p.a);
@@ -9865,10 +9851,10 @@ fn parts_moved_at(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
     // #1541): their arm legs carry what's left of the struct, whose line
     // stops where they split (it can't say its other fields still can be
     // used there).
-    if !all && !none_usable && parts.iter().all(|t| unusable.contains(&t.resource_access_point.name()) || moved_in_every_arm(t, line).is_some()) {
+    if !all && !none_usable && parts.iter().all(|t| moved.contains(t.resource_access_point.name()) || moved_in_every_arm(t, line).is_some()) {
         all = true;
     }
-    Some(PartsMoved { moved, maybe, all, maybe_moved, none_usable, nested })
+    Some(PartsMoved { moved, maybe, all, maybe_moved, none_usable })
 }
 
 /// The elements (`pair[0]`) a slice pattern moved out of an array's
@@ -9943,9 +9929,6 @@ struct PartsMoved {
     maybe_moved: Vec<String>,
     /// Every field is moved, some on some paths only (#1583).
     none_usable: bool,
-    /// Some of `moved` are fields of a field (`o.inner.x`): which of the
-    /// struct's own fields can still be used isn't said (#1619).
-    nested: bool,
 }
 
 /// The rows where a borrow of a field of what the `&mut` reference

@@ -3439,39 +3439,42 @@ pub fn state_arm_join(label: &str) -> String {
 // it can't be used as a whole any more, only the fields still in it.
 // `maybe`: on some paths through a conditional above only; Rust still
 // rejects using the struct as a whole after it.
-pub fn state_partly_moved(my_name: &String, moved: &[String], maybe: bool, _others_usable: bool) -> String {
-    // (Nothing about the other fields: one may be borrowed, or a field
-    // of a field moved, #1619.)
-    if maybe {
-        return state_fields_maybe_moved(my_name);
-    }
+pub fn state_partly_moved(my_name: &String, moved: &[String], maybe: bool) -> String {
     let names: Vec<String> = moved.iter().map(|m| styled_name_html(m)).collect();
-    let (list, verb) = match names.as_slice() {
-        [one] => (one.clone(), "was"),
-        [init @ .., last] => (format!("{} and {}", init.join(", "), last), "were"),
-        [] => (String::new(), "was"),
+    let (list, verb) = match (names.as_slice(), maybe) {
+        ([one], false) => (one.clone(), "was"),
+        ([one], true) => (one.clone(), "may have been"),
+        ([init @ .., last], false) => (format!("{} and {}", init.join(", "), last), "were"),
+        ([init @ .., last], true) => (format!("{} and {}", init.join(", "), last), "may have been"),
+        ([], _) => (String::new(), "was"),
     };
     format!(
-        "{0} is partially moved: {1} {2} moved out, so {0} can't be used as a whole",
+        "{0} is partially moved: {1} {2} moved out, so {0} can't be used as a whole; its other fields still can",
         styled_name_html(my_name), list, verb
     )
 }
 
-// Fields moved on some paths only (#1583, #1619): which ones, and what is
-// left where, isn't claimed.
-pub fn state_fields_maybe_moved(my_name: &String) -> String {
-    format!("Some of {0}'s fields may have been moved out, so {0} can't be used as a whole", styled_name_html(my_name))
-}
-
 // The line of a struct every field of which was moved out, some of them
 // on some paths through a conditional above only (`let s2 = p.b; if c {
-// drop(p.a); }`, #1583): on the other paths it still holds those, but
-// neither it nor any field of it can be used (E0382). It isn't
-// "partially moved" on every path (each arm may move all of it, #1599);
-// what is left is dropped when it is overwritten (a `mut` binding) or at
-// its scope end, as those dots say.
-pub fn state_fields_maybe_all_moved(my_name: &String, _surely: &[String], _maybe: &[String], _mutable: bool) -> String {
-    state_fields_maybe_moved(my_name)
+// drop(p.a); }`, #1583): on the other paths it still holds those, and
+// drops them at its scope end, but neither it nor any field of it can
+// be used (E0382).
+pub fn state_fields_maybe_all_moved(my_name: &String, surely: &[String], maybe: &[String]) -> String {
+    fn list(names: &[String]) -> String {
+        let fmt: Vec<String> = names.iter().map(|m| styled_name_html(m)).collect();
+        match fmt.as_slice() {
+            [init @ .., last] if !init.is_empty() => format!("{} and {}", init.join(", "), last),
+            _ => fmt.concat(),
+        }
+    }
+    let moved = match surely.len() {
+        0 => format!("{} may have been moved out", list(maybe)),
+        n => format!("{} {} moved out and {} may have been", list(surely), if n > 1 { "were" } else { "was" }, list(maybe)),
+    };
+    format!(
+        "{0} is partially moved: {1}, so neither {0} nor any of its fields can be used; what is left in {0} is dropped when it goes out of scope",
+        styled_name_html(my_name), moved
+    )
 }
 
 // The line of an array a slice pattern moved some elements out of
