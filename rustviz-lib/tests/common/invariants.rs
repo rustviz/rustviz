@@ -48,6 +48,10 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // A guard whose call stores a borrow and turns out false: the later
     // arm's legs start where the columns have no dot.
     ("guard_stores_borrow_1769", "line-starts-nowhere", 1786),
+    // Q6: the loop's exit edge ends the iterator's loan on the loop's
+    // closing row; every arm of the body's last `if` leaves the body, and
+    // the renderer ends xs's column in them.
+    ("exit_loop_body_all_exit", "event-on-dead-column", 1864),
     // Geometric (`geometry.rs`), from here on.
     // Tuple column goes on after its fields were moved out.
     // A borrow arrow leaving an arm's dot along the fork leg, its track
@@ -70,12 +74,10 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("fn_ret_ref_arg_lists", "arrow-along-leg", 1542),
     ("holder_return_clear_of_leg_1476", "arrow-along-leg", 1542),
     ("holder_tuple_literal_1459", "arrow-along-leg", 1542),
-    ("iter_holder_copied_1399", "arrow-along-leg", 1542),
     ("iter_mut_holder_1399", "arrow-along-leg", 1542),
     ("let_else_holder_return_1458", "arrow-along-leg", 1542),
     ("let_pattern_literal_unbound_moves", "arrow-along-leg", 1542),
     ("pattern_ref_several_lenders", "arrow-along-leg", 1542),
-    ("refs_array_literal", "arrow-along-leg", 1542),
     ("store_through_mut_ref_1124", "arrow-along-leg", 1542),
     ("tuple_scrutinee_nested", "arrow-along-leg", 1542),
     ("two_field_borrow_through_ref_1080", "arrow-along-leg", 1542),
@@ -84,6 +86,9 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("known_bugs/1580_repoint_later_use", "event-on-dead-column", 1580),
     ("known_bugs/1580_repoint_later_use", "fork-without-dot", 1580),
     ("known_bugs/1580_repoint_nested_arm_dead_loan", "arrow-along-leg", 1580),
+    // The arm's own ends of r2 and r3 (rustc's: both loans end as the arm
+    // starts), whose arrows the 2.x router lays along s2's leg.
+    ("known_bugs/1580_repoint_nested_arm_live_loan", "arrow-along-leg", 1580),
     ("known_bugs/1582_maybe_held_assign_move_join", "line-starts-nowhere", 1582),
     ("known_bugs/1584_maybe_held_second_returning_if", "line-starts-nowhere", 1584),
     ("known_bugs/1585_unused_ref_binding_nested_return", "invalid-state", 1585),
@@ -96,16 +101,12 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("known_bugs/1625_repoint_live_reborrow", "event-on-dead-column", 1625),
     ("known_bugs/1625_repoint_live_reborrow", "invalid-state", 1625),
     ("known_bugs/1627_closure_captures_review", "invalid-state", 1627),
-    ("known_bugs/1637_drop_holder_return", "field-outlives-moved-struct", 1637),
     ("known_bugs/1638_borrow_ref_scrutinee", "event-on-dead-column", 1638),
     ("known_bugs/1638_borrow_ref_scrutinee", "invalid-state", 1638),
     ("known_bugs/1638_chain_ref_scrutinee", "line-starts-nowhere", 1638),
     ("known_bugs/1645_move_then_two_reassigns", "drop-of-moved-value-at-reassign", 1645),
     ("known_bugs/1662_arm_loan_kinds", "invalid-state", 1662),
-    ("known_bugs/1664_stored_reference_slot", "invalid-state", 1664),
-    ("known_bugs/1681_reused_element", "invalid-state", 1681),
     ("known_bugs/1694_nested_overlapping_loans", "arrow-along-leg", 1694),
-    ("known_bugs/1694_nested_overlapping_loans", "event-on-dead-column", 1694),
     ("known_bugs/1715_nested_downgrade", "invalid-state", 1715),
     ("known_bugs/1732_stored_loan_kinds", "arrow-along-leg", 1732),
     ("known_bugs/1732_stored_loan_kinds", "invalid-state", 1732),

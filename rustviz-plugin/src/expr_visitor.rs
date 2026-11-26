@@ -12099,7 +12099,11 @@ pub fn print_out_of_scope(&mut self){
         // where the loop ends) needs the renderer to keep the binding's
         // column after its end: until then the binding gives the lender
         // back where the loop ends, as 2.x draws it.
+        // (A binding with no lender of its own to give back to, `for (a, b)
+        // in self.items.iter().zip(..)`, draws no arrow: its own end at its
+        // last use each time round, as rustc has it.)
         let end = match end {
+          End::LoopExit { own, .. } if matches!(lender, ResourceTy::Anonymous) => End::Own(own),
           End::LoopExit { back, .. } => End::Arrow(back),
           e => e,
         };
