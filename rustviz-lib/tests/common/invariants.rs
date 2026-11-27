@@ -57,7 +57,6 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // A borrow arrow leaving an arm's dot along the fork leg, its track
     // crossing other columns' legs at ~22 degrees; a copy leaving a dot
     // beside the leg into it.
-    ("arm_binding_value_1327", "arrow-along-leg", 1489),
     ("assign_branch_ref_arms_1393", "arrow-along-leg", 1489),
     ("repoint_if_chain_806", "arrow-along-leg", 1489),
     ("repoint_if_chain_read_middle_806", "arrow-along-leg", 1489),
@@ -228,6 +227,7 @@ struct Seg {
     /// `line` (a column outside conditionals), not `branch_line`.
     main: bool,
     state: String,
+    tip: String,
     lines: Vec<(f64, f64, f64, f64)>,
 }
 
@@ -331,7 +331,7 @@ pub fn parse(svg: &str) -> Fig {
                 let lines = n.descendants().filter(|c| c.has_tag_name("line"))
                     .map(|l| (num(l, "x1"), num(l, "y1"), num(l, "x2"), num(l, "y2")))
                     .collect();
-                fig.segs.push(Seg { id, var, hash, main: kind == "line", state: a("data-rv-state"), lines });
+                fig.segs.push(Seg { id, var, hash, main: kind == "line", state: a("data-rv-state"), tip: plain(&a("data-tooltip-text")), lines });
             }
             "arrow" => fig.arrows.push(Arrow {
                 id, var,
@@ -572,7 +572,13 @@ pub fn check(fig: &Fig, src: &str) -> Vec<(&'static str, String)> {
                 let partial = states_partial_drop(d)
                     && !earlier.iter().rev().find(|p| p.has_any(END) || p.has_any(INIT))
                         .is_some_and(|p| whole_move(p) && !INIT.iter().any(|i| p.pos(i) > p.pos("move")));
-                if !maybe && !box_contents && !partial {
+                // Assigned on every path that runs, so the value is there to
+                // drop, but drawn unusable (dashed) because the borrow checker
+                // also checks an unreachable path that skips the assignment
+                // (an irrefutable `if let`'s dead `else`, design Q5, #1867).
+                let borrowck_only_unassigned = fig.segs.iter().any(|s| s.hash == d.hash
+                    && s.tip.contains("is assigned on every path that runs") && meets(s, d.x, d.y).0);
+                if !maybe && !box_contents && !partial && !borrowck_only_unassigned {
                     out.push(("drop-without-value", d.describe()));
                 }
             }

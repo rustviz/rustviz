@@ -4,7 +4,7 @@ use crate::svg_generator::{
 };
 use anyhow::Result;
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// The rendered visualization. This is also the plugin's output format:
 /// it is printed to stdout as one JSON object and read back by
@@ -62,6 +62,8 @@ impl Rustviz {
       approx_notes,
       row_lines: Vec::new(),
       raised_headers: HashSet::new(),
+      fork_above: HashSet::new(),
+      inline_dead_rows: BTreeSet::new(),
       state_table,
       fn_source_lines,
       source_lines,

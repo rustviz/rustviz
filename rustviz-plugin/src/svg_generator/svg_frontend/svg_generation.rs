@@ -4,7 +4,7 @@ use crate::svg_generator::data::{branch_is_collapsed, is_param_value_line, retur
 use crate::svg_generator::svg_frontend::{code_panel, rv_attrs, timeline_panel};
 use handlebars::Handlebars;
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use crate::svg_generator::svg_frontend::templates::*;
 use crate::svg_generator::svg_frontend::themes::theme_css;
 use log::info;
@@ -1179,6 +1179,14 @@ struct OneLineArmGaps {
     /// it, or above it on the line's row, the two joins looked like one
     /// conditional's.
     join_past_inner: bool,
+    /// Design Q9: a conditional written on one line whose arms got rows of
+    /// their own, with no one-line conditional of its own in an arm (those
+    /// keep #1306's layout): it forks on the blank row above its line, every
+    /// column there (`VisualizationData::fork_above`), so each arm's leg
+    /// comes down a full row to its first row. Forked from the line's own
+    /// row, a column with an event of the first arm there forked half a row
+    /// up and one without forked on the line, a row lower.
+    fork_above: bool,
 }
 
 impl OneLineArmGaps {
@@ -1192,6 +1200,8 @@ impl OneLineArmGaps {
         binding_columns: &[(u64, u64)],
         arrow_tracks: &HashMap<usize, usize>,
         forced: bool,
+        disagree: bool,
+        one_row_per_arm: &BTreeSet<usize>,
     ) -> Self {
         let spans: Vec<(usize, usize)> = (0..branches.len()).map(|j| branch_type.get_start_end(j)).collect();
         // Arm j and an earlier arm both have events on the line arm j
@@ -1211,7 +1221,7 @@ impl OneLineArmGaps {
         // copies of everything `mutate_branch_lines` changes.
         let stacks = || branches.iter().zip(&spans).any(|(b, &(start, _))| {
             mutate_branch_lines(&mut b.clone(), &mut l_map.clone(), 0, (line_num, start),
-                &mut binding_columns.to_vec(), &mut arrow_tracks.clone(), false) > 0
+                &mut binding_columns.to_vec(), &mut arrow_tracks.clone(), false, one_row_per_arm, &mut HashSet::new()) > 0
         });
         let stacked: Vec<bool> = (0..spans.len())
             .map(|j| shares_row(j) && branches[..=j].iter().any(|b| stacks_on(b, spans[j].0)))
@@ -1229,9 +1239,12 @@ impl OneLineArmGaps {
         // take(g) } else { take(h) }`): the outer conditional is no longer
         // one row, so the inner fork sits below the outer one.
         let own_row = |j: usize| j > 0 && spans[j].0 == spans[j - 1].1 && on_line(&branches[j], spans[j].0);
+        // RustViz 3, design Q1: the arms leave a column in different states
+        // (from MIR, `StateTable::arms_disagree`): one row per arm.
+        let disagree = disagree && branch_is_collapsed(line_num, merge_point);
         let gap_before: Vec<bool> = (0..spans.len())
             .map(|j| stacked[j]
-                || (nests && own_row(j))
+                || ((nests || disagree) && own_row(j))
                 || (shares_row(j) && arms_arrows_overlap(branches, j, spans[j].0, binding_columns)))
             .collect();
         let on_joined_column = |e: &ExternalEvent| on_joined_column(e, live_vars);
@@ -1240,12 +1253,15 @@ impl OneLineArmGaps {
         let join_past_inner = join_below && branches.iter().any(|b| b.e_data.iter().any(|(l, e)| *l == merge_point
             && matches!(e, ExternalEvent::Branch { split_point, merge_point: m, .. } if *m == merge_point && branch_is_collapsed(*split_point, *m))));
         if !gap_before.iter().any(|&s| s) {
-            return OneLineArmGaps { gap_before, ends_on_merge: false, join_below, join_past_inner };
+            return OneLineArmGaps { gap_before, ends_on_merge: false, join_below, join_past_inner, fork_above: false };
         }
         let ends_on_merge = branches.iter().zip(&spans).rev()
             .find(|(b, _)| !b.e_data.is_empty())
             .is_some_and(|(b, &(_, end))| end == merge_point && on_line(b, end));
-        OneLineArmGaps { gap_before, ends_on_merge, join_below, join_past_inner }
+        // (The blank row above the line: `insert_blank_rows` puts one above
+        // every conditional whose arms share lines.)
+        let fork_above = branch_is_collapsed(line_num, merge_point) && !nests && line_num >= 2;
+        OneLineArmGaps { gap_before, ends_on_merge, join_below, join_past_inner, fork_above }
     }
 
     /// Whether any arm got a row of its own: a one-line conditional
@@ -1264,6 +1280,102 @@ impl OneLineArmGaps {
     fn before_merge(&self) -> bool {
         (self.ends_on_merge && self.gap_before.iter().any(|&g| g)) || self.join_below
     }
+}
+
+/// RustViz 3, design Q1: the conditionals (their events' ids) written on
+/// one line whose arms leave one of the columns drawn there in different
+/// states (the state table's per-arm cells): each arm gets a row of its
+/// own (`OneLineArmGaps`). Arms that agree stay on one row. Read while
+/// the events' lines are still source lines.
+fn one_row_per_arm_ids(visualization_data: &VisualizationData) -> BTreeSet<usize> {
+    fn walk(events: &[(usize, ExternalEvent)], vd: &VisualizationData, out: &mut BTreeSet<usize>) {
+        for (_, e) in events {
+            if let ExternalEvent::Branch { branches, split_point, merge_point, live_vars, id, .. } = e {
+                if branch_is_collapsed(*split_point, *merge_point) {
+                    #[expect(clippy::disallowed_methods, reason = "collected into a sorted set")]
+                    let names: BTreeSet<String> = live_vars.iter().map(|r| r.name().to_owned()).collect();
+                    // (This conditional's own arms, by their source spans: not
+                    // a sibling conditional's on the same line.)
+                    let spans: Vec<_> = branches.iter().map(|b| b.source_span).collect();
+                    if vd.state_table.arms_disagree(*split_point, &names, &spans) {
+                        out.insert(*id);
+                    }
+                }
+                for b in branches {
+                    walk(&b.e_data, vd, out);
+                }
+            }
+        }
+    }
+    let mut out = BTreeSet::new();
+    walk(&visualization_data.preprocess_external_events, visualization_data, &mut out);
+    out
+}
+
+/// The rows of code that never runs (`StateTable::dead_row`) inside an
+/// `else { .. }` block and outside every conditional drawn with arms: the
+/// dead `else` of an irrefutable `if let`, drawn inline (#987). (Not the
+/// code after an `if let` whose body always leaves: nothing is drawn for
+/// it, #1004.) Read while the events' lines are still source lines.
+fn inline_dead_rows(visualization_data: &VisualizationData) -> BTreeSet<usize> {
+    fn spans(events: &[(usize, ExternalEvent)], out: &mut Vec<(usize, usize)>) {
+        for (_, e) in events {
+            if let ExternalEvent::Branch { branches, split_point, merge_point, .. } = e {
+                out.push((*split_point, *merge_point));
+                for b in branches {
+                    spans(&b.e_data, out);
+                }
+            }
+        }
+    }
+    let mut drawn = Vec::new();
+    spans(&visualization_data.preprocess_external_events, &mut drawn);
+    // The `else` blocks: from the `else` keyword (a word of its own, not
+    // part of a name like `dead_else_early`) to the line its block's brace
+    // closes on, the `{` on that line or a later one. A closing line with
+    // only its `}` counts only where the code after it is dead too: else
+    // below it the conditional has joined, on the path that runs.
+    let text: Vec<String> = visualization_data.source_lines.iter().map(|l| timeline_panel::code_text(l)).collect();
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut elses: Vec<(usize, usize, bool)> = Vec::new();
+    for (i, t) in text.iter().enumerate() {
+        let keywords = t.match_indices("else").map(|(p, _)| p).filter(|&p| {
+            !t[..p].chars().next_back().is_some_and(word) && !t[p + 4..].chars().next().is_some_and(word)
+        });
+        for p in keywords {
+            // The block's `{`: the first after the keyword.
+            let Some((oi, open)) = text.iter().enumerate().skip(i)
+                .find_map(|(j, line)| line[if j == i { p } else { 0 }..].find('{').map(|o| (j, o + if j == i { p } else { 0 })))
+            else { continue };
+            let mut depth = 0i64;
+            let close = text.iter().enumerate().skip(oi).find_map(|(j, line)| {
+                let from = if j == oi { open } else { 0 };
+                for (k, c) in line[from..].char_indices() {
+                    match c {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return Some((j + 1, line[..from + k].trim().is_empty()));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            });
+            if let Some((close, lone)) = close {
+                elses.push((i + 1, close, lone && close > i + 1));
+            }
+        }
+    }
+    let dead = visualization_data.state_table.dead_rows();
+    // (A lone `}` counts where the code after it is dead too: the `if let`
+    // arm always leaves, so only the imaginary path goes on past it.)
+    dead.iter().copied()
+        .filter(|r| elses.iter().any(|&(e, c, lone)| e < *r && (*r < c || (*r == c && !(lone && !dead.contains(&(c + 1)))))))
+        .filter(|r| !drawn.iter().any(|(s, m)| s <= r && r <= m))
+        .collect()
 }
 
 /// How far an arm's first row moves (`start`, the line it starts on, of a
@@ -1309,6 +1421,8 @@ pub fn mutate_branch_lines(
     binding_columns: &mut Vec<(u64, u64)>,
     arrow_tracks: &mut HashMap<usize, usize>,
     in_spread_arm: bool,
+    one_row_per_arm: &BTreeSet<usize>,
+    fork_above: &mut HashSet<usize>,
 ) -> usize {
     let old_extra_lines = extra_lines;
     let src_line: HashMap<usize, usize> = b_data.e_data.iter().map(|(l, e)| (e.get_id(), *l)).collect();
@@ -1349,10 +1463,10 @@ pub fn mutate_branch_lines(
             _ => *l += extra_lines_here, // update starting line of event
         }
         match e {
-            ExternalEvent::Branch {branches, split_point, merge_point, branch_type, live_vars, .. } => {
+            ExternalEvent::Branch {branches, split_point, merge_point, branch_type, live_vars, id, .. } => {
                 split_rows = (*merge_point > line_num).then_some((line_num, extra_lines));
                 *split_point = *l; // update split point
-                let gaps = OneLineArmGaps::of(branches, branch_type, *merge_point, line_num, live_vars, l_map, binding_columns, arrow_tracks, in_spread_arm);
+                let gaps = OneLineArmGaps::of(branches, branch_type, *merge_point, line_num, live_vars, l_map, binding_columns, arrow_tracks, in_spread_arm, one_row_per_arm.contains(id), one_row_per_arm);
                 for (j, branch) in branches.iter_mut().enumerate(){ // mutate branches
                     let (start, end) = branch_type.get_mut_start_end(j);
                     let before_gap = extra_lines;
@@ -1362,7 +1476,7 @@ pub fn mutate_branch_lines(
                     }
                     let pattern_lines = (line_num, *start);
                     *start += arm_start_shift(*start, line_num, before_gap, extra_lines);
-                    let b = mutate_branch_lines(branch, l_map, extra_lines, pattern_lines, binding_columns, arrow_tracks, gaps.spread());
+                    let b = mutate_branch_lines(branch, l_map, extra_lines, pattern_lines, binding_columns, arrow_tracks, gaps.spread(), one_row_per_arm, fork_above);
                     extra_lines += b;
                     *end += extra_lines;
                 }
@@ -1377,6 +1491,12 @@ pub fn mutate_branch_lines(
                     extra_lines += 1;
                 }
                 *merge_point += extra_lines + usize::from(gaps.join_past_inner);
+                // (Not one on the line the conditional it is in splits on, a
+                // let-chain's block, #1287: the outer fork is raised above it
+                // already, on the row above.)
+                if gaps.fork_above && line_num != pattern_lines.0 && !branch_is_collapsed(*split_point, *merge_point) {
+                    fork_above.insert(*id);
+                }
             }
             _ => {
                 // add extra lines if we need to
@@ -1828,7 +1948,7 @@ fn insert_blank_rows(annotated_src_str: &str, source_rs_str: &str, visualization
 
 /// Give every external event its row, inserting the extra rows stacked arrows
 /// need. Returns the number of rows inserted below each line.
-fn place_external_events(source_rs_str: &str, visualization_data: &mut VisualizationData) -> HashMap<usize, usize> {
+fn place_external_events(source_rs_str: &str, visualization_data: &mut VisualizationData, one_row_per_arm: &BTreeSet<usize>) -> HashMap<usize, usize> {
     //-----------------------update line number for external events------------------
     // This might be the worst part of the code-base
     // extra lines need to be 'inserted' when two (or more) events that produce an arrow
@@ -1942,11 +2062,11 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
         // println!("line {} event {:#?}", line_num, event);
         match event {
             // need to mutate line numbers of events inside the branch
-            ExternalEvent::Branch { branches, split_point, merge_point, branch_type, live_vars, .. } => {
+            ExternalEvent::Branch { branches, split_point, merge_point, branch_type, live_vars, id, .. } => {
                 split_rows = (*merge_point > *split_point).then_some((*split_point, extra_lines));
                 *split_point += extra_lines;
                 branch_line = *line_num + extra_lines;
-                let gaps = OneLineArmGaps::of(branches, branch_type, *merge_point, *line_num, live_vars, &line_insertion_map, &visualization_data.binding_columns, &visualization_data.arrow_tracks, false);
+                let gaps = OneLineArmGaps::of(branches, branch_type, *merge_point, *line_num, live_vars, &line_insertion_map, &visualization_data.binding_columns, &visualization_data.arrow_tracks, false, one_row_per_arm.contains(id), one_row_per_arm);
                 let extra_before = extra_lines;
                 for (j, branch) in branches.iter_mut().enumerate() {
                     let (start, end) = branch_type.get_mut_start_end(j);
@@ -1958,7 +2078,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                     let pattern_lines = (*line_num, *start);
                     *start += arm_start_shift(*start, *line_num, before_gap, extra_lines);
                     // recurse into the branch
-                    let b = mutate_branch_lines(branch, &mut line_insertion_map, extra_lines, pattern_lines, &mut visualization_data.binding_columns, &mut visualization_data.arrow_tracks, gaps.spread());
+                    let b = mutate_branch_lines(branch, &mut line_insertion_map, extra_lines, pattern_lines, &mut visualization_data.binding_columns, &mut visualization_data.arrow_tracks, gaps.spread(), one_row_per_arm, &mut visualization_data.fork_above);
                     extra_lines += b;
                     *end += extra_lines;
                 }
@@ -1973,6 +2093,9 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                     extra_lines += 1;
                 }
                 *merge_point += extra_lines + usize::from(gaps.join_past_inner);
+                if gaps.fork_above && !branch_is_collapsed(*split_point, *merge_point) {
+                    visualization_data.fork_above.insert(*id);
+                }
                 if extra_lines > extra_before {
                     branch_extras.push((*line_num, extra_lines - extra_before));
                 }
@@ -2404,6 +2527,8 @@ pub fn render_svg(
     // below so that pass operates on the post-hide layout — `prev`
     // checks for fn neighbours, etc., reflect what the user will
     // actually see.
+    let one_row_per_arm = one_row_per_arm_ids(visualization_data);
+    visualization_data.inline_dead_rows = inline_dead_rows(visualization_data);
     let (post_hide_a, post_hide_s) = hide_source_lines(annotated_src_str, source_rs_str, visualization_data, hide_lines);
     let annotated_src_str: &str = post_hide_a.as_str();
     let source_rs_str: &str = post_hide_s.as_str();
@@ -2412,7 +2537,7 @@ pub fn render_svg(
     let annotated_src_str: &str = new_a_str.as_str();
     let source_rs_str: &str = new_s_str.as_str();
 
-    let line_insertion_map = place_external_events(source_rs_str, visualization_data);
+    let line_insertion_map = place_external_events(source_rs_str, visualization_data, &one_row_per_arm);
 
     sort_line_map_events(visualization_data);
     info!("processed line map {:#?}", visualization_data.event_line_map);
@@ -2452,7 +2577,8 @@ pub fn render_svg(
     let (timeline_panel_string, max_width) = timeline_panel::render_timeline_panel(visualization_data);
     // Each element's `data-rv-id`, and its rows as code-panel lines.
     let timeline_panel_string = rv_attrs::finalize(&timeline_panel_string, &row_lines);
-    let tl_rv = rv_attrs::invalid_states_attr(visualization_data, &row_lines);
+    let tl_rv = rv_attrs::invalid_states_attr(visualization_data, &row_lines)
+        + &rv_attrs::dead_rows_attr(&visualization_data.inline_dead_rows);
     
     // Code-panel width: scale with the longest source line so long
     // function signatures (e.g. `fn compare_strings(_a: &String,
