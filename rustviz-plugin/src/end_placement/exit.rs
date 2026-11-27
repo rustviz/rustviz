@@ -19,7 +19,7 @@ struct EndEdge<'a> {
 type Template = (usize, ExternalEvent, Path);
 
 impl ExprVisitor<'_, '_> {
-  pub(crate) fn place_exit_ends(&mut self) {
+  pub(crate) fn place_exit_ends(&mut self, empty_payloads: &BTreeSet<(usize, crate::facts::SwitchEdge)>) {
     let Some(facts) = self.body_facts else { return };
     let mut slots = Vec::new();
     templates_in(self.preprocessed_events, &mut Vec::new(), None, &mut slots);
@@ -128,6 +128,10 @@ impl ExprVisitor<'_, '_> {
                 source
               }
             };
+          if fact.fieldless_operand.as_ref() == Some(giver) && fact.occurrence.successor.is_some_and(|to|
+            empty_payloads.contains(&(*loan, crate::facts::SwitchEdge { switch: fact.location, successor: to.block }))) {
+            continue;
+          }
           let list = events_at(self.preprocessed_events, &site.path).unwrap();
           if list.iter().any(
             |(_, e)| matches!(e,ExternalEvent::OrAltBorrow { into,ro,end:true,.. } if into == r && Some(ro) == to.extract_rap()),

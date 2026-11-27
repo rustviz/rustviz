@@ -6887,7 +6887,7 @@ pub fn event_dot_copy_field_returned(field: &str, parent: &str) -> String {
 /// where it comes from and goes to, then the special cases (a returned
 /// call result, an `Rc` call, a borrow ending, a `break` alternative, a
 /// borrow a call result keeps).
-pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &ResourceTy, option_ref: bool) -> String {
+pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &ResourceTy, option_ref: bool, borrow_intro: Option<&String>) -> String {
     if let ExternalEvent::Move { carried_with: Some((parent, dest)), .. } = external_event {
         if !matches!(to, ResourceTy::Caller | ResourceTy::Anonymous) {
             return field_carried_with(&from.name(), &to.name(), parent, dest);
@@ -6964,6 +6964,7 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
             title = arrow_rc_call(&from.name(), &to.name(), call);
         }
     }
+    if let Some(intro) = borrow_intro { title.clone_from(intro); }
     if let ExternalEvent::Move { break_alt: Some(alt), .. }
          | ExternalEvent::Copy { break_alt: Some(alt), .. }
          | ExternalEvent::StaticBorrow { break_alt: Some(alt), .. }
@@ -6994,7 +6995,7 @@ pub fn arrow_field_lenders_title(external_event: &ExternalEvent, from: &Resource
         let which = if previous { "The earlier reference" } else { "The reference" };
         format!("{which} in {field} no longer keeps {places} borrowed. The borrow checker can still restrict {all} through other references")
     } else {
-        let title = arrow_full_title(external_event, from, to, option_ref);
+        let title = arrow_full_title(external_event, from, to, option_ref, None);
         let field = styled_name_html(&to.name());
         let title = title.replacen(&format!(" from {}", styled_name_html(&from.name())), &format!(" from {}", or_list(lenders)), 1);
         // A call's result says why already (`arrow_borrow_via_call_suffix`).

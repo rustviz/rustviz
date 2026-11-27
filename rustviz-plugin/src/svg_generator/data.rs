@@ -5765,7 +5765,7 @@ impl Visualizable for VisualizationData {
             };
             states.push((previous_line, row, pre_event_state));
             match e {
-                Event::Branch { branch_history, ty, split_point, merge_point, maybe_init, maybe_held, on_exhaustion, .. } => {
+                Event::Branch { branch_history, ty, split_point, merge_point, maybe_init, maybe_held, on_exhaustion, id, .. } => {
                     let entry_state = previous_state.clone();
                     // Timeline is empty in the middle during a branch
                     states.push((*split_point, *merge_point, State::OutOfScope));
@@ -5778,7 +5778,12 @@ impl Visualizable for VisualizationData {
                     let mut broke_states: Vec<State> = Vec::new();
                     for (i, branch) in branch_history.iter_mut().enumerate() {
                         let diverges = branch.diverges;
-                        branch.entry_state = Some(previous_state.clone());
+                        let entry = if self.row_layout.fieldless_lenders.contains_key(&(*id, i, *hash)) {
+                            State::FullPrivilege { s: LineState::Full }
+                        } else {
+                            previous_state.clone()
+                        };
+                        branch.entry_state = Some(entry.clone());
                         let end_state = self.compute_branch_states(
                             & mut branch.e_data,
                             & mut branch.states,
@@ -5789,7 +5794,7 @@ impl Visualizable for VisualizationData {
                             // bridges that last row — unless the
                             // branches share lines (#117).
                             branch_column_rows(*split_point, *merge_point),
-                            previous_state.clone());
+                            entry);
                         if !diverges {
                             reaching_states.push(end_state);
                         } else if breaks_out_only(&branch.exits) {
@@ -5949,7 +5954,7 @@ impl Visualizable for VisualizationData {
             e.note_access_before_end(&previous_state, self.is_mutref(hash));
             states.push((previous_line, row, previous_state.clone()));
             match e {
-                Event::Branch { branch_history, ty, split_point, merge_point, maybe_init, maybe_held, on_exhaustion, .. } => {
+                Event::Branch { branch_history, ty, split_point, merge_point, maybe_init, maybe_held, on_exhaustion, id, .. } => {
                     // Timeline is empty in the middle during a branch
                     states.push((*split_point, *merge_point, State::OutOfScope));
                     // State of each branch that reaches the merge; a
@@ -5961,7 +5966,12 @@ impl Visualizable for VisualizationData {
                     let mut broke_states: Vec<State> = Vec::new();
                     for (i, branch) in branch_history.iter_mut().enumerate() {
                         let diverges = branch.diverges;
-                        branch.entry_state = Some(previous_state.clone());
+                        let entry = if self.row_layout.fieldless_lenders.contains_key(&(*id, i, *hash)) {
+                            State::FullPrivilege { s: LineState::Full }
+                        } else {
+                            previous_state.clone()
+                        };
+                        branch.entry_state = Some(entry.clone());
                         let end_state = self.compute_branch_states(
                             & mut branch.e_data,
                             & mut branch.states,
@@ -5972,7 +5982,7 @@ impl Visualizable for VisualizationData {
                             // bridges that last row — unless the
                             // branches share lines (#117).
                             branch_column_rows(*split_point, *merge_point),
-                            previous_state.clone());
+                            entry);
                         if !diverges {
                             reaching_states.push(end_state);
                         } else if breaks_out_only(&branch.exits) {

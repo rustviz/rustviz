@@ -13299,12 +13299,13 @@ pub fn print_out_of_scope(&mut self){
     self.place_arm_local_ends();
     self.place_scrutinee_ends();
     self.place_last_holders();
+    let empty_payloads = self.place_proven_fork_ends();
     self.end_outer_borrows_in_arms();
     self.place_nested_ends();
     // The exit walk must see the MIR returns inside a let-else, including
     // both arms of a nested test. Otherwise it adds another at the join.
     self.place_let_else_ends();
-    self.place_exit_ends();
+    self.place_exit_ends(&empty_payloads);
     mark_exhaustion_paths(self.preprocessed_events, &self.exit_scopes);
     self.print_out_of_scope();
     if let Some(facts) = facts {

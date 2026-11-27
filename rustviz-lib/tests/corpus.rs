@@ -8134,11 +8134,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Partial copy from third to x",
             "Immutable borrow from v to x: x is a reference copied out of third",
             "If x holds a shared borrow affecting v, that borrow ends here. It no longer restricts access to v",
-            "If third holds a shared borrow affecting v, that borrow ends here. It no longer restricts access to v",
+            "After the reference is copied out of third, the shared borrow of v continues in x",
             // x takes over third's loan on one dot: said once (#1450).
             "v's resource is no longer borrowed by third, but is still immutably borrowed by x; v is read-only while the borrow is live",
         ],
         must_not_contain: &[
+            "Return immutably borrowed resource from third to v",
             ", through the reference copied out of",
             ", through the reference moved out of",
             "x's shared borrow of *x ends",
@@ -25462,11 +25463,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Mutable borrow from s to t.0: downgrade's signature gives the reference it returns the same lifetime as its argument",
             "t.0's mutable borrow ends",
             "r's mutable borrow ends",
-            "If r2 holds a mutable borrow affecting s3, that borrow ends here. It no longer restricts access to s3",
+            "The mutable borrow of s3 ends after the last use of r2. This borrow no longer restricts access to s3",
             "If h2.r holds a shared borrow affecting s3, that borrow ends here. It no longer restricts access to s3",
             "s3's resource is no longer mutably borrowed",
         ],
         must_not_contain: &[
+            "Return mutably borrowed resource from r2 to s3",
             "=r2's immutable borrow ends",
             "=r's immutable borrow ends",
             "t.0 immutably borrows a resource",
@@ -27069,11 +27071,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "w acquires ownership of a new resource; its previous resource is dropped",
             "Mutable borrow from s1 to y: Some's signature gives the value it returns the same lifetime as its argument; y isn't a reference, but its value holds one",
             "y holds a value that mutably borrows s1's resource (y isn't a reference itself)",
-            "If y holds a mutable borrow affecting s1, that borrow ends here. It no longer restricts access to s1",
         ],
         must_not_contain: &[
             "r's shared borrow of a ends",
             "q's shared borrow of b ends",
+            // The None edge cannot give back a value from y.
+            "Return mutably borrowed resource from y to s1",
+            "Return immutably borrowed resource from r to a",
+            "Return immutably borrowed resource from q to b",
             "Mutable borrow from s2 to y",
             "y holds a value that mutably borrows s2's resource",
             "x's mutable borrow ends (what it borrows from isn't shown)",
@@ -44488,11 +44493,12 @@ fn caught_panic_keeps_the_stored_reference_1884() {
 fn pattern_return_and_empty_arm_end_separately_1884() {
     let svg = run_with_local_backend("rv3_facts_review_1854").timeline_panel_string();
     assert!(svg.contains("x>s@L183:arrow:static_die"));
-    assert!(svg.contains("o>s@L184:arrow:static_die"));
+    // The checked None edge has no payload. Only the caller loan ends there.
+    assert!(!svg.contains("o>s@L184:arrow:static_die"));
     assert!(!svg.contains("o>s@L183:arrow:static_die"));
     for line in [183, 184] {
-        let tip = tooltip_of_id(&svg, &format!("s@L{line}:dot:static_reacquire")).unwrap();
-        assert!(tip.contains("s's immutable borrow ends"), "{tip}");
+        assert!(rv_elements(&svg, &format!("s@L{line}:dot:")).iter()
+            .any(|dot| dot.1.contains("s's immutable borrow ends")));
     }
 }
 
@@ -45530,4 +45536,276 @@ fn loop_review_shared_continuation_reads_state_after_cleanup() {
         assert!(values.keys().all(|key| !["pair", "guard"].iter().any(|name| key == name || key.starts_with(&format!("{name}.")))),
             "{field}: {values:#?}");
     }
+}
+
+#[test]
+fn proven_fork_end_keeps_the_borrow_end_teaching_clause_1884() {
+    // An ended `&mut` borrow is not a move of the lender (2.x text, kept).
+    let svg = run_with_local_backend("branch_legs_table_review_1866").timeline_panel_string();
+    let ends = rv_elements(&svg, "m>s2@");
+    assert!(!ends.is_empty());
+    for (_, tip, ..) in ends.iter().filter(|(id, ..)| id.contains(":arrow:mutable_die")) {
+        assert!(tip.contains("m's mutable borrow of s2 ends. This borrow no longer restricts access to s2"), "{tip}");
+        assert!(tip.contains("Ending the borrow doesn't move the value"), "{tip}");
+    }
+}
+
+#[test]
+fn adjacent_forks_return_on_each_reading_leg_1884() {
+    let svg = run_with_local_backend("edition2024/normal_fork_ends_1884").timeline_panel_string();
+    // Each arm of the first decision reads r. The second decision, which
+    // starts on the same line, can mutate s on both of its paths.
+    for row in [31, 32] {
+        let arrows = rv_elements(&svg, &format!("r>s@L{row}:arrow:static_die"));
+        assert_eq!(arrows.len(), 1);
+        let read = rv_elements(&svg, &format!("r@L{row}:dot:")).into_iter()
+            .find(|(_, t, ..)| t.contains("is passed to see")).expect("the call on this leg");
+        let returns = rv_elements(&svg, &format!("s@L{row}:dot:static_reacquire"));
+        assert_eq!(returns.len(), 1);
+        let (_, _, x, y) = arrows[0];
+        assert!((x.1 - read.2.0).abs() < 8.0 && (x.0 - returns[0].2.0).abs() < 8.0);
+        assert_eq!((y.0 + y.1) / 2.0, read.3.0);
+        assert_eq!(read.3.0, returns[0].3.0);
+        assert!(arrows[0].1.contains("This borrow no longer restricts access to what s points to"));
+    }
+    let join = rv_elements(&svg, "r@L32:dot:branch_join");
+    assert!(join[0].1.contains("r isn't moved in any of the branches above"));
+    assert!(join[0].1.contains("r's borrow ended in each branch above"));
+    for row in [33, 34] {
+        assert!(rv_elements(&svg, &format!("r>s@L{row}:arrow:static_die")).is_empty());
+    }
+}
+
+#[test]
+fn fieldless_path_has_no_aggregate_give_back_1884() {
+    let svg = run_with_local_backend("assign_branch_vec_holder_1477").timeline_panel_string();
+    assert_eq!(rv_elements(&svg, "x>s1@L56:arrow:mutable_die").len(), 1);
+    assert!(!svg.contains("y>s1@"), "None cannot return the loan moved into Some");
+}
+
+#[test]
+fn failed_chain_does_not_always_return_from_unmoved_holder_1884() {
+    let svg = run_with_local_backend("edition2024/chain_block_moves_ref_1262").timeline_panel_string();
+    // Some(1) and None both run the else body. Only None bypasses the
+    // move to wr and the return from take. A release described as a
+    // definite return from r on their common else leg is false for Some(1).
+    assert_eq!(rv_elements(&svg, "wr>v@L19:arrow:mutable_die").len(), 1);
+    let ends: Vec<_> = rv_elements(&svg, "v@").into_iter().filter(|(id, ..)|
+        (21..=23).any(|row| id.starts_with(&format!("v@L{row}:dot:mutable_reacquire")))).collect();
+    assert_eq!(ends.len(), 1);
+    let title = &ends[0].1;
+    for case in ["Some(x)", "r's mutable borrow of v ends", "x > 5", "wr's mutable borrow of v already ended", "take"] {
+        assert!(title.contains(case), "{title}");
+    }
+    assert!((21..=23).all(|row| rv_elements(&svg, &format!("r>v@L{row}:arrow:mutable_die")).is_empty()));
+}
+
+#[test]
+fn fieldless_leg_does_not_still_borrow_from_the_lender_1884() {
+    let svg = run_with_local_backend("assign_branch_vec_holder_1477").timeline_panel_string();
+    // On the Some leg x holds and uses the borrow. On the other leg
+    // None holds no reference, and rustc accepts s1.clear() immediately.
+    assert_eq!(rv_elements(&svg, "x>s1@L56:arrow:mutable_die").len(), 1);
+    assert!(!rv_elements(&svg, "s1@L55-56:branch_line:full_privilege_gray").is_empty());
+    for (_, title, ..) in rv_elements(&svg, "s1@L55-56:branch_line:").into_iter()
+        .chain(rv_elements(&svg, "s1@L57:branch_line:")) {
+        assert!(!title.contains("mutably borrowed by y"), "{title}");
+    }
+}
+
+#[test]
+fn opaque_fork_result_names_each_possible_referent_1884() {
+    let svg = run_with_local_backend("edition2024/opaque_fork_end_1884").timeline_panel_string();
+    // The same function signature permits first and second. Both owners
+    // are usable again after take(wr), whichever referent wr actually had.
+    for lender in ["v", "t"] {
+        let dots = rv_elements(&svg, &format!("{lender}@L15:dot:mutable_lend"));
+        assert_eq!(dots.len(), 1);
+        let tip = &dots[0].1;
+        assert!(tip.contains("wr may refer to v or t") || tip.contains("wr may refer to t or v"), "{tip}");
+        assert!(tip.contains("keeps both unavailable until the last use of wr"), "{tip}");
+        assert!(!tip.contains("mutably borrowed by wr"), "{tip}");
+        let starts = rv_elements(&svg, &format!("{lender}>wr@L15:arrow:mutable_borrow"));
+        assert_eq!(starts.len(), 1);
+        assert!(starts[0].1.contains("route's signature") && starts[0].1.contains("may refer to"));
+        assert!(!starts[0].1.contains(&format!("Mutable borrow from {lender} to wr")));
+        let arrows = rv_elements(&svg, &format!("wr>{lender}@L16:arrow:mutable_die"));
+        assert_eq!(arrows.len(), 1);
+        let tip = &arrows[0].1;
+        assert!(tip.contains(&format!("wr may have referred to {lender}")), "{tip}");
+        assert!(tip.contains(&format!("The mutable borrow of {lender} ends. This borrow no longer restricts access to {lender}")), "{tip}");
+        assert!(!tip.contains("Return mutably borrowed resource"), "{tip}");
+    }
+    let dots = rv_elements(&svg, "v@L20:dot:mutable_reacquire");
+    assert_eq!(dots.len(), 1);
+    let tip = &dots[0].1;
+    for clause in ["Some(x)", "r's mutable borrow of v ends", "x > 5", "wr may have referred to v",
+        "The mutable borrow of v ended when take(wr) returned", "This borrow no longer restricts access to v"] {
+        assert!(tip.contains(clause), "{tip}");
+    }
+    assert!(!tip.contains("wr's mutable borrow of v"), "{tip}");
+    assert!(!svg.contains("r>v@L20:arrow:mutable_die"));
+}
+
+#[test]
+fn reference_fields_end_with_the_move_into_the_callback_1884() {
+    let fixture = "edition2024/opaque_fork_end_1884";
+    let rv = run_with_local_backend(fixture);
+    let source = read_corpus(fixture);
+    let compact = source.replace("route(\n            inputs,\n        )", "route(inputs)");
+    assert_ne!(source, compact);
+    for code in [source.clone(), compact] {
+        let svg = if code == source { rv.timeline_panel_string() }
+            else { Rustviz::new(&code).expect("render the callback").timeline_panel_string() };
+        let dot_y = |var: &str, kind: &str| {
+            let dots: Vec<_> = rv_elements(&svg, &format!("{var}@")).into_iter()
+                .filter(|(id, ..)| id.ends_with(&format!(":dot:{kind}"))).collect();
+            assert_eq!(dots.len(), 1, "{var} {kind}");
+            dots[0].3
+        };
+        let moved = dot_y("inputs", "move");
+        for field in ["inputs.0", "inputs.1"] {
+            assert_eq!(dot_y(field, "mutable_die"), moved, "{field} moves with the tuple");
+            let title = rv_elements(&svg, &format!("{field}@")).into_iter()
+                .find(|(id, ..)| id.ends_with(":dot:mutable_die")).unwrap().1;
+            assert!(title.contains(&format!("{field}'s reference moves with inputs into the call to route")), "{title}");
+            assert!(!title.contains("mutable borrow ends"), "{title}");
+        }
+        assert!(moved.1 < dot_y("wr", "mutable_borrow").0, "the callback consumes its input before returning wr");
+        let figure = common::invariants::parse(&svg);
+        let defects = common::invariants::check(&figure, &code);
+        assert!(defects.is_empty(), "{defects:?}");
+    }
+}
+
+#[test]
+fn moved_reference_keeps_loan_in_destination_1884() {
+    let svg = run_with_local_backend("edition2024/chain_multiline_split_1291").timeline_panel_string();
+    let moves = rv_elements(&svg, "r@L86:dot:move");
+    assert_eq!(moves.len(), 1);
+    assert!(moves[0].1.contains("moves into wr") && moves[0].1.contains("loan continues"), "{}", moves[0].1);
+    assert!(!moves[0].1.contains("mutable borrow ends"));
+}
+
+#[test]
+fn multiline_failure_leg_qualifies_both_histories_1884() {
+    let svg = run_with_local_backend("edition2024/chain_multiline_split_1291").timeline_panel_string();
+    let legs = rv_elements(&svg, "v@L86-89:branch_line:");
+    assert!(!legs.is_empty());
+    for (_, text, ..) in legs {
+        for clause in ["Some(x)", "r's mutable borrow of v ends", "x > 5", "wr's mutable borrow of v already ended"] {
+            assert!(text.contains(clause), "{text}");
+        }
+        assert!(!text.contains("mutably borrowed by r"), "{text}");
+    }
+}
+
+#[test]
+fn chain_reference_leaves_scope_at_its_block_1884() {
+    let svg = run_with_local_backend("edition2024/chain_multiline_split_1291").timeline_panel_string();
+    let scope: Vec<_> = rv_elements(&svg, "wr@").into_iter().filter(|(_, t, ..)| t.contains("wr goes out of scope")).collect();
+    assert_eq!(scope.len(), 1);
+    assert!(scope[0].0.starts_with("wr@L86:dot:"), "{}", scope[0].0);
+}
+
+#[test]
+fn same_holder_on_distinct_failure_edges_1884() {
+    let src = read_corpus("edition2024/chain_block_moves_ref_1262").replace("let wr = r; take(wr);", "take(r);");
+    let svg = Rustviz::new(&src).unwrap().timeline_panel_string();
+    let ends = rv_elements(&svg, "v@L21:dot:mutable_reacquire");
+    assert_eq!(ends.len(), 1);
+    let tip = &ends[0].1;
+    for case in ["Some(x)", "r's mutable borrow of v ends", "x > 5", "r's mutable borrow of v already ended when take"] {
+        assert!(tip.contains(case), "{tip}");
+    }
+    assert!(!svg.contains("r>v@L21:arrow:mutable_die"));
+}
+
+#[test]
+fn downgrade_keeps_the_exclusive_loan_live_1884() {
+    let svg = run_with_local_backend("known_bugs/1596_downgraded_arm_loan").timeline_panel_string();
+    let lines = rv_elements(&svg, "text@L24-25:branch_line:");
+    assert!(!lines.is_empty());
+    for (_, text, ..) in lines {
+        assert!(text.contains("mutably borrowed") && text.contains("can't be used until the borrow ends"), "{text}");
+        assert!(!text.contains("mutably borrowed by result"), "{text}");
+    }
+    for (id, positive, negative) in [
+        ("text@L24:dot:", "mutable borrow of text stays live while result is in use", "mutably borrowed by result"),
+        ("text>result@L24:arrow:", "downgrade's signature gives the reference it returns the same lifetime as its argument", "Mutable borrow from text to result"),
+        ("result@L25:dot:", "mutable borrow of text ends after the last use of result", "result's mutable borrow ends"),
+        ("result>text@L25:arrow:", "This borrow no longer restricts access to text", "Return mutably borrowed resource from result"),
+    ] {
+        let marks = rv_elements(&svg, id);
+        assert_eq!(marks.len(), 1);
+        assert!(marks[0].1.contains(positive) && !marks[0].1.contains(negative), "{}", marks[0].1);
+    }
+}
+
+#[test]
+fn fieldless_join_keeps_ownership_explanation_1884() {
+    for (fixture, prefix, owner, clauses) in [
+        ("book/c8_03_vec_get_match", "v@L7:", "None", vec!["v is the owner of the resource"]),
+        ("book/c8_03_vec_get_match", "third@L7:", "None", vec!["third isn't a reference itself", "third holds a copyable value"]),
+        ("assign_branch_vec_holder_1477", "s1@L57:", "else", vec!["s1 is the owner of the resource"]),
+    ] {
+        let svg = run_with_local_backend(fixture).timeline_panel_string();
+        let connector = format!("This segment leads from the {owner} branch to where the branches join.");
+        let tips: Vec<_> = rv_elements(&svg, prefix).into_iter().filter(|(_, t, ..)| t.contains(&connector)).collect();
+        assert!(!tips.is_empty(), "{prefix}");
+        for (_, t, ..) in tips {
+            for clause in &clauses { assert!(t.contains(clause), "{t}"); }
+            assert!(!t.contains("mutably borrowed by y"), "{t}");
+        }
+    }
+}
+
+#[test]
+fn nested_decision_names_the_borrowed_variant_payload_1884() {
+    let svg = run_with_local_backend("rv3_issues/1581_letelse_ref_mut_then_if").timeline_panel_string();
+    let arrows = rv_elements(&svg, "binding>opt@L4:arrow:mutable_die");
+    assert_eq!(arrows.len(), 2);
+    for (_, text, ..) in arrows {
+        assert!(text.contains("binding's mutable borrow of the String inside opt's Some variant ends"), "{text}");
+        assert!(!text.contains("binding's mutable borrow ends"), "{text}");
+    }
+}
+
+#[test]
+fn mutable_callback_binding_arrives_after_the_tuple_move_1884() {
+    let source = read_corpus("edition2024/opaque_fork_end_1884").replace("let wr =", "let mut wr =");
+    let compact = source.replace("route(\n            inputs,\n        )", "route(inputs)");
+    assert_ne!(source, compact);
+    for code in [source, compact] {
+        let svg = Rustviz::new(&code).unwrap().timeline_panel_string();
+        let moved = rv_elements(&svg, "inputs@").into_iter().find(|(id, ..)| id.ends_with(":dot:move")).unwrap();
+        let result = rv_elements(&svg, "wr@").into_iter().find(|(id, ..)| id.ends_with(":dot:mutable_borrow")).unwrap();
+        assert!(moved.3.1 < result.3.0, "route consumes inputs before the return initializes wr");
+        for field in ["inputs.0", "inputs.1"] {
+            let end = rv_elements(&svg, &format!("{field}@")).into_iter()
+                .find(|(id, ..)| id.ends_with(":dot:mutable_die")).unwrap();
+            assert_eq!(end.3, moved.3);
+        }
+    }
+}
+
+#[test]
+fn fieldless_sibling_returns_cover_both_mir_calls_1884() {
+    let svg = run_with_local_backend("edition2024/fieldless_sibling_returns_1884").timeline_panel_string();
+    let ends = rv_elements(&svg, "r>s@L6:arrow:static_die");
+    let reads: Vec<_> = rv_elements(&svg, "r@L6:dot:").into_iter()
+        .filter(|(_, tip, ..)| tip.contains("is passed to see")).collect();
+    assert_eq!(ends.len(), 2);
+    assert_eq!(reads.len(), 2);
+    assert_ne!(reads[0].3, reads[1].3);
+    for (_, _, x, y) in reads {
+        assert_eq!(ends.iter().filter(|(_, _, span, height)| (x.0 - span.1).abs() < 8.0
+            && (height.0 + height.1) / 2.0 == y.0).count(), 1, "return at each call's own dot");
+    }
+    // On Some the reference is copied out of value on L5. None has no
+    // payload, so that handoff must be the only arrow from the aggregate.
+    let handoffs = rv_elements(&svg, "value>s@");
+    assert_eq!(handoffs.len(), 1);
+    assert!(handoffs[0].0.starts_with("value>s@L5:"));
+    assert!(handoffs[0].1.contains("shared borrow of s continues in r"));
 }
