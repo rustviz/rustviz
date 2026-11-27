@@ -42088,6 +42088,189 @@ fn condition_loan_ends_before_either_push_1741() {
     }
 }
 
+/// The arrow shaft stops short of the dot to make room for the head.
+fn assert_closure_arrow(svg: &str, tip: &str, from: &str, to: &str, rows: std::ops::Range<f64>) {
+    let arrows = arrow_shafts(svg, tip);
+    let [arrow] = arrows.as_slice() else { panic!("expected one arrow for {tip}, got {arrows:?}") };
+    let points: Vec<f64> = arrow.split(|c: char| c.is_whitespace() || c == ',')
+        .filter_map(|c| c.parse().ok()).collect();
+    let (x1, y1, x2) = (points[0], points[1], points[points.len() - 2]);
+    assert!(rows.contains(&y1), "{tip}: arrow starts at y={y1}, expected {rows:?}");
+    assert!((x1 - label_x(svg, from)).abs() < 8.0, "{tip}: wrong source {arrow:?}");
+    assert!((x2 - label_x(svg, to)).abs() < 25.0, "{tip}: wrong destination {arrow:?}");
+}
+
+const CLOSURE_RESULT_1689: &str = "known_bugs/1689_kept_field_loans";
+
+#[test]
+fn closure_argument_lends_mutably_into_the_call_result_1689() {
+    // Rustc allows reading a during the shared loan, rejects reading b
+    // (E0502), and allows taking fresh mutable borrows after the last use.
+    let rv = render_cell(CLOSURE_RESULT_1689).unwrap();
+    let svg = rv.timeline_panel_string();
+    let code = rv.code_panel_string();
+    let call = code_row_y(&code, "let value = wrap(&a, || &mut b);");
+    let last_use = code_row_y(&code, r#"println!("{a} {value:?}");"#);
+    let next = code_row_y(&code, "let _ = &mut b;");
+    let tips = timeline_tooltips(&svg);
+    let shared = tips.iter().find(|tip| tip.starts_with("Immutable borrow from a to value")).unwrap();
+    let mutable = "After wrap returns, value may hold a reference from the closure argument. The borrow checker keeps the mutable borrow of b live while value is in use";
+    assert_closure_arrow(&svg, shared, "a", "value", call..last_use);
+    assert_closure_arrow(&svg, mutable, "b", "value", call..last_use);
+    assert_closure_arrow(&svg, "Return immutably borrowed value from value to a", "value", "a", last_use..next);
+    assert_closure_arrow(&svg, "Return mutably borrowed value from value to b", "value", "b", last_use..next);
+    for must_not_contain in ["Immutable borrow from b to value", "Mutable borrow from a to value", "Mutable borrow from b to value"] {
+        assert!(!forbidden_present(must_not_contain, &tips), "{must_not_contain}");
+    }
+}
+
+#[test]
+fn closure_result_may_hold_nothing_1689() {
+    // ignore returns None without calling the closure. The same E0502
+    // applies while h is live, and the next mutable borrow compiles.
+    let rv = render_cell(CLOSURE_RESULT_1689).unwrap();
+    let svg = rv.timeline_panel_string();
+    let tips = timeline_tooltips(&svg);
+    let must_not_contain = "Mutable borrow from ignored to h";
+    assert!(!forbidden_present(must_not_contain, &tips), "{must_not_contain}");
+    let code = rv.code_panel_string();
+    assert_closure_arrow(&svg,
+        "After ignore returns, h may hold a reference from the closure argument. The borrow checker keeps the mutable borrow of ignored live while h is in use",
+        "ignored", "h", code_row_y(&code, "let h = ignore(|| &mut ignored);")..code_row_y(&code, "assert!(h.is_none());"));
+}
+
+#[test]
+fn copyable_closure_results_keep_the_copy_clause_1689() {
+    // Rustc accepts both copies and later reads of both originals.
+    let svg = render_cell(CLOSURE_RESULT_1689).unwrap().timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    for holder in ["r", "opt"] {
+        let title = format!("{holder} holds a copyable value. The borrow checker keeps shared borrowed while {holder} is in use");
+        let found = doc.descendants().filter(|n| n.children().any(|c| c.has_tag_name("line"))).any(|n| {
+            let open = svg[n.range()].split_once('>').unwrap().0;
+            timeline_tooltips(open).iter().any(|t| t.contains(&title))
+        });
+        assert!(found, "{holder}: missing Copy and loan clauses on the lifeline");
+        let must_not_contain = format!("={holder} holds a value that borrows from shared ({holder} isn't a reference itself)");
+        assert!(!forbidden_present(&must_not_contain, &timeline_tooltips(&svg)), "{must_not_contain}");
+    }
+}
+
+#[test]
+fn moved_closure_result_preserves_the_exclusive_loan_1689() {
+    // Reading exclusive_b before moved's last use is E0502. A fresh
+    // mutable borrow immediately after that use compiles.
+    let rv = render_cell(CLOSURE_RESULT_1689).unwrap();
+    let (svg, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    assert_closure_arrow(&svg, "Return mutably borrowed value from moved to exclusive_b", "moved", "exclusive_b",
+        code_row_y(&code, r#"println!("{shared_a} {moved:?}");"#)..code_row_y(&code, "let _ = &mut exclusive_b;"));
+    let must_not_contain = "Return immutably borrowed value from moved to exclusive_b";
+    assert!(!forbidden_present(must_not_contain, &timeline_tooltips(&svg)), "{must_not_contain}");
+}
+
+#[test]
+fn assigned_closure_result_follows_the_mir_store_1689() {
+    // The call returns into a temporary. MIR moves it into replacement.
+    let rv = render_cell(CLOSURE_RESULT_1689).unwrap();
+    let (svg, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let last_use = code_row_y(&code, r#"println!("{replacement:?}");"#);
+    assert_closure_arrow(&svg,
+        "After keep returns, replacement may hold a reference from the closure argument. The borrow checker keeps the mutable borrow of assigned live while replacement is in use",
+        "assigned", "replacement", code_row_y(&code, "replacement = keep(|| &mut assigned);")..last_use);
+    assert_closure_arrow(&svg, "Return mutably borrowed value from replacement to assigned", "replacement", "assigned",
+        last_use..code_row_y(&code, "let _ = &mut assigned;"));
+}
+
+#[test]
+fn conditional_closure_results_follow_each_call_1689() {
+    // MIR gives each keep call its own path. Rustc rejects a read of
+    // either lender before the joined value's last use, including before
+    // maybe_ref's last use when the other arm yields None.
+    let rv = render_cell(CLOSURE_RESULT_1689).unwrap();
+    let (svg, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let joined_use = r#"println!("{joined:?}");"#;
+    let maybe_use = r#"println!("{maybe_ref:?}");"#;
+    for (lender, holder, next, last_use, after_use) in [
+        ("left", "joined", "keep(|| &mut right)", joined_use, "let _ = (&mut left, &mut right);"),
+        ("right", "joined", joined_use, joined_use, "let _ = (&mut left, &mut right);"),
+        ("maybe", "maybe_ref", maybe_use, maybe_use, "let _ = &mut maybe;"),
+    ] {
+        let call = code_row_y(&code, &format!("keep(|| &mut {lender})"));
+        let bound = code_row_y(&code, next);
+        let tip = format!("After keep returns, {holder} may hold a reference from the closure argument. The borrow checker keeps the mutable borrow of {lender} live while {holder} is in use");
+        let arrows = arrow_points(&svg, &tip);
+        let [arrow] = arrows.as_slice() else { panic!("{lender}: expected one arrow, got {arrows:?}") };
+        assert!((call..bound).contains(&arrow[0].1), "{lender}: {arrow:?} does not start in its call's arm");
+        let end = format!("Return mutably borrowed value from {holder} to {lender}");
+        assert_closure_arrow(&svg, &end, holder, lender, code_row_y(&code, last_use)..code_row_y(&code, after_use));
+    }
+}
+
+#[test]
+fn closure_result_borrows_the_reference_slot_1689() {
+    // Assigning slot before slot_holder's last use is E0506.
+    let rv = render_cell(CLOSURE_RESULT_1689).unwrap();
+    let (svg, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for must_not_contain in ["Immutable borrow from x to slot_holder",
+                             "keeps the shared borrow of x live while slot_holder is in use"] {
+        assert!(!forbidden_present(must_not_contain, &timeline_tooltips(&svg)), "{must_not_contain}");
+    }
+    assert_closure_arrow(&svg,
+        "After keep returns, slot_holder may hold a reference from the closure argument. The borrow checker keeps the mutable borrow of the binding slot live while slot_holder is in use",
+        "slot", "slot_holder", code_row_y(&code, "let slot_holder = keep(|| &mut slot);")..code_row_y(&code, r#"println!("{slot_holder:?}");"#));
+}
+
+#[test]
+fn closure_results_reach_their_own_fields_1689() {
+    // package writes the reference to item into its named field.
+    // package_tuple puts the reference in the tuple's second field.
+    let rv = render_cell(CLOSURE_RESULT_1689).unwrap();
+    let (svg, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (lender, field, callee, call, use_) in [
+        ("item", "packaged.item", "package", "let packaged = package(|| &mut item, &other);", "*packaged.item += 1;"),
+        ("element", "tuple.1", "package_tuple", "let tuple = package_tuple(|| &mut element);", r#"println!("{:?}", tuple.1);"#),
+    ] {
+        let tip = format!("After {callee} returns, {field} may hold a reference from the closure argument. The borrow checker keeps the mutable borrow of {lender} live while {field} is in use");
+        // The angled shaft starts at the edge of its dot, above the row.
+        assert_closure_arrow(&svg, &tip, lender, field, code_row_y(&code, call) - 4.0..code_row_y(&code, use_) - 4.0);
+    }
+}
+
+#[test]
+fn nested_closure_result_field_returns_its_loan_1689() {
+    // The outer struct's tuple member contains the returned reference.
+    // Reading nested_item before the write is E0502. The next read compiles.
+    let rv = render_cell(CLOSURE_RESULT_1689).unwrap();
+    let (svg, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (lender, call, use_, next) in [
+        ("nested_item", "let mut nested = package_nested(|| &mut nested_item);", "*nested.inner.0 += 1;", "assert_eq!(nested_item, 2);"),
+        ("new_item", "nested = package_nested(|| &mut new_item);", "*nested.inner.0 += 2;", "assert_eq!(new_item, 5);"),
+    ] {
+        let call = code_row_y(&code, call);
+        let last_use = code_row_y(&code, use_);
+        let next = code_row_y(&code, next);
+        let tip = format!("After package_nested returns, nested.inner.0 may hold a reference from the closure argument. The borrow checker keeps the mutable borrow of {lender} live while nested.inner.0 is in use");
+        assert_closure_arrow(&svg, &tip, lender, "nested.inner.0", call - 4.0..last_use - 4.0);
+        assert_closure_arrow(&svg, &format!("Return mutably borrowed value from nested.inner.0 to {lender}"), "nested.inner.0", lender,
+            last_use - 4.0..next - 4.0);
+    }
+}
+
+#[test]
+fn distinct_closure_and_argument_loans_get_two_arrows_1689() {
+    // Rustc's MIR issues two shared borrows of both for separate, and
+    // one shared borrow of both whose reference feeds both inputs to same.
+    let svg = render_cell(CLOSURE_RESULT_1689).unwrap().timeline_panel_string();
+    let tips = timeline_tooltips(&svg);
+    for (holder, count) in [("separate", 2), ("same", 1)] {
+        let ordinary = format!("Immutable borrow from both to {holder}");
+        let closure = format!("After shared_pair returns, {holder} may hold a reference from the closure argument. The borrow checker keeps the shared borrow of both live while {holder} is in use");
+        let arrivals: usize = tips.iter().filter(|t| t.starts_with(&ordinary) || **t == closure)
+            .collect::<std::collections::BTreeSet<_>>().into_iter().map(|t| arrow_points(&svg, t).len()).sum();
+        assert_eq!(arrivals, count, "{holder}");
+    }
+}
+
 #[test]
 fn inline_match_lends_the_reference_on_the_scrutinee_row_1638() {
     let rv = render_cell("known_bugs/1638_borrow_ref_scrutinee").unwrap();

@@ -4359,7 +4359,10 @@ fn timeline_segment_title(
     if rap.holds_borrow() {
         if let State::FullPrivilege { .. } = state {
             if let Some(copy) = option_ref_copy(visualization_data, rap.hash(), rap.name(), line) {
-                return hover_messages::state_option_holds_loans(rap.name(), copy, &[], false);
+                return hover_messages::state_value_holds_loans(rap.name(), copy, &[], false);
+            }
+            if visualization_data.row_layout.closure_result_holders.contains(rap.hash()) {
+                return hover_messages::state_value_holds_loans(rap.name(), rap.is_copy_owner(), &[], false);
             }
             // `let mut refs = Vec::new();` starts out holding no
             // reference; `refs.push(&s)` stores one later (#392).
@@ -10684,7 +10687,9 @@ fn owner_segment_of(rap: &ResourceAccessPoint, vd: &VisualizationData, row: usiz
 /// The ownership clause for a cell with its whole value.
 fn owner_value_title(rap: &ResourceAccessPoint, vd: &VisualizationData, fn_line: usize, cell: &crate::facts::table::Cell, row: Option<usize>) -> String {
     let name = rap.name();
-    if let Some(copy) = cell.option_ref_copy() {
+    if let Some(copy) = cell.option_ref_copy()
+        .or_else(|| vd.row_layout.closure_result_holders.contains(rap.hash()).then_some(rap.is_copy_owner()))
+    {
         let mut lenders = BTreeSet::new();
         let mut temporary = false;
         for loan in cell.holds.iter().chain(&cell.option_holds)
@@ -10696,7 +10701,7 @@ fn owner_value_title(rap: &ResourceAccessPoint, vd: &VisualizationData, fn_line:
                 _ => {}
             }
         }
-        return hover_messages::state_option_holds_loans(name, copy, &lenders.into_iter().collect::<Vec<_>>(), temporary);
+        return hover_messages::state_value_holds_loans(name, copy, &lenders.into_iter().collect::<Vec<_>>(), temporary);
     } else if cell.holder_type == Some(crate::facts::schema::HolderType::Primitive) {
         return hover_messages::state_full_privilege_copyable(name);
     } else if rap.holds_borrow() && !cell.borrowed_from.is_empty() {

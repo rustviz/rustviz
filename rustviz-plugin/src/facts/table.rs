@@ -926,6 +926,7 @@ mod tests {
     fn body(func: &str, first: usize, cols: &[&str], rows: Vec<Row>) -> BodyFacts {
         BodyFacts {
             drop_holders: Default::default(),
+            closure_result_loans: Default::default(),
             aggregate_loans: Default::default(),
             issued_operand_loans: Default::default(),
             returned_operand_loans: Default::default(),

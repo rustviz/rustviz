@@ -39,6 +39,7 @@ struct Order<'a, 'tcx> {
     field_overwrite_ends: &'a BTreeSet<usize>,
     ends: &'a BTreeMap<usize, Vec<usize>>,
     issues: &'a BTreeMap<usize, usize>,
+    closure_arrivals: &'a BTreeMap<usize, Location>,
 }
 
 fn place(r: &ResourceTy) -> Option<String> {
@@ -113,6 +114,10 @@ impl Order<'_, '_> {
     }
 
     fn point(&self, ev: &E, row: &Row, straight_line: bool) -> Option<Point> {
+        if let Some(at) = self.closure_arrivals.get(&ev.get_id()) {
+            let rank = self.body.basic_blocks.reverse_postorder().iter().position(|b| *b == at.block)?;
+            return Some((rank, at.statement_index, 1));
+        }
         if let Some(id) = self.issues.get(&ev.get_id()) {
             return row.facts.iter().find(|f| matches!(f.fact, Fact::Borrow { loan, .. } if loan == *id)).map(fact_point);
         }
@@ -1262,6 +1267,7 @@ pub(crate) fn order_body(visitor: &mut ExprVisitor<'_, '_>, facts: &BodyFacts) {
         field_overwrite_ends: &visitor.field_overwrite_ends,
         ends: &visitor.end_loans,
         issues: &visitor.aggregate_issues,
+        closure_arrivals: &visitor.closure_result_arrivals,
     };
     order.place_arm_ends(
         visitor.preprocessed_events,
@@ -1350,6 +1356,7 @@ pub(crate) enum StoredLoan {
 pub struct RowLayout {
     /// Both column dots and the connecting arrow describe the same aggregate operand.
     pub(crate) aggregate_titles: BTreeMap<usize, String>,
+    pub(crate) closure_result_holders: BTreeSet<u64>,
     pub(crate) stored_lender_loans: BTreeMap<u64, BTreeSet<usize>>,
     pub(crate) stored_loans: BTreeMap<usize, StoredLoan>,
     /// Borrow events drawn on an ancestor column, with the actual MIR loan and place.
@@ -1381,6 +1388,7 @@ pub struct RowLayout {
 impl RowLayout {
     pub fn append(&mut self, other: &mut Self) {
         self.aggregate_titles.append(&mut other.aggregate_titles);
+        self.closure_result_holders.append(&mut other.closure_result_holders);
         self.stored_lender_loans.append(&mut other.stored_lender_loans);
         self.restored.append(&mut other.restored);
         self.stored_loans.append(&mut other.stored_loans);

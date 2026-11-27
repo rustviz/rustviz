@@ -2154,6 +2154,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         }
         held_in(&os, p)
     };
+    let mut closure_result_loans = std::collections::HashMap::new();
     let mut receiver_loans = std::collections::HashMap::new();
     let mut argument_stores = std::collections::HashMap::<_, Vec<_>>::new();
     let published: BTreeSet<usize> = loans.iter().map(|l| l.loan).collect();
@@ -2274,6 +2275,72 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
             if !stored.is_empty() {
                 receiver_loans.insert((term.source_info.span.with_parent(None), name), stored);
+            }
+        }
+        for (bb, data) in body.basic_blocks.iter_enumerated() {
+            if !runs.contains(&bb) { continue; }
+            let term = data.terminator();
+            let TerminatorKind::Call { args, destination, target: Some(return_to), .. } = &term.kind else { continue };
+            let dest_ty = decl_place_ty(tcx, body, *destination);
+            if dest_ty.is_ref() || dest_ty.is_closure() { continue; }
+            let loc = Location { block: bb, statement_index: data.statements.len() };
+            let successor = Location { block: *return_to, statement_index: 0 };
+            let before = t.start_index(loc);
+            let after = t.start_index(successor);
+            let returned = held_by_place(*destination, after);
+            if returned.is_empty() { continue; }
+            let mut captured = BTreeSet::new();
+            let mut ordinary = BTreeSet::new();
+            for arg in args {
+                let Some(operand) = arg.node.place() else { continue };
+                let TyKind::Closure(def, args) = *decl_place_ty(tcx, body, operand).kind() else {
+                    ordinary.extend(held_by_place(operand, before));
+                    continue;
+                };
+                let output = args.as_closure().sig().skip_binder().output();
+                let TyKind::Ref(region, ..) = *output.kind() else { continue };
+                let Some(origin) = region_vid(region) else { continue };
+                if dest_ty.walk().any(|a| a.as_type().is_some_and(|ty|
+                    matches!(ty.kind(), TyKind::Closure(d, _) if *d == def))) { continue; }
+                // The outer origin names the reference the closure can
+                // return. For `&mut slot` it carries the loan of the slot,
+                // while the inner origin carries the slot's own reference.
+                captured.extend(held_in(&[Origin::from(origin)], before).intersection(&held_by_place(operand, before)).copied());
+            }
+            if captured.is_disjoint(&returned) { continue; }
+            let (holder, arrival) = if cx.name(*destination).is_some() {
+                (*destination, loc)
+            } else {
+                // An assignment can stage the result in a temporary while
+                // dropping the old value. Follow the actual MIR store.
+                let Some(store) = call_result_store(&cx, *destination, successor) else { continue };
+                store
+            };
+            let (Some(root), Some(&row)) = (cx.name(holder), cx.rows.row.get(&arrival)) else { continue };
+            let mut holders = BTreeMap::new();
+            for (_, place, name) in columns.iter().chain(&synth) {
+                if place.local != holder.local { continue; }
+                let Some(fields) = place.projection.strip_prefix(&holder.projection[..]) else { continue };
+                let Some(ty) = fields.iter().try_fold(dest_ty, |ty, field| {
+                    let ProjectionElem::Field(index, _) = field else { return None };
+                    match ty.kind() {
+                        TyKind::Tuple(tys) => tys.get(index.index()).copied(),
+                        TyKind::Adt(def, args) if def.is_struct() =>
+                            def.non_enum_variant().fields.get(*index).map(|fd| fd.ty(tcx, args)),
+                        _ => None,
+                    }
+                }) else { continue };
+                // Consult this field's own origins. A field without origins
+                // cannot carry the loans of a sibling field.
+                let returned = held_in(&regions_of(ty), after);
+                let loans: BTreeSet<_> = returned.intersection(&captured).filter(|id| published.contains(id)).copied().collect();
+                if !loans.is_empty() {
+                    let argument_loans = returned.intersection(&ordinary).filter(|id| published.contains(id)).copied().collect();
+                    holders.insert(name.clone(), ClosureResultHolder { loans, argument_loans });
+                }
+            }
+            if !holders.is_empty() {
+                closure_result_loans.insert((term.source_info.span.with_parent(None), root), ClosureResultLoans { arrival, row, holders });
             }
         }
         // Copies and moves of a direct holder's reference (through MIR
@@ -4383,7 +4450,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         _ => None,
     }).collect();
     BodyFacts {
-        drop_holders, conditional_ends,
+        drop_holders,
+        closure_result_loans,
+        conditional_ends,
         aggregate_loans,
         issued_operand_loans,
         returned_operand_loans,
@@ -4419,6 +4488,41 @@ fn region_vid(r: rustc_middle::ty::Region<'_>) -> Option<rustc_middle::ty::Regio
     match r.kind() {
         rustc_middle::ty::RegionKind::ReVar(v) => Some(v),
         _ => None,
+    }
+}
+
+/// Follow the normal edge and direct transfers of a call's temporary
+/// result until it reaches a user place.
+fn call_result_store<'tcx>(cx: &Cx<'_, 'tcx>, mut value: Place<'tcx>, mut at: Location) -> Option<(Place<'tcx>, Location)> {
+    value.as_local()?;
+    let mut seen = BTreeSet::new();
+    loop {
+        if !seen.insert(at) { return None; }
+        let block = &cx.body.basic_blocks[at.block];
+        for (idx, stmt) in block.statements.iter().enumerate().skip(at.statement_index) {
+            match &stmt.kind {
+                StatementKind::Assign(asg) => match &asg.1 {
+                    Rvalue::Use(Operand::Move(src) | Operand::Copy(src)) if *src == value => {
+                        if cx.name(asg.0).is_some() {
+                            return Some((asg.0, Location { block: at.block, statement_index: idx }));
+                        }
+                        asg.0.as_local()?;
+                        value = asg.0;
+                    }
+                    _ if asg.0.local == value.local => return None,
+                    _ => {}
+                },
+                StatementKind::StorageDead(local) if *local == value.local => return None,
+                _ => {}
+            }
+        }
+        match &block.terminator().kind {
+            TerminatorKind::Goto { .. } => {}
+            TerminatorKind::Drop { place, .. } if place.local != value.local => {}
+            _ => return None,
+        }
+        let [next] = cx.r.real_succs(Location { block: at.block, statement_index: block.statements.len() })[..] else { return None };
+        at = next;
     }
 }
 
