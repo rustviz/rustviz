@@ -474,9 +474,22 @@ pub struct Struct {
     pub holds_borrow: bool,
 }
 
+/// Several sibling declarations can share a drawn column. Keep the MIR
+/// identity on the event without changing that column's equality or hash.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RefBinding {
+    pub local: Option<rustc_middle::mir::Local>,
+    pub slice_item: bool,
+}
+
+impl PartialEq for RefBinding { fn eq(&self, _: &Self) -> bool { true } }
+impl Eq for RefBinding {}
+impl Hash for RefBinding { fn hash<H: Hasher>(&self, _: &mut H) {} }
+
 // a reference of type &mut T
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub struct MutRef {         // let (mut) r1 = &mut a;
+    pub binding: RefBinding,
     pub name: String,
     pub hash: u64,
     pub is_mut: bool,
@@ -496,6 +509,7 @@ pub struct MutRef {         // let (mut) r1 = &mut a;
 // a reference of type & T
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub struct StaticRef {                // let (mut) r1 = & a;
+    pub binding: RefBinding,
     pub name: String,
     pub hash: u64,
     pub is_mut: bool,
@@ -853,6 +867,14 @@ pub fn is_param_value_line(evs: &[ExternalEvent]) -> bool {
 }
 
 impl ResourceAccessPoint {
+    pub(crate) fn ref_local(&self) -> Option<rustc_middle::mir::Local> {
+        match self {
+            Self::StaticRef(r) => r.binding.local,
+            Self::MutRef(r) => r.binding.local,
+            _ => None,
+        }
+    }
+
     pub(crate) fn owner_local(&self) -> Option<rustc_middle::mir::Local> {
         match self {
             Self::Owner(o) => o.local,
@@ -1295,6 +1317,7 @@ impl BranchType {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtBranchData {
+    pub source: Option<crate::facts::SourceArm>,
     pub source_span: Option<crate::facts::table::ArmSpan>,
     pub imaginary: Option<crate::facts::ImaginaryEdgeId>,
     // Event Data: a list of External Events
@@ -2722,7 +2745,8 @@ impl ExternalEvent {
 // as well as the state changes
 #[derive(Debug, Clone)]
 pub struct BranchData {
-  pub source_span: Option<crate::facts::table::ArmSpan>,
+  pub source: Option<crate::facts::SourceArm>,
+    pub source_span: Option<crate::facts::table::ArmSpan>,
   pub imaginary: Option<crate::facts::ImaginaryEdgeId>,
   pub t_data: TimelineColumnData,
   pub e_data: Vec<(usize, Event)>,
@@ -4660,6 +4684,10 @@ impl Event {
             Event::StaticReacquire{ is, of_ref_var: true, ..} if ref_lender(is).is_some() => {
                 hover_messages::event_dot_static_reacquire_ref_var(ref_lender(is).unwrap().name())
             }
+            Event::StaticReacquire { from: ResourceTy::Value(ResourceAccessPoint::StaticRef(item)), is, .. }
+                if item.binding.slice_item && ref_lender(is).is_some() => {
+                format!("The borrow of this slice element through {} ends here", hover_messages::styled_name_html(&item.name))
+            }
             Event::StaticReacquire{ from, is, ..} | Event::MutableReacquire{ from, is, ..} if ref_lender(is).is_some() => {
                 let r = ref_lender(is).unwrap();
                 let mutable = matches!(self, Event::MutableReacquire { .. });
@@ -6160,7 +6188,7 @@ impl Visualizable for VisualizationData {
                             append_arm_ref_die(self, e, *l, rap, !matches!(branch_type, BranchType::Loop(..)),
                                 skipped_holds.get(rap.hash()), &mut new_b_history);
                         }
-                        new_branches.push(BranchData { source_span: b.source_span, imaginary: b.imaginary, t_data: TimelineColumnData { // produce some dummy timeline data for now
+                        new_branches.push(BranchData { source: b.source, source_span: b.source_span, imaginary: b.imaginary, t_data: TimelineColumnData { // produce some dummy timeline data for now
                             name: "".to_owned(),
                             x_val: -1,
                             title: "".to_owned(),
@@ -6421,7 +6449,7 @@ impl Visualizable for VisualizationData {
                                 skipped_holds.get(var.hash()), &mut b_history);
                         }
 
-                        branch_history.push(BranchData { source_span: branch.source_span, imaginary: branch.imaginary, t_data: TimelineColumnData { // produce some dummy timeline data for now
+                        branch_history.push(BranchData { source: branch.source, source_span: branch.source_span, imaginary: branch.imaginary, t_data: TimelineColumnData { // produce some dummy timeline data for now
                             name: "".to_owned(),
                             x_val: -1,
                             title: "".to_owned(),

@@ -89,12 +89,31 @@ pub enum TerminalArgument {
     Formatted,
 }
 
+/// A HIR call can lower to multiple MIR call sites. Preserve each occurrence.
+pub(crate) type ClosureResults = rustc_data_structures::fx::FxIndexMap<
+    rustc_hir::HirId, BTreeMap<rustc_middle::mir::Local, Vec<Option<ClosureResultLoans>>>,
+>;
+
+fn closure_calls<S: serde::Serializer>(calls: &ClosureResults, s: S) -> Result<S::Ok, S::Error> {
+    s.collect_seq(calls.values().flat_map(|sites| sites.values().flatten().flatten()))
+}
+
+#[derive(Serialize)]
 pub struct ClosureResultLoans {
+    #[serde(serialize_with = "location")]
+    pub call_location: Location,
+    /// The call writes here before a possible drop of the eventual holder.
+    #[serde(serialize_with = "local")]
+    pub destination: rustc_middle::mir::Local,
+    #[serde(serialize_with = "local")]
+    pub holder: rustc_middle::mir::Local,
+    #[serde(serialize_with = "location")]
     pub arrival: rustc_middle::mir::Location,
     pub row: usize,
     pub holders: BTreeMap<String, ClosureResultHolder>,
 }
 
+#[derive(Serialize)]
 pub struct ClosureResultHolder {
     pub loans: BTreeSet<usize>,
     /// Loans also carried by an ordinary argument into this place.
@@ -127,8 +146,8 @@ pub struct BodyFacts {
     #[serde(skip)]
     pub aggregate_loans: std::collections::HashMap<rustc_span::Span, Vec<AggregateLoan>>,
     /// Loans from a closure operand that reach the named call destination.
-    #[serde(skip)]
-    pub closure_result_loans: std::collections::HashMap<(rustc_span::Span, String), ClosureResultLoans>,
+    #[serde(serialize_with = "closure_calls", skip_serializing_if = "ClosureResults::is_empty")]
+    pub(crate) closure_result_loans: ClosureResults,
     /// Loans carried by a non-receiver MIR operand into the receiver, indexed
     /// by the call and the receiver place.
     #[serde(skip)]
@@ -184,10 +203,14 @@ pub struct BodyFacts {
     /// classification, including where a boundary has no state.
     #[serde(skip)]
     pub uniform_option_refs: BTreeMap<String, bool>,
+    pub switches: Vec<SwitchExit>,
     pub loans: Vec<LoanInfo>,
+    /// Immutable bindings initialized from the Some payload of a slice iterator in a for loop.
+    #[serde(skip)]
+    pub slice_items: BTreeSet<rustc_middle::mir::Local>,
     /// Borrowck loans at MIR assignments to pattern bindings.
     #[serde(skip)]
-    pub binding_loans: BTreeMap<rustc_middle::mir::Location, Vec<usize>>,
+    pub binding_loans: BTreeMap<rustc_middle::mir::Local, BTreeMap<rustc_middle::mir::Location, Vec<usize>>>,
     pub rows: Vec<Row>,
     /// Temporaries that hold a value needing drop.
     pub temps: Vec<TempInfo>,
@@ -331,10 +354,23 @@ pub struct ColumnInfo {
     pub is_box: bool,
 }
 
+fn local<S: serde::Serializer>(local: &rustc_middle::mir::Local, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_u64(local.index() as u64)
+}
+
+fn optional_local<S: serde::Serializer>(local: &Option<rustc_middle::mir::Local>, s: S) -> Result<S::Ok, S::Error> {
+    local.map(|l| l.index()).serialize(s)
+}
+
 #[derive(Serialize, Clone, Debug)]
 pub struct LoanInfo {
     #[serde(skip)]
     pub issue: Option<rustc_middle::mir::Location>,
+    /// Base local of the actual borrowed place, including projected places.
+    #[serde(serialize_with = "optional_local", skip_serializing_if = "Option::is_none")]
+    pub lender_local: Option<rustc_middle::mir::Local>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issued_on: Option<SwitchEdge>,
     pub loan: usize,
     /// "borrow": a borrow borrowck tracks (its `BorrowIndex`) of a user
     /// place. The others restrict no column (`columns` is empty, no `lent`
@@ -418,6 +454,9 @@ pub struct LoanInfo {
     /// also has those that hold it only through a reborrow of it, a call's
     /// result or a reference to a holder.
     pub direct_holders: Vec<String>,
+    /// Named locals carrying the reference directly, including MIR copies and moves.
+    #[serde(skip)]
+    pub direct_locals: BTreeSet<rustc_middle::mir::Local>,
     /// Variables that hold it through a call's result: the call was given
     /// the loan, or a reference to something holding it, and its result
     /// carries it (`let b = s.as_bytes();`, `let m = v.iter().max();`, `for
@@ -584,8 +623,62 @@ pub struct Row {
     pub arms: Vec<Arm>,
 }
 
+/// Coordinates in borrowck MIR, serialized independently of rustc's debug format.
+fn location<S: serde::Serializer>(loc: &Location, s: S) -> Result<S::Ok, S::Error> {
+    (loc.block.index(), loc.statement_index).serialize(s)
+}
+
+fn optional_location<S: serde::Serializer>(loc: &Option<Location>, s: S) -> Result<S::Ok, S::Error> {
+    loc.map(|l| (l.block.index(), l.statement_index)).serialize(s)
+}
+
+fn block<S: serde::Serializer>(bb: &BasicBlock, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_u64(bb.index() as u64)
+}
+
+/// A normal successor of one SwitchInt in this body. Several switch values
+/// leading to the same block take the same CFG edge.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+pub struct SwitchEdge {
+    #[serde(serialize_with = "location")]
+    pub switch: Location,
+    #[serde(serialize_with = "block")]
+    pub successor: BasicBlock,
+}
+
+#[derive(Serialize)]
+pub struct SwitchExit {
+    #[serde(flatten)]
+    pub edge: SwitchEdge,
+    #[serde(skip)]
+    pub branch: Option<rustc_hir::HirId>,
+    /// Pattern whose MatchCmp result is being tested, before any guard.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tested_pattern: Option<usize>,
+    /// Drawn arm entered, when this test commits to one.
+    pub arm: Option<usize>,
+}
+
+/// One execution site in this body. Drops on two early exits can execute the
+/// same MIR instruction. A borrow can end on just one successor of that site.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct Occurrence {
+    #[serde(serialize_with = "location")]
+    pub at: Location,
+    #[serde(serialize_with = "optional_location", skip_serializing_if = "Option::is_none")]
+    pub exit: Option<Location>,
+    #[serde(serialize_with = "optional_location", skip_serializing_if = "Option::is_none")]
+    pub successor: Option<Location>,
+}
+
+#[cfg(test)]
+impl Occurrence {
+    pub(crate) fn at(at: Location) -> Self { Self { at, exit: None, successor: None } }
+}
+
 #[derive(Serialize)]
 pub struct Arm {
+    pub edge: SwitchEdge,
     #[serde(skip)]
     pub runs: bool,
     /// Index of the branch on this row (one per `SwitchInt` with arms
@@ -602,10 +695,6 @@ pub struct Arm {
     /// one of those locations terminates execution in this body.
     #[serde(skip)]
     pub has_exit: bool,
-    #[serde(skip)]
-    pub switch_col: usize,
-    #[serde(skip)]
-    pub code_spans: BTreeSet<(usize, usize)>,
     /// State on the continuing exits of an arm with a nested switch.
     #[serde(skip)]
     pub continuing: Option<State>,
@@ -656,16 +745,14 @@ pub struct Ev {
     /// for an unwind drop it is the initiating call.
     #[serde(skip)]
     pub location: rustc_middle::mir::Location,
-    /// Path of a drop. An unwind drop is positioned at the initiating call
-    /// and is conditional on unwinding reaching that cleanup.
     /// Root MIR local for initialization, move, drop, and scope-end events.
     #[serde(skip)]
     pub place_local: Option<rustc_middle::mir::Local>,
+    /// An unwind drop is displayed at the call that can enter its cleanup.
     #[serde(skip_serializing_if = "DropRoute::is_not_unwind")]
     pub drop_route: DropRoute,
-    /// Successor on which this borrow or hold ends. Two edges can lead to the same display row.
-    #[serde(skip)]
-    pub end_successor: Option<rustc_middle::mir::Location>,
+    /// Actual instruction, including the exit or successor that distinguishes this occurrence.
+    pub occurrence: Occurrence,
     /// MIR location used by the row model to display an early exit.
     #[serde(skip)]
     pub display_location: rustc_middle::mir::Location,
@@ -692,17 +779,13 @@ pub struct Ev {
     /// `BorrowEnd` comes after the location's other events.
     #[serde(skip)]
     pub order: (usize, usize, u8),
-    /// For a shared drop placed on an exit's row: that exit's own location
-    /// (its order), so copies on two exits stay two events.
-    #[serde(skip)]
-    pub site: Option<(usize, usize, u8)>,
 }
 
 impl Ev {
     /// Display coordinates can coincide for two different MIR edges.
     pub(super) fn same_occurrence(&self, other: &Self) -> bool {
-        self.fact == other.fact && self.order == other.order && self.site == other.site
-            && self.place_local == other.place_local && self.end_successor == other.end_successor
+        self.fact == other.fact && self.occurrence == other.occurrence && self.drop_route == other.drop_route
+            && self.place_local == other.place_local
     }
 }
 
@@ -714,13 +797,13 @@ mod tests {
     #[test]
     fn dedup_keeps_ends_with_distinct_mir_successors() {
         let first = Ev {
-            location: Location::START, display_location: Location::START, place_local: None, drop_route: DropRoute::Normal, end_successor: Some(BasicBlock::from_usize(1).start_location()),
+            location: Location::START, display_location: Location::START, place_local: None, drop_route: DropRoute::Normal, occurrence: super::Occurrence { at: Location::START, exit: None, successor: Some(BasicBlock::from_usize(1).start_location()) },
             end_places: vec![], caller_slot: None, transfer_paths: vec![],
-            col: 8, arm: None, order: (0, 0, 1), site: None,
+            col: 8, arm: None, order: (0, 0, 1),
             fact: Fact::HoldEnd { loan: 0, holder: "other.r".into(), to_line: 4, to_col: 1 },
         };
         let mut second = first.clone();
-        second.end_successor = Some(BasicBlock::from_usize(2).start_location());
+        second.occurrence.successor = Some(BasicBlock::from_usize(2).start_location());
         let mut facts = vec![first.clone(), first, second];
         facts.dedup_by(|a, b| a.same_occurrence(b));
         assert_eq!(facts.len(), 2);

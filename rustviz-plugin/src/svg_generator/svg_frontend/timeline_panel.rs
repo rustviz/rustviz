@@ -1433,7 +1433,7 @@ fn render_branch_dots(
                         let b = &branch_history[*arm];
                         b.source_span.and_then(|span| {
                             let f = *visualization_data.fn_source_lines.get(hash)?;
-                            let (cell, _) = visualization_data.state_table.arm_loan_cell(f, rap.name(), span.end.0, span)?;
+                            let (cell, _) = visualization_data.state_table.arm_loan_cell(f, rap.name(), span.end.0, span, b.source)?;
                             // MIR reborrows the reference on this edge. The
                             // transfer to the loop result has that same holder.
                             let supplied = cell.lent.iter().any(|l| history.iter().any(|(_, e)|
@@ -9086,8 +9086,8 @@ fn render_branches(
         };
 
         // Each arm's source span: which of the facts' arms on a one-line
-        // conditional's row are this conditional's (`StateTable::arm_order`).
-        let arm_spans: Vec<Option<crate::facts::table::ArmSpan>> = branch_history.iter().map(|b| b.source_span).collect();
+        // conditional's row are this conditional's (matched by source arm).
+        let arm_sources: Vec<_> = branch_history.iter().map(|b| b.source).collect();
         for (i, branch) in branch_history.iter().enumerate() {
             let branch_x = branch.t_data.x_val as f64;
             // The arms this one is nested in, and this one, by their
@@ -9282,7 +9282,7 @@ fn render_branches(
                 // (A one-line arm's own cell is its state after its code: from its
                 // last dot on.)
                 let last_event = branch.e_data.iter().map(|(l, _)| *l).max().unwrap_or(0);
-                let pieces = leg_table_pieces(rap, visualization_data, &state, *top, bot, own, *split_point, (i, &arm_spans, *merge_point, last_event), &arm_path);
+                let pieces = leg_table_pieces(rap, visualization_data, &state, *top, bot, own, *split_point, (i, &arm_sources, *merge_point, last_event), &arm_path);
                 if pieces.is_empty() {
                     push_seg_if_renderable(
                         &mut segs, rap,
@@ -9365,7 +9365,7 @@ fn render_branches(
                     let diagonal = match arm_bottom.take() {
                         Some((b, st, t)) => (Some(b) == column_bot).then_some((st, t)),
                         None => last_dot.filter(|d| Some(*d) == column_bot).and_then(|d| {
-                            let cell = leg_one_line_arm_cell(rap, visualization_data, d, ty.get_start_end(i), *split_point, (i, &arm_spans, *merge_point, d))?;
+                            let cell = leg_one_line_arm_cell(rap, visualization_data, d, ty.get_start_end(i), *split_point, (i, &arm_sources, *merge_point, d))?;
                             one_line_arm_piece(&end_state, rap, visualization_data, d, cell, &arm_path)
                         }),
                     };
@@ -9379,10 +9379,10 @@ fn render_branches(
                             let span = branch.source_span.filter(|s| s.start.0 == s.end.0)?;
                             let row = span.start.0;
                             if *fork_above && i == 1 && branch_history.len() == 2 && branch.e_data.is_empty() {
-                                let other = branch_history[0].source_span.filter(|s| s.start.0 == row && s.end.0 == row)?;
-                                table.empty_sibling_cell(*visualization_data.fn_source_lines.get(rap.hash())?, rap.name(), row, other)
+                                let other = branch_history[0].source?;
+                                table.empty_sibling_cell(*visualization_data.fn_source_lines.get(rap.hash())?, rap.name(), row, branch.source?, other)
                             } else {
-                                table.continuing_arm_cell(*visualization_data.fn_source_lines.get(rap.hash())?, rap.name(), row, span)
+                                table.continuing_arm_cell(*visualization_data.fn_source_lines.get(rap.hash())?, rap.name(), row, branch.source?)
                             }
                         }).flatten()
                         .filter(|c| c.init == crate::facts::table::Init::Own && c.parts.is_none() && c.lent.is_empty())
@@ -9612,7 +9612,7 @@ fn render_branches(
             }
             let mut segs = trim_dashes_under_solid(segs);
             if let Some(span) = branch.source_span.filter(|_| branch.imaginary.is_none()) {
-                segs = part_loans_in_arm(segs, rap, visualization_data, span, branch_x);
+                segs = part_loans_in_arm(segs, rap, visualization_data, span, branch.source, branch_x);
             }
 
             // The arm's own source lines, as the y-range that hovering
@@ -9677,8 +9677,8 @@ fn render_branches(
             // The arm's column is split into stretches (see
             // `render_branch_run`), each its own `branch-group`.
             let mut stretches: Vec<String> = Vec::new();
-            for run in &runs {
-                let (joints, run_stretches) = render_branch_run(rap, *hash, run, own_y, split_row, row_lines, stop_at);
+            for (run_index, run) in runs.iter().enumerate() {
+                let (joints, run_stretches) = render_branch_run(rap, *hash, run, (*id, i, run_index), own_y, split_row, row_lines, stop_at);
                 // Joint discs are decorative; they ride with the first stretch.
                 let mut run_stretches = run_stretches.into_iter();
                 if let Some(first) = run_stretches.next() { stretches.push(joints + &first); }
@@ -9799,7 +9799,7 @@ fn leg_table_pieces(
     bot: usize,
     own: (usize, usize),
     split: usize,
-    arm: (usize, &[Option<crate::facts::table::ArmSpan>], usize, usize),
+    arm: (usize, &[Option<crate::facts::SourceArm>], usize, usize),
     path: &[(usize, usize)],
 ) -> Vec<(usize, usize, State, Option<String>, bool)> {
     let lined = match state {
@@ -10043,7 +10043,7 @@ fn leg_lent_state_of(state: &State, rap: &ResourceAccessPoint, visualization_dat
 /// The state-table cell an arm (`arm`: its index and the number of arms)
 /// of a conditional written on one line shows below visual row `row`:
 /// its own arm's, from the facts' arms of that row
-/// (`StateTable::arm_order`), on the arm's own rows (`own`; one row, or
+/// (matched by source arm), on the arm's own rows (`own`; one row, or
 /// the conditional's row when the arms share it). None for another row,
 /// or where the row's arms can't be matched with the conditional's (a
 /// nested one on the line).
@@ -10053,7 +10053,7 @@ fn leg_one_line_arm_cell(
     row: usize,
     own: (usize, usize),
     split: usize,
-    (i, spans, merge, last_event): (usize, &[Option<crate::facts::table::ArmSpan>], usize, usize),
+    (i, spans, merge, last_event): (usize, &[Option<crate::facts::SourceArm>], usize, usize),
 ) -> Option<crate::facts::table::Cell> {
     // (Its cell is the state after the arm's code: not above its last dot.)
     if row < last_event {
@@ -10075,13 +10075,7 @@ fn leg_one_line_arm_cell(
     {
         return None;
     }
-    let order = table.arm_order(fn_line, src, spans)?;
-    let arm = *order.get(i)?;
-    let mut cell = table.cell_in_arm(fn_line, rap.name(), src, arm)?;
-    // After the arm's code: not a loan that dies on its way out.
-    let ends = table.arm_loan_ends(fn_line, rap.name(), src, arm);
-    cell.lent.retain(|l| !ends.contains(&l.loan));
-    Some(cell)
+    table.one_line_arm_cell(fn_line, rap.name(), src, (*spans.get(i)?)?, spans)
 }
 
 /// A source line's code: without comments and string or char literals'
@@ -10130,13 +10124,13 @@ fn opens_conditional(code: &str) -> bool {
 /// no snapshots between the events stacked inside it.
 fn part_loans_in_arm(
     segments: Vec<BranchSeg>, rap: &ResourceAccessPoint, data: &VisualizationData,
-    span: crate::facts::table::ArmSpan, branch_x: f64,
+    span: crate::facts::table::ArmSpan, source: Option<crate::facts::SourceArm>, branch_x: f64,
 ) -> Vec<BranchSeg> {
     let Some(&fn_line) = data.fn_source_lines.get(rap.hash()) else { return segments };
     if rap.is_ref() || rap.is_closure() || !data.state_table.has_part_loans(fn_line, rap.name()) { return segments; }
     // (A part named as the owner itself keeps the leg's own title.)
     let on_row = |row, state: &State, title: &String| {
-        let (cell, arm) = data.state_table.arm_loan_cell(fn_line, rap.name(), row, span)?;
+        let (cell, arm) = data.state_table.arm_loan_cell(fn_line, rap.name(), row, span, source)?;
         part_loan_state(state, rap, data, fn_line, &cell, arm).map(|(st, t)| (st, t.unwrap_or_else(|| title.clone())))
     };
     let mut out = Vec::new();
@@ -10152,8 +10146,8 @@ fn part_loans_in_arm(
             // own (a loan taken there, `&mut p.b` as the arm's value, is
             // still live past the `}`).
             let exit = (span.start.0 + 1..span.end.0).rev()
-                .find(|r| data.state_table.arm_loan_cell(fn_line, rap.name(), *r, span).is_some());
-            let at = if span.start.0 == span.end.0 || data.state_table.arm_loan_cell(fn_line, rap.name(), span.end.0, span).is_some() {
+                .find(|r| data.state_table.arm_loan_cell(fn_line, rap.name(), *r, span, source).is_some());
+            let at = if span.start.0 == span.end.0 || data.state_table.arm_loan_cell(fn_line, rap.name(), span.end.0, span, source).is_some() {
                 Some(span.end.0)
             } else {
                 exit
@@ -10336,6 +10330,7 @@ fn render_branch_run(
     rap: &ResourceAccessPoint,
     hash: u64,
     run: &[&BranchSeg],
+    (branch, arm, run_index): (usize, usize, usize),
     own_y: Option<(f64, f64)>,
     split_row: f64,
     row_lines: Option<&[Option<usize>]>,
@@ -10366,10 +10361,11 @@ fn render_branch_run(
     let mut polys: Vec<String> = vec![String::new(); n_chunks];
 
     // The `data-rv-*` attributes of a segment's nodes: its hover
-    // polygon is the element, its lines are parts of it.
-    let seg_rv = |seg: &BranchSeg| Rv::new(rv_attrs::BRANCH_LINE).state(&seg.state).var(rap.name())
+    // polygon and its lines belong to one segment of this branch event.
+    // Different forks on one row can have identical endpoints.
+    let seg_rv = |seg: &BranchSeg, index: usize| Rv::new(rv_attrs::BRANCH_LINE).state(&seg.state).var(rap.name())
         .rows(seg.rows.0, seg.rows.1)
-        .at(format!("{} {} {} {}", seg.p1.0, seg.p1.1, seg.p2.0, seg.p2.1));
+        .at(format!("{branch} {arm} {run_index} {index}"));
 
     // Visible lines per segment.
     for (i, (style, dashed, seg)) in classified.iter().enumerate() {
@@ -10378,7 +10374,7 @@ fn render_branch_run(
         match style {
             OwnerLine::Solid => svg.push_str(&format!(
                 "            <line data-hash=\"{}\" class=\"solid tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\"{}{} style=\"stroke-dasharray: {};\"/>\n",
-                hash, seg.p1.0, seg.p1.1, seg.p2.0, seg.p2.1, seg.title, seg_rv(seg).part("line").attrs(), underline_attr(seg, own_y, split_row, row_lines), dasharray,
+                hash, seg.p1.0, seg.p1.1, seg.p2.0, seg.p2.1, seg.title, seg_rv(seg, i).part("line").attrs(), underline_attr(seg, own_y, split_row, row_lines), dasharray,
             )),
             OwnerLine::Hollow => {
                 let perp = perp_unit(seg.p1, seg.p2);
@@ -10387,7 +10383,7 @@ fn render_branch_run(
                     let oy = perp.1 * sign * BRANCH_HALF_W;
                     svg.push_str(&format!(
                         "            <line data-hash=\"{}\" class=\"hollow tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\"{}{} style=\"stroke-dasharray: {};\"/>\n",
-                        hash, seg.p1.0 + ox, seg.p1.1 + oy, seg.p2.0 + ox, seg.p2.1 + oy, seg.title, seg_rv(seg).part(part).attrs(), underline_attr(seg, own_y, split_row, row_lines), dasharray,
+                        hash, seg.p1.0 + ox, seg.p1.1 + oy, seg.p2.0 + ox, seg.p2.1 + oy, seg.title, seg_rv(seg, i).part(part).attrs(), underline_attr(seg, own_y, split_row, row_lines), dasharray,
                     ));
                 }
             }
@@ -10395,7 +10391,7 @@ fn render_branch_run(
             // takes the hover.
             OwnerLine::Dotted => svg.push_str(&format!(
                 "            <line data-hash=\"{}\" class=\"lent tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\"{}{}/>\n",
-                hash, seg.p1.0, seg.p1.1, seg.p2.0, seg.p2.1, seg.title, seg_rv(seg).part("line").attrs(), underline_attr(seg, own_y, split_row, row_lines),
+                hash, seg.p1.0, seg.p1.1, seg.p2.0, seg.p2.1, seg.title, seg_rv(seg, i).part("line").attrs(), underline_attr(seg, own_y, split_row, row_lines),
             )),
             OwnerLine::Empty => {} // unreachable: filtered before push
         }
@@ -10462,7 +10458,7 @@ fn render_branch_run(
                     .map_or_else(|| prev_seg.title.clone(), hover_messages::state_inactive_arm_unlit);
                 svg.push_str(&format!(
                     "            <line data-hash=\"{}\" class=\"hollow tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\"{} data-underline=\"none\" style=\"stroke-dasharray: {};\"/>\n",
-                    hash, prev_off.0, prev_off.1, curr_off.0, curr_off.1, bevel_title, seg_rv(prev_seg).part(part).attrs(), dasharray,
+                    hash, prev_off.0, prev_off.1, curr_off.0, curr_off.1, bevel_title, seg_rv(prev_seg, wi).part(part).attrs(), dasharray,
                 ));
             }
         }
@@ -10507,7 +10503,7 @@ fn render_branch_run(
         let underline = underline_attr(seg, own_y, split_row, row_lines);
         svg.push_str(&format!(
             "            <polygon data-hash=\"{}\" class=\"tooltip-trigger\" points=\"{}\" data-tooltip-text=\"{}\"{}{} style=\"fill:transparent; stroke:none; pointer-events:fill;\"/>\n",
-            hash, pts_str, seg.title, seg_rv(seg).attrs(), underline,
+            hash, pts_str, seg.title, seg_rv(seg, si).attrs(), underline,
         ));
     }
 
@@ -11234,7 +11230,7 @@ fn part_loan_state(
     data: &VisualizationData,
     fn_line: FunctionStart,
     cell: &crate::facts::table::Cell,
-    arm: Option<usize>,
+    arm: Option<crate::facts::SourceArm>,
 ) -> Option<(State, Option<String>)> {
     use crate::facts::table::Init;
     if rap.is_ref() || rap.is_fn() || rap.is_closure() || !matches!(cell.init, Init::Own | Init::Partly) {
@@ -11254,7 +11250,7 @@ fn part_loan_state(
     };
     let strongest = cell.lent.iter().map(|l| rank(l.kind)).max()?;
     let cell_for = |name: &str| match arm {
-        Some(a) => table.cell_in_arm(fn_line, name, cell.from_row, a),
+        Some(a) => table.source_arm_cell(fn_line, name, cell.from_row, a),
         None => table.cell(fn_line, name, cell.from_row, cell.from_row),
     };
     let strongest_loans = || cell.lent.iter().filter(|l| rank(l.kind) == strongest);
@@ -11565,10 +11561,10 @@ fn table_lent_state_of(
         let in_arm = arms.iter().any(Option::is_some);
         // Borrowed on some paths only: a loan from an arm, unless some
         // loan isn't from one or every arm of that branch has one.
-        let branches: BTreeSet<(usize, usize)> = arms.iter().flatten().map(|((l, b, _), _)| (*l, *b)).collect();
-        let every_path = arms.iter().any(Option::is_none) || branches.iter().any(|(l, b)| {
-            let covered: BTreeSet<usize> = arms.iter().flatten().filter(|((l2, b2, _), _)| l2 == l && b2 == b).map(|((_, _, a), _)| *a).collect();
-            arms.iter().flatten().find(|((l2, b2, _), _)| l2 == l && b2 == b).is_some_and(|(_, n)| covered.len() == *n)
+        let every_path = arms.iter().any(Option::is_none) || arms.iter().flatten().any(|(edge, count)| {
+            let covered: BTreeSet<_> = arms.iter().flatten().filter(|(other, _)| other.switch == edge.switch)
+                .map(|(other, _)| other.successor).collect();
+            covered.len() == *count
         });
         let column = |name: &str| visualization_data.timelines.values().map(|t| &t.resource_access_point)
             .find(|h| h.name() == name && visualization_data.fn_source_lines.get(h.hash()).is_some_and(|start| start.body == fn_line.body));
@@ -12444,6 +12440,7 @@ mod tests {
 
     fn arm(e_data: Vec<(usize, Event)>) -> BranchData {
         BranchData {
+            source: None,
             source_span: None,
             imaginary: None,
             t_data: TimelineColumnData {

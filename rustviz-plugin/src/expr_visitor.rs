@@ -291,10 +291,20 @@ pub struct BodyRaps {
 impl BodyRaps {
   pub fn binding(&self, id: rustc_hir::HirId) -> Option<&RapData> {
     if let Some(local) = self.bindings.declarations.get(&id) {
-      let rd = self.columns.get(self.bindings.locals.get(local)?)?;
-      return if rd.local == Some(*local) { Some(rd) } else { self.earlier.get(local).map(|(rd, _)| rd) };
+      return self.place(*local, self.bindings.locals.get(local)?);
     }
     self.columns.get(self.parameters.get(&id)?)
+  }
+
+  /// A shared drawing column can represent several locals. A field column
+  /// additionally identifies the projection within that particular local.
+  pub(crate) fn place(&self, local: Local, column: &str) -> Option<&RapData> {
+    let rd = self.columns.get(column)?;
+    if rd.local == Some(local) || rd.rap.owner_local() == Some(local)
+      || rd.rap.is_member() && self.struct_locals.get(&rd.rap.get_owner()) == Some(&local) {
+      return Some(rd);
+    }
+    self.earlier.get(&local).map(|(rd, _)| rd).filter(|rd| rd.rap.name() == column)
   }
 
   pub(crate) fn path_loan<'a>(&'a self, rd: &RapData, loans: &'a HashMap<String, RefData>) -> Option<&'a RefData> {
@@ -317,6 +327,10 @@ impl BodyRaps {
 
   pub(crate) fn local(&self, column: &str) -> Option<Local> {
     self.active.get(column).copied()
+  }
+
+  fn root_local(&self, column: &str) -> Option<Local> {
+    self.local(column).or_else(|| self.columns.get(column)?.rap.owner_local())
   }
 
   pub fn pattern_local(&self, column: &str, pat: &Pat<'_>) -> Option<Local> {
@@ -856,9 +870,8 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   pub first_synthesized_end: usize,
   /// Borrowing arrows for reference assignments, by the loan of the RHS.
   pub repoint_borrows: BTreeMap<usize, usize>,
-  /// HIR spans of the conditions corresponding to drawn forks in this body.
-  pub branch_conditions: BTreeMap<usize, rustc_span::Span>,
-  pub arm_patterns: BTreeMap<usize, Vec<(usize,rustc_span::Span)>>,
+  /// Pattern declarations in each drawn arm of this body.
+  pub arm_bindings: BTreeMap<usize, Vec<(usize, Local)>>,
   /// The arms being visited, innermost last: (the conditional's first
   /// and last lines, the arm's first and last lines).
   pub arm_frames: Vec<(usize, usize, usize, usize)>,
@@ -1350,8 +1363,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       repointed_loans: Vec::new(),
       first_synthesized_end: 0,
       repoint_borrows: BTreeMap::new(),
-      branch_conditions: BTreeMap::new(),
-      arm_patterns: BTreeMap::new(),
+      arm_bindings: BTreeMap::new(),
       arm_frames: Vec::new(),
       defer_old_ends: false,
       deferred_holder_borrows: None,
@@ -1904,6 +1916,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   ) {
     self.add_rap(
       ResourceAccessPoint::StaticRef(StaticRef {
+        binding: RefBinding::default(),
         name,
         hash: self.rap_hashes as u64,
         is_mut: mutability,
@@ -1925,6 +1938,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   ) {
     self.add_rap(
       ResourceAccessPoint::MutRef(MutRef {
+        binding: RefBinding::default(),
         name,
         hash: self.rap_hashes as u64,
         is_mut: mutability,
@@ -1971,6 +1985,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     self.in_scope.push(key.clone());
     let local = self.raps.local(&key);
     match &mut r {
+      ResourceAccessPoint::MutRef(r) => r.binding.local = local,
+      ResourceAccessPoint::StaticRef(r) => {
+        r.binding.local = local;
+        r.binding.slice_item = local.is_some_and(|l| self.body_facts.is_some_and(|f| f.slice_items.contains(&l)));
+      }
       ResourceAccessPoint::Owner(o) => o.local = local,
       ResourceAccessPoint::Struct(s) => {
         s.local = if s.is_member { self.raps.struct_locals.get(&s.owner).copied() } else { local };
@@ -4032,9 +4051,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   }
 
   /// Reference columns whose hold ends on the edge that bypasses the body.
-  pub(crate) fn skipped_holds(&self, guard: &Expr<'_>, then: &Expr<'_>) -> BTreeMap<u64, SkippedHold> {
-    use crate::facts::Fact;
-    use rustc_middle::mir::{BasicBlock, TerminatorKind};
+  pub(crate) fn skipped_holds(&self, branch: rustc_hir::HirId) -> BTreeMap<u64, SkippedHold> {
+    use crate::facts::{Fact, SourceArm};
+    use rustc_middle::mir::BasicBlock;
     let mut holds = BTreeMap::<u64, SkippedHold>::new();
     let Some(body) = self.body_facts else { return holds };
     let mir = self.mir_body;
@@ -4052,17 +4071,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     };
     let facts = || body.rows.iter().flat_map(|row| &row.facts);
     let skip_edge = |ev: &crate::facts::Ev| {
-      let test = ev.location.block;
-      let bb = &mir.basic_blocks[test];
-      let TerminatorKind::SwitchInt { discr, .. } = &bb.terminator().kind else { return None };
-      if ev.location.statement_index != bb.statements.len() || !discr.ty(mir, self.tcx).is_bool()
-        || !guard.span.contains(bb.terminator().source_info.span) { return None; }
-      let skip = ev.end_successor?.block;
-      let successors = crate::facts::real_successor_blocks(mir, test);
-      let &[left, right] = successors.as_slice() else { return None };
-      if skip == left && skip != right { Some((test, skip, right)) }
-      else if skip == right && skip != left { Some((test, skip, left)) }
-      else { None }
+      let edge = body.entered(ev.location, ev.occurrence.successor)?;
+      if edge != (SourceArm { branch, index: 1 }) { return None; }
+      let skip = ev.occurrence.successor?.block;
+      let mut others = body.switches.iter().filter(|e| e.edge.switch == ev.location && e.edge.successor != skip);
+      let taken = others.next()?.edge.successor;
+      others.next().is_none().then_some((ev.location.block, skip, taken))
     };
     for ev in facts() {
       let Fact::HoldEnd { holder, loan, .. } = &ev.fact else { continue };
@@ -4073,7 +4087,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       for row in &body.rows {
         for e in &row.facts {
           if !matches!(&e.fact, Fact::HoldEnd { holder: h, loan: l, .. } if h == holder && l == loan) { continue; }
-          if then.span.contains(mir.source_info(e.location).span)
+          if crate::facts::location_arms(self.tcx, mir, body, e.location).contains(&SourceArm { branch, index: 0 })
             && row.facts.iter().any(|m| m.location == e.location && matches!(&m.fact, Fact::Move { path, .. }
               if holder.strip_prefix(path.as_str()).is_some_and(|suffix| suffix.starts_with('.')))) {
             moves.insert(e.location.block);
@@ -7595,7 +7609,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   fn register_call_member_lenders(&mut self, root: &str, name: &str, init: &'tcx Expr<'tcx>, ty: Ty<'tcx>, reassigning: bool) {
     // A tuple's elements too (`let q = pair(&s);`, #1341).
-    let closure_result = self.closure_result(root, init);
+    let closure_result = self.closure_result(self.raps.root_local(root), init);
     for (field_name, field_ty) in self.member_fields(ty) {
       let fname = format!("{}.{}", name, field_name);
       let has_fields = self.has_member_columns(field_ty);
@@ -7819,7 +7833,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       }
       self.note_loan_kinds(&fname, rhs);
     }
-    if self.closure_result(st.name(), rhs).is_some() {
+    if self.closure_result(st.owner_local().or_else(|| self.raps.root_local(st.name())), rhs).is_some() {
       self.register_call_member_lenders(st.name(), st.name(), rhs, ty, true);
     }
   }
@@ -7991,20 +8005,25 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     });
   }
 
-  fn closure_result(&self, root: &str, call: &Expr<'_>) -> Option<&'a crate::facts::schema::ClosureResultLoans> {
-    self.body_facts?.closure_result_loans.get(&(call.span.with_parent(None), root.to_owned()))
+  fn closure_result(&self, holder: Option<Local>, call: &Expr<'_>) -> Option<&'a crate::facts::schema::ClosureResultLoans> {
+    let sites = self.body_facts?.closure_result_loans.get(&call.hir_id)?;
+    // One HIR expression can evaluate in several copies of a guard. Its
+    // single drawn call cannot select a MIR occurrence in that case.
+    if sites.len() != 1 { return None; }
+    let [Some(result)] = sites.first_key_value()?.1.as_slice() else { return None };
+    (Some(result.holder) == holder).then_some(result)
   }
 
   pub fn has_closure_result(&self, holder: &str, value: &'tcx Expr<'tcx>) -> bool {
     let Some(value) = branch_value_expr(value) else { return false };
-    self.closure_result(holder, value).is_some_and(|r| r.holders.contains_key(holder))
+    self.closure_result(self.raps.root_local(holder), value).is_some_and(|r| r.holders.contains_key(holder))
       || holder_branch_bodies(value).is_some_and(|arms|
         arms.into_iter().any(|arm| self.has_closure_result(holder, arm)))
   }
 
   fn closure_result_lender(&self, loan: &crate::facts::LoanInfo) -> Option<ResourceTy> {
     if !matches!(loan.kind, "shared" | "mut") || loan.through.is_some() { return None; }
-    self.raps.get(&loan.lender).map(|r| ResourceTy::Value(r.rap.clone()))
+    self.raps.place(loan.lender_local?, &loan.lender).map(|r| ResourceTy::Value(r.rap.clone()))
   }
 
   fn record_lender_kind(kinds: &mut Vec<(ResourceTy, bool)>, lender: &ResourceTy, mutable: bool) {
@@ -8027,7 +8046,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       }
       return;
     }
-    let Some(result) = self.closure_result(root, value).and_then(|r| r.holders.get(holder)) else { return };
+    let Some(result) = self.closure_result(self.raps.root_local(root), value).and_then(|r| r.holders.get(holder)) else { return };
     for loan in facts.loans.iter().filter(|l| result.loans.contains(&l.loan)) {
       let Some(lender) = self.closure_result_lender(loan) else { continue };
       Self::record_lender_kind(kinds, &lender, loan.kind == "mut");
@@ -8039,7 +8058,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   /// Keep the signature arrow only if a distinct ordinary argument loan
   /// can account for it. One loan carried by both operands gets one arrow.
-  fn closure_result_supplies_lender(&self, root: &str, holder: &str, call: &Expr<'_>, lender: &ResourceTy) -> bool {
+  fn closure_result_supplies_lender(&self, root: Option<Local>, holder: &str, call: &Expr<'_>, lender: &ResourceTy) -> bool {
     let Some(result) = self.closure_result(root, call).and_then(|r| r.holders.get(holder)) else { return false };
     let Some(facts) = self.body_facts else { return false };
     let mut matching = facts.loans.iter().filter(|l| self.closure_result_lender(l).as_ref() == Some(lender));
@@ -9555,7 +9574,7 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
   };
   let lenders: Vec<_> = rd.all_lenders().into_iter()
     .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..)) && own.contains(l))
-    .filter(|l| !self.closure_result_supplies_lender(lhs_rap.name(), lhs_rap.name(), call, l))
+    .filter(|l| !self.closure_result_supplies_lender(lhs_rap.owner_local().or_else(|| self.raps.root_local(lhs_rap.name())), lhs_rap.name(), call, l))
     .collect();
   if lenders.is_empty() {
     return false;
@@ -9697,7 +9716,7 @@ pub fn emit_struct_field_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'
     let frap = frap.rap.to_owned();
     let lenders: Vec<ResourceTy> = rd.all_lenders().into_iter()
       .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)))
-      .filter(|l| !self.closure_result_supplies_lender(&st.name, &fname, call, l))
+      .filter(|l| !self.closure_result_supplies_lender(st.local.or_else(|| self.raps.root_local(&st.name)), &fname, call, l))
       .collect();
     // A reference field whose argument has no column (`part("a")`, a
     // call's result we don't track): the field still gets its value
@@ -10728,7 +10747,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
   /// loans its closure operands contribute to the returned value.
   fn draw_closure_result_borrows(&mut self, holder: &ResourceTy, call: &Expr<'_>) {
     let ResourceTy::Value(root) = holder else { return };
-    let Some(result) = self.closure_result(root.name(), call) else { return };
+    let Some(result) = self.closure_result(root.owner_local().or_else(|| self.raps.root_local(root.name())), call) else { return };
     let Some(facts) = self.body_facts else { return };
     let func = match call.kind {
       ExprKind::Call(f, _) => hirid_to_var_name(f.hir_id, &self.tcx),
@@ -10736,7 +10755,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       _ => None,
     };
     for (name, field) in &result.holders {
-      let Some(rap) = self.raps.get(name).map(|rd| rd.rap.clone()) else { continue };
+      let Some(rap) = self.raps.place(result.holder, name).map(|rd| rd.rap.clone()) else { continue };
       if !rap.holds_borrow() && !rap.is_ref() { continue; }
       for loan in facts.loans.iter().filter(|loan| field.loans.contains(&loan.loan)) {
         let Some(lender) = self.closure_result_lender(loan) else { continue };
@@ -12901,7 +12920,14 @@ pub fn print_out_of_scope(&mut self){
       if !slot.arm && slot.rows.1 == usize::MAX && handed_off.contains(k) {
         continue;
       }
-      let Some(from_ro) = self.raps.get(k).map(|r| r.rap.to_owned()) else { continue };
+      let Some(current) = self.raps.get(k) else { continue };
+      let from_ro = match slot.rd.local {
+        Some(local) if current.rap.is_ref() => {
+          let Some(binding) = self.raps.place(local, k) else { continue };
+          &binding.rap
+        }
+        _ => &current.rap,
+      }.clone();
       let rd = slot.rd.clone();
       let mut ends = Vec::new();
       for (lender, end, loans) in std::mem::take(&mut decided[i]) {

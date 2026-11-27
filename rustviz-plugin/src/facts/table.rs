@@ -8,6 +8,7 @@
 //! by the first row of the leg it draws, since rows above a leg's start
 //! may belong to another arm.
 
+use super::{SourceArm, SwitchEdge};
 use rustc_hir::def_id::DefId;
 use rustc_data_structures::fx::FxIndexMap;
 use super::schema::{ProjectedPlace, DropRoute, LoanInfo, BodyFacts, CrateFacts, Extraction, Fact, HolderType, Lent, Parts, State};
@@ -123,8 +124,7 @@ impl Cell {
 
 type Cells = BTreeMap<String, Cell>;
 
-/// Source coordinates of the arm represented by a drawn leg. Its HIR
-/// span and the MIR arm spans use the same 1-based character positions.
+/// Source bounds of a drawn leg for layout, in 1-based character positions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ArmSpan {
     pub start: (usize, usize),
@@ -135,14 +135,11 @@ pub struct ArmSpan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArmInfo {
     pub runs: bool,
-    pub branch: usize,
-    pub arm: usize,
     pub parent: Option<usize>,
-    pub col_lo: usize,
-    pub col_hi: usize,
+    edge: SwitchEdge,
+    source: Option<SourceArm>,
+    branch: Option<rustc_hir::HirId>,
     has_exit: bool,
-    switch_col: usize,
-    code_spans: BTreeSet<(usize, usize)>,
     continuing: Option<Cells>,
 }
 
@@ -161,12 +158,41 @@ struct RowCells {
     arms: Vec<(ArmInfo, Cells)>,
 }
 
+/// Only expose a property of a drawn arm when all its MIR exits agree.
+fn agreed<T: PartialEq>(mut values: impl Iterator<Item = T>) -> Option<T> {
+    let first = values.next()?;
+    values.all(|value| value == first).then_some(first)
+}
+
+impl RowCells {
+    /// An instruction in a common target executes on every incoming edge
+    /// to that block. Its event is stored only once on the row.
+    fn same_target(&self, a: usize, b: usize) -> bool {
+        self.arms.get(a).zip(self.arms.get(b)).is_some_and(|((a, _), (b, _))| a.edge.successor == b.edge.successor)
+    }
+
+    fn indices(&self, source: SourceArm) -> impl Iterator<Item = usize> + '_ {
+        self.arms.iter().enumerate().filter_map(move |(i, (a, _))| (a.source == Some(source)).then_some(i))
+    }
+
+    fn siblings(&self, sources: &[Option<SourceArm>]) -> Option<Vec<Vec<usize>>> {
+        let branch = sources.first().copied().flatten()?.branch;
+        sources.iter().map(|&s| {
+            let source = s?;
+            let indices: Vec<_> = self.indices(source).collect();
+            (source.branch == branch && !indices.is_empty() && !self.arms.iter().any(|(a, _)|
+                a.branch != Some(branch) && a.parent.is_some_and(|p| indices.contains(&p)))).then_some(indices)
+        }).collect()
+    }
+}
+
 #[derive(Debug)]
 struct BodyTable {
     first_line: usize,
     last_line: usize,
     function_body_start: Option<(usize, usize)>,
     rows: BTreeMap<usize, RowCells>,
+    successor_counts: BTreeMap<rustc_middle::mir::Location, usize>,
     joins: BTreeMap<rustc_span::Span, Cells>,
     /// Column names, in the facts' order.
     columns: Vec<String>,
@@ -252,28 +278,24 @@ impl StateTable {
         (c.from_row == row || body.rows[&c.from_row].continues_to.is_some_and(|n| row < n)).then_some(c)
     }
 
-    /// Associate a rendered arm with its own MIR exit. SwitchInt successor
-    /// order is not source order. On a shared row, require exactly one
-    /// MIR arm inside the supplied span. Never use the joined snapshot
-    /// for a leg that cannot be identified.
-    pub fn arm_loan_cell(&self, function: FunctionStart, column: &str, row: usize, span: ArmSpan) -> Option<(Cell, Option<usize>)> {
-        if row < span.start.0 || row > span.end.0 {
-            return None;
-        }
+    /// Read the named arm's exit on a shared row. On an interior row the
+    /// displayed arm supplies the bounds for carrying its last state forward.
+    pub fn arm_loan_cell(&self, function: FunctionStart, column: &str, row: usize, span: ArmSpan, source: Option<SourceArm>) -> Option<(Cell, Option<SourceArm>)> {
+        if row < span.start.0 || row > span.end.0 { return None; }
         let body = self.bodies.get(&function.body)?;
-        if let Some(rc) = body.rows.get(&row).filter(|rc| !rc.arms.is_empty()) {
-            let mut matches = rc.arms.iter().enumerate().filter(|(_, (a, _))|
-                a.col_lo != 0 && span.start <= (row, a.col_lo) && (row, a.col_hi) <= span.end);
-            let (arm, _) = matches.next()?;
-            if matches.next().is_some() { return None; }
-            return Some((self.cell_in_arm(function, column, row, arm)?, Some(arm)));
+        if body.rows.get(&row).is_some_and(|rc| !rc.arms.is_empty()) {
+            let arm = source?;
+            return Some((self.source_arm_cell(function, column, row, arm)?, Some(arm)));
         }
-        // An interior row belongs to this arm alone. A boundary row can
-        // include its condition, a sibling arm, or code after the join.
         if span.start.0 < row && row < span.end.0 {
             return Some((self.loan_cell(function, column, row, span.start.0 + 1)?, None));
         }
         None
+    }
+
+    pub fn source_arm_cell(&self, function: FunctionStart, column: &str, row: usize, arm: SourceArm) -> Option<Cell> {
+        let rc = self.bodies.get(&function.body)?.rows.get(&row)?;
+        agreed(rc.indices(arm).map(|i| self.cell_in_arm(function, column, row, i)))?
     }
 
     /// `cell` on one arm of a row with several (`arms`): its own state and
@@ -288,10 +310,9 @@ impl StateTable {
             return None;
         }
         let here = body.rows.get(&row);
-        let why: Vec<Why> = here
-            .and_then(|r| r.why.get(column))
-            .map(|v| v.iter().filter(|(a, _)| arm.is_none() || *a == arm || a.is_none()).map(|(_, w)| w.clone()).collect())
-            .unwrap_or_default();
+        let why = here.map(|r| r.why.get(column).into_iter().flatten()
+            .filter(|(a, _)| arm.zip(*a).is_none_or(|(i, j)| r.same_target(i, j)))
+            .map(|(_, w)| w.clone()).collect()).unwrap_or_default();
         let found = if let Some(i) = arm {
             let r = here?;
             r.arms.get(i).and_then(|(_, cells)| cells.get(column)).map(|c| (row, c.clone()))
@@ -392,7 +413,10 @@ impl StateTable {
         if writes.next().is_some() || !why.iter().any(|(a, w)| a.as_ref() == Some(arm) && matches!(w,
             Why::Dropped { how: "drops_if_init", at_reassign: true, .. })) { return false; }
         let Some((written, _)) = rc.arms.get(*arm) else { return false };
-        rc.arms.iter().any(|(a, cells)| a.runs && a.branch == written.branch && a.arm != written.arm
+        rc.arms.iter().any(|(a, cells)| a.runs && a.edge.switch == written.edge.switch && a.edge.successor != written.edge.successor
+            // A shared target's snapshot includes paths from other tests.
+            // It cannot establish what skipping this particular write did.
+            && !rc.arms.iter().any(|(other, _)| other.edge.switch != a.edge.switch && other.edge.successor == a.edge.successor)
             && cells.get(column).is_some_and(|c| c.init == Init::Maybe && c.cause == Some("moved")))
     }
 
@@ -470,100 +494,10 @@ impl StateTable {
             .map_or(Vec::new(), |r| r.arms.iter().map(|(a, _)| a.clone()).collect())
     }
 
-    /// The facts' arms (indices into row `row`'s arms) of a renderer's
-    /// conditional on that row, one per renderer arm in its order, given
-    /// those arms' source spans (None: an arm with no code of its own, an
-    /// implicit `else`): the one branch of the row whose every arm lies in
-    /// exactly one of the spans, one per span; spanless arms take the
-    /// branch's arms no span holds, in source order. That tells a
-    /// conditional from a sibling one on the same line. None where no
-    /// single branch fits, or where an arm of it has a branch of its own
-    /// (`?`, an `else if`): its state joins that branch's exits, an early
-    /// return's too. `whole_row`: also None where any branch on the row
-    /// nests in another.
-    fn match_arms(r: &RowCells, row: usize, spans: &[Option<ArmSpan>], whole_row: bool) -> Option<Vec<usize>> {
-        if r.arms.is_empty() || spans.is_empty() || (whole_row && r.arms.iter().any(|(a, _)| a.parent.is_some())) {
-            return None;
-        }
-        // (An arm in a span: all its code, or where its code starts or ends
-        // when no arm is all inside: an `if let` arm's code starts at its
-        // pattern's binding, before its block's span; a `return` arm's runs
-        // on to the end of the line, its early exit's drops.)
-        let at = |s: &ArmSpan, c: usize| s.start <= (row, c) && (row, c) <= s.end;
-        let inside = |s: &ArmSpan, a: &ArmInfo| a.col_lo != 0 && (at(s, a.col_lo) || at(s, a.col_hi));
-        let whole = |s: &ArmSpan, a: &ArmInfo| a.col_lo != 0 && at(s, a.col_lo) && at(s, a.col_hi);
-        let branches: BTreeSet<usize> = r.arms.iter().map(|(a, _)| a.branch).collect();
-        let mut found = None;
-        for br in branches {
-            let idx: Vec<usize> = (0..r.arms.len()).filter(|&i| r.arms[i].0.branch == br).collect();
-            if idx.len() != spans.len() || r.arms.iter().any(|(a, _)| a.parent.is_some_and(|p| idx.contains(&p))) {
-                continue;
-            }
-            // A branch nested in an arm (`else if`, a `?`) is the
-            // conditional only if the conditional lies in that arm's code.
-            let within = |s: &ArmSpan, p: &ArmInfo| s.start.0 == row && s.end.0 == row && p.col_lo <= s.start.1 && s.end.1 <= p.col_hi + 1;
-            if let Some(p) = r.arms[idx[0]].0.parent.and_then(|p| r.arms.get(p)) {
-                if !spans.iter().flatten().all(|s| within(s, &p.0)) {
-                    continue;
-                }
-            }
-            let mut out: Vec<Option<usize>> = vec![None; spans.len()];
-            let mut ok = true;
-            for (j, s) in spans.iter().enumerate() {
-                let Some(s) = s else { continue };
-                let mut m: Vec<usize> = idx.iter().copied().filter(|&i| inside(s, &r.arms[i].0)).collect();
-                // The empty successor can coincide with a non-empty arm's
-                // closing brace. It belongs to the implicit else.
-                if spans.iter().any(Option::is_none) && m.iter().any(|&i| r.arms[i].0.col_lo < r.arms[i].0.col_hi) {
-                    m.retain(|&i| r.arms[i].0.col_lo < r.arms[i].0.col_hi);
-                }
-                // (Best fit first: all the arm's code in the span, else where
-                // it ends, else where it starts.)
-                if m.len() > 1 && m.iter().any(|&i| whole(s, &r.arms[i].0)) {
-                    m.retain(|&i| whole(s, &r.arms[i].0));
-                }
-                if m.len() > 1 && m.iter().any(|&i| at(s, r.arms[i].0.col_hi)) {
-                    m.retain(|&i| at(s, r.arms[i].0.col_hi));
-                }
-                // (An implicit `else` has no code: its arm is the point at
-                // the `if` arm's closing brace.)
-                if m.len() > 1 {
-                    m.retain(|&i| r.arms[i].0.col_lo < r.arms[i].0.col_hi);
-                }
-                match m.as_slice() {
-                    [one] if !out.contains(&Some(*one)) => out[j] = Some(*one),
-                    _ => {
-                        ok = false;
-                        break;
-                    }
-                }
-            }
-            if !ok {
-                continue;
-            }
-            let mut rest: Vec<usize> = idx.iter().copied().filter(|i| !out.contains(&Some(*i))).collect();
-            rest.sort_by_key(|&i| (r.arms[i].0.col_lo == 0, r.arms[i].0.col_lo, r.arms[i].0.col_hi));
-            let mut rest = rest.into_iter();
-            for o in out.iter_mut().filter(|o| o.is_none()) {
-                *o = rest.next();
-            }
-            if found.is_some() {
-                return None;
-            }
-            found = out.into_iter().collect::<Option<Vec<usize>>>();
-        }
-        found
-    }
-
-    /// Whether the arms of the one-line conditional on source row `row`
-    /// whose arms span `spans` (`match_arms`) leave one of `columns` in
-    /// different states (its value; the kind, holder and every variable
-    /// holding each loan restricting it; the parts moved out of it; the
-    /// loans it holds): design Q1, such a conditional gets a row per arm.
-    /// Loans that die on an arm's way out don't count (after its code they
-    /// are over, `arm_loan_ends`; an arm `match_arms` accepts has no
-    /// branch of its own, so its code has one way out).
-    pub fn arms_disagree(&self, function: DefId, row: usize, columns: &BTreeSet<String>, spans: &[Option<ArmSpan>]) -> bool {
+    /// A one-line conditional gets separate rows when its own exits disagree.
+    /// Compare sibling exits of a single decision. A guard can commit to the
+    /// same body on several edges, and a nested branch has a separate join.
+    pub fn arms_disagree(&self, function: DefId, row: usize, columns: &BTreeSet<String>, sources: &[Option<SourceArm>]) -> bool {
         type Key<'a> = (Init, Vec<(&'static str, String, BTreeSet<String>)>, Option<Parts>, BTreeSet<&'a str>);
         self.bodies.get(&function).is_some_and(|b| {
             // (What it holds: the variables its loans borrow, not a constant
@@ -581,18 +515,15 @@ impl StateTable {
                 (c.init, lent, c.parts.clone(), holds)
             };
             let Some(r) = b.rows.get(&row) else { return false };
-            let Some(arms) = Self::match_arms(r, row, spans, false) else { return false };
-            // The loans each arm's own events end, whatever column has them.
-            let ends: Vec<BTreeSet<usize>> = arms.iter().map(|&i| {
-                r.why.values().flatten().filter_map(|(a, w)| match w {
-                    Why::LoanEnded { loan, .. } if *a == Some(i) => Some(*loan),
-                    _ => None,
-                }).collect()
+            let Some(arms) = r.siblings(sources) else { return false };
+            let ends = |i| r.why.values().flatten().filter_map(|(a, w)| match w {
+                Why::LoanEnded { loan, .. } if a.is_some_and(|j| r.same_target(i, j)) => Some(*loan),
+                _ => None,
             }).collect();
             columns.iter().any(|col| {
-                let mut seen = arms.iter().zip(&ends).map(|(&i, e)| r.arms[i].1.get(col).map(|c| key(c, e)));
-                let first = seen.next();
-                first.is_some_and(|f| seen.any(|o| o != f))
+                let states = arms.iter().map(|group| agreed(group.iter().map(|&i|
+                    r.arms[i].1.get(col).map(|c| key(c, &ends(i)))))).collect::<Option<Vec<_>>>();
+                states.is_some_and(|s| s.windows(2).any(|w| w[0] != w[1]))
             })
         })
     }
@@ -600,65 +531,47 @@ impl StateTable {
     /// The loans of `column` whose end is one of arm `arm`'s own events on
     /// source row `row` (a loan its code last uses, dying on the arm's way
     /// out to the join): the arm's state, read at its exits, still has
-    /// them. (An arm `arm_order` matches has no branch of its own, so its
-    /// code has one way out.)
-    pub fn arm_loan_ends(&self, function: FunctionStart, column: &str, row: usize, arm: usize) -> Vec<usize> {
-        self.bodies.get(&function.body)
-            .and_then(|b| b.rows.get(&row))
-            .and_then(|r| r.why.get(column))
-            .map_or(Vec::new(), |ws| ws.iter().filter_map(|(a, w)| match w {
-                Why::LoanEnded { loan, .. } if *a == Some(arm) => Some(*loan),
-                _ => None,
-            }).collect())
+    /// them until the ending edge is applied.
+    fn arm_loan_ends(&self, function: FunctionStart, column: &str, row: usize, arm: usize) -> Vec<usize> {
+        let Some(r) = self.bodies.get(&function.body).and_then(|b| b.rows.get(&row)) else { return Vec::new() };
+        r.why.get(column).into_iter().flatten().filter_map(|(a, w)| match w {
+            Why::LoanEnded { loan, .. } if a.is_some_and(|i| r.same_target(i, arm)) => Some(*loan),
+            _ => None,
+        }).collect()
     }
 
-    /// The arms of the one-line conditional on source row `row` (in the
-    /// body of the MIR body `function` that has `column`) whose arms
-    /// span `spans` (a renderer's, in its order), as indices into the
-    /// row's arms (`match_arms`): its arm `i` is the renderer's `i`th.
-    /// None on a row where branches nest.
-    pub fn arm_order(&self, function: FunctionStart, row: usize, spans: &[Option<ArmSpan>]) -> Option<Vec<usize>> {
+    /// State after the code on a one-line leg, including loans that end
+    /// as that leg leaves the row. Tests within a guard or && are part of
+    /// one source decision. A nested source branch has its own join.
+    pub fn one_line_arm_cell(&self, function: FunctionStart, column: &str, row: usize, source: SourceArm, sources: &[Option<SourceArm>]) -> Option<Cell> {
         let r = self.bodies.get(&function.body)?.rows.get(&row)?;
-        Self::match_arms(r, row, spans, true)
+        if r.arms.iter().any(|(a, _)| a.parent.is_some_and(|p| r.arms[p].0.branch != a.branch)) { return None; }
+        r.siblings(sources)?;
+        agreed(r.indices(source).map(|i| {
+            let mut cell = self.cell_in_arm(function, column, row, i)?;
+            let ends = self.arm_loan_ends(function, column, row, i);
+            cell.lent.retain(|l| !ends.contains(&l.loan));
+            Some(cell)
+        }))?
     }
 
-    /// Match one drawn arm by the compiler spans of its own MIR code.
-    /// A switch inside the span belongs to a nested conditional, while
-    /// the arm's own switch precedes its code. The siblings' shapes and
-    /// the names on the diagram play no part in this lookup.
-    fn arm_in_span(&self, function: DefId, row: usize, span: ArmSpan) -> Option<(&RowCells, usize)> {
-        let r = self.bodies.get(&function)?.rows.get(&row)?;
-        let mut arms = r.arms.iter().enumerate().filter_map(|(i, (a, _))| {
-                ((row, a.switch_col) < span.start && a.code_spans.iter().any(|&(lo, hi)|
-                    span.start <= (row, lo) && (row, hi) <= span.end)).then_some((r, i))
-            });
-        let first = arms.next()?;
-        arms.next().is_none().then_some(first)
+    pub fn arm_has_exit(&self, function: DefId, row: usize, source: SourceArm) -> bool {
+        self.bodies.get(&function).and_then(|b| b.rows.get(&row))
+            .and_then(|r| agreed(r.indices(source).map(|i| r.arms[i].0.has_exit))) == Some(true)
     }
 
-    /// Whether the matched MIR arm has a reachable exit on this row.
-    pub fn arm_has_exit(&self, function: DefId, row: usize, span: ArmSpan) -> bool {
-        self.arm_in_span(function, row, span).is_some_and(|(r, i)| r.arms[i].0.has_exit)
-    }
-
-    pub fn continuing_arm_cell(&self, function: FunctionStart, column: &str, row: usize, span: ArmSpan) -> Option<Cell> {
-        let (r, i) = self.arm_in_span(function.body, row, span)?;
-        let mut cell = r.arms[i].0.continuing.as_ref()?.get(column)?.clone();
+    pub fn continuing_arm_cell(&self, function: FunctionStart, column: &str, row: usize, source: SourceArm) -> Option<Cell> {
+        let r = self.bodies.get(&function.body)?.rows.get(&row)?;
+        let mut cell = agreed(r.indices(source).map(|i| r.arms[i].0.continuing.as_ref()?.get(column)))??.clone();
         cell.from_row = row;
         Some(cell)
     }
 
-    /// An empty arm can have no MIR span of its own. When the other arm
-    /// of a two-arm conditional is matched and has a nested join, the
-    /// remaining successor of that switch supplies the empty arm's cell.
-    pub fn empty_sibling_cell(&self, function: FunctionStart, column: &str, row: usize, other: ArmSpan) -> Option<Cell> {
-        let (r, i) = self.arm_in_span(function.body, row, other)?;
-        let (matched, _) = &r.arms[i];
-        matched.continuing.as_ref()?;
-        let mut siblings = r.arms.iter().enumerate().filter(|(j, (a, _))| *j != i && a.branch == matched.branch);
-        let (_, (arm, cells)) = siblings.next()?;
-        if siblings.next().is_some() || !arm.has_exit { return None; }
-        let mut cell = cells.get(column)?.clone();
+    pub fn empty_sibling_cell(&self, function: FunctionStart, column: &str, row: usize, source: SourceArm, other: SourceArm) -> Option<Cell> {
+        let r = self.bodies.get(&function.body)?.rows.get(&row)?;
+        if source.branch != other.branch || !self.arm_has_exit(function.body, row, source)
+            || agreed(r.indices(other).map(|i| r.arms[i].0.continuing.is_some())) != Some(true) { return None; }
+        let mut cell = agreed(r.indices(source).map(|i| r.arms[i].1.get(column)))??.clone();
         cell.from_row = row;
         Some(cell)
     }
@@ -674,7 +587,7 @@ impl StateTable {
         let b = self.bodies.get(&function.body)?;
         let r = b.rows.get(&row).filter(|_| row == b.last_line)?;
         let first = r.arms.first()?;
-        if r.arms.iter().any(|(a, _)| a.parent.is_some() || a.branch != first.0.branch) {
+        if r.arms.iter().any(|(a, _)| a.parent.is_some() || a.edge.switch != first.0.edge.switch) {
             return None;
         }
         let cells: Vec<&Cell> = r.arms.iter().map(|(_, c)| c.get(column)).collect::<Option<_>>()?;
@@ -810,17 +723,12 @@ impl StateTable {
         place == column || column.starts_with(&format!("{place}.")) || column.starts_with(&format!("{place}["))
     }
 
-    /// The arm of a one-line branch `loan` was taken in (`if c { &mut x }
-    /// else { &mut y }`; held on that arm's path only), as (row, branch,
-    /// arm), with the number of arms that branch has.
-    pub fn loan_arm(&self, function: FunctionStart, loan: usize) -> Option<((usize, usize, usize), usize)> {
-        let b = self.bodies.get(&function.body)?;
-        let info = b.loans.get(&loan)?;
-        let r = b.rows.get(&info.line)?;
-        // The innermost arm with the loan's column in it.
-        let (a, _) = r.arms.iter().filter(|(a, _)| a.col_lo <= info.col && info.col <= a.col_hi).min_by_key(|(a, _)| a.col_hi - a.col_lo)?;
-        let n = r.arms.iter().filter(|(o, _)| o.branch == a.branch).count();
-        Some(((info.line, a.branch, a.arm), n))
+    /// Exact edge on which the loan was issued on this row, and the
+    /// number of real successors of that switch, including empty ones.
+    pub fn loan_arm(&self, function: FunctionStart, loan: usize) -> Option<(SwitchEdge, usize)> {
+        let body = self.bodies.get(&function.body)?;
+        let edge = body.loans.get(&loan)?.issued_on?;
+        Some((edge, *body.successor_counts.get(&edge.switch)?))
     }
 
     /// Whether the table contains this MIR body.
@@ -885,8 +793,11 @@ fn body_table(b: &BodyFacts) -> BodyTable {
     for r in &b.rows {
         let mut rc = RowCells { snapshot: !r.after.state.is_empty() || !r.after.locals.is_empty(), continues_to: r.continues_to, cells: cells_of(&r.after), before: r.before.as_ref().map(cells_of), block_end: r.block_end, jumps: r.jumps, ..Default::default() };
         for a in &r.arms {
-            let info = ArmInfo { runs: a.runs, branch: a.branch, arm: a.arm, parent: a.parent, col_lo: a.col_lo, col_hi: a.col_hi, has_exit: a.has_exit,
-                switch_col: a.switch_col, code_spans: a.code_spans.clone(), continuing: a.continuing.as_ref().map(cells_of) };
+            let exit = b.switches.binary_search_by_key(&a.edge, |e| e.edge).ok().map(|i| &b.switches[i]);
+            let branch = exit.and_then(|e| e.branch);
+            let source = exit.and_then(|e| Some(SourceArm { branch: branch?, index: e.arm? }));
+            let info = ArmInfo { edge: a.edge, branch, source, runs: a.runs,
+                parent: a.parent, has_exit: a.has_exit, continuing: a.continuing.as_ref().map(cells_of) };
             rc.arms.push((info, cells_of(&a.after)));
         }
         for ev in &r.facts {
@@ -924,7 +835,11 @@ fn body_table(b: &BodyFacts) -> BodyTable {
     let part_lenders = b.loans.iter().flat_map(|l| l.part_of.iter().cloned()).collect();
     let loans = b.loans.iter().map(|l| (l.loan, l.clone())).collect();
     let hidden_fields = b.columns.iter().filter(|c| c.hidden_fields).map(|c| c.name.clone()).collect();
-    BodyTable { drop_holders: b.drop_holders.clone(), joins: b.joins.iter().map(|(s, j)| (*s, cells_of(&j.state))).collect(), first_line: b.first_line, last_line: b.last_line, function_body_start: b.function_body_start, rows, columns, moved_places, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
+    let mut successor_counts = BTreeMap::new();
+    for exit in &b.switches {
+        *successor_counts.entry(exit.edge.switch).or_default() += 1;
+    }
+    BodyTable { successor_counts, drop_holders: b.drop_holders.clone(), joins: b.joins.iter().map(|(s, j)| (*s, cells_of(&j.state))).collect(), first_line: b.first_line, last_line: b.last_line, function_body_start: b.function_body_start, rows, columns, moved_places, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
 }
 
 #[cfg(test)]
@@ -944,7 +859,7 @@ mod tests {
     }
 
     fn row(line: usize, cols: &[(&str, &'static str)], lent: &[(&str, usize, &'static str)], facts: Vec<(Option<usize>, Fact)>) -> Row {
-        let facts = facts.into_iter().map(|(arm, fact)| Ev { location: rustc_middle::mir::Location::START, display_location: rustc_middle::mir::Location::START, place_local: None, drop_route: DropRoute::Normal, end_successor: None, end_places: vec![], caller_slot: None, transfer_paths: vec![], col: 1, arm, fact, order: (0, 0, 0), site: None }).collect();
+        let facts = facts.into_iter().map(|(arm, fact)| Ev { location: rustc_middle::mir::Location::START, display_location: rustc_middle::mir::Location::START, place_local: None, drop_route: DropRoute::Normal, occurrence: super::super::Occurrence::at(rustc_middle::mir::Location::START), end_places: vec![], caller_slot: None, transfer_paths: vec![], col: 1, arm, fact, order: (0, 0, 0) }).collect();
         Row { line, continues_to: None, after: state(cols, lent), before: None, block_end: false, jumps: false, facts, arms: Vec::new() }
     }
 
@@ -955,6 +870,7 @@ mod tests {
     fn body(func: &str, first: usize, cols: &[&str], rows: Vec<Row>) -> BodyFacts {
         BodyFacts {
             drop_holders: Default::default(),
+            switches: vec![],
             closure_result_loans: Default::default(),
             bindings: Default::default(),
             aggregate_loans: Default::default(),
@@ -977,10 +893,13 @@ mod tests {
             vars: Vec::new(),
             columns: cols.iter().map(|c| col(c)).collect(),
             uniform_option_refs: Default::default(),
+            slice_items: BTreeSet::new(),
             binding_loans: BTreeMap::new(),
             loans: vec![LoanInfo {
                 projected: None,
                 issue: None,
+                lender_local: None,
+                issued_on: None,
                 loan: 0,
                 line: 3,
                 col: 5,
@@ -1000,6 +919,7 @@ mod tests {
                 end_lines: vec![5],
                 source: "borrow",
                 made_through: Vec::new(),
+                direct_locals: BTreeSet::new(),
                 direct_holders: vec!["r".into()],
                 via_call: Vec::new(),
                 implicit: false,
@@ -1019,9 +939,9 @@ mod tests {
         one_line.after.cause.insert("s".into(), "moved");
         one_line.arms = vec![
             Arm { runs: true, branch: 0, arm: 0, parent: None, col_lo: 10, col_hi: 20, has_exit: true,
-                switch_col: 5, code_spans: BTreeSet::from([(10, 20)]), continuing: None, after: state(&[("s", "moved")], &[]) },
+                edge: SwitchEdge { switch: rustc_middle::mir::Location::START, successor: rustc_middle::mir::BasicBlock::from_usize(1) }, continuing: None, after: state(&[("s", "moved")], &[]) },
             Arm { runs: true, branch: 0, arm: 1, parent: None, col_lo: 30, col_hi: 40, has_exit: true,
-                switch_col: 5, code_spans: BTreeSet::from([(30, 40)]), continuing: None, after: state(&[("s", "own")], &[]) },
+                edge: SwitchEdge { switch: rustc_middle::mir::Location::START, successor: rustc_middle::mir::BasicBlock::from_usize(2) }, continuing: None, after: state(&[("s", "own")], &[]) },
         ];
         body("main", 1, &["s", "p", "p.a"], vec![
             row(2, &[("s", "own")], &[], vec![(None, Fact::Init { path: "s".into(), from: "<value>".into(), reassign: false, maybe_had: false })]),

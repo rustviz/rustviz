@@ -25,6 +25,9 @@
 //! write them to as well.
 
 mod body;
+mod control;
+pub use control::SourceArm;
+pub(crate) use control::{enclosing_arms, location_arms};
 mod call_stores;
 mod holder_path;
 mod places;
