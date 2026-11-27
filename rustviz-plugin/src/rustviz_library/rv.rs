@@ -37,6 +37,7 @@ impl Rustviz {
     hidden_source_lines: HashSet<usize>,
     approx_notes: Vec<ApproxNote>,
     state_table: crate::facts::table::StateTable,
+    row_layout: crate::event_order::RowLayout,
   ) -> Result<Rustviz>{
     /* ******************************************
             --- Build VisualizationData ---
@@ -50,6 +51,7 @@ impl Rustviz {
       timelines: BTreeMap::new(),
       external_events: Vec::new(),
       preprocess_external_events: p_evts,
+      row_layout,
       event_line_map: ev_map,
       num_valid_raps: num_raps,
       fn_start_lines,

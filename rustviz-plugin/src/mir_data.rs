@@ -589,7 +589,12 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 for (b, _, _) in loans.iter() {
                     if !cursor.get().contains(*b) { continue; }
                     if is_write { at_write.push(*b); }
-                    if l_line >= line { live_later.push(*b); }
+                    // A use before every write on this very row is on the
+                    // same path. It cannot justify a note about another path.
+                    if l_line >= line && !(l_line == line && writes.iter().all(|(w, _)| {
+                        if location.block == w.block { location.statement_index < w.statement_index }
+                        else { body.basic_blocks.dominators().dominates(location.block, w.block) }
+                    })) { live_later.push(*b); }
                 }
             }
         }

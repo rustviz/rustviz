@@ -5207,6 +5207,137 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
   }
 
   fn visit_expr(&mut self, expr: &'tcx Expr<'tcx>) {
+    let outer = self.emitting_span.replace(expr.span);
+    self.visit_expr_at(expr);
+    self.emitting_span = outer;
+  }
+  fn visit_stmt(&mut self, statement: &'tcx Stmt<'tcx>) {
+    match statement.kind {
+      StmtKind::Let(ref local) => self.visit_local(local),
+      StmtKind::Item(item) => self.visit_nested_item(item),
+      StmtKind::Expr(ref expression) | StmtKind::Semi(ref expression) => {
+          self.visit_expr(expression)
+      }
+    }
+  }
+
+  // locals are let statements: let <pat>:<ty> = <expr>
+  fn visit_local(&mut self, local: &'tcx LetStmt<'tcx>) {
+    // Skip macro-expanded `let` bindings. Modern `println!`,
+    // `format_args!`, and friends expand to something like
+    // `let args = ::core::fmt::Arguments::new(...)` followed by a
+    // call to write to stdout — the synthetic `args` local isn't in
+    // the user's source but the plugin would otherwise register it
+    // as a RAP and give it its own timeline column. Same rationale
+    // as the from_expansion check on ExprKind::If/Match: macro
+    // internals shouldn't appear as user-visible variables.
+    if local.span.from_expansion() {
+      // ... but a `let t = $e;` from the user's own macro moves or
+      // copies a variable the caller passed in (#342).
+      if let Some(init) = local.init {
+        self.refuse_user_macro_use(local.span, init);
+      }
+      return;
+    }
+    let local_line = self.tcx.sess.source_map().lookup_char_pos(local.span.lo()).line;
+    let is_skipped = self.skip_lines.contains(&local_line);
+    if let Some(init) = local.init {
+      self.process_let_binding(local.pat, init, is_skipped, local.els);
+    } else {
+      // `let x;` (deferred initialization, #234): x owns nothing yet,
+      // so register no RAP and emit no event here. Remember each
+      // binding; its first assignment registers the RAP with this
+      // `let`'s scope and reads as initialization (see the Assign arm).
+      let (scope, inside_branch, frames_at) = (self.current_scope, self.inside_branch, self.exit_frames.len());
+      local.pat.each_binding(|annotation, hir_id, _, _| {
+        self.uninit_locals.insert(hir_id, DeferredLet { annotation, scope, inside_branch, is_skipped, frames_at });
+        // Its place among the locals an exit drops (#1436).
+        self.in_scope.push(deferred_slot(hir_id));
+      });
+    }
+
+    if let (Some(els), None) = (local.els, local.init) {
+      self.visit_block(els);
+    }
+  }
+}
+
+/// How a literal is named on the column of the value it builds:
+/// `P { .. }`, `(..)`, `[..]`.
+fn literal_temporary_name(expr: &Expr) -> Option<String> {
+  match expr.kind {
+    ExprKind::Struct(qpath, ..) => {
+      let name = match qpath {
+        QPath::Resolved(_, p) => p.segments.iter().map(|s| s.ident.as_str()).collect::<Vec<_>>().join("::"),
+        QPath::TypeRelative(_, seg) => seg.ident.as_str().to_owned(),
+      };
+      Some(format!("{} {{ .. }}", name))
+    }
+    ExprKind::Tup(_) => Some("(..)".to_owned()),
+    ExprKind::Array(_) => Some("[..]".to_owned()),
+    _ => None,
+  }
+}
+
+/// True iff `pat` may not match a value of its type. Conservative: an
+/// or-pattern, a literal or a variant (`Some(_)`) counts as refutable;
+/// a struct or tuple pattern is refutable iff a sub-pattern is.
+fn pat_refutable(pat: &Pat) -> bool {
+  match pat.kind {
+    PatKind::Wild | PatKind::Binding(.., None) => false,
+    PatKind::Binding(.., Some(sub)) | PatKind::Box(sub) | PatKind::Deref(sub) | PatKind::Ref(sub, ..) => pat_refutable(sub),
+    PatKind::Tuple(ps, _) => ps.iter().any(pat_refutable),
+    PatKind::Struct(QPath::Resolved(_, p), fields, _) if matches!(p.res, Res::Def(DefKind::Struct, _) | Res::SelfTyAlias { .. }) =>
+      fields.iter().any(|f| pat_refutable(f.pat)),
+    PatKind::TupleStruct(QPath::Resolved(_, p), ps, _) if matches!(p.res, Res::Def(DefKind::Ctor(rustc_hir::def::CtorOf::Struct, _), _) | Res::SelfCtor(_)) =>
+      ps.iter().any(pat_refutable),
+    _ => true,
+  }
+}
+
+/// Whether `a` and `b` name the same place: the same local, or the same
+/// field of the same place (`v` and `v`, `p.f` and `p.f`).
+fn same_place(a: &Expr, b: &Expr) -> bool {
+  match (a.kind, b.kind) {
+    (ExprKind::Path(QPath::Resolved(None, pa)), ExprKind::Path(QPath::Resolved(None, pb))) =>
+      matches!((pa.res, pb.res), (Res::Local(x), Res::Local(y)) if x == y),
+    (ExprKind::Field(ra, fa), ExprKind::Field(rb, fb)) => fa.name == fb.name && same_place(ra, rb),
+    _ => false,
+  }
+}
+
+/// The temporary an extending `&` borrows (part of): `operand` itself
+/// when it's a value expression (`&String::from("a")`), or the value
+/// expression a field or index projection is applied to
+/// (`&make_user().name`, `&String::from("a")[1..]`, `&mk()[0].name`),
+/// which Rust's temporary lifetime extension reaches too (#1165). None
+/// when the `&` borrows a place (`&x`, `&v[0]`, `&p.f`, `&*r`) or
+/// another borrow (`&&x`).
+pub(crate) fn extended_temp_operand<'a, 'tcx>(operand: &'a Expr<'tcx>) -> Option<&'a Expr<'tcx>> {
+  let mut base = operand;
+  while let ExprKind::Field(b, _) | ExprKind::Index(b, _, _) = base.kind {
+    base = b;
+  }
+  match base.kind {
+    ExprKind::Path(_) | ExprKind::Unary(UnOp::Deref, _) | ExprKind::AddrOf(..) => None,
+    _ => Some(base),
+  }
+}
+
+/// `x`, `p.f`, `v[i]`, `*r`: an expression that names a place.
+fn is_place_expr(e: &Expr) -> bool {
+  match e.kind {
+    ExprKind::Path(QPath::Resolved(_, p)) => matches!(p.res, Res::Local(_)),
+    ExprKind::Field(base, _) | ExprKind::Index(base, _, _) | ExprKind::Unary(UnOp::Deref, base) => is_place_expr(base),
+    _ => false,
+  }
+}
+
+/// Iterator adapters that hand out their receiver's items as they are.
+const SAME_ITEMS: &[&str] = &["rev", "skip", "take", "step_by", "skip_while", "take_while", "filter", "peekable", "fuse", "inspect"];
+
+impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
+  fn visit_expr_at(&mut self, expr: &'tcx Expr<'tcx>) {
     // A value a branch of the returned `if` / `match` yields goes to
     // the caller once it's evaluated, inside its branch (#674).
     if self.tail_values.remove(&expr.hir_id) {
@@ -6060,132 +6191,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
       }
     }
   }
-  fn visit_stmt(&mut self, statement: &'tcx Stmt<'tcx>) {
-    match statement.kind {
-      StmtKind::Let(ref local) => self.visit_local(local),
-      StmtKind::Item(item) => self.visit_nested_item(item),
-      StmtKind::Expr(ref expression) | StmtKind::Semi(ref expression) => {
-          self.visit_expr(expression)
-      }
-    }
-  }
 
-  // locals are let statements: let <pat>:<ty> = <expr>
-  fn visit_local(&mut self, local: &'tcx LetStmt<'tcx>) {
-    // Skip macro-expanded `let` bindings. Modern `println!`,
-    // `format_args!`, and friends expand to something like
-    // `let args = ::core::fmt::Arguments::new(...)` followed by a
-    // call to write to stdout — the synthetic `args` local isn't in
-    // the user's source but the plugin would otherwise register it
-    // as a RAP and give it its own timeline column. Same rationale
-    // as the from_expansion check on ExprKind::If/Match: macro
-    // internals shouldn't appear as user-visible variables.
-    if local.span.from_expansion() {
-      // ... but a `let t = $e;` from the user's own macro moves or
-      // copies a variable the caller passed in (#342).
-      if let Some(init) = local.init {
-        self.refuse_user_macro_use(local.span, init);
-      }
-      return;
-    }
-    let local_line = self.tcx.sess.source_map().lookup_char_pos(local.span.lo()).line;
-    let is_skipped = self.skip_lines.contains(&local_line);
-    if let Some(init) = local.init {
-      self.process_let_binding(local.pat, init, is_skipped, local.els);
-    } else {
-      // `let x;` (deferred initialization, #234): x owns nothing yet,
-      // so register no RAP and emit no event here. Remember each
-      // binding; its first assignment registers the RAP with this
-      // `let`'s scope and reads as initialization (see the Assign arm).
-      let (scope, inside_branch, frames_at) = (self.current_scope, self.inside_branch, self.exit_frames.len());
-      local.pat.each_binding(|annotation, hir_id, _, _| {
-        self.uninit_locals.insert(hir_id, DeferredLet { annotation, scope, inside_branch, is_skipped, frames_at });
-        // Its place among the locals an exit drops (#1436).
-        self.in_scope.push(deferred_slot(hir_id));
-      });
-    }
-
-    if let (Some(els), None) = (local.els, local.init) {
-      self.visit_block(els);
-    }
-  }
-}
-
-/// How a literal is named on the column of the value it builds:
-/// `P { .. }`, `(..)`, `[..]`.
-fn literal_temporary_name(expr: &Expr) -> Option<String> {
-  match expr.kind {
-    ExprKind::Struct(qpath, ..) => {
-      let name = match qpath {
-        QPath::Resolved(_, p) => p.segments.iter().map(|s| s.ident.as_str()).collect::<Vec<_>>().join("::"),
-        QPath::TypeRelative(_, seg) => seg.ident.as_str().to_owned(),
-      };
-      Some(format!("{} {{ .. }}", name))
-    }
-    ExprKind::Tup(_) => Some("(..)".to_owned()),
-    ExprKind::Array(_) => Some("[..]".to_owned()),
-    _ => None,
-  }
-}
-
-/// True iff `pat` may not match a value of its type. Conservative: an
-/// or-pattern, a literal or a variant (`Some(_)`) counts as refutable;
-/// a struct or tuple pattern is refutable iff a sub-pattern is.
-fn pat_refutable(pat: &Pat) -> bool {
-  match pat.kind {
-    PatKind::Wild | PatKind::Binding(.., None) => false,
-    PatKind::Binding(.., Some(sub)) | PatKind::Box(sub) | PatKind::Deref(sub) | PatKind::Ref(sub, ..) => pat_refutable(sub),
-    PatKind::Tuple(ps, _) => ps.iter().any(pat_refutable),
-    PatKind::Struct(QPath::Resolved(_, p), fields, _) if matches!(p.res, Res::Def(DefKind::Struct, _) | Res::SelfTyAlias { .. }) =>
-      fields.iter().any(|f| pat_refutable(f.pat)),
-    PatKind::TupleStruct(QPath::Resolved(_, p), ps, _) if matches!(p.res, Res::Def(DefKind::Ctor(rustc_hir::def::CtorOf::Struct, _), _) | Res::SelfCtor(_)) =>
-      ps.iter().any(pat_refutable),
-    _ => true,
-  }
-}
-
-/// Whether `a` and `b` name the same place: the same local, or the same
-/// field of the same place (`v` and `v`, `p.f` and `p.f`).
-fn same_place(a: &Expr, b: &Expr) -> bool {
-  match (a.kind, b.kind) {
-    (ExprKind::Path(QPath::Resolved(None, pa)), ExprKind::Path(QPath::Resolved(None, pb))) =>
-      matches!((pa.res, pb.res), (Res::Local(x), Res::Local(y)) if x == y),
-    (ExprKind::Field(ra, fa), ExprKind::Field(rb, fb)) => fa.name == fb.name && same_place(ra, rb),
-    _ => false,
-  }
-}
-
-/// The temporary an extending `&` borrows (part of): `operand` itself
-/// when it's a value expression (`&String::from("a")`), or the value
-/// expression a field or index projection is applied to
-/// (`&make_user().name`, `&String::from("a")[1..]`, `&mk()[0].name`),
-/// which Rust's temporary lifetime extension reaches too (#1165). None
-/// when the `&` borrows a place (`&x`, `&v[0]`, `&p.f`, `&*r`) or
-/// another borrow (`&&x`).
-pub(crate) fn extended_temp_operand<'a, 'tcx>(operand: &'a Expr<'tcx>) -> Option<&'a Expr<'tcx>> {
-  let mut base = operand;
-  while let ExprKind::Field(b, _) | ExprKind::Index(b, _, _) = base.kind {
-    base = b;
-  }
-  match base.kind {
-    ExprKind::Path(_) | ExprKind::Unary(UnOp::Deref, _) | ExprKind::AddrOf(..) => None,
-    _ => Some(base),
-  }
-}
-
-/// `x`, `p.f`, `v[i]`, `*r`: an expression that names a place.
-fn is_place_expr(e: &Expr) -> bool {
-  match e.kind {
-    ExprKind::Path(QPath::Resolved(_, p)) => matches!(p.res, Res::Local(_)),
-    ExprKind::Field(base, _) | ExprKind::Index(base, _, _) | ExprKind::Unary(UnOp::Deref, base) => is_place_expr(base),
-    _ => false,
-  }
-}
-
-/// Iterator adapters that hand out their receiver's items as they are.
-const SAME_ITEMS: &[&str] = &["rev", "skip", "take", "step_by", "skip_while", "take_while", "filter", "peekable", "fuse", "inspect"];
-
-impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// The `ExprKind::Assign` arm of `visit_expr`: `lhs = rhs`.
   /// `r.n = 2` / `r.n += 1` through a reference to a local struct (#854):
   /// the write also lands on the field's own column (`s.n`): an assignment
@@ -8896,6 +8902,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let reaching: Vec<&[(usize, ExternalEvent)]> = b_branches.iter()
       .filter(|b| !b.diverges).map(|b| b.e_data.as_slice()).collect();
     let maybe_held = self.maybe_held_after(&liveness, &reaching, &maybe_init, &self.deferred_cols(&maybe_init_before), |name| self.rap_ownership_now(name));
+    self.event_spans.insert(*self.unique_id, guard_expr.span);
     self.add_external_event(line_num,
       ExternalEvent::Branch {
         live_vars: liveness,
@@ -9756,6 +9763,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let reaching: Vec<&[(usize, ExternalEvent)]> = branch_data.iter()
       .filter(|b| !b.diverges).map(|b| b.e_data.as_slice()).collect();
     let maybe_held = self.maybe_held_after(&liveness, &reaching, &maybe_init, &held_before, |name| self.rap_ownership_now(name));
+    if let ExprKind::Match(scrutinee, ..) = expr.kind {
+      self.event_spans.insert(*self.unique_id, scrutinee.span);
+    }
     self.add_external_event(split, ExternalEvent::Branch {
       live_vars: liveness,
       branches: branch_data,
