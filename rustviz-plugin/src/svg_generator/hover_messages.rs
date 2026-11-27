@@ -3884,6 +3884,36 @@ pub enum HolderLender {
     Own,
 }
 
+/// A shared reference can keep several input loans live, including an
+/// exclusive loan that the stored reference itself cannot write through.
+pub(crate) fn stored_loan_message(detail: crate::event_order::StoredLoan, holder: &ResourceTy, lender: &ResourceTy,
+    method: Option<&str>, ended: bool) -> String {
+    use crate::event_order::StoredLoan;
+    let h = styled_name_html(&holder.name());
+    let l = styled_name_html(&lender.name());
+    match detail {
+        StoredLoan::SharedInput { mutable, binding } | StoredLoan::Carrier { mutable, binding } => {
+            let kind = if mutable { "mutable" } else { "shared" };
+            let place = if binding { format!("the binding {l}") }
+                else if lender.is_ref() { format!("the referent of {l}") } else { l };
+            if matches!(detail, StoredLoan::Carrier { .. }) {
+                let when = method.map_or_else(String::new, |f| format!("After {}, ", styled_name_html(f)));
+                return format!("{when}{h} holds a value that can contain references ({h} isn't a reference itself). The borrow checker keeps the {kind} borrow of {place} live while {h} is in use");
+            }
+            let start = match method {
+                Some(f) => format!("{} stores a shared reference in {h}", styled_name_html(f)),
+                None => format!("{h} holds a shared reference"),
+            };
+            format!("{start} ({h} isn't a reference itself). While that reference is in use, the borrow checker keeps the {kind} borrow of {place} live")
+        }
+        StoredLoan::UniqueCapture if ended => format!("The stored closure's unique immutable borrow of {l} ends"),
+        StoredLoan::UniqueCapture => {
+            let start = method.map_or_else(|| format!("{h} holds a closure"), |f| format!("{} stores a closure in {h}", styled_name_html(f)));
+            format!("{start} with a unique immutable capture of {l}. The closure can write through {l}, and other code cannot use {l} while the capture is live")
+        }
+    }
+}
+
 // The holder's dot where its value starts borrowing `from`. When
 // `from` is itself a reference (a reference parameter `v: &Vec<i32>`
 // in `let it = v.iter();`; #393), the value borrows the data `from`

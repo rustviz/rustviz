@@ -27644,11 +27644,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "r4's borrow ended before the branches above, and each borrow a branch gave r4 ended in that branch",
             "r6's borrow ended before the branches above, and each borrow a branch gave r6 ended in that branch",
             "r7's borrow ended before the branches above, and each borrow a branch gave r7 ended in that branch",
+            "r3 holds an immutable reference; it can read the borrowed resource",
             "r6's immutable borrow ends",
             "r7's mutable borrow ends",
         ],
         must_not_contain: &[
-            "r3 holds an immutable reference; it can read the borrowed resource",
             "s7's resource is mutably borrowed; s7 can't be used until the borrow ends",
         ],
     },
@@ -28002,19 +28002,22 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // borrowed. Main drew a new immutable loan of s while s was
         // mutably borrowed (and s's column State::Invalid).
         must_contain: &[
-            "Mutable borrow from s to vr, stored in vr by push; vr isn't a reference, but its value now holds one",
+            "push stores a shared reference in vr (vr isn't a reference itself). While that reference is in use, the borrow checker keeps the mutable borrow of s live",
             "s's resource is mutably borrowed by vr; s can't be used while the borrow is live",
             "Return mutably borrowed resource from vr to s",
-            "Mutable borrow from s1 to vs, stored in vs by push; vs isn't a reference, but its value now holds one",
+            "push stores a shared reference in vs (vs isn't a reference itself). While that reference is in use, the borrow checker keeps the mutable borrow of s1 live",
             "s1's resource is mutably borrowed by vs; s1 can't be used while the borrow is live",
             "Mutable borrow from s2 to v2",
             "s2's resource is mutably borrowed by v2; s2 can't be used while the borrow is live",
-            "Mutable borrow from s3 to v3, stored in v3 by insert; v3 isn't a reference, but its value now holds one",
+            "insert stores a shared reference in v3 (v3 isn't a reference itself). While that reference is in use, the borrow checker keeps the mutable borrow of s3 live",
             "Mutable borrow from s4 to o4: Some's signature gives the value it returns the same lifetime as its argument; o4 isn't a reference, but its value holds one",
             "s5's resource is mutably borrowed by o5; s5 can't be used while the borrow is live",
             "vr's mutable borrow ends",
         ],
         must_not_contain: &[
+            "Mutable borrow from s to vr, stored in vr by push",
+            "Mutable borrow from s1 to vs, stored in vs by push",
+            "Mutable borrow from s3 to v3, stored in v3 by insert",
             "Immutable borrow from s to vr",
             "Immutable borrow from s1 to vs",
             "Immutable borrow from s2 to v2",
@@ -36197,9 +36200,9 @@ fn old_lender_ends_on_each_arm_where_it_is_borrowed_no_longer() {
 /// `else` arm's lone end keeps the plain wording.
 #[test]
 fn a_dot_ending_two_loans_names_each_lender() {
-    for (name, kind, new_borrow, lenders) in [
-        ("borrow_end_join_else", "immutable", "c immutably borrows a value", ("x", "y")),
-        ("borrow_end_two_loans_mut", "mutable", "c mutably borrows a value", ("a", "b")),
+    for (name, kind, new_borrow, holder, lenders) in [
+        ("borrow_end_join_else", "immutable", "c immutably borrows a value", "c holds an immutable reference; it can read the borrowed value", ("x", "y")),
+        ("borrow_end_two_loans_mut", "mutable", "c mutably borrows a value", "c holds a mutable reference; it can read and write the borrowed value", ("a", "b")),
     ] {
         let timeline = run_with_local_backend(name).timeline_panel_string();
         let plain = format!("c's {} borrow ends", kind);
@@ -36209,6 +36212,7 @@ fn a_dot_ending_two_loans_names_each_lender() {
         let want = vec![
             format!("c's {} borrow of {} ends", kind, lenders.0),
             new_borrow.to_string(),
+            holder.to_owned(),
             format!("c's {} borrow of {} ends", kind, lenders.1),
         ];
         assert!(dots.iter().any(|l| *l == want), "{}: no dot lists {:?}; dots: {:?}", name, want, dots);
@@ -41052,6 +41056,7 @@ fn arm_borrow_ends_in_order_1512_1513_1537() {
     assert_dot_lines_in_order("match_binding_end_in_nested_arm_1513", &[
         "h.r no longer borrows the resource m points to",
         "r no longer borrows the resource m points to",
+        "m holds a mutable reference; it can read and write the borrowed resource",
         "m's mutable borrow ends",
     ]);
     assert_dot_lines_in_order("param_pushed_into_vec_in_arm_1512", &[
@@ -41101,7 +41106,7 @@ fn loan_ends_before_conflicting_use_1529_1516() {
               "v's resource is mutably borrowed by m2; v can't be used while the borrow is live"][..],
             &["v's resource is no longer immutably borrowed",
               "v's resource is mutably borrowed by m; v can't be used while the borrow is live"][..],
-            &["a mutably borrows a resource", "a's mutable borrow ends"][..],
+            &["a mutably borrows a resource", "a holds a mutable reference; it can read and write the borrowed resource", "a's mutable borrow ends"][..],
         ][..]),
         ("write_after_reborrow_1516", &[
             &["r no longer borrows the resource m points to",
@@ -42157,4 +42162,168 @@ fn review_replacing_a_literal_ends_its_slot_value_at_the_store() {
     let tip = "o.a's borrow of the string literal ends";
     assert!(tooltip_of_id(&svg, "o.a>o.a@L41:arrow:static_die").is_some_and(|t| t.contains(tip)));
     assert!(tooltip_of_id(&svg, "o.a>o.a@L42:arrow:static_die").is_none());
+}
+
+#[test]
+fn one_dot_reference_intervals_1888() {
+    // rustc types r and the copied r4 as &String. Once the field
+    // reborrows end, self and m can again write through their &mut.
+    for (case, id, holder, end) in [
+        ("rv3_issues/1669_oneline_in_arm_end_order", "r@L4:dot:static_borrow", "r holds an immutable reference; it can read the borrowed resource", "r's immutable borrow ends"),
+        ("one_line_else_if_rows_1426", "r4@L32:dot:copy", "r4 holds an immutable reference; it can read the borrowed resource", "r4's immutable borrow ends"),
+        ("closure_field_capture_through_ref_1093", "self@L22:dot:static_reacquire", "self holds a mutable reference; it can read and write the borrowed resource", "self's mutable borrow ends"),
+        ("rv3_issues/1580_repoint_else_if_dead_old_b", "r@L5:dot:static_borrow", "r holds an immutable reference; it can read the borrowed resource", "r's immutable borrow ends"),
+        ("reference_loan_holders_1862", "m@L13:dot:static_reacquire", "m holds a mutable reference; it can read and write the borrowed resource", "m's mutable borrow ends"),
+    ] {
+        let svg = run_with_local_backend(case).timeline_panel_string();
+        let tip = tooltip_of_id(&svg, id).unwrap();
+        assert!(tip.split_once(holder).is_some_and(|(_, rest)| rest.contains(end)), "{case} {id}: {tip}");
+    }
+    // r3 can read through the new reference at the assignment, but its
+    // already-ended old loan must not acquire a readable branch leg (#1524).
+    let svg = run_with_local_backend("reassign_dead_old_loan_1524").timeline_panel_string();
+    let reassigned = tooltip_of_id(&svg, "r3@L37:dot:static_borrow+static_die").unwrap();
+    assert!(reassigned.contains("r3 holds an immutable reference; it can read the borrowed resource"), "{reassigned}");
+    for (id, tip, ..) in rv_elements(&svg, "r3@") {
+        if tip.contains("it can read the borrowed resource") {
+            assert!(id.contains(":dot:"), "{id}: {tip}");
+        }
+    }
+}
+
+#[test]
+fn field_returns_its_second_loan_of_t_1888() {
+    // The old longest result may refer to either argument. MIR then
+    // stores a fresh &t, followed by &u. t.clear() compiles only after
+    // that second store. Each generation needs its own return arrow.
+    let svg = run_with_local_backend("rv3_issues/1718_field_two_writes_one_line").timeline_panel_string();
+    for (lender, target) in [("s", "s or t"), ("t", "t"), ("u", "u")] {
+        let id = format!("h.r>{lender}@L6:arrow:static_die");
+        let tip = tooltip_of_id(&svg, &id);
+        assert!(tip.as_ref().is_some_and(|t| t.contains(&format!("Return immutably borrowed resource from h.r to {target}"))), "{id}: {tip:?}");
+    }
+    let writes = drawn_clauses(&svg, "h.r", "6").into_iter()
+        .filter(|(_, _, t)| t.contains("h.r immutably borrows a resource")).collect::<Vec<_>>();
+    let [(_, first, _), (_, second, _)] = writes.as_slice() else { panic!("expected two stores: {writes:?}") };
+    let returns = arrow_points(&svg, "Return immutably borrowed resource from h.r to t");
+    let [arrow] = returns.as_slice() else { panic!("expected one return of the fresh &t") };
+    // The shaft starts at the rim of the dot where the second store runs.
+    assert!((arrow[0].1 - f64::from(*second)).abs() < (arrow[0].1 - f64::from(*first)).abs());
+}
+
+#[test]
+fn capture_explains_the_prior_pattern_loan_1888() {
+    // In two_captures the pattern binding is never read. rustc permits
+    // v.clear() just before the closure expression (with v mutable).
+    let svg = run_with_local_backend("closure_in_one_line_arm_1420").timeline_panel_string();
+    let tip = tooltip_of_id(&svg, "v@L25:dot:static_lend").unwrap();
+    assert!(!tip.contains("but is still immutably borrowed by _c"), "{tip}");
+    assert!(tip.split_once("by closure _c").is_some_and(|(_, rest)| rest.contains("immutable borrow by _x had already ended")
+        && rest.contains("v's resource was no longer immutably borrowed")), "{tip}");
+}
+
+#[test]
+fn stored_call_result_keeps_each_input_loan_kind_1888() {
+    // pick receives &mut p and &q. Both slots contain &String, so the
+    // strings can both be read while nested keeps the result alive.
+    let svg = run_with_local_backend("known_bugs/1732_stored_loan_kinds").timeline_panel_string();
+    for place in ["s", "t", "q"] {
+        assert!(tooltip_of_id(&svg, &format!("{place}>nested@L70:arrow:static_borrow")).is_some(), "{place} is shared");
+        assert!(tooltip_of_id(&svg, &format!("nested>{place}@L71:arrow:static_die")).is_some(), "{place} has a shared return");
+        assert!(drawn_clauses(&svg, place, "70").iter().all(|(_, _, t)| !t.contains(" is mutably borrowed by nested")));
+    }
+    for place in ["s", "t"] {
+        let line = tooltip_of_id(&svg, &format!("{place}@L70-71:line:partial_privilege")).unwrap();
+        assert!(line.contains(&format!("{place} stays borrowed while nested is in use")), "{line}");
+    }
+    let holder = tooltip_of_id(&svg, "nested@L70:dot:").unwrap();
+    let arrow = tooltip_of_id(&svg, "p>nested@L70:arrow:mutable_borrow").unwrap();
+    for tip in [&holder, &arrow] {
+        assert!(tip.contains("shared reference") && tip.contains("keeps the mutable borrow of the binding p live"), "{tip}");
+        for must_not_contain in ["holds a value that mutably borrows p", "Mutable borrow from p to nested, stored"] {
+            assert!(!tip.contains(must_not_contain), "{tip}");
+        }
+    }
+    for (slot, kind, event) in [("p", "mutably", "mutable_die"), ("q", "immutably", "static_die")] {
+        let tip = tooltip_of_id(&svg, &format!("nested>{slot}@L71:arrow:{event}")).unwrap();
+        assert_eq!(tip, format!("Return {kind} borrowed value from nested to {slot}"));
+    }
+}
+
+#[test]
+fn repeated_store_keeps_the_prior_shared_loan_1888() {
+    let svg = run_with_local_backend("stored_inputs_1888").timeline_panel_string();
+    let tip = tooltip_of_id(&svg, "t>nested@L16:arrow:static_borrow").unwrap();
+    assert!(tip.contains("shared borrow of t"), "{tip}");
+    assert!(drawn_clauses(&svg, "t", "16").iter().all(|(_, _, t)| !t.contains(" is mutably borrowed by nested")));
+    // inspect's argument lifetime is independent of the receiver. The shared
+    // loan already in both operands does not make this call another store.
+    assert!(tooltip_of_id(&svg, "s>h@L49:arrow:").is_some());
+    assert!(tooltip_of_id(&svg, "s>h@L50:arrow:").is_none());
+    assert!(!timeline_tooltips(&svg).iter().any(|t| t.contains("stored in h by inspect")));
+}
+
+#[test]
+fn shared_call_borrows_each_reference_slot_1888() {
+    let svg = run_with_local_backend("stored_inputs_1888").timeline_panel_string();
+    let holder = tooltip_of_id(&svg, "refs@L28:dot:").unwrap();
+    for slot in ["p", "q"] {
+        assert!(holder.contains(&format!("shared borrow of the binding {slot}")), "{holder}");
+        assert!(!holder.contains(&format!("immutably borrows the data {slot} points to")), "{holder}");
+        assert_eq!(tooltip_of_id(&svg, &format!("refs>{slot}@L29:arrow:static_die")).unwrap(),
+            format!("Return immutably borrowed value from refs to {slot}"));
+    }
+}
+
+#[test]
+fn store_keeps_the_ordinary_string_lenders_distinct_1888() {
+    let svg = run_with_local_backend("known_bugs/1732_stored_loan_kinds").timeline_panel_string();
+    assert!(tooltip_of_id(&svg, "j>v@L54:arrow:mutable_borrow").is_some());
+    assert!(tooltip_of_id(&svg, "k>v@L54:arrow:static_borrow").is_some());
+    assert!(!timeline_tooltips(&svg).iter().any(|tip| tip.contains("Mutable borrow from k to v")));
+}
+
+#[test]
+fn stored_unique_capture_1888() {
+    let svg = run_with_local_backend("stored_inputs_1888").timeline_panel_string();
+    for id in ["p@L34:dot:", "p>callbacks@L34:arrow:", "callbacks@L34:dot:"] {
+        let tip = tooltip_of_id(&svg, id).unwrap();
+        assert!(tip.contains("unique immutable capture of p"), "{tip}");
+    }
+    assert!(tooltip_of_id(&svg, "callbacks>p@L35:arrow:").unwrap().contains("unique immutable borrow of p ends"));
+    for forbidden in ["p is mutably borrowed by callbacks", "Mutable borrow from p to callbacks",
+        "Return mutably borrowed value from callbacks to p"] {
+        assert!(!timeline_tooltips(&svg).iter().any(|t| t.contains(forbidden)), "{forbidden}");
+    }
+    assert!(tooltip_of_id(&svg, "k>callbacks@L34:arrow:mutable_borrow").is_some());
+}
+
+#[test]
+fn same_dot_reborrow_restores_writes_at_its_end_1888() {
+    let svg = run_with_local_backend("same_dot_reborrow_1888").timeline_panel_string();
+    let tip = tooltip_of_id(&svg, "m@L10:dot:static_reacquire+mutable_die").unwrap();
+    let (_, after) = tip.split_once("h.view no longer borrows").unwrap();
+    assert!(after.split_once("it can read and write the borrowed resource").is_some_and(|(_, end)| end.contains("m's mutable borrow ends")), "{tip}");
+    assert!(!tooltip_of_id(&svg, "m@L10:dot:static_lend").unwrap().contains("it can read and write"));
+}
+
+#[test]
+fn same_field_same_lender_has_two_returns_1888() {
+    let svg = run_with_local_backend("repeated_field_loan_1888").timeline_panel_string();
+    let arrows = arrow_points(&svg, "Return immutably borrowed resource from h.r to t");
+    assert_eq!(arrows.len(), 2, "each MIR loan has a return");
+    let clauses = drawn_clauses(&svg, "h.r", "5");
+    let last_install = clauses.iter().rposition(|(_, _, tip)| tip.contains("h.r immutably borrows a resource")).unwrap();
+    assert!(clauses[last_install + 1..].iter().any(|(_, _, tip)| tip.contains("h.r's immutable borrow of t ends")), "{clauses:?}");
+}
+
+/// `z.extend([&mut p2.0[0].0])`: the borrowed field sits inside an array
+/// element, so it has no column of its own. The loan still restricts p2, and
+/// z still holds it. rustc rejects any use of p2.0 before z's last use.
+#[test]
+fn extend_borrowing_a_field_inside_an_element_still_draws_the_holder_1888() {
+    let svg = run_with_local_backend("known_bugs/1632_extend_field_loan").timeline_panel_string();
+    let tips = timeline_tooltips(&svg);
+    assert!(tips.iter().any(|t| t.starts_with("Mutable borrow from p2") && t.contains("to z, stored in z by extend")), "{tips:?}");
+    assert!(tips.iter().any(|t| t.starts_with("Return mutably borrowed") && t.ends_with("from z to p2")), "{tips:?}");
 }

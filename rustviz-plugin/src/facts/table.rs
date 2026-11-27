@@ -927,6 +927,7 @@ mod tests {
             issued_operand_loans: Default::default(),
             returned_operand_loans: Default::default(),
             conditional_ends: Default::default(),
+            receiver_loans: Default::default(), restored_reborrows: Default::default(),
             evaluated_spans: Vec::new(),
             constructed_vecs: Default::default(),
             def_id: rustc_hir::def_id::CRATE_DEF_ID.to_def_id(),

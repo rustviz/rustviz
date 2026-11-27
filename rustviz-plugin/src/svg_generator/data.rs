@@ -741,7 +741,7 @@ fn append_decl_ref_die(vd: &VisualizationData, e: &ExternalEvent, line: usize, v
     if let ExternalEvent::RefDie { from: from_ro @ ResourceTy::Value(r), id, .. } = e {
         if r == var {
             if !r.is_mutref() && history_holds_mut_borrow(vd, b_history, r, line, 4) {
-                b_history.push((line, Event::MutableDie { to: ResourceTy::Anonymous, is: from_ro.clone(), id: *id, skip_note: None }));
+                b_history.push((line, Event::MutableDie { to: ResourceTy::Anonymous, is: from_ro.clone(), id: *id, skip_note: None, readable: false }));
             } else {
                 b_history.extend(vd.event_of_external_event(line, e, false));
             }
@@ -2877,6 +2877,7 @@ pub enum Event {
         is: ResourceTy,
         id: usize,
         skip_note: Option<String>,
+        readable: bool,
     },
     // `still_borrowed_by`: see ExternalEvent::StaticDie. Non-empty,
     // the borrower gave back its part of a borrow these values still
@@ -2908,6 +2909,7 @@ pub enum Event {
         is: ResourceTy,
         id: usize,
         skip_note: Option<String>,
+        readable: bool,
     },
     StaticReacquire {
         from: ResourceTy,
@@ -3753,6 +3755,15 @@ impl Display for Event {
 }
 
 impl Event {
+    /// Record the state immediately before this particular end, before
+    /// adjacent line segments are coalesced and lose their event identity.
+    fn note_access_before_end(&mut self, before: &State, mut_ref: bool) {
+        if let Event::StaticDie { readable, .. } | Event::MutableDie { readable, .. } = self {
+            *readable = matches!(before, State::FullPrivilege { s: LineState::Full })
+                || !mut_ref && matches!(before, State::PartialPrivilege { s: LineState::Full });
+        }
+    }
+
     /// The move of `*b` out of a Box drawn as its payload's part columns
     /// (`x => …` on `match *b`, `let x = *b;`, #898): the parts' own
     /// moves say what left; b keeps its heap allocation, so on b's
@@ -3782,8 +3793,8 @@ impl Event {
                 Some(match (*mutable, *end) {
                     (false, false) => Event::StaticBorrow { from: other, is, id, of_ref_var: false },
                     (true, false) => Event::MutableBorrow { from: other, is, id, of_ref_var: false },
-                    (false, true) => Event::StaticDie { to: other, is, id, skip_note: None },
-                    (true, true) => Event::MutableDie { to: other, is, id, skip_note: None },
+                    (false, true) => Event::StaticDie { to: other, is, id, skip_note: None, readable: false },
+                    (true, true) => Event::MutableDie { to: other, is, id, skip_note: None, readable: false },
                 })
             }
             _ => None,
@@ -5587,6 +5598,7 @@ impl Visualizable for VisualizationData {
         let mut line_start: (usize, State) = (0, State::OutOfScope);
         let (mut last_lend, mut call_lent): (Option<(usize, usize)>, Option<usize>) = (None, None);
         for (i, (l, e)) in history.iter_mut().enumerate() {
+            e.note_access_before_end(&previous_state, self.is_mutref(hash));
             // For let-as-rhs (`let s = if … { … } else { … };`) the
             // parent's pre-branch state is OOS — the variable
             // doesn't exist yet — but the rows between this arm's
@@ -5778,6 +5790,7 @@ impl Visualizable for VisualizationData {
         let mut line_start: (usize, State) = (0, State::OutOfScope);
         let (mut last_lend, mut call_lent): (Option<(usize, usize)>, Option<usize>) = (None, None);
         for (i, (l, e)) in history.iter_mut().enumerate() {
+            e.note_access_before_end(&previous_state, self.is_mutref(hash));
             states.push((previous_line, *l, previous_state.clone()));
             match e {
                 Event::Branch { branch_history, ty, split_point, merge_point, maybe_init, maybe_held, on_exhaustion, .. } => {
@@ -5954,7 +5967,7 @@ impl Visualizable for VisualizationData {
           if to_o && !from_ro.is_same_underlying(&to_ro){ 
             vec![(line_num,  Event::StaticReacquire{from : from_ro.to_owned(), is: to_ro.clone(), id: *id, still_borrowed_by: still_borrowed_by.clone(), of_ref_var: *of_ref_var})] 
           }
-          else { vec![(line_num, Event::StaticDie{to : to_ro.to_owned(), is: from_ro.clone(), id: *id, skip_note: None })] }
+          else { vec![(line_num, Event::StaticDie{to : to_ro.to_owned(), is: from_ro.clone(), id: *id, skip_note: None, readable: false })] }
         },
         ExternalEvent::MutableBorrow{from: from_ro, to: to_ro, id, of_ref_var, ..} => {
           if to_o { vec![(line_num,  Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id, of_ref_var: *of_ref_var})] }
@@ -5964,17 +5977,17 @@ impl Visualizable for VisualizationData {
           if to_o && !from_ro.is_same_underlying(&to_ro){ 
             vec![(line_num,  Event::MutableReacquire{from : from_ro.to_owned(), is: to_ro.clone(), id: *id, still_borrowed_by: still_borrowed_by.clone(), of_ref_var: *of_ref_var})] 
           }
-          else { vec![(line_num, Event::MutableDie{to : to_ro.to_owned(), is: from_ro.clone(), id: *id, skip_note: None })] }
+          else { vec![(line_num, Event::MutableDie{to : to_ro.to_owned(), is: from_ro.clone(), id: *id, skip_note: None, readable: false })] }
         },
         ExternalEvent::RefDie { from: from_ro, to: to_ro, id ,..} => {
           match from_ro.clone() {
               ResourceTy::Deref(ro_is) | ResourceTy::Value(ro_is) => {
                   if (ro_is.is_mutref() || holds_mut_borrow(self, &ro_is)) && !to_o {
-                    vec![(line_num, Event::MutableDie {to: ResourceTy::Anonymous, is: from_ro.clone(), id: *id, skip_note: None })]
+                    vec![(line_num, Event::MutableDie {to: ResourceTy::Anonymous, is: from_ro.clone(), id: *id, skip_note: None, readable: false })]
                   }
                   else {
                     if to_o { vec![] }
-                    else { vec![(line_num, Event::StaticDie{to : to_ro.to_owned(), is: from_ro.clone(), id: *id, skip_note: None })] }
+                    else { vec![(line_num, Event::StaticDie{to : to_ro.to_owned(), is: from_ro.clone(), id: *id, skip_note: None, readable: false })] }
                   }
               }
               _ => panic!("internal state: a RefDie event whose source is not a reference")
@@ -5985,7 +5998,7 @@ impl Visualizable for VisualizationData {
         ExternalEvent::PassByStaticReference{from: from_ro, to: to_ro, id, stored_in, result_keeps_borrow, still_borrowed_by, of_ref_var, ..} => {
           if to_o { 
             vec![(line_num,  Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id, of_ref_var: *of_ref_var}),
-            (line_num,  Event::StaticDie{to : from_ro.to_owned(), is: to_ro.clone(), id: *id, skip_note: None })]
+            (line_num,  Event::StaticDie{to : from_ro.to_owned(), is: to_ro.clone(), id: *id, skip_note: None, readable: false })]
           }
           else if stored_in.0.is_some() || *result_keeps_borrow {
             vec![(line_num, Event::StaticLend{to : to_ro.to_owned(), is: from_ro.clone(), id: *id, of_ref_var: *of_ref_var})]
@@ -5998,7 +6011,7 @@ impl Visualizable for VisualizationData {
         ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro, id, stored_in, result_keeps_borrow, of_ref_var, ..} => {
           if to_o { 
             vec![(line_num,  Event::MutableBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id, of_ref_var: *of_ref_var}),
-            (line_num,  Event::MutableDie{to : from_ro.to_owned(), is: to_ro.clone(), id: *id, skip_note: None })]
+            (line_num,  Event::MutableDie{to : from_ro.to_owned(), is: to_ro.clone(), id: *id, skip_note: None, readable: false })]
           }
           else if stored_in.0.is_some() || *result_keeps_borrow {
             vec![(line_num, Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: *id, of_ref_var: *of_ref_var})]
@@ -6466,7 +6479,7 @@ impl Visualizable for VisualizationData {
                   maybe_append_event(self, &to_ro.clone(), Event::StaticReacquire{from : from_ro.to_owned(), is: to_ro.clone(), id: id, still_borrowed_by, of_ref_var}, line_number);
                 }
                 if !matches!(from_ro, ResourceTy::Index(..)) {
-                    maybe_append_event(self, &from_ro.clone(), Event::StaticDie{to : to_ro.to_owned(), is: from_ro, id: id, skip_note: None }, line_number);
+                    maybe_append_event(self, &from_ro.clone(), Event::StaticDie{to : to_ro.to_owned(), is: from_ro, id: id, skip_note: None, readable: false }, line_number);
                 }
             },
             ExternalEvent::MutableBorrow{from: from_ro, to: to_ro, id, of_ref_var, ..} => {
@@ -6482,7 +6495,7 @@ impl Visualizable for VisualizationData {
                   maybe_append_event(self, &to_ro.clone(), Event::MutableReacquire{from : from_ro.to_owned(), is: to_ro.clone(), id: id, still_borrowed_by, of_ref_var}, line_number);
                 }
                 if !matches!(from_ro, ResourceTy::Index(..)) {
-                    maybe_append_event(self, &from_ro.clone(), Event::MutableDie{to : to_ro.to_owned(), is: from_ro, id: id, skip_note: None }, line_number);
+                    maybe_append_event(self, &from_ro.clone(), Event::MutableDie{to : to_ro.to_owned(), is: from_ro, id: id, skip_note: None, readable: false }, line_number);
                 }
             },
             // don't need to append an event to the to resource since a RefDie doesn't change the state of the to ro
@@ -6490,11 +6503,11 @@ impl Visualizable for VisualizationData {
                 match from_ro.clone() {
                     ResourceTy::Deref(ro_is) | ResourceTy::Value(ro_is) => {
                         if ro_is.is_mutref() || holds_mut_borrow(self, &ro_is) {
-                            maybe_append_event(self, &from_ro.clone(), Event::MutableDie { to: ResourceTy::Anonymous, is: from_ro.clone(), id: id, skip_note: None }, line_number);
+                            maybe_append_event(self, &from_ro.clone(), Event::MutableDie { to: ResourceTy::Anonymous, is: from_ro.clone(), id: id, skip_note: None, readable: false }, line_number);
                             //maybe_append_event(self, &to_ro.clone(), Event::MutableReacquire { from: from_ro, is: to_ro }, &line_number);
                         }
                         else {
-                            maybe_append_event(self, &from_ro.clone(), Event::StaticDie { to: ResourceTy::Anonymous, is: from_ro.clone(), id: id, skip_note: None }, line_number);
+                            maybe_append_event(self, &from_ro.clone(), Event::StaticDie { to: ResourceTy::Anonymous, is: from_ro.clone(), id: id, skip_note: None, readable: false }, line_number);
                             //maybe_append_event(self, &to_ro.clone(), Event::RefDie { from: from_ro, is: to_ro, num_curr_borrowers, id: id}, line_number);
                         }
                     }
@@ -6515,7 +6528,7 @@ impl Visualizable for VisualizationData {
                 if stored_in.0.is_none() && !result_keeps_borrow {
                     maybe_append_event(self, &from_ro, Event::StaticReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: id, still_borrowed_by, of_ref_var}, line_number);
                 }
-                maybe_append_event(self, &to_ro.clone(), Event::StaticDie{to : from_ro.to_owned(), is: to_ro, id: id, skip_note: None }, line_number);
+                maybe_append_event(self, &to_ro.clone(), Event::StaticDie{to : from_ro.to_owned(), is: to_ro, id: id, skip_note: None, readable: false }, line_number);
             },
             ExternalEvent::PassByMutableReference{from: from_ro, to: to_ro, id, stored_in, result_keeps_borrow, of_ref_var, ..} => {
                 maybe_append_event(self, &from_ro.clone(), Event::MutableLend{to : to_ro.to_owned(), is: from_ro.clone(), id: id, of_ref_var}, line_number);
@@ -6523,7 +6536,7 @@ impl Visualizable for VisualizationData {
                 if stored_in.0.is_none() && !result_keeps_borrow {
                     maybe_append_event(self, &from_ro.clone(), Event::MutableReacquire{from : to_ro.to_owned(), is: from_ro.clone(), id: id, still_borrowed_by: Vec::new(), of_ref_var}, line_number);
                 }
-                maybe_append_event(self, &to_ro.clone(), Event::MutableDie{to : from_ro.to_owned(), is: to_ro, id: id, skip_note: None }, line_number);
+                maybe_append_event(self, &to_ro.clone(), Event::MutableDie{to : from_ro.to_owned(), is: to_ro, id: id, skip_note: None, readable: false }, line_number);
             },
             ExternalEvent::ClosureCall { closure, fates, timing, id } => {
                 maybe_append_event(self, &closure, Event::ClosureCall { is: closure.clone(), timing, fates, id }, line_number);
