@@ -1216,7 +1216,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let ctor = matches!(init.kind, ExprKind::Call(f, _) if matches!(f.kind, ExprKind::Path(QPath::Resolved(_, p))
       if matches!(p.res, rustc_hir::def::Res::Def(rustc_hir::def::DefKind::Ctor(..), _))));
     // `vec![(&mut f, &g)]` (#1433): what the elements the user wrote hold.
-    if let Some(elems) = vec_macro_elems(init) {
+    if let Some(elems) = vec_macro_elems(self.tcx, init) {
       if !elems.iter().all(|x| self.collect_lender_muts(x, &mut out)) {
         return Vec::new();
       }

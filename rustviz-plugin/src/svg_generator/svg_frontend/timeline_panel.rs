@@ -51,6 +51,8 @@ enum DotNote {
     /// it runs at most once (`ApproxNote::Loop`).
     Loop(bool, bool),
     Other(String),
+    UnreachedTransfer,
+    UnreachedScopeExit,
 }
 
 impl DotNote {
@@ -58,6 +60,8 @@ impl DotNote {
         match self {
             DotNote::Loop(declares, at_most_once) => hover_messages::approx_note_loop(*declares, *at_most_once),
             DotNote::Other(t) => t.clone(),
+            DotNote::UnreachedTransfer => hover_messages::UNREACHED_TRANSFER.to_owned(),
+            DotNote::UnreachedScopeExit => "This dot describes normal scope exit. The closure never returns, so this exit never runs.".to_owned(),
         }
     }
 }
@@ -236,6 +240,18 @@ impl DotLayer {
             }
         }
         for note in notes {
+            if let ApproxNote::UnreachedTransfer { columns, line, scope_ends, .. } = note {
+                for hash in columns {
+                    if let Some(col) = by_col.get(hash) {
+                        add(&mut self.dots, first_in(col, *line, *line), DotNote::UnreachedTransfer);
+                    }
+                }
+                for (hash, end) in scope_ends {
+                    if let Some(col) = by_col.get(hash) {
+                        add(&mut self.dots, first_in(col, *end, *end), DotNote::UnreachedScopeExit);
+                    }
+                }
+            }
             if let ApproxNote::At { hash, lines: (lo, hi), text } = note {
                 if let Some(col) = by_col.get(hash) {
                     add(&mut self.dots, first_in(col, *lo, *hi), DotNote::Other(text.clone()));
@@ -336,11 +352,12 @@ fn merged_dot_title(lines: &[(Option<usize>, String)]) -> String {
 /// A dot's tooltip with its approximation notes, each on a line of its
 /// own after the events' text (which stays as it was).
 fn with_approx_notes(title: String, notes: &[DotNote]) -> String {
-    let mut lines: Vec<String> = Vec::new();
+    let qualifies = |note: &DotNote| matches!(note, DotNote::UnreachedTransfer | DotNote::UnreachedScopeExit);
+    let mut lines: Vec<_> = notes.iter().filter(|n| qualifies(n)).map(DotNote::text).collect();
     if !title.is_empty() {
         lines.push(title);
     }
-    lines.extend(notes.iter().map(DotNote::text));
+    lines.extend(notes.iter().filter(|n| !qualifies(n)).map(DotNote::text));
     lines.join("&lt;br&gt;")
 }
 
@@ -2666,7 +2683,15 @@ fn render_dot(
                             hover_messages::event_dot_ref_assign(&name, f, false, rap.is_mutref()),
                         _ => None,
                     };
-                    if let Some(title) = union_write_title(event, rap, &name, visualization_data, *hash) {
+                    let replacement = match (history[..i].last(), event) {
+                        (Some((_, Event::ClosureCall { fates: None, .. })), Event::Acquire { from: ResourceTy::Value(source), .. })
+                            if rap.holds_borrow() && !source.is_fn() && !source.is_ref() =>
+                            Some(hover_messages::event_dot_replaced_callable(&name, source.name())),
+                        _ => None,
+                    };
+                    if let Some(title) = replacement {
+                        data.title = title;
+                    } else if let Some(title) = union_write_title(event, rap, &name, visualization_data, *hash) {
                         data.title = title;
                     } else if let Some(title) = ref_assign_title {
                         data.title = title;
@@ -6798,10 +6823,14 @@ fn render_generic_arrow(
     if arrow_is_undrawn(external_event, from, to) || arrow_left_out(visualization_data, external_event) {
         return;
     }
-    let title = match visualization_data.field_lenders.get(&external_event.get_id()) {
+    let mut title = match visualization_data.field_lenders.get(&external_event.get_id()) {
         Some(f) => hover_messages::arrow_field_lenders_title(external_event, from, to, &f.lenders, f.end),
         None => hover_messages::arrow_full_title(external_event, from, to),
     };
+
+    if visualization_data.approx_notes.iter().any(|n| matches!(n, ApproxNote::UnreachedTransfer { id, .. } if *id == external_event.get_id())) {
+        title = format!("{} {}", hover_messages::UNREACHED_TRANSFER, title);
+    }
 
     // order of points is to -> from
     let mut data = ArrowData {
@@ -10804,6 +10833,21 @@ fn table_lent_state_of(
     let binding_shared = own_loans.iter().any(|l| l.kind == "shared"
         && table.loan(fn_line, col, l.loan).is_some_and(|info| info.whole.contains(col)));
     if rap.is_ref() && !own_loans.is_empty() {
+        // A drawn shared lend of the reference binding itself (match &r).
+        // The partial-privilege style alone can't distinguish it from &*r.
+        if let [loan] = own_loans.as_slice() {
+            if loan.kind == "shared" && of_itself(loan.loan)
+                && matches!(state, State::PartialPrivilege { .. })
+                && table.loan_arm(fn_line, col, loan.loan).is_none()
+                && table.loan(fn_line, col, loan.loan).is_some_and(|l| l.direct_holders.contains(&loan.holder)
+                    && visualization_data.timelines.get(rap.hash()).is_some_and(|timeline| timeline.history.iter().any(|(row, e)|
+                        matches!(e, Event::StaticLend { to, of_ref_var: true, .. } if to.real_name() == loan.holder)
+                        && rv_attrs::line_of(*row, &visualization_data.row_lines) == Some(l.line))))
+            {
+                let title = hover_messages::event_dot_static_lend_ref_var(col, &loan.holder);
+                return Some((State::PartialPrivilege { s }, Some(title)));
+            }
+        }
         // Where the table can't say it per path or 2.x's words don't fit,
         // 2.x's style stands: a loan taken in one arm of a branch on one
         // row; a shared loan of the binding or its struct (`&r`, `match &r`:

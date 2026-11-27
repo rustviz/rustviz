@@ -2515,7 +2515,7 @@ pub enum ExternalEvent {
     // capture, in capture order. No arrow; the event is a dot on `f`.
     ClosureCall {
         closure: ResourceTy,
-        fates: Vec<CapturedFate>,
+        fates: Option<Vec<CapturedFate>>,
         id: usize
     },
 
@@ -2962,7 +2962,7 @@ pub enum Event {
     // (ExternalEvent::ClosureCall).
     ClosureCall {
         is: ResourceTy,
-        fates: Vec<CapturedFate>,
+        fates: Option<Vec<CapturedFate>>,
         id: usize
     },
 }
@@ -3879,7 +3879,7 @@ impl Event {
         match self {
             // no arrow involved
             Event::ClosureCall { fates, .. } => {
-                hover_messages::event_dot_closure_call_once(my_name, fates)
+                hover_messages::event_dot_closure_call_once(my_name, fates.as_deref())
             }
             Event::OwnerGoOutOfScope { .. } => {
                 hover_messages::event_dot_owner_go_out_of_scope(my_name)
@@ -4824,6 +4824,8 @@ pub enum ApproxNote {
     /// `text` on the first event dot of column `hash` on a source line
     /// in `lines` (inclusive).
     At { hash: u64, lines: (usize, usize), text: String },
+    /// rustc checks this transfer after a closure call whose body cannot return.
+    UnreachedTransfer { id: usize, columns: Vec<u64>, line: usize, scope_ends: Vec<(u64, usize)> },
     /// A loop whose first line is `head`. It gets one note, on its
     /// first event dot in source order (then leftmost) that is drawn for
     /// a pass: on a line in `pass` (inclusive), or on `head` for a
@@ -4854,6 +4856,10 @@ impl ApproxNote {
     /// the figure removed before it).
     pub fn map_lines(&mut self, f: impl Fn(usize) -> usize) {
         match self {
+            ApproxNote::UnreachedTransfer { line, scope_ends, .. } => {
+                *line = f(*line);
+                for (_, end) in scope_ends { *end = f(*end); }
+            }
             ApproxNote::At { lines, .. } => *lines = (f(lines.0), f(lines.1)),
             ApproxNote::Loop { head, pass, nested, .. } => {
                 *head = f(*head);

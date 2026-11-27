@@ -110,6 +110,18 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
         if drop && sp.desugaring_kind() == Some(rustc_span::DesugaringKind::ForLoop) {
             return self.tcx.sess.source_map().lookup_char_pos(sp.hi()).line;
         }
+        // vec![a, b] allocates uninitialized storage before evaluating a.
+        // The allocation's span covers the entire macro. Giving it the last
+        // row would push every intervening element past its actual move.
+        if let TerminatorKind::Call { destination, .. } = &data.terminator().kind {
+            if l.statement_index == data.statements.len()
+                && super::is_vec_expansion(self.tcx, data.terminator().source_info.span.ctxt().outer_expn())
+                && destination.ty(&self.body.local_decls, self.tcx).ty.boxed_ty()
+                    .and_then(|t| t.ty_adt_def()).is_some_and(|adt| Some(adt.did()) == self.tcx.lang_items().maybe_uninit())
+            {
+                return self.line_lo(sp);
+            }
+        }
         // The drop of the old value before `x = <rhs>;` runs once the
         // right-hand side is done: on the assignment's row.
         if l.statement_index == data.statements.len() {

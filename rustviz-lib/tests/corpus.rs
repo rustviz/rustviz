@@ -40571,3 +40571,94 @@ fn arm_leg_no_value_yet_is_dashed_1866() {
     assert!(timeline.contains("data-rv-id=\"ym@L40-41:branch_line:full_privilege_uninit"), "ym's leg on L40 is dashed");
     assert!(!timeline.contains("data-rv-id=\"ym@L40-41:branch_line:full_privilege\""), "not solid");
 }
+
+/// rustc rejects a read of each consumed String (E0382). On the path where
+/// the closure call returns, the following element is consumed as well.
+/// A non-returning element has no normal successor in MIR.
+#[test]
+fn vec_element_transfers_follow_mir() {
+    for (case, transfers) in [
+        ("rv3_issues/1682_vec_macro_elem_with_format", &[("s2", "v")][..]),
+        ("rv3_issues/1744_vec_macro_nested_vec", &[("s2", "v")]),
+        ("rv3_issues/1779_vec_macro_loop_and_closure_elements", &[("loop_s", "lv"), ("call_s", "cv")]),
+    ] {
+        let svg = run_with_local_backend(case).timeline_panel_string();
+        let tips = timeline_tooltips(&svg);
+        for (src, dst) in transfers {
+            let arrow = format!("Move from {src} to {dst}");
+            if *src == "call_s" {
+                assert!(tips.iter().any(|t| t.ends_with(&arrow) && t.contains("the transfer never runs")), "{case}: {arrow}");
+                assert!(tooltip_lines(&svg).iter().any(|lines| lines.first().is_some_and(|t| t.contains("this exit never runs"))
+                    && lines.iter().any(|t| t.contains("call_s goes out of scope"))));
+            } else {
+                assert_eq!(tips.iter().filter(|t| **t == arrow).count(), 1, "{case}: {arrow}");
+            }
+        }
+        assert!(!tips.iter().any(|t| t == "Move from r to v"), "format! reads its argument");
+    }
+    let svg = run_with_local_backend("known_bugs/1682_vec_macro_element_move").timeline_panel_string();
+    let tips = timeline_tooltips(&svg);
+    for unbuilt in ["pv", "qv", "wv", "bv"] {
+        assert!(!svg.contains(&format!("data-rv-id=\"{unbuilt}@")), "{unbuilt} is never initialized or read");
+    }
+    for src in ["panic_s", "quit_s", "wrap_s", "block_s"] {
+        assert!(!tips.iter().any(|t| t.starts_with(&format!("Move from {src} to "))), "{src} is never evaluated");
+    }
+}
+
+/// The boxed array's first operand is a MIR move before the second operand
+/// assigns to item. The later i32 operand is a MIR copy. The executable
+/// asserts both the original element and the replacement are still correct.
+#[test]
+fn vec_elements_are_evaluated_before_reassignment() {
+    let svg = run_with_local_backend("vec_element_evaluation_1682").timeline_panel_string();
+    assert!(svg.contains("item@L5:dot:move"));
+    assert!(svg.contains("item@L6:dot:acquire"));
+    let tips = timeline_tooltips(&svg);
+    assert!(!tips.iter().any(|t| t.contains("previous resource") && t.contains("is dropped")));
+    assert!(tips.iter().any(|t| t == "Copy from count to counts"));
+}
+
+/// call_once takes the old f before the argument assigns g to f. The next
+/// call consumes that replacement. On the conditional path, p.z survives
+/// the call of p.f (rustc accepts a read of p.z there).
+#[test]
+fn fnonce_receiver_precedes_its_arguments() {
+    let svg = run_with_local_backend("rv3_issues/1704_fnonce_field_and_arg_reassign").timeline_panel_string();
+    for id in ["h.f@L4:dot:closure_call", "f@L7:dot:closure_call+acquire", "f@L8:dot:closure_call"] {
+        assert!(svg.contains(&format!("data-rv-id=\"{id}\"")), "missing {id}");
+    }
+    let tips = timeline_tooltips(&svg);
+    assert!(!tips.iter().any(|t| t.contains("its previous resource") && t.contains("is dropped")));
+    assert!(tips.iter().any(|t| t == "f goes out of scope. No resource is dropped."));
+    assert!(!tips.iter().any(|t| t.contains("and the borrow it holds")));
+    let svg = run_with_local_backend("known_bugs/1627_closure_captures_review").timeline_panel_string();
+    assert!(timeline_tooltips(&svg).iter().any(|t| t == "f's value is copied"));
+    let svg = run_with_local_backend("rv3_issues/1730_fnonce_field_partly_moved").timeline_panel_string();
+    assert!(svg.contains("p.f@L4:dot:closure_call"));
+    assert!(!svg.contains("p.z@L4:dot:closure_call"));
+}
+
+/// MIR makes a fresh loan of the place holding the reference. Its last
+/// use in the arm gives that place back. Neither a move nor a copy of r
+/// would have these endpoints.
+#[test]
+fn scrutinee_borrows_the_reference_binding() {
+    for (name, kind, start, end) in [
+        ("1638_match_mut_ref_of_ref_var", "mutable", 4, 5),
+        ("1638_match_mut_ref_of_ref_var_b", "static", 4, 5),
+        ("1811_irrefutable_while_let", "mutable", 5, 6),
+    ] {
+        let svg = run_with_local_backend(&format!("rv3_issues/{name}")).timeline_panel_string();
+        let tips = timeline_tooltips(&svg);
+        let borrow = if kind == "static" { "Immutable" } else { "Mutable" };
+        assert!(tips.contains(&format!("{borrow} borrow from r to s")), "{name}");
+        assert!(!tips.iter().any(|t| t == "Move from r to s" || t == "Copy from r to s"), "{name}");
+        assert!(svg.contains(&format!("r@L{start}:dot:{kind}_lend")), "{name}: lender row");
+        assert!(svg.contains(&format!("r@L{end}:dot:{kind}_reacquire")), "{name}: last use");
+    }
+    let tips = timeline_tooltips(&run_with_local_backend("known_bugs/1638_borrow_ref_scrutinee").timeline_panel_string());
+    for arrow in ["Mutable borrow from r to arm", "Mutable borrow from r to last", "Mutable borrow from h.r to field"] {
+        assert!(tips.iter().any(|t| t == arrow), "{arrow}");
+    }
+}

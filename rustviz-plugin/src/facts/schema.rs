@@ -31,6 +31,9 @@ pub struct CrateFacts {
 
 #[derive(Serialize)]
 pub struct BodyFacts {
+    /// Standard vec! constructions that can complete on the body's normal CFG.
+    #[serde(skip)]
+    pub constructed_vecs: std::collections::HashMap<rustc_span::hygiene::ExpnId, usize>,
     /// `main`, `Foo::bar`, `main::{closure#0}`.
     pub func: String,
     /// "fn" or "closure".
@@ -309,6 +312,9 @@ pub struct Arm {
 /// A fact with its position on the row.
 #[derive(Serialize, Clone, PartialEq, Eq)]
 pub struct Ev {
+    /// Original MIR location, before the row model places the event.
+    #[serde(skip)]
+    pub location: rustc_middle::mir::Location,
     /// Source column (1-based) where the MIR location's span starts.
     pub col: usize,
     /// The innermost arm of this event's row. For an early-exit drop,

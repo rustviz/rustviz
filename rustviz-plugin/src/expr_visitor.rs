@@ -19,6 +19,14 @@ use rustc_borrowck::consumers::BodyWithBorrowckFacts;
 use crate::facts::schema::BodyFacts;
 
 
+pub(crate) struct Transfer<'a> {
+  pub row: usize,
+  pub kind: Evt,
+  pub path: &'a str,
+  pub to: &'a str,
+  pub location: rustc_middle::mir::Location,
+}
+
 // A struct to help with appending ExternalEvents
 #[derive(Debug, Clone)]
 pub enum Evt { 
@@ -324,6 +332,11 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   pub tcx: TyCtxt<'tcx>, // type context
   pub mir_body: &'a Body<'tcx>, 
   pub hir_body: &'a rustc_hir::Body<'tcx>,
+  // Exact MIR effects at the source expression being rendered. The same span
+  // on another expansion or in another body has its own effects.
+  pub pattern_loans: HashMap<u64, &'a crate::facts::LoanInfo>,
+  body_facts: Option<&'a crate::facts::BodyFacts>,
+  effects: HashMap<rustc_span::Span, Vec<(usize, &'a crate::facts::Ev)>>,
   pub bwf: &'a BodyWithBorrowckFacts<'tcx>,
 
   // Data structure used to represent active loans
@@ -1121,6 +1134,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     mir_body: &'a Body<'tcx>,
     hir_body: &'a rustc_hir::Body<'tcx>,
     bwf: &'a BodyWithBorrowckFacts<'tcx>,
+    body_facts: Option<&'a crate::facts::BodyFacts>,
     current_fn_start: usize,
     event_line_map: &'a mut BTreeMap<usize, Vec<ExternalEvent>>,
     preprocessed_events: &'a mut Vec<(usize, ExternalEvent)>,
@@ -1132,7 +1146,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     fn_ret: bool,
     skip_lines: &'a HashSet<usize>,
   ) -> Self {
+    let mut effects = HashMap::<_, Vec<_>>::new();
+    for row in body_facts.into_iter().flat_map(|b| &b.rows) {
+      for ev in &row.facts {
+        let span = mir_body.source_info(ev.location).span.with_parent(None);
+        effects.entry(span).or_default().push((row.line, ev));
+      }
+    }
     ExprVisitor {
+      pattern_loans: HashMap::new(),
+      body_facts,
+      effects,
       tcx,
       mir_body,
       hir_body,
@@ -2882,6 +2906,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   }
 
   pub fn ext_ev_of_evt(&self, evt: Evt, lhs: ResourceTy, rhs: ResourceTy, id: usize, is_partial: bool) -> ExternalEvent{
+    let pattern_ref = |holder: &ResourceTy, lender: &ResourceTy| holder.extract_rap()
+      .and_then(|h| self.pattern_loans.get(h.hash()))
+      .is_some_and(|l| lender.is_ref() && lender.real_name() == l.lender);
     match evt {
       Evt::Bind => ExternalEvent::Bind { from: rhs, to: lhs, id, break_alt: None },
       Evt::Copy => {
@@ -2894,15 +2921,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial, into_closure: false, break_alt: None, closure_value: false, into_ctor: None, pointee, of_const: None }
       }
       Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: self.try_move, closure_value: false },
-      Evt::SBorrow => ExternalEvent::StaticBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None, of_ref_var: false },
-      Evt::MBorrow => ExternalEvent::MutableBorrow { from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None, of_ref_var: false },
+      Evt::SBorrow => ExternalEvent::StaticBorrow { of_ref_var: pattern_ref(&lhs, &rhs), from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None },
+      Evt::MBorrow => ExternalEvent::MutableBorrow { of_ref_var: pattern_ref(&lhs, &rhs), from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None },
       Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, pointee_interior_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new(), of_ref_var: false, deep: None },
       Evt::PassByMRef => ExternalEvent::PassByMutableReference {
         from: rhs, to: lhs, id, is_reborrow: false, result_has_lifetime: false, implicit: ImplicitRef::No,
         result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, of_ref_var: false, deep: None,
       },
-      Evt::SDie =>  ExternalEvent::StaticDie { from: rhs, to: lhs, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false },
-      Evt::MDie => ExternalEvent::MutableDie { from: rhs, to: lhs, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false }
+      Evt::SDie =>  ExternalEvent::StaticDie { of_ref_var: pattern_ref(&rhs, &lhs), from: rhs, to: lhs, id, static_lender: None, still_borrowed_by: Vec::new() },
+      Evt::MDie => ExternalEvent::MutableDie { of_ref_var: pattern_ref(&rhs, &lhs), from: rhs, to: lhs, id, static_lender: None, still_borrowed_by: Vec::new() }
     }
   }
 
@@ -3834,42 +3861,45 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     Some(DeepPlace { derefs: derefs - 1, holds_value: holds_value(place_ty), held_mut: None, elem: None })
   }
 
-  /// After a call `callee(args)`: if `callee` names a local closure
-  /// binding that rustc inferred to be `FnOnce` (`let f = || drop(s);
-  /// f();`), record that the call moves the closure and what happens
-  /// to what it captured by value (#271). `FnOnce::call_once` takes the
-  /// closure by value, so after the call `f` is gone and has nothing
-  /// left to drop at its scope end. `Fn` / `FnMut` closures are only
-  /// borrowed by their calls; nothing is recorded for them.
-  ///
-  /// The same for an `FnOnce` closure stored in a struct field (`(h.f)()`,
-  /// #725): the call moves `h.f` out of `h`.
-  pub fn closure_call_events(&mut self, callee: &'tcx Expr<'tcx>, line_num: usize) {
-    let name = match callee.kind {
-      ExprKind::Path(QPath::Resolved(None, path)) if matches!(path.res, Res::Local(_)) => path_name(path, &self.tcx),
-      ExprKind::Field(..) => match expr_to_rap_name(callee, &self.tcx) {
-        Some(n) => n,
-        None => return,
-      },
-      _ => return,
-    };
-    let typeck = self.tcx.typeck(callee.hir_id.owner);
-    let rustc_middle::ty::Closure(closure_def_id, closure_args) = typeck.expr_ty(callee).kind() else { return };
-    if closure_args.as_closure().kind() != rustc_middle::ty::ClosureKind::FnOnce {
+  /// An actual read of a named MIR place at this expression. Effects sharing
+  /// an expansion span are ambiguous unless exactly one transfer matches.
+  pub(crate) fn transfer_at(&self, expr: &Expr<'_>) -> Option<Transfer<'a>> {
+    use crate::facts::Fact;
+    let mut found = self.effects.get(&expr.span.with_parent(None))?.iter().filter_map(|&(row, ev)| match &ev.fact {
+      Fact::Move { path, to, .. } => Some(Transfer { row, kind: Evt::Move, path, to, location: ev.location }),
+      Fact::Copy { path, to, .. } => Some(Transfer { row, kind: Evt::Copy, path, to, location: ev.location }),
+      _ => None,
+    });
+    let one = found.next()?;
+    found.next().is_none().then_some(one)
+  }
+
+  /// The receiver of call_once is evaluated before its arguments. Its move
+  /// or copy is the MIR operand's. For a local closure body we can also
+  /// explain what the call does with each capture (#271, #725, #1704).
+  pub fn closure_call_events(&mut self, call: &Expr<'_>, callee: &'tcx Expr<'tcx>) {
+    let typeck = self.tcx.typeck(call.hir_id.owner);
+    if !typeck.type_dependent_def_id(call.hir_id)
+      .is_some_and(|d| self.tcx.trait_of_assoc(d) == self.tcx.lang_items().fn_once_trait()) {
       return;
     }
-    let Some(closure_local) = closure_def_id.as_local() else { return };
-    // The capture list names variables of the fn the closure was
-    // written in; only that fn's RAPs can stand for them.
-    if self.tcx.typeck_root_def_id(*closure_def_id) != callee.hir_id.owner.to_def_id() {
+    let Some(Transfer { row: line_num, kind, path, .. }) = self.transfer_at(callee) else { return };
+    let Some(closure_rap) = self.raps.get(path).map(|r| r.rap.clone()) else { return };
+    if matches!(kind, Evt::Copy) {
+      self.add_ev(line_num, Evt::Copy, ResourceTy::Anonymous, ResourceTy::Value(closure_rap), false);
       return;
     }
-    let closure_rap = match self.raps.get(&name) {
-      Some(rd) if rd.rap.is_closure() => rd.rap.to_owned(),
-      // A field's column (`h.f`) is a struct member, not a closure binding.
-      Some(rd) if matches!(callee.kind, ExprKind::Field(..)) && !rd.rap.is_ref() => rd.rap.to_owned(),
-      _ => return,
+    let fates = match typeck.expr_ty(callee).kind() {
+      rustc_middle::ty::Closure(did, _) if self.tcx.typeck_root_def_id(*did) == callee.hir_id.owner.to_def_id() =>
+        did.as_local().map(|local| self.call_capture_fates(callee, local)),
+      _ => None,
     };
+    let id = *self.unique_id;
+    *self.unique_id += 1;
+    self.add_external_event(line_num, ExternalEvent::ClosureCall { closure: ResourceTy::Value(closure_rap), fates, id });
+  }
+
+  fn call_capture_fates(&self, callee: &Expr<'_>, closure_local: rustc_hir::def_id::LocalDefId) -> Vec<CapturedFate> {
     // What the body does with each capture (all captures, to keep the
     // field index of each), then the by-value, non-Copy ones named.
     let closure_typeck = self.tcx.typeck(closure_local);
@@ -3898,13 +3928,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         needs_drop: self.needs_drop(capture.place.ty(), callee.hir_id.owner),
       });
     }
-    let id = *self.unique_id;
-    *self.unique_id += 1;
-    self.add_external_event(line_num, ExternalEvent::ClosureCall {
-      closure: ResourceTy::Value(closure_rap),
-      fates,
-      id,
-    });
+    fates
   }
 
   // Return the ResourceTy that corresponds to the LHS of an assignment.
@@ -5565,6 +5589,56 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
+  pub(crate) fn unfinished_vec(&self, expr: &'tcx Expr<'tcx>) -> bool {
+    crate::facts::is_vec_expansion(self.tcx, expr.span.ctxt().outer_expn())
+      && vec_macro_elems(self.tcx, expr).is_some()
+      && self.body_facts.is_some_and(|b| !b.constructed_vecs.contains_key(&expr.span.ctxt().outer_expn()))
+  }
+
+  /// The actual transfer for an element that names a column. A temp is all
+  /// MIR proves for an element evaluated before a diverging sibling.
+  pub(crate) fn draw_vec_place(&mut self, elem: &'tcx Expr<'tcx>, receiver: Option<&ResourceTy>) -> bool {
+    let Some(Transfer { row, kind, path, to: dest, location }) = self.transfer_at(elem) else { return false };
+    // Staged reads are emitted while visiting the arguments, before any
+    // later argument can reinitialize the source or leave the expression.
+    if (dest == "<temp>") != receiver.is_none() { return false; }
+    let receiver = receiver.unwrap_or(&ResourceTy::Anonymous);
+    let src = self.raps.get(path).map(|r| ResourceTy::Value(r.rap.clone()))
+      .or_else(|| self.box_contents_of(elem).filter(|r| r.name() == path));
+    let Some(src) = src else { return false };
+    // A reference's loan traveling with the vector has its own borrow
+    // events. A move of the reference still consumes its column.
+    if src.is_ref() && matches!(kind, Evt::Copy) && dest != "<return>" { return false; }
+    let to = match receiver {
+      _ if dest == "<return>" => ResourceTy::Caller,
+      ResourceTy::Value(r) if dest == r.name() || (r.is_fn() && dest.strip_suffix("()") == Some(r.name())) => receiver.clone(),
+      _ => ResourceTy::Anonymous,
+    };
+    let moved_whole = matches!(kind, Evt::Move) && matches!(src, ResourceTy::Value(_));
+    if let Some(rap) = src.extract_rap() { self.update_rap(&rap, row); }
+    if crate::facts::after_diverging_closure(self.tcx, self.mir_body, location) {
+      let endpoints: Vec<_> = [src.extract_rap(), to.extract_rap()].into_iter().flatten().collect();
+      let mut scope_ends = Vec::new();
+      for r in self.body_facts.into_iter().flat_map(|b| &b.rows) {
+        for ev in &r.facts {
+          let crate::facts::Fact::Drop { path, at_reassign: false, early_exit: None, .. } = &ev.fact else { continue };
+          if let Some(rap) = endpoints.iter().find(|rap| rap.name() == path) {
+            if crate::facts::after_diverging_closure(self.tcx, self.mir_body, ev.location) {
+              scope_ends.push((*rap.hash(), r.line));
+            }
+          }
+        }
+      }
+      let columns = endpoints.iter().map(|r| *r.hash()).collect();
+      self.approx_notes.push(ApproxNote::UnreachedTransfer { id: *self.unique_id, columns, line: row, scope_ends });
+    }
+    self.add_ev(row, kind, to.clone(), src, false);
+    if moved_whole {
+      self.move_struct_fields_away(row, path);
+    }
+    !matches!(to, ResourceTy::Anonymous)
+  }
+
   pub fn match_array_elems(&mut self, lhs: ResourceTy, elems: &'tcx [Expr<'tcx>], line_num: usize) {
     self.match_literal_parts(lhs, elems.iter().collect(), line_num);
   }
@@ -5573,12 +5647,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// part: the elements of an array literal or `vec![..]`, or a struct
   /// literal written to `v[i]` / `*r` (#1143). See `match_array_elems`.
   pub fn match_literal_parts(&mut self, lhs: ResourceTy, parts: Vec<&'tcx Expr<'tcx>>, line_num: usize) {
+    self.draw_literal_parts(lhs, parts, line_num, false);
+  }
+
+  fn draw_literal_parts(&mut self, lhs: ResourceTy, parts: Vec<&'tcx Expr<'tcx>>, line_num: usize, vec_elements: bool) {
     let mut drew_source = false;
     // An element that is itself a literal (`vec![B { name: r }]`,
     // `[(r, 1)]`, `vec![Some(r)]`): what it is built from goes into
     // `lhs` the same way (#1143).
     let mut work: Vec<&'tcx Expr<'tcx>> = parts.into_iter().rev().collect();
     while let Some(elem) = work.pop() {
+      if vec_elements {
+        if let Some(inner) = vec_macro_elems(self.tcx, elem) {
+          work.extend(inner.iter().rev());
+          continue;
+        }
+        if matches!(elem.kind, ExprKind::Path(_) | ExprKind::Field(..)) || self.box_contents_of(elem).is_some() {
+          drew_source |= self.draw_vec_place(elem, Some(&lhs));
+          continue;
+        }
+      }
       if !elem.span.from_expansion() {
         match elem.kind {
           ExprKind::Struct(_, fields, tail) => {
@@ -5965,7 +6053,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // call with it, so `s` is moved into the call (#297).
     let built_elems = match arg.kind {
       ExprKind::Array(elems) if !arg.span.from_expansion() => Some(elems),
-      _ => vec_macro_elems(arg),
+      _ => vec_macro_elems(self.tcx, arg),
     };
     if let Some(elems) = built_elems {
       self.add_fn(fn_name.clone());
@@ -5975,7 +6063,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         // `take(vec![B { name: r }])`, `take([(r, 1)])`: what the
         // literal element is built from goes into the call (#1143).
         let is_literal = matches!(elem.kind, ExprKind::Struct(..) | ExprKind::Tup(_)) && !elem.span.from_expansion();
-        if is_var || is_literal {
+        if vec_macro_elems(self.tcx, elem).is_some() {
+          self.match_arg(elem, fn_name.clone());
+        } else if arg.span.from_expansion() && matches!(elem.kind, ExprKind::Path(_) | ExprKind::Field(..))
+            && !self.tcx.typeck(elem.hir_id.owner).expr_ty(elem).is_ref() {
+          let to = ResourceTy::Value(self.raps[&fn_key(&fn_name)].rap.clone());
+          self.draw_vec_place(elem, Some(&to));
+        } else if is_var || is_literal {
           self.match_arg(elem, fn_name.clone());
         }
       }
@@ -8585,9 +8679,9 @@ pub fn register_iflet_let_bindings(
         self.get_dec_of_pat_parts(sp, typeck_res, &sp_parent, sp_parent_ty, scope, &mut sub);
         let sp_ty = typeck_res.node_type(sp.hir_id);
         for (r, e, from, partial) in sub {
-            let from = self.retarget_tuple_borrow(scrutinee, &r, &e, from);
+            let mut from = self.retarget_tuple_borrow(scrutinee, &r, &e, from);
             // `if let s = &t`: s borrows t (#1235).
-            let e = self.addr_of_scrutinee_borrow(sp_expr, sp, &r, &e, &from).unwrap_or(e);
+            let e = self.addr_of_scrutinee_borrow(sp_expr, sp, &r, &e, &mut from).unwrap_or(e);
             decls.push((r, e, from, Some(partial.unwrap_or(sp_parent_ty != sp_ty))));
         }
     }
@@ -8640,7 +8734,8 @@ pub fn register_iflet_let_bindings(
             // (None: an or-pattern's name, bound as a new value.)
             is_partial.unwrap_or(false),
         );
-        self.add_external_event(let_line, event);
+        let row = self.pattern_loans.get(binding_rap.hash()).map_or(let_line, |loan| loan.line);
+        self.add_external_event(row, event);
         *self.unique_id += 1;
         borrows.extend(self.pattern_ref_copy_borrow(&binding_rap, &evt_kind, scrutinee));
 
@@ -9611,26 +9706,44 @@ fn call_result_lender(&self, scrutinee: &'tcx Expr<'tcx>, evt: &Evt, from: Resou
 /// resolves to t's column (`from`), so without this the binding reads as
 /// a copy of t. Returns the borrow event and points the binding's loan
 /// (registered with no lender by `collect_pat_binding_events`) at t.
-pub fn addr_of_scrutinee_borrow(&mut self, scrutinee: &'tcx Expr<'tcx>, pat: &'tcx Pat<'tcx>, binding: &ResourceAccessPoint, evt: &Evt, from: &ResourceTy) -> Option<Evt> {
-  if !matches!(evt, Evt::Copy | Evt::Move) || !binding.is_ref() || from.is_ref() {
-    return None;
-  }
-  if !matches!(pat.kind, PatKind::Binding(ann, _, _, None) if matches!(ann.0, rustc_hir::ByRef::No)) {
+pub fn addr_of_scrutinee_borrow(&mut self, scrutinee: &'tcx Expr<'tcx>, pat: &'tcx Pat<'tcx>, binding: &ResourceAccessPoint, evt: &Evt, from: &mut ResourceTy) -> Option<Evt> {
+  if !matches!(evt, Evt::Copy | Evt::Move) || !binding.is_ref()
+      || !matches!(pat.kind, PatKind::Binding(ann, _, _, None) if matches!(ann.0, rustc_hir::ByRef::No)) {
     return None;
   }
   let mut e = scrutinee;
-  while let ExprKind::DropTemps(inner) = e.kind {
-    e = inner;
-  }
-  let ExprKind::AddrOf(rustc_hir::BorrowKind::Ref, mutbl, _) = e.kind else { return None };
-  if !matches!(from, ResourceTy::Value(r) if !r.is_fn()) {
-    return None;
-  }
+  while let ExprKind::DropTemps(inner) = e.kind { e = inner; }
+  let ExprKind::AddrOf(rustc_hir::BorrowKind::Ref, _, operand) = e.kind else { return None };
+  // For an overloaded index the autoref of the container is on the
+  // indexed operand. Its loan reaches the binding via the Index result.
+  let container = match operand.kind { ExprKind::Index(base, ..) => Some(base.span), _ => None };
+  let matching_loan = [Some(e.span), Some(operand.span), container].into_iter().flatten().find_map(|span| {
+    let body = self.body_facts?;
+    let mut matching = self.effects.get(&span.with_parent(None))?.iter().filter_map(|(_, ev)| match &ev.fact {
+      crate::facts::Fact::Borrow { loan, .. } => body.loans.iter().find(|l| l.loan == *loan
+        && l.through.is_none() && l.holders.contains(binding.name())
+        && matches!(from, ResourceTy::Value(r) if *r.name() == l.lender)),
+      _ => None,
+    });
+    let loan = matching.next()?;
+    matching.next().is_none().then_some((span, loan))
+  });
+  let Some((span, loan)) = matching_loan else {
+    // The pattern receives a newly created reference. Without a proven
+    // lender, show only the binding, never a transfer from the operand.
+    *from = ResourceTy::Anonymous;
+    return Some(Evt::Bind);
+  };
   let aliasing = get_aliasing_data(from, &self.borrow_map);
   let rd = self.borrow_map.get_mut(binding.name())?;
   rd.lender = from.clone();
   rd.aliasing = aliasing;
-  Some(if mutbl == Mutability::Mut { Evt::MBorrow } else { Evt::SBorrow })
+  if from.is_ref() {
+    rd.borrow_span = Some(span);
+    self.ref_var_borrows.insert(span);
+    self.pattern_loans.insert(*binding.hash(), loan);
+  }
+  Some(if loan.kind == "mut" { Evt::MBorrow } else { Evt::SBorrow })
 }
 
 /// `tuple_elem_lender` for the binding `binding`, also pointing the
@@ -10106,8 +10219,11 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     let line_num = span_to_line(&user_span, &self.tcx);
     // `vec![s, t]` / `vec![x; n]`: the elements the user wrote are
     // moved (or copied) into the new Vec, like an array literal's.
-    if let Some(elems) = vec_macro_elems(rhs) {
-      self.match_array_elems(lhs, elems, line_num);
+    if let Some(elems) = vec_macro_elems(self.tcx, rhs) {
+      // Earlier elements may already have moved into MIR temporaries. The
+      // assignment itself never happens if an element returns or diverges.
+      let Some(row) = self.body_facts.and_then(|b| b.constructed_vecs.get(&rhs.span.ctxt().outer_expn())) else { return };
+      self.draw_literal_parts(lhs, elems.iter().collect(), *row, true);
       return;
     }
     self.bind_from_anonymous(line_num, lhs);
@@ -11158,7 +11274,7 @@ pub fn enclosing_ctor_name(&self, e: &'tcx Expr<'tcx>) -> Option<String> {
 /// isn't a value of literals. What it is built from goes to the caller
 /// with it (#1143).
 pub fn is_nested_literal(&self, e: &'tcx Expr<'tcx>) -> bool {
-  if vec_macro_elems(e).is_some() {
+  if vec_macro_elems(self.tcx, e).is_some() {
     return true;
   }
   !e.span.from_expansion() && match e.kind {
