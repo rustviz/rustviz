@@ -186,6 +186,11 @@ impl Order<'_, '_> {
                 return Some((store.order.0, store.order.1, BEFORE_STORE));
             }
         }
+        if matches!(ev, E::StaticBorrow { .. } | E::MutableBorrow { .. }) {
+            if let Some((store, _)) = self.field_generation(ev, row) {
+                return Some(fact_point(store));
+            }
+        }
         let mut candidates: Vec<_> = row.facts.iter().filter(|e| self.matches(ev, e)).collect();
         // Closure captures passed to calls have a presentation-only
         // function column. Resolve the actual MIR capture by its expression
@@ -849,7 +854,13 @@ impl Order<'_, '_> {
             .filter_map(|(f, old, new)| {
                 if let Some(ids) = self.ends.get(&ev.get_id()).filter(|_| end(ev)) {
                     if ids.is_empty() { return None; }
-                    if ids.iter().all(|id| new.contains(id)) { return Some((f, new.as_slice())); }
+                    // Borrowck can release several generations of the same
+                    // lender together. The normal end at the final store
+                    // belongs to the value installed there.
+                    let released_at_store = new.iter().any(|id| ids.contains(id)) && ids.iter().all(|id|
+                        row.facts.iter().any(|e| e.location == f.location && matches!(e.fact,
+                            Fact::BorrowEnd { loan, .. } if loan == *id)));
+                    if ids.iter().all(|id| new.contains(id)) || released_at_store { return Some((f, new.as_slice())); }
                     // The first store can replace a reference made on an
                     // earlier row (including a call with several inputs).
                     // Later stores' incoming values already have a generation
@@ -1074,6 +1085,39 @@ impl Order<'_, '_> {
         adt.has_dtor(self.tcx).then(|| ro.name().clone())
     }
 
+    /// Both arrows must end on the same MIR edge, where the reborrow
+    /// through this parent is released and no competing loan survives.
+    fn restores_before_end(&self, child: &E, parent: &E, row: &Row, child_at: Option<Point>, parent_at: Option<Point>) -> bool {
+        let (holder, through) = endpoints(child);
+        let Some(r) = through.extract_rap().filter(|r| r.is_mutref()) else { return false };
+        let Some(h) = place(holder) else { return false };
+        let mut restored = BTreeSet::new();
+        let mut child_points = BTreeSet::new();
+        let mut ends = BTreeSet::new();
+        for e in &row.facts {
+            let Fact::BorrowEnd { loan, .. } = e.fact else { continue };
+            let (Some(l), Some(succ)) = (self.loan(loan), e.end_successor) else { continue };
+            let at = fact_point(e);
+            if child_at.is_none_or(|p| p == at) && l.through.as_ref() == Some(r.name()) && names_lender(through, l)
+                && (l.direct_holders.contains(&h) || l.via_call.contains(&h) || l.holders.contains(&h))
+                && self.ends.get(&child.get_id()).is_none_or(|ids| ids.contains(&loan)) {
+                child_points.insert(at);
+                if self.facts.restored_reborrows.contains(&(e.location, succ, loan)) {
+                    restored.extend(l.made_through.iter().map(|original| (e.location, succ, *original)));
+                }
+            }
+            if parent_at.is_none_or(|p| p == at) && l.direct_holders.contains(r.name())
+                && names_lender(endpoints(parent).1, l)
+                && self.ends.get(&parent.get_id()).is_none_or(|ids| ids.contains(&loan)) {
+                ends.insert((e.location, succ, loan));
+            }
+        }
+        // An event without an assigned point or loan cannot select one
+        // of several distinct releases of the same displayed place.
+        (child_at.is_some() || self.ends.contains_key(&child.get_id()) || child_points.len() == 1)
+            && !ends.is_empty() && ends.is_subset(&restored)
+    }
+
     fn order_list(&self, events: &mut [(usize, E)], map: &mut BTreeMap<usize, Vec<E>>, layout: &mut RowLayout) {
         let mut lines: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (i, (line, ev)) in events.iter_mut().enumerate() {
@@ -1139,6 +1183,9 @@ impl Order<'_, '_> {
                     }
                     if points[i].zip(points[j]).is_some_and(|(x, y)| x.2 >= 0 && y.2 >= 0 && self.earlier(x, y)) {
                         layout.before.insert(ids);
+                    }
+                    if gives_back_to(a, b) && self.restores_before_end(a, b, row, points[i], points[j]) {
+                        layout.restored.insert(ids);
                     }
                     if end(a) && end(b) && points[i].is_some() && points[i] == points[j] && gives_back_to(a, b) {
                         layout.same_dot.entry(ids.1).or_default().push(ids.0);
@@ -1273,11 +1320,22 @@ pub(crate) struct FieldGeneration {
     pub(crate) replaced: bool,
 }
 
+/// What the receiver holds when an input and the loan it carries have different access rights.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum StoredLoan {
+    SharedInput { mutable: bool, binding: bool },
+    Carrier { mutable: bool, binding: bool },
+    UniqueCapture,
+}
+
 /// Coincident effects on one column can include a dot without an arrow.
 #[derive(Default, Debug)]
 pub struct RowLayout {
     /// Both column dots and the connecting arrow describe the same aggregate operand.
     pub(crate) aggregate_titles: BTreeMap<usize, String>,
+    pub(crate) stored_lender_loans: BTreeMap<u64, BTreeSet<usize>>,
+    pub(crate) stored_loans: BTreeMap<usize, StoredLoan>,
+    pub(crate) restored: BTreeSet<(usize, usize)>,
     pub(crate) ended_before_call: BTreeMap<usize, BTreeSet<String>>,
     pub(crate) ended_at_fork: BTreeSet<(usize, u64)>,
     pub(crate) after_destructor: BTreeMap<usize, String>,
@@ -1300,6 +1358,9 @@ pub struct RowLayout {
 impl RowLayout {
     pub fn append(&mut self, other: &mut Self) {
         self.aggregate_titles.append(&mut other.aggregate_titles);
+        self.stored_lender_loans.append(&mut other.stored_lender_loans);
+        self.restored.append(&mut other.restored);
+        self.stored_loans.append(&mut other.stored_loans);
         self.ended_at_fork.append(&mut other.ended_at_fork);
         self.after_destructor.append(&mut other.after_destructor);
         self.copied_ends.append(&mut other.copied_ends);

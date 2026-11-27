@@ -85,11 +85,8 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("known_bugs/1645_move_then_two_reassigns", "drop-of-moved-value-at-reassign", 1645),
     ("known_bugs/1662_arm_loan_kinds", "invalid-state", 1662),
     ("known_bugs/1694_nested_overlapping_loans", "arrow-along-leg", 1694),
-    ("known_bugs/1715_nested_downgrade", "invalid-state", 1715),
     ("known_bugs/1732_stored_loan_kinds", "arrow-along-leg", 1732),
-    ("known_bugs/1732_stored_loan_kinds", "invalid-state", 1732),
     ("known_bugs/1823_shared_ref_of_mut_hedge", "arrow-along-leg", 1823),
-    ("known_bugs/1823_shared_ref_of_mut_hedge", "invalid-state", 1823),
     ("known_bugs/1823_shared_ref_of_mut_kinds", "invalid-state", 1823),
     ("known_bugs/1823_shared_ref_of_mut_siblings", "invalid-state", 1823),
 ];

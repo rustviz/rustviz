@@ -1781,6 +1781,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         out
     };
     // The CFG edges each loan ends on (for `HoldEnd`s below).
+    let mut restored_reborrows = BTreeSet::new();
     let mut ended_edges: BTreeSet<(Location, Location, usize)> = BTreeSet::new();
     // Borrow ends: a location where a loan is in scope (before or after
     // its effect: a loan taken here and dead before the next location
@@ -1825,6 +1826,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             if let Some(t) = table {
                 there.extend(untracked_at(t.start_index(*s)));
             }
+            let restricted: BTreeSet<_> = loans.iter().filter(|l| there.contains(&BorrowIndex::from_usize(l.loan)))
+                .flat_map(|l| l.through.iter().chain(&l.columns)).cloned().collect();
             for b in &here {
                 if there.contains(b) {
                     continue;
@@ -1904,6 +1907,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 if !li.end_lines.contains(&row) {
                     li.end_lines.push(row);
                 }
+                if li.through.as_ref().is_some_and(|r| !restricted.contains(r)) {
+                    restored_reborrows.insert((loc, *s, b.index()));
+                }
                 ended_edges.insert((loc, *s, b.index()));
                 let f = Fact::BorrowEnd { loan: b.index(), lender: li.lender.clone(), holder, why, to_line, to_col };
                 let mut end = cx.ev(loc, f);
@@ -1976,6 +1982,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         }
         held_in(&os, p)
     };
+    let mut receiver_loans = std::collections::HashMap::new();
     let published: BTreeSet<usize> = loans.iter().map(|l| l.loan).collect();
     if let Some(t) = table {
         let lmap = bwf.borrow_set.location_map();
@@ -1997,6 +2004,81 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             let mut v: Vec<usize> = held_by_place(refp, t.start_index(loc)).into_iter().filter(|x| *x != l.loan && published.contains(x)).collect();
             v.sort();
             l.made_through = v;
+        }
+        for (bb, data) in body.basic_blocks.iter_enumerated() {
+            let term = data.terminator();
+            let TerminatorKind::Call { args, target: Some(return_to), .. } = &term.kind else { continue };
+            let Some((receiver, inputs)) = args.split_first() else { continue };
+            let Some(p) = receiver.node.place() else { continue };
+            let TyKind::Ref(_, inner, m) = decl_place_ty(tcx, body, p).kind() else { continue };
+            if !m.is_mut() || inputs.is_empty() || !runs.contains(&bb) { continue; }
+            let regions = regions_of(*inner);
+            if regions.is_empty() { continue; }
+            let dest = resolve_temp_deref(tcx, body, tcx.mk_place_deref(p));
+            let Some(name) = cx.name(dest) else { continue };
+            let loc = Location { block: bb, statement_index: data.statements.len() };
+            // The referent's origins at the call include its instantiated
+            // lifetime constraints, even if the receiver is dead on return.
+            let retained = held_in(&regions, t.mid_index(loc));
+            let before = held_by_place(dest, t.start_index(loc));
+            let after = held_by_place(dest, t.start_index(Location { block: *return_to, statement_index: 0 }));
+            let mut stored = Vec::new();
+            for (index, arg) in inputs.iter().enumerate() {
+                let Some(place) = arg.node.place() else { continue };
+                let ty = decl_place_ty(tcx, body, place);
+                let carried = held_by_place(place, t.start_index(loc));
+                let ids: Vec<_> = carried.intersection(&retained).copied()
+                    .filter(|id| loans.iter().any(|l| l.loan == *id && matches!(l.source, "borrow" | "caller" | "untracked")))
+                    .collect();
+                // A direct borrow operand has a known target, even if that
+                // target itself holds other loans (e.g. push(&x), x: &T).
+                // A call result need not identify a single referent.
+                let direct = |id: usize| {
+                    if id < base {
+                        bwf.borrow_set.location_map().get_index(id).is_some_and(|(_, bd)| bd.assigned_place() == place)
+                    } else {
+                        untracked.get(id - base).is_some_and(|u| u.assigned == place && u.field.is_none())
+                    }
+                };
+                #[expect(clippy::disallowed_methods, reason = "only tests membership among MIR destinations")]
+                let literal = cx.vec_results.values().any(|(_, result)| *result == place);
+                let direct_operand = ty.is_ref() && ids.iter().any(|&id| direct(id));
+                let shared = matches!(ty.kind(), TyKind::Ref(_, _, m) if !m.is_mut());
+                for &id in &ids {
+                    let exclusive = loans.iter().any(|l| l.loan == id && l.kind == "mut");
+                    if direct_operand && !direct(id) && !exclusive { continue; }
+                    let operand = if shared && (!direct_operand || exclusive) {
+                        StoredOperand::SharedReference
+                    } else if ty.is_mutable_ptr() && !inner.walk().filter_map(|a| a.as_type()).any(|t|
+                        tcx.erase_and_anonymize_regions(t) == tcx.erase_and_anonymize_regions(ty)) {
+                        StoredOperand::Carrier
+                    } else if !ty.is_ref() && !ty.is_closure() && !literal &&
+                        (!matches!(ty.kind(), TyKind::Array(..) | TyKind::Tuple(..)) || ids.len() > 1) {
+                        // E.g. extend with a filtered iterator: the receiver
+                        // keeps the loan even if no element was yielded.
+                        StoredOperand::Carrier
+                    } else {
+                        StoredOperand::Direct
+                    };
+                    // A shared reborrow through a shared reference can outlive
+                    // that binding. Follow the loan it actually points through.
+                    let mut stack = vec![id];
+                    let mut visited = BTreeSet::new();
+                    while let Some(source) = stack.pop() {
+                        if !visited.insert(source) { continue; }
+                        let Some(l) = loans.iter().find(|l| l.loan == source) else { continue };
+                        if l.source == "untracked" && l.through.is_some() && !l.made_through.is_empty() {
+                            stack.extend(l.made_through.iter().copied());
+                        } else if matches!(l.source, "borrow" | "caller" | "untracked") {
+                            let operand = if shared && l.kind == "mut" { StoredOperand::SharedReference } else { operand };
+                            stored.push(ReceiverLoan { loan: source, argument: index + 1, operand, newly_held: !before.contains(&id) && after.contains(&id) });
+                        }
+                    }
+                }
+            }
+            if !stored.is_empty() {
+                receiver_loans.insert((term.source_info.span.with_parent(None), name), stored);
+            }
         }
         // Copies and moves of a direct holder's reference (through MIR
         // temporaries), into a variable, a field (`h.r`, `o.0`), or a whole
@@ -3963,6 +4045,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         issued_operand_loans,
         returned_operand_loans,
         evaluated_spans,
+        receiver_loans, restored_reborrows,
         constructed_vecs,
         take_calls: take_calls.into_iter().map(|loc| body.source_info(loc).span.with_parent(None)).collect(),
         binding_sources,

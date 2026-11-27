@@ -45,11 +45,39 @@ pub struct AggregateLoan {
     pub conditional: bool,
 }
 
+/// How the MIR operand carries this loan into a receiver.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum StoredOperand {
+    /// A reference with an identified referent, or an aggregate of direct references.
+    Direct,
+    /// A shared reference whose target or access rights differ from what
+    /// the individual loan would suggest.
+    SharedReference,
+    /// The loan flows into the receiver's lifetimes. Its contents at run time are unknown.
+    Carrier,
+}
+
+/// The argument index includes the receiver at index zero. A loan already
+/// in the receiver needs an independent signature tie to this argument.
+pub struct ReceiverLoan {
+    pub loan: usize,
+    pub argument: usize,
+    pub operand: StoredOperand,
+    pub newly_held: bool,
+}
+
 #[derive(Serialize)]
 pub struct BodyFacts {
     /// Loans carried by the operands of this MIR aggregate, in operand order.
     #[serde(skip)]
     pub aggregate_loans: std::collections::HashMap<rustc_span::Span, Vec<AggregateLoan>>,
+    /// Loans carried by a non-receiver MIR operand into the receiver, indexed
+    /// by the call and the receiver place.
+    #[serde(skip)]
+    pub receiver_loans: std::collections::HashMap<(rustc_span::Span, String), Vec<ReceiverLoan>>,
+    /// A reborrow end after which no loan still restricts its parent on this CFG edge.
+    #[serde(skip)]
+    pub restored_reborrows: BTreeSet<(rustc_middle::mir::Location, rustc_middle::mir::Location, usize)>,
     #[serde(skip)]
     pub evaluated_spans: Vec<rustc_span::Span>,
     /// Borrow issues whose references are staged directly in an aggregate.

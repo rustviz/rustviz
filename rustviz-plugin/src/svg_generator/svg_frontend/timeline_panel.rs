@@ -1351,7 +1351,7 @@ fn render_branch_dots(
                     branch.states[i - 1].2,
                     State::FullPrivilege { s: LineState::Full | LineState::Gray } | State::PartialPrivilege { .. }
                 ));
-                                render_dot(hash, &branch.e_data, &branch.t_data, visualization_data, hold, dots, held_at_event);
+            render_dot(hash, &branch.e_data, &branch.t_data, visualization_data, hold, dots, held_at_event);
             for text in dots.take_carry(*hash) {
                 if !branch.diverges && !leftover.iter().any(|(t, _)| *t == text.0) {
                     leftover.push(text);
@@ -2289,6 +2289,44 @@ fn loop_runs_on_owns(line_number: &usize, hash: &u64, history: &[(usize, Event)]
     whole.then_some(true)
 }
 
+/// A readable interval that fits entirely on the borrow's end dot.
+fn one_dot_holder_state(history: &[(usize, Event)], i: usize, rap: &ResourceAccessPoint,
+    layout: &crate::event_order::RowLayout) -> Option<State> {
+    let (row, event) = &history[i];
+    let (Event::StaticDie { readable, .. } | Event::MutableDie { readable, .. }) = event else { return None };
+    if !rap.is_ref() { return None; }
+    let here = event_dot_y(history, i);
+    let mut on_dot = history[..i].iter().enumerate().rev()
+        .take_while(|(j, (r, _))| r == row && event_dot_y(history, *j) == here)
+        .map(|(_, (_, e))| e);
+    if on_dot.clone().next().is_some_and(|e| layout.restored.contains(&(e.get_id(), event.get_id()))) {
+        return Some(State::FullPrivilege { s: LineState::Full });
+    }
+    let acquired = on_dot.find(|e| matches!(e, Event::StaticDie { .. } | Event::MutableDie { .. } | Event::Move { .. }
+        | Event::StaticBorrow { .. } | Event::MutableBorrow { .. } | Event::Copy { is: ResourceTy::Value(_), .. }
+        | Event::Acquire { is: ResourceTy::Value(_), .. } | Event::StaticLend { is: ResourceTy::DerefField(..), .. }
+        | Event::MutableLend { is: ResourceTy::DerefField(..), .. }));
+    let same_generation = acquired.is_some_and(|start|
+        layout.field_generations.get(&start.get_id()) == layout.field_generations.get(&event.get_id()));
+    (*readable && same_generation && matches!(acquired, Some(Event::StaticBorrow { .. } | Event::MutableBorrow { .. }
+        | Event::Copy { .. } | Event::Acquire { .. }))).then(|| {
+        if rap.is_mutref() { State::FullPrivilege { s: LineState::Full } }
+        else { State::PartialPrivilege { s: LineState::Full } }
+    })
+}
+
+/// Introduce the closure capture first, then explain that the previous
+/// binding's borrow had already ended. Both effects must share a dot and
+/// MIR must put the release before the capture.
+fn borrow_before_capture<'a>(history: &'a [(usize, Event)], i: usize, layout: &crate::event_order::RowLayout) -> Option<&'a String> {
+    let Event::StaticLend { to, id, .. } = &history[i].1 else { return None };
+    let previous = i.checked_sub(1)?;
+    let Event::StaticReacquire { from: ResourceTy::Value(holder), id: end, still_borrowed_by, .. } = &history[previous].1 else { return None };
+    (to.is_closure() && holder.is_ref() && still_borrowed_by.is_empty()
+        && layout.closure_captures.values().any(|ids| ids.contains(id))
+        && layout.precedes(*end, *id) && event_dot_y(history, previous) == event_dot_y(history, i)).then_some(holder.name())
+}
+
 fn render_dot(
     hash: &u64,
     history: &Vec<(usize, Event)>,
@@ -2812,6 +2850,19 @@ fn render_dot(
                 }
             }
         }
+        if let Some(&detail) = visualization_data.row_layout.stored_loans.get(&event.get_id()) {
+            let parties = match event {
+                Event::StaticBorrow { from, is, .. } | Event::MutableBorrow { from, is, .. } => Some((is, from, false)),
+                Event::StaticLend { to, is, .. } | Event::MutableLend { to, is, .. }
+                    if matches!(detail, crate::event_order::StoredLoan::UniqueCapture) => Some((to, is, false)),
+                Event::MutableDie { to, is, .. } => Some((is, to, true)),
+                Event::MutableReacquire { from, is, .. } => Some((from, is, true)),
+                _ => None,
+            };
+            if let Some((holder, lender, ended)) = parties {
+                data.title = hover_messages::stored_loan_message(detail, holder, lender, None, ended);
+            }
+        }
         if matches!(event, Event::StaticDie { .. } | Event::MutableDie { .. }) {
             if let Some(owner) = visualization_data.row_layout.after_destructor.get(&event.get_id()) {
                 data.title.push_str(&format!(". The old {} can use this reference in its destructor before the replacement is installed.", styled_name_html(owner)));
@@ -2873,12 +2924,25 @@ fn render_dot(
         if let Some(title) = visualization_data.row_layout.aggregate_titles.get(&event.get_id()) {
             data.title.clone_from(title);
         }
+        let rap = &visualization_data.timelines[hash].resource_access_point;
+        if let Some(state) = one_dot_holder_state(history, i, rap, &visualization_data.row_layout) {
+            let tip = timeline_segment_title(&state, rap, visualization_data, None);
+            dots.entry(*hash, timeline_data.x_val, event_y, *line_number, timeline_data).lines.push((None, tip));
+        }
         // push to individual timelines
         let lend_id = match event {
             Event::StaticLend { id, .. } | Event::MutableLend { id, .. } => Some(*id),
             _ => None,
         };
         append_dot(data, timeline_data, dots, lend_id, rv_attrs::event_name(event), *line_number);
+        if let Some(holder) = borrow_before_capture(history, i, &visualization_data.row_layout) {
+            let dot = dots.entry(*hash, timeline_data.x_val, event_y, *line_number, timeline_data);
+            if let [.., release, capture] = dot.lines.as_mut_slice() {
+                if release.1 != hover_messages::event_dot_static_reacquire(rap.name(), rap.holds_value()) { continue; }
+                release.1 = format!("Before this capture, the immutable borrow by {} had already ended. {}'s {} was no longer immutably borrowed", styled_name_html(holder), styled_name_html(rap.name()), if rap.holds_value() { "value" } else { "resource" });
+                std::mem::swap(release, capture);
+            }
+        }
     }
 }
 
@@ -6916,6 +6980,14 @@ fn render_generic_arrow(
     if let Some(operand) = visualization_data.row_layout.aggregate_titles.get(&external_event.get_id()) {
         title.clone_from(operand);
     }
+    if let Some(&detail) = visualization_data.row_layout.stored_loans.get(&external_event.get_id()) {
+        match external_event {
+            ExternalEvent::StaticBorrow { via: Some(v), .. } | ExternalEvent::MutableBorrow { via: Some(v), .. } =>
+                title = hover_messages::stored_loan_message(detail, to, from, Some(&v.func), false),
+            ExternalEvent::MutableDie { .. } => title = hover_messages::stored_loan_message(detail, from, to, None, true),
+            _ => {}
+        }
+    }
     if visualization_data.approx_notes.iter().any(|n| matches!(n, ApproxNote::VecElement { id, nested: true, .. } if *id == external_event.get_id())) {
         title.push_str(". The element goes into an inner vector held by the destination");
     }
@@ -10729,9 +10801,17 @@ fn owner_loan_title(
             hover_messages::state_borrowed_by_loop_iterator_holder(name, rap.holds_value(), exclusive)
         }
     } else if kept_by.is_some() && same_kind && !matches!(layout, State::ResourceMoved { .. }) {
-        // The facts can't say the holder points to it: 2.x's title for the
-        // same kind of loan stands.
-        return (layout.clone(), legacy(), true);
+        // A container can borrow reference slots as well as the places
+        // they keep borrowed. The shared line alone doesn't name the
+        // container. Keep its duration clause for those places (#1888).
+        let borrows_slots = holder.and_then(holder_rap).is_some_and(|r| r.holds_borrow())
+            && possible_sources.is_some_and(|sources| sources.iter().any(|p| holder_rap(p).is_some_and(|r| r.is_ref())));
+        let stored = vd.row_layout.stored_lender_loans.get(rap.hash())
+            .is_some_and(|ids| loans.iter().any(|l| ids.contains(&l.loan)));
+        if !stored && (exclusive || !borrows_slots) {
+            return (layout.clone(), legacy(), true);
+        }
+        legacy()
     } else if exclusive {
         hover_messages::state_lent_out(name, to, lent_place(rap, false, false), None)
     } else {
