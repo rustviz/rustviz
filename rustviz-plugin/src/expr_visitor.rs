@@ -1487,6 +1487,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     self.body_facts?.value_flow.call(expr.span, self.mir_callee(expr))
   }
 
+  pub(crate) fn call_relationship(&self, expr: &Expr<'_>) -> Option<&'a crate::facts::call_relationships::CallRelationship> {
+    self.body_facts?.call_relationships.call(self.mir_call(expr)?.site?.at)
+  }
+
   pub(crate) fn mir_constructor(&self, expr: &Expr<'_>) -> bool {
     self.body_facts.is_some_and(|b| b.value_flow.constructor(expr.span))
   }
@@ -4187,105 +4191,109 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     through.is_mutref().then(|| Reborrow { loan, through: through.clone(), holder })
   }
 
-  /// The receiver of call_once is evaluated before its arguments. Its move
-  /// or copy is the MIR operand's. For a local closure body we can also
-  /// explain what the call does with each capture (#271, #725, #1704).
-  pub fn closure_call_events(&mut self, call: &Expr<'_>, callee: &'tcx Expr<'tcx>) {
-    let typeck = self.tcx.typeck(call.hir_id.owner);
-    if !typeck.type_dependent_def_id(call.hir_id)
-      .is_some_and(|d| self.tcx.trait_of_assoc(d) == self.tcx.lang_items().fn_once_trait()) {
-      return;
-    }
+  /// Draw the callable receiver separately from the arguments and result.
+  pub fn closure_call_events(&mut self, call: &Expr<'_>, callee: &'tcx Expr<'tcx>, name: &str) {
+    use crate::facts::call_relationships::{CallKind, CaptureTransfer, kind};
+    let Some(method) = self.tcx.typeck(call.hir_id.owner).type_dependent_def_id(call.hir_id) else { return };
+    let kind = kind(self.tcx, Some(method));
+    if !kind.is_callable() { return; }
+    let Some(facts) = self.body_facts else { return };
     if let ExprKind::Closure(literal) = callee.kind {
-      // The aggregate initializes the callable. Its operands are captures,
-      // each with its own MIR transfer, even if they share a source span.
-      let captures = self.effects.get(&callee.span.with_parent(None)).cloned().unwrap_or_default();
-      for (row, effect) in captures {
-        let loc = effect.location;
-        let Some(st) = self.mir_body.basic_blocks[loc.block].statements.get(loc.statement_index) else { continue };
-        if !matches!(&st.kind, StatementKind::Assign(a) if matches!(&a.1, Rvalue::Aggregate(k, _)
-          if matches!(&**k, rustc_middle::mir::AggregateKind::Closure(d, _) if *d == literal.def_id.to_def_id()))) { continue; }
-        let (path, kind) = match &effect.fact {
-          crate::facts::Fact::Move { path, .. } => (path, Evt::Move),
-          crate::facts::Fact::Copy { path, .. } => (path, Evt::Copy),
+      if kind != CallKind::FnOnce { return; }
+      // A literal has no receiver column. Its moved or copied operands
+      // are the environment fields, not arguments passed to the body.
+      let typeck = self.tcx.typeck(literal.def_id);
+      for (field, capture) in typeck.closure_min_captures_flattened(literal.def_id).enumerate() {
+        let Some((fact, src)) = self.closure_capture(literal.def_id, field, capture) else { continue };
+        let evt = match fact.transfer {
+          CaptureTransfer::Move => Evt::Move,
+          CaptureTransfer::Copy => Evt::Copy,
           _ => continue,
         };
-        let Some(src) = self.raps.get(path).map(|r| ResourceTy::Value(r.rap.clone())) else { continue };
-        let mut event = self.ext_ev_of_evt(kind, ResourceTy::Anonymous, src, *self.unique_id, false);
+        let mut event = self.ext_ev_of_evt(evt, ResourceTy::Anonymous, ResourceTy::Value(src), *self.unique_id, false);
         if let ExternalEvent::Move { into_closure, .. } | ExternalEvent::Copy { into_closure, .. } = &mut event {
           *into_closure = true;
         }
-        self.add_external_event(row, event);
+        self.add_external_event(fact.row, event);
         *self.unique_id += 1;
       }
       return;
     }
-    let Some(Transfer { row: line_num, kind, path, location, .. }) = self.transfer_at(callee) else { return };
-    // A closure aggregate can have the same span as the capture it moves.
-    // Only a use of a place of the callable type stages the receiver.
-    use rustc_middle::mir::{Rvalue, StatementKind, TerminatorKind};
-    let body = self.mir_body;
-    let block = &body.basic_blocks[location.block];
-    let Some(StatementKind::Assign(assignment)) = block.statements.get(location.statement_index).map(|s| &s.kind) else { return };
-    let Rvalue::Use(operand) = &assignment.1 else { return };
-    let erase = |ty| self.tcx.erase_and_anonymize_regions(ty);
-    if erase(operand.ty(&body.local_decls, self.tcx)) != erase(typeck.expr_ty(callee)) { return; }
-    let invocation = body.basic_blocks.iter_enumerated().find_map(|(bb, b)| {
-      let TerminatorKind::Call { func, args, .. } = &b.terminator().kind else { return None };
-      let (method, _) = func.const_fn_def()?;
-      (self.tcx.trait_of_assoc(method) == self.tcx.lang_items().fn_once_trait()
-        && args.first()?.node.place() == Some(assignment.0)).then_some(bb)
-    });
-    let timing = match invocation {
-      None => CallTiming::Never,
-      Some(bb) if bb != location.block => CallTiming::AfterArguments,
-      Some(_) => CallTiming::Direct,
-    };
-    let Some(closure_rap) = self.raps.get(path).map(|r| r.rap.clone()) else { return };
-    if matches!(kind, Evt::Copy) {
-      self.add_ev(line_num, Evt::Copy, ResourceTy::Anonymous, ResourceTy::Value(closure_rap), false);
-      return;
+    let Some((read, invocation)) = facts.value_flow.call_receiver(call.span, method, callee.span) else { return };
+    let row = read.site.row;
+    match (&read.effect, kind) {
+      (OperandEffect::Borrow { source, mutable, of_ref_slot }, CallKind::Fn | CallKind::FnMut)
+        if *mutable == (kind == CallKind::FnMut) =>
+      {
+        // The ordinary reference-pass event includes the normal
+        // continuation. A call proven to diverge has no such endpoint.
+        if !invocation.and_then(|at| facts.call_relationships.call(at)).is_some_and(|call| call.can_return) {
+          return;
+        }
+        let Some(from) = self.transfer_source(source, callee) else { return };
+        let Some(to) = self.raps.get(&fn_key(name)).map(|r| ResourceTy::Value(r.rap.clone())) else { return };
+        let ty = self.tcx.typeck(callee.hir_id.owner).expr_ty(callee).peel_refs();
+        if matches!(ty.kind(), TyKind::Param(_) | TyKind::Alias(..) | TyKind::Dynamic(..)) {
+          self.row_layout.opaque_call_receivers.insert(*self.unique_id);
+        }
+        if *mutable {
+          let reborrow = matches!(from, ResourceTy::Deref(_) | ResourceTy::DerefField(..));
+          self.add_pass_by_mref_ev(row, to, from, reborrow, false, ImplicitRef::No, *of_ref_slot);
+        } else {
+          self.add_pass_by_sref_ev(row, to, from, ImplicitRef::No, false, *of_ref_slot);
+        }
+      }
+      (OperandEffect::Copy(source), CallKind::FnOnce) => {
+        let Some(from) = self.transfer_source(source, callee) else { return };
+        self.add_ev(row, Evt::Copy, ResourceTy::Anonymous, from, false);
+      }
+      (OperandEffect::Move(source), CallKind::FnOnce) => {
+        let Some(closure) = self.transfer_source(source, callee) else { return };
+        let timing = match invocation {
+          None if self.mir_call(call).is_some() => CallTiming::Direct,
+          None => CallTiming::Never,
+          Some(at) if at.block != read.site.at.block => CallTiming::AfterArguments,
+          Some(_) => CallTiming::Direct,
+        };
+        let record = invocation.and_then(|at| facts.call_relationships.call(at));
+        let fates = match self.tcx.typeck(callee.hir_id.owner).expr_ty(callee).kind() {
+          TyKind::Closure(id, _) => id.as_local().zip(record).map(|(local, call)| {
+            let typeck = self.tcx.typeck(local);
+            typeck.closure_min_captures_flattened(local).zip(&call.capture_fates)
+              .filter_map(|(capture, outcomes)| {
+                if !matches!(capture.info.capture_kind, rustc_middle::ty::UpvarCapture::ByValue | rustc_middle::ty::UpvarCapture::ByUse)
+                  || self.ty_is_copy(capture.place.ty(), callee.hir_id.owner) { return None; }
+                let rap = self.capture_column(capture)?;
+                Some(CapturedFate {
+                  name: rap.name().to_owned(),
+                  outcomes: outcomes.clone(),
+                  needs_drop: self.needs_drop(capture.place.ty(), callee.hir_id.owner),
+                })
+              }).collect()
+          }),
+          _ => None,
+        };
+        let id = *self.unique_id;
+        *self.unique_id += 1;
+        self.add_external_event(row, ExternalEvent::ClosureCall { closure, fates, timing, id });
+      }
+      _ => {}
     }
-    let fates = match typeck.expr_ty(callee).kind() {
-      rustc_middle::ty::Closure(did, _) if self.tcx.typeck_root_def_id(*did) == callee.hir_id.owner.to_def_id() =>
-        did.as_local().map(|local| self.call_capture_fates(callee, local)),
-      _ => None,
-    };
-    let id = *self.unique_id;
-    *self.unique_id += 1;
-    self.add_external_event(line_num, ExternalEvent::ClosureCall { closure: ResourceTy::Value(closure_rap), fates, timing, id });
   }
 
-  fn call_capture_fates(&self, callee: &Expr<'_>, closure_local: rustc_hir::def_id::LocalDefId) -> Vec<CapturedFate> {
-    // What the body does with each capture (all captures, to keep the
-    // field index of each), then the by-value, non-Copy ones named.
-    let closure_typeck = self.tcx.typeck(closure_local);
-    let captures: Vec<_> = closure_typeck.closure_min_captures_flattened(closure_local).collect();
-    let bwf = rustc_utils::mir::borrowck_facts::get_body_with_borrowck_facts(self.tcx, closure_local);
-    let ends = closure_capture_ends(self.tcx, &bwf.body, captures.len());
-    let env = typing_env(self.tcx, callee.hir_id.owner);
-    let mut fates = Vec::new();
-    for (capture, end) in captures.iter().zip(ends) {
-      let by_value = matches!(capture.info.capture_kind,
-        rustc_middle::ty::UpvarCapture::ByValue | rustc_middle::ty::UpvarCapture::ByUse);
-      // A Copy capture is copied into the closure; there's nothing of
-      // it to move or drop.
-      if !by_value || self.tcx.type_is_copy_modulo_regions(env, capture.place.ty()) {
-        continue;
-      }
-      let upvar_hir_id = match capture.place.base {
-        rustc_middle::hir::place::PlaceBase::Upvar(upvar_id) => upvar_id.var_path.hir_id,
-        _ => continue,
-      };
-      let upvar_name = binding_name(&self.tcx, upvar_hir_id);
-      let Some(rap) = self.capture_rap(&capture.place, &upvar_name) else { continue };
-      fates.push(CapturedFate {
-        name: rap.name().to_owned(),
-        end,
-        needs_drop: self.needs_drop(capture.place.ty(), callee.hir_id.owner),
-      });
-    }
-    fates
+  fn capture_column(&self, capture: &rustc_middle::ty::CapturedPlace<'tcx>) -> Option<ResourceAccessPoint> {
+    let rustc_middle::hir::place::PlaceBase::Upvar(upvar) = capture.place.base else { return None };
+    let binding = self.raps.binding(upvar.var_path.hir_id)?;
+    self.capture_rap(&capture.place, binding.rap.name())
+  }
+
+  fn closure_capture(
+    &self, closure: rustc_hir::def_id::LocalDefId, field: usize, capture: &rustc_middle::ty::CapturedPlace<'tcx>,
+  ) -> Option<(&'a crate::facts::call_relationships::Capture, ResourceAccessPoint)> {
+    let mut sites = self.body_facts?.call_relationships.captures(closure.to_def_id(), field);
+    let first = sites.next()?;
+    if !sites.all(|site| (site.transfer, &site.source_place, site.row) == (first.transfer, &first.source_place, first.row)) { return None; }
+    Some((first, self.capture_column(capture)?))
   }
 
   pub(crate) fn note_reference_slot_write(&mut self, span: rustc_span::Span, lhs: &ResourceTy) {
@@ -4520,59 +4528,52 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// Returns false if nothing was drawn, so the caller falls back to
   /// the plain argument handling.
   pub(crate) fn match_closure_arg(&mut self, closure: &'tcx rustc_hir::Closure<'tcx>, arg: &'tcx Expr, to_ro: &ResourceTy, fn_name: &str) -> bool {
-    let line_num = expr_to_line(&arg, &self.tcx);
+    use crate::facts::call_relationships::CaptureTransfer;
     let last_line = self.tcx.sess.source_map().lookup_char_pos(arg.span.hi()).line;
     let typeck = self.tcx.typeck(closure.def_id);
-    let env = typing_env(self.tcx, arg.hir_id.owner);
     let mut drew_any = false;
     for (index, capture) in typeck.closure_min_captures_flattened(closure.def_id).enumerate() {
-      let upvar_hir_id = match capture.place.base {
-        rustc_middle::hir::place::PlaceBase::Upvar(upvar_id) => upvar_id.var_path.hir_id,
-        _ => continue,
-      };
-      let root = binding_name(&self.tcx, upvar_hir_id);
-      let Some(from_rap) = self.capture_rap(&capture.place, &root) else { continue };
-      match capture.info.capture_kind {
-        rustc_middle::ty::UpvarCapture::ByValue | rustc_middle::ty::UpvarCapture::ByUse => {
+      let Some((fact, from_rap)) = self.closure_capture(closure.def_id, index, capture) else { continue };
+      let line_num = fact.row;
+      match fact.transfer {
+        CaptureTransfer::Move | CaptureTransfer::Copy => {
           self.update_rap(&from_rap, line_num);
-          let evt = if self.tcx.type_is_copy_modulo_regions(env, capture.place.ty()) { Evt::Copy } else { Evt::Move };
+          let evt = if fact.transfer == CaptureTransfer::Copy { Evt::Copy } else { Evt::Move };
           let mut ev = self.ext_ev_of_evt(evt, to_ro.clone(), ResourceTy::Value(from_rap), *self.unique_id, false);
           if let ExternalEvent::Move { into_closure, .. } | ExternalEvent::Copy { into_closure, .. } = &mut ev {
             *into_closure = true;
           }
           self.add_external_event(line_num, ev);
           *self.unique_id += 1;
-          drew_any = true;
         }
-        rustc_middle::ty::UpvarCapture::ByRef(kind) => {
-          let Some(sites) = crate::facts::call_wording::capture_borrows(self.mir_body, closure.def_id, index) else { continue };
-          let Some(&(_, place)) = sites.first() else { continue };
-          // One source dot can describe several guard occurrences when the
-          // captured place and the displayed end row agree on every path.
-          if !sites.iter().all(|&(issue, p)| p == place && self.facts.and_then(|b| b.loans.iter().find(|l| l.issue == Some(issue)))
-            .is_some_and(|l| !l.end_lines.is_empty() && l.end_lines.iter().all(|row| *row <= last_line))) { continue; }
+        CaptureTransfer::Shared | CaptureTransfer::Mutable | CaptureTransfer::Unique => {
+          let Some(body) = self.body_facts else { continue };
+          // A single mark can cover several guard occurrences if each
+          // construction's loan ends by the same expression boundary.
+          if !body.call_relationships.captures(closure.def_id.to_def_id(), index).all(|site|
+            site.issue.and_then(|issue| body.loans.iter().find(|l| l.issue == Some(issue)))
+              .is_some_and(|l| !l.end_lines.is_empty() && l.end_lines.iter().all(|row| *row <= last_line))) { continue; }
           let target_name = format!("the closure passed to {}", fn_name);
           if !self.raps.contains_key(&fn_key(&target_name)) {
             self.add_fn(target_name.clone());
           }
           let target = ResourceTy::Value(self.raps.get(&fn_key(&target_name)).unwrap().rap.to_owned());
           self.update_rap(&from_rap, line_num);
-          // The reference variable itself, not what it points to (#1180).
           let of_ref_var = from_rap.is_ref() && capture.place.projections.is_empty();
           let implicit = ImplicitRef::Capture {
-            place: crate::facts::call_wording::binding_place(self.mir_body, &self.raps.bindings, place)
-              .unwrap_or_else(|| capture.to_string(self.tcx)),
-            unique: matches!(kind, rustc_middle::ty::BorrowKind::UniqueImmutable),
+            place: fact.source.clone().unwrap_or_else(|| capture.to_string(self.tcx)),
+            unique: fact.transfer == CaptureTransfer::Unique,
             interior_mut: self.ty_has_interior_mut(capture.place.ty(), arg.hir_id.owner) == InteriorMut::Yes,
           };
-          match kind {
-            rustc_middle::ty::BorrowKind::Mutable =>
-              self.add_pass_by_mref_ev(line_num, target, ResourceTy::Value(from_rap), false, false, implicit, of_ref_var),
-            _ => self.add_pass_by_sref_ev(line_num, target, ResourceTy::Value(from_rap), implicit, false, of_ref_var),
+          if fact.transfer == CaptureTransfer::Mutable {
+            self.add_pass_by_mref_ev(line_num, target, ResourceTy::Value(from_rap), false, false, implicit, of_ref_var);
+          } else {
+            self.add_pass_by_sref_ev(line_num, target, ResourceTy::Value(from_rap), implicit, false, of_ref_var);
           }
-          drew_any = true;
         }
+        CaptureTransfer::Unknown => continue,
       }
+      drew_any = true;
     }
     drew_any
   }
@@ -6450,9 +6451,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     };
     let Some(index) = index else { return CallSlots::default() };
     let callee = self.mir_callee(parent);
-    let trait_id = callee.and_then(|callee| self.tcx.trait_of_assoc(callee));
-    let lang = self.tcx.lang_items();
-    let callable = trait_id.is_some() && [lang.fn_trait(), lang.fn_mut_trait(), lang.fn_once_trait()].contains(&trait_id);
+    let callable = crate::facts::call_relationships::kind(self.tcx, callee).is_callable();
     CallSlots {
       span: Some(parent.span),
       callee,
@@ -12099,56 +12098,10 @@ pub fn match_rhs_call(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
     self.bind_from_ctor(line_num, lhs, rhs);
     return;
   }
-  // A call through a local `f` (closure, fn pointer) that leaves
-  // `f` in place: the result comes from the call, so its source is
-  // the call's Function RAP, not `f`'s column (#254, #299). An
-  // `FnOnce` call does consume `f`, and keeps `f` as the source.
-  let Some(call) = self.mir_call(rhs).filter(|c| c.has_result) else {
-    return;
-  };
+  let Some(call) = self.mir_call(rhs).filter(|c| c.has_result) else { return };
   let evt = if matches!(lhs, ResourceTy::Caller) && call.copyable { Evt::Copy } else { evt };
-  let callee = match local_callee_result_key(rhs, &self.tcx) {
-    // A Copy result (`let n = f();` with `f: FnOnce() -> i32`)
-    // isn't a copy of anything `f` holds: it comes from the call
-    // (#271). Nor is the value of one of several ways out of a
-    // labeled block or loop (`'a: { if c { break 'a t; } f() }`,
-    // #1526): the call consumed `f` where it was made, on that way
-    // only (`ClosureCall`), and the result reaches the receiver where
-    // the block ends.
-    LocalCallee::Consumed if matches!(evt, Evt::Copy) || self.break_alt.is_some() => {
-      match hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
-        Some(n) => LocalCallee::Call(fn_key(&n)),
-        None => LocalCallee::Consumed,
-      }
-    }
-    other => other,
-  };
-  match callee {
-    LocalCallee::Call(key) => {
-      // Registered on the fly if visit_expr hasn't reached the call yet.
-      if !self.raps.contains_key(&key) {
-        if let Some(n) = hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
-          self.add_fn(n);
-        }
-      }
-      let from = self.raps.get(&key)
-        .map(|rd| ResourceTy::Value(fn_result_rap(rhs, rd.rap.with_mir_result(), &self.tcx)))
-        .unwrap_or(ResourceTy::Anonymous);
-      self.add_call_result(call, line_num, evt, lhs, from);
-      return;
-    }
-    LocalCallee::Consumed => {
-      let from = expr_to_rap_name(fn_expr, &self.tcx)
-        .and_then(|n| self.raps.get(&n))
-        .map(|rd| ResourceTy::Value(rd.rap.to_owned()))
-        .unwrap_or(ResourceTy::Anonymous);
-      self.add_call_result(call, line_num, evt, lhs, from);
-      return;
-    }
-    LocalCallee::NotLocal => {}
-  }
-  // The callee is an expression (`(w.f)()`, `make()(x)`; #703):
-  // the result is a new value the call returned.
+  // The result is produced by the invocation. The receiver's pass or
+  // consumption is already recorded by closure_call_events.
   if !matches!(fn_expr.kind, ExprKind::Path(_)) {
     self.bind_from_anonymous(line_num, lhs);
     return;
@@ -12455,28 +12408,12 @@ pub fn match_rhs_closure(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, clos
   // line the user expects.
   let mir_b_data = self.gather_borrow_data(self.bwf);
 
+  use crate::facts::call_relationships::CaptureTransfer;
   let typeck = self.tcx.typeck(closure.def_id);
   for (index, capture) in typeck.closure_min_captures_flattened(closure.def_id).enumerate() {
-    let upvar_hir_id = match capture.place.base {
-      rustc_middle::hir::place::PlaceBase::Upvar(upvar_id) => upvar_id.var_path.hir_id,
-      _ => continue,
-    };
-    // The root variable's name (MIR loans below are keyed on it)
-    // and the captured place's column: `p.name` for a disjoint
-    // field capture, `p` for a whole-variable one.
-    let upvar_name = binding_name(&self.tcx, upvar_hir_id);
-    let by_value = matches!(capture.info.capture_kind,
-      rustc_middle::ty::UpvarCapture::ByValue | rustc_middle::ty::UpvarCapture::ByUse);
-    // A by-value capture of a Copy place copies it into the
-    // closure (#311): `m` is still usable afterwards and the
-    // closure has nothing of m's to drop. A Copy field
-    // (`move || p.x`) is drawn on its own column (#328).
-    let env = typing_env(self.tcx, rhs.hir_id.owner);
-    let copied = by_value && self.tcx.type_is_copy_modulo_regions(env, capture.place.ty());
-    let upvar_rap = match self.capture_rap(&capture.place, &upvar_name) {
-      Some(rap) => rap,
-      None => continue,
-    };
+    let Some((fact, upvar_rap)) = self.closure_capture(closure.def_id, index, capture) else { continue };
+    let line_num = fact.row;
+    let copied = fact.transfer == CaptureTransfer::Copy;
     // A closure that uses a reference variable through it
     // (`|| r.push('a')`, `|| r.len()`) captures the place `*r`,
     // i.e. it reborrows what r points to rather than borrowing r
@@ -12490,19 +12427,12 @@ pub fn match_rhs_closure(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, clos
     let of_ref_var = upvar_rap.is_ref() && !through_ref && capture.place.projections.is_empty();
     let from = ResourceTy::Value(upvar_rap);
     let to = lhs.clone();
-    let evt_kind = match capture.info.capture_kind {
-      _ if copied => Evt::Copy,
-      rustc_middle::ty::UpvarCapture::ByValue
-      | rustc_middle::ty::UpvarCapture::ByUse => Evt::Move,
-      rustc_middle::ty::UpvarCapture::ByRef(kind) => match kind {
-        rustc_middle::ty::BorrowKind::Mutable => Evt::MBorrow,
-        // Immutable + UniqueImmBorrow both render as a static
-        // (immutable) borrow from the user's perspective —
-        // UniqueImmBorrow is an internal closure-borrow flavor
-        // they can't write, and the visualization shouldn't
-        // distinguish it.
-        _ => Evt::SBorrow,
-      },
+    let evt_kind = match fact.transfer {
+      CaptureTransfer::Copy => Evt::Copy,
+      CaptureTransfer::Move => Evt::Move,
+      CaptureTransfer::Shared | CaptureTransfer::Unique => Evt::SBorrow,
+      CaptureTransfer::Mutable => Evt::MBorrow,
+      CaptureTransfer::Unknown => continue,
     };
     let capture_id = *self.unique_id;
     match evt_kind {
@@ -12538,9 +12468,11 @@ pub fn match_rhs_closure(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, clos
       }
     }
     if let Some(die_evt) = die_evt {
-      let loan = crate::facts::call_wording::capture_borrows(self.mir_body, closure.def_id, index).and_then(|sites| {
-        let [(at, _)] = sites.as_slice() else { return None };
-        self.bwf.borrow_set.location_map().get_index_of(at)
+      let loan = self.body_facts.and_then(|body| {
+        let mut sites = body.call_relationships.captures(closure.def_id.to_def_id(), index);
+        let issue = sites.next()?.issue?;
+        if sites.next().is_some() { return None; }
+        self.bwf.borrow_set.location_map().get_index_of(&issue)
       });
       let kill_line = loan.and_then(|id| mir_b_data.iter().find(|b| b.borrow_idx == id)).map(|b| b.region.1);
       // A reference the closure reborrows through or borrows (`|| r.len()`,

@@ -6643,13 +6643,13 @@ pub fn event_dot_break_alt_move_to_caller(my_name: &String, alt: &crate::svg_gen
 // `f()` of a closure rustc inferred to be `FnOnce` (#271): `f` is
 // moved into the call, and each value it captured by value is dropped
 // or moved out of it inside the call. `fates` comes from the closure
-// body's MIR (see closure_capture_fates).
+// body's MIR.
 pub fn event_dot_closure_call_once(
     my_name: &String,
     fates: Option<&[crate::svg_generator::data::CapturedFate]>,
     timing: crate::svg_generator::data::CallTiming,
 ) -> String {
-    use crate::svg_generator::data::CapturedEnd;
+    use crate::facts::call_relationships::CaptureFate::*;
     let f = styled_name_html(my_name);
     use crate::svg_generator::data::CallTiming;
     let prefix = match timing {
@@ -6664,15 +6664,13 @@ pub fn event_dot_closure_call_once(
         "{prefix}{f} is moved into the call (an FnOnce closure can only be called once)");
     for fate in fates {
         let s = styled_name_html(&fate.name);
-        let tail = match fate.end {
-            CapturedEnd::Dropped if fate.needs_drop =>
-                "is dropped during the call",
-            CapturedEnd::Dropped =>
-                "goes out of scope at the end of the call (it has nothing to drop)",
-            CapturedEnd::Returned =>
-                "is moved out of the closure as the call's result",
-            CapturedEnd::Moved =>
-                "is moved on or dropped by the call",
+        let tail = match fate.outcomes.iter().copied().collect::<Vec<_>>().as_slice() {
+            [Dropped] if fate.needs_drop => "is dropped during the call",
+            [Dropped] => "is consumed during the call (it has nothing to drop)",
+            [Returned] => "is moved out of the closure as the call's result",
+            [Dropped, Returned] => "may be dropped during the call or moved out as the call's result",
+            [Transferred] | [Dropped, Transferred] => "is moved on or dropped by the call",
+            _ => continue,
         };
         let during = if matches!(timing, CallTiming::AfterArguments) { "If the call starts, " } else { "" };
         msg.push_str(&format!(". {during}{s}, which {f} captured, {tail}"));
@@ -6885,6 +6883,11 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
     if let ExternalEvent::Move { loop_head: LoopHead::Part { path, copy, .. }, .. } = external_event {
         let what = if *copy { "Copy" } else { "Move" };
         title = format!("{} of {} to {}", what, element_part("each element", path, &styled_from_string), styled_to_string);
+    }
+    if let (ExternalEvent::Move { .. }, ResourceTy::Value(ResourceAccessPoint::Function(f))) = (external_event, from) {
+        if f.mir_result && f.callable_result && !to.is_closure() {
+            title = format!("Move of the result of {styled_from_string}() to {styled_to_string}");
+        }
     }
     // A Copy-typed value a call returns (`let n = v.len();`): the
     // source is the call's result, not a variable (or anything)

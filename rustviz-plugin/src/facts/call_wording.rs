@@ -2,7 +2,6 @@
 use super::BodyBindings;
 use rustc_middle::mir::{
     Body, Local, Location, Operand, Place, ProjectionElem, Rvalue, StatementKind, TerminatorKind,
-    RETURN_PLACE, START_BLOCK,
 };
 use rustc_middle::ty::{Ty, TyCtxt};
 use rustc_span::Span;
@@ -180,122 +179,6 @@ pub(crate) fn macro_operand<'tcx>(
     slot
 }
 
-/// Follow the return place backwards over normal MIR edges. A mutable
-/// reference result can be reborrowed through several temporaries *after*
-/// the arms join. Select an arm by an instruction contributing to the
-/// returned value, even when both arms occupy the same source row.
-pub(crate) fn return_origins<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    body: &Body<'tcx>,
-    span: Option<Span>,
-) -> Option<BTreeSet<Option<Local>>> {
-    let mut work: Vec<_> = body
-        .basic_blocks
-        .iter_enumerated()
-        .filter(|(_, bb)| matches!(bb.terminator().kind, TerminatorKind::Return))
-        .map(|(bb, _)| (body.terminator_loc(bb), RETURN_PLACE, span.is_none()))
-        .collect();
-    // An indirect write could replace the reference in an address-taken slot.
-    let exposed: BTreeSet<_> = body
-        .basic_blocks
-        .iter()
-        .flat_map(|b| &b.statements)
-        .filter_map(|st| {
-            let StatementKind::Assign(a) = &st.kind else {
-                return None;
-            };
-            match a.1 {
-                Rvalue::Ref(_, rustc_middle::mir::BorrowKind::Mut { .. }, p)
-                | Rvalue::RawPtr(_, p)
-                    if !p.is_indirect() =>
-                {
-                    Some(p.local)
-                }
-                _ => None,
-            }
-        })
-        .collect();
-    let mut seen = BTreeSet::new();
-    let mut origins = BTreeSet::new();
-    'trace: while let Some((at, mut local, mut selected)) = work.pop() {
-        if !seen.insert((at, local, selected)) {
-            continue;
-        }
-        for st in body[at.block].statements[..at.statement_index].iter().rev() {
-            let StatementKind::Assign(a) = &st.kind else {
-                continue;
-            };
-            if a.0.local != local || a.0.is_indirect() {
-                continue;
-            }
-            a.0.as_local()?;
-            selected |= span.is_some_and(|s| st.source_info.span.source_equal(s));
-            local = match a.1 {
-                Rvalue::Use(Operand::Constant(_)) => {
-                    if selected {
-                        origins.insert(None);
-                    }
-                    continue 'trace;
-                }
-                Rvalue::Use(Operand::Copy(p) | Operand::Move(p)) => p.as_local()?,
-                Rvalue::Ref(_, _, p)
-                    if p.projection.first() == Some(&ProjectionElem::Deref)
-                        && p.projection[1..].iter().all(|e| {
-                            matches!(e, ProjectionElem::Field(..) | ProjectionElem::Downcast(..))
-                        }) =>
-                {
-                    p.local
-                }
-                _ => return None,
-            };
-            if exposed.contains(&local) {
-                return None;
-            }
-        }
-        if at.block == START_BLOCK {
-            if selected {
-                origins.insert(Some(body.args_iter().find(|p| *p == local)?));
-            }
-            continue;
-        }
-        for &pred in body.basic_blocks.predecessors()[at.block].iter() {
-            if !super::real_successor_blocks(body, pred).contains(&at.block) {
-                continue;
-            }
-            let term = body[pred].terminator();
-            let mut src = local;
-            let mut through = selected;
-            if let TerminatorKind::Call {
-                func,
-                args,
-                destination,
-                ..
-            } = &term.kind
-            {
-                if destination.local == local {
-                    // The standard String-to-str deref borrows the String's contents.
-                    let (method, generics) = func.const_fn_def()?;
-                    let self_ty = generics.types().next()?;
-                    if !tcx
-                        .trait_of_assoc(method)
-                        .is_some_and(|d| tcx.is_lang_item(d, rustc_hir::LangItem::Deref))
-                        || !self_ty
-                            .ty_adt_def()
-                            .is_some_and(|d| tcx.is_lang_item(d.did(), rustc_hir::LangItem::String))
-                    {
-                        return None;
-                    }
-                    let [arg] = &args[..] else { return None };
-                    src = arg.node.place()?.as_local()?;
-                    through |= span.is_some_and(|s| term.source_info.span.source_equal(s));
-                }
-            }
-            work.push((body.terminator_loc(pred), src, through));
-        }
-    }
-    (!origins.is_empty()).then_some(origins)
-}
-
 /// A pattern reference bound directly to the payload of a single-field
 /// enum variant, including through the shared temporary in `match &opt`.
 pub(crate) fn payload_borrow<'tcx>(
@@ -343,40 +226,4 @@ pub(crate) fn payload_borrow<'tcx>(
         _ => return None,
     };
     Some((parent, kind))
-}
-
-/// A guard can construct the same closure on several MIR paths. Keep the
-/// borrow of this environment field at *each* construction site.
-pub(crate) fn capture_borrows<'tcx>(
-    body: &Body<'tcx>,
-    closure: rustc_hir::def_id::LocalDefId,
-    index: usize,
-) -> Option<Vec<(Location, Place<'tcx>)>> {
-    let mut sites = Vec::new();
-    for (block, bb) in body.basic_blocks.iter_enumerated() {
-        for (statement_index, statement) in bb.statements.iter().enumerate() {
-            let StatementKind::Assign(a) = &statement.kind else {
-                continue;
-            };
-            let Rvalue::Aggregate(kind, fields) = &a.1 else {
-                continue;
-            };
-            if !matches!(**kind, rustc_middle::mir::AggregateKind::Closure(id, _) if id == closure.to_def_id())
-            {
-                continue;
-            }
-            let field = fields
-                .get(rustc_abi::FieldIdx::from_usize(index))?
-                .place()?;
-            sites.push(operand_borrow(
-                body,
-                Location {
-                    block,
-                    statement_index,
-                },
-                field,
-            )?);
-        }
-    }
-    Some(sites)
 }

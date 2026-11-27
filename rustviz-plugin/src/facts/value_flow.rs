@@ -193,6 +193,23 @@ impl ValueFlow {
         }
     }
 
+    /// Follow the implicit receiver's own operand to slot zero of this
+    /// invocation. Ordinary closure arguments are fields of slot one.
+    pub fn call_receiver(&self, span: Span, callee: DefId, receiver: Span) -> Option<(Read, Option<Location>)> {
+        let slots = CallSlots { span: Some(span), callee: Some(callee), ..CallSlots::default() };
+        let operands = &self.operands;
+        if operands.calls.get(&span.with_parent(None)).is_some_and(|calls| calls.iter().any(|c| c.callee == Some(callee))) {
+            let read = Operands::common_read(operands.argument_reads(receiver, slots))?;
+            let at = read.exact.then(|| self.unique_argument(&read, slots).map(|(at, _)| at)).flatten();
+            return Some((read, at));
+        }
+        // A call whose arguments diverge can still stage its receiver.
+        // The compiler provided a resolved FnOnce method but no call
+        // terminator. Keep only an unforwarded transfer into a temporary.
+        let read = self.read(receiver)?;
+        (read.staging.is_some() && read.destinations.is_empty() && read.exact).then_some((read, None))
+    }
+
     pub fn drops_argument(&self, read: &Read, slots: CallSlots) -> bool {
         let operands = if read.runs { &self.operands } else { &self.imaginary };
         slots.span.and_then(|span| operands.call(span, slots.callee)).is_some_and(|call| call.drops_arg)
@@ -620,7 +637,12 @@ fn collect_blocks<'tcx>(
                     if let Some(place) = op.place() {
                         record_use(place, at, target.clone());
                     }
-                    staged.extend(read(op, at, 0).map(|read| (span, read, vec![target])));
+                    if let Some(mut read) = read(op, at, 0) {
+                        if matches!(a.1, Rvalue::Use(_)) && temporary(a.0) {
+                            read.staging = a.0.as_local();
+                        }
+                        staged.push((span, read, vec![target]));
+                    }
                 }
                 Rvalue::Ref(_, kind, p) => {
                     if p.projection.is_empty() || p.projection.first() == Some(&ProjectionElem::Deref) {

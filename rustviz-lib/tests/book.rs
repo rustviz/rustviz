@@ -1025,10 +1025,9 @@ const BOOK: &[Snippet] = &[
     // ─── Chapter 13: closures and iterators ───────────────────────────
     Snippet {
         id: "c13_01_closure_param",
-        status: Missing,
-        note: "The shared borrow of the closure is missing (#299)",
         must_contain: &[
             "Closure add_one is bound",
+            "L3 add_one is passed to add_one by shared reference. add_one may read it",
             "L3 y is initialized with the value add_one() returns",
             "y receives the value add_one() returns",
         ],

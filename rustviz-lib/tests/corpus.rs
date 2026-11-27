@@ -5470,9 +5470,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Closure capture (immutable borrow) from b to f",
             "If f holds a shared borrow affecting b, that borrow ends here. It no longer restricts access to b",
             "b₂ goes out of scope. Its resource is dropped.",
-            // fnonce_shadowed
-            "Move from g₂ to t",
-            "g₂'s resource is moved",
+            // fnonce_shadowed: MIR passes g₂ by value and puts b in the result.
+            "Move of the result of g() to t",
+            "g₂ is moved into the call (an FnOnce closure can only be called once). b, which g₂ captured, is moved out of the closure as the call's result",
             // closure_arg
             "Move from h₂ into the closure passed to apply",
             "h₂ goes out of scope. No resource is dropped.",
@@ -5482,6 +5482,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Closure capture (immutable borrow) from c to f",
             "m goes out of scope. No resource is dropped.",
             "Move from g to t",
+            "Move from g₂ to t",
+            "g₂'s resource is moved",
             "g's resource is moved",
             "Move from h into the closure passed to apply",
         ],
@@ -7267,7 +7269,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // The body returns `s`, so it leaves f as the call's result and
         // `t` owns it: f drops nothing and the call doesn't drop it.
         must_contain: &[
-            "Move from f to t",
+            "Move of the result of f() to t",
             "f is moved into the call (an FnOnce closure can only be called once). \
              s, which f captured, is moved out of the closure as the call's result",
             "f goes out of scope. No resource is dropped.",
@@ -13336,6 +13338,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "closure_value_not_resource",
         must_contain: &[
+            // The MIR borrows the generic callable. Its type does not
+            // establish whether the callable holds any resource.
+            "f is passed to f by shared reference. f may read it",
             "f's value is captured (immutably borrowed) by closure g",
             "f's value is being shared by one or more variables",
             "f's value is no longer immutably borrowed",
@@ -27565,9 +27570,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "c may have been moved: the block can end through a break that comes before c is moved, or by reaching its end after c is moved, so c can't be used after the block",
             "c goes out of scope. Its captured resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
             "c2 was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, and execution reaches the end of c2's scope with the resource still held, it is dropped there.",
-            "c2 goes out of scope. Its captured resource is dropped here only if no branch above called or moved it (Rust tracks this with a runtime drop flag).",
-            "c3 goes out of scope. Its captured resource is dropped here only if no branch above called or moved it (Rust tracks this with a runtime drop flag).",
-            "c4 goes out of scope. Its captured resource is dropped here only if no branch above called or moved it (Rust tracks this with a runtime drop flag).",
+            "c2 goes out of scope. Its captured resource is dropped here only if no branch above called it (Rust tracks this with a runtime drop flag).",
+            "c3 goes out of scope. Its captured resource is dropped here only if no branch above called it (Rust tracks this with a runtime drop flag).",
+            "c4 goes out of scope. Its captured resource is dropped here only if no branch above called it (Rust tracks this with a runtime drop flag).",
             "c5 may have been moved: the loop can end through a break that comes after c5 is moved, so c5 can't be used after the loop",
         ],
         must_not_contain: &[
@@ -44973,4 +44978,102 @@ fn closure_capture_ends_follow_their_own_loan_1909() {
     let svg = run_with_local_backend("rv3_issues/1759_closure_moved_in_one_arm").timeline_panel_string();
     assert!(tooltip_of_id(&svg, "g>s@L8:arrow:static_die").unwrap().contains("shared borrow affecting s"));
     assert!(tooltip_of_id(&svg, "g>s@L11:arrow:static_die").is_none());
+}
+
+#[test]
+fn p4_closure_receiver_and_result_are_separate() {
+    let svg = run_with_local_backend("book/c13_01_closure_param").timeline_panel_string();
+    let use_marks = drawn_clauses(&svg, "add_one", "3");
+    let uses: Vec<_> = use_marks.iter().filter(|(_, _, tip)| {
+        tip.contains("add_one is passed to add_one by shared reference. add_one may read it")
+    }).collect();
+    // MIR borrows add_one for the receiver and initializes y directly
+    // at the call's destination. There is no copy from the closure.
+    assert_eq!(uses.len(), 1, "{use_marks:?}");
+    let tips = timeline_tooltips(&svg);
+    assert_eq!(tips.iter().filter(|tip| tip.contains("add_one is passed to add_one by shared reference")).count(), 1);
+    assert!(tips.iter().any(|tip| tip.contains("y is initialized with the value add_one() returns")));
+    assert!(tips.iter().any(|tip| tip.contains("y receives the value add_one() returns")));
+    assert!(!tips.iter().any(|tip| tip.contains("Copy of the value add_one() returns") || tip.contains("Copy from add_one to y")));
+}
+
+#[test]
+fn p4_call_return_sources_follow_mir_places() {
+    use serde_json::json;
+    let call = |body: &serde_json::Value, callee: &str| {
+        body["call_relationships"]["calls"].as_array().expect("missing MIR calls")
+            .iter().find(|call| call["callee"] == callee).unwrap().clone()
+    };
+    let rv = run_with_local_backend("rv3_call_relationships");
+    let facts = rv.facts().unwrap();
+    let main = fact_body(facts, "main");
+    // MIR reborrows through several aliases of pair.left. The caller's
+    // borrow of pair is still governed by field's input/output lifetime.
+    assert_eq!(call(main, "field")["return_sources"], json!([
+        {"kind": "input", "index": 0, "projection": ["deref", {"field": 0}]}
+    ]));
+    // A callee can repoint the reference stored behind the mutable slot.
+    // MIR does not prove which reference the subsequent load will read.
+    let read = fact_body(facts, "loaded_after_call");
+    assert_eq!(call(read, "read_slot")["return_sources"], json!([{"kind": "unknown"}]));
+    let literal = fact_body(facts, "literal_forward");
+    assert_eq!(call(literal, "literal_choice")["return_sources"], json!([
+        {"kind": "input", "index": 1, "projection": []}
+    ]));
+    let erased = fact_body(facts, "erased");
+    let erased_calls = erased["call_relationships"]["calls"].as_array().unwrap();
+    assert_eq!(erased_calls.len(), 1);
+    assert_eq!(erased_calls[0]["kind"], "fn_once");
+    assert!(erased_calls[0]["return_sources"].is_null());
+    assert_eq!(erased_calls[0]["capture_fates"], json!([]));
+
+    let rv = run_with_local_backend("book/c10_07_longest_inner_scope");
+    let longest = call(fact_body(rv.facts().unwrap(), "main"), "longest");
+    assert_eq!(longest["return_sources"], json!([
+        {"kind": "input", "index": 0, "projection": []},
+        {"kind": "input", "index": 1, "projection": []}
+    ]));
+    let svg = rv.timeline_panel_string();
+    let tips = timeline_tooltips(&svg);
+    for lender in ["string1", "string2"] {
+        assert!(tips.iter().any(|tip| tip.contains(&format!("borrow from {lender} to result"))
+            && tip.contains("At the caller, both stay borrowed while result is in use")));
+    }
+}
+
+#[test]
+fn p4_closure_capture_transfer_and_fate() {
+    use serde_json::json;
+    let rv = run_with_local_backend("rv3_call_relationships");
+    let facts = rv.facts().unwrap();
+    let main = &fact_body(facts, "main")["call_relationships"];
+    let captures = main["captures"].as_array().expect("missing closure captures");
+    for (name, transfer) in [("offset", "copy"), ("count", "mutable"), ("captured", "move")] {
+        let capture = captures.iter().find(|c| c["source"] == name).unwrap();
+        assert_eq!(capture["transfer"], transfer);
+        assert_eq!(capture["issue"].is_array(), transfer == "mutable");
+    }
+    let calls = main["calls"].as_array().unwrap();
+    for (row, kind) in [(32, "fn"), (35, "fn_mut"), (38, "fn_once")] {
+        assert_eq!(calls.iter().filter(|c| c["row"] == row && c["kind"] == kind).count(), 1);
+    }
+    let take = calls.iter().find(|c| c["kind"] == "fn_once").unwrap();
+    assert_eq!(take["return_sources"], json!([{"kind": "capture", "field": 0, "projection": []}]));
+    assert_eq!(take["capture_fates"], json!([["returned"]]));
+
+    // One MIR branch moves held into the result. The other passes held
+    // to mem::drop before making a fresh String. Both reach the return.
+    let alternatives = fact_body(facts, "alternatives");
+    let calls = alternatives["call_relationships"]["calls"].as_array().unwrap();
+    let f = calls.iter().find(|c| c["kind"] == "fn_once").unwrap();
+    assert_eq!(f["capture_fates"][1], json!(["dropped", "returned"]));
+    assert!(f["return_sources"].as_array().unwrap().contains(&json!({"kind": "unknown"})));
+    let svg = rv.timeline_panel_string();
+    let tips = timeline_tooltips(&svg);
+    assert_eq!(tips.iter().filter(|t| t.contains("tick is passed to tick by mutable reference")).count(), 1);
+    assert!(tips.iter().any(|t| t.contains("held, which f captured, may be dropped during the call or moved out as the call's result")));
+    assert!(tips.iter().any(|t| t.contains("only if no branch above called it") && t.contains("runtime drop flag")));
+    assert!(tips.iter().any(|t| t == "Move of the result of take() to result"));
+    assert!(!tips.iter().any(|t| t == "Move from take to result"));
+    assert!(!tips.iter().any(|t| t == "Move from f to the caller"));
 }

@@ -447,7 +447,7 @@ pub(crate) fn reference_argument_source<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tc
     let either_input = callee.as_local().filter(|id| tcx.hir_maybe_body_owned_by(*id).is_some()).is_some_and(|id| {
         let inner = &rustc_utils::mir::borrowck_facts::get_body_with_borrowck_facts(tcx, id).body;
         inner.arg_count == 2 && inner.args_iter().all(|l| inner.local_decls[l].ty.is_ref())
-            && super::call_wording::return_origins(tcx, inner, None)
+            && super::call_relationships::return_arguments(tcx, inner, None)
                 .is_some_and(|origins| origins == inner.args_iter().map(Some).collect())
     });
     Some((tcx.item_name(callee).to_string(), reborrow, either_input))
@@ -5797,7 +5797,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         _ => None,
     }).collect();
     let value_flow = super::value_flow::collect(tcx, body, &cx.names, &runs, &checked, &cx.rows.event_row);
+    let call_relationships = super::call_relationships::collect(tcx, body, &cx.names.bindings, &runs, &checked, &cx.rows.event_row);
     BodyFacts {
+        call_relationships,
         value_flow,
         residual_drops,
         short_call_borrows,

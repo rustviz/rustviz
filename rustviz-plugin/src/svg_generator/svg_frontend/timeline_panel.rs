@@ -2515,6 +2515,14 @@ fn render_dot(
         if is_closure_capture_event {
             continue;
         }
+        // Keep these history events for the layout. The call dot already
+        // explains the reference pass for this opaque callable.
+        if visualization_data.row_layout.opaque_call_receivers.contains(&event.get_id())
+            && matches!(event, Event::StaticLend { .. } | Event::MutableLend { .. }
+                | Event::StaticReacquire { .. } | Event::MutableReacquire { .. })
+        {
+            continue;
+        }
         //matching the event
         match event {
             Event::RefDie { .. } => {

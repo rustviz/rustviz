@@ -1731,52 +1731,6 @@ pub fn unary_op_operand<'tcx>(
   }
 }
 
-/// What a call `callee(args)` returns, as far as the `raps` map goes,
-/// when `callee` might be a local variable. See `local_callee_result_key`.
-pub enum LocalCallee {
-  /// The callee isn't a local variable (a fn item, a path to a
-  /// constructor, a method, ...): look the call up by its callee's name.
-  NotLocal,
-  /// A local whose call leaves it in place (an `Fn` / `FnMut` closure,
-  /// a fn pointer or item bound to a local): the result comes from the
-  /// call, i.e. the Function RAP under this key (`fn_key("f")`).
-  Call(String),
-  /// A local that the call consumes (`FnOnce::call_once`, e.g. a
-  /// closure that moves a captured value out): the value comes out of
-  /// the variable itself, which is moved.
-  Consumed,
-}
-
-/// Whether the value `call` returns is `Copy`.
-pub fn call_result_is_copy(call: &Expr, tcx: &TyCtxt) -> bool {
-  let typeck = tcx.typeck(call.hir_id.owner);
-  typeck.expr_ty_opt(call).is_some_and(|ty|
-    tcx.type_is_copy_modulo_regions(typing_env(*tcx, call.hir_id.owner), ty))
-}
-
-/// Classify the callee of `call` (an `ExprKind::Call`). Only a path to
-/// a local binding (`Res::Local`) counts as local.
-pub fn local_callee_result_key(call: &Expr, tcx: &TyCtxt) -> LocalCallee {
-  let ExprKind::Call(callee, _) = call.kind else { return LocalCallee::NotLocal };
-  let ExprKind::Path(QPath::Resolved(None, path)) = callee.kind else { return LocalCallee::NotLocal };
-  if !matches!(path.res, Res::Local(_)) {
-    return LocalCallee::NotLocal;
-  }
-  // rustc records a call through a closure or a generic `F: Fn*` as a
-  // call of the trait method it resolved to; `call_once` takes the
-  // callee by value.
-  let typeck = tcx.typeck(call.hir_id.owner);
-  if let Some(method) = typeck.type_dependent_def_id(call.hir_id) {
-    // A concrete closure can return one of its own captures. For an
-    // opaque callable the result comes from the call; its body is unknown.
-    if matches!(typeck.expr_ty(callee).kind(), rustc_middle::ty::Closure(..))
-        && matches!(tcx.trait_of_assoc(method), Some(t) if Some(t) == tcx.lang_items().fn_once_trait()) {
-      return LocalCallee::Consumed;
-    }
-  }
-  LocalCallee::Call(fn_key(tcx.hir_name(path.segments[0].hir_id).as_str()))
-}
-
 /// Which `Rc` / `Arc` / `Weak` kind `ty` is, by std diagnostic item.
 fn rc_kind_of_ty(tcx: &TyCtxt, ty: rustc_middle::ty::Ty) -> Option<RcKind> {
   use rustc_span::sym;
@@ -1827,7 +1781,8 @@ pub fn fn_result_rap(call: &Expr, rap: ResourceAccessPoint, tcx: &TyCtxt) -> Res
   if let ResourceAccessPoint::Function(f) = &mut rap {
     let typeck = tcx.typeck(call.hir_id.owner);
     f.callable_result = typeck.type_dependent_def_id(call.hir_id)
-      .is_some_and(|method| tcx.trait_of_assoc(method) == tcx.lang_items().fn_once_trait());
+      .is_some_and(|method| crate::facts::call_relationships::kind(*tcx, Some(method))
+        == crate::facts::call_relationships::CallKind::FnOnce);
   }
   let rap = match rc_call_of_expr(call, tcx) {
     Some(rc_call) => rap.with_rc_call(rc_call),
@@ -1922,18 +1877,7 @@ pub fn get_rap(expr: &Expr, tcx: &TyCtxt, raps: &BodyRaps) -> ResourceTy {
       // A call through a local (`f(1)` with `f` a closure or fn
       // pointer) yields the call's result, not `f`'s own value: name
       // the call's Function RAP, never the variable (#254, #299).
-      let key = match local_callee_result_key(expr, tcx) {
-        LocalCallee::Call(key) => Some(key),
-        // A Copy result of an `FnOnce` call (`Some(f())`, `wrap(f())`
-        // with `f: FnOnce() -> i32`) isn't a copy of anything `f`
-        // holds: it comes from the call, like `let n = f();` (#271,
-        // #1140).
-        LocalCallee::Consumed if call_result_is_copy(expr, tcx) =>
-          hirid_to_var_name(fn_expr.hir_id, tcx).map(|n| fn_key(&n)),
-        // The variable itself (`f₂` for a shadowing `let f`).
-        LocalCallee::Consumed => raps.place_name(fn_expr, tcx),
-        LocalCallee::NotLocal => hirid_to_var_name(fn_expr.hir_id, tcx).map(|n| fn_key(&n)),
-      };
+      let key = hirid_to_var_name(fn_expr.hir_id, tcx).map(|n| fn_key(&n));
       key.and_then(|n| raps.get(&n).map(|rd| fn_result_rap(expr, rd.rap.to_owned(), tcx)))
         .map_or(ResourceTy::Anonymous, ResourceTy::Value)
     }
@@ -2143,148 +2087,6 @@ pub fn find_lender(rhs: &Expr, tcx: &TyCtxt, raps: &BodyRaps, borrow_map: &HashM
   _ => ResourceTy::Anonymous,
   }
 }
-/// Where each value an `FnOnce` closure captured by value ends up when
-/// the closure is called (#271), read from the closure body's MIR.
-/// `body` is the closure's own MIR, whose first argument (`_1`) is the
-/// closure value itself, passed by value because the closure is
-/// `FnOnce`; its fields are the captures, in the order of
-/// `closure_min_captures_flattened`. Entry `i` describes capture `i`:
-///
-/// * `Returned`: the body's only use of it is to return it.
-/// * `Dropped`: the body passes it to `mem::drop`, or never moves it
-///   out, so it is dropped with the rest of the closure's environment
-///   when the call ends.
-/// * `Moved`: it is moved somewhere else, or moved on only some paths
-///   (the body has a branch), so all that can be said is that the call
-///   uses it up.
-pub fn closure_capture_ends<'tcx>(
-  tcx: TyCtxt<'tcx>,
-  body: &rustc_middle::mir::Body<'tcx>,
-  n_captures: usize,
-) -> Vec<crate::svg_generator::data::CapturedEnd> {
-  use crate::svg_generator::data::CapturedEnd;
-  use rustc_middle::mir::{Local, Operand, Place, PlaceElem, Rvalue, StatementKind, TerminatorKind, RETURN_PLACE};
-
-  let all_moved = || vec![CapturedEnd::Moved; n_captures];
-  let env = Local::from_u32(1);
-  // Not an owned environment: not a by-value `FnOnce` body.
-  if body.arg_count < 1 || body.local_decls[env].ty.is_ref() {
-    return all_moved();
-  }
-  // The capture a whole-field place stands for.
-  fn field_of(place: &Place<'_>, env: Local) -> Option<(usize, bool)> {
-    if place.local != env {
-      return None;
-    }
-    match place.projection.first() {
-      Some(PlaceElem::Field(f, _)) => Some((f.index(), place.projection.len() == 1)),
-      _ => None,
-    }
-  }
-  // Locals holding a captured value moved out of the environment
-  // (`_3 = move (_1.0)`), and which capture, to a fixpoint.
-  let mut alias: HashMap<Local, usize> = HashMap::new();
-  loop {
-    let before = alias.len();
-    for bb in body.basic_blocks.iter() {
-      for st in &bb.statements {
-        if let StatementKind::Assign(asg) = &st.kind {
-          let (dest, rv) = &**asg;
-          if let Rvalue::Use(Operand::Move(src)) = rv {
-          if dest.projection.is_empty() && dest.local != RETURN_PLACE {
-            let i = match field_of(src, env) {
-              Some((i, true)) => Some(i),
-              _ if src.projection.is_empty() => alias.get(&src.local).copied(),
-              _ => None,
-            };
-            if let Some(i) = i {
-              alias.insert(dest.local, i);
-            }
-          }
-          }
-        }
-      }
-    }
-    if alias.len() == before {
-      break;
-    }
-  }
-  // Which capture a moved operand carries, and whether it moved only
-  // part of it.
-  let carried = |op: &Operand<'tcx>| -> Option<(usize, bool)> {
-    let Operand::Move(p) = op else { return None };
-    match field_of(p, env) {
-      Some(x) => Some(x),
-      None if p.projection.is_empty() => alias.get(&p.local).map(|i| (*i, true)),
-      None => alias.get(&p.local).map(|i| (*i, false)),
-    }
-  };
-  let mut ends: Vec<Option<CapturedEnd>> = vec![None; n_captures];
-  let mut mark = |i: usize, e: CapturedEnd| {
-    if let Some(slot) = ends.get_mut(i) {
-      *slot = Some(match slot { None => e, Some(old) if *old == e => e, Some(_) => CapturedEnd::Moved });
-    }
-  };
-  let mut has_branch = false;
-  for bb in body.basic_blocks.iter() {
-    for st in &bb.statements {
-      let StatementKind::Assign(asg) = &st.kind else { continue };
-      let (dest, rv) = &**asg;
-      if let Rvalue::Use(op) = rv {
-        if let Some((i, whole)) = carried(op) {
-          if dest.projection.is_empty() && dest.local != RETURN_PLACE {
-            continue; // an alias, followed above
-          }
-          if whole && dest.local == RETURN_PLACE && dest.projection.is_empty() {
-            mark(i, CapturedEnd::Returned);
-          } else {
-            mark(i, CapturedEnd::Moved);
-          }
-        }
-        continue;
-      }
-      let ops: Vec<&Operand<'tcx>> = match rv {
-        Rvalue::Repeat(o, _) | Rvalue::Cast(_, o, _) | Rvalue::UnaryOp(_, o) => vec![o],
-        Rvalue::BinaryOp(_, ab) => vec![&ab.0, &ab.1],
-        Rvalue::Aggregate(_, ops) => ops.iter().collect(),
-        _ => vec![],
-      };
-      for o in ops {
-        if let Some((i, _)) = carried(o) {
-          mark(i, CapturedEnd::Moved);
-        }
-      }
-    }
-    match &bb.terminator().kind {
-      TerminatorKind::Call { func, args, .. } => {
-        let is_mem_drop = func.const_fn_def()
-          .map_or(false, |(def_id, _)| tcx.is_diagnostic_item(rustc_span::sym::mem_drop, def_id));
-        for a in args {
-          if let Some((i, whole)) = carried(&a.node) {
-            mark(i, if is_mem_drop && whole { CapturedEnd::Dropped } else { CapturedEnd::Moved });
-          }
-        }
-      }
-      TerminatorKind::TailCall { args, .. } => {
-        for a in args {
-          if let Some((i, _)) = carried(&a.node) {
-            mark(i, CapturedEnd::Moved);
-          }
-        }
-      }
-      TerminatorKind::SwitchInt { .. } => has_branch = true,
-      _ => {}
-    }
-  }
-  ends.into_iter()
-    .map(|e| match e {
-      None => CapturedEnd::Dropped,
-      Some(_) if has_branch => CapturedEnd::Moved,
-      Some(e) => e,
-    })
-    .collect()
-}
-
 /// For an expression expanded from `vec![…]`, the elements the user
 /// wrote: `vec![s, t]` (an array literal inside the expansion) gives
 /// `[s, t]`, `vec![x; n]` (`from_elem(x, n)`) gives `[x]`. `None` for
