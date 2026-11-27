@@ -1116,7 +1116,7 @@ const VALUE_EVENTS: &[&str] = &[
 /// What a reference's line says (a deferred `let r;` has no bracket).
 const HOLDS_REF: &[&str] = &["holds an immutable reference", "holds a mutable reference"];
 /// What a struct's line says once a field was moved out of it.
-const PARTLY_MOVED: &[&str] = &["is partially moved", "can't be used as a whole"];
+const PARTLY_MOVED: &[&str] = &["is partially moved", "can't be used as a whole", "part of it may have been moved out", "a move of part of it on an unreachable path"];
 const MAYBE_MOVED: &[&str] = &["moved in at least one branch", "may have been moved", "moved out in at least one branch"];
 const IMAGINARY_MOVE: &str = "considers a move on an unreachable path";
 
@@ -1194,7 +1194,9 @@ fn claims(pts: &Points, d: &Drawing, skips: &mut Skips) -> Vec<Claim> {
                     }
                     // A dashed owner line can mean E0382 or E0381. Its
                     // title explains why borrowck rejects a read (Q5).
-                    if s.tip.contains("may have been moved out") || s.tip.contains("considers a move on an unreachable path") {
+                    if PARTLY_MOVED.iter().any(|m| s.tip.contains(m)) {
+                        Drawn::PartlyMoved
+                    } else if s.tip.contains("may have been moved out") || s.tip.contains(IMAGINARY_MOVE) {
                         Drawn::Moved
                     } else {
                         Drawn::Unassigned
@@ -1976,7 +1978,12 @@ fn verify(src: &str, pts: &Points, claims: Vec<Claim>, mut st: Stats, mut out: V
             // can only be shown wrong: no E0381/E0382 means x has its
             // value on every path.
             (Drawn::Moved | Drawn::PartlyMoved, _) => {
-                let maybe = MAYBE_MOVED.iter().chain(["may have been moved", "may have no value", IMAGINARY_MOVE].iter()).any(|m| c.tip.contains(m));
+                // A mixed history can explain why a move is possible
+                // even when the drawing claims there is no value on
+                // any path. E0382 only confirms the possible move.
+                let maybe = !c.tip.contains(" has no value here") &&
+                    MAYBE_MOVED.iter().chain(["may have no value", IMAGINARY_MOVE, "a move of part of it on an unreachable path"].iter())
+                        .any(|m| c.tip.contains(m));
                 let partly = c.drawn == Drawn::PartlyMoved;
                 match (&e0382, &e0381) {
                     (Some(e), _) if maybe && partly_msg(&e.1, &c.var) == partly => Ok(()),
@@ -1991,8 +1998,8 @@ fn verify(src: &str, pts: &Points, claims: Vec<Claim>, mut st: Stats, mut out: V
                     (None, None) => Err(Some(("oracle-moved", conflict.as_ref().map_or(none.clone(), said)))),
                 }
             }
-            // "has no value yet" is E0381 isn't initialized, on every
-            // path; "may have no value" is any E0381 / E0382.
+            // E0381 is the diagnostic for a skipped assignment.
+            // Mixed tooltips that name a move are checked above.
             (Drawn::Unassigned, _) => {
                 let maybe = c.tip.contains("may have no value") || c.tip.contains("unreachable path that skips the assignment");
                 match (&e0381, &e0382) {

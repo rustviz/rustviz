@@ -13238,8 +13238,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "s was assigned a value in only some of the branches above, and each of them moved it away, so s holds nothing after the branches.",
             "s goes out of scope. No resource is dropped: each branch above that assigned s moved it away.",
-            "t was assigned a value in only some of the branches above, so it can't be used after the branches. If the branch that ran assigned it and didn't move it, its resource is dropped when t goes out of scope.",
-            "t goes out of scope. Its resource is dropped here only if t was assigned in the branch that ran and wasn't moved there (Rust tracks this with a runtime drop flag).",
+            "t may have no value here. Some paths the borrow checker considers never assigned it. The borrow checker also considers paths on which it may have been moved out, so t can't be used here. t was assigned a value in only some of the branches above. If t still holds a value when it goes out of scope, its resource is dropped there.",
+            "t goes out of scope. Its resource is dropped here only if t still holds it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             "s goes out of scope. Its resource is dropped",
@@ -28958,6 +28958,182 @@ fn assert_imaginary_leg_endpoints(timeline: &str, var: &str, arm: &str, fork_row
 fn imaginary_else_forks_at_the_snapshot_1804() {
     let rv = run_with_local_backend("rv3_issues/1804_imaginary_else_assigns");
     assert_imaginary_leg_endpoints(&rv.timeline_panel_string(), "s", "8 12", 7);
+}
+
+#[test]
+fn imaginary_else_explains_both_empty_paths_1902() {
+    let name = "rv3_issues/1804_imaginary_else_assigns";
+    let rv = run_with_local_backend(name);
+    let svg = rv.timeline_panel_string();
+    // Rustc gives E0382 on the merged entry. Isolating the incoming
+    // histories gives E0381 on the path without assignment and E0382
+    // on the path with drop(s). Neither incoming path holds a value.
+    check_review_tip(&svg, "s@L8-10:branch_line:", &[
+        "this else branch never runs",
+        "s has no value here",
+        "Some paths the borrow checker considers never assigned it",
+        "may have been moved out",
+    ], &["a move leaves it unusable on other paths", "s may have no value here"]);
+}
+
+#[test]
+fn definite_mixed_claim_is_inconclusive_in_drawing_oracle_1902() {
+    let name = "rv3_issues/1804_imaginary_else_assigns";
+    let rv = run_with_local_backend(name);
+    let (violations, passed, stats) =
+        common::oracle::check(&read_corpus(name), &rv.timeline_panel_string(), &rv.code_panel_string());
+    assert!(violations.is_empty(), "{violations:?}");
+    assert!(!passed.contains(&(8, "s".to_owned(), "oracle-moved")),
+        "E0382 at the dead else entry can't confirm that s is empty on every path: {passed:?}");
+    assert!(stats.skips.contains_key("rustc's verdict doesn't decide the drawn state"), "{stats:?}");
+}
+
+#[test]
+fn ordinary_join_distinguishes_unassigned_from_moved_1902() {
+    let svg = run_with_local_backend("unassigned_or_moved_1902").timeline_panel_string();
+    // E0382 inside the assigning arm. With !consume the old value
+    // is dropped on reassignment if refill, or at scope end otherwise.
+    check_review_tip(&svg, "s@L7:dot:branch_join", &[
+        "was moved in at least one branch above",
+        "If the branch that ran didn't move it, its resource is dropped when s is assigned again (or, if s is never assigned again, when s goes out of scope).",
+    ], &["never assigned it", "its resource is dropped when s goes out of scope."]);
+    check_review_tip(&svg, "s@L4-10:branch_line:", &["s has no value yet"], &["moved"]);
+    check_review_tip(&svg, "s@L11:dot:branch_join", &[
+        "s may have no value here",
+        "Some paths the borrow checker considers never assigned it",
+        "may have been moved out",
+        "If s is assigned again while it still holds a value, its resource is dropped at the assignment.",
+        "If s still holds a value when it goes out of scope, its resource is dropped there.",
+    ], &["each of them moved it away", "s holds nothing after the branches", "a move leaves it unusable on other paths"]);
+}
+
+#[test]
+fn ordinary_segment_explains_both_empty_paths_1902() {
+    let svg = run_with_local_backend("unassigned_or_moved_1902").timeline_panel_string();
+    // The loop can be skipped, preserving both causes of unavailability.
+    // Rustc rejects &s after the loop with E0382.
+    check_review_tip(&svg, "s@L14-17:line:full_privilege_uninit", &[
+        "s may have no value here",
+        "Some paths the borrow checker considers never assigned it",
+        "may have been moved out",
+    ], &["a move leaves it unusable on other paths", "s has no value here"]);
+
+    // The irrefutable arm always runs if its enclosing condition is
+    // true, so x never retains a runtime value after the outer join.
+    let svg = run_with_local_backend("rv3_issues/1804_runtime_moved_or_unassigned").timeline_panel_string();
+    check_review_tip(&svg, "x@L8:dot:branch_join", &[
+        "each of them moved it away, so x holds nothing after the branches",
+    ], &["x may have no value here", "If x still holds a value"]);
+}
+
+#[test]
+fn ordinary_join_can_keep_an_earlier_assignment_1902() {
+    let svg = run_with_local_backend("known_bugs/1582_maybe_held_assign_move_join").timeline_panel_string();
+    // With c && !d, x keeps its first value and drops it on exit.
+    // The second conditional doesn't have to assign x for it to hold a value.
+    check_review_tip(&svg, "x@L78:dot:branch_join", &[
+        "x may have no value here",
+        "Some paths the borrow checker considers never assigned it",
+        "may have been moved out",
+        "x was assigned a value in only some of the branches above.",
+        "If x still holds a value when it goes out of scope, its resource is dropped there.",
+    ], &["x holds nothing after the branches", "If the branch that ran assigned it", "a move leaves it unusable on other paths"]);
+}
+
+#[test]
+fn three_arm_join_can_keep_an_earlier_assignment_1902() {
+    let svg = run_with_local_backend("known_bugs/1582_maybe_held_assign_move_join").timeline_panel_string();
+    // A read at the join gives E0382. With c = true and k = 2 the
+    // wildcard arm leaves x's original value, dropped at scope end.
+    check_review_tip(&svg, "x@L123:dot:branch_join", &[
+        "x may have no value here",
+        "Some paths the borrow checker considers never assigned it",
+        "may have been moved out",
+        "x was assigned a value in only some of the branches above.",
+        "If x still holds a value when it goes out of scope, its resource is dropped there.",
+    ], &["If the branch that ran assigned it"]);
+    check_review_tip(&svg, "x@L124:dot:owner_go_out_of_scope", &[
+        "Its resource is dropped here only if x still holds it (Rust tracks this with a runtime drop flag).",
+    ], &["only if x was assigned in the branch that ran"]);
+}
+
+#[test]
+fn correlated_paths_do_not_make_a_move_definite_1902() {
+    let svg = run_with_local_backend("mixed_init_review_1902").timeline_panel_string();
+    // E0382 after the outer if. The inner move cannot execute
+    // because !assign contradicts the enclosing condition.
+    check_review_tip(&svg, "s@L8:dot:branch_join", &[
+        "s may have no value here",
+        "the borrow checker considers never assigned it",
+        "may have been moved out",
+    ], &["a move leaves it unusable on other paths", "s has no value here"]);
+}
+
+#[test]
+fn an_imaginary_move_keeps_the_skipped_assignment_history_1902() {
+    let svg = run_with_local_backend("mixed_init_review_1902").timeline_panel_string();
+    // E0382 after the outer if. On assign, s retains its String.
+    // Otherwise it is never initialized.
+    check_review_tip(&svg, "s@L20:dot:branch_join", &[
+        "s may have no value here",
+        "the borrow checker considers never assigned it",
+        "It can still hold a value at runtime.",
+        "considers a move on an unreachable path",
+    ], &["s still holds its value at runtime", "s has no value here"]);
+}
+
+#[test]
+fn synthesized_fields_distinguish_whole_and_sibling_moves_1902() {
+    let name = "mixed_init_review_1902";
+    let rv = run_with_local_backend(name);
+    let svg = rv.timeline_panel_string();
+    // At the dead else entry, &p.spare gives E0382 if p was
+    // moved whole and E0381 if only its sibling may have moved.
+    check_review_tip(&svg, "p.spare@L38-40:branch_line:", &[
+        "this else branch never runs",
+        "p.spare may have no value here",
+        "the borrow checker considers never assigned it",
+        "may have been moved out",
+    ], &["p.spare has no value here", "a move leaves it unusable on other paths"]);
+    check_review_tip(&svg, "p.spare@L52-54:branch_line:", &[
+        "this else branch never runs",
+        "it hasn't been assigned on every path",
+    ], &["may have been moved out"]);
+    // The same skipped assignment gives E0381 for a read of p
+    // as a whole even when another path moves only p.taken.
+    let sibling = fact_body(rv.facts().unwrap(), "sibling_move");
+    assert_eq!(fact_row(sibling, 50)["cause"]["p"], "unassigned");
+
+    let (violations, passed, _) = common::oracle::check(&read_corpus(name), &svg, &rv.code_panel_string());
+    assert!(violations.is_empty(), "{violations:?}");
+    assert!(passed.contains(&(38, "p.spare".to_owned(), "oracle-moved")), "{passed:?}");
+}
+
+#[test]
+fn a_future_assignment_may_unwind_before_the_write_1902() {
+    let svg = run_with_local_backend("mixed_init_review_1902").timeline_panel_string();
+    // E0382 before fail(). With assign && !consume, the old value
+    // drops during unwind cleanup. The destination is never written.
+    check_review_tip(&svg, "s@L68:dot:branch_join", &[
+        "If s is assigned again while it still holds a value, its resource is dropped at the assignment.",
+        "If s still holds a value when it goes out of scope, its resource is dropped there.",
+    ], &["its resource is dropped when s is assigned again"]);
+}
+
+#[test]
+fn ending_storage_does_not_count_as_a_move_1902() {
+    // Rustc accepts &e after the match. The arm that moved e and
+    // assigned a new value then returns, so it never reaches this row.
+    let svg = run_with_local_backend("exit_after_nested_reinit_1135").timeline_panel_string();
+    check_review_tip(&svg, "e@L64-65:line:", &["e is the owner of the resource"], &["may have been moved"]);
+
+    // Rustc accepts &p after the inner if. Ending the arm's storage
+    // does not move either field out of p.
+    let svg = run_with_local_backend("nested_arm_local_borrowed_1522").timeline_panel_string();
+    assert!(rv_elements(&svg, "p@L68-69:line:").iter().all(|(_, tip, ..)| !tip.contains("may be partially moved")));
+    check_review_tip(&svg, "p@L69:dot:owner_go_out_of_scope", &[
+        "p goes out of scope. Its resource is dropped.",
+    ], &["No resource is dropped"]);
 }
 
 #[test]

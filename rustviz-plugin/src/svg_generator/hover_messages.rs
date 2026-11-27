@@ -3468,6 +3468,24 @@ pub fn event_dot_assignment_join(name: &str, drops: bool) -> String {
     format!("{me} may have no value when this block ends. The borrow checker considers the break as well as fallthrough. It can't prove that {me} holds an assigned value on both, so {me} can't be used here.{scope_end}")
 }
 
+pub fn state_maybe_init(name: &str, cell: &crate::facts::table::Cell) -> String {
+    let Some(mixed) = cell.mixed_init else { return state_maybe(name, cell.cause) };
+    let has_value = if mixed.may_hold_value { "may have no value here" } else { "has no value here" };
+    let moved = match (mixed.imaginary_move, mixed.whole_move) {
+        (true, true) => "also considers a move on an unreachable path",
+        (true, false) => "also considers a move of part of it on an unreachable path",
+        (_, true) => "also considers paths on which it may have been moved out",
+        (_, false) => "also considers paths on which part of it may have been moved out",
+    };
+    let me = styled_name_html(name);
+    let runtime = if mixed.imaginary_move && mixed.may_hold_value_at_runtime {
+        " It can still hold a value at runtime."
+    } else {
+        ""
+    };
+    format!("{me} {has_value}. Some paths the borrow checker considers never assigned it.{runtime} The borrow checker {moved}, so {me} can't be used here")
+}
+
 pub fn state_maybe(name: &str, cause: Option<&str>) -> String {
     let me = styled_name_html(name);
     match cause {
@@ -4814,6 +4832,26 @@ pub fn event_dot_branch_merge_maybe_held(my_name: &String, value: bool, mutable:
 // value away, so the drop also needs s not to have been moved there.
 fn assigned_in_branch_that_ran(moved: bool) -> &'static str {
     if moved { "assigned it and didn't move it" } else { "assigned it" }
+}
+
+pub fn event_dot_branch_merge_mixed_init(
+    name: &str, cell: &crate::facts::table::Cell, drops: bool, mutable: bool, note: &str,
+) -> String {
+    let mixed = cell.mixed_init.expect("a mixed initialization history");
+    let mut out = state_maybe_init(name, cell);
+    out.push_str(if mutable { " until it's assigned again." } else { "." });
+    let me = styled_name_html(name);
+    if mixed.assigned_in_some_arms {
+        out.push_str(&format!(" {me} was assigned a value in only some of the branches above."));
+    }
+    if drops && mixed.may_hold_value_at_runtime {
+        let (holds, rest) = split_drop_note(note);
+        if cell.reassigned.is_some() {
+            out.push_str(&format!(" If {me} is assigned again while it still holds a value, its resource{holds} is dropped{rest} at the assignment."));
+        }
+        out.push_str(&format!(" If {me} still holds a value when it goes out of scope, its resource{holds} is dropped{rest} there."));
+    }
+    out
 }
 
 // The join of the conditional. `value`: s holds a Copy value, a
