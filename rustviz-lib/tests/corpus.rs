@@ -12632,7 +12632,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "for_method_head_label",
         must_contain: &[
-            "If x holds a mutable borrow affecting v, that borrow ends here. It no longer restricts access to v",
+            "When the iterator runs out of items, its mutable borrow of v ends. This borrow no longer restricts access to v",
             "If s holds a shared borrow affecting w, that borrow ends here. It no longer restricts access to w",
         ],
         must_not_contain: &["borrow of iter_mut ends", "^s's shared borrow of iter ends. This borrow no longer restricts access to iter"],
@@ -14174,7 +14174,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from animals to animal",
             "animals's resource is immutably borrowed by animal; animals is read-only while the borrow is live",
             "animal is immutably borrowed by println!; animal is read-only while the borrow is live",
-            "If animal holds a shared borrow affecting animals, that borrow ends here. It no longer restricts access to animals",
+            "When the iterator runs out of items, its shared borrow of animals ends. This borrow no longer restricts access to animals",
             "animals goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
@@ -14725,7 +14725,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the value x points to is immutably borrowed by read",
             "s's resource is immutably borrowed by _t; s is read-only while the borrow is live",
             "_t's shared borrow of s ends. This borrow no longer restricts access to s. Ending the borrow doesn't move the resource",
-            "If x holds a shared borrow affecting arr, that borrow ends here. It no longer restricts access to arr",
+            "When the iterator runs out of items, its shared borrow of arr ends. This borrow no longer restricts access to arr",
             "s goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
@@ -15496,7 +15496,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "v's resource is no longer borrowed by len, but is still immutably borrowed by a",
             "v's resource is no longer borrowed by len, but is still immutably borrowed by it",
             "r's shared borrow of v ends. This borrow no longer restricts access to v. Ending the borrow doesn't move the resource",
-            "If a holds a shared borrow affecting v, that borrow ends here. It no longer restricts access to v",
+            "When the iterator runs out of items, its shared borrow of v ends. This borrow no longer restricts access to v",
             "v's resource is no longer immutably borrowed",
             "v goes out of scope. Its resource is dropped (including every String it holds).",
         ],
@@ -15656,7 +15656,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "words's resource is immutably borrowed by the `for` loop's iterator; words is read-only until the loop ends",
             "s's resource is immutably borrowed by the `for` loop's iterator; s is read-only until the loop ends",
             // `w` points into words, but which element isn't drawn.
-            "w is bound to an immutable reference",
+            "w is bound to an immutable reference; it can read the borrowed resource",
             "w's immutable borrow ends",
             "name is bound to an immutable reference",
             "t is bound to a mutable reference",
@@ -16655,7 +16655,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // checked in `a_reused_name_keeps_the_earlier_borrows_end`; main
         // printed nothing false that a tooltip check can forbid.
         must_contain: &[
-            "If x holds a shared borrow affecting v, that borrow ends here. It no longer restricts access to v",
+            "When the iterator runs out of items, its shared borrow of v ends. This borrow no longer restricts access to v",
             "x's immutable borrow ends",
             "v's resource is no longer immutably borrowed",
             "r's shared borrow of w ends. This borrow no longer restricts access to w. Ending the borrow doesn't move the resource",
@@ -24388,7 +24388,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the return from x to v at the loop's end, with no borrow.
         must_contain: &[
             "Mutable borrow from v to x",
-            "If x holds a mutable borrow affecting v, that borrow ends here. It no longer restricts access to v",
+            "When the iterator runs out of items, its mutable borrow of v ends. This borrow no longer restricts access to v",
             "Immutable borrow from v to y",
             "If y holds a shared borrow affecting v, that borrow ends here. It no longer restricts access to v",
             "Immutable borrow from q.items to s",
@@ -24492,7 +24492,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "iter_mut_deref",
         // #1347.
-        must_contain: &["Mutable borrow from v to x", "If x holds a mutable borrow affecting v, that borrow ends here. It no longer restricts access to v"],
+        must_contain: &["Mutable borrow from v to x", "When the iterator runs out of items, its mutable borrow of v ends. This borrow no longer restricts access to v"],
         must_not_contain: &["x is bound to a mutable reference"],
     },
     TooltipExpect {
@@ -25627,8 +25627,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move of each element of refs to r",
             "r is bound to a mutable reference moved out of refs",
-            "If r holds a mutable borrow affecting a, that borrow ends here. It no longer restricts access to a",
-            "If r holds a mutable borrow affecting b, that borrow ends here. It no longer restricts access to b",
+            "When the iterator runs out of items, the borrow checker no longer restricts access to a through this iterator.",
+            "When the iterator runs out of items, the borrow checker no longer restricts access to b through this iterator.",
             "a's resource is no longer mutably borrowed",
             "b's resource is no longer mutably borrowed",
             "Copy of each element of shared to s",
@@ -25639,6 +25639,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "e's resource is no longer mutably borrowed",
         ],
         must_not_contain: &[
+            "When the iterator runs out of items, its mutable borrow of b ends. This borrow no longer restricts access to b",
+            "When the iterator runs out of items, its mutable borrow of a ends. This borrow no longer restricts access to a",
             "r's mutable borrow of refs ends",
             "refs's resource is no longer mutably borrowed",
             "s's shared borrow of shared ends",
@@ -25825,7 +25827,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "If pairs holds a shared borrow affecting g, that borrow ends here. It no longer restricts access to g",
             "pairs holds a value that mutably borrows f's resource (pairs isn't a reference itself)",
             "Immutable borrow from g to shared",
-            "Immutable borrow from e to r",
+            "On each pass, r holds a shared reference to either e or g.",
             "Immutable borrow from g to r",
             "If r holds a shared borrow affecting e, that borrow ends here. It no longer restricts access to e",
             "If r holds a shared borrow affecting g, that borrow ends here. It no longer restricts access to g",
@@ -25835,6 +25837,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from g to y",
         ],
         must_not_contain: &[
+            "Each pass yields one reference. The borrow checker tracks borrowed data from e and g through r",
             "what it borrows from isn't shown",
             "=pairs is the owner of the resource",
         ],
@@ -27307,16 +27310,22 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "for_moved_mut_binding_1511",
         must_contain: &[
+            "On each pass, h holds a mutable reference to either a or b.",
             "e's mutable reference is moved (not the resource it points to)",
             "v's resource is no longer borrowed by e, but is still mutably borrowed by the `for` loop's iterator",
             "w's resource is no longer borrowed by f, but is still mutably borrowed by the `for` loop's iterator",
             "u's resource is no longer borrowed by g, but is still mutably borrowed by the `for` loop's iterator",
-            "a's resource is no longer borrowed by h, but is still mutably borrowed by the `for` loop's iterator",
-            "b's resource is no longer borrowed by h, but is still mutably borrowed by the `for` loop's iterator",
+            "h stops holding the yielded reference. The borrow checker still restricts access to a during iteration.",
+            "h stops holding the yielded reference. The borrow checker still restricts access to b during iteration.",
             "v's resource is mutably borrowed by the `for` loop's iterator; v can't be used until the loop ends",
-            "a's resource is mutably borrowed by the `for` loop's iterator; a can't be used until the loop ends",
+            "The borrow checker keeps a exclusively borrowed during iteration. a can't be used until the borrow ends.",
         ],
         must_not_contain: &[
+            "a's resource is no longer borrowed by h, but is still mutably borrowed by the `for` loop's iterator",
+            "b's resource is no longer borrowed by h, but is still mutably borrowed by the `for` loop's iterator",
+            "a's resource is mutably borrowed by the `for` loop's iterator; a can't be used until the loop ends",
+            "Each pass yields one reference. The borrow checker tracks borrowed data from a and b through h",
+            "iterator still holds the mutable borrow",
             "=v's resource is mutably borrowed by e; v can't be used until the loop ends",
             "=w's resource is mutably borrowed by f; w can't be used until the borrow ends",
             "=u's resource is mutably borrowed by g; u can't be used until the borrow ends",
@@ -27331,8 +27340,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "for_consumed_ref_elems_1519",
         must_contain: &[
             "e is bound to a copy of an element of v",
-            "f is bound to an immutable reference",
-            "g is bound to an immutable reference",
+            "f is bound to an immutable reference; it can read the borrowed value",
+            "g is bound to an immutable reference; it can read the borrowed value",
             "e's immutable borrow ends",
             "If h holds a shared borrow affecting words, that borrow ends here. It no longer restricts access to words",
         ],
@@ -36392,7 +36401,7 @@ fn loop_iterator_drop_dots_sit_where_the_loop_is_left() {
     let row = |src: &str| code_row_y(&code, src);
     let step = row("for s in it3 {") - row("let it3 = z.into_iter();");
     let drop_dot = |text: &str, want_y: f64, var_line: &str| {
-        let dots = dots_with_tooltip(&timeline, text);
+        let dots = dots_listing_tooltip(&timeline, text);
         assert_eq!(dots.len(), 1, "one dot {:?}: {:?}", text, dots);
         let (x, y) = dots[0];
         assert_eq!(y, want_y, "{:?} is at y={}, not on the row y={}", text, y, want_y);
@@ -38199,9 +38208,10 @@ fn loop_call_arg_unbranched_call_and_borrow_end_share_a_row() {
 fn borrow_ends_at_rustcs_end_for_loops_and_reassigned_refs() {
     let rv = run_with_local_backend("borrow_end_nll_loop");
     let (svg, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    let exhaustion = dots_listing_tooltip(&svg, "When the iterator runs out of items, its mutable borrow of m ends. This borrow no longer restricts access to m");
+    assert_eq!(exhaustion.len(), 1);
+    assert_eq!(exhaustion[0].1, code_row_y(&code, "} // end of mut_loop's for"));
     for (text, line) in [
-        // The iterator holds the loan until the loop ends.
-        ("m's resource is no longer mutably borrowed", "} // end of mut_loop's for"),
         ("pairs's resource is no longer immutably borrowed", "} // end of shared_loop's for"),
         // `r` is overwritten before it is used again: a is free after
         // the println!.
@@ -45539,6 +45549,82 @@ fn loop_review_shared_continuation_reads_state_after_cleanup() {
 }
 
 #[test]
+fn p4_iterator_conversion_and_payload_are_distinct() {
+    let rv = run_with_local_backend("p4_iterator_storage");
+    let svg = rv.timeline_panel_string();
+    // Ticket::into_iter constructs a fresh String. Only ticket moves into the call.
+    assert!(tooltip_of_id(&svg, "ticket>fresh@L14:arrow:move").is_none());
+    check_review_tip(&svg, "ticket>into_iter@L14:arrow:move", &["Move from ticket to into_iter"], &[]);
+    check_review_tip(&svg, "fresh@L14:dot:acquire",
+        &["fresh acquires ownership", "variables declared inside it are new on each pass"], &["element of ticket"]);
+}
+
+#[test]
+fn p4_iterator_custom_deref_has_an_opaque_item_source() {
+    // Wrapped's DerefMut returns fresh storage. Rustc ties its lifetime
+    // to wrapped, but the assignment through item leaves wrapped.0 intact.
+    let rv = run_with_local_backend("p4_iterator_storage");
+    let svg = rv.timeline_panel_string();
+    assert!(tooltip_of_id(&svg, "wrapped>item@L70:arrow:mutable_borrow").is_none());
+    assert!(tooltip_of_id(&svg, "wrapped@L71:dot:acquire").is_none());
+    assert_eq!(line_state_at(&svg, "wrapped", 70).as_deref(), Some("revoked_privilege"));
+}
+
+#[test]
+fn p4_iterator_binding_ends_while_storage_still_holds_the_loan() {
+    let rv = run_with_local_backend("p4_iterator_storage");
+    let body = fact_body(rv.facts().unwrap(), "moved_item");
+    let storage = &body["iterators"][0];
+    let item = &storage["bindings"][0];
+    let events = row_facts(body, 22);
+    let end = events.iter().find(|e| e["ev"] == "HoldEnd" && e["holder"] == "first").unwrap();
+    assert_eq!(item["local"], end["end_places"][0]["local"]);
+    assert_eq!(item["consumed"], end["occurrence"]["at"]);
+    assert!(storage["loans"].as_array().unwrap().contains(&end["loan"]));
+    let svg = rv.timeline_panel_string();
+    check_review_tip(&svg, "first>values@L22:arrow:mutable_die",
+        &["first stops holding this reference", "iterator still holds a mutable borrow of the collection"], &["no longer restricts"]);
+}
+
+#[test]
+fn p4_iterator_drop_follows_its_item_on_early_return() {
+    let rv = run_with_local_backend("p4_iterator_storage");
+    let svg = rv.timeline_panel_string();
+    // The same program prints inner item, inner rest, outer item, outer rest.
+    for (iterator, item) in [("inner", "b"), ("outer", "a")] {
+        check_review_tip(&svg, &format!("{iterator}@L41:dot:loop_iterator_drop"),
+            &[&format!("Rust drops {item} before this iterator.")], &[]);
+    }
+}
+
+#[test]
+fn p4_iterator_each_pass_ends_before_exhaustion() {
+    let rv = run_with_local_backend("p4_iterator_storage");
+    let body = fact_body(rv.facts().unwrap(), "read_pass");
+    let storage = &body["iterators"][0];
+    let holds = row_facts(body, 55);
+    let end = holds.iter().find(|e| e["ev"] == "HoldEnd" && e["holder"] == "word").unwrap();
+    assert_eq!(end["end_places"][0]["local"], storage["bindings"][0]["local"]);
+    let exits = row_facts(body, 54);
+    assert!(exits.iter().any(|e| e["ev"] == "BorrowEnd" && e["loan"] == end["loan"]
+        && e["end_places"][0]["local"] == storage["storage"]));
+    let svg = rv.timeline_panel_string();
+    assert!(tooltip_of_id(&svg, "word>strings@L57:arrow:static_die").is_none());
+    assert!(dots_listing_tooltip(&svg, "word's immutable borrow ends")
+        .iter().any(|dot| dot.1 == code_row_y(&rv.code_panel_string(), "std::hint::black_box(word);")));
+}
+
+#[test]
+fn p4_iterator_storage_excludes_a_consumed_adapter_loan() {
+    // Rustc accepts self.a.clear() in this loop. collect copied its
+    // integers, while the other zip operand still borrows self.b.
+    let rv = run_with_local_backend("rv3_issues/1692_for_collect_two_fields_self");
+    check_review_tip(&rv.timeline_panel_string(), "self@L4-7:line:full_privilege",
+        &["self.b is immutably borrowed by the `for` loop's iterator"],
+        &["self.a and self.b", "self.a is immutably borrowed"]);
+}
+
+#[test]
 fn proven_fork_end_keeps_the_borrow_end_teaching_clause_1884() {
     // An ended `&mut` borrow is not a move of the lender (2.x text, kept).
     let svg = run_with_local_backend("branch_legs_table_review_1866").timeline_panel_string();
@@ -45808,4 +45894,112 @@ fn fieldless_sibling_returns_cover_both_mir_calls_1884() {
     assert_eq!(handoffs.len(), 1);
     assert!(handoffs[0].0.starts_with("value>s@L5:"));
     assert!(handoffs[0].1.contains("shared borrow of s continues in r"));
+}
+
+#[test]
+fn p4_review_ref_pattern_borrows_the_yielded_value() {
+    let svg = run_with_local_backend("p4_iterator_review").timeline_panel_string();
+    check_review_tip(&svg, "word@L3:dot:", &["shared borrow of the value yielded on this pass"],
+        &["mutable reference moved out of words"]);
+    assert!(rv_elements(&svg, "words>word@L3:arrow:move").is_empty());
+}
+
+#[test]
+fn p4_review_opaque_collection_result_does_not_identify_the_referent() {
+    // produce returns a reference to a fresh allocation even though its
+    // result lifetime prevents x from being used during iteration.
+    let svg = run_with_local_backend("p4_iterator_review").timeline_panel_string();
+    assert!(rv_elements(&svg, "x>cell@L28:arrow:mutable_borrow").is_empty());
+    assert!(rv_elements(&svg, "x@L29:dot:acquire").is_empty());
+}
+
+#[test]
+fn p4_review_lowered_conversion_can_return_a_fresh_referent() {
+    let rv = run_with_local_backend("p4_iterator_review");
+    let it = &fact_body(rv.facts().unwrap(), "opaque")["iterators"][0];
+    assert!(!it["opaque_item_loans"].as_array().unwrap().is_empty());
+    let svg = rv.timeline_panel_string();
+    assert!(rv_elements(&svg, "wrapped@L24:dot:acquire").is_empty());
+    check_review_tip(&svg, "wrapped@L23:dot:mutable_lend",
+        &["into_iter takes a mutable borrow of wrapped", "borrow checker restricts access to wrapped during iteration"],
+        &["mutably borrowed by the `for` loop's iterator"]);
+}
+
+#[test]
+fn p4_review_replacement_move_does_not_consume_the_yielded_reference() {
+    let rv = run_with_local_backend("p4_iterator_review");
+    let it = &fact_body(rv.facts().unwrap(), "replacement")["iterators"][0];
+    assert!(it["bindings"][0].get("consumed").is_none(), "{it}");
+}
+
+#[test]
+fn p4_review_head_borrow_can_end_at_conversion() {
+    let rv = run_with_local_backend("p4_iterator_review");
+    // Both functions borrow maker again inside the loop. In the second
+    // case the iterator still carries n's loan through a copied reference.
+    for row in [44, 115] {
+        check_review_tip(&rv.timeline_panel_string(), &format!("maker@L{row}:dot:"),
+            &["into_iter"], &["until the loop ends"]);
+    }
+}
+
+#[test]
+fn p4_review_owned_result_moves_into_the_conversion() {
+    let svg = run_with_local_backend("p4_iterator_review").timeline_panel_string();
+    check_review_tip(&svg, "input>into_iter@L88:arrow:move", &["Move from input to into_iter"], &[]);
+    check_review_tip(&svg, "input@L88:dot:", &["can't be used"], &["moved into the `for` loop's iterator"]);
+}
+
+#[test]
+fn p4_review_only_a_whole_item_drop_precedes_storage() {
+    let rv = run_with_local_backend("p4_iterator_review");
+    let it = &fact_body(rv.facts().unwrap(), "partial")["iterators"][0];
+    check_review_tip(&rv.timeline_panel_string(), "pair@L82:dot:owner_go_out_of_scope",
+        &["pair.0 was moved out earlier, so only pair.1 is dropped"], &[]);
+    assert!(it["drops"].as_array().unwrap().iter().all(|d| d.get("after_item").is_none()), "{it}");
+}
+
+#[test]
+fn p4_review_temporary_iterator_drops_after_the_item_on_return() {
+    let svg = run_with_local_backend("p4_iterator_review").timeline_panel_string();
+    assert!(rv_elements(&svg, "").iter().any(|(id, tip, ..)| id.contains("@L72:dot:")
+        && tip.contains("Rust drops word before this iterator.")));
+}
+
+#[test]
+fn p4_review_moved_head_field_is_unusable() {
+    let svg = run_with_local_backend("p4_iterator_storage").timeline_panel_string();
+    check_review_tip(&svg, "ticket.0@L14:dot:", &["ticket.0's resource is moved", "ticket.0 can't be used"], &[]);
+}
+
+#[test]
+fn p4_review_nested_binding_explains_read_access() {
+    let svg = run_with_local_backend("approx_loop_nested_853").timeline_panel_string();
+    check_review_tip(&svg, "cell@L12:dot:", &["cell is bound to an immutable reference", "it can read the borrowed value",
+        "variables declared inside it are new on each pass"], &["cell acquires ownership"]);
+}
+
+#[test]
+fn p4_review_branch_iterator_calls_retain_their_borrows() {
+    let svg = run_with_local_backend("p4_iterator_review").timeline_panel_string();
+    for lender in ["a", "b"] {
+        check_review_tip(&svg, &format!("{lender}@L59:dot:static_lend"),
+            &["iter takes a shared reference"], &["no longer immutably borrowed"]);
+    }
+}
+
+#[test]
+fn p4_review_temporary_borrow_lasts_through_collection() {
+    let svg = run_with_local_backend("rv3_issues/1692_for_collect_two_fields_self").timeline_panel_string();
+    check_review_tip(&svg, "self@L4:dot:static_lend", &["result of iter keeps this borrow until collect returns",
+        "self.b is immutably borrowed by the `for` loop's iterator"], &["self.a's resource is no longer immutably borrowed"]);
+}
+
+#[test]
+fn p4_review_shared_input_is_copyable_while_collection_reads_it() {
+    // iter yields &&i32 and copied yields &i32. The vector's loan
+    // ends at collect, so w.clear() compiles and the yielded x is usable.
+    let svg = run_with_local_backend("rv3_issues/1692_for_collect_through_shared_ref_b").timeline_panel_string();
+    check_review_tip(&svg, "v@L4:dot:static_lend", &["result of iter keeps this borrow until collect returns",
+        "v is a shared reference and can still be used or copied"], &["iter no longer borrows", "until the loop ends"]);
 }

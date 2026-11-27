@@ -2675,6 +2675,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       };
       match temp_ty {
         Some((ty, literal, part)) => {
+          if how == "return" {
+            if let Some(item) = self.iterator_temps.get(rap.hash()).and_then(|local|
+              self.body_facts?.iterators.iter().find(|it| it.storage == *local)?.after_item_on_exit(site)) {
+              let name = crate::svg_generator::hover_messages::styled_name_html(item);
+              self.row_layout.iterator_end_notes.insert(id, format!("Rust drops {name} before this iterator."));
+            }
+          }
           let early = self.unbranched_temps.contains(&rap);
           self.add_external_event(line, ExternalEvent::TemporaryDrop { ro: rap, ty: Some(ty), when, literal, early, part, id })
         }
@@ -2903,12 +2910,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// which variables were moved into (#482), where its other drops are
   /// drawn (`drop_locals_on_exit`: in a branch). The caller leaves out
   /// a `return` in a closure, which leaves only the closure.
-  fn drop_loop_iterators_on_return(&mut self, line: usize) {
+  fn drop_loop_iterators_on_return(&mut self, ret: &'tcx Expr<'tcx>) {
     if !self.exit_frames.iter().any(|f| matches!(f, ExitFrame::Branch { .. })) {
       return;
     }
-    for (_, ro) in self.loop_iterators.clone() {
-      let id = self.add_loop_iterator_drop(ro, line, LoopLeft::Return);
+    let Some(body) = self.body_facts else { return };
+    let line = span_to_line(&ret.span, &self.tcx);
+    for (_, local, ro) in self.loop_iterators.clone().into_iter().rev() {
+      let Some(storage) = body.iterators.iter().find(|it| it.storage == local) else { continue };
+      let mut drops = storage.drops.iter().filter(|d| d.exit_span.is_some_and(|sp| sp.source_equal(ret.span)));
+      if drops.next().is_none() { continue; }
+      let after_item = storage.after_item_on_exit(ret.span).map(str::to_owned);
+      let id = self.add_loop_iterator_drop(ro, line, LoopLeft::Return, after_item);
       self.exit_drops.insert(id);
     }
   }
@@ -2991,7 +3004,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       vars.push((rd.rap.clone(), idx >= len));
     }
-    let iters = self.loop_iterators.iter().map(|(_, ro)| ro.clone()).collect();
+    let iters = self.loop_iterators.iter().map(|(_, _, ro)| ro.clone()).collect();
     self.loop_returns.push(LoopReturn { line, vars, iters });
   }
 
@@ -3375,19 +3388,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       drop_ids(&mut self.preprocessed_events, &mut *self.event_line_map, &removed);
     }
 
-    // Every event, those in branches too (with each branch's line map).
-    fn walk(events: &mut [(usize, ExternalEvent)], f: &mut impl FnMut(usize, &mut ExternalEvent)) {
-      for (line, ev) in events.iter_mut() {
-        walk_one(*line, ev, f);
-      }
-    }
-    fn walk_map(map: &mut BTreeMap<usize, Vec<ExternalEvent>>, f: &mut impl FnMut(usize, &mut ExternalEvent)) {
-      for (line, evs) in map.iter_mut() {
-        for ev in evs.iter_mut() {
-          walk_one(*line, ev, f);
-        }
-      }
-    }
     // Removes the events `ids`, those in branches too.
     fn drop_ids(events: &mut Vec<(usize, ExternalEvent)>, map: &mut BTreeMap<usize, Vec<ExternalEvent>>, ids: &HashSet<usize>) {
       events.retain(|(_, e)| !ids.contains(&e.get_id()));
@@ -3429,27 +3429,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
       }
     }
-    fn walk_one(line: usize, ev: &mut ExternalEvent, f: &mut impl FnMut(usize, &mut ExternalEvent)) {
-      if let ExternalEvent::Branch { branches, .. } = ev {
-        for b in branches.iter_mut() {
-          walk(&mut b.e_data, f);
-          walk_map(&mut b.line_map, f);
-        }
-      } else {
-        f(line, ev);
-      }
-    }
+
   }
 
   /// A `?` inside a `for` loop over an iterator variable returns early
   /// on `Err` / `None`, dropping that iterator with the rest (#649).
   /// Conditional, so it ends no column (like `note_try`'s dots).
   fn note_try_loop_iterators(&mut self, line: usize, from: usize) {
-    for (_, ro) in self.loop_iterators[from..].to_vec() {
+    for (_, _, ro) in self.loop_iterators[from..].to_vec() {
       let dup = self.preprocessed_events.iter().any(|(l, e)| *l == line
         && matches!(e, ExternalEvent::LoopIteratorDrop { ro: r, left: LoopLeft::Try, .. } if *r == ro));
       if !dup {
-        self.add_loop_iterator_drop(ro, line, LoopLeft::Try);
+        self.add_loop_iterator_drop(ro, line, LoopLeft::Try, None);
       }
     }
   }
@@ -3473,13 +3464,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       return;
     }
     let inner: Vec<ResourceAccessPoint> = self.loop_iterators.iter()
-      .filter(|(lp, _)| (labeled && *lp == target)
+      .filter(|(lp, _, _)| (labeled && *lp == target)
         || (*lp != target
         && self.tcx.hir_parent_iter(*lp).any(|(id, _)| id == target)))
-      .map(|(_, ro)| ro.clone())
+      .map(|(_, _, ro)| ro.clone())
       .collect();
     for ro in inner {
-      let id = self.add_loop_iterator_drop(ro, line, left);
+      let id = self.add_loop_iterator_drop(ro, line, left, None);
       self.exit_drops.insert(id);
     }
   }
@@ -3488,10 +3479,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// `line`: where the loop ends, or (`early`) at a `return` inside it
   /// (#482). Drawn on `ro`'s column, which doesn't own it any more.
   /// Returns the event's id.
-  pub fn add_loop_iterator_drop(&mut self, ro: ResourceAccessPoint, line: usize, left: LoopLeft) -> usize {
+  pub fn add_loop_iterator_drop(&mut self, ro: ResourceAccessPoint, line: usize, left: LoopLeft, after_item: Option<String>) -> usize {
     let id = *self.unique_id;
     *self.unique_id += 1;
-    self.add_external_event(line, ExternalEvent::LoopIteratorDrop { ro, left, id, early: Vec::new() });
+    self.add_external_event(line, ExternalEvent::LoopIteratorDrop { ro, left, id, early: Vec::new(), after_item });
     id
   }
 
@@ -4145,8 +4136,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       self.drop_locals_on_exit(line, call.span, None, None, false, "panic");
       if !self.in_closure(call) && self.exit_frames.iter().any(|f| matches!(f, ExitFrame::Branch { .. })) {
-        for (_, ro) in self.loop_iterators.clone() {
-          let id = self.add_loop_iterator_drop(ro, line, LoopLeft::Panic);
+        for (_, _, ro) in self.loop_iterators.clone() {
+          let id = self.add_loop_iterator_drop(ro, line, LoopLeft::Panic, None);
           self.exit_drops.insert(id);
         }
       }
@@ -5033,8 +5024,7 @@ fn is_place_expr(e: &Expr) -> bool {
   }
 }
 
-/// Iterator adapters that hand out their receiver's items as they are.
-const SAME_ITEMS: &[&str] = &["rev", "skip", "take", "step_by", "skip_while", "take_while", "filter", "peekable", "fuse", "inspect"];
+
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   fn visit_expr_at(&mut self, expr: &'tcx Expr<'tcx>) {
@@ -5458,7 +5448,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           self.drop_locals_on_exit(expr_to_line(expr, &self.tcx), expr.span, ret, None, false, "return");
         }
         if !self.in_closure(expr) {
-          self.drop_loop_iterators_on_return(expr_to_line(expr, &self.tcx));
+          self.drop_loop_iterators_on_return(expr);
         }
         if !breakless {
           self.note_return_in_loop(expr);
@@ -5907,107 +5897,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let erase = |ty: rustc_middle::ty::Ty<'tcx>| self.tcx.erase_and_anonymize_regions(ty.peel_refs());
     let tys: Vec<_> = self.column_tys(owner.name(), lhs_expr.hir_id.owner).into_iter().map(erase).collect();
     (!tys.is_empty() && !tys.contains(&erase(lhs_ty))).then_some(owner)
-  }
-
-  /// The `&mut` bindings of a `for` loop's tuple pattern and the
-  /// variable each points into (as `mut_call_chain_root`), following
-  /// the head's adapters: `enumerate` pairs an index with its
-  /// receiver's item, `zip` pairs its receiver's item with its
-  /// argument's (also as `std::iter::zip(a, b)`; #1082), and `rev` /
-  /// `skip` / `take` / ... hand out their receiver's items (#1067).
-  fn loop_pat_write_roots(&self, pat: &'tcx Pat<'tcx>, head: &'tcx Expr<'tcx>, out: &mut Vec<(String, Vec<ResourceAccessPoint>)>) {
-    let typeck = self.tcx.typeck(pat.hir_id.owner);
-    match (pat.kind, head.kind) {
-      (PatKind::Binding(BindingMode(rustc_hir::ByRef::No, _), hirid, _, None), _) => {
-        if typeck.pat_ty(pat).ref_mutability() == Some(Mutability::Mut) && typeck.pat_adjustments().get(pat.hir_id).is_none() {
-          if let Some(roots) = self.loop_item_roots(head) {
-            out.push((binding_name(&self.tcx, hirid), roots));
-          }
-        }
-      }
-      (PatKind::Tuple(ps, dd), ExprKind::MethodCall(seg, rcvr, args, _)) if ps.len() == 2 && dd.as_opt_usize().is_none()
-        && matches!(seg.ident.as_str(), "enumerate" | "zip") =>
-      {
-        if seg.ident.as_str() == "enumerate" {
-          self.loop_pat_write_roots(&ps[1], rcvr, out);
-        } else if let [arg] = args {
-          self.loop_pat_write_roots(&ps[0], rcvr, out);
-          self.loop_pat_write_roots(&ps[1], arg, out);
-        }
-      }
-      (PatKind::Tuple(ps, dd), ExprKind::Call(f, [a, b])) if ps.len() == 2 && dd.as_opt_usize().is_none() && self.is_iter_zip_fn(f) => {
-        self.loop_pat_write_roots(&ps[0], a, out);
-        self.loop_pat_write_roots(&ps[1], b, out);
-      }
-      (_, ExprKind::MethodCall(seg, rcvr, _, _)) if SAME_ITEMS.contains(&seg.ident.as_str()) => {
-        self.loop_pat_write_roots(pat, rcvr, out);
-      }
-      _ => {}
-    }
-  }
-
-  /// `std::iter::zip` (`core::iter::zip`), called as a function.
-  fn is_iter_zip_fn(&self, f: &'tcx Expr<'tcx>) -> bool {
-    let ExprKind::Path(ref qpath) = f.kind else { return false };
-    let Res::Def(DefKind::Fn, def_id) = self.tcx.typeck(f.hir_id.owner).qpath_res(qpath, f.hir_id) else { return false };
-    !def_id.is_local() && self.tcx.item_name(def_id).as_str() == "zip"
-      && matches!(self.tcx.crate_name(def_id.krate).as_str(), "core" | "std")
-  }
-
-  /// The variables what a `for` loop's `&mut` items point into (as
-  /// `mut_call_chain_root`, or a `&mut` reference moved into an adapter,
-  /// `moved_mut_ref_arg`), following `rev` / `skip` / ... to their
-  /// receiver. `chain` hands out its receiver's items and then its
-  /// argument's, so an item points into either (`a.iter_mut().chain(b)`;
-  /// #1082). None when one of them isn't known: `x` in
-  /// `a.iter_mut().chain(once(&mut z))` doesn't always point into a.
-  fn loop_item_roots(&self, e: &'tcx Expr<'tcx>) -> Option<Vec<ResourceAccessPoint>> {
-    match e.kind {
-      ExprKind::MethodCall(seg, rcvr, [arg], _) if seg.ident.as_str() == "chain" => {
-        let mut roots = self.loop_item_roots(rcvr)?;
-        for r in self.loop_item_roots(arg)? {
-          if !roots.contains(&r) {
-            roots.push(r);
-          }
-        }
-        Some(roots)
-      }
-      ExprKind::MethodCall(seg, rcvr, _, _) if SAME_ITEMS.contains(&seg.ident.as_str()) && self.has_chain_call(rcvr) =>
-        self.loop_item_roots(rcvr),
-      // `.chain(..).map(f)`: f may hand out anything.
-      _ if self.has_chain_call(e) => None,
-      _ => self.mut_call_chain_root(e).or_else(|| self.moved_mut_ref_arg(e)).map(|r| vec![r]),
-    }
-  }
-
-  /// Whether the method chain `e` has a `chain` call in it
-  /// (`a.iter_mut().chain(b.iter_mut()).rev()`).
-  fn has_chain_call(&self, e: &'tcx Expr<'tcx>) -> bool {
-    let mut e = e;
-    while let ExprKind::MethodCall(seg, rcvr, _, _) = e.kind {
-      if seg.ident.as_str() == "chain" {
-        return true;
-      }
-      e = rcvr;
-    }
-    false
-  }
-
-  /// `b` in `a.iter_mut().zip(b)` with `b: &mut Vec<_>`: a `&mut`
-  /// reference variable passed as it is to an adapter, which moves it
-  /// in (#1076). What the adapter hands out points into the resource b
-  /// points to.
-  fn moved_mut_ref_arg(&self, e: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
-    let typeck = self.tcx.typeck(e.hir_id.owner);
-    // (Also a field holding one, `for x in h.r`, #1129.)
-    if !matches!(e.kind, ExprKind::Path(_) | ExprKind::Field(..)) || typeck.expr_ty(e).ref_mutability() != Some(Mutability::Mut)
-      || !typeck.expr_adjustments(e).is_empty() {
-      return None;
-    }
-    match get_rap(e, &self.tcx, &self.raps) {
-      ResourceTy::Value(r) if r.is_mutref() => Some(r),
-      _ => None,
-    }
   }
 
   /// The variable whose resource (or, for a reference parameter, the
@@ -9591,124 +9480,56 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         })
       {
         let head_from = self.in_scope.len();
-        let head_temp = self.note_for_head_temporary(head_arg, guard_expr, expr);
-        // Iterand event: shape of head_arg dictates the arrow.
-        //   &v       ⇒ SBorrow from v
-        //   &mut v   ⇒ MBorrow from v
-        //   v (owned, non-Copy) ⇒ Move from v
-        //   anything else (Range, call result, …) ⇒ Bind (below)
-        let for_line = self.tcx.sess.source_map()
-          .lookup_char_pos(expr.span.lo()).line;
-        let head_rty = get_rap(head_arg, &self.tcx, &self.raps);
-        // A variable, or a field with a column of its own (`for n in
-        // t.names`, `self.names`, `pair.0`; #1164).
-        let place_head = match head_arg.kind {
-          ExprKind::Path(_) => true,
-          ExprKind::Field(..) => matches!(head_rty, ResourceTy::Value(_)),
-          _ => false,
-        };
-        // `for x in r` with `r: &mut Vec<_>`: `IntoIterator::into_iter`
-        // takes a generic `Self`, so no reborrow is inserted and r is
-        // moved into the loop's iterator (using r after the loop is
-        // E0382; #1129). A shared `&` head is copied.
-        let head_moves_ref = place_head && {
-          let typeck = self.tcx.typeck(head_arg.hir_id.owner);
-          typeck.node_type(head_arg.hir_id).ref_mutability() == Some(Mutability::Mut)
-            && typeck.expr_adjustments(head_arg).is_empty()
-            && head_rty.extract_rap().is_some_and(|r| r.is_mutref())
-        };
-        let iterand_evt = match head_arg.kind {
-          ExprKind::AddrOf(_, Mutability::Not, _) => Some(Evt::SBorrow),
-          ExprKind::AddrOf(_, Mutability::Mut, _) => Some(Evt::MBorrow),
-          _ if head_moves_ref => Some(Evt::Move),
-          _ if place_head => {
-            let head_ty = self.tcx.typeck(head_arg.hir_id.owner)
-              .node_type(head_arg.hir_id);
-            let is_copy = self.tcx.type_is_copy_modulo_regions(
-              typing_env(self.tcx, head_arg.hir_id.owner),
-              head_ty);
-            if head_ty.is_ref() { None }   // a shared ref, copied in
-            else if is_copy { None }       // Range / Copy iterand
-            else { Some(Evt::Move) }
-          }
-          _ => None,
-        };
+        use crate::facts::IteratorInput;
+        // Match the compiler's marked constructor span, including its
+        // expansion context. Two loops on one row have distinct calls.
+        let storage = self.body_facts.and_then(|f| {
+          let mut sites = f.iterators.iter().filter(|it| it.site.with_parent(None) == guard_expr.span.with_parent(None));
+          let site = sites.next()?;
+          sites.next().is_none().then_some(site)
+        });
+        let head = storage.and_then(|it| it.head.as_ref());
+        let head_rty = head.and_then(|h| self.iterator_place(&h.place)).unwrap_or(ResourceTy::Anonymous);
+        let place_head = head.is_some_and(|h| matches!(h.access, IteratorInput::Move | IteratorInput::Copy));
+        let head_moves_ref = head.is_some_and(|h| h.access == IteratorInput::Move)
+          && head_rty.extract_rap().is_some_and(|r| r.is_mutref());
+        let iterand_evt = head.and_then(|h| match h.access {
+          IteratorInput::Shared => Some(Evt::SBorrow),
+          IteratorInput::Mutable => Some(Evt::MBorrow),
+          IteratorInput::Move => Some(Evt::Move),
+          IteratorInput::Copy => None,
+        }).filter(|_| !matches!(head_rty, ResourceTy::Anonymous));
+        let head_is_iterator = place_head && !head_moves_ref && storage.is_some_and(|it| it.identity)
+          && matches!(iterand_evt, Some(Evt::Move));
+        let head_temp = storage.filter(|_| !head_is_iterator)
+          .and_then(|it| self.note_for_head_temporary(head_arg, it.storage, expr));
+        if let (Some(temp), Some(it)) = (&head_temp, storage) {
+          self.iterator_temps.insert(*temp.hash(), it.storage);
+        }
+        let iterator_needs_drop = storage.is_some_and(|it| self.needs_drop(
+          self.mir_body.local_decls[it.storage].ty, guard_expr.hir_id.owner));
+        let for_line = span_to_line(&expr.span, &self.tcx);
         // `for (i, a) in v.iter().enumerate()`: the loop's iterator
         // borrows `v` until the loop ends (#868).
-        let loop_loans = self.keep_loop_head_loans(head_arg);
+        let loop_loans = self.keep_loop_head_loans(head_arg, storage);
         // `a.iter_mut().zip(b)` with `b: &mut Vec<_>` moves b into the
         // loop's iterator, which writes through it until the loop ends
         // (#1076).
-        let mut moved_ref_args: Vec<ResourceAccessPoint> = self.loop_head_ref_args(head_arg)
-          .into_iter().filter(|r| r.is_mutref()).collect();
-        // The head itself (#1129).
+        let mut moved_ref_args: Vec<_> = storage.into_iter().flat_map(|it| &it.arguments).filter(|a| a.reaches_storage).filter_map(|a| {
+          let h = a.input.as_ref()?;
+          let r = self.iterator_place(&h.place)?.extract_rap()?.clone();
+          (r.is_mutref() && h.access == IteratorInput::Move).then_some((r, a.call.clone()))
+        }).collect();
         if head_moves_ref {
-          moved_ref_args.extend(head_rty.extract_rap().cloned());
+          moved_ref_args.extend(head_rty.extract_rap().cloned().map(|r| (r, "into_iter".to_owned())));
         }
         // Their columns end at the move (#1365): no write through a loop
         // variable, and no borrow end, is drawn on them after it.
-        for r in &moved_ref_args {
+        for (r, _) in &moved_ref_args {
           if let Some(rd) = self.borrow_map.get(r.name()) {
             self.loop_moved_refs.insert(r.name().to_owned(), rd.assigned_at);
           }
         }
-        // `for x in it` where `it` is already an iterator
-        // (`let it = v.iter_mut();`): `IntoIterator::into_iter`
-        // returns its argument unchanged, so the loop *moves*
-        // `it` into itself and each `x` is something `next()`
-        // hands out, not something `it` owns or lends (#417).
-        // Compare the head's type with the type of the
-        // `into_iter(head)` call: they are equal only for an
-        // iterator.
-        let head_is_iterator = place_head && !head_moves_ref
-          && matches!(iterand_evt, Some(Evt::Move))
-          && {
-            let typeck = self.tcx.typeck(head_arg.hir_id.owner);
-            let head_ty = typeck.node_type(head_arg.hir_id);
-            !head_ty.is_ref()
-              && head_ty == typeck.node_type(guard_expr.hir_id)
-          };
-
-        // The loop owns its iterator and drops it when the loop
-        // ends: a head that is moved in (`for s in v`, `for s in
-        // it`) whose iterator has drop glue (`vec::IntoIter`)
-        // says where it goes on the move (#482). `slice::Iter`
-        // and the like have nothing to drop. The iterator built
-        // from a collection (`v`) is a `(temporary N)` column
-        // (`note_for_head_temporary`); an iterator variable
-        // (`it`) is the loop's iterator itself, so its drop is
-        // on its own column (`iterator_head`).
-        let iterator_needs_drop = matches!(iterand_evt, Some(Evt::Move))
-          && place_head
-          && self.needs_drop(
-            self.tcx.typeck(guard_expr.hir_id.owner).node_type(guard_expr.hir_id),
-            guard_expr.hir_id.owner);
-
-        // Register the user pattern binding(s) as branch-scoped
-        // RAPs so events inside the body referencing them
-        // resolve. Two cases:
-        //
-        //   `for x in &v`           — single binding, attribute
-        //                             an iterand-shaped event
-        //                             (SBorrow / MBorrow / Move)
-        //                             from the head expression.
-        //
-        //   `for (i, a) in iter`    — tuple / struct / etc. The
-        //                             iterand semantics don't
-        //                             pair element-wise against
-        //                             a tuple pattern (the
-        //                             iterator yields tuples but
-        //                             the iter expression isn't
-        //                             one), so fall back to
-        //                             `bind_walk`: register every
-        //                             binding the pattern names
-        //                             against `head_arg`. Each
-        //                             gets a best-effort event
-        //                             (a Move/Copy via
-        //                             match_rhs) — approximate,
-        //                             but the body refs to
-        //                             `i`/`a` resolve and the
-        //                             columns aren't empty.
         let prev_inside_branch = self.inside_branch;
         self.inside_branch = true;
         // A `break` / `continue` names the inner `loop` as its
@@ -9737,153 +9558,56 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           let pat_name = self.raps.declare(pat_hirid, &self.tcx);
           let pat_ty = self.tcx.typeck(user_pat.hir_id.owner)
             .pat_ty(user_pat);
+          if pat_ty.is_ref() {
             let pointee_copy = self.ref_pointee_is_copy(pat_ty, user_pat.hir_id.owner);
-          if pat_ty.is_ref() && (head_is_iterator || head_moves_ref) {
-            // A reference an iterator hands out: its lender isn't
-            // known here, and nothing is "returned" to the
-            // iterator (or to anything) when it ends. For `for x in
-            // r` with r a `&mut` moved in (#1129), a write through x
-            // goes into the resource r points to (#1046).
-            if head_moves_ref && pat_ty.ref_mutability() == Some(Mutability::Mut) {
-              if let Some(roots) = self.loop_item_roots(head_arg) {
-                let prev = self.loop_ref_into.insert(pat_name.clone(), roots);
-                loop_ref_prev.push((pat_name.clone(), prev));
-              }
-            }
-            self.add_ref(
-              pat_name.clone(),
-              bool_of_mut(pat_ty.ref_mutability().unwrap()),
-              false,
-              for_line,
-              ResourceTy::Anonymous,
-              std::collections::VecDeque::new(),
-              self.current_scope,
-              false,
-              pointee_copy,
-            );
-            self.unlent_refs.insert(pat_name.clone());
-          } else if let Some((holder, lenders)) = self.moved_ref_holder(head_arg, place_head, &iterand_evt) {
-            // `for r in refs` / `for r in refs.into_iter()` with `refs:
-            // Vec<&mut String>` (#1389): the loop moves refs into its
-            // iterator, and each r is one of the references refs held. r
-            // borrows what they borrow (a, b), not refs, and gives that
-            // back where the loop ends (the iterator, which holds the
-            // rest, keeps the loans live until then). refs has nothing
-            // left to end a borrow on after the move.
-            let (first, rest) = lenders.split_first().map(|(f, r)| (f.clone(), r.to_vec())).unwrap();
-            self.add_ref(
-              pat_name.clone(),
-              bool_of_mut(pat_ty.ref_mutability().unwrap()),
-              false,
-              for_line,
-              first,
-              std::collections::VecDeque::new(),
-              self.current_scope,
-              false,
-              pointee_copy,
-            );
-            if let Some(rd) = self.borrow_map.get_mut(&pat_name) {
-              rd.co_lenders = rest;
-            }
-            if let Some(rd) = self.borrow_map.get(&holder) {
-              self.loop_moved_refs.insert(holder, rd.assigned_at);
-            }
-          } else if let Some(lenders) = pat_ty.is_ref().then(|| self.literal_head_lenders(head_arg)).flatten() {
-            // `for r in [&e, &g]` / `vec![&e, &g]` (#1433): each r is one
-            // of the literal's references, which the loop's iterator
-            // holds until the loop ends. r borrows what they borrow, as
-            // for `for r in refs` (#1389), drawn from each lender.
-            let (first, rest) = lenders.split_first().map(|(f, r)| (f.clone(), r.to_vec())).unwrap();
-            self.add_ref(
-              pat_name.clone(),
-              bool_of_mut(pat_ty.ref_mutability().unwrap()),
-              false,
-              for_line,
-              first,
-              std::collections::VecDeque::new(),
-              self.current_scope,
-              false,
-              pointee_copy,
-            );
-            if let Some(rd) = self.borrow_map.get_mut(&pat_name) {
-              rd.co_lenders = rest;
-            }
-            literal_lenders = Some(lenders);
-          } else if pat_ty.is_ref() {
-            // `for x in v.iter_mut()`: the loan came from `v`;
-            // `iter_mut` is the method that lent it, not the
-            // variable x hands the borrow back to (#749).
-            let lender = match head_arg.kind {
-              // Only an owner lends by autoref: a reference
-              // receiver (`text.split_whitespace()` with
-              // `text: &str`) is copied, so nothing is lent from it.
-              ExprKind::MethodCall(_, recv, _, _)
-                if !self.tcx.typeck(recv.hir_id.owner).node_type(recv.hir_id).is_ref() =>
-              {
-                match get_rap(recv, &self.tcx, &self.raps) {
-                  r @ ResourceTy::Value(_) => r,
-                  _ => head_rty.clone(),
+            let endpoints = self.iterator_item_lenders(storage, pat_hirid);
+            let direct = storage.is_some_and(|it| (it.collection || it.direct_items) && it.bindings.iter().any(|b|
+              Some(&b.local) == self.raps.bindings.declarations.get(&pat_hirid) && b.loans.is_disjoint(&it.opaque_item_loans)));
+            let borrowed_head = matches!(iterand_evt, Some(Evt::SBorrow | Evt::MBorrow))
+              && storage.is_some_and(|it| it.collection);
+            let copied_ref = head.is_some_and(|h| h.access == IteratorInput::Copy) && head_rty.is_ref()
+              && storage.is_some_and(|it| it.collection);
+            let lenders = if borrowed_head || copied_ref { vec![head_rty.clone()] } else if direct && !head_moves_ref {
+              endpoints.iter().filter(|p| matches!(p, ResourceTy::Value(r) if !r.is_ref()) || (storage.is_some_and(|it| it.collection) && matches!(p, ResourceTy::Deref(_)))).cloned().collect()
+            } else { Vec::new() };
+            let mutable = pat_ty.ref_mutability() == Some(Mutability::Mut);
+            let evt = if mutable { Evt::MBorrow } else { Evt::SBorrow };
+            // The loop's head move already pictures the item when the named
+            // collection supplies its elements. A separate call has its
+            // own move, and does not borrow the collection it consumed.
+            if !place_head && !borrowed_head {
+              if storage.is_some_and(|it| it.collection) {
+                literal_lenders = Some(lenders.clone()).filter(|ls| !ls.is_empty());
+              } else if let [lender] = lenders.as_slice() {
+                if loop_loans.iter().any(|(l, _, _)| l == lender) {
+                  call_lender = Some((lender.clone(), evt));
                 }
               }
-              _ => head_rty.clone(),
-            };
-            // `for e in v` / `v.into_iter()` with `v: Vec<&str>` (or a
-            // `[&str; 2]` array, copied in): the loop takes v's elements by
-            // value, and each e is one of the references v stored. e
-            // doesn't borrow v, and gives nothing back to it (#1519). (One
-            // whose lenders are drawn is `moved_ref_holder`'s, above.)
-            let typeck = self.tcx.typeck(head_arg.hir_id.owner);
-            let by_value = |e: &'tcx Expr<'tcx>| !typeck.node_type(e.hir_id).is_ref()
-              && !typeck.expr_adjustments(e).iter().any(|a| matches!(a.kind, Adjust::Borrow(_)));
-            let consumed = match head_arg.kind {
-              ExprKind::Path(_) | ExprKind::Field(..) => place_head && by_value(head_arg),
-              ExprKind::MethodCall(_, recv, _, _) => matches!(recv.kind, ExprKind::Path(_) | ExprKind::Field(..))
-                && by_value(recv) && typeck.type_dependent_def_id(head_arg.hir_id)
-                  .is_some_and(|d| self.tcx.item_name(d).as_str() == "into_iter"),
-              _ => false,
-            };
-            // `for x in v.iter().rev()`: the receiver of the last call
-            // is the previous call's result, not a variable, and `x`
-            // isn't a borrow of a method (it said "Return ... from x
-            // to iter"). What x points into isn't known here; the
-            // loop's own borrow of `v` is drawn on v (#868).
-            let lender = match lender {
-              ResourceTy::Value(r) if r.is_fn() => {
-                self.unlent_refs.insert(pat_name.clone());
-                ResourceTy::Anonymous
-              }
-              ResourceTy::Value(_) if consumed => {
-                self.unlent_refs.insert(pat_name.clone());
-                ResourceTy::Anonymous
-              }
-              l => l,
-            };
-            // `for e in v.iter_mut()` with v a `&mut Vec<_>` (a
-            // parameter, or a local reference), `for e in
-            // v.iter_mut().rev()`: e has no lender, but a write through
-            // it goes into v's resource, or the resource v points to
-            // (#1046).
-            if matches!(lender, ResourceTy::Anonymous) && pat_ty.ref_mutability() == Some(Mutability::Mut) {
-              if let Some(roots) = self.loop_item_roots(head_arg) {
-                let prev = self.loop_ref_into.insert(pat_name.clone(), roots);
-                loop_ref_prev.push((pat_name.clone(), prev));
+            }
+            let moved_holder = storage.and_then(|it| it.consumed_collection.as_ref())
+              .and_then(|p| self.iterator_place(p))
+              .or_else(|| matches!(iterand_evt, Some(Evt::Move)).then(|| head_rty.clone()));
+            if let Some(holder) = moved_holder.and_then(|p| p.extract_rap().cloned()) {
+              if let Some(rd) = self.borrow_map.get(holder.name()).filter(|_| !lenders.is_empty()) {
+                self.loop_moved_refs.insert(holder.name().clone(), rd.assigned_at);
               }
             }
-            if matches!(head_arg.kind, ExprKind::MethodCall(..)) && matches!(&lender, ResourceTy::Value(r) if !r.is_fn()) {
-              let evt = if pat_ty.ref_mutability() == Some(Mutability::Mut) { Evt::MBorrow } else { Evt::SBorrow };
-              call_lender = Some((lender.clone(), evt));
+            if lenders.is_empty() {
+              self.unlent_refs.insert(pat_name.clone());
+              if mutable && !head_is_iterator {
+                let roots = self.iterator_write_roots(storage, pat_hirid);
+                if !roots.is_empty() {
+                  let prev = self.loop_ref_into.insert(pat_name.clone(), roots);
+                  loop_ref_prev.push((pat_name.clone(), prev));
+                }
+              }
             }
-            self.add_ref(
-              pat_name.clone(),
-              bool_of_mut(pat_ty.ref_mutability().unwrap()),
-              false,
-              for_line,
-              lender,
-              std::collections::VecDeque::new(),
-              self.current_scope,
-              false,
-              pointee_copy,
-            );
+            let first = lenders.first().cloned().unwrap_or(ResourceTy::Anonymous);
+            self.add_ref(pat_name.clone(), mutable, false, for_line, first,
+              VecDeque::new(), self.current_scope, false, pointee_copy);
+            if let Some(rd) = self.borrow_map.get_mut(&pat_name) {
+              rd.co_lenders.extend(lenders.into_iter().skip(1));
+            }
           } else {
             let is_copy = self.tcx.type_is_copy_modulo_regions(
               typing_env(self.tcx, user_pat.hir_id.owner),
@@ -9911,7 +9635,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // is a reference `next()` hands out (#1129).
             self.add_ev(for_line, Evt::Move, ResourceTy::Anonymous, head_rty.clone(), false);
             self.add_ev(for_line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
-          } else if let Some(e) = iterand_evt {
+          } else if let Some(e) = iterand_evt.filter(|_| storage.is_some_and(|it| it.collection)) {
             // `for n in a` moving a collection of Copy elements
             // (`Vec<i32>`): `a` is moved into the loop's
             // iterator, and each `n` is a copy `next()` hands
@@ -9921,26 +9645,43 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // draws an arrow out of its source, #1372), "Copy of each
             // element of a to n". So for `&T` elements (`Vec<&String>`),
             // which are Copy too.
-            let elem_copy = matches!(e, Evt::Move) && self.tcx.type_is_copy_modulo_regions(
-              typing_env(self.tcx, user_pat.hir_id.owner),
-              pat_ty);
-            if elem_copy {
+            let item = storage.and_then(|it| it.bindings.iter().find(|b| Some(&b.local) == self.raps.bindings.declarations.get(&pat_hirid)));
+            let elem_copy = matches!(e, Evt::Move) && item.is_some_and(|b| b.access == IteratorInput::Copy);
+            if matches!(e, Evt::Move) && item.is_some_and(|b| matches!(b.access, IteratorInput::Shared | IteratorInput::Mutable)) {
+              if iterator_needs_drop {
+                self.add_loop_head_move_ev(for_line, ResourceTy::Anonymous, head_rty, LoopHead::Collection);
+              } else {
+                self.add_ev(for_line, Evt::Move, ResourceTy::Anonymous, head_rty, false);
+              }
+              let id = *self.unique_id;
+              self.add_ev(for_line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
+              let kind = if pat_ty.ref_mutability() == Some(Mutability::Mut) { "mutable" } else { "shared" };
+              self.row_layout.iterator_end_notes.insert(id, format!("The pattern takes a {kind} borrow of the value yielded on this pass."));
+            } else if elem_copy {
               self.add_loop_head_move_ev(for_line, to_rty, head_rty, LoopHead::CollectionCopy);
-            } else if iterator_needs_drop {
+            } else if matches!(e, Evt::Move) && iterator_needs_drop {
               self.add_loop_head_move_ev(for_line, to_rty, head_rty, LoopHead::Collection);
             } else {
               self.add_ev(for_line, e, to_rty, head_rty, false);
             }
+          } else if head.is_some_and(|h| h.access == IteratorInput::Move) {
+            self.move_into_iter(for_line, head_rty);
+            self.add_ev(for_line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
+          } else if head.is_some_and(|h| matches!(h.access, IteratorInput::Mutable | IteratorInput::Shared)) {
+            let mutable = head.is_some_and(|h| h.access == IteratorInput::Mutable);
+            let event = if mutable { Evt::MBorrow } else { Evt::SBorrow };
+            let id = *self.unique_id;
+            if storage.is_some_and(|it| it.head_loan_retained) {
+              self.note_conversion_borrow(id, &head_rty, mutable);
+              self.add_ev(for_line, event, ResourceTy::Anonymous, head_rty.clone(), false);
+              head_loan = Some((head_rty, mutable, id));
+            } else {
+              self.borrow_for_conversion(for_line, head_rty, mutable);
+            }
+            self.add_ev(for_line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
           } else if let Some(lenders) = literal_lenders.take() {
             let evt = if pat_ty.ref_mutability() == Some(Mutability::Mut) { Evt::MBorrow } else { Evt::SBorrow };
-            for l in lenders {
-              match l {
-                // `[&mut *w]` / `[w]` with w a local `&mut`: a reborrow
-                // through w, drawn from w's column (#1330).
-                ResourceTy::Deref(r) => self.add_borrow_ev(for_line, evt.clone(), to_rty.clone(), ResourceTy::Value(r), true),
-                l => self.add_ev(for_line, evt.clone(), to_rty.clone(), l, false),
-              }
-            }
+            self.add_iterator_item_borrows(for_line, evt, to_rty, lenders);
           } else if let Some((lender, evt)) = call_lender.take() {
             // `for x in v.iter_mut()` / `v.iter()`: each x is a
             // reference into v, which v lends (through the iterator
@@ -9953,6 +9694,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // value comes out of the iterator's `next()`. Give the
             // binding a plain Bind so its column starts at the
             // `for` line (#205).
+            if let Some(rap) = to_rty.extract_rap().filter(|r| r.is_ref()) {
+              // In a generic body needs_drop can mean "depends on T".
+              let resource = matches!(pat_ty.kind(), rustc_middle::ty::Ref(_, inner, _)
+                if self.needs_drop(*inner, user_pat.hir_id.owner) && !inner.walk().any(|arg|
+                  arg.as_type().is_some_and(|ty| matches!(ty.kind(), rustc_middle::ty::Param(_) | rustc_middle::ty::Alias(..)))));
+              let name = crate::svg_generator::hover_messages::styled_name_html(rap.name());
+              let (kind, access) = if rap.is_mutref() { ("a mutable", "read and write") } else { ("an immutable", "read") };
+              let pointee = if resource { "resource" } else { "value" };
+              let title = format!("{name} is bound to {kind} reference; it can {access} the borrowed {pointee}");
+              self.row_layout.aggregate_titles.insert(*self.unique_id, title);
+            }
             self.add_ev(for_line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
           }
         } else {
@@ -9978,33 +9730,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // draws an arrow from the head, as `let (s, k) = pair;` draws
           // one from each field (#1390): "Move of the `.0` of each element
           // of names to s"; the first one also draws the head's move.
-          let moved_in = matches!(iterand_evt, Some(Evt::Move)) && !head_is_iterator;
-          let borrowed = matches!(iterand_evt, Some(Evt::SBorrow) | Some(Evt::MBorrow))
+          let moved_in = matches!(iterand_evt, Some(Evt::Move)) && storage.is_some_and(|it| it.collection);
+          let borrowed = storage.is_some_and(|it| it.collection) && matches!(iterand_evt, Some(Evt::SBorrow) | Some(Evt::MBorrow))
             && matches!(&head_rty, ResourceTy::Value(r) if !r.is_ref() && !r.is_fn());
           if moved_in || borrowed {
-            let holder = if moved_in { self.moved_ref_holder(head_arg, place_head, &iterand_evt) } else { None };
-            self.pattern_elem = Some(PatternElem { head: head_rty.clone(), moved: moved_in, source_pending: moved_in, holder, deferred: Vec::new() });
+            self.pattern_elem = Some(PatternElem { head: head_rty.clone(), moved: moved_in, source_pending: moved_in, deferred: Vec::new() });
           }
-          // `for (a, b) in &pairs` / `&mut pairs`: each reference
-          // binding borrows the head (#576).
-          if matches!(iterand_evt, Some(Evt::SBorrow) | Some(Evt::MBorrow)) {
+          if borrowed {
             self.pattern_lender = iterand_evt.clone().map(|e| (e, head_rty.clone()));
           }
-          // `for (x, y) in [(&e, &g)]`: x and y copy the literal's
-          // references (#1433).
-          if iterand_evt.is_none() {
-            self.pattern_literal = match head_arg.kind {
-              ExprKind::Array(elems) if !head_arg.span.from_expansion() => Some(elems),
-              _ => vec_macro_elems(self.tcx, head_arg),
-            };
-          }
-          self.register_pattern_bindings_anon(user_pat, for_line);
+          self.register_iterator_bindings(user_pat, for_line, storage);
           self.pattern_lender = None;
-          self.pattern_literal = None;
           let pattern_elem = self.pattern_elem.take();
           let head_move_pending = pattern_elem.as_ref().is_none_or(|p| p.source_pending);
           if matches!(iterand_evt, Some(Evt::Move)) && head_move_pending {
-            if iterator_needs_drop {
+            if !moved_in && !head_is_iterator && !head_moves_ref {
+              self.move_into_iter(for_line, head_rty.clone());
+            } else if iterator_needs_drop {
               if head_is_iterator {
                 iterator_head = head_rty.extract_rap().cloned();
                 self.add_loop_head_move_ev(for_line, ResourceTy::Anonymous, head_rty.clone(), LoopHead::Iterator);
@@ -10030,22 +9772,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               }
             }
           }
-          // `for (i, e) in v.iter_mut().enumerate()`, `for (x, y) in
-          // a.iter_mut().zip(b.iter_mut())` with v, a, b `&mut`
-          // references or fields through `&mut self`: as for `for e in
-          // v.iter_mut()`, a write through e goes into the resource v
-          // points to (#1067), and one through y into b's.
-          if !head_is_iterator {
-            let mut roots = Vec::new();
-            self.loop_pat_write_roots(user_pat, head_arg, &mut roots);
-            for (name, roots) in roots {
-              let unlent = self.borrow_map.get(&name).is_some_and(|d| matches!(d.lender, ResourceTy::Anonymous));
-              if unlent {
+          user_pat.walk_always(|pat| {
+            let PatKind::Binding(_, id, _, _) = pat.kind else { return };
+            let Some(binding) = self.raps.binding(id) else { return };
+            if !binding.rap.is_mutref() { return; }
+            let name = binding.rap.name().clone();
+            if self.borrow_map.get(&name).is_some_and(|d| matches!(d.lender, ResourceTy::Anonymous)) {
+              let roots = self.iterator_write_roots(storage, id);
+              if !roots.is_empty() {
                 let prev = self.loop_ref_into.insert(name.clone(), roots);
                 loop_ref_prev.push((name, prev));
               }
             }
-          }
+          });
           // `for &y in &v`, `for &(a, b) in &pairs`, `for _ in &v`: no
           // loop variable borrows the head (each is a copy, or there is
           // none), but the loop's iterator still borrows `v` until the
@@ -10061,8 +9800,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             if !borrowed && !r.is_ref() && !r.is_fn() {
               let id = *self.unique_id;
               let is_mut = matches!(e, Evt::MBorrow);
-              self.add_ev(for_line, e.clone(), ResourceTy::Anonymous, head_rty.clone(), false);
-              head_loan = Some((head_rty.clone(), is_mut, id));
+              if storage.is_some_and(|it| it.head_loan_retained) {
+                if !storage.is_some_and(|it| it.collection) { self.note_conversion_borrow(id, &head_rty, is_mut); }
+                self.add_ev(for_line, e.clone(), ResourceTy::Anonymous, head_rty.clone(), false);
+                head_loan = Some((head_rty.clone(), is_mut, id));
+              } else {
+                self.borrow_for_conversion(for_line, head_rty.clone(), is_mut);
+              }
             }
           }
           // The copies out of a borrowed head's elements, after its
@@ -10075,7 +9819,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // Visit body — events flow into the global timeline.
         if let Some(ro) = &iterator_head {
           if let Some(loop_expr) = arms.first().map(|a| a.body) {
-            self.loop_iterators.push((loop_expr.hir_id, ro.clone()));
+            if let Some(it) = storage { self.loop_iterators.push((loop_expr.hir_id, it.storage, ro.clone())); }
           }
         }
         // The path to a `break` in the body starts here, after the head
@@ -10155,31 +9899,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let runs_to_the_end = (no_break && !body_returns(body_expr)) || reaches_end;
         let mut pat_decls = HashSet::new();
         collect_pat_bindings(user_pat, &self.tcx, &self.raps, &mut pat_decls);
-        // A `&mut` binding the body moves away (`drop(e)`, `take(e)` with a
-        // generic parameter: no reborrow) has nothing left after the move:
-        // its borrow ends there, and the loop's iterator holds the loan to
-        // the loop's end, as for a loop with no binding to name it (#1511).
-        // (A move on every path, into a call: one in a branch of the body
-        // is not, nor a move into a variable, which takes the loan on.)
-        let moved_in_body = |name: &str| self.preprocessed_events[body_events_at..].iter().find_map(|(line, ev)| match ev {
-          ExternalEvent::Move { from: ResourceTy::Value(r), to, .. } if r.name() == name && r.is_mutref()
-            && matches!(to, ResourceTy::Anonymous | ResourceTy::Value(ResourceAccessPoint::Function(_))) => Some(*line),
-          _ => None,
-        });
-        // (Nor one something borrows through: `let g = id(e);`.)
-        #[expect(clippy::disallowed_methods, reason = "`any` over the map: order never observed")]
-        let lends = |name: &str| self.borrow_map.values().any(|rd| rd.all_lenders().iter()
-          .any(|l| matches!(l, ResourceTy::Value(r) | ResourceTy::Deref(r) if r.name() == name)));
-        #[expect(clippy::disallowed_methods, reason = "collected into a sorted map")]
-        let moved_at: BTreeMap<String, usize> = pat_decls.iter()
-          .filter(|d| !lends(d.name()))
-          .filter(|d| self.borrow_map.get(d.name()).is_some_and(|rd| !matches!(rd.lender, ResourceTy::Anonymous)))
-          .filter_map(|d| moved_in_body(d.name()).map(|l| (d.name().to_owned(), l)))
-          .collect();
-        for (name, line) in moved_at.iter() {
-          self.for_loop_moved_bindings.push((name.clone(), *line, body_end));
+        let mut moved_decls = BTreeSet::new();
+        for item in storage.into_iter().flat_map(|it| &it.bindings) {
+          let Some(at) = item.consumed else { continue };
+          let Some(name) = self.raps.bindings.locals.get(&item.local) else { continue };
+          let Some(rd) = self.borrow_map.get(name) else { continue };
+          if matches!(rd.lender, ResourceTy::Anonymous) { continue; }
+          let line = span_to_line(&self.mir_body.source_info(at).span, &self.tcx);
+          self.for_loop_moved_bindings.insert(item.local, (item.loans.clone(), line));
+          moved_decls.insert(name.clone());
         }
-        let moved_decls: BTreeSet<String> = moved_at.into_keys().collect();
         #[expect(clippy::disallowed_methods, reason = "each binding's floor is raised on its own")]
         for decl in pat_decls.iter().filter(|d| runs_to_the_end && !moved_decls.contains(d.name())) {
           let lent = self.borrow_map.get(decl.name())
@@ -10219,11 +9948,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // draws no end (#1365: its end was drawn on its column after the
         // move); a parameter's caller-side lender isn't drawn.
         let mut moved_ref_loans: Vec<(ResourceTy, bool, StaticLender)> = Vec::new();
-        for r in moved_ref_args {
+        for (r, call) in moved_ref_args {
           let Some(rd) = self.borrow_map.get(r.name()) else { continue };
-          let is_r = |a: &'tcx Expr<'tcx>| matches!(a.kind, ExprKind::Path(_) | ExprKind::Field(..))
-            && get_rap(a, &self.tcx, &self.raps).extract_rap().is_some_and(|x| x.hash() == r.hash());
-          let call = head_call_taking(head_arg, &is_r, &self.tcx).unwrap_or_else(|| "into_iter".to_owned());
           for l in rd.all_lenders() {
             if matches!(&l, ResourceTy::Value(x) if !x.is_fn() && self.raps.get(x.name()).is_some_and(|d| d.rap.hash() == x.hash()))
               && !moved_ref_loans.iter().any(|(o, _, _)| *o == l) {
@@ -10321,7 +10047,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // The loop drops its iterator where it ends, however it
         // ends (running out, a `break`) (#482).
         if let Some(ro) = iterator_head {
-          self.add_loop_iterator_drop(ro, span_end_line(&expr.span, &self.tcx), LoopLeft::End);
+          self.add_loop_iterator_drop(ro, span_end_line(&expr.span, &self.tcx), LoopLeft::End, None);
         }
       }
     }
@@ -10329,6 +10055,104 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 }
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
+  /// Map loans at this particular Some payload assignment to the displayed
+  /// places. Parent loans reach it transitively through a reborrow; only
+  /// the immediate source describes this binding.
+  fn iterator_item_lenders(&self, storage: Option<&crate::facts::IteratorStorage>, id: HirId) -> Vec<ResourceTy> {
+    let Some(body) = self.body_facts else { return Vec::new() };
+    let Some(it) = storage else { return Vec::new() };
+    let Some(&local) = body.bindings.declarations.get(&id) else { return Vec::new() };
+    let Some(item) = it.bindings.iter().find(|b| b.local == local) else { return Vec::new() };
+    let loans: Vec<_> = body.loans.iter().filter(|l| item.loans.contains(&l.loan) && it.loans.contains(&l.loan)).collect();
+    let mut endpoints = Vec::new();
+    for loan in loans.iter().filter(|l| !loans.iter().any(|child| child.made_through.contains(&l.loan))) {
+      let Some(local) = loan.lender_local else { continue };
+      let value = if let Some(rap) = self.raps.place(local, &loan.lender) {
+        ResourceTy::Value(rap.rap.clone())
+      } else if let Some(root) = body.bindings.locals.get(&local).and_then(|n| self.raps.place(local, n)) {
+        if !root.rap.is_ref() { continue; }
+        ResourceTy::Deref(root.rap.clone())
+      } else { continue };
+      if !endpoints.contains(&value) { endpoints.push(value); }
+    }
+    endpoints
+  }
+
+  fn add_iterator_item_borrows(&mut self, line: usize, evt: Evt, item: ResourceTy, lenders: Vec<ResourceTy>) {
+    let candidates: Vec<_> = lenders.iter().map(|l| l.name()).collect();
+    for lender in lenders {
+      let id = *self.unique_id;
+      match lender {
+        ResourceTy::Deref(r) => self.add_borrow_ev(line, evt.clone(), item.clone(), ResourceTy::Value(r), true),
+        l => self.add_ev(line, evt.clone(), item.clone(), l, false),
+      }
+      if candidates.len() > 1 {
+        let sources = crate::svg_generator::hover_messages::or_list(&candidates);
+        let name = crate::svg_generator::hover_messages::styled_name_html(&item.name());
+        let kind = if matches!(evt, Evt::MBorrow) { "mutable" } else { "shared" };
+        self.row_layout.aggregate_titles.insert(id, format!("On each pass, {name} holds a {kind} reference to either {sources}."));
+      }
+    }
+  }
+
+  fn iterator_write_roots(&self, storage: Option<&crate::facts::IteratorStorage>, id: HirId) -> Vec<ResourceAccessPoint> {
+    let Some(it) = storage else { return Vec::new() };
+    let local = self.raps.bindings.declarations.get(&id);
+    let Some(binding) = it.bindings.iter().find(|b| Some(&b.local) == local) else { return Vec::new() };
+    if !binding.loans.is_disjoint(&it.opaque_item_loans) || it.identity && it.head.is_some() { return Vec::new(); }
+    self.iterator_item_lenders(Some(it), id).into_iter().filter_map(|p| p.extract_rap().cloned()).collect()
+  }
+
+  fn into_iter_rap(&mut self) -> ResourceTy {
+    let name = "into_iter";
+    let key = fn_key(name);
+    if !self.raps.contains_key(&key) {
+      self.add_fn(name.to_owned());
+    }
+    ResourceTy::Value(self.raps.get(&key).unwrap().rap.clone())
+  }
+
+  fn note_conversion_borrow(&mut self, id: usize, head: &ResourceTy, mutable: bool) {
+    let name = crate::svg_generator::hover_messages::styled_name_html(&head.name());
+    let kind = if mutable { "mutable" } else { "shared" };
+    self.row_layout.aggregate_titles.insert(id, format!(
+      "into_iter takes a {kind} borrow of {name}. The borrow checker restricts access to {name} during iteration."));
+  }
+
+  fn borrow_for_conversion(&mut self, line: usize, head: ResourceTy, mutable: bool) {
+    let callee = self.into_iter_rap();
+    if mutable {
+      self.add_pass_by_mref_ev(line, callee, head, false, true, ImplicitRef::No, false);
+    } else {
+      self.add_pass_by_sref_ev(line, callee, head, ImplicitRef::No, false, false);
+    }
+  }
+
+  fn move_into_iter(&mut self, line: usize, head: ResourceTy) {
+    let callee = self.into_iter_rap();
+    let first = self.preprocessed_events.len();
+    self.add_ev(line, Evt::Move, callee, head, false);
+    // The conversion consumes the head, including each pictured field.
+    for (_, ev) in &self.preprocessed_events[first..] {
+      if let ExternalEvent::Move { from, id, .. } = ev {
+        let name = crate::svg_generator::hover_messages::styled_name_html(&from.name());
+        self.row_layout.iterator_end_notes.insert(*id, format!("{name} can't be used until it is initialized again."));
+      }
+    }
+  }
+
+  fn iterator_place(&self, place: &crate::facts::EndPlace) -> Option<ResourceTy> {
+    let local = Local::from_usize(place.local);
+    if let Some(r) = self.raps.place(local, &place.name) {
+      return Some(ResourceTy::Value(r.rap.clone()));
+    }
+    if place.projection == [crate::facts::EndProjection::Deref] {
+      let name = self.raps.bindings.locals.get(&local)?;
+      return Some(ResourceTy::Deref(self.raps.place(local, name)?.rap.clone()));
+    }
+    None
+  }
+
   /// The parts of each element a `for` loop's pattern leaves unbound
   /// that need drop (`.1` in `for (f, _) in v` over `(String, String)`;
   /// `[""]`, the whole element, for `for _ in v`), which Rust drops at
@@ -10433,99 +10257,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       _ => false,
     }
-  }
-
-  /// A `for` loop's head that is an array literal or `vec![..]` of
-  /// references (`[&e, &g]`, `vec![&mut a]`, #1433): the variables they
-  /// borrow (drawn columns only). None for any other head, or when none
-  /// is drawn.
-  fn literal_head_lenders(&self, head: &'tcx Expr<'tcx>) -> Option<Vec<ResourceTy>> {
-    let literal = matches!(head.kind, ExprKind::Array(..) | ExprKind::Repeat(..)) && !head.span.from_expansion()
-      || vec_macro_elems(self.tcx, head).is_some();
-    if !literal {
-      return None;
-    }
-    let lenders: Vec<ResourceTy> = self.value_lenders(head).into_iter()
-      .filter(|l| match l {
-        ResourceTy::Value(r) => !r.is_fn(),
-        ResourceTy::Deref(_) => true,
-        _ => false,
-      })
-      .collect();
-    (!lenders.is_empty()).then_some(lenders)
-  }
-
-  /// The variables borrowed by the references in the part `path` (`.0`,
-  /// `.1.name`; the whole element when None) of each element of a
-  /// literal `for` head (`[(&e, &g)]`, #1433). A part that isn't itself
-  /// written as a literal counts the whole element's.
-  fn literal_part_lenders(&self, elems: &'tcx [Expr<'tcx>], path: Option<&str>) -> Vec<ResourceTy> {
-    let mut out: Vec<ResourceTy> = Vec::new();
-    for elem in elems {
-      let mut e = elem;
-      for seg in path.unwrap_or("").split('.').filter(|s| !s.is_empty()) {
-        let next = match (e.kind, seg.parse::<usize>()) {
-          (ExprKind::Tup(es), Ok(i)) => es.get(i),
-          (ExprKind::Call(f, args), Ok(i)) if is_ctor_path(f, self.tcx.typeck(e.hir_id.owner)) => args.get(i),
-          (ExprKind::Struct(_, fields, _), _) => fields.iter().find(|f| f.ident.as_str() == seg).map(|f| f.expr),
-          _ => None,
-        };
-        match next {
-          Some(n) => e = n,
-          None => break,
-        }
-      }
-      for l in self.value_lenders(e) {
-        let drawn = match &l {
-          ResourceTy::Value(r) => !r.is_fn(),
-          ResourceTy::Deref(_) => true,
-          _ => false,
-        };
-        if drawn && !out.contains(&l) {
-          out.push(l);
-        }
-      }
-    }
-    out
-  }
-
-  /// A `for` loop's head that moves a value holding references into the
-  /// loop's iterator, whose items are those references (`for r in refs`,
-  /// `for r in refs.into_iter()` with `refs: Vec<&mut String>`, #1389):
-  /// the holder's name and the variables its references borrow, which
-  /// each item borrows. None for a head that lends the items itself
-  /// (`refs.iter()`, `&refs`), or whose holder's loans aren't known.
-  fn moved_ref_holder(&self, head_arg: &'tcx Expr<'tcx>, place_head: bool, iterand_evt: &Option<Evt>) -> Option<(String, Vec<ResourceTy>)> {
-    let typeck = self.tcx.typeck(head_arg.hir_id.owner);
-    let holder = match head_arg.kind {
-      _ if place_head => {
-        // Moved in. (Not an iterator, `for x in it`, whose items
-        // `next()` hands out: the caller handles it first.)
-        if !matches!(iterand_evt, Some(Evt::Move)) {
-          return None;
-        }
-        head_arg
-      }
-      // `refs.into_iter()`: a by-value method on the holder.
-      ExprKind::MethodCall(seg, recv, [], _) if seg.ident.name.as_str() == "into_iter"
-        && matches!(recv.kind, ExprKind::Path(_) | ExprKind::Field(..))
-        && !typeck.expr_ty(recv).is_ref()
-        && !is_method_autoref(recv, typeck) => recv,
-      _ => return None,
-    };
-    let ty = typeck.expr_ty(holder);
-    if ty.is_ref() || self.ty_is_copy(ty, holder.hir_id.owner) {
-      return None;
-    }
-    let ResourceTy::Value(rap) = get_rap(holder, &self.tcx, &self.raps) else { return None };
-    if rap.is_ref() || !rap.holds_borrow() {
-      return None;
-    }
-    let rd = self.borrow_map.get(rap.name())?;
-    let lenders: Vec<ResourceTy> = rd.all_lenders().into_iter()
-      .filter(|l| matches!(l, ResourceTy::Value(r) if !r.is_fn()))
-      .collect();
-    (!lenders.is_empty()).then(|| (rap.name().to_owned(), lenders))
   }
 
   /// The std macro whose result `expr` is, when the user wrote the macro
@@ -11428,18 +11159,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// say so on one like a call's result. Nothing is stated for a head
   /// that is a reference or whose iterator owns nothing (`&v`, `0..n`,
   /// `v.iter()`, `s.chars()`).
-  fn note_for_head_temporary(&mut self, head: &'tcx Expr<'tcx>, iter_call: &'tcx Expr<'tcx>, for_expr: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
-    let typeck = self.tcx.typeck(iter_call.hir_id.owner);
-    let ty = typeck.expr_ty(iter_call);
-    if ty.is_ref() || !self.needs_drop(ty, iter_call.hir_id.owner) || self.temp_drops_noted.contains(&head.hir_id) {
-      return None;
-    }
-    // `for s in it` with `it` an iterator already: `into_iter` hands
-    // `it`'s value back unchanged, so no new value is built. It's moved
-    // into the loop, and its drop is stated on its own column (#482).
-    if matches!(head.kind, ExprKind::Path(QPath::Resolved(_, p)) if matches!(p.res, Res::Local(_)))
-      && typeck.expr_ty(head) == ty
-    {
+  fn note_for_head_temporary(&mut self, head: &'tcx Expr<'tcx>, storage: Local, for_expr: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
+    let ty = self.tcx.erase_and_anonymize_regions(self.mir_body.local_decls[storage].ty);
+    if !self.needs_drop(ty, for_expr.hir_id.owner) || self.temp_drops_noted.contains(&head.hir_id) {
       return None;
     }
     let end_line = span_end_line(&for_expr.span, &self.tcx);
@@ -14139,54 +13861,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
-  /// Register a single named binding `name` introduced by a `let`
-  /// pattern, with `init` as its resource source. Same effect the
-  /// pre-#86 `PatKind::Binding` arm had: pick Move vs. Copy from the
-  /// LHS type, define the LHS RAP, and emit the move/copy event —
-  /// unless the binding's source line is on the skip list, in which
-  /// case we still register the RAP (so later references resolve)
-  /// but record it in `skip_raps` so events touching it get dropped.
-  /// Walk a pattern (`(a, b)`, `Some(x)`, etc.) and register each
-  /// binding as a branch-scoped RAP with a synthetic Bind from
-  /// Anonymous on `line`. Used for for-loop tuple patterns where the
-  /// "real" source (the iter expression's tail call) doesn't render
-  /// cleanly — see the for-loop arm of `visit_expr` for context.
-  pub fn register_pattern_bindings_anon(&mut self, pat: &'tcx Pat<'tcx>, line: usize) {
-    self.register_pattern_bindings_below(pat, line, 0, Some(String::new()));
-  }
-
-  /// The paths (`.0`, `.name`) of the sub-patterns of the tuple (or
-  /// tuple struct) pattern `pat` with sub-patterns `ps`, `..` at `ddpos`:
-  /// None for each when the arity isn't known.
-  fn tuple_pat_paths(&self, pat: &'tcx Pat<'tcx>, ps: &'tcx [Pat<'tcx>], ddpos: rustc_hir::DotDotPos) -> Vec<Option<String>> {
-    let typeck = self.tcx.typeck(pat.hir_id.owner);
-    let arity = match pat.kind {
-      PatKind::Tuple(..) => match typeck.pat_ty(pat).kind() {
-        rustc_middle::ty::TyKind::Tuple(tys) => Some(tys.len()),
-        _ => None,
-      },
-      PatKind::TupleStruct(ref qpath, ..) => match (typeck.qpath_res(qpath, pat.hir_id), typeck.pat_ty(pat).ty_adt_def()) {
-        (res, Some(adt)) if !matches!(res, Res::Err) => Some(adt.variant_of_res(res).fields.len()),
-        _ => None,
-      },
-      _ => None,
-    };
-    let dd = ddpos.as_opt_usize();
-    (0..ps.len()).map(|i| match dd {
-      Some(d) if i >= d => arity.map(|n| format!(".{}", i + n - ps.len())),
-      _ => Some(format!(".{}", i)),
-    }).collect()
-  }
-
-  /// `derefs` counts the references the pattern has gone through above
-  /// `pat`, written (`&w`) or implicit (default binding modes): the
-  /// first is the loop item's own `&` into the head (`pattern_lender`).
-  /// `path`: the part of the loop's item `pat` matches (`.0`), when known.
-  fn register_pattern_bindings_below(&mut self, pat: &'tcx Pat<'tcx>, line: usize, derefs: usize, path: Option<String>) {
-    let typeck = self.tcx.typeck(pat.hir_id.owner);
-    let derefs = derefs + typeck.pat_adjustments().get(pat.hir_id).map_or(0, |a| a.len());
-    match pat.kind {
-      PatKind::Binding(_, hirid, ident, sub_pat) => {
+  /// HIR supplies names and annotation spans. The payload assignment supplies each part and transfer.
+  fn register_iterator_bindings(&mut self, pattern: &'tcx Pat<'tcx>, line: usize, storage: Option<&crate::facts::IteratorStorage>) {
+    use crate::facts::IteratorInput;
+    let typeck = self.tcx.typeck(pattern.hir_id.owner);
+    let mut seen = HashSet::new();
+    pattern.walk_always(|pat| {
+        let PatKind::Binding(_, hirid, ident, _) = pat.kind else { return };
+        if !seen.insert(hirid) { return; }
+        let local = self.raps.bindings.declarations.get(&hirid);
+        let mut assignments = storage.into_iter().flat_map(|it| &it.bindings).filter(|b| Some(&b.local) == local);
+        let binding = assignments.next().filter(|first| assignments.all(|b|
+          b.part == first.part && b.derefs == first.derefs && b.access == first.access));
         let name = self.raps.declare(hirid, &self.tcx);
         let pat_ty = typeck.pat_ty(pat);
         // A reference binding borrows the head when it is the item's
@@ -14196,8 +13882,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // binding below a deref copies a reference stored in the
         // element (`for &w in &words`, words: Vec<&str>): it points
         // wherever that reference does, not into the head (#888).
-        let by_ref = matches!(typeck.pat_binding_modes().get(hirid).map(|m| m.0), Some(rustc_hir::ByRef::Yes(..)));
-        let borrows_head = if by_ref { derefs <= 1 } else { derefs == 0 };
+        let by_ref = binding.is_some_and(|b| matches!(b.access, IteratorInput::Shared | IteratorInput::Mutable));
+        let derefs = binding.map(|b| b.derefs);
+        let borrows_head = derefs.is_some_and(|d| if by_ref { d <= 1 } else { d == 0 });
         let lender = if pat_ty.is_ref() && borrows_head { self.pattern_lender.clone() } else { None };
         if pat_ty.is_ref() {
           let pointee_copy = self.ref_pointee_is_copy(pat_ty, hirid.owner);
@@ -14229,26 +13916,27 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // into the loop (`s` in `for (s, k) in names`), or a copy out of
         // an element of a borrowed head (`a` in `for &(a, b) in
         // &pairs`): an arrow from the head (#1390).
-        let part = match (&self.pattern_elem, &path) {
-          (Some(pe), Some(p)) if !by_ref && lender.is_none()
-            && (if pe.moved { derefs == 0 } else { derefs == 1 && self.ty_is_copy(pat_ty, hirid.owner) }) =>
-            Some((pe.head.clone(), p.clone(), pe.moved)),
-          _ => None,
-        };
+        let part = binding.and_then(|b| {
+          let head = self.pattern_elem.as_ref()?;
+          let copy = b.access == IteratorInput::Copy;
+          let from_head = if head.moved { b.derefs == 0 } else { b.derefs == 1 && copy };
+          let path = b.part.as_ref()?;
+          (from_head && !by_ref && lender.is_none()).then(|| (head.head.clone(), path.clone(), head.moved, copy))
+        });
         match (lender, part) {
           (Some((e, l)), _) => self.add_ev(line, e, to_rty, l, false),
-          (None, Some((head, p, moved))) => {
-            let copy = self.ty_is_copy(pat_ty, hirid.owner);
+          (None, Some((head, p, moved, copy))) => {
             // A reference moved out of a head holding references
             // borrows what they borrow (#1389).
             if pat_ty.is_ref() && !copy {
-              if let Some((holder, lenders)) = self.pattern_elem.as_ref().and_then(|pe| pe.holder.clone()) {
+              let lenders = self.iterator_item_lenders(storage, hirid);
+              if let Some((first, rest)) = lenders.split_first() {
                 if let Some(rd) = self.borrow_map.get_mut(&name) {
-                  rd.lender = lenders[0].clone();
-                  rd.co_lenders = lenders[1..].to_vec();
+                  rd.lender = first.clone();
+                  rd.co_lenders = rest.to_vec();
                 }
-                if let Some(rd) = self.borrow_map.get(&holder) {
-                  self.loop_moved_refs.insert(holder, rd.assigned_at);
+                if let Some(holder) = head.extract_rap().and_then(|r| self.borrow_map.get(r.name())) {
+                  self.loop_moved_refs.insert(head.real_name(), holder.assigned_at);
                 }
               }
             }
@@ -14263,8 +13951,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           }
           // `x` in `for (x, y) in [(&e, &g)]` (#1433): a copy of the
           // reference the literal holds in that part of each element.
-          (None, None) if pat_ty.is_ref() && !by_ref && derefs == 0 && self.pattern_literal.is_some() => {
-            let lenders = self.literal_part_lenders(self.pattern_literal.unwrap_or_default(), path.as_deref());
+          (None, None) if pat_ty.is_ref() && !by_ref && derefs == Some(0) && storage.is_some_and(|it| it.collection && it.head.is_none()) => {
+            let lenders = self.iterator_item_lenders(storage, hirid);
             if lenders.is_empty() {
               self.add_ev(line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
             } else {
@@ -14273,58 +13961,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 rd.co_lenders = lenders[1..].to_vec();
               }
               let evt = if pat_ty.ref_mutability() == Some(Mutability::Mut) { Evt::MBorrow } else { Evt::SBorrow };
-              for l in lenders {
-                match l {
-                  ResourceTy::Deref(r) => self.add_borrow_ev(line, evt.clone(), to_rty.clone(), ResourceTy::Value(r), true),
-                  l => self.add_ev(line, evt.clone(), to_rty.clone(), l, false),
-                }
-              }
+              self.add_iterator_item_borrows(line, evt, to_rty, lenders);
             }
           }
           (None, None) => self.add_ev(line, Evt::Bind, to_rty, ResourceTy::Anonymous, false),
         }
-        if let Some(sub) = sub_pat {
-          self.register_pattern_bindings_below(sub, line, derefs, path);
-        }
-      }
-      PatKind::Tuple(ps, dd) | PatKind::TupleStruct(_, ps, dd) => {
-        let paths = self.tuple_pat_paths(pat, ps, dd);
-        for (p, sub) in ps.iter().zip(paths) {
-          let sub = path.as_ref().zip(sub).map(|(a, b)| format!("{}{}", a, b));
-          self.register_pattern_bindings_below(p, line, derefs, sub);
-        }
-      }
-      PatKind::Struct(_, fs, _) => {
-        for f in fs {
-          let sub = path.as_ref().map(|a| format!("{}.{}", a, f.ident));
-          self.register_pattern_bindings_below(f.pat, line, derefs, sub);
-        }
-      }
-      PatKind::Or(ps) => {
-        // alternatives bind the same names — first is enough. (Each
-        // may take it from another part.)
-        if let Some(p) = ps.first() { self.register_pattern_bindings_below(p, line, derefs, None); }
-      }
-      PatKind::Ref(inner, _, _) => {
-        self.register_pattern_bindings_below(inner, line, derefs + 1, path);
-      }
-      PatKind::Box(inner)
-      | PatKind::Deref(inner)
-      | PatKind::Guard(inner, _) => {
-        self.register_pattern_bindings_below(inner, line, derefs, None);
-      }
-      PatKind::Slice(before, mid, after) => {
-        for (i, p) in before.iter().enumerate() {
-          let sub = path.as_ref().map(|a| format!("{}[{}]", a, i));
-          self.register_pattern_bindings_below(p, line, derefs, sub);
-        }
-        if let Some(p) = mid { self.register_pattern_bindings_below(p, line, derefs, None); }
-        for p in after { self.register_pattern_bindings_below(p, line, derefs, None); }
-      }
-      // No bindings inside.
-      PatKind::Wild | PatKind::Never | PatKind::Missing | PatKind::Err(_)
-      | PatKind::Expr(_) | PatKind::Range(..) => {}
-    }
+    });
   }
 
   fn bind_one(
@@ -16347,27 +15989,6 @@ pub(crate) fn conditional_branch_bodies<'tcx>(e: &'tcx Expr<'tcx>, out: &mut Vec
   }
 }
 
-/// The name of the call in a `for` loop's head `head` that takes as it
-/// is an argument `is_var` picks (`zip` in `a.iter_mut().zip(b)`), if
-/// any.
-fn head_call_taking<'tcx>(head: &'tcx Expr<'tcx>, is_var: &dyn Fn(&'tcx Expr<'tcx>) -> bool, tcx: &rustc_middle::ty::TyCtxt<'tcx>) -> Option<String> {
-  match head.kind {
-    ExprKind::MethodCall(seg, rcvr, args, _) => {
-      if args.iter().any(|a| is_var(a)) {
-        return Some(seg.ident.as_str().to_owned());
-      }
-      args.iter().find_map(|a| head_call_taking(a, is_var, tcx)).or_else(|| head_call_taking(rcvr, is_var, tcx))
-    }
-    ExprKind::Call(f, args) => {
-      if args.iter().any(|a| is_var(a)) {
-        return hirid_to_var_name(f.hir_id, tcx);
-      }
-      args.iter().find_map(|a| head_call_taking(a, is_var, tcx))
-    }
-    _ => None,
-  }
-}
-
 /// True iff an event among `events` (also in a conditional nested in
 /// them) moves something out of `t` or borrows from it.
 fn takes_from(events: &[(usize, ExternalEvent)], t: &ResourceAccessPoint) -> bool {
@@ -16673,4 +16294,28 @@ fn may_panic_or_leave<'tcx>(b: &'tcx Block<'tcx>) -> bool {
   let mut v = V { found: false };
   v.visit_block(b);
   v.found
+}
+
+// Every event, those in branches too (with each branch's line map).
+pub(crate) fn walk(events: &mut [(usize, ExternalEvent)], f: &mut impl FnMut(usize, &mut ExternalEvent)) {
+  for (line, ev) in events.iter_mut() {
+    walk_one(*line, ev, f);
+  }
+}
+pub(crate) fn walk_map(map: &mut BTreeMap<usize, Vec<ExternalEvent>>, f: &mut impl FnMut(usize, &mut ExternalEvent)) {
+  for (line, evs) in map.iter_mut() {
+    for ev in evs.iter_mut() {
+      walk_one(*line, ev, f);
+    }
+  }
+}
+fn walk_one(line: usize, ev: &mut ExternalEvent, f: &mut impl FnMut(usize, &mut ExternalEvent)) {
+  if let ExternalEvent::Branch { branches, .. } = ev {
+    for b in branches.iter_mut() {
+      walk(&mut b.e_data, f);
+      walk_map(&mut b.line_map, f);
+    }
+  } else {
+    f(line, ev);
+  }
 }

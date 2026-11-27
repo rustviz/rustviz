@@ -2406,6 +2406,7 @@ pub enum ExternalEvent {
         ro: ResourceAccessPoint,
         left: LoopLeft,
         id: usize,
+        after_item: Option<String>,
         early: Vec<usize>,
     },
     // At the end of a loop: `ro`, a `let x;` local declared before the
@@ -3065,9 +3066,9 @@ pub enum Event {
     // hand. The owner is left in a moved-out-like state.
     ManuallyDropByHand,
     // An unbound temporary is dropped (see ExternalEvent).
-    TemporaryDrop { ty: Option<String>, when: String, literal: bool, early: bool, part: Option<TempPart>, assign: bool },
+    TemporaryDrop { id: usize, ty: Option<String>, when: String, literal: bool, early: bool, part: Option<TempPart>, assign: bool },
     // See ExternalEvent::LoopIteratorDrop.
-    LoopIteratorDrop { left: LoopLeft, early: Vec<usize> },
+    LoopIteratorDrop { left: LoopLeft, early: Vec<usize>, after_item: Option<String> },
     // See ExternalEvent::LoopMaybeInit.
     LoopMaybeInit { before_loop: Option<bool>, nested: bool, prior_assignment: bool, always_assigned: bool },
     // See ExternalEvent::LoopExitKept.
@@ -4151,8 +4152,12 @@ impl Event {
             Event::TupleTempDrop { tuple, at, with } => {
                 hover_messages::event_dot_tuple_temp_drop(tuple, *at, with)
             }
-            Event::LoopIteratorDrop { left, early } => {
-                hover_messages::event_dot_loop_iterator_drop(my_name, *left, early)
+            Event::LoopIteratorDrop { left, early, after_item } => {
+                let mut title = hover_messages::event_dot_loop_iterator_drop(my_name, *left, early);
+                if let Some(item) = after_item {
+                    title.push_str(&format!("&lt;br&gt;Rust drops {} before this iterator.", hover_messages::styled_name_html(item)));
+                }
+                title
             }
             // (The timeline panel says "value" for a value.)
             Event::LoopExitKept { reassigned } => {
@@ -6213,11 +6218,11 @@ impl Visualizable for VisualizationData {
         ExternalEvent::ManuallyDropByHand{..} => {
           vec![(line_num, Event::ManuallyDropByHand)]
         },
-        ExternalEvent::TemporaryDrop{ ro, ty, when, literal, early, part, .. } => {
-          vec![(line_num, Event::TemporaryDrop { ty: ty.clone(), when: when.clone(), literal: *literal, early: *early, part: part.clone(), assign: ro.is_assign_literal_temporary() })]
+        ExternalEvent::TemporaryDrop{ ro, ty, when, literal, early, part, id } => {
+          vec![(line_num, Event::TemporaryDrop { id: *id, ty: ty.clone(), when: when.clone(), literal: *literal, early: *early, part: part.clone(), assign: ro.is_assign_literal_temporary() })]
         },
-        ExternalEvent::LoopIteratorDrop{ left, early, .. } => {
-          vec![(line_num, Event::LoopIteratorDrop { left: *left, early: early.clone() })]
+        ExternalEvent::LoopIteratorDrop{ left, early, after_item, .. } => {
+          vec![(line_num, Event::LoopIteratorDrop { left: *left, early: early.clone(), after_item: after_item.clone() })]
         },
         ExternalEvent::LoopMaybeInit{ before_loop, nested, prior_assignment, always_assigned, .. } => {
           vec![(line_num, Event::LoopMaybeInit { before_loop: *before_loop, nested: *nested, prior_assignment: *prior_assignment, always_assigned: *always_assigned })]
@@ -6740,12 +6745,12 @@ impl Visualizable for VisualizationData {
             ExternalEvent::ManuallyDropByHand{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::ManuallyDropByHand, line_number);
             },
-            ExternalEvent::TemporaryDrop{ro, ty, when, literal, early, part, ..} => {
+            ExternalEvent::TemporaryDrop{ro, ty, when, literal, early, part, id} => {
                 let assign = ro.is_assign_literal_temporary();
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::TemporaryDrop { ty, when, literal, early, part, assign }, line_number);
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::TemporaryDrop { id, ty, when, literal, early, part, assign }, line_number);
             },
-            ExternalEvent::LoopIteratorDrop{ro, left, early, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopIteratorDrop { left, early }, line_number);
+            ExternalEvent::LoopIteratorDrop{ro, left, early, after_item, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopIteratorDrop { left, early, after_item }, line_number);
             },
             ExternalEvent::LoopMaybeInit{ro, before_loop, nested, prior_assignment, always_assigned, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopMaybeInit { before_loop, nested, prior_assignment, always_assigned }, line_number);

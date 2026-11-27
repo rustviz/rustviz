@@ -1548,6 +1548,9 @@ pub struct RowLayout {
     /// Both column dots and the connecting arrow describe the same aggregate operand.
     pub(crate) pattern_payloads: BTreeMap<usize, (String, &'static str)>,
     pub(crate) aggregate_titles: BTreeMap<usize, String>,
+    pub(crate) collection_reborrow_ends: BTreeSet<usize>,
+    pub(crate) yielded_reference_ends: BTreeSet<usize>,
+    pub(crate) iterator_end_notes: BTreeMap<usize, String>,
     pub(crate) shadowed_borrow_lenders: BTreeMap<usize, String>,
     pub(crate) closure_result_holders: BTreeSet<u64>,
     pub(crate) stored_lender_loans: BTreeMap<u64, BTreeSet<usize>>,
@@ -1610,6 +1613,9 @@ impl RowLayout {
         self.holder_handoff_titles.append(&mut other.holder_handoff_titles);
         self.result_lend_titles.append(&mut other.result_lend_titles);
         self.aggregate_titles.append(&mut other.aggregate_titles);
+        self.collection_reborrow_ends.append(&mut other.collection_reborrow_ends);
+        self.yielded_reference_ends.append(&mut other.yielded_reference_ends);
+        self.iterator_end_notes.append(&mut other.iterator_end_notes);
         self.shadowed_borrow_lenders.append(&mut other.shadowed_borrow_lenders);
         self.closure_result_holders.append(&mut other.closure_result_holders);
         self.stored_lender_loans.append(&mut other.stored_lender_loans);

@@ -2681,6 +2681,12 @@ fn render_dot(
                             }
                         }
                     }
+                    if let Event::TemporaryDrop { id, .. } = event {
+                        if let Some(note) = visualization_data.row_layout.iterator_end_notes.get(id) {
+                            title.push_str("&lt;br&gt;");
+                            title.push_str(note);
+                        }
+                    }
                     if conditional_drop.is_some() {
                         title = format!("{}. This assignment runs on only some paths through this expression.", title.trim_end_matches('.'));
                     }
@@ -3058,6 +3064,17 @@ fn render_dot(
         }
         if let Some(title) = visualization_data.row_layout.aggregate_titles.get(&event.get_id()) {
             data.title.clone_from(title);
+        }
+        if visualization_data.row_layout.yielded_reference_ends.contains(&event.get_id()) {
+            if let Event::MutableReacquire { from, is, .. } = event {
+                let item = hover_messages::styled_name_html(&from.name());
+                let place = hover_messages::styled_name_html(&is.name());
+                data.title = format!("{item} stops holding the yielded reference. The borrow checker still restricts access to {place} during iteration.");
+            }
+        }
+        if let Some(note) = visualization_data.row_layout.iterator_end_notes.get(&event.get_id()) {
+            data.title.push_str("&lt;br&gt;");
+            data.title.push_str(note);
         }
         let mut event_kind = rv_attrs::event_name(event);
         if matches!(event, Event::StaticLend { .. } | Event::MutableLend { .. }
@@ -7345,6 +7362,15 @@ fn render_generic_arrow(
         (Some(f), _) => {
             let previous = layout.field_generations.get(&id).is_some_and(|g| g.replaced);
             hover_messages::arrow_field_lenders_title(external_event, from, to, f, previous, option_ref)
+        }
+        (_, ExternalEvent::MutableDie { still_borrowed_by, .. })
+            if still_borrowed_by.as_slice() == [hover_messages::LOOP_ITERATOR_HOLDER] => {
+            let item = hover_messages::styled_name_html(&from.name());
+            if layout.collection_reborrow_ends.contains(&id) {
+                format!("{item} stops holding this reference. The iterator still holds a mutable borrow of the collection.")
+            } else {
+                format!("{item} stops holding this reference. The borrow checker still restricts access through the iterator until iteration ends.")
+            }
         }
         (None, ExternalEvent::StaticDie { static_lender, of_ref_var, .. } | ExternalEvent::MutableDie { static_lender, of_ref_var, .. }) => {
             let table = &visualization_data.state_table;
@@ -11940,6 +11966,13 @@ fn owner_loan_title(
         format!("The borrow checker requires exclusive access to {} until the borrow ends", styled_name_html(name))
     } else if let Some(parent) = subject.filter(|p| *p != name && rap.is_member()).and_then(|p| display_place(vd, fn_line, name, p)) {
         hover_messages::state_lent_with_parent(name, &parent, exact_holder, exclusive, read_only)
+    } else if iterator && loans.iter().any(|l| table.iterator_restricts(fn_line, l.loan)) {
+        let name = styled_name_html(name);
+        if exclusive {
+            format!("The borrow checker keeps {name} exclusively borrowed during iteration. {name} can't be used until the borrow ends.")
+        } else {
+            format!("The borrow checker keeps {name} shared during iteration.")
+        }
     } else if iterator {
         // 2.x's own loop-iterator title where it drew one; else 2.x's clause
         // and who holds the borrow (not "until the loop ends": a path that

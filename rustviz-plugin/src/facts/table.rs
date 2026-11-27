@@ -220,6 +220,7 @@ struct BodyTable {
     uniform_option_refs: BTreeMap<String, bool>,
     /// Each loan's borrowed place (`s`, `p.a`, `*b`, `v[_]`).
     loans: BTreeMap<usize, LoanInfo>,
+    iterator_restrictions: BTreeSet<usize>,
     drop_holders: BTreeMap<usize, BTreeSet<String>>,
     part_lenders: BTreeSet<String>,
     /// Columns with fields this body can't name (no columns of their own).
@@ -345,6 +346,12 @@ impl StateTable {
     /// (the nearest state doesn't have it) or nothing is known.
     pub fn cell(&self, function: FunctionStart, column: &str, row: usize, floor: usize) -> Option<Cell> {
         self.cell_on(function, column, row, floor, None)
+    }
+
+    /// These loans constrain iteration even if the current reference has
+    /// moved out of storage or a conversion returned an unrelated referent.
+    pub fn iterator_restricts(&self, function: FunctionStart, loan: usize) -> bool {
+        self.bodies.get(&function.body).is_some_and(|b| b.iterator_restrictions.contains(&loan))
     }
 
     pub fn has_part_loans(&self, function: FunctionStart, column: &str) -> bool {
@@ -1019,7 +1026,10 @@ fn body_table(b: &BodyFacts) -> BodyTable {
             join: bounds.join.as_ref().map(cells_of),
         })).collect())
     }).collect();
-    BodyTable { successor_counts, drop_holders: b.drop_holders.clone(), branch_entries, arm_boundaries, first_line: b.first_line, last_line: b.last_line, function_body_start: b.function_body_start, rows, columns, parents, moved_places, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
+    let iterator_restrictions = b.iterators.iter().flat_map(|it|
+        it.opaque_item_loans.iter().filter(|_| !it.identity).chain(it.bindings.iter().filter(|_| it.moves_references)
+            .flat_map(|binding| binding.loans.intersection(&it.loans)))).copied().collect();
+    BodyTable { iterator_restrictions, successor_counts, drop_holders: b.drop_holders.clone(), branch_entries, arm_boundaries, first_line: b.first_line, last_line: b.last_line, function_body_start: b.function_body_start, rows, columns, parents, moved_places, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
 }
 
 fn body_joins(b: &BodyFacts) -> BodyJoins {
@@ -1105,7 +1115,7 @@ mod tests {
             vars: Vec::new(),
             columns: cols.iter().map(|c| col(c)).collect(),
             uniform_option_refs: Default::default(),
-            slice_items: BTreeSet::new(),
+            iterators: Vec::new(),
             binding_loans: BTreeMap::new(),
             loans: vec![LoanInfo {
                 projected: None,

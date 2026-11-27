@@ -664,7 +664,7 @@ const BOOK: &[Snippet] = &[
         id: "c8_04_vec_for_ref",
         must_contain: &[
             "Immutable borrow from v to i",
-            "If i holds a shared borrow affecting v, that borrow ends here. It no longer restricts access to v",
+            "When the iterator runs out of items, its shared borrow of v ends. This borrow no longer restricts access to v",
             "v goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &["i is the owner of the resource"],
@@ -676,7 +676,7 @@ const BOOK: &[Snippet] = &[
             "Mutable borrow from v to i",
             "i holds a mutable reference; it can read and write the borrowed value",
             "the value i points to is modified through *i",
-            "If i holds a mutable borrow affecting v, that borrow ends here. It no longer restricts access to v",
+            "When the iterator runs out of items, its mutable borrow of v ends. This borrow no longer restricts access to v",
         ],
         must_not_contain: &["i is the owner of the resource", "*i acquires ownership of a resource"],
         ..E
@@ -921,6 +921,7 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c10_01_largest_generic",
         must_contain: &[
+            "L3 item is bound to an immutable reference; it can read the borrowed value",
             "list is an immutable borrow from the caller",
             "Immutable reborrow from list to largest",
             "a reference from largest is returned to the caller; the data it points to is not copied",
@@ -935,6 +936,7 @@ const BOOK: &[Snippet] = &[
             "the resource list points to is immutably borrowed by largest",
         ],
         must_not_contain: &[
+            "L3 item is bound to an immutable reference; it can read the borrowed resource",
             "result is the owner of the resource",
             "item's resource is copied",
             "list's immutable borrow ends",
@@ -1105,11 +1107,11 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c13_08_iter_mut",
         status: Correct,
-        note: "x's mutable borrow returns to v at the end of the loop (was 'returned' to iter_mut, #171; #789), and v isn't unborrowed on the for line (#868)",
+        note: "Each x stops holding its reference at its last use. The iterator keeps v borrowed through exhaustion (#171, #789, #868).",
         must_contain: &[
             "iter_mut takes a mutable reference (as self, implicitly borrowed). It may read or write through that reference",
             "the value x points to is modified through *x",
-            "If x holds a mutable borrow affecting v, that borrow ends here. It no longer restricts access to v",
+            "When the iterator runs out of items, its mutable borrow of v ends. This borrow no longer restricts access to v",
             // x's borrow of v, on the `for` line (#1347).
             "Mutable borrow from v to x",
             "x's mutable borrow ends",
