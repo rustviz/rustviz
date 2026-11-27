@@ -265,6 +265,9 @@ pub struct BodyFacts {
     /// The state at a conditional's normal MIR continuation, before its first instruction.
     #[serde(serialize_with = "conditional_joins", skip_serializing_if = "rustc_data_structures::fx::FxIndexMap::is_empty")]
     pub joins: rustc_data_structures::fx::FxIndexMap<rustc_hir::HirId, Join>,
+    /// Loop boundaries keyed by the compiler's loop expression.
+    #[serde(serialize_with = "loop_states", skip_serializing_if = "rustc_data_structures::fx::FxIndexMap::is_empty")]
+    pub loops: rustc_data_structures::fx::FxIndexMap<rustc_hir::HirId, LoopState>,
     /// The state at the first MIR decision of a drawn conditional.
     #[serde(skip)]
     pub branch_entries: rustc_data_structures::fx::FxIndexMap<rustc_hir::HirId, State>,
@@ -276,6 +279,66 @@ pub struct BodyFacts {
 pub(crate) struct DropMove {
     pub local: Local,
     pub fields: Vec<String>,
+}
+
+fn loop_states<S: serde::Serializer>(
+    loops: &rustc_data_structures::fx::FxIndexMap<rustc_hir::HirId, LoopState>, s: S,
+) -> Result<S::Ok, S::Error> {
+    s.collect_seq(loops.values())
+}
+
+#[derive(Serialize)]
+pub struct LoopState {
+    #[serde(serialize_with = "location")]
+    pub at: Location,
+    pub row: usize,
+    pub entry: State,
+    pub head: State,
+    pub next_iteration: Option<State>,
+    pub continuation: Option<State>,
+    pub edges: Vec<LoopEdge>,
+    #[serde(skip)]
+    pub constant_pruned_backedge: bool,
+    #[serde(skip)]
+    pub changes: BTreeMap<String, LoopChange>,
+}
+
+#[derive(Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopEdgeKind {
+    Entry,
+    Backedge,
+    Break,
+    Exhaustion,
+}
+
+#[derive(Serialize)]
+pub struct LoopEdge {
+    #[serde(serialize_with = "location")]
+    pub from: Location,
+    #[serde(serialize_with = "location")]
+    pub to: Location,
+    pub kind: LoopEdgeKind,
+    pub runs: bool,
+    #[serde(skip)]
+    pub jump: Option<rustc_hir::HirId>,
+    pub state: State,
+}
+
+#[derive(Default)]
+pub struct LoopChange {
+    pub moved: bool,
+    pub moved_part: bool,
+    pub entry_empty_at_runtime: bool,
+    pub wrote: bool,
+    pub writes_on_all_exits: bool,
+    pub carried: bool,
+    pub moved_away: bool,
+    pub wrote_away: bool,
+    pub changes_next_iteration: bool,
+    pub moved_at_break: bool,
+    pub branch_move: bool,
+    pub moved_at_exhaustion: bool,
 }
 
 #[derive(Default)]

@@ -1076,6 +1076,7 @@ mod tests {
             short_circuit_branches: Default::default(),
             explicit_drop_ends: Default::default(),
             switches: vec![],
+            loops: Default::default(),
             closure_result_loans: Default::default(),
             bindings: Default::default(),
             aggregate_loans: Default::default(),

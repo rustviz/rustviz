@@ -50,9 +50,7 @@ struct PendingDot {
 /// An approximation note on a dot, and whether it is a loop's.
 #[derive(Clone, PartialEq)]
 enum DotNote {
-    /// A loop's note; whether the loop declares variables, and whether
-    /// it runs at most once (`ApproxNote::Loop`).
-    Loop(bool, bool),
+    Loop(String),
     Other(String),
     UnreachedScopeExit,
 }
@@ -60,7 +58,7 @@ enum DotNote {
 impl DotNote {
     fn text(&self) -> String {
         match self {
-            DotNote::Loop(declares, at_most_once) => hover_messages::approx_note_loop(*declares, *at_most_once),
+            DotNote::Loop(t) => t.clone(),
             DotNote::Other(t) => t.clone(),
             DotNote::UnreachedScopeExit => "This dot describes normal scope exit. A preceding closure call never returns, so this exit never runs. If the call panics, values still owned at the call are dropped if unwinding reaches their cleanup.".to_owned(),
         }
@@ -234,7 +232,7 @@ impl DotLayer {
         // would sit inside a nested loop, where "this loop" reads as the
         // nested one, whose own note already says it.
         for note in notes {
-            let ApproxNote::Loop { head, pass: (lo, hi), head_cols, locals, nested, declares, at_most_once } = note else { continue };
+            let ApproxNote::Loop { head, pass: (lo, hi), head_cols, locals, nested, text } = note else { continue };
             let mut best: Option<(usize, i64, usize)> = None;
             for (hash, col) in &by_col {
                 if !locals.contains(hash) && !col.iter().any(|(l, _)| l < head) {
@@ -252,7 +250,7 @@ impl DotLayer {
                 }
             }
             if let Some((.., i)) = best {
-                add(&mut self.dots, vec![i], DotNote::Loop(*declares, *at_most_once));
+                add(&mut self.dots, vec![i], DotNote::Loop(text.clone()));
             }
         }
         for note in notes {
@@ -2071,7 +2069,12 @@ fn scope_end_message(
             && (can_be_conditional || partial.is_some_and(|p| !p.payloads_conditional.is_empty())) {
             // A loop above may have ended before assigning
             // it (#786): the drop flag decides here.
-            return (hover_messages::event_dot_go_out_of_scope_after_loop(&name, &ro.drop_note(), loop_maybe_init_before(history)), true);
+            let title = if loop_maybe_init_prior_assignment(history) {
+                hover_messages::event_dot_go_out_of_scope_maybe_kept(&name, &ro.drop_note())
+            } else {
+                hover_messages::event_dot_go_out_of_scope_after_loop(&name, &ro.drop_note(), loop_maybe_init_before(history))
+            };
+            return (title, true);
         } else if let (false, Some(InitJoin::Maybe { moved })) = (ro.holds_value() || !can_be_conditional, (match &exit_path {
             // An exit's drop in a branch, after a conditional above the
             // branch's that assigned it in some branches only (#1436).
@@ -2546,7 +2549,11 @@ fn render_dot(
                             }
                             title
                         } else {
-                            hover_messages::event_dot_owner_drop_at_reassign_after_loop(&name, &note, loop_maybe_init_before(&history[..i]))
+                            if loop_maybe_init_prior_assignment(&history[..i]) {
+                                hover_messages::event_dot_owner_drop_at_reassign_maybe_kept(&name, &note)
+                            } else {
+                                hover_messages::event_dot_owner_drop_at_reassign_after_loop(&name, &note, loop_maybe_init_before(&history[..i]))
+                            }
                         }
                     } else if let Event::OwnerDropAtReassign { maybe_init: Some(InitBy::EarlierIteration), maybe_moved: true, by_cond, .. } = event {
                         // The first thing a loop's body does to it,
@@ -2698,7 +2705,7 @@ fn render_dot(
                     data.title = hover_messages::event_dot_loop_maybe_init_nested(
                         &name, rap.drops_nothing(), rap.is_mut());
                 }
-                Event::LoopMaybeInit { before_loop, .. } => {
+                Event::LoopMaybeInit { before_loop, prior_assignment, always_assigned, .. } => {
                     // A loop above may have ended before assigning it
                     // (#786): like a conditional's maybe-initialized
                     // join, say when its value, if any, is dropped.
@@ -2715,12 +2722,12 @@ fn render_dot(
                     let assigned = visualization_data.fn_source_lines.get(hash).and_then(|&function| {
                         let row = rv_attrs::line_of(*line_number, &visualization_data.row_lines)?;
                         visualization_data.state_table.segment_cell(function, rap.name(), row)
-                    }).is_some_and(|cell| cell.always_assigned);
+                    }).is_some_and(|cell| cell.always_assigned) || *always_assigned;
                     data.title = if assigned {
                         hover_messages::event_dot_runtime_assigned(rap.name(), !rap.drops_nothing(), rap.is_mut(), reassigned, &rap.drop_note())
                     } else {
                         hover_messages::event_dot_loop_maybe_init(
-                            &name, rap.drops_nothing(), rap.is_mut(), reassigned, *before_loop)
+                            &name, rap.drops_nothing(), rap.is_mut(), reassigned, *before_loop, *prior_assignment)
                     };
                 }
                 Event::LoopExitKept { reassigned } => {
@@ -3313,13 +3320,6 @@ fn arm_end_state(rap: &ResourceAccessPoint, branch: &BranchData, branch_history:
     if ended_here || ended_in_nested { State::FullPrivilege { s: LineState::Uninit } } else { end }
 }
 
-/// Loops still use the drawn exits until their own MIR join migration.
-fn loop_merge_moves(branch_history: &[BranchData]) -> (bool, bool) {
-    let moved = branch_history.iter().filter(|b| !b.diverges)
-        .any(|b| b.states.last().is_none_or(|s| !state_is_alive(&s.2)));
-    (moved, false)
-}
-
 fn branch_moves(event: &Event) -> (bool, bool) {
     match event {
         Event::Branch { join: Some(join), .. } => (
@@ -3327,7 +3327,6 @@ fn branch_moves(event: &Event) -> (bool, bool) {
                 || join.cell.init == Init::Partly && (join.cell.unnamed_maybe || join.maybe_empty_box),
             join.cell.init == Init::Moved,
         ),
-        Event::Branch { branch_history, ty: BranchType::Loop(..), .. } => loop_merge_moves(branch_history),
         _ => (false, false),
     }
 }
@@ -3336,14 +3335,13 @@ fn branch_maybe_held(event: &Event) -> bool {
     match event {
         Event::Branch { join: Some(join), .. } => join.cell.init == Init::Maybe
             && join.change.wrote && !join.change.writes_on_all_paths && join.change.entry_maybe,
-        Event::Branch { ty: BranchType::Loop(..), .. } => leaves_maybe_held(event),
         Event::Branch { is, .. } if is.extract_rap().is_some_and(is_branch_temp_col) => leaves_maybe_held(event),
         _ => false,
     }
 }
 
 fn branch_initialization(event: &Event) -> Option<InitJoin> {
-    let Event::Branch { join, ty, is, branch_history, maybe_init, .. } = event else { return None };
+    let Event::Branch { join, is, branch_history, maybe_init, .. } = event else { return None };
     if let Some(j) = join {
         if j.cell.init != Init::Maybe || j.cell.always_assigned { return None; }
         if let Some(mixed) = j.cell.mixed_init.filter(|_| !j.change.entry_own) {
@@ -3357,7 +3355,7 @@ fn branch_initialization(event: &Event) -> Option<InitJoin> {
             .then_some(InitJoin::Maybe { moved: false });
     }
     // Transient values still use their own display lifecycle.
-    if matches!(ty, BranchType::Loop(..)) || is.extract_rap().is_some_and(is_branch_temp_col) {
+    if is.extract_rap().is_some_and(is_branch_temp_col) {
         return branches_init_join(*maybe_init, branch_history);
     }
     None
@@ -3415,6 +3413,7 @@ fn maybe_moved_at_end(history: &[(usize, Event)]) -> bool {
             }
             // A loop left through a `break` after a move (or another
             // way): maybe-moved; through such `break`s only: moved.
+            Event::LoopExitMove { at: MaybeMovedAt::LoopPartial, .. } => {}
             Event::LoopExitMove { definite, .. } => maybe = !*definite,
             // Moved into a name an or-pattern binds, on the paths where
             // the alternative that binds from here matched (#533).
@@ -3520,6 +3519,13 @@ fn loop_maybe_init_before(history: &[(usize, Event)]) -> Option<bool> {
         Event::LoopMaybeInit { before_loop, .. } => Some(*before_loop),
         _ => None,
     }).flatten()
+}
+
+fn loop_maybe_init_prior_assignment(history: &[(usize, Event)]) -> bool {
+    history.iter().rev().find_map(|(_, e)| match e {
+        Event::LoopMaybeInit { prior_assignment, .. } => Some(*prior_assignment),
+        _ => None,
+    }).unwrap_or(false)
 }
 
 // A drop-flag assignment to a maybe-initialized `let x;` local (#244),
@@ -9552,13 +9558,6 @@ fn append_line(
 //     no body in between), each becomes its own run with its own
 //     hover polygons — the gap stays empty rather than getting
 //     bridged.
-
-/// Whether the variable still owns / can-borrow a resource at this
-/// state. Used by the merge-dot classifier to decide between the
-/// drop-dot (mixed branches), all-moved, and unchanged tooltips.
-fn state_is_alive(state: &State) -> bool {
-    !matches!(state, State::ResourceMoved { .. } | State::OutOfScope)
-}
 
 /// Whether the arm draws a solid, hollow or dotted segment for the column.
 fn seg_drawn(rap: &ResourceAccessPoint, state: &State) -> bool {
