@@ -46,6 +46,22 @@ pub struct AggregateLoan {
     pub conditional: bool,
 }
 
+/// The source-level name and the typed steps that have no column of their own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProjectedPlace {
+    pub base: String,
+    pub steps: Vec<PlaceStep>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PlaceStep {
+    Deref,
+    Field(String),
+    Element,
+    Subslice,
+    Payload,
+}
+
 /// How the MIR operand carries this loan into a receiver.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum StoredOperand {
@@ -69,6 +85,10 @@ pub struct ReceiverLoan {
 
 #[derive(Serialize)]
 pub struct BodyFacts {
+    /// Places a callee can write through a mutable operand, paired with
+    /// the loans carried by the source operand at that exact MIR call.
+    #[serde(skip)]
+    pub(crate) argument_stores: std::collections::HashMap<(rustc_span::Span, usize), Vec<(String, BTreeSet<usize>)>>,
     /// Loans carried by the operands of this MIR aggregate, in operand order.
     #[serde(skip)]
     pub aggregate_loans: std::collections::HashMap<rustc_span::Span, Vec<AggregateLoan>>,
@@ -268,6 +288,8 @@ pub struct LoanInfo {
     /// The borrowed place as the source writes it (`s`, `p.a`, `v[_]`,
     /// `*b`, `(o as Some).0`).
     pub lender: String,
+    #[serde(skip)]
+    pub(crate) projected: Option<ProjectedPlace>,
     /// The columns this loan restricts (every column whose place
     /// overlaps the borrowed place: `v` for `v[_]`, `p` and `p.a` for
     /// `p.a`).

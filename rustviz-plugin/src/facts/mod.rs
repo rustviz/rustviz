@@ -25,6 +25,7 @@
 //! write them to as well.
 
 mod body;
+mod call_stores;
 mod places;
 mod rows;
 pub mod schema;

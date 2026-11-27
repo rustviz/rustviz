@@ -143,6 +143,56 @@ impl<'tcx> Names<'tcx> {
         Some(name_projections(root, &mut ty, &place.projection[skip..]))
     }
 
+    /// Describe projections that cannot be written as a named source place.
+    pub(super) fn projected(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'tcx>) -> Option<super::ProjectedPlace> {
+        use super::PlaceStep;
+        let (_, skip, _) = self.root(place)?;
+        if !place.projection[skip..].iter().any(|p| matches!(p, ProjectionElem::Index(_) |
+            ProjectionElem::ConstantIndex { .. } | ProjectionElem::Subslice { .. })) {
+            return None;
+        }
+        let first = (skip..place.projection.len()).find(|&i| matches!(place.projection[i],
+            ProjectionElem::Index(_) | ProjectionElem::ConstantIndex { .. } |
+            ProjectionElem::Subslice { .. } | ProjectionElem::Downcast(..)))?;
+        let prefix = Place { local: place.local, projection: tcx.mk_place_elems(&place.projection[..first]) };
+        let base = self.name(tcx, body, prefix)?;
+        let mut ty = place_ty_prefix(tcx, body, place, first);
+        let mut variant = None;
+        let mut steps = Vec::new();
+        for elem in &place.projection[first..] {
+            let step = match *elem {
+                ProjectionElem::Deref => PlaceStep::Deref,
+                ProjectionElem::Index(_) | ProjectionElem::ConstantIndex { .. } => PlaceStep::Element,
+                ProjectionElem::Subslice { .. } => PlaceStep::Subslice,
+                ProjectionElem::Downcast(_, v) => {
+                    variant = Some(v);
+                    continue;
+                }
+                ProjectionElem::Field(field, _) => {
+                    let f = match (ty.kind(), variant.take()) {
+                        (TyKind::Adt(def, _), Some(v)) => {
+                            let fields = &def.variant(v).fields;
+                            if fields.len() == 1 && fields[field].name.as_str() == "0" {
+                                steps.push(PlaceStep::Payload);
+                                ty = project_ty(ty, elem);
+                                continue;
+                            }
+                            fields[field].name.to_string()
+                        }
+                        (TyKind::Adt(def, _), None) if !def.is_enum() => def.non_enum_variant().fields[field].name.to_string(),
+                        (TyKind::Tuple(_), _) => field.index().to_string(),
+                        _ => return None,
+                    };
+                    PlaceStep::Field(f)
+                }
+                _ => return None,
+            };
+            steps.push(step);
+            ty = project_ty(ty, elem);
+        }
+        (!steps.is_empty()).then_some(super::ProjectedPlace { base, steps })
+    }
+
     /// A place in a MIR temporary, written from the temporary's source
     /// text: `(make_o().opt as Some).0`.
     pub fn name_in_temp(&self, body: &Body<'tcx>, place: Place<'tcx>, root: String) -> String {

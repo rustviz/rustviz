@@ -501,7 +501,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// argument was built as an aggregate (`v.push((&a, &mut b))`).
   pub(crate) fn receiver_aggregate_operands(&self, call: &'tcx Expr<'tcx>) -> Vec<OperandBorrow<'a>> {
     let flows = self.call_arg_flows_into(call, FlowTarget::Receiver).unwrap_or_default();
-    flows.iter().filter(|f| f.content).filter_map(|f| self.aggregate_borrows(f.arg)).flatten().collect()
+    flows.iter().filter(|f| f.content).filter_map(|f| self.aggregate_operand_borrows(f.arg, true)).flatten().collect()
   }
 
   /// If an input and receiver already share a loan, their overlap alone
@@ -1218,6 +1218,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// The loan identities attached to the operands of this MIR construction.
   /// A lender column is a projection of an identified loan, never its key.
   pub(crate) fn aggregate_borrows(&self, init: &Expr<'_>) -> Option<Vec<OperandBorrow<'a>>> {
+    self.aggregate_operand_borrows(init, false)
+  }
+
+  fn aggregate_operand_borrows(&self, init: &Expr<'_>, receiver: bool) -> Option<Vec<OperandBorrow<'a>>> {
     let facts = self.body_facts?;
     let span = if crate::facts::is_vec_expansion(self.tcx, init.span.ctxt().outer_expn()) { init.span.source_callsite() } else { init.span };
     // For a reassignment rustc can attach the assignment's span to the
@@ -1261,7 +1265,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
       } else {
         let column = self.raps.get(&loan.lender).or_else(|| match loan.columns.as_slice() {
-          [only] => self.raps.get(only), _ => None,
+          [only] => self.raps.get(only),
+          _ if receiver && loan.projected.is_some() => loan.part_of.iter().find_map(|p| self.raps.get(p)),
+          _ => None,
         });
         let Some(column) = column else { continue };
         ResourceTy::Value(column.rap.clone())

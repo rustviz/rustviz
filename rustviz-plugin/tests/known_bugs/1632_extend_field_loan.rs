@@ -42,9 +42,9 @@ fn nested_field() {
     println!("{k} {}", d.1);
 }
 
-// Fields of one variable lent both ways in one store: one kind is drawn
-// for every lender of a store, so these keep the whole-variable drawing
-// rather than a field drawn with the other field's kind.
+// Fields of one variable lent both ways in one store: e.0 can be read
+// while y holds its shared reference. Access to e.1 stays exclusive
+// until the mutable loan ends.
 fn mixed_kinds() {
     let mut e = (1, 2);
     let mut y: Vec<(&i32, &mut i32)> = Vec::new();

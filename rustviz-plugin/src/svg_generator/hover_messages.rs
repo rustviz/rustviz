@@ -2413,15 +2413,15 @@ pub fn aggregate_reservation(through: &String, holder: &String) -> String {
         styled_name_html(through), styled_name_html(holder))
 }
 
-pub fn aggregate_arm_borrow(lender: &String, holder: &String, mutable: bool, conditional: bool) -> String {
+pub fn aggregate_arm_borrow(lender: &str, holder: &String, mutable: bool, conditional: bool) -> String {
     let path = if conditional { "If this operand is selected, " } else { "" };
     let kind = if mutable { "mutable" } else { "shared" };
     format!("{path}{} holds a {kind} borrow of {}. The borrow checker keeps the borrowed place restricted while {} is in use",
-        styled_name_html(holder), styled_name_html(lender), styled_name_html(holder))
+        styled_name_html(holder), lender, styled_name_html(holder))
 }
 
-pub fn conditional_aggregate_end(holder: &String, lender: &String) -> String {
-    format!("If {} holds the borrow of {}, that borrow ends here", styled_name_html(holder), styled_name_html(lender))
+pub fn conditional_aggregate_end(holder: &String, lender: &str) -> String {
+    format!("If {} holds the borrow of {}, that borrow ends here", styled_name_html(holder), lender)
 }
 
 /// Marks, in the place of a returned reborrow (`DerefField`), a
@@ -3493,7 +3493,7 @@ pub fn state_shared_by(name: &String, holder: Option<&str>, value: bool) -> Stri
 
 /// Names for a list of places; `None`: a temporary 2.x draws no column for.
 fn place_list(names: &[Option<String>], conj: &str) -> String {
-    let fmt: Vec<String> = names.iter().map(|n| n.as_deref().map_or_else(|| "a temporary value".to_owned(), styled_name_html)).collect();
+    let fmt: Vec<String> = names.iter().map(|n| n.clone().unwrap_or_else(|| "a temporary value".to_owned())).collect();
     match fmt.as_slice() {
         [init @ .., last] if !init.is_empty() => format!("{} {conj} {last}", init.join(", ")),
         _ => fmt.concat(),
@@ -3505,7 +3505,7 @@ fn place_list(names: &[Option<String>], conj: &str) -> String {
 /// "mutable", "reserved" (a two-phase `&mut` of a method call's receiver,
 /// before the call) or "unique" (a closure's unique capture). `may`: on
 /// some paths only.
-pub fn state_lent_parts(name: &str, places: &std::collections::BTreeSet<&str>, holder: Option<&str>, kind: &str, may: bool) -> String {
+pub fn state_lent_parts(name: &str, places: &[String], holder: Option<&str>, kind: &str, may: bool) -> String {
     let by = holder.map_or_else(String::new, |h| format!(" by {}", styled_name_html(h)));
     let (what, restricted) = match kind {
         "mutable" => ("mutable borrow", "used"),
@@ -3516,12 +3516,12 @@ pub fn state_lent_parts(name: &str, places: &std::collections::BTreeSet<&str>, h
     let paths = if may { format!(" ({})", some_paths_why(false)) } else { String::new() };
     let me = styled_name_html(name);
     if places.len() == 1 {
-        let place = styled_name_html(places.first().unwrap());
+        let place = &places[0];
         let is = if may { "may be" } else { "is" };
         let done = if kind == "reserved" { "reserved for a mutable borrow by a method call" } else { "borrowed" };
         format!("{place} {is} {done}{by} here{paths}. This {what} prevents {me} from being {restricted} as a whole until it ends")
     } else {
-        let names = places.iter().map(|p| styled_name_html(p)).collect::<Vec<_>>().join(", ");
+        let names = places.join(", ");
         let names = names.rsplit_once(", ").map_or(names.clone(), |(a, b)| format!("{a} and {b}"));
         format!("The borrow checker counts {what}s of {names} here{paths}. While they are in scope, {me} can't be {restricted} as a whole")
     }
@@ -3887,15 +3887,27 @@ pub enum HolderLender {
 /// A shared reference can keep several input loans live, including an
 /// exclusive loan that the stored reference itself cannot write through.
 pub(crate) fn stored_loan_message(detail: crate::event_order::StoredLoan, holder: &ResourceTy, lender: &ResourceTy,
-    method: Option<&str>, ended: bool) -> String {
+    method: Option<&str>, ended: bool, projected: Option<&str>) -> String {
     use crate::event_order::StoredLoan;
     let h = styled_name_html(&holder.name());
     let l = styled_name_html(&lender.name());
     match detail {
         StoredLoan::SharedInput { mutable, binding } | StoredLoan::Carrier { mutable, binding } => {
             let kind = if mutable { "mutable" } else { "shared" };
-            let place = if binding { format!("the binding {l}") }
-                else if lender.is_ref() { format!("the referent of {l}") } else { l };
+            let place = if let Some(place) = projected {
+                place.to_owned()
+            } else if binding && lender.extract_rap().is_some_and(|r| r.is_member()) {
+                format!("the reference-valued field {l}")
+            } else if binding {
+                format!("the binding {l}")
+            } else if lender.is_ref() {
+                format!("the referent of {l}")
+            } else {
+                l
+            };
+            if ended {
+                return format!("The shared reference in {h} stops keeping the {kind} borrow of {place} live");
+            }
             if matches!(detail, StoredLoan::Carrier { .. }) {
                 let when = method.map_or_else(String::new, |f| format!("After {}, ", styled_name_html(f)));
                 return format!("{when}{h} holds a value that can contain references ({h} isn't a reference itself). The borrow checker keeps the {kind} borrow of {place} live while {h} is in use");
@@ -4042,14 +4054,14 @@ pub fn state_lent_with_parent(my_name: &str, parent: &str, by: Option<&str>, mut
 /// variable the facts prove took this loan and holds nothing else).
 pub fn part_loan(place: &str, kind: &str, holder: Option<&str>) -> String {
     let by = holder.map_or_else(String::new, |h| format!(" by {}", styled_name_html(h)));
-    format!("{} is {}{by}", part_name_html(place), part_loan_kind(kind))
+    format!("{} is {}{by}", place, part_loan_kind(kind))
 }
 
 /// RustViz 3 (P1-3b): the one loan of a part, taken on some paths only;
 /// the borrow checker counts it on every path.
 pub fn part_loan_maybe(place: &str, kind: &str, holder: Option<&str>) -> String {
     let while_ = holder.map_or_else(String::new, |h| format!(" while {} is in use", styled_name_html(h)));
-    format!("{} may be {}; the borrow checker counts it as borrowed{while_}", part_name_html(place), part_loan_kind(kind))
+    format!("{} may be {}; the borrow checker counts it as borrowed{while_}", place, part_loan_kind(kind))
 }
 
 /// RustViz 3 (P1-3b): live loans of parts of an owner as the borrow
@@ -4059,10 +4071,9 @@ pub fn part_loan_maybe(place: &str, kind: &str, holder: Option<&str>) -> String 
 /// `holder` is only the variable whose use keeps them live.
 pub fn part_loans_counted(groups: &[(&str, Vec<String>)], holder: Option<&str>) -> String {
     let each: Vec<String> = groups.iter().map(|(kind, places)| {
-        let names: Vec<String> = places.iter().map(|p| part_name_html(p)).collect();
-        let names = match names.as_slice() {
+        let names = match places.as_slice() {
             [init @ .., last] if !init.is_empty() => format!("{} and {last}", init.join(", ")),
-            _ => names.concat(),
+            _ => places.concat(),
         };
         format!("{names} as {}", part_loan_kind(kind))
     }).collect();
@@ -4072,7 +4083,7 @@ pub fn part_loans_counted(groups: &[(&str, Vec<String>)], holder: Option<&str>) 
 
 /// A lent part's name: a place (styled), or a phrase ("what the reference
 /// in s.v points to", "a part of s") with the places in it styled.
-fn part_name_html(place: &str) -> String {
+pub(crate) fn part_name_html(place: &str) -> String {
     if let Some(r) = place.strip_prefix("what the reference in ").and_then(|r| r.strip_suffix(" points to")) {
         format!("what the reference in {} points to", styled_name_html(r))
     } else if let Some(c) = place.strip_prefix("a part of ") {
@@ -4080,6 +4091,21 @@ fn part_name_html(place: &str) -> String {
     } else {
         styled_name_html(place)
     }
+}
+
+pub(crate) fn projected_place_html(place: &crate::facts::ProjectedPlace) -> String {
+    use crate::facts::PlaceStep;
+    let mut shown = styled_name_html(&place.base);
+    for step in &place.steps {
+        shown = match step {
+            PlaceStep::Deref => format!("what {shown} points to"),
+            PlaceStep::Element => format!("an element of {shown}"),
+            PlaceStep::Subslice => format!("a slice of {shown}"),
+            PlaceStep::Payload => format!("the value inside {shown}"),
+            PlaceStep::Field(field) => format!("the `.{0}` of {shown}", escape_tooltip_name(field)),
+        };
+    }
+    shown
 }
 
 fn part_loan_kind(kind: &str) -> &'static str {
