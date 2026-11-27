@@ -5075,150 +5075,52 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
-  /// `arg` is `&x` / `&mut x` passed to a call whose signature lets it
-  /// store that reference behind another argument (#513):
-  /// `point(&mut hold, &t)` with
-  /// `fn point<'a>(h: &mut H<'a>, t: &'a String)` may do `h.r = t`, so
-  /// the borrow checker keeps t borrowed while `hold` may still hold
-  /// the reference, not just until point returns. Returns the place it
-  /// may be stored in (an `Index` naming it, with no column of its own
-  /// in this event) and the line the loan ends on. None (the borrow
-  /// ends at the call, as before) unless x is a variable with a column
-  /// that owns its data, or a reference variable the call borrows
-  /// itself (`keep(&mut v, &x)` with `x: &String` and
-  /// `fn keep<'a>(h: &mut Vec<&'a &'a String>, r: &'a &'a String)`,
-  /// see `ref_var_borrow`, #960), the place is a variable or field with
-  /// a column, and the loan outlives the call's line.
-  fn stored_borrow(&self, arg: &'tcx Expr<'tcx>, from_ro: &ResourceTy, line: usize) -> Option<(ResourceTy, usize)> {
-    let ExprKind::AddrOf(..) = arg.kind else { return None };
-    let ResourceTy::Value(lender) = from_ro else { return None };
-    if lender.is_fn() || (lender.is_ref() && !ref_var_borrow(arg, self.tcx.typeck(arg.hir_id.owner))) {
-      return None;
-    }
-    let rustc_hir::Node::Expr(call) = self.tcx.parent_hir_node(arg.hir_id) else { return None };
-    let target = self.arg_storable_behind(call, arg)?;
-    let place = self.mut_arg_place(target)?;
-    let end_line = self.loan_end_line(line, lender.name()).filter(|&end| end > line)?;
-    let label = place.name().to_owned();
-    Some((ResourceTy::Index(place, label, PlaceWrite::Update), end_line))
-  }
-
-  /// `arg` is a call returning a reference (`b.as_str()`) passed to a
-  /// call whose signature lets it store that reference behind another
-  /// argument (`store(&mut r, b.as_str())`, #1124): each variable with
-  /// a column the returned reference borrows, the place it may be
-  /// stored in, and the line the loan ends on. The inner call's own
-  /// borrow is marked as kept by its result.
-  fn stored_call_result_borrows(&mut self, arg: &'tcx Expr<'tcx>, line: usize) -> Vec<(ResourceTy, ResourceTy, usize)> {
-    let is_call = match arg.kind {
+  /// Draw a call's store only when the actual MIR source operand carries
+  /// the loan and the callee can write it through the destination operand.
+  fn argument_stored_borrows(&mut self, arg: &'tcx Expr<'tcx>, from: &ResourceTy, line: usize, issued: Option<usize>)
+      -> Vec<(ResourceTy, ResourceTy, usize, usize)> {
+    let Some(facts) = self.body_facts else { return Vec::new() };
+    let rustc_hir::Node::Expr(call) = self.tcx.parent_hir_node(arg.hir_id) else { return Vec::new() };
+    let index = match call.kind {
+      ExprKind::Call(_, args) => args.iter().position(|a| a.hir_id == arg.hir_id),
+      ExprKind::MethodCall(_, receiver, args, _) =>
+        std::iter::once(receiver).chain(args.iter()).position(|a| a.hir_id == arg.hir_id),
+      _ => None,
+    };
+    let Some(stores) = index.and_then(|i| facts.argument_stores.get(&(call.span.with_parent(None), i))) else { return Vec::new() };
+    let from_call = match arg.kind {
       ExprKind::MethodCall(..) => true,
       ExprKind::Call(callee, _) => !crate::visitor::is_ctor_path(callee, self.tcx.typeck(arg.hir_id.owner)),
       _ => false,
-    };
-    if !is_call || arg.span.from_expansion() {
+    } && !arg.span.from_expansion();
+    let lenders = if from_call {
+      self.call_lenders(arg)
+    } else if matches!(arg.kind, ExprKind::AddrOf(..)) {
+      vec![from.clone()]
+    } else {
       return Vec::new();
-    }
-    let rustc_hir::Node::Expr(call) = self.tcx.parent_hir_node(arg.hir_id) else { return Vec::new() };
-    let Some(place) = self.arg_storable_behind(call, arg).and_then(|t| self.mut_arg_place(t)) else { return Vec::new() };
+    };
     let mut out = Vec::new();
-    for lender in self.call_lenders(arg) {
-      let ResourceTy::Value(l) = &lender else { continue };
-      if l.is_ref() || l.is_fn() {
-        continue;
+    for (holder, ids) in stores {
+      let Some(place) = self.raps.get(holder).map(|d| &d.rap) else { continue };
+      for lender in &lenders {
+        let ResourceTy::Value(l) = lender else { continue };
+        if l.is_fn() { continue; }
+        for loan in facts.loans.iter().filter(|loan| ids.contains(&loan.loan) && loan.lender == *l.name()) {
+          if !from_call && issued != Some(loan.loan) { continue; }
+          let Some(end) = loan.end_lines.last().copied().filter(|&end| end > line) else { continue };
+          let dest = ResourceTy::Index(place.clone(), holder.clone(), PlaceWrite::Update);
+          out.push((lender.clone(), dest, end, loan.loan));
+        }
       }
-      let Some(end_line) = self.loan_end_line(line, l.name()).filter(|&end| end > line) else { continue };
-      self.mark_borrow_kept_by_result(arg, std::slice::from_ref(&lender));
-      let label = place.name().to_owned();
-      out.push((lender.clone(), ResourceTy::Index(place.clone(), label, PlaceWrite::Update), end_line));
+    }
+    out.dedup();
+    if from_call {
+      for (lender, ..) in &out {
+        self.mark_borrow_kept_by_result(arg, std::slice::from_ref(lender));
+      }
     }
     out
-  }
-
-  /// The argument of `call` that its signature lets it store the
-  /// reference `arg` behind: a `&mut` parameter whose pointee's type
-  /// mentions a lifetime of `arg`'s reference type
-  /// (`h: &mut H<'a>` for `t: &'a String`). Read from the signature
-  /// only, like the borrow checker; rustc has already filled in
-  /// elided lifetimes, and distinct ones never match.
-  fn arg_storable_behind(&self, call: &'tcx Expr<'tcx>, arg: &'tcx Expr<'tcx>) -> Option<&'tcx Expr<'tcx>> {
-    use rustc_middle::ty;
-    let typeck = self.tcx.typeck(call.hir_id.owner);
-    let (def_id, args): (_, Vec<&'tcx Expr<'tcx>>) = match call.kind {
-      ExprKind::Call(callee, args) => match typeck.node_type_opt(callee.hir_id)?.kind() {
-        ty::FnDef(def_id, _) => (*def_id, args.iter().collect()),
-        _ => return None,
-      },
-      ExprKind::MethodCall(_, rcvr, args, _) =>
-        (typeck.type_dependent_def_id(call.hir_id)?, std::iter::once(rcvr).chain(args.iter()).collect()),
-      _ => return None,
-    };
-    let sig = self.tcx.fn_sig(def_id).instantiate_identity().skip_norm_wip();
-    let sig = self.tcx.liberate_late_bound_regions(def_id, sig);
-    let inputs = sig.inputs();
-    if inputs.len() != args.len() {
-      return None;
-    }
-    let i = args.iter().position(|a| a.hir_id == arg.hir_id)?;
-    // `&'a String` for a parameter `&'a String`; or a type parameter
-    // the call fills with the reference (`std::mem::replace(&mut r,
-    // &b)`, `fn replace<T>(dest: &mut T, src: T) -> T`, #1124).
-    let stored = |g: ty::GenericArg<'tcx>| match inputs[i].kind() {
-      ty::Ref(region, _, _) => g.as_region() == Some(*region),
-      ty::Param(p) => g.as_type().is_some_and(|t| matches!(t.kind(), ty::Param(q) if q.index == p.index)),
-      _ => false,
-    };
-    if !matches!(inputs[i].kind(), ty::Ref(..) | ty::Param(_)) {
-      return None;
-    }
-    // A method's receiver (`refs.push(x)`, `push(&mut self, value: T)`)
-    // that may store the argument is drawn by `record_receiver_store`
-    // (#392); a type parameter is only followed into another argument.
-    let is_method = matches!(call.kind, ExprKind::MethodCall(..));
-    let by_param = matches!(inputs[i].kind(), ty::Param(_));
-    inputs.iter().zip(&args).enumerate().find_map(|(j, (input, other))| {
-      let ty::Ref(_, pointee, Mutability::Mut) = input.kind() else { return None };
-      if by_param && is_method && j == 0 {
-        return None;
-      }
-      (j != i && pointee.walk().any(stored)).then_some(*other)
-    })
-  }
-
-  /// The variable or field a `&mut` argument points to, if it has a
-  /// column: `hold` for `&mut hold`, for a method receiver `hold`
-  /// (auto-referenced), and for a local reference `rh` that borrows
-  /// `hold`.
-  fn mut_arg_place(&self, target: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
-    let place = match target.kind {
-      ExprKind::AddrOf(_, _, inner) => inner,
-      _ => target,
-    };
-    if !matches!(place.kind, ExprKind::Path(_) | ExprKind::Field(..)) {
-      return None;
-    }
-    let name = expr_to_rap_name(place, &self.tcx)?;
-    let rap = self.raps.get(&name)?.rap.to_owned();
-    if rap.is_fn() {
-      return None;
-    }
-    if !rap.is_ref() {
-      return Some(rap);
-    }
-    // `&mut r` with r a reference variable (`store(&mut r, &b)`,
-    // `std::mem::replace(&mut r, &b)`): the reference stored there is
-    // r's new value, so r is the place (#1124).
-    if !std::ptr::eq(place, target) {
-      return Some(rap);
-    }
-    // A reference variable passed as is (`point(rh, &t)`): the place
-    // is what it borrows.
-    match &self.borrow_map.get(&name)?.lender {
-      ResourceTy::Value(lender) if !lender.is_ref() && !lender.is_fn() => Some(lender.to_owned()),
-      // `rr = &mut r` with r a reference variable: what's stored
-      // through rr is r's new value (#1124).
-      ResourceTy::Value(lender) if lender.is_ref() && rap.is_mutref() => Some(lender.to_owned()),
-      _ => None,
-    }
   }
 
   /// The last line of the MIR loan of `lender_name` (a variable or a
@@ -6449,19 +6351,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // `show(&x)` / `bump(&mut m)` with x / m a reference variable and
       // a `&&String` / `&mut &mut String` parameter: the call borrows
       // x / m itself, not what it points to (#938).
-      let of_ref_var = ref_var_borrow(arg, tycheck_results);
+      let argument_loan = self.argument_loan(arg.span);
+      let of_ref_var = ref_var_borrow(arg, tycheck_results)
+        || matches!((&from_ro, argument_loan),
+          (ResourceTy::Value(r), Some(loan)) if r.is_member() && r.is_ref() && *r.name() == loan.lender);
+      let projected = argument_loan.and_then(|loan| Some((loan.loan, loan.projected.clone()?)));
       // `point(&mut hold, &t)` where point's signature lets it store
       // `&t` in `hold`: t stays borrowed past the call (#513).
       // `store(&mut r, b.as_str())`: the reference a call returns,
       // into b, may be stored in r; b stays borrowed while r is (#1124).
-      let stored = match self.stored_borrow(arg, &from_ro, line_num) {
-        Some((place, end_line)) => vec![(from_ro.clone(), place, end_line)],
-        None => self.stored_call_result_borrows(arg, line_num),
-      };
-      for (from_ro, place, end_line) in stored.iter().cloned() {
+      let stored = self.argument_stored_borrows(arg, &from_ro, line_num, argument_loan.map(|loan| loan.loan));
+      for (from_ro, place, end_line, loan) in stored.iter().cloned() {
         let mutable = arg_mut == Mutability::Mut;
         let id = *self.unique_id;
-        let loans = self.loans_issued_in(arg.span);
+        let loans = vec![loan];
         self.stored_borrows.push(StoredBorrow {
           holder: place.name().to_owned(), at: line_num, until: end_line, lender: from_ro.real_name(), is_mut: mutable, id, loans,
         });
@@ -6486,7 +6389,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         // `r = &b;` (#1353). (A place that isn't a reference, `keep(&mut
         // v, &b)`, keeps the borrow on b's column only.)
         let ref_holder = match &place {
-          ResourceTy::Index(p, _, _) if p.is_ref() && !p.is_member() && self.borrow_map.contains_key(p.name()) => Some(p.clone()),
+          ResourceTy::Index(p, _, _) if p.is_ref() && self.borrow_map.contains_key(p.name()) => Some(p.clone()),
           _ => None,
         };
         let place = match &ref_holder {
@@ -6519,6 +6422,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         if let ExternalEvent::StaticDie { of_ref_var: o, .. } | ExternalEvent::MutableDie { of_ref_var: o, .. } = &mut die {
           *o = of_ref_var;
         }
+        if let Some(holder) = &ref_holder {
+          self.end_loans.insert(*self.unique_id, vec![loan]);
+          if holder.is_member() {
+            self.row_layout.stored_field_ends.insert(*self.unique_id);
+          }
+        }
         self.add_external_event(end_line, die);
         *self.unique_id += 1;
         if ref_holder.is_some() {
@@ -6537,6 +6446,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         (ResourceTy::Deref(r), Some(DeepPlace { elem: Some(_), .. })) => ResourceTy::Value(r.clone()),
         _ => from_ro,
       };
+      let id = *self.unique_id;
       match arg_mut {
         Mutability::Not => {
           // `bump(rc)` with `rc: &Cell<i32>` (#1149): bump can change
@@ -6577,6 +6487,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           // `grow(&mut r.name)` with `r = &mut p`: the call can modify
           // p.name, drawn on its column too (#1216).
           self.write_field_behind_ref(&from_ro, arg, line_num);
+        }
+      }
+      if let Some(projected) = projected {
+        self.row_layout.projected_loan_places.insert(id, projected);
+        if tycheck_results.expr_ty_adjusted(arg).ref_mutability() == Some(Mutability::Not) {
+          self.row_layout.shared_projected_calls.insert(id);
         }
       }
     }
@@ -8259,11 +8175,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       return;
     }
     let ExprKind::MethodCall(seg, ..) = call.kind else { return };
-    let operands = self.receiver_aggregate_operands(call);
     let name = rcvr.name().to_owned();
     let Some(facts) = self.body_facts else { return };
     let Some(inputs) = facts.receiver_loans.get(&(call.span.with_parent(None), name.clone())) else { return };
     let inputs = self.receiver_input_loans(call, inputs);
+    let operands: Vec<_> = self.receiver_aggregate_operands(call).into_iter()
+      .filter(|b| b.loan.projected.is_none() || inputs.contains_key(&b.loan.loan)).collect();
     use crate::facts::StoredOperand;
     struct Store {
       place: ResourceTy,
@@ -8271,6 +8188,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       binding: bool,
       unique_capture: bool,
       operand: StoredOperand,
+      projected: Option<(usize, crate::facts::ProjectedPlace)>,
     }
     let mut stored: Vec<Store> = Vec::new();
     for (&id, &operand) in &inputs {
@@ -8293,17 +8211,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let place = ResourceTy::Value(lender.rap.clone());
       let binding = lender.rap.is_ref() && target == &loan.lender;
       let exclusive = matches!(loan.kind, "mut" | "unique");
+      let projected = loan.projected.clone().map(|place| (id, place));
+      if projected.is_some() && operand == StoredOperand::Carrier {
+        self.row_layout.uncertain_projected_stores.insert((*rcvr.hash(), id));
+      } else if projected.is_some() && operand == StoredOperand::SharedReference && exclusive {
+        self.row_layout.shared_projected_stores.insert((*rcvr.hash(), id));
+      }
       if loan.kind == "unique" { self.stored_unique_captures.insert((*rcvr.hash(), id)); }
-      if let Some(prior) = stored.iter_mut().find(|s| s.place == place) {
+      if let Some(prior) = stored.iter_mut().find(|s| s.place == place && projected.is_none() && s.projected.is_none()) {
         prior.exclusive |= exclusive;
         prior.binding &= binding;
         prior.unique_capture &= loan.kind == "unique";
         if prior.operand != operand { prior.operand = StoredOperand::Carrier; }
       } else {
-        stored.push(Store { place, exclusive, binding, unique_capture: loan.kind == "unique", operand });
+        stored.push(Store { place, exclusive, binding, unique_capture: loan.kind == "unique", operand, projected });
       }
     }
-    let lenders: Vec<_> = stored.iter().map(|s| s.place.clone()).collect();
+    let mut lenders = Vec::new();
+    for store in &stored {
+      if !lenders.contains(&store.place) { lenders.push(store.place.clone()); }
+    }
     if lenders.is_empty() { return; }
     for s in &stored {
       if s.binding { self.stored_ref_var_lends.insert((name.clone(), s.place.real_name())); }
@@ -8341,7 +8268,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           loan_line: None,
           co_lenders: lenders[1..].to_vec(),
           lender_muts: if stored.iter().all(|s| s.exclusive == any_mut) { Vec::new() }
-            else { stored.iter().map(|s| (s.place.clone(), s.exclusive)).collect() },
+            else { lenders.iter().map(|l| (l.clone(), stored.iter().any(|s| s.place == *l && s.exclusive))).collect() },
           through: Vec::new(),
         });
       }
@@ -8360,8 +8287,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let rd = self.borrow_map[rcvr.name()].clone();
       self.draw_holder_borrows(&to, &aggregate, &rd, &operands, line, Some(&via));
     }
-    for Store { place: lender, exclusive: is_mut, binding: of_ref_var, unique_capture, operand } in stored.into_iter().filter(|s| !aggregate.contains(&s.place)) {
+    for Store { place: lender, exclusive: is_mut, binding: of_ref_var, unique_capture, operand, projected } in stored.into_iter().filter(|s| {
+      match &s.projected {
+        Some((id, _)) => !operands.iter().any(|b| b.lender == s.place && b.loan.loan == *id),
+        None => !aggregate.contains(&s.place),
+      }
+    }) {
       let id = *self.unique_id;
+      if let Some(projected) = projected {
+        self.row_layout.projected_loan_places.insert(id, projected);
+      }
       let detail = if unique_capture {
         Some(crate::event_order::StoredLoan::UniqueCapture)
       } else if operand == StoredOperand::Carrier {
@@ -9497,10 +9432,19 @@ fn draw_holder_borrows(&mut self, lhs: &ResourceTy, lenders: &[ResourceTy], rd: 
       if b.conditional || (tracks_ends && b.issued && self.body_facts.is_some_and(|f| f.conditional_ends.contains(&b.loan.loan))) {
         self.conditional_aggregate_ends.push((lhs.clone(), lender.clone(), b.loan.loan));
       }
+      let projected = via.filter(|v| v.carrier == ViaCarrier::StoredBy).and(b.loan.projected.as_ref());
+      if let Some(place) = projected {
+        self.row_layout.projected_loan_places.insert(id, (b.loan.loan, place.clone()));
+        if b.conditional {
+          self.row_layout.uncertain_projected_stores.insert((*lhs.hash(), b.loan.loan));
+        }
+      }
       let title = if b.issued && b.loan.two_phase {
         Some(crate::svg_generator::hover_messages::aggregate_reservation(&from.name(), &lhs.name()))
       } else if alternatives {
-        Some(crate::svg_generator::hover_messages::aggregate_arm_borrow(&lender.name(), &lhs.name(), is_mut, b.conditional))
+        use crate::svg_generator::hover_messages as hover;
+        let place = projected.map_or_else(|| hover::styled_name_html(&lender.name()), hover::projected_place_html);
+        Some(hover::aggregate_arm_borrow(&place, &lhs.name(), is_mut, b.conditional))
       } else { None };
       if let Some(title) = title { self.row_layout.aggregate_titles.insert(id, title); }
     }
@@ -12709,7 +12653,19 @@ pub fn print_out_of_scope(&mut self){
       }
       let Some(from_ro) = self.raps.get(k).map(|r| r.rap.to_owned()) else { continue };
       let rd = slot.rd.clone();
+      let mut ends = Vec::new();
       for (lender, end, loans) in std::mem::take(&mut decided[i]) {
+        let separate = from_ro.holds_borrow() && matches!(end, End::Arrow(_)) && loans.len() > 1
+          && self.row_layout.stored_lender_loans.get(lender.hash()).is_some_and(|ids| loans.iter().all(|id|
+            ids.contains(id) && facts.and_then(|f| f.loans.iter().find(|loan| loan.loan == *id))
+              .is_some_and(|loan| loan.projected.is_some())));
+        if separate {
+          ends.extend(loans.into_iter().map(|id| (lender.clone(), end, vec![id])));
+        } else {
+          ends.push((lender, end, loans));
+        }
+      }
+      for (lender, end, loans) in ends {
         let to_ro = match &lender {
           ResourceTy::Anonymous => ResourceTy::Deref(from_ro.clone()),
           l => l.clone(),
@@ -12758,7 +12714,15 @@ pub fn print_out_of_scope(&mut self){
               else if let Some(c) = self.closure_moved_into(&from_ro) { ResourceTy::Value(c) }
               else { ResourceTy::Value(from_ro.clone()) };
             let id = *self.unique_id;
-            if co && !self.stored_ref_var_lends.contains(&(k.clone(), lender.real_name())) {
+            let projected_kind = match loans.as_slice() {
+              [id] if self.row_layout.stored_lender_loans.get(lender.hash()).is_some_and(|ids| ids.contains(id)) =>
+                facts.and_then(|f| f.loans.iter().find(|l| l.loan == *id))
+                  .filter(|loan| loan.projected.is_some()).map(|loan| matches!(loan.kind, "mut" | "unique")),
+              _ => None,
+            };
+            if let Some(mutable) = projected_kind {
+              self.add_ev(line, if mutable { Evt::MDie } else { Evt::SDie }, lender.clone(), end_from, false);
+            } else if co && !self.stored_ref_var_lends.contains(&(k.clone(), lender.real_name())) {
               let evt = if rd.mut_of(&lender) { Evt::MDie } else { Evt::SDie };
               self.add_ev(line, evt, lender.clone(), end_from, false);
             } else {
@@ -12811,16 +12775,31 @@ pub fn print_out_of_scope(&mut self){
             self.add_own_end(line, &from_ro, to_ro, k, &loans);
           }
         }
-        if from_ro.holds_borrow() && matches!(end, End::Arrow(_)) && self.conditional_aggregate_ends.iter().any(|(holder, source, loan)|
-          holder.hash() == from_ro.hash() && *source == lender && loans.contains(loan)) {
+        let projected = match (end, loans.as_slice()) {
+          (End::Arrow(_), [id]) => facts.and_then(|facts| facts.loans.iter().find(|loan| loan.loan == *id))
+            .and_then(|loan| Some((loan.loan, loan.projected.as_ref()?))),
+          _ => None,
+        };
+        let conditional = self.conditional_aggregate_ends.iter().any(|(holder, source, loan)|
+          holder.hash() == from_ro.hash() && *source == lender && loans.contains(loan))
+          || projected.is_some_and(|(loan, _)| self.row_layout.uncertain_projected_stores.contains(&(*from_ro.hash(), loan)));
+        if from_ro.holds_borrow() && matches!(end, End::Arrow(_)) && conditional {
+          use crate::svg_generator::hover_messages as hover;
+          let place = projected.map_or_else(|| hover::styled_name_html(&lender.name()), |(_, p)| hover::projected_place_html(p));
           for id in first_id..*self.unique_id {
-            self.row_layout.aggregate_titles.insert(id, crate::svg_generator::hover_messages::conditional_aggregate_end(k, &lender.name()));
+            self.row_layout.aggregate_titles.insert(id, hover::conditional_aggregate_end(k, &place));
           }
         }
         if !loans.is_empty() {
           for id in first_id..*self.unique_id {
             if loans.iter().all(|id| self.stored_unique_captures.contains(&(*from_ro.hash(), *id))) {
               self.row_layout.stored_loans.insert(id, crate::event_order::StoredLoan::UniqueCapture);
+            }
+            if let Some((loan, place)) = projected {
+              self.row_layout.projected_loan_places.insert(id, (loan, place.clone()));
+              if self.row_layout.shared_projected_stores.contains(&(*from_ro.hash(), loan)) {
+                self.row_layout.stored_loans.insert(id, crate::event_order::StoredLoan::SharedInput { mutable: true, binding: false });
+              }
             }
             self.end_loans.insert(id, loans.clone());
           }

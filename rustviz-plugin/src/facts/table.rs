@@ -9,7 +9,7 @@
 //! by the first row of the leg it draws, since rows above a leg's start
 //! may belong to another arm.
 
-use super::schema::{DropRoute, LoanInfo, BodyFacts, CrateFacts, Extraction, Fact, HolderType, Lent, Parts, State};
+use super::schema::{ProjectedPlace, DropRoute, LoanInfo, BodyFacts, CrateFacts, Extraction, Fact, HolderType, Lent, Parts, State};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A column's value on a row.
@@ -759,6 +759,11 @@ impl StateTable {
         self.loan(fn_line, column, loan).map(|l| l.lender.as_str())
     }
 
+    pub(crate) fn projected_lender(&self, fn_line: usize, column: &str, name: &str) -> Option<&ProjectedPlace> {
+        self.body(fn_line, column)?.loans.values().find_map(|loan|
+            (loan.lender == name).then_some(loan.projected.as_ref()).flatten())
+    }
+
     /// The source line `loan` is taken on.
     pub fn loan_line(&self, fn_line: usize, column: &str, loan: usize) -> Option<usize> {
         self.loan(fn_line, column, loan).map(|l| l.line)
@@ -919,7 +924,7 @@ mod tests {
             issued_operand_loans: Default::default(),
             returned_operand_loans: Default::default(),
             conditional_ends: Default::default(),
-            receiver_loans: Default::default(), restored_reborrows: Default::default(),
+            argument_stores: Default::default(), receiver_loans: Default::default(), restored_reborrows: Default::default(),
             evaluated_spans: Vec::new(),
             constructed_vecs: Default::default(),
             def_id: rustc_hir::def_id::CRATE_DEF_ID.to_def_id(),
@@ -937,6 +942,7 @@ mod tests {
             binding_loans: BTreeMap::new(),
             inline_holder_ends: Vec::new(),
             loans: vec![LoanInfo {
+                projected: None,
                 issue: None,
                 loan: 0,
                 line: 3,

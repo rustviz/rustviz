@@ -2850,7 +2850,53 @@ fn render_dot(
                 }
             }
         }
-        if let Some(&detail) = visualization_data.row_layout.stored_loans.get(&event.get_id()) {
+        let layout = &visualization_data.row_layout;
+        let projected = layout.projected_loan_places.get(&event.get_id())
+            .map(|(_, place)| hover_messages::projected_place_html(place));
+        let stored = layout.stored_loans.get(&event.get_id()).copied();
+        if let Some(place) = projected.as_deref() {
+            let mutable = matches!(event, Event::MutableLend { .. } | Event::MutableBorrow { .. } |
+                Event::MutableReacquire { .. } | Event::MutableDie { .. });
+            let kind = if mutable { "mutable" } else { "shared" };
+            match event {
+                Event::StaticLend { to, is, .. } | Event::MutableLend { to, is, .. } => {
+                    let receiver = styled_name_html(&to.name());
+                    let owner = styled_name_html(&is.name());
+                    let restriction = if mutable {
+                        format!("{owner} can't be used as a whole while the borrow is live")
+                    } else {
+                        format!("While the borrow is live, you can't overwrite or move {place}")
+                    };
+                    data.title = if layout.shared_projected_calls.contains(&event.get_id()) && mutable {
+                        format!("A mutable borrow of {place} is live while {receiver} uses a shared reference. {restriction}")
+                    } else if stored.is_some() {
+                        format!("The borrow checker keeps the {kind} borrow of {place} live while {receiver} is in use. {restriction}")
+                    } else {
+                        let adverb = if mutable { "mutably" } else { "immutably" };
+                        format!("{receiver} {adverb} borrows {place}. {restriction}")
+                    };
+                }
+                Event::StaticBorrow { is, .. } | Event::MutableBorrow { is, .. } if stored.is_none() => {
+                    let holder = styled_name_html(&is.name());
+                    let adverb = if mutable { "mutably" } else { "immutably" };
+                    data.title = format!("{holder} holds a value that {adverb} borrows {place} ({holder} isn't a reference itself)");
+                }
+                Event::StaticReacquire { from, .. } | Event::MutableReacquire { from, .. }
+                    if from.extract_rap().is_some_and(|r| r.is_fn()) => {
+                    data.title = if layout.shared_projected_calls.contains(&event.get_id()) && mutable {
+                        format!("The stored shared reference keeps the original mutable borrow of {place} live")
+                    } else {
+                        format!("The borrow of {place} continues in the stored reference")
+                    };
+                }
+                Event::StaticReacquire { from, .. } | Event::MutableReacquire { from, .. }
+                | Event::StaticDie { is: from, .. } | Event::MutableDie { is: from, .. } => {
+                    data.title = format!("{}'s {kind} borrow of {place} ends", styled_name_html(&from.name()));
+                }
+                _ => {}
+            }
+        }
+        if let Some(detail) = stored {
             let parties = match event {
                 Event::StaticBorrow { from, is, .. } | Event::MutableBorrow { from, is, .. } => Some((is, from, false)),
                 Event::StaticLend { to, is, .. } | Event::MutableLend { to, is, .. }
@@ -2860,7 +2906,7 @@ fn render_dot(
                 _ => None,
             };
             if let Some((holder, lender, ended)) = parties {
-                data.title = hover_messages::stored_loan_message(detail, holder, lender, None, ended);
+                data.title = hover_messages::stored_loan_message(detail, holder, lender, None, ended, projected.as_deref());
             }
         }
         if matches!(event, Event::StaticDie { .. } | Event::MutableDie { .. }) {
@@ -6990,14 +7036,32 @@ fn render_generic_arrow(
         None => hover_messages::arrow_full_title(external_event, from, to, option_ref),
     };
 
-    if let Some(operand) = visualization_data.row_layout.aggregate_titles.get(&external_event.get_id()) {
+    let layout = &visualization_data.row_layout;
+    let id = external_event.get_id();
+    let projected = layout.projected_loan_places.get(&id)
+        .map(|(_, place)| hover_messages::projected_place_html(place));
+    if let Some(operand) = layout.aggregate_titles.get(&id) {
         title.clone_from(operand);
-    }
-    if let Some(&detail) = visualization_data.row_layout.stored_loans.get(&external_event.get_id()) {
+    } else if let Some(&detail) = layout.stored_loans.get(&id) {
         match external_event {
             ExternalEvent::StaticBorrow { via: Some(v), .. } | ExternalEvent::MutableBorrow { via: Some(v), .. } =>
-                title = hover_messages::stored_loan_message(detail, to, from, Some(&v.func), false),
-            ExternalEvent::MutableDie { .. } => title = hover_messages::stored_loan_message(detail, from, to, None, true),
+                title = hover_messages::stored_loan_message(detail, to, from, Some(&v.func), false, projected.as_deref()),
+            ExternalEvent::MutableDie { .. } =>
+                title = hover_messages::stored_loan_message(detail, from, to, None, true, projected.as_deref()),
+            _ => {}
+        }
+    } else if let Some(place) = projected {
+        match external_event {
+            ExternalEvent::StaticBorrow { via: Some(v), .. } | ExternalEvent::MutableBorrow { via: Some(v), .. } => {
+                let kind = if matches!(external_event, ExternalEvent::MutableBorrow { .. }) { "Mutable" } else { "Immutable" };
+                let holder = styled_name_html(&to.name());
+                let method = styled_name_html(&v.func);
+                title = format!("{kind} borrow of {place} stored in {holder} by {method}. {holder} isn't a reference itself. Its value holds the reference");
+            }
+            ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. } => {
+                let kind = if matches!(external_event, ExternalEvent::MutableDie { .. }) { "mutable" } else { "shared" };
+                title = format!("{}'s {kind} borrow of {place} ends", styled_name_html(&from.name()));
+            }
             _ => {}
         }
     }
@@ -7126,6 +7190,14 @@ fn render_generic_arrow(
 
             let title = if visualization_data.row_layout.reassigned_receivers.contains(&external_event.get_id()) {
                 format!("{} reads and writes through the receiver reserved before {} was reassigned", styled_name_html(&function.name), styled_name_html(&from_variable.name()))
+            } else if let Some((_, place)) = visualization_data.row_layout.projected_loan_places.get(&external_event.get_id()) {
+                let shared = visualization_data.row_layout.shared_projected_calls.contains(&external_event.get_id());
+                let access = if !shared && matches!(external_event, ExternalEvent::PassByMutableReference { .. }) {
+                    "may read or write"
+                } else {
+                    "may read"
+                };
+                format!("{} {access} {} through this borrow", styled_name_html(&function.name), hover_messages::projected_place_html(place))
             } else {
                 hover_messages::arrow_call_title(external_event, function, from_variable)
             };
@@ -8090,6 +8162,7 @@ fn field_lender_walk(
                 if from.is_same_underlying(to) {
                     continue;
                 }
+                if layout.stored_field_ends.contains(id) { continue; }
                 let key = (*field.hash(), *row, matches!(ev, ExternalEvent::MutableDie { .. }), layout.field_generations.get(id).copied());
                 let before: Vec<String> = pending.get(field.hash()).into_iter().flatten()
                     .filter(|(_, r, _)| r != row && key.3.is_none()).map(|(n, ..)| n.clone()).collect();
@@ -10581,7 +10654,7 @@ fn owner_value_title(rap: &ResourceAccessPoint, vd: &VisualizationData, fn_line:
             .filter_map(|&id| vd.state_table.loan(fn_line, name, id))
         {
             match loan.source {
-                "borrow" => { lenders.insert(Some(loan.lender.clone())); }
+                "borrow" => { lenders.insert(Some(loan.projected.as_ref().map_or_else(|| styled_name_html(&loan.lender), hover_messages::projected_place_html))); }
                 "temporary" => temporary = true,
                 _ => {}
             }
@@ -10592,6 +10665,11 @@ fn owner_value_title(rap: &ResourceAccessPoint, vd: &VisualizationData, fn_line:
     } else if rap.holds_borrow() && !cell.borrowed_from.is_empty() {
         // An iterator can borrow data through raw pointers.
         let from = display_places(vd, fn_line, name, &cell.borrowed_from);
+        if cell.holds.iter().any(|&id| vd.row_layout.uncertain_projected_stores.contains(&(*rap.hash(), id))) {
+            let mut title = hover_messages::state_holder_starts_empty(name);
+            title.push_str(&hover_messages::state_holder_tracks(name, &from));
+            return title;
+        }
         return hover_messages::state_holder_borrows_from(name, &from);
     }
     timeline_segment_title(&State::FullPrivilege { s: LineState::Full }, rap, vd, row)
@@ -10669,8 +10747,12 @@ fn display_place(vd: &VisualizationData, fn_line: usize, column: &str, place: &s
 }
 
 /// `display_place` of each, sorted, without repeats.
-fn display_places<'a>(vd: &VisualizationData, fn_line: usize, column: &str, places: impl IntoIterator<Item = &'a String>) -> Vec<Option<String>> {
-    let set: BTreeSet<Option<String>> = places.into_iter().map(|p| display_place(vd, fn_line, column, p)).collect();
+fn display_places<'a, T: AsRef<str> + ?Sized + 'a>(vd: &VisualizationData, fn_line: usize, column: &str, places: impl IntoIterator<Item = &'a T>) -> Vec<Option<String>> {
+    let set: BTreeSet<Option<String>> = places.into_iter().map(|p| {
+        let p = p.as_ref();
+        vd.state_table.projected_lender(fn_line, column, p).map(hover_messages::projected_place_html)
+            .or_else(|| display_place(vd, fn_line, column, p).map(|p| styled_name_html(&p)))
+    }).collect();
     set.into_iter().collect()
 }
 
@@ -10779,7 +10861,9 @@ fn owner_loan_title(
         // named, whatever the loan's kind (`p.a` reserved by `p.a.insert(..)`
         // leaves `p.b` usable).
         let kind = if unique { "unique" } else if exclusive { "mutable" } else if reserved { "reserved" } else { "shared" };
-        hover_messages::state_lent_parts(name, &parts.iter().map(String::as_str).collect(), exact_holder, kind, cell.may_lend)
+        let parts = display_places(vd, fn_line, name, borrowed.iter().copied());
+        let parts: Vec<_> = parts.into_iter().flatten().collect();
+        hover_messages::state_lent_parts(name, &parts, exact_holder, kind, cell.may_lend)
     } else if reserved {
         let call =
             loans.iter().find(|l| l.kind == "reserved").and_then(|l| table.loan(fn_line, name, l.loan)?.to_call.as_deref());
@@ -10950,11 +11034,15 @@ fn part_loan_state(
                     .any(|r| r.name() == h && r.is_ref() && !r.is_mutref() && data.fn_source_lines.get(r.hash()) == Some(&fn_line)))
         });
         let shown = holder.and_then(|h| display_place(data, fn_line, col, h));
-        parts.push((part_display_name(data, fn_line, col, &loan.lender), lent.kind, shown, exact && loan.runs));
+        let place = loan.projected.as_ref().map_or_else(
+            || hover_messages::part_name_html(&part_display_name(data, fn_line, col, &loan.lender)),
+            hover_messages::projected_place_html,
+        );
+        parts.push((place, lent.kind, shown, exact && loan.runs));
     }
     // A loan of a part 2.x's columns don't name (an enum's payload, shown
     // as the owner itself): the owner's own loan title says it.
-    let whole_named = parts.iter().all(|(p, ..)| p == col);
+    let whole_named = parts.iter().all(|(p, ..)| *p == styled_name_html(col));
     let behind_ref = strongest_loans().all(|l| table.loan(fn_line, col, l.loan).is_some_and(|i| i.through.is_some()));
     // One loan held by a variable the facts prove holds it: who holds it.
     // Otherwise (several loans, which need not all be taken on one path: an

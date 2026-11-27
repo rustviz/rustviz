@@ -1756,6 +1756,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             line: cx.row_of(*loc),
             col: cx.rows.col.get(loc).copied().unwrap_or(0),
             lender,
+            projected: cx.names.projected(tcx, body, bp),
             columns: cols,
             whole,
             direct_holder: cx.name(bd.assigned_place()),
@@ -1826,6 +1827,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             line,
             col,
             lender: u.lender.clone(),
+            projected: u.place.and_then(|p| cx.names.projected(tcx, body, p)),
             columns: Vec::new(),
             whole: BTreeSet::new(),
             direct_holder: None,
@@ -2080,6 +2082,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         held_in(&os, p)
     };
     let mut receiver_loans = std::collections::HashMap::new();
+    let mut argument_stores = std::collections::HashMap::<_, Vec<_>>::new();
     let published: BTreeSet<usize> = loans.iter().map(|l| l.loan).collect();
     if let Some(t) = table {
         let lmap = bwf.borrow_set.location_map();
@@ -2102,18 +2105,41 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             v.sort();
             l.made_through = v;
         }
+        let mut callees = std::collections::HashMap::new();
         for (bb, data) in body.basic_blocks.iter_enumerated() {
             let term = data.terminator();
-            let TerminatorKind::Call { args, target: Some(return_to), .. } = &term.kind else { continue };
+            let TerminatorKind::Call { func, args, target: Some(return_to), .. } = &term.kind else { continue };
+            if !runs.contains(&bb) || args.len() < 2 { continue; }
+            let loc = Location { block: bb, statement_index: data.statements.len() };
+            let callee = match *func.ty(&body.local_decls, tcx).kind() {
+                TyKind::FnDef(def, _) if args.iter().any(|arg| arg.node.place()
+                    .is_some_and(|p| decl_place_ty(tcx, body, p).is_mutable_ptr())) => Some(def),
+                _ => None,
+            };
+            if let Some(def) = callee {
+                let writes = callees.entry(def).or_insert_with(|| super::call_stores::argument_stores(tcx, def));
+                for &(dst, src) in writes.iter() {
+                    let operand = |index: usize| args.get(index).and_then(|a| a.node.place());
+                    let (Some(dst), Some(source)) = (operand(dst), operand(src)) else { continue };
+                    let target = resolve_write_deref(tcx, body, tcx.mk_place_deref(dst));
+                    let Some(holder) = cx.name(target).filter(|_| cx.names.root(target)
+                        .is_some_and(|(_, skip, _)| column_projection(body, target, skip))) else { continue; };
+                    let kept = held_by_place(target, t.mid_index(loc));
+                    let carried = held_by_place(source, t.start_index(loc));
+                    let ids: BTreeSet<_> = kept.intersection(&carried).filter(|id| published.contains(id)).copied().collect();
+                    if !ids.is_empty() {
+                        argument_stores.entry((term.source_info.span.with_parent(None), src)).or_default().push((holder, ids));
+                    }
+                }
+            }
             let Some((receiver, inputs)) = args.split_first() else { continue };
             let Some(p) = receiver.node.place() else { continue };
             let TyKind::Ref(_, inner, m) = decl_place_ty(tcx, body, p).kind() else { continue };
-            if !m.is_mut() || inputs.is_empty() || !runs.contains(&bb) { continue; }
+            if !m.is_mut() || inputs.is_empty() { continue; }
             let regions = regions_of(*inner);
             if regions.is_empty() { continue; }
             let dest = resolve_temp_deref(tcx, body, tcx.mk_place_deref(p));
             let Some(name) = cx.name(dest) else { continue };
-            let loc = Location { block: bb, statement_index: data.statements.len() };
             // The referent's origins at the call include its instantiated
             // lifetime constraints, even if the receiver is dead on return.
             let retained = held_in(&regions, t.mid_index(loc));
@@ -4178,7 +4204,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         issued_operand_loans,
         returned_operand_loans,
         evaluated_spans,
-        receiver_loans, restored_reborrows,
+        argument_stores, receiver_loans, restored_reborrows,
         constructed_vecs,
         take_calls: take_calls.into_iter().map(|loc| body.source_info(loc).span.with_parent(None)).collect(),
         skipped_closure_returns,
@@ -4340,7 +4366,7 @@ fn resolve_temp_deref<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'
 /// Follow single-assignment reference or raw-pointer locals when checking
 /// writes. A mutable borrow or raw address of the pointer itself can
 /// retarget it, so a unique direct assignment is insufficient in that case.
-fn resolve_write_deref<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'tcx>) -> Place<'tcx> {
+pub(super) fn resolve_write_deref<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'tcx>) -> Place<'tcx> {
     resolve_deref(tcx, body, place, true)
 }
 

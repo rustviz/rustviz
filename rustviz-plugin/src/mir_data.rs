@@ -973,6 +973,26 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
             .collect()
     }
 
+    /// The loan issued at this expression's MIR source span. Coercions
+    /// can add a second loan through the first loan's argument temporary.
+    pub(crate) fn argument_loan(&self, span: Span) -> Option<&crate::facts::schema::LoanInfo> {
+        let span = span.with_parent(None);
+        let candidates: Vec<_> = self.body_facts?.loans.iter().filter_map(|loan| {
+            let loc = loan.issue?;
+            let stmt = self.mir_body.basic_blocks[loc.block].statements.get(loc.statement_index)?;
+            if self.location_to_span(loc, self.bwf).with_parent(None) != span { return None; }
+            let StatementKind::Assign(assignment) = &stmt.kind else { return None };
+            let Rvalue::Ref(_, _, place) = &assignment.1 else { return None };
+            Some((loan, assignment.0, *place))
+        }).collect();
+        let mut issued = candidates.iter().filter(|(_, _, place)| {
+            place.projection.first() != Some(&ProjectionElem::Deref) || !candidates.iter().any(|(_, dest, _)|
+                dest.as_local() == Some(place.local) && !self.mir_body.local_decls[place.local].is_user_variable())
+        });
+        let (loan, ..) = issued.next()?;
+        issued.next().is_none().then_some(*loan)
+    }
+
     /// The variables that hold one of `loans` at some point, by rustc's
     /// borrow checker: a variable whose type has a lifetime the loan is
     /// in (Polonius' `origin_contains_loan_at`) while the variable is

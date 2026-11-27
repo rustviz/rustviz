@@ -4806,6 +4806,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Since #1361 v and w, which hold borrows, take the stored one
         // as `v.push(&u)` would: an arrow into v / w and back.
         must_contain: &[
+            "point reads from u; point's signature lets it store this reference in h, so u stays borrowed while h is in use",
             "u's resource is immutably borrowed by v; u is read-only while the borrow is live",
             "Immutable borrow from u to v",
             "Return immutably borrowed resource from v to u",
@@ -28507,6 +28508,89 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Mutable borrow from c to saved",
         ],
     },
+    TooltipExpect {
+        name: "known_bugs/1632_extend_field_loan",
+        must_contain: &[
+            "z holds a value that borrows from the `.0` of an element of p2.0 (z isn't a reference itself)",
+            "Mutable borrow of the `.0` of an element of p2.0 stored in z by extend. z isn't a reference itself. Its value holds the reference",
+            "z's mutable borrow of the `.0` of an element of p2.0 ends",
+        ],
+        must_not_contain: &[
+            "p2.0[_].0",
+            "Mutable borrow from p2 to z",
+            "z holds a value that mutably borrows p2's value",
+            "p2.0 was moved out",
+        ],
+    },
+    TooltipExpect {
+        name: "known_bugs/1689_kept_field_loans",
+        must_contain: &[
+            "s.0 is immutably borrowed by extend; s.0 is read-only while the borrow is live",
+            "After extend, v holds a value that can contain references (v isn't a reference itself). The borrow checker keeps the shared borrow of the reference-valued field s.0 live while v is in use",
+        ],
+        must_not_contain: &[
+            "the value s.0 points to is immutably borrowed by extend",
+            "the binding s.0",
+        ],
+    },
+    TooltipExpect {
+        name: "known_bugs/1732_stored_loan_kinds",
+        must_contain: &[
+            "push stores a shared reference in dest (dest isn't a reference itself). While that reference is in use, the borrow checker keeps the shared borrow of d live",
+            "store stores a shared reference in v (v isn't a reference itself). While that reference is in use, the borrow checker keeps the shared borrow of k live",
+            "push stores a shared reference in nested (nested isn't a reference itself). While that reference is in use, the borrow checker keeps the mutable borrow of the binding p live",
+            "push stores a shared reference in nested (nested isn't a reference itself). While that reference is in use, the borrow checker keeps the shared borrow of the binding q live",
+        ],
+        must_not_contain: &[
+            "pick's signature lets it store this reference in p",
+            "q is immutably borrowed by p;",
+            "the mutable borrow of d live",
+            "the mutable borrow of k live",
+            "the mutable borrow of s live",
+            "the mutable borrow of t live",
+        ],
+    },
+    TooltipExpect {
+        name: "known_bugs/projected_receiver_loans_1898",
+        must_contain: &[
+            "push stores a shared reference in v (v isn't a reference itself). While that reference is in use, the borrow checker keeps the mutable borrow of the `.0` of an element of a.0 live",
+            "push stores a shared reference in refs (refs isn't a reference itself). While that reference is in use, the borrow checker keeps the mutable borrow of the `.0` of an element of b.0 live",
+            "The shared reference in v stops keeping the mutable borrow of the `.0` of an element of a.0 live",
+            "After extend, empty holds a value that can contain references (empty isn't a reference itself). The borrow checker keeps the shared borrow of the `.0` of an element of a.0 live while empty is in use",
+            "empty owns a value that can hold references (empty isn't a reference itself). The borrow checker tracks borrowed data from the `.0` of an element of a.0 through empty",
+            "out immutably borrows the value inside an element of a. While the borrow is live, you can't overwrite or move the value inside an element of a",
+            "Immutable borrow of the value inside an element of a stored in out by push. out isn't a reference itself. Its value holds the reference",
+            "out's shared borrow of the value inside an element of a ends",
+        ],
+        must_not_contain: &[
+            "Mutable borrow of the `.0` of an element of a.0 stored in v",
+            "push may read or write the `.0` of an element of a.0",
+            "Mutable borrow of the `.0` of an element of b.0 stored in refs",
+            "v's mutable borrow of the `.0` of an element of a.0 ends",
+            "empty holds a value that borrows from",
+            "empty holds the reference inside its value",
+            "empty holds a value that immutably borrows",
+            "out's shared borrow of an element of a ends",
+            "out's shared borrow of an element of b ends",
+            " as Some)",
+            "[_]",
+        ],
+    },
+    TooltipExpect {
+        name: "known_bugs/call_slot_transfers_1898",
+        must_contain: &[
+            "Immutable borrow from q to dst.0: replace_slot's signature lets it store this reference in dst.0",
+            "Return immutably borrowed value from dst.0 to q",
+            "Immutable borrow from q to second: store_second's signature lets it store this reference in second",
+            "Return immutably borrowed value from second to q",
+        ],
+        must_not_contain: &[
+            "store_second's signature lets it store this reference in first",
+            "only_return's signature lets it store this reference in slot",
+            "just_return's signature lets it store this reference in slot",
+            "Return immutably borrowed value from dst.0 to q or r",
+        ],
+    },
 ];
 
 #[test]
@@ -42290,6 +42374,11 @@ fn stored_call_result_keeps_each_input_loan_kind_1888() {
     // pick receives &mut p and &q. Both slots contain &String, so the
     // strings can both be read while nested keeps the result alive.
     let svg = run_with_local_backend("known_bugs/1732_stored_loan_kinds").timeline_panel_string();
+    let elements = common::svg::rv_elements(&svg);
+    for (source, dest) in [("q", "p"), ("p", "q")] {
+        assert!(elements.iter().all(|e| e.kind != "arrow" || e.var.as_deref() != Some(source) || e.to.as_deref() != Some(dest)),
+            "pick should draw no {source} to {dest} arrow");
+    }
     for place in ["s", "t", "q"] {
         assert!(tooltip_of_id(&svg, &format!("{place}>nested@L70:arrow:static_borrow")).is_some(), "{place} is shared");
         assert!(tooltip_of_id(&svg, &format!("nested>{place}@L71:arrow:static_die")).is_some(), "{place} has a shared return");
@@ -42386,7 +42475,61 @@ fn same_field_same_lender_has_two_returns_1888() {
 #[test]
 fn extend_borrowing_a_field_inside_an_element_still_draws_the_holder_1888() {
     let svg = run_with_local_backend("known_bugs/1632_extend_field_loan").timeline_panel_string();
-    let tips = timeline_tooltips(&svg);
-    assert!(tips.iter().any(|t| t.starts_with("Mutable borrow from p2") && t.contains("to z, stored in z by extend")), "{tips:?}");
-    assert!(tips.iter().any(|t| t.starts_with("Return mutably borrowed") && t.ends_with("from z to p2")), "{tips:?}");
+    let part = "the `.0` of an element of p2.0";
+    let issue = tooltip_of_id(&svg, "p2>z@L60:arrow:mutable_borrow").unwrap();
+    let end = tooltip_of_id(&svg, "z>p2@L61:arrow:mutable_die").unwrap();
+    assert!(issue.contains(&format!("Mutable borrow of {part} stored in z by extend")), "{issue}");
+    assert_eq!(end, format!("z's mutable borrow of {part} ends"));
+    let call = tooltip_of_id(&svg, "p2.0@L60:dot:").unwrap();
+    assert_eq!(call, format!(
+        "extend mutably borrows {part}. p2.0 can't be used as a whole while the borrow is live extend may read or write {part} through this borrow The borrow of {part} continues in the stored reference"
+    ));
+    let sibling = tooltip_of_id(&svg, "p2.1@L60-61:line:full_privilege").unwrap();
+    assert_eq!(sibling, "p2.1 holds a copyable value");
+}
+
+
+#[test]
+fn projected_receiver_loan_kinds_and_ends_1898() {
+    let svg = run_with_local_backend("known_bugs/projected_receiver_loans_1898").timeline_panel_string();
+    let part = "the `.0` of an element of a.0";
+    assert_eq!(tooltip_of_id(&svg, "a.0@L5:dot:").unwrap(), format!(
+        "A mutable borrow of {part} is live while push uses a shared reference. a.0 can't be used as a whole while the borrow is live push may read {part} through this borrow The stored shared reference keeps the original mutable borrow of {part} live"
+    ));
+    for (place, row, holder, method) in [("p", 28, "out", "extend"), ("pair", 64, "refs", "push")] {
+        for (field, kind, event) in [(0, "shared", "static"), (1, "mutable", "mutable")] {
+            let tip = tooltip_of_id(&svg, &format!("{place}>{holder}@L{row}:arrow:{event}_borrow")).unwrap();
+            let part = format!("the `.{field}` of an element of {place}.0");
+            let claim = if method == "extend" {
+                format!("keeps the {kind} borrow of {part} live")
+            } else {
+                let kind = if kind == "shared" { "Immutable" } else { "Mutable" };
+                format!("{kind} borrow of {part} stored in {holder} by push")
+            };
+            assert!(tip.contains(&claim), "{tip}");
+            assert!(!tip.contains(" as Some)"), "{tip}");
+        }
+    }
+    for place in ["a", "b"] {
+        let tip = format!("If out holds the borrow of an element of {place}, that borrow ends here");
+        assert_eq!(tooltip_of_id(&svg, &format!("out>{place}@L39:arrow:static_die")).unwrap(), tip);
+        let dot = tooltip_of_id(&svg, &format!("{place}@L39:dot:static_reacquire")).unwrap();
+        assert_eq!(dot, tip);
+    }
+}
+
+#[test]
+fn returned_loan_has_no_slot_transfer_1898() {
+    let svg = run_with_local_backend("known_bugs/call_slot_transfers_1898").timeline_panel_string();
+    let elements = common::svg::rv_elements(&svg);
+    for (from, to, row) in [("b", "slot", "39"), ("q", "slot", "54")] {
+        assert!(elements.iter().all(|e| e.kind != "arrow" || e.var.as_deref() != Some(from)
+            || e.to.as_deref() != Some(to) || e.line.as_deref() != Some(row)), "unexpected {from} to {to} arrow");
+    }
+    assert!(tooltip_of_id(&svg, "slot>b@L41:arrow:static_die").is_none());
+    // The actual assignment at L56 does write the returned reference.
+    assert!(tooltip_of_id(&svg, "returned>slot@L56:arrow:copy").is_some());
+    let returns = elements.iter().filter(|e| e.kind == "arrow" && e.var.as_deref() == Some("slot")
+        && e.to.as_deref() == Some("q")).count();
+    assert_eq!(returns, 1, "only the later assignment supplies a loan to return");
 }

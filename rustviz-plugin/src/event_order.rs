@@ -1213,6 +1213,9 @@ impl Order<'_, '_> {
 }
 
 pub(crate) fn order_body(visitor: &mut ExprVisitor<'_, '_>, facts: &BodyFacts) {
+    let layout = &mut visitor.row_layout;
+    let stored: BTreeSet<_> = layout.stored_lender_loans.values().flatten().copied().collect();
+    layout.projected_loan_places.retain(|_, (loan, _)| stored.contains(loan));
     let order = Order {
         activations: visitor
             .bwf
@@ -1325,6 +1328,12 @@ pub struct RowLayout {
     pub(crate) aggregate_titles: BTreeMap<usize, String>,
     pub(crate) stored_lender_loans: BTreeMap<u64, BTreeSet<usize>>,
     pub(crate) stored_loans: BTreeMap<usize, StoredLoan>,
+    /// Borrow events drawn on an ancestor column, with the actual MIR loan and place.
+    pub(crate) projected_loan_places: BTreeMap<usize, (usize, crate::facts::ProjectedPlace)>,
+    pub(crate) stored_field_ends: BTreeSet<usize>,
+    pub(crate) uncertain_projected_stores: BTreeSet<(u64, usize)>,
+    pub(crate) shared_projected_stores: BTreeSet<(u64, usize)>,
+    pub(crate) shared_projected_calls: BTreeSet<usize>,
     pub(crate) restored: BTreeSet<(usize, usize)>,
     pub(crate) ended_before_call: BTreeMap<usize, BTreeSet<String>>,
     pub(crate) ended_at_fork: BTreeSet<(usize, u64)>,
@@ -1351,6 +1360,11 @@ impl RowLayout {
         self.stored_lender_loans.append(&mut other.stored_lender_loans);
         self.restored.append(&mut other.restored);
         self.stored_loans.append(&mut other.stored_loans);
+        self.projected_loan_places.append(&mut other.projected_loan_places);
+        self.stored_field_ends.append(&mut other.stored_field_ends);
+        self.uncertain_projected_stores.append(&mut other.uncertain_projected_stores);
+        self.shared_projected_stores.append(&mut other.shared_projected_stores);
+        self.shared_projected_calls.append(&mut other.shared_projected_calls);
         self.ended_at_fork.append(&mut other.ended_at_fork);
         self.after_destructor.append(&mut other.after_destructor);
         self.copied_ends.append(&mut other.copied_ends);
@@ -1368,7 +1382,7 @@ impl RowLayout {
     }
 
     pub(crate) fn name_lender(&self, id: usize) -> bool {
-        self.field_generations.contains_key(&id) || self.name_field_ends.contains(&id)
+        self.field_generations.contains_key(&id) || self.name_field_ends.contains(&id) || self.stored_field_ends.contains(&id)
     }
 
     pub(crate) fn project(&self, history: &mut [(usize, crate::svg_generator::data::Event)]) {
