@@ -1139,8 +1139,16 @@ fn claims(pts: &Points, d: &Drawing, skips: &mut Skips) -> Vec<Claim> {
         // Code that never runs, drawn inline as 2.x draws it (the dead
         // `else` of an irrefutable `if let`): rustc checks it on an imaginary
         // path the drawing doesn't show. Not checked until that `else` is
-        // drawn as a branch of its own (#1873); counted.
-        if d.dead.contains(&p.line) {
+        // drawn as a branch of its own (#1873); counted. Only a point
+        // inside that code (its block's statements all end on dead rows),
+        // or after an `if let ... else { }` whose closing `}` the renderer
+        // marks: it does so only where the code after it is dead too (the
+        // `if let` arm always leaves). After one whose arm goes on, the
+        // paths have joined, and the point is checked.
+        let in_dead_block = p.ancestors.last().and_then(|&b| pts.blocks.get(b))
+            .is_some_and(|b| !b.stmts.is_empty() && b.stmts.iter().all(|(_, last)| d.dead.contains(last)));
+        let lone_close = pts.src.get((p.line as usize).wrapping_sub(1)).is_some_and(|l| l.trim() == "}");
+        if d.dead.contains(&p.line) && (in_dead_block || lone_close) {
             *skips.entry("dead-arm rows (code that never runs, drawn inline, #1873), not checked").or_default() += 1;
             continue;
         }

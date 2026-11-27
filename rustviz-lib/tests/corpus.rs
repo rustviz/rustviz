@@ -28425,34 +28425,145 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
 ];
 
+/// A figure's timeline elements whose `data-rv-id` starts with `prefix`:
+/// (id, plain tooltip, x range, y range of what they draw).
+fn rv_elements(tl: &str, prefix: &str) -> Vec<(String, String, (f64, f64), (f64, f64))> {
+    let doc = roxmltree::Document::parse(tl).expect("timeline svg parses");
+    let plain = |t: &str| {
+        let mut out = String::new();
+        let mut tag = false;
+        for c in t.chars() {
+            match c { '<' => tag = true, '>' => tag = false, c if !tag => out.push(c), _ => {} }
+        }
+        out.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+    };
+    let mut out = Vec::new();
+    for n in doc.descendants().filter(|n| n.attribute("data-rv-id").is_some_and(|id| id.starts_with(prefix))) {
+        let (mut xs, mut ys) = (Vec::new(), Vec::new());
+        for d in n.descendants() {
+            let num = |k: &str| d.attribute(k).and_then(|a| a.parse::<f64>().ok());
+            xs.extend(["x1", "x2", "cx"].into_iter().filter_map(num));
+            ys.extend(["y1", "y2", "cy"].into_iter().filter_map(num));
+            if let Some(p) = d.attribute("points") {
+                let nums: Vec<f64> = p.split([' ', ',']).filter_map(|w| w.parse().ok()).collect();
+                xs.extend(nums.iter().step_by(2));
+                ys.extend(nums.iter().skip(1).step_by(2));
+            }
+        }
+        let range = |v: &[f64]| (v.iter().copied().fold(f64::INFINITY, f64::min), v.iter().copied().fold(f64::NEG_INFINITY, f64::max));
+        let tip = n.attribute("data-tooltip-text").map(plain).unwrap_or_default();
+        out.push((n.attribute("data-rv-id").unwrap().to_owned(), tip, range(&xs), range(&ys)));
+    }
+    out
+}
+
 /// #1866's review, after design Q1 (P1-6B): `let maybe = if choose {
 /// v.first() } else { None };` gets a row per arm, and the `if choose`
-/// arm's leg reads its own cell after the arm's code: v is borrowed by
-/// maybe there (true on that path). The `if e` arm below (lines 12-14) is
-/// on both paths, so v is only maybe borrowed there, not surely shared.
+/// arm's leg reads its own cell after the arm's code: v stays borrowed
+/// while maybe is in use there. (#1871's first version said "v's resource
+/// is being shared by one or more variables" on that leg, and required it
+/// here: on an empty v the arm gives maybe None, so no variable need hold
+/// a reference; 2.x's clause stands, with the borrow checker's restriction,
+/// Codex review of #1871.) The `if e` arm below (lines 12-14) is on both
+/// paths, so v is only maybe borrowed there.
 #[test]
 fn one_line_arm_cell_and_maybe_shared_leg_1866() {
     let tl = run_with_local_backend("branch_legs_table_review_1866").timeline_panel_string();
-    let doc = roxmltree::Document::parse(&tl).expect("timeline svg parses");
-    let tips = |prefix: &str| -> Vec<String> {
-        doc.descendants()
-            .filter(|n| n.attribute("data-rv-id").is_some_and(|id| id.starts_with(prefix)))
-            .filter_map(|n| n.attribute("data-tooltip-text"))
-            .map(|t| {
-                let mut out = String::new();
-                let mut tag = false;
-                for c in t.chars() {
-                    match c { '<' => tag = true, '>' => tag = false, c if !tag => out.push(c), _ => {} }
-                }
-                out
-            })
-            .collect()
-    };
     let shared = "v's resource is being shared by one or more variables";
-    let arm = tips("v@L10:branch_line:partial_privilege");
-    assert!(arm.iter().any(|t| t.contains(shared) && t.contains("while maybe is in use")), "the `if choose` arm: v shared with maybe, got {arm:?}");
-    let later = tips("v@L12-14:branch_line");
-    assert!(!later.is_empty() && later.iter().all(|t| !t.contains(shared)), "the `if e` arm: v only maybe borrowed, got {later:?}");
+    // The `if choose` arm's column: left of the `else` arm's, below the
+    // borrow's dot.
+    let dot = rv_elements(&tl, "v@L10:dot:static_lend");
+    let (dot_x, dot_y) = (dot[0].2 .0, dot[0].3 .0);
+    let legs = rv_elements(&tl, "v@L10:branch_line");
+    let arm: Vec<&String> = legs.iter().filter(|e| e.2 .0 <= dot_x + 3.0 && e.3 .0 >= dot_y - 3.0 && !e.0.contains('/')).map(|e| &e.1).collect();
+    assert!(!arm.is_empty() && arm.iter().all(|t| t.starts_with("v is the owner of the resource. v stays borrowed while maybe is in use")),
+        "the `if choose` arm: v owned, kept borrowed while maybe is in use, got {arm:?}");
+    assert!(legs.iter().all(|e| !e.1.contains(shared)), "no leg of line 10 says v is surely shared, got {legs:?}");
+    // The `None` arm's diagonal: maybe's value holds no reference there.
+    let maybe = rv_elements(&tl, "maybe@L10:branch_line");
+    let none_dot = rv_elements(&tl, "maybe@L10:dot:acquire");
+    let none_leg: Vec<&String> = maybe.iter().filter(|e| e.3 .0 >= none_dot[0].3 .0 - 3.0 && e.2 .1 > none_dot[0].2 .0 - 3.0 && !e.0.contains('/')).map(|e| &e.1).collect();
+    assert!(!none_leg.is_empty() && none_leg.iter().all(|t| t.contains("maybe owns a value that can hold references")),
+        "the `else {{ None }}` arm's leg after its dot, got {none_leg:?}");
+    let later: Vec<String> = rv_elements(&tl, "v@L12-14:branch_line:partial_privilege").into_iter().map(|e| e.1).collect();
+    assert!(!later.is_empty() && later.iter().all(|t| t.starts_with("v's resource may be immutably borrowed here (a branch above borrowed it on some paths only)")),
+        "the `if e` arm: v only maybe borrowed, got {later:?}");
+}
+
+/// #1871's review (Codex): one-line conditionals whose arms get rows of
+/// their own (design Q1), and the dead `else` rows (Q9(b)). Each check
+/// failed on #1871's first version.
+#[test]
+fn one_line_arms_review_1871() {
+    let rv = run_with_local_backend("one_line_arms_review_1871");
+    let tl = rv.timeline_panel_string();
+    let y_of = |id: &str| rv_elements(&tl, id).first().unwrap_or_else(|| panic!("no {id}")).3 .0;
+    // `w.push((if flag { r } else { &b }, &c))`: the arms' rows are above
+    // c's dot, and c is lent only from its dot on.
+    let c_dot = y_of("c@L11:dot:static_lend");
+    let above: Vec<(String, String)> = rv_elements(&tl, "c@L").into_iter()
+        .filter(|e| e.0.contains(":line:") && e.3 .0 < c_dot - 1.0).map(|e| (e.0, e.1)).collect();
+    assert!(!above.is_empty() && above.iter().all(|(id, t)| id.ends_with("full_privilege") && t == "c is the owner of the resource"),
+        "c above its `&c` dot, got {above:?}");
+    // Two conditionals on line 20: the first's arms lend s or t, so they
+    // get rows of their own; the second's agree, a one-row diamond (its
+    // split, arm and join rows).
+    assert_eq!(y_of("s@L20:dot:branch_join#2") - y_of("s@L20:dot:branch#2"), 60.0, "the second conditional on line 20 is one row");
+    assert!(y_of("s@L20:dot:branch_join") - y_of("s@L20:dot:branch") > 60.0, "the first conditional on line 20 has a row per arm");
+    // `if choose { v.first() } else { None }`: v stays borrowed while maybe
+    // is in use (maybe may be None), and the None arm holds no reference.
+    let v: Vec<String> = rv_elements(&tl, "v@L27:branch_line:partial_privilege").into_iter().map(|e| e.1).collect();
+    assert!(!v.is_empty() && v.iter().all(|t| t == "v is the owner of the resource. v stays borrowed while maybe is in use"), "got {v:?}");
+    let maybe: Vec<String> = rv_elements(&tl, "maybe@L27:branch_line").into_iter().map(|e| e.1).collect();
+    assert!(maybe.iter().all(|t| !t.contains("contains a reference")) && maybe.iter().any(|t| t.contains("can hold references")), "got {maybe:?}");
+    // The `?` arm's state includes its early return (s dropped there): not
+    // a disagreement with the other arm on the way to the join.
+    assert_eq!(y_of("s@L37:dot:branch_join") - y_of("s@L37:dot:branch"), 60.0, "the conditional with a `?` in an arm is one row");
+    // `if c { q = r; } else { println!("{}", q); }`: s is lent to r on both
+    // arms (and to q too on the first), and q holds s's or t's borrow: the
+    // arms differ, each gets a row.
+    assert!(y_of("q@L66:dot:branch_join") - y_of("q@L66:dot:branch") > 60.0, "q's arms differ: a row per arm");
+    // The dead `else` with its `{` on the next line: its rows are marked
+    // and value is dashed there, saying why.
+    let doc = roxmltree::Document::parse(&tl).expect("timeline svg parses");
+    let dead = doc.root_element().attribute("data-rv-dead-rows").unwrap_or("");
+    assert_eq!(dead, "53 54", "dead rows");
+    let value: Vec<(String, String)> = rv_elements(&tl, "value@L").into_iter().filter(|e| e.0.contains(":line:")).map(|e| (e.0, e.1)).collect();
+    assert!(value.iter().any(|(id, t)| id.ends_with("full_privilege_uninit") && t.starts_with("This else never runs")), "got {value:?}");
+
+    // `dead_else_early` (a fn name with `else` in it): the dead rows are
+    // its `else` block's (its `}` too: the `if let` arm returns, so the
+    // code after it is dead as well), not the `0` after it, which is no
+    // else's (#1004).
+    let doc995 = run_with_local_backend("edition2024/irrefutable_iflet_inline_995").timeline_panel_string();
+    let doc995 = roxmltree::Document::parse(&doc995).expect("timeline svg parses");
+    assert_eq!(doc995.root_element().attribute("data-rv-dead-rows"), Some("34 35"), "995's dead rows");
+    // A dead else's closing `}`, where the `if let` arm goes on, is where
+    // the paths have joined: not a dead row (the drawing oracle checks the
+    // point after the `if let`).
+    let tl987 = run_with_local_backend("edition2024/dead_else_987").timeline_panel_string();
+    let doc987 = roxmltree::Document::parse(&tl987).expect("timeline svg parses");
+    assert_eq!(doc987.root_element().attribute("data-rv-dead-rows"), Some("13 23 35 45"), "987's dead rows");
+
+    // One-line arms keep 2.x's leg title where the arm's own cell lends the
+    // column the same way: the cell is read where the arm's value isn't in
+    // its variable yet, so it can't name the holder, and a title read for
+    // the row is the join's hedge.
+    let tip_of = |fixture: &str, id: &str| -> String {
+        let tl = run_with_local_backend(fixture).timeline_panel_string();
+        rv_elements(&tl, id).into_iter().find(|e| e.0 == id).unwrap_or_else(|| panic!("{fixture}: no {id}")).1
+    };
+    assert_eq!(tip_of("one_line_arm_overlap_1264", "f@L34:branch_line:partial_privilege"), "f's resource is being shared by one or more variables");
+    assert_eq!(tip_of("arm_ref_binding_value_1327", "o2@L19:branch_line:partial_privilege"), "o2's resource is being shared by one or more variables");
+    assert_eq!(tip_of("rv3_owner_lines_1852", "x@L44:branch_line:revoked_privilege"), "x's resource is mutably borrowed by r; x can't be used until the borrow ends");
+    assert_eq!(tip_of("rv3_owner_lines_1852", "y@L44:branch_line:revoked_privilege"), "y's resource is mutably borrowed by s; y can't be used until the borrow ends");
+    // `let it = if c { v1.iter() } else { v2.iter() };`: v1 still owns
+    // its vector while the iterator borrows it.
+    assert_eq!(tip_of("branch_holder_lenders_1404", "v1@L40:branch_line:partial_privilege"), "v1 is the owner of the resource. v1 stays borrowed while it is in use");
+    // A fn on one line, `if c { p.a } else { p.b }`: p's line over the
+    // arms' rows is partly moved, not "the owner".
+    let p = tip_of("one_line_if_on_header_row_1342", "p@L9:line:full_privilege");
+    assert!(p.contains("p.a and p.b may have been moved out"), "got {p}");
 }
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws
@@ -39325,9 +39436,9 @@ fn one_line_diamonds_end_brackets_at_forks_and_return_outward() {
     }
     // A left arm's L and a call's result to the caller in the gutter on
     // one row (`if c { *b } else { String::new() }`): their heads apart.
-    // (Since design Q1 the two arms are on rows of their own, b moved on
-    // one arm only, so the heads are a row apart; on one row they'd have
-    // to be apart sideways.)
+    // (Since design Q1 the two arms are on rows of their own: the String
+    // in b's box, `*b`, is moved out on one arm only, so b's box is partly
+    // moved there and whole on the other. The heads are a row apart.)
     let tip = |id: &str| -> (f64, f64) {
         let doc = roxmltree::Document::parse(&tl).expect("timeline svg parses");
         let g = doc.descendants().find(|n| n.attribute("data-rv-id") == Some(id))
@@ -39337,8 +39448,8 @@ fn one_line_diamonds_end_brackets_at_forks_and_return_outward() {
         (p[2], p[3])
     };
     let (b, new) = (tip("b>caller@L66:arrow:move"), tip("String::new>caller@L66:arrow:move"));
-    if (b.0 - new.0).abs() < 16.0 && (b.1 - new.1).abs() < 16.0 {
-        bad.push(format!("{fixture}: the heads of b's and String::new's returns are {:?} apart", (b.0 - new.0, b.1 - new.1)));
+    if (b.1 - new.1).abs() < 25.0 {
+        bad.push(format!("{fixture}: the heads of b's and String::new's returns are {:?} apart, not on rows of their own", (b.0 - new.0, b.1 - new.1)));
     }
     // A call's logo on an arm's diagonal (or the bend below the fork)
     // goes on the arm's outer side, not into the diamond on the other

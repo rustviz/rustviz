@@ -1294,7 +1294,10 @@ fn one_row_per_arm_ids(visualization_data: &VisualizationData) -> BTreeSet<usize
                 if branch_is_collapsed(*split_point, *merge_point) {
                     #[expect(clippy::disallowed_methods, reason = "collected into a sorted set")]
                     let names: BTreeSet<String> = live_vars.iter().map(|r| r.name().to_owned()).collect();
-                    if vd.state_table.arms_disagree(*split_point, &names) {
+                    // (This conditional's own arms, by their source spans: not
+                    // a sibling conditional's on the same line.)
+                    let spans: Vec<_> = branches.iter().map(|b| b.source_span).collect();
+                    if vd.state_table.arms_disagree(*split_point, &names, &spans) {
                         out.insert(*id);
                     }
                 }
@@ -1327,36 +1330,50 @@ fn inline_dead_rows(visualization_data: &VisualizationData) -> BTreeSet<usize> {
     }
     let mut drawn = Vec::new();
     spans(&visualization_data.preprocess_external_events, &mut drawn);
-    // The `else` blocks: from a line with `else {` to the line its brace
-    // closes on.
+    // The `else` blocks: from the `else` keyword (a word of its own, not
+    // part of a name like `dead_else_early`) to the line its block's brace
+    // closes on, the `{` on that line or a later one. A closing line with
+    // only its `}` counts only where the code after it is dead too: else
+    // below it the conditional has joined, on the path that runs.
     let text: Vec<String> = visualization_data.source_lines.iter().map(|l| timeline_panel::code_text(l)).collect();
-    let mut elses: Vec<(usize, usize)> = Vec::new();
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut elses: Vec<(usize, usize, bool)> = Vec::new();
     for (i, t) in text.iter().enumerate() {
-        let Some(p) = t.find("else") else { continue };
-        let Some(open) = t[p..].find('{').map(|o| p + o) else { continue };
-        let mut depth = 0i64;
-        let close = text.iter().enumerate().skip(i).find_map(|(j, line)| {
-            let from = if j == i { open } else { 0 };
-            for c in line[from..].chars() {
-                match c {
-                    '{' => depth += 1,
-                    '}' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            return Some(j + 1);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            None
+        let keywords = t.match_indices("else").map(|(p, _)| p).filter(|&p| {
+            !t[..p].chars().next_back().is_some_and(word) && !t[p + 4..].chars().next().is_some_and(word)
         });
-        if let Some(close) = close {
-            elses.push((i + 1, close));
+        for p in keywords {
+            // The block's `{`: the first after the keyword.
+            let Some((oi, open)) = text.iter().enumerate().skip(i)
+                .find_map(|(j, line)| line[if j == i { p } else { 0 }..].find('{').map(|o| (j, o + if j == i { p } else { 0 })))
+            else { continue };
+            let mut depth = 0i64;
+            let close = text.iter().enumerate().skip(oi).find_map(|(j, line)| {
+                let from = if j == oi { open } else { 0 };
+                for (k, c) in line[from..].char_indices() {
+                    match c {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return Some((j + 1, line[..from + k].trim().is_empty()));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            });
+            if let Some((close, lone)) = close {
+                elses.push((i + 1, close, lone && close > i + 1));
+            }
         }
     }
-    visualization_data.state_table.dead_rows().into_iter()
-        .filter(|r| elses.iter().any(|(e, c)| e < r && r <= c))
+    let dead = visualization_data.state_table.dead_rows();
+    // (A lone `}` counts where the code after it is dead too: the `if let`
+    // arm always leaves, so only the imaginary path goes on past it.)
+    dead.iter().copied()
+        .filter(|r| elses.iter().any(|&(e, c, lone)| e < *r && (*r < c || (*r == c && !(lone && !dead.contains(&(c + 1)))))))
         .filter(|r| !drawn.iter().any(|(s, m)| s <= r && r <= m))
         .collect()
 }
