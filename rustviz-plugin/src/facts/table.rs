@@ -9,7 +9,7 @@
 //! by the first row of the leg it draws, since rows above a leg's start
 //! may belong to another arm.
 
-use super::schema::{DropRoute, LoanInfo, BodyFacts, CrateFacts, Fact, Lent, Parts, State};
+use super::schema::{DropRoute, LoanInfo, BodyFacts, CrateFacts, Fact, HolderType, Lent, Parts, State};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A column's value on a row.
@@ -87,6 +87,8 @@ pub struct Cell {
     /// later row uses, a moved-out or unassigned variable, or a field
     /// column (only variable columns have them).
     pub holds: Vec<usize>,
+    pub holder_type: Option<HolderType>,
+    pub option_holds: Vec<usize>,
     pub always_assigned: bool,
     pub reassigned: Option<bool>,
     pub moved_in_arm: bool,
@@ -94,6 +96,16 @@ pub struct Cell {
     /// The row this state was read on (the row asked for, or the row
     /// above it that the state carries over from).
     pub from_row: usize,
+}
+
+impl Cell {
+    /// The active binding is an Option of a reference, and whether it is Copy.
+    pub fn option_ref_copy(&self) -> Option<bool> {
+        match self.holder_type {
+            Some(HolderType::OptionRef { copy, .. }) => Some(copy),
+            _ => None,
+        }
+    }
 }
 
 type Cells = BTreeMap<String, Cell>;
@@ -142,7 +154,7 @@ struct BodyTable {
     columns: Vec<String>,
     array_lengths: BTreeMap<String, usize>,
     boxes: BTreeSet<String>,
-    option_refs: BTreeSet<String>,
+    uniform_option_refs: BTreeMap<String, bool>,
     /// Each loan's borrowed place (`s`, `p.a`, `*b`, `v[_]`).
     loans: BTreeMap<usize, LoanInfo>,
     part_lenders: BTreeSet<String>,
@@ -317,6 +329,9 @@ impl StateTable {
             cell.may_lend = here.may_lend;
             cell.borrowed_from = here.borrowed_from;
             cell.holder_sources = here.holder_sources;
+            let same_type = cell.holder_type == here.holder_type;
+            cell.holds = if same_type { here.holds } else { Vec::new() };
+            cell.option_holds = if same_type { here.option_holds } else { Vec::new() };
         }
         cell.from_row = next;
         Some(cell)
@@ -623,8 +638,24 @@ impl StateTable {
         self.body(fn_line, column).is_some_and(|b| b.boxes.contains(column))
     }
 
-    pub fn is_option_ref(&self, fn_line: usize, column: &str) -> bool {
-        self.body(fn_line, column).is_some_and(|b| b.option_refs.contains(column))
+    /// The event's column can be absent from either side (a new binding,
+    /// or one whose scope ends on the same row). Require agreement across
+    /// available snapshots if both sides have a binding.
+    pub fn option_ref_copy(&self, fn_line: usize, column: &str, row: Option<usize>) -> Option<bool> {
+        let body = self.body(fn_line, column)?;
+        if let Some(&copy) = body.uniform_option_refs.get(column) {
+            // A branch leg may have no cell of its own. All bindings
+            // represented by this column have the same type classification.
+            return Some(copy);
+        }
+        let r = body.rows.get(&row?)?;
+        let mut cells = [&r.cells].into_iter()
+            .chain(r.before.iter())
+            .chain(r.arms.iter().map(|(_, cells)| cells))
+            .filter_map(|cells| cells.get(column));
+        let holder_type = cells.next()?.holder_type?;
+        let HolderType::OptionRef { copy, .. } = holder_type else { return None };
+        cells.all(|c| c.holder_type == Some(holder_type)).then_some(copy)
     }
 
     pub fn array_len(&self, fn_line: usize, column: &str) -> Option<usize> {
@@ -737,6 +768,8 @@ fn cells_of(st: &State) -> Cells {
                     .filter_map(|h| Some((h.clone(), st.holder_sources.get(h)?.clone())))
                     .collect(),
                 holds: st.holds.get(col).cloned().unwrap_or_default(),
+                holder_type: st.holder_types.get(col).copied(),
+                option_holds: st.option_holds.get(col).cloned().unwrap_or_default(),
                 from_row: 0,
                 why: Vec::new(),
             },
@@ -791,16 +824,10 @@ fn body_table(b: &BodyFacts) -> BodyTable {
     }
     let array_lengths = b.columns.iter().filter_map(|c| Some((c.name.clone(), c.array_len?))).collect();
     let boxes = b.columns.iter().filter(|c| c.is_box).map(|c| c.name.clone()).collect();
-    // Only variable cells have holds. Shared display columns require all
-    // their variables to agree on the type before using an option title.
-    let mut option_refs: BTreeSet<_> = b.vars.iter().filter(|v| v.is_option_ref).map(|v| v.name.clone()).collect();
-    for v in b.vars.iter().filter(|v| !v.is_option_ref) {
-        option_refs.remove(&v.name);
-    }
     let part_lenders = b.loans.iter().flat_map(|l| l.part_of.iter().cloned()).collect();
     let loans = b.loans.iter().map(|l| (l.loan, l.clone())).collect();
     let hidden_fields = b.columns.iter().filter(|c| c.hidden_fields).map(|c| c.name.clone()).collect();
-    BodyTable { joins: b.joins.iter().map(|(s, j)| (*s, cells_of(&j.state))).collect(), first_line: b.first_line, last_line: b.last_line, rows, columns, array_lengths, boxes, option_refs, loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
+    BodyTable { joins: b.joins.iter().map(|(s, j)| (*s, cells_of(&j.state))).collect(), first_line: b.first_line, last_line: b.last_line, rows, columns, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
 }
 
 #[cfg(test)]
@@ -839,6 +866,7 @@ mod tests {
             last_line: first + 9,
             vars: Vec::new(),
             columns: cols.iter().map(|c| col(c)).collect(),
+            uniform_option_refs: Default::default(),
             loans: vec![LoanInfo {
                 loan: 0,
                 line: 3,

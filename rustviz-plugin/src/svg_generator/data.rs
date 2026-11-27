@@ -1521,6 +1521,8 @@ pub struct ArgTie {
     /// Some tied argument has a lifetime that only outlives the
     /// result's (`'a: 'b`, #1125): "the same lifetime" isn't true of it.
     pub via_outlives: bool,
+    /// The resolved callee constructs a variant with the argument in it.
+    pub constructs_variant: bool,
 }
 
 /// An argument a call's result is tied to only through the references
@@ -3794,6 +3796,10 @@ impl Event {
 
     // This function tells us what the text associated with a Dot event should be
     pub fn print_message_with_name(&self, my_name: &mut String) -> String {
+        self.print_message_with_option_type(my_name, false)
+    }
+
+    pub fn print_message_with_option_type(&self, my_name: &mut String, may_be_none: bool) -> String {
         match self {
             // no arrow involved
             Event::ClosureCall { fates, timing, .. } => {
@@ -4495,7 +4501,7 @@ impl Event {
                     hover_messages::event_dot_holder_borrow_caller(&self.deref_name(my_name))
                 } else if is.holds_borrow() {
                     // `refs.push(&mut m)` stores a borrow of m itself (#973).
-                    hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), true, if *of_ref_var { hover_messages::HolderLender::Own } else { holder_lender_kind(from) }, *of_ref_var || holds_copy_value(from))
+                    hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), true, if *of_ref_var { hover_messages::HolderLender::Own } else { holder_lender_kind(from) }, *of_ref_var || holds_copy_value(from), may_be_none)
                 } else if matches!(is, ResourceTy::Value(r) if r.is_ref() && !r.is_mutref()) {
                     hover_messages::event_dot_mut_borrow_by_shared_ref(&self.deref_name(my_name), *of_ref_var || loan_holds_value(from, is))
                 } else {
@@ -4508,7 +4514,7 @@ impl Event {
                     hover_messages::event_dot_closure_capture_static_borrow(&self.deref_name(my_name), &from.name())
                 } else if is.holds_borrow() {
                     // `refs.push(&x)` stores a borrow of x itself (#973).
-                    hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), false, if *of_ref_var { hover_messages::HolderLender::Own } else { holder_lender_kind(from) }, *of_ref_var || holds_copy_value(from))
+                    hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), false, if *of_ref_var { hover_messages::HolderLender::Own } else { holder_lender_kind(from) }, *of_ref_var || holds_copy_value(from), may_be_none)
                 } else if matches!(is, ResourceTy::Value(r) if r.is_mutref()) {
                     hover_messages::event_dot_static_borrow_by_mut_ref(&self.deref_name(my_name), *of_ref_var || loan_holds_value(from, is))
                 } else {

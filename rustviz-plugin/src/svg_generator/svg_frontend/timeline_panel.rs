@@ -2744,7 +2744,10 @@ fn render_dot(
                     } else if let Some(title) = deep_lend_title(event, visualization_data) {
                         data.title = title;
                     } else {
-                        data.title = event.print_message_with_name(& mut name);
+                        let may_be_none = matches!(event, Event::StaticBorrow { .. } | Event::MutableBorrow { .. })
+                            && option_ref_copy(visualization_data, hash, &name, Some(*line_number)).is_some()
+                            && borrow_result_may_be_none(&visualization_data.external_events, event.get_id());
+                        data.title = event.print_message_with_option_type(&mut name, may_be_none);
                     }
                     // One of several `break` values reaching the loop's
                     // receiver: it happened only if that `break` ended
@@ -4166,10 +4169,11 @@ fn timeline_segment_title(
     }
     // A value that holds a borrow (`let it = v.iter();`, #336) owns
     // its value, not the data it borrows.
-    if rap.holds_borrow() && !visualization_data.fn_source_lines.get(rap.hash())
-        .is_some_and(|&f| visualization_data.state_table.is_option_ref(f, rap.name()))
-    {
+    if rap.holds_borrow() {
         if let State::FullPrivilege { .. } = state {
+            if let Some(copy) = option_ref_copy(visualization_data, rap.hash(), rap.name(), line) {
+                return hover_messages::state_option_holds_loans(rap.name(), copy, &[], false);
+            }
             // `let mut refs = Vec::new();` starts out holding no
             // reference; `refs.push(&s)` stores one later (#392).
             if holder_starts_empty(visualization_data, rap) {
@@ -4232,6 +4236,22 @@ fn timeline_segment_title(
         return hover_messages::state_mut_ref_partial_privilege(rap.name(), rap.points_to_copy());
     }
     state.print_message_with_name(rap.name())
+}
+
+fn option_ref_copy(vd: &VisualizationData, hash: &u64, name: &str, row: Option<usize>) -> Option<bool> {
+    let fn_line = *vd.fn_source_lines.get(hash)?;
+    vd.state_table.option_ref_copy(fn_line, name, row.and_then(|r| rv_attrs::line_of(r, &vd.row_lines)))
+}
+
+fn borrow_result_may_be_none(events: &[(usize, ExternalEvent)], id: usize) -> bool {
+    events.iter().any(|(_, event)| match event {
+        ExternalEvent::StaticBorrow { id: i, via: Some(via), .. }
+        | ExternalEvent::MutableBorrow { id: i, via: Some(via), .. } if *i == id => {
+            !via.tie.constructs_variant || !via.passed_on.is_empty()
+        }
+        ExternalEvent::Branch { branches, .. } => branches.iter().any(|b| borrow_result_may_be_none(&b.e_data, id)),
+        _ => false,
+    })
 }
 
 /// Every event of a column, those in its conditionals' arms included,
@@ -6829,9 +6849,11 @@ fn render_generic_arrow(
     if arrow_is_undrawn(external_event, from, to) || arrow_left_out(visualization_data, external_event) {
         return;
     }
+    let option_ref = matches!(external_event, ExternalEvent::StaticBorrow { via: Some(_), .. } | ExternalEvent::MutableBorrow { via: Some(_), .. })
+        && to.extract_rap().is_some_and(|rap| option_ref_copy(visualization_data, rap.hash(), rap.name(), Some(*line_number)).is_some());
     let mut title = match visualization_data.field_lenders.get(&external_event.get_id()) {
-        Some(f) => hover_messages::arrow_field_lenders_title(external_event, from, to, &f.lenders, f.end),
-        None => hover_messages::arrow_full_title(external_event, from, to),
+        Some(f) => hover_messages::arrow_field_lenders_title(external_event, from, to, &f.lenders, f.end, option_ref),
+        None => hover_messages::arrow_full_title(external_event, from, to, option_ref),
     };
 
     if visualization_data.approx_notes.iter().any(|n| matches!(n, ApproxNote::VecElement { id, nested: true, .. } if *id == external_event.get_id())) {
@@ -10168,21 +10190,21 @@ fn render_timeline(
 /// reference, borrowed by ...) and adds or corrects only what the cell
 /// knows (who holds a borrow, on some paths only, moved parts).
 fn owner_segment(rap: &ResourceAccessPoint, vd: &VisualizationData, row: usize, layout: &State, between_own_dots: bool) -> Option<(State, String)> {
-    use crate::facts::table::Why;
+    // The row-end snapshot can include events after this interval. Replay
+    // has already applied the current dot and has yet to apply the next one.
+    if between_own_dots {
+        let (state, mut title) = owner_segment_of(rap, vd, row, layout, None)?;
+        if matches!(state, State::PartialPrivilege { s: LineState::Full }) && !rap.holds_value() && !rap.holds_borrow() {
+            title = format!("{}. {title}", hover_messages::state_full_privilege(rap.name()));
+        }
+        return Some((state, title));
+    }
     let fn_line = *vd.fn_source_lines.get(rap.hash())?;
     let src = rv_attrs::line_of(row, &vd.row_lines)?;
     // (A fn written on one line has no state between its rows: below a
     // one-line conditional's arms, the arms joined.)
     let cell = vd.state_table.segment_cell(fn_line, rap.name(), src)
         .or_else(|| vd.state_table.arms_joined_cell(fn_line, rap.name(), src));
-    // A loan issued on this row and still live at its end can start after
-    // this owner's current dot. Keep the event replay's state and title
-    // between the dots, where the table has no snapshot for that loan yet.
-    if between_own_dots && cell.as_ref().is_some_and(|c| {
-        c.why.iter().any(|w| matches!(w, Why::Lent { loan } if c.lent.iter().any(|l| l.loan == *loan)))
-    }) {
-        return owner_segment_of(rap, vd, row, layout, None);
-    }
     // Code that never runs, drawn inline (the dead `else` of an irrefutable
     // `if let`, #987): its cell is the borrow checker's imaginary path's.
     // Where that path has no value for a column the path that runs fills,
@@ -10315,8 +10337,8 @@ fn owner_segment_of(rap: &ResourceAccessPoint, vd: &VisualizationData, row: usiz
         return Some((part_loan_style.unwrap_or(full), title));
     }
     let (state, loan_title, whole) = owner_loan_title(rap, vd, fn_line, &cell, layout, row);
-    if !whole_title || !whole {
-        // Moved parts, or a loan of a part of it: both are said.
+    if !whole_title || !whole || cell.option_ref_copy().is_some() {
+        // The value's own loans and a borrow of the value can coexist.
         title.push_str(". ");
         title.push_str(&loan_title);
     } else {
@@ -10329,15 +10351,21 @@ fn owner_segment_of(rap: &ResourceAccessPoint, vd: &VisualizationData, row: usiz
 /// The ownership clause for a cell with its whole value.
 fn owner_value_title(rap: &ResourceAccessPoint, vd: &VisualizationData, fn_line: usize, cell: &crate::facts::table::Cell, row: Option<usize>) -> String {
     let name = rap.name();
-    if vd.state_table.is_option_ref(fn_line, name) {
-        if !cell.holds.is_empty() {
-            let lenders: BTreeSet<_> = cell.holds.iter()
-                .filter_map(|&id| vd.state_table.loan(fn_line, name, id))
-                .filter(|loan| loan.columns.contains(&loan.lender))
-                .map(|loan| Some(loan.lender.clone()))
-                .collect();
-            return hover_messages::state_option_holds_loans(name, &lenders.into_iter().collect::<Vec<_>>());
+    if let Some(copy) = cell.option_ref_copy() {
+        let mut lenders = BTreeSet::new();
+        let mut temporary = false;
+        for loan in cell.holds.iter().chain(&cell.option_holds)
+            .filter_map(|&id| vd.state_table.loan(fn_line, name, id))
+        {
+            match loan.source {
+                "borrow" => { lenders.insert(Some(loan.lender.clone())); }
+                "temporary" => temporary = true,
+                _ => {}
+            }
         }
+        return hover_messages::state_option_holds_loans(name, copy, &lenders.into_iter().collect::<Vec<_>>(), temporary);
+    } else if cell.holder_type == Some(crate::facts::schema::HolderType::Primitive) {
+        return hover_messages::state_full_privilege_copyable(name);
     } else if rap.holds_borrow() && !cell.borrowed_from.is_empty() {
         // An iterator can borrow data through raw pointers.
         let from = display_places(vd, fn_line, name, &cell.borrowed_from);

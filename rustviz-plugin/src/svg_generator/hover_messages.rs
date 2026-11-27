@@ -2859,7 +2859,7 @@ pub const TRY_PASSES_ON: &str = "\u{1d}?";
 // result to several arguments (`longest(&a, &b)`): the borrow checker
 // can't know which one it points into, so all of them stay borrowed
 // for as long as the result is used.
-pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[String], also_unnamed: bool, tie: &ArgTie, carrier: ViaCarrier, passed_on: &[String]) -> String {
+fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[String], also_unnamed: bool, tie: &ArgTie, carrier: ViaCarrier, passed_on: &[String], option_ref: bool) -> String {
     let func_fmt = styled_name_html(func);
     let to_fmt = styled_name_html(to_name);
     if carrier == ViaCarrier::StoredBy {
@@ -2964,9 +2964,14 @@ pub fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[
     }
     // A value that isn't a reference (`let it = v.iter();`) or a
     // struct with a reference field can carry the borrow too (#336).
+    let may_be_none = option_ref && (!tie.constructs_variant || !passed_on.is_empty());
     let (noun, not_ref) = match carrier {
         ViaCarrier::Reference => ("reference", String::new()),
+        ViaCarrier::Value if may_be_none => ("value", format!("; {to_fmt}'s value can hold a reference ({to_fmt} isn't a reference itself)")),
         ViaCarrier::Value => ("value", format!("; {0} isn't a reference, but its value holds one", to_fmt)),
+        ViaCarrier::StructField | ViaCarrier::TupleField if may_be_none =>
+            (if carrier == ViaCarrier::StructField { "struct" } else { "tuple" },
+                format!("; {to_fmt}'s value can hold a reference ({to_fmt} isn't a reference itself)")),
         ViaCarrier::StructField => ("struct", String::new()),
         ViaCarrier::TupleField => ("tuple", String::new()),
         ViaCarrier::Element | ViaCarrier::StoredBy | ViaCarrier::PatternBinding { .. } | ViaCarrier::PatternRef | ViaCarrier::ReturnedClosure { .. } | ViaCarrier::Part | ViaCarrier::StoredThrough => unreachable!(),
@@ -3530,12 +3535,19 @@ pub fn state_holder_borrows_from(name: &str, sources: &[Option<String>]) -> Stri
 }
 
 /// The borrow checker can count loans through an option even when it is None.
-pub fn state_option_holds_loans(name: &str, lenders: &[Option<String>]) -> String {
-    let me = styled_name_html(name);
-    let mut title = format!("{me} holds a value that can hold a reference ({me} isn't a reference itself)");
+pub fn state_option_holds_loans(name: &String, copy: bool, lenders: &[Option<String>], temporary: bool) -> String {
+    let mut title = state_holder_starts_empty(name);
+    if copy {
+        title.push_str(". ");
+        title.push_str(&state_full_privilege_copyable(name));
+    }
     if !lenders.is_empty() {
+        let me = styled_name_html(name);
         let places = place_list(lenders, "and");
         title.push_str(&format!(". The borrow checker keeps {places} borrowed while {me} is in use"));
+    }
+    if temporary {
+        title.push_str(". It can hold a reference that borrows from a temporary");
     }
     title
 }
@@ -3820,17 +3832,19 @@ pub enum HolderLender {
 // A field reached through a reference (`self.items` in `let it =
 // self.items.iter();` with `self: &mut Self`; #1080) is named as the
 // place it is.
-pub fn event_dot_holder_borrow(my_name: &String, from_name: &String, is_mut: bool, from: HolderLender, holds_value: bool) -> String {
+pub fn event_dot_holder_borrow(my_name: &String, from_name: &String, is_mut: bool, from: HolderLender, holds_value: bool, option_ref: bool) -> String {
     let what = match from {
         HolderLender::Pointee => format!("the data {} points to", styled_name_html(from_name)),
         HolderLender::FieldThroughRef => styled_name_html(from_name),
         HolderLender::Own => format!("{}'s {}", styled_name_html(from_name), if holds_value { "value" } else { "resource" }),
     };
     format!(
-        "{0} holds a value that {1} borrows {2} ({0} isn't a reference itself)",
+        "{0} holds a value that {3}{1} {4} {2} ({0} isn't a reference itself)",
         styled_name_html(my_name),
         if is_mut { "mutably" } else { "immutably" },
-        what
+        what,
+        if option_ref { "can " } else { "" },
+        if option_ref { "borrow" } else { "borrows" },
     )
 }
 
@@ -6382,7 +6396,7 @@ pub fn field_carried_with(field: &str, into: &str, parent: &str, dest: &str) -> 
 /// where it comes from and goes to, then the special cases (a returned
 /// call result, an `Rc` call, a borrow ending, a `break` alternative, a
 /// borrow a call result keeps).
-pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &ResourceTy) -> String {
+pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &ResourceTy, option_ref: bool) -> String {
     if let ExternalEvent::Move { carried_with: Some((parent, dest)), .. } = external_event {
         return field_carried_with(&from.name(), &to.name(), parent, dest);
     }
@@ -6478,7 +6492,7 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
     }
     if let ExternalEvent::StaticBorrow { via: Some(via), .. }
          | ExternalEvent::MutableBorrow { via: Some(via), .. } = external_event {
-        title.push_str(&arrow_borrow_via_call_suffix(&to.name(), &via.func, &via.lenders, via.also_unnamed, &via.tie, via.carrier, &via.passed_on));
+        title.push_str(&arrow_borrow_via_call_suffix(&to.name(), &via.func, &via.lenders, via.also_unnamed, &via.tie, via.carrier, &via.passed_on, option_ref));
     }
     title
 }
@@ -6490,8 +6504,8 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
 /// "Immutable borrow from s1 or s2 to d.a: …" / "Return immutably
 /// borrowed resource from d.a to s1 or s2 (d.a may point into either;
 /// its borrow of both ends here)".
-pub fn arrow_field_lenders_title(external_event: &ExternalEvent, from: &ResourceTy, to: &ResourceTy, lenders: &[String], end: bool) -> String {
-    let title = arrow_full_title(external_event, from, to);
+pub fn arrow_field_lenders_title(external_event: &ExternalEvent, from: &ResourceTy, to: &ResourceTy, lenders: &[String], end: bool, option_ref: bool) -> String {
+    let title = arrow_full_title(external_event, from, to, option_ref);
     let (either, all) = if lenders.len() == 2 { ("either", "both") } else { ("any of them", "all of them") };
     if end {
         let field = styled_name_html(&from.name());

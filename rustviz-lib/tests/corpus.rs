@@ -6879,12 +6879,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "holder_iter_get",
         // `it` (an Iter) and `third` (an Option<&i32>) aren't
-        // references, but each holds a borrow of `v` until its last use
+        // references, but each keeps `v` borrowed until its last use
         // (rustc rejects `v.push(4)` before line 6). `x` is a copy of a
         // reference `it` hands out, so it borrows `v` too.
         must_contain: &[
             "Immutable borrow from v to it: iter's signature gives the value it returns the same lifetime as the value it was called on; it isn't a reference, but its value holds one",
-            "Immutable borrow from v to third: get's signature gives the value it returns the same lifetime as the value it was called on; third isn't a reference, but its value holds one",
+            "Immutable borrow from v to third: get's signature gives the value it returns the same lifetime as the value it was called on; third's value can hold a reference (third isn't a reference itself)",
             "Immutable borrow from v to x: next's signature gives the value it returns the same lifetime as the references stored in it; unwrap passes the borrow on",
             "it holds a value that immutably borrows v's resource (it isn't a reference itself)",
             "it holds a value that borrows from v (it isn't a reference itself)",
@@ -6900,6 +6900,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "it goes out of scope. Its value is dropped, but not the data it borrowed.",
             ", through the value iter returned",
             ", through the value get returned",
+            "third isn't a reference, but its value holds one",
             ", through the reference unwrap returned",
             "Move from iter to it",
             "Copy from get to third",
@@ -20807,8 +20808,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed value from r to p.n",
             "self holds a mutable reference, but self.items is immutably borrowed by f while the borrow is live",
             "self.items's resource is immutably borrowed by f; self.items is read-only while the borrow is live",
-            "f holds a value that immutably borrows self.items (f isn't a reference itself)",
-            "Immutable borrow from self.items to f: find's signature gives the value it returns the same lifetime as the references stored in the value it was called on; f isn't a reference, but its value holds one",
+            "f holds a value that can immutably borrow self.items (f isn't a reference itself)",
+            "Immutable borrow from self.items to f: find's signature gives the value it returns the same lifetime as the references stored in the value it was called on; f's value can hold a reference (f isn't a reference itself)",
             "Return immutably borrowed resource from f to self.items",
             "self.items's resource is no longer immutably borrowed",
             "the resource self points to is modified through self.n",
@@ -20828,6 +20829,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "same lifetime as the value it was called on",
             "borrows the data self points to",
             "f no longer borrows the resource self points to",
+            "f holds a value that immutably borrows self.items",
+            "f isn't a reference, but its value holds one",
             "Immutable borrow from self to f",
             "Mutable borrow from self to f",
             "Return immutably borrowed resource from f to self<",
@@ -22757,13 +22760,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "_x's mutable borrow ends",
             "Mutable reborrow from r2 to x: first_mut's signature gives the value it returns the same lifetime as the value it was called on; unwrap passes the borrow on",
             "x no longer borrows the resource r2 points to",
-            "Mutable reborrow from r3 to o: get_mut's signature gives the value it returns the same lifetime as the value it was called on; o isn't a reference, but its value holds one",
+            "Mutable reborrow from r3 to o: get_mut's signature gives the value it returns the same lifetime as the value it was called on; o's value can hold a reference (o isn't a reference itself)",
             "Mutable reborrow from r4 to y: last_mut's signature gives the value it returns the same lifetime as the value it was called on; unwrap passes the borrow on",
         ],
         must_not_contain: &[
             "Mutable borrow from v to it",
             "Mutable borrow from v to x",
             "Mutable borrow from v to o",
+            "o isn't a reference, but its value holds one",
             "Mutable borrow from v to y",
             "iter_mut no longer borrows the resource r1 points to",
             "first_mut no longer borrows the resource r2 points to",
@@ -25126,8 +25130,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // Q7 (P2-1b, ends from the facts): x and refs are read on the last row; refs (read last) gives a1 back, x's own borrow ends.
             "x's immutable borrow ends",
             "Return immutably borrowed resource from refs to a1",
-            "Mutable borrow from refs to o: iter_mut's signature gives the value it returns the same lifetime as the value it was called on; next passes the borrow on; o isn't a reference, but its value holds one",
-            "Mutable borrow from refs to p: last_mut's signature gives the value it returns the same lifetime as the value it was called on; p isn't a reference, but its value holds one",
+            "Mutable borrow from refs to o: iter_mut's signature gives the value it returns the same lifetime as the value it was called on; next passes the borrow on; o's value can hold a reference (o isn't a reference itself)",
+            "Mutable borrow from refs to p: last_mut's signature gives the value it returns the same lifetime as the value it was called on; p's value can hold a reference (p isn't a reference itself)",
             "Mutable borrow from arr to el: iter_mut's signature gives the value it returns the same lifetime as the value it was called on; next and unwrap pass the borrow on",
         ],
         must_not_contain: &[
@@ -25138,6 +25142,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from a1 to r1",
             "Immutable borrow from a1 to r2",
             "Immutable borrow from refs to x",
+            "o isn't a reference, but its value holds one",
+            "p isn't a reference, but its value holds one",
             "holds a value that mutably borrows a1's resource",
             "so it may point into",
             "so it may borrow from",
@@ -28563,30 +28569,152 @@ fn column_line_at(svg: &str, column: &str, row: usize) -> (String, Vec<String>) 
     (lines[0].attribute("data-rv-state").unwrap().to_owned(), timeline_tooltips(&svg[lines[0].range()]))
 }
 
-#[test]
-fn option_holder_title_follows_live_loan_1880() {
-    let svg = run_with_local_backend("rv3_option_holder_title_1880").timeline_panel_string();
-    // Moving clear() above black_box(maybe) gives E0502, including when
-    // first() would return None on an empty vector. After black_box it compiles.
-    let (_, live) = column_line_at(&svg, "maybe", 2);
-    let (_, ended) = column_line_at(&svg, "maybe", 3);
-    assert!(!live[0].contains("contains a reference") && !ended[0].contains("contains a reference"),
-        "first() can return None: live {live:?}, ended {ended:?}");
-    assert!(live[0].contains("maybe holds a value that can hold a reference")
-        && live[0].contains("keeps v borrowed"), "{live:?}");
-    assert_eq!(ended[0], "maybe holds a copyable value");
+fn assert_review_title(title: &str, must_contain: &[&str], must_not_contain: &[&str]) {
+    for &forbidden in must_not_contain {
+        assert!(!title.contains(forbidden), "{title:?} must not contain {forbidden:?}");
+    }
+    for &wanted in must_contain {
+        assert!(title.contains(wanted), "{title:?} must contain {wanted:?}");
+    }
 }
 
 #[test]
-fn stacked_owner_title_follows_current_dot_1875() {
+fn review_titles_shared_option_1880() {
+    let svg = run_with_local_backend("rv3_option_holder_title_1880").timeline_panel_string();
+    let (_, live) = column_line_at(&svg, "maybe", 2);
+    let (_, ended) = column_line_at(&svg, "maybe", 3);
+    // Option<&String> is Copy whether first() returns Some or None.
+    // A clear before black_box is E0502, and the one after it compiles.
+    assert_review_title(&live[0], &["maybe holds a copyable value", "keeps v borrowed"], &["contains a reference"]);
+    assert_review_title(&ended[0], &["maybe owns a value that can hold references (maybe isn't a reference itself)", "maybe holds a copyable value"],
+        &["contains a reference", "keeps v borrowed"]);
+}
+
+#[test]
+fn review_titles_none_and_temporary_1880() {
+    // MIR assigns None on line 12. The binding owns that enum value.
+    let svg = run_with_local_backend("assign_branch_holder_1455").timeline_panel_string();
+    let (_, none) = column_line_at(&svg, "q", 12);
+    assert_review_title(&none[0], &["q owns a value that can hold references (q isn't a reference itself)"],
+        &["contains a reference", "keeps a borrowed", "keeps b borrowed"]);
+
+    // MIR gives o5 the type Option<&String>. Its type stays known on the
+    // match arms, where a drawn leg can lack a state cell of its own.
+    let svg = run_with_local_backend("arm_binding_value_1327").timeline_panel_string();
+    let legs: Vec<_> = rv_elements(&svg, "o5@L41:branch_line:full_privilege").into_iter()
+        .filter(|(id, _, _, _)| !id.contains("full_privilege_gray"))
+        .collect();
+    assert!(!legs.is_empty(), "no o5 legs for the match");
+    for (_, title, _, _) in legs {
+        assert_review_title(&title, &["o5 owns a value that can hold references", "o5 holds a copyable value"], &["contains a reference"]);
+    }
+
+    // MIR constructs Some with a reference to an extended temporary,
+    // then drops that String after the last use of the Option.
+    for (fixture, name, live_row, ended_row) in [
+        ("nested_extended_temporary", "s", 27, 29),
+        ("ext_temp_in_some_or_array_1357", "t", 12, 15),
+    ] {
+        let svg = run_with_local_backend(fixture).timeline_panel_string();
+        let (_, live) = column_line_at(&svg, name, live_row);
+        let (_, ended) = column_line_at(&svg, name, ended_row);
+        assert_review_title(&live[0], &["borrows from a temporary"], &["contains a reference"]);
+        assert_review_title(&ended[0], &["can hold references"], &["borrows from a temporary"]);
+    }
+}
+
+#[test]
+fn review_titles_mutable_option_1880() {
+    let svg = run_with_local_backend("rv3_option_holder_title_1880").timeline_panel_string();
+    let (_, live) = column_line_at(&svg, "maybe", 8);
+    let (_, ended) = column_line_at(&svg, "maybe", 9);
+    // The &mut String in the Option makes it non-Copy (E0277). clear()
+    // while the Option remains in use is E0499.
+    assert_review_title(&live[0], &["can hold references", "keeps v borrowed"], &["copyable", "contains a reference"]);
+    assert_review_title(&ended[0], &["maybe owns a value that can hold references (maybe isn't a reference itself)"],
+        &["copyable", "contains a reference", "keeps v borrowed"]);
+}
+
+#[test]
+fn review_titles_option_boundary_1880() {
+    let svg = run_with_local_backend("rv3_option_holder_title_1880").timeline_panel_string();
+    // clear() compiles before the assignment and gives E0502 after it.
+    let (_, before) = column_line_at(&svg, "h", 23);
+    let (_, after) = column_line_at(&svg, "h", 24);
+    assert_review_title(&before[0], &["can hold references"], &["keeps b borrowed"]);
+    assert_review_title(&after[0], &["keeps b borrowed"], &["contains a reference"]);
+
+    // The break skips clear(). At the join, where both paths reach
+    // black_box(q), putting clear() before that call gives E0502.
+    let (_, fallthrough) = column_line_at(&svg, "q", 49);
+    let (_, joined) = column_line_at(&svg, "q", 50);
+    assert_review_title(&fallthrough[0], &["can hold references"], &["keeps a borrowed"]);
+    assert_review_title(&joined[0], &["keeps a borrowed"], &["contains a reference"]);
+}
+
+#[test]
+fn review_titles_siblings_and_whole_borrow_1880() {
+    let svg = run_with_local_backend("rv3_option_holder_title_1880").timeline_panel_string();
+    let (_, option) = column_line_at(&svg, "x", 31);
+    let (_, primitive) = column_line_at(&svg, "x", 35);
+    // MIR uses separate locals. first() can return None, and u32
+    // contains no reference.
+    assert_review_title(&option[0], &["keeps v borrowed"], &["holds a value that borrows from v"]);
+    assert_review_title(&primitive[0], &["x holds a copyable value"], &["contains a reference", "can hold references", "keeps v borrowed"]);
+
+    // r shares o and retains v's loan. clear() is E0502 before
+    // black_box(r) and accepted afterward.
+    let (state, shared) = column_line_at(&svg, "o", 15);
+    assert_eq!(state, "partial_privilege");
+    assert_review_title(&shared[0], &["o's value is being shared", "keeps v borrowed"], &["contains a reference"]);
+}
+
+#[test]
+fn review_titles_option_dots_arrows_and_fields_1880() {
+    let svg = run_with_local_backend("rv3_option_holder_title_1880").timeline_panel_string();
+    // first() and first_mut() return None on an empty vector. The
+    // reference can exist inside the enum, including in a projected field.
+    for (name, row, kind, how) in [
+        ("maybe", 2, "static", "immutably"),
+        ("maybe", 8, "mutable", "mutably"),
+        ("h.entry", 58, "static", "immutably"),
+    ] {
+        let dot = tooltip_of_id(&svg, &format!("{name}@L{row}:dot:{kind}_borrow")).unwrap();
+        let arrow = tooltip_of_id(&svg, &format!("v>{name}@L{row}:arrow:{kind}_borrow")).unwrap();
+        assert_review_title(&dot, &[&format!("can {how} borrow v's resource")], &[&format!("that {how} borrows")]);
+        assert_review_title(&arrow, &["value can hold a reference"], &["its value holds one"]);
+    }
+    let (_, live) = column_line_at(&svg, "h.entry", 58);
+    let (_, ended) = column_line_at(&svg, "h.entry", 59);
+    // clear() before the field's last use is E0502, then it compiles.
+    assert_review_title(&live[0], &["keeps v borrowed"], &["contains a reference"]);
+    assert_review_title(&ended[0], &["h.entry owns a value that can hold references"], &["contains a reference", "keeps v borrowed"]);
+}
+
+#[test]
+fn review_titles_stacked_owner_1875() {
     let svg = run_with_local_backend("rv3_stacked_owner_title_1875").timeline_panel_string();
     // &mut p.a before inspect(q) is E0502. The same borrow after it
     // compiles, and inspect(&p) is legal again after r.clear().
-    let shared = tooltip_of_id(&svg, "p@L4:line:partial_privilege").unwrap();
-    assert!(shared.contains("p's resource is being shared by one or more variables")
-        && !shared.contains("p.a"), "{shared}");
+    for row in [4, 10] {
+        // On row 10 both loans end before the row does. The interval
+        // between the two dots for p is still the shared one.
+        let shared = tooltip_of_id(&svg, &format!("p@L{row}:line:partial_privilege")).unwrap();
+        assert_review_title(&shared, &["p is the owner of the resource", "p's resource is being shared by one or more variables"],
+            &["p.a is borrowed by r here", "p.a is mutably borrowed by r"]);
+    }
     let exclusive = tooltip_of_id(&svg, "p@L4-5:line:revoked_privilege").unwrap();
     assert!(exclusive.contains("p.a is mutably borrowed by r"), "{exclusive}");
+}
+
+#[test]
+fn review_titles_stacked_move_1875() {
+    // MIR borrows arr before moving it into drop. A use of r after
+    // that move gives E0505.
+    let svg = run_with_local_backend("unused_arm_binding_move_1503").timeline_panel_string();
+    let borrowed = tooltip_of_id(&svg, "arr@L65:line:partial_privilege").unwrap();
+    assert_review_title(&borrowed, &["arr is the owner of the resource", "arr's resource is being shared"],
+        &["arr's value was moved out"]);
 }
 
 #[test]

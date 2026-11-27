@@ -628,7 +628,7 @@ const BOOK: &[Snippet] = &[
         status: Correct,
         must_contain: &[
             "get reads from v (implicitly borrowed)",
-            "L3 Immutable borrow from v to third: get's signature gives the value it returns the same lifetime as the value it was called on; third isn't a reference, but its value holds one",
+            "L3 Immutable borrow from v to third: get's signature gives the value it returns the same lifetime as the value it was called on; third's value can hold a reference (third isn't a reference itself)",
             "L5 third₂ is initialized with a copy of a value inside third",
             "L5 a value inside third is copied",
             "L5 Immutable borrow from v to third₂: third₂ is a reference copied out of third",
@@ -638,6 +638,7 @@ const BOOK: &[Snippet] = &[
         ],
         must_not_contain: &[
             "Return immutably borrowed resource from third to third",
+            "third isn't a reference, but its value holds one",
             "L3 v's resource is no longer immutably borrowed",
             "=L5 Partial copy from third to third",
             // third₂ copies the reference inside third, not third (#866).
