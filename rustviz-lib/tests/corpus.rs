@@ -44707,3 +44707,76 @@ fn closure_capture_ends_follow_their_own_loan_1909() {
     assert!(tooltip_of_id(&svg, "g>s@L8:arrow:static_die").unwrap().contains("shared borrow affecting s"));
     assert!(tooltip_of_id(&svg, "g>s@L11:arrow:static_die").is_none());
 }
+
+#[test]
+fn p4_loop_boundaries_follow_the_compilers_normal_edges() {
+    let rv = run_with_local_backend("p4_loop_continuation");
+    let facts = rv.facts().unwrap();
+    let loops = |name| fact_body(facts, name)["loops"].as_array()
+        .unwrap_or_else(|| panic!("{name}: missing loop boundaries"));
+
+    // Dropping or borrowing either deferred binding after the loop is
+    // E0381. The write at the end of an iteration does carry a value back.
+    for (name, place) in [("zero_or_more", "value"), ("exhausted", "last")] {
+        let [boundary] = loops(name).as_slice() else { panic!("{name}: expected one loop") };
+        assert_eq!(boundary["entry"]["state"][place], "unassigned");
+        assert_eq!(boundary["head"]["state"][place], "maybe");
+        assert_eq!(boundary["next_iteration"]["state"][place], "own");
+        assert_eq!(boundary["continuation"]["state"][place], "maybe");
+        assert_eq!(boundary["continuation"]["cause"][place], "unassigned");
+        let edges = boundary["edges"].as_array().unwrap();
+        let rounds: Vec<_> = edges.iter().filter(|e| e["kind"] == "backedge").collect();
+        let exits: Vec<_> = edges.iter().filter(|e| e["kind"] == "exhaustion").collect();
+        assert_eq!((rounds.len(), exits.len()), (1, 1), "{name}: {edges:?}");
+        assert_eq!(rounds[0]["to"], boundary["at"]);
+        assert_ne!(exits[0]["to"], boundary["at"]);
+        assert_eq!(exits[0]["state"]["state"][place], "maybe");
+    }
+
+    let [pattern] = loops("refutable").as_slice() else { panic!("expected one while-let") };
+    assert_eq!(pattern["next_iteration"]["state"]["item"], "own");
+    let exit_states: Vec<_> = pattern["edges"].as_array().unwrap().iter()
+        .filter(|e| e["kind"] == "break" || e["kind"] == "exhaustion")
+        .map(|e| (e["kind"].as_str().unwrap(), e["state"]["state"]["item"].as_str().unwrap()))
+        .collect();
+    // An exhausted test of Some/None never moves the payload. The explicit
+    // break has already dropped it. Rustc rejects a whole-place read below.
+    assert_eq!(exit_states, [("exhaustion", "own"), ("break", "partly")]);
+
+    let [outer, inner] = loops("nested").as_slice() else { panic!("expected nested loops") };
+    for (boundary, expected) in [(outer, "moved"), (inner, "own")] {
+        let breaks: Vec<_> = boundary["edges"].as_array().unwrap().iter().filter(|e| e["kind"] == "break").collect();
+        assert_eq!(breaks.len(), 1);
+        assert_eq!(breaks[0]["state"]["state"]["carried"], expected);
+        assert_eq!(boundary["continuation"]["state"]["carried"], expected);
+    }
+    assert_eq!(outer["continuation"]["state"]["result"], "own");
+    assert_eq!(outer["next_iteration"]["state"]["carried"], "own");
+    assert!(inner["next_iteration"].is_null());
+
+    // A read at the start of the body is E0382. A read after the loop
+    // compiles because every exiting break comes after the store.
+    let [boundary] = loops("replaced").as_slice() else { panic!("expected one bare loop") };
+    assert_eq!(boundary["head"]["state"]["value"], "maybe");
+    assert_eq!(boundary["next_iteration"]["state"]["value"], "moved");
+    assert_eq!(boundary["continuation"]["state"]["value"], "own");
+}
+
+#[test]
+fn p4_loop_continuation_does_not_join_an_iteration_local() {
+    let rv = run_with_local_backend("p4_loop_continuation");
+    let tips = timeline_tooltips(&rv.timeline_panel_string());
+    assert!(tips.iter().any(|t| t.contains("payload goes out of scope. No resource is dropped")));
+    assert!(!tips.iter().any(|t| t.contains("payload may have been moved: the loop can end")));
+    assert!(tips.iter().any(|t| t.contains("every break comes after value gets a new resource")));
+    assert!(tips.iter().any(|t| t.contains("only if the loop above assigned last")
+        && t.contains("runtime drop flag")));
+}
+
+#[test]
+fn p4_loop_retries_before_the_only_write() {
+    let rv = run_with_local_backend("p4_loop_continuation");
+    let tips = timeline_tooltips(&rv.timeline_panel_string());
+    assert!(tips.iter().any(|t| t == "once acquires ownership of a resource"));
+    assert!(!tips.iter().any(|t| t.contains("earlier iteration gave once")), "{tips:?}");
+}

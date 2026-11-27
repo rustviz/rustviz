@@ -341,7 +341,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let ExprKind::Loop(block, _, source, _) = l.kind else { continue };
       // One that never comes back round (#1467): a bare `loop` runs its
       // body once, as drawn; a `while` / `for` once or not at all.
-      let at_most_once = self.loop_never_rounds(l.span) == Some(true);
+      let at_most_once = self.loop_never_rounds(l.hir_id) == Some(true);
       // An irrefutable while-let has no pattern-failure path on which
       // to skip the body. Its scrutinee can still exit during evaluation.
       let always_matches = block.expr.is_some_and(|e| matches!(e.kind, ExprKind::If(cond, ..)

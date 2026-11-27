@@ -1029,6 +1029,7 @@ mod tests {
             short_call_borrows: Default::default(),
             drop_holders: Default::default(),
             switches: vec![],
+            loops: Default::default(),
             closure_result_loans: Default::default(),
             bindings: Default::default(),
             aggregate_loans: Default::default(),

@@ -3353,13 +3353,6 @@ fn arm_end_state(rap: &ResourceAccessPoint, branch: &BranchData, branch_history:
     if ended_here || ended_in_nested { State::FullPrivilege { s: LineState::Uninit } } else { end }
 }
 
-/// Loops still use the drawn exits until their own MIR join migration.
-fn loop_merge_moves(branch_history: &[BranchData]) -> (bool, bool) {
-    let moved = branch_history.iter().filter(|b| !b.diverges)
-        .any(|b| b.states.last().is_none_or(|s| !state_is_alive(&s.2)));
-    (moved, false)
-}
-
 fn branch_moves(event: &Event) -> (bool, bool) {
     match event {
         Event::Branch { join: Some(join), .. } => (
@@ -3367,7 +3360,6 @@ fn branch_moves(event: &Event) -> (bool, bool) {
                 || join.cell.init == Init::Partly && (join.cell.unnamed_maybe || join.maybe_empty_box),
             join.cell.init == Init::Moved,
         ),
-        Event::Branch { branch_history, ty: BranchType::Loop(..), .. } => loop_merge_moves(branch_history),
         _ => (false, false),
     }
 }
@@ -3376,14 +3368,13 @@ fn branch_maybe_held(event: &Event) -> bool {
     match event {
         Event::Branch { join: Some(join), .. } => join.cell.init == Init::Maybe
             && join.change.wrote && !join.change.writes_on_all_paths && join.change.entry_maybe,
-        Event::Branch { ty: BranchType::Loop(..), .. } => leaves_maybe_held(event),
         Event::Branch { is, .. } if is.extract_rap().is_some_and(is_branch_temp_col) => leaves_maybe_held(event),
         _ => false,
     }
 }
 
 fn branch_initialization(event: &Event) -> Option<InitJoin> {
-    let Event::Branch { join, ty, is, branch_history, maybe_init, .. } = event else { return None };
+    let Event::Branch { join, is, branch_history, maybe_init, .. } = event else { return None };
     if let Some(j) = join {
         if j.cell.init != Init::Maybe || j.cell.always_assigned { return None; }
         if let Some(mixed) = j.cell.mixed_init.filter(|_| !j.change.entry_own) {
@@ -3397,7 +3388,7 @@ fn branch_initialization(event: &Event) -> Option<InitJoin> {
             .then_some(InitJoin::Maybe { moved: false });
     }
     // Transient values still use their own display lifecycle.
-    if matches!(ty, BranchType::Loop(..)) || is.extract_rap().is_some_and(is_branch_temp_col) {
+    if is.extract_rap().is_some_and(is_branch_temp_col) {
         return branches_init_join(*maybe_init, branch_history);
     }
     None
@@ -9058,13 +9049,6 @@ fn append_line(
 //     no body in between), each becomes its own run with its own
 //     hover polygons — the gap stays empty rather than getting
 //     bridged.
-
-/// Whether the variable still owns / can-borrow a resource at this
-/// state. Used by the merge-dot classifier to decide between the
-/// drop-dot (mixed branches), all-moved, and unchanged tooltips.
-fn state_is_alive(state: &State) -> bool {
-    !matches!(state, State::ResourceMoved { .. } | State::OutOfScope)
-}
 
 /// Whether the arm draws a solid, hollow or dotted segment for the column.
 fn seg_drawn(rap: &ResourceAccessPoint, state: &State) -> bool {
