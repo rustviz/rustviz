@@ -2965,6 +2965,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     let mut loan_cleanups = BTreeSet::new();
     let mut terminal_ends = BTreeSet::new();
     // The CFG edges each loan ends on (for `HoldEnd`s below).
+    let mut usable_after_release = BTreeSet::new();
     let mut restored_reborrows = BTreeSet::new();
     let mut ended_edges: BTreeSet<(Location, Location, usize)> = BTreeSet::new();
     // Borrow ends: a location where a loan is in scope (before or after
@@ -3134,6 +3135,29 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     event.1.drop_route = DropRoute::Unwind;
                 }
                 event.1.occurrence.successor = Some(successor);
+                // A direct loan of an entire local can give back access at
+                // this particular boundary when borrowck permits access on
+                // the normal successor and the value is initialized.
+                if !diverges && event.1.occurrence.exit.is_none() {
+                    if let Some((_, data)) = bwf.borrow_set.location_map().get_index(b.index()) {
+                        if let Some(local) = data.borrowed_place().as_local() {
+                            // The synthetic origins used to trace a value
+                            // through calls aren't borrowck restrictions.
+                            if inscope.get().iter().all(|other| {
+                                let (_, bd) = bwf.borrow_set.location_map().get_index(other.index()).unwrap();
+                                !places_conflict(tcx, body, bd.borrowed_place(), local.into(), PlaceConflictBias::Overlap)
+                            })
+                                && move_data.rev_lookup.find_local(local).is_some_and(|mpi|
+                                    {
+                                        let state = flow.state(&[successor], false, mpi);
+                                        state.word() == "own" && !state.payload_maybe && !state.payload_moved
+                                    })
+                            {
+                                usable_after_release.insert((b.index(), event.1.occurrence));
+                            }
+                        }
+                    }
+                }
                 push(&mut evs, event);
             }
             if diverges {
@@ -4086,35 +4110,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         v.retain(|(_, ls)| !(ls.len() == 1 && new.contains(&ls[0]) && span.contains(cx.r.span_of(taken_at(ls[0]).unwrap_or(loc)))));
         v.push((loc, new));
     }
-    // The stores whose loans can still be in the field at `loc`: those on
-    // a way to it not overwritten by a later store on the same way
-    // (dominance: a store dominated by another reaching one is the later).
-    let reaches = |a: Location, b: Location| -> bool {
-        if a.block == b.block && a.statement_index < b.statement_index {
-            return true;
-        }
-        let mut seen = BTreeSet::new();
-        let mut work: Vec<_> = body.basic_blocks[a.block].terminator().successors().collect();
-        while let Some(bb) = work.pop() {
-            if bb == b.block {
-                return true;
-            }
-            if seen.insert(bb) {
-                work.extend(body.basic_blocks[bb].terminator().successors());
-            }
-        }
-        false
-    };
     let ldom = |a: Location, b: Location| if a.block == b.block { a.statement_index <= b.statement_index } else { doms.dominates(a.block, b.block) };
-    let reaching_stores = |stores: &[(Location, Vec<usize>)], loc: Location| -> Vec<Vec<usize>> {
-        let cands: Vec<&(Location, Vec<usize>)> = stores.iter().filter(|(l, _)| *l != loc && reaches(*l, loc)).collect();
-        cands
-            .iter()
-            .filter(|(l, _)| !cands.iter().any(|(m, _)| m != l && ldom(*l, *m) && ldom(*m, loc)))
-            .map(|(_, ls)| ls.clone())
-            .collect()
-    };
-
     // The parts of a place that drop elaboration drops on their own when some
     // of it was moved out (on some path), as (field key, depth, name, how):
     // each field in declaration order, those that may hold a value behind a
@@ -4988,7 +4984,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                                 let held = |p: Point| -> Vec<usize> {
                                     held_by(lhs.local, p).into_iter().filter(|l| published.contains(l)).collect()
                                 };
-                                let f = Fact::Repoint { reaching: None, holder: path.clone(), old: held(t.start_index(loc)), new: held(t.mid_index(loc)) };
+                                let f = Fact::Repoint { definitions: Vec::new(), maybe_uninitialized: false, reaching: None, holder: path.clone(), old: held(t.start_index(loc)), new: held(t.mid_index(loc)) };
                                 push(&mut evs, cx.ev(loc, f));
                             }
                         }
@@ -4997,19 +4993,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         // way here put there (and still in scope), the new ones
                         // those this store puts there.
                         if let Some(this) = field_stores.get(&path).and_then(|v| v.iter().find(|(l, _)| *l == loc)) {
-                            inscope.seek_before_primary_effect(loc);
-                            let mut live: BTreeSet<usize> = inscope.get().iter().map(|b| b.index()).collect();
-                            if let Some(t) = table {
-                                live.extend(untracked_at(t.start_index(loc)).iter().map(|b| b.index()));
-                            }
-                            let mut old: Vec<usize> = reaching_stores(&field_stores[&path], loc)
-                                .into_iter()
-                                .flatten()
-                                .filter(|l| live.contains(l) && !this.1.contains(l))
-                                .collect();
-                            old.sort();
-                            old.dedup();
-                            push(&mut evs, cx.ev(loc, Fact::Repoint { reaching: None, holder: path.clone(), old, new: this.1.clone() }));
+                            let old = Vec::new();
+                            push(&mut evs, cx.ev(loc, Fact::Repoint { definitions: Vec::new(), maybe_uninitialized: false, reaching: None, holder: path.clone(), old, new: this.1.clone() }));
                         }
                         if !reassign && lhs.projection.is_empty() {
                             if body.local_decls[lhs.local].mutability.is_not()
@@ -7070,72 +7055,108 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     // at its first definition. Record the loans at that definition, when
     // the value was produced, rather than their liveness at the overwrite.
     let has_repoints = out_rows.iter().flat_map(|r| &r.facts).any(|e| matches!(e.fact, Fact::Repoint { .. }));
+    let mut direct_releases = BTreeMap::new();
     if let Some(t) = table.filter(|_| has_repoints) {
-        let mut stores: BTreeMap<String, BTreeMap<Location, Vec<usize>>> = field_stores.iter()
-            .map(|(path, v)| (path.clone(), v.iter().cloned().collect())).collect();
+        let addressed = super::repoints::addressed_slots(tcx, body);
         let mut preds: BTreeMap<Location, Vec<Location>> = BTreeMap::new();
         for &loc in cx.rows.row.keys().filter(|l| executes_at(l.block)) {
             for next in executed_successors(loc) { preds.entry(next).or_default().push(loc); }
-            let data = &body.basic_blocks[loc.block];
-            let Some(st) = data.statements.get(loc.statement_index) else {
-                // Only the normal return edge writes the destination. The
-                // reaching-store graph excludes unwinding and cleanup.
-                if let TerminatorKind::Call { destination, target: Some(target), .. } = data.terminator().kind {
-                    if destination.projection.is_empty() && body.local_decls[destination.local].ty.is_ref() {
-                        if let Some(name) = cx.name(destination) {
-                            let returned = Location { block: target, statement_index: 0 };
-                            let ids = held_by_place(destination, t.start_index(returned)).into_iter()
-                                .filter(|l| published.contains(l)).collect();
-                            stores.entry(name).or_default().insert(loc, ids);
+        }
+        let stores = super::repoints::IncomingStores { tcx, body, preds, addressed, moves: &move_data };
+        let slots: BTreeSet<_> = out_rows.iter().flat_map(|r| &r.facts).filter_map(|e| {
+            if !matches!(e.fact, Fact::Repoint { .. }) { return None; }
+            let StatementKind::Assign(write) = &body[e.location.block].statements[e.location.statement_index].kind else { return None };
+            write.0.as_local()
+        }).collect();
+        for end in out_rows.iter().flat_map(|r| &r.facts) {
+            let Fact::BorrowEnd { loan, .. } = end.fact else { continue };
+            let [p] = end.end_places.as_slice() else { continue };
+            let holder = Local::from_usize(p.local);
+            if !p.projection.is_empty() || !slots.contains(&holder) { continue; }
+            let at = end.occurrence.at;
+            // An unused reference can end at the exit of the very store
+            // that installs it. At a call the holder supplied its operand.
+            let before = if body[at.block].statements.get(at.statement_index).is_some_and(|stmt|
+                matches!(&stmt.kind, StatementKind::Assign(write) if write.0.as_local() == Some(holder))) {
+                at.successor_within_block()
+            } else { at };
+            if stores.direct_borrow(before, holder.into()).is_some_and(|issue| taken_at(loan) == Some(issue)) {
+                let key = (loan, end.occurrence);
+                direct_releases.insert(key, usable_after_release.contains(&key));
+            }
+        }
+        let carried = |src, at| held_by_place(src, at).into_iter()
+            .filter(|id| published.contains(id)).collect::<BTreeSet<_>>();
+        for e in out_rows.iter_mut().flat_map(|r| &mut r.facts) {
+            let Fact::Repoint { definitions, reaching, maybe_uninitialized, old, new, .. } = &mut e.fact else { continue };
+            let loc = e.occurrence.at;
+            let Some(stmt) = body[loc.block].statements.get(loc.statement_index) else { continue };
+            let StatementKind::Assign(write) = &stmt.kind else { continue };
+            let slot = write.0;
+            let incoming = stores.definitions(loc, slot);
+            *maybe_uninitialized = incoming.uninitialized;
+            definitions.extend(incoming.sites);
+            if incoming.unknown { continue; }
+            // Read the projected value at each defining instruction. In
+            // particular, a whole-aggregate transfer supplies the field on
+            // its RHS, even when the old field's region is still live.
+            let loans_at = || -> Option<BTreeSet<usize>> {
+                let mut work: Vec<_> = definitions.iter().map(|&site| (slot, site)).collect();
+                let mut ids = BTreeSet::new();
+                let mut seen = std::collections::HashSet::new();
+                while let Some((place, site)) = work.pop() {
+                    if !seen.insert((place, site)) { continue; }
+                    let at = site.at;
+                    if let Some(next) = site.successor {
+                        // A returned aggregate's fields can share a region.
+                        // Its signature cannot identify individual operands.
+                        place.as_local()?;
+                        ids.extend(carried(place, t.start_index(next)));
+                        continue;
+                    }
+                    let StatementKind::Assign(asg) = &body[at.block].statements[at.statement_index].kind else { return None };
+                    let suffix = &place.projection[asg.0.projection.len()..];
+                    if let Rvalue::Ref(_, _, borrowed) = asg.1 {
+                        if let Some(loan) = loans.iter().find(|l| taken_at(l.loan) == Some(at)) {
+                            ids.insert(loan.loan);
+                        } else if let Some(i) = borrowed.projection.iter().rposition(|e| e == ProjectionElem::Deref) {
+                            let input = Place { local: borrowed.local, projection: tcx.mk_place_elems(&borrowed.projection[..i]) };
+                            // Dereferencing a raw pointer does not inherit
+                            // the nested lifetimes of the pointee.
+                            if let TyKind::Ref(region, ..) = decl_place_ty(tcx, body, input).kind() {
+                                ids.extend(region_vid(*region).into_iter().flat_map(|v|
+                                    held_in(&[Origin::from(v)], t.start_index(at))).filter(|id| published.contains(id)));
+                            }
                         }
+                    } else if let Some(src) = source_slots.source(&asg.1, suffix, |_| false) {
+                        let direct_operand = suffix.is_empty() && src.projection.iter().any(|e| !matches!(e, ProjectionElem::Field(..)));
+                        if src.projection.is_empty() || direct_operand {
+                            ids.extend(carried(src, t.start_index(at)));
+                        } else {
+                            // Follow this field through staging temporaries to
+                            // its constructor operand. Field origins alone can
+                            // include a sibling that has the same lifetime.
+                            let source = stores.definitions(at, src);
+                            if source.unknown || source.uninitialized { return None; }
+                            work.extend(source.sites.into_iter().map(|def| (src, def)));
+                        }
+                    } else if suffix.is_empty() {
+                        ids.extend(carried(place, t.mid_index(at)));
+                    } else {
+                        return None;
                     }
                 }
-                continue;
+                Some(ids)
             };
-            let StatementKind::Assign(asg) = &st.kind else { continue };
-            let (dst, rv) = &**asg;
-            if !dst.projection.is_empty() || !body.local_decls[dst.local].ty.is_ref() { continue; }
-            let Some(name) = cx.name(*dst) else { continue };
-            let issued = loans.iter().find(|l| taken_at(l.loan) == Some(loc));
-            let ids = match rv {
-                Rvalue::Ref(_, _, borrowed) => {
-                    if let Some(l) = issued { vec![l.loan] }
-                    else if let Some(i) = borrowed.projection.iter().rposition(|e| e == ProjectionElem::Deref) {
-                        // Coercing a match arm can reborrow its reference
-                        // temporary into the join destination. If that
-                        // reborrow has no published loan, the loans in
-                        // the reference operand still reach this store.
-                        let input = Place { local: borrowed.local, projection: tcx.mk_place_elems(&borrowed.projection[..i]) };
-                        // Only the outer reference is dereferenced. Lifetimes
-                        // inside its pointee (including a raw pointer's
-                        // pointee) do not establish a reborrow from them.
-                        match decl_place_ty(tcx, body, input).kind() {
-                            TyKind::Ref(r, ..) => region_vid(*r).into_iter().flat_map(|v|
-                                held_in(&[Origin::from(v)], t.start_index(loc))).filter(|id| published.contains(id)).collect(),
-                            _ => Vec::new(),
-                        }
-                    } else { Vec::new() }
-                }
-                Rvalue::Use(Operand::Copy(src) | Operand::Move(src)) =>
-                    held_by_place(*src, t.start_index(loc)).into_iter().filter(|l| published.contains(l)).collect(),
-                _ => held_by(dst.local, t.mid_index(loc)).into_iter().filter(|l| published.contains(l)).collect(),
-            };
-            stores.entry(name).or_default().insert(loc, ids);
-        }
-        for e in out_rows.iter_mut().flat_map(|r| &mut r.facts) {
-            let Fact::Repoint { holder, reaching, .. } = &mut e.fact else { continue };
-            let loc = e.location;
             if !executes_at(loc.block) { continue; }
-            let Some(defs) = stores.get(holder) else { continue };
-            let mut work = preds.get(&loc).cloned().unwrap_or_default();
-            let mut seen = BTreeSet::new();
-            let mut ids = BTreeSet::new();
-            while let Some(at) = work.pop() {
-                if !seen.insert(at) { continue; }
-                if let Some(ls) = defs.get(&at) { ids.extend(ls); }
-                else if let Some(prev) = preds.get(&at) { work.extend(prev); }
+            let Some(ids) = loans_at() else { continue };
+            if !slot.projection.is_empty() {
+                inscope.seek_before_primary_effect(loc);
+                let mut live: BTreeSet<_> = inscope.get().iter().collect();
+                live.extend(untracked_at(t.start_index(loc)));
+                old.extend(ids.iter().copied().filter(|id| live.contains(&BorrowIndex::from_usize(*id)) && !new.contains(id)));
             }
-            *reaching = Some(ids.into_iter().copied().collect());
+            *reaching = Some(ids.into_iter().collect());
         }
     }
     let function_body_start = (!tcx.is_closure_like(def_id)).then(|| {
@@ -7172,7 +7193,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         reassignment_sites,
         drop_flags,
         drop_part_flags,
-        argument_stores, receiver_loans, restored_reborrows,
+        argument_stores, receiver_loans, restored_reborrows, direct_releases,
         imaginary_edges,
         constructed_vecs,
         take_calls: take_calls.into_iter().map(|loc| body.source_info(loc).span.with_parent(None)).collect(),

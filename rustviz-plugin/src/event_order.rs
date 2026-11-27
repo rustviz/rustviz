@@ -2,6 +2,9 @@
 //! body. Compare events on one row and on compatible execution paths.
 //! A source span identifies the emitting expression; its byte position is
 //! never an evaluation order.
+mod repoints;
+pub(crate) use repoints::DrawnReferenceEffects;
+
 use crate::expr_visitor::ExprVisitor;
 use crate::facts::schema::{BodyFacts, DropRoute, Ev, Fact, LoanInfo, Row};
 use crate::svg_generator::data::{ExternalEvent as E, ResourceAccessPoint, ResourceTy};
@@ -39,6 +42,8 @@ struct Order<'a, 'tcx> {
     field_overwrite_ends: &'a BTreeSet<usize>,
     ends: &'a BTreeMap<usize, Vec<usize>>,
     issues: &'a BTreeMap<usize, usize>,
+    reference_facts: &'a crate::facts::repoints::ReferenceEffects<'a, 'tcx>,
+    references: &'a DrawnReferenceEffects<'a, 'tcx>,
     closure_arrivals: &'a BTreeMap<usize, Location>,
 }
 
@@ -199,7 +204,7 @@ impl Order<'_, '_> {
         }
         if matches!(ev, E::StaticBorrow { .. } | E::MutableBorrow { .. }) {
             if let Some((store, _)) = self.field_generation(ev, row) {
-                return Some(fact_point(store));
+                return Some(fact_point(store.fact));
             }
         }
         let mut candidates: Vec<_> = normal_facts(row).filter(|e| self.matches(ev, e)).collect();
@@ -252,19 +257,8 @@ impl Order<'_, '_> {
             }
         }
         if is_end {
-            if let Some((_, ids)) = self.field_generation(ev, row) {
-                // Replacing a slot and releasing its lender need not
-                // coincide. This arrow gives the resource back.
-                let mut releases = normal_facts(row).filter_map(|f| match &f.fact {
-                    Fact::BorrowEnd { loan, .. }
-                        if ids.contains(loan) && self.loan(*loan).is_some_and(|l| names_lender(endpoints(ev).1, l)) =>
-                    {
-                        Some(fact_point(f))
-                    }
-                    _ => None,
-                });
-                let first = releases.next()?;
-                return releases.all(|p| p == first).then_some(first);
+            if self.field_generation(ev, row).is_some() {
+                return self.holder_end_point(ev.get_id()).map(|(p, _)| p);
             }
             let (holder, lender) = endpoints(ev);
             // A write through a reference can leave the presentation
@@ -844,76 +838,14 @@ impl Order<'_, '_> {
         }
     }
 
-    /// The loan set written by this store (or replaced, for an old end).
-    /// Only distinguish successive stores. Several incoming arrows for
-    /// the same call result describe one reference with possible lenders.
-    fn field_generation<'a>(&'a self, ev: &E, row: &'a Row) -> Option<(&'a Ev, &'a [usize])> {
-        let (from, to) = endpoints(ev);
-        let field = (if end(ev) { from } else { to }).extract_rap().filter(|r| r.is_member() && r.is_ref())?;
-        let mut stores = normal_facts(row)
-            .filter_map(|f| match &f.fact {
-                Fact::Repoint { holder, old, new, .. } if holder == field.name() => Some((f, old, new)),
-                _ => None,
-            })
-            .filter(|(f, _, _)| {
-                normal_facts(row).any(|g| {
-                    matches!(&g.fact, Fact::Repoint{holder,..} if holder==field.name())
-                        && f.arm == g.arm
-                        && (self.earlier(fact_point(f), fact_point(g)) || self.earlier(fact_point(g), fact_point(f)))
-                })
-            })
-            .filter_map(|(f, old, new)| {
-                if let Some(ids) = self.ends.get(&ev.get_id()).filter(|_| end(ev)) {
-                    if ids.is_empty() { return None; }
-                    // Borrowck can release several generations of the same
-                    // lender together. The normal end at the final store
-                    // belongs to the value installed there.
-                    let released_at_store = new.iter().any(|id| ids.contains(id)) && ids.iter().all(|id|
-                        row.facts.iter().any(|e| e.location == f.location && matches!(e.fact,
-                            Fact::BorrowEnd { loan, .. } if loan == *id)));
-                    if ids.iter().all(|id| new.contains(id)) || released_at_store { return Some((f, new.as_slice())); }
-                    // The first store can replace a reference made on an
-                    // earlier row (including a call with several inputs).
-                    // Later stores' incoming values already have a generation
-                    // here, at the store which produced them.
-                    let Fact::Repoint { reaching: Some(incoming), .. } = &f.fact else { return None };
-                    let issued_here = row.facts.iter().any(|other| matches!(&other.fact,
-                        Fact::Repoint { holder, new, .. } if holder == field.name() && ids.iter().any(|id| new.contains(id))));
-                    return (!issued_here && ids.iter().all(|id| incoming.contains(id))).then_some((f, incoming.as_slice()));
-                }
-                let hir = rustc_utils::BodyExt::location_to_hir_id(self.body, f.occurrence.at);
-                let rustc_hir::Node::Expr(expr) = self.tcx.hir_node(hir) else {
-                    return None;
-                };
-                if !self.spans.get(&ev.get_id()).is_some_and(|s| expr.span.contains(*s) || s.contains(expr.span)) {
-                    return None;
-                }
-                let ids = if end(ev) { old } else { new };
-                let lender = if end(ev) { to } else { from };
-                ids.iter()
-                    .any(|id| self.loan(*id).is_some_and(|l| names_lender(lender, l)))
-                    .then_some((f, ids.as_slice()))
-            });
-        let generation = stores.next()?;
-        stores.next().is_none().then_some(generation)
-    }
-
     fn distinguish_field_writes(&self, ev: &E, row: &Row, layout: &mut RowLayout) {
-        if let Some((store, ids)) = self.field_generation(ev, row) {
-            let Fact::Repoint { holder, new, .. } = &store.fact else { unreachable!() };
-            let slot = FieldGeneration { block: store.order.0, statement: store.order.1, replaced: new != ids };
+        if let Some((store, replaced)) = self.field_generation(ev, row) {
+            let slot = FieldGeneration { block: store.fact.order.0, statement: store.fact.order.1, replaced };
             layout.field_generations.insert(ev.get_id(), slot);
-            let effect = if end(ev) { self.point(ev, row, false) } else { Some(fact_point(store)) };
-            // Release arrows go below the first store only when the loan
-            // actually lasts beyond it. Merely overwriting a slot cannot
-            // tell us that its lender is available again.
-            if effect.is_some_and(|at| {
-                normal_facts(row).any(|f| {
-                    matches!(&f.fact, Fact::Repoint{holder: other,..} if other == holder)
-                        && f.arm == store.arm
-                        && self.earlier(fact_point(f), at)
-                })
-            }) {
+            let effect = if end(ev) { self.point(ev, row, false) } else { Some(fact_point(store.fact)) };
+            // An overwrite can precede the previous generation's release.
+            if effect.is_some_and(|at| self.reference_facts.stores.values().any(|prior|
+                prior.row == row.line && prior.destination == store.destination && self.earlier(fact_point(prior.fact), at))) {
                 layout.later_field_effects.insert(ev.get_id());
             }
             return;
@@ -992,29 +924,9 @@ impl Order<'_, '_> {
                 };
             }
         }
-        if let E::RefDie { from, to, id, .. } = ev {
-            let holds: Vec<_> = normal_facts(row)
-                .filter_map(|f| match &f.fact {
-                    Fact::HoldEnd { loan, holder, .. } if Some(holder) == place(from).as_ref() => {
-                        self.loan(*loan).filter(|l| names_lender(to, l)).map(|l| (f, l))
-                    }
-                    _ => None,
-                })
-                .collect();
-            let copied = holds.iter().any(|(hold, _)| {
-                normal_facts(row).any(|f| {
-                    hold.order.0 == f.order.0
-                        && hold.order.1 == f.order.1
-                        && matches!(&f.fact, Fact::Copy { path, .. } if Some(path) == place(from).as_ref())
-                })
-            });
-            let repointed = normal_facts(row)
-                .any(|f| matches!(&f.fact, Fact::Repoint { holder, .. } if Some(holder) == place(from).as_ref()));
-            if copied
-                && repointed
-                && holds.iter().all(|(_, loan)| loan.kind == "mut")
-                && from.extract_rap().is_some_and(|r| r.is_ref() && !r.is_mutref())
-            {
+        if let E::RefDie { from, id, .. } = ev {
+            let holder = from.extract_rap().filter(|r| !r.is_mutref()).and_then(ResourceAccessPoint::ref_local);
+            if holder.is_some_and(|holder| self.copied_at_repoint(*id, holder)) {
                 layout.copied_ends.insert(*id);
             }
         }
@@ -1346,6 +1258,7 @@ impl Order<'_, '_> {
             {
                 continue;
             }
+            self.order_stores(&indices, events, layout);
             for &i in &indices {
                 self.annotate(&mut events[i].1, row, layout);
                 if let Some(arrow) =
@@ -1453,6 +1366,8 @@ pub(crate) fn order_body(visitor: &mut ExprVisitor<'_, '_>, facts: &BodyFacts) {
         field_overwrite_ends: &visitor.field_overwrite_ends,
         ends: &visitor.end_loans,
         issues: &visitor.aggregate_issues,
+        references: &visitor.drawn_references,
+        reference_facts: &visitor.reference_effects,
         closure_arrivals: &visitor.closure_result_arrivals,
     };
     order.place_arm_ends(
@@ -1577,6 +1492,9 @@ pub struct RowLayout {
     pub(crate) holder_handoff_titles: BTreeMap<usize, String>,
     pub(crate) result_lend_titles: BTreeMap<usize, String>,
     pub(crate) closure_captures: BTreeMap<usize, Vec<usize>>,
+    pub(crate) stack_points: BTreeMap<usize, (usize, Point)>,
+    pub(crate) uncertain_store_ends: BTreeSet<usize>,
+    pub(crate) available_after_store_end: BTreeMap<usize, usize>,
     pub(crate) field_generations: BTreeMap<usize, FieldGeneration>,
     pub(crate) later_field_effects: BTreeSet<usize>,
     name_field_ends: BTreeSet<usize>,
@@ -1599,6 +1517,9 @@ pub(crate) struct DroppedFieldLoan {
 
 impl RowLayout {
     pub fn append(&mut self, other: &mut Self) {
+        self.stack_points.append(&mut other.stack_points);
+        self.uncertain_store_ends.append(&mut other.uncertain_store_ends);
+        self.available_after_store_end.append(&mut other.available_after_store_end);
         self.arm_points.append(&mut other.arm_points);
         self.pattern_payloads.append(&mut other.pattern_payloads);
         self.terminal_calls.append(&mut other.terminal_calls);
@@ -1686,6 +1607,37 @@ impl RowLayout {
         for (row, e) in placed {
             if let Some(anchor) = self.field_handoffs.get(&e.get_id()).and_then(|id| rows.get(id)) {
                 *row = *anchor;
+            }
+        }
+    }
+
+    /// Project the complete MIR sequence onto the rows reserved by its
+    /// arrows. A read that ends a loan joins the return dot, while writes
+    /// between two generations follow the preceding return.
+    pub(crate) fn align_store_events(&self, placed: &mut [(usize, E)], stacked: &BTreeSet<usize>) {
+        let mut groups = BTreeMap::<usize, Vec<_>>::new();
+        let mut anchors = BTreeMap::<usize, BTreeMap<Point, (usize, bool)>>::new();
+        for (index, (row, event)) in placed.iter().enumerate() {
+            let id = event.get_id();
+            let Some(&(group, point)) = self.stack_points.get(&id) else { continue };
+            groups.entry(group).or_default().push((index, point));
+            if stacked.contains(&id) {
+                anchors.entry(group).or_default().insert(point, (*row, end(event)));
+            }
+        }
+        for (group, indices) in groups {
+            let Some(rows) = anchors.get(&group) else { continue };
+            let mut events: Vec<_> = indices.iter().map(|&(index, point)| {
+                let next = rows.range(point..).next();
+                let row = match next {
+                    Some((&p, &(r, is_end))) if p == point || is_end => r,
+                    _ => rows.range(..point).next_back().or(next).unwrap().1.0,
+                };
+                (point, row, placed[index].1.clone())
+            }).collect();
+            events.sort_by_key(|(point, ..)| *point);
+            for ((index, _), (_, row, event)) in indices.into_iter().zip(events) {
+                placed[index] = (row, event);
             }
         }
     }

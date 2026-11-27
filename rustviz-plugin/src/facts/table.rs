@@ -286,9 +286,6 @@ pub struct StateTable {
     /// Borrow-end event IDs are unique across the drawing. Loan indices
     /// are local to the event's body.
     pub end_loans: BTreeMap<usize, Vec<usize>>,
-    /// For consecutive stores on one source row, event ID to group and
-    /// execution rank. Alternative lenders of one store share its rank.
-    pub store_order: BTreeMap<usize, (usize, usize)>,
     bodies: FxIndexMap<DefId, BodyTable>,
     drop_wording: FxIndexMap<DefId, DropWording>,
     joins: FxIndexMap<DefId, BodyJoins>,
@@ -1084,7 +1081,7 @@ mod tests {
             issued_operand_loans: Default::default(),
             returned_operand_loans: Default::default(),
             conditional_ends: Default::default(),
-            argument_stores: Default::default(), receiver_loans: Default::default(), restored_reborrows: Default::default(),
+            argument_stores: Default::default(), receiver_loans: Default::default(), restored_reborrows: Default::default(), direct_releases: Default::default(),
             inline_holder_ends: vec![],
             evaluated_spans: Vec::new(),
             implicit_mut_reborrows: Default::default(),

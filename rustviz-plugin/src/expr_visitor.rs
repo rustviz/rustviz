@@ -870,8 +870,8 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   pub repointed_loans: Vec<(String, Vec<String>, usize, usize)>,
   /// Separates ends emitted during the HIR walk from the subsequent P2-1b slots.
   pub first_synthesized_end: usize,
-  /// Borrowing arrows for reference assignments, by the loan of the RHS.
-  pub repoint_borrows: BTreeMap<usize, usize>,
+  pub(crate) reference_effects: crate::facts::repoints::ReferenceEffects<'a, 'tcx>,
+  pub(crate) drawn_references: crate::event_order::DrawnReferenceEffects<'a, 'tcx>,
   /// Pattern declarations in each drawn arm of this body.
   pub arm_bindings: BTreeMap<usize, Vec<(usize, Local)>>,
   /// The arms being visited, innermost last: (the conditional's first
@@ -1341,7 +1341,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       arm_value_binds: HashSet::new(),
       repointed_loans: Vec::new(),
       first_synthesized_end: 0,
-      repoint_borrows: BTreeMap::new(),
+      reference_effects: crate::facts::repoints::ReferenceEffects::new(tcx, mir_body, body_facts),
+      drawn_references: Default::default(),
       arm_bindings: BTreeMap::new(),
       arm_frames: Vec::new(),
       defer_old_ends: false,
@@ -12652,7 +12653,8 @@ pub fn print_out_of_scope(&mut self){
         let renewed = ix.as_ref().map(|ix| ix.renewed_at(&k, rd.assigned_at)).unwrap_or_default();
         held.retain(|l| l.line >= rd.assigned_at || l.direct_holders.first() != Some(&k) || renewed.contains(&l.loan));
       }
-      let loans: Vec<usize> = held.into_iter().map(|l| l.loan).collect();
+      let ended = self.drawn_references.ended_before_install(rd.borrow_span, self.mir_body, &self.reference_effects);
+      let loans: Vec<usize> = held.into_iter().map(|l| l.loan).filter(|id| !ended.contains(id)).collect();
       slot_loans.push(loans);
       slots.push(Slot { key: k, rd, rows: (from, usize::MAX), arm: false });
     }
@@ -13267,6 +13269,7 @@ pub fn print_out_of_scope(&mut self){
                 self.row_layout.stored_loans.insert(id, crate::event_order::StoredLoan::SharedInput { mutable: true, binding: false });
               }
             }
+            self.drawn_references.bind_end(id, &loans, rd.borrow_span, *from_ro.hash(), from_ro.ref_local(), matches!(end, End::Arrow(_)), &self.reference_effects);
             self.end_loans.insert(id, loans.clone());
           }
         }
