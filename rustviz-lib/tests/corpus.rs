@@ -18293,10 +18293,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "The temporary tuple (b, c) is dropped here, at the end of the if branch, and with it c's resource",
             "k's resource is moved into the temporary tuple (h, k)",
             "The temporary tuple (h, k) is dropped here, at the end of the if branch, and with it k's resource",
-            // The `else` blocks are dead code, not drawn as a path
-            // (#987): h, k and m end as after an `if let` without one.
-            "h goes out of scope. No resource is dropped.",
-            "k goes out of scope. No resource is dropped.",
+            // Both inputs move into the tuple before the pattern
+            // matches. Neither has a value for an imaginary leg.
+            "h goes out of scope. No resource is dropped. h was moved while evaluating the scrutinee, before the pattern matched.",
+            "k goes out of scope. No resource is dropped. k was moved while evaluating the scrutinee, before the pattern matched.",
             "m goes out of scope. No resource is dropped.",
             "The temporary tuple (p, q) is dropped when the if branch leaves early, and with it q's resource",
             // a body that always returns is drawn inline too (#995), and
@@ -18342,22 +18342,27 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "edition2024/dead_else_987",
         must_contain: &[
             "Move from f to x",
-            "f goes out of scope. No resource is dropped.",
-            "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to g",
+            "f goes out of scope. No resource is dropped: f was moved or dropped in every branch above that reaches this point.",
+            "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to g. At the entry to the borrow checker's imaginary path, g is the owner of the resource",
+            "g still holds its value at runtime. The borrow checker considers a move on an unreachable path, so g can't be used here",
             "g goes out of scope. Its resource is dropped.",
             "Move from p to x",
             "q's resource is moved into the temporary tuple (p, q)",
             "The temporary tuple (p, q) is dropped here, at the end of the if branch, and with it q's resource",
-            "p goes out of scope. No resource is dropped.",
-            "q goes out of scope. No resource is dropped.",
-            "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to r",
+            "p goes out of scope. No resource is dropped. p was moved while evaluating the scrutinee, before the pattern matched.",
+            "q goes out of scope. No resource is dropped. q was moved while evaluating the scrutinee, before the pattern matched.",
+            "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to r. At the entry to the borrow checker's imaginary path, r is the owner of the resource",
+            "r still holds its value at runtime. The borrow checker considers a move on an unreachable path, so r can't be used here",
             "r goes out of scope. Its resource is dropped.",
             "Move from s1 to y",
-            "s1 goes out of scope. No resource is dropped.",
-            "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to s2",
+            "y acquired ownership of a resource in the matching arm, which always runs",
+            "s1 goes out of scope. No resource is dropped: s1 was moved or dropped in every branch above that reaches this point.",
+            "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to s2. At the entry to the borrow checker's imaginary path, s2 is the owner of the resource",
+            "s2 still holds its value at runtime. The borrow checker considers a move on an unreachable path, so s2 can't be used here",
             "s2 goes out of scope. Its resource is dropped.",
             "y goes out of scope. Its resource is dropped.",
-            "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to h",
+            "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to h. At the entry to the borrow checker's imaginary path, h is the owner of the resource",
+            "h keeps its value at runtime. The unreachable else arm would replace its value. The borrow checker allows h to be used after the conditional",
             "h goes out of scope. Its resource is dropped.",
             // control: `Some(x)` can fail, so the else runs when o is None
             "Move from k to take",
@@ -18365,6 +18370,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "k goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
+            "p was moved or dropped in every branch above",
+            "q was moved or dropped in every branch above",
+            "g isn't moved in any of the branches above",
+            "r isn't moved in any of the branches above",
+            "s2 isn't moved in any of the branches above",
+            "h isn't moved in any of the branches above",
+            "h can't be used after the branches",
             // the dead else's events
             "Move from g to drop",
             "g's resource is moved into drop",
@@ -18387,8 +18399,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=s2 goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             // #989's else-path dot for the tuple: there is no else path
             "The pattern always matches the temporary tuple (p, q), so the else branch never runs",
-            "p was moved or dropped in every branch above",
-            "q was moved or dropped in every branch above",
+            "p was moved or dropped in every branch above.",
+            "q was moved or dropped in every branch above.",
         ],
     },
     TooltipExpect {
@@ -18404,6 +18416,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from x to v",
             "x goes out of scope. No resource is dropped.",
             "Move from y to w",
+            "The `if let` pattern always matches. When the matching arm yields a value, the let binding gives that value to w after the conditional",
             "y goes out of scope. No resource is dropped.",
             "h goes out of scope. Its resource is dropped.",
             "Move from z to u",
@@ -18420,6 +18433,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "cnt is bound to a value (in all branches above)",
         ],
         must_not_contain: &[
+            "w acquired ownership of a resource in the matching arm",
+            "w has no value yet",
+            "w is live in a conditional expression",
             "x goes out of scope. Its resource is dropped.",
             "y goes out of scope. Its resource is dropped.",
             "z goes out of scope. Its resource is dropped.",
@@ -18449,7 +18465,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // w (p's String) and r are dropped at the `return` too (#1004)
             "w goes out of scope. Its resource is dropped.",
             "r goes out of scope. Its resource is dropped.",
-            "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to r",
+            "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to r. At the entry to the borrow checker's imaginary path, r is the owner of the resource",
             "Move from s to t",
             "s goes out of scope. No resource is dropped.",
         ],
@@ -18467,7 +18483,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "y was assigned a value in only some of the branches above",
             "Rust tracks this with a runtime drop flag",
             "s may have been moved",
-            "is live in a conditional expression",
+            "f is live in a conditional expression",
+            "a is live in a conditional expression",
+            "s is live in a conditional expression",
             // `g.len()` never runs (#1004)
             "g's resource is immutably borrowed by len",
         ],
@@ -28591,6 +28609,57 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed value from dst.0 to q or r",
         ],
     },
+    TooltipExpect {
+        // MIR puts the scrutinee drop before the edition-2024 else entry
+        // and gives the temporary pair exactly one drop on the matching path.
+        name: "edition2024/dead_else_review_1873",
+        must_contain: &[
+            "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to r. At the entry to the borrow checker's imaginary path, r holds a mutable reference. r can read the borrowed value. A shared borrow restricts access through r, so the borrow checker won't allow writes through it here",
+            "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to a. At the entry to the borrow checker's imaginary path, a's resource may be immutably borrowed here (a branch above borrowed it on some paths only), so a is read-only until that borrow ends. The borrow checker tracks borrowed data from a and b through r",
+            "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to am. At the entry to the borrow checker's imaginary path, am may be mutably borrowed here (a branch above borrowed it on some paths only), so am can't be used until that borrow ends. The borrow checker tracks borrowed data from am and bm through r",
+            "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to opts. At the entry to the borrow checker's imaginary path, Part of opts may have been moved out, so opts can't be used as a whole",
+            "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to at_entry. At the entry to the borrow checker's imaginary path, at_entry holds a copyable value",
+            "This temporary (String, String) is dropped when the block of this `if let` ends (its pattern matched), and with it whatever the pattern didn't move out of it",
+            "kept still holds its value at runtime. The borrow checker considers a move on an unreachable path, so kept can't be used here",
+            "The borrow checker treats partial as possibly moved here, so partial can't be used here",
+            "partial.1 still holds its value at runtime. The borrow checker considers a move on an unreachable path, so partial.1 can't be used here",
+            "The `if let` pattern always matches. When the matching arm yields a value, the let binding gives that value to result after the conditional",
+        ],
+        must_not_contain: &[
+            "At the entry to the borrow checker's imaginary path, r holds a mutable reference; it can read and write the borrowed value",
+            "At the entry to the borrow checker's imaginary path, a's resource is being shared",
+            "At the entry to the borrow checker's imaginary path, am's resource is mutably borrowed",
+            "At the entry to the borrow checker's imaginary path, Part of opts was moved out",
+            "At the entry to the borrow checker's imaginary path, at_entry's value is mutably borrowed",
+            "This temporary (String, String) is dropped before the `else` block of this `if let` runs",
+            "kept was moved in at least one branch above",
+            "partial keeps its value at runtime. The unreachable else arm would move its value",
+            "partial isn't moved in any of the branches above",
+            "partial.1 isn't moved in any of the branches above",
+            "result.0 has no value yet",
+            "result.1 has no value yet",
+            "result.0 acquired ownership of a resource in the matching arm",
+            "result.1 acquired ownership of a resource in the matching arm",
+        ],
+    },
+    TooltipExpect {
+        // Rustc allows &a at the brace and rejects it after drop(a).
+        name: "dead_else_1873",
+        must_contain: &[
+            "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to a. At the entry to the borrow checker's imaginary path, a is the owner of the resource. After this code on that path, a's value was moved out, so it can't be used here",
+        ],
+        must_not_contain: &["Move from a to drop"],
+    },
+    TooltipExpect {
+        // Both within the dead arm and after the join, rustc rejects
+        // &de.a and accepts &de.b.
+        name: "known_bugs/1595_struct_arm_parts_moved",
+        must_contain: &[
+            "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to de. At the entry to the borrow checker's imaginary path, de is the owner of the resource. After this code on that path, de is partially moved: de.a was moved out, so de can't be used as a whole; its other fields still can",
+            "de.a still holds its value at runtime. The borrow checker considers a move on an unreachable path, so de.a can't be used here",
+        ],
+        must_not_contain: &["de.a isn't moved in any of the branches above"],
+    },
 ];
 
 #[test]
@@ -28818,6 +28887,101 @@ fn one_line_arm_cell_and_maybe_shared_leg_1866() {
         "the `if e` arm: v only maybe borrowed, got {later:?}");
 }
 
+#[test]
+fn imaginary_else_has_its_own_leg_1873() {
+    let rv = run_with_local_backend("dead_else_1873");
+    let timeline = rv.timeline_panel_string();
+    let doc = roxmltree::Document::parse(&timeline).expect("timeline svg parses");
+    let dead_leg = |var: &str, first: &str, last: &str, state: &str, words: &str| {
+        let tips = rv_elements(&timeline, &format!("{var}@L"));
+        doc.descendants().find(|n| n.attribute("data-rv-kind") == Some("branch_line")
+            && n.attribute("data-rv-var") == Some(var)
+            && n.attribute("data-rv-state") == Some(state)
+            && n.attribute("data-rv-line") == Some(first)
+            && n.attribute("data-rv-line-end").unwrap_or(first) == last
+            && n.ancestors().any(|a| a.attribute("data-rv-cause") == Some("imaginary"))
+            && tips.iter().any(|(id, tip, _, _)| n.attribute("data-rv-id") == Some(id.as_str())
+                && tip.contains("this else branch never runs") && tip.contains(words)))
+            .unwrap_or_else(|| panic!("missing {state} imaginary leg for {var} on {first}–{last}"))
+    };
+    // Rustc accepts &a at else entry and rejects &value (E0381).
+    // Executable MIR never reaches drop(a), so the leg is unchanged.
+    dead_leg("a", "7", "9", "full_privilege", "a is the owner of the resource");
+    dead_leg("a", "9", "11", "full_privilege", "so it can't be used here");
+    dead_leg("value", "7", "11", "full_privilege_uninit", "value has no value yet");
+    dead_leg("input", "17", "17", "full_privilege", "input is the owner of the resource");
+    dead_leg("saved", "17", "17", "full_privilege_uninit", "saved has no value yet");
+    assert_imaginary_leg_endpoints(&timeline, "a", "7 12", 5);
+    assert_imaginary_leg_endpoints(&timeline, "value", "7 12", 5);
+    let fork_y = assert_imaginary_leg_endpoints(&timeline, "input", "17 54", 17);
+    assert_eq!(fork_y, assert_imaginary_leg_endpoints(&timeline, "saved", "17 54", 17),
+        "one fork row for the whole conditional");
+    assert!(!timeline.contains("Move from a to drop") && !timeline.contains("Move from input to drop"),
+        "nothing in the imaginary arm happens");
+}
+
+fn assert_imaginary_leg_endpoints(timeline: &str, var: &str, arm: &str, fork_row: usize) -> f64 {
+    let doc = roxmltree::Document::parse(timeline).unwrap();
+    let same_arm = |n: &roxmltree::Node<'_, '_>| n.attribute("data-rv-var") == Some(var)
+        && n.ancestors().any(|a| a.attribute("data-rv-arm-start") == Some(arm));
+    let num = |n: roxmltree::Node<'_, '_>, key: &str| n.attribute(key).unwrap().parse::<f64>().unwrap();
+    let find = |id: &str| doc.descendants().find(|n| n.attribute("data-rv-id") == Some(id))
+        .unwrap_or_else(|| panic!("missing {id}"));
+    let fork = find(&format!("{var}@L{fork_row}:dot:branch"));
+    let bar = doc.descendants().find(|n| same_arm(n) && n.has_tag_name("line")
+        && n.attribute("data-rv-kind") == Some("stop_bar")).expect("the imaginary leg needs a stop bar");
+    let mut starts = Vec::new();
+    let mut ends = Vec::new();
+    for node in doc.descendants().filter(|n| same_arm(n) && n.has_tag_name("line")
+        && n.attribute("data-rv-kind") == Some("branch_line"))
+    {
+        let other = match node.attribute("data-rv-part") {
+            Some("line") => node,
+            Some("side1") => find(&format!("{}/side2", node.attribute("data-rv-id").unwrap().strip_suffix("/side1").unwrap())),
+            _ => continue,
+        };
+        let middle = |x, y| ((num(node, x) + num(other, x)) / 2.0, (num(node, y) + num(other, y)) / 2.0);
+        starts.push(middle("x1", "y1"));
+        ends.push(middle("x2", "y2"));
+    }
+    let start = starts.into_iter().min_by(|a, b| a.1.total_cmp(&b.1)).expect("the imaginary leg needs a line");
+    let end = ends.into_iter().max_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
+    let fork_at = (num(fork, "cx"), num(fork, "cy"));
+    let bar_at = ((num(bar, "x1") + num(bar, "x2")) / 2.0, num(bar, "y1"));
+    let close = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).abs() < 0.5 && (a.1 - b.1).abs() < 0.5;
+    assert!(close(start, fork_at), "{var}: line starts at {start:?}, fork is at {fork_at:?}");
+    assert!(close(end, bar_at), "{var}: line ends at {end:?}, stop bar is at {bar_at:?}");
+    fork_at.1
+}
+
+#[test]
+fn imaginary_else_forks_at_the_snapshot_1804() {
+    let rv = run_with_local_backend("rv3_issues/1804_imaginary_else_assigns");
+    assert_imaginary_leg_endpoints(&rv.timeline_panel_string(), "s", "8 12", 7);
+}
+
+#[test]
+fn imaginary_else_drawing_oracle_probes_the_entry_1873() {
+    for (name, expected) in [
+        ("dead_else_1873", &[(17, "saved", "oracle-moved")][..]),
+        ("edition2024/dead_else_review_1873", &[
+            (91, "saved", "oracle-moved"),        // else if
+            (101, "saved", "oracle-moved"),        // entry before an immediate return
+            (113, "p", "oracle-moved"),          // partially moved
+            (113, "p.1", "oracle-usable"),       // other field remains usable
+            (130, "partial", "oracle-moved"),   // whole move in the dead arm
+            (130, "partial.1", "oracle-moved"), // sibling kept at runtime
+        ][..]),
+    ] {
+        let rv = run_with_local_backend(name);
+        let (violations, passed, _) = common::oracle::check(&read_corpus(name), &rv.timeline_panel_string(), &rv.code_panel_string());
+        assert!(violations.is_empty(), "{name}: {violations:?}");
+        for &(line, place, check) in expected {
+            assert!(passed.contains(&(line, place.to_owned(), check)), "{name}: no verdict for {place} on {line} in {passed:?}");
+        }
+    }
+}
+
 /// #1871's review (Codex): one-line conditionals whose arms get rows of
 /// their own (design Q1), and the dead `else` rows (Q9(b)). Each check
 /// failed on #1871's first version.
@@ -28851,27 +29015,12 @@ fn one_line_arms_review_1871() {
     // arms (and to q too on the first), and q holds s's or t's borrow: the
     // arms differ, each gets a row.
     assert!(y_of("q@L66:dot:branch_join") - y_of("q@L66:dot:branch") > 60.0, "q's arms differ: a row per arm");
-    // The dead `else` with its `{` on the next line: its rows are marked
-    // and value is dashed there, saying why.
-    let doc = roxmltree::Document::parse(&tl).expect("timeline svg parses");
-    let dead = doc.root_element().attribute("data-rv-dead-rows").unwrap_or("");
-    assert_eq!(dead, "53 54", "dead rows");
-    let value: Vec<(String, String)> = rv_elements(&tl, "value@L").into_iter().filter(|e| e.0.contains(":line:")).map(|e| (e.0, e.1)).collect();
-    assert!(value.iter().any(|(id, t)| id.ends_with("full_privilege_uninit") && t.starts_with("This else never runs")), "got {value:?}");
-
-    // `dead_else_early` (a fn name with `else` in it): the dead rows are
-    // its `else` block's (its `}` too: the `if let` arm returns, so the
-    // code after it is dead as well), not the `0` after it, which is no
-    // else's (#1004).
-    let doc995 = run_with_local_backend("edition2024/irrefutable_iflet_inline_995").timeline_panel_string();
-    let doc995 = roxmltree::Document::parse(&doc995).expect("timeline svg parses");
-    assert_eq!(doc995.root_element().attribute("data-rv-dead-rows"), Some("34 35"), "995's dead rows");
-    // A dead else's closing `}`, where the `if let` arm goes on, is where
-    // the paths have joined: not a dead row (the drawing oracle checks the
-    // point after the `if let`).
-    let tl987 = run_with_local_backend("edition2024/dead_else_987").timeline_panel_string();
-    let doc987 = roxmltree::Document::parse(&tl987).expect("timeline svg parses");
-    assert_eq!(doc987.root_element().attribute("data-rv-dead-rows"), Some("13 23 35 45"), "987's dead rows");
+    // The dead else starts on a separate brace line. Rustc checks value
+    // before the arm's assignment as uninitialized (E0381). Nothing on
+    // this arm executes, so its leg keeps that state throughout.
+    let value = rv_elements(&tl, "value@L52-55:branch_line:full_privilege_uninit");
+    assert!(value.iter().any(|(_, t, _, _)| t.contains("this else branch never runs")
+        && t.contains("value has no value yet")), "got {value:?}");
 
     // One-line arms keep 2.x's leg title where the arm's own cell lends the
     // column the same way: the cell is read where the arm's value isn't in
@@ -29439,20 +29588,29 @@ fn dead_loan_note_on_write_row_1443() {
     }
 }
 
-/// #987: a dot that says nothing is dropped is a plain dot, not a drop
-/// dot (a `<g>` with a triangle): the dead `else`'s note.
+/// The dead else's explanation belongs to its leg. Its written
+/// statements draw no event dots, including moves and drops.
 #[test]
-fn never_runs_dots_are_not_drop_dots() {
-    for (name, text) in [
-        ("edition2024/dead_else_987", "so this else branch never runs: nothing in it happens to"),
-    ] {
-        let rv = run_with_local_backend(name);
-        let timeline = rv.timeline_panel_string();
-        let has = |kind: &str| start_tags(&timeline, kind).into_iter()
-            .any(|t| t.contains("data-tooltip-text=") && t.contains(text));
-        assert!(has("circle"), "{name}: no plain dot says {text:?}");
-        assert!(!has("g"), "{name}: a drop dot says {text:?}");
+fn imaginary_else_has_no_event_dots_987() {
+    let rv = run_with_local_backend("edition2024/dead_else_987");
+    let timeline = rv.timeline_panel_string();
+    let doc = roxmltree::Document::parse(&timeline).expect("timeline svg parses");
+    let imaginary = |n: &roxmltree::Node<'_, '_>| n.ancestors()
+        .any(|a| a.attribute("data-rv-cause") == Some("imaginary"));
+    assert!(doc.descendants().any(|n| n.attribute("data-rv-kind") == Some("branch_line")
+        && imaginary(&n)));
+    for row in ["13", "23", "35", "45"] {
+        assert!(!doc.descendants().any(|n| n.attribute("data-rv-kind") == Some("dot")
+            && n.attribute("data-rv-line") == Some(row)), "an event was drawn in the imaginary arm at line {row}");
     }
+    for (var, row) in [("g", 14), ("r", 24), ("s2", 36)] {
+        let id = format!("{var}@L{row}:dot:branch_join");
+        let tip = tooltip_of_id(&timeline, &id).unwrap_or_else(|| panic!("missing {id}"));
+        assert!(tip.contains("still holds its value at runtime")
+            && tip.contains(&format!("considers a move on an unreachable path, so {var} can't be used here")), "{id}: {tip}");
+    }
+    let tip = tooltip_of_id(&timeline, "h@L46:dot:branch_join").expect("missing h's join dot");
+    assert!(tip.contains("keeps its value at runtime") && tip.contains("allows h to be used after the conditional"), "h's join: {tip}");
 }
 
 fn corpus_dir() -> PathBuf {

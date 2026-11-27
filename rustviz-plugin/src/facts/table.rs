@@ -187,6 +187,17 @@ pub struct StateTable {
     /// closure bodies are not drawn as columns of their own and are left
     /// out.
     bodies: BTreeMap<usize, Vec<BodyTable>>,
+    imaginary_arms: BTreeMap<super::ImaginaryEdgeId, ImaginaryArm>,
+}
+
+#[derive(Debug)]
+pub struct ImaginaryArm {
+    pub entry: Cells,
+    pub after: BTreeMap<usize, Cells>,
+    pub join: Cells,
+    pub changes: BTreeMap<String, super::ImaginaryChange>,
+    pub scrutinee_moves: BTreeSet<String>,
+    pub initializer_bindings: BTreeMap<String, String>,
 }
 
 impl StateTable {
@@ -195,7 +206,16 @@ impl StateTable {
         for b in facts.bodies.iter().filter(|b| b.kind == "fn") {
             bodies.entry(b.first_line).or_default().push(body_table(b));
         }
-        StateTable { bodies, ..Default::default() }
+        let imaginary_arms = facts.bodies.iter().flat_map(|b| &b.imaginary_edges)
+            .map(|e| (e.id, ImaginaryArm {
+                entry: cells_of(&e.entry),
+                after: e.after.iter().map(|(&row, state)| (row, cells_of(state))).collect(),
+                join: cells_of(&e.join),
+                changes: e.changes.clone(),
+                scrutinee_moves: e.scrutinee_moves.clone(),
+                initializer_bindings: e.initializer_bindings.clone(),
+            })).collect();
+        StateTable { bodies, imaginary_arms, ..Default::default() }
     }
 
     /// The body starting on `fn_line` that has `column`.
@@ -672,9 +692,9 @@ impl StateTable {
         Some(cell)
     }
 
-    /// Every dead row used by the inline-arm layout.
-    pub fn dead_rows(&self) -> BTreeSet<usize> {
-        self.bodies.values().flatten().flat_map(|b| b.dead_lines.iter().copied()).collect()
+    /// The borrow checker's state on entering an arm that never runs.
+    pub fn imaginary_arm(&self, edge: super::ImaginaryEdgeId) -> Option<&ImaginaryArm> {
+        self.imaginary_arms.get(&edge)
     }
 
     /// Source rows the borrow checker sees but the function body cannot execute.
@@ -980,6 +1000,7 @@ mod tests {
             binding_sources: Vec::new(),
             joins: BTreeMap::new(),
             dead_lines: BTreeSet::new(),
+            imaginary_edges: Vec::new(),
         }
     }
 

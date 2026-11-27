@@ -138,6 +138,8 @@ pub struct BodyFacts {
     /// A path reaching an end of this loan can bypass the borrow altogether.
     #[serde(skip)]
     pub conditional_ends: BTreeSet<usize>,
+    #[serde(skip)]
+    pub imaginary_edges: Vec<ImaginaryEdge>,
     /// Standard vec! constructions that can complete on the body's normal CFG.
     #[serde(skip)]
     pub constructed_vecs: std::collections::HashMap<rustc_span::hygiene::ExpnId, usize>,
@@ -249,6 +251,32 @@ impl OtherBindings {
         }
         result
     }
+}
+
+/// The source span of an arm that only the borrow checker reaches.
+#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone, Copy)]
+pub struct ImaginaryEdgeId(pub rustc_span::Span);
+
+pub struct ImaginaryEdge {
+    pub id: ImaginaryEdgeId,
+    pub entry: State,
+    /// Borrow-checker states after this arm's written code on each row.
+    pub after: BTreeMap<usize, State>,
+    /// Borrow-checker state where this arm would rejoin executable code.
+    pub join: State,
+    /// Changes written on the dead arm, with runtime overlap marked.
+    pub changes: BTreeMap<String, ImaginaryChange>,
+    /// Places emptied while evaluating the scrutinee before matching.
+    pub scrutinee_moves: BTreeSet<String>,
+    /// Columns with live storage whose binding enters scope after its initializer.
+    pub initializer_bindings: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ImaginaryChange {
+    Move,
+    Assign,
+    AlsoChangesAtRuntime,
 }
 
 #[derive(Serialize)]

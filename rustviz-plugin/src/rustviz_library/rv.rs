@@ -66,7 +66,6 @@ impl Rustviz {
       raised_headers: HashSet::new(),
       fork_above: HashSet::new(),
       exits_at_split: BTreeSet::new(),
-      inline_dead_rows: BTreeSet::new(),
       state_table,
       fn_source_lines,
       source_lines,
