@@ -3519,7 +3519,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         }
         row.before = entries.get(&line).map(|locs| state_at(&locs.iter().copied().collect::<Vec<_>>(), false));
         if let Some(specs) = cx.rows.arms.get(&line) {
-            for s in specs {
+            let nested: BTreeSet<_> = specs.iter().filter_map(|s| s.parent).collect();
+            for (i, s) in specs.iter().enumerate() {
                 row.arms.push(Arm {
                     runs: s.exits.iter().any(|e| runs.contains(&e.block)),
                     branch: s.branch,
@@ -3527,6 +3528,11 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     parent: s.parent,
                     col_lo: s.col_lo,
                     col_hi: s.col_hi,
+                    has_exit: s.exits.iter().any(|exit| runs.contains(&exit.block)),
+                    switch_col: s.switch_col,
+                    code_spans: s.code_spans.clone(),
+                    continuing: (nested.contains(&i) && s.continuing.iter().any(|exit| runs.contains(&exit.block)))
+                        .then(|| state_at(&s.continuing, true)),
                     after: state_at(&s.exits, true),
                 });
             }

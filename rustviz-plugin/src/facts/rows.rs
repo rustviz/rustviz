@@ -43,6 +43,12 @@ pub struct ArmSpec {
     pub parent: Option<usize>,
     pub locs: BTreeSet<Location>,
     pub exits: Vec<Location>,
+    /// Exits with a successor, excluding paths known to leave the function.
+    /// Loop exits are included conservatively: a break can rejoin an arm
+    /// after leaving a loop inside it.
+    pub continuing: Vec<Location>,
+    pub switch_col: usize,
+    pub code_spans: BTreeSet<(usize, usize)>,
     pub col_lo: usize,
     pub col_hi: usize,
 }
@@ -856,18 +862,30 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
                 // the whole branch (MIR gives some gotos the `if`'s span).
                 let mut lo = usize::MAX;
                 let mut hi = 0;
+                let mut code_spans = BTreeSet::new();
                 for l in &locs {
                     let sp = self.span_of(*l);
                     if sp.contains(sw_span) || self.line_lo(sp) != r || self.line_hi(sp) != r {
                         continue;
                     }
-                    lo = lo.min(self.col_lo(sp));
-                    hi = hi.max(self.col_hi(sp));
+                    let start = self.col_lo(sp);
+                    let end = self.col_hi(sp);
+                    lo = lo.min(start);
+                    hi = hi.max(end);
+                    if start < end && (!passes(*l) || self.exit_kind(*l).is_some()) {
+                        code_spans.insert((start, end));
+                    }
                 }
                 if lo == usize::MAX {
                     lo = 0;
                 }
-                specs.push(ArmSpec { switch: loc, branch: 0, arm: i, parent: None, locs, exits: arm_exits, col_lo: lo, col_hi: hi });
+                let continuing = arm_exits.iter().copied().filter(|&l| {
+                    self.exit_kind(l) != Some(true)
+                        && origin.get(&l).is_none_or(|from| from.is_empty() || from.iter().any(|&r| r >= LOOP_EXIT))
+                        && self.real_succs(l).iter().any(|s| !locs.contains(s))
+                }).collect();
+                specs.push(ArmSpec { switch: loc, branch: 0, arm: i, parent: None, locs, exits: arm_exits,
+                    continuing, switch_col: self.col_lo(sw_span), code_spans, col_lo: lo, col_hi: hi });
             }
             if specs.len() >= 2 {
                 arms.entry(r).or_default().extend(specs);

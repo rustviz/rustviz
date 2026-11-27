@@ -644,14 +644,12 @@ pub fn render_timeline_panel(visualization_data : & mut VisualizationData) -> (S
             timelines: String::new(), ref_line: String::new(), arrows: String::new() })); 
     // Note: key {-1} = non-struct timelines
     
-    // render resource owner labels
-    let mut marks = ColumnMarks::default();
-    render_timelines(&mut output, visualization_data, &resource_owners_layout, &registry, &mut marks); // vertical bars
-    render_labels_string(&mut output, &resource_owners_layout, &visualization_data.fn_start_lines, &visualization_data.raised_headers, &registry); // headers
-    // Dots are drawn before arrows, and the arrow pass needs to know
-    // where they landed: a straight arrow hops over any dot between
-    // its two ends (see `render_hopping_arrow`).
+    // Place event dots before the branch bars and arrows, which need
+    // their positions.
     let mut dots = render_dots_string(visualization_data, &resource_owners_layout); // dot events
+    let mut marks = ColumnMarks::default();
+    render_timelines(&mut output, visualization_data, &resource_owners_layout, &registry, &dots, &mut marks); // vertical bars
+    render_labels_string(&mut output, &resource_owners_layout, &visualization_data.fn_start_lines, &visualization_data.raised_headers, &registry); // headers
     dots.bars = marks.bars;
     dots.legs = marks.legs;
     dots.cols = marks.cols;
@@ -8738,11 +8736,12 @@ fn render_branches(
     timeline_data: &TimelineColumnData,
     maybe_init: bool,
     path: &[(usize, usize)],
+    dots: &DotLayer,
     bars: &mut ColumnMarks,
 ) {
     if rap.is_fn() { return; }
     for (k, (_, ev)) in history.iter().enumerate() {
-        let Event::Branch { branch_history, split_point, merge_point, ty, .. } = ev else { continue };
+        let Event::Branch { branch_history, split_point, merge_point, ty, fork_above, id, .. } = ev else { continue };
         // Maybe-initialized as the conditional starts (#244): where an
         // arm hasn't assigned s yet, s may or may not hold a value.
         let entry_init = init_after(maybe_init.then_some(InitJoin::Maybe { moved: false }), &history[..k]);
@@ -8837,6 +8836,18 @@ fn render_branches(
             let passive_dashed = state_is_dashed(&branch_state_converter(&parent_active));
             let end_state = arm_end_state(rap, branch, branch_history, ty);
 
+            // A diverging arm stops on its exit row instead of joining.
+            // For separate arm rows, a matched MIR exit can land on the
+            // first arm's own row, where the raised fork's diagonal ends.
+            let own = ty.get_start_end(i);
+            let exit_at_split = branch.diverges && *fork_above && own.1 == *split_point
+                && visualization_data.exits_at_split.contains(&(*id, i));
+            let stop_line = branch.diverges.then(|| {
+                let (lo, hi) = branch_column_rows(*split_point, *merge_point);
+                let lo = if exit_at_split { *split_point } else { lo };
+                own.1.clamp(lo, hi.max(lo))
+            });
+
             // Build segments. Empty-classified states drop out so
             // a Move (anywhere) ends the visible run there.
             let mut segs: Vec<BranchSeg> = Vec::new();
@@ -8875,7 +8886,7 @@ fn render_branches(
             // arm. Likewise a one-row diamond's fork, a row up (`else { if
             // s.is_empty() { return; } }` on the line, #1534): run on to
             // the row, it hung below the fork in mid-air.
-            if raised {
+            if raised && !exit_at_split {
                 let first_row = branch.states.iter().find(|(top, bot, _)| top <= bot).map(|s| s.0);
                 if let Some(first_row) = first_row.filter(|r| r > split_point) {
                     let rise = apexes.raised_splits.get(&first_row).copied()
@@ -8888,14 +8899,6 @@ fn render_branches(
                     );
                 }
             }
-            // A branch of type `!` (`return`, `panic!()`, `break`,
-            // `continue`) never reaches the merge (#296): its column
-            // stops at the branch's last line instead of running on
-            // to the merge dot, and ends in a short bar (#317).
-            let stop_line = branch.diverges.then(|| {
-                let (lo, hi) = branch_column_rows(*split_point, *merge_point);
-                ty.get_start_end(i).1.clamp(lo, hi.max(lo))
-            });
             // A reference declared before the conditional whose borrow
             // ends in this arm (`end_outer_borrows_in_arms`): the
             // dashed rest of the arm is "no value" only in the sense
@@ -8960,7 +8963,6 @@ fn render_branches(
                 let n = segs.len();
                 // RustViz 3: on the arm's own rows, the state table's.
                 // (Not a one-line conditional's: its row's state is every arm's.)
-                let own = ty.get_start_end(i);
                 // (A one-line arm's own cell is its state after its code: from its
                 // last dot on.)
                 let last_event = branch.e_data.iter().map(|(l, _)| *l).max().unwrap_or(0);
@@ -8995,19 +8997,19 @@ fn render_branches(
                 }
                 if segs.len() > n { ended_title(&mut segs, bot); }
             }
-            // A diverging arm on one row (`0 => return s,`, a one-line
-            // `if c { break a; } else { break b; }`) has no rows of its
-            // own: its column is the split diagonal alone, which ends in
-            // the bar like a longer arm's column does (#1295), unless the
-            // arm ended the value there (a move or a drop has its dot) or
-            // has any other dot of this column on that row (`return n,`
-            // copying n out): the diagonal ends at that dot, and a bar
-            // under it would only poke out at its sides.
+            // The split diagonal alone can reach the exit row of a
+            // diverging arm (#1295, #1876). A dot ending the value will
+            // cap it below. On a separate arm row, a live dot still
+            // needs a bar just past it.
             if let (None, Some(stop)) = (stop_y, stop_line) {
-                if seg_drawn(rap, &end_state) && !branch.e_data.iter().any(|(l, _)| *l == stop) {
+                if exit_at_split || (seg_drawn(rap, &end_state) && !branch.e_data.iter().any(|(l, _)| *l == stop)) {
                     let stop_row_y = get_y_axis_pos(stop) as f64;
                     stop_y = segs.last()
-                        .filter(|seg| seg.p2.0 == branch_x && seg.p2.1 <= stop_row_y + 0.5)
+                        .filter(|seg| seg.p2.0 == branch_x && if exit_at_split {
+                            seg.p2.1 == stop_row_y
+                        } else {
+                            seg.p2.1 <= stop_row_y + 0.5
+                        })
                         .map(|seg| seg.p2.1);
                 }
             }
@@ -9051,12 +9053,30 @@ fn render_branches(
                             one_line_arm_piece(&end_state, rap, visualization_data, d, cell, &arm_path)
                         }),
                     };
-                    match diagonal.filter(|(st, _)| lined(st) && lined(&end_state)).map(|(st, t)| ((), st, t)) {
-                        Some((_, st, Some(title))) => segs.push(BranchSeg {
+                    // The padded outer leg can follow a nested join even
+                    // when its replayed end state is the inactive stretch
+                    // beside a sibling. Read ownership on the MIR exits
+                    // that can actually carry a value to this join.
+                    let nested_join = (matches!(end_state, State::FullPrivilege { s: LineState::Gray }) && !rap.is_ref())
+                        .then(|| {
+                            let table = &visualization_data.state_table;
+                            let span = branch.source_span.filter(|s| s.start.0 == s.end.0)?;
+                            let row = span.start.0;
+                            if *fork_above && i == 1 && branch_history.len() == 2 && branch.e_data.is_empty() {
+                                let other = branch_history[0].source_span.filter(|s| s.start.0 == row && s.end.0 == row)?;
+                                table.empty_sibling_cell(rap.name(), row, other)
+                            } else {
+                                table.continuing_arm_cell(rap.name(), row, span)
+                            }
+                        }).flatten()
+                        .filter(|c| c.init == crate::facts::table::Init::Own && c.parts.is_none() && c.lent.is_empty())
+                        .map(|_| (State::FullPrivilege { s: LineState::Full }, None));
+                    match diagonal.filter(|(st, _)| lined(st) && lined(&end_state)).or(nested_join) {
+                        Some((st, Some(title))) => segs.push(BranchSeg {
                             p1: (branch_x, leg_top_y), p2: (parent_x, merge_y), state: st, title,
                             inactive_arm: None, own_row: false, rows: (*merge_point, *merge_point),
                         }),
-                        Some((_, st, None)) => push_seg_if_renderable(
+                        Some((st, None)) => push_seg_if_renderable(
                             &mut segs, rap,
                             (branch_x, leg_top_y), (parent_x, merge_y),
                             st, visualization_data, &arm_label, Leg::Join, *merge_point, *merge_point, &arm_path,
@@ -9090,13 +9110,14 @@ fn render_branches(
                     if segs.len() > n { ended_title(&mut segs, *merge_point); }
                 }
                 Some(stop) => {
+                    let has_dot = !exit_at_split || dots.at.contains_key(&(*hash, branch.t_data.x_val, get_y_axis_pos(stop)));
                     // Only where the column is still drawn: a branch
                     // that moved the value away ended its column at
                     // the move already.
                     // Nor where it ends in a drop on that line (a
                     // one-line `0 => panic!()` arm, #410): the drop
                     // dot ends it.
-                    let dropped_at_stop = branch.e_data.iter().any(|(l, e)| *l == stop
+                    let dropped_at_stop = has_dot && branch.e_data.iter().any(|(l, e)| *l == stop
                         && matches!(e, Event::OwnerGoOutOfScope { .. } | Event::RefGoOutOfScope { .. } | Event::TemporaryDrop { .. }));
                     // Nor where the arm moved the value away on that line
                     // (`return take(q);`), as in a one-row arm (#1295) and
@@ -9106,16 +9127,24 @@ fn render_branches(
                     // covered the bar drawn under it but for a 1px nub
                     // (#1375).
                     let at_stop = |e: &Event| !matches!(e, Event::Branch { .. });
-                    let ended_at_stop = branch.e_data.iter().any(|(l, e)| *l == stop && at_stop(e)
+                    let ended_at_stop = has_dot && branch.e_data.iter().any(|(l, e)| *l == stop && at_stop(e)
                         && (!seg_drawn(rap, &end_state)
                             || matches!(e, Event::StaticDie { .. } | Event::MutableDie { .. } | Event::RefDie { .. })));
                     // A dot of the still-live column on that line (`s.push('a');
                     // break;`) covered it too: the column runs on a little
                     // past the dot and the bar goes there.
-                    if !dropped_at_stop && !ended_at_stop && branch.e_data.iter().any(|(l, e)| *l == stop && at_stop(e)) {
+                    if has_dot && !dropped_at_stop && !ended_at_stop && branch.e_data.iter().any(|(l, e)| *l == stop && at_stop(e)) {
                         if let (Some(y), Some(seg)) = (stop_y, segs.last_mut()) {
                             if seg.p2 == (branch_x, y) {
-                                seg.p2.1 += STOP_BAR_BELOW_DOT;
+                                if seg.p1.0 == branch_x {
+                                    seg.p2.1 += STOP_BAR_BELOW_DOT;
+                                } else {
+                                    push_seg_if_renderable(
+                                        &mut segs, rap,
+                                        (branch_x, y), (branch_x, y + STOP_BAR_BELOW_DOT),
+                                        end_state.clone(), visualization_data, &arm_label, Leg::Column, stop, stop, &arm_path,
+                                    );
+                                }
                                 stop_y = Some(y + STOP_BAR_BELOW_DOT);
                             }
                         }
@@ -9126,7 +9155,7 @@ fn render_branches(
                     if let Some(stop_y) = stop_y.filter(|y| !dropped_at_stop && segs.last().is_some_and(|seg| seg.p2 == (branch_x, *y))) {
                         stop_at = Some((branch_x, stop_y));
                         bars.bars.push((branch_x, stop_y));
-                        let title = hover_messages::branch_never_reaches_merge();
+                        let title = hover_messages::branch_never_reaches_merge(branch.exits.contains(&BranchExit::Other));
                         let rv = Rv::new(rv_attrs::STOP_BAR).var(rap.name()).row(stop)
                             .at(format!("stop {} {}", branch_x, stop_y));
                         stop_bar = format!(
@@ -9291,9 +9320,12 @@ fn render_branches(
             // A dashed stretch that underlines nothing mustn't say
             // "the underlined code" (#843).
             let split_row = get_y_axis_pos(*split_point) as f64;
+            // Nested forks with separate arm rows can leave a dashed
+            // stretch entirely between the code rows it would underline.
+            let row_lines = (*fork_above && !path.is_empty()).then_some(visualization_data.row_lines.as_slice());
             for seg in &mut segs {
                 if let Some(arm) = &seg.inactive_arm {
-                    if seg_underline_y(seg, own_y, split_row).is_none() {
+                    if seg_underline_y(seg, own_y, split_row, row_lines).is_none() {
                         seg.title = hover_messages::state_inactive_arm_unlit(arm);
                     }
                 }
@@ -9318,7 +9350,7 @@ fn render_branches(
             // `render_branch_run`), each its own `branch-group`.
             let mut stretches: Vec<String> = Vec::new();
             for run in &runs {
-                let (joints, run_stretches) = render_branch_run(rap, *hash, run, own_y, get_y_axis_pos(*split_point) as f64, stop_at);
+                let (joints, run_stretches) = render_branch_run(rap, *hash, run, own_y, split_row, row_lines, stop_at);
                 // Joint discs are decorative; they ride with the first stretch.
                 let mut run_stretches = run_stretches.into_iter();
                 if let Some(first) = run_stretches.next() { stretches.push(joints + &first); }
@@ -9333,7 +9365,7 @@ fn render_branches(
 
             render_branches(
                 hash, rap, &branch.e_data, &branch.states,
-                output, visualization_data, &branch.t_data, entry_maybe_init, &arm_path, bars,
+                output, visualization_data, &branch.t_data, entry_maybe_init, &arm_path, dots, bars,
             );
         }
     }
@@ -9809,7 +9841,7 @@ fn push_seg_if_renderable(
 /// the two stretches highlights separate code (#626). A diagonal (the
 /// split's or the join's connector) and a solid segment of an arm with
 /// no lines of its own give `None` (#369).
-fn seg_underline_y(seg: &BranchSeg, own_y: Option<(f64, f64)>, split_row: f64) -> Option<(f64, f64)> {
+fn seg_underline_y(seg: &BranchSeg, own_y: Option<(f64, f64)>, split_row: f64, row_lines: Option<&[Option<usize>]>) -> Option<(f64, f64)> {
     if (seg.p1.0 - seg.p2.0).abs() > 1e-6 { return None; }
     let (top, bot) = (seg.p1.1.min(seg.p2.1), seg.p1.1.max(seg.p2.1));
     if state_is_dashed(&seg.state) {
@@ -9827,7 +9859,13 @@ fn seg_underline_y(seg: &BranchSeg, own_y: Option<(f64, f64)>, split_row: f64) -
                 top = top.max(own_bot + 3.0);
             }
         }
-        return if top < bot { Some((top, bot)) } else { None };
+        let has_code = row_lines.is_none_or(|row_lines| {
+            let row_zero = get_y_axis_pos(0) as f64;
+            let first = ((top - 2.0 - row_zero) / LINE_SPACE as f64).ceil() as usize;
+            let last = ((bot + 2.0 - row_zero) / LINE_SPACE as f64).floor() as usize;
+            row_lines.get(first..=last).is_some_and(|rows| rows.iter().any(Option::is_some))
+        });
+        return (top < bot && has_code).then_some((top, bot));
     }
     let (own_top, own_bot) = own_y?;
     // A one-row arm's own stretch spans half a row either side of its row.
@@ -9850,8 +9888,8 @@ fn state_is_dashed(state: &State) -> bool {
 
 /// ` data-underline-y` / ` data-underline="none"` for one drawn line of
 /// a segment (read by `insertUnderline` in helpers.js).
-fn underline_attr(seg: &BranchSeg, own_y: Option<(f64, f64)>, split_row: f64) -> String {
-    match seg_underline_y(seg, own_y, split_row) {
+fn underline_attr(seg: &BranchSeg, own_y: Option<(f64, f64)>, split_row: f64, row_lines: Option<&[Option<usize>]>) -> String {
+    match seg_underline_y(seg, own_y, split_row, row_lines) {
         Some((t, b)) => format!(" data-underline-y=\"{} {}\"", t, b),
         None => " data-underline=\"none\"".to_owned(),
     }
@@ -9888,6 +9926,7 @@ fn render_branch_run(
     run: &[&BranchSeg],
     own_y: Option<(f64, f64)>,
     split_row: f64,
+    row_lines: Option<&[Option<usize>]>,
     stop_at: Option<(f64, f64)>,
 ) -> (String, Vec<String>) {
     let mut svg = String::new();
@@ -9927,7 +9966,7 @@ fn render_branch_run(
         match style {
             OwnerLine::Solid => svg.push_str(&format!(
                 "            <line data-hash=\"{}\" class=\"solid tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\"{}{} style=\"stroke-dasharray: {};\"/>\n",
-                hash, seg.p1.0, seg.p1.1, seg.p2.0, seg.p2.1, seg.title, seg_rv(seg).part("line").attrs(), underline_attr(seg, own_y, split_row), dasharray,
+                hash, seg.p1.0, seg.p1.1, seg.p2.0, seg.p2.1, seg.title, seg_rv(seg).part("line").attrs(), underline_attr(seg, own_y, split_row, row_lines), dasharray,
             )),
             OwnerLine::Hollow => {
                 let perp = perp_unit(seg.p1, seg.p2);
@@ -9936,7 +9975,7 @@ fn render_branch_run(
                     let oy = perp.1 * sign * BRANCH_HALF_W;
                     svg.push_str(&format!(
                         "            <line data-hash=\"{}\" class=\"hollow tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\"{}{} style=\"stroke-dasharray: {};\"/>\n",
-                        hash, seg.p1.0 + ox, seg.p1.1 + oy, seg.p2.0 + ox, seg.p2.1 + oy, seg.title, seg_rv(seg).part(part).attrs(), underline_attr(seg, own_y, split_row), dasharray,
+                        hash, seg.p1.0 + ox, seg.p1.1 + oy, seg.p2.0 + ox, seg.p2.1 + oy, seg.title, seg_rv(seg).part(part).attrs(), underline_attr(seg, own_y, split_row, row_lines), dasharray,
                     ));
                 }
             }
@@ -9944,7 +9983,7 @@ fn render_branch_run(
             // takes the hover.
             OwnerLine::Dotted => svg.push_str(&format!(
                 "            <line data-hash=\"{}\" class=\"lent tooltip-trigger\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" data-tooltip-text=\"{}\"{}{}/>\n",
-                hash, seg.p1.0, seg.p1.1, seg.p2.0, seg.p2.1, seg.title, seg_rv(seg).part("line").attrs(), underline_attr(seg, own_y, split_row),
+                hash, seg.p1.0, seg.p1.1, seg.p2.0, seg.p2.1, seg.title, seg_rv(seg).part("line").attrs(), underline_attr(seg, own_y, split_row, row_lines),
             )),
             OwnerLine::Empty => {} // unreachable: filtered before push
         }
@@ -10053,7 +10092,7 @@ fn render_branch_run(
             .map(|p| format!("{},{}", p.0, p.1))
             .collect::<Vec<_>>()
             .join(" ");
-        let underline = underline_attr(seg, own_y, split_row);
+        let underline = underline_attr(seg, own_y, split_row, row_lines);
         svg.push_str(&format!(
             "            <polygon data-hash=\"{}\" class=\"tooltip-trigger\" points=\"{}\" data-tooltip-text=\"{}\"{}{} style=\"fill:transparent; stroke:none; pointer-events:fill;\"/>\n",
             hash, pts_str, seg.title, seg_rv(seg).attrs(), underline,
@@ -10105,6 +10144,7 @@ fn render_timeline(
     visualization_data: &VisualizationData,
     timeline_data: &TimelineColumnData,
     registry: &Handlebars,
+    dots: &DotLayer,
     bars: &mut ColumnMarks,
 ) {
     if rap.is_fn() { return; } // functions have no timelines
@@ -10114,7 +10154,7 @@ fn render_timeline(
     // ranges (clean_states leaves an OOS placeholder over the
     // branch's split..merge span, so those rows naturally render
     // as nothing).
-    render_branches(hash, rap, history, states, output, visualization_data, timeline_data, false, &[], bars);
+    render_branches(hash, rap, history, states, output, visualization_data, timeline_data, false, &[], dots, bars);
 
     let apexes = CollapsedApexes::of(history);
     let owner = !rap.is_ref() && !rap.is_closure();
@@ -11723,6 +11763,7 @@ fn render_timelines(
     visualization_data: &VisualizationData,
     resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
     registry: &Handlebars,
+    dots: &DotLayer,
     bars: &mut ColumnMarks,
 ){
     let timelines = &visualization_data.timelines;
@@ -11733,7 +11774,7 @@ fn render_timelines(
             _ => {
                 // println!("hash {}, timeline {:#?}", hash, timeline);
                 let t_data = resource_owners_layout.get(hash).unwrap();
-                render_timeline(hash, rap, &timeline.history, &timeline.states, output, visualization_data, t_data, registry, bars);
+                render_timeline(hash, rap, &timeline.history, &timeline.states, output, visualization_data, t_data, registry, dots, bars);
             }
         }
     }

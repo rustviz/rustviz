@@ -4735,13 +4735,11 @@ pub struct VisualizationData {
     pub raised_headers: HashSet<u64>,
 
     /// The conditionals (their events' ids) written on one line whose arms
-    /// got rows of their own (`OneLineArmGaps`), set by `render_svg`: each
-    /// forks a row above its line, onto the blank row there, with its
-    /// first arm on the line's row and the others on rows below, so every
-    /// column forks on one row and each arm's diagonal is a full row
-    /// (design Q9). Not one with another one-line conditional in an arm
-    /// (#1306's layout).
+    /// got rows of their own (`OneLineArmGaps`), set by `render_svg`.
+    /// Every column forks on the row above its first arm (design Q9).
     pub fork_above: HashSet<usize>,
+    /// Branch event id and arm index with a reachable exit on its split row.
+    pub exits_at_split: BTreeSet<(usize, usize)>,
 
     /// Source rows of code that never runs (reached only by borrowck's
     /// imaginary edges, `StateTable::dead_row`) that 2.x draws inline, in no

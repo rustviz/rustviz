@@ -50,7 +50,6 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // A borrow arrow leaving an arm's dot along the fork leg, its track
     // crossing other columns' legs at ~22 degrees; a copy leaving a dot
     // beside the leg into it.
-    ("assign_branch_ref_arms_1393", "arrow-along-leg", 1489),
     ("repoint_if_chain_806", "arrow-along-leg", 1489),
     ("repoint_if_chain_read_middle_806", "arrow-along-leg", 1489),
     // Arrows fanned into one dot from below (#1312): one head still comes
