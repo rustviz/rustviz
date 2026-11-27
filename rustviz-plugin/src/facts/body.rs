@@ -5,15 +5,15 @@
 //! events happen). Then read at the row model's locations.
 
 use super::places::{borrows_part_of, column_projection, Capture, Names};
-use super::rows::{is_unreachable, RowModel, Rows};
+use super::rows::{is_unreachable, real_successor_blocks, RowModel, Rows};
 use super::schema::*;
 use polonius_engine::{Algorithm, FactTypes, Output};
 use rustc_borrowck::consumers::{
     places_conflict, BodyWithBorrowckFacts, BorrowIndex, Borrows, PlaceConflictBias, RustcFacts, TwoPhaseActivation,
 };
 use rustc_middle::mir::{
-    AggregateKind, Body, BorrowKind, Local, Location, MutBorrowKind, Operand, Place, ProjectionElem, Rvalue,
-    StatementKind, TerminatorKind, RETURN_PLACE,
+    AggregateKind, BasicBlock, Body, BorrowKind, Local, Location, MutBorrowKind, Operand, Place, ProjectionElem, Rvalue,
+    StatementKind, TerminatorKind, UnwindAction, RETURN_PLACE,
 };
 use rustc_middle::ty::{TyCtxt, TyKind};
 use rustc_mir_dataflow::impls::{
@@ -147,12 +147,6 @@ fn manually_taken<'tcx>(
     }).collect()
 }
 
-/// A transfer on the normal return edge of a call to a local closure can
-/// be checked by rustc even when the closure has no path to a return.
-pub(crate) fn after_diverging_closure<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, loc: Location) -> bool {
-    after_call(body, loc, |f| closure_has_no_return(tcx, f))
-}
-
 fn after_call<'tcx>(body: &Body<'tcx>, loc: Location, predicate: impl Fn(&Operand<'tcx>) -> bool) -> bool {
     let dom = body.basic_blocks.dominators();
     let mut block = loc.block;
@@ -229,26 +223,128 @@ pub(crate) fn dropped_on_residual<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, fa
     })
 }
 
-fn closure_has_no_return<'tcx>(tcx: TyCtxt<'tcx>, func: &Operand<'tcx>) -> bool {
-    let Some((method, args)) = func.const_fn_def() else { return false };
-    let Some(trait_id) = tcx.trait_of_assoc(method) else { return false };
+fn called_closure<'tcx>(tcx: TyCtxt<'tcx>, func: &Operand<'tcx>) -> Option<&'tcx Body<'tcx>> {
+    let (method, args) = func.const_fn_def()?;
+    let trait_id = tcx.trait_of_assoc(method)?;
     if ![tcx.lang_items().fn_trait(), tcx.lang_items().fn_mut_trait(), tcx.lang_items().fn_once_trait()].contains(&Some(trait_id)) {
-        return false;
+        return None;
     }
-    let TyKind::Closure(id, _) = args.type_at(0).kind() else { return false };
-    let Some(local) = id.as_local() else { return false };
-    let closure = &rustc_utils::mir::borrowck_facts::get_body_with_borrowck_facts(tcx, local).body;
+    let TyKind::Closure(id, _) = args.type_at(0).kind() else { return None };
+    let local = id.as_local()?;
+    Some(&rustc_utils::mir::borrowck_facts::get_body_with_borrowck_facts(tcx, local).body)
+}
+
+fn closure_has_no_return<'tcx>(tcx: TyCtxt<'tcx>, func: &Operand<'tcx>) -> bool {
+    called_closure(tcx, func).is_some_and(|body| !closure_can_return(tcx, body))
+}
+
+fn closure_can_return<'tcx>(tcx: TyCtxt<'tcx>, closure: &Body<'tcx>) -> bool {
     let rows = Rows { tcx, body: closure };
     let mut work = vec![rustc_middle::mir::START_BLOCK];
     let mut seen = BTreeSet::new();
     while let Some(bb) = work.pop() {
         if !seen.insert(bb) { continue; }
         let data = &closure.basic_blocks[bb];
-        if matches!(data.terminator().kind, TerminatorKind::Return) { return false; }
+        if matches!(data.terminator().kind, TerminatorKind::Return) { return true; }
         let end = Location { block: bb, statement_index: data.statements.len() };
         work.extend(rows.real_succs(end).into_iter().map(|next| next.block));
     }
-    true
+    false
+}
+
+/// Work out which normal blocks become unreachable when local closures
+/// with no MIR return stop execution on each path. Retain the initiating
+/// call when all paths into a skipped block go through the same cut.
+fn skipped_closure_returns<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> BTreeMap<BasicBlock, Option<Location>> {
+    let mut reachable = BTreeSet::new();
+    let mut cuts = Vec::new();
+    let mut work = vec![rustc_middle::mir::START_BLOCK];
+    while let Some(bb) = work.pop() {
+        if !reachable.insert(bb) { continue; }
+        if let TerminatorKind::Call { func, target: Some(target), .. } = &body.basic_blocks[bb].terminator().kind {
+            if closure_has_no_return(tcx, func) {
+                cuts.push((*target, Some(body.terminator_loc(bb))));
+                continue;
+            }
+        }
+        work.extend(real_successor_blocks(body, bb));
+    }
+
+    let mut skipped: BTreeMap<BasicBlock, Option<Location>> = BTreeMap::new();
+    while let Some((bb, from)) = cuts.pop() {
+        if reachable.contains(&bb) || is_unreachable(body, bb) { continue; }
+        let from = match skipped.get(&bb) {
+            Some(&prev) if prev == from || prev.is_none() => continue,
+            Some(_) => None,
+            None => from,
+        };
+        skipped.insert(bb, from);
+        cuts.extend(real_successor_blocks(body, bb).into_iter().map(|target| (target, from)));
+    }
+    skipped
+}
+
+/// Look for a compiler panic entry point with a route out of the closure.
+/// A generic call's MIR unwind edge alone says nothing about whether it
+/// can panic: rustc can retain that edge even for process termination.
+fn closure_has_panic_route<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> bool {
+    use rustc_hir::LangItem::{BeginPanic, PanicDisplay, PanicFmt};
+
+    let mut work = vec![rustc_middle::mir::START_BLOCK];
+    let mut seen = BTreeSet::new();
+    while let Some(bb) = work.pop() {
+        if !seen.insert(bb) { continue; }
+        if let TerminatorKind::Call { func, unwind, .. } = &body.basic_blocks[bb].terminator().kind {
+            if func.const_fn_def().is_some_and(|(id, _)| [PanicFmt, PanicDisplay, BeginPanic].into_iter()
+                .any(|item| tcx.is_lang_item(id, item))) {
+                let propagates = match *unwind {
+                    UnwindAction::Continue => true,
+                    UnwindAction::Cleanup(start) => cleanup_path(body, start).last().is_some_and(|bb|
+                        matches!(body.basic_blocks[bb].terminator().kind, TerminatorKind::UnwindResume)),
+                    _ => false,
+                };
+                if propagates { return true; }
+            }
+            if closure_has_no_return(tcx, func) { continue; }
+        }
+        work.extend(real_successor_blocks(body, bb));
+    }
+    false
+}
+
+/// Borrowck MIR records pending drops on the cleanup edge. Read its
+/// straight-line chain in execution order, following each drop's return.
+fn cleanup_path<'a, 'tcx>(body: &'a Body<'tcx>, start: BasicBlock) -> impl Iterator<Item = BasicBlock> + use<'a, 'tcx> {
+    let mut seen = BTreeSet::new();
+    let mut next = Some(start);
+    std::iter::from_fn(move || {
+        let bb = next.take()?;
+        let data = &body.basic_blocks[bb];
+        if !seen.insert(bb) || !data.is_cleanup || !data.statements.iter().all(|s|
+            matches!(s.kind, StatementKind::StorageDead(_) | StatementKind::Nop)) {
+            return None;
+        }
+        next = match data.terminator().kind {
+            TerminatorKind::Drop { target, .. } | TerminatorKind::Goto { target } => Some(target),
+            _ => None,
+        };
+        Some(bb)
+    })
+}
+
+fn cleanup_drops<'tcx>(body: &Body<'tcx>, start: BasicBlock) -> Vec<(Location, Place<'tcx>)> {
+    let mut storage_dead = BTreeSet::new();
+    cleanup_path(body, start).filter_map(|bb| {
+        let data = &body.basic_blocks[bb];
+        storage_dead.extend(data.statements.iter().filter_map(|s| match s.kind {
+            StatementKind::StorageDead(local) => Some(local),
+            _ => None,
+        }));
+        match data.terminator().kind {
+            TerminatorKind::Drop { place, .. } if !storage_dead.contains(&place.local) => Some((body.terminator_loc(bb), place)),
+            _ => None,
+        }
+    }).collect()
 }
 
 /// On entry to this while-let, real MIR edges lead straight to a pattern
@@ -1030,6 +1126,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             .then_some((expansion, (Location { block: bb, statement_index: data.statements.len() }, *destination)))
     }).collect();
     let cx = Cx { tcx, body, names, rows, r, vec_results };
+    let skipped_closure_returns = skipped_closure_returns(tcx, body);
     let mut notes: Vec<String> = Vec::new();
 
     // ---- variables ---------------------------------------------------------
@@ -2772,6 +2869,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         cx.is_user(p).then_some(p)
     };
     let mut temps: BTreeMap<Local, TempInfo> = BTreeMap::new();
+    let vec_buffers: std::collections::HashSet<_> = body.basic_blocks.iter().filter_map(|b| cx.r.vec_buffer(b.terminator())).collect();
     for (&loc, _) in &cx.rows.row {
         let data = &body.basic_blocks[loc.block];
         let statement = data.statements.get(loc.statement_index);
@@ -2960,7 +3058,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             continue;
         }
         match &data.terminator().kind {
-            TerminatorKind::Call { args, destination, fn_span, func, .. } => {
+            TerminatorKind::Call { args, destination, fn_span, func, unwind, .. } => {
                 let f = cx.call_name(*fn_span, func, loc);
                 let in_macro = cx.macro_of(*fn_span);
                 for a in args.iter() {
@@ -2987,6 +3085,41 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         LookupResult::Parent(_) => (false, false),
                     };
                     push(&mut evs, cx.ev(loc, Fact::Init { path, from: format!("{}()", f), reassign, maybe_had }));
+                }
+                // The caller still has a normal return edge for a closure
+                // with a written result type. Keep its borrowck state and
+                // record the actual cleanup on the call's own row (Q2).
+                let UnwindAction::Cleanup(start) = *unwind else { continue };
+                if vec_buffers.is_empty() || !tcx.sess.panic_strategy().unwinds()
+                    || skipped_closure_returns.contains_key(&loc.block) { continue; }
+                let Some(closure) = called_closure(tcx, func) else { continue };
+                if closure_can_return(tcx, closure) || !closure_has_panic_route(tcx, closure) { continue; }
+
+                let drops = cleanup_drops(body, start);
+                // The same allocation place is live at the call and
+                // released by cleanup while construction is in progress.
+                if !drops.iter().any(|(_, place)| vec_buffers.contains(place)
+                    && matches!(rt_md.rev_lookup.find(place.as_ref()), LookupResult::Exact(mpi)
+                        if rt.state(&[loc], false, mpi).may_init)) {
+                    continue;
+                }
+                // Read init at this call, before other unwind edges
+                // merge into the cleanup block. Moves at the call and
+                // earlier drops of the same local would change it.
+                let mut touched: BTreeSet<_> = rt_md.loc_map[loc].iter()
+                    .map(|m| rt_md.move_paths[rt_md.moves[*m].path].place.local).collect();
+                for (at, place) in drops {
+                    if !touched.insert(place.local) || !place.projection.is_empty() { continue; }
+                    let Some(path) = cx.name(place) else { continue };
+                    if !ty_info(place.ty(&body.local_decls, tcx).ty).1 { continue; }
+                    let LookupResult::Exact(mpi) = rt_md.rev_lookup.find(place.as_ref()) else { continue };
+                    let how = rest_how(&mut rt, &[loc], false, mpi);
+                    if how == "nothing_to_drop" { continue; }
+                    let mut ev = cx.ev(loc, Fact::Drop { path, how, at_reassign: false, early_exit: None, also_on_exits: Vec::new() });
+                    ev.1.drop_route = DropRoute::Unwind;
+                    ev.1.site = Some(ev.1.order);
+                    ev.1.order = cx.rows.order(at);
+                    push(&mut evs, ev);
                 }
             }
             TerminatorKind::Drop { place, target, .. } => {
@@ -4048,6 +4181,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         receiver_loans, restored_reborrows,
         constructed_vecs,
         take_calls: take_calls.into_iter().map(|loc| body.source_info(loc).span.with_parent(None)).collect(),
+        skipped_closure_returns,
         binding_sources,
         joins,
         def_id,

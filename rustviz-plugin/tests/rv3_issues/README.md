@@ -76,6 +76,7 @@ why = "The taken arm replaces c on row 6. Only the other path still needs the ol
 row = 10
 place = "x"
 how = "definite"               # definite | conditional (drop flag) | rest (fields left) | none | any
+route = "normal"                # normal (includes explicit exits) | unwind; omit to match either
 absent = false                 # true: no such drop on this row
 src = "issue"
 why = "Both successors reach the MIR drop of the initialized x."
@@ -134,10 +135,12 @@ shared MIR drops. A definite shared drop also proves the destructor runs on
 each listed exit in an archived dump. Only positioned events can establish
 evaluation order. A shared drop flag alone leaves the exit-specific result open.
 
-An `[[order]]` is checked along a single path through a row. For nested
-branches that includes the selected arm's parents. Spike dumps lack arm
-membership and sort events by kind, so they cannot verify an order, and a
-v1 early-exit drop's `arm` was taken at the wrong place, so v1 cannot either.
+An `[[order]]` is checked along a single path through a row, excluding
+unwind drops. For nested branches that includes the selected arm's parents.
+Use a `[[drop]]` with `route = "unwind"` to check what drops if unwinding
+reaches its cleanup. Spike dumps lack arm membership and sort events by kind,
+so they cannot verify an order. A v1 early-exit drop uses the original drop's
+arm, so it cannot verify order at the exit.
 `exact_drops = true` additionally requires that the path runs no destructor
 the order does not name (use it where a dump that drops both locals on a path
 where one moved must fail). From v3 on, each exit that drops a value has its

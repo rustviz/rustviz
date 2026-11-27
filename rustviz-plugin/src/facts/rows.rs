@@ -29,7 +29,7 @@
 //!    locations and exits are recorded with its source columns.
 
 use rustc_hir as hir;
-use rustc_middle::mir::{BasicBlock, Body, Location, StatementKind, TerminatorKind};
+use rustc_middle::mir::{BasicBlock, Body, Location, Place, StatementKind, Terminator, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
 use rustc_span::Span;
 use rustc_utils::{BodyExt, SpanExt};
@@ -105,6 +105,14 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
         self.tcx.sess.source_map().lookup_char_pos(sp.source_callsite().hi()).col.0 + 1
     }
 
+    /// The uninitialized boxed buffer allocated by this `vec!` expansion.
+    pub fn vec_buffer(&self, term: &Terminator<'tcx>) -> Option<Place<'tcx>> {
+        let TerminatorKind::Call { destination, .. } = term.kind else { return None };
+        let boxed = destination.ty(&self.body.local_decls, self.tcx).ty.boxed_ty()?.ty_adt_def()?;
+        (Some(boxed.did()) == self.tcx.lang_items().maybe_uninit()
+            && super::is_vec_expansion(self.tcx, term.source_info.span.ctxt().outer_expn())).then_some(destination)
+    }
+
     /// Rule 2, before rule 1 is applied.
     fn raw_row(&self, l: Location) -> usize {
         let sp = self.span_of(l);
@@ -119,14 +127,8 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
         // vec![a, b] allocates uninitialized storage before evaluating a.
         // The allocation's span covers the entire macro. Giving it the last
         // row would push every intervening element past its actual move.
-        if let TerminatorKind::Call { destination, .. } = &data.terminator().kind {
-            if l.statement_index == data.statements.len()
-                && super::is_vec_expansion(self.tcx, data.terminator().source_info.span.ctxt().outer_expn())
-                && destination.ty(&self.body.local_decls, self.tcx).ty.boxed_ty()
-                    .and_then(|t| t.ty_adt_def()).is_some_and(|adt| Some(adt.did()) == self.tcx.lang_items().maybe_uninit())
-            {
-                return self.line_lo(sp);
-            }
+        if l.statement_index == data.statements.len() && self.vec_buffer(data.terminator()).is_some() {
+            return self.line_lo(sp);
         }
         // The drop of the old value before `x = <rhs>;` runs once the
         // right-hand side is done: on the assignment's row.

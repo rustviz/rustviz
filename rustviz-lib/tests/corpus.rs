@@ -41358,6 +41358,75 @@ fn vec_elements_are_evaluated_before_reassignment() {
     assert!(tips.iter().any(|t| t == "Copy from count to counts"));
 }
 
+/// The closure's MIR has no return. The caller's unwind edge drops the
+/// still-initialized String before the later element can be evaluated.
+#[test]
+fn vec_closure_unwind_drops_the_unevaluated_element_1779() {
+    let rv = run_with_local_backend("rv3_issues/1779_vec_macro_loop_and_closure_elements");
+    let facts = rv.facts().expect("expected MIR facts");
+    let row = fact_row(fact_body(facts, "closure_call_element"), 8);
+    let drops: Vec<_> = row["facts"].as_array().unwrap().iter()
+        .filter(|event| event["ev"] == "Drop").collect();
+    assert_eq!(drops.len(), 1, "{drops:?}");
+    assert_eq!(drops[0]["path"], "call_s");
+    assert_eq!(drops[0]["how"], "drops");
+    assert_eq!(drops[0]["drop_route"], "unwind");
+
+    let svg = rv.timeline_panel_string();
+    check_review_tip(&svg, "call_s@L8:dot:move",
+        &["the transfer never runs", "If the closure call panics and unwinding reaches call_s, call_s's resource is dropped."],
+        &["If the closure call unwinds,"]);
+    let normal_exit = tooltip_lines(&svg).into_iter().find(|lines|
+        lines.iter().any(|line| line.contains("call_s goes out of scope"))).unwrap();
+    assert!(normal_exit.first().unwrap().contains("this exit never runs"), "{normal_exit:?}");
+    assert!(normal_exit.first().unwrap().contains("if unwinding reaches their cleanup"), "{normal_exit:?}");
+    assert!(!normal_exit.first().unwrap().contains("If it unwinds, values still owned here are dropped"), "{normal_exit:?}");
+}
+
+#[test]
+fn vec_closure_cleanup_1779_can_stop_at_an_earlier_destructor() {
+    // Pinned rustc runs Guard::First's destructor and then aborts.
+    // It never reaches last's destructor on the cleanup edge.
+    let svg = run_with_local_backend("vec_closure_cleanup_1779").timeline_panel_string();
+    check_review_tip(&svg, "last@L15:dot:move",
+        &["the transfer never runs", "If the closure call panics and unwinding reaches last, last's resource is dropped."],
+        &["If the closure call unwinds,"]);
+}
+
+#[test]
+fn vec_closure_cleanup_1779_abort_does_not_unwind() {
+    // The abort call has a cleanup edge in borrowck MIR. At runtime it
+    // terminates without running either element's destructor.
+    let rv = run_with_local_backend("vec_closure_cleanup_1779");
+    let body = fact_body(rv.facts().unwrap(), "abort_element");
+    assert!(row_facts(body, 20).iter().all(|e| e["drop_route"] != "unwind"));
+    check_review_tip(&rv.timeline_panel_string(), "after_abort@L20:dot:move",
+        &["the transfer never runs"], &["after_abort's resource is dropped", "unwinding reaches after_abort"]);
+}
+
+#[test]
+fn vec_closure_cleanup_1779_only_the_selected_branch_runs() {
+    // Each branch panics before the call to c, and each cleanup drops the
+    // same still-initialized local.
+    let rv = run_with_local_backend("vec_closure_cleanup_1779");
+    let body = fact_body(rv.facts().unwrap(), "branch_elements");
+    for line in [30, 32] {
+        assert!(row_facts(body, line).iter().any(|e|
+            e["ev"] == "Drop" && e["path"] == "after_branch" && e["drop_route"] == "unwind" && e["how"] == "drops"));
+    }
+    assert!(row_facts(body, 34).iter().all(|e| e["drop_route"] != "unwind"));
+}
+
+#[test]
+fn vec_closure_cleanup_1779_walks_past_storage_dead() {
+    // When the async block is polled, the compiler's cleanup reaches the
+    // buffer drop and then after_panic, through blocks with StorageDead.
+    let rv = run_with_local_backend("vec_closure_cleanup_1779");
+    let body = fact_body(rv.facts().unwrap(), "async_element::{closure#0}");
+    assert!(row_facts(body, 42).iter().any(|e|
+        e["ev"] == "Drop" && e["path"] == "after_panic" && e["drop_route"] == "unwind" && e["how"] == "drops"));
+}
+
 /// call_once takes the old f before the argument assigns g to f. The next
 /// call consumes that replacement. On the conditional path, p.z survives
 /// the call of p.f (rustc accepts a read of p.z there).
