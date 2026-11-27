@@ -877,6 +877,7 @@ fn on_joined_column(e: &ExternalEvent, live_vars: &HashSet<ResourceAccessPoint>)
         // reference's own column ends at its dot and joins a row below
         // anyway.)
         ExternalEvent::StaticDie { to, .. } | ExternalEvent::MutableDie { to, .. } => joins(to),
+        ExternalEvent::RefDie { from, .. } => joins(from),
         e => { let (from, to) = ResourceAccessPoint_extract(e); joins(from) || joins(to) }
     }
 }
@@ -905,6 +906,21 @@ fn one_line_join_below(
         }))
 }
 
+/// A continuing arm can end a loan on a row below the last row of
+/// its source span. Leave room for that dot before the join.
+fn rows_below_late_arm_events(
+    branches: &[ExtBranchData],
+    live_vars: &HashSet<ResourceAccessPoint>,
+    merge_row: usize,
+) -> usize {
+    branches.iter().filter(|b| !b.diverges)
+        .flat_map(|b| b.e_data.iter())
+        .filter(|(row, e)| *row > merge_row && !matches!(e, ExternalEvent::Branch { .. })
+            && on_joined_column(e, live_vars))
+        .map(|(row, _)| row + 1 - merge_row)
+        .max().unwrap_or(0)
+}
+
 /// Rows to add below a conditional written on one line (`split_line`,
 /// `merge_line`, in source lines) so that its join, on row `merge_row`,
 /// sits below the join of every one-row diamond nested in its arms: a
@@ -927,6 +943,15 @@ fn rows_below_nested_diamonds(branches: &[ExtBranchData], split_line: usize, mer
         })
         .max()
         .unwrap_or(0)
+}
+
+/// An arrow stack starts on an already placed row. Any rows reserved
+/// below that same anchor also clear the stack's first tracks.
+fn reserve_stack_rows(insertions: &mut HashMap<usize, usize>, row: usize, count: usize) -> usize {
+    let reserved = insertions.entry(row).or_default();
+    let additional = count.saturating_sub(*reserved);
+    *reserved += additional;
+    additional
 }
 
 /// Rows to add around the arms of a conditional written on one line
@@ -1174,6 +1199,7 @@ pub fn mutate_branch_lines(
     let old_extra_lines = extra_lines;
     let src_line: HashMap<usize, usize> = b_data.e_data.iter().map(|(l, e)| (e.get_id(), *l)).collect();
     let old_line_map = b_data.line_map.clone();
+    let nested_drawn = arm_listed_arrows(&b_data.e_data);
     let mut new_line_map: BTreeMap<usize, Vec<ExternalEvent>> = BTreeMap::new();
     let mut skippable_ev: HashSet<usize> = HashSet::new();
     // (source line, shift) for the rest of a line whose arrows were
@@ -1249,6 +1275,10 @@ pub fn mutate_branch_lines(
                     *l_map.entry(*merge_point + extra_lines).or_insert(0) += 1;
                     extra_lines += 1;
                 }
+                let merge_row = *merge_point + extra_lines;
+                let late_rows = rows_below_late_arm_events(branches, live_vars, merge_row);
+                *l_map.entry(merge_row).or_default() += late_rows;
+                extra_lines += late_rows;
                 *merge_point += extra_lines + usize::from(gaps.join_past_inner);
                 if gaps.fork_above && !branch_is_collapsed(*split_point, *merge_point) {
                     fork_above.insert(*id);
@@ -1262,9 +1292,11 @@ pub fn mutate_branch_lines(
                     // below); an off-map arrow on the same line used
                     // to trigger it again and double the extra rows.
                     let id = e.get_id();
+                    // A nested arm reserves space for the arrows it draws.
                     let res = old_line_map.get(&line_num)
                         .filter(|ev| ev.iter().any(|x| x.get_id() == id))
-                        .cloned();
+                        .map(|ev| ev.iter().filter(|e| !nested_drawn.contains(&e.get_id())
+                            || src_line.contains_key(&e.get_id())).cloned().collect::<Vec<_>>());
                     let side_by_side = res.as_ref().and_then(|ev| {
                         let on_pattern_line = line_num == pattern_lines.0 || line_num == pattern_lines.1;
                         on_pattern_line.then(|| side_by_side_bindings(ev, b_data)).flatten()
@@ -1286,8 +1318,7 @@ pub fn mutate_branch_lines(
                             new_line_map.insert(row, group);
                             row += count;
                         }
-                        l_map.insert(new_line_num, ev.len() - 1);
-                        ev.len() - 1
+                        reserve_stack_rows(l_map, new_line_num, ev.len() - 1)
                     }
                     Some(ev) if side_by_side.is_some() => {
                         // All on the line's own row, and left out of the
@@ -1371,13 +1402,6 @@ pub fn mutate_branch_lines(
                         if is_param_value_line(&ev) {
                             ev_len = 0;
                         }
-                        // (Not an arrow a conditional nested in this arm
-                        // holds: that arm draws it, #1279.)
-                        let nested_drawn = arm_listed_arrows(&b_data.e_data);
-                        let here = |e: &ExternalEvent| !nested_drawn.contains(&e.get_id())
-                            || b_data.e_data.iter().any(|(_, p_e)| p_e.get_id() == e.get_id());
-                        let front: Vec<ExternalEvent> = front.into_iter().filter(|e| here(e)).collect();
-                        let back: Vec<ExternalEvent> = back.into_iter().filter(|e| here(e)).collect();
                         // A stack that ends the borrow of a reference the arm
                         // declares (`let x = ra; (x.to_string(), h)`, #1277):
                         // the rest of the line went on the stack's last row,
@@ -1399,8 +1423,7 @@ pub fn mutate_branch_lines(
                             new_line_map.insert(back_line, back);
                         }
                         new_line_map.insert(new_line_num, front); // insert new line number into new event line map
-                        l_map.insert(new_line_num, ev_len);
-                        ev_len
+                        reserve_stack_rows(l_map, new_line_num, ev_len)
                         },
                         None => {
                             0
@@ -1864,6 +1887,10 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                     *line_insertion_map.entry(*merge_point + extra_lines).or_insert(0) += 1;
                     extra_lines += 1;
                 }
+                let merge_row = *merge_point + extra_lines;
+                let late_rows = rows_below_late_arm_events(branches, live_vars, merge_row);
+                *line_insertion_map.entry(merge_row).or_default() += late_rows;
+                extra_lines += late_rows;
                 *merge_point += extra_lines + usize::from(gaps.join_past_inner);
                 if gaps.fork_above && !branch_is_collapsed(*split_point, *merge_point) {
                     visualization_data.fork_above.insert(*id);
@@ -2001,16 +2028,18 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                 i += 1;
                 continue;
             }
-            let res = line_ev.cloned();
+            // The arms have already reserved rows for their arrows.
+            // Plan the parent stack from the arrows it actually draws.
+            let res = line_ev.map(|evs| evs.iter()
+                .filter(|e| !arm_drawn.contains(&e.get_id()))
+                .cloned().collect::<Vec<_>>());
             let ordered = res.as_deref().and_then(|ev| ordered_store_rows(ev, &visualization_data.state_table.store_order));
             let ex = match res {
                 Some(ev) if ordered.is_some() => {
                     let mut row = final_line_num;
                     for group in ordered.unwrap() {
                         for e in &group {
-                            if !arm_drawn.contains(&e.get_id()) {
-                                placed.push((row, e.clone()));
-                            }
+                            placed.push((row, e.clone()));
                             skippable_ev.insert(e.get_id());
                         }
                         same_line_row = Some((line_num, row));
@@ -2020,8 +2049,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                     }
                     let blanks = source_lines_for_absorb.iter().skip(line_num).take_while(|l| l.trim().is_empty()).count();
                     let extra = (ev.len() - 1).saturating_sub(blanks);
-                    line_insertion_map.insert(final_line_num, extra);
-                    extra
+                    reserve_stack_rows(&mut line_insertion_map, final_line_num, extra)
                 }
                 Some(ev) if chain_bindings_side_by_side(&ev, &chain_pairs) => {
                     // A let-chain's bindings (#584): all on the line's
@@ -2097,14 +2125,6 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                             placed.push((row, d.clone()));
                             skippable_ev.insert(d.get_id());
                         }
-                        // An arrow of the line map that an arm holds (a
-                        // borrow end moved into the arm a let-chain's
-                        // later parts are drawn in, #1279) is drawn
-                        // there, on this row of the stack; not here too.
-                        if arm_drawn.contains(&e.get_id()) {
-                            skippable_ev.insert(e.get_id());
-                            continue;
-                        }
                         placed.push((row, e.clone()));
                         skippable_ev.insert(e.get_id());
                         // The struct's fields move with it, on its row (#1283).
@@ -2147,16 +2167,12 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                         .take_while(|l| l.trim().is_empty())
                         .count();
                     let to_insert = needed.saturating_sub(trailing_blanks);
-                    // (Not the arm's arrows: the arm draws them.)
-                    let front: Vec<ExternalEvent> = front.into_iter().filter(|e| !arm_drawn.contains(&e.get_id())).collect();
-                    let back: Vec<ExternalEvent> = back.into_iter().filter(|e| !arm_drawn.contains(&e.get_id())).collect();
                     if !back.is_empty() {
                         same_line_row = Some((line_num, back_row));
                         event_line_map_replace.insert(back_row, back);
                     }
                     event_line_map_replace.insert(final_line_num, front); // insert new line number into new event line map
-                    line_insertion_map.insert(final_line_num, to_insert);
-                    to_insert
+                    reserve_stack_rows(&mut line_insertion_map, final_line_num, to_insert)
                 },
                 None => {
                     placed.push((final_line_num, event.clone()));
@@ -2343,7 +2359,7 @@ pub fn render_svg(
 
     // data for tl panel
     visualization_data.row_lines = row_lines.clone();
-    let (timeline_panel_string, max_width) = timeline_panel::render_timeline_panel(visualization_data);
+    let (timeline_panel_string, max_width, min_height) = timeline_panel::render_timeline_panel(visualization_data);
     // Each element's `data-rv-id`, and its rows as code-panel lines.
     let timeline_panel_string = rv_attrs::finalize(&timeline_panel_string, &row_lines);
     let mut tl_rv = rv_attrs::invalid_states_attr(visualization_data, &row_lines);
@@ -2373,12 +2389,10 @@ pub fn render_svg(
         tl_id: "tl_".to_owned() + "vis",
         tl_width: code_panel_width,
         // The last code line's text sits at y = LINE_SPACE * (num_lines + 1).
-        // Nothing in either panel is drawn more than ~5px below it (a
-        // drop dot's radius, or a glyph's descender), so a fixed margin
-        // below it leaves an even gap about as tall as the one above
-        // the first line. It used to be a fixed 100px band (#844).
-        height: (num_lines + 1) * LINE_SPACE as i32 + BOTTOM_MARGIN
-            - (OLD_FIRST_ROW_Y - FIRST_ROW_Y) as i32,
+        // Keep a margin below the code and include any timeline marks
+        // placed below it.
+        height: ((num_lines + 1) * LINE_SPACE as i32 + BOTTOM_MARGIN
+            - (OLD_FIRST_ROW_Y - FIRST_ROW_Y) as i32).max(min_height),
         tl_rv,
     };
 
@@ -2395,4 +2409,87 @@ pub fn render_svg(
         escape_tooltip_attrs(&final_timeline_svg_content),
         svg_data.height,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::svg_generator::data::{BranchType, Owner, StaticRef};
+
+    fn arm(events: Vec<(usize, ExternalEvent)>, line_map: BTreeMap<usize, Vec<ExternalEvent>>) -> ExtBranchData {
+        ExtBranchData {
+            source: None, source_span: None, imaginary: None, e_data: events, line_map,
+            decl_vars: HashSet::new(), diverges: false, exits: vec![], break_carries: vec![],
+        }
+    }
+
+    fn owner(name: &str, hash: u64) -> ResourceTy {
+        ResourceTy::Value(ResourceAccessPoint::Owner(Owner {
+            name: name.into(), hash, is_copy: true, ..Default::default()
+        }))
+    }
+
+    fn copy(id: usize) -> ExternalEvent {
+        ExternalEvent::Copy {
+            from: owner("from", 1), to: owner("to", 2), id,
+            is_partial: false, into_closure: false, closure_value: false,
+            into_ctor: None, pointee: None, break_alt: None, of_const: None,
+        }
+    }
+
+    fn holder() -> ResourceAccessPoint {
+        ResourceAccessPoint::StaticRef(StaticRef {
+            binding: Default::default(), name: "r".into(), hash: 3, is_mut: false, pointee_copy: true, member_of: None,
+        })
+    }
+
+    fn place_arm(arm: &mut ExtBranchData, insertions: &mut HashMap<usize, usize>, extra: usize) -> usize {
+        mutate_branch_lines(arm, insertions, extra, (1, 1), &mut vec![], &mut HashMap::new(),
+            &BTreeMap::new(), false, None, &BTreeSet::new(), &mut HashSet::new(), &Default::default())
+    }
+
+    #[test]
+    fn shared_reservation_advances_events_only_by_new_rows() {
+        let copies: Vec<_> = (0..4).map(copy).collect();
+        let mut events: Vec<_> = copies.iter().cloned().map(|e| (6, e)).collect();
+        events.push((7, copy(4)));
+        let mut arm = arm(events, BTreeMap::from([(6, copies)]));
+        let mut insertions = HashMap::from([(8, 2)]);
+        assert_eq!(place_arm(&mut arm, &mut insertions, 2), 1);
+        assert_eq!(insertions[&8], 3);
+        assert_eq!(arm.e_data.last().unwrap().0, 10);
+    }
+
+    #[test]
+    fn nested_loan_end_is_reserved_only_by_the_arm_that_draws_it() {
+        let end = ExternalEvent::StaticDie {
+            from: ResourceTy::Value(holder()), to: owner("to", 2), id: 2, slot: 2,
+            static_lender: None, still_borrowed_by: vec![], of_ref_var: false, exhaustion: vec![],
+        };
+        let inner = arm(vec![(6, end.clone())], BTreeMap::from([(6, vec![end.clone()])]));
+        let branch = ExternalEvent::Branch {
+            body: rustc_hir::def_id::CRATE_DEF_ID.to_def_id(), join_span: None,
+            live_vars: HashSet::new(), skipped_holds: BTreeMap::new(), on_exhaustion: BTreeSet::new(),
+            branches: vec![inner], branch_type: BranchType::If(vec!["If".into()], vec![(6, 8)]),
+            split_point: 6, merge_point: 8, maybe_init: HashSet::new(), loop_assigned: HashSet::new(),
+            maybe_held: HashSet::new(), id: 3,
+        };
+        let mut outer = arm(vec![(6, copy(1)), (6, branch), (9, copy(4))],
+            BTreeMap::from([(6, vec![copy(1), end])]));
+        let mut insertions = HashMap::new();
+        assert_eq!(place_arm(&mut outer, &mut insertions, 0), 0);
+        assert_eq!(outer.e_data.last().unwrap().0, 9);
+    }
+
+    #[test]
+    fn late_holder_only_loan_end_clears_the_join() {
+        let holder = holder();
+        let end = ExternalEvent::RefDie {
+            from: ResourceTy::Value(holder.clone()), to: ResourceTy::Anonymous,
+            id: 1, slot: 1, num_curr_borrowers: 0,
+        };
+        let arms = [arm(vec![(8, end)], BTreeMap::new())];
+        assert_eq!(rows_below_late_arm_events(&arms, &HashSet::from([holder]), 6), 3);
+        assert_eq!(rows_below_late_arm_events(&arms, &HashSet::new(), 6), 0);
+    }
 }

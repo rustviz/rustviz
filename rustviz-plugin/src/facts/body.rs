@@ -1367,7 +1367,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         } else {
             "field"
         };
-        column_info.push(ColumnInfo { local: mp.place.local, name: n.clone(), root, kind, copy, needs_drop, is_box: mp.place.ty(&body.local_decls, tcx).ty.is_box(), array_len: array_len(mp.place), hidden_fields: false });
+        column_info.push(ColumnInfo { local: mp.place.local, name: n.clone(), parent: None, root, kind, copy, needs_drop, is_box: mp.place.ty(&body.local_decls, tcx).ty.is_box(), array_len: array_len(mp.place), hidden_fields: false });
         columns.push((mpi, mp.place, n));
     }
     // Fields with no move path of their own (nothing moves or assigns them
@@ -1454,13 +1454,25 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             // name; each keeps its own places.)
             if !column_info.iter().any(|c| c.name == n) {
                 let (copy, needs_drop, _) = ty_info(fty);
-                column_info.push(ColumnInfo { local: fp.local, name: n.clone(), root, kind: "field", copy, needs_drop, is_box: fty.is_box(), array_len: array_len(fp), hidden_fields: false });
+                column_info.push(ColumnInfo { local: fp.local, name: n.clone(), parent: None, root, kind: "field", copy, needs_drop, is_box: fty.is_box(), array_len: array_len(fp), hidden_fields: false });
             }
             synth.push((mpi, fp, n));
             // (Nested structs and tuples; never through a reference or a
             // Box stored in a field, so the type nesting bounds this.)
             work.push((mpi, fp, false));
         }
+    }
+    let displayed: std::collections::HashMap<_, _> = columns.iter().chain(&synth)
+        .map(|(_, place, name)| ((place.local, &place.projection[..]), name.as_str())).collect();
+    let parents: BTreeMap<_, _> = columns.iter().chain(&synth).filter_map(|(_, place, name)| {
+        let parent = place.iter_projections().filter_map(|(prefix, _)| {
+            displayed.get(&(prefix.local, prefix.projection))
+                .copied().filter(|parent| *parent != name)
+        }).last()?;
+        Some(((place.local, name.as_str()), parent))
+    }).collect();
+    for column in &mut column_info {
+        column.parent = parents.get(&(column.local, column.name.as_str())).map(|p| (*p).to_owned());
     }
     let column_name = |mpi: MovePathIndex| columns.iter().find(|(m, _, _)| *m == mpi).map(|(_, _, n)| n.clone());
 

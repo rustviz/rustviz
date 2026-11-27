@@ -113,6 +113,14 @@ struct ColumnMarks {
 }
 
 impl DotLayer {
+    fn trunk_restart_y(&self, row: usize, hash: u64, owner_key: i64, is_descendant: impl Fn(&str) -> bool) -> Option<i64> {
+        self.dots.iter()
+            .filter(|dot| dot.event && dot.row == row
+                && (dot.hash == hash || (dot.owner_key == owner_key && is_descendant(&dot.var))))
+            .min_by_key(|dot| (dot.hash != hash, !dot.events.contains(&rv_attrs::BRANCH_JOIN), dot.y))
+            .map(|dot| dot.y)
+    }
+
     fn entry(&mut self, hash: u64, x: i64, y: i64, row: usize, column: &TimelineColumnData) -> &mut PendingDot {
         let (owner_key, is_member) = if column.is_struct_group {
             (column.owner as i64, column.is_member)
@@ -629,7 +637,7 @@ fn ensure_owner_entry<'a>(
     })
 }
 
-pub fn render_timeline_panel(visualization_data : & mut VisualizationData) -> (String, i32) {
+pub fn render_timeline_panel(visualization_data : & mut VisualizationData) -> (String, i32, i32) {
     /* Template creation */
     let mut registry = Handlebars::new();
     prepare_registry(&mut registry);
@@ -656,6 +664,14 @@ pub fn render_timeline_panel(visualization_data : & mut VisualizationData) -> (S
     dots.cols = marks.cols;
     render_ref_line(&mut output, visualization_data, &resource_owners_layout, &registry, &mut dots.brackets); // reference lines
     render_arrows_string_external_events_version(&mut output, visualization_data, &resource_owners_layout, &mut dots, &registry); // arrows
+    // A join or scope-end mark can sit below the last code baseline.
+    // Include the whole glyph, including the drop marker on call dots.
+    let dot_bottom = dots.dots.iter().map(|d| d.y + if d.call && d.drop { 17 } else { 5 }).max().unwrap_or(0);
+    let segment_bottom = dots.legs.iter().chain(&dots.cols).chain(&dots.brackets)
+        .map(|&(a, b)| a.1.max(b.1) + BRANCH_HALF_W)
+        .chain(dots.bars.iter().map(|&(_, y)| y + STOP_BAR_HOVER_HALF_H))
+        .fold(0.0_f64, f64::max);
+    let min_height = dot_bottom.max(segment_bottom.max(dots.lanes.painted_bottom).ceil() as i64) as i32;
     // Written last: a call icon (`f`) added by the arrow pass shares
     // the dot of the borrow it makes.
     dots.add_approx_notes(&visualization_data.approx_notes, &visualization_data.row_lines);
@@ -683,7 +699,7 @@ pub fn render_timeline_panel(visualization_data : & mut VisualizationData) -> (S
         output_string.push_str(&registry.render("struct_template", &output_data).unwrap());
     }
 
-    (output_string, width)
+    (output_string, width, min_height)
 
 }
 
@@ -1241,6 +1257,17 @@ fn caller_end(event: &Event) -> bool {
     matches!(event, Event::StaticDie { to: ResourceTy::Caller, .. } | Event::MutableDie { to: ResourceTy::Caller, .. })
 }
 
+fn branch_entry_state(state: &State) -> State {
+    match state {
+        State::OutOfScope => State::FullPrivilege { s: LineState::Uninit },
+        state => convert_back(state),
+    }
+}
+
+fn arm_entry_state(parent: &State, active: bool) -> State {
+    if active { parent.clone() } else { branch_state_converter(parent) }
+}
+
 /// The split dot, the arm lines and the join dot a conditional draws on one
 /// variable's column (an `Event::Branch` in its history).
 fn render_branch_dots(
@@ -1279,12 +1306,11 @@ fn render_branch_dots(
         // each arm's first dot said s is live in the conditional.
         let split_has_line = branch_history.first()
             .and_then(|b| b.entry_state.as_ref())
-            .map_or(true, |entry| {
-                let leading = match entry {
-                    State::OutOfScope => State::FullPrivilege { s: LineState::Uninit },
-                    s => convert_back(s),
-                };
-                seg_drawn(rap, &leading)
+            .is_none_or(|entry| {
+                let parent = branch_entry_state(entry);
+                branch_history.iter().enumerate().any(|(i, arm)| {
+                    seg_drawn(rap, &arm_entry_state(&parent, i == 0 && !arm.e_data.is_empty()))
+                })
             });
         // A conditional on a column whose value was already moved
         // away (a nested `if` in an arm after `match (x, y)` moved
@@ -1296,14 +1322,31 @@ fn render_branch_dots(
         let imaginary_arm = imaginary_edge.and_then(|edge| visualization_data.state_table.imaginary_arm(edge));
         let imaginary_has_line = imaginary_edge
             .is_some_and(|edge| imaginary_leg(rap, visualization_data, edge, *split_point).is_some());
-        let split_drawn = imaginary_has_line || (!moved_at_event && split_has_line);
+        let split_drawn = imaginary_has_line || split_has_line;
         // Text waiting from before the conditional goes on the
         // split dot, or else on each arm's first dot.
         let initializer = imaginary_arm.and_then(|arm| arm.initializer_bindings.get(rap.name()));
+        let entry_maybe_init = visualization_data.fn_source_lines.get(hash)
+            .zip(rv_attrs::line_of(*line_number, &visualization_data.row_lines))
+            .and_then(|(&function, row)| visualization_data.state_table.incoming_cell(function, rap.name(), row))
+            .is_some_and(|cell| cell.init == crate::facts::table::Init::Maybe)
+            // A source row can include another arm's boundary (e.g. an
+            // else-if on its own line after the preceding arm's brace).
+            // Check the history of the arm that actually reaches this fork.
+            && history.iter().position(|(_, e)| std::ptr::eq(e, event))
+                .and_then(|i| history_path(&visualization_data.timelines[hash].history, history, i))
+                .is_some_and(|path| maybe_moved_at_end(&path)
+                    || matches!(init_at_end(&path), Some(InitJoin::Maybe { .. } | InitJoin::Loop)));
         let fork_title = || if let Some(binding) = initializer {
             hover_messages::event_dot_imaginary_initializer(binding)
         } else if visualization_data.row_layout.ended_at_fork.contains(&(event.get_id(), *hash)) {
             hover_messages::state_ref_borrow_ended(&is.real_name())
+        } else if entry_maybe_init {
+            format!("The borrow checker can't prove that {} holds a value when this conditional begins.", is.real_name())
+        } else if moved_at_event && split_has_line {
+            // The entry state still draws a dashed fork, for example
+            // after a block that may have left the binding unassigned.
+            "The conditional begins here.".to_owned()
         } else {
             event.print_message_with_name(&mut is.real_name())
         };
@@ -5843,15 +5886,20 @@ struct ArrowLanes {
     /// dots.
     probing: bool,
     drawn: Vec<Drawn>,
+    /// Bottom edge of the arrows and standalone logos painted in the final pass.
+    painted_bottom: f64,
     /// A probing pass draws a track's hops over dots (`track_hops`), as
     /// the final drawing always does (`untangle` searches both ways).
     probe_hops: bool,
     /// A call's logo's dot's y, by the first pass.
     logo_rows: HashMap<(usize, usize), i64>,
+    /// Vertical clearance for a local turn across a shallow fork leg.
+    leg_turn: HashMap<ArrowKey, i64>,
 }
 
 /// A straight piece of an arrow's shaft.
 type Piece = ((f64, f64), (f64, f64));
+type ArrowKey = (usize, usize);
 
 /// An arrow or a function logo as a probing pass draws it: the shaft's
 /// straight pieces (a hop's arcs left out), the head's triangle, or the
@@ -5859,7 +5907,7 @@ type Piece = ((f64, f64), (f64, f64));
 /// (`rustviz-lib/tests/common/geometry.rs`).
 #[derive(Clone, Debug, Default)]
 struct Drawn {
-    key: (usize, usize),
+    key: ArrowKey,
     tip: String,
     /// `data-rv-var` / `data-rv-to`.
     var: String,
@@ -6171,6 +6219,13 @@ impl ArrowLanes {
     fn capture(&mut self, d: Drawn) {
         if self.probing {
             self.drawn.push(d);
+        } else if !self.recording {
+            self.painted_bottom = d.pieces.iter()
+                .map(|&(a, b)| a.1.max(b.1) + 2.5)
+                .chain(d.arcs.iter().map(|p| p.1 + 2.5))
+                .chain(d.tri.iter().map(|p| p.1))
+                .chain(d.logo.map(|(_, y)| y + 3.0))
+                .fold(self.painted_bottom, f64::max);
         }
     }
 
@@ -6179,6 +6234,7 @@ impl ArrowLanes {
             lane_y: self.lane_y.clone(), flipped: self.flipped.clone(), slot: self.slot.clone(),
             leg_dx: self.leg_dx.clone(), far: self.far.clone(), self_right: self.self_right.clone(),
             level_in: self.level_in.clone(),
+            leg_turn: self.leg_turn.clone(),
         }
     }
 
@@ -6190,6 +6246,7 @@ impl ArrowLanes {
         self.far = s.far;
         self.self_right = s.self_right;
         self.level_in = s.level_in;
+        self.leg_turn = s.leg_turn;
     }
 
     /// The other ways `untangle` may draw the arrow or logo `key`, given
@@ -6202,7 +6259,7 @@ impl ArrowLanes {
     /// dot, a logo off its dot's row, a result to the caller half a row
     /// lower, and, for an arrow whose head lies on another's shaft, its
     /// head coming in level or nearly, from either side (`level_in_ways`).
-    fn alternatives(&self, key: (usize, usize), drawn: &[Drawn], ys: (i64, i64), far: bool) -> Vec<LaneSettings> {
+    fn alternatives(&self, key: (usize, usize), drawn: &[Drawn], ys: (i64, i64), far: bool, on_leg: bool) -> Vec<LaneSettings> {
         let now = self.settings();
         let mut out = Vec::new();
         let mine: Vec<&Drawn> = drawn.iter().filter(|d| d.key == key).collect();
@@ -6310,6 +6367,36 @@ impl ArrowLanes {
                     }
                 }
             }
+            if on_leg {
+                // Wide forks leave shallow diagonals across several columns.
+                // The usual half-row tracks and 20px bends can all follow
+                // one of those diagonals. Try intermediate tracks, varying
+                // both bends together so neither end has to follow a leg.
+                let mut leg_tracks = BTreeSet::new();
+                for base in [fy, ty] {
+                    for offset in [0, 8, -8, 15, -15, 23, -23, 30, -30, 38, -38, 45, -45, 53, -53, 60, -60,
+                        5, -5, 11, -11, 19, -19, 26, -26, 34, -34] {
+                        let y = base + offset;
+                        if y < ys.0 || y > ys.1 || y < ty.min(fy) - 2 * LINE_SPACE || (y == ty && y == fy)
+                            || !leg_tracks.insert(y) {
+                            continue;
+                        }
+                        for (head, tail) in [(28, 8), (8, 28), (32, 32), (12, 12), (40, 20), (20, 40),
+                            (48, 48), (30, 54), (54, 30)] {
+                            if head + tail + 4 > width {
+                                continue;
+                            }
+                            let mut s = now.clone();
+                            s.lane_y.insert(key, y);
+                            s.leg_dx.insert((key, true), head);
+                            s.leg_dx.insert((key, false), tail);
+                            s.far.remove(&key);
+                            s.level_in.remove(&key);
+                            out.push(s);
+                        }
+                    }
+                }
+            }
         }
         for d in &mine {
             if d.logo.is_none() {
@@ -6370,6 +6457,7 @@ struct LaneSettings {
     far: std::collections::HashSet<(usize, usize)>,
     self_right: std::collections::HashSet<(usize, usize)>,
     level_in: HashMap<(usize, usize), i64>,
+    leg_turn: HashMap<ArrowKey, i64>,
 }
 
 fn dist(a: (f64, f64), b: (f64, f64)) -> f64 {
@@ -6520,6 +6608,13 @@ fn head_on_shaft(a: &Drawn, b: &Drawn) -> bool {
 /// the first one's head or logo on the second, or the two along one
 /// stretch.
 fn marks_on_others(drawn: &[Drawn], ends: &Ends) -> Vec<(usize, usize)> {
+    arrow_mark_hits(drawn, ends).into_iter().map(|(i, j, _)| (i, j)).collect()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ArrowMarkHit { SharedShaft, Head, Logo }
+
+fn arrow_mark_hits(drawn: &[Drawn], ends: &Ends) -> Vec<(usize, usize, ArrowMarkHit)> {
     let mut out = Vec::new();
     let arrows: Vec<usize> = (0..drawn.len()).filter(|&i| drawn[i].logo.is_none()).collect();
     // What each covers, a little wider: two whose boxes don't meet can't
@@ -6546,7 +6641,7 @@ fn marks_on_others(drawn: &[Drawn], ends: &Ends) -> Vec<(usize, usize)> {
                 .flat_map(|&p| b.pieces.iter().map(move |&q| shared_stretch(p, q)))
                 .fold(0.0, f64::max);
             if most > 12.0 {
-                out.push((i, j));
+                out.push((i, j, ArrowMarkHit::SharedShaft));
             }
         }
     }
@@ -6563,7 +6658,7 @@ fn marks_on_others(drawn: &[Drawn], ends: &Ends) -> Vec<(usize, usize)> {
             let head = b.tri.len() == 3 && i < j
                 && samples(&tri_edges(&b.tri)).into_iter().any(|p| inside_tri(&a.tri, p) > 1.0);
             if shaft || head {
-                out.push((i, j));
+                out.push((i, j, ArrowMarkHit::Head));
             }
         }
     }
@@ -6580,14 +6675,14 @@ fn marks_on_others(drawn: &[Drawn], ends: &Ends) -> Vec<(usize, usize)> {
             }
             if samples(&b.pieces).into_iter().any(|p| in_box(bx, p, 1.5))
                 || samples(&tri_edges(&b.tri)).into_iter().any(|p| in_box(bx, p, -1.0)) {
-                out.push((i, j));
+                out.push((i, j, ArrowMarkHit::Logo));
             }
         }
         for (j, m) in drawn.iter().enumerate().skip(i + 1) {
             let Some(mat) = m.logo else { continue };
             let c = logo_box(mat);
             if l.tip != m.tip && bx.0.max(c.0) < bx.2.min(c.2) - 1.0 && bx.1.max(c.1) < bx.3.min(c.3) - 1.0 {
-                out.push((i, j));
+                out.push((i, j, ArrowMarkHit::Logo));
             }
         }
     }
@@ -6599,6 +6694,12 @@ fn marks_on_others(drawn: &[Drawn], ends: &Ends) -> Vec<(usize, usize)> {
 /// `y -> a` past z's dot), or a column's stop bar (#1344). A hop's arc
 /// isn't a shaft.
 fn through_marks(drawn: &[Drawn], dots: &DotPositions, bars: &[(f64, f64)]) -> Vec<usize> {
+    dot_and_bar_hits(drawn, dots, bars, false).into_iter().map(|(i, _, _)| i).collect()
+}
+
+fn dot_and_bar_hits(
+    drawn: &[Drawn], dots: &DotPositions, bars: &[(f64, f64)], include_head: bool,
+) -> Vec<(usize, bool, usize)> {
     let off = |c: (f64, f64), (p, q): Piece| {
         let l = dist(p, q);
         let t = if l < 1e-9 { 0.0 } else { (((c.0 - p.0) * (q.0 - p.0) + (c.1 - p.1) * (q.1 - p.1)) / (l * l)).clamp(0.0, 1.0) };
@@ -6609,18 +6710,22 @@ fn through_marks(drawn: &[Drawn], dots: &DotPositions, bars: &[(f64, f64)]) -> V
         // Where its pieces start and stop, and its head's tip: a dot within
         // 6 px of one is a dot it leaves (5.25 px off it) or points at.
         let ends: Vec<(f64, f64)> = d.pieces.iter().flat_map(|&(p, q)| [p, q]).chain(d.tri.get(1).copied()).collect();
-        for &(x, y) in dots {
+        for (mark, &(x, y)) in dots.iter().enumerate() {
             let c = (x as f64, y as f64);
             // Through its centre, or the 5 px stroke touching the dot's rim.
             let reach = if ends.iter().any(|&e| dist(e, c) < 6.0) { 4.5 } else { 5.0 + 2.5 };
-            if d.pieces.iter().any(|&p| off(c, p) < reach) {
-                out.push(i);
+            if d.pieces.iter().any(|&p| off(c, p) < reach)
+                || (include_head && d.tri.len() == 3 && off_tri(&d.tri, c) < 5.0) {
+                out.push((i, false, mark));
             }
         }
         // Along a stop bar (12 px wide, level): its middle under the shaft.
-        for &c in bars {
-            if d.pieces.iter().any(|&p| off(c, p) < 4.5) {
-                out.push(i);
+        for (mark, &c) in bars.iter().enumerate() {
+            let bar = ((c.0 - 6.0, c.1), (c.0 + 6.0, c.1));
+            if d.pieces.iter().any(|&p| off(c, p) < 4.5)
+                || (include_head && d.tri.len() == 3
+                    && samples(&[bar]).into_iter().any(|p| off_tri(&d.tri, p) < 2.0)) {
+                out.push((i, true, mark));
             }
         }
     }
@@ -6636,20 +6741,24 @@ fn through_marks(drawn: &[Drawn], dots: &DotPositions, bars: &[(f64, f64)]) -> V
 /// few px). A shaft: `shaft_on_leg`. The
 /// `arrow-along-leg` check in `rustviz-lib/tests/common/geometry.rs`.
 fn on_legs(drawn: &[Drawn], legs: &[Piece]) -> Vec<usize> {
+    leg_hits(drawn, legs).into_iter().map(|(i, _)| i).collect()
+}
+
+fn leg_hits(drawn: &[Drawn], legs: &[Piece]) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     for (i, d) in drawn.iter().enumerate().filter(|(_, d)| d.logo.is_none()) {
         let pts = d.pieces.iter().flat_map(|&(p, q)| [p, q]).chain(d.tri.iter().copied());
         let (lo_x, lo_y, hi_x, hi_y) = pts.fold((f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
             |b, p| (b.0.min(p.0), b.1.min(p.1), b.2.max(p.0), b.3.max(p.1)));
-        for &(p, q) in legs {
-            if p.0.max(q.0) < lo_x - 3.0 || p.0.min(q.0) > hi_x + 3.0 || p.1.max(q.1) < lo_y - 3.0 || p.1.min(q.1) > hi_y + 3.0 {
+        for (mark, &(p, q)) in legs.iter().enumerate() {
+            if p.0.max(q.0) < lo_x - 4.5 || p.0.min(q.0) > hi_x + 4.5 || p.1.max(q.1) < lo_y - 4.5 || p.1.min(q.1) > hi_y + 4.5 {
                 continue;
             }
             let head = d.tri.len() == 3
                 && samples(&[(p, q)]).into_iter().filter(|&c| inside_tri(&d.tri, c) > -1.0).count() > 6;
             let shaft = d.pieces.iter().any(|&piece| shaft_on_leg(piece, (p, q)));
             if head || shaft {
-                out.push(i);
+                out.push((i, mark));
             }
         }
     }
@@ -6765,20 +6874,11 @@ fn defects(drawn: &[Drawn], dots: &DotLayer) -> Vec<(usize, usize)> {
 /// times two arrows cross.
 fn untangle_cost(drawn: &[Drawn], dots: &DotLayer) -> (usize, usize) {
     let through = through_marks(drawn, &dots.positions, &dots.bars).len() + end_to_end(drawn, &dots.lanes.ends).len();
-    let cross = |(p, q): Piece, (r, t): Piece| {
-        let d = (q.0 - p.0) * (t.1 - r.1) - (q.1 - p.1) * (t.0 - r.0);
-        if d.abs() < 1e-9 {
-            return false;
-        }
-        let u = ((r.0 - p.0) * (t.1 - r.1) - (r.1 - p.1) * (t.0 - r.0)) / d;
-        let v = ((r.0 - p.0) * (q.1 - p.1) - (r.1 - p.1) * (q.0 - p.0)) / d;
-        u > 0.0 && u < 1.0 && v > 0.0 && v < 1.0
-    };
     let arrows: Vec<&Drawn> = drawn.iter().filter(|d| d.logo.is_none()).collect();
     let mut crossings = 0;
     for (n, a) in arrows.iter().enumerate() {
         for b in &arrows[n + 1..] {
-            crossings += a.pieces.iter().map(|&p| b.pieces.iter().filter(|&&q| cross(p, q)).count()).sum::<usize>();
+            crossings += shaft_crossings(a, b);
         }
     }
     // Two arrows' pieces in line and touching (one running on where the
@@ -6815,6 +6915,19 @@ fn untangle_cost(drawn: &[Drawn], dots: &DotLayer) -> (usize, usize) {
         .any(|b| b.tip != a.tip && b.arcs.iter().any(|&p| inside_tri(&a.tri, p) > -1.5))).count();
     let hops: usize = drawn.iter().map(|d| d.track_hops).sum();
     (marks_on_others(drawn, &dots.lanes.ends).len() + on_legs(drawn, &dots.legs).len() + on_arcs + hops + 10 * (through + touching + stacked), crossings)
+}
+
+fn shaft_crossings(a: &Drawn, b: &Drawn) -> usize {
+    let cross = |(p, q): Piece, (r, t): Piece| {
+        let d = (q.0 - p.0) * (t.1 - r.1) - (q.1 - p.1) * (t.0 - r.0);
+        if d.abs() < 1e-9 {
+            return false;
+        }
+        let u = ((r.0 - p.0) * (t.1 - r.1) - (r.1 - p.1) * (t.0 - r.0)) / d;
+        let v = ((r.0 - p.0) * (q.1 - p.1) - (r.1 - p.1) * (q.0 - p.0)) / d;
+        u > 0.0 && u < 1.0 && v > 0.0 && v < 1.0
+    };
+    a.pieces.iter().map(|&p| b.pieces.iter().filter(|&&q| cross(p, q)).count()).sum()
 }
 
 /// One of a field's arrows from or to several lenders other than the one
@@ -7860,6 +7973,9 @@ fn finish_arrow(mut data: ArrowData, mut head_offset: f64, from: &ResourceTy, ou
         let n = data.coordinates.len();
         data.coordinates[n - 1] =
             tail_off_dot(data.coordinates[n - 1], data.coordinates[n - 2], &dots.positions);
+        if let Some(&clearance) = dots.lanes.leg_turn.get(&data.key) {
+            data.coordinates = turn_across_legs(&data.coordinates, &dots.legs, clearance as f64);
+        }
 
         // Compute the inline arrow-head triangle, sized to
         // match the previous SVG marker (viewBox 0 0 10 10,
@@ -8000,6 +8116,34 @@ fn track_hops(route: &[(f64, f64)], dots: &DotPositions) -> Option<(String, Vec<
         pieces.push((at, q));
     }
     Some((d, pieces, arcs, n))
+}
+
+/// Turn a level shaft across a shallow leg at a steeper angle, leaving
+/// the tracks near its dots alone. The route is checked again after drawing.
+fn turn_across_legs(route: &[(f64, f64)], legs: &[Piece], clearance: f64) -> Vec<(f64, f64)> {
+    let mut out = vec![route[0]];
+    for points in route.windows(2) {
+        let (p, q) = (points[0], points[1]);
+        if (p.1 - q.1).abs() < 1e-9 {
+            let dir = (q.0 - p.0).signum();
+            let mut crossings: Vec<_> = legs.iter().filter_map(|&(a, b)| {
+                if (b.1 - a.1).abs() < 1e-9 || !shaft_on_leg((p, q), (a, b)) {
+                    return None;
+                }
+                let fraction = (p.1 - a.1) / (b.1 - a.1);
+                (0.0..=1.0).contains(&fraction).then(|| a.0 + fraction * (b.0 - a.0))
+            }).collect();
+            crossings.sort_by(|a, b| (dir * a).total_cmp(&(dir * b)));
+            for x in crossings {
+                if dir * (x - out.last().unwrap().0) > 18.0 && dir * (q.0 - x) > 18.0 {
+                    out.extend([(x - dir * 18.0, p.1), (x - dir * 8.0, p.1 + clearance),
+                        (x + dir * 8.0, p.1 + clearance), (x + dir * 18.0, p.1)]);
+                }
+            }
+        }
+        out.push(q);
+    }
+    out
 }
 
 /// Every arrow event with the row it is drawn on, including those nested
@@ -8303,7 +8447,8 @@ fn untangle(
         let drawn = probe_arrows(visualization_data, resource_owners_layout, dots, registry);
         // (On a tie, the one with fewer heads along a column, #1488.)
         let c = untangle_cost(&drawn, dots);
-        results.push(((c.0, c.1, on_cols(&drawn, &dots.cols).len()), dots.lanes.settings()));
+        let geometry = visible_arrow_defects(&drawn, dots) + on_legs(&drawn, &dots.legs).len();
+        results.push(((geometry, c.0, c.1, on_cols(&drawn, &dots.cols).len()), dots.lanes.settings()));
     }
     // (The first on a tie: no hops weighed.)
     let best = results.into_iter().min_by_key(|(c, _)| *c).map(|(_, s)| s).unwrap_or(start);
@@ -8355,7 +8500,7 @@ fn untangle_search(
             for far in [false, true] {
                 'one: for &m in &marks {
                     for key in keys_of(&drawn, m) {
-                        for s in dots.lanes.alternatives(key, &drawn, ys, far) {
+                        for s in dots.lanes.alternatives(key, &drawn, ys, far, false) {
                             let (c, d) = eval(dots, &s, &mut budget);
                             if better(c, &best) {
                                 best = Some((c, s, d));
@@ -8372,7 +8517,7 @@ fn untangle_search(
                 }
                 'two: for &m in &marks {
                     for key in keys_of(&drawn, m) {
-                        for s1 in dots.lanes.alternatives(key, &drawn, ys, far) {
+                        for s1 in dots.lanes.alternatives(key, &drawn, ys, far, false) {
                             if budget == 0 {
                                 break 'two;
                             }
@@ -8383,7 +8528,7 @@ fn untangle_search(
                             for m2 in defects(&d1, dots) {
                                 for key2 in keys_of(&d1, m2) {
                                     dots.lanes.set(s1.clone());
-                                    for s2 in dots.lanes.alternatives(key2, &d1, ys, far) {
+                                    for s2 in dots.lanes.alternatives(key2, &d1, ys, far, false) {
                                         let (c, d) = eval(dots, &s2, &mut budget);
                                         if better(c, &best) {
                                             best = Some((c, s2, d));
@@ -8453,7 +8598,7 @@ fn untangle_search(
                 cands.push(s);
             }
         }
-        cands.extend(dots.lanes.alternatives(key, &drawn, ys, true));
+        cands.extend(dots.lanes.alternatives(key, &drawn, ys, true, false));
         for s in cands {
             if s.lane_y.get(&key) != now.lane_y.get(&key) || s.slot != now.slot || s.flipped != now.flipped || s.self_right != now.self_right
                 || s.level_in != now.level_in {
@@ -8476,6 +8621,130 @@ fn untangle_search(
             drawn = d;
         }
     }
+    // An arrow may still follow a fork leg when the ordinary search
+    // prefers to avoid a hop or an extra crossing. A hop already leaves
+    // the dot visible. Use the intermediate tracks if they clear the
+    // leg without covering any other marks.
+    let keys: BTreeSet<_> = on_legs(&drawn, &dots.legs).into_iter().map(|i| drawn[i].key).collect();
+    if keys.is_empty() {
+        return;
+    }
+    let redraw = |dots: &mut DotLayer, settings: LaneSettings| {
+        dots.lanes.set(settings);
+        let drawn = probe_arrows(visualization_data, resource_owners_layout, dots, registry);
+        let hits = route_hits(&drawn, dots);
+        (drawn, hits)
+    };
+    let mut hits = route_hits(&drawn, dots);
+    for key in keys {
+        let follows_leg = |hit: &RouteHit| matches!(hit, RouteHit::Leg(k, _) if *k == key);
+        if !hits.iter().any(follows_leg) {
+            continue;
+        }
+        let now = dots.lanes.settings();
+        let mut pairs = Vec::new();
+        let turns = [12, -12].map(|clearance| {
+            let mut s = now.clone();
+            s.leg_turn.insert(key, clearance);
+            s
+        });
+        for s in dots.lanes.alternatives(key, &drawn, ys, true, true).into_iter().chain(turns) {
+            let (d, candidate) = redraw(dots, s.clone());
+            if candidate.iter().any(follows_leg) || !inside(&d) {
+                continue;
+            }
+            if candidate.is_subset(&hits) {
+                hits = candidate;
+                drawn = d;
+                break;
+            }
+            if let Some(other) = single_route_blocker(&hits, &candidate, key) {
+                pairs.push((s, d, other));
+            }
+        }
+        if !hits.iter().any(follows_leg) {
+            continue;
+        }
+        // A borrow and its return can share both dots. Try moving the
+        // blocking arrow too when it is the only mark in the way.
+        let mut remaining = 400;
+        'pair: for (s, d, other) in pairs {
+            dots.lanes.set(s);
+            for s in dots.lanes.alternatives(other, &d, ys, true, false) {
+                if remaining == 0 {
+                    break 'pair;
+                }
+                remaining -= 1;
+                let (d, candidate) = redraw(dots, s);
+                if !candidate.iter().any(follows_leg) && candidate.is_subset(&hits) && inside(&d) {
+                    hits = candidate;
+                    drawn = d;
+                    break 'pair;
+                }
+            }
+        }
+        if hits.iter().any(follows_leg) {
+            dots.lanes.set(now);
+        }
+    }
+}
+
+type ArrowMark = (ArrowKey, bool);
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum RouteHit {
+    Arrow(ArrowMark, ArrowMark, ArrowMarkHit),
+    EndToEnd(ArrowKey, ArrowKey),
+    Crossing(ArrowKey, ArrowKey, usize),
+    Dot(ArrowKey, usize),
+    StopBar(ArrowKey, usize),
+    Leg(ArrowKey, usize),
+    Column(ArrowKey, usize),
+    Bracket(ArrowKey, usize),
+}
+
+fn single_route_blocker(before: &BTreeSet<RouteHit>, after: &BTreeSet<RouteHit>, key: ArrowKey) -> Option<ArrowKey> {
+    let mut partners = after.difference(before).map(|hit| {
+        let (a, b) = match *hit {
+            RouteHit::Arrow((a, _), (b, _), _) | RouteHit::Crossing(a, b, _) | RouteHit::EndToEnd(a, b) => (a, b),
+            _ => return None,
+        };
+        if a == key { Some(b) } else if b == key { Some(a) } else { None }
+    });
+    let other = partners.next()??;
+    (other != key && partners.all(|p| p == Some(other))).then_some(other)
+}
+
+/// Each obstruction keeps the identities of the marks that meet. Clearing
+/// one of them cannot pay for introducing another, even of the same kind.
+fn route_hits(drawn: &[Drawn], dots: &DotLayer) -> BTreeSet<RouteHit> {
+    let mark = |i: usize| (drawn[i].key, drawn[i].logo.is_some());
+    let mut hits = BTreeSet::new();
+    hits.extend(arrow_mark_hits(drawn, &dots.lanes.ends).into_iter()
+        .map(|(i, j, kind)| RouteHit::Arrow(mark(i), mark(j), kind)));
+    hits.extend(end_to_end(drawn, &dots.lanes.ends).into_iter()
+        .map(|(i, j)| RouteHit::EndToEnd(drawn[i].key, drawn[j].key)));
+    hits.extend(dot_and_bar_hits(drawn, &dots.positions, &dots.bars, true).into_iter()
+        .map(|(i, bar, m)| if bar { RouteHit::StopBar(drawn[i].key, m) } else { RouteHit::Dot(drawn[i].key, m) }));
+    hits.extend(leg_hits(drawn, &dots.legs).into_iter().map(|(i, m)| RouteHit::Leg(drawn[i].key, m)));
+    hits.extend(leg_hits(drawn, &dots.cols).into_iter().map(|(i, m)| RouteHit::Column(drawn[i].key, m)));
+    for (i, a) in drawn.iter().enumerate().filter(|(_, a)| a.logo.is_none()) {
+        for b in drawn[i + 1..].iter().filter(|b| b.logo.is_none()) {
+            let (lo, hi) = (a.key.min(b.key), a.key.max(b.key));
+            hits.extend((0..shaft_crossings(a, b)).map(|n| RouteHit::Crossing(lo, hi, n)));
+        }
+        hits.extend(dots.brackets.iter().enumerate()
+            .filter(|&(_, b)| on_bracket(&a.pieces, &a.tri, std::slice::from_ref(b)))
+            .map(|(m, _)| RouteHit::Bracket(a.key, m)));
+    }
+    hits
+}
+
+fn visible_arrow_defects(drawn: &[Drawn], dots: &DotLayer) -> usize {
+    marks_on_others(drawn, &dots.lanes.ends).len()
+        + through_marks(drawn, &dots.positions, &dots.bars).len()
+        + end_to_end(drawn, &dots.lanes.ends).len()
+        + on_cols(drawn, &dots.cols).len()
 }
 
 fn determine_owner_line_styles(
@@ -8950,10 +9219,7 @@ fn render_branches(
                 .find(|(s, e, _)| *s <= *split_point && *split_point <= *e)
                 .map(|item| item.2.clone())
                 .unwrap_or(State::OutOfScope));
-        let parent_active = match parent_pre {
-            State::OutOfScope => State::FullPrivilege { s: LineState::Uninit },
-            ref s => convert_back(s),
-        };
+        let parent_active = branch_entry_state(&parent_pre);
 
         // Each arm's source span: which of the facts' arms on a one-line
         // conditional's row are this conditional's (matched by source arm).
@@ -8968,11 +9234,7 @@ fn render_branches(
             // leading so it's dashed).
             let is_active = i == 0 && !branch.e_data.is_empty();
             let arm_label = ty.string_of_branch(i);
-            let leading_state = if is_active {
-                parent_active.clone()
-            } else {
-                branch_state_converter(&parent_active)
-            };
+            let leading_state = arm_entry_state(&parent_active, is_active);
             // A passive arm's column is drawn dashed beside the other
             // arms' rows unless the state has no inactive look (a lent
             // owner's dotted line, #1333).
@@ -9144,7 +9406,7 @@ fn render_branches(
                     s => (*top, s.clone()),
                 };
                 let top = &top;
-                let Some((y1, y2)) = apexes.segment_ys(*top, bot) else { continue };
+                let Some((y1, y2)) = apexes.segment_ys(*top, bot, None) else { continue };
                 if stop_line == Some(bot) { stop_y = Some(y2 as f64); }
                 let n = segs.len();
                 // RustViz 3: on the arm's own rows, the state table's.
@@ -9164,7 +9426,7 @@ fn render_branches(
                 for (p_top, p_bot, p_state, p_title, from_arm) in pieces {
                     arm_bottom = from_arm.then(|| (p_bot, p_state.clone(), p_title.clone()));
                     // (Inside the stretch 2.x draws for the segment.)
-                    let Some((py1, py2)) = apexes.segment_ys(p_top, p_bot) else { continue };
+                    let Some((py1, py2)) = apexes.segment_ys(p_top, p_bot, None) else { continue };
                     let (py1, py2) = (if p_top == *top { y1 } else { py1.max(y1) }, if p_bot == bot { y2 } else { py2.min(y2) });
                     if py2 <= py1 {
                         continue;
@@ -10471,6 +10733,7 @@ fn render_timeline(
         (owner && matches!(ev, Event::StaticReacquire { .. } | Event::MutableReacquire { .. })
             && visualization_data.row_layout.later_field_effects.contains(&ev.get_id())).then_some(*at)
     }).collect();
+    let mut trunk_ended = false;
     for (seg_start, seg_end, state) in states {
         let mut bounds = vec![*seg_start];
         if owner {
@@ -10504,10 +10767,11 @@ fn render_timeline(
         bounds.dedup();
         bounds.push(*seg_end);
         // (Pieces with the same state and text are drawn as one.)
-        let mut pieces: Vec<(usize, usize, State, String)> = Vec::new();
+        let mut pieces: Vec<(usize, usize, State, String, Option<i64>)> = Vec::new();
         let between_own_dots = owner && line(*seg_start).is_some_and(|src| line(*seg_end) == Some(src))
             && own_dots.contains(seg_start) && own_dots.contains(seg_end);
         for w in bounds.windows(2) {
+            let mut restart_y = None;
             let before_field_release = field_releases.iter().any(|&at| w[0] < at && line(w[0]) == line(at));
             let (st, title) = if before_field_release || above_own_dot(w[0]) {
                 // A row of a one-line conditional's arms above this column's
@@ -10519,7 +10783,22 @@ fn render_timeline(
                 }
                 (state.clone(), timeline_segment_title(state, rap, visualization_data, Some(w[0])))
             } else if owner {
-                let Some(piece) = owner_segment(rap, visualization_data, w[0], state, between_own_dots) else { continue };
+                let piece = owner_segment(rap, visualization_data, w[0], state, between_own_dots);
+                if piece.is_none() && matches!(rap, ResourceAccessPoint::Struct(Struct { is_box: false, .. })) {
+                    trunk_ended |= visualization_data.fn_source_lines.get(hash).zip(line(w[0]))
+                        .is_some_and(|(f, src)| trunk_ends_at_fields(visualization_data, *f, rap.name(), w[0], src));
+                }
+                if trunk_ended && piece.is_some() {
+                    // Resume a trunk from the event on it or on one of
+                    // its fields, e.g. the join of a labeled block that
+                    // can break before moving the last field.
+                    let function = visualization_data.fn_source_lines[hash];
+                    restart_y = dots.trunk_restart_y(w[0], *hash, timeline_data.owner as i64,
+                        |column| visualization_data.state_table.is_within(function, column, rap.name()));
+                    trunk_ended = restart_y.is_none();
+                    if trunk_ended { continue; }
+                }
+                let Some(piece) = piece else { continue };
                 piece
             } else {
                 match table_ref_rows.then(|| table_lent_state(state, rap, visualization_data, w[0], &[])).flatten() {
@@ -10535,22 +10814,22 @@ fn render_timeline(
                 format!("{} is never initialized because a preceding closure call never returns", styled_name_html(rap.name()))
             } else { title };
             match pieces.last_mut() {
-                Some(last) if last.1 == w[0] && last.3 == title && std::mem::discriminant(&last.2) == std::mem::discriminant(&st) => last.1 = w[1],
-                _ => pieces.push((w[0], w[1], st, title)),
+                Some(last) if restart_y.is_none() && last.1 == w[0] && last.3 == title && std::mem::discriminant(&last.2) == std::mem::discriminant(&st) => last.1 = w[1],
+                _ => pieces.push((w[0], w[1], st, title, restart_y)),
             }
         }
-        for (line_start, line_end, piece_state, title) in pieces {
+        for (line_start, line_end, piece_state, title, restart_y) in pieces {
             let state = &piece_state;
             // Every part was moved out: nothing is left to draw (#1157).
             if title.is_empty() {
                 continue;
             }
-            let Some((mut y1, mut y2)) = apexes.segment_ys(line_start, line_end) else { continue };
+            let Some((mut y1, mut y2)) = apexes.segment_ys(line_start, line_end, restart_y) else { continue };
             // A reference column's pieces stay inside the stretch 2.x draws
             // for the segment (a row's stacked sub-rows of dots below it
             // aren't part of it). A segment drawn whole is drawn as 2.x did.
             if table_ref_rows && (line_start, line_end) != (*seg_start, *seg_end) {
-                let Some((s1, s2)) = apexes.segment_ys(*seg_start, *seg_end) else { continue };
+                let Some((s1, s2)) = apexes.segment_ys(*seg_start, *seg_end, None) else { continue };
                 (y1, y2) = (y1.max(s1), y2.min(s2));
                 if y2 <= y1 {
                     continue;
@@ -12013,14 +12292,14 @@ impl CollapsedApexes {
 
     /// The y range of a column segment from line `top` to line `bot`,
     /// or `None` when nothing is left to draw.
-    fn segment_ys(&self, top: usize, bot: usize) -> Option<(i64, i64)> {
+    fn segment_ys(&self, top: usize, bot: usize, start_y: Option<i64>) -> Option<(i64, i64)> {
         if top == bot {
             return None;
         }
         let (after_join, before_split) = (self.merges.contains(&top), self.splits.contains(&bot));
         let raised_rise = self.raised_splits.get(&bot).copied();
         let before_raised_split = raised_rise.is_some();
-        let y1 = get_y_axis_pos(top) + if after_join { COLLAPSED_APEX } else { 0 };
+        let y1 = start_y.unwrap_or_else(|| get_y_axis_pos(top) + if after_join { COLLAPSED_APEX } else { 0 });
         let y2 = get_y_axis_pos(bot) - if before_split {
             COLLAPSED_APEX
         } else if let Some(rise) = raised_rise {
@@ -12028,7 +12307,7 @@ impl CollapsedApexes {
         } else {
             0
         };
-        if (after_join || before_split || before_raised_split) && y1 >= y2 {
+        if (start_y.is_some() || after_join || before_split || before_raised_split) && y1 >= y2 {
             return None;
         }
         Some((y1, y2))
@@ -12359,6 +12638,73 @@ mod tests {
 
     fn leaves(n: usize) -> Vec<(usize, Event)> {
         branch((0..n).map(|_| arm(Vec::new())).collect())
+    }
+
+    #[test]
+    fn a_nested_trunk_restarts_at_its_fields_offset_join() {
+        let row = 8;
+        let baseline = get_y_axis_pos(row);
+        for offset in [COLLAPSED_APEX, -LINE_SPACE / 2] {
+            let mut dots = DotLayer::default();
+            let mut column = arm(Vec::new()).t_data;
+            column.is_struct_group = true;
+            column.is_member = true;
+            column.owner = 1;
+            column.name = "p.other".into();
+            let is_descendant = |column: &str| column == "p.inner.a";
+            dots.add_event(3, 100, baseline, &column, String::new(), false, None, "acquire", row);
+            assert_eq!(dots.trunk_restart_y(row, 2, 1, is_descendant), None);
+            column.name = "p.inner.a".into();
+            let join_y = baseline + offset;
+            dots.add_event(4, 130, join_y, &column, String::new(), false, None, rv_attrs::BRANCH_JOIN, row);
+            let start = dots.trunk_restart_y(row, 2, 1, is_descendant);
+            assert_eq!(start, Some(join_y));
+            let apexes = CollapsedApexes::of(&[]);
+            assert_eq!(apexes.segment_ys(row, row + 2, start), Some((join_y, get_y_axis_pos(row + 2))));
+        }
+    }
+
+    #[test]
+    fn clearing_a_leg_cannot_trade_one_covered_mark_for_another() {
+        let key = (1, 1);
+        let before = Drawn { key, pieces: vec![((0.0, 0.0), (40.0, 0.0))], ..Default::default() };
+        let after = Drawn { key, pieces: vec![((0.0, 20.0), (40.0, 20.0))], ..Default::default() };
+        let dots = DotLayer {
+            positions: BTreeSet::from([(20, 0), (20, 20)]),
+            legs: vec![((5.0, 0.0), (35.0, 0.0))],
+            ..Default::default()
+        };
+        assert_eq!(visible_arrow_defects(std::slice::from_ref(&before), &dots),
+            visible_arrow_defects(std::slice::from_ref(&after), &dots));
+        let before = route_hits(&[before], &dots);
+        let after = route_hits(&[after], &dots);
+        assert!(before.contains(&RouteHit::Leg(key, 0)));
+        assert!(!after.contains(&RouteHit::Leg(key, 0)));
+        assert!(!after.is_subset(&before));
+    }
+
+    #[test]
+    fn fallback_checks_heads_against_dots_and_stop_bars() {
+        let key = (1, 1);
+        let arrow = Drawn {
+            key, pieces: vec![((0.0, 20.0), (30.0, 20.0))],
+            tri: vec![(30.0, 14.0), (43.0, 20.0), (30.0, 26.0)],
+            ..Default::default()
+        };
+        let dots = DotLayer {
+            positions: BTreeSet::from([(39, 20)]), bars: vec![(40.0, 22.0)],
+            ..Default::default()
+        };
+        let hits = route_hits(&[arrow], &dots);
+        assert!(hits.contains(&RouteHit::Dot(key, 0)));
+        assert!(hits.contains(&RouteHit::StopBar(key, 0)));
+    }
+
+    #[test]
+    fn fallback_checks_for_a_crossing_with_the_other_arrow() {
+        let a = Drawn { key: (1, 1), pieces: vec![((0.0, 15.0), (40.0, 15.0))], ..Default::default() };
+        let b = Drawn { key: (2, 2), pieces: vec![((20.0, 0.0), (20.0, 30.0))], ..Default::default() };
+        assert!(route_hits(&[a, b], &DotLayer::default()).contains(&RouteHit::Crossing((1, 1), (2, 2), 0)));
     }
 
     /// #1468: a level return on the track half a row below its dots, and

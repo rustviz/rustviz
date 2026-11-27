@@ -197,6 +197,7 @@ struct BodyTable {
     joins: BTreeMap<rustc_span::Span, Cells>,
     /// Column names, in the facts' order.
     columns: Vec<String>,
+    parents: BTreeMap<String, String>,
     moved_places: BTreeMap<rustc_middle::mir::Local, BTreeSet<String>>,
     array_lengths: BTreeMap<(rustc_middle::mir::Local, String), usize>,
     boxes: BTreeSet<String>,
@@ -695,6 +696,18 @@ impl StateTable {
         })
     }
 
+    pub fn is_within(&self, function: FunctionStart, column: &str, ancestor: &str) -> bool {
+        let Some(body) = self.bodies.get(&function.body) else { return false };
+        let mut column = column;
+        loop {
+            if column == ancestor {
+                return true;
+            }
+            let Some(parent) = body.parents.get(column) else { return false };
+            column = parent;
+        }
+    }
+
     pub fn is_box(&self, function: FunctionStart, column: &str) -> bool {
         self.bodies.get(&function.body).is_some_and(|b| b.boxes.contains(column))
     }
@@ -902,7 +915,8 @@ fn body_table(b: &BodyFacts) -> BodyTable {
     for exit in &b.switches {
         *successor_counts.entry(exit.edge.switch).or_default() += 1;
     }
-    BodyTable { successor_counts, drop_holders: b.drop_holders.clone(), joins: b.joins.iter().map(|(s, j)| (*s, cells_of(&j.state))).collect(), first_line: b.first_line, last_line: b.last_line, function_body_start: b.function_body_start, rows, columns, moved_places, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
+    let parents = b.columns.iter().filter_map(|c| Some((c.name.clone(), c.parent.clone()?))).collect();
+    BodyTable { successor_counts, drop_holders: b.drop_holders.clone(), joins: b.joins.iter().map(|(s, j)| (*s, cells_of(&j.state))).collect(), first_line: b.first_line, last_line: b.last_line, function_body_start: b.function_body_start, rows, columns, parents, moved_places, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
 }
 
 #[cfg(test)]
@@ -927,7 +941,7 @@ mod tests {
     }
 
     fn col(name: &str) -> ColumnInfo {
-        ColumnInfo { local: rustc_middle::mir::Local::from_usize(1), name: name.into(), root: name.split('.').next().unwrap().into(), kind: "var", copy: false, needs_drop: true, is_box: false, array_len: None, hidden_fields: false }
+        ColumnInfo { local: rustc_middle::mir::Local::from_usize(1), name: name.into(), parent: None, root: name.split('.').next().unwrap().into(), kind: "var", copy: false, needs_drop: true, is_box: false, array_len: None, hidden_fields: false }
     }
 
     fn body(func: &str, first: usize, cols: &[&str], rows: Vec<Row>) -> BodyFacts {
@@ -1028,6 +1042,18 @@ mod tests {
         let mut other = body("g", 1, &["s"], vec![row(2, &[("s", "moved")], &[], Vec::new())]);
         other.def_id = def(2);
         StateTable::from_facts(&CrateFacts { version: 2, bodies: vec![main_body(), other], errors: Vec::new() })
+    }
+
+    #[test]
+    fn a_nested_place_contains_its_fields_and_excludes_siblings() {
+        let mut main = body("main", 1, &["p", "p.inner", "p.inner.a", "p.other"], Vec::new());
+        main.columns[1].parent = Some("p".into());
+        main.columns[2].parent = Some("p.inner".into());
+        main.columns[3].parent = Some("p".into());
+        let table = StateTable::from_facts(&CrateFacts { version: 2, bodies: vec![main], errors: Vec::new() });
+        assert!(table.is_within(start(1), "p.inner.a", "p.inner"));
+        assert!(table.is_within(start(1), "p.inner.a", "p"));
+        assert!(!table.is_within(start(1), "p.other", "p.inner"));
     }
 
     #[test]

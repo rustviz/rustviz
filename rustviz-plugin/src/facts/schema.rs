@@ -342,6 +342,9 @@ pub struct ColumnInfo {
     #[serde(skip)]
     pub local: rustc_middle::mir::Local,
     pub name: String,
+    /// Nearest displayed ancestor, obtained from the MIR place projection.
+    #[serde(skip)]
+    pub parent: Option<String>,
     /// The variable it belongs to.
     pub root: String,
     /// "var" | "field" | "box_payload"
