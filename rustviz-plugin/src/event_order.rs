@@ -40,6 +40,7 @@ struct Order<'a, 'tcx> {
     ends: &'a BTreeMap<usize, Vec<usize>>,
     issues: &'a BTreeMap<usize, usize>,
     closure_arrivals: &'a BTreeMap<usize, Location>,
+    let_else_branches: &'a BTreeSet<usize>,
 }
 
 fn place(r: &ResourceTy) -> Option<String> {
@@ -730,6 +731,7 @@ impl Order<'_, '_> {
         for i in 0..events.len() {
             let (line, branch) = &events[i];
             let E::Branch {
+                id: branch_id,
                 split_point,
                 merge_point,
                 branches,
@@ -739,7 +741,10 @@ impl Order<'_, '_> {
             else {
                 continue;
             };
-            if split_point != merge_point || branches.len() != 2 {
+            // Let-else binds after the fork. Its failed edge is already
+            // placed from MIR by place_let_else_ends, without a giver
+            // for a binding that would only exist on success.
+            if self.let_else_branches.contains(branch_id) || split_point != merge_point || branches.len() != 2 {
                 continue;
             }
             let Some(row) = self.facts.rows.iter().find(|r| r.line == *line) else {
@@ -1148,12 +1153,17 @@ impl Order<'_, '_> {
         shadowed.then(|| loan.lender.clone())
     }
 
-    fn order_list(&self, events: &mut [(usize, E)], map: &mut BTreeMap<usize, Vec<E>>, layout: &mut RowLayout) {
+    fn order_list(&self, events: &mut [(usize, E)], map: &mut BTreeMap<usize, Vec<E>>, layout: &mut RowLayout, dead: bool) {
         let mut lines: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (i, (line, ev)) in events.iter_mut().enumerate() {
-            if let E::Branch { branches, .. } = ev {
-                for arm in branches {
-                    self.order_list(&mut arm.e_data, &mut arm.line_map, layout);
+            if dead { layout.unreachable_events.insert(ev.get_id()); }
+            if let E::Branch { branches, id, .. } = ev {
+                for (index, arm) in branches.iter_mut().enumerate() {
+                    let unreachable = dead || arm.source.is_some_and(|source| {
+                        self.facts.dead_arms.get(&source.branch).is_some_and(|arms| arms.contains(&source.index))
+                    });
+                    if unreachable { layout.unreachable_arms.insert((*id, index)); }
+                    self.order_list(&mut arm.e_data, &mut arm.line_map, layout, unreachable);
                 }
             }
             if let Some(lender) = self.shadowed_borrow_lender(ev) {
@@ -1281,6 +1291,7 @@ pub(crate) fn order_body(visitor: &mut ExprVisitor<'_, '_>, facts: &BodyFacts) {
         ends: &visitor.end_loans,
         issues: &visitor.aggregate_issues,
         closure_arrivals: &visitor.closure_result_arrivals,
+        let_else_branches: &visitor.let_else_branches,
     };
     order.place_arm_ends(
         visitor.preprocessed_events,
@@ -1289,7 +1300,7 @@ pub(crate) fn order_body(visitor: &mut ExprVisitor<'_, '_>, facts: &BodyFacts) {
         &mut visitor.row_layout,
     );
     order.across_arms(visitor.preprocessed_events, &mut Vec::new(), &mut visitor.row_layout);
-    order.order_list(visitor.preprocessed_events, visitor.event_line_map, &mut visitor.row_layout);
+    order.order_list(visitor.preprocessed_events, visitor.event_line_map, &mut visitor.row_layout, false);
 }
 
 /// Read the independent columns in their existing order, emitting any
@@ -1370,6 +1381,12 @@ pub struct RowLayout {
     /// The scope-ending MIR occurrence selected before rows are shifted or
     /// stacked. Two exits on the same printed line can have different drops.
     pub(crate) scope_ends: BTreeMap<usize, crate::facts::ScopeEnd>,
+    /// Lexical boundaries for locals whose storage never becomes live.
+    pub(crate) unreachable_scope_ends: BTreeMap<usize, bool>,
+    /// Whether non-executing storage is still present in borrowck MIR.
+    pub(crate) unreachable_bindings: BTreeMap<(u64, rustc_middle::mir::Local), bool>,
+    pub(crate) unreachable_arms: BTreeSet<(usize, usize)>,
+    pub(crate) unreachable_events: BTreeSet<usize>,
     /// The call ends the pictured control flow without a normal storage boundary.
     pub(crate) terminal_calls: BTreeSet<usize>,
     /// Both column dots and the connecting arrow describe the same aggregate operand.
@@ -1421,6 +1438,10 @@ impl RowLayout {
         self.pattern_payloads.append(&mut other.pattern_payloads);
         self.terminal_calls.append(&mut other.terminal_calls);
         self.scope_ends.append(&mut other.scope_ends);
+        self.unreachable_scope_ends.append(&mut other.unreachable_scope_ends);
+        self.unreachable_bindings.append(&mut other.unreachable_bindings);
+        self.unreachable_arms.append(&mut other.unreachable_arms);
+        self.unreachable_events.append(&mut other.unreachable_events);
         self.aggregate_titles.append(&mut other.aggregate_titles);
         self.shadowed_borrow_lenders.append(&mut other.shadowed_borrow_lenders);
         self.closure_result_holders.append(&mut other.closure_result_holders);

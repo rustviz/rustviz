@@ -2089,6 +2089,15 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
         }
     }
+    let mut checked = BTreeSet::new();
+    {
+        let mut work = vec![rustc_middle::mir::START_BLOCK];
+        while let Some(bb) = work.pop() {
+            if !is_unreachable(body, bb) && !body[bb].is_cleanup && checked.insert(bb) {
+                work.extend(body[bb].terminator().successors());
+            }
+        }
+    }
     // Drop elaboration runs before the constant and range refinements.
     // Record a runtime flag even if the executable paths all set it.
     let drop_body = rt_body.clone();
@@ -4658,6 +4667,27 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             scope_ends.boundaries.insert(local, span);
         }
     }
+    let mut live_storage: BTreeSet<_> = body.args_iter().collect();
+    let mut declared_storage = BTreeSet::new();
+    for (bb, data) in body.basic_blocks.iter_enumerated() {
+        for stmt in &data.statements {
+            if let StatementKind::StorageLive(local) = stmt.kind {
+                if checked.contains(&bb) { declared_storage.insert(local); }
+                if executes_at(bb) { live_storage.insert(local); }
+            }
+            if let StatementKind::StorageDead(local) = stmt.kind {
+                if checked.contains(&bb) && !executes_at(bb)
+                    && scope_ends.boundaries.get(&local).is_some_and(|span| stmt.source_info.span.hi() == span.hi())
+                {
+                    scope_ends.unreached_boundaries.insert(local);
+                }
+            }
+        }
+    }
+    // After an unconditional transfer, rustc can retain a debug binding
+    // without emitting any storage statements for it in borrowck MIR.
+    scope_ends.unreachable.extend(scope_ends.boundaries.keys().copied()
+        .filter(|l| !live_storage.contains(l)).map(|l| (l, declared_storage.contains(&l))));
     // The runtime view: a cloned loop entry executes beside the original
     // block, and a constant condition removes edges. Scope ends read every
     // execution of a location, not only the original's.
@@ -4680,6 +4710,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     let leg_entries: Vec<_> = switches.iter().filter_map(|s| {
         let (owner, index) = (s.branch?, s.arm?);
         let block = s.edge.successor;
+        if !dom.is_reachable(block) { return None; }
         if rt_body.basic_blocks.predecessors()[block].iter().any(|bb| *bb != s.edge.switch.block && executing.contains(bb)) { return None; }
         let span = match tcx.hir_node(owner) {
             rustc_hir::Node::Expr(e) => match e.kind {
@@ -4694,7 +4725,12 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     }).collect();
     let mut record_scope = |rt: &mut Flow<'_, '_, 'tcx>, local: Local, loc: Location,
                             sites: &[Location], after: bool, site: Option<Span>, storage: bool| {
-        let legs: Vec<_> = leg_entries.iter().filter(|(bb, _)| dom.dominates(*bb, loc.block)).map(|(_, span)| *span).collect();
+        if sites.is_empty() { return; }
+        // A cloned loop entry can execute even if its original block
+        // does not. Only compare blocks present in these dominators.
+        let legs: Vec<_> = leg_entries.iter()
+            .filter(|(bb, _)| dom.is_reachable(loc.block) && dom.dominates(*bb, loc.block))
+            .map(|(_, span)| *span).collect();
         let boundary = cx.r.line_hi(cx.r.span_of(loc));
         let row = site.map_or(boundary, |span| cx.r.line_lo(span));
         let mut parts = match rt_md.rev_lookup.find(Place::from(local).as_ref()) {
@@ -6177,15 +6213,6 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         }
         st
     };
-    let mut checked: BTreeSet<rustc_middle::mir::BasicBlock> = BTreeSet::new();
-    {
-        let mut work = vec![rustc_middle::mir::START_BLOCK];
-        while let Some(bb) = work.pop() {
-            if !is_unreachable(body, bb) && !body.basic_blocks[bb].is_cleanup && checked.insert(bb) {
-                work.extend(body.basic_blocks[bb].terminator().successors());
-            }
-        }
-    }
     let mut branch_tests = rustc_data_structures::fx::FxIndexMap::<_, BTreeSet<_>>::default();
     for exit in &switches {
         if let Some(branch) = exit.branch.filter(|_| checked.contains(&exit.edge.switch.block)) {
@@ -6518,14 +6545,24 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     for (line, fs) in evs {
         notes.push(format!("{} facts on row {} outside the body's rows", fs.len(), line));
     }
-    // Lines whose code only borrowck's imaginary edges reach: reachable in
-    // the CFG borrowck checks, but not in what runs (`runs`).
-    let run_lines: BTreeSet<usize> = cx.rows.row.iter().filter(|(l, _)| runs.contains(&l.block)).map(|(_, r)| *r).collect();
+    // A line can have contributions from several paths. Only mark it
+    // unreachable if none of its MIR locations execute.
+    let run_lines: BTreeSet<usize> = cx.rows.row.iter().filter(|(l, _)| executes_at(l.block)).map(|(_, r)| *r).collect();
     let dead_lines: BTreeSet<usize> = cx.rows.row.iter()
-        .filter(|(l, r)| checked.contains(&l.block) && !runs.contains(&l.block) && !run_lines.contains(*r))
+        .filter(|(l, r)| checked.contains(&l.block) && !run_lines.contains(*r))
         .map(|(_, r)| *r)
         .filter(|r| *r >= first_line && *r <= last_line)
         .collect();
+    let mut arm_runs = rustc_data_structures::fx::FxIndexMap::<_, BTreeMap<_, bool>>::default();
+    for switch in &switches {
+        let (Some(branch), Some(arm)) = (switch.branch, switch.arm) else { continue };
+        if !checked.contains(&switch.edge.switch.block) { continue; }
+        let runs = executed_successors(switch.edge.switch).contains(&switch.edge.successor.start_location());
+        *arm_runs.entry(branch).or_default().entry(arm).or_default() |= runs;
+    }
+    let dead_arms = arm_runs.into_iter().map(|(branch, arms)| {
+        (branch, arms.into_iter().filter_map(|(arm, runs)| (!runs).then_some(arm)).collect())
+    }).collect();
     let constructed_vecs = runs.iter().filter_map(|&bb| {
         let expansion = body.basic_blocks[bb].terminator().source_info.span.ctxt().outer_expn();
         let &(call, _) = cx.vec_results.get(&expansion)?;
@@ -7165,6 +7202,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         temps,
         notes,
         dead_lines,
+        dead_arms,
     }
 }
 

@@ -28958,7 +28958,38 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &["(RustViz draws one pass through this loop. Its body runs at most once.)"],
         must_not_contain: &["which may not run at all"],
     },
+    TooltipExpect {
+        // On the failed length test MIR has no initialized `x`. Only
+        // the successful test reaches the assignment of the reference.
+        name: "let_else_slice_1934",
+        must_contain: &["x holds an immutable reference; it can read the borrowed resource"],
+        must_not_contain: &["x goes out of scope. Its resource is dropped."],
+    },
+    TooltipExpect {
+        // MIR's constant switch never enters b's StorageLive or Drop.
+        name: "unreachable_scope_1935",
+        must_contain: &["b's lexical scope ends here. This path never runs. Rust's borrow checker still checks it."],
+        must_not_contain: &["b goes out of scope. Its resource is dropped."],
+    },
+    TooltipExpect {
+        // The unconditional break returns without activating either
+        // binding's storage. Their source scope is the loop body.
+        name: "unreachable_loop_1935",
+        must_contain: &["o's lexical scope ends here. This code never runs.", "o2's lexical scope ends here. This code never runs."],
+        must_not_contain: &["o goes out of scope. Its resource is dropped.", "o2 goes out of scope. Its resource is dropped."],
+    },
 ];
+
+#[test]
+fn unreachable_closure_preserves_enclosing_facts_1935() {
+    let rv = run_with_local_backend("unreachable_closure_1935");
+    let facts = rv.facts().expect("MIR facts");
+    assert_eq!(facts["errors"], serde_json::json!([]));
+    let body = fact_body(facts, "main");
+    let row = body["rows"].as_array().unwrap().iter().find(|r| r["line"] == 3).unwrap();
+    // rustc reports E0382 for a probe of `s` after the array initializer.
+    assert_eq!(row["state"]["s"], "moved");
+}
 
 #[test]
 fn closure_break_ends_the_owned_segment_1909() {

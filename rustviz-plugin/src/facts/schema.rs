@@ -254,11 +254,13 @@ pub struct BodyFacts {
     /// Temporaries that hold a value needing drop.
     pub temps: Vec<TempInfo>,
     pub notes: Vec<String>,
-    /// Source lines whose code borrowck checks but that never runs: reached
-    /// only by borrowck's imaginary edges (the dead `else` of an irrefutable
-    /// `if let`). Their rows' states are that imaginary path's.
+    /// Source lines whose code borrowck checks but that never runs.
+    /// Their rows' states are those of the checked path.
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     pub dead_lines: BTreeSet<usize>,
+    /// Source arms for which none of the MIR entry edges executes.
+    #[serde(skip)]
+    pub(crate) dead_arms: rustc_data_structures::fx::FxIndexMap<rustc_hir::HirId, BTreeSet<usize>>,
     /// Binding assignments on both checked and executable MIR paths.
     #[serde(skip)]
     pub binding_sources: Vec<BindingSource>,
@@ -1035,6 +1037,10 @@ pub(crate) struct ScopeEnds {
     /// These mark the end of a timeline even when no destructor executes.
     pub(crate) terminal_calls: BTreeMap<rustc_middle::mir::Local, Vec<(rustc_span::Span, usize)>>,
     pub(crate) boundaries: BTreeMap<rustc_middle::mir::Local, rustc_span::Span>,
+    /// Named bindings whose storage never becomes live in executable MIR.
+    pub(crate) unreachable: BTreeMap<rustc_middle::mir::Local, bool>,
+    /// Lexical storage boundaries that exist on checked paths only.
+    pub(crate) unreached_boundaries: BTreeSet<rustc_middle::mir::Local>,
     places: BTreeMap<rustc_middle::mir::Local, BTreeMap<String, Vec<ScopeEnd>>>,
 }
 

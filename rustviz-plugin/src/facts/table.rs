@@ -778,6 +778,13 @@ impl StateTable {
             .flat_map(|(body, rows)| rows.iter().map(move |&row| (body, row)))
     }
 
+    /// A segment that reads the checked path leaving an unreachable row.
+    pub fn segment_never_runs(&self, function: FunctionStart, row: usize) -> bool {
+        let Some(body) = self.bodies.get(&function.body) else { return false };
+        body.dead_lines.contains(&row) && body.rows.get(&row)
+            .is_some_and(|r| r.snapshot && !r.block_end && !r.jumps)
+    }
+
     /// The direct field columns of `column` (`p.a`, `p.b` of `p`).
     pub fn fields_of(&self, function: FunctionStart, column: &str) -> Vec<String> {
         let prefix = format!("{}.", column);
@@ -1144,6 +1151,7 @@ mod tests {
             branch_entries: Default::default(),
             arm_boundaries: Default::default(),
             dead_lines: BTreeSet::new(),
+            dead_arms: Default::default(),
             imaginary_edges: Vec::new(),
         }
     }
