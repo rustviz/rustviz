@@ -3284,7 +3284,69 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     // enclosing aggregate, including nested columns with no Drop of
     // their own. A lost field and all its descendants count only once.
     let rt_doms = rt_body.basic_blocks.dominators();
-    let partial_drops = |rt: &mut Flow<'_, '_, 'tcx>, at: Location, after: bool, top: MovePathIndex| {
+    let variant_drops = |rt: &mut Flow<'_, '_, 'tcx>, at: Location, after: bool, drop_at: Option<Location>, root: MovePathIndex, name: &str| {
+        let place = rt_md.move_paths[root].place;
+        let ty = place.ty(&body.local_decls, tcx).ty;
+        let TyKind::Adt(def, args) = *ty.kind() else { return Vec::new() };
+        if !def.is_enum() || !ty_info(ty).1 { return Vec::new(); }
+        let moved = may_after(&rt_moved_entry, &|st, l| moved_transfer(&rt_md, &rt_body, st, l), at, after);
+        let state = rt.state(&[at], after, root);
+        if !state.may_init || state.may_uninit { return Vec::new(); }
+        // Like ElaborateDrops::collect_drop_flags, use the paths which
+        // are both maybe initialized and maybe uninitialized at the
+        // actual Drop, including enum downcasts. An exit sharing that
+        // Drop can still know more about what reaches it.
+        let flagged = drop_at.filter(|loc| runs.contains(&loc.block))
+            .map(|loc| rt.state(&[loc], false, root).sub_maybe)
+            .unwrap_or_default();
+        let downcasts: BTreeMap<_, _> = descendants(&rt_md, root).into_iter().filter_map(|path| {
+            match &rt_md.move_paths[path].place.projection[place.projection.len()..] {
+                [ProjectionElem::Downcast(_, variant)] => Some((*variant, path)),
+                _ => None,
+            }
+        }).collect();
+        // If a downcast is always initialized, that is the only variant
+        // reaching this exit. A known inactive variant has no move to report.
+        let active = downcasts.iter().find_map(|(&variant, &path)| {
+            let st = rt.state(&[at], after, path);
+            (st.may_init && !st.may_uninit).then_some(variant)
+        });
+        def.variants().iter_enumerated().filter_map(|(variant, data)| {
+            if active.is_some_and(|active| active != variant) { return None; }
+            let downcast = downcasts.get(&variant).copied();
+            let payload = match data.fields.raw.as_slice() {
+                [] => VariantPayload::Empty,
+                [field] => {
+                    let ty = field.ty(tcx, args);
+                    let (copy, needs_drop, _) = ty_info(ty);
+                    if copy && ty.is_primitive() {
+                        VariantPayload::Copy(ty.to_string())
+                    } else {
+                        if !needs_drop { return None; }
+                        let downcast = downcast?;
+                        let path = rt_md.move_paths[downcast].first_child?;
+                        if !moved.contains(&path) { return None; }
+                        let st = rt.state(&[at], after, path);
+                        let TyKind::Adt(def, _) = ty.kind() else { return None; };
+                        let ty = tcx.item_name(def.did()).to_string();
+                        if !st.may_init {
+                            VariantPayload::Moved(ty)
+                        } else if flagged.contains(&path) && st.may_uninit && st.sub_moved.is_empty() && st.sub_maybe.is_empty() {
+                            VariantPayload::Conditional(ty)
+                        } else {
+                            return None;
+                        }
+                    }
+                }
+                _ => return None,
+            };
+            let tracks_variant_init = matches!(payload, VariantPayload::Moved(_)) && downcast.is_some_and(|path| {
+                flagged.contains(&path) && state.sub_maybe.contains(&path)
+            });
+            Some(VariantDrop { column: name.to_owned(), variant: data.name.to_string(), payload, tracks_variant_init })
+        }).collect()
+    };
+    let partial_drops = |rt: &mut Flow<'_, '_, 'tcx>, at: Location, after: bool, drop_at: Option<Location>, top: MovePathIndex| {
         let state = rt.state(&[at], after, top);
         if !state.ever_init || (state.may_init && state.sub_moved.is_empty() && state.sub_maybe.is_empty()) {
             return Vec::new();
@@ -3327,6 +3389,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             let drops_resource = needs_drop && rest_how(rt, &[at], after, m) != "nothing_to_drop";
             let mut split = PartialDrop { drops_resource, incomplete: hidden && drops_resource, ..PartialDrop::default() };
             let mut flagged_fields = Vec::new();
+            let mut observed_enums = BTreeSet::new();
             for (paths, conditional) in [(st.sub_moved, false), (st.sub_maybe, true)] {
                 let mut paths = paths;
                 paths.sort_by_key(|&ch| field_key(ch));
@@ -3361,6 +3424,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                                 LookupResult::Exact(path) => Some(path),
                                 LookupResult::Parent(_) => None,
                             };
+                            if let Some(parent) = parent {
+                                observed_enums.insert((parent, name));
+                            }
                             if parent.is_some_and(|p| rest_how(rt, &[at], after, p) == "nothing_to_drop") {
                                 if !split.payloads_empty.contains(name) {
                                     split.payloads_empty.push(name.clone());
@@ -3430,6 +3496,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     }
                 }
             }
+            for (root, name) in observed_enums {
+                split.variant_drops.extend(variant_drops(rt, at, after, drop_at, root, name));
+            }
             if split.moved.is_empty() && split.conditional.is_empty()
                 && split.payloads_moved.is_empty() && split.payloads_conditional.is_empty()
                 && split.payloads_empty.is_empty() && !split.incomplete
@@ -3440,6 +3509,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 out.push((place.local, empty.clone(), PartialDrop {
                     payloads_empty: vec![empty.clone()],
                     payloads_moved: split.payloads_moved.iter().filter(|name| *name == empty).cloned().collect(),
+                    variant_drops: split.variant_drops.iter().filter(|drop| drop.column == *empty).cloned().collect(),
                     ..PartialDrop::default()
                 }));
             }
@@ -3751,7 +3821,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         if let LookupResult::Exact(top) = rt_md.rev_lookup.find(Place::from(*l).as_ref()) {
                             let site = cx.rows.exit_site.get(&loc).map(|&at| cx.r.exit_span(at));
                             scope_partials.entry(ev.0).or_default().extend(
-                                partial_drops(&mut rt, loc, false, top).into_iter().map(|(local, name, parts)| (site, local, name, parts)));
+                                partial_drops(&mut rt, loc, false, None, top).into_iter().map(|(local, name, parts)| (site, local, name, parts)));
                         }
                         push(&mut evs, ev);
                     }
@@ -3861,11 +3931,13 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     if let LookupResult::Exact(mpi) = rt_md.rev_lookup.find(place.as_ref()) {
                         for (r, at) in shared {
                             let how_there = rest_how(&mut rt, &[*at], true, mpi);
-                            if try_span(*at).is_none() {
-                                let site = Some(cx.r.exit_span(*at));
-                                scope_partials.entry(*r).or_default().extend(
-                                    partial_drops(&mut rt, *at, true, mpi).into_iter().map(|(local, name, parts)| (site, local, name, parts)));
-                            }
+                            let (row, site) = try_span(*at).map_or_else(
+                                || (*r, cx.r.exit_span(*at)),
+                                |site| (cx.r.line_lo(site), site),
+                            );
+                            scope_partials.entry(row).or_default().extend(
+                                partial_drops(&mut rt, *at, true, Some(loc), mpi).into_iter()
+                                    .map(|(local, name, parts)| (Some(site), local, name, parts)));
                             if how_there == "nothing_to_drop" {
                                 continue;
                             }
@@ -3906,12 +3978,15 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                             items.insert(0, whole);
                         }
                         let route = drop_route(loc, shared);
-                        if !at_reassign && exit.and_then(try_span).is_none() {
+                        if !at_reassign {
                             if let LookupResult::Exact(top) = rt_md.rev_lookup.find(place.as_ref()) {
-                                let row = cx.rows.event_row[&loc];
-                                let site = exit.map(|at| cx.r.exit_span(at));
+                                let (row, site) = exit.and_then(try_span).map_or_else(
+                                    || (cx.rows.event_row[&loc], exit.map(|at| cx.r.exit_span(at))),
+                                    |site| (cx.r.line_lo(site), Some(site)),
+                                );
                                 scope_partials.entry(row).or_default().extend(
-                                    partial_drops(&mut rt, loc, false, top).into_iter().map(|(local, name, parts)| (site, local, name, parts)));
+                                    partial_drops(&mut rt, loc, false, Some(loc), top).into_iter()
+                                        .map(|(local, name, parts)| (site, local, name, parts)));
                             }
                         }
                         for (n, h, also) in items {

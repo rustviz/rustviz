@@ -509,7 +509,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c6_04_match_moves_string",
-        must_contain: &["Partial move from opt to s", "s goes out of scope. Its resource is dropped.", "opt may be partially moved above, so it can't be used as a whole after the branches. If execution reaches the end of opt's scope while it still holds its resource (including the String it holds, if any), it is dropped there.", "opt goes out of scope. No value inside opt remains to drop here. No resource is dropped."],
+        must_contain: &["Partial move from opt to s", "s goes out of scope. Its resource is dropped.", "opt may be partially moved above, so it can't be used as a whole after the branches. If execution reaches the end of opt's scope while it still holds its resource (including the String it holds, if any), it is dropped there.", "opt goes out of scope. No value inside opt remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. In MIR, Rust creates a runtime drop flag for the initialization of opt's Some variant."],
         must_not_contain: &[JOIN_OPT, "opt was moved in at least one branch above,"],
         ..E
     },
@@ -542,7 +542,7 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c6_07_if_let_else_string",
         note: "the None path has no payload, and the Some path moves its payload to n",
-        must_contain: &["Move from name to n", "n goes out of scope. Its resource is dropped.", "name may be partially moved above, so it can't be used as a whole after the branches. If execution reaches the end of name's scope while it still holds its resource (including the String it holds, if any), it is dropped there.", "name goes out of scope. No value inside name remains to drop here. No resource is dropped."],
+        must_contain: &["Move from name to n", "n goes out of scope. Its resource is dropped.", "name may be partially moved above, so it can't be used as a whole after the branches. If execution reaches the end of name's scope while it still holds its resource (including the String it holds, if any), it is dropped there.", "name goes out of scope. No value inside name remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. In MIR, Rust creates a runtime drop flag for the initialization of name's Some variant."],
         must_not_contain: &[
             "name was moved in at least one branch above,",
             "name was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
@@ -553,14 +553,15 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c6_08_let_else",
         must_contain: &[
-            // Reaching the `else` proves s was None, so the return drops no payload.
-            "L3 s goes out of scope. No value inside s remains to drop here. No resource is dropped.",
+            // ElaborateDrops emits only discriminant checks for s at these exits.
+            "L3 s goes out of scope. No value inside s remains to drop here. No resource is dropped. None carries no payload.",
+            "L6 s goes out of scope. A value inside s was moved out earlier. No value inside s remains to drop here. No resource is dropped. For Some, the String payload was moved out.",
             "Move from s to x",
             "x's resource is moved to the caller",
             "Move from describe to d",
             "d goes out of scope. Its resource is dropped.",
         ],
-        must_not_contain: &["L3 s goes out of scope. Its resource is dropped"],
+        must_not_contain: &["L3 s goes out of scope. Its resource is dropped", "runtime drop flag"],
         ..E
     },
     Snippet {
@@ -816,7 +817,7 @@ const BOOK: &[Snippet] = &[
             "Partial move from r to e",
             "e goes out of scope. Its resource is dropped.",
             "r may be partially moved above, so it can't be used as a whole after the branches. If execution reaches the end of r's scope while it still holds its resource (including the String it holds, if any), it is dropped there.",
-            "r goes out of scope. No value inside r remains to drop here. No resource is dropped.",
+            "r goes out of scope. No value inside r remains to drop here. No resource is dropped. Ok holds a value of type i32 that needs no drop. For Err, the String payload was moved out. In MIR, Rust creates a runtime drop flag for the initialization of r's Err variant.",
         ],
         must_not_contain: &[
             "r was moved in at least one branch above,",
@@ -1610,14 +1611,14 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "x16_match_arm_block_body",
         note: "control for c6_04: a block-bodied arm draws s's drop on canvas",
-        must_contain: &["Partial move from opt to s", "L6 s goes out of scope. Its resource is dropped.", "opt may be partially moved above, so it can't be used as a whole after the branches. If execution reaches the end of opt's scope while it still holds its resource (including the String it holds, if any), it is dropped there.", "opt goes out of scope. No value inside opt remains to drop here. No resource is dropped."],
+        must_contain: &["Partial move from opt to s", "L6 s goes out of scope. Its resource is dropped.", "opt may be partially moved above, so it can't be used as a whole after the branches. If execution reaches the end of opt's scope while it still holds its resource (including the String it holds, if any), it is dropped there.", "opt goes out of scope. No value inside opt remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. In MIR, Rust creates a runtime drop flag for the initialization of opt's Some variant."],
         must_not_contain: &[JOIN_OPT, "opt was moved in at least one branch above,"],
         ..E
     },
     Snippet {
         id: "x17_match_arm_fn_call_body",
         note: "control: fn-call arm body",
-        must_contain: &["Partial move from opt to s", "Move from s to show", "s goes out of scope. No resource is dropped.", "opt may be partially moved above, so it can't be used as a whole after the branches. If execution reaches the end of opt's scope while it still holds its resource (including the String it holds, if any), it is dropped there.", "opt goes out of scope. No value inside opt remains to drop here. No resource is dropped."],
+        must_contain: &["Partial move from opt to s", "Move from s to show", "s goes out of scope. No resource is dropped.", "opt may be partially moved above, so it can't be used as a whole after the branches. If execution reaches the end of opt's scope while it still holds its resource (including the String it holds, if any), it is dropped there.", "opt goes out of scope. No value inside opt remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. In MIR, Rust creates a runtime drop flag for the initialization of opt's Some variant."],
         must_not_contain: &[JOIN_OPT, "opt was moved in at least one branch above,"],
         ..E
     },

@@ -3548,6 +3548,30 @@ pub fn event_dot_partial_scope_drop(
             out.push_str(" No resource is dropped.");
         }
     }
+    for drop in &split.variant_drops {
+        use crate::facts::schema::VariantPayload;
+        let column = styled_name_html(&drop.column);
+        let variant_name = styled_name_html(&drop.variant);
+        let variant = if &drop.column == name {
+            variant_name.clone()
+        } else {
+            format!("{column}'s {variant_name} variant")
+        };
+        out.push_str(&match &drop.payload {
+            VariantPayload::Empty => format!(" {variant} carries no payload."),
+            VariantPayload::Copy(ty) => format!(" {variant} holds a value of type {} that needs no drop.", styled_name_html(ty)),
+            VariantPayload::Moved(ty) => format!(" For {variant}, the {} payload was moved out.", styled_name_html(ty)),
+            VariantPayload::Conditional(ty) => format!(
+                " For {variant}, a runtime drop flag tracks whether {column} still holds its {} payload.",
+                styled_name_html(ty),
+            ),
+        });
+        if drop.tracks_variant_init {
+            out.push_str(&format!(
+                " In MIR, Rust creates a runtime drop flag for the initialization of {column}'s {variant_name} variant."
+            ));
+        }
+    }
     out
 }
 

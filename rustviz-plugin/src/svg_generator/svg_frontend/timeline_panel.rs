@@ -2154,7 +2154,7 @@ fn render_scope_end_dot(
             };
             append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
             return true;
-        } else if !resource_hold && partial.as_ref().is_none_or(|p| p.payloads_empty.is_empty())
+        } else if !resource_hold && partial.is_none_or(|p| p.payloads_empty.is_empty())
             && (maybe_moved_at_end(history)
             // An exit's drop in a branch, after a conditional above the
             // branch's that moved it on some paths (#1194).
@@ -2171,7 +2171,11 @@ fn render_scope_end_dot(
             });
             // A Box whose contents need no drop (no drop note), moved
             // out in some branches only (#929).
-            let title = if chain_new_value_lasts(history) {
+            let title = if let Some(split) = partial.filter(|p| p.drops_resource
+                && p.variant_drops.iter().any(|drop| matches!(drop.payload, crate::facts::schema::VariantPayload::Conditional(_))))
+            {
+                hover_messages::event_dot_partial_scope_drop(&name, split, false, is_box)
+            } else if chain_new_value_lasts(history) {
                 // Given a new value by a condition (#603).
                 hover_messages::event_dot_go_out_of_scope_chain_new_value(&name, &ro.drop_note())
             } else if ro.box_contents_moved() && ro.drop_note().is_empty()
@@ -2595,6 +2599,13 @@ fn render_dot(
                     if matches!(try_drop, Some(("nothing_to_drop", _))) {
                         continue;
                     }
+                    let try_variant_drop = (|| {
+                        let Event::OwnerDropIfTryReturns { local: Some(local), span } = event else { return None; };
+                        let function = *visualization_data.fn_source_lines.get(hash)?;
+                        let row = rv_attrs::line_of(*line_number, &visualization_data.row_lines)?;
+                        visualization_data.state_table.partial_drop(function, &name, row, *local, Some(*span))
+                            .filter(|split| !split.variant_drops.is_empty() && split.drops_resource)
+                    })();
                     // A reassignment, or the drop at a `?`'s early return,
                     // says what else goes with it (#373, #542).
                     let note = if matches!(event, Event::OwnerDropAtReassign { parts: None, payload: false, .. } | Event::OwnerDropIfTryReturns { .. } | Event::OwnerDropUnlessReturned { .. }) {
@@ -2700,6 +2711,10 @@ fn render_dot(
                         hover_messages::event_dot_extended_temporary_drop_made(&name, when, made_at)
                     } else if let (Event::OwnerDropIfTryReturns { .. }, Some(made_at)) = (event, branch_temp_maybe_made(visualization_data, hash, history, i)) {
                         hover_messages::event_dot_temp_drop_if_try_returns_made(&name, made_at)
+                    } else if let Some(split) = try_variant_drop {
+                        let boxed = matches!(visualization_data.timelines[hash].resource_access_point, ResourceAccessPoint::Struct(Struct { is_box: true, .. }));
+                        let scope_end = hover_messages::event_dot_partial_scope_drop(&name, split, false, boxed);
+                        hover_messages::event_dot_owner_drop_if_try_returns_partial(&name, &scope_end)
                     } else if let Some(split) = matches!(event, Event::OwnerDropIfTryReturns { .. })
                         .then(|| try_partial_move_split(visualization_data, *hash as u64, *line_number)).flatten() {
                         // A struct some fields of which were moved out

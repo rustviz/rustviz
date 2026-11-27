@@ -541,9 +541,29 @@ pub struct PartialDrop {
     pub payloads_conditional: Vec<String>,
     /// No value inside this enum field reaches its destructor.
     pub payloads_empty: Vec<String>,
+    pub variant_drops: Vec<VariantDrop>,
     pub drops_resource: bool,
     /// Part of the drop has no named field.
     pub incomplete: bool,
+}
+
+/// Drop information for a variant of a partially moved enum.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VariantDrop {
+    pub column: String,
+    pub variant: String,
+    pub payload: VariantPayload,
+    /// Drop elaboration allocates a flag for this downcast move path.
+    /// The drop ladder can still have no field to drop for the variant.
+    pub tracks_variant_init: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VariantPayload {
+    Empty,
+    Copy(String),
+    Moved(String),
+    Conditional(String),
 }
 
 /// The borrow checker considers both a skipped assignment and a move.
