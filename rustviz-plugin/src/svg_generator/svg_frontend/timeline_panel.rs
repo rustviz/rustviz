@@ -1502,7 +1502,8 @@ fn render_branch_dots(
         let function = visualization_data.fn_source_lines.get(hash).copied();
         let Event::Branch { join, .. } = event else { unreachable!() };
         let join = join.as_deref();
-        let segment = if join.is_none() && (matches!(ty, BranchType::Loop(..)) || is_branch_temp_col(rap)) {
+        let short_circuit = visualization_data.row_layout.short_circuit_forks.contains(&event.get_id());
+        let segment = if join.is_none() && (matches!(ty, BranchType::Loop(..)) || is_branch_temp_col(rap) || short_circuit) {
             (|| {
                 let row = rv_attrs::line_of(*merge_point, &visualization_data.row_lines)?;
                 visualization_data.state_table.segment_cell(function?, rap.name(), row)
@@ -1511,6 +1512,8 @@ fn render_branch_dots(
             None
         };
         let join_cell = join.map(|j| &j.cell).or(segment.as_ref());
+        let field_initialized = short_circuit && rap.is_ref()
+            && join_cell.is_some_and(|cell| cell.init == crate::facts::table::Init::Own);
         let reassigned = join_cell.and_then(|cell| cell.reassigned);
         let staged = join.is_some_and(|j| j.change.staged_result);
         let (mixed_moved, all_moved) = if staged { (false, false) } else { branch_moves(event) };
@@ -1609,7 +1612,10 @@ fn render_branch_dots(
         });
         let mixed_init = join.filter(|j| !j.change.replaces_moved && !j.change.entry_own).map(|j| &j.cell).filter(|c| c.mixed_init.is_some_and(|mixed|
             mixed.may_hold_value && !is_branch_temp_col(rap)));
-        let title = if imaginary_join.is_some() {
+        let title = if field_initialized {
+            let kind = if rap.is_mutref() { "a mutable" } else { "an immutable" };
+            Some(format!("{} holds {kind} reference after the short-circuit expression.", styled_name_html(rap.name())))
+        } else if imaginary_join.is_some() {
             imaginary_join
         } else if visualization_data.row_layout.ended_at_fork.contains(&(event.get_id(), *hash)) {
             Some(hover_messages::state_ref_borrow_ended(&is.real_name()))
@@ -1702,8 +1708,12 @@ fn render_branch_dots(
             // may have moved it (#940, #953), or a `match` arm's
             // guard that failed (#247): the keyword of the conditional,
             // for "can't be used after the if / match".
-            let by_cond = (join.is_some_and(|j| j.change.test_moved)
-                || chain_condition_moved_here(branch_history)).then_some(branch_keyword);
+            let by_cond = if short_circuit {
+                Some("short-circuit expression")
+            } else {
+                (join.is_some_and(|j| j.change.test_moved)
+                    || chain_condition_moved_here(branch_history)).then_some(branch_keyword)
+            };
             Some(if rap.is_split_scrutinee_temporary() {
                 // A scrutinee temporary an arm's pattern moved (part of)
                 // its value out of (#1386): its drop, on this dot or
@@ -3038,6 +3048,19 @@ fn render_dot(
             };
             if let Some((holder, lender, ended)) = parties {
                 data.title = hover_messages::stored_loan_message(detail, holder, lender, None, ended, projected.as_deref());
+            }
+        }
+        if let Some(end) = visualization_data.row_layout.dropped_field_loans.get(&event.get_id()) {
+            let field = styled_name_html(&end.field);
+            let holder = styled_name_html(&end.holder);
+            let lender = styled_name_html(visualization_data.timelines[hash].resource_access_point.name());
+            let kind = if matches!(event, Event::MutableReacquire { .. }) { "mutable" } else { "shared" };
+            data.title = format!("The old {field}'s {kind} borrow of {lender} ends when the old {holder} is dropped. This borrow no longer restricts access to {lender}.");
+            if let Some(conditional) = end.replacement {
+                data.title.push_str(" Its destructor can use this reference before the replacement is installed.");
+                if conditional {
+                    data.title.push_str(&format!(" Rust tracks whether {holder} still holds the old value with a runtime drop flag."));
+                }
             }
         }
         if matches!(event, Event::StaticDie { .. } | Event::MutableDie { .. }) {
@@ -11334,6 +11357,11 @@ fn render_timeline(
     }).collect();
     let mut trunk_ended = false;
     for (seg_start, seg_end, state) in states {
+        let short_circuit_join = table_ref_rows && matches!(state, State::ResourceMoved { .. })
+            && history.iter().any(|(_, e)| {
+                matches!(e, Event::Branch { merge_point, .. } if merge_point == seg_start)
+                    && visualization_data.row_layout.short_circuit_forks.contains(&e.get_id())
+            });
         let mut bounds = vec![*seg_start];
         if owner {
             // OOS includes the placeholder occupied by the arm legs.
@@ -11400,12 +11428,16 @@ fn render_timeline(
                 let Some(piece) = piece else { continue };
                 piece
             } else {
+                let maybe_moved = short_circuit_join && visualization_data.fn_source_lines.get(hash).zip(line(w[0]))
+                    .and_then(|(&function, row)| visualization_data.state_table.segment_cell(function, rap.name(), row))
+                    .is_some_and(|c| c.init == crate::facts::table::Init::Maybe && c.cause == Some("moved"));
                 match table_ref_rows.then(|| table_lent_state(state, rap, visualization_data, w[0], &[])).flatten() {
                     Some((st, Some(title))) => (st, title),
                     Some((st, None)) => {
                         let t = timeline_segment_title(&st, rap, visualization_data, Some(w[0]));
                         (st, t)
                     }
+                    None if maybe_moved => (state.clone(), hover_messages::state_maybe(rap.name(), Some("moved"))),
                     None => (state.clone(), timeline_segment_title(state, rap, visualization_data, Some(w[0]))),
                 }
             };

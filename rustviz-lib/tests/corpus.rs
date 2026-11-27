@@ -43830,6 +43830,146 @@ fn owner_lines_explain_a_field_loan_until_its_holder_drops_1916() {
     }
 }
 
+fn assert_drop_holder_releases_1921(svg: &str, fork: usize, drop: usize, assign: usize, fields: &[&str]) {
+    let dots: Vec<_> = rv_elements(svg, "b@L").into_iter().filter(|(id, ..)| {
+        id.contains(":dot:") && id[3..].split(':').next().and_then(|row| row.parse::<usize>().ok())
+            .is_some_and(|row| (fork..=assign).contains(&row))
+    }).collect();
+    let forbidden = ["b's resource is no longer immutably borrowed", "a or b", "<temp>", "<operand>"];
+    for (id, tip, ..) in &dots {
+        if [fork, drop, assign].iter().any(|line| id.starts_with(&format!("b@L{line}:"))) {
+            assert_review_title(tip, &[], &forbidden);
+        }
+    }
+    let x_at = |row, kind: &str| {
+        let id = format!("b@L{row}:dot:{kind}");
+        dots.iter().find(|(actual, ..)| actual.starts_with(&id))
+            .unwrap_or_else(|| panic!("missing {id}: {dots:?}")).2.0
+    };
+    let fork_x = x_at(fork, "branch");
+    for field in fields {
+        let clause = format!("The old {field}'s shared borrow of b ends when the old h is dropped");
+        let releases: Vec<_> = dots.iter().filter(|(_, tip, ..)| tip.contains(&clause)).collect();
+        assert_eq!(releases.len(), 2, "{clause}: {dots:?}");
+        let (id, _, then_x, _) = releases.iter().find(|(id, ..)| id.starts_with(&format!("b@L{drop}:dot:")))
+            .expect("release at the explicit drop");
+        assert!(then_x.0 < fork_x, "{id} must be on the taken leg");
+        let (id, tip, assignment_x, _) = releases.iter().find(|(id, ..)| id.starts_with(&format!("b@L{assign}:dot:")))
+            .expect("release at the assignment boundary");
+        assert_eq!(assignment_x.0, fork_x, "{id} must be on the assignment boundary");
+        assert_review_title(tip, &["This borrow no longer restricts access to b", "Its destructor can use this reference before the replacement is installed", "runtime drop flag"], &forbidden);
+    }
+    for field in fields {
+        assert!(!rv_elements(svg, &format!("{field}>b@")).iter().any(|(_, tip, ..)| tip.contains("a or b")));
+    }
+}
+
+#[test]
+fn overwritten_drop_holder_releases_the_old_loan_on_its_paths_1921() {
+    let svg = run_with_local_backend("rv3_issues/1778_drop_holder_moved_in_rhs").timeline_panel_string();
+    // Rustc rejects writing b before drop(h) or in the else body with
+    // E0502 and accepts it after either drop. The elaborated MIR tests
+    // the holder's drop flag before installing the replacement.
+    assert_drop_holder_releases_1921(&svg, 8, 9, 14, &["h.0"]);
+}
+
+#[test]
+fn overwritten_drop_holder_can_end_while_another_loan_survives_1921() {
+    let svg = run_with_local_backend("rv3_1921_drop_holder_overwrite").timeline_panel_string();
+    // Writing b immediately after drop(h) is E0502 because keep is
+    // read later, independently of the reference held in h.0.
+    assert_drop_holder_releases_1921(&svg, 34, 35, 39, &["h.0"]);
+    for id in ["b@L35-37:branch_line:partial_privilege", "b@L39-40:line:partial_privilege"] {
+        check_review_tip(&svg, id, &["keep holds a shared borrow"], &["b's resource is no longer immutably borrowed"]);
+    }
+}
+
+#[test]
+fn overwritten_drop_holder_ends_each_projected_loan_1921() {
+    let svg = run_with_local_backend("rv3_1921_drop_holder_overwrite").timeline_panel_string();
+    // NLL issues two different loans of b for the two fields. The
+    // destructor can read both of them on either path to replacement.
+    assert_drop_holder_releases_1921(&svg, 13, 14, 18, &["h.0", "h.1"]);
+}
+
+#[test]
+fn short_circuit_drop_moves_the_reference_field_with_its_holder_1921() {
+    let svg = run_with_local_backend("rv3_1921_drop_holder_short_circuit").timeline_panel_string();
+    // The true edge moves h, then initializes h with a new reference.
+    // The false edge skips both and the final read uses the original h.0.
+    let field = rv_elements(&svg, "h.0@");
+    let dot = |id: &str| field.iter().find(|(actual, ..)| actual.starts_with(id)).unwrap_or_else(|| panic!("missing {id}: {field:?}"));
+    let (_, _, (fork_x, _), _) = dot("h.0@L7:dot:branch");
+    let (_, _, (taken_x, _), (moved_y, _)) = dot("h.0@L8:dot:move");
+    let (_, _, (_, _), (rebound_y, _)) = dot("h.0@L10:dot:static_borrow");
+    let (_, join_tip, _, (joined_y, _)) = dot("h.0@L12:dot:branch_join");
+    assert_review_title(join_tip, &["h.0 holds an immutable reference"], &["may have been moved", "can't be used"]);
+    let live: Vec<_> = field.iter().filter(|(id, tip, ..)| id.contains(":branch_line:partial_privilege")
+        && tip.contains("holds an immutable reference")).collect();
+    assert!(taken_x < fork_x);
+    assert!(live.iter().any(|(_, _, (_, x), (_, end))| x <= &(fork_x + 2.0) && (*end - moved_y).abs() <= 2.0),
+        "the old field must reach the move on the taken leg: {live:?}");
+    assert!(!live.iter().any(|(_, _, (x, _), (start, end))|
+        x < fork_x && *start < rebound_y - 2.0 && *end > moved_y + 2.0),
+        "the moved field must leave a gap up to reinitialization: {live:?}");
+    assert!(live.iter().any(|(_, _, (x, _), (start, end))|
+        x < fork_x && (*start - rebound_y).abs() <= 2.0 && *end > *start),
+        "the replacement reference must be live on the taken leg: {live:?}");
+    assert!(live.iter().any(|(_, _, (_, x), (start, end))|
+        x > fork_x && *start <= moved_y + 2.0 && *end > *rebound_y),
+        "the original reference must stay live on the bypass: {live:?}");
+    assert!(live.iter().any(|(_, _, (_, x), (_, end))|
+        x > fork_x && (*end - joined_y).abs() <= 2.0),
+        "the bypass must reach the join: {live:?}");
+}
+
+#[test]
+fn short_circuit_drop_traces_both_definitions_of_its_argument_1921() {
+    let svg = run_with_local_backend("rv3_1921_drop_holder_short_circuit").timeline_panel_string();
+    // Either inner MIR predecessor moves h into the same argument. A
+    // read of h.0 after the call, inside the operand, would be E0382.
+    let moves = rv_elements(&svg, "h.0@L20:dot:move");
+    assert_eq!(moves.len(), 2, "{moves:?}");
+    let fork = rv_elements(&svg, "h.0@L20:dot:branch");
+    assert_eq!(fork.len(), 1, "{fork:?}");
+    assert!(moves[0].2.0 < fork[0].2.0 && fork[0].2.0 < moves[1].2.0, "{moves:?}");
+}
+
+#[test]
+fn short_circuit_drop_moves_only_the_selected_holder_fields_1921() {
+    let svg = run_with_local_backend("rv3_1921_drop_holder_short_circuit").timeline_panel_string();
+    // Each inner predecessor initializes the same argument from a
+    // different source. Rustc accepts reads of the unselected field
+    // in each arm and rejects a read of the selected one after the move.
+    for (field, left) in [("h.0", true), ("k.0", false)] {
+        let moves = rv_elements(&svg, &format!("{field}@L34:dot:move"));
+        assert_eq!(moves.len(), 1, "{field}: {moves:?}");
+        let fork_id = format!("{field}@L34:dot:branch");
+        let (_, _, (fork_x, _), _) = rv_elements(&svg, &fork_id).into_iter()
+            .find(|(id, ..)| id == &fork_id).expect("inner fork at the drop argument");
+        assert_eq!(moves[0].2.0 < fork_x, left, "{field}: {moves:?}");
+        let surviving_leg = rv_elements(&svg, &format!("{field}@L34:branch_line:partial_privilege"));
+        assert!(surviving_leg.iter().any(|(_, tip, (lo, hi), (_, end))|
+            tip.contains("holds an immutable reference") && *end > moves[0].3.1
+                && if left { *hi > fork_x + 2.0 } else { *lo < fork_x - 2.0 }),
+            "{field} must still be live when the other holder moves: {surviving_leg:?}");
+    }
+}
+
+#[test]
+fn short_circuit_drop_join_can_still_hold_the_old_field_1921() {
+    let svg = run_with_local_backend("rv3_1921_drop_holder_join").timeline_panel_string();
+    // After the join, E0382 forbids reading h.0 and E0502 forbids
+    // writing b. The runtime drop flag at reassignment is still set
+    // on the bypass, where the old h can read its reference to b.
+    check_review_tip(&svg, "h.0@L15:dot:branch_join",
+        &["h.0 may have been moved", "can't be used"], &["reference was moved out", "<temp>", "<operand>"]);
+    check_review_tip(&svg, "h@L17:dot:",
+        &["runtime drop flag"], &["nothing to drop"]);
+    check_review_tip(&svg, "h.0@L15-17:line:",
+        &["h.0 may have been moved", "can't be used"], &["reference was moved out"]);
+}
+
 #[test]
 fn issued_loan_can_end_on_one_incoming_path_1916() {
     // b is borrowed before the split. A write to b after replacing h

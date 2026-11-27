@@ -5592,6 +5592,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // A method of the user's that never returns (#1553).
         self.note_panic(expr);
       }
+      ExprKind::Binary(_, left, right) if self.body_facts.is_some_and(|body|
+        body.short_circuit_branches.contains(&expr.hir_id)) =>
+      {
+        self.visit_if(expr, left, right, None);
+      }
       ExprKind::Binary(_, expra, exprb) => {
         self.visit_expr(expra);
         self.visit_expr(exprb);
@@ -6639,7 +6644,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // Drawn now, before the conditional's fork on this row, as a
       // holder's old loan is (`reassign_holder`): a branch's new borrow of
       // an old lender is a loan of its own.
-      self.draw_struct_field_borrow_ends(ends, true);
+      self.draw_struct_field_borrow_ends(lhs_expr, ends, true);
       Vec::new()
     };
     for b in bodies {
@@ -8081,7 +8086,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // holds tr's borrow (#1384).
         self.store_ref_copy_into_holder(lhs_expr, rhs_expr, n_events);
       }
-      self.draw_struct_field_borrow_ends(struct_field_ends, false);
+      self.draw_struct_field_borrow_ends(lhs_expr, struct_field_ends, false);
       // `v[1] = v[2]`: match_rhs has nothing to say about some
       // RHS shapes (an index read, a field of a call, …), but the
       // element is still overwritten.
@@ -8886,9 +8891,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let merge_minus_one = merge.saturating_sub(1);
     let collapsed = branch_is_collapsed(split, merge);
     let if_slice = if collapsed { (split, if_end) } else { (split + 1, if_end) };
+    let short_circuit = matches!(expr.kind, ExprKind::Binary(..));
     let else_slice = match else_expr {
       Some(e) if imaginary_else.is_some() => (span_to_line(&e.span, &self.tcx), merge),
       Some(e) if collapsed => (self.tcx.sess.source_map().lookup_char_pos(e.span.lo()).line, merge),
+      None if short_circuit => (split, merge),
       _ if collapsed => (if_end, merge),
       _ => (if_end, merge_minus_one),
     };
@@ -8925,11 +8932,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       },
     ];
     // An if-let's bindings are on the if arm's first row (#382).
-    let mut b_labels = vec!["If".to_owned(), "Else".to_owned()];
+    let mut b_labels = if short_circuit {
+      vec!["Right operand".to_owned(), "Skipped operand".to_owned()]
+    } else {
+      vec!["If".to_owned(), "Else".to_owned()]
+    };
     if !iflet_bindings.is_empty() {
       b_labels[0] = IF_LET_ARM.to_owned();
     }
     let b_ty = BranchType::If(b_labels, vec![if_slice, else_slice]);
+    if short_circuit {
+      self.row_layout.short_circuit_forks.insert(*self.unique_id);
+    }
     self.note_exit_scope();
     let loop_assigned = self.loop_assigned_now(&liveness);
     // (The arms' events are out of the global timeline by now: what

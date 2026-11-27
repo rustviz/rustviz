@@ -23,6 +23,10 @@ pub struct SourceArm {
 /// For layout, declarations evaluated in a condition are drawn with
 /// that condition's bindings. That association is never an entry edge.
 pub(crate) fn enclosing_arms(tcx: TyCtxt<'_>, id: HirId, declaration_layout: bool) -> Vec<SourceArm> {
+    enclosing_arms_with(tcx, id, declaration_layout, |_| false)
+}
+
+fn enclosing_arms_with(tcx: TyCtxt<'_>, id: HirId, declaration_layout: bool, draws_short_circuit: impl Fn(HirId) -> bool) -> Vec<SourceArm> {
     let mut arms = Vec::new();
     let mut child = id;
     let mut body_arm = None;
@@ -32,6 +36,7 @@ pub(crate) fn enclosing_arms(tcx: TyCtxt<'_>, id: HirId, declaration_layout: boo
             Node::Expr(e) => match e.kind {
                 ExprKind::If(cond, then, _) if child == then.hir_id || declaration_layout && child == cond.hir_id => Some(0),
                 ExprKind::If(_, _, Some(els)) if child == els.hir_id => Some(1),
+                ExprKind::Binary(_, _, rhs) if child == rhs.hir_id && draws_short_circuit(parent) => Some(0),
                 ExprKind::Match(_, arms, _) if body_arm == Some(child) => arms.iter().position(|a| a.hir_id == child),
                 _ => None,
             },
@@ -144,7 +149,7 @@ fn unique_pattern<'hir>(arms: &'hir [Arm<'hir>], matches: impl Fn(&Arm<'hir>) ->
 /// and the switch's actual incoming edge for those instructions.
 pub(crate) fn location_arms(tcx: TyCtxt<'_>, body: &Body<'_>, facts: &super::BodyFacts, at: Location) -> Vec<SourceArm> {
     let id = body.location_to_hir_id(at);
-    let mut path = enclosing_arms(tcx, id, false);
+    let mut path = enclosing_arms_with(tcx, id, false, |branch| facts.short_circuit_branches.contains(&branch));
     if let Some(a) = candidate(tcx, body, at) {
         path.push(a);
     }

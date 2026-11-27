@@ -3,7 +3,7 @@
 //! [`VERSION`]. Every map is a `BTreeMap` and every list is in MIR
 //! evaluation order or sorted, so the dump is deterministic.
 
-use rustc_middle::mir::{BasicBlock, Location};
+use rustc_middle::mir::{BasicBlock, Local, Location};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -143,6 +143,18 @@ pub struct BodyFacts {
     /// Named holders still carrying each loan when their destructor runs.
     #[serde(skip)]
     pub drop_holders: BTreeMap<usize, BTreeSet<String>>,
+    /// Old loans kept alive by drop-use at an assignment's destructor.
+    #[serde(skip)]
+    pub(crate) reassign_drop_loans: BTreeMap<Location, BTreeSet<usize>>,
+    /// Reference fields taken by moves into `std::mem::drop` in a
+    /// short-circuit operand, keyed by the instruction moving the place.
+    #[serde(skip)]
+    pub(crate) drop_moves: BTreeMap<Location, DropMove>,
+    #[serde(skip)]
+    pub(crate) short_circuit_branches: rustc_data_structures::fx::FxHashSet<rustc_hir::HirId>,
+    /// Named source fields proven to carry a loan into an explicit drop.
+    #[serde(skip)]
+    pub(crate) explicit_drop_ends: BTreeMap<(Location, usize), BTreeSet<EndPlace>>,
     #[serde(skip)]
     pub bindings: std::rc::Rc<BodyBindings>,
     /// Loans carried by the operands of this MIR aggregate, in operand order.
@@ -242,6 +254,11 @@ pub struct BodyFacts {
     /// States at the normal entry and continuing edges of drawn arms.
     #[serde(skip)]
     pub arm_boundaries: rustc_data_structures::fx::FxIndexMap<rustc_hir::HirId, BTreeMap<usize, ArmBoundaries>>,
+}
+
+pub(crate) struct DropMove {
+    pub local: Local,
+    pub fields: Vec<String>,
 }
 
 #[derive(Default)]
