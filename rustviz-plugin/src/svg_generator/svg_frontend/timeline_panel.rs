@@ -1326,7 +1326,11 @@ fn render_branch_dots(
         // Text waiting from before the conditional goes on the
         // split dot, or else on each arm's first dot.
         let initializer = imaginary_arm.and_then(|arm| arm.initializer_bindings.get(rap.name()));
-        let entry_maybe_init = visualization_data.fn_source_lines.get(hash)
+        let entry = visualization_data.fn_source_lines.get(hash).and_then(|&function| {
+            let branch = branch_history.iter().find_map(|arm| arm.source)?.branch;
+            visualization_data.state_table.branch_entry_cell(function, rap.name(), branch)
+        });
+        let entry_maybe_init = entry.map_or_else(|| visualization_data.fn_source_lines.get(hash)
             .zip(rv_attrs::line_of(*line_number, &visualization_data.row_lines))
             .and_then(|(&function, row)| visualization_data.state_table.incoming_cell(function, rap.name(), row))
             .is_some_and(|cell| cell.init == crate::facts::table::Init::Maybe)
@@ -1336,13 +1340,16 @@ fn render_branch_dots(
             && history.iter().position(|(_, e)| std::ptr::eq(e, event))
                 .and_then(|i| history_path(&visualization_data.timelines[hash].history, history, i))
                 .is_some_and(|path| maybe_moved_at_end(&path)
-                    || matches!(init_at_end(&path), Some(InitJoin::Maybe { .. } | InitJoin::Loop)));
+                    || matches!(init_at_end(&path), Some(InitJoin::Maybe { .. } | InitJoin::Loop))),
+            |cell| cell.init == crate::facts::table::Init::Maybe);
         let fork_title = || if let Some(binding) = initializer {
             hover_messages::event_dot_imaginary_initializer(binding)
         } else if visualization_data.row_layout.ended_at_fork.contains(&(event.get_id(), *hash)) {
             hover_messages::state_ref_borrow_ended(&is.real_name())
         } else if entry_maybe_init {
-            format!("The borrow checker can't prove that {} holds a value when this conditional begins.", is.real_name())
+            format!("The borrow checker can't prove that {} holds a value at this branch decision.", is.real_name())
+        } else if entry.is_some_and(|cell| cell.init == crate::facts::table::Init::Unassigned) {
+            hover_messages::state_uninitialized(&is.real_name())
         } else if moved_at_event && split_has_line {
             // The entry state still draws a dashed fork, for example
             // after a block that may have left the binding unassigned.
@@ -9235,6 +9242,25 @@ fn render_branches(
             let is_active = i == 0 && !branch.e_data.is_empty();
             let arm_label = ty.string_of_branch(i);
             let leading_state = arm_entry_state(&parent_active, is_active);
+            let explain_drop_loan = |seg: &mut BranchSeg, joining| {
+                if !rap.is_ref() && matches!(seg.state, State::PartialPrivilege { s: LineState::Full }
+                    | State::FullPrivilege { s: LineState::Full })
+                {
+                    if let Some((&function, arm)) = visualization_data.fn_source_lines.get(rap.hash()).zip(branch.source) {
+                        let table = &visualization_data.state_table;
+                        if let Some((cell, holder)) = table.arm_boundary_cell(function, rap.name(), arm, joining)
+                            .and_then(|cell| Some((cell, table.shared_drop_holder(function, rap.name(), cell)?)))
+                        {
+                            if holder.some_paths || matches!(seg.state, State::FullPrivilege { .. }) {
+                                let (state, title, _) = owner_loan_title(rap, visualization_data, function, cell, &seg.state, seg.rows.0, false);
+                                seg.state = state;
+                                seg.title = title;
+                            }
+                            append_drop_holder(&mut seg.title, rap.name(), holder);
+                        }
+                    }
+                }
+            };
             // A passive arm's column is drawn dashed beside the other
             // arms' rows unless the state has no inactive look (a lent
             // owner's dotted line, #1333).
@@ -9317,6 +9343,9 @@ fn render_branches(
                     (parent_x, split_y), (branch_x, leg_end_y),
                     leading_state.clone(), visualization_data, &arm_label, Leg::Split, *split_point, *split_point, &arm_path,
                 );
+                if let Some(seg) = segs.get_mut(split_segment) {
+                    explain_drop_loan(seg, false);
+                }
                 if is_active && branch.diverges && !branch.e_data.is_empty() && branch.e_data.iter().all(|(_, e)| caller_end(e)) {
                     if let Some(seg) = segs.get_mut(split_segment) {
                         seg.title.push_str(". ");
@@ -9422,6 +9451,11 @@ fn render_branches(
                         (branch_x, y2 as f64),
                         state, visualization_data, &arm_label, Leg::Column, *top, bot, &arm_path,
                     );
+                    if *top == own.0 {
+                        if let Some(seg) = segs.get_mut(n) {
+                            explain_drop_loan(seg, false);
+                        }
+                    }
                 }
                 for (p_top, p_bot, p_state, p_title, from_arm) in pieces {
                     arm_bottom = from_arm.then(|| (p_bot, p_state.clone(), p_title.clone()));
@@ -9437,10 +9471,18 @@ fn render_branches(
                             inactive_arm: None, own_row: false, rows: (p_top, p_bot),
                         }),
                         Some(_) => {}
-                        None => push_seg_if_renderable(
-                            &mut segs, rap, (branch_x, py1 as f64), (branch_x, py2 as f64),
-                            p_state, visualization_data, &arm_label, Leg::Column, p_top, p_bot, &arm_path,
-                        ),
+                        None => {
+                            let next = segs.len();
+                            push_seg_if_renderable(
+                                &mut segs, rap, (branch_x, py1 as f64), (branch_x, py2 as f64),
+                                p_state, visualization_data, &arm_label, Leg::Column, p_top, p_bot, &arm_path,
+                            );
+                            if p_top == own.0 {
+                                if let Some(seg) = segs.get_mut(next) {
+                                    explain_drop_loan(seg, false);
+                                }
+                            }
+                        }
                     }
                 }
                 if segs.len() > n { ended_title(&mut segs, bot); }
@@ -9539,6 +9581,7 @@ fn render_branches(
                     // failed edge of a let-chain. Keep the dashed connector's
                     // explanation and the owner's state once the loan ends.
                     if let Some(seg) = segs.get_mut(n) {
+                        explain_drop_loan(seg, true);
                         if matches!(seg.state, State::FullPrivilege { s: LineState::Gray })
                             && !rap.is_ref() && !rap.holds_borrow()
                             && branch.e_data.iter().any(|(l, e)| Some(*l) == last_dot
@@ -10124,6 +10167,8 @@ fn one_line_arm_piece(state: &State, rap: &ResourceAccessPoint, visualization_da
     let holds_nothing = rap.holds_borrow() && !lent && cell.init == Init::Own
         && cell.holds.is_empty() && cell.borrowed_from.is_empty()
         && cell.why.iter().any(|w| matches!(w, Why::Assigned { .. }));
+    let has_drop_holder = !rap.is_ref() && visualization_data.fn_source_lines.get(rap.hash())
+        .and_then(|&function| visualization_data.state_table.shared_drop_holder(function, name, &cell)).is_some();
     let (st, title) = leg_lent_state_of(state, rap, visualization_data, at, Some(cell), path)?;
     let same_kind = match (&st, state) {
         (State::FullPrivilege { s: a }, State::FullPrivilege { s: b }) => a == b,
@@ -10138,14 +10183,14 @@ fn one_line_arm_piece(state: &State, rap: &ResourceAccessPoint, visualization_da
     // (Unless the cell names who holds it: "r holds a shared borrow", a
     // part's loan "p.a is borrowed by r here".)
     let names_holder = title.as_deref().is_some_and(|t| t.contains(" holds a ") || t.replace("shared by one or more", "").contains(" by "));
-    if same_kind && lent && !names_holder {
+    if same_kind && lent && !names_holder && !has_drop_holder {
         return Some((state.clone(), None));
     }
     // (`state_kept_borrowed_by`'s clause: the facts can't say the holder
     // points to it.)
     let kept = format!(". {} stays borrowed while ", styled_name_html(name));
     let title = match title {
-        Some(t) if !same_kind && *state == full && t.contains(&kept) => {
+        Some(t) if !same_kind && *state == full && !has_drop_holder && t.contains(&kept) => {
             let at_kept = t.find(&kept).unwrap_or(0);
             Some(format!("{}{}", timeline_segment_title(&full, rap, visualization_data, None), &t[at_kept..]))
         }
@@ -11018,7 +11063,12 @@ fn owner_segment_of(rap: &ResourceAccessPoint, vd: &VisualizationData, row: usiz
     if cell.lent.is_empty() {
         return Some((part_loan_style.unwrap_or(full), title));
     }
-    let (state, loan_title, whole) = owner_loan_title(rap, vd, fn_line, &cell, layout, row, imaginary.is_some());
+    let (state, mut loan_title, whole) = owner_loan_title(rap, vd, fn_line, &cell, layout, row, imaginary.is_some());
+    if imaginary.is_none() {
+        if let Some(holder) = table.shared_drop_holder(fn_line, name, &cell) {
+            append_drop_holder(&mut loan_title, name, holder);
+        }
+    }
     if !whole_title || !whole || cell.option_ref_copy().is_some() {
         // The value's own loans and a borrow of the value can coexist.
         title.push_str(". ");
@@ -11028,6 +11078,16 @@ fn owner_segment_of(rap: &ResourceAccessPoint, vd: &VisualizationData, row: usiz
     }
     // (A loan of an enum's payload restricts the owner's line, P1-3b.)
     Some((part_loan_style.unwrap_or(state), title))
+}
+
+/// Keep the sharing explanation and explain the drop obligation.
+fn append_drop_holder(title: &mut String, name: &str, holder: &crate::facts::schema::DropLoanHolder) {
+    let start = if holder.some_paths { ". On some paths, the" } else { ". The" };
+    let clause = format!("{start} borrow checker keeps {} borrowed until the old value of {} is dropped",
+        styled_name_html(name), styled_name_html(&holder.name));
+    if !title.contains(&clause) {
+        title.push_str(&clause);
+    }
 }
 
 /// The ownership clause for a cell with its whole value.
@@ -11228,6 +11288,7 @@ fn owner_loan_title(
     let subject = borrowed.first().copied().filter(|_| borrowed.len() == 1);
     let possible_sources = holder.and_then(|h| cell.holder_sources.get(h));
     let read_only = whole && !rap.may_have_interior_mut();
+    let drop_holder = table.shared_drop_holder(fn_line, name, cell);
     // 2.x's title where its replay drew the same kind of loan and explains
     // the paths itself: a place an or-pattern's reference may borrow
     // (#565), "borrowed by r if the alternative that binds it matched".
@@ -11267,6 +11328,8 @@ fn owner_loan_title(
         } else {
             hover_messages::state_maybe_exclusive(name, false)
         }
+    } else if drop_holder.is_some_and(|holder| holder.some_paths) {
+        format!("The borrow checker counts a shared borrow of {} here", styled_name_html(name))
     } else if cell.may_lend {
         hover_messages::state_maybe_shared(name, exact_holder, rap.holds_value(), read_only, false)
     } else if loans.iter().all(|l| l.kind == "unique") {
@@ -11311,7 +11374,7 @@ fn owner_loan_title(
     } else {
         hover_messages::state_shared_by(name, exact_holder, rap.holds_value())
     };
-    if let Some(h) = kept_by.filter(|_| whole && !imaginary && !cell.may_lend) {
+    if let Some(h) = kept_by.filter(|_| whole && !imaginary && !cell.may_lend && drop_holder.is_none()) {
         title.push_str(&hover_messages::state_kept_borrowed_by(name, h));
     }
     if let Some((h, sources)) = shown_holder.as_deref().zip(possible_sources).filter(|(_, s)| cell.may_lend && s.len() > 1) {

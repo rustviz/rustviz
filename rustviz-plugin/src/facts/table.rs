@@ -195,6 +195,8 @@ struct BodyTable {
     rows: BTreeMap<usize, RowCells>,
     successor_counts: BTreeMap<rustc_middle::mir::Location, usize>,
     joins: BTreeMap<rustc_span::Span, Cells>,
+    branch_entries: FxIndexMap<rustc_hir::HirId, Cells>,
+    arm_boundaries: FxIndexMap<rustc_hir::HirId, BTreeMap<usize, ArmBoundaryCells>>,
     /// Column names, in the facts' order.
     columns: Vec<String>,
     parents: BTreeMap<String, String>,
@@ -210,6 +212,12 @@ struct BodyTable {
     hidden_fields: BTreeSet<String>,
     /// Rows whose code never runs (`BodyFacts::dead_lines`).
     dead_lines: BTreeSet<usize>,
+}
+
+#[derive(Debug)]
+struct ArmBoundaryCells {
+    entry: Option<Cells>,
+    join: Option<Cells>,
 }
 
 type ScopePartials = BTreeMap<(Option<(rustc_span::BytePos, rustc_span::BytePos)>, rustc_middle::mir::Local, String), Option<PartialDrop>>;
@@ -456,6 +464,16 @@ impl StateTable {
         self.bodies.get(&function.body)?.rows.get(&row)?.before.as_ref()?.get(column)
     }
 
+    pub fn branch_entry_cell(&self, function: FunctionStart, column: &str, branch: rustc_hir::HirId) -> Option<&Cell> {
+        self.bodies.get(&function.body)?.branch_entries.get(&branch)?.get(column)
+    }
+
+    pub fn arm_boundary_cell(&self, function: FunctionStart, column: &str, arm: SourceArm, joining: bool) -> Option<&Cell> {
+        let bounds = self.bodies.get(&function.body)?.arm_boundaries.get(&arm.branch)?.get(&arm.index)?;
+        let cells = if joining { &bounds.join } else { &bounds.entry };
+        cells.as_ref()?.get(column)
+    }
+
     /// On a shared row, the only write is in one arm and a real sibling
     /// can leave the place moved. This also covers a short-circuit RHS.
     pub fn skips_reassignment(&self, function: FunctionStart, column: &str, row: usize) -> bool {
@@ -518,6 +536,14 @@ impl StateTable {
 
     pub fn kept_through_drop(&self, function: FunctionStart, loan: usize, holder: &str) -> bool {
         self.bodies.get(&function.body).and_then(|b| b.drop_holders.get(&loan)).is_some_and(|places| places.contains(holder))
+    }
+
+    pub fn shared_drop_holder<'a>(&self, function: FunctionStart, column: &str, cell: &'a Cell) -> Option<&'a super::schema::DropLoanHolder> {
+        let [loan] = cell.lent.as_slice() else { return None };
+        if loan.kind != "shared" || !self.loan(function, loan.loan)?.whole.contains(column) {
+            return None;
+        }
+        loan.drop_holder.as_ref()
     }
 
     /// The source lines of the loans of `lender` (a temporary's `(code)`
@@ -916,7 +942,14 @@ fn body_table(b: &BodyFacts) -> BodyTable {
         *successor_counts.entry(exit.edge.switch).or_default() += 1;
     }
     let parents = b.columns.iter().filter_map(|c| Some((c.name.clone(), c.parent.clone()?))).collect();
-    BodyTable { successor_counts, drop_holders: b.drop_holders.clone(), joins: b.joins.iter().map(|(s, j)| (*s, cells_of(&j.state))).collect(), first_line: b.first_line, last_line: b.last_line, function_body_start: b.function_body_start, rows, columns, parents, moved_places, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
+    let branch_entries = b.branch_entries.iter().map(|(&branch, state)| (branch, cells_of(state))).collect();
+    let arm_boundaries = b.arm_boundaries.iter().map(|(&branch, arms)| {
+        (branch, arms.iter().map(|(&index, bounds)| (index, ArmBoundaryCells {
+            entry: bounds.entry.as_ref().map(cells_of),
+            join: bounds.join.as_ref().map(cells_of),
+        })).collect())
+    }).collect();
+    BodyTable { successor_counts, drop_holders: b.drop_holders.clone(), joins: b.joins.iter().map(|(s, j)| (*s, cells_of(&j.state))).collect(), branch_entries, arm_boundaries, first_line: b.first_line, last_line: b.last_line, function_body_start: b.function_body_start, rows, columns, parents, moved_places, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
 }
 
 #[cfg(test)]
@@ -1007,6 +1040,8 @@ mod tests {
             notes: Vec::new(),
             binding_sources: Vec::new(),
             joins: BTreeMap::new(),
+            branch_entries: Default::default(),
+            arm_boundaries: Default::default(),
             dead_lines: BTreeSet::new(),
             imaginary_edges: Vec::new(),
         }

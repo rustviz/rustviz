@@ -2796,7 +2796,20 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     };
     // Direct holders and projected origins are now known. Resolve each
     // edge at its MIR location, including call argument temporaries.
+    let drops_at_reassign = |place, target: rustc_middle::mir::BasicBlock| {
+        matches!(body.basic_blocks[target].statements.first().map(|s| &s.kind),
+            Some(StatementKind::Assign(asg)) if asg.0 == place)
+    };
+    // Drop-use includes fields destroyed by drop glue, even when the
+    // enclosing type has no Drop implementation.
+    let mut drop_origins = BTreeMap::<_, Vec<_>>::new();
+    if let Some(facts) = pfacts {
+        for &(local, origin) in &facts.drop_of_var_derefs_origin {
+            drop_origins.entry(local).or_default().push(origin);
+        }
+    }
     let mut drop_holders = BTreeMap::<usize, BTreeSet<String>>::new();
+    let mut reassign_drop_holders = BTreeMap::<_, BTreeSet<_>>::new();
     for ev in evs.values_mut().flatten() {
         let Fact::BorrowEnd { loan, holder, why, .. } = &mut ev.fact else { continue };
         let Some(li) = loans.iter().find(|li| li.loan == *loan) else { continue };
@@ -2811,15 +2824,24 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 else { places.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join("|") };
         }
         let at = ev.location;
-        if let TerminatorKind::Drop { place, .. } = body[at.block].terminator().kind {
+        if let TerminatorKind::Drop { place, target, .. } = body[at.block].terminator().kind {
             let exit = ev.drop_route == DropRoute::Unwind || cx.rows.early_exit.contains_key(&at)
                 || cx.rows.shared_exits.contains_key(&at);
-            if exit && at == body.terminator_loc(at.block) && place.projection.is_empty()
-                && place.ty(&body.local_decls, tcx).ty.ty_adt_def().is_some_and(|adt| adt.has_dtor(tcx))
-            {
-                drop_holders.entry(*loan).or_default().extend(
-                    places.iter().filter(|p| p.local == place.local.index()).map(|p| p.name.clone())
-                );
+            if at == body.terminator_loc(at.block) && place.projection.is_empty() {
+                let ty = place.ty(&body.local_decls, tcx).ty;
+                if exit && ty.ty_adt_def().is_some_and(|adt| adt.has_dtor(tcx)) {
+                    drop_holders.entry(*loan).or_default().extend(
+                        places.iter().filter(|p| p.local == place.local.index()).map(|p| p.name.clone())
+                    );
+                }
+                let carries_at_drop = || table.zip(drop_origins.get(&place.local)).is_some_and(|(t, origins)| {
+                    held_in(origins, t.start_index(at)).contains(loan)
+                });
+                if *loan < base && runs.contains(&at.block) && drops_at_reassign(place, target)
+                    && ty.needs_drop(tcx, typing_env) && carries_at_drop()
+                {
+                    reassign_drop_holders.entry(place.local).or_default().insert(*loan);
+                }
             }
         }
         ev.caller_slot = caller_slot;
@@ -3907,8 +3929,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 }
             }
             TerminatorKind::Drop { place, target, .. } => {
-                let tdata = &body.basic_blocks[*target];
-                let at_reassign = matches!(tdata.statements.first().map(|s| &s.kind), Some(StatementKind::Assign(asg)) if asg.0 == *place);
+                let at_reassign = drops_at_reassign(*place, *target);
                 let early_exit = cx.rows.early_exit.get(&loc).map(|(r, _)| *r);
                 let exit = cx.rows.exit_site.get(&loc).copied();
                 let shared = cx.rows.shared_exits.get(&loc).map(Vec::as_slice).unwrap_or_default();
@@ -4138,7 +4159,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             &body.basic_blocks.predecessors()[loc.block]
         }
     };
-    let may_skip = |locations: &[Location], after: bool, ids: &BTreeSet<usize>, imaginary: bool| {
+    let may_skip = |locations: &[Location], after: bool, ids: &BTreeSet<usize>, imaginary: bool,
+                    released: &dyn Fn(Location, bool) -> bool| {
         let mut work: Vec<_> = locations.iter().map(|l| (*l, after)).collect();
         let mut seen = BTreeSet::new();
         while let Some((loc, inclusive)) = work.pop() {
@@ -4147,6 +4169,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
             if inclusive && issued.get(&loc).is_some_and(|id| ids.contains(id)) {
                 continue;
+            }
+            if released(loc, inclusive) {
+                return true;
             }
             if loc.statement_index > 0 {
                 work.push((Location { statement_index: loc.statement_index - 1, ..loc }, true));
@@ -4233,6 +4258,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             if manually_drop_take(tcx, body, func))
     }).map(|bb| body.terminator_loc(bb)).collect();
     let manually_taken = manually_taken(&cx, &take_calls);
+    let drop_holders_at_reassign: Vec<_> = reassign_drop_holders.iter().filter_map(|(local, loans)|
+        Some((*local, cx.names.locals.get(local)?, drop_origins.get(local)?, loans))
+    ).collect();
     let mut state_at = |exits: &[Location], after: bool, imaginary: bool| -> State {
         let mut st = State::default();
         let mut active = BTreeMap::new();
@@ -4649,13 +4677,13 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             for c in &l.columns {
                 // Only columns that hold a value can be lent.
                 if matches!(st.state.get(c), Some(&"own" | &"partly" | &"maybe")) {
-                    st.lent.entry(c.clone()).or_default().push(Lent { loan: l.loan, kind, holder: holder.clone(), iterator, current: current.clone() });
+                    st.lent.entry(c.clone()).or_default().push(Lent { loan: l.loan, kind, holder: holder.clone(), iterator, current: current.clone(), drop_holder: None });
                 }
             }
             // A lender that is no column (`*r` reborrowed through `r`,
             // `v[_]`): listed under its own name too (not a temporary).
             if !l.columns.contains(&l.lender) && l.source == "borrow" {
-                st.lent.entry(l.lender.clone()).or_default().push(Lent { loan: l.loan, kind, holder: holder.clone(), iterator, current: current.clone() });
+                st.lent.entry(l.lender.clone()).or_default().push(Lent { loan: l.loan, kind, holder: holder.clone(), iterator, current: current.clone(), drop_holder: None });
             }
         }
         // What each variable's references hold where the next row of the
@@ -4674,6 +4702,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         if let Some(t) = table {
             let known: BTreeSet<usize> = loans.iter().map(|l| l.loan).collect();
             let mut holds: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+            let mut reassignment_holds = BTreeMap::<_, BTreeMap<_, usize>>::new();
+            let mut legs_checked = 0;
             let mut option_holds: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
             // A block more than one way of code that runs comes into (a
             // join).
@@ -4742,6 +4772,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     legs.retain(|(_, _, nx)| nx.is_some_and(|(_, r)| r == n));
                 }
                 for (last, frozen, nx) in legs {
+                    legs_checked += 1;
                     for (o, untracked) in [(pol.as_ref(), false), (spol.as_ref(), true)] {
                         let Some(o) = o else { continue };
                         // (Each run's own loans: the untracked run's
@@ -4786,6 +4817,18 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                                 }
                             }
                         }
+                        for &(local, name, origins, loans) in &drop_holders_at_reassign {
+                            if untracked || !runs.contains(&e.block) || st.locals.get(name) != Some(&Some(local))
+                                || st.state.get(name) != Some(&"own") { continue; }
+                            let mut held = at(last, origins);
+                            if let Some((first, _)) = nx {
+                                let there = at(first, origins);
+                                held.retain(|loan| there.contains(loan));
+                            }
+                            for &loan in held.intersection(loans) {
+                                *reassignment_holds.entry(loan).or_default().entry(name).or_default() += 1;
+                            }
+                        }
                         let active_option = |local: Local, name: &str| {
                             matches!(st.holder_types.get(name), Some(HolderType::OptionRef { local: i, .. }) if *i == local.index())
                                 && st.state.get(name) == Some(&"own")
@@ -4820,6 +4863,22 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
             st.holds = holds.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();
             st.option_holds = option_holds.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();
+            let mut explanations = BTreeMap::new();
+            for (loan, holders) in reassignment_holds {
+                let Some((&name, &legs)) = holders.first_key_value().filter(|_| holders.len() == 1) else { continue; };
+                let id = BorrowIndex::from_usize(loan);
+                // A path may have issued the loan and released it before
+                // joining a path that still holds it.
+                let released = |loc, after| {
+                    let point = if after { t.mid_index(loc) } else { t.start_index(loc) };
+                    pol.as_ref().is_some_and(|pol| !pol.loans_in_scope_at(point).contains(&id))
+                };
+                let some_paths = legs < legs_checked || may_skip(exits, after, &BTreeSet::from([loan]), imaginary, &released);
+                explanations.insert(loan, DropLoanHolder { name: name.clone(), some_paths });
+            }
+            for loan in st.lent.values_mut().flatten() {
+                loan.drop_holder = explanations.get(&loan.loan).cloned();
+            }
         }
         for take in &manually_taken {
             if st.state.get(&take.column) != Some(&"own") { continue; }
@@ -4836,7 +4895,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         for (name, loans) in &st.lent {
             let exclusive = loans.iter().any(|l| matches!(l.kind, "mut" | "unique"));
             let ids = loans.iter().filter(|l| matches!(l.kind, "mut" | "unique") == exclusive).map(|l| l.loan).collect();
-            if may_skip(exits, after, &ids, imaginary) { st.may_lend.insert(name.clone()); }
+            if may_skip(exits, after, &ids, imaginary, &|_, _| false) { st.may_lend.insert(name.clone()); }
         }
         st
     };
@@ -4846,6 +4905,44 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         while let Some(bb) = work.pop() {
             if !is_unreachable(body, bb) && !body.basic_blocks[bb].is_cleanup && checked.insert(bb) {
                 work.extend(body.basic_blocks[bb].terminator().successors());
+            }
+        }
+    }
+    let mut branch_tests = rustc_data_structures::fx::FxIndexMap::<_, BTreeSet<_>>::default();
+    for exit in &switches {
+        if let Some(branch) = exit.branch.filter(|_| checked.contains(&exit.edge.switch.block)) {
+            branch_tests.entry(branch).or_default().insert(exit.edge.switch);
+        }
+    }
+    let branch_entries: rustc_data_structures::fx::FxIndexMap<_, _> = branch_tests.into_iter().filter_map(|(branch, tests)| {
+        // A guard or a short circuit can lower to more than one test. Only
+        // use a test every other test of this conditional passes through.
+        let first = tests.iter().copied().find(|&test| tests.iter().all(|&other| ldom(test, other)))?;
+        Some((branch, state_at(&[first], false, false)))
+    }).collect();
+    let mut arm_boundaries = rustc_data_structures::fx::FxIndexMap::<_, BTreeMap<_, ArmBoundaries>>::default();
+    let arm_edges: Vec<_> = switches.iter().filter_map(|exit| {
+        let arm = super::SourceArm { branch: exit.branch?, index: exit.arm? };
+        let edge = exit.edge;
+        (!drop_holders_at_reassign.is_empty() && runs.contains(&edge.switch.block) && runs.contains(&edge.successor))
+            .then_some((arm, edge.successor))
+    }).collect();
+    let mut arm_entries = rustc_data_structures::fx::FxIndexMap::<_, BTreeMap<_, BTreeSet<_>>>::default();
+    for (arm, block) in &arm_edges {
+        arm_entries.entry(arm.branch).or_default().entry(arm.index).or_default().insert(block.start_location());
+    }
+    for (branch, arms) in arm_entries {
+        for (arm, entries) in arms {
+            let boundaries = arm_boundaries.entry(branch).or_default().entry(arm).or_default();
+            // Every incoming edge must enter this arm. In a short circuit
+            // the same arm can be reached directly and through cleanup.
+            if entries.iter().all(|entry| {
+                let incoming = super::rows::real_predecessors(body, entry.block);
+                super::control::common_entry(&switches, body, entry.block, &incoming)
+                    == Some(super::SourceArm { branch, index: arm })
+            }) {
+                let entries: Vec<_> = entries.into_iter().collect();
+                boundaries.entry = Some(state_at(&entries, false, false));
             }
         }
     }
@@ -5238,6 +5335,26 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         {
             continue;
         }
+        // The arms' join connectors precede the merged state. A loan's
+        // holder can still be initialized on one incoming edge only.
+        if !arm_edges.is_empty() {
+            for (&branch, boundaries) in &mut arm_boundaries {
+                if tcx.hir_span(branch) != span { continue; }
+                let mut incoming = BTreeMap::<_, Vec<_>>::new();
+                for &pred in runtime_preds() {
+                    let arms: BTreeSet<_> = arm_edges.iter().filter_map(|(arm, successor)|
+                        (arm.branch == branch && doms.dominates(*successor, pred.block)).then_some(arm.index)).collect();
+                    if let Some(&arm) = arms.first().filter(|_| arms.len() == 1) {
+                        incoming.entry(arm).or_default().push(pred);
+                    }
+                }
+                for (arm, entries) in incoming {
+                    if let Some(bounds) = boundaries.get_mut(&arm).filter(|bounds| bounds.entry.is_some()) {
+                        bounds.join = Some(state_at(&entries, false, false));
+                    }
+                }
+            }
+        }
         for (_, place, name) in columns.iter().chain(&synth) {
             let Some(mixed) = join.state.mixed_init.get_mut(name) else { continue; };
             let writes_here = |l| move_data.init_loc_map[l].iter().any(|i| {
@@ -5364,6 +5481,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         skipped_closure_returns,
         binding_sources,
         joins,
+        branch_entries,
+        arm_boundaries,
         def_id,
         func,
         kind: if tcx.is_closure_like(def_id) { "closure" } else { "fn" },

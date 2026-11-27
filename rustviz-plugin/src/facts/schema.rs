@@ -230,6 +230,18 @@ pub struct BodyFacts {
     /// The state at a conditional's normal MIR continuation, before its first instruction.
     #[serde(skip)]
     pub joins: BTreeMap<rustc_span::Span, Join>,
+    /// The state at the first MIR decision of a drawn conditional.
+    #[serde(skip)]
+    pub branch_entries: rustc_data_structures::fx::FxIndexMap<rustc_hir::HirId, State>,
+    /// States at the normal entry and continuing edges of drawn arms.
+    #[serde(skip)]
+    pub arm_boundaries: rustc_data_structures::fx::FxIndexMap<rustc_hir::HirId, BTreeMap<usize, ArmBoundaries>>,
+}
+
+#[derive(Default)]
+pub struct ArmBoundaries {
+    pub entry: Option<State>,
+    pub join: Option<State>,
 }
 
 pub struct Join {
@@ -499,6 +511,15 @@ pub struct Lent {
     /// holders need not denote the same borrow on every incoming path.
     #[serde(skip)]
     pub current: BTreeSet<String>,
+    /// The drop-use origins of this holder carry the loan to a reassignment drop.
+    #[serde(skip)]
+    pub drop_holder: Option<DropLoanHolder>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropLoanHolder {
+    pub name: String,
+    pub some_paths: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
