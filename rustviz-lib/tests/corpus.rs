@@ -39991,6 +39991,76 @@ fn unread_field_of_call_result_returns_at_last_use() {
     }
 }
 
+/// #1874: MIR has two switches in each conditional. Their fork rows are
+/// shared across the columns each switch splits, and the inner fork is
+/// below the outer one. The let-chain binds a before the inner switch.
+#[test]
+fn nested_one_line_forks_are_aligned_1874() {
+    let cases: &[(&str, usize, &[&str], &[&str], bool)] = &[
+        ("one_line_diamond_1306_1308_1309", 35, &["f", "g", "h"], &["g", "h"], true),
+        ("one_line_diamond_1306_1308_1309", 38, &["f", "g", "h"], &["f", "g"], true),
+        ("edition2024/chain_block_if_1287", 37, &["s", "z"], &["s", "z", "a"], false),
+    ];
+    let mut problems = Vec::new();
+    for &(name, line, outer, inner, outer_one_line) in cases {
+        let tl = run_with_local_backend(name).timeline_panel_string();
+        let (dots, _, _) = marks_and_headers(&tl);
+        let fork_y = |var: &str, nested: bool| {
+            let suffix = if nested && outer.contains(&var) { "#2" } else { "" };
+            let id = format!("{var}@L{line}:dot:branch{suffix}");
+            dots.iter().find(|(_, _, found)| found == &id
+                || (var == "a" && found.starts_with(&format!("a@L{line}:dot:"))
+                    && found.split(':').next_back().is_some_and(|events| events.split('+').any(|event| event == "branch"))))
+                .unwrap_or_else(|| panic!("{name}: no {id}")).1
+        };
+        let inner_ys: Vec<_> = inner.iter().map(|var| fork_y(var, true)).collect();
+        let outer_ys: Vec<_> = outer.iter().map(|var| fork_y(var, false)).collect();
+        if inner_ys.iter().any(|&y| y != inner_ys[0] || outer_ys.iter().any(|&outer_y| outer_y >= y)) {
+            problems.push(format!("{name} L{line}: outer {outer_ys:?}, inner {inner_ys:?}"));
+        }
+        if outer_one_line && outer_ys.iter().any(|&y| y != outer_ys[0] || inner_ys[0] != y + 30.0) {
+            problems.push(format!("{name} L{line}: outer forks {outer_ys:?}"));
+        }
+        if !outer_one_line {
+            let src = dots.iter().find(|(_, _, id)| id == "y@L37:dot:duplicate").unwrap().1;
+            let dst = dots.iter().find(|(_, _, id)| id.starts_with("a@L37:dot:copy")).unwrap().1;
+            if src != dst || dst >= inner_ys[0] {
+                problems.push(format!("{name} L{line}: binding from ({src}) to ({dst}) before inner fork {inner_ys:?}"));
+            }
+        }
+    }
+    assert_eq!(problems, Vec::<String>::new());
+}
+
+/// #1876: MIR's first break moves k out and drops j on its way out of
+/// the loop. k's stop bar is on that arm's row, where j's drop is drawn.
+/// The first return copies n, so its live column reaches a bar just below
+/// its copy dot, before the next arm's row.
+#[test]
+fn diverging_first_arm_stops_on_its_own_row_1876() {
+    let mut problems = Vec::new();
+    for (name, bar_id, dot_id, offset) in [
+        ("loop_break_several_locals", "k@L11:stop_bar", "j@L11:dot:owner_go_out_of_scope", 0.0),
+        ("one_line_diverging_arm_1295", "n@L11:stop_bar", "n@L11:dot:duplicate", 15.0),
+    ] {
+        let tl = run_with_local_backend(name).timeline_panel_string();
+        let (dots, _, _) = marks_and_headers(&tl);
+        let own_y = dots.iter().find(|(_, _, id)| id == dot_id).unwrap().1;
+        let bar = start_tags(&tl, "line").into_iter().find(|tag| attr(tag, "data-rv-id") == Some(bar_id))
+            .unwrap_or_else(|| panic!("{name}: missing {bar_id}"));
+        let coord = |key| attr(bar, key).unwrap().parse::<f64>().unwrap();
+        let (bar_x, bar_y) = ((coord("x1") + coord("x2")) / 2.0, coord("y1"));
+        if (bar_y - (own_y + offset)).abs() > 0.5 {
+            problems.push(format!("{name}: {bar_id} at {bar_y}, expected {}", own_y + offset));
+        }
+        let hash = attr(bar, "data-hash").unwrap();
+        assert!(branch_leg_centrelines(&tl).iter().any(|(h, _, [_, _, x2, y2])|
+            h == hash && (*x2 - bar_x).abs() < 1.0 && (*y2 - bar_y).abs() < 1.0),
+            "{name}: no leg reaches {bar_id}");
+    }
+    assert_eq!(problems, Vec::<String>::new());
+}
+
 /// Centres of the `<circle>`s (event dots) and anchors of the function
 /// logos (`f`) of a timeline panel, and its column headers' anchors.
 fn marks_and_headers(timeline: &str) -> (Vec<(f64, f64, String)>, Vec<(f64, f64)>, Vec<(f64, f64, String)>) {

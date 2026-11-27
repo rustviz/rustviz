@@ -3527,6 +3527,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     parent: s.parent,
                     col_lo: s.col_lo,
                     col_hi: s.col_hi,
+                    has_exit: s.exits.iter().any(|exit| runs.contains(&exit.block)),
                     after: state_at(&s.exits, true),
                 });
             }

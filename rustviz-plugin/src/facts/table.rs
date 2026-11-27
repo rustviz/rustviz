@@ -127,6 +127,7 @@ pub struct ArmInfo {
     pub parent: Option<usize>,
     pub col_lo: usize,
     pub col_hi: usize,
+    has_exit: bool,
 }
 
 #[derive(Debug, Default)]
@@ -586,6 +587,14 @@ impl StateTable {
         Self::match_arms(r, row, spans, true)
     }
 
+    /// Whether MIR has an exit on this source row for the given drawn
+    /// arm. The caller knows whether the exit reaches the join.
+    pub fn arm_has_exit(&self, fn_line: usize, column: &str, row: usize, spans: &[Option<ArmSpan>], arm: usize) -> bool {
+        let Some(r) = self.body(fn_line, column).and_then(|b| b.rows.get(&row)) else { return false };
+        Self::match_arms(r, row, spans, false).and_then(|arms| arms.get(arm).copied())
+            .is_some_and(|i| r.arms[i].0.has_exit)
+    }
+
     /// `column` where the arms of the one branch on the fn's last row join,
     /// before its scope end drops what is left: a fn written on one line
     /// (`fn f(p: P, c: bool) -> String { if c { p.a } else { p.b } }`),
@@ -801,7 +810,7 @@ fn body_table(b: &BodyFacts) -> BodyTable {
     for r in &b.rows {
         let mut rc = RowCells { snapshot: !r.after.state.is_empty(), continues_to: r.continues_to, cells: cells_of(&r.after), before: r.before.as_ref().map(cells_of), block_end: r.block_end, jumps: r.jumps, ..Default::default() };
         for a in &r.arms {
-            let info = ArmInfo { runs: a.runs, branch: a.branch, arm: a.arm, parent: a.parent, col_lo: a.col_lo, col_hi: a.col_hi };
+            let info = ArmInfo { runs: a.runs, branch: a.branch, arm: a.arm, parent: a.parent, col_lo: a.col_lo, col_hi: a.col_hi, has_exit: a.has_exit };
             rc.arms.push((info, cells_of(&a.after)));
         }
         for ev in &r.facts {
@@ -918,8 +927,8 @@ mod tests {
         let mut one_line = row(8, &[("s", "maybe")], &[], vec![(Some(0), Fact::Move { path: "s".into(), to: "f()".into(), in_macro: None })]);
         one_line.after.cause.insert("s".into(), "moved");
         one_line.arms = vec![
-            Arm { runs: true, branch: 0, arm: 0, parent: None, col_lo: 10, col_hi: 20, after: state(&[("s", "moved")], &[]) },
-            Arm { runs: true, branch: 0, arm: 1, parent: None, col_lo: 30, col_hi: 40, after: state(&[("s", "own")], &[]) },
+            Arm { runs: true, branch: 0, arm: 0, parent: None, col_lo: 10, col_hi: 20, has_exit: true, after: state(&[("s", "moved")], &[]) },
+            Arm { runs: true, branch: 0, arm: 1, parent: None, col_lo: 30, col_hi: 40, has_exit: true, after: state(&[("s", "own")], &[]) },
         ];
         body("main", 1, &["s", "p", "p.a"], vec![
             row(2, &[("s", "own")], &[], vec![(None, Fact::Init { path: "s".into(), from: "<value>".into(), reassign: false, maybe_had: false })]),
