@@ -7,6 +7,7 @@ fn run(o: Option<i32>) {
             m.push('a');
         }
         None => {
+            println!("None");
             println!("{}", x);
         }
     }

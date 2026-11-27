@@ -3038,7 +3038,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             if let [exit] = exits.as_slice() {
                 if let [next] = cx.r.real_succs(*exit).as_slice() {
                     let next_line = cx.row_of(*next);
-                    if next_line > line + 1 && (next.block == exit.block || body.basic_blocks.predecessors()[next.block].len() == 1) {
+                    if next_line > line && (next.block == exit.block || body.basic_blocks.predecessors()[next.block].len() == 1) {
                         row.continues_to = Some(next_line);
                     }
                 }

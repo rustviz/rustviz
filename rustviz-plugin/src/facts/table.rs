@@ -184,6 +184,11 @@ impl StateTable {
         self.body(fn_line, column).is_some_and(|b| b.part_lenders.contains(column))
     }
 
+    /// The source row reached by the snapshot's single forward MIR edge.
+    pub fn continues_to_row(&self, fn_line: usize, column: &str, row: usize) -> Option<usize> {
+        self.body(fn_line, column)?.rows.get(&row)?.continues_to
+    }
+
     /// A loan boundary on the drawn path. Carry across an empty row only
     /// along the MIR edge that actually connects the surrounding rows.
     pub fn loan_cell(&self, fn_line: usize, column: &str, row: usize, floor: usize) -> Option<Cell> {

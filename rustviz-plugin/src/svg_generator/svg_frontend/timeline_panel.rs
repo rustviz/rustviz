@@ -9232,14 +9232,21 @@ fn leg_table_row(rap: &ResourceAccessPoint, visualization_data: &VisualizationDa
     // column not forked there), every way on agrees: its arms' states are
     // the same, or it does nothing to the column (a loan dying on one way
     // on only is an event of the row).
-    let own_state = |l: usize| table.cell(fn_line, col, l, l).is_some() && {
+    let own_state = |l: usize| {
+        let Some(cell) = table.cell(fn_line, col, l, l) else { return false };
         let arms = table.arms(fn_line, col, l);
         let cells: Vec<_> = (0..arms.len()).map(|i| table.cell_in_arm(fn_line, col, l, i).map(|c| (c.init, c.lent.iter().map(|x| x.loan).collect::<Vec<_>>(), c.parts))).collect();
         let heads = code_text(visualization_data.source_lines.get(l.wrapping_sub(1)).map_or("", |t| t.as_str()));
         if cells.is_empty() {
             !opens_conditional(&heads) || table.quiet(fn_line, col, l, false)
         } else {
+            // On a lowered `for` head, the iterator's body entry and
+            // exhausted exit can disagree. Use the snapshot if its MIR
+            // edge leads straight into the next row of this leg and
+            // the hidden iterator holds the loan there.
             cells.windows(2).all(|w| w[0] == w[1])
+                || (!rap.is_ref() && cell.lent.iter().any(|loan| loan.iterator)
+                    && table.continues_to_row(fn_line, col, l).is_some_and(|next| rl.get(row + 1) == Some(&Some(next))))
         }
     };
     // (A match arm on one row, `0 => c = &y,`: as a one-row arm, #1865.)
