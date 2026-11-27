@@ -2278,6 +2278,7 @@ pub enum ExternalEvent {
     // this scope end (#1020).
     GoOutOfScope {
         ro: ResourceAccessPoint,
+        exit_site: Option<rustc_span::Span>,
         id: usize,
         early: Option<EarlyReturns>,
     },
@@ -2411,6 +2412,7 @@ pub enum ExternalEvent {
     // `OwnerDropAtReassign`.
     OwnerDropIfTryReturns {
         ro: ResourceAccessPoint,
+        span: rustc_span::Span,
         id: usize
     },
     // `return if b { p } else { q };` in a branch: `p`, which only some
@@ -2995,7 +2997,7 @@ pub enum Event {
     // this happens when a owner is returned this line,
     // or if this owner's scope ends at this line. The data must be dropped.
     // `holds`, `early`: the ExternalEvent's.
-    OwnerGoOutOfScope { ro: ResourceAccessPoint, early: Option<EarlyReturns>, id: usize },
+    OwnerGoOutOfScope { ro: ResourceAccessPoint, exit_site: Option<rustc_span::Span>, early: Option<EarlyReturns>, id: usize },
     // this happens when a vairable that is not an owner goes out of scope.
     // The data is not dropped in this case
     RefGoOutOfScope { early: Option<EarlyReturns>, id: usize },
@@ -3022,7 +3024,7 @@ pub enum Event {
     LoopExitMove { definite: bool, at: MaybeMovedAt },
     // The owner's resource is dropped here only if the `?` returns
     // early (#430). The owner's state is unchanged.
-    OwnerDropIfTryReturns,
+    OwnerDropIfTryReturns { local: Option<rustc_middle::mir::Local>, span: rustc_span::Span },
     // See ExternalEvent::OwnerDropUnlessReturned.
     OwnerDropUnlessReturned { is_break: bool },
     // See ExternalEvent::TupleTempDrop.
@@ -3765,7 +3767,7 @@ impl Display for Event {
             Event::LoopExitMove { .. } => {
                 write!(f, "May have been moved when the loop ends")
             },
-            Event::OwnerDropIfTryReturns => {
+            Event::OwnerDropIfTryReturns { .. } => {
                 write!(f, "Resource is dropped if the `?` returns early")
             },
             Event::OwnerDropUnlessReturned { is_break } => {
@@ -4068,7 +4070,7 @@ impl Event {
             Event::TemporaryDrop { ty: Some(ty), when, literal, part: None, assign, .. } => {
                 hover_messages::event_dot_temporary_drop(ty, when, *literal, *assign)
             }
-            Event::OwnerDropIfTryReturns => {
+            Event::OwnerDropIfTryReturns { .. } => {
                 hover_messages::event_dot_owner_drop_if_try_returns(my_name, "")
             }
             Event::OwnerDropUnlessReturned { is_break } => {
@@ -5528,7 +5530,7 @@ impl Visualizable for VisualizationData {
             (_, Event::TemporaryDrop { .. }) => State::OutOfScope,
             // Dropped only on the path that returns; the code after the
             // `?` runs on the other one.
-            (_, Event::OwnerDropIfTryReturns) => (*previous_state).clone(),
+            (_, Event::OwnerDropIfTryReturns { .. }) => (*previous_state).clone(),
             (_, Event::OwnerDropUnlessReturned { .. }) => (*previous_state).clone(),
             // A dot on a column whose value already went into the tuple:
             // no change.
@@ -6087,10 +6089,10 @@ impl Visualizable for VisualizationData {
         ExternalEvent::InitRefParam{param: ro, id, own_param, in_pattern, rest} => {
           vec![(line_num, Event::InitRefParam{param : ro.to_owned(), id: *id, own_param: own_param.clone(), in_pattern: in_pattern.clone(), rest: rest.clone()})]
         },
-        ExternalEvent::GoOutOfScope{ro, early, id} => {
+        ExternalEvent::GoOutOfScope{ro, early, id, exit_site} => {
           match ro {
             ResourceAccessPoint::Owner(..) | ResourceAccessPoint::Struct(..) => {
-              vec![(line_num, Event::OwnerGoOutOfScope { ro: ro.clone(), early: early.clone(), id: *id })]
+              vec![(line_num, Event::OwnerGoOutOfScope { ro: ro.clone(), exit_site: *exit_site, early: early.clone(), id: *id })]
             },
             ResourceAccessPoint::MutRef(..) | ResourceAccessPoint::StaticRef(..)=> {
               vec![(line_num, Event::RefGoOutOfScope { early: early.clone(), id: *id })]
@@ -6124,8 +6126,8 @@ impl Visualizable for VisualizationData {
         ExternalEvent::LoopExitMove{definite, at, ..} => {
           vec![(line_num, Event::LoopExitMove { definite: *definite, at: at.clone() })]
         },
-        ExternalEvent::OwnerDropIfTryReturns{..} => {
-          vec![(line_num, Event::OwnerDropIfTryReturns)]
+        ExternalEvent::OwnerDropIfTryReturns { ro, span, .. } => {
+          vec![(line_num, Event::OwnerDropIfTryReturns { local: ro.owner_local(), span: *span })]
         },
         ExternalEvent::OwnerDropUnlessReturned{is_break, ..} => {
           vec![(line_num, Event::OwnerDropUnlessReturned { is_break: *is_break })]
@@ -6607,10 +6609,10 @@ impl Visualizable for VisualizationData {
             ExternalEvent::InitRefParam{param: ro, id, own_param, in_pattern, rest} => {
                 maybe_append_event(self, &ResourceTy::Value(ro.clone()), Event::InitRefParam{param : ro.to_owned(), id: id, own_param, in_pattern, rest}, line_number);
             },
-            ExternalEvent::GoOutOfScope{ro, early, id} => {
+            ExternalEvent::GoOutOfScope{ro, early, id, exit_site} => {
                 match ro {
                     ResourceAccessPoint::Owner(..) | ResourceAccessPoint::Struct(..) => {
-                        maybe_append_event(self, &ResourceTy::Value(ro.clone()), Event::OwnerGoOutOfScope { ro, early, id }, line_number);
+                        maybe_append_event(self, &ResourceTy::Value(ro.clone()), Event::OwnerGoOutOfScope { ro, early, id, exit_site }, line_number);
                     },
                     ResourceAccessPoint::MutRef(..) | ResourceAccessPoint::StaticRef(..)=> {
                         maybe_append_event(self, &ResourceTy::Value(ro), Event::RefGoOutOfScope { early, id }, line_number);
@@ -6645,8 +6647,9 @@ impl Visualizable for VisualizationData {
             ExternalEvent::LoopExitMove{ro, definite, at, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopExitMove { definite, at }, line_number);
             },
-            ExternalEvent::OwnerDropIfTryReturns{ro, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropIfTryReturns, line_number);
+            ExternalEvent::OwnerDropIfTryReturns { ro, span, .. } => {
+                let event = Event::OwnerDropIfTryReturns { local: ro.owner_local(), span };
+                maybe_append_event(self, &ResourceTy::Value(ro), event, line_number);
             },
             ExternalEvent::OwnerDropUnlessReturned{ro, is_break, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropUnlessReturned { is_break }, line_number);

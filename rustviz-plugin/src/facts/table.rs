@@ -11,7 +11,7 @@
 use super::{SourceArm, SwitchEdge};
 use rustc_hir::def_id::DefId;
 use rustc_data_structures::fx::FxIndexMap;
-use super::schema::{ProjectedPlace, DropRoute, LoanInfo, BodyFacts, CrateFacts, Extraction, Fact, HolderType, Lent, Parts, State};
+use super::schema::{ProjectedPlace, DropRoute, LoanInfo, BodyFacts, CrateFacts, Extraction, Fact, HolderType, Lent, PartialDrop, Parts, State};
 pub use super::schema::MixedInit;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -105,6 +105,7 @@ pub struct Cell {
     pub option_holds: Vec<usize>,
     pub always_assigned: bool,
     pub reassigned: Option<bool>,
+    pub unwind_before_write: bool,
     pub moved_in_arm: bool,
     pub why: Vec<Why>,
     /// The row this state was read on (the row asked for, or the row
@@ -210,6 +211,42 @@ struct BodyTable {
     dead_lines: BTreeSet<usize>,
 }
 
+type ScopePartials = BTreeMap<(Option<(rustc_span::BytePos, rustc_span::BytePos)>, rustc_middle::mir::Local, String), Option<PartialDrop>>;
+type TryDrops = BTreeMap<(rustc_middle::mir::Local, rustc_span::BytePos, rustc_span::BytePos, Option<String>), Option<(&'static str, bool)>>;
+
+#[derive(Debug, Default)]
+struct DropWording {
+    scope_partials: BTreeMap<usize, ScopePartials>,
+    try_drops: TryDrops,
+    staged_try_drops: TryDrops,
+}
+
+impl DropWording {
+    fn from_body(body: &BodyFacts) -> Self {
+        fn record<K: Ord, T: PartialEq>(map: &mut BTreeMap<K, Option<T>>, key: K, value: T) {
+            use std::collections::btree_map::Entry;
+            match map.entry(key) {
+                Entry::Vacant(entry) => { entry.insert(Some(value)); }
+                Entry::Occupied(mut entry) if entry.get().as_ref() != Some(&value) => { entry.insert(None); }
+                Entry::Occupied(_) => {}
+            }
+        }
+
+        let mut wording = Self::default();
+        for row in &body.rows {
+            for (site, local, name, partial) in &row.partial_drops {
+                let parts = wording.scope_partials.entry(row.line).or_default();
+                record(parts, (site.map(|s| (s.lo(), s.hi())), *local, name.clone()), partial.clone());
+            }
+        }
+        for drop in &body.residual_drops {
+            let map = if drop.staged { &mut wording.staged_try_drops } else { &mut wording.try_drops };
+            record(map, (drop.local, drop.site.lo(), drop.site.hi(), drop.path.clone()), (drop.how, drop.only_assigned));
+        }
+        wording
+    }
+}
+
 /// The state table of a crate: per fn body, per row (and arm), per
 /// column. Rows are source lines: a renderer that hides or inserts lines
 /// maps its visual rows back (`VisualizationData::row_lines`) before it
@@ -223,6 +260,7 @@ pub struct StateTable {
     /// execution rank. Alternative lenders of one store share its rank.
     pub store_order: BTreeMap<usize, (usize, usize)>,
     bodies: FxIndexMap<DefId, BodyTable>,
+    drop_wording: FxIndexMap<DefId, DropWording>,
     imaginary_arms: BTreeMap<super::ImaginaryEdgeId, ImaginaryArm>,
 }
 
@@ -249,7 +287,20 @@ impl StateTable {
                 scrutinee_moves: e.scrutinee_moves.clone(),
                 initializer_bindings: e.initializer_bindings.clone(),
             })).collect();
-        StateTable { bodies, imaginary_arms, ..Default::default() }
+        let drop_wording = facts.bodies.iter().filter(|b| b.kind == "fn")
+            .map(|b| (b.def_id, DropWording::from_body(b))).collect();
+        StateTable { bodies, drop_wording, imaginary_arms, ..Default::default() }
+    }
+
+    /// Hidden code still has MIR scope ends and residual exits. Keep the
+    /// drop wording and move its row keys with the code panel.
+    pub fn hide_rows(&mut self, keep: impl Fn(usize) -> bool, shift: impl Fn(usize) -> usize) {
+        let mut drop_wording = std::mem::take(&mut self.drop_wording);
+        for wording in drop_wording.values_mut() {
+            wording.scope_partials = std::mem::take(&mut wording.scope_partials).into_iter()
+                .filter(|(row, _)| keep(*row)).map(|(row, parts)| (shift(row), parts)).collect();
+        }
+        *self = Self { drop_wording, ..Self::default() };
     }
 
     /// The state of `column` of the MIR body `function` after `row`,
@@ -359,6 +410,7 @@ impl StateTable {
                         own.mixed_init = n.mixed_init;
                         own.always_assigned = n.always_assigned;
                         own.reassigned = n.reassigned;
+                        own.unwind_before_write = n.unwind_before_write;
                     }
                 }
                 return Some(own);
@@ -422,10 +474,6 @@ impl StateTable {
 
     /// A normal scope-end drop (the column can already be out of storage
     /// in the row's after-cell). Several sites must agree.
-    pub fn scope_drop(&self, function: FunctionStart, column: &str, row: usize) -> Option<&'static str> {
-        self.local_scope_drop(function, column, row, None)
-    }
-
     pub fn local_scope_drop(&self, function: FunctionStart, column: &str, row: usize, local: Option<rustc_middle::mir::Local>) -> Option<&'static str> {
         let events = self.bodies.get(&function.body)?.rows.get(&row)?.why.get(column)?.iter()
             .filter(|(_, why)| local.is_none() || matches!(why, Why::Dropped { local: l, .. } if *l == local));
@@ -438,6 +486,20 @@ impl StateTable {
         });
         let how = drops.next()?;
         drops.all(|h| h == how).then_some(how)
+    }
+
+    /// A drop on the residual edge of this compiler span, scoped to the
+    /// exact local even when different bindings share a column.
+    pub fn try_drop(&self, function: FunctionStart, column: &str, local: rustc_middle::mir::Local, span: rustc_span::Span) -> Option<(&'static str, bool)> {
+        let wording = self.drop_wording.get(&function.body)?;
+        let key = (local, span.lo(), span.hi(), Some(column.to_owned()));
+        wording.staged_try_drops.get(&key).or_else(|| wording.try_drops.get(&key))
+            .or_else(|| wording.try_drops.get(&(local, span.lo(), span.hi(), None))).copied().flatten()
+    }
+
+    pub fn partial_drop(&self, function: FunctionStart, column: &str, row: usize, local: rustc_middle::mir::Local, site: Option<rustc_span::Span>) -> Option<&PartialDrop> {
+        self.drop_wording.get(&function.body)?.scope_partials.get(&row)?
+            .get(&(site.map(|s| (s.lo(), s.hi())), local, column.to_owned()))?.as_ref()
     }
 
     /// The next MIR boundary is the function's scope exit and actually
@@ -755,6 +817,7 @@ fn cells_of(st: &State) -> Cells {
                 mixed_init: st.mixed_init.get(col).copied(),
                 always_assigned: st.always_assigned.contains(col),
                 reassigned: st.reassigned.get(col).copied(),
+                unwind_before_write: st.unwind_before_write.contains(col),
                 moved_in_arm: st.moved_in_arm.contains(col),
                 may,
                 may_lend: st.may_lend.contains(col),
@@ -860,7 +923,7 @@ mod tests {
 
     fn row(line: usize, cols: &[(&str, &'static str)], lent: &[(&str, usize, &'static str)], facts: Vec<(Option<usize>, Fact)>) -> Row {
         let facts = facts.into_iter().map(|(arm, fact)| Ev { location: rustc_middle::mir::Location::START, display_location: rustc_middle::mir::Location::START, place_local: None, drop_route: DropRoute::Normal, occurrence: super::super::Occurrence::at(rustc_middle::mir::Location::START), end_places: vec![], caller_slot: None, transfer_paths: vec![], col: 1, arm, fact, order: (0, 0, 0) }).collect();
-        Row { line, continues_to: None, after: state(cols, lent), before: None, block_end: false, jumps: false, facts, arms: Vec::new() }
+        Row { line, continues_to: None, after: state(cols, lent), before: None, block_end: false, jumps: false, facts, arms: Vec::new(), partial_drops: Vec::new() }
     }
 
     fn col(name: &str) -> ColumnInfo {
@@ -869,6 +932,7 @@ mod tests {
 
     fn body(func: &str, first: usize, cols: &[&str], rows: Vec<Row>) -> BodyFacts {
         BodyFacts {
+            residual_drops: Vec::new(),
             drop_holders: Default::default(),
             switches: vec![],
             closure_result_loans: Default::default(),

@@ -9099,7 +9099,7 @@ pub fn emit_scope_end(&mut self, vars: HashSet<ResourceAccessPoint>, line: usize
     vars.sort_by_key(|r| *r.hash());
     vars.dedup_by_key(|r| *r.hash());
     for var in vars {
-        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: var, id: *self.unique_id, early: None });
+        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: var, exit_site: None, id: *self.unique_id, early: None });
         *self.unique_id += 1;
     }
 }
@@ -9259,6 +9259,7 @@ pub fn register_iflet_let_bindings(
         for r in scoped {
             if let Some(body_end) = emit_gos_at {
                 self.add_external_event(body_end, ExternalEvent::GoOutOfScope {
+                    exit_site: None,
                     ro: r.clone(),
                     id: *self.unique_id,
                     early: None,
@@ -12353,12 +12354,12 @@ pub fn print_out_of_scope(&mut self){
       let later: Vec<_> = rap.extra_scopes.iter().filter(|(s, _)| !left_at(*s))
         .map(|(s, local)| (*s, local.and_then(&owner).unwrap_or_else(|| rap.rap.clone()))).collect();
       if rap.is_global && !duplicate && !left_at(rap.scope) {
-        self.add_external_event(rap.scope, ExternalEvent::GoOutOfScope { ro: first, id: *self.unique_id, early: None });
+        self.add_external_event(rap.scope, ExternalEvent::GoOutOfScope { ro: first, exit_site: None, id: *self.unique_id, early: None });
         *self.unique_id += 1;
       }
       // The later variables that share this column (#589).
       for (scope, ro) in later {
-        self.add_external_event(scope, ExternalEvent::GoOutOfScope { ro, id: *self.unique_id, early: None });
+        self.add_external_event(scope, ExternalEvent::GoOutOfScope { ro, exit_site: None, id: *self.unique_id, early: None });
         *self.unique_id += 1;
       }
     }

@@ -61,6 +61,8 @@ pub struct RowModel {
     /// The exit (its row and its own location) whose path alone runs the
     /// location (rule 4).
     pub early_exit: BTreeMap<Location, (usize, Location)>,
+    /// Single-exit locations, including exits on the drop's own row.
+    pub exit_site: BTreeMap<Location, Location>,
     /// Early exits (row, the exit's own location) that share the
     /// location with the normal path or with each other: the drop runs
     /// on each of those paths too.
@@ -429,6 +431,20 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
         }
     }
 
+    pub fn exit_span(&self, loc: Location) -> Span {
+        let raw = self.body.source_info(loc).span;
+        if raw.desugaring_kind() == Some(rustc_span::DesugaringKind::QuestionMark) {
+            return raw.source_callsite();
+        }
+        let id = self.body.location_to_hir_id(loc);
+        let nodes = std::iter::once(self.tcx.hir_node(id)).chain(self.tcx.hir_parent_iter(id).map(|(_, node)| node));
+        nodes.map_while(|node| match node {
+            hir::Node::Expr(expr) => Some(expr),
+            _ => None,
+        }).find(|expr| matches!(expr.kind, hir::ExprKind::Ret(_) | hir::ExprKind::Break(..) | hir::ExprKind::Continue(..)))
+            .map_or(raw, |expr| expr.span).source_callsite()
+    }
+
     pub fn build(&self, switches: &[super::SwitchExit]) -> RowModel {
         let body = self.body;
         let rpo_v: Vec<BasicBlock> = body.basic_blocks.reverse_postorder().to_vec();
@@ -691,6 +707,7 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
         }
         let mut event_row = row.clone();
         let mut early_exit = BTreeMap::new();
+        let mut exit_site = BTreeMap::new();
         let mut shared_exits: BTreeMap<Location, Vec<(usize, Location)>> = BTreeMap::new();
         // Locations only a `return` / `?` reaches leave the function: their
         // state is not what the `}` row shows (`let ... else { return }`).
@@ -722,12 +739,15 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
                         event_row.insert(*loc, last);
                     }
                 }
-            } else if exits[0] < row[loc] {
+            } else if let [(_, at)] = all_at.as_slice() {
+                exit_site.insert(*loc, *at);
+                if exits[0] >= row[loc] {
+                    continue;
+                }
                 event_row.insert(*loc, exits[0]);
                 // The exit's first location (`_0 = ..` of `return`, the
                 // `break` value), not a jump with no span of its own.
-                let at = origin_at.get(loc).and_then(|a| a.iter().next().map(|(_, l)| *l)).unwrap_or(*loc);
-                early_exit.insert(*loc, (exits[0], at));
+                early_exit.insert(*loc, (exits[0], *at));
                 if set.iter().all(|r| *r < LOOP_EXIT) {
                     leaves_fn.insert(*loc);
                 }
@@ -928,7 +948,7 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
             }
         }
 
-        RowModel { rpo, row, event_row, early_exit, shared_exits, exit_only, col, exits, arms }
+        RowModel { rpo, row, event_row, early_exit, exit_site, shared_exits, exit_only, col, exits, arms }
     }
 }
 

@@ -1538,6 +1538,7 @@ fn hide_source_lines(annotated_src_str: &str, source_rs_str: &str, visualization
             sorted.iter().take_while(|&&r| r < l).count()
         };
         let shift = |l: usize| -> usize { l - removed_before(l) };
+        visualization_data.state_table.hide_rows(|l| !removed_set.contains(&l), shift);
 
         let pruned_a: String = annotated_src_str
             .lines()
