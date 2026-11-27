@@ -3567,9 +3567,7 @@ pub fn event_dot_partial_scope_drop(
             ),
         });
         if drop.tracks_variant_init {
-            out.push_str(&format!(
-                " In MIR, Rust creates a runtime drop flag for the initialization of {column}'s {variant_name} variant."
-            ));
+            out.push_str(" Rust tracks the move with a runtime drop flag.");
         }
     }
     out

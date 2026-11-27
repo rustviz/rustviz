@@ -3384,7 +3384,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from opt to x",
             "Move from s to take",
             "opt may be partially moved above, so it can't be used as a whole after the branches. If execution reaches the end of opt's scope while it still holds its resource (including the String it holds, if any), it is dropped there.",
-            "opt goes out of scope. No value inside opt remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. In MIR, Rust creates a runtime drop flag for the initialization of opt's Some variant.",
+            "opt goes out of scope. No value inside opt remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. Rust tracks the move with a runtime drop flag.",
             "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, and execution reaches the end of s's scope with the resource still held, it is dropped there.",
             "s goes out of scope. Its resource is dropped here only if no branch above moved it \
              (Rust tracks this with a runtime drop flag).",
@@ -8063,7 +8063,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "r's resource is moved",
             "s acquires ownership of a resource",
             "s goes out of scope. Its resource is dropped.",
-            "r goes out of scope. No value inside r remains to drop here. No resource is dropped. For Ok, the String payload was moved out. In MIR, Rust creates a runtime drop flag for the initialization of r's Ok variant. For Err, the String payload was moved out. In MIR, Rust creates a runtime drop flag for the initialization of r's Err variant.",
+            "r goes out of scope. No value inside r remains to drop here. No resource is dropped. For Ok, the String payload was moved out. Rust tracks the move with a runtime drop flag. For Err, the String payload was moved out. Rust tracks the move with a runtime drop flag.",
         ],
         must_not_contain: &["r goes out of scope. Its resource is dropped."],
     },
@@ -9150,7 +9150,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from x to a",
             "Move from a to consume",
             "x may have been moved: when the condition moves x to a and then turns out false, the else branch runs after that move, so x can't be used here. When the condition fails after that move, a goes out of scope and its resource is dropped.",
-            "x goes out of scope. No value inside x remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. In MIR, Rust creates a runtime drop flag for the initialization of x's Some variant.",
+            "x goes out of scope. No value inside x remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. Rust tracks the move with a runtime drop flag.",
         ],
         must_not_contain: &[
             "=x goes out of scope. Its resource (including the String it holds, if any) is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
@@ -9168,7 +9168,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from x to a",
             "x may have been moved: when the condition moves x to a and then turns out false, the body is skipped but the move has happened, so x can't be used after the if. When the condition fails after that move, a goes out of scope and its resource is dropped.",
-            "x goes out of scope. No value inside x remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. In MIR, Rust creates a runtime drop flag for the initialization of x's Some variant.",
+            "x goes out of scope. No value inside x remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. Rust tracks the move with a runtime drop flag.",
         ],
         must_not_contain: &[
             "=x goes out of scope. Its resource (including the String it holds, if any) is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
@@ -9241,8 +9241,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "edition2024/if_let_chain_field_move",
         must_contain: &[
             "p.name may have been moved: when the condition moves p.name to a and then turns out false, the else branch runs after that move, so p.name can't be used here. When the condition fails after that move, a goes out of scope and its resource is dropped.",
-            "p goes out of scope. No value inside p.name remains to drop here. p.id is dropped. p.name's None variant carries no payload. For p.name's Some variant, the String payload was moved out. In MIR, Rust creates a runtime drop flag for the initialization of p.name's Some variant.",
-            "p.name goes out of scope. No value inside p.name remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. In MIR, Rust creates a runtime drop flag for the initialization of p.name's Some variant.",
+            "p goes out of scope. No value inside p.name remains to drop here. p.id is dropped. p.name's None variant carries no payload. For p.name's Some variant, the String payload was moved out. Rust tracks the move with a runtime drop flag.",
+            "p.name goes out of scope. No value inside p.name remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. Rust tracks the move with a runtime drop flag.",
         ],
         must_not_contain: &["Rust uses drop flags to drop the values that are still there.", "only if no branch above moved it", "moved out in at least one branch above"],
     },
@@ -10221,7 +10221,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x acquires ownership of a resource",
             "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.0, t.0's resource is moved into x here; otherwise t.0 still owns it (Rust tracks this with a runtime drop flag).",
             "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1, t.1's resource is moved into x here; otherwise t.1 still owns it (Rust tracks this with a runtime drop flag).",
-            "t.0 goes out of scope. No value inside t.0 remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. In MIR, Rust creates a runtime drop flag for the initialization of t.0's Some variant.",
+            "t.0 goes out of scope. No value inside t.0 remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. Rust tracks the move with a runtime drop flag.",
             "t.1 goes out of scope. A value inside t.1 may have been moved out above. Rust uses drop flags to drop the values that are still there. None carries no payload. For Some, a runtime drop flag tracks whether t.1 still holds its String payload.",
         ],
         must_not_contain: &[
@@ -11043,7 +11043,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "edition2024/if_let_chain_reused_name",
         must_contain: &[
             "p may have been moved: when the condition moves p to a and then turns out false, the else branch runs after that move, so p can't be used here. When the condition fails after that move, a goes out of scope and its resource is dropped.",
-            "p goes out of scope. No value inside p remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. In MIR, Rust creates a runtime drop flag for the initialization of p's Some variant.",
+            "p goes out of scope. No value inside p remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. Rust tracks the move with a runtime drop flag.",
         ],
         must_not_contain: &[
             "=p goes out of scope. Its resource (including the String it holds, if any) is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
@@ -12537,8 +12537,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x is bound from t.1.0 or t.1.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1.1, t.1.1's resource is moved into x here; otherwise t.1.1 still owns it (Rust tracks this with a runtime drop flag).",
             "x acquires ownership of a resource",
             "n is initialized with a copy of t.0",
-            "t.1.0 goes out of scope. No value inside t.1.0 remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. In MIR, Rust creates a runtime drop flag for the initialization of t.1.0's Some variant.",
-            "t.1 goes out of scope. A value inside t.1.1 may have been moved out above. No value inside t.1.0 remains to drop here. Rust uses drop flags to drop the values that are still there. t.1.1's None variant carries no payload. For t.1.1's Some variant, a runtime drop flag tracks whether t.1.1 still holds its String payload. t.1.0's None variant carries no payload. For t.1.0's Some variant, the String payload was moved out. In MIR, Rust creates a runtime drop flag for the initialization of t.1.0's Some variant.",
+            "t.1.0 goes out of scope. No value inside t.1.0 remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. Rust tracks the move with a runtime drop flag.",
+            "t.1 goes out of scope. A value inside t.1.1 may have been moved out above. No value inside t.1.0 remains to drop here. Rust uses drop flags to drop the values that are still there. t.1.1's None variant carries no payload. For t.1.1's Some variant, a runtime drop flag tracks whether t.1.1 still holds its String payload. t.1.0's None variant carries no payload. For t.1.0's Some variant, the String payload was moved out. Rust tracks the move with a runtime drop flag.",
         ],
         must_not_contain: &[
             "=t.1.0 goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
@@ -16160,9 +16160,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x goes out of scope. Its resource is dropped.",
             "x.n acquires ownership of a resource",
             "x.n goes out of scope. Its resource is dropped.",
-            "t.0 goes out of scope. No value inside t.0 remains to drop here. No resource is dropped. None carries no payload. For Some, the P payload was moved out. In MIR, Rust creates a runtime drop flag for the initialization of t.0's Some variant.",
+            "t.0 goes out of scope. No value inside t.0 remains to drop here. No resource is dropped. None carries no payload. For Some, the P payload was moved out. Rust tracks the move with a runtime drop flag.",
             "t.1 goes out of scope. A value inside t.1 may have been moved out above. Rust uses drop flags to drop the values that are still there. None carries no payload. For Some, a runtime drop flag tracks whether t.1 still holds its P payload.",
-            "t goes out of scope. A value inside t.1 may have been moved out above. No value inside t.0 remains to drop here. Rust uses drop flags to drop the values that are still there. t.1's None variant carries no payload. For t.1's Some variant, a runtime drop flag tracks whether t.1 still holds its P payload. t.0's None variant carries no payload. For t.0's Some variant, the P payload was moved out. In MIR, Rust creates a runtime drop flag for the initialization of t.0's Some variant.",
+            "t goes out of scope. A value inside t.1 may have been moved out above. No value inside t.0 remains to drop here. Rust uses drop flags to drop the values that are still there. t.1's None variant carries no payload. For t.1's Some variant, a runtime drop flag tracks whether t.1 still holds its P payload. t.0's None variant carries no payload. For t.0's Some variant, the P payload was moved out. Rust tracks the move with a runtime drop flag.",
         ],
         must_not_contain: &[
             "=t.0 goes out of scope. Its resource (including the P it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
@@ -16285,7 +16285,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x.n goes out of scope. Its resource is dropped.",
             "t.0 goes out of scope. No value inside t.0 remains to drop here. No resource is dropped. None carries no payload.",
             "t.1 goes out of scope. A value inside t.1 may have been moved out above. Rust uses drop flags to drop the values that are still there. For Some, a runtime drop flag tracks whether t.1 still holds its P payload.",
-            "t goes out of scope. A value inside t.1 may have been moved out above. No value inside t.0 remains to drop here. Rust uses drop flags to drop the values that are still there. For t.1's Some variant, a runtime drop flag tracks whether t.1 still holds its P payload. t.0's None variant carries no payload. For t.0's Some variant, the P payload was moved out. In MIR, Rust creates a runtime drop flag for the initialization of t.0's Some variant.",
+            "t goes out of scope. A value inside t.1 may have been moved out above. No value inside t.0 remains to drop here. Rust uses drop flags to drop the values that are still there. For t.1's Some variant, a runtime drop flag tracks whether t.1 still holds its P payload. t.0's None variant carries no payload. For t.0's Some variant, the P payload was moved out. Rust tracks the move with a runtime drop flag.",
         ],
         must_not_contain: &[
             "=t.0 goes out of scope. Its resource (including the P it holds, if any) is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
