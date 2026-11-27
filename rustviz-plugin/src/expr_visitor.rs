@@ -968,7 +968,7 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // The same for a call's argument written as an `if` / `match`
   // (`take(if c { a } else { b })`): the value each branch yields is
   // passed to the call named here when its branch runs (#1174).
-  pub arg_values: HashMap<rustc_hir::HirId, String>,
+  pub arg_values: HashMap<rustc_hir::HirId, (String, bool)>,
   // Where the arms of each if/else and match leave to when they exit
   // early, by the Branch event's id (see `end_borrows_at_exits`).
   pub exit_scopes: HashMap<usize, ExitScope>,
@@ -2949,7 +2949,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       Evt::MBorrow => ExternalEvent::MutableBorrow { of_ref_var: pattern_ref(&lhs, &rhs), from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None },
       Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, pointee_interior_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new(), of_ref_var: false, deep: None },
       Evt::PassByMRef => ExternalEvent::PassByMutableReference {
-        from: rhs, to: lhs, id, is_reborrow: false, result_has_lifetime: false, implicit: ImplicitRef::No,
+        manually_takes: false, from: rhs, to: lhs, id, is_reborrow: false, result_has_lifetime: false, implicit: ImplicitRef::No,
         result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, of_ref_var: false, deep: None,
       },
       Evt::SDie =>  ExternalEvent::StaticDie { of_ref_var: pattern_ref(&rhs, &lhs), from: rhs, to: lhs, id, static_lender: None, still_borrowed_by: Vec::new(), exhaustion: Vec::new() },
@@ -3835,7 +3835,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   pub fn add_pass_by_mref_ev_deep(&mut self, line_num: usize, func: ResourceTy, arg: ResourceTy, is_reborrow: bool, result_has_lifetime: bool, implicit: ImplicitRef, of_ref_var: bool, deep: Option<DeepPlace>) {
     let id = *self.unique_id;
     self.add_external_event(line_num, ExternalEvent::PassByMutableReference {
-      from: arg, to: func, id, is_reborrow, result_has_lifetime, implicit, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, of_ref_var, deep,
+      manually_takes: false, from: arg, to: func, id, is_reborrow, result_has_lifetime, implicit, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, of_ref_var, deep,
     });
     *self.unique_id += 1;
   }
@@ -6175,6 +6175,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     self.emitting_span = outer;
   }
 
+  pub(crate) fn match_call_arg(&mut self, arg: &'tcx Expr, fn_name: String, manually_takes: bool) {
+    let start = self.preprocessed_events.len();
+    self.match_arg(arg, fn_name);
+    if manually_takes {
+      for (_, event) in &mut self.preprocessed_events[start..] {
+        if let ExternalEvent::PassByMutableReference { manually_takes, .. } = event {
+          *manually_takes = true;
+        }
+      }
+    }
+  }
+
   fn match_arg_at(&mut self, arg: &'tcx Expr, fn_name: String) {
     // `sum(&arr as &[i32])` passes the borrow `&arr` (#1175).
     let arg = peel_ref_casts(arg, self.tcx.typeck(arg.hir_id.owner));
@@ -6400,7 +6412,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         let stored_in = StoredIn(Some(place.name().to_owned()), Vec::new(), Vec::new(), false, Vec::new(), false, Vec::new());
         self.add_external_event(line_num, if mutable {
           ExternalEvent::PassByMutableReference {
-            from: from_ro.clone(), to: to_ro.clone(), id, is_reborrow: false, result_has_lifetime: true,
+            manually_takes: false, from: from_ro.clone(), to: to_ro.clone(), id, is_reborrow: false, result_has_lifetime: true,
             implicit: ImplicitRef::No, result_keeps_borrow: false, stored_in, break_alt: None, of_ref_var, deep: None,
           }
         } else {
@@ -9605,7 +9617,7 @@ pub fn keep_loop_head_loans(&mut self, head: &'tcx Expr<'tcx>) -> Vec<(ResourceT
         let (from, to) = (field.clone(), target);
         let ev = if is_mut {
           ExternalEvent::PassByMutableReference {
-            from, to, id, is_reborrow: false, result_has_lifetime: true, implicit: ImplicitRef::No,
+            manually_takes: false, from, to, id, is_reborrow: false, result_has_lifetime: true, implicit: ImplicitRef::No,
             result_keeps_borrow: true, stored_in: StoredIn::default(), break_alt: None,
             of_ref_var: false, deep: None,
           }

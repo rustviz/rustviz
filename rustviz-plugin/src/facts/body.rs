@@ -39,6 +39,114 @@ struct Cx<'a, 'tcx> {
     vec_results: std::collections::HashMap<rustc_span::hygiene::ExpnId, (Location, Place<'tcx>)>,
 }
 
+/// Use the MIR operand's function-item type, even for a call through a local.
+fn manually_drop_take<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, func: &Operand<'tcx>) -> bool {
+    let TyKind::FnDef(method, _) = *func.ty(&body.local_decls, tcx).kind() else { return false };
+    tcx.item_name(method).as_str() == "take" && tcx.impl_of_assoc(method).is_some_and(|imp| {
+        tcx.impl_opt_trait_ref(imp).is_none()
+            && tcx.type_of(imp).skip_binder().ty_adt_def().is_some_and(|d| d.is_manually_drop())
+    })
+}
+
+#[derive(Clone, Copy, Default)]
+struct ExtractionPaths {
+    taken: bool,
+    intact: bool,
+}
+
+impl ExtractionPaths {
+    const TAKEN: Self = Self { taken: true, intact: false };
+    const INTACT: Self = Self { taken: false, intact: true };
+
+    fn join(&mut self, other: Self) -> bool {
+        let changed = (other.taken && !self.taken) || (other.intact && !self.intact);
+        self.taken |= other.taken;
+        self.intact |= other.intact;
+        changed
+    }
+}
+
+struct ManuallyTaken {
+    column: String,
+    inner: String,
+    boundaries: BTreeMap<(Location, bool), ExtractionPaths>,
+}
+
+/// Track both possible contents states over the normal MIR CFG. The
+/// wrapper's borrowck initialization remains independent of its contents.
+fn manually_taken<'tcx>(
+    cx: &Cx<'_, 'tcx>, calls: &BTreeSet<Location>,
+) -> Vec<ManuallyTaken> {
+    let Cx { tcx, body, .. } = *cx;
+    let mut takes: Vec<(Place<'tcx>, BTreeSet<Location>)> = Vec::new();
+    for &loc in calls {
+        let TerminatorKind::Call { args, .. } = &body.basic_blocks[loc.block].terminator().kind else { continue };
+        let [arg] = args.as_ref() else { continue };
+        let Some(arg) = arg.node.place() else { continue };
+        let place = resolve_temp_deref(tcx, body, tcx.mk_place_deref(arg));
+        if place.projection.iter().all(|p| matches!(p, ProjectionElem::Field(..))) {
+            if let Some((_, sites)) = takes.iter_mut().find(|(p, _)| *p == place) {
+                sites.insert(loc);
+            } else {
+                takes.push((place, BTreeSet::from([loc])));
+            }
+        }
+    }
+    takes.into_iter().filter_map(|(place, takes)| {
+        let TyKind::Adt(def, args) = *place.ty(&body.local_decls, tcx).ty.kind() else { return None };
+        if !def.is_manually_drop() { return None; }
+        let column = cx.name(place)?;
+        let ty = args.type_at(0);
+        let inner = match ty.kind() {
+            TyKind::Adt(def, _) => tcx.item_name(def.did()).to_string(),
+            TyKind::Closure(..) => "closure".to_owned(),
+            TyKind::Ref(..) => "reference".to_owned(),
+            TyKind::Tuple(..) if !ty.is_unit() => "tuple".to_owned(),
+            TyKind::Array(..) => "array".to_owned(),
+            _ if ty.is_primitive() => ty.to_string(),
+            _ => "value".to_owned(),
+        };
+        let writes = |dest: Place<'tcx>| {
+            let dest = resolve_write_deref(tcx, body, dest);
+            dest.local == place.local && place.projection.starts_with(dest.projection)
+        };
+        let entry = Location { block: rustc_middle::mir::START_BLOCK, statement_index: 0 };
+        let mut boundaries = BTreeMap::from([((entry, false), ExtractionPaths::INTACT)]);
+        let mut work = vec![entry];
+        while let Some(loc) = work.pop() {
+            let data = &body.basic_blocks[loc.block];
+            let replaced = if let Some(st) = data.statements.get(loc.statement_index) {
+                match &st.kind {
+                    StatementKind::Assign(a) => writes(a.0),
+                    StatementKind::StorageLive(l) | StatementKind::StorageDead(l) => *l == place.local,
+                    _ => false,
+                }
+            } else if let TerminatorKind::Call { func, args, destination, .. } = &data.terminator().kind {
+                writes(*destination) || (matches!(func.ty(&body.local_decls, tcx).kind(), TyKind::FnDef(did, _)
+                    if tcx.is_diagnostic_item(rustc_span::sym::ptr_write, *did))
+                    && args.first().and_then(|a| a.node.place()).is_some_and(|p| writes(tcx.mk_place_deref(p))))
+            } else {
+                false
+            };
+            let after = if replaced {
+                ExtractionPaths::INTACT
+            } else if takes.contains(&loc) {
+                ExtractionPaths::TAKEN
+            } else {
+                boundaries[&(loc, false)]
+            };
+            if boundaries.entry((loc, true)).or_default().join(after) {
+                for next in cx.r.real_succs(loc) {
+                    if boundaries.entry((next, false)).or_default().join(after) {
+                        work.push(next);
+                    }
+                }
+            }
+        }
+        Some(ManuallyTaken { column, inner, boundaries })
+    }).collect()
+}
+
 /// A transfer on the normal return edge of a call to a local closure can
 /// be checked by rustc even when the closure has no path to a return.
 pub(crate) fn after_diverging_closure<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, loc: Location) -> bool {
@@ -2920,6 +3028,12 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         }
         assigned.then_some(!ended)
     };
+    let take_calls: BTreeSet<_> = runs.iter().copied().filter(|&bb| {
+        let data = &body.basic_blocks[bb];
+        !data.is_cleanup && matches!(&data.terminator().kind, TerminatorKind::Call { func, target: Some(_), .. }
+            if manually_drop_take(tcx, body, func))
+    }).map(|bb| body.terminator_loc(bb)).collect();
+    let manually_taken = manually_taken(&cx, &take_calls);
     let mut state_at = |exits: &[Location], after: bool| -> State {
         let mut st = State::default();
         let mut active = BTreeMap::new();
@@ -3445,6 +3559,18 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             st.holds = holds.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();
             st.option_holds = option_holds.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();
         }
+        for take in &manually_taken {
+            if st.state.get(&take.column) != Some(&"own") { continue; }
+            let mut paths = ExtractionPaths::default();
+            for &loc in &rt_exits {
+                if let Some(status) = take.boundaries.get(&(loc, after)) {
+                    paths.join(*status);
+                }
+            }
+            if paths.taken {
+                st.manually_taken.insert(take.column.clone(), Extraction { inner: take.inner.clone(), maybe: paths.intact });
+            }
+        }
         for (name, loans) in &st.lent {
             let exclusive = loans.iter().any(|l| matches!(l.kind, "mut" | "unique"));
             let ids = loans.iter().filter(|l| matches!(l.kind, "mut" | "unique") == exclusive).map(|l| l.loan).collect();
@@ -3703,9 +3829,15 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             *reaching = Some(ids.into_iter().copied().collect());
         }
     }
+    let function_body_start = (!tcx.is_closure_like(def_id)).then(|| {
+        let hir = tcx.hir_body_owned_by(def_id.expect_local());
+        let pos = tcx.sess.source_map().lookup_char_pos(hir.value.span.lo());
+        (pos.line, pos.col.0)
+    });
     BodyFacts {
         evaluated_spans,
         constructed_vecs,
+        take_calls: take_calls.into_iter().map(|loc| body.source_info(loc).span.with_parent(None)).collect(),
         binding_sources,
         joins,
         def_id,
@@ -3714,6 +3846,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         parent: tcx.is_closure_like(def_id).then(|| tcx.def_path_str(tcx.parent(def_id))),
         first_line,
         last_line,
+        function_body_start,
         vars,
         columns: column_info,
         uniform_option_refs,
@@ -3857,9 +3990,20 @@ fn field_paths_with<'tcx>(tcx: TyCtxt<'tcx>, ty: rustc_middle::ty::Ty<'tcx>, nam
 /// user place the temporary refers to: `**_t` is `*gx` when the body's only
 /// assignment of `_t` is `_t = &gx`; `*_t` is `*r` when it is `_t = copy r`.
 fn resolve_temp_deref<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'tcx>) -> Place<'tcx> {
+    resolve_deref(tcx, body, place, false)
+}
+
+/// Follow single-assignment reference or raw-pointer locals when checking
+/// writes. A mutable borrow or raw address of the pointer itself can
+/// retarget it, so a unique direct assignment is insufficient in that case.
+fn resolve_write_deref<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'tcx>) -> Place<'tcx> {
+    resolve_deref(tcx, body, place, true)
+}
+
+fn resolve_deref<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'tcx>, for_write: bool) -> Place<'tcx> {
     let mut place = place;
     for _ in 0..4 {
-        if place.projection.first() != Some(&ProjectionElem::Deref) || body.local_decls[place.local].is_user_variable() || place.local == RETURN_PLACE || place.local.index() <= body.arg_count {
+        if place.projection.first() != Some(&ProjectionElem::Deref) || (!for_write && body.local_decls[place.local].is_user_variable()) || place.local == RETURN_PLACE || place.local.index() <= body.arg_count {
             return place;
         }
         let mut src: Option<Place<'tcx>> = None;
@@ -3867,6 +4011,11 @@ fn resolve_temp_deref<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'
         for data in body.basic_blocks.iter() {
             for st in &data.statements {
                 if let StatementKind::Assign(asg) = &st.kind {
+                    if for_write && matches!(asg.1, Rvalue::Ref(_, BorrowKind::Mut { .. }, p) | Rvalue::RawPtr(_, p)
+                        if p.local == place.local && p.projection.is_empty())
+                    {
+                        return place;
+                    }
                     if asg.0.local == place.local {
                         n += 1;
                         if !asg.0.projection.is_empty() {
@@ -3875,6 +4024,7 @@ fn resolve_temp_deref<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'
                         src = match &asg.1 {
                             // `*_t` of `_t = &P` is P.
                             Rvalue::Ref(_, _, p) => Some(*p),
+                            Rvalue::RawPtr(_, p) if for_write => Some(*p),
                             // `*_t` of `_t = copy r` is `*r`.
                             Rvalue::Use(Operand::Copy(p) | Operand::Move(p)) => Some(tcx.mk_place_deref(*p)),
                             _ => None,

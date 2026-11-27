@@ -569,8 +569,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// dropped as the function returns (#1195). So all are visited (the
   /// `?` among them, which says what it drops) before `before_pass`
   /// runs and any is passed.
-  pub fn visit_call_args(&mut self, args: &'tcx [Expr<'tcx>], fn_name: &str, defer: bool, before_pass: impl FnOnce(&mut Self)) {
-    let in_branches: Vec<bool> = args.iter().map(|a| self.mark_branch_args(a, fn_name)).collect();
+  pub fn visit_call_args(&mut self, args: &'tcx [Expr<'tcx>], fn_name: &str, defer: bool, manually_takes: bool, before_pass: impl FnOnce(&mut Self)) {
+    let in_branches: Vec<bool> = args.iter().map(|a| self.mark_branch_args(a, fn_name, manually_takes)).collect();
     if defer {
       for arg in args {
         self.visit_expr(arg);
@@ -582,7 +582,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.visit_expr(arg);
       }
       if !branched {
-        self.match_arg(arg, fn_name.to_owned());
+        self.match_call_arg(arg, fn_name.to_owned(), manually_takes);
       }
     }
   }
@@ -590,7 +590,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// `arg`, a call's argument, is an `if` / `else` or a `match`: mark
   /// the value each branch yields to be passed to `fn_name` where it is
   /// visited (`arg_values`). False for any other `arg`.
-  fn mark_branch_args(&mut self, arg: &'tcx Expr<'tcx>, fn_name: &str) -> bool {
+  fn mark_branch_args(&mut self, arg: &'tcx Expr<'tcx>, fn_name: &str, manually_takes: bool) -> bool {
     // A tuple built in the argument list with an `if` / `match` element
     // (`take((if c { d } else { e }, 1))`, #1267): the element's value
     // goes into the call with the tuple, inside its branch; `match_arg`
@@ -598,7 +598,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if let ExprKind::Tup(parts) = arg.kind {
       if !arg.span.from_expansion() {
         for part in parts.iter() {
-          self.mark_branch_args(part, fn_name);
+          self.mark_branch_args(part, fn_name, manually_takes);
         }
       }
       return false;
@@ -607,7 +607,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let mut values = Vec::new();
     self.returned_values(arg, &mut values);
     for v in values {
-      self.arg_values.insert(v.hir_id, fn_name.to_owned());
+      self.arg_values.insert(v.hir_id, (fn_name.to_owned(), manually_takes));
     }
     true
   }
@@ -1641,7 +1641,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             let line_num = expr_to_line(recv, &self.tcx);
             let id = *self.unique_id;
             self.add_external_event(line_num, ExternalEvent::PassByMutableReference {
-              from, to, id, is_reborrow: false, result_has_lifetime: false, implicit: ImplicitRef::MacroArg,
+              manually_takes: false, from, to, id, is_reborrow: false, result_has_lifetime: false, implicit: ImplicitRef::MacroArg,
               result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, of_ref_var: false, deep: None,
             });
             *self.unique_id += 1;
@@ -2185,9 +2185,6 @@ fn place_rap(expr: &Expr, tcx: &rustc_middle::ty::TyCtxt, raps: &std::collection
   }
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum ManuallyDropFn { Drop, Take }
-
 /// A name an or-pattern arm binds from a different place in each
 /// alternative (#533): the places, in the order of the alternatives.
 pub(crate) struct OrConflict {
@@ -2260,37 +2257,22 @@ struct MatchArmPat {
 
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
-  /// If `fn_expr` names the inherent `ManuallyDrop::drop` or
-  /// `ManuallyDrop::take` (resolved through the callee's DefId, not
-  /// its spelling), which of the two.
-  fn manually_drop_assoc_fn(&self, fn_expr: &'tcx Expr<'tcx>) -> Option<ManuallyDropFn> {
-    let def_id = self.tcx.typeck(fn_expr.hir_id.owner).type_dependent_def_id(fn_expr.hir_id)?;
-    if !matches!(self.tcx.def_kind(def_id), DefKind::AssocFn) {
-      return None;
-    }
-    let imp = self.tcx.impl_of_assoc(def_id)?;
-    if self.tcx.impl_opt_trait_ref(imp).is_some()
-      || !self.tcx.type_of(imp).skip_binder().ty_adt_def().map_or(false, |d| d.is_manually_drop())
-    {
-      return None;
-    }
-    match self.tcx.item_name(def_id).as_str() {
-      "drop" => Some(ManuallyDropFn::Drop),
-      "take" => Some(ManuallyDropFn::Take),
-      _ => None,
-    }
-  }
-
   /// `ManuallyDrop::drop(&mut md)` drops the value inside `md` by
-  /// hand; `ManuallyDrop::take(&mut md)` moves it out into the
-  /// result. Returns false (nothing emitted) when the argument isn't
-  /// `&mut` of a tracked ManuallyDrop place, so the generic call
-  /// handling runs instead.
-  fn manually_drop_by_hand(&mut self, fn_expr: &'tcx Expr<'tcx>, args: &'tcx [Expr<'tcx>], which: ManuallyDropFn) -> bool {
+  /// hand. Handle the inherent function on a tracked place.
+  fn manually_drop_by_hand(&mut self, fn_expr: &'tcx Expr<'tcx>, args: &'tcx [Expr<'tcx>]) -> bool {
+    let Some(def_id) = self.tcx.typeck(fn_expr.hir_id.owner).type_dependent_def_id(fn_expr.hir_id) else { return false };
+    if !matches!(self.tcx.def_kind(def_id), DefKind::AssocFn) || self.tcx.item_name(def_id).as_str() != "drop" {
+      return false;
+    }
+    let Some(imp) = self.tcx.impl_of_assoc(def_id) else { return false };
+    if self.tcx.impl_opt_trait_ref(imp).is_some()
+      || !self.tcx.type_of(imp).skip_binder().ty_adt_def().is_some_and(|d| d.is_manually_drop())
+    {
+      return false;
+    }
     let [arg] = args else { return false };
     let ExprKind::AddrOf(_, Mutability::Mut, inner) = arg.kind else { return false };
-    let Some(from) = place_rap(inner, &self.tcx, &self.raps) else { return false };
-    let ResourceTy::Value(rap) = from.clone() else { return false };
+    let Some(ResourceTy::Value(rap)) = place_rap(inner, &self.tcx, &self.raps) else { return false };
     if !rap.is_manually_drop() {
       return false;
     }
@@ -2298,21 +2280,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.add_fn(fn_name.clone());
     self.visit_expr(arg);
     let line_num = expr_to_line(arg, &self.tcx);
-    match which {
-      ManuallyDropFn::Drop => {
-        // Keep the usual call-site events (the `&mut` borrow), then
-        // mark the value as dropped.
-        self.match_arg(arg, fn_name);
-        self.add_external_event(line_num, ExternalEvent::ManuallyDropByHand { ro: rap, id: *self.unique_id });
-        *self.unique_id += 1;
-      }
-      ManuallyDropFn::Take => {
-        // The value moves out of `md` into the call (and on into the
-        // result), like passing an owner by value.
-        let to = ResourceTy::Value(self.raps.get(&fn_key(&fn_name)).unwrap().rap.to_owned());
-        self.add_ev(line_num, Evt::Move, to, from, false);
-      }
-    }
+    self.match_arg(arg, fn_name);
+    self.add_external_event(line_num, ExternalEvent::ManuallyDropByHand { ro: rap, id: *self.unique_id });
+    *self.unique_id += 1;
     true
   }
 }
@@ -5373,9 +5343,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     // Likewise a value a branch of an `if` / `match` written as a call's
     // argument yields is passed to the call inside its branch (#1174).
-    if let Some(fn_name) = self.arg_values.remove(&expr.hir_id) {
+    if let Some((fn_name, manually_takes)) = self.arg_values.remove(&expr.hir_id) {
       self.visit_expr(expr);
-      self.match_arg(expr, fn_name);
+      self.match_call_arg(expr, fn_name, manually_takes);
       return;
     }
     // Two complementary behaviours for synthesized HIR nodes (those
@@ -5423,12 +5393,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     match expr.kind {
       // fn call <expr>[<expr>]
       ExprKind::Call(fn_expr, args) => {
-        // `ManuallyDrop::drop(&mut md)` / `ManuallyDrop::take(&mut md)`
-        // on a tracked ManuallyDrop place (#283).
-        if let Some(which) = self.manually_drop_assoc_fn(fn_expr) {
-          if self.manually_drop_by_hand(fn_expr, args, which) {
-            return;
-          }
+        if self.manually_drop_by_hand(fn_expr, args) {
+          return;
         }
         // `let W(y) = W(g);`: a constructor that a `let` pattern takes
         // apart is no actor either (as below, #950). `bind_pat` draws
@@ -5539,7 +5505,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.add_fn(fn_name.clone());
         self.closure_call_events(expr, fn_expr);
         let defer = args.iter().skip(1).any(|a| holds_try(a));
-        self.visit_call_args(args, &fn_name, defer, |_| {});
+        let manually_takes = self.facts.is_some_and(|b| b.take_calls.contains(&expr.span.with_parent(None)));
+        self.visit_call_args(args, &fn_name, defer, manually_takes, |_| {});
         // `g()` with `g` a `Box<dyn Fn() + '_>` holding a borrow:
         // calling it uses it, so it holds the borrow at least until
         // here (#1104). A borrow rustc's facts don't give an end for
@@ -5596,7 +5563,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         if !(defer && by_value) {
           self.method_receiver_events(expr, name_and_generic_args, rcvr, &fn_name, line_num);
         }
-        self.visit_call_args(args, &fn_name, defer, |this| if defer && by_value {
+        self.visit_call_args(args, &fn_name, defer, false, |this| if defer && by_value {
           this.method_receiver_events(expr, name_and_generic_args, rcvr, &fn_name, line_num);
         });
         // `refs.push(&s)`: the receiver now holds s's borrow (#392).

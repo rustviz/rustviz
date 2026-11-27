@@ -2200,6 +2200,8 @@ pub enum ExternalEvent {
     // lifetime, so the reborrow may outlive the call
     // (`let w = first(r);`). Both drive the call-site dot's suffix.
     PassByMutableReference {
+        // This MIR callee reads the inner value without writing the wrapper.
+        manually_takes: bool,
         from: ResourceTy,
         to: ResourceTy, // must be a function
         is_reborrow: bool,
@@ -3095,6 +3097,9 @@ pub enum State {
         borrow_to: ResourceTy,
         prev_state: Box<State>
     },
+    // A ManuallyDrop wrapper whose initialized storage may still contain
+    // extracted contents. Its ordinary borrow state supplies the line style.
+    ManuallyTaken { wrapper: Box<State> },
     // should not appear for visualization in a correct program
     Invalid,
 }
@@ -3113,6 +3118,7 @@ impl std::fmt::Display for State {
             State::FullPrivilege { .. } => write!(f, "FullPrivilege"),
             State::PartialPrivilege { .. } => write!(f, "PartialPrivilege"),
             State::RevokedPrivilege { .. } => write!(f, "RevokedPrivilege"),
+            State::ManuallyTaken { .. } => write!(f, "ManuallyTaken"),
             State::Invalid => write!(f, "Invalid"),
         }
     }
@@ -3242,6 +3248,7 @@ impl State {
             State::RevokedPrivilege { to: _, borrow_to: _, prev_state: _} => {
                 hover_messages::state_resource_revoked(my_name)
             }
+            State::ManuallyTaken { .. } => hover_messages::state_manually_taken(my_name, "value", true, false),
             State::Invalid => {
                 hover_messages::state_invalid(my_name)
             }
@@ -3287,6 +3294,7 @@ impl Ord for State {
                 RevokedPrivilege { .. } => 1,
                 PartialPrivilege { .. } => 2,
                 FullPrivilege {..} => 3,
+                ManuallyTaken { wrapper } => rank(wrapper),
                 Invalid | OutOfScope => 4,
             }
         }
@@ -3305,6 +3313,8 @@ impl PartialEq for State {
             (State::PartialPrivilege { s }, State::PartialPrivilege { s: s2 }) => s == s2,
             (State::FullPrivilege { s }, State::FullPrivilege { s: s2 }) => s == s2,
             (State::ResourceMoved { .. }, State::ResourceMoved { .. }) => true,
+            (State::ManuallyTaken { wrapper: a }, State::ManuallyTaken { wrapper: b }) => a == b
+                || matches!((a.as_ref(), b.as_ref()), (State::RevokedPrivilege { .. }, State::RevokedPrivilege { .. })),
             _ => false
         }
     }

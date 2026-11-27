@@ -334,7 +334,6 @@ pub const KNOWN_ORACLE_FAILURES: &[(&str, &str, u32, &str, u32)] = &[
     ("known_bugs/1632_extend_field_loan", "oracle-borrowed", 39, "d.1", 1632),
     ("known_bugs/1632_extend_field_loan", "oracle-borrowed", 40, "d.0.0", 1632),
     ("known_bugs/1632_extend_field_loan", "oracle-borrowed", 40, "d.1", 1632),
-    ("known_bugs/1632_extend_field_loan", "oracle-borrowed", 51, "e.0", 1632),
     ("known_bugs/1632_extend_field_loan", "oracle-borrowed", 60, "p2.1", 1632),
     ("known_bugs/1637_drop_holder_return", "oracle-borrowed", 14, "n", 1637),
     ("known_bugs/1637_drop_holder_return", "oracle-borrowed", 23, "n2", 1637),
@@ -353,7 +352,6 @@ pub const KNOWN_ORACLE_FAILURES: &[(&str, &str, u32, &str, u32)] = &[
     ("known_bugs/1681_reused_element", "oracle-borrowed", 10, "v", 1681),
     ("known_bugs/1683_nested_if_let_join", "oracle-borrowed", 13, "v", 1683),
     ("known_bugs/1686_box_shared_across_read", "oracle-usable", 12, "b", 1686),
-    ("known_bugs/1689_kept_field_loans", "oracle-borrowed", 8, "e.0", 1689),
     ("known_bugs/1689_kept_field_loans", "oracle-borrowed", 22, "s.1", 1689),
     ("known_bugs/1689_kept_field_loans", "oracle-borrowed", 23, "s.1", 1689),
     ("known_bugs/1689_kept_field_loans", "oracle-usable", 14, "p.0", 1689),
@@ -378,11 +376,7 @@ pub const KNOWN_ORACLE_FAILURES: &[(&str, &str, u32, &str, u32)] = &[
     ("known_bugs/1728_struct_nested_maybe_moves", "oracle-usable", 21, "p", 1728),
     ("known_bugs/1728_struct_nested_maybe_moves", "oracle-usable", 21, "p.i", 1728),
     ("known_bugs/1732_stored_loan_kinds", "oracle-borrowed", 24, "d", 1732),
-    ("known_bugs/1732_stored_loan_kinds", "oracle-borrowed", 54, "k", 1732),
-    ("known_bugs/1732_stored_loan_kinds", "oracle-borrowed", 55, "k", 1732),
     ("known_bugs/1732_stored_loan_kinds", "oracle-borrowed", 70, "q", 1732),
-    ("known_bugs/1732_stored_loan_kinds", "oracle-borrowed", 70, "s", 1732),
-    ("known_bugs/1732_stored_loan_kinds", "oracle-borrowed", 70, "t", 1732),
     ("known_bugs/1750_chain_mixed", "oracle-readable", 10, "exclusive", 1750),
     ("known_bugs/1750_mixed_arm_holder", "oracle-readable", 18, "d", 1750),
     ("known_bugs/1791_short_circuit_reassignment", "oracle-usable", 6, "s", 1791),
@@ -397,23 +391,15 @@ pub const KNOWN_ORACLE_FAILURES: &[(&str, &str, u32, &str, u32)] = &[
     ("known_bugs/1823_shared_ref_of_mut_hedge", "oracle-borrowed", 67, "c23", 1823),
     ("known_bugs/1823_shared_ref_of_mut_hedge", "oracle-borrowed", 68, "c23", 1823),
     ("known_bugs/1823_shared_ref_of_mut_hedge", "oracle-borrowed", 68, "q24", 1823),
-    ("known_bugs/1823_shared_ref_of_mut_hedge", "oracle-borrowed", 68, "s24", 1823),
-    ("known_bugs/1823_shared_ref_of_mut_hedge", "oracle-borrowed", 68, "t24", 1823),
     ("known_bugs/1823_shared_ref_of_mut_hedge", "oracle-borrowed", 69, "c23", 1823),
     ("known_bugs/1823_shared_ref_of_mut_hedge", "oracle-borrowed", 70, "c23", 1823),
     ("known_bugs/1823_shared_ref_of_mut_hedge", "oracle-borrowed", 71, "c23", 1823),
     ("known_bugs/1823_shared_ref_of_mut_hedge", "oracle-borrowed", 72, "c23", 1823),
     ("known_bugs/1823_shared_ref_of_mut_hedge", "oracle-borrowed", 73, "c23", 1823),
-    ("known_bugs/1823_shared_ref_of_mut_hedge", "oracle-borrowed", 74, "b25", 1823),
     ("known_bugs/1823_shared_ref_of_mut_hedge", "oracle-borrowed", 74, "c23", 1823),
     ("known_bugs/1823_shared_ref_of_mut_hedge", "oracle-borrowed", 75, "b25", 1823),
     ("known_bugs/1823_shared_ref_of_mut_hedge", "oracle-borrowed", 75, "c23", 1823),
     ("known_bugs/1823_shared_ref_of_mut_kinds", "oracle-borrowed", 19, "a", 1823),
-    ("known_bugs/1823_shared_ref_of_mut_kinds", "oracle-borrowed", 31, "a2", 1823),
-    ("known_bugs/1823_shared_ref_of_mut_kinds", "oracle-borrowed", 32, "a2", 1823),
-    ("known_bugs/1823_shared_ref_of_mut_siblings", "oracle-borrowed", 67, "a4", 1823),
-    ("known_bugs/1823_shared_ref_of_mut_siblings", "oracle-borrowed", 132, "b13", 1823),
-    ("known_bugs/1823_shared_ref_of_mut_siblings", "oracle-borrowed", 137, "a14", 1823),
     ("known_bugs/1823_shared_ref_of_mut_siblings", "oracle-usable", 93, "a8.x", 1823),
     ("known_bugs/1823_shared_ref_of_mut_siblings", "oracle-usable", 121, "b12", 1823),
 ];
@@ -427,8 +413,6 @@ pub const ORACLE_EXEMPT: &[(&str, &str, u32, &str, &str)] = &[
     // its `else` block, and the code after a body that always returns,
     // never run, so the drawing shows nothing there. rustc still checks
     // them as if they could run (#987, #995, #1004, #1013, #949).
-    // `ManuallyDrop::take(&mut m)` moves the value out (#283); rustc only
-    // sees a `&mut` borrow.
     ("edition2024/dead_else_987", "oracle-moved", 13, "f", "irrefutable pattern: dead else"),
     ("edition2024/dead_else_987", "oracle-moved", 35, "a", "irrefutable pattern: dead else"),
     ("edition2024/dead_else_987", "oracle-moved", 35, "s1", "irrefutable pattern: dead else"),
@@ -438,18 +422,8 @@ pub const ORACLE_EXEMPT: &[(&str, &str, u32, &str, &str)] = &[
     ("edition2024/dead_else_987", "oracle-usable", 35, "s2", "irrefutable pattern: dead else"),
     ("edition2024/dead_else_987", "oracle-usable", 36, "s2", "irrefutable pattern: dead else"),
     ("edition2024/dead_else_987", "oracle-usable", 37, "s2", "irrefutable pattern: dead else"),
-    ("edition2024/irrefutable_iflet_inline_995", "oracle-moved", 14, "f", "irrefutable pattern: code after never runs"),
     ("edition2024/irrefutable_iflet_inline_995", "oracle-moved", 34, "p", "irrefutable pattern: code after never runs"),
     ("edition2024/irrefutable_iflet_inline_995", "oracle-moved", 35, "p", "irrefutable pattern: code after never runs"),
-    ("inline_exit_1004", "oracle-moved", 11, "f", "irrefutable pattern: code after never runs"),
-    ("inline_exit_nested_1013", "oracle-moved", 13, "f", "irrefutable pattern: code after never runs"),
-    ("inline_exit_nested_1013", "oracle-moved", 65, "s", "irrefutable pattern: code after never runs"),
-    ("inline_exit_nested_1013", "oracle-moved", 66, "s", "irrefutable pattern: code after never runs"),
-    ("manually_drop_by_hand", "oracle-moved", 14, "m2", "ManuallyDrop::take moves out behind a &mut"),
-    ("manually_drop_by_hand", "oracle-moved", 15, "m2", "ManuallyDrop::take moves out behind a &mut"),
-    ("manually_drop_by_hand", "oracle-moved", 16, "m2", "ManuallyDrop::take moves out behind a &mut"),
-    ("manually_drop_by_hand", "oracle-moved", 17, "m2", "ManuallyDrop::take moves out behind a &mut"),
-    ("manually_drop_by_hand", "oracle-moved", 18, "m2", "ManuallyDrop::take moves out behind a &mut"),
 ];
 
 
@@ -550,6 +524,8 @@ struct Points {
     /// declaration starts the body, if its first statement starts on a
     /// later line than the `{`).
     spans: Vec<(u32, u32, Option<u32>)>,
+    /// Opening brace of each function body (line, zero-based column).
+    body_starts: Vec<Option<(u32, u32)>>,
     /// The function (index) each item level is in; None in a const,
     /// static or other non-fn item.
     stack: Vec<Option<usize>>,
@@ -612,6 +588,10 @@ impl Points {
             .map(|l| l.as_str()).collect::<Vec<_>>().join("\n");
         self.unprobeable.push(["/*", "*/", "__rv_"].iter().any(|t| text.contains(t)));
         self.spans.push((line_of(sig).0, end, open));
+        self.body_starts.push(body.map(|b| {
+            let pos = b.brace_token.span.open().start();
+            (pos.line as u32, pos.column as u32)
+        }));
         self.stack.push(Some(self.bindings.len() - 1));
     }
     fn body<F: FnOnce(&mut Self)>(&mut self, f: F) {
@@ -945,6 +925,8 @@ struct Drawing {
     /// Rows of code that never runs drawn inline (`data-rv-dead-rows`: the
     /// dead `else` of an irrefutable `if let`, #987).
     dead: HashSet<u32>,
+    /// Body's opening brace (line, column) and row reached only by imaginary edges.
+    unreachable: HashSet<((u32, u32), u32)>,
 }
 
 fn plain(t: &str) -> String {
@@ -968,9 +950,18 @@ fn num(n: roxmltree::Node, a: &str) -> f64 {
 
 fn drawing(timeline: &str, code: &str) -> Result<Drawing, String> {
     let doc = roxmltree::Document::parse(timeline).map_err(|e| e.to_string())?;
-    let dead = doc.root_element().attribute("data-rv-dead-rows").unwrap_or("")
+    let source_rows = |attr| doc.root_element().attribute(attr).unwrap_or("")
         .split_whitespace().filter_map(|w| w.parse().ok()).collect();
-    let mut d = Drawing { dots: vec![], segs: vec![], columns: BTreeMap::new(), header_x: HashMap::new(), refs: HashSet::new(), row: HashMap::new(), dead };
+    let mut d = Drawing {
+        dots: vec![], segs: vec![], columns: BTreeMap::new(), header_x: HashMap::new(),
+        refs: HashSet::new(), row: HashMap::new(), dead: source_rows("data-rv-dead-rows"),
+        unreachable: doc.root_element().attribute("data-rv-unreachable-rows").unwrap_or("")
+            .split_whitespace().filter_map(|word| {
+                let (body_line, rest) = word.split_once(':')?;
+                let (col, row) = rest.split_once(':')?;
+                Some(((body_line.parse().ok()?, col.parse().ok()?), row.parse().ok()?))
+            }).collect(),
+    };
     for n in doc.descendants().filter(|n| n.attribute("data-rv-id").is_some()) {
         let a = |k: &str| n.attribute(k).unwrap_or("").to_owned();
         let hash = n.descendants().find_map(|c| c.attribute("data-hash")).unwrap_or("").to_owned();
@@ -1187,9 +1178,11 @@ fn claims(pts: &Points, d: &Drawing, skips: &mut Skips) -> Vec<Claim> {
                             skip = Some("a reference's line (says what it holds)");
                             continue;
                         }
-                        "full_privilege" => Drawn::Usable,
-                        "partial_privilege" => Drawn::Shared,
-                        "revoked_privilege" => Drawn::MutLent,
+                        // These probes borrow the ManuallyDrop wrapper.
+                        // They say nothing about the safety of reusing its old contents.
+                        "full_privilege" | "manually_taken" => Drawn::Usable,
+                        "partial_privilege" | "manually_taken_shared" => Drawn::Shared,
+                        "revoked_privilege" | "manually_taken_mut" => Drawn::MutLent,
                         "resource_moved" => Drawn::Moved,
                         _ => continue,
                     }
@@ -1227,6 +1220,13 @@ fn claims(pts: &Points, d: &Drawing, skips: &mut Skips) -> Vec<Claim> {
                 let moved = has(MOVE_EVENTS)
                     || (last.events.iter().any(|e| e == "branch_join") && MAYBE_MOVED.iter().any(|m| last.tip.contains(m)));
                 if !moved {
+                    continue;
+                }
+                // An exit can end the drawn path entirely. The missing
+                // line then makes no claim on the imaginary path rustc
+                // uses for this row. Explicit segments are checked above.
+                if pts.body_starts[p.func].is_some_and(|body| d.unreachable.contains(&(body, p.line))) {
+                    *skips.entry("no segment on a runtime-unreachable row").or_default() += 1;
                     continue;
                 }
                 if last.tip.split(" / ").any(|b| b.trim_start_matches("• ").starts_with('*')) {

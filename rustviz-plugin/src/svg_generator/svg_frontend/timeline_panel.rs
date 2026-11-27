@@ -8349,6 +8349,10 @@ fn determine_owner_line_styles(
     // itself is communicated by the borrow-region trapezoid drawn
     // on the borrower's column, not by varying the lender's
     // stroke style.
+    let state = match state {
+        State::ManuallyTaken { wrapper } => wrapper.as_ref(),
+        state => state,
+    };
     match (state, rap.is_mut()) {
         (State::FullPrivilege{..}, true) => OwnerLine::Solid,
         (State::FullPrivilege{..}, false) => OwnerLine::Hollow,
@@ -8460,23 +8464,21 @@ fn create_owner_line_string(
         }
         _ => {}
     }
-    match (state, style) {
-        (State::FullPrivilege{..}, OwnerLine::Solid) | (State::PartialPrivilege{ .. }, OwnerLine::Solid) => {
+    match style {
+        OwnerLine::Solid => {
             data.line_class = String::from("solid");
             // (The historical "binding can be reassigned" suffix
             // mixed a binding property into a state message; the
             // state text alone is enough.)
             registry.render("vertical_line_template", &data).unwrap()
         },
-        (State::FullPrivilege{..}, OwnerLine::Hollow) | (State::PartialPrivilege{..}, OwnerLine::Hollow) => {
+        OwnerLine::Hollow => {
             let hollow_line_data = data.clone();
             let new_hollow_line_data = compute_hollow_line_data(hollow_line_data, 3.5);
             registry.render("new_hollow_line_template", &new_hollow_line_data).unwrap()
         },
-        (State::RevokedPrivilege{..}, OwnerLine::Dotted) => lent_line_string(data),
-        (State::OutOfScope, _) => "".to_owned(),
-        // do nothing when the case is (OutofScope, _), (ResourceMoved, _)
-        (_, _) => "".to_owned()
+        OwnerLine::Dotted => lent_line_string(data),
+        OwnerLine::Empty => String::new(),
     }
 }
 
@@ -10429,6 +10431,18 @@ fn owner_segment_of(rap: &ResourceAccessPoint, vd: &VisualizationData, row: usiz
         }
         Init::Own | Init::Partly => {}
     }
+    if let Some(taken) = &cell.manually_taken {
+        let mut title = hover_messages::state_manually_taken(name, &taken.inner, taken.maybe, rap.is_copy_owner());
+        let wrapper = if cell.lent.is_empty() {
+            full
+        } else {
+            let (state, borrow, _) = owner_loan_title(rap, vd, fn_line, &cell, layout, row);
+            title.push(' ');
+            title.push_str(&borrow);
+            state
+        };
+        return Some((State::ManuallyTaken { wrapper: Box::new(wrapper) }, title));
+    }
     // A live loan of a part (a field, an element, a capture of one) restricts
     // the whole owner column, worded by the part (P1-3b).
     let part_loan = owner_part_loan_state(if matches!(layout, State::ResourceMoved { .. }) { &full } else { layout }, rap, vd, row);
@@ -10635,6 +10649,18 @@ fn owner_loan_title(
     let whole = loans.iter().all(|l| table.loan(fn_line, name, l.loan).is_some_and(|i| i.whole.contains(name)));
     if !whole && !matches!(layout, State::ResourceMoved { .. }) {
         state = layout.clone();
+    }
+    if cell.manually_taken.is_some() {
+        let kind = if exclusive { "an exclusive" } else { "a shared" };
+        let mut title = match exact_holder {
+            Some(h) if !cell.may_lend => format!("{} holds {kind} borrow of the wrapper.", styled_name_html(h)),
+            _ if cell.may_lend => format!("The wrapper may have {kind} borrow."),
+            _ => format!("The wrapper has {kind} borrow."),
+        };
+        if let Some(h) = kept_by.filter(|_| !cell.may_lend) {
+            title.push_str(&hover_messages::state_kept_borrowed_by(name, h));
+        }
+        return (state, title, whole);
     }
     let subject = borrowed.first().copied().filter(|_| borrowed.len() == 1);
     let possible_sources = holder.and_then(|h| cell.holder_sources.get(h));

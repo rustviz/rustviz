@@ -9,7 +9,7 @@
 //! by the first row of the leg it draws, since rows above a leg's start
 //! may belong to another arm.
 
-use super::schema::{DropRoute, LoanInfo, BodyFacts, CrateFacts, Fact, HolderType, Lent, Parts, State};
+use super::schema::{DropRoute, LoanInfo, BodyFacts, CrateFacts, Extraction, Fact, HolderType, Lent, Parts, State};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A column's value on a row.
@@ -88,6 +88,7 @@ pub struct Cell {
     /// column (only variable columns have them).
     pub holds: Vec<usize>,
     pub holder_type: Option<HolderType>,
+    pub manually_taken: Option<Extraction>,
     pub option_holds: Vec<usize>,
     pub always_assigned: bool,
     pub reassigned: Option<bool>,
@@ -152,6 +153,7 @@ struct RowCells {
 struct BodyTable {
     first_line: usize,
     last_line: usize,
+    function_body_start: Option<(usize, usize)>,
     rows: BTreeMap<usize, RowCells>,
     joins: BTreeMap<rustc_span::Span, Cells>,
     /// Column names, in the facts' order.
@@ -673,9 +675,15 @@ impl StateTable {
         self.bodies.get(&fn_line).is_some_and(|bs| bs.iter().any(|b| b.dead_lines.contains(&row)))
     }
 
-    /// Every row of code that never runs (`dead_row`), over all fn bodies.
+    /// Every dead row used by the inline-arm layout.
     pub fn dead_rows(&self) -> BTreeSet<usize> {
         self.bodies.values().flatten().flat_map(|b| b.dead_lines.iter().copied()).collect()
+    }
+
+    /// Source rows the borrow checker sees but the function body cannot execute.
+    pub fn unreachable_rows(&self) -> impl Iterator<Item = ((usize, usize), usize)> + '_ {
+        self.bodies.values().flatten().filter_map(|b| Some((b.function_body_start?, &b.dead_lines)))
+            .flat_map(|(body, rows)| rows.iter().map(move |&row| (body, row)))
     }
 
     /// The direct field columns of `column` (`p.a`, `p.b` of `p`).
@@ -825,6 +833,7 @@ fn cells_of(st: &State) -> Cells {
                     .collect(),
                 holds: st.holds.get(col).cloned().unwrap_or_default(),
                 holder_type: st.holder_types.get(col).copied(),
+                manually_taken: st.manually_taken.get(col).cloned(),
                 option_holds: st.option_holds.get(col).cloned().unwrap_or_default(),
                 from_row: 0,
                 why: Vec::new(),
@@ -884,7 +893,7 @@ fn body_table(b: &BodyFacts) -> BodyTable {
     let part_lenders = b.loans.iter().flat_map(|l| l.part_of.iter().cloned()).collect();
     let loans = b.loans.iter().map(|l| (l.loan, l.clone())).collect();
     let hidden_fields = b.columns.iter().filter(|c| c.hidden_fields).map(|c| c.name.clone()).collect();
-    BodyTable { joins: b.joins.iter().map(|(s, j)| (*s, cells_of(&j.state))).collect(), first_line: b.first_line, last_line: b.last_line, rows, columns, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
+    BodyTable { joins: b.joins.iter().map(|(s, j)| (*s, cells_of(&j.state))).collect(), first_line: b.first_line, last_line: b.last_line, function_body_start: b.function_body_start, rows, columns, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
 }
 
 #[cfg(test)]
@@ -917,11 +926,13 @@ mod tests {
             evaluated_spans: Vec::new(),
             constructed_vecs: Default::default(),
             def_id: rustc_hir::def_id::CRATE_DEF_ID.to_def_id(),
+            take_calls: BTreeSet::new(),
             func: func.into(),
             kind: "fn",
             parent: None,
             first_line: first,
             last_line: first + 9,
+            function_body_start: Some((first, 0)),
             vars: Vec::new(),
             columns: cols.iter().map(|c| col(c)).collect(),
             uniform_option_refs: Default::default(),

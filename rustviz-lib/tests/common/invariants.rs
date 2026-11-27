@@ -210,9 +210,11 @@ struct Seg {
 }
 
 impl Seg {
-    /// Drawn as a live column: not "no value yet", not moved out.
+    /// Drawn as a live column, including an initialized ManuallyDrop
+    /// wrapper whose contents were taken.
     fn live(&self) -> bool {
-        ["full_privilege", "partial_privilege", "revoked_privilege"]
+        ["full_privilege", "partial_privilege", "revoked_privilege",
+         "manually_taken", "manually_taken_shared", "manually_taken_mut"]
             .iter()
             .any(|s| self.state == *s || self.state == format!("{}_gray", s))
     }

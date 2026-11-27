@@ -2411,8 +2411,13 @@ pub fn render_svg(
     let (timeline_panel_string, max_width) = timeline_panel::render_timeline_panel(visualization_data);
     // Each element's `data-rv-id`, and its rows as code-panel lines.
     let timeline_panel_string = rv_attrs::finalize(&timeline_panel_string, &row_lines);
-    let tl_rv = rv_attrs::invalid_states_attr(visualization_data, &row_lines)
-        + &rv_attrs::dead_rows_attr(&visualization_data.inline_dead_rows);
+    let mut tl_rv = rv_attrs::invalid_states_attr(visualization_data, &row_lines)
+        + &rv_attrs::source_rows_attr("data-rv-dead-rows", &visualization_data.inline_dead_rows);
+    let unreachable = visualization_data.state_table.unreachable_rows()
+        .map(|((line, col), row)| format!("{line}:{col}:{row}")).collect::<Vec<_>>().join(" ");
+    if !unreachable.is_empty() {
+        tl_rv.push_str(&format!(" data-rv-unreachable-rows=\"{unreachable}\""));
+    }
     
     // Code-panel width: scale with the longest source line so long
     // function signatures (e.g. `fn compare_strings(_a: &String,

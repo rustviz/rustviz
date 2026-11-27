@@ -1,7 +1,7 @@
 // #283: dropping a `ManuallyDrop<T>` by hand. `ManuallyDrop::drop`
 // drops the value inside it (md must not be used afterwards, and its
-// scope end still drops nothing); `ManuallyDrop::take` moves the value
-// out into the result, so md is moved-out afterwards.
+// scope end still drops nothing); `ManuallyDrop::take` returns the value
+// through an unsafe call that leaves the wrapper initialized in MIR.
 use std::mem::ManuallyDrop;
 
 struct Holder { a: ManuallyDrop<String>, b: String }
@@ -16,4 +16,13 @@ fn main() {
     let mut h = Holder { a: ManuallyDrop::new(String::from("a")), b: String::from("b") };
     unsafe { ManuallyDrop::drop(&mut h.a); }
     println!("{}", h.b);
+}
+
+fn replace_taken_wrapper() {
+    let mut slot = ManuallyDrop::new(String::from("old"));
+    let old = unsafe { ManuallyDrop::take(&mut slot) };
+    drop(old);
+    slot = ManuallyDrop::new(String::from("new"));
+    let new = ManuallyDrop::into_inner(slot);
+    drop(new);
 }
