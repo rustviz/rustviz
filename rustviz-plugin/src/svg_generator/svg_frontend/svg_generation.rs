@@ -1012,6 +1012,18 @@ fn ordered_effect_rows(events: &[ExternalEvent], order: &BTreeMap<usize, (usize,
     (rows.len() > 1).then(|| rows.into_values().collect())
 }
 
+/// Split proven successive assignments to the same slot into drawing rows.
+fn ordered_store_rows(events: &[ExternalEvent], order: &BTreeMap<usize, (usize, (usize, usize, i8))>) -> Option<Vec<Vec<ExternalEvent>>> {
+    let &(group, _) = order.get(&events.first()?.get_id())?;
+    let mut rows = BTreeMap::<_, Vec<_>>::new();
+    for event in events {
+        let &(g, rank) = order.get(&event.get_id())?;
+        if group != g { return None; }
+        rows.entry(rank).or_default().push(event.clone());
+    }
+    (rows.len() > 1).then(|| rows.into_values().collect())
+}
+
 impl OneLineArmGaps {
     fn of(
         branches: &[ExtBranchData],
@@ -1022,7 +1034,6 @@ impl OneLineArmGaps {
         l_map: &HashMap<usize, usize>,
         binding_columns: &[(u64, u64)],
         arrow_tracks: &HashMap<usize, usize>,
-        store_order: &BTreeMap<usize, (usize, usize)>,
         forced: bool,
         disagree: bool,
         one_row_per_arm: &BTreeSet<usize>,
@@ -1046,7 +1057,7 @@ impl OneLineArmGaps {
         // copies of everything `mutate_branch_lines` changes.
         let stacks = || branches.iter().zip(&spans).any(|(b, &(start, _))| {
             mutate_branch_lines(&mut b.clone(), &mut l_map.clone(), 0, (line_num, start),
-                &mut binding_columns.to_vec(), &mut arrow_tracks.clone(), store_order, false, None, one_row_per_arm, &mut HashSet::new(), row_layout) > 0
+                &mut binding_columns.to_vec(), &mut arrow_tracks.clone(), false, None, one_row_per_arm, &mut HashSet::new(), row_layout) > 0
         });
         let stacked: Vec<bool> = (0..spans.len())
             .map(|j| shares_row(j) && branches[..=j].iter().any(|b| stacks_on(b, spans[j].0)))
@@ -1189,13 +1200,13 @@ pub fn mutate_branch_lines(
     pattern_lines: (usize, usize),
     binding_columns: &mut Vec<(u64, u64)>,
     arrow_tracks: &mut HashMap<usize, usize>,
-    store_order: &BTreeMap<usize, (usize, usize)>,
     in_spread_arm: bool,
     enclosing_fork: Option<(usize, bool)>,
     one_row_per_arm: &BTreeSet<usize>,
     fork_above: &mut HashSet<usize>,
     row_layout: &crate::event_order::RowLayout,
 ) -> usize {
+    let mut stacked_stores = BTreeSet::new();
     let old_extra_lines = extra_lines;
     let src_line: HashMap<usize, usize> = b_data.e_data.iter().map(|(l, e)| (e.get_id(), *l)).collect();
     let old_line_map = b_data.line_map.clone();
@@ -1234,7 +1245,7 @@ pub fn mutate_branch_lines(
         }
         match e {
             ExternalEvent::Branch {branches, split_point, merge_point, branch_type, live_vars, id, .. } => {
-                let gaps = OneLineArmGaps::of(branches, branch_type, *merge_point, line_num, live_vars, l_map, binding_columns, arrow_tracks, store_order, in_spread_arm, one_row_per_arm.contains(id), one_row_per_arm, row_layout);
+                let gaps = OneLineArmGaps::of(branches, branch_type, *merge_point, line_num, live_vars, l_map, binding_columns, arrow_tracks, in_spread_arm, one_row_per_arm.contains(id), one_row_per_arm, row_layout);
                 // Leave a full row for the enclosing diagonal before the
                 // inner fork. Earlier events on this row, such as a
                 // let-chain's pattern binding, retain their positions.
@@ -1261,7 +1272,7 @@ pub fn mutate_branch_lines(
                     }
                     let pattern_lines = (line_num, *start);
                     *start += arm_start_shift(*start, line_num, before_gap, extra_lines);
-                    let b = mutate_branch_lines(branch, l_map, extra_lines, pattern_lines, binding_columns, arrow_tracks, store_order, gaps.spread(), Some((fork_row, gaps.fork_above)), one_row_per_arm, fork_above, row_layout);
+                    let b = mutate_branch_lines(branch, l_map, extra_lines, pattern_lines, binding_columns, arrow_tracks, gaps.spread(), Some((fork_row, gaps.fork_above)), one_row_per_arm, fork_above, row_layout);
                     extra_lines += b;
                     *end += extra_lines;
                 }
@@ -1302,11 +1313,12 @@ pub fn mutate_branch_lines(
                         on_pattern_line.then(|| side_by_side_bindings(ev, b_data)).flatten()
                             .or_else(|| chain_bindings_side_by_side(ev, binding_columns).then(Vec::new))
                     });
-                    let ordered = res.as_deref().and_then(|ev| ordered_effect_rows(ev, store_order).or_else(|| ordered_effect_rows(ev, &row_layout.call_rows)));
+                    let ordered = res.as_deref().and_then(|ev| ordered_store_rows(ev, &row_layout.stack_points).or_else(|| ordered_effect_rows(ev, &row_layout.call_rows)));
                     let ex = match res {
                     Some(ev) if ordered.is_some() => {
                         let mut row = new_line_num;
                         for group in ordered.unwrap() {
+                            stacked_stores.extend(group.iter().map(ExternalEvent::get_id));
                             for event in &group {
                                 skippable_ev.insert(event.get_id());
                                 if let Some((l, _)) = b_data.e_data[i..].iter_mut().find(|(_, e)| e.get_id() == event.get_id()) {
@@ -1489,6 +1501,7 @@ pub fn mutate_branch_lines(
     // writes through, `r.name = a` with r's last use, #1349, still comes
     // first.)
     row_layout.align_field_handoffs(&mut b_data.e_data);
+    row_layout.align_store_events(&mut b_data.e_data, &stacked_stores);
     sort_line_ends_by_row(&mut b_data.e_data, &src_line);
     note_still_borrowed_on_later_rows(&mut b_data.e_data, &src_line);
     extra_lines - old_extra_lines
@@ -1779,6 +1792,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
     let sequence: HashMap<_, _> = visualization_data.preprocess_external_events.iter()
         .enumerate().map(|(i, (_, e))| (e.get_id(), i)).collect();
     let mut placed = Vec::new();
+    let mut stacked_stores = BTreeSet::new();
     let mut i: usize = 0;
     let size: usize = visualization_data.preprocess_external_events.len();
     let mut event_line_map_replace: BTreeMap<usize, Vec<ExternalEvent>> = BTreeMap::new();
@@ -1861,7 +1875,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                 split_rows = (*merge_point > *split_point).then_some((*split_point, extra_lines));
                 *split_point += extra_lines;
                 branch_line = *line_num + extra_lines;
-                let gaps = OneLineArmGaps::of(branches, branch_type, *merge_point, *line_num, live_vars, &line_insertion_map, &visualization_data.binding_columns, &visualization_data.arrow_tracks, &visualization_data.state_table.store_order, false, one_row_per_arm.contains(id), one_row_per_arm, &visualization_data.row_layout);
+                let gaps = OneLineArmGaps::of(branches, branch_type, *merge_point, *line_num, live_vars, &line_insertion_map, &visualization_data.binding_columns, &visualization_data.arrow_tracks, false, one_row_per_arm.contains(id), one_row_per_arm, &visualization_data.row_layout);
                 let extra_before = extra_lines;
                 let fork_row = *split_point - usize::from(gaps.fork_above);
                 for (j, branch) in branches.iter_mut().enumerate() {
@@ -1874,7 +1888,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                     let pattern_lines = (*line_num, *start);
                     *start += arm_start_shift(*start, *line_num, before_gap, extra_lines);
                     // recurse into the branch
-                    let b = mutate_branch_lines(branch, &mut line_insertion_map, extra_lines, pattern_lines, &mut visualization_data.binding_columns, &mut visualization_data.arrow_tracks, &visualization_data.state_table.store_order, gaps.spread(), Some((fork_row, gaps.fork_above)), one_row_per_arm, &mut visualization_data.fork_above, &visualization_data.row_layout);
+                    let b = mutate_branch_lines(branch, &mut line_insertion_map, extra_lines, pattern_lines, &mut visualization_data.binding_columns, &mut visualization_data.arrow_tracks, gaps.spread(), Some((fork_row, gaps.fork_above)), one_row_per_arm, &mut visualization_data.fork_above, &visualization_data.row_layout);
                     extra_lines += b;
                     *end += extra_lines;
                 }
@@ -2034,11 +2048,12 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
             let res = line_ev.map(|evs| evs.iter()
                 .filter(|e| !arm_drawn.contains(&e.get_id()))
                 .cloned().collect::<Vec<_>>());
-            let ordered = res.as_deref().and_then(|ev| ordered_effect_rows(ev, &visualization_data.state_table.store_order).or_else(|| ordered_effect_rows(ev, &visualization_data.row_layout.call_rows)));
+            let ordered = res.as_deref().and_then(|ev| ordered_store_rows(ev, &visualization_data.row_layout.stack_points).or_else(|| ordered_effect_rows(ev, &visualization_data.row_layout.call_rows)));
             let ex = match res {
                 Some(ev) if ordered.is_some() => {
                     let mut row = final_line_num;
                     for group in ordered.unwrap() {
+                        stacked_stores.extend(group.iter().map(ExternalEvent::get_id));
                         for e in &group {
                             placed.push((row, e.clone()));
                             skippable_ev.insert(e.get_id());
@@ -2236,6 +2251,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
     visualization_data.row_layout.align(&mut placed, &event_line_map_replace);
     visualization_data.row_layout.align_field_handoffs(&mut placed);
     crate::event_order::replay(&mut placed, &sequence, &visualization_data.row_layout);
+    visualization_data.row_layout.align_store_events(&mut placed, &stacked_stores);
     for (row, event) in placed {
         visualization_data.append_processed_external_event(event, row);
     }
@@ -2463,7 +2479,7 @@ mod tests {
 
     fn place_arm(arm: &mut ExtBranchData, insertions: &mut HashMap<usize, usize>, extra: usize) -> usize {
         mutate_branch_lines(arm, insertions, extra, (1, 1), &mut vec![], &mut HashMap::new(),
-            &BTreeMap::new(), false, None, &BTreeSet::new(), &mut HashSet::new(), &Default::default())
+            false, None, &BTreeSet::new(), &mut HashSet::new(), &Default::default())
     }
 
     #[test]

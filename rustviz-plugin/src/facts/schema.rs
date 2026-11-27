@@ -174,6 +174,9 @@ pub struct BodyFacts {
     /// by the call and the receiver place.
     #[serde(skip)]
     pub receiver_loans: std::collections::HashMap<(rustc_span::Span, String), Vec<ReceiverLoan>>,
+    /// A single proven source for this holder at release. True when its whole owner is also usable.
+    #[serde(skip)]
+    pub(crate) direct_releases: BTreeMap<(usize, Occurrence), bool>,
     /// A reborrow end after which no loan still restricts its parent on this CFG edge.
     #[serde(skip)]
     pub restored_reborrows: BTreeSet<(rustc_middle::mir::Location, rustc_middle::mir::Location, usize)>,
@@ -1061,7 +1064,7 @@ impl ScopeEnds {
 
 /// One execution site in this body. Drops on two early exits can execute the
 /// same MIR instruction. A borrow can end on just one successor of that site.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Hash, Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
 pub struct Occurrence {
     #[serde(serialize_with = "location")]
     pub at: Location,
@@ -1146,7 +1149,7 @@ pub enum EndProjection {
 }
 
 impl EndPlace {
-    pub(super) fn new<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, p: rustc_middle::mir::Place<'tcx>, name: String) -> Self {
+    pub(crate) fn new<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, p: rustc_middle::mir::Place<'tcx>, name: String) -> Self {
         use rustc_middle::mir::ProjectionElem::*;
         let projection = p.projection.iter().map(|step| match step {
             Deref => EndProjection::Deref,
@@ -1299,6 +1302,13 @@ pub enum Fact {
         /// including a definition whose loan has already gone out of scope.
         #[serde(skip_serializing_if = "Option::is_none")]
         reaching: Option<Vec<usize>>,
+        /// Definition sites of the slot on the incoming normal CFG paths.
+        /// The same loan can be installed again by copying a reference.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        definitions: Vec<Occurrence>,
+        /// At least one incoming normal path has no value in the slot.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        maybe_uninitialized: bool,
     },
     /// A `Drop` of `path`. `how` (what runs, as drop elaboration decides:
     /// borrowck's imaginary `else` of an irrefutable `if let` doesn't

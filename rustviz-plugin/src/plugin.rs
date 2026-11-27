@@ -286,7 +286,6 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
             visitor.collect_approx_notes(hir_body);
             approx_notes.append(&mut visitor.approx_notes);
             rap_hash_num = visitor.rap_hashes;
-            visitor.record_store_order(&mut state_table.store_order);
             state_table.end_loans.append(&mut visitor.end_loans);
             binding_columns.append(&mut visitor.binding_columns);
             moves_out_first.append(&mut visitor.moves_out_first);
@@ -348,7 +347,6 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
         visitor.collect_approx_notes(hir_body);
         approx_notes.append(&mut visitor.approx_notes);
         rap_hash_num = visitor.rap_hashes;
-        visitor.record_store_order(&mut state_table.store_order);
         state_table.end_loans.append(&mut visitor.end_loans);
         binding_columns.append(&mut visitor.binding_columns);
         moves_out_first.append(&mut visitor.moves_out_first);

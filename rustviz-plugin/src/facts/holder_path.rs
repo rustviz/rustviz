@@ -27,7 +27,7 @@ pub(super) struct Trace {
 }
 
 impl<'tcx> HolderPath<'_, 'tcx> {
-    fn source(
+    pub(super) fn source(
         &self,
         value: &Rvalue<'tcx>,
         suffix: &[PlaceElem<'tcx>],

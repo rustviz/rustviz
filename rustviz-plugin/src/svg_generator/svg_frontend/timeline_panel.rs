@@ -3069,9 +3069,13 @@ fn render_dot(
             }
         }
         let rap = &visualization_data.timelines[hash].resource_access_point;
+        let stacked = visualization_data.row_layout.stack_points.contains_key(&event.get_id());
         if let Some(state) = one_dot_holder_state(history, i, rap, &visualization_data.row_layout) {
             let tip = timeline_segment_title(&state, rap, visualization_data, None);
-            dots.entry(*hash, timeline_data.x_val, event_y, *line_number, timeline_data).lines.push((None, tip));
+            let dot = dots.entry(*hash, timeline_data.x_val, event_y, *line_number, timeline_data);
+            if !stacked || !dot.lines.iter().any(|(_, line)| *line == tip) {
+                dot.lines.push((None, tip));
+            }
         }
         // push to individual timelines
         let lend_id = match event {
@@ -3093,6 +3097,13 @@ fn render_dot(
             data.title = title;
         }
         append_dot(data, timeline_data, dots, lend_id, event_kind, *line_number);
+        if stacked && matches!(event, Event::StaticBorrow { .. }) && rap.is_ref() && !rap.is_mutref() {
+            let tip = hover_messages::state_static_ref_full_privilege(rap.name(), rap.points_to_copy());
+            let dot = dots.entry(*hash, timeline_data.x_val, event_y, *line_number, timeline_data);
+            if !dot.lines.iter().any(|(_, line)| *line == tip) {
+                dot.lines.push((None, tip));
+            }
+        }
         if let Some(holder) = borrow_before_capture(history, i, &visualization_data.row_layout) {
             let dot = dots.entry(*hash, timeline_data.x_val, event_y, *line_number, timeline_data);
             if let [.., release, capture] = dot.lines.as_mut_slice() {
@@ -3213,6 +3224,7 @@ fn field_lenders_dot_title(event: &Event, name: &String, vd: &VisualizationData)
 // reference that borrows from two lenders, `longest(&a, &b)`) already
 // read as one sentence, and a lone end keeps its plain wording.
 fn ends_several_loans_title(event: &Event, history: &[(usize, Event)], line: usize, name: &mut String, vd: &VisualizationData, rap: &ResourceAccessPoint) -> Option<String> {
+    if vd.row_layout.uncertain_store_ends.contains(&event.get_id()) { return None; }
     let mine = event.borrow_end_lender_name()?;
     let is_mut = matches!(event, Event::MutableDie { .. });
     let table = &vd.state_table;
@@ -3242,7 +3254,7 @@ fn ends_several_loans_title(event: &Event, history: &[(usize, Event)], line: usi
         // A field returned by a call may represent alternative lenders.
         // Only separate its names when the stores themselves are ordered.
         let alternatives = history.iter().any(|(l, e)| on_row(*l) && vd.field_lenders.contains_key(&e.get_id()));
-        if (!alternatives || table.store_order.contains_key(&event.get_id()))
+        if (!alternatives || vd.row_layout.stack_points.contains_key(&event.get_id()))
             && history.iter().any(|(l,e)| on_row(*l) && matches!(e, Event::StaticBorrow { .. } | Event::MutableBorrow { .. }))
             && history.iter().any(|(l,e)| on_row(*l) && identified(e).is_some_and(|other| other != id)
                 && e.borrow_end_lender_name().as_ref() != Some(&mine))
@@ -7350,12 +7362,16 @@ fn render_generic_arrow(
             let table = &visualization_data.state_table;
             let lookup = |id| table.loan(*visualization_data.fn_source_lines.get(from.hash())?, id);
             let ids = table.end_loans.get(&id).map(Vec::as_slice).unwrap_or_default();
-            let loan = match ids { [id] => lookup(*id), _ => None };
+            let loan = match ids { [loan] if !layout.uncertain_store_ends.contains(&id) => lookup(*loan), _ => None };
             // Several loans can share one end arrow. Their common permission
             // is known even when no single loan describes the holder's path.
             let kind_of = |id| lookup(id).and_then(hover_messages::loan_kind_word);
             let kind = ids.first().and_then(|id| kind_of(*id)).filter(|k| ids.iter().all(|id| kind_of(*id) == Some(*k)));
-            hover_messages::arrow_end_title(from, to, static_lender.as_ref(), *of_ref_var, loan, kind, layout.pattern_payloads.get(&id))
+            if let Some(kind) = layout.available_after_store_end.get(&id).and_then(|id| kind_of(*id)) {
+                hover_messages::arrow_repoint_release(from, to, kind)
+            } else {
+                hover_messages::arrow_end_title(from, to, static_lender.as_ref(), *of_ref_var, loan, kind, layout.pattern_payloads.get(&id))
+            }
         }
         _ => hover_messages::arrow_full_title(external_event, from, to, option_ref,
             visualization_data.row_layout.result_lend_titles.get(&external_event.get_id())),

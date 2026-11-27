@@ -3,6 +3,7 @@
 //! assignment in a successor that prompted the walk to draw a give-back.
 use crate::expr_visitor::ExprVisitor;
 use crate::facts::{Ev, Fact, LoanInfo};
+use crate::facts::repoints::Boundary;
 use crate::svg_generator::data::{ExternalEvent, ResourceTy, StaticLender};
 use rustc_middle::mir::{Body, Location};
 use rustc_span::Span;
@@ -19,7 +20,7 @@ type Path = Vec<(usize, usize)>; // Branch event id, arm index.
 
 #[derive(Default)]
 struct RepresentedEnds {
-  edges: BTreeSet<(usize, Location, Option<Location>)>,
+  edges: BTreeSet<(usize, crate::facts::Occurrence)>,
   arm_loans: BTreeSet<(usize, usize, usize)>, // Branch id, arm, loan.
 }
 
@@ -215,6 +216,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // the assignment's drop or an explicit drop of the old holder.
       let dropped = self.field_overwrite_ends.remove(&ev.get_id());
       let mut sites = BTreeMap::<Site, BTreeSet<usize>>::new();
+      let mut boundaries = BTreeMap::<Site, Vec<crate::facts::repoints::Boundary>>::new();
       let mut lender_only = BTreeSet::new();
       let mut replacement_drops = BTreeMap::new();
       let mut drop_holder = None;
@@ -293,6 +295,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               lender_only.insert(site.clone());
             }
           }
+          boundaries.entry(site.clone()).or_default().push(crate::facts::repoints::Boundary {
+            loan: *loan, fact: edge, release: !is_own, row: row.line,
+          });
           sites.entry(site).or_default().insert(*loan);
         }
       }
@@ -333,12 +338,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           continue;
         }
         let detached = lender_only.contains(&site);
+        let ends = if individual { boundaries.remove(&site).unwrap_or_default() }
+          else { boundaries.values().flatten().copied().collect() };
         if !detached && !individual && site.matches(self.preprocessed_events, &origin, line, ev.get_id()) {
+          self.drawn_references.ends.insert(ev.get_id(), ends);
           continue;
         }
         remove.insert(ev.get_id());
         let mut e = ev.clone();
         identify_end(&mut e, !first, ids, self.unique_id, &mut self.end_loans);
+        self.drawn_references.ends.insert(e.get_id(), ends);
         if detached {
           if let ExternalEvent::StaticDie { from, .. } | ExternalEvent::MutableDie { from, .. } = &mut e {
             *from = ResourceTy::Anonymous;
@@ -392,13 +401,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if !ends.iter().all(|(l, _, _, _)| l == line) || !ends.iter().any(|(_, _, h, _)| *h == r.name()) {
         continue;
       }
-      let mut mine = BTreeSet::new();
+      let mut mine = BTreeMap::<_, Vec<_>>::new();
       let mut others = BTreeSet::new();
       for (row, e, h, next) in ends {
         let mut site = Site { path: Vec::new(), before: None, row };
         self.locate(self.preprocessed_events, &switches, e.location, e, next, &mut site);
         if h == r.name() {
-          mine.insert(site);
+          mine.entry(site).or_default().push(Boundary { loan: *loan, fact: e, release: true, row });
         } else if slots.iter().any(|(_, ae, arm)| {
           !arm.is_empty()
             && *arm == site.path
@@ -412,12 +421,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           break;
         }
       }
-      if others.is_empty() || mine.is_empty() || mine.iter().any(|s| s.path.is_empty() || others.contains(&s.path)) {
+      if others.is_empty() || mine.is_empty() || mine.keys().any(|s| s.path.is_empty() || others.contains(&s.path)) {
         continue;
       }
       // A later exit pass handles a conditional that reaches its join.
       // If all paths leave here the last holder on each exit is final.
-      if !mine.iter().all(|s| {
+      if !mine.keys().all(|s| {
         s.path.last().is_some_and(|(id, _)| {
           matches!(branch_at(self.preprocessed_events,*id,&mut Vec::new()),
           Some((_, ExternalEvent::Branch { branches, .. })) if branches.iter().all(|b|b.diverges))
@@ -426,12 +435,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         continue;
       }
       remove.insert(ev.get_id());
-      for site in mine {
+      for (site, edges) in mine {
         let mut copy = ev.clone();
         if let ExternalEvent::StaticDie { id, .. } | ExternalEvent::MutableDie { id, .. } = &mut copy {
           *id = *self.unique_id;
           *self.unique_id += 1;
           self.end_loans.insert(*id, vec![*loan]);
+          self.drawn_references.ends.insert(*id, edges);
         }
         put.push((site, copy));
       }
@@ -448,6 +458,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let id = *self.unique_id;
         *self.unique_id += 1;
         self.end_loans.insert(id, vec![*loan]);
+        self.drawn_references.ends.insert(id, vec![Boundary { loan: *loan, fact: e, release: false, row: *row }]);
         put.push((site, ExternalEvent::RefDie { slot: id, id, from: from.clone(), to: to.clone(), num_curr_borrowers: 1 }));
       }
     }
@@ -578,7 +589,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             }
           }
         }
-        candidates.push((h.as_str(), site, own && !is_own, *loan));
+        candidates.push((h.as_str(), site, own && !is_own, Boundary { loan: *loan, fact: e, release: !own, row }));
       }
       let dests = nested_destinations(candidates, holder, root.map(String::as_str), line);
       if dests.is_empty() {
@@ -586,13 +597,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       let listed = arm.line_map.get(&line).is_some_and(|g| g.iter().any(|x| x.get_id() == ev.get_id()));
       remove.insert(ev.get_id());
-      for (i, ((s, only_holder), ids)) in dests.into_iter().enumerate() {
+      for (i, ((s, only_holder), edges)) in dests.into_iter().enumerate() {
         let mut event = if only_holder {
           ExternalEvent::RefDie { slot: ev.end_slot().unwrap_or(ev.get_id()), from: from.clone(), to: to.clone(), id: ev.get_id(), num_curr_borrowers: 1 }
         } else {
           ev.clone()
         };
-        identify_end(&mut event, i > 0, ids.into_iter().collect(), self.unique_id, &mut self.end_loans);
+        let loans = edges.iter().map(|b| b.loan).collect::<BTreeSet<_>>();
+        identify_end(&mut event, i > 0, loans.into_iter().collect(), self.unique_id, &mut self.end_loans);
+        self.drawn_references.ends.insert(event.get_id(), edges);
         let mut path = origin.clone();
         path.extend(s.path);
         put.push((path, s.before, (s.row, event), listed && line == s.row));
@@ -638,7 +651,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     for (line, ev, origin) in templates {
       let (ResourceTy::Index(current, ..), _) = endpoints(&ev) else { continue };
       let ids = &loans[&ev.get_id()];
-      let mut dest = BTreeSet::new();
+      let mut dest = BTreeMap::<_, Vec<_>>::new();
       for row in &facts.rows {
         for end in &row.facts {
           let Fact::BorrowEnd { loan, holder, to_line, .. } = &end.fact else { continue };
@@ -655,15 +668,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               }
             }
           }
-          dest.insert((site, holder.clone()));
+          dest.entry((site, holder.clone())).or_default().push(Boundary { loan: *loan, fact: end, release: true, row: row.line });
         }
       }
-      if dest.iter().all(|(site, holder)| site.matches(self.preprocessed_events, &origin, line, ev.get_id()) && holder == current.name()) {
+      if dest.keys().all(|(site, holder)| site.matches(self.preprocessed_events, &origin, line, ev.get_id()) && holder == current.name()) {
+        self.drawn_references.ends.insert(ev.get_id(), dest.into_values().flatten().collect());
         continue;
       }
-      let stay = dest.len() == 1 && dest.first().is_some_and(|(site, _)| site.matches(self.preprocessed_events, &origin, line, ev.get_id()));
+      let stay = dest.len() == 1 && dest.keys().next().is_some_and(|(site, _)| site.matches(self.preprocessed_events, &origin, line, ev.get_id()));
       if !stay { remove.insert(ev.get_id()); }
-      for (i, (site, name)) in dest.into_iter().enumerate() {
+      for (i, ((site, name), boundaries)) in dest.into_iter().enumerate() {
         let mut e = ev.clone();
         let (id, from) = match &mut e {
           ExternalEvent::StaticDie { id, from, .. } | ExternalEvent::MutableDie { id, from, .. } => (id, from),
@@ -673,7 +687,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           *id = *self.unique_id;
           *self.unique_id += 1;
         }
-        self.end_loans.insert(*id, ids.clone());
+        self.end_loans.insert(*id, boundaries.iter().map(|b| b.loan).collect());
+        self.drawn_references.ends.insert(*id, boundaries);
         if let (ResourceTy::Index(r, label, _), Some(to)) = (from, self.raps.get(&name)) {
           if label == r.name() {
             *label = name;
@@ -693,114 +708,45 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
-  /// The successive reference values of one slot. Stores on alternative
-  /// control-flow paths cannot form a sequence. Each borrowing arrow
-  /// carries the ID of the reference that its RHS produced.
-  pub(crate) fn record_store_order(&self, order: &mut BTreeMap<usize, (usize, usize)>) {
-    let Some(facts) = self.body_facts else { return };
-    if self.repoint_borrows.len() < 2 { return; }
-    let mut slots = Vec::new();
-    templates_in(self.preprocessed_events, &mut Vec::new(), Some(&self.end_loans), &mut slots);
-    for row in &facts.rows {
-      let mut writes = BTreeMap::<_, Vec<_>>::new();
-      for e in &row.facts {
-        if let Fact::Repoint { holder, new, reaching: Some(old), .. } = &e.fact {
-          writes.entry(holder).or_default().push((e, new, old));
-        }
-      }
-      for (holder, stores) in writes {
-        // Require both execution order and reaching definitions. Two stores
-        // in different arms can have the same source row and the same slot.
-        if stores.len() < 2 || !stores.windows(2).all(|w|
-          dominates(&self.bwf.body, w[0].0.location, w[1].0.location) && w[0].1 == w[1].2)
-          || !stores.iter().all(|(_, new, _)| matches!(new.as_slice(), [l] if self.repoint_borrows.values().any(|b| b == l)))
-        {
-          continue;
-        }
-        let mut effects = BTreeMap::new();
-        for &(store, new, _) in &stores {
-          for (&id, &loan) in &self.repoint_borrows {
-            if new.contains(&loan) { effects.insert(id, store); }
-          }
-        }
-        // Overwriting a reference need not release its lender. Match the
-        // return arrow to the actual loan's end, even for an earlier store.
-        for (_, event, _) in slots.iter().filter(|(l, e, _)| *l == row.line && endpoints(e).0.name() == *holder) {
-          let id = event.get_id();
-          let ids = &self.end_loans[&id];
-          let lender = endpoints(event).1.name();
-          let mut ends = row.facts.iter().filter(|e| matches!(&e.fact,
-            Fact::BorrowEnd { loan, lender: from, .. } if ids.contains(loan) && *from == lender));
-          if let Some(end) = ends.next().filter(|first| ends.all(|e| e.location == first.location && e.occurrence.successor == first.occurrence.successor)) {
-            effects.insert(id, end);
-          }
-        }
-        let Some((&group, _)) = effects.first_key_value() else { continue };
-        let mut effects: Vec<_> = effects.into_iter().collect();
-        effects.sort_by_key(|(_, e)| e.order);
-        // A loan can end on just one edge out of a block. Its end only
-        // precedes a later effect on a path through that successor.
-        if !effects.windows(2).all(|w| {
-          let (a, b) = (w[0].1, w[1].1);
-          if a.order == b.order { return a.occurrence.successor == b.occurrence.successor; }
-          dominates(&self.bwf.body, a.location, b.location)
-            && a.occurrence.successor.is_none_or(|next| dominates(&self.bwf.body, next, b.location))
-        }) {
-          continue;
-        }
-        for (rank, same_point) in effects.chunk_by(|a, b| a.1.order == b.1.order).enumerate() {
-          order.extend(same_point.iter().map(|(id, _)| (*id, (group, rank))));
-        }
-      }
-    }
-  }
-
-  /// Associate existing return dots with their compiler edges. An event on
-  /// another path, or one that could describe several edges, cannot cover
-  /// this edge. Pattern bindings also have a loan identity at their MIR init.
-  fn represented_edges(&self, switches: &BTreeMap<usize, Vec<Location>>) -> RepresentedEnds {
+  /// End placement records the actual boundaries it drew. Pattern arms
+  /// also need to know that their binding received the loan: the failing
+  /// successor of the switch can release it without ever initializing that
+  /// local. A row shared by the two successors says nothing about coverage.
+  fn drawn_ends(&self, switches: &BTreeMap<usize, Vec<Location>>) -> RepresentedEnds {
     let Some(facts) = self.body_facts else { return Default::default() };
     let mut slots = Vec::new();
     templates_in(self.preprocessed_events, &mut Vec::new(), None, &mut slots);
-    let mut represented = RepresentedEnds::default();
-    for (row, ev, path) in slots {
-      if !matches!(&ev, ExternalEvent::MutableDie { still_borrowed_by, .. } | ExternalEvent::StaticDie { still_borrowed_by, .. }
+    let mut drawn = RepresentedEnds::default();
+    for (line, event, path) in slots {
+      if !matches!(&event, ExternalEvent::MutableDie { still_borrowed_by, .. } | ExternalEvent::StaticDie { still_borrowed_by, .. }
         if still_borrowed_by.is_empty()) { continue; }
-      let (from, to) = endpoints(&ev);
-      let holder = from.real_name();
-      let lender = to.real_name();
-      let mut bound = BTreeSet::new();
-      for &(id, a) in &path {
-        if let Some(patterns) = self.arm_bindings.get(&id) {
-          let local = from.extract_rap().and_then(|r| r.ref_local().or_else(|| r.owner_local()));
-          for &(_, local) in patterns.iter().filter(|&&(arm, p)| arm == a && Some(p) == local) {
-            if let Some(inits) = facts.binding_loans.get(&local) {
-              bound.extend(inits.values().flatten().copied());
-            }
+      let id = event.get_id();
+      let (from, to) = endpoints(&event);
+      let holder = from.extract_rap().and_then(|r| r.ref_local().or_else(|| r.owner_local()));
+      let matches_lender = |loan| facts.loans.iter().find(|l| l.loan == loan).is_some_and(|l|
+        l.lender_local.and_then(|local| self.raps.place(local, &l.lender)).is_some_and(|r| Some(&r.rap) == to.extract_rap()));
+      let bound: BTreeSet<_> = if let Some(loans) = self.end_loans.get(&id) {
+        loans.iter().copied().collect()
+      } else {
+        path.iter().flat_map(|(id, arm)| self.arm_bindings.get(id).into_iter().flatten()
+          .filter(move |(a, p)| a == arm && Some(*p) == holder))
+          .flat_map(|(_, p)| facts.binding_loans.get(p).into_iter().flat_map(|inits| inits.values().flatten().copied())).collect()
+      };
+      for loan in bound.into_iter().filter(|&l| matches_lender(l)) {
+        drawn.arm_loans.extend(path.iter().map(|&(id, a)| (id, a, loan)));
+      }
+      if let Some(boundaries) = self.drawn_references.ends.get(&id) {
+        for end in boundaries.iter().filter(|e| e.release) {
+          let Fact::BorrowEnd { to_line, .. } = end.fact.fact else { continue };
+          let mut site = Site { path: Vec::new(), row: end.row, before: None };
+          self.locate(self.preprocessed_events, switches, end.fact.display_location, end.fact, to_line, &mut site);
+          if site.matches(self.preprocessed_events, &path, line, id) {
+            drawn.edges.insert(end.key());
           }
         }
       }
-      if let Some(ids) = self.end_loans.get(&ev.get_id()) { bound = ids.iter().copied().collect(); }
-      for &loan in &bound {
-        if facts.loans.iter().any(|l| l.loan == loan && l.lender == lender) {
-          represented.arm_loans.extend(path.iter().map(|&(id, a)| (id, a, loan)));
-        }
-      }
-      let mut candidates = Vec::new();
-      for r in &facts.rows {
-        for e in &r.facts {
-          let Fact::BorrowEnd { loan, holder: h, lender: l, to_line, .. } = &e.fact else { continue };
-          if !bound.contains(loan) || *l != lender || !h.split('|').any(|n| n == holder) { continue; }
-          let mut site = Site { path: Vec::new(), before: None, row: r.line };
-          self.locate(self.preprocessed_events, switches, e.location, e, *to_line, &mut site);
-          if site.matches(self.preprocessed_events, &path, row, ev.get_id()) {
-            candidates.push((*loan, e.location, e.occurrence.successor));
-          }
-        }
-      }
-      if let [edge] = candidates.as_slice() { represented.edges.insert(*edge); }
     }
-    represented
+    drawn
   }
 
   /// Loans taken into pattern bindings are also ended on the outgoing
@@ -813,7 +759,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let body = &self.bwf.body;
     let mut put = Vec::new();
     let mut remove = BTreeSet::new();
-    let mut represented = self.represented_edges(&switches);
+    let mut represented = self.drawn_ends(&switches);
     for (&id, patterns) in &self.arm_bindings {
       if self.let_else_branches.contains(&id) { continue; }
       let mut parent = Vec::new();
@@ -882,7 +828,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             let rustc_middle::mir::Rvalue::Use(rustc_middle::mir::Operand::Copy(src)) = &pair.1 else { return false };
             binding(pair.0.local) && e.end_places.iter().any(|p| p.local == src.local.index())
           });
-          if copy_into_binding || represented.edges.contains(&(loan.loan, e.location, e.occurrence.successor)) {
+          if copy_into_binding || represented.edges.contains(&(loan.loan, e.occurrence)) {
             continue;
           }
           let initialized = |local| facts.rows.iter().flat_map(|r| &r.facts).any(|f|
@@ -940,7 +886,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             site.row = branch_type.get_start_end(a).0;
             site.before = arm.e_data.first().map(|(_, e)| e.get_id());
           }
-          represented.edges.insert((loan.loan, e.location, e.occurrence.successor));
+          represented.edges.insert((loan.loan, e.occurrence));
+          self.drawn_references.ends.insert(id_ev, vec![crate::facts::repoints::Boundary {
+            loan: loan.loan, fact: e, release: true, row: *row,
+          }]);
           self.end_loans.insert(id_ev, vec![loan.loan]);
           put.push((site.path, site.before, (site.row, event)));
           if from.extract_rap().is_some() {
@@ -972,7 +921,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       return;
     }
     let switches = self.branch_switches();
-    let mut covered = self.represented_edges(&switches).edges;
+    let mut covered = self.drawn_ends(&switches).edges;
     let mut put = Vec::new();
     for &id in &self.let_else_branches {
       let Some(bindings) = self.arm_bindings.get(&id) else { continue };
@@ -1028,10 +977,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             } else if let Fact::BorrowEnd { to_line, .. } = ev.fact {
               self.locate(&branches[0].e_data, &switches, ev.location, ev, to_line, &mut site);
             }
-            if !covered.insert((loan.loan, ev.location, ev.occurrence.successor)) { continue; }
+            if !covered.insert((loan.loan, ev.occurrence)) { continue; }
             let id = *self.unique_id;
             *self.unique_id += 1;
             self.end_loans.insert(id, vec![loan.loan]);
+            self.drawn_references.ends.insert(id, vec![Boundary { loan: loan.loan, fact: ev, release: true, row: row.line }]);
             let to = ResourceTy::Value(lender.clone());
             let end = if loan.kind == "mut" {
               ExternalEvent::MutableDie { slot: id, from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false, exhaustion: Vec::new() }
@@ -1117,13 +1067,13 @@ fn branch_at<'a>(events: &'a Events, wanted: usize, path: &mut Path) -> Option<&
 
 /// Different copies can hold the same loan. Only a boundary of the
 /// displayed holder can identify the template row being split.
-fn nested_destinations(
-  candidates: Vec<(&str, Site, bool, usize)>, holder: &str, root: Option<&str>, row: usize,
-) -> Vec<((Site, bool), BTreeSet<usize>)> {
-  let mut sites = BTreeMap::<_, BTreeSet<_>>::new();
+fn nested_destinations<T>(
+  candidates: Vec<(&str, Site, bool, T)>, holder: &str, root: Option<&str>, row: usize,
+) -> Vec<((Site, bool), Vec<T>)> {
+  let mut sites = BTreeMap::<_, Vec<_>>::new();
   for (names, site, only_holder, loan) in candidates {
     if names.split('|').any(|n| n == holder || Some(n) == root) {
-      sites.entry((site, only_holder)).or_default().insert(loan);
+      sites.entry((site, only_holder)).or_default().push(loan);
     }
   }
   if !sites.keys().any(|(s, _)| s.row == row) { return Vec::new(); }
@@ -1393,3 +1343,6 @@ mod tests {
     assert_eq!(by_id[&second.get_id()], [1]);
   }
 }
+
+#[cfg(test)]
+mod boundary_tests;

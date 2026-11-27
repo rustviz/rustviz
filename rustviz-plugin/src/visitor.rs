@@ -7075,35 +7075,51 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // Use the defining stores of the value this assignment replaces.
           // Its old copy can already be dead here, even though a different
           // holder keeps the loan alive in a sibling arm.
-          let mut old = self.body_facts.into_iter().flat_map(|f| f.rows.iter().flat_map(|r| &r.facts)
-            .filter_map(|ev| {
-              let crate::facts::Fact::Repoint { holder, reaching, .. } = &ev.fact else { return None };
-              let span = self.bwf.body.source_info(ev.location).span.with_parent(None);
-              (holder == &me && (span == lhs_expr.span.with_parent(None) || span == expr.span.with_parent(None)))
-                .then_some(reaching.as_ref()).flatten()
-            })).flatten().copied().collect::<std::collections::BTreeSet<_>>();
-          if old.is_empty() {
-            if let Some(l) = ref_data.borrow_span.and_then(|s| self.loan_at_span(s)) { old.insert(l.loan); }
+          if write_span.is_some() {
+            let store = self.reference_effects.assignment(lhs_expr.span, expr.span);
+            let issued = || ref_data.borrow_span.and_then(|span| self.loan_at_span(span));
+            if let Some(store) = store.filter(|s| s.incoming.is_none()) {
+              // The contents at the overwrite are unknown. An earlier,
+              // independently recorded end still belongs at its own MIR
+              // boundary (e.g. a call was passed &mut slot).
+              if let Some(loan) = issued() {
+                let slot = crate::facts::EndPlace::new(self.tcx, store.destination, String::new());
+                let ends = self.reference_effects.ends(loan.loan).filter(|b|
+                  crate::facts::repoints::precedes(&self.bwf.body, b.fact, store.fact)).collect::<Vec<_>>();
+                for (row, ev) in self.preprocessed_events.iter().rev().take_while(|(_, e)| e.get_id() >= ends_lo)
+                    .chain(self.late_old_ends.iter().rev().take_while(|(_, e)| e.get_id() >= ends_lo)) {
+                  let release = match ev {
+                    ExternalEvent::RefDie { .. } => false,
+                    ExternalEvent::StaticDie { to, .. } | ExternalEvent::MutableDie { to, .. }
+                      if loan.lender_local.is_some() && loan.lender_local == to.extract_rap()
+                        .and_then(|r| r.owner_local().or_else(|| r.ref_local())) => true,
+                    _ => continue,
+                  };
+                  let holds_slot = |b: &crate::facts::repoints::Boundary<'_>| b.fact.end_places.iter()
+                    .any(|p| p.local == slot.local && p.projection == slot.projection);
+                  let mut matches = ends.iter().copied().filter(|b| b.release == release &&
+                    (holds_slot(b) || (release && b.fact.end_places.is_empty())));
+                  // Select by loan, slot and normal edge. A release through
+                  // another holder can supply the kind at its own dot.
+                  if let Some(boundary) = matches.next().filter(|b| matches.next().is_none() && (holds_slot(b) || b.row == *row)) {
+                    self.drawn_references.ends.insert(ev.get_id(), vec![boundary]);
+                    self.end_loans.insert(ev.get_id(), vec![loan.loan]);
+                  }
+                }
+              }
+            } else {
+              let old = match store.and_then(|s| s.incoming) {
+                Some(loans) => loans.to_vec(),
+                None => issued().into_iter().map(|l| l.loan).collect(),
+              };
+              if !old.is_empty() {
+                for id in ends_lo..*self.unique_id {
+                  self.end_loans.insert(id, old.clone());
+                  if let Some(store) = store { self.drawn_references.replaced_by.insert(id, store); }
+                }
+              }
+            }
           }
-          if write_span.is_some() && !old.is_empty() {
-            for id in ends_lo..*self.unique_id { self.end_loans.insert(id, old.iter().copied().collect()); }
-          }
-          // Add event for possible lender if necessary
-          // set possible lender to None
-
-          // check for a match in MIR
-          // let mir_b_data = self.gather_borrow_data(&self.bwf);
-          // for m_data in mir_b_data.iter() {
-          //   match ExprVisitor::borrow_match(&ref_data, m_data) {
-          //     Some(kill) => {
-          //       if kill > line_num { // this loan needs to be extended 
-                  
-          //       }
-          //       break;
-          //     }
-          //     None => {}
-          //   }
-          // }
 
           // update lhs_rty with new lender information (for a
           // destructuring assignment, as computed before any of
@@ -7645,10 +7661,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           }
           None => self.match_rhs(lhs_rty.clone(), pair_rhs, e),
         }
-        if let Some(loan) = self.loan_at_span(rhs_expr.span) {
+        if let Some(store) = self.reference_effects.assignment(lhs_expr.span, expr.span) {
           for (_, ev) in &self.preprocessed_events[n_events..] {
-            if matches!(ev, ExternalEvent::StaticBorrow { to, .. } | ExternalEvent::MutableBorrow { to, .. } if to == &lhs_rty) {
-              self.repoint_borrows.insert(ev.get_id(), loan.loan);
+            if matches!(ev, ExternalEvent::StaticBorrow { to, .. } | ExternalEvent::MutableBorrow { to, .. }
+              | ExternalEvent::Copy { to, .. } | ExternalEvent::Move { to, .. } if to == &lhs_rty) {
+              self.drawn_references.install(ev.get_id(), rhs_expr.span, *lhs_rty.hash(), self.tcx, store);
             }
           }
         }

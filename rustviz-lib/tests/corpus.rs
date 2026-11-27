@@ -45809,3 +45809,185 @@ fn fieldless_sibling_returns_cover_both_mir_calls_1884() {
     assert!(handoffs[0].0.starts_with("value>s@L5:"));
     assert!(handoffs[0].1.contains("shared borrow of s continues in r"));
 }
+
+#[test]
+fn repeated_repoint_orders_identical_arrows_and_their_uses() {
+    // The two calls read different generations of r. rustc permits the
+    // intervening push and rejects it inside either borrow before read(r).
+    let svg = run_with_local_backend("repoint_occurrences").timeline_panel_string();
+    let installs = arrow_points(&svg, "Immutable borrow from s to r");
+    let releases = arrow_points(&svg,
+        "r's shared borrow of s ends. This borrow no longer restricts access to s. Ending the borrow doesn't move the resource");
+    assert_eq!(installs.len(), 2, "both stores must reach r");
+    assert_eq!(releases.len(), 2, "each loan has a definite return from r");
+    let mut starts = installs.iter().map(|p| p[0].1).collect::<Vec<_>>();
+    let mut ends = releases.iter().map(|p| p[0].1).collect::<Vec<_>>();
+    starts.sort_by(f64::total_cmp);
+    ends.sort_by(f64::total_cmp);
+    assert!(starts[0] < ends[0] && ends[0] < starts[1] && starts[1] < ends[1],
+        "stores {starts:?}, releases {ends:?}");
+    let clauses = drawn_clauses(&svg, "r", "7");
+    assert!(clauses.iter().all(|(_, _, t)| !t.contains("can be used again")),
+        "s is readable during a shared borrow, so 'again' is false");
+    for start in &starts {
+        assert!(clauses.iter().any(|(_, y, t)| f64::from(*y) == *start &&
+            t.contains("r holds an immutable reference; it can read the borrowed resource")),
+            "the install dot at {start} must explain what r can read");
+    }
+    let calls = clauses.iter().cloned().filter_map(|(_, y, t)|
+        t.contains("A shared reference through r is passed to read").then_some(f64::from(y))).collect::<Vec<_>>();
+    assert_eq!(calls.len(), 2);
+    for i in 0..2 {
+        assert!(starts[i] <= calls[i] && calls[i] <= ends[i], "generation {i}, reads {calls:?}");
+        if calls[i] == ends[i] {
+            let on_dot = clauses.iter().filter(|(_, y, _)| f64::from(*y) == ends[i]);
+            let read = on_dot.clone().position(|(_, _, t)| t.contains("passed to read")).unwrap();
+            let end = on_dot.clone().position(|(_, _, t)| t.contains("r's immutable borrow ends")).unwrap();
+            assert!(read < end, "generation {i} ends before its read on the shared dot");
+        }
+    }
+    assert_drawn_sequence("repoint_occurrences", "s", "7", &[
+        "immutably borrowed by r", "no longer immutably borrowed", "s is passed to push by mutable reference",
+        "immutably borrowed by r", "no longer immutably borrowed",
+    ]);
+}
+
+#[test]
+fn repoint_definitions_follow_the_slot_on_each_normal_edge() {
+    let rv = run_with_local_backend("repoint_occurrences");
+    let body = fact_body(rv.facts().unwrap(), "alternate");
+    // rustc's switch takes either bb2 or bb3. Both write r from source
+    // and jump to bb4. Neither branch executes the other branch's write.
+    let writes: Vec<_> = row_facts(body, 15).into_iter().filter(|f| f["ev"] == "Repoint").collect();
+    assert_eq!(writes.len(), 2);
+    for write in writes {
+        assert_eq!(write["definitions"], serde_json::json!([{"at": [0, 4]}]));
+    }
+    let last = row_facts(body, 17).into_iter().find(|f| f["ev"] == "Repoint").unwrap();
+    assert_eq!(last["definitions"], serde_json::json!([{"at": [2, 2]}, {"at": [3, 2]}]));
+
+    // The two writes to the same field carry different inferred regions
+    // on their MIR field types. Both destinations are the same storage.
+    let rv = run_with_local_backend("repeated_field_loan_1888");
+    let body = fact_body(rv.facts().unwrap(), "repeated");
+    let writes: Vec<_> = row_facts(body, 5).into_iter().filter(|f| f["ev"] == "Repoint").collect();
+    assert_eq!(writes.len(), 2);
+    assert_eq!(writes[0]["definitions"], serde_json::json!([{"at": [0, 5]}]));
+    assert_eq!(writes[1]["definitions"], serde_json::json!([{"at": [0, 13]}]));
+}
+
+#[test]
+fn repoint_review_call_result_has_only_one_runtime_lender() {
+    // Running both paths of pick prints a or b. The signature keeps both
+    // inputs borrowed, while the returned reference names only one of them.
+    let svg = run_with_local_backend("repoint_review").timeline_panel_string();
+    for lender in ["a", "b"] {
+        check_review_tip(&svg, &format!("r>{lender}@L11:arrow:static_die"),
+            &[&format!("If r holds a shared borrow affecting {lender}")],
+            &[&format!("r's shared borrow of {lender} ends")]);
+        assert!(drawn_clauses(&svg, "r", "11").iter().all(|(_, _, t)|
+            !t.contains(&format!("r's immutable borrow of {lender} ends"))));
+    }
+}
+
+#[test]
+fn repoint_review_unrelated_loan_does_not_restrict_the_lender() {
+    // rustc accepts s.clear() while the exclusive loan of t remains live.
+    let svg = run_with_local_backend("repoint_review").timeline_panel_string();
+    for suffix in ["", "#2"] {
+        check_review_tip(&svg, &format!("r>s@L20:arrow:static_die{suffix}"),
+            &["r's shared borrow of s ends. This borrow no longer restricts access to s", "Ending the borrow doesn't move the resource"],
+            &["If r holds", "can be used again"]);
+    }
+    // Conversely, a live reference to s itself prevents s.clear().
+    // Both reads must still precede their holder ends on these shared dots.
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    for event in doc.descendants().filter(|e| e.attribute("data-rv-line") == Some("109")) {
+        assert!(!event.attribute("data-tooltip-text").unwrap_or_default().contains("can be used again"));
+    }
+    assert_drawn_sequence("repoint_review", "r", "109", &[
+        "passed to read", "r's immutable borrow ends", "passed to read", "r's immutable borrow ends",
+    ]);
+
+}
+
+#[test]
+fn repoint_review_writes_stay_between_their_reads() {
+    // The four reads print 4, 0, 1, 5. MIR assigns n between the
+    // inspect calls and writes the addition to s before borrowing it again.
+    assert_drawn_sequence("repoint_review", "n", "30", &[
+        "n is passed to inspect", "n is assigned a new value", "n is passed to inspect",
+    ]);
+    assert_drawn_sequence("repoint_review", "s", "30", &[
+        "immutably borrowed by r", "no longer immutably borrowed", "s is assigned a new value",
+        "immutably borrowed by r", "no longer immutably borrowed",
+    ]);
+}
+
+fn review_repoint(body: &serde_json::Value, row: u64) -> serde_json::Value {
+    row_facts(body, row).into_iter().find(|e| e["ev"] == "Repoint").unwrap()
+}
+
+#[test]
+fn repoint_review_indirect_store_has_unknown_predecessor() {
+    let rv = run_with_local_backend("repoint_review");
+    let body = fact_body(rv.facts().unwrap(), "indirect");
+    // Taking its address does not overwrite r. rustc still rejects writing a
+    // at the first assignment, while p can carry the original reference.
+    let first = review_repoint(body, 71);
+    assert_eq!(first["definitions"].as_array().unwrap().len(), 1);
+    assert_eq!(first["reaching"], serde_json::json!([fact_loan(body, 69, "a")["loan"]]));
+    assert!(tooltip_of_id(&rv.timeline_panel_string(), "a@L71:dot:static_reacquire").is_none());
+    // The pointer writes &c into r. A direct-store walk cannot prove b.
+    let last = review_repoint(body, 75);
+    assert!(last.get("definitions").is_none() && last.get("reaching").is_none(), "{last}");
+}
+
+#[test]
+fn repoint_review_field_comes_from_the_whole_struct_move() {
+    let rv = run_with_local_backend("repoint_review");
+    let body = fact_body(rv.facts().unwrap(), "aggregate");
+    let moved = row_facts(body, 40).into_iter().find(|e| e["ev"] == "Init" && e["path"] == "h").unwrap();
+    let last = review_repoint(body, 42);
+    assert_eq!(last["definitions"], serde_json::json!([moved["occurrence"]]));
+    assert_eq!(last["reaching"], serde_json::json!([fact_loan(body, 38, "b")["loan"]]));
+}
+
+#[test]
+fn repoint_review_moved_holder_is_uninitialized() {
+    let rv = run_with_local_backend("repoint_review");
+    let body = fact_body(rv.facts().unwrap(), "moved");
+    // The old &mut has moved into q, which still writes b after r writes c.
+    let last = review_repoint(body, 53);
+    assert_eq!(last["maybe_uninitialized"], true, "{last}");
+    assert!(last.get("definitions").is_none());
+    assert_eq!(last["reaching"], serde_json::json!([]));
+}
+
+#[test]
+fn repoint_review_initialized_and_empty_predecessors_survive_the_join() {
+    let rv = run_with_local_backend("repoint_review");
+    let body = fact_body(rv.facts().unwrap(), "maybe");
+    let then = row_facts(body, 61).into_iter().find(|e| e["ev"] == "Init" && e["path"] == "r").unwrap();
+    let last = review_repoint(body, 62);
+    assert_eq!(last["definitions"], serde_json::json!([then["occurrence"]]), "{last}");
+    assert_eq!(last["maybe_uninitialized"], true);
+    assert_eq!(last["reaching"], serde_json::json!([fact_loan(body, 61, "a")["loan"]]));
+}
+
+#[test]
+fn repoint_review_field_holder_ends_before_the_new_reference_arrives() {
+    let rv = run_with_local_backend("repoint_review");
+    let svg = rv.timeline_panel_string();
+    // h.r gives q a copy of &b, then receives &c. read(q) still uses b.
+    let dots = drawn_clauses(&svg, "h.r", "84");
+    let starts: Vec<_> = dots.iter().filter(|(_, _, t)| t.contains("h.r immutably borrows a resource")).collect();
+    let end = dots.iter().find(|(_, _, t)| t.contains("h.r's immutable borrow ends")).unwrap();
+    let copy = dots.iter().find(|(_, _, t)| t.contains("reference is copied")).unwrap();
+    assert!(matches!(starts.as_slice(), [a, b] if a.1 < copy.1 && copy.1 <= end.1 && end.1 < b.1), "{dots:?}");
+    assert_drawn_sequence("repoint_review", "h.r", "84", &["reference is copied", "immutable borrow ends", "immutably borrows"]);
+    let body = fact_body(rv.facts().unwrap(), "field_copy");
+    let loan = &fact_loan(body, 84, "b")["loan"];
+    assert!(row_facts(body, 84).iter().any(|e| e["ev"] == "HoldEnd" && e["loan"] == *loan && e["holder"] == "h.r"));
+    assert!(row_facts(body, 85).iter().any(|e| e["ev"] == "BorrowEnd" && e["loan"] == *loan && e["holder"] == "q"));
+}

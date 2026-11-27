@@ -32,6 +32,7 @@ mod call_stores;
 pub(crate) mod call_wording;
 mod holder_path;
 mod places;
+pub(crate) mod repoints;
 mod rows;
 mod runtime;
 pub mod schema;

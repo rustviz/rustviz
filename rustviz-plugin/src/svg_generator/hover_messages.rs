@@ -6829,6 +6829,15 @@ pub fn loan_kind_word(loan: &crate::facts::LoanInfo) -> Option<&'static str> {
     }
 }
 
+/// The named holder carried this loan and the whole lender is usable on
+/// its normal successor. Retain the distinction between a return and a move.
+pub fn arrow_repoint_release(from: &ResourceTy, to: &ResourceTy, kind: &str) -> String {
+    let holder = styled_name_html(&from.name());
+    let lender = styled_name_html(&to.name());
+    let value = if crate::svg_generator::data::holds_copy_value(to) { "value" } else { "resource" };
+    format!("{holder}'s {kind} borrow of {lender} ends. This borrow no longer restricts access to {lender}. Ending the borrow doesn't move the {value}")
+}
+
 /// An end arrow is anchored on the lender's column. Only an identified
 /// loan supplies its kind and borrowed place. A holder can carry different
 /// loans on different incoming paths.
