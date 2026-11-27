@@ -28641,6 +28641,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &["de.a isn't moved in any of the branches above"],
     },
+    TooltipExpect {
+        // Inserting a borrow of s before any of the last three ifs gives
+        // E0382. Only the first if's assignment can replace the drop.
+        name: "rv3_issues/1584_maybe_held_two_returning_ifs",
+        must_contain: &["The borrow checker can't prove that s holds a value when this conditional begins."],
+        must_not_contain: &["s is live in a conditional expression"],
+    },
 ];
 
 #[test]
@@ -32732,6 +32739,7 @@ fn property_snippets() -> Vec<String> {
             }
         }
     }
+    names.extend(geometry_repros());
     // Programs outside the corpus (a generator's output, bug repros):
     // reported like the rest. An absolute name is read from its path.
     if let Ok(extra) = env::var("RV_INVARIANTS_EXTRA") {
@@ -32790,6 +32798,75 @@ fn corpus_invariants_hold() {
          entry with its number); a GONE one was fixed (delete its entry).\n{}\nSnippets the plugin failed on: {:#?}",
         diff, failed
     );
+}
+
+fn geometry_repros() -> Vec<String> {
+    let dir = "geometry_1907";
+    let mut names: Vec<_> = fs::read_dir(corpus_dir().join(dir)).unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+        .map(|path| format!("{dir}/{}", path.file_stem().unwrap().to_str().unwrap()))
+        .collect();
+    names.sort();
+    names
+}
+
+/// The minimized progen programs from both seeds in #1907. The normal
+/// geometry assertions pin these routes independently of coordinates.
+/// Several repros also have pre-existing ownership invariant failures.
+/// Both rustc oracles check every repro.
+#[test]
+fn corpus_1907_geometry() {
+    let names = geometry_repros();
+    assert_eq!(names.len(), 68);
+    prerender(names.iter().map(String::as_str));
+    let mut violations = Vec::new();
+    for name in names {
+        let rv = render_cell(&name).unwrap_or_else(|e| panic!("{e}"));
+        assert_well_formed(&name, &rv);
+        let svg = rv.timeline_panel_string();
+        let doc = roxmltree::Document::parse(&svg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        for (check, detail) in common::geometry::check(&common::geometry::parse(&doc)) {
+            violations.push(format!("{name}: {check}: {detail}"));
+        }
+    }
+    assert!(violations.is_empty(), "geometry regressions:\n{}", violations.join("\n"));
+}
+
+#[test]
+fn shared_row_reservations_keep_the_join_at_the_closing_brace() {
+    let rv = run_with_local_backend("edition2024/rv3_1907_shared_row_reservation");
+    let timeline = rv.timeline_panel_string();
+    // rustc accepts borrowing p after L34 inside the else arm. It
+    // rejects that probe after L35, where the path that dropped p joins.
+    let doc = roxmltree::Document::parse(&timeline).unwrap();
+    for column in ["p", "p.a", "p.b"] {
+        let joins: Vec<_> = doc.descendants().filter(|node| {
+            node.attribute("data-rv-kind") == Some("dot")
+                && node.attribute("data-rv-var") == Some(column)
+                && node.attribute("data-rv-event").is_some_and(|events| events.split_whitespace().any(|e| e == "branch_join"))
+        }).collect();
+        assert!(joins.iter().any(|node| node.attribute("data-rv-line") == Some("35")), "{column}: missing join at L35");
+        assert!(!joins.iter().any(|node| node.attribute("data-rv-line") == Some("34")), "{column}: early join at L34");
+    }
+}
+
+#[test]
+fn function_result_arrows_and_logos_fit_in_the_timeline() {
+    let svg = run_with_local_backend("rv3_1907_function_result_extent").timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    let height: f64 = doc.root_element().attribute("height").unwrap().trim_end_matches("px").parse().unwrap();
+    let marks = |kind| doc.descendants().filter(move |node| {
+        node.attribute("data-rv-kind") == Some(kind) && node.attribute("data-rv-to") == Some("caller")
+    });
+    assert_eq!(marks("fn").count(), 3);
+    assert_eq!(marks("arrow").count(), 3);
+    for logo in marks("fn") {
+        let baseline: f64 = logo.attribute("y").unwrap().parse().unwrap();
+        assert!(height >= baseline + 3.0, "function logo at {baseline} is clipped at {height}");
+    }
+    let figure = common::geometry::parse(&doc);
+    assert!(!common::geometry::check(&figure).iter().any(|(check, _)| *check == "outside-figure"));
 }
 
 /// rustc as ground truth for the drawn state of each variable
@@ -40139,13 +40216,32 @@ fn arrows_dipping_below_a_line_do_not_cross() {
     // borrow from v to third₂".
     let back = shaft("third>v@L81:arrow:static_die");
     let lent = shaft("v>third₂@L81:arrow:static_borrow");
-    let cross = |(p, q): ((f64, f64), (f64, f64)), (r, s): ((f64, f64), (f64, f64))| {
-        let side = |a: (f64, f64), b: (f64, f64), c: (f64, f64)| (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
-        side(p, q, r) * side(p, q, s) < 0.0 && side(r, s, p) * side(r, s, q) < 0.0
-    };
-    let crossings: Vec<_> = back.iter().flat_map(|&a| lent.iter().filter(move |&&b| cross(a, b)).map(move |&b| (a, b))).collect();
+    let crossings: Vec<_> = back.iter().flat_map(|&a| lent.iter().filter(move |&&b| shafts_cross(a, b)).map(move |&b| (a, b))).collect();
     assert!(back.len() > 1 && lent.len() > 1, "both dip: {:?} {:?}", back, lent);
     assert_eq!(crossings, Vec::new(), "the two arrows cross");
+}
+
+fn shafts_cross((p, q): ((f64, f64), (f64, f64)), (r, s): ((f64, f64), (f64, f64))) -> bool {
+    let side = |a: (f64, f64), b: (f64, f64), c: (f64, f64)| (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
+    side(p, q, r) * side(p, q, s) < 0.0 && side(r, s, p) * side(r, s, q) < 0.0
+}
+
+#[test]
+fn clearing_a_fork_leg_keeps_other_loan_arrows_separate() {
+    for (name, routed, other_arrows) in [
+        ("geometry_1907/rv3_1907_1127_27_arrow_along_leg",
+            "x2>o@L3:arrow:static_die", &["m>s@L4:arrow:mutable_die"][..]),
+        ("geometry_1907/rv3_1907_2711_05_arrow_along_leg",
+            "x>o@L7:arrow:static_die", &["s2>r2@L8:arrow:static_borrow", "r2>s2@L8:arrow:static_die"][..]),
+    ] {
+        let rv = run_with_local_backend(name);
+        let (arrows, _) = arrows_and_logos(&rv.timeline_panel_string());
+        let shaft = |id: &str| &arrows.iter().find(|a| a.0 == id).unwrap_or_else(|| panic!("{name}: missing {id}")).2;
+        for other in other_arrows {
+            assert!(!shaft(routed).iter().any(|&p| shaft(other).iter().any(|&q| shafts_cross(p, q))),
+                "{name}: {routed} crosses {other}");
+        }
+    }
 }
 
 /// Branch legs (`branch_line` centre lines) whose top or bottom end is at

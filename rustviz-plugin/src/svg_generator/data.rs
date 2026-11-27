@@ -3721,6 +3721,14 @@ pub fn clean_states(states: &Vec<(usize, usize, State)>) -> Vec<(usize, usize, S
     cleaned_states
 }
 
+/// Replay can apply an event drawn on the header after the branch. The
+/// parent column still resumes at the join. Preserve the event's row
+/// for the dot and reserve the fork's interior for the arm columns.
+fn continuation_row(row: usize, fork: Option<(usize, usize)>) -> usize {
+    fork.filter(|&(split, merge)| split <= row && row < merge)
+        .map_or(row, |(_, merge)| merge)
+}
+
 
 
 // provide string output for usages like format!("{}", eventA)
@@ -5660,9 +5668,11 @@ impl Visualizable for VisualizationData {
         let is_ref = self.is_ref(hash);
         let kept = ends_kept_alive(is_ref, history);
         let mut previous_line = lead_end;
+        let mut fork = None;
         let mut line_start: (usize, State) = (0, State::OutOfScope);
         let (mut last_lend, mut call_lent): (Option<(usize, usize)>, Option<usize>) = (None, None);
         for (i, (l, e)) in history.iter_mut().enumerate() {
+            let row = continuation_row(*l, fork);
             e.note_access_before_end(&previous_state, self.is_mutref(hash));
             // For let-as-rhs (`let s = if … { … } else { … };`) the
             // parent's pre-branch state is OOS — the variable
@@ -5681,7 +5691,7 @@ impl Visualizable for VisualizationData {
                 State::OutOfScope => branch_state_converter(&previous_state),
                 ref s => s.clone(),
             };
-            states.push((previous_line, *l, pre_event_state));
+            states.push((previous_line, row, pre_event_state));
             match e {
                 Event::Branch { branch_history, ty, split_point, merge_point, maybe_init, maybe_held, on_exhaustion, .. } => {
                     let entry_state = previous_state.clone();
@@ -5776,6 +5786,7 @@ impl Visualizable for VisualizationData {
                     // resuming a row later leaves a visible gap
                     // between the join and the post-merge state.
                     previous_line = *merge_point;
+                    fork = Some((*split_point, *merge_point));
                 }
                 // A loop in this branch may have ended before assigning
                 // it (#1495): as for a value a nested conditional may have
@@ -5784,7 +5795,13 @@ impl Visualizable for VisualizationData {
                 // and the conditional joins as one that may have moved it.
                 Event::LoopMaybeInit { .. } => {
                     previous_state = State::ResourceMoved { move_to: ResourceTy::Anonymous, move_at_line: *l, dropped_by_hand: false };
-                    previous_line = *l;
+                    previous_line = row;
+                }
+                // The cleanup on the error edge leaves the continuing
+                // arm's dashed column as it was before the `?`.
+                Event::OwnerDropIfTryReturns { .. } if matches!(previous_state, State::OutOfScope) => {
+                    previous_state = branch_state_converter(&previous_state);
+                    previous_line = row;
                 }
                 _ => {
                     if line_start.0 != *l {
@@ -5801,7 +5818,7 @@ impl Visualizable for VisualizationData {
                     if !(kept[i] && holds_reference(&previous_state)) {
                         previous_state = self.calc_state(&previous_state, e, *l, hash);
                     }
-                    previous_line = *l;
+                    previous_line = row;
                 }
             }
         }
@@ -5851,12 +5868,14 @@ impl Visualizable for VisualizationData {
         let is_ref = self.is_ref(hash);
         let kept = ends_kept_alive(is_ref, history);
         let mut previous_line = 1;
+        let mut fork = None;
         let mut previous_state = State::OutOfScope;
         let mut line_start: (usize, State) = (0, State::OutOfScope);
         let (mut last_lend, mut call_lent): (Option<(usize, usize)>, Option<usize>) = (None, None);
         for (i, (l, e)) in history.iter_mut().enumerate() {
+            let row = continuation_row(*l, fork);
             e.note_access_before_end(&previous_state, self.is_mutref(hash));
-            states.push((previous_line, *l, previous_state.clone()));
+            states.push((previous_line, row, previous_state.clone()));
             match e {
                 Event::Branch { branch_history, ty, split_point, merge_point, maybe_init, maybe_held, on_exhaustion, .. } => {
                     // Timeline is empty in the middle during a branch
@@ -5929,6 +5948,7 @@ impl Visualizable for VisualizationData {
                     // resuming a row later leaves a visible gap
                     // between the join and the post-merge state.
                     previous_line = *merge_point;
+                    fork = Some((*split_point, *merge_point));
 
                 }
                 _ => {
@@ -5946,7 +5966,7 @@ impl Visualizable for VisualizationData {
                     if !(kept[i] && holds_reference(&previous_state)) {
                         previous_state = self.calc_state(&previous_state, e, *l, hash);
                     }
-                    previous_line = *l;
+                    previous_line = row;
                 }
             }
         }

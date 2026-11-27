@@ -46,12 +46,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 /// that invariant in that snippet.
 pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // Geometric (`geometry.rs`), from here on.
-    // Tuple column goes on after its fields were moved out.
-    // A borrow arrow leaving an arm's dot along the fork leg, its track
-    // crossing other columns' legs at ~22 degrees; a copy leaving a dot
-    // beside the leg into it.
-    ("repoint_if_chain_806", "arrow-along-leg", 1489),
-    ("repoint_if_chain_read_middle_806", "arrow-along-leg", 1489),
     // Arrows fanned into one dot from below (#1312): one head still comes
     // in at 70-85 degrees along the column under the dot.
     ("assign_branch_reborrow_holder_1482", "arrow-along-leg", 1542),
@@ -72,10 +66,6 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("tuple_scrutinee_nested", "arrow-along-leg", 1542),
     // Programs kept from the closed 2.x fix PRs (known_bugs/README.md); each is tracked by the issue named.
     ("known_bugs/1578_match_scrutinee_ref_repointed", "invalid-state", 1578),
-    // The arm's own ends of r2 and r3 (rustc's: both loans end as the arm
-    // starts), whose arrows the 2.x router lays along s2's leg.
-    ("known_bugs/1580_repoint_nested_arm_live_loan", "arrow-along-leg", 1580),
-    ("known_bugs/1582_maybe_held_assign_move_join", "line-starts-nowhere", 1582),
     ("known_bugs/1584_maybe_held_second_returning_if", "line-starts-nowhere", 1584),
     ("known_bugs/1585_unused_ref_binding_nested_return", "invalid-state", 1585),
     ("known_bugs/1585_unused_ref_binding_nested_return", "line-through-fork", 1585),
@@ -84,11 +74,17 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("known_bugs/1625_repoint_live_reborrow", "invalid-state", 1625),
     ("known_bugs/1645_move_then_two_reassigns", "drop-of-moved-value-at-reassign", 1645),
     ("known_bugs/1662_arm_loan_kinds", "invalid-state", 1662),
-    ("known_bugs/1694_nested_overlapping_loans", "arrow-along-leg", 1694),
     ("known_bugs/1732_stored_loan_kinds", "arrow-along-leg", 1732),
     ("known_bugs/1823_shared_ref_of_mut_hedge", "arrow-along-leg", 1823),
     ("known_bugs/1823_shared_ref_of_mut_kinds", "invalid-state", 1823),
     ("known_bugs/1823_shared_ref_of_mut_siblings", "invalid-state", 1823),
+    // Ownership failures that predate the geometry fixes in #1907.
+    ("geometry_1907/rv3_1907_1127_22_arrow_along_leg", "event-on-dead-column", 1907),
+    ("geometry_1907/rv3_1907_1127_55_outside_figure", "event-on-dead-column", 1907),
+    ("geometry_1907/rv3_1907_2711_04_arrow_along_leg", "event-on-dead-column", 1907),
+    ("geometry_1907/rv3_1907_2711_24_arrow_along_leg", "drop-without-value", 1907),
+    ("geometry_1907/rv3_1907_2711_26_arrow_along_leg", "event-on-dead-column", 1907),
+    ("geometry_1907/rv3_1907_2711_36_arrow_along_leg", "event-on-dead-column", 1907),
 ];
 
 /// The invariants, by the name the failure list and messages use.
