@@ -3,11 +3,13 @@ cluster = "C23"
 title = "`o.unwrap_or_else(|| &b)`: the reference the closure returns isn't tracked, so b is never drawn borrowed"
 fn = "main"
 
+# Both loans reach assert_eq!: bb3 continues to the closing brace, while
+# bb4 passes references to the non-returning assert_failed call.
 [[loan]]
 row = 5
 lender = "b"
 holder = "r"
-ends = [6]
+ends = [[6, 7], [6, 0]]
 src = "issue"
 why = "`let _ = &mut b;` after row 5 fails (E0502), after row 6 compiles"
 
@@ -15,7 +17,7 @@ why = "`let _ = &mut b;` after row 5 fails (E0502), after row 6 compiles"
 row = 4
 lender = "a"
 holder = "r"
-ends = [6]
+ends = [[6, 7], [6, 0]]
 src = "issue"
 why = "`let _ = &mut a;` (a made `mut`) after row 5 fails: r may hold the receiver's &a"
 

@@ -495,7 +495,9 @@ fn problems(name: &str, src: &str, text: &str) -> Vec<String> {
     let n_lines = src.lines().count() as u32;
     let rows: Vec<u32> = c.state.iter().map(|s| s.row).chain(c.lent.iter().map(|s| s.row)).chain(c.holds.iter().map(|s| s.row)).chain(c.loan.iter().map(|s| s.row))
         .chain(c.loan.iter().flat_map(|l| l.ends.iter().flatten().flat_map(|e| match *e {
-            EndSpec::Row(r) => vec![r],
+            // A zero destination denotes an exit from the body. The source
+            // of that edge is still an ordinary program row.
+            EndSpec::Row(r) | EndSpec::Edge([r, 0]) | EndSpec::EdgeCol([r, 0, _]) => vec![r],
             EndSpec::Edge([r, n]) | EndSpec::EdgeCol([r, n, _]) => vec![r, n],
         })))
         .chain(c.loan.iter().flat_map(|l| l.ends_include.iter().chain(&l.ends_exclude).copied()))

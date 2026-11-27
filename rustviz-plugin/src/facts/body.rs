@@ -284,6 +284,36 @@ fn skipped_closure_returns<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> BTreeM
     skipped
 }
 
+/// How a call with no normal successor uses this mutable argument. The
+/// formatter case requires a direct MIR path from the parameter to panic_display.
+pub(crate) fn terminal_argument<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, span: Span) -> Option<TerminalArgument> {
+    let mut uses = body.basic_blocks.iter().filter_map(|bb| {
+        let TerminatorKind::Call { func, args, target: None, .. } = &bb.terminator().kind else { return None };
+        let mut indices = args.iter().enumerate().filter(|(_, a)| a.span.source_equal(span)).map(|(i, _)| i);
+        let index = indices.next()?;
+        let callee = func.const_fn_def().and_then(|(id, _)| id.as_local());
+        Some(indices.next().is_none().then_some((callee, index)))
+    });
+    let argument = uses.next()?;
+    let formatted = argument.filter(|_| uses.next().is_none()).is_some_and(|(callee, index)| {
+        let Some(id) = callee.filter(|id| tcx.hir_maybe_body_owned_by(*id).is_some()) else { return false };
+        let body = &rustc_utils::mir::borrowck_facts::get_body_with_borrowck_facts(tcx, id).body;
+        let first = &body[rustc_middle::mir::START_BLOCK];
+        let TerminatorKind::Call { func, args, .. } = &first.terminator().kind else { return false };
+        let Some(param) = body.args_iter().nth(index) else { return false };
+        let [arg] = &args[..] else { return false };
+        // The formatter must receive the incoming reference. A store or
+        // address-taking operation could have retargeted the parameter.
+        if first.statements.iter().any(|s|
+            matches!(&s.kind, StatementKind::Assign(a) if a.0.local == param ||
+                matches!(a.1, Rvalue::Ref(_, BorrowKind::Mut { .. }, p) | Rvalue::RawPtr(_, p) if p.local == param)))
+        { return false; }
+        func.const_fn_def().is_some_and(|(d, _)| tcx.is_lang_item(d, rustc_hir::LangItem::PanicDisplay))
+            && arg.node.place().is_some_and(|p| resolve_write_deref(tcx, body, tcx.mk_place_deref(p)) == Place::from(param))
+    });
+    Some(if formatted { TerminalArgument::Formatted } else { TerminalArgument::Borrowed })
+}
+
 /// Look for a compiler panic entry point with a route out of the closure.
 /// A generic call's MIR unwind edge alone says nothing about whether it
 /// can panic: rustc can retain that edge even for process termination.
@@ -779,7 +809,7 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
         if matches!(fact, Fact::BorrowEnd { .. }) {
             order.2 = 1;
         }
-        let ev = Ev { location: l, drop_route: DropRoute::Normal, end_successor: None, col: self.rows.col.get(&at).copied().unwrap_or(0), arm: self.rows.arm_of(at), fact, order, site: None };
+        let ev = Ev { location: l, display_location: at, drop_route: DropRoute::Normal, end_successor: None, end_places: vec![], caller_slot: None, transfer_paths: vec![], col: self.rows.col.get(&at).copied().unwrap_or(0), arm: self.rows.arm_of(at), fact, order, site: None };
         (row, ev)
     }
 }
@@ -1879,6 +1909,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         }
         out
     };
+    let mut loan_cleanups = BTreeSet::new();
+    let mut terminal_ends = BTreeSet::new();
     // The CFG edges each loan ends on (for `HoldEnd`s below).
     let mut restored_reborrows = BTreeSet::new();
     let mut ended_edges: BTreeSet<(Location, Location, usize)> = BTreeSet::new();
@@ -1902,28 +1934,50 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         if here.is_empty() {
             continue;
         }
-        // (Not borrowck's imaginary edge of a `FalseEdge`: no path takes it.)
-        let real_only = |s: &rustc_middle::mir::BasicBlock| match &data.terminator().kind {
-            TerminatorKind::FalseEdge { real_target, .. } => s == real_target,
-            _ => true,
-        };
-        let succs: Vec<Location> = if loc.statement_index < data.statements.len() {
-            vec![loc.successor_within_block()]
-        } else {
-            data.terminator()
-                .successors()
-                .filter(|s| !body.basic_blocks[*s].is_cleanup && !is_unreachable(body, *s) && real_only(s))
-                .map(|s| Location { block: s, statement_index: 0 })
-                .collect()
-        };
-        for s in &succs {
-            if !runs.contains(&s.block) {
-                continue;
+        let diverges = loc.statement_index == data.statements.len()
+            && matches!(data.terminator().kind, TerminatorKind::Call { target: None, .. });
+        // A missing normal target is not an end. Even a cleanup successor
+        // can be fictitious (process termination). Follow the unwind edge
+        // with just the loans that entered it at this particular call.
+        let mut edges = Vec::new();
+        if diverges {
+            let TerminatorKind::Call { func, unwind: UnwindAction::Cleanup(start), .. } = &data.terminator().kind else { continue };
+            if !tcx.sess.panic_strategy().unwinds() { continue; }
+            // An indirect callee may store its argument in caller-owned
+            // storage before it panics. Local temporary liveness does not
+            // prove that the caller's loan ends on that edge.
+            let Some((callee, _)) = func.const_fn_def() else { continue };
+            if ["process_exit", "process_abort"].into_iter()
+                .any(|item| tcx.is_diagnostic_item(rustc_span::Symbol::intern(item), callee)) { continue; }
+            // Caller-origin loans may be passed into a direct callee too.
+            // Its signature can let them escape, even when no local holds
+            // them on the cleanup edge. A panic entry point only formats
+            // the arguments and starts unwinding.
+            use rustc_hir::LangItem::{BeginPanic, PanicDisplay, PanicFmt, Panic};
+            if ![Panic, PanicFmt, PanicDisplay, BeginPanic].iter().any(|item| tcx.is_lang_item(callee, *item)) {
+                here.retain(|b| b.index() < base || untracked[b.index() - base].param.is_none());
             }
-            inscope.seek_before_primary_effect(*s);
-            let mut there: BTreeSet<BorrowIndex> = inscope.get().iter().collect();
+            edges.push((loc, start.start_location()));
+            for bb in cleanup_path(body, *start) {
+                let block = &body[bb];
+                for i in 0..block.statements.len() {
+                    let at = Location { block: bb, statement_index: i };
+                    edges.push((at, at.successor_within_block()));
+                }
+                if let TerminatorKind::Drop { target, .. } | TerminatorKind::Goto { target } = block.terminator().kind {
+                    edges.push((body.terminator_loc(bb), target.start_location()));
+                }
+            }
+        } else {
+            edges.extend(cx.r.real_succs(loc).into_iter().filter(|s| runs.contains(&s.block)).map(|s| (loc, s)));
+        }
+        let call = loc;
+        for (loc, successor) in edges {
+            let data = &body[loc.block];
+            inscope.seek_before_primary_effect(successor);
+            let mut there: BTreeSet<_> = inscope.get().iter().collect();
             if let Some(t) = table {
-                there.extend(untracked_at(t.start_index(*s)));
+                there.extend(untracked_at(t.start_index(successor)));
             }
             let restricted: BTreeSet<_> = loans.iter().filter(|l| there.contains(&BorrowIndex::from_usize(l.loan)))
                 .flat_map(|l| l.through.iter().chain(&l.columns)).cloned().collect();
@@ -1934,8 +1988,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 let Some(li) = loans.iter_mut().find(|l| l.loan == b.index()) else { continue };
                 // The next row of this path (past a block start that carries
                 // the branch's span, past temporaries' drops).
-                let to_line = cx.r.next_row(&cx.rows, *s, row);
-                let to_col = cx.rows.col.get(s).copied().unwrap_or(0);
+                let to_line = if diverges { 0 } else { cx.r.next_row(&cx.rows, successor, row) };
+                let to_col = if diverges { 0 } else { cx.rows.col.get(&successor).copied().unwrap_or(0) };
                 // Who holds it as it ends (Polonius, at this location), not
                 // whoever held it first.
                 let mut now: Vec<String> = Vec::new();
@@ -1979,22 +2033,24 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         || (now.is_empty() && last.is_empty() && li.holders.first().is_some_and(|h| h == n))
                 };
                 let mut why = "no further use".to_string();
-                let sdata = &body.basic_blocks[s.block];
-                match sdata.statements.get(s.statement_index).map(|st| &st.kind) {
-                    Some(StatementKind::Assign(asg)) if cx.name(asg.0).is_some_and(|n| holds(&n)) => {
-                        why = "holder overwritten".into()
-                    }
-                    Some(StatementKind::StorageDead(l)) if cx.names.locals.get(l).is_some_and(|n| holds(n)) => {
-                        why = format!("{} out of scope", cx.names.locals[l])
-                    }
-                    None => {
-                        if let TerminatorKind::Drop { place, .. } = &sdata.terminator().kind {
-                            if let Some(n) = cx.name(*place).filter(|n| holds(n)) {
-                                why = format!("{} dropped", n);
+                {
+                    let sdata = &body.basic_blocks[successor.block];
+                    match sdata.statements.get(successor.statement_index).map(|st| &st.kind) {
+                        Some(StatementKind::Assign(asg)) if cx.name(asg.0).is_some_and(|n| holds(&n)) => {
+                            why = "holder overwritten".into()
+                        }
+                        Some(StatementKind::StorageDead(l)) if cx.names.locals.get(l).is_some_and(|n| holds(n)) => {
+                            why = format!("{} out of scope", cx.names.locals[l])
+                        }
+                        None => {
+                            if let TerminatorKind::Drop { place, .. } = &sdata.terminator().kind {
+                                if let Some(n) = cx.name(*place).filter(|n| holds(n)) {
+                                    why = format!("{} dropped", n);
+                                }
                             }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
                 if loc.statement_index == data.statements.len() {
                     if let TerminatorKind::Drop { place, .. } = &data.terminator().kind {
@@ -2007,13 +2063,29 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     li.end_lines.push(row);
                 }
                 if li.through.as_ref().is_some_and(|r| !restricted.contains(r)) {
-                    restored_reborrows.insert((loc, *s, b.index()));
+                    restored_reborrows.insert((loc, successor, b.index()));
                 }
-                ended_edges.insert((loc, *s, b.index()));
+                ended_edges.insert((loc, successor, b.index()));
+                if diverges && loc == call {
+                    terminal_ends.insert((loc, b.index()));
+                    why = "non-returning call".into();
+                }
                 let f = Fact::BorrowEnd { loan: b.index(), lender: li.lender.clone(), holder, why, to_line, to_col };
-                let mut end = cx.ev(loc, f);
-                end.1.end_successor = Some(*s);
-                push(&mut evs, end);
+                let mut event = cx.ev(call, f);
+                if loc != call {
+                    loan_cleanups.insert(call);
+                    event.1.site = Some(cx.rows.order(call));
+                    event.1.location = loc;
+                    event.1.order = cx.rows.order(loc);
+                    event.1.order.2 = 1;
+                    event.1.drop_route = DropRoute::Unwind;
+                }
+                event.1.end_successor = Some(successor);
+                push(&mut evs, event);
+            }
+            if diverges {
+                here.retain(|b| there.contains(b));
+                if here.is_empty() { break; }
             }
         }
     }
@@ -2034,6 +2106,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 ev.1.col = cx.rows.col.get(&at).copied().unwrap_or(0);
                 ev.1.arm = cx.rows.arm_of(at);
                 ev.1.location = at;
+                ev.1.display_location = at;
                 ev.1.site = Some(cx.rows.order(at));
                 if !li.end_lines.contains(&r) {
                     li.end_lines.push(r);
@@ -2452,6 +2525,112 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         }
     }
 
+    let source_slots = super::holder_path::HolderPath { tcx, body, runs: &runs };
+    let iterators: Vec<_> = body.local_decls.indices().filter(|l| for_iter(*l) && !cx.names.locals.contains_key(l)).collect();
+    let mut end_provenance = |loc: Location, bi: BorrowIndex, li: &LoanInfo, only: Option<Place<'tcx>>| {
+        let caller_slot = bi.index().checked_sub(base).and_then(|id| untracked[id].param).and_then(|param| {
+            // A mutable binding may already contain a different reference.
+            if body.local_decls[param].mutability.is_mut() { return None; }
+            let mpi = move_data.rev_lookup.find_local(param)?;
+            (flow.state(&[loc], false, mpi).word() == "own")
+                .then(|| EndPlace { local: param.index(), name: cx.names.locals[&param].clone() })
+        });
+        let mut places = BTreeSet::new();
+        let mut transfers = BTreeSet::new();
+        if let Some(t) = table {
+            let issued = if bi.index() < base {
+                bwf.borrow_set.location_map().get_index(bi.index()).map(|(at, _)| *at)
+            } else {
+                untracked[bi.index() - base].at
+            };
+            let tested = only.is_none().then(|| source_slots.discriminant_input(loc)).flatten();
+            // Stores through references can leave a loan in a container
+            // that was never a direct assignment target. Its own origin
+            // must still carry this loan at the discriminant or its input.
+            let can_name = |n: &String| {
+                li.direct_holders.contains(n) || li.via_call.contains(n) || tested.is_some() && li.holders.contains(n)
+            };
+            let named = |p: Place<'tcx>| {
+                if iterators.contains(&p.local) && p.projection.is_empty() { return Some(EndPlace { local: p.local.index(), name: "<iterator>".into() }); }
+                let name = cx.name(p)?;
+                can_name(&name)
+                    .then_some(EndPlace { local: p.local.index(), name })
+            };
+            let carries = |p, at| held_by_place(p, t.start_index(at)).contains(&bi.index());
+            let mut record = |mut path: Vec<HolderStep>| {
+                if let Some(last) = path.first() { places.insert(last.place.clone()); }
+                if path.len() > 1 {
+                    path.reverse();
+                    transfers.insert(path);
+                }
+            };
+            let candidates = columns.iter().chain(&synth)
+                .filter(|(_,_,name)| can_name(name)).map(|(_,p,_)|*p)
+                .chain(iterators.iter().map(|l| Place::from(*l)));
+            for place in candidates {
+                if only.is_some_and(|p| p != place) { continue; }
+                let start = carries(place, loc);
+                let mid = held_by_place(place, t.mid_index(loc)).contains(&bi.index());
+                if !start && (!mid || loc.statement_index == body[loc.block].statements.len()) { continue; }
+                let before = if start { loc } else { loc.successor_within_block() };
+                record(source_slots.trace(before, place, issued, &named, &carries));
+            }
+            if let Some((read, input)) = tested {
+                if carries(input, read) { record(source_slots.trace(read, input, issued, &named, &carries)); }
+            }
+            // Calls consume argument temporaries. Follow the value actually
+            // passed there, even if its last named holder is no longer live.
+            for arg in source_slots.call_args(loc).filter(|p| only.is_none() && carries(*p, loc)) {
+                record(source_slots.trace(loc, arg, issued, &named, &carries));
+            }
+            // The loop binding represents its hidden iterator in the drawing.
+            // It can stand for that iterator on an exit only if its value
+            // still exists and its assignment came from this same iterator.
+            if only.is_none() && places.iter().any(|p| p.name == "<iterator>") {
+                for (mpi, p, n) in &columns {
+                    if !li.via_call.contains(n) || flow.state(&[loc], false, *mpi).word() != "own" { continue; }
+                    let mut chain = source_slots.trace(loc, *p, issued, &named, &carries);
+                    if chain.iter().skip(1).any(|s| s.place.name == "<iterator>" && places.contains(&s.place)) {
+                        chain.reverse();
+                        transfers.insert(chain);
+                    }
+                }
+            }
+        }
+        (places.into_iter().collect::<Vec<_>>(), transfers.into_iter().collect::<Vec<_>>(), caller_slot)
+    };
+    // Direct holders and projected origins are now known. Resolve each
+    // edge at its MIR location, including call argument temporaries.
+    let mut drop_holders = BTreeMap::<usize, BTreeSet<String>>::new();
+    for ev in evs.values_mut().flatten() {
+        let Fact::BorrowEnd { loan, holder, why, .. } = &mut ev.fact else { continue };
+        let Some(li) = loans.iter().find(|li| li.loan == *loan) else { continue };
+        let (mut places, paths, caller_slot) = end_provenance(ev.location, BorrowIndex::from_usize(*loan), li, None);
+        if places.is_empty() && unused.contains(loan) {
+            if let Some(param) = untracked[*loan - base].param {
+                places.push(EndPlace { local: param.index(), name: cx.names.locals[&param].clone() });
+            }
+        }
+        if why == "non-returning call" {
+            *holder = if places.is_empty() { "<temp>".into() }
+                else { places.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join("|") };
+        }
+        let at = ev.location;
+        if let TerminatorKind::Drop { place, .. } = body[at.block].terminator().kind {
+            let exit = ev.drop_route == DropRoute::Unwind || cx.rows.early_exit.contains_key(&at)
+                || cx.rows.shared_exits.contains_key(&at);
+            if exit && at == body.terminator_loc(at.block) && place.projection.is_empty()
+                && place.ty(&body.local_decls, tcx).ty.ty_adt_def().is_some_and(|adt| adt.has_dtor(tcx))
+            {
+                drop_holders.entry(*loan).or_default().extend(
+                    places.iter().filter(|p| p.local == place.local.index()).map(|p| p.name.clone())
+                );
+            }
+        }
+        ev.caller_slot = caller_slot;
+        ev.end_places = places;
+        ev.transfer_paths = paths;
+    }
     // ---- per-holder ends ---------------------------------------------------------
     // Where a direct or via-call holder stops holding a loan that goes on.
     if let Some(t) = table {
@@ -2509,6 +2688,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 }
                 let next = succs_of(x);
                 if next.is_empty() {
+                    if terminal_ends.contains(&(x, loan)) { continue; }
                     return false;
                 }
                 for y in next {
@@ -2557,6 +2737,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         let to_col = cx.rows.col.get(&s).copied().unwrap_or(0);
                         let mut f = cx.ev(loc, Fact::HoldEnd { loan: l.loan, holder: h.clone(), to_line, to_col });
                         f.1.end_successor = Some(s);
+                        let (_, paths, _) = end_provenance(loc, bi, l, Some(hp));
+                        f.1.end_places.push(EndPlace { local: hp.local.index(), name: h.clone() });
+                        f.1.transfer_paths = paths;
                         f.1.order.2 = 1;
                         if ends_on_row(s, row, l.loan) {
                             inline_holder_ends.push(f);
@@ -3116,18 +3299,17 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 // with a written result type. Keep its borrowck state and
                 // record the actual cleanup on the call's own row (Q2).
                 let UnwindAction::Cleanup(start) = *unwind else { continue };
-                if vec_buffers.is_empty() || !tcx.sess.panic_strategy().unwinds()
+                if !tcx.sess.panic_strategy().unwinds()
                     || skipped_closure_returns.contains_key(&loc.block) { continue; }
-                let Some(closure) = called_closure(tcx, func) else { continue };
-                if closure_can_return(tcx, closure) || !closure_has_panic_route(tcx, closure) { continue; }
-
+                let loan_cleanup = loan_cleanups.contains(&loc);
+                if !loan_cleanup && vec_buffers.is_empty() { continue; }
                 let drops = cleanup_drops(body, start);
-                // The same allocation place is live at the call and
-                // released by cleanup while construction is in progress.
-                if !drops.iter().any(|(_, place)| vec_buffers.contains(place)
-                    && matches!(rt_md.rev_lookup.find(place.as_ref()), LookupResult::Exact(mpi)
-                        if rt.state(&[loc], false, mpi).may_init)) {
-                    continue;
+                if !loan_cleanup {
+                    let Some(closure) = called_closure(tcx, func) else { continue };
+                    if closure_can_return(tcx, closure) || !closure_has_panic_route(tcx, closure) { continue; }
+                    if !drops.iter().any(|(_, place)| vec_buffers.contains(place)
+                        && matches!(rt_md.rev_lookup.find(place.as_ref()), LookupResult::Exact(mpi)
+                            if rt.state(&[loc], false, mpi).may_init)) { continue; }
                 }
                 // Read init at this call, before other unwind edges
                 // merge into the cleanup block. Moves at the call and
@@ -3194,6 +3376,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                                 // before `s` at `return`), which come before it
                                 // in the CFG; one copy per exit site.
                                 ev.1.order = cx.rows.order(loc);
+                                ev.1.display_location = *at;
                                 ev.1.site = Some(cx.rows.order(*at));
                                 push(&mut evs, ev);
                             }
@@ -3270,6 +3453,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                             ev.0 = *r;
                             ev.1.col = cx.rows.col.get(at).copied().unwrap_or(0);
                             ev.1.arm = cx.rows.arm_of(*at);
+                            ev.1.display_location = *at;
                             ev.1.site = Some(cx.rows.order(*at));
                             if !ti.drop_lines.contains(r) {
                                 ti.drop_lines.push(*r);
@@ -4199,10 +4383,11 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         _ => None,
     }).collect();
     BodyFacts {
-        conditional_ends,
+        drop_holders, conditional_ends,
         aggregate_loans,
         issued_operand_loans,
         returned_operand_loans,
+        inline_holder_ends,
         evaluated_spans,
         argument_stores, receiver_loans, restored_reborrows,
         constructed_vecs,
@@ -4222,7 +4407,6 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         uniform_option_refs,
         loans,
         binding_loans,
-        inline_holder_ends,
         rows: out_rows,
         temps,
         notes,

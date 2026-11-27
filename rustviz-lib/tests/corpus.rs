@@ -23626,8 +23626,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // #1296: `if c { break k; } else { break j; }`: k goes on after the
         // loop only from `break k` (the other branch drops it, #410).
         must_contain: &[
-            "No branch above reaches this point: k goes on after the loop from the branch that breaks out of it",
-            "No branch above reaches this point: j goes on after the loop from the branch that breaks out of it",
+            "Both branches break out of the loop. No branch above reaches this point. k goes on after the loop from the if branch",
+            "Both branches break out of the loop. No branch above reaches this point. j goes on after the loop from the else branch",
         ],
         must_not_contain: &[
             "k goes on after the loop from the branches that break out of it",
@@ -42532,4 +42532,265 @@ fn returned_loan_has_no_slot_transfer_1898() {
     let returns = elements.iter().filter(|e| e.kind == "arrow" && e.var.as_deref() == Some("slot")
         && e.to.as_deref() == Some("q")).count();
     assert_eq!(returns, 1, "only the later assignment supplies a loan to return");
+}
+
+/// The panic call has no normal successor. Its argument still carries m's
+/// loan, and the cleanup edge leads to v's destructor (NLL MIR bb2 -> bb7).
+#[test]
+fn diverging_end_before_unwind_drop_1884() {
+    let rv = run_with_local_backend("exit_outer_borrow_return");
+    let b = fact_body(rv.facts().unwrap(), "panics");
+    let loan = &fact_loan(b, 35, "v")["loan"];
+    for row in [37, 41] {
+        let facts = row_facts(b, row);
+        let ends: Vec<_> = facts.iter().filter(|e| e["ev"] == "BorrowEnd" && e["loan"] == *loan).collect();
+        assert_eq!(ends.len(), 1, "missing end on path through {row}: {facts:?}");
+        assert_eq!(ends[0]["holder"], "m");
+        if row == 37 {
+            assert_eq!(ends[0]["to_line"], 0);
+            assert_eq!(ends[0]["why"], "non-returning call");
+        }
+    }
+    let svg = rv.timeline_panel_string();
+    assert!(svg.contains("v@L37:dot:mutable_reacquire+owner_go_out_of_scope"));
+}
+
+/// The branch to return precedes the MIR move of w into w2. The other
+/// edge carries that same loan through the move and use of w2.0.
+#[test]
+fn field_holder_on_return_edge_1884() {
+    let rv = run_with_local_backend("struct_update_after_return_1530");
+    let b = fact_body(rv.facts().unwrap(), "moved_whole_after_return");
+    let loan = &fact_loan(b, 51, "s")["loan"];
+    for (row, slot) in [(52, "w.r"), (56, "w2.r")] {
+        let e = row_facts(b, row).into_iter().find(|e| e["ev"] == "BorrowEnd" && e["loan"] == *loan).unwrap();
+        assert_eq!(e["end_places"][0]["name"], slot, "end on {row}: {e}");
+    }
+    let svg = rv.timeline_panel_string();
+    assert!(svg.contains("w.r@L53:dot:static_die"));
+    assert!(!svg.contains("w2.r@L53:"));
+}
+
+/// rustc rejects a second mutable borrow of s after the conditional break
+/// (E0499). The exit edge and fall-through move have distinct end sites.
+#[test]
+fn conditional_break_does_not_release_fallthrough_1884() {
+    let rv = run_with_local_backend("labeled_block_move_in_arm_1531");
+    let b = fact_body(rv.facts().unwrap(), "local");
+    let loan = &fact_loan(b, 4, "s")["loan"];
+    for row in [7, 8, 11] {
+        let e = row_facts(b, row).into_iter().find(|e| e["ev"] == "BorrowEnd" && e["loan"] == *loan).unwrap();
+        assert_eq!(e["end_places"][0]["name"], "m");
+    }
+    let svg = rv.timeline_panel_string();
+    assert!(svg.contains("s@L8:dot:mutable_reacquire"));
+    assert!(!svg.contains("s@L7:dot:mutable_reacquire"));
+}
+
+#[test]
+fn diverging_call_after_field_transfer_1884() {
+    let rv = run_with_local_backend("diverging_field_holder_1884");
+    let b = fact_body(rv.facts().unwrap(), "use_field");
+    let loan = fact_loan(b, 13, "s");
+    let ends: Vec<_> = b["rows"].as_array().unwrap().iter().flat_map(|r|
+        r["facts"].as_array().unwrap().iter().filter(|e| e["ev"] == "BorrowEnd" && e["loan"] == loan["loan"])
+            .map(|e| (r["line"].as_u64().unwrap(), e["end_places"][0]["name"].as_str(), e["why"].as_str()))
+    ).collect();
+    let transfer = row_facts(b, 16).into_iter().find(|e| e["loan"] == loan["loan"] && e["ev"] == "BorrowEnd").unwrap();
+    let path = transfer["transfer_paths"][0].as_array().unwrap();
+    assert_eq!(path.iter().map(|p| p["name"].as_str().unwrap()).collect::<Vec<_>>(), ["w.r", "moved.r"]);
+    assert_ne!(path[0]["local"], path[1]["local"]);
+    // bb2 moves w into moved before reborrowing its field for stop().
+    // The switch's other edge kills the loan before process::exit(0).
+    assert_eq!(ends, [(14, Some("w.r"), Some("no further use")), (16, Some("moved.r"), Some("non-returning call"))]);
+}
+
+/// The unwind edge drops the guard before text. Its destructor reads the
+/// field, so the panic call cannot release text's loan before that drop.
+#[test]
+fn unwind_drop_keeps_loan_1884() {
+    let rv = run_with_local_backend("diverging_field_holder_1884");
+    let b = fact_body(rv.facts().unwrap(), "unwind_reads_field");
+    let loan = &fact_loan(b, 31, "text")["loan"];
+    let cleanup = row_facts(b, 32);
+    let drop_at = |place: &str| cleanup.iter().position(|e| e["ev"] == "Drop" && e["path"] == place
+        && e["drop_route"] == "unwind").unwrap_or_else(|| panic!("missing drop({place}): {cleanup:?}"));
+    let ends: Vec<_> = cleanup.iter().enumerate().filter(|(_, e)| e["ev"] == "BorrowEnd" && e["loan"] == *loan).collect();
+    assert_eq!(ends.len(), 1, "{cleanup:?}");
+    let (end, fact) = ends[0];
+    assert!(drop_at("guard") < end && end < drop_at("text"), "{cleanup:?}");
+    assert_eq!(fact["end_places"][0]["name"], "guard.0");
+    let svg = rv.timeline_panel_string();
+    let tip = tooltip_of_id(&svg, "text@L32:dot:").unwrap();
+    assert!(tip.find("no longer immutably borrowed").unwrap() < tip.find("Its resource is dropped").unwrap(), "{tip}");
+    assert!(!tip.contains("No resource is dropped"), "{tip}");
+    // Formatting takes a separate shared loan of the field itself.
+    let formatting = &fact_loan(b, 32, "guard.0")["loan"];
+    assert!(cleanup[..drop_at("guard")].iter().any(|e| e["ev"] == "BorrowEnd" && e["loan"] == *formatting));
+    let exit = fact_body(rv.facts().unwrap(), "exit_with_guard");
+    assert!(!row_facts(exit, 39).iter().any(|e| e["drop_route"] == "unwind" || e["why"] == "non-returning call"));
+    for name in ["guard", "text"] {
+        let tip = tooltip_of_id(&svg, &format!("{name}@L39:dot:")).unwrap();
+        assert!(tip.contains("without running any destructor") && !tip.contains("Its resource is dropped"), "{tip}");
+    }
+}
+
+/// D::drop writes through its field on the early return. Rust rejects a
+/// write to n after the println and before the return with E0506.
+#[test]
+fn holder_return_waits_for_destructor_1884() {
+    for (name, print, exit) in [("rv3_issues/1637_drop_holder_return", 9, 10), ("known_bugs/1637_drop_holder_return", 11, 12)] {
+        let svg = run_with_local_backend(name).timeline_panel_string();
+        assert!(svg.contains(&format!("d.0>n@L{exit}:arrow:mutable_die")));
+        assert!(!svg.contains(&format!("d.0>n@L{print}:arrow:mutable_die")));
+        let tip = tooltip_of_id(&svg, &format!("n@L{print}-{exit}:branch_line:revoked_privilege")).unwrap();
+        assert!(tip.contains("n stays borrowed while d.0 is in use"), "{name}: {tip}");
+        assert!(!tip.contains("no longer mutably borrowed"), "{name}: {tip}");
+    }
+}
+
+/// In patterns, next borrows the iterator and returns an Option. bb31
+/// switches on that Option's discriminant. The None path drops the vector
+/// before returning. The Some path carries the loan into e4 on row 53.
+#[test]
+fn enum_payload_holder_at_early_return_1884() {
+    let rv = run_with_local_backend("iter_mut_holder_1399");
+    let b = fact_body(rv.facts().unwrap(), "patterns");
+    let loan = &fact_loan(b, 51, "refs")["loan"];
+    let end = |row| row_facts(b, row).into_iter().find(|e| e["ev"] == "BorrowEnd" && e["loan"] == *loan).unwrap();
+    assert_eq!(end(52)["end_places"][0]["name"], "it4");
+    assert_eq!(end(53)["end_places"][0]["name"], "e4");
+    let svg = rv.timeline_panel_string();
+    assert!(svg.contains("it4>refs@L52:arrow:mutable_die"));
+    let drop = tooltip_of_id(&svg, "refs@L52:dot:mutable_reacquire+static_die+owner_go_out_of_scope").unwrap();
+    assert!(drop.contains("Its resource is dropped, but not the data it borrowed"), "{drop}");
+}
+
+/// The None edge exits before an item exists. Continue reaches the next
+/// call to next(), while panic_display consumes a reference to this item
+/// and has only an unwind successor.
+#[test]
+fn panic_and_iterator_exhaustion_have_separate_ends_1884() {
+    let rv = run_with_local_backend("loop_panic_exhaustion_1884");
+    let body = fact_body(rv.facts().unwrap(), "scan");
+    let loan = &fact_loan(body, 2, "*xs")["loan"];
+    assert!(row_facts(body, 5).iter().any(|e|
+        e["ev"] == "BorrowEnd" && e["loan"] == *loan && e["holder"] == "x" && e["to_line"] == 0));
+    let svg = rv.timeline_panel_string();
+    let ends: Vec<_> = rv_elements(&svg, "xs@").into_iter()
+        .filter(|e| e.0.contains(":dot:") && e.1.contains("xs's immutable borrow ends"))
+        .map(|e| e.0).collect();
+    assert_eq!(ends.len(), 2, "{ends:?}");
+    assert!(ends.iter().any(|id| id.starts_with("xs@L5:")), "{ends:?}");
+    assert!(ends.iter().any(|id| id.starts_with("xs@L9:")), "{ends:?}");
+    assert!(rv_elements(&svg, "xs@L8:dot:branch_join").iter().any(|e| e.1.contains("next() returned None")));
+}
+
+/// panic_display receives &x. The formatting read precedes the end of x's
+/// own borrow, even though the caller's iterator loan also ends on this row.
+#[test]
+fn formatting_precedes_item_end_1884() {
+    let svg = run_with_local_backend("loop_panic_exhaustion_1884").timeline_panel_string();
+    let tip = tooltip_of_id(&svg, "x@L5:dot:").unwrap();
+    let read = tip.find("panic! reads from x through an implicit reference").unwrap();
+    let end = tip.find("x's immutable borrow ends").unwrap();
+    assert!(read < end, "borrow ended before formatting: {tip}");
+}
+
+#[test]
+fn diverging_reborrow_formats_its_argument_1884() {
+    let svg = run_with_local_backend("diverging_field_holder_1884").timeline_panel_string();
+    let tip = tooltip_of_id(&svg, "moved.r@L16:dot:").unwrap();
+    assert!(tip.contains("stop reads through moved.r"), "{tip}");
+    for false_text in ["reads and writes", "until stop returns"] {
+        assert!(!tip.contains(false_text), "{tip}");
+    }
+}
+
+#[test]
+fn loop_result_comes_from_selected_break_1884() {
+    for (name, slot, line) in [("loop_break_borrow_alt", "rb", 13), ("ref_column_styles_1860", "ra2", 22)] {
+        let svg = run_with_local_backend(name).timeline_panel_string();
+        let tip = tooltip_of_id(&svg, &format!("{slot}@L{line}:dot:branch_join")).unwrap();
+        assert!(tip.contains("Both branches break") && tip.contains(&format!("else branch supplies a reborrow through {slot} as the loop result")), "{tip}");
+        assert!(!tip.contains("the branch that breaks out"), "{tip}");
+    }
+}
+
+#[test]
+fn return_and_panic_keep_their_control_flow_lesson_1884() {
+    let svg = run_with_local_backend("inner_block_before_all_exit_1139").timeline_panel_string();
+    let split = tooltip_of_id(&svg, "t@L37:branch_line:").unwrap();
+    assert!(split.contains("This segment leads into the if branch"), "{split}");
+    assert!(tooltip_of_id(&svg, "t@L38:dot:").unwrap().contains("t's immutable borrow ends"));
+    let panic = tooltip_of_id(&svg, "t@L40:dot:").unwrap();
+    assert!(panic.contains("t's immutable borrow ends") && panic.contains("This branch stops here") &&
+        panic.contains("never reaches the end of the conditional"), "{panic}");
+    assert!(!panic.contains("reaches the join here"), "{panic}");
+}
+
+#[test]
+fn repointed_holder_named_after_returning_arm_1884() {
+    assert_owner_title("known_bugs/1626_repoint_return_let_else", "left", 19, 20, Some("revoked_privilege"),
+        "left's resource is mutably borrowed by cursor", "left's resource is mutably borrowed;");
+    assert_owner_title("known_bugs/1626_repoint_return_let_else", "left", 27, 28, Some("revoked_privilege"),
+        "left's resource is mutably borrowed by cursor", "left's resource is mutably borrowed;");
+}
+
+/// Both panic edges use r, but neither of them reaches the final println.
+/// The normal edges from both breaks use r there.
+#[test]
+fn nested_panic_does_not_cover_sibling_break_1884() {
+    let svg = run_with_local_backend("unwind_paths_1884").timeline_panel_string();
+    for row in [16, 19, 23] {
+        assert!(svg.contains(&format!("r>value@L{row}:arrow:static_die")), "missing end on {row}");
+    }
+}
+
+/// The Some constructor copies a into its payload. The selected variant's
+/// field is copied into q. The same loan reaches the panic through both.
+#[test]
+fn downcast_traces_selected_field_1884() {
+    let rv = run_with_local_backend("unwind_paths_1884");
+    let b = fact_body(rv.facts().unwrap(), "payload");
+    let loan = &fact_loan(b, 27, "text")["loan"];
+    let end = row_facts(b, 30).into_iter().find(|e| e["ev"] == "BorrowEnd" && e["loan"] == *loan).unwrap();
+    assert!(end["transfer_paths"].as_array().is_some_and(|paths| paths.iter().any(|p| {
+        let steps = p.as_array().unwrap();
+        steps.first().is_some_and(|s| s["name"] == "a") && steps.last().is_some_and(|s| s["name"] == "q")
+    })), "{end}");
+}
+
+#[test]
+fn caught_panic_keeps_the_stored_reference_1884() {
+    let rv = run_with_local_backend("unwind_paths_1884");
+    for name in ["forward", "opaque"] {
+        let b = fact_body(rv.facts().unwrap(), name);
+        let value = b["loans"].as_array().unwrap().iter().find(|l| l["source"] == "caller" && l["lender"] == "*value").unwrap();
+        assert_eq!(value["end_lines"], serde_json::json!([]), "{name}: {value}");
+    }
+}
+
+/// The discriminant's None edge ends the copy still in o. The Some edge
+/// carries the caller loan through x until len reads it on the return.
+#[test]
+fn pattern_return_and_empty_arm_end_separately_1884() {
+    let svg = run_with_local_backend("rv3_facts_review_1854").timeline_panel_string();
+    assert!(svg.contains("x>s@L183:arrow:static_die"));
+    assert!(svg.contains("o>s@L184:arrow:static_die"));
+    assert!(!svg.contains("o>s@L183:arrow:static_die"));
+    for line in [183, 184] {
+        let tip = tooltip_of_id(&svg, &format!("s@L{line}:dot:static_reacquire")).unwrap();
+        assert!(tip.contains("s's immutable borrow ends"), "{tip}");
+    }
+}
+
+/// A lender with a shared and a mutable loan stored in one holder gets
+/// the mutable loan back first on every leg, so no column state is
+/// invalid (the shared reacquire has no rule while the mutable borrow
+/// still revokes pair).
+#[test]
+fn mixed_stored_loans_end_mutable_first_1884() {
+    let svg = run_with_local_backend("mixed_stored_loans_exit_1884").timeline_panel_string();
+    assert!(!svg.contains("data-rv-invalid"), "a column went invalid");
 }
