@@ -2389,6 +2389,13 @@ pub fn event_dot_ref_assign(my_name: &String, from: &ResourceAccessPoint, copied
     }
 }
 
+pub(crate) fn event_dot_shared_field_reborrow(dest: &ResourceAccessPoint, src: &ResourceAccessPoint) -> String {
+    let field = styled_name_html(dest.name());
+    let source = styled_name_html(src.name());
+    let holds = state_static_ref_full_privilege(dest.name(), dest.points_to_copy());
+    format!("{field} is assigned a shared reborrow through {source}. {holds}")
+}
+
 // Acquire whose destination column is a reference variable
 // (`let s: &str = "hi";`, `let r2 = r;` for r: &mut T). A
 // reference never owns what it points to, so "acquires ownership"
@@ -7020,6 +7027,47 @@ pub fn event_dot_copy_field_into_tuple(field: &str, parent: &str, tuple: &str) -
 pub fn event_dot_copy_field_returned(field: &str, parent: &str) -> String {
     format!("{} moves as a whole to the caller, carrying {} with it. The field is still Copy",
         styled_name_html(parent), styled_name_html(field))
+}
+
+/// The copy transfers the shared reference in the element. The borrow
+/// checker may retain extra restrictions from the array's common lifetime.
+pub(crate) fn array_reference_copy(
+    holder: &str, element: &str, lender: &str, mutable: bool, read_only: bool,
+    restrictions: &std::collections::BTreeSet<String>,
+) -> String {
+    let holder = styled_name_html(holder);
+    let element = styled_name_html(element);
+    let mut title = format!("{holder} is a reference copied out of {element}. It points to {lender}");
+    if mutable {
+        title.push_str(&format!(". {holder} gives shared access. The borrow checker keeps the mutable borrow of {lender} live while {holder} is in use"));
+    } else {
+        title.push_str(&format!(". {holder} immutably borrows a resource and can read it"));
+        if read_only {
+            title.push_str(&format!(". {lender} is read-only while the borrow is live"));
+        }
+    }
+    if !restrictions.is_empty() {
+        let names: Vec<_> = restrictions.iter().cloned().collect();
+        title.push_str(&format!(". Through the array's common lifetime, the borrow checker also keeps {} borrowed while {holder} is in use", join_names(&names)));
+    }
+    title
+}
+
+pub(crate) fn array_loan_release(holder: Option<&str>, lender: &str, kind: &str) -> String {
+    let place = styled_name_html(lender);
+    let subject = match (kind, holder) {
+        ("mut", _) => format!("The original mutable borrow of {place}"),
+        (_, Some(holder)) => format!("{}'s shared borrow of {place}", styled_name_html(holder)),
+        _ => format!("The shared borrow of {place}"),
+    };
+    format!("{subject} ends. This borrow no longer restricts access to {place}.")
+}
+
+pub(crate) fn reference_hold_end(holder: &str, lender: &str, kind: &str) -> String {
+    let holder = styled_name_html(holder);
+    let lender = styled_name_html(lender);
+    let borrow = if kind == "mut" { "original mutable borrow" } else { "shared borrow" };
+    format!("{holder} stops using its shared reference. The {borrow} of {lender} remains live.")
 }
 
 /// The full title of an arrow between two columns: `arrow_title`, then

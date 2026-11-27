@@ -418,7 +418,10 @@ pub enum JoinAssignment {
 pub struct BindingSource {
     /// Source local, pictured column, and the part taken by the binding.
     pub projected_move: Option<(rustc_middle::mir::Local, String, String)>,
+    /// A fixed array slot used as the operand of a shared reference copy.
+    pub(crate) fixed_array_copy: Option<(rustc_middle::mir::Local, String, String)>,
     pub location: rustc_middle::mir::Location,
+    pub(crate) row: usize,
     pub runs: bool,
     pub declaration: rustc_middle::mir::Local,
     pub site: rustc_span::Span,
@@ -583,6 +586,8 @@ pub struct LoanInfo {
     pub lender: String,
     #[serde(skip)]
     pub(crate) projected: Option<ProjectedPlace>,
+    #[serde(skip)]
+    pub(crate) payload: Option<ProjectedPlace>,
     /// The columns this loan restricts (every column whose place
     /// overlaps the borrowed place: `v` for `v[_]`, `p` and `p.a` for
     /// `p.a`).
@@ -640,6 +645,11 @@ pub struct LoanInfo {
     /// also has those that hold it only through a reborrow of it, a call's
     /// result or a reference to a holder.
     pub direct_holders: Vec<String>,
+    /// Exact projected stores that may install this loan's reference.
+    /// The kind describes the stored reference, including a shared
+    /// reference reached through an originally mutable loan.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub holder_stores: Vec<HolderStore>,
     /// Named locals carrying the reference directly, including MIR copies and moves.
     #[serde(skip)]
     pub direct_locals: BTreeSet<rustc_middle::mir::Local>,
@@ -1165,6 +1175,16 @@ impl EndPlace {
         }).collect();
         Self { local: p.local.index(), projection, name }
     }
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct HolderStore {
+    #[serde(flatten)]
+    pub place: EndPlace,
+    pub occurrence: Occurrence,
+    pub kind: &'static str,
+    /// Every reaching source of the stored reference was identified.
+    pub complete: bool,
 }
 
 /// A holder along a reaching MIR value transfer. `assigned_at` is the

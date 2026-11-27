@@ -7087,17 +7087,20 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "refs_array_literal",
-        // `pair[0]` may be either element as far as rustc is concerned,
-        // so `first` keeps both `a` and `b` borrowed. `pair` (a Copy
-        // array of `&String`) is copied into `drop`, not dropped.
+        // MIR copies slot zero into first. The common array lifetime
+        // keeps both lenders borrowed through the last use of first.
+        // The Copy array itself is copied into drop.
         must_contain: &[
             "Immutable borrow from a to pair",
             "Immutable borrow from b to pair",
-            "Immutable borrow from a to first: first is a reference copied out of pair, which holds references to a and b, so it may point into either, and both stay borrowed while first is in use",
-            "If first holds a shared borrow affecting a, that borrow ends here. It no longer restricts access to a",
-            "If first holds a shared borrow affecting b, that borrow ends here. It no longer restricts access to b",
+            "first is a reference copied out of pair[0]. It points to a. first immutably borrows a resource and can read it. a is read-only while the borrow is live. Through the array's common lifetime, the borrow checker also keeps b borrowed while first is in use",
+            "Copy from pair to drop",
+            "first's shared borrow of a ends. This borrow no longer restricts access to a.",
+            "The shared borrow of b ends. This borrow no longer restricts access to b.",
         ],
         must_not_contain: &[
+            "so it may point into either",
+            "If first holds a shared borrow affecting b",
             ", through the reference copied out of",
             "first's shared borrow of pair ends",
             "pair's resource is no longer immutably borrowed",
@@ -27750,11 +27753,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "a is assigned a copy of b's reference",
             "a's mutable borrow ends",
-            "h.r is assigned a copy of r4's reference",
+            "h.r is assigned a shared reborrow through r4. h.r holds an immutable reference; it can read the borrowed resource",
             "h.r's mutable borrow ends",
         ],
         must_not_contain: &[
             "a's immutable borrow ends",
+            "h.r is assigned a copy of r4's reference",
             "h.r's immutable borrow ends",
             // r4 is a copy of h.r, whose loan of s4 is mutable
             // (`downgrade(&mut s4)`): its end gives nothing back (h.r
@@ -46344,12 +46348,266 @@ fn repoint_review_field_holder_ends_before_the_new_reference_arrives() {
     // h.r gives q a copy of &b, then receives &c. read(q) still uses b.
     let dots = drawn_clauses(&svg, "h.r", "84");
     let starts: Vec<_> = dots.iter().filter(|(_, _, t)| t.contains("h.r immutably borrows a resource")).collect();
-    let end = dots.iter().find(|(_, _, t)| t.contains("h.r's immutable borrow ends")).unwrap();
+    let end = dots.iter().find(|(_, _, t)| t.contains("h.r stops using its shared reference")).unwrap();
     let copy = dots.iter().find(|(_, _, t)| t.contains("reference is copied")).unwrap();
     assert!(matches!(starts.as_slice(), [a, b] if a.1 < copy.1 && copy.1 <= end.1 && end.1 < b.1), "{dots:?}");
-    assert_drawn_sequence("repoint_review", "h.r", "84", &["reference is copied", "immutable borrow ends", "immutably borrows"]);
+    assert_drawn_sequence("repoint_review", "h.r", "84", &["reference is copied", "shared borrow of b remains live", "immutably borrows"]);
+    check_review_tip(&svg, "h.r@L84:dot:duplicate", &["shared borrow of b remains live"], &["h.r's immutable borrow ends"]);
     let body = fact_body(rv.facts().unwrap(), "field_copy");
     let loan = &fact_loan(body, 84, "b")["loan"];
     assert!(row_facts(body, 84).iter().any(|e| e["ev"] == "HoldEnd" && e["loan"] == *loan && e["holder"] == "h.r"));
     assert!(row_facts(body, 85).iter().any(|e| e["ev"] == "BorrowEnd" && e["loan"] == *loan && e["holder"] == "q"));
+}
+
+fn direct_holder_stores<'a>(loan: &'a serde_json::Value, holder: &str) -> Vec<&'a serde_json::Value> {
+    loan["holder_stores"].as_array().into_iter().flatten()
+        .filter(|s| s["name"] == holder).collect()
+}
+
+#[test]
+fn direct_holder_sibling_fields_keep_their_own_loan_identity() {
+    let rv = run_with_local_backend("p4_direct_holders");
+    let body = fact_body(rv.facts().unwrap(), "siblings");
+    // The constructor consumes two separate borrows of same despite the
+    // equal lender and the struct using the same lifetime for both fields.
+    let loans: Vec<_> = body["loans"].as_array().unwrap().iter()
+        .filter(|l| l["line"] == 13 && l["lender"] == "same").collect();
+    assert_eq!(loans.len(), 2);
+    let [left, right] = loans.as_slice() else { unreachable!() };
+    let positions = serde_json::json!([{"field": 0}]);
+    assert_eq!(direct_holder_stores(left, "pair.left")[0]["projection"], positions);
+    assert!(direct_holder_stores(left, "pair.right").is_empty());
+    let right_store = direct_holder_stores(right, "pair.right");
+    assert_eq!(right_store[0]["projection"], serde_json::json!([{"field": 1}]));
+    assert!(direct_holder_stores(right, "pair.left").is_empty());
+    // The overwrite replaces only the left field. The borrow checker can
+    // keep the previous loan restricted due to the common lifetime.
+    let store = review_repoint(body, 15);
+    assert_eq!(store["reaching"], serde_json::json!([left["loan"]]));
+    assert_eq!(store["new"], serde_json::json!([fact_loan(body, 15, "other")["loan"]]));
+}
+
+#[test]
+fn direct_holder_copy_preserves_shared_reference_kind() {
+    let rv = run_with_local_backend("p4_direct_holders");
+    let body = fact_body(rv.facts().unwrap(), "shared_copy");
+    let exclusive = fact_loan(body, 44, "value");
+    let shared = fact_loan(body, 45, "*exclusive");
+    // MIR creates a shared reborrow through the mutable reference. It
+    // copies this shared reference into the tuple and out of its field.
+    assert_eq!(exclusive["kind"], "mut");
+    for holder in ["pair.0", "copy"] {
+        let stores = direct_holder_stores(shared, holder);
+        assert_eq!(stores.len(), 1, "{holder}: {shared:#}");
+        assert_eq!(stores[0]["kind"], "shared");
+        assert!(direct_holder_stores(exclusive, holder).is_empty());
+    }
+}
+
+#[test]
+fn direct_holder_overwrite_records_each_storage_generation() {
+    let rv = run_with_local_backend("p4_direct_holders");
+    let body = fact_body(rv.facts().unwrap(), "overwrite");
+    let a = fact_loan(body, 25, "a");
+    let c = fact_loan(body, 27, "c");
+    let original = direct_holder_stores(a, "pair.0");
+    let reborrow = fact_loan(body, 27, "*original");
+    let replacement = direct_holder_stores(reborrow, "pair.0");
+    let writes: Vec<_> = row_facts(body, 27).into_iter()
+        .filter(|f| f["ev"] == "Repoint" && f["holder"] == "pair.0").collect();
+    // The first write stores rustc's shared reborrow of original; the
+    // second stores a reference to c. The original constructor is a
+    // separate generation and cannot reach the second write.
+    assert_eq!(original.len(), 1, "{a:#}");
+    assert_eq!(replacement.len(), 1, "{reborrow:#}");
+    assert_eq!(writes.len(), 2, "{writes:#?}");
+    assert_eq!(writes[0]["occurrence"], replacement[0]["occurrence"]);
+    assert_eq!(writes[0]["definitions"], serde_json::json!([original[0]["occurrence"]]));
+    assert_eq!(writes[1]["definitions"], serde_json::json!([replacement[0]["occurrence"]]));
+    assert!(writes[0]["new"].as_array().unwrap().contains(&reborrow["loan"]));
+    assert_eq!(writes[1]["new"], serde_json::json!([c["loan"]]));
+    assert_eq!(writes[1]["reaching"], serde_json::json!([reborrow["loan"]]));
+}
+
+#[test]
+fn direct_holder_array_elements_keep_their_own_loan_identity() {
+    let rv = run_with_local_backend("p4_direct_holders");
+    let body = fact_body(rv.facts().unwrap(), "array_move");
+    for (offset, lender, correct, sibling) in [(0, "value", "first", "second"), (1, "other", "second", "first")] {
+        let info = fact_loan(body, 34, lender);
+        let array = direct_holder_stores(info, "items");
+        assert_eq!(array.len(), 1, "{info:#}");
+        assert_eq!(array[0]["projection"], serde_json::json!([{"constant_index": {
+            "offset": offset, "min_length": 2, "from_end": false
+        }}]));
+        assert_eq!(direct_holder_stores(info, correct).len(), 1);
+        assert!(direct_holder_stores(info, sibling).is_empty());
+    }
+}
+
+#[test]
+fn direct_holder_array_copy_keeps_mutable_origin_restricted() {
+    let rv = run_with_local_backend("p4_direct_holders");
+    let body = fact_body(rv.facts().unwrap(), "shared_from_mutable_origin");
+    // Borrowck issues the mutable loan into a temporary and then stores
+    // a shared reference to that same resource. The array and its
+    // destructured copy both hold shared reference values.
+    let loan = fact_loan(body, 54, "value");
+    assert_eq!(loan["kind"], "mut");
+    for name in ["shared", "slots", "copy"] {
+        let stores = direct_holder_stores(loan, name);
+        assert_eq!(stores.len(), 1, "{name}: {loan:#}");
+        assert_eq!(stores[0]["kind"], "shared");
+    }
+    let svg = rv.timeline_panel_string();
+    check_review_tip(&svg, "slots>copy@L56:arrow:copy",
+        &["copy gives shared access", "keeps the mutable borrow of value live while copy is in use"],
+        &["copy mutably borrows"]);
+}
+
+#[test]
+fn direct_holder_array_drawing_names_only_the_proven_lender() {
+    let svg = run_with_local_backend("p4_direct_holders").timeline_panel_string();
+    for (correct, wrong, holder, index) in [("value", "other", "first", 0), ("other", "value", "second", 1)] {
+        check_review_tip(&svg, &format!("items>{holder}@L35:arrow:copy"),
+            &[&format!("{holder} is a reference copied out of items[{index}]"), &format!("It points to {correct}"),
+                &format!("also keeps {wrong} borrowed")],
+            &["so it may point into either"]);
+        for lender in [correct, wrong] {
+            assert!(tooltip_of_id(&svg, &format!("{lender}>{holder}@L35:arrow:static_borrow")).is_none());
+        }
+        assert!(tooltip_of_id(&svg, &format!("{holder}>{wrong}@L37:arrow:static_die")).is_none());
+    }
+}
+
+#[test]
+fn direct_holder_array_reports_shared_access() {
+    let svg = run_with_local_backend("p4_direct_holders").timeline_panel_string();
+    // The MIR copies the two &String values. Shared access permits reads,
+    // and mutating either String before the array region dies is rejected.
+    for (holder, lender) in [("first", "value"), ("second", "other")] {
+        check_review_tip(&svg, &format!("items>{holder}@L35:arrow:copy"),
+            &[&format!("{holder} immutably borrows a resource"), &format!("{lender} is read-only while the borrow is live")],
+            &["so it may point into either", &format!("{holder} mutably borrows a resource")]);
+    }
+}
+
+#[test]
+fn direct_holder_array_drawing_separates_holder_uses_from_release() {
+    let rv = run_with_local_backend("p4_direct_holders");
+    let svg = rv.timeline_panel_string();
+    check_review_tip(&svg, "items@L35:dot:", &["items stops using its shared reference"], &["items's immutable borrow ends"]);
+    check_review_tip(&svg, "first@L36:dot:", &["first stops using its shared reference", "shared borrow of value remains live"],
+        &["first's immutable borrow ends"]);
+    for holder in ["items", "first", "second"] {
+        assert!(rv_elements(&svg, &format!("{holder}>value@L37:arrow:")).is_empty());
+    }
+    let release = rv_elements(&svg, "value@L37:dot:static_reacquire");
+    assert_eq!(release.len(), 1, "{release:?}");
+    check_review_tip(&svg, "value@L37:dot:static_reacquire",
+        &["The shared borrow of value ends. This borrow no longer restricts access to value"], &["If items holds"]);
+}
+
+#[test]
+fn direct_holder_array_release_names_the_original_mutable_loan() {
+    let rv = run_with_local_backend("p4_direct_holders");
+    let svg = rv.timeline_panel_string();
+    // A clear between the copy and read is rejected with E0499. A clear
+    // after the read is accepted even with all three holders in scope.
+    check_review_tip(&svg, "slots@L56:dot:", &["slots stops using its shared reference", "original mutable borrow of value remains live"],
+        &["slots's mutable borrow ends"]);
+    check_review_tip(&svg, "copy@L57:dot:", &["The original mutable borrow of value ends", "This borrow no longer restricts access to value"],
+        &["copy's mutable borrow ends"]);
+    check_review_tip(&svg, "value@L55:dot:", &["value can't be used while the borrow is live"],
+        &["shared is given a new reference", "shared's borrow of value is already over"]);
+    assert!(rv_elements(&svg, "slots>value@L56:arrow:").is_empty());
+}
+
+#[test]
+fn direct_holder_match_copies_the_selected_element() {
+    let svg = run_with_local_backend("p4_direct_holders").timeline_panel_string();
+    for (holder, offset, lender) in [("first", 0, "x"), ("second", 1, "y")] {
+        check_review_tip(&svg, &format!("items>{holder}@L66:arrow:copy"),
+            &[&format!("copied out of items[{offset}]"), &format!("It points to {lender}")], &["may point into either"]);
+        for source in ["x", "y"] {
+            assert!(rv_elements(&svg, &format!("{source}>{holder}@L66:arrow:static_borrow")).is_empty());
+        }
+    }
+}
+
+#[test]
+fn direct_holder_field_array_copies_the_selected_element() {
+    let svg = run_with_local_backend("p4_direct_holders").timeline_panel_string();
+    for (holder, offset, lender) in [("r", 0, "a"), ("s", 1, "b")] {
+        check_review_tip(&svg, &format!("wrap.slots>{holder}@L81:arrow:copy"),
+            &[&format!("copied out of wrap.slots[{offset}]"), &format!("It points to {lender}")], &["may point into either"]);
+    }
+}
+
+#[test]
+fn direct_holder_fixed_index_copies_the_selected_element() {
+    let svg = run_with_local_backend("p4_direct_holders").timeline_panel_string();
+    check_review_tip(&svg, "slots>r@L90:arrow:copy",
+        &["copied out of slots[0]", "It points to a", "also keeps b borrowed"], &["may point into either"]);
+    assert!(rv_elements(&svg, "b>r@L90:arrow:").is_empty());
+}
+
+#[test]
+fn direct_holder_copy_explains_payload_restriction_in_source_terms() {
+    let svg = run_with_local_backend("p4_direct_holders").timeline_panel_string();
+    check_review_tip(&svg, "slots>r@L99:arrow:copy",
+        &["Through the array's common lifetime", "keeps the value inside pack borrowed"],
+        &["(pack as Some).0", "*payload"]);
+}
+
+#[test]
+fn direct_holder_staged_tuple_keeps_its_constant_reference() {
+    let rv = run_with_local_backend("p4_direct_holders");
+    let body = fact_body(rv.facts().unwrap(), "staged_constant");
+    // The inner aggregate contains the string constant operand. Its
+    // whole value is moved into the outer aggregate's first field.
+    let literal = fact_loan(body, 106, "\"hello\"");
+    assert_eq!(literal["source"], "static");
+    let stores = direct_holder_stores(literal, "pair.0.0");
+    assert_eq!(stores.len(), 1);
+    assert_eq!(stores[0]["projection"], serde_json::json!([{"field": 0}, {"field": 0}]));
+}
+
+#[test]
+fn direct_holder_fixed_array_overwrite_records_the_reaching_store() {
+    let rv = run_with_local_backend("p4_direct_holders");
+    let body = fact_body(rv.facts().unwrap(), "overwrite_element");
+    // Both elements initially borrow x. MIR assigns through an index
+    // local defined by const 0, and only that slot receives &y.
+    let old = body["loans"].as_array().unwrap().iter()
+        .find(|l| l["lender"] == "x" && direct_holder_stores(l, "arr").iter().any(|s| s["projection"][0]["constant_index"]["offset"] == 0)).unwrap();
+    let new = fact_loan(body, 115, "y");
+    let overwrite = review_repoint(body, 115);
+    assert_eq!(overwrite["holder"], "arr[0]");
+    assert_eq!(overwrite["definitions"], serde_json::json!([direct_holder_stores(old, "arr")[0]["occurrence"]]));
+    assert_eq!(overwrite["reaching"], serde_json::json!([old["loan"]]));
+    assert_eq!(overwrite["new"], serde_json::json!([new["loan"]]));
+}
+
+#[test]
+fn direct_holder_field_write_distinguishes_reborrow_from_copy() {
+    let svg = run_with_local_backend("p4_direct_holders").timeline_panel_string();
+    check_review_tip(&svg, "pair.0@L27:dot:",
+        &["pair.0 is assigned a shared reborrow through original", "pair.0 holds an immutable reference; it can read the borrowed resource"],
+        &["pair.0 is assigned a copy of original's reference"]);
+}
+
+#[test]
+fn direct_holder_new_field_borrow_keeps_the_permission_clause() {
+    let svg = run_with_local_backend("p4_direct_holders").timeline_panel_string();
+    check_review_tip(&svg, "pair.0@L27:dot:static_borrow",
+        &["pair.0 immutably borrows a resource", "pair.0 holds an immutable reference; it can read the borrowed resource"],
+        &["pair.0 mutably borrows a resource"]);
+}
+
+#[test]
+fn direct_holder_none_connector_keeps_its_branch_context() {
+    let svg = run_with_local_backend("assign_arm_ref_binding_1327").timeline_panel_string();
+    check_review_tip(&svg, "o@L8:branch_line:full_privilege",
+        &["This segment leads from the None branch to where the branches join.", "o can be used on this path."], &[]);
 }

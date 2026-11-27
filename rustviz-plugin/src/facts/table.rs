@@ -1116,6 +1116,7 @@ mod tests {
             binding_loans: BTreeMap::new(),
             loans: vec![LoanInfo {
                 projected: None,
+                payload: None,
                 issue: None,
                 lender_local: None,
                 issued_on: None,
@@ -1141,6 +1142,7 @@ mod tests {
                 made_through: Vec::new(),
                 direct_locals: BTreeSet::new(),
                 direct_holders: vec!["r".into()],
+                holder_stores: Vec::new(),
                 via_call: Vec::new(),
                 implicit: false,
             }],

@@ -4,6 +4,7 @@
 //! the CFG without its imaginary edges for what runs (drop kinds, which
 //! events happen). Then read at the row model's locations.
 
+use super::direct_holders::{self, DirectHolders, Installation};
 use super::places::{borrows_part_of, column_projection, place_under, Capture, Names};
 use super::rows::{is_unreachable, real_successor_blocks, RowModel, Rows};
 use super::schema::*;
@@ -1398,22 +1399,22 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
     /// the variable, struct field, call or closure that consumes it.
     fn dest_name(&self, place: Place<'tcx>, loc: Location, depth: usize) -> String {
         match self.destination(place, loc, depth) {
-            (name, true) if name == "<temp>" => "<temporary Vec>".into(),
-            (name, _) => name,
+            (name, true, _) if name == "<temp>" => "<temporary Vec>".into(),
+            (name, _, _) => name,
         }
     }
 
     /// The flag means the value is inside a vector element. Its fields
     /// aren't fields of the column that owns the vector.
-    fn destination(&self, place: Place<'tcx>, loc: Location, depth: usize) -> (String, bool) {
+    fn destination(&self, place: Place<'tcx>, loc: Location, depth: usize) -> (String, bool, Option<Place<'tcx>>) {
         if let Some(n) = self.name(place) {
-            return (n, false);
+            return (n, false, Some(place));
         }
         if place.local == RETURN_PLACE {
-            return ("<return>".into(), false);
+            return ("<return>".into(), false, None);
         }
         if depth > 6 || !place.projection.is_empty() {
-            return ("<temp>".into(), false);
+            return ("<temp>".into(), false, None);
         }
         // A MIR temporary is assigned once and used once: follow it to
         // that use (whatever the rows in between).
@@ -1447,20 +1448,14 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
                     _ => false,
                 };
                 if operand {
-                    best = Some(("<operand>".into(), false));
+                    best = Some(("<operand>".into(), false, None));
                     continue;
                 }
                 let field = match rv {
                     Rvalue::Use(o) => in_tmp(o).then_some(None),
                     Rvalue::Cast(_, o, _) => is_tmp(o).then_some(None),
-                    Rvalue::Aggregate(k, ops) => ops.iter_enumerated().find(|(_, o)| is_tmp(o)).map(|(f, _)| match &**k {
-                        AggregateKind::Adt(did, v, ..) => {
-                            let adt = self.tcx.adt_def(*did);
-                            Some(adt.variant(*v).fields.get(f).map_or_else(|| f.index().to_string(), |fd| fd.name.to_string()))
-                        }
-                        AggregateKind::Tuple => Some(f.index().to_string()),
-                        _ => None,
-                    }),
+                    Rvalue::Aggregate(k, ops) => ops.iter_enumerated().find(|(_, o)| is_tmp(o))
+                        .map(|(f, _)| Some((&**k, f))),
                     Rvalue::Ref(_, _, p) => (p.local == tmp && p.projection.first() == Some(&ProjectionElem::Deref)).then_some(None),
                     _ => None,
                 };
@@ -1475,19 +1470,35 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
                 if matches!(rv, Rvalue::Aggregate(k, _) if matches!(**k, AggregateKind::Array(_))) {
                     if let Some(&(call, result)) = self.vec_results.get(&st.source_info.span.ctxt().outer_expn()) {
                         return if self.row_of(loc) == self.row_of(call) && !self.replaces_after_call(call) && self.reaches_without_branch(loc, here) {
-                            (self.dest_name(result, call, depth + 1), true)
+                            let (name, _, dest) = self.destination(result, call, depth + 1);
+                            (name, true, dest)
                         } else {
-                            ("<temp>".into(), false)
+                            ("<temp>".into(), false, None)
                         };
                     }
                 }
-                let (d, element) = self.destination(*lhs, here, depth + 1);
+                let (d, element, dest) = self.destination(*lhs, here, depth + 1);
                 let closure = matches!(rv, Rvalue::Aggregate(k, _) if matches!(**k, AggregateKind::Closure(..)));
-                best = Some((match field {
-                    _ if closure => format!("closure {}", d),
-                    Some(f) if !element && !d.starts_with('<') && !d.ends_with("()") => format!("{}.{}", d, f),
+                let member = field.filter(|(k, _)| !element && matches!(k, AggregateKind::Tuple | AggregateKind::Adt(..)));
+                let dest = if let Some((kind, field)) = member {
+                    dest.and_then(|p| direct_holders::operand_place(self.tcx, self.body, p, kind, field))
+                } else {
+                    dest
+                };
+                let name = match field {
+                    _ if closure => format!("closure {d}"),
+                    _ if member.is_some() && !d.starts_with('<') && !d.ends_with("()") => {
+                        let (kind, field) = member.unwrap();
+                        let name = match kind {
+                            AggregateKind::Adt(id, variant, ..) =>
+                                self.tcx.adt_def(*id).variant(*variant).fields[field].name.to_string(),
+                            _ => field.index().to_string(),
+                        };
+                        format!("{d}.{name}")
+                    }
                     _ => d,
-                }, element));
+                };
+                best = Some((name, element, dest));
             }
             if let TerminatorKind::Call { args, fn_span, func, destination, .. } = &data.terminator().kind {
                 if best.is_none() && args.iter().any(|a| matches!(&a.node, Operand::Move(p) | Operand::Copy(p) if p.local == tmp)) {
@@ -1501,17 +1512,18 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
                         let count = args.get(1).and_then(|a| a.node.constant()).and_then(|c|
                             c.const_.try_eval_target_usize(self.tcx, self.body.typing_env(self.tcx)));
                         if repeat && (count.is_none_or(|n| n == 0) || self.row_of(loc) != self.row_of(at) || self.replaces_after_call(at) || !self.reaches_without_branch(loc, at)) {
-                            ("<temp>".into(), false)
+                            ("<temp>".into(), false, None)
                         } else {
-                            (self.dest_name(*destination, at, depth + 1), true)
+                            let (name, _, dest) = self.destination(*destination, at, depth + 1);
+                            (name, true, dest)
                         }
                     } else {
-                        (format!("{}()", self.call_name(*fn_span, func, at)), false)
+                        (format!("{}()", self.call_name(*fn_span, func, at)), false, None)
                     });
                 }
             }
         }
-        best.unwrap_or_else(|| ("<temp>".into(), false))
+        best.unwrap_or_else(|| ("<temp>".into(), false, None))
     }
 
     fn replaces_after_call(&self, call: Location) -> bool {
@@ -1673,8 +1685,6 @@ struct Untracked<'tcx> {
     /// Where the reference is put.
     assigned: Place<'tcx>,
     param: Option<Local>,
-    /// The field of an aggregate it is put in (`text` of `P { text: "x" }`).
-    field: Option<String>,
 }
 
 struct Flow<'a, 'mir, 'tcx> {
@@ -2469,7 +2479,6 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 place: None,
                 assigned: Place::from(p),
                 param: Some(p),
-                field: None,
             });
         }
         let lmap = bwf.borrow_set.location_map();
@@ -2501,7 +2510,6 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         place: Some(*place),
                         assigned: *lhs,
                         param: None,
-                        field: None,
                     });
                 }
                 Rvalue::Use(Operand::Constant(c)) | Rvalue::Cast(_, Operand::Constant(c), _) if c.ty().is_ref() => {
@@ -2527,7 +2535,6 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         place: None,
                         assigned: *lhs,
                         param: None,
-                        field: None,
                     });
                 }
                 Rvalue::Aggregate(k, ops) => {
@@ -2537,14 +2544,11 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         if !c.ty().is_ref() {
                             continue;
                         }
-                        let Some(field) = aggregate_field(tcx, k, f) else { continue };
-                        let d = cx.dest_name(*lhs, loc, 0);
-                        if user_place(&d).is_none() {
-                            continue;
-                        }
+                        let Some(slot) = direct_holders::operand_place(tcx, body, *lhs, k, f) else { continue };
+                        if !cx.is_user(*lhs) && cx.destination(*lhs, loc, 0).2.is_none() { continue; }
                         // (Into the field's own origins: `"left"` of `("left",
                         // "right")` is held by `p.0` only.)
-                        let os: Vec<Origin> = aggregate_field_ty(tcx, k, decl_place_ty(tcx, body, *lhs), f).map(regions_of).unwrap_or_default();
+                        let os = regions_of(decl_place_ty(tcx, body, slot));
                         if os.is_empty() {
                             continue;
                         }
@@ -2556,9 +2560,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                             lender: text.trim_start_matches('&').trim().to_string(),
                             kind: const_kind(c.ty()),
                             place: None,
-                            assigned: *lhs,
+                            assigned: slot,
                             param: None,
-                            field: Some(field),
                         });
                     }
                 }
@@ -2835,6 +2838,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             col: cx.rows.col.get(loc).copied().unwrap_or(0),
             lender,
             projected: cx.names.projected(tcx, body, bp),
+            payload: cx.names.payload(tcx, body, bp),
             columns: cols,
             whole,
             direct_holder: cx.name(bd.assigned_place()),
@@ -2853,7 +2857,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             source,
             made_through: Vec::new(),
             direct_locals: BTreeSet::new(),
-            direct_holders: user_place(&direct).into_iter().collect(),
+            direct_holders: Vec::new(),
+            holder_stores: Vec::new(),
             via_call: Vec::new(),
             implicit: !cx.written_borrow(*loc),
         });
@@ -2863,14 +2868,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         let bi = BorrowIndex::from_usize(id);
         let (direct, in_macro) = match (u.param, u.at) {
             (Some(p), _) => (cx.names.locals[&p].clone(), None),
-            (None, Some(loc)) => {
-                let d = cx.dest_name(u.assigned, loc, 0);
-                let d = match &u.field {
-                    Some(f) if user_place(&d).is_some() => format!("{}.{}", d, f),
-                    _ => d,
-                };
-                (d, cx.macro_at(loc))
-            }
+            (None, Some(loc)) => (cx.dest_name(u.assigned, loc, 0), cx.macro_at(loc)),
             (None, None) => continue,
         };
         let mut holders: Vec<String> = user_place(&direct).into_iter().collect();
@@ -2910,6 +2908,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             col,
             lender: u.lender.clone(),
             projected: u.place.and_then(|p| cx.names.projected(tcx, body, p)),
+            payload: u.place.and_then(|p| cx.names.payload(tcx, body, p)),
             columns: Vec::new(),
             whole: BTreeSet::new(),
             direct_holder: None,
@@ -2926,7 +2925,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             source: u.source,
             made_through: Vec::new(),
             direct_locals: BTreeSet::new(),
-            direct_holders: user_place(&direct).into_iter().collect(),
+            direct_holders: Vec::new(),
+            holder_stores: Vec::new(),
             via_call: Vec::new(),
             implicit: u.place.is_some() && u.at.is_some_and(|loc| !cx.written_borrow(loc)),
         });
@@ -3236,6 +3236,119 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     let mut receiver_loans = std::collections::HashMap::new();
     let mut argument_stores = std::collections::HashMap::<_, Vec<_>>::new();
     let published: BTreeSet<usize> = loans.iter().map(|l| l.loan).collect();
+    let taken_at = |loan: usize| -> Option<Location> {
+        if loan < base {
+            bwf.borrow_set.location_map().get_index(loan).map(|(at, _)| *at)
+        } else {
+            untracked.get(loan - base).and_then(|u| u.at)
+        }
+    };
+    let source_slots = super::holder_path::HolderPath {
+        tcx, body, runs: &runs,
+        borrowed_slots: rustc_mir_dataflow::impls::borrowed_locals(body).iter().collect(),
+    };
+    let stores = {
+        let addressed = super::repoints::addressed_slots(tcx, body);
+        let mut preds: BTreeMap<Location, Vec<Location>> = BTreeMap::new();
+        for &loc in cx.rows.row.keys().filter(|l| executes_at(l.block)) {
+            for next in executed_successors(loc) { preds.entry(next).or_default().push(loc); }
+        }
+        super::repoints::IncomingStores { tcx, body, preds, addressed, moves: &move_data }
+    };
+    let mut direct = DirectHolders { stores: &stores, paths: &source_slots, tracked: base, issues: BTreeMap::new() };
+    for l in &loans {
+        let place = if l.loan < base {
+            bwf.borrow_set.location_map().get_index(l.loan).map(|(_, bd)| bd.assigned_place())
+        } else {
+            untracked.get(l.loan - base).map(|u| u.assigned)
+        };
+        let Some(place) = place else { continue };
+        direct.issues.entry(taken_at(l.loan)).or_default().push((place, l.loan));
+    }
+    let array_offsets = direct_holders::array_offsets(&stores);
+    // Pick the drawn column after resolving the projected place. Array
+    // elements and enum payloads share the containing value's column.
+    let drawn_slot = |p: Place<'tcx>| {
+        let (_, skip, _) = cx.names.root(p)?;
+        let n = p.projection.iter().skip(skip).position(|step| !matches!(step, ProjectionElem::Field(..)))
+            .map_or(p.projection.len(), |n| skip + n);
+        let shown = Place { local: p.local, projection: tcx.mk_place_elems(&p.projection[..n]) };
+        Some((shown, cx.name(shown)?))
+    };
+    let mut installations = Vec::new();
+    for &bb in body.basic_blocks.reverse_postorder().iter().filter(|bb| runs.contains(bb)) {
+        for (i, stmt) in body[bb].statements.iter().enumerate() {
+            let StatementKind::Assign(pair) = &stmt.kind else { continue };
+            let at = Location { block: bb, statement_index: i };
+            let Some(dst) = stores.slot_before(at, pair.0).filter(|p| cx.is_user(*p)) else { continue };
+            let mut slots = Vec::new();
+            direct_holders::reference_slots(tcx, body, dst, &array_offsets, &mut slots);
+            for place in slots {
+                let origins = direct.installed(at, place);
+                installations.push(Installation {
+                    place, occurrence: Occurrence { at, exit: None, successor: None },
+                    complete: !origins.unknown && !origins.unpictured && origins.calls.is_empty(),
+                    retained: origins.retained, loans: origins.loans,
+                });
+            }
+        }
+    }
+    let opaque = |place| {
+        let ty = decl_place_ty(tcx, body, place);
+        place.is_indirect() || ty.is_closure()
+            || ty.ty_adt_def().is_some_and(|adt| adt.is_box() || adt.is_struct() && !adt.did().is_local())
+    };
+    let mut holder_places: BTreeMap<usize, Vec<(Place<'tcx>, String)>> = BTreeMap::new();
+    for (&at, issues) in &direct.issues {
+        for &(place, loan) in issues {
+            let label = if at.is_none() || place.is_indirect() {
+                cx.name(place).map(|n| (place, n))
+            } else {
+                let (name, _, dest) = cx.destination(place, at.unwrap(), 0);
+                dest.filter(|&p| opaque(p)).zip(user_place(&name))
+            };
+            if let Some(holder) = label { holder_places.entry(loan).or_default().push(holder); }
+        }
+    }
+    for install in &installations {
+        let Some((shown, name)) = drawn_slot(install.place) else { continue };
+        let alias = if install.place.projection.iter().any(|p| matches!(p, ProjectionElem::Downcast(..)))
+            && !install.place.projection.iter().any(|p| matches!(p, ProjectionElem::ConstantIndex { .. }))
+        {
+            // The aggregate may have a payload label even when its only
+            // column is the enclosing enum. Omit the variant in that label.
+            let projection = tcx.mk_place_elems_from_iter(install.place.projection.iter()
+                .filter(|p| !matches!(p, ProjectionElem::Downcast(..))));
+            let mut ty = body.local_decls[install.place.local].ty;
+            cx.names.locals.get(&install.place.local).map(|root|
+                super::places::name_projections(root.clone(), &mut ty, projection.as_slice()))
+        } else { None };
+        let kind = const_kind(decl_place_ty(tcx, body, install.place));
+        let at = install.occurrence.at;
+        let held = table.map_or_else(BTreeSet::new, |t| held_by_place(install.place, t.mid_index(at)));
+        for &id in install.loans.iter().chain(install.retained.keys().filter(|id| !install.loans.contains(id) && held.contains(id))) {
+            let Some(loan) = loans.iter_mut().find(|l| l.loan == id) else { continue };
+            let direct = install.loans.contains(&id);
+            if name == loan.lender || !direct && loan.kind != "mut" && !install.retained[&id] { continue; }
+            if direct {
+                loan.holder_stores.push(HolderStore {
+                    place: EndPlace::new(tcx, install.place, name.clone()), occurrence: install.occurrence, kind,
+                    complete: install.complete,
+                });
+            }
+            let name = alias.as_ref().unwrap_or(&name);
+            let holders = holder_places.entry(id).or_default();
+            if !holders.iter().any(|(p, n)| n == name && p.projection.len() == shown.projection.len() && place_under(*p, shown)) {
+                holders.push((shown, name.clone()));
+            }
+        }
+    }
+    for loan in &mut loans {
+        for (p, name) in holder_places.get(&loan.loan).into_iter().flatten() {
+            loan.direct_locals.insert(p.local);
+            if !loan.direct_holders.contains(name) { loan.direct_holders.push(name.clone()); }
+        }
+    }
     if let Some(t) = table {
         let lmap = bwf.borrow_set.location_map();
         for l in loans.iter_mut() {
@@ -3312,7 +3425,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     if id < base {
                         bwf.borrow_set.location_map().get_index(id).is_some_and(|(_, bd)| bd.assigned_place() == place)
                     } else {
-                        untracked.get(id - base).is_some_and(|u| u.assigned == place && u.field.is_none())
+                        untracked.get(id - base).is_some_and(|u| u.assigned == place)
                     }
                 };
                 #[expect(clippy::disallowed_methods, reason = "only tests membership among MIR destinations")]
@@ -3440,73 +3553,6 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
         }
         closure_result_loans.retain(|_, sites| sites.values().flatten().any(Option::is_some));
-        // Copies and moves of a direct holder's reference (through MIR
-        // temporaries), into a variable, a field (`h.r`, `o.0`), or a whole
-        // struct that carries it (`s2` of `s1` gives `s2.r` of `s1.r`). Only
-        // while the source holds the loan there (Polonius).
-        let mut changed = true;
-        let mut rounds = 0;
-        while changed && rounds < 64 {
-            changed = false;
-            rounds += 1;
-            for &bb in body.basic_blocks.reverse_postorder() {
-                if !runs.contains(&bb) {
-                    continue;
-                }
-                for (i, st) in body.basic_blocks[bb].statements.iter().enumerate() {
-                    let loc = Location { block: bb, statement_index: i };
-                    let StatementKind::Assign(asg) = &st.kind else { continue };
-                    let (lhs, rv) = &**asg;
-                    let srcs: Vec<(Place<'tcx>, Option<String>)> = match rv {
-                        Rvalue::Use(Operand::Copy(p) | Operand::Move(p)) | Rvalue::Cast(_, Operand::Copy(p) | Operand::Move(p), _) => vec![(*p, None)],
-                        Rvalue::Aggregate(k, ops) => ops
-                            .iter_enumerated()
-                            .filter_map(|(f, o)| match o {
-                                Operand::Copy(p) | Operand::Move(p) => Some((*p, aggregate_field(tcx, k, f))),
-                                _ => None,
-                            })
-                            .filter(|(_, f)| f.is_some())
-                            .collect(),
-                        _ => Vec::new(),
-                    };
-                    for (src, field) in srcs {
-                        let Some(sname) = cx.name(src).map(|n| without_downcasts(&n)) else { continue };
-                        let held = held_by(src.local, t.start_index(loc));
-                        if held.is_empty() {
-                            continue;
-                        }
-                        let d = cx.dest_name(*lhs, loc, 0);
-                        let Some(d) = user_place(&d) else { continue };
-                        let d = match &field {
-                            Some(f) => format!("{}.{}", d, f),
-                            None => d,
-                        };
-                        // (Only what the destination holds after: not a
-                        // `usize` field copied out of a tuple with a reference.)
-                        let now = held_by(lhs.local, t.mid_index(loc));
-                        for l in loans.iter_mut() {
-                            if !held.contains(&l.loan) || !now.contains(&l.loan) {
-                                continue;
-                            }
-                            let mut add = Vec::new();
-                            for h in &l.direct_holders {
-                                if *h == sname {
-                                    add.push(d.clone());
-                                } else if let Some(rest) = h.strip_prefix(&format!("{}.", sname)) {
-                                    add.push(format!("{}.{}", d, rest));
-                                }
-                            }
-                            for a in add {
-                                if !l.direct_holders.contains(&a) && a != l.lender {
-                                    l.direct_holders.push(a);
-                                    changed = true;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
         // Holders by a call's result. Per loan, the locals that carry it as
         // their value (`copy`: the reference itself, through copies, moves
         // and field reads; `call`: out of a call's result), and those that
@@ -3652,16 +3698,17 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
             for (local, k) in &how {
                 let Some(n) = cx.names.locals.get(local) else { continue };
-                if *k == 0 { l.direct_locals.insert(*local); }
-                let root_direct = l.direct_holders.iter().any(|d| d == n || d.starts_with(&format!("{}.", n)));
+                let root_direct = holder_places.get(&l.loan).is_some_and(|places|
+                    places.iter().any(|(p, _)| p.local == *local));
                 if root_direct || *n == l.lender {
                     continue;
                 }
-                // A copy through MIR temporaries the names above don't follow
-                // (`if let Some(m) = Some(r)`).
-                if *k == 0 && local != &first {
+                if *k == 0 && !matches!(body.local_decls[*local].ty.kind(), TyKind::Ref(..) | TyKind::Tuple(..) | TyKind::Array(..))
+                    && !body.local_decls[*local].ty.ty_adt_def().is_some_and(|def| def.is_struct() && def.did().is_local() || def.is_enum())
+                {
+                    l.direct_locals.insert(*local);
                     l.direct_holders.push(n.clone());
-                    continue;
+                    holder_places.entry(l.loan).or_default().push((Place::from(*local), n.clone()));
                 }
                 if *k != 1 {
                     continue;
@@ -3690,10 +3737,6 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         }
     }
 
-    let source_slots = super::holder_path::HolderPath {
-        tcx, body, runs: &runs,
-        borrowed_slots: rustc_mir_dataflow::impls::borrowed_locals(body).iter().collect(),
-    };
     let iterators: Vec<_> = body.local_decls.indices().filter(|l| for_iter(*l) && !cx.names.locals.contains_key(l)).collect();
     let end_provenance = |flow: &mut Flow<'_, '_, 'tcx>, loc: Location, bi: BorrowIndex, li: &LoanInfo, only: Option<Place<'tcx>>| {
         let caller_slot = bi.index().checked_sub(base).and_then(|id| untracked[id].param).and_then(|param| {
@@ -3717,12 +3760,15 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             // that was never a direct assignment target. Its own origin
             // must still carry this loan at the discriminant or its input.
             let can_name = |n: &String| {
-                li.direct_holders.contains(n) || li.via_call.contains(n) || tested.is_some() && li.holders.contains(n)
+                li.via_call.contains(n) || tested.is_some() && li.holders.contains(n)
             };
+            let direct_slots = holder_places.get(&li.loan).map(Vec::as_slice).unwrap_or(&[]);
+            let belongs = |p: Place<'tcx>| direct_slots.iter().any(|(slot, _)|
+                slot.projection.len() == p.projection.len() && place_under(p, *slot));
             let named = |p: Place<'tcx>| {
                 if iterators.contains(&p.local) && p.projection.is_empty() { return Some(EndPlace::new(tcx, p, "<iterator>".into())); }
                 let name = cx.name(p)?;
-                can_name(&name)
+                (belongs(p) || li.via_call.contains(&name) || tested.is_some() && li.holders.contains(&name))
                     .then_some(EndPlace::new(tcx, p, name))
             };
             let carries = |p, at| held_by_place(p, t.start_index(at)).contains(&bi.index());
@@ -3736,7 +3782,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 }
             };
             let candidates = columns.iter().chain(&synth)
-                .filter(|(_,_,name)| can_name(name)).map(|(_,p,_)|*p)
+                .filter(|(_,p,name)| belongs(*p) || can_name(name)).map(|(_,p,_)|*p)
                 .chain(iterators.iter().map(|l| Place::from(*l)));
             for place in candidates {
                 if only.is_some_and(|p| p != place) { continue; }
@@ -3853,27 +3899,6 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     // Where a direct or via-call holder stops holding a loan that goes on.
     if let Some(t) = table {
         let killed: BTreeSet<_> = pfacts.into_iter().flat_map(|f| f.loan_killed_at.iter().copied()).collect();
-        // The place a holder's name is (`h.0`, `h.inner.r`): its own field,
-        // so `h.0` and `h.1` each have their own end.
-        let place_of = |local: Local, fields: &str| -> Option<Place<'tcx>> {
-            let mut place = Place::from(local);
-            for seg in fields.split_terminator('.') {
-                let ty = decl_place_ty(tcx, body, place);
-                let (i, fty) = match ty.kind() {
-                    TyKind::Tuple(tys) => {
-                        let i: usize = seg.parse().ok()?;
-                        (i, *tys.get(i)?)
-                    }
-                    TyKind::Adt(def, args) if def.is_struct() => {
-                        let (i, fd) = def.non_enum_variant().fields.iter().enumerate().find(|(_, fd)| fd.name.as_str() == seg)?;
-                        (i, fd.ty(tcx, args))
-                    }
-                    _ => return Some(place),
-                };
-                place = tcx.mk_place_field(place, rustc_abi::FieldIdx::from_usize(i), fty);
-            }
-            Some(place)
-        };
         let succs_of = |loc: Location| -> Vec<Location> {
             let data = &body.basic_blocks[loc.block];
             if loc.statement_index < data.statements.len() {
@@ -3921,20 +3946,21 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 continue;
             }
             let bi = BorrowIndex::from_usize(l.loan);
-            let mut seen: BTreeSet<&String> = BTreeSet::new();
-            let refs: Vec<_> = columns.iter().chain(&synth).filter(|(_, p, n)|
-                decl_place_ty(tcx, body, *p).is_ref()
-                    && (l.direct_holders.contains(n) || l.via_call.contains(n))).collect();
-            let holders = l.direct_holders.iter().chain(l.via_call.iter()).filter(|h| seen.insert(*h));
-            for (h, hp) in holders.flat_map(|h| {
-                let (root, fields) = h.split_once('.').unwrap_or((h, ""));
-                cx.names.columns.get(root).into_iter().flatten().filter_map(move |local| Some((h, place_of(*local, fields)?)))
-            }) {
+            let mut holders = holder_places.get(&l.loan).cloned().unwrap_or_default();
+            for (_, p, name) in columns.iter().chain(&synth) {
+                if l.via_call.contains(name) && !holders.contains(&(*p, name.clone())) {
+                    holders.push((*p, name.clone()));
+                }
+            }
+            let refs: Vec<_> = holders.iter().filter(|(p, _)| decl_place_ty(tcx, body, *p).is_ref()).collect();
+            for (hp, h) in &holders {
+                let hp = *hp;
                 for (&loc, &row) in &cx.rows.row {
                     if !runs.contains(&loc.block) {
                         continue;
                     }
-                    let held_here = held_by_place(hp, t.start_index(loc)).contains(&l.loan) || held_by_place(hp, t.mid_index(loc)).contains(&l.loan);
+                    let held_here = held_by_place(hp, t.start_index(loc)).contains(&l.loan)
+                        || held_by_place(hp, t.mid_index(loc)).contains(&l.loan);
                     if !held_here {
                         continue;
                     }
@@ -3963,7 +3989,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         // Propagation across this edge requires the same live
                         // reference origin on both ends. The successor alone
                         // can contain a loan introduced by another predecessor.
-                        f.1.continuing_places = refs.iter().filter(|_| executable.contains(&s)).filter_map(|(_, p, n)| {
+                        f.1.continuing_places = refs.iter().filter(|_| executable.contains(&s)).filter_map(|(p, n)| {
                             let TyKind::Ref(region, ..) = *decl_place_ty(tcx, body, *p).kind() else { return None };
                             let origin = Origin::from(region_vid(region)?);
                             let out = out_for(bi)?;
@@ -3993,27 +4019,12 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         }
     }
 
-    // ---- stores of references into struct fields (`h.r = &b`) ------------------
-    // Per field: each place a store puts loans there, and which loans. The
-    // struct literal stores the loans first held by the field; an
-    // assignment `h.r = <rhs>` the loans its right-hand side takes, or those
-    // a reference variable it copies holds (`h.r = s`).
-    let mut field_stores: BTreeMap<String, Vec<(Location, Vec<usize>)>> = BTreeMap::new();
-    // Where each listed loan is taken (an untracked one's, from its record).
-    let taken_at = |loan: usize| -> Option<Location> {
-        if loan < base {
-            bwf.borrow_set.location_map().get_index(loan).map(|(bl, _)| *bl)
-        } else {
-            untracked.get(loan - base).and_then(|u| u.at)
-        }
-    };
-    for l in &loans {
-        if let Some(f) = l.holders.first().filter(|h| h.contains('.')) {
-            if let Some(bl) = taken_at(l.loan) {
-                field_stores.entry(f.clone()).or_default().push((bl, vec![l.loan]));
-            }
-        }
-    }
+    let projected_stores: BTreeMap<_, _> = installations.iter().filter_map(|install| {
+        let at = install.occurrence.at;
+        let StatementKind::Assign(write) = &body[at.block].statements[at.statement_index].kind else { return None };
+        (!write.0.projection.is_empty() && write.0.projection.len() == install.place.projection.len())
+            .then_some((at, install))
+    }).collect();
     let issued: BTreeMap<_, _> = loans.iter().filter_map(|l| Some((taken_at(l.loan)?, l.loan))).collect();
     let doms = body.basic_blocks.dominators();
     let mut issued_operand_loans = BTreeSet::new();
@@ -4039,8 +4050,15 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     // A whole operand can carry its fields' loans. Compare MIR
                     // projections before resolving a holder to its published column.
                     let in_operand = |h: &String| name.as_ref() == Some(h) || columns.iter().chain(&synth).any(|(_, field, label)|
-                        label == h && field.local == p.local && field.projection.starts_with(p.projection));
-                    loans.iter().filter(|l| l.runs && held.contains(&l.loan) && (name.is_none() || l.direct_holders.iter().chain(&l.via_call).any(in_operand))
+                        label == h && place_under(*field, p));
+                    let mut slots = Vec::new();
+                    direct_holders::reference_slots(tcx, body, p, &array_offsets, &mut slots);
+                    let direct_value = !slots.is_empty() && !opaque(p);
+                    let exact: BTreeSet<_> = slots.into_iter().flat_map(|p| direct.before(at, p).loans).collect();
+                    loans.iter().filter(|l| l.runs && held.contains(&l.loan)
+                        && (exact.contains(&l.loan) || l.via_call.iter().any(in_operand)
+                            || name.is_none() || (!direct_value && holder_places.get(&l.loan).is_some_and(|hs|
+                                hs.iter().any(|(slot, _)| place_under(*slot, p)))))
                         && !loans.iter().any(|child| held.contains(&child.loan) && child.made_through.contains(&l.loan)))
                         .map(|l| l.loan).collect()
                 };
@@ -4061,54 +4079,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 }
                 aggregate_loans.entry(key).or_insert_with(Vec::new).extend(ids);
             }
-            let Rvalue::Aggregate(k, ops) = &asg.1 else { continue };
-            let Some(d) = user_place(&cx.dest_name(asg.0, loc, 0)) else { continue };
-            for (f, o) in ops.iter_enumerated() {
-                let (Operand::Copy(p) | Operand::Move(p)) = o else { continue };
-                let Some(field) = aggregate_field(tcx, k, f) else { continue };
-                let ls: Vec<usize> = held_by_place(*p, t.start_index(loc)).into_iter().filter(|l| published.contains(l)).collect();
-                if !ls.is_empty() {
-                    field_stores.entry(format!("{}.{}", d, field)).or_default().push((loc, ls));
-                }
-            }
         }
-    }
-    for (&loc, _) in &cx.rows.row {
-        let Some(st) = body.basic_blocks[loc.block].statements.get(loc.statement_index) else { continue };
-        let StatementKind::Assign(asg) = &st.kind else { continue };
-        let lhs = &asg.0;
-        if lhs.projection.is_empty() || !lhs.ty(&body.local_decls, tcx).ty.is_ref() {
-            continue;
-        }
-        let Some(path) = cx.name(*lhs).filter(|_| cx.names.root(*lhs).is_some_and(|(_, skip, _)| column_projection(body, *lhs, skip))) else { continue };
-        let span = {
-            let hid = rustc_utils::BodyExt::location_to_hir_id(body, loc);
-            match tcx.hir_node(hid) {
-                rustc_hir::Node::Expr(e) => e.span,
-                _ => cx.r.span_of(loc),
-            }
-        };
-        let mut new: Vec<usize> = loans
-            .iter()
-            .filter(|l| l.holders.first() == Some(&path) && taken_at(l.loan).is_some_and(|bl| span.contains(cx.r.span_of(bl))))
-            .map(|l| l.loan)
-            .collect();
-        // And the loans the field holds right after the store that it didn't
-        // hold just before (`h.r = s` carries s's loan in; `h.r = "y"`).
-        if let Some(t) = table {
-            let (before, after) = (held_by_place(*lhs, t.start_index(loc)), held_by_place(*lhs, t.mid_index(loc)));
-            for b in after.difference(&before) {
-                if published.contains(b) && !new.contains(b) {
-                    new.push(*b);
-                }
-            }
-        }
-        new.sort();
-        // (Replaces the literal's entries for loans taken in this very
-        // statement: those are this store's.)
-        let v = field_stores.entry(path).or_default();
-        v.retain(|(_, ls)| !(ls.len() == 1 && new.contains(&ls[0]) && span.contains(cx.r.span_of(taken_at(ls[0]).unwrap_or(loc)))));
-        v.push((loc, new));
     }
     let ldom = |a: Location, b: Location| if a.block == b.block { a.statement_index <= b.statement_index } else { doms.dominates(a.block, b.block) };
     // The parts of a place that drop elaboration drops on their own when some
@@ -4881,10 +4852,16 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     })?;
                     Some((p.local, column.clone(), label))
                 });
+                let fixed_array_copy = if matches!(rv, Rvalue::Use(Operand::Copy(_))) && body.local_decls[lhs.local].ty.is_ref() {
+                    source.and_then(|p| stores.slot_before(loc, p)).and_then(|p| cx.names.fixed_array_slot(tcx, body, p))
+                } else {
+                    None
+                };
                 binding_sources.push(BindingSource {
                     projected_move,
+                    fixed_array_copy,
                     parents, covers, moves: matches!(rv, Rvalue::Use(Operand::Move(p)) if !ty_info(p.ty(&body.local_decls, tcx).ty).0),
-                    location: loc, runs: runs.contains(&loc.block),
+                    location: loc, row: cx.row_of(loc), runs: runs.contains(&loc.block),
                     declaration: lhs.local,
                     site: st.source_info.span, into: into.clone(), from,
                 });
@@ -4957,6 +4934,30 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         }
                     }
                     let lhs_col = cx.names.root(*lhs).is_some_and(|(_, skip, _)| column_projection(body, *lhs, skip));
+                    // Repoint is about the storage slot even when it has
+                    // no column of its own, as for a fixed array element.
+                    if let Some(this) = projected_stores.get(&loc) {
+                        let holder = if lhs_col {
+                            cx.name(*lhs)
+                        } else {
+                            cx.names.fixed_array_slot(tcx, body, this.place).map(|(_, _, label)| label)
+                        };
+                        if let Some(holder) = holder {
+                            let mut installed = this.loans.clone();
+                            if let Some(t) = table {
+                                let current = held_by_place(*lhs, t.mid_index(loc));
+                                let prior = held_by_place(*lhs, t.start_index(loc));
+                                installed.extend(this.retained.keys().copied().filter(|id| current.contains(id) && !prior.contains(id)));
+                                if installed.is_empty() && !this.complete {
+                                    installed.extend(current.difference(&prior).copied().filter(|id| published.contains(id)));
+                                }
+                            }
+                            push(&mut evs, cx.ev(loc, Fact::Repoint {
+                                definitions: Vec::new(), maybe_uninitialized: false, reaching: None, holder,
+                                old: Vec::new(), new: installed.into_iter().collect(),
+                            }));
+                        }
+                    }
                     if lhs_col {
                         let path = cx.name(*lhs).unwrap_or_default();
                         let from = match rv {
@@ -4987,14 +4988,6 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                                 let f = Fact::Repoint { definitions: Vec::new(), maybe_uninitialized: false, reaching: None, holder: path.clone(), old: held(t.start_index(loc)), new: held(t.mid_index(loc)) };
                                 push(&mut evs, cx.ev(loc, f));
                             }
-                        }
-                        // A reference stored in a field (`h.r = &mut y;`): the
-                        // old loans are those the last store into `h.r` on the
-                        // way here put there (and still in scope), the new ones
-                        // those this store puts there.
-                        if let Some(this) = field_stores.get(&path).and_then(|v| v.iter().find(|(l, _)| *l == loc)) {
-                            let old = Vec::new();
-                            push(&mut evs, cx.ev(loc, Fact::Repoint { definitions: Vec::new(), maybe_uninitialized: false, reaching: None, holder: path.clone(), old, new: this.1.clone() }));
                         }
                         if !reassign && lhs.projection.is_empty() {
                             if body.local_decls[lhs.local].mutability.is_not()
@@ -7057,12 +7050,6 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     let has_repoints = out_rows.iter().flat_map(|r| &r.facts).any(|e| matches!(e.fact, Fact::Repoint { .. }));
     let mut direct_releases = BTreeMap::new();
     if let Some(t) = table.filter(|_| has_repoints) {
-        let addressed = super::repoints::addressed_slots(tcx, body);
-        let mut preds: BTreeMap<Location, Vec<Location>> = BTreeMap::new();
-        for &loc in cx.rows.row.keys().filter(|l| executes_at(l.block)) {
-            for next in executed_successors(loc) { preds.entry(next).or_default().push(loc); }
-        }
-        let stores = super::repoints::IncomingStores { tcx, body, preds, addressed, moves: &move_data };
         let slots: BTreeSet<_> = out_rows.iter().flat_map(|r| &r.facts).filter_map(|e| {
             if !matches!(e.fact, Fact::Repoint { .. }) { return None; }
             let StatementKind::Assign(write) = &body[e.location.block].statements[e.location.statement_index].kind else { return None };
@@ -7092,64 +7079,23 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             let loc = e.occurrence.at;
             let Some(stmt) = body[loc.block].statements.get(loc.statement_index) else { continue };
             let StatementKind::Assign(write) = &stmt.kind else { continue };
-            let slot = write.0;
+            let Some(slot) = stores.slot_before(loc, write.0) else { continue; };
             let incoming = stores.definitions(loc, slot);
             *maybe_uninitialized = incoming.uninitialized;
             definitions.extend(incoming.sites);
-            if incoming.unknown { continue; }
-            // Read the projected value at each defining instruction. In
-            // particular, a whole-aggregate transfer supplies the field on
-            // its RHS, even when the old field's region is still live.
-            let loans_at = || -> Option<BTreeSet<usize>> {
-                let mut work: Vec<_> = definitions.iter().map(|&site| (slot, site)).collect();
-                let mut ids = BTreeSet::new();
-                let mut seen = std::collections::HashSet::new();
-                while let Some((place, site)) = work.pop() {
-                    if !seen.insert((place, site)) { continue; }
-                    let at = site.at;
-                    if let Some(next) = site.successor {
-                        // A returned aggregate's fields can share a region.
-                        // Its signature cannot identify individual operands.
-                        place.as_local()?;
-                        ids.extend(carried(place, t.start_index(next)));
-                        continue;
-                    }
-                    let StatementKind::Assign(asg) = &body[at.block].statements[at.statement_index].kind else { return None };
-                    let suffix = &place.projection[asg.0.projection.len()..];
-                    if let Rvalue::Ref(_, _, borrowed) = asg.1 {
-                        if let Some(loan) = loans.iter().find(|l| taken_at(l.loan) == Some(at)) {
-                            ids.insert(loan.loan);
-                        } else if let Some(i) = borrowed.projection.iter().rposition(|e| e == ProjectionElem::Deref) {
-                            let input = Place { local: borrowed.local, projection: tcx.mk_place_elems(&borrowed.projection[..i]) };
-                            // Dereferencing a raw pointer does not inherit
-                            // the nested lifetimes of the pointee.
-                            if let TyKind::Ref(region, ..) = decl_place_ty(tcx, body, input).kind() {
-                                ids.extend(region_vid(*region).into_iter().flat_map(|v|
-                                    held_in(&[Origin::from(v)], t.start_index(at))).filter(|id| published.contains(id)));
-                            }
-                        }
-                    } else if let Some(src) = source_slots.source(&asg.1, suffix, |_| false) {
-                        let direct_operand = suffix.is_empty() && src.projection.iter().any(|e| !matches!(e, ProjectionElem::Field(..)));
-                        if src.projection.is_empty() || direct_operand {
-                            ids.extend(carried(src, t.start_index(at)));
-                        } else {
-                            // Follow this field through staging temporaries to
-                            // its constructor operand. Field origins alone can
-                            // include a sibling that has the same lifetime.
-                            let source = stores.definitions(at, src);
-                            if source.unknown || source.uninitialized { return None; }
-                            work.extend(source.sites.into_iter().map(|def| (src, def)));
-                        }
-                    } else if suffix.is_empty() {
-                        ids.extend(carried(place, t.mid_index(at)));
-                    } else {
-                        return None;
-                    }
-                }
-                Some(ids)
-            };
+            if incoming.unknown || incoming.argument { continue; }
             if !executes_at(loc.block) { continue; }
-            let Some(ids) = loans_at() else { continue };
+            let origins = direct.reaching(definitions, slot);
+            if origins.unknown { continue; }
+            let mut ids = origins.loans;
+            if slot.projection.is_empty() {
+                // The local repoint layout also tracks the original
+                // restriction kept by a reborrow of the entire reference.
+                ids.extend(origins.retained.into_keys());
+            }
+            for (next, place) in origins.calls {
+                ids.extend(carried(place, t.start_index(next)));
+            }
             if !slot.projection.is_empty() {
                 inscope.seek_before_primary_effect(loc);
                 let mut live: BTreeSet<_> = inscope.get().iter().collect();
@@ -7271,7 +7217,7 @@ fn call_result_store<'tcx>(cx: &Cx<'_, 'tcx>, mut value: Place<'tcx>, mut at: Lo
 /// The type of `place`, with the region variables of its local's declared
 /// type: a projection's own field type has fresh ones after borrowck's
 /// renumbering, which no origin of the local is.
-fn decl_place_ty<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'tcx>) -> rustc_middle::ty::Ty<'tcx> {
+pub(super) fn decl_place_ty<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'tcx>) -> rustc_middle::ty::Ty<'tcx> {
     let mut ty = body.local_decls[place.local].ty;
     let mut variant: Option<rustc_abi::VariantIdx> = None;
     for e in place.projection.iter() {
@@ -7306,16 +7252,6 @@ fn const_kind(ty: rustc_middle::ty::Ty<'_>) -> &'static str {
     if matches!(ty.kind(), TyKind::Ref(_, _, m) if m.is_mut()) { "mut" } else { "shared" }
 }
 
-/// The type of field `f` of an aggregate of kind `k` whose type is `ty`
-/// (with `ty`'s region variables).
-fn aggregate_field_ty<'tcx>(tcx: TyCtxt<'tcx>, k: &AggregateKind<'tcx>, ty: rustc_middle::ty::Ty<'tcx>, f: rustc_abi::FieldIdx) -> Option<rustc_middle::ty::Ty<'tcx>> {
-    match (k, ty.kind()) {
-        (AggregateKind::Tuple, TyKind::Tuple(tys)) => tys.get(f.index()).copied(),
-        (AggregateKind::Adt(_, v, ..), TyKind::Adt(def, args)) => def.variant(*v).fields.get(f).map(|fd| fd.ty(tcx, args)),
-        _ => None,
-    }
-}
-
 /// The origins (region variables) a type has, in order.
 fn regions_of(ty: rustc_middle::ty::Ty<'_>) -> Vec<Origin> {
     let mut out = Vec::new();
@@ -7337,19 +7273,6 @@ fn regions_of(ty: rustc_middle::ty::Ty<'_>) -> Vec<Origin> {
 fn user_place(d: &str) -> Option<String> {
     let d = d.trim_start_matches("closure ");
     (!d.is_empty() && !d.starts_with('<') && !d.ends_with("()")).then(|| d.to_owned())
-}
-
-/// The name of an aggregate's field `f` (`r` of `H { r }`, `0` of a tuple or
-/// of `Some(..)`), if the aggregate is a struct, enum variant or tuple.
-fn aggregate_field<'tcx>(tcx: TyCtxt<'tcx>, k: &AggregateKind<'tcx>, f: rustc_abi::FieldIdx) -> Option<String> {
-    match k {
-        AggregateKind::Adt(did, v, ..) => {
-            let adt = tcx.adt_def(*did);
-            Some(adt.variant(*v).fields.get(f).map_or_else(|| f.index().to_string(), |fd| fd.name.to_string()))
-        }
-        AggregateKind::Tuple => Some(f.index().to_string()),
-        _ => None,
-    }
 }
 
 /// The field paths of a struct or tuple value (`t.0`, `h.inner.r`) whose
@@ -7444,15 +7367,4 @@ fn resolve_deref<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'tcx>,
         place = Place { local: base.local, projection: tcx.mk_place_elems(&proj) };
     }
     place
-}
-
-/// A place name without its enum downcasts, as a field path: `o.0` for
-/// `(o as Some).0` (how a pattern reads what `Some(r)` put in `o.0`).
-fn without_downcasts(n: &str) -> String {
-    let mut n = n.to_owned();
-    while let Some(a) = n.find(" as ") {
-        let (Some(open), Some(close)) = (n[..a].rfind('('), n[a..].find(')').map(|c| a + c)) else { break };
-        n = format!("{}{}{}", &n[..open], &n[open + 1..a], &n[close + 1..]);
-    }
-    n
 }

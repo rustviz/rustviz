@@ -1199,8 +1199,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           None => (lenders, self.call_borrow_is_mut(init)),
         }
       }
-      // `let refs = [&a, &b];` (`vec![&a, &b]` is a call; #349).
-      ExprKind::Array(..) | ExprKind::Repeat(..) => (self.value_lenders(init), self.value_borrow_is_mut(init)),
       // `let it2 = it;` / `let t2 = third;`: the new variable holds
       // the same borrow.
       ExprKind::Path(QPath::Resolved(..)) => match expr_to_rap_name(init, &self.tcx)

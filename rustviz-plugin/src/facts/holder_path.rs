@@ -27,11 +27,10 @@ pub(super) struct Trace {
 }
 
 impl<'tcx> HolderPath<'_, 'tcx> {
-    pub(super) fn source(
+    pub(super) fn direct_source(
         &self,
         value: &Rvalue<'tcx>,
         suffix: &[PlaceElem<'tcx>],
-        carries: impl Fn(Place<'tcx>) -> bool,
     ) -> Option<Place<'tcx>> {
         let (source, remaining) = match value {
             Rvalue::Use(op) => (op.place()?, suffix),
@@ -40,7 +39,6 @@ impl<'tcx> HolderPath<'_, 'tcx> {
                 return None
             }
             Rvalue::Aggregate(kind, ops) => {
-                // The projected field is relative to its selected variant.
                 let suffix = match suffix {
                     [ProjectionElem::Downcast(_, selected), rest @ ..] => {
                         if !matches!(&**kind, AggregateKind::Adt(_, variant, ..) if selected == variant) { return None; }
@@ -48,21 +46,38 @@ impl<'tcx> HolderPath<'_, 'tcx> {
                     }
                     other => other,
                 };
-                match suffix.split_first() {
-                    Some((ProjectionElem::Field(index, _), rest)) => (ops.get(*index)?.place()?, rest),
-                    None => return unique(ops.iter().filter_map(Operand::place).filter(|p| carries(*p))),
-                    _ => return None,
-                }
+                let (step, rest) = suffix.split_first()?;
+                let operand = match step {
+                    ProjectionElem::Field(index, _) => ops.get(*index),
+                    ProjectionElem::ConstantIndex { offset, from_end: false, .. } if matches!(**kind, AggregateKind::Array(_)) =>
+                        ops.raw.get(usize::try_from(*offset).ok()?),
+                    _ => None,
+                }?;
+                (operand.place()?, rest)
             }
-            Rvalue::Ref(_, _, borrowed) => {
-                // The loan is carried through the reference in `&*m` or
-                // `&*h.r`. A non-reborrow such as `&s` starts a new loan.
-                let n = borrowed.projection.iter().position(|e| e == ProjectionElem::Deref).unwrap_or(borrowed.projection.len());
-                return Some(Place { local: borrowed.local, projection: self.tcx.mk_place_elems(&borrowed.projection[..n]) });
-            }
+            Rvalue::Repeat(op, _) if matches!(suffix.first(), Some(ProjectionElem::ConstantIndex { .. })) =>
+                (op.place()?, &suffix[1..]),
             _ => return None,
         };
         Some(source.project_deeper(remaining, self.tcx))
+    }
+
+    fn source(
+        &self,
+        value: &Rvalue<'tcx>,
+        suffix: &[PlaceElem<'tcx>],
+        carries: impl Fn(Place<'tcx>) -> bool,
+    ) -> Option<Place<'tcx>> {
+        match value {
+            Rvalue::Aggregate(kind, ops) if suffix.is_empty()
+                && !matches!(&**kind, AggregateKind::Adt(id, ..) if self.tcx.adt_def(*id).is_union()) =>
+                unique(ops.iter().filter_map(Operand::place).filter(|p| carries(*p))),
+            Rvalue::Ref(_, _, borrowed) => {
+                let n = borrowed.projection.iter().position(|e| e == ProjectionElem::Deref).unwrap_or(borrowed.projection.len());
+                Some(Place { local: borrowed.local, projection: self.tcx.mk_place_elems(&borrowed.projection[..n]) })
+            }
+            _ => self.direct_source(value, suffix),
+        }
     }
 
     /// Trace a single reaching definition. A merge stops the walk.

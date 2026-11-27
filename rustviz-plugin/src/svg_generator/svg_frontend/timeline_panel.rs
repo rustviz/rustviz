@@ -3116,7 +3116,8 @@ fn render_dot(
             data.title = title;
         }
         append_dot(data, timeline_data, dots, lend_id, event_kind, *line_number);
-        if stacked && matches!(event, Event::StaticBorrow { .. }) && rap.is_ref() && !rap.is_mutref() {
+        if (stacked || layout.field_generations.contains_key(&event.get_id()))
+            && matches!(event, Event::StaticBorrow { .. }) && rap.is_ref() && !rap.is_mutref() {
             let tip = hover_messages::state_static_ref_full_privilege(rap.name(), rap.points_to_copy());
             let dot = dots.entry(*hash, timeline_data.x_val, event_y, *line_number, timeline_data);
             if !dot.lines.iter().any(|(_, line)| *line == tip) {
@@ -10459,6 +10460,27 @@ fn render_branches(
             let mut segs = trim_dashes_under_solid(segs);
             if let Some(span) = branch.source_span.filter(|_| branch.imaginary.is_none()) {
                 segs = part_loans_in_arm(segs, rap, visualization_data, span, branch.source, branch_x);
+                let released_on_this_path = || {
+                    use crate::facts::table::{Init, Why};
+                    let table = &visualization_data.state_table;
+                    let &function = visualization_data.fn_source_lines.get(rap.hash())?;
+                    let source = branch.source?;
+                    let row = span.start.0;
+                    if span.end.0 != row || rap.is_ref() { return None; }
+                    let cell = table.one_line_arm_cell(function, rap.name(), row, source, &arm_sources)?;
+                    if cell.init != Init::Own || cell.may || cell.parts.is_some() || !cell.lent.is_empty() { return None; }
+                    arm_sources.iter().flatten().filter(|&&other| other != source)
+                        .filter_map(|&other| table.one_line_arm_cell(function, rap.name(), row, other, &arm_sources))
+                        .any(|other| other.lent.iter().any(|l| cell.why.iter().any(|why|
+                            matches!(why, Why::LoanEnded { loan, .. } if *loan == l.loan))))
+                        .then_some(())
+                };
+                if let Some(join) = segs.iter_mut().find(|s| s.p1.0 == branch_x && s.p2.0 == parent_x
+                    && matches!(s.state, State::FullPrivilege { s: LineState::Full })).filter(|_| released_on_this_path().is_some()) {
+                    let path = hover_messages::state_arm_join(&arm_label);
+                    let owner = styled_name_html(rap.name());
+                    join.title = format!("{path} {owner} can be used on this path. {}", join.title);
+                }
             }
 
             // This leg combines several feasible incoming edges. Its
