@@ -45,6 +45,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 /// the ones in those directories. One entry covers every violation of
 /// that invariant in that snippet.
 pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
+    // The join says a Copy leaf of a moved field was moved (true), but its
+    // column's line goes on (#1923).
+    ("drop_paths_1904", "owner-after-maybe-moved-join", 1923),
     // Geometric (`geometry.rs`), from here on.
     // Arrows fanned into one dot from below (#1312): one head still comes
     // in at 70-85 degrees along the column under the dot.

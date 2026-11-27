@@ -324,7 +324,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // the caller, and `self`'s borrow goes on with it (#784). Drawn as a
     // copy of the reference for `&mut` too: `self` isn't moved, it is
     // reborrowed.
-    let reborrow = if lhs_ty.is_ref() { self.reborrow_through_ref(e) } else { None };
+    let reborrow = if lhs_ty.is_ref() {
+      self.reborrow_through_ref(e).or_else(|| {
+        if !self.tail_plain.contains(&e.hir_id) { return None; }
+        let facts = self.facts?;
+        let rap = fetch_rap(e, &self.tcx, &self.raps).filter(|r| r.is_mutref())?;
+        if !facts.implicit_mut_reborrows.contains(&(e.span.with_parent(None), rap.ref_local()?)) {
+          return None;
+        }
+        let place = format!("&mut *{}", rap.name());
+        let holds = self.field_holds(lhs_ty.builtin_deref(true)?, e.hir_id.owner);
+        Some(ResourceTy::DerefField(rap, place, PlaceWrite::Update, holds))
+      })
+    } else { None };
     // `v.get_mut(0).unwrap()`: the borrow the call takes through `v`
     // goes on in the returned reference, so `get_mut` doesn't give it
     // back here (#1078).
@@ -4774,7 +4786,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   }
 
   fn emit_assignment_joins(&mut self, expr: &'tcx Expr<'tcx>, imaginary: bool) {
-    let Some(join) = self.facts.and_then(|f| f.joins.get(&expr.span)) else { return };
+    let Some(join) = self.facts.and_then(|f| f.joins.get(&expr.hir_id)) else { return };
     for (name, always_assigned) in &join.assignments {
       if *always_assigned != imaginary { continue; }
       if let Some(rd) = self.raps.get(name) {
@@ -8275,7 +8287,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // literal the way it was built (`(x, _)` on `(f, s)`, `Some(x)` on
     // `Some(f)`, #981). Its body always runs.
     let always_matches = iflet_tuple.is_some_and(|l| self.let_always_matches(l.pat, l.init)
-      || (pat_has_or(l.pat) && else_expr.is_none() && self.facts.and_then(|f| f.joins.get(&expr.span)).is_some_and(|j| j.dead_implicit_else)));
+      || (pat_has_or(l.pat) && else_expr.is_none() && self.facts.and_then(|f| f.joins.get(&expr.hir_id)).is_some_and(|j| j.dead_implicit_else)));
     let imaginary_edge = else_expr.and_then(|e| self.imaginary_edge(e.span));
     let imaginary_columns: HashSet<ResourceAccessPoint> = imaginary_edge.into_iter()
       .flat_map(|edge| edge.entry.state.keys())
@@ -8927,7 +8939,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.add_external_event(line_num,
       ExternalEvent::Branch {
         body: self.mir_body.source.def_id(),
-        join_span: Some(expr.span),
+        join_id: Some(expr.hir_id),
         live_vars: liveness,
         branches: b_branches,
         on_exhaustion: Default::default(),
@@ -9833,7 +9845,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     self.add_external_event(split, ExternalEvent::Branch {
       body: self.mir_body.source.def_id(),
-      join_span: Some(expr.span),
+      join_id: Some(expr.hir_id),
       live_vars: liveness,
       on_exhaustion: Default::default(),
       skipped_holds: Default::default(),
@@ -13094,7 +13106,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if !locals.is_empty() { self.arm_bindings.insert(*self.unique_id, locals); }
     self.add_external_event(split, ExternalEvent::Branch {
       body: self.mir_body.source.def_id(),
-      join_span: None,
+      join_id: Some(self.tcx.parent_hir_id(pat.hir_id)),
       live_vars: liveness,
       branches,
       on_exhaustion: Default::default(),

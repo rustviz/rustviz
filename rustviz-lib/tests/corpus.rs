@@ -1218,13 +1218,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from opt to x",
             "show reads from x",
             "x goes out of scope. Its resource is dropped.",
-            "opt was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, and execution reaches the end of opt's scope with the resource (including the String it holds, if any) still held, it is dropped there.",
+            "opt may be partially moved above, so it can't be used as a whole after the branches. If execution reaches the end of opt's scope while it still holds its resource (including the String it holds, if any), it is dropped there.",
         ],
         must_not_contain: &[
+            "opt was moved in at least one branch above, so it can't be used after",
             // #768: `Some` is a constructor, never an actor.
             "Move from Some to opt",
             "to Some",
-            "may have been moved",
+            "opt was moved in at least one branch above",
             "moved or dropped in every branch",
             "in branches where it was not",
         ],
@@ -5946,7 +5947,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "n is bound to a copyable value",
             // a's String went to x, or, in the `None` arm, was dropped
             // with the temporary (#807).
-            "a goes out of scope. No resource is dropped: a was moved or dropped in every branch above.",
+            "a goes out of scope. No resource is dropped. a was moved or dropped on every path through the conditional that reaches this point.",
             "d goes out of scope. No resource is dropped.",
         ],
         must_not_contain: &[
@@ -6114,6 +6115,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "msg may be partially moved above, so it can't be used as a whole after the branches. If execution reaches the end of msg's scope while it still holds its resource (including the String it holds, if any), it is dropped there.",
         ],
         must_not_contain: &[
+            "msg was moved in at least one branch above, so it can't be used after",
             "Move from msg to n",
             "Copy from msg to s",
             "msg's resource is copied",
@@ -8924,10 +8926,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from x to a",
             "Move from y to b",
-            "x goes out of scope. No resource is dropped: x was moved or dropped in every branch above.",
-            "y goes out of scope. No resource is dropped: y was moved or dropped in every branch above.",
+            "x goes out of scope. No resource is dropped. x was moved or dropped on every path through the conditional that reaches this point.",
+            "y goes out of scope. No resource is dropped. y was moved or dropped on every path through the conditional that reaches this point.",
             "Move from q to r",
-            "p goes out of scope. No resource is dropped: p was moved or dropped in every branch above.",
+            "p goes out of scope. No resource is dropped. p was moved or dropped on every path through the conditional that reaches this point.",
             "Move from entry to key",
             "Partial copy from entry to n",
             "key goes out of scope. Its resource is dropped.",
@@ -8967,8 +8969,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // every name from its own element.
         must_contain: &[
             "Move from x to a",
-            "x goes out of scope. No resource is dropped: x was moved or dropped in every branch above.",
-            "y goes out of scope. No resource is dropped: y was moved or dropped in every branch above.",
+            "x goes out of scope. No resource is dropped. x was moved or dropped on every path through the conditional that reaches this point.",
+            "y goes out of scope. No resource is dropped. y was moved or dropped on every path through the conditional that reaches this point.",
             "Move from t.0 to first",
             "Copy from t.1.0 to n",
             "Move from t.1.1 to second",
@@ -9003,7 +9005,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "The temporary tuple (x, y) is dropped after this arm, when the match ends, and with it y's resource",
             // `_ => return 0` drops the tuple as it returns.
             "The temporary tuple (x, y) is dropped when this arm leaves the match early, and with it x's and y's resources",
-            "x goes out of scope. No resource is dropped: x was moved or dropped in every branch above that reaches this point.",
+            "x goes out of scope. No resource is dropped. x was moved or dropped on every path through the conditional that reaches this point.",
             // `early_if`: p's value goes when the branch returns.
             "The temporary tuple (p, q) is dropped when the if branch leaves early, and with it p's resource",
             "The pattern didn't match, so the temporary tuple (p, q) is dropped here, and with it p's and q's resources",
@@ -9038,11 +9040,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "x's resource is moved into the temporary tuple (x, y)",
             "The temporary tuple (x, y) is dropped after this arm, when the match ends, and with it x's and y's resources",
-            "x goes out of scope. No resource is dropped: x was moved or dropped in every branch above.",
+            "x goes out of scope. No resource is dropped. x was moved or dropped on every path through the conditional that reaches this point.",
             "p's resource is moved into the temporary tuple (p, q)",
             "The temporary tuple (p, q) is dropped here, at the end of the if branch, and with it p's resource",
-            "p goes out of scope. No resource is dropped: p was moved or dropped in every branch above.",
-            "q goes out of scope. No resource is dropped: q was moved or dropped in every branch above.",
+            "p goes out of scope. No resource is dropped. p was moved or dropped on every path through the conditional that reaches this point.",
+            "q goes out of scope. No resource is dropped. q was moved or dropped on every path through the conditional that reaches this point.",
             // The `ref mut s` end dot keeps its text (#658); the arrow
             // that used to carry the "(what it borrows from isn't
             // shown)" text is gone (see `ref_mut_out_of_temporary_tuple_ends_without_arrow`).
@@ -9082,8 +9084,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "The temporary tuple (p, q) is dropped here, at the end of the if branch, and with it p's resource",
             "m's resource is moved into the temporary tuple (m, n)",
             // #694: the join dots are gone; the scope-end dots say it.
-            "x goes out of scope. No resource is dropped: x was moved or dropped in every branch above.",
-            "s goes out of scope. No resource is dropped: s was moved or dropped in every branch above that reaches this point.",
+            "x goes out of scope. No resource is dropped. x was moved or dropped on every path through the conditional that reaches this point.",
+            "s goes out of scope. No resource is dropped. s was moved or dropped on every path through the conditional that reaches this point.",
         ],
         must_not_contain: &[
             "=x was moved or dropped in every branch above",
@@ -9371,8 +9373,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "The temporary tuple (a, b) is dropped after this arm, when the match ends, and with it a's and b's resources",
             // #694: no join dot (every branch finds a and b moved into
             // the tuple); the scope end gives the reason.
-            "a goes out of scope. No resource is dropped: a was moved or dropped in every branch above.",
-            "b goes out of scope. No resource is dropped: b was moved or dropped in every branch above.",
+            "a goes out of scope. No resource is dropped. a was moved or dropped on every path through the conditional that reaches this point.",
+            "b goes out of scope. No resource is dropped. b was moved or dropped on every path through the conditional that reaches this point.",
             "x goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
@@ -9446,9 +9448,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "a goes out of scope. No resource is dropped.",
             "b goes out of scope. No resource is dropped.",
             // `three`: no join dot (#694); the scope end gives the reason.
-            "a goes out of scope. No resource is dropped: a was moved or dropped in every branch above.",
-            "b goes out of scope. No resource is dropped: b was moved or dropped in every branch above.",
-            "c goes out of scope. No resource is dropped: c was moved or dropped in every branch above.",
+            "a goes out of scope. No resource is dropped. a was moved or dropped on every path through the conditional that reaches this point.",
+            "b goes out of scope. No resource is dropped. b was moved or dropped on every path through the conditional that reaches this point.",
+            "c goes out of scope. No resource is dropped. c was moved or dropped on every path through the conditional that reaches this point.",
         ],
         must_not_contain: &[
             "x is bound from a or b, whichever alternative of the pattern matches. If it's the alternative that binds x from a, a's resource is moved out of the temporary tuple (a, b) into x here; otherwise it stays in the tuple",
@@ -9814,8 +9816,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "x immutably borrows a resource",
             "The temporary tuple (a, b) is dropped after this arm, when the match ends, and with it a's and b's resources",
-            "a goes out of scope. No resource is dropped: a was moved or dropped in every branch above.",
-            "b goes out of scope. No resource is dropped: b was moved or dropped in every branch above.",
+            "a goes out of scope. No resource is dropped. a was moved or dropped on every path through the conditional that reaches this point.",
+            "b goes out of scope. No resource is dropped. b was moved or dropped on every path through the conditional that reaches this point.",
         ],
         must_not_contain: &[
             // #873: a constructor is not an actor.
@@ -10316,8 +10318,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x is bound from a or b, whichever alternative of the pattern matches. If it's the alternative that binds x from b, b's resource is moved out of the temporary tuple (a, b) into x here; otherwise it stays in the tuple",
             "The temporary tuple (a, b) is dropped here, at the end of the if branch, and with it whatever of a's and b's resources x didn't take",
             "The pattern didn't match, so the temporary tuple (a, b) is dropped here, before the else branch runs, and with it a's and b's resources",
-            "a goes out of scope. No resource is dropped: a was moved or dropped in every branch above.",
-            "b goes out of scope. No resource is dropped: b was moved or dropped in every branch above.",
+            "a goes out of scope. No resource is dropped. a was moved or dropped on every path through the conditional that reaches this point.",
+            "b goes out of scope. No resource is dropped. b was moved or dropped on every path through the conditional that reaches this point.",
             "x acquires ownership of a resource",
         ],
         must_not_contain: &[
@@ -11225,18 +11227,22 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=t goes out of scope. Its resource is dropped.",
         ],
     },
-    // A shared reference is copied to the caller; a `&mut` one is moved
-    // on its path only, and owns nothing to drop on the others.
+    // Rustc reborrows the mutable referent in each tail-if arm.
     TooltipExpect {
         name: "return_tail_if_refs",
         must_contain: &[
+            "a mutable reference to *k, reborrowed through k, is returned to the caller; the data it points to is not copied",
+            "a mutable reference to *m, reborrowed through m, is returned to the caller; the data it points to is not copied",
             "a reference from x is returned to the caller; the data it points to is not copied",
             "a reference from y is returned to the caller; the data it points to is not copied",
-            "m's mutable reference is moved to the caller (not the resource it points to)",
-            "k's mutable reference is moved to the caller (not the resource it points to)",
-            "m was moved in at least one branch above, so it can't be used after the branches.",
+            "m isn't moved in any of the branches above",
+            "k isn't moved in any of the branches above",
         ],
         must_not_contain: &[
+            "k's mutable reference is moved to the caller",
+            "m's mutable reference is moved to the caller",
+            "m was moved in at least one branch above",
+            "k was moved in at least one branch above",
             "its resource is dropped when m goes out of scope",
             "its resource is dropped when k goes out of scope",
         ],
@@ -11272,12 +11278,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "return_tail_if_mutref_param",
         must_contain: &[
-            "m's mutable reference is moved to the caller (not the resource it points to)",
-            "n's mutable reference is moved to the caller (not the resource it points to)",
-            "m was moved in at least one branch above, so it can't be used after the branches.",
-            "n was moved in at least one branch above, so it can't be used after the branches.",
+            "a mutable reference to *n, reborrowed through n, is returned to the caller; the data it points to is not copied",
+            "a mutable reference to *m, reborrowed through m, is returned to the caller; the data it points to is not copied",
+            "m isn't moved in any of the branches above",
+            "n isn't moved in any of the branches above",
         ],
         must_not_contain: &[
+            "n's mutable reference is moved to the caller",
+            "m's mutable reference is moved to the caller",
+            "m was moved in at least one branch above",
+            "n was moved in at least one branch above",
             "m's mutable borrow ends",
             "n's mutable borrow ends",
         ],
@@ -12804,7 +12814,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from e to y",
             "The temporary tuple (d, (e, f)) is dropped here, at the end of the if branch, and with it f's resource",
             "The pattern didn't match, so the temporary tuple (d, (e, f)) is dropped here, and with it d's, e's and f's resources",
-            "e goes out of scope. No resource is dropped: e was moved or dropped in every branch above.",
+            "e goes out of scope. No resource is dropped. e was moved or dropped on every path through the conditional that reaches this point.",
             "Move from h to z",
             "Move from k to z",
             "z goes out of scope. Its resource is dropped.",
@@ -15924,7 +15934,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from b5.0 to s5",
             "Copy from b5.1 to n5",
             "b5.0 was moved: the condition moves b5.0 to s5 before it can turn out false, so the move has happened even when the body is skipped, and b5.0 can't be used after the if. When the condition fails after that move, s5 goes out of scope and its resource is dropped.",
-            "b5.0 goes out of scope. No resource is dropped: b5.0 was moved or dropped in every branch above.",
+            "b5.0 goes out of scope. No resource is dropped. b5.0 was moved or dropped on every path through the conditional that reaches this point.",
             "b5 goes out of scope. b5.0 was moved out earlier, so no field is dropped. The Box's heap allocation, if it has one, is freed.",
         ],
         must_not_contain: &[
@@ -16973,7 +16983,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "The pattern didn't match, so the temporary tuple (x, y.name) is dropped here, before the else branch runs, and with it x's and y.name's resources",
             "The temporary tuple (x, y.name) is dropped here, at the end of the if branch, and with it y.name's resource",
             "y goes out of scope. y.name was moved out earlier, so only y.tag is dropped.",
-            "y.name goes out of scope. No resource is dropped: y.name was moved or dropped in every branch above.",
+            "y.name goes out of scope. No resource is dropped. y.name was moved or dropped on every path through the conditional that reaches this point.",
             "p.0's resource is moved into the temporary tuple (w, p.0)",
             "The temporary tuple (w, p.0) is dropped after this arm, when the match ends, and with it p.0's resource",
             "The temporary tuple (w, p.0) is dropped after this arm, when the match ends, and with it w's and p.0's resources",
@@ -16981,7 +16991,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "q.name's resource is moved into the temporary tuple (u, q.name)",
             "The pattern didn't match, so the temporary tuple (u, q.name) is dropped here, and with it u's and q.name's resources",
             "q goes out of scope. q.name was moved out earlier, so only q.tag is dropped.",
-            "q.name goes out of scope. No resource is dropped: q.name was moved or dropped in every branch above.",
+            "q.name goes out of scope. No resource is dropped. q.name was moved or dropped on every path through the conditional that reaches this point.",
             "b.name's resource is moved into the temporary tuple (v, b.name)",
             "The temporary tuple (v, b.name) is dropped here, at the end of the if branch, and with it b.name's resource",
             "b goes out of scope. b.name was moved out earlier, so only b.tag is dropped. The Box's heap allocation, if it has one, is freed.",
@@ -17800,7 +17810,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from f to x",
             "f's resource is moved into the temporary value Some(f)",
             "The temporary value Some(f) is dropped after this arm, when the match ends, and with it f's resource",
-            "f goes out of scope. No resource is dropped: f was moved or dropped in every branch above.",
+            "f goes out of scope. No resource is dropped. f was moved or dropped on every path through the conditional that reaches this point.",
             "Move from h to y",
             // `Some(y)` always matches `Some(h)`: no else path (#981)
             "h goes out of scope. No resource is dropped.",
@@ -18110,13 +18120,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from f to x",
             "f was moved: the condition moves f to x before it can turn out false, so the move has happened even when the body is skipped, and f can't be used after the if. When the condition fails after that move, x goes out of scope and its resource is dropped.",
-            "f goes out of scope. No resource is dropped: f was moved or dropped in every branch above.",
+            "f goes out of scope. No resource is dropped. f was moved or dropped on every path through the conditional that reaches this point.",
             "Move from h to y",
             "h was moved: the condition moves h to y before it can turn out false, so the else branch runs after that move, and h can't be used here. When the condition fails after that move, y goes out of scope and its resource is dropped.",
             "Move from k to z",
             "Move from o to w",
             "o was moved: the condition moves o into the temporary value Some(o) before it can turn out false, so the move has happened even when the body is skipped, and o can't be used after the if. If the pattern doesn't match, the temporary value Some(o) is dropped, and with it o's resource; if it matches and the condition fails after that, w goes out of scope and its resource is dropped.",
-            "o goes out of scope. No resource is dropped: o was moved or dropped in every branch above.",
+            "o goes out of scope. No resource is dropped. o was moved or dropped on every path through the conditional that reaches this point.",
         ],
         must_not_contain: &[
             "Move from f to Some",
@@ -18137,7 +18147,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // o is moved into the temporary however the condition goes:
             // no drop flag
             "o goes out of scope. Its resource",
-            "f goes out of scope. No resource is dropped.",
+            "f was moved or dropped in every branch above.",
         ],
     },
     // #950: `let W(y) = W(g);` takes the constructor apart like `let (y,
@@ -18201,19 +18211,21 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from f to x",
             "f was moved: the condition moves f to x before it can turn out false, so the move has happened even when the body is skipped, and f can't be used after the if. When the condition fails after that move, x goes out of scope and its resource is dropped.",
-            "f goes out of scope. No resource is dropped: f was moved or dropped in every branch above.",
+            "f goes out of scope. No resource is dropped. f was moved or dropped on every path through the conditional that reaches this point.",
             "s's resource is moved into the temporary tuple (f, s)",
             "s was moved: the condition moves s into the temporary tuple (f, s) before it can turn out false, so the move has happened even when the body is skipped, and s can't be used after the if. When the condition fails, the temporary tuple (f, s) is dropped, and with it s's resource.",
             "The temporary tuple (f, s) is dropped here, at the end of the if branch, and with it s's resource",
-            "s goes out of scope. No resource is dropped: s was moved or dropped in every branch above.",
+            "s goes out of scope. No resource is dropped. s was moved or dropped on every path through the conditional that reaches this point.",
             "Move from g to y",
             "t was moved: the condition moves t into the temporary tuple (g, t) before it can turn out false, so the else branch runs after that move, and t can't be used here. When the condition fails, the temporary tuple (g, t) is dropped, and with it t's resource.",
             "The temporary tuple (g, t) is dropped here, at the end of the if branch, and with it t's resource",
-            "g goes out of scope. No resource is dropped: g was moved or dropped in every branch above.",
-            "t goes out of scope. No resource is dropped: t was moved or dropped in every branch above.",
+            "g goes out of scope. No resource is dropped. g was moved or dropped on every path through the conditional that reaches this point.",
+            "t goes out of scope. No resource is dropped. t was moved or dropped on every path through the conditional that reaches this point.",
             "Move from k to z",
             "The temporary tuple (k, m) is dropped here, at the end of the if branch, and with it m's resource",
-            "m was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, and execution reaches the end of m's scope with the resource still held, it is dropped there.",
+            // Rustc reports E0382 at an after-join read. The right operand
+            // of && moves m before entering the body, and c can skip it.
+            "m may have been moved above, so it can't be used after the if. If execution reaches the end of m's scope while it still holds its resource, it is dropped there.",
             "Move from a to p",
             "The temporary tuple (a, b) is dropped when the if branch leaves early, and with it b's resource",
             "Move from o to w",
@@ -18321,7 +18333,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "edition2024/dead_else_987",
         must_contain: &[
             "Move from f to x",
-            "f goes out of scope. No resource is dropped: f was moved or dropped in every branch above that reaches this point.",
+            "f goes out of scope. No resource is dropped. f was moved or dropped on every path through the conditional that reaches this point.",
             "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to g. At the entry to the borrow checker's imaginary path, g is the owner of the resource",
             "g still holds its value at runtime. The borrow checker considers a move on an unreachable path, so g can't be used here",
             "g goes out of scope. Its resource is dropped.",
@@ -19483,7 +19495,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             // keep2: only the else branch's `v = g` drops v's old String
             "v acquires ownership of a new resource; its previous resource is dropped",
-            "v isn't moved in any of the branches above",
+            // Rustc moves v into a temporary and back on the self-assignment path.
+            "v acquired ownership of a resource (in all branches above)",
             "v's resource is moved to the caller",
             "w goes out of scope. Its resource is dropped.",
             "t goes out of scope. Its resource is dropped.",
@@ -19496,6 +19509,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from v to v",
             "=v's resource is moved",
             "v was moved in at least one branch above",
+            "=v isn't moved in any of the branches above",
             "Move from w to w",
             "=w's resource is moved",
             "w acquires ownership of a new resource",
@@ -19796,22 +19810,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "match_guard_move_then_reassign_247",
-        // #247: the guard moves s, and the later arm assigns s again. Its
-        // old value is dropped there only if the guard didn't run (a drop
-        // flag). From then on s holds a value on that path, so after the
-        // match only the arm whose guard moved s has it moved: the join and
-        // scope end say "no branch above", not "nothing above" (on the `_`
-        // path the guard did move s, yet the new value is dropped at the
-        // scope end). Checked with a `Drop`-printing type. main refused the
-        // program.
+        // The test consumes the old value. A failed test can reach an
+        // assignment whose replacement is dropped at scope end.
         must_contain: &[
             "s may have been moved: when the guard on line 6 moves s to consume and then turns out false, matching goes on with the next pattern after that move, so s can't be used here (the borrow checker counts every later arm as one that may run after a failed guard)",
             "s acquires ownership of a new resource. Its previous resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
-            "s was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, and execution reaches the end of s's scope with the resource still held, it is dropped there.",
-            "s goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "s may have been moved above, so it can't be used after the match until it's assigned again. If s still holds a value, its resource is dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
-            "s may have been moved above",
+            "A path that moved its old value can give s a new one",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it",
             "s goes out of scope. Its resource is dropped here only if nothing above moved it",
         ],
     },
@@ -19827,26 +19836,23 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x goes out of scope. A value inside x may have been moved out above. Rust uses drop flags to drop the values that are still there. None carries no payload. For Some, a runtime drop flag tracks whether x still holds its String payload.",
         ],
         must_not_contain: &[
+            "x may have been moved above, so it can't be used after",
             "can't be used after the if",
         ],
     },
     TooltipExpect {
         name: "edition2024/chain_move_then_reassign_247",
-        // The let-chain counterpart of match_guard_move_then_reassign_247:
-        // the condition moves s and fails, and the else branch assigns s
-        // again. The else branch then ends holding a value, so the scope
-        // end's drop flag is down to the if-branch, not the condition: it
-        // used to say "dropped here only if nothing above moved it", false
-        // on the else path (the condition moved the old s, and the new one
-        // is dropped there). Checked with a `Drop`-printing type.
+        // The test consumes the old value. A failed test can reach an
+        // assignment whose replacement is dropped at scope end.
         must_contain: &[
             "s may have been moved: when the condition moves s to consume and then turns out false, the else branch runs after that move, so s can't be used here",
             "s acquires ownership of a new resource. Its previous resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
-            "s was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, and execution reaches the end of s's scope with the resource still held, it is dropped there.",
-            "s goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "s may have been moved above, so it can't be used after the if until it's assigned again. If s still holds a value, its resource is dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped here only if s still holds it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
-            "s may have been moved above",
+            "A path that moved its old value can give s a new one",
+            "s goes out of scope. Its resource is dropped here only if no branch above moved it",
             "s goes out of scope. Its resource is dropped here only if nothing above moved it",
         ],
     },
@@ -21530,12 +21536,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "box_rebox_branch_1220",
         must_contain: &[
             "b goes out of scope. Whatever it still holds (if anything) is dropped here.",
+            "b was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). The Box may no longer hold its original contents.",
             "f goes out of scope. Whatever it still holds (if anything) is dropped here.",
             "g goes out of scope. Whatever it still holds (if anything) is dropped here.",
             "g was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). The Box may no longer hold its original contents.",
             "j acquires ownership of a new resource. Whatever it still held (if anything) is dropped here.",
         ],
         must_not_contain: &[
+            "its resource (including the String it holds) is dropped when b goes out of scope",
             "=b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation, if it has one, is freed.",
             "f goes out of scope. Its resource (including the String it holds) is dropped here only if no branch above moved it",
             "g goes out of scope. Its resource (including the String it holds) is dropped here only if no branch above moved it",
@@ -26749,13 +26757,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // decides their drop).
         must_contain: &[
             "s was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the assignment runs and s still holds its old resource, that resource is dropped when s is assigned again. If a panic unwinds before the assignment, cleanup can drop the resource s still holds.",
-            "s holds a value after the branches: each branch above that moved it gave it a new one",
-            "m was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, and execution reaches the end of m's scope with the resource still held, it is dropped there.",
+            "s holds a value after the branches. On every path that reaches this point, any move out of s was followed by an assignment",
+            "m was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If m still holds a value, its resource is dropped when m goes out of scope.",
             "m goes out of scope. Its resource is dropped here only if m still holds it (Rust tracks this with a runtime drop flag).",
             "p goes out of scope. Its resource is dropped here only if p still holds it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             "s may have no value after the branches",
+            "If the branch that ran didn't move it, its resource is dropped when m goes out of scope.",
             "=s isn't moved in any of the branches above",
             "If the branch that ran didn't move it, its resource is dropped when s goes out of scope.",
             "=p goes out of scope. Its resource is dropped.",
@@ -26856,6 +26865,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "q goes out of scope. Its resource is dropped here only if the loop above assigned q or no branch above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
+            "b may have been moved above, so it can't be used after",
             "=p.name goes out of scope. Its resource is dropped.",
             "=q goes out of scope. Its resource is dropped.",
             "=a was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If the branch that ran didn't move it, its resource is dropped when a is assigned again.",
@@ -27308,12 +27318,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "s may have no value after the loop: the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it, its resource is dropped when s goes out of scope.",
             "s may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when s goes out of scope.",
-            "t was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, and execution reaches the end of t's scope with the resource still held, it is dropped there.",
+            "t was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If t still holds a value, its resource is dropped when t goes out of scope.",
             "t goes out of scope. Its resource is dropped here only if t still holds it (Rust tracks this with a runtime drop flag).",
             "u may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when u goes out of scope.",
-            "w was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). If the branch that ran didn't move it, and execution reaches the end of w's scope with the resource still held, it is dropped there.",
+            "w was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If w still holds a value, its resource is dropped when w goes out of scope.",
         ],
         must_not_contain: &[
+            "A path that moved its old value can give w a new one",
             "s has no value yet",
             "t has no value yet",
             "u has no value yet",
@@ -27369,13 +27380,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "struct_reassign_from_self_1508",
         must_contain: &[
             "p.a gets the same resource back, as part of the new value assigned here",
-            "p.a holds a value after the branches: each branch above that moved it gave it a new one",
+            "p.a holds a value after the branches. On every path that reaches this point, any move out of p.a was followed by an assignment",
             "p goes out of scope. Its resource is dropped.",
-            "w.a holds a value after the branches: each branch above that moved it gave it a new one",
+            "w.a holds a value after the branches. On every path that reaches this point, any move out of w.a was followed by an assignment",
             "q.a acquired ownership of a resource (in all branches above)",
             "q.b acquired ownership of a resource (in all branches above)",
-            "m.a holds a value after the branches: each branch above that moved it gave it a new one",
-            "t.0 holds a value after the branches: each branch above that moved it gave it a new one",
+            "m.a holds a value after the branches. On every path that reaches this point, any move out of m.a was followed by an assignment",
+            "t.0 holds a value after the branches. On every path that reaches this point, any move out of t.0 was followed by an assignment",
             "x goes out of scope. Its resource is dropped.",
             "x.a goes out of scope. Its resource is dropped.",
             "y.a goes out of scope. Its resource is dropped.",
@@ -28628,9 +28639,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Rustc allows &a at the brace and rejects it after drop(a).
         name: "dead_else_1873",
         must_contain: &[
+            "value is assigned on every path that runs. The borrow checker also checks an unreachable path that skips the assignment, so value can't be used here",
             "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to a. At the entry to the borrow checker's imaginary path, a is the owner of the resource. After this code on that path, a's value was moved out, so it can't be used here",
         ],
-        must_not_contain: &["Move from a to drop"],
+        must_not_contain: &[
+            "Move from a to drop",
+            "value may have no value here, as before the branches: none of the branches that get here assigns it",
+        ],
     },
     TooltipExpect {
         // Both within the dead arm and after the join, rustc rejects
@@ -28648,6 +28663,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "rv3_issues/1584_maybe_held_two_returning_ifs",
         must_contain: &["The borrow checker can't prove that s holds a value at this branch decision."],
         must_not_contain: &["s is live in a conditional expression"],
+    },
+    TooltipExpect {
+        name: "one_line_diamond_1306_1308_1309",
+        // #1919 review: a join with no compiler snapshot (a one-line chain
+        // of calls) kept only "may have been moved out"; the scope-end drop
+        // the value still gets on the paths that didn't move it was lost.
+        // g and h are each consumed by one arm and untouched by the others.
+        must_contain: &[
+            "g may have been moved out, so it can't be used here. If g still holds its resource when execution reaches the end of its scope, it is dropped there",
+            "h may have been moved out, so it can't be used here. If h still holds its resource when execution reaches the end of its scope, it is dropped there",
+        ],
+        must_not_contain: &[],
     },
 ];
 
@@ -44351,4 +44378,195 @@ fn p4_review_guard_alternatives_finish_their_common_binding_code() {
         assert!(arm["lent"].get("o").is_none());
     }
     assert!(rv_elements(&rv.timeline_panel_string(), "o@L5-6:branch_line:partial_privilege").is_empty());
+}
+
+#[test]
+fn p4_conditional_join_reads_exact_incoming_edges() {
+    let rv = run_with_local_backend("p4_conditional_joins");
+    let dump = rv.facts().unwrap();
+    // Rustc rejects reads after one/all/residual with E0382, and after
+    // absent with E0381. The explicit read of kept already compiles.
+    for (function, place, state, at, incoming) in [
+        ("one", "one", "maybe", [4, 0], &[([2, 3], true, "moved"), ([3, 1], true, "own")][..]),
+        ("all", "all", "moved", [6, 0], &[([4, 1], true, "moved"), ([5, 1], true, "moved")]),
+        ("returning", "kept", "own", [2, 1], &[([2, 0], true, "own")]),
+        ("residual", "value", "maybe", [13, 0], &[([2, 3], true, "moved"), ([12, 2], true, "own")]),
+        ("absent", "assigned", "maybe", [6, 0], &[([4, 2], true, "own"), ([5, 1], true, "unassigned")]),
+    ] {
+        let body = fact_body(dump, function);
+        let joins = body["joins"].as_array().unwrap_or_else(|| panic!("{function}: missing joins"));
+        let [join] = joins.as_slice() else { panic!("{function}: {joins:?}"); };
+        check_join_edges(join, place, state, at, incoming);
+    }
+    assert_eq!(fact_body(dump, "absent")["joins"][0]["cause"]["assigned"], "unassigned");
+
+    let svg = rv.timeline_panel_string();
+    check_review_tip(&svg, "one@L14:dot:owner_go_out_of_scope", &["runtime drop flag"], &["No resource is dropped"]);
+    check_review_tip(&svg, "all@L22:dot:owner_go_out_of_scope", &["No resource is dropped", "every branch"], &["runtime drop flag"]);
+    check_review_tip(&svg, "kept@L29:dot:branch_join", &["still owns its resource", "returned before reaching this point"], &["can't be used"]);
+    check_review_tip(&svg, "value@L38:dot:owner_drop_if_try_returns", &["returns early", "resource is dropped"], &["runtime drop flag"]);
+    check_review_tip(&svg, "assigned@L49:dot:owner_go_out_of_scope", &["assigned in the branch that ran", "runtime drop flag"], &["was moved"]);
+}
+
+#[test]
+fn p4_conditional_join_can_drop_a_replacement_after_a_move() {
+    let rv = run_with_local_backend("p4_conditional_joins");
+    let svg = rv.timeline_panel_string();
+    // With c && input.is_ok(), drop(after) consumes old and the
+    // replacement new drops at scope end. With !c && d there is no
+    // replacement. The residual path never reaches the replacement.
+    check_review_tip(&svg, "after@L61:dot:owner_go_out_of_scope", &[
+        "only if after still holds it",
+        "runtime drop flag",
+    ], &["only if no branch above moved it"]);
+    let joins = rv_elements(&svg, "after@L59:dot:branch_join");
+    assert!(joins.iter().any(|(_, tip, ..)| {
+        tip.contains("If after still holds a value")
+            && !tip.contains("If the branch that ran didn't move it")
+    }), "{joins:?}");
+}
+
+
+fn check_join_edges(
+    join: &serde_json::Value, place: &str, state: &str, at: [u64; 2], edges: &[([u64; 2], bool, &str)],
+) {
+    assert_eq!(join["at"], serde_json::json!(at), "{join:?}");
+    assert_eq!(join["state"][place], state, "{join:?}");
+    let incoming = join["incoming"].as_array().unwrap();
+    assert_eq!(incoming.len(), edges.len(), "{join:?}");
+    for (edge, (from, runs, state)) in incoming.iter().zip(edges) {
+        assert_eq!(edge["from"], serde_json::json!(from), "{join:?}");
+        assert_eq!(edge["runs"], *runs, "{join:?}");
+        assert_eq!(edge["state"][place], *state, "{join:?}");
+    }
+}
+
+#[test]
+fn p4_review_shared_conditional_join_and_imaginary_edges() {
+    let rv = run_with_local_backend("p4_join_review");
+    let dump = rv.facts().unwrap();
+    let joins = fact_body(dump, "shared")["joins"].as_array().unwrap();
+    let [outer, inner] = joins.as_slice() else { panic!("{joins:?}"); };
+    // Both scopes complete at bb8. Only bb7 skips the inner conditional.
+    let completions = [([4, 3], true, "moved"), ([6, 3], true, "moved"), ([7, 1], true, "own")];
+    check_join_edges(outer, "s", "maybe", [8, 0], &completions);
+    check_join_edges(inner, "s", "moved", [8, 0], &completions[..2]);
+
+    // bb2's imaginary edge reaches bb1, whose goto never runs.
+    check_join_edges(&fact_body(dump, "imaginary")["joins"][0], "s", "moved", [5, 0],
+        &[([1, 1], false, "own"), ([4, 3], true, "moved")]);
+}
+
+#[test]
+fn p4_review_pattern_and_staged_result_boundaries() {
+    let rv = run_with_local_backend("p4_join_review");
+    let dump = rv.facts().unwrap();
+    // The pattern initializes s in bb3's second statement, before the
+    // new String is even constructed. The later write has its own location.
+    check_join_edges(&fact_body(dump, "pattern")["joins"][0], "s", "own", [3, 2],
+        &[([3, 1], true, "own")]);
+    for (function, expected) in [("staged", "y"), ("aggregate", "tuple.0.0")] {
+        let join = &fact_body(dump, function)["joins"][0];
+        let staged: Vec<_> = join["changes"].as_object().unwrap().iter()
+            .filter(|(_, effect)| effect["staged_result"] == true)
+            .map(|(name, _)| name.as_str()).collect();
+        assert_eq!(staged, [expected], "{function}: {join:?}");
+    }
+}
+
+
+#[test]
+fn p4_review_moves_and_assignments_describe_the_paths_that_reach_each_join() {
+    let rv = run_with_local_backend("p4_join_review");
+    let svg = rv.timeline_panel_string();
+    // MIR stores before the branch test. Both arms use that String.
+    check_review_tip(&svg, "s@L48:dot:branch_join",
+        &["s was assigned during the test above", "holds a value on every path that reaches this point"],
+        &["in all branches above"]);
+    // A false first operand skips the test assignment and takes the
+    // else arm. Every path still reaches the read with a value.
+    check_review_tip(&svg, "s@L118:dot:branch_join",
+        &["An assignment above leaves s holding a value on every path that reaches this point"],
+        &["in all branches above", "s was assigned during the test above"]);
+    // The returning arm moves s and never reaches a replacement store.
+    check_review_tip(&svg, "s@L59:dot:branch_join",
+        &["any move out of s was followed by an assignment", "returned before reaching this point"],
+        &["each branch above that moved it gave it a new one"]);
+    // The else arm inherits the prior move. Its body never drops s.
+    check_review_tip(&svg, "s@L71:dot:owner_go_out_of_scope",
+        &["No resource is dropped"], &["was moved or dropped in every branch"]);
+    // The move is part of the match scrutinee before either arm runs.
+    check_review_tip(&svg, "s@L77:dot:branch_join",
+        &["may have been moved above", "can't be used after the match", "If s still holds a value"],
+        &["was moved in at least one branch above"]);
+}
+
+#[test]
+fn p4_review_partial_move_preserves_the_other_field() {
+    let svg = run_with_local_backend("p4_join_review").timeline_panel_string();
+    // Rustc accepts pair.1.push and retains its drop on every path.
+    check_review_tip(&svg, "pair.0@L38:dot:branch_join",
+        &["pair.0 may be partially moved above, so it can't be used as a whole after the branches", "it is dropped there"],
+        &["pair.0 was moved in at least one branch"]);
+    check_review_tip(&svg, "pair.1@L41:dot:owner_go_out_of_scope",
+        &["Its resource is dropped"], &["runtime drop flag"]);
+}
+
+#[test]
+fn p4_review_reassignment_preserves_the_drop_note_without_claiming_a_different_value() {
+    let svg = run_with_local_backend("p4_join_review").timeline_panel_string();
+    // MIR moves the same String out and back in the self-assignment arm.
+    check_review_tip(&svg, "s@L85:dot:branch_join",
+        &["If s still holds a value, its resource is dropped"],
+        &["A path that moved its old value can give s a new one", "If the branch that ran didn't move it"]);
+    check_review_tip(&svg, "s@L86:dot:owner_go_out_of_scope",
+        &["runtime drop flag"], &["only if no branch above moved it"]);
+    // The remaining Rc drops at scope end only if still held. Its shared
+    // String drops only when the last strong reference is dropped.
+    check_review_tip(&svg, "p@L93:dot:branch_join",
+        &["If p still holds a value", "lowers the reference count", "the shared value is dropped only if that was its last Rc"],
+        &["If the branch that ran didn't move it"]);
+}
+
+#[test]
+fn p4_review_residual_drops_use_each_conversion_edge() {
+    let rv = run_with_local_backend("p4_join_review");
+    let svg = rv.timeline_panel_string();
+    let tips = tooltip_lines(&svg);
+    // Two `?` conversions can enter the same drop block, and the normal
+    // continuations never execute it: each `?` still drops `shared`.
+    let shared = tips.iter().flatten().filter(|l| l.starts_with("If the `?` here returns early, shared's resource is dropped.")).count();
+    assert_eq!(shared, 2, "{tips:?}");
+    // `a?; if c { drop(local); } b?;`: the first `?` always drops local. The
+    // second drops it only if the branch didn't move it (a runtime drop flag).
+    check_review_tip(&svg, "local@L103:dot:owner_drop_if_try_returns",
+        &["If the first `?` returns early, local's resource is dropped."], &["runtime drop flag"]);
+    check_review_tip(&svg, "local@L103:dot:branch_join+owner_drop_if_try_returns",
+        &["If the second `?` returns early, local's resource is dropped if local still holds it", "runtime drop flag"], &[]);
+}
+
+#[test]
+fn p4_review_moved_place_has_no_residual_drop() {
+    let rv = run_with_local_backend("p4_join_review");
+    // No drop glue for local on the residual route after drop(local).
+    assert!(rv_elements(&rv.timeline_panel_string(), "local@L109:dot:owner_drop_if_try_returns").is_empty());
+}
+
+#[test]
+fn p4_review_try_block_exit_uses_its_residual_conversion() {
+    let rv = run_with_local_backend("try_block_drops_1656");
+    // The residual_into_try_type call leaves inner's scope. outer is
+    // still accessible after the try block.
+    check_review_tip(&rv.timeline_panel_string(), "inner@L10:dot:owner_drop_if_try_returns",
+        &["returns early", "inner's resource is dropped"], &["runtime drop flag"]);
+}
+
+#[test]
+fn p4_review_join_without_a_snapshot_keeps_the_move_explanation() {
+    let svg = run_with_local_backend("nested_sibling_exit_1876").timeline_panel_string();
+    // The returning arm leaves before the join. On both sibling paths
+    // rustc sees the String consumed and rejects a read after the if.
+    check_review_tip(&svg, "s@L8:dot:branch_join",
+        &["s may have been moved out, so it can't be used here", "No resource is dropped"],
+        &["The conditional above ends here"]);
 }

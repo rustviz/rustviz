@@ -3583,6 +3583,18 @@ pub fn state_maybe(name: &str, cause: Option<&str>) -> String {
     }
 }
 
+/// A branch consumed the value but no compiler snapshot of the join is
+/// available: the move is hedged, and the scope-end drop is too.
+pub fn event_dot_branch_merge_maybe_moved_no_snapshot(name: &str, value: bool, note: &str) -> String {
+    let mut text = state_maybe(name, Some("moved"));
+    if !value {
+        let me = styled_name_html(name);
+        let (holds, rest) = split_drop_note(note);
+        text.push_str(&format!(". If {me} still holds its resource{holds} when execution reaches the end of its scope, it is dropped{rest} there"));
+    }
+    text
+}
+
 pub fn state_imaginary_unassigned(name: &str) -> String {
     let me = styled_name_html(name);
     format!("{me} is assigned on every path that runs. The borrow checker also checks an unreachable path that skips the assignment, so {me} can't be used here")
@@ -4669,6 +4681,11 @@ pub fn event_dot_go_out_of_scope_all_moved_suffix(my_name: &String, some_diverge
     )
 }
 
+pub fn event_dot_go_out_of_scope_moved_through_conditional(my_name: &str) -> String {
+    let name = styled_name_html(my_name);
+    format!(". No resource is dropped. {name} was moved or dropped on every path through the conditional that reaches this point.")
+}
+
 /// Every branch above contributed a value that ends up in this
 /// variable (the `let s = if … { … } else { … };` shape, plus the
 /// match-as-rhs analog). After the conditional the variable owns a
@@ -4886,6 +4903,20 @@ fn drop_time(name: &str, reassigned: Option<bool>) -> String {
         Some(false) => format!("when {name} is assigned again (or, if {name} is never assigned again, when {name} goes out of scope)"),
         None => format!("when {name} goes out of scope"),
     }
+}
+
+/// Paths at this join can leave the place initialized after a move and store.
+pub fn event_dot_branch_merge_replaced_or_moved(
+    my_name: &String, value: bool, mutable: bool, reassigned: Option<bool>, by_cond: Option<&str>, note: &str,
+) -> String {
+    let name = styled_name_html(my_name);
+    let mut text = branch_merge_moved(&name, by_cond);
+    text.push_str(if mutable { " until it's assigned again." } else { "." });
+    if !value {
+        let (holds, rest) = split_drop_note(note);
+        text.push_str(&format!(" If {name} still holds a value, its resource{holds} is dropped{rest} {}.", drop_time(&name, reassigned)));
+    }
+    text
 }
 
 // The join of a conditional that gives a new value, in only some of its
@@ -5447,12 +5478,26 @@ pub const DEAD_LOAN_NOTE_START: &str = "On this path";
 pub fn event_dot_branch_merge_unchanged(my_name: &String) -> String {
     format!("{0} isn't moved in any of the branches above", styled_name_html(my_name))
 }
-// Merge dot for a variable that a branch above moved and then gave a new
-// value (`if c { drop(s); s = String::new(); }`, #1413): it holds a value
-// after the branches on every path, though it isn't the one it had.
-pub fn event_dot_branch_merge_reassigned_after_move(my_name: &String) -> String {
-    format!("{0} holds a value after the branches: each branch above that moved it gave it a new one", styled_name_html(my_name))
+// An initialized join can have moves and assignments on reaching paths.
+pub fn event_dot_branch_merge_reassigned_after_move(my_name: &str, leavers: &[Vec<BranchExit>]) -> String {
+    let name = styled_name_html(my_name);
+    let mut text = format!("{name} holds a value after the branches. On every path that reaches this point, any move out of {name} was followed by an assignment");
+    if !leavers.is_empty() {
+        let reason = leavers_never_got_here("moved", &name, leavers);
+        text.push_str(&format!(". {}", reason.replacen("the ", "The ", 1)));
+    }
+    text
 }
+
+pub fn event_dot_branch_merge_assigned_in_test(my_name: &str, every_path: bool) -> String {
+    let name = styled_name_html(my_name);
+    if every_path {
+        format!("{name} was assigned during the test above and holds a value on every path that reaches this point")
+    } else {
+        format!("An assignment above leaves {name} holding a value on every path that reaches this point")
+    }
+}
+
 // Extra text for a column label: for a subscript (`s₂`), a variable
 // that shadows an earlier one of the same name (`let s` while the first
 // `s` is in scope, see `binding_name`); for a column of a variable whose

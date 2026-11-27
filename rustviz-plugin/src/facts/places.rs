@@ -215,6 +215,11 @@ fn same_elem<'tcx>(a: PlaceElem<'tcx>, b: PlaceElem<'tcx>) -> bool {
     }
 }
 
+pub(super) fn place_under<'tcx>(place: Place<'tcx>, base: Place<'tcx>) -> bool {
+    place.local == base.local && place.projection.len() >= base.projection.len()
+        && place.projection.iter().zip(base.projection.iter()).all(|(a, b)| same_elem(a, b))
+}
+
 /// Does this loan select a field or element strictly inside the column?
 /// Overlap alone does not imply containment (for example, union fields).
 pub(super) fn borrows_part_of<'tcx>(borrowed: Place<'tcx>, column: Place<'tcx>) -> bool {
