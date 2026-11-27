@@ -262,6 +262,9 @@ pub struct BodyFacts {
     /// fields covered by a whole-place drop and unnamed temporaries.
     #[serde(skip)]
     pub residual_drops: Vec<ResidualDrop>,
+    /// Residual conversions that borrowck checks but cannot execute.
+    #[serde(skip)]
+    pub skipped_residuals: BTreeSet<rustc_span::Span>,
     /// Temporaries that hold a value needing drop.
     pub temps: Vec<TempInfo>,
     /// Source anchors of typed operands rustc lifted into promoted MIR.
@@ -465,6 +468,12 @@ pub struct Join {
     pub state: State,
     /// Checked incoming edges, including any edges that cannot execute.
     pub incoming: Vec<JoinEdge>,
+    #[serde(skip)]
+    pub checked_only: bool,
+    /// A checked-only join flows straight to an executable continuation
+    /// where these places hold nothing on every path.
+    #[serde(skip)]
+    pub empty_at_runtime: BTreeSet<String>,
     /// Effects within the conditional on paths that reach its join.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub changes: BTreeMap<String, JoinChange>,
@@ -844,7 +853,15 @@ pub struct ResidualDrop {
     /// The initialized paths come from assignments and no move can
     /// explain why the drop is conditional.
     pub only_assigned: bool,
-    pub staged: bool,
+    pub flag: bool,
+    /// A temporary contains a value previously moved from this place.
+    pub staged: Option<ResidualStaging>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ResidualStaging {
+    Operand,
+    Constructed,
 }
 
 /// What happens to the named fields of a partially moved aggregate at a
@@ -956,6 +973,9 @@ pub struct State {
     /// counts a path that holds a value (a write only a dead path reaches).
     #[serde(skip)]
     pub borrowck_maybe: BTreeSet<String>,
+    /// Places proved empty by an explicitly supplied executable continuation.
+    #[serde(skip)]
+    pub runtime_empty: BTreeSet<(rustc_middle::mir::Local, String)>,
     /// A partial value whose remaining fields have no destructor to run.
     #[serde(skip)]
     pub partial_without_drop: BTreeSet<String>,

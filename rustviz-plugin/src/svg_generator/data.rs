@@ -2487,6 +2487,7 @@ pub enum ExternalEvent {
     OwnerDropIfTryReturns {
         ro: ResourceAccessPoint,
         span: rustc_span::Span,
+        staged: bool,
         id: usize
     },
     // `return if b { p } else { q };` in a branch: `p`, which only some
@@ -3099,7 +3100,7 @@ pub enum Event {
     LoopExitMove { definite: bool, at: MaybeMovedAt },
     // The owner's resource is dropped here only if the `?` returns
     // early (#430). The owner's state is unchanged.
-    OwnerDropIfTryReturns { local: Option<rustc_middle::mir::Local>, span: rustc_span::Span, flag: bool },
+    OwnerDropIfTryReturns { local: Option<rustc_middle::mir::Local>, span: rustc_span::Span, flag: bool, staged: bool },
     // See ExternalEvent::OwnerDropUnlessReturned.
     OwnerDropUnlessReturned { is_break: bool },
     // See ExternalEvent::TupleTempDrop.
@@ -6290,8 +6291,8 @@ impl Visualizable for VisualizationData {
         ExternalEvent::LoopExitMove{definite, at, ..} => {
           vec![(line_num, Event::LoopExitMove { definite: *definite, at: at.clone() })]
         },
-        ExternalEvent::OwnerDropIfTryReturns { ro, span, id } => {
-          vec![(line_num, Event::OwnerDropIfTryReturns { local: ro.owner_local(), span: *span, flag: self.row_layout.temp_drop_flags.contains(id) })]
+        ExternalEvent::OwnerDropIfTryReturns { ro, span, staged, id } => {
+          vec![(line_num, Event::OwnerDropIfTryReturns { local: ro.owner_local(), span: *span, flag: self.row_layout.temp_drop_flags.contains(id), staged: *staged })]
         },
         ExternalEvent::OwnerDropUnlessReturned{is_break, ..} => {
           vec![(line_num, Event::OwnerDropUnlessReturned { is_break: *is_break })]
@@ -6818,8 +6819,8 @@ impl Visualizable for VisualizationData {
             ExternalEvent::LoopExitMove{ro, definite, at, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopExitMove { definite, at }, line_number);
             },
-            ExternalEvent::OwnerDropIfTryReturns { ro, span, id } => {
-                let event = Event::OwnerDropIfTryReturns { local: ro.owner_local(), span, flag: self.row_layout.temp_drop_flags.contains(&id) };
+            ExternalEvent::OwnerDropIfTryReturns { ro, span, staged, id } => {
+                let event = Event::OwnerDropIfTryReturns { local: ro.owner_local(), span, flag: self.row_layout.temp_drop_flags.contains(&id), staged };
                 maybe_append_event(self, &ResourceTy::Value(ro), event, line_number);
             },
             ExternalEvent::OwnerDropUnlessReturned{ro, is_break, ..} => {

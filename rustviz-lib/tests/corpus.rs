@@ -21366,7 +21366,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "If the `?` here returns early, u's resource is dropped. If the `?` succeeds, the assignment runs: u acquires ownership of a new resource; its previous resource is dropped.",
             "If the `?` here returns early, x's resource is dropped. If the `?` succeeds, x's resource isn't dropped here.",
             "x's resource is mutably borrowed by push_str; x can't be used while the borrow is live",
-            "If the `?` here returns early, y's resource is dropped. If the `?` succeeds, y's resource isn't dropped here.",
+            "If the `?` here returns early, it drops the value moved from y into the temporary. If the `?` succeeds, that value isn't dropped by the `?`.",
             "y's resource is moved",
         ],
         must_not_contain: &[
@@ -21379,6 +21379,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "nothing happens to u here",
             "nothing happens to x here",
             "nothing happens to y here",
+            "If the `?` here returns early, y's resource is dropped",
             // The assignment's own line, as if it happened on both paths.
             "=s acquires ownership of a new resource; its previous resource is dropped",
             "=t acquires ownership of a new resource; its previous resource is dropped",
@@ -40628,11 +40629,20 @@ fn a_try_after_an_argument_drops_what_the_argument_holds() {
     let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
     let row = |src: &str| code_row_y(&code, src);
     for (name, line) in [("s", "take(s, bar()?);"), ("w", "q.put(w, bar()?);"), ("q", "q.eat(bar()?);")] {
-        let drop = format!("If the `?` here returns early, {name}'s resource is dropped.");
-        let ys: Vec<f64> = dots_where(&tl, |lines| lines.iter().any(|l| l.starts_with(&drop))
-            && lines.iter().any(|l| *l == format!("{name}'s resource is moved")))
+        let moved = format!("{name}'s resource is moved");
+        let staged = format!("moved from {name} into the temporary");
+        let ys: Vec<f64> = dots_where(&tl, |lines| {
+            let mut lines = lines.iter();
+            lines.any(|l| *l == moved) && lines.any(|l| l.contains(&staged))
+        })
             .into_iter().map(|(_, y)| y).collect();
         assert_eq!(ys, vec![row(line)], "{name}: the `?` drop and the move belong on one dot on {line:?}");
+    }
+    let doc = roxmltree::Document::parse(&tl).unwrap();
+    for (name, line) in [("s", "14"), ("w", "17"), ("q", "18")] {
+        let drops = residual_dots(&doc, name, line);
+        assert_eq!(drops.len(), 1);
+        assert_eq!(drops[0].attribute("data-rv-drop"), None);
     }
 }
 
@@ -44631,6 +44641,148 @@ fn skipped_else_write_uses_checked_wording_1909() {
     assert_review_title(tip,
         &["The borrow checker treats s as assigned on this path. The assignment is skipped at runtime."],
         &["previous resource", "acquires ownership"]);
+}
+
+#[test]
+fn checked_only_joins_do_not_promise_runtime_drops_1929() {
+    let exact = run_with_local_backend("geometry_1907/rv3_1907_2711_10_fork_without_dot").timeline_panel_string();
+    let siblings = run_with_local_backend("checked_only_join_1929").timeline_panel_string();
+    for (svg, id, runtime) in [
+        (&exact, "s@L8:dot:branch_join", "No resource remains in s on the paths that run."),
+        (&siblings, "s@L7:dot:branch+branch_join", "No resource remains in s on the paths that run."),
+        (&siblings, "s@L20:dot:branch+branch_join", "This join is skipped at runtime."),
+        (&siblings, "s@L31:dot:branch_join", "No resource remains in s on the paths that run."),
+        (&siblings, "s@L41:dot:branch+branch_join", "This join is skipped at runtime."),
+    ] {
+        // On 2711_10 the first join dot on row 8 is on the inner leg.
+        // A read fails with E0382 there, but assigning s restores it.
+        check_review_tip(svg, id,
+            &["The borrow checker treats s as possibly moved here, so s can't be used here until it's assigned again.",
+              "This join is skipped at runtime.", runtime],
+            &["If it has one, its resource is dropped"]);
+    }
+}
+
+#[test]
+fn checked_only_joins_distinguish_initialization_from_execution_1929() {
+    let svg = run_with_local_backend("checked_only_join_1929").timeline_panel_string();
+    // Rustc allows drop(s) after two checked assignments, but neither
+    // assignment runs. In the second case s is empty on every real path.
+    check_review_tip(&svg, "s@L56:dot:branch_join",
+        &["The borrow checker treats s as initialized here. This join is skipped at runtime.",
+          "Every checked path to this join assigns s."],
+        &["s acquired ownership of a resource"]);
+    check_review_tip(&svg, "s@L66:dot:branch_join",
+        &["The borrow checker can't prove that s holds a value here", "No resource remains in s on the paths that run."],
+        &["If the branch that ran assigned it, its resource is dropped"]);
+}
+
+fn residual_dots<'a, 'input>(svg: &'a roxmltree::Document<'input>, variable: &str, row: &str) -> Vec<roxmltree::Node<'a, 'input>> {
+    svg.descendants().filter(|node| node.attribute("data-rv-kind") == Some("dot")
+        && node.attribute("data-rv-var") == Some(variable) && node.attribute("data-rv-line") == Some(row)
+        && node.attribute("data-rv-event").is_some_and(|events|
+            events.split_whitespace().any(|event| event == "owner_drop_if_try_returns"))).collect()
+}
+
+#[test]
+fn skipped_residuals_have_no_drop_events_1929() {
+    let svg = run_with_local_backend("checked_only_join_1929").timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    // Rustc checks the constant-false arm, but skips both its owners'
+    // residual drops. The closure panics before its caller can branch.
+    for (owner, row) in [("s", "42"), ("old", "42"), ("owner", "72")] {
+        assert!(residual_dots(&doc, owner, row).is_empty(), "{owner} on row {row} has a skipped residual drop");
+    }
+}
+
+#[test]
+fn early_return_drops_values_staged_in_aggregates_1911() {
+    let nested_vec = run_with_local_backend("known_bugs/1682_mixed_vec_elements").timeline_panel_string();
+    let aggregates = run_with_local_backend("staged_residual_drop_1911").timeline_panel_string();
+    let mut failures = Vec::new();
+    for (svg, source, row) in [
+        (&nested_vec, "inner", "57"),
+        (&aggregates, "left", "5"),
+        (&aggregates, "right", "5"),
+        (&aggregates, "field", "11"),
+        (&aggregates, "element", "17"),
+        (&aggregates, "payload", "23"),
+        (&aggregates, "contents", "29"),
+        (&aggregates, "repeated", "35"),
+    ] {
+        let clauses = drawn_clauses(svg, source, row);
+        let must_contain = format!("If the `?` here returns early, it drops the value moved from {source} into the temporary. If the `?` succeeds, that value isn't dropped by the `?`.");
+        let must_not_contain = format!("If the `?` here returns early, {source}'s resource is dropped");
+        let moved = format!("{source}'s resource is moved");
+        let mut in_order = clauses.iter();
+        let doc = roxmltree::Document::parse(svg).unwrap();
+        let drops = residual_dots(&doc, source, row);
+        // The move happens before the residual and only the temporary's
+        // destructor runs. The source column must have no drop triangle.
+        if !in_order.any(|(_, _, tip)| tip.contains(&moved))
+            || !in_order.any(|(_, _, tip)| tip.contains(&must_contain))
+            || clauses.iter().any(|(_, _, tip)| tip.contains(&must_not_contain))
+            || drops.len() != 1 || drops[0].attribute("data-rv-drop").is_some()
+        {
+            failures.push(format!("{source} on row {row}: {clauses:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn extracted_temporary_value_drops_before_the_try_1911() {
+    let svg = run_with_local_backend("staged_residual_drop_1911").timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    // Option::take leaves None and drop consumes the value before tail?.
+    assert!(residual_dots(&doc, "s", "41").is_empty(), "{:?}", drawn_clauses(&svg, "s", "41"));
+}
+
+#[test]
+fn residual_drops_the_staged_value_and_the_replacement_1911() {
+    let svg = run_with_local_backend("staged_residual_drop_1911").timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    for (row, current, flag) in [
+        ("48", "s's resource is dropped.", false),
+        ("57", "s's resource is dropped if s still holds it", true),
+    ] {
+        // MIR drops the aggregate holding old s, then drops the replacement
+        // in s if initialized. The drop flag only guards the second case.
+        let clauses = drawn_clauses(&svg, "s", row);
+        let drops = residual_dots(&doc, "s", row);
+        assert!(drops.iter().any(|dot| dot.attribute("data-rv-drop") == Some("true")), "{row}: {clauses:?}");
+        assert!(clauses.iter().any(|(_, _, tip)| tip.contains(current) && tip.contains("runtime drop flag") == flag), "{row}: {clauses:?}");
+        assert!(clauses.iter().any(|(_, _, tip)| tip.contains("drops the value moved from s into the temporary")), "{row}: {clauses:?}");
+        assert!(clauses.iter().all(|(_, _, tip)| !tip.contains("If the `?` succeeds, the assignment runs")), "{row}: {clauses:?}");
+    }
+}
+
+#[test]
+fn residual_drops_a_staged_value_from_the_operand_binding_1911() {
+    let svg = run_with_local_backend("staged_residual_drop_1911").timeline_panel_string();
+    let clauses = drawn_clauses(&svg, "s", "66");
+    let mut in_order = clauses.iter();
+    // The replacement Err is returned to the caller; the staged Result
+    // is dropped before returning, even though both values came from s.
+    assert!(in_order.any(|(_, _, tip)| tip.contains("s's resource is moved into the `?`")), "{clauses:?}");
+    assert!(in_order.any(|(_, _, tip)| tip.contains("drops the value") && tip.contains("moved from s into the temporary")), "{clauses:?}");
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    let drops = residual_dots(&doc, "s", "66");
+    assert_eq!(drops.len(), 1);
+    assert_eq!(drops[0].attribute("data-rv-drop"), None);
+    assert!(clauses.iter().all(|(_, _, tip)| !tip.contains("s's resource is dropped")), "{clauses:?}");
+}
+
+#[test]
+fn residual_drops_a_staged_value_after_its_source_scope_ends_1911() {
+    let svg = run_with_local_backend("staged_residual_drop_1911").timeline_panel_string();
+    let clauses = drawn_clauses(&svg, "s", "76");
+    assert!(clauses.iter().any(|(_, _, tip)| tip.contains("drops the value moved from s into the temporary")), "{clauses:?}");
+    assert!(clauses.iter().all(|(_, _, tip)| !tip.contains("s's resource is dropped")), "{clauses:?}");
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    let drops = residual_dots(&doc, "s", "76");
+    assert_eq!(drops.len(), 1);
+    assert_eq!(drops[0].attribute("data-rv-drop"), None);
 }
 
 #[test]
