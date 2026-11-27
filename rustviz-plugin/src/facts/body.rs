@@ -1095,6 +1095,23 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
     }
 }
 
+/// A None constructor stored directly, or staged immediately before the
+/// old value's Drop terminator and installed on its normal return edge.
+fn assigned_none<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, at: Location, lhs: Place<'tcx>, rv: &Rvalue<'tcx>) -> bool {
+    let none = |rv: &Rvalue<'tcx>| matches!(rv, Rvalue::Aggregate(k, _) if matches!(**k, AggregateKind::Adt(def, variant, ..)
+        if tcx.is_lang_item(tcx.adt_def(def).variant(variant).def_id, rustc_hir::LangItem::OptionNone)));
+    if none(rv) { return true; }
+    let Rvalue::Use(Operand::Move(tmp)) = rv else { return false };
+    if at.statement_index != 0 || !tmp.as_local().is_some_and(|l| body.local_kind(l) == rustc_middle::mir::LocalKind::Temp) {
+        return false;
+    }
+    let preds = &body.basic_blocks.predecessors()[at.block];
+    !preds.is_empty() && preds.iter().all(|&bb| {
+        matches!(body[bb].terminator().kind, TerminatorKind::Drop { place, target, .. } if place == lhs && target == at.block)
+            && body[bb].statements.last().is_some_and(|stmt| matches!(&stmt.kind, StatementKind::Assign(a) if a.0 == *tmp && none(&a.1)))
+    })
+}
+
 /// Where to read what `place` held before the assignment at `loc`: if
 /// MIR drops the old value first (`drop(s) -> bb; bb: s = ..`), before
 /// those drops; else at `loc`.
@@ -2145,6 +2162,27 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             .then_some(destination.as_local()?)
     }).collect();
     let mut slice_items = BTreeSet::new();
+    // Classify each capture field as we would the captured value. Following
+    // moves between bindings would count a restored closure more than once.
+    let owner = tcx.local_def_id_to_hir_id(def_id.expect_local()).owner;
+    let closure_captures = cx.names.bindings.columns.iter().filter_map(|(name, locals)| {
+        let mut counts = locals.iter().map(|&l| match body.local_decls[l].ty.kind() {
+            TyKind::Closure(_, args) => Some(args.as_closure().upvar_tys().iter()
+                .filter(|ty| !ty.is_ref() && !tcx.type_is_copy_modulo_regions(typing_env, *ty)
+                    && !crate::expr_visitor::ty_is_plain(tcx, *ty, owner)).count()),
+            _ => None,
+        });
+        let count = counts.next()??;
+        counts.all(|n| n == Some(count)).then(|| (name.clone(), count))
+    }).collect();
+    // An immutable reference cannot be overwritten through an alias. Keep
+    // all its initialization sites, including bindings in patterns.
+    let reference_inits = columns.iter().filter_map(|(path, place, _)| {
+        let local = place.as_local()?;
+        let decl = &body.local_decls[local];
+        (decl.ty.is_ref() && !decl.mutability.is_mut()).then(|| (local,
+            move_data.init_path_map[*path].iter().map(|i| move_data.inits[*i].span(body)).collect()))
+    }).collect();
     let mut binding_loans = BTreeMap::new();
     let mut evs: BTreeMap<usize, Vec<Ev>> = BTreeMap::new();
     let push = |evs: &mut BTreeMap<usize, Vec<Ev>>, (row, ev): (usize, Ev)| evs.entry(row).or_default().push(ev);
@@ -4188,6 +4226,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     if lhs_col {
                         let path = cx.name(*lhs).unwrap_or_default();
                         let from = match rv {
+                            _ if assigned_none(tcx, body, loc, *lhs, rv) => "Option::None".into(),
                             Rvalue::Use(Operand::Move(p) | Operand::Copy(p)) => cx.name(*p).unwrap_or_else(|| "<value>".into()),
                             Rvalue::Ref(_, k, p) => format!(
                                 "&{}{}",
@@ -5648,6 +5687,48 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
         }
     }
+    // A successful let has a point of its own before the enclosing arm's
+    // scope ends. rustc emits a ForLet read of the initialized binding,
+    // including after the successful branch of `?`. The next source row
+    // may instead join a path that skipped the entire declaration.
+    let mut completed = BTreeMap::<usize, Vec<Location>>::new();
+    for &loc in cx.rows.row.keys() {
+        let data = &body.basic_blocks[loc.block];
+        let Some(StatementKind::FakeRead(read)) = data.statements.get(loc.statement_index).map(|s| &s.kind) else { continue };
+        if !matches!(read.0, rustc_middle::mir::FakeReadCause::ForLet(None)) { continue; }
+        let Some(local) = read.1.as_local() else { continue };
+        let Some(binding) = body.local_decls[local].source_info.scope.lint_root(&body.source_scopes) else { continue };
+        if cx.names.declarations.get(&binding) != Some(&local) { continue; }
+        let Some((_, rustc_hir::Node::LetStmt(ls))) = tcx.hir_parent_iter(binding).next() else { continue };
+        let Some(init) = ls.init else { continue };
+        if ls.span.from_expansion() { continue; }
+        let end = cx.r.line_hi(ls.span);
+        if cx.r.line_lo(ls.span) == end && !matches!(init.kind, rustc_hir::ExprKind::Match(_, _, rustc_hir::MatchSource::TryDesugar(_))) {
+            continue;
+        }
+        // Only the boundary between statements on separate rows has a
+        // segment of its own. An enclosing block ending here is a join.
+        let Some(block) = tcx.hir_parent_iter(ls.hir_id).find_map(|(_, n)| match n {
+            rustc_hir::Node::Block(b) => Some(b), _ => None,
+        }) else { continue };
+        if cx.r.line_hi(block.span) == end || block.stmts.iter().any(|s| s.span.lo() >= ls.span.hi() && cx.r.line_lo(s.span) == end)
+            || block.expr.is_some_and(|e| e.span.lo() >= ls.span.hi() && cx.r.line_lo(e.span) == end) { continue; }
+        // Follow the normal completion of this statement, including its
+        // temporary destructors. Stop on its side of the edge: the next
+        // block may also be reached by a path that skipped the binding.
+        let mut work = vec![loc];
+        let mut seen = BTreeSet::new();
+        while let Some(at) = work.pop() {
+            if !seen.insert(at) { continue; }
+            for next in cx.r.real_succs(at) {
+                if ls.span.contains(body.source_info(next).span.source_callsite()) {
+                    work.push(next);
+                } else {
+                    completed.entry(end).or_default().push(at);
+                }
+            }
+        }
+    }
     let mut entries: BTreeMap<usize, BTreeSet<Location>> = BTreeMap::new();
     let start = Location::START;
     entries.entry(cx.row_of(start)).or_default().insert(start);
@@ -5667,6 +5748,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     lines.extend(evs.keys().copied());
     lines.extend(scope_partials.keys().copied());
     lines.extend(block_ends.iter().copied());
+    lines.extend(completed.keys().copied());
     for line in lines.into_iter().filter(|l| *l >= first_line && *l <= last_line) {
         let mut row = Row { line, partial_drops: scope_partials.remove(&line).unwrap_or_default(), ..Default::default() };
         if let Some(exits) = cx.rows.exits.get(&line) {
@@ -5694,6 +5776,10 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             });
         }
         row.runtime_entry = entries.get(&line).map(|locs| locs.iter().any(|l| executes_at(l.block)));
+        if let Some(points) = completed.get(&line) {
+            row.after = state_at(points, true, false, None);
+            row.completed_let = true;
+        }
         row.before = entries.get(&line).map(|locs| state_at(&locs.iter().copied().collect::<Vec<_>>(), false, false, None));
         if let Some(specs) = cx.rows.arms.get(&line) {
             let nested: BTreeSet<_> = specs.iter().filter_map(|s| s.parent).collect();
@@ -6024,7 +6110,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             s.source_info.span == span.shrink_to_hi() && matches!(&s.kind, StatementKind::Assign(a)
                 if a.0.ty(&body.local_decls, tcx).ty.is_unit()))).peekable();
         let dead_implicit_else = implicit_else.peek().is_some() && implicit_else.all(|&p| !edge_runs(p));
-        joins.insert(id, Join { at, state, incoming: edge_states, changes, assignments, dead_implicit_else });
+        joins.insert(id, Join { span: tcx.hir_span(id), at, state, incoming: edge_states, changes, assignments, dead_implicit_else });
     }
     // NLL may have already released the old value at a later reassignment.
     // Find the stores that actually reach the write, stopping on each path
@@ -6151,6 +6237,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         uniform_option_refs,
         loans,
         slice_items,
+        reference_inits,
+        closure_captures,
         binding_loans,
         rows: out_rows,
         temps,

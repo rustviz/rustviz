@@ -946,6 +946,14 @@ fn what_pattern_left(part: &TempPart) -> String {
     }
 }
 
+pub fn reassign_to_none(name: &str, title: String) -> String {
+    let name = styled_name_html(name);
+    match title.strip_prefix(&format!("{name} acquires ownership of a new resource")) {
+        Some(drop) => format!("{name} is assigned None, which holds no payload{}", drop.replace("previous resource", "previous value")),
+        None => title,
+    }
+}
+
 /// Whether `acquire` is the plain "acquires ownership of a resource" line
 /// that `reassign` (`event_dot_owner_drop_at_reassign`) already says, for
 /// the same variable, with more (#506, #519). `*b = (..)` on a Box drawn
@@ -967,6 +975,7 @@ pub fn reassign_subsumes_acquire(reassign: &str, acquire: &str) -> bool {
             .is_some_and(|(name, tail)| (tail.starts_with(" is dropped") || tail.starts_with(" (including "))
                 && acquire.strip_prefix(name).is_some_and(|rest| rest.starts_with(" acquires ownership of the resource the `?` takes out of ")));
     };
+    if reassign.strip_prefix(name).is_some_and(|r| r.starts_with(" is assigned None, which holds no payload")) { return true; }
     reassign == skipped_reassignment(name) || reassign.strip_prefix(name)
         .and_then(|rest| rest.strip_prefix(" acquires ownership of a new resource"))
         .is_some_and(|rest| {
@@ -5659,6 +5668,16 @@ fn leavers_never_got_here(verb: &str, name: &str, leavers: &[Vec<BranchExit>]) -
     }
 }
 
+pub fn event_dot_reference_join(name: &str, mutable: bool, unchanged: bool) -> String {
+    let name = styled_name_html(name);
+    let kind = if mutable { "mutable" } else { "shared" };
+    if unchanged {
+        format!("None of the branches above assigned {name}. It still holds its {kind} reference")
+    } else {
+        format!("{name} holds a {kind} reference after the conditional")
+    }
+}
+
 // Join of a conditional for a `let x;` local that has no value on any
 // path that gets here (#919; this used to be an empty tooltip).
 // `leavers`: how each branch that assigned it left (`if c { x = …;
@@ -6672,27 +6691,18 @@ pub fn event_dot_closure_call_once(
     msg
 }
 
-// Scope end of a closure that was called (and so moved) on some paths
-// of a conditional and not on others: whether its captured resources
-// are dropped here is decided at runtime by a drop flag (#179, #271).
-// `by_cond`: a let-chain's condition may have moved it (into a call,
-// #281); that's not a call of the closure.
-/// `called` / `moved`: what the branches did with the closure, an
-/// `FnOnce` call (#271) or a move (`v.push(f)`, `let g = f;`, #1158).
-pub fn event_dot_closure_go_out_of_scope_maybe_moved(my_name: &String, by_cond: bool, count: usize, called: bool, moved: bool) -> String {
-    let what = match (called, moved) {
-        (true, true) => "called or moved",
-        (true, false) => "called",
-        _ => "moved",
+/// At a conditional drop, rustc tests whether the binding currently holds
+/// a closure. Calls and moves can explain why the slot is empty.
+pub fn event_dot_closure_go_out_of_scope_maybe_moved(my_name: &String, count: usize, called: bool, moved: bool) -> String {
+    let name = styled_name_html(my_name);
+    let capture = if count == 1 { "resource is" } else { "resources are" };
+    let reason = match (called, moved) {
+        (true, true) => " A consuming call or a move takes the closure out of the binding.",
+        (true, false) => " A consuming call takes the closure out of the binding.",
+        (false, true) => " A move takes the closure out of the binding.",
+        _ => "",
     };
-    let cond = if by_cond { format!("nothing above {} it", what) } else { format!("no branch above {} it", what) };
-    format!(
-        "{0} goes out of scope. Its captured {1} dropped here only if {2} \
-         (Rust tracks this with a runtime drop flag).",
-        styled_name_html(my_name),
-        if count == 1 { "resource is" } else { "resources are" },
-        cond
-    )
+    format!("{name} goes out of scope. Its captured {capture} dropped here if {name} still holds the closure (Rust tracks this with a runtime drop flag).{reason}")
 }
 
 

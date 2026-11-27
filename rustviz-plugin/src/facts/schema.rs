@@ -136,6 +136,12 @@ pub struct BodyFacts {
     /// Mutable call operands whose own loan ends on the normal return edge.
     #[serde(skip)]
     pub short_call_borrows: BTreeSet<(rustc_span::Span, usize)>,
+    /// Number of owned resource fields in the binding's closure type.
+    #[serde(skip)]
+    pub closure_captures: BTreeMap<String, usize>,
+    /// Every MIR initialization of an immutable reference binding.
+    #[serde(skip)]
+    pub reference_inits: BTreeMap<rustc_middle::mir::Local, Vec<rustc_span::Span>>,
     /// Places a callee can write through a mutable operand, paired with
     /// the loans carried by the source operand at that exact MIR call.
     #[serde(skip)]
@@ -288,6 +294,9 @@ fn conditional_joins<S: serde::Serializer>(
 
 #[derive(Serialize)]
 pub struct Join {
+    /// The conditional's source span (not serialized).
+    #[serde(skip)]
+    pub span: rustc_span::Span,
     #[serde(serialize_with = "location")]
     pub at: Location,
     #[serde(flatten)]
@@ -810,6 +819,9 @@ pub struct Row {
     pub completed_bindings: Vec<State>,
     #[serde(skip)]
     pub block_end: bool,
+    /// Snapshot at the MIR read of a completed statement binding.
+    #[serde(skip)]
+    pub completed_let: bool,
     /// The row's code that runs leaves it only by jumps past the next row
     /// the paths come into (`break k;`, `return i;`).
     #[serde(skip)]

@@ -13098,6 +13098,21 @@ pub fn print_out_of_scope(&mut self){
           End::Arrow(l) if unlent => End::Own(l),
           e => e,
         };
+        let end = match end {
+          End::Own(row) if from_ro.is_mutref() && !lender.is_ref() && facts.is_some_and(|facts| {
+            let [id] = loans.as_slice() else { return false };
+            let Some(parent) = facts.loans.iter().find(|l| l.loan == *id && l.kind == "mut"
+              && l.lender == lender.real_name() && l.via_call.contains(k)) else { return false };
+            let mut ends = facts.rows.iter().flat_map(|r| r.facts.iter().map(move |e| (r.line, e)))
+              .filter(|(_, e)| matches!(e.fact, crate::facts::Fact::BorrowEnd { loan, .. } if loan == parent.loan));
+            ends.next().is_some_and(|(line, edge)| line == row && ends.next().is_none()
+              && facts.loans.iter().any(|child| child.made_through.contains(id) && child.through.as_ref() == Some(k)
+                && facts.rows.iter().flat_map(|r| &r.facts).any(|e| e.location == edge.location
+                  && e.occurrence.successor == edge.occurrence.successor
+                  && matches!(e.fact, crate::facts::Fact::BorrowEnd { loan, .. } if loan == child.loan))))
+          }) => End::Arrow(row),
+          end => end,
+        };
         let first_id = *self.unique_id;
         match end {
           End::None => {}

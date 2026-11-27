@@ -189,7 +189,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let mut put = Vec::new();
     for (line, ev, origin) in templates {
       let ids = self.end_loans[&ev.get_id()].clone();
-      if ev.get_id() >= self.first_synthesized_end {
+      let synthesized = ev.get_id() >= self.first_synthesized_end;
+      if synthesized {
         if walk.iter().any(|(row, other, path)| {
           *row == line
             && *path == origin
@@ -198,8 +199,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             && self.end_loans.get(&other.get_id()) == Some(&ids)
         }) {
           remove.insert(ev.get_id());
+          continue;
         }
-        continue;
+        if !matches!(ev, ExternalEvent::MutableDie { .. }) || ids.len() != 1 || !origin.is_empty() {
+          continue;
+        }
       }
       // A literal's self-arrow describes replacement of the slot; no
       // resource is released by the aggregate's later region boundary.
@@ -213,6 +217,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // the assignment's drop or an explicit drop of the old holder.
       let dropped = self.field_overwrite_ends.remove(&ev.get_id());
       let mut sites = BTreeMap::<Site, BTreeSet<usize>>::new();
+      let mut ends_before_new_borrow = false;
       let mut lender_only = BTreeSet::new();
       let mut replacement_drops = BTreeMap::new();
       let mut drop_holder = None;
@@ -247,7 +252,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           if info.source == "static" { continue; }
           let mine = h.split('|').any(|h| h == holder || holder.strip_prefix(h).is_some_and(|part| part.starts_with('.')));
           let drawn = to.real_name();
-          let lender = info.lender == drawn
+          // A later overwrite in an arm may have emitted the end of an
+          // earlier copy from the caller. The transfer chain names the
+          // copied slot and its true edge precedes the fork.
+          let caller_copy = matches!(to, ResourceTy::Caller) && info.source == "caller"
+            && edge.transfer_paths.iter().any(|path| path.len() > 1 && path.last().is_some_and(|step| self.raps.get(&holder)
+              .is_some_and(|binding| from.extract_rap() == Some(&binding.rap) && binding.local.is_some_and(|l| l.index() == step.place.local))))
+            && origin.first().and_then(|(id, _)| switches.get(id)).is_some_and(|at|
+              !at.is_empty() && at.iter().all(|&fork| dominates(&self.bwf.body, edge.location, fork)));
+          let lender = caller_copy || info.lender == drawn
             || info.through.as_ref() == Some(&drawn)
             || (to.is_ref() && info.direct_holders.iter().any(|n| n == &drawn));
           if !mine || !lender {
@@ -269,7 +282,32 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             continue;
           }
           let mut site = Site { path: Vec::new(), before: None, row: row.line };
-          self.locate(self.preprocessed_events, &switches, edge.display_location, edge, *next, &mut site);
+          let entry = self.locate(self.preprocessed_events, &switches, edge.display_location, edge, *next, &mut site);
+          if synthesized && !is_own && entry {
+            if let Some(&(id, a)) = site.path.last() {
+              let Some((_, ExternalEvent::Branch { branches, .. })) =
+                branch_at(self.preprocessed_events, id, &mut Vec::new()) else { continue };
+              let arm = &branches[a];
+              // A shared access to this same place in the successor arm
+              // needs the exclusive loan to have ended on entry.
+              let borrowed_place = |loan: &LoanInfo| {
+                self.bwf.borrow_set.location_map().get(&loan.issue?).map(|data| data.borrowed_place())
+              };
+              if let Some(place) = borrowed_place(info) {
+                ends_before_new_borrow |= facts.loans.iter().any(|other| {
+                  other.kind == "shared" && borrowed_place(other).is_some_and(|shared| {
+                    shared.local == place.local && (shared.projection.starts_with(place.projection)
+                      || place.projection.starts_with(shared.projection))
+                  })
+                    && other.issue.is_some_and(|at| {
+                      arm.source.is_some_and(|s| crate::facts::location_arms(self.tcx, &self.bwf.body, facts, at).contains(&s))
+                        && edge.occurrence.successor.is_some_and(|to| dominates(&self.bwf.body, to, at))
+                    })
+                });
+              }
+              site.before = arm.e_data.first().map(|(_, e)| e.get_id());
+            }
+          }
           // Region inference can keep b restricted after x = &b; x = y.
           // If MIR ended x's holding and overwrote that value on every path
           // here, the eventual loan end belongs on b alone (#1742).
@@ -291,11 +329,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               lender_only.insert(site.clone());
             }
           }
+          if synthesized {
+            // The region can end on a failed scrutinee before its
+            // success-only binding receives the reference. Prove the
+            // holder at this edge independently of the drawn arm.
+            let bound = self.raps.get(&holder).filter(|rd| from.extract_rap() == Some(&rd.rap))
+              .and_then(|rd| rd.local)
+              .is_some_and(|local| edge.end_places.iter().any(|p| p.local == local.index() && p.name == holder));
+            if !bound { lender_only.insert(site.clone()); }
+          }
           sites.entry(site).or_default().insert(*loan);
         }
       }
-      if sites.is_empty() {
-        continue;
+      if sites.is_empty() { continue; }
+      if synthesized {
+        if !ends_before_new_borrow || sites.len() < 2 || sites.keys().any(|s| s.path.is_empty())
+          || !facts.loans.iter().any(|l| l.loan == ids[0] && l.holders == [holder.as_str()]) {
+          continue;
+        }
       }
       let site = if sites.len() == 1 {
         sites.first_key_value().unwrap().0.clone()
@@ -314,7 +365,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           Site { path: common, before: None, row: line }
         }
       };
-      let individual = dropped || site.before.is_some() && sites.len() > 1;
+      let individual = dropped || synthesized || site.before.is_some() && sites.len() > 1;
       let destinations = if individual { sites } else { BTreeMap::from([(site, ids.iter().copied().collect())]) };
       let mut first = true;
       for (site, loans) in destinations {
@@ -476,6 +527,35 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       };
       let arm = &branches[a];
       if !arm.e_data.iter().any(|(_, e)| matches!(e, ExternalEvent::Branch { .. })) {
+        // A split caller return may already be in its leaf arm, on
+        // entry. If a reborrow is the last use of the caller's loan,
+        // both ends belong at the reborrow's actual ending edge.
+        if matches!(to, ResourceTy::Caller) {
+          let ids = self.end_loans.get(&ev.get_id()).map(Vec::as_slice);
+          if let Some([parent]) = ids {
+            let mut ends = BTreeSet::new();
+            for (child_row, child_event) in &arm.e_data {
+              if *child_row <= line || !matches!(child_event, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. }) {
+                continue;
+              }
+              let Some([child]) = self.end_loans.get(&child_event.get_id()).map(Vec::as_slice) else { continue };
+              if !facts.loans.iter().any(|l| l.loan == *child && l.made_through.contains(parent) && l.through.as_ref() == Some(r.name())) {
+                continue;
+              }
+              let Some(row) = facts.rows.iter().find(|row| row.line == *child_row) else { continue };
+              if row.facts.iter().any(|e| matches!(e.fact, Fact::BorrowEnd { loan, .. } if loan == *parent)
+                && arm.source.is_some_and(|s| crate::facts::location_arms(self.tcx, &self.bwf.body, facts, e.location).contains(&s))
+                && row.facts.iter().any(|c| matches!(c.fact, Fact::BorrowEnd { loan, .. } if loan == *child)
+                  && c.location == e.location && c.occurrence.successor == e.occurrence.successor)) {
+                ends.insert(*child_row);
+              }
+            }
+            if ends.len() == 1 {
+              remove.insert(ev.get_id());
+              put.push((origin, None, (*ends.first().unwrap(), ev), false));
+            }
+          }
+        }
         continue;
       }
       let holder = r.name();
@@ -510,7 +590,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           .iter()
           .filter(|l| {
             l.holders.contains(holder)
-              && lender.is_some_and(|r| &l.lender == r.name())
+              && lender.is_some_and(|r| l.columns.contains(r.name()) || &l.lender == r.name())
               && facts.rows.iter().flat_map(|row| &row.facts).any(|issue| {
                 matches!(issue.fact,Fact::Borrow{loan,..} if loan==l.loan)
                   && inits.iter().any(|&at| dominates(&self.bwf.body, issue.location, at))
@@ -524,6 +604,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         loans = matched;
       }
       let mut candidates = Vec::new();
+      let mut handoffs = BTreeSet::new();
+      let mut skipped_let_else = false;
+      let mut sibling_returns = BTreeSet::new();
       for (row, e) in facts
         .rows
         .iter()
@@ -551,15 +634,83 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             }
           }
         }
+        // Later tests of a let chain run only after the earlier pattern
+        // matched. The renderer puts their call events on that leg. A
+        // discriminant edge bypassing those tests belongs on the failed
+        // leg, even if both successors have the same displayed row.
+        for (_, branch) in &arm.e_data {
+          let ExternalEvent::Branch { id, branches, .. } = branch else { continue };
+          let Some(cond) = self.event_spans.get(id) else { continue };
+          let [tested, failed] = branches.as_slice() else { continue };
+          let Some((failure_row, _)) = failed.e_data.iter().find(|(_, e)| matches!(e, ExternalEvent::ChainFailUse { .. })) else { continue };
+          let span = self.bwf.body.source_info(e.location).span;
+          if !cond.contains(span) { continue; }
+          let body = &self.bwf.body;
+          if switches.get(id).is_some_and(|ss| ss.contains(&e.location)) {
+            let Some(to) = e.occurrence.successor else { continue };
+            let skips_use = facts.rows.iter().flat_map(|r| &r.facts).any(|later|
+              matches!(&later.fact, Fact::BorrowEnd { loan: l, holder: name, .. } if l == loan && name == h)
+                && later.location != e.location && cond.contains(body.source_info(later.location).span)
+                && body[e.location.block].terminator().successors().any(|b| b != to.block
+                  && body.basic_blocks.dominators().dominates(b, later.location.block)));
+            if skips_use {
+              site = Site { path: vec![(*id, 1)], row: *failure_row, before: None };
+            }
+          } else if site.path.is_empty() {
+            let call = tested.e_data.iter().find(|(_, event)| {
+              matches!(event, ExternalEvent::PassByStaticReference { .. } | ExternalEvent::PassByMutableReference { .. })
+                && self.event_spans.get(&event.get_id()).is_some_and(|s| cond.contains(*s) && (s.contains(span) || span.contains(*s)))
+            });
+            if let Some((row, _)) = call {
+              site = Site { path: vec![(*id, 0)], row: *row, before: None };
+            }
+          }
+        }
+        // A pattern can yield several copies of the same loan. rustc
+        // ends the unused binding's holding before the fork, while its
+        // sibling continues to carry the loan into the fork.
+        if own && h == holder && site.path.is_empty() && site.before.is_some()
+          && e.end_places.iter().any(|p| facts.bindings.columns.get(holder).is_some_and(|ls|
+            ls.len() == 1 && ls[0].index() == p.local)) {
+          handoffs.insert((site.clone(), *loan, e.occurrence.successor));
+        }
+        if !own && h != holder && row == line && !site.path.is_empty()
+          && e.end_places.iter().any(|p| p.name != *holder && h.split('|').any(|name| name == p.name)) {
+          sibling_returns.insert((*loan, site.path[0].0, e.location));
+        }
         let Some(&(nested, _)) = site.path.first() else { continue };
+        // A let-else binding receives its value after its own fork. Its
+        // column cannot give the loan back on the scrutinee's failed edge.
+        if site.path.iter().any(|(branch, _)| self.let_else_branches.contains(branch)
+          && branch_at(self.preprocessed_events, *branch, &mut Vec::new()).and_then(|(_, event)| match event {
+            ExternalEvent::Branch { branches, .. } => branches.first()?.source,
+            _ => None,
+          }).and_then(|source| match self.tcx.hir_node(source.branch) {
+            rustc_hir::Node::LetStmt(stmt) => Some(stmt.pat.hir_id),
+            _ => None,
+          }).is_some_and(|pat|
+            self.raps.bindings.columns.get(r.name()).into_iter().flatten().any(|&local| {
+              let decl = &self.bwf.body.local_decls[local];
+              decl.source_info.scope.lint_root(&self.bwf.body.source_scopes).is_some_and(|id|
+                (id == pat || self.tcx.hir_parent_id_iter(id).any(|p| p == pat))
+                  && self.raps.binding(id).is_some_and(|rd| rd.rap == *r))
+            }))) {
+          skipped_let_else = true;
+          continue;
+        }
         let Some((_, ExternalEvent::Branch { branches: arms, live_vars, branch_type, .. })) =
           arm.e_data.iter().find(|(_, e)| e.get_id() == nested)
         else {
           continue;
         };
+        let returns_caller = matches!(to, ResourceTy::Caller) && !own && facts.loans.iter().any(|child|
+          child.made_through.contains(loan) && child.through.as_ref() == Some(holder)
+            && facts.rows.iter().flat_map(|r| &r.facts).any(|end| end.location == e.location
+              && end.occurrence.successor == e.occurrence.successor
+              && matches!(&end.fact, Fact::BorrowEnd { loan, holder, .. } if *loan == child.loan && holder == h)));
         if matches!(branch_type, crate::svg_generator::data::BranchType::Loop(..))
           || arms.iter().any(|b| b.decl_vars.contains(r))
-          || (!live_vars.contains(r) && !lender.is_some_and(|l| live_vars.contains(l)))
+          || (!returns_caller && !live_vars.contains(r) && !lender.is_some_and(|l| live_vars.contains(l)))
         {
           continue;
         }
@@ -573,10 +724,25 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             }
           }
         }
-        candidates.push((h.as_str(), site, own && !is_own, *loan));
+        candidates.push((if returns_caller { holder } else { h.as_str() }, site, own && !is_own, *loan));
       }
-      let dests = nested_destinations(candidates, holder, root.map(String::as_str), line);
+      let mut dests = nested_destinations(candidates, holder, root.map(String::as_str), line);
+      if dests.is_empty() && handoffs.len() == 1 {
+        let (site, loan, successor) = handoffs.pop_first().unwrap();
+        // This replaces the whole template. A release on a different
+        // fork or for another reaching loan cannot account for it.
+        if sibling_returns.iter().any(|&(returned, fork, at)| {
+          sibling_completes_handoff(&loans, loan, site.before, returned, fork)
+            && successor.is_some_and(|s| dominates(&self.bwf.body, s, at))
+        }) {
+          dests.push(((site, true), BTreeSet::from([loan])));
+        }
+      }
       if dests.is_empty() {
+        // The binding has no column on the failed edge, and the let-else
+        // pass draws that edge's return from the lender. Leaving this
+        // end in place would name the binding where it has no value.
+        if skipped_let_else { remove.insert(ev.get_id()); }
         continue;
       }
       let listed = arm.line_map.get(&line).is_some_and(|g| g.iter().any(|x| x.get_id() == ev.get_id()));
@@ -935,6 +1101,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             site.row = branch_type.get_start_end(a).0;
             site.before = arm.e_data.first().map(|(_, e)| e.get_id());
           }
+          // The failure note marks the failed test on a chain's skipped
+          // path, even when the implicit else has no body or source row.
+          if entry && arm.source_span.is_none() {
+            if let Some((row, note)) = arm.e_data.iter().find(|(_, event)|
+              matches!(event, ExternalEvent::ChainFailUse { ro, .. } if ro == lender)) {
+              site.row = *row;
+              site.before = Some(note.get_id());
+            }
+          }
           represented.edges.insert((loan.loan, e.location, e.occurrence.successor));
           self.end_loans.insert(id_ev, vec![loan.loan]);
           put.push((site.path, site.before, (site.row, event)));
@@ -996,6 +1171,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         if !live_vars.contains(lender) {
           continue;
         }
+        // The successor containing the initialization of the pattern
+        // binding is the successful path.
+        let binds: Vec<_> = facts.rows.iter().flat_map(|r| &r.facts).filter_map(|ev| match &ev.fact {
+          Fact::Init { path, .. } if vars.contains(path) && loan.holders.contains(path) => Some(ev.location),
+          _ => None,
+        }).collect();
         for row in &facts.rows {
           for ev in &row.facts {
             let Fact::BorrowEnd { loan: n, holder, .. } = &ev.fact else { continue };
@@ -1012,7 +1193,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             let from = if vars.contains(holder) {
               ResourceTy::Anonymous
             } else if let Some(h) = self.raps.get(holder) {
-              ResourceTy::Value(h.rap.clone())
+              // The region summary can name a copy made only after the
+              // pattern matched. That copy never held the scrutinee on
+              // the failed edge. Keep the lender's return there.
+              let stores: Vec<_> = facts.rows.iter().flat_map(|r| &r.facts)
+                .filter(|e| h.local.is_some() && e.place_local == h.local && matches!(&e.fact, Fact::Init { path, .. } if path == holder))
+                .map(|e| e.location).collect();
+              if on_entry && ev.end_places.is_empty() && !stores.is_empty() && stores.iter().all(|&store|
+                binds.iter().any(|&init| dominates(&self.bwf.body, init, store))) {
+                ResourceTy::Anonymous
+              } else {
+                ResourceTy::Value(h.rap.clone())
+              }
             } else {
               continue;
             };
@@ -1108,6 +1300,10 @@ fn branch_at<'a>(events: &'a Events, wanted: usize, path: &mut Path) -> Option<&
     }
   }
   None
+}
+
+fn sibling_completes_handoff(template: &[usize], held: usize, before: Option<usize>, returned: usize, fork: usize) -> bool {
+  template == [held] && returned == held && before == Some(fork)
 }
 
 /// Different copies can hold the same loan. Only a boundary of the
@@ -1356,6 +1552,16 @@ fn insert_local(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn sibling_return_proves_only_its_own_loan_at_its_own_fork() {
+    // copy and last in progen_1906_edge_holders can both carry the
+    // loans of a and b. An end of one cannot consume a two-loan slot.
+    assert!(!sibling_completes_handoff(&[0, 1], 0, Some(4), 1, 4));
+    assert!(!sibling_completes_handoff(&[0, 1], 0, Some(4), 0, 4));
+    assert!(!sibling_completes_handoff(&[0], 0, Some(4), 0, 7));
+    assert!(sibling_completes_handoff(&[0], 0, Some(4), 0, 4));
+  }
 
   #[test]
   fn a_copy_cannot_validate_the_other_holders_template_row() {

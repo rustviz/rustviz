@@ -26,6 +26,17 @@ fn fact_point(f: &Ev) -> Point {
     (f.order.0, f.order.1, f.order.2 as i8)
 }
 
+/// A switch dominates both arms. Its release on a particular edge can
+/// be replayed before a use only if that edge dominates the use.
+fn edge_dominates_use(blocks: &rustc_middle::mir::BasicBlocks<'_>, from: Location, to: Location, use_at: Location) -> bool {
+    let dom = blocks.dominators();
+    if !to.dominates(use_at, dom) { return false; }
+    if from.statement_index < blocks[from.block].statements.len() { return true; }
+    // Back edges from blocks dominated by the target cannot enter it first.
+    to.block != from.block && blocks.predecessors()[to.block].iter()
+        .all(|&p| p == from.block || dom.dominates(to.block, p))
+}
+
 fn end(e: &E) -> bool {
     matches!(e, E::StaticDie { .. } | E::MutableDie { .. } | E::RefDie { .. })
 }
@@ -1148,7 +1159,39 @@ impl Order<'_, '_> {
         shadowed.then(|| loan.lender.clone())
     }
 
+    /// Every matching release at this MIR point must occur on the
+    /// route to the use. A switch may end the loan on just its residual edge.
+    fn release_before_use(&self, release: &E, row: &Row, a: Point, b: Point) -> bool {
+        if !self.earlier(a, b) { return false; }
+        let blocks = &self.body.basic_blocks;
+        let use_at = Location { block: blocks.reverse_postorder()[b.0], statement_index: b.1 };
+        let mut edges = normal_facts(row).filter(|e| self.matches(release, e) && fact_point(e) == a).peekable();
+        edges.peek().is_some() && edges.all(|e| e.occurrence.successor.is_some_and(|to| {
+            edge_dominates_use(blocks, e.location, to, use_at)
+        }))
+    }
+
     fn order_list(&self, events: &mut [(usize, E)], map: &mut BTreeMap<usize, Vec<E>>, layout: &mut RowLayout) {
+        // A repoint can move the previous loan's end to an earlier
+        // statement. Replay it before a subsequent use of its lender
+        // when their MIR points establish that order on this leg.
+        for i in 1..events.len() {
+            let (end_row, release) = &events[i];
+            if !end(release) || !self.ends.contains_key(&release.get_id()) { continue; }
+            let Some(row) = self.facts.rows.iter().find(|r| r.line == *end_row) else { continue };
+            let mut before = i;
+            for j in (0..i).rev() {
+                let (use_row, usage) = &events[j];
+                if use_row <= end_row || matches!(usage, E::Branch { .. }) { break; }
+                if !related(release, usage) { continue; }
+                let Some(next) = self.facts.rows.iter().find(|r| r.line == *use_row) else { continue };
+                if self.point(release, row, true).zip(self.point(usage, next, true))
+                    .is_some_and(|(a, b)| self.release_before_use(release, row, a, b)) {
+                    before = j;
+                }
+            }
+            events[before..=i].rotate_right(1);
+        }
         let mut lines: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (i, (line, ev)) in events.iter_mut().enumerate() {
             if let E::Branch { branches, .. } = ev {
@@ -1527,6 +1570,24 @@ pub(crate) fn replay(placed: &mut [(usize, E)], sequence: &HashMap<usize, usize>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn try_residual_release_does_not_precede_success_path_use() {
+        use rustc_middle::mir::{BasicBlock, BasicBlockData, BasicBlocks, Operand, Place, SourceInfo, SwitchTargets, Terminator, RETURN_PLACE};
+        let at = |n| Location { block: BasicBlock::from_usize(n), statement_index: 0 };
+        let (switch, success, residual) = (at(0), at(1), at(2));
+        // The switch and the two successors of ready? in progen_1906_edge_holders.
+        let kinds = [TerminatorKind::SwitchInt {
+            discr: Operand::Copy(Place::from(RETURN_PLACE)),
+            targets: SwitchTargets::static_if(0, success.block, residual.block),
+        }, TerminatorKind::Return, TerminatorKind::Return];
+        let blocks = BasicBlocks::new(kinds.into_iter().map(|kind| BasicBlockData::new(Some(Terminator {
+            source_info: SourceInfo::outermost(rustc_span::DUMMY_SP), kind,
+        }), false)).collect());
+        assert!(switch.dominates(success, blocks.dominators()));
+        assert!(!edge_dominates_use(&blocks, switch, residual, success));
+        assert!(edge_dominates_use(&blocks, switch, residual, residual));
+    }
 
     #[test]
     fn unwind_only_row_allows_the_normal_field_store_lookup() {
